@@ -83,6 +83,8 @@ struct State {
     refresh_ending: Rc<(std::cell::Cell<bool>, std::cell::Cell<bool>)>,
     /// A finger is dragging: UIKit's `isDragging` stays false, its pan elsewhere.
     dragging: std::cell::Cell<bool>,
+    /// This finger has the indicator: at its lift the scroll stops where it is.
+    scrubbing: std::cell::Cell<bool>,
     /// Finds the pull to refresh at a window point, and the one in play.
     pull_at: Box<dyn Fn(f32, f32) -> Option<zgx::native_control::PullRefresh>>,
     pull: RefCell<Option<zgx::native_control::PullRefresh>>,
@@ -800,10 +802,8 @@ fn finish_keyboard_move(state: &State, edge: f64) {
         state.following.borrow_mut().take();
     }
     if let Some(view) = &*state.scroller.borrow() {
-        // SAFETY: UIScrollView's setter, on the main thread.
-        let _: () = unsafe {
-            msg_send![&**view, setContentInset: UiEdgeInsets(0., 0., state.bottom_inset.get(), 0.)]
-        };
+        // SAFETY: on the main thread, UIScrollView's.
+        unsafe { set_bottom_inset(view, state.bottom_inset.get()) };
     }
     crate::ios_gestures::log(&format!("keyboard edge rests at {edge:.0}"));
 }
@@ -925,7 +925,20 @@ unsafe impl objc2::Encode for UiEdgeInsets {
         ],
     );
 }
-const NO_INSETS: UiEdgeInsets = UiEdgeInsets(0., 0., 0., 0.);
+
+/// Give the scroller `bottom` of room below its content for a keyboard. The top
+/// isn't zgx's: a refreshing `UIRefreshControl` holds its height there
+/// (`-[UIScrollView _addRefreshInset:]`), which is what keeps the page down.
+///
+/// # Safety
+/// `view` is a `UIScrollView`, on the main thread.
+unsafe fn set_bottom_inset(view: &AnyObject, bottom: f64) {
+    // SAFETY: as the function's.
+    unsafe {
+        let had: UiEdgeInsets = msg_send![view, contentInset];
+        let _: () = msg_send![view, setContentInset: UiEdgeInsets(had.0, had.1, bottom, had.3)];
+    }
+}
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -1048,10 +1061,32 @@ define_class!(
                 end_refresh(control);
             }
         }
+        // The indicator grabbed (a knob recognizer's own target).
+        #[unsafe(method(scrubbed:))]
+        fn scrubbed(&self, recognizer: &AnyObject) {
+            // SAFETY: UIGestureRecognizer's getter, UIKit calling on the main thread.
+            let phase: isize = unsafe { msg_send![recognizer, state] };
+            // UIGestureRecognizerStateBegan.
+            if phase == 1 {
+                self.ivars().scrubbing.set(true);
+            }
+        }
+        // A scrub's lift stops where it is, as UIKit's own: with its pan on
+        // another view, this scroller would coast on the finger's speed.
+        #[unsafe(method(scrollViewWillEndDragging:withVelocity:targetContentOffset:))]
+        fn will_end_dragging(&self, view: &AnyObject, _speed: CGPoint, target: *mut CGPoint) {
+            if self.ivars().scrubbing.replace(false) {
+                // SAFETY: UIKit's pointer for this call; UIScrollView's getter.
+                unsafe {
+                    *target = msg_send![view, contentOffset];
+                }
+            }
+        }
         #[unsafe(method(scrollViewWillBeginDragging:))]
         fn will_begin_dragging(&self, view: &AnyObject) {
             crate::ios_gestures::log("scroll dragging");
             let state = self.ivars();
+            state.scrubbing.set(false);
             stop_following(state, view);
             unglue(state);
             state.lock.borrow_mut().take();
@@ -1111,6 +1146,11 @@ fn scroller_class() -> &'static AnyClass {
     extern "C-unwind" fn should_begin(this: &AnyObject, _: Sel, pan: &AnyObject) -> Bool {
         // SAFETY: UIScrollView's and UIGestureRecognizer's own methods.
         unsafe {
+            // Its other recognizers (the indicator's grab) are UIKit's to decide.
+            let scrolls: Retained<AnyObject> = msg_send![this, panGestureRecognizer];
+            if !std::ptr::eq(pan, &*scrolls) {
+                return msg_send![super(this, class!(UIScrollView)), gestureRecognizerShouldBegin: pan];
+            }
             // A page scrolls itself: its finger isn't zgx's to scroll with.
             let root: Option<Retained<AnyObject>> = msg_send![pan, view];
             if let Some(root) = root {
@@ -1332,8 +1372,7 @@ fn configure(state: &State, view: &AnyObject, driver: ScrollDriver, at: Option<C
         // A short list gives under a finger, as a table view does.
         let _: () = msg_send![view, setAlwaysBounceVertical: !metrics.horizontal];
         let _: () = msg_send![view, setContentSize: content];
-        let inset = UiEdgeInsets(0., 0., state.bottom_inset.get(), 0.);
-        let _: () = msg_send![view, setContentInset: inset];
+        set_bottom_inset(view, state.bottom_inset.get());
         let _: () = msg_send![view, setContentOffset: CGPoint { x: offset_x, y: offset_y }];
     }
     *state.driver.borrow_mut() = Some(driver);
@@ -1500,6 +1539,7 @@ impl NativeScroller {
             bottom_inset: std::cell::Cell::new(0.),
             refresh_ending: Rc::default(),
             dragging: std::cell::Cell::new(false),
+            scrubbing: std::cell::Cell::new(false),
             pull_at: Box::new(pull_at),
             pull: RefCell::default(),
             delegate: RefCell::default(),
@@ -1536,6 +1576,23 @@ impl NativeScroller {
             let _: () = msg_send![&*root_layer, addSublayer: &*own];
             let pan: Retained<AnyObject> = msg_send![&*view, panGestureRecognizer];
             let _: () = msg_send![&*root, addGestureRecognizer: &*pan];
+            // The indicator's grab goes with it: no touch lands on the scroller, and
+            // UIKit's own knob scrubs it from there.
+            let recognizers: Option<Retained<AnyObject>> = msg_send![&*view, gestureRecognizers];
+            if let Some(recognizers) = recognizers {
+                let count: usize = msg_send![&*recognizers, count];
+                for i in 0..count {
+                    let recognizer: Retained<AnyObject> =
+                        msg_send![&*recognizers, objectAtIndex: i];
+                    let name = (*recognizer).class().name().to_string_lossy().into_owned();
+                    if name.contains("KnobLongPress") {
+                        let _: () = msg_send![&*root, addGestureRecognizer: &*recognizer];
+                        let _: () = msg_send![&*recognizer,
+                            addTarget: &*delegate,
+                            action: sel!(scrubbed:)];
+                    }
+                }
+            }
             view
         };
         // `ZGX_IOS_SCROLL_PROBE=y`: three seconds in, UIKit animates the main
@@ -1620,7 +1677,7 @@ impl NativeScroller {
                 }
                 done_state.bottom_inset.set(0.);
                 // SAFETY: UIScrollView's setter, on the main thread.
-                let _: () = unsafe { msg_send![&*done_view, setContentInset: NO_INSETS] };
+                unsafe { set_bottom_inset(&done_view, 0.) };
             }
             crate::ios_gestures::log(&format!("keyboard moved page to {to:.0}"));
             done_state.window.request_redraw();
