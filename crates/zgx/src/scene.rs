@@ -7689,7 +7689,7 @@ impl Scene {
             })
             .collect();
         changed.then(|| {
-            crate::rich_text::RichText::new(rich.text(), runs)
+            rich.remade(rich.text_arc(), runs)
                 .expect("the same runs")
                 .with_options(rich.options())
         })
@@ -15064,6 +15064,29 @@ impl<'a> Iterator for PaintIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// Taking a language again keeps a text's boxes.
+    #[test]
+    fn review_relayered_text_keeps_its_boxes() {
+        use crate::rich_text::{INLINE_BOX_TEXT, InlineBox, RichText, TextRun};
+        let mut scene = Scene::new(100., 100.);
+        let root = scene.root();
+        let id = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        scene.set_language(id, Some("zh-Hant".into()));
+        let rich = RichText::new(
+            INLINE_BOX_TEXT,
+            vec![TextRun {
+                range: 0..3,
+                font_size: 14.,
+                ..Default::default()
+            }],
+        )
+        .unwrap()
+        .with_inline_boxes(vec![InlineBox::new(0)])
+        .unwrap();
+        let relayered = scene.relayered(id, &rich).expect("its features changed");
+        assert_eq!(relayered.inline_boxes().len(), 1);
+        assert!(relayered.has_inline_boxes());
+    }
     use super::*;
     /// A long column's ink worked out from its kept union and the children
     /// that grew where they were (`grown_ink`) is, to the bit, the ink worked
