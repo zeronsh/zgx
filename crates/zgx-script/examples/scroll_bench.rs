@@ -7,6 +7,25 @@ mod bench_limits;
 use zgx::profile::{Phase, span};
 use zgx_script::{ScriptHost, testing::TestApp};
 
+// Keep one driver for the original baseline and newer engine pins. Inherent
+// engine methods win over these compatibility fallbacks when they exist.
+#[allow(dead_code)]
+trait BaselineSpareTime: Sized {
+    fn with_spare_time(host: impl FnOnce(&zgx::reactive::Runtime) -> ScriptHost) -> Self;
+    fn spend_spare_time(&self);
+}
+impl BaselineSpareTime for TestApp {
+    fn with_spare_time(host: impl FnOnce(&zgx::reactive::Runtime) -> ScriptHost) -> Self {
+        Self::with_desktop(host)
+    }
+    fn spend_spare_time(&self) {}
+}
+#[allow(dead_code)]
+trait BaselinePictures {
+    fn allow_pictures(&self, _: bool) {}
+}
+impl BaselinePictures for zgx::scene::Scene {}
+
 fn main() {
     let scene = std::env::var("SCENE").unwrap_or_else(|_| "transcript".into());
     let source = if scene == "transcript" || scene == "tables" {
@@ -17,7 +36,7 @@ fn main() {
     let examples = std::env::var("ZGX_EXAMPLES")
         .unwrap_or_else(|_| format!("{}/examples", env!("CARGO_MANIFEST_DIR")));
     let path = format!("{examples}/{source}/app.luau");
-    let mut app = TestApp::with_desktop(|runtime| {
+    let mut app = TestApp::with_spare_time(|runtime| {
         ScriptHost::new(runtime, path)
             .limits(bench_limits::limits())
             .args([scene.clone()])
@@ -29,6 +48,7 @@ fn main() {
     app.ui.scene.borrow_mut().resize(960., 720.);
     app.ui.scene.borrow_mut().set_pixel_scale(scale);
     app.ui.set_assistive_technology(false);
+    app.ui.scene.borrow().allow_pictures(true);
     let mut gpu = std::env::var_os("GPU").map(|_| {
         let mut gpu = zgx_gpu::GpuRenderer::new((960. * scale) as u32, (720. * scale) as u32)
             .expect("GPU adapter");
@@ -38,6 +58,7 @@ fn main() {
         gpu
     });
     zgx::trace::set_enabled(true);
+    let mut main_frames = Vec::new();
     let mut draw = |app: &mut TestApp| {
         app.ui.prepare_frame();
         let damage = app.ui.scene.borrow_mut().flush().damage;
@@ -54,8 +75,11 @@ fn main() {
             assert!(partial == full, "stale paint after scroll");
         }
         app.frame();
+        main_frames.push(zgx::trace::frame_index());
+        app.spend_spare_time();
     };
     app.frames(4);
+    app.spend_spare_time();
     // Visit this exact region twice. Reversing must reuse rows built there,
     // and a third traversal measures only the warm path.
     for _ in 0..2 {
@@ -78,7 +102,7 @@ fn main() {
     }
     let frames: Vec<_> = zgx::trace::frames(480)
         .into_iter()
-        .filter(|f| f.index > from)
+        .filter(|f| f.index > from && main_frames.contains(&f.index))
         .collect();
     let rows: usize = frames
         .iter()

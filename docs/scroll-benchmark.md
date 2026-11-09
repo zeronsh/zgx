@@ -259,3 +259,12 @@ keys are accepted, and every run records the overrides. With no overrides the
 engine's defaults apply. `prepare_zeron.py` uses the existing perf builder's
 source-touch step before compiling so a reused target cache cannot supply an
 older path-crate artifact whose timestamp looks fresh.
+
+The headless driver mounts with `TestApp::with_spare_time`, drains
+`spend_spare_time` after each frame, and enables retained pictures when the
+engine provides those APIs. Small Rust trait fallbacks preserve the same driver
+on original baseline commits: inherent engine methods take precedence. The
+driver records its own main-frame indices before draining spare work, so no
+spare entry is charged as a moving frame even on baselines without `Frame.spare`.
+This was checked on the old API (3 transcript rows rebuilt over96 frames) and
+build-ahead API (zero rows on transcript/plain/grid/nested).
