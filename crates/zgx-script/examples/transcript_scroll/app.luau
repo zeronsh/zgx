@@ -143,7 +143,7 @@ local function message(m: Message, _: State<number>, row: State<Message>): Node
 						w_full = true,
 						overflow = "hidden",
 						fade_x = { 0, 28 },
-						ui.text { m.title, literal = true, nowrap = true, color = "$text.tertiary", shrink = 0 },
+						ui.text { m.title, literal = true, color = "$text.tertiary", shrink = 0 },
 					},
 					ui.markdown_view {
 						function()
@@ -175,7 +175,7 @@ return ui.column {
 	},
 	ui.div {
 		id = "composer",
-		position = "absolute",
+		absolute = true,
 		left = 120,
 		right = 120,
 		bottom = 20,
