@@ -5341,6 +5341,7 @@ dependencies = [
  "memchr",
  "png 0.18.1",
  "polling",
+ "wgpu",
  "windows-sys 0.59.0",
  "zgx",
  "zgx-alacritty-terminal",
