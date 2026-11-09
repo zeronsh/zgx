@@ -1,0 +1,26 @@
+[package]
+name = "zgx-wasm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+keywords = ["gui", "wasm", "webgpu", "plugins", "zgx"]
+categories = ["gui", "graphics", "wasm"]
+description = "WebAssembly apps for zgx: a sandboxed component run in the host's process, drawing with WebGPU on the host's own device, shown as an element with its input."
+
+[dependencies]
+# Wasmtime 48: the newest whose MSRV (1.95) is the workspace's. The
+# Component Model, Cranelift, and nothing that reaches outside the sandbox.
+wasmtime = { version = "48.0.8", default-features = false, features = ["runtime", "cranelift", "component-model", "std", "parallel-compilation"] }
+# WASI 0.2 (what `wasm32-wasip2` builds against), with nothing granted:
+# no files, network, environment or arguments.
+wasmtime-wasi = { version = "48.0.8", default-features = false, features = ["p2"] }
+# The guest's standard output and error, as the session's log.
+bytes = "1"
+tokio = { version = "1", default-features = false, features = ["io-util"] }
+# Popping an error scope (ready at once on native backends).
+pollster = "0.4"
+zgx = { path = "../zgx", version = "0.1.10", default-features = false }
+zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }

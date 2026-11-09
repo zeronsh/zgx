@@ -28,7 +28,7 @@ mod actions;
 mod anim;
 mod anime;
 mod apps;
-pub use apps::{AppLaunch, AppSpec};
+pub use apps::{AppLaunch, AppSpec, WasmLaunch, WasmSpec};
 pub mod app_config;
 pub mod app_types;
 mod bundle;
@@ -982,6 +982,12 @@ pub enum Capability {
     /// their input forwarded. Each start is also asked of the host's
     /// vetting hook (`ScriptHost::vet_apps`), if it set one.
     Apps,
+    /// `ui.app(id, { wasm })` and `ui.surface`: a WebAssembly app run in
+    /// the host's process, sandboxed (no files, network, environment or
+    /// programs; its memory, time and GPU use capped), drawing with the
+    /// GPU and hearing its element's input. Less than `Apps`, which allows
+    /// it too. Each start is also asked of `ScriptHost::vet_wasm`.
+    Wasm,
     /// `ui.web` and `ui.webview`: web pages.
     Web,
     /// `ui.window`: windows of its own, which could pose as the app's or
@@ -2503,6 +2509,18 @@ impl ScriptHost {
     /// needs `Capability::Apps`. The last one set applies, at once.
     pub fn vet_apps(&self, vet: impl Fn(&AppLaunch) -> Result<AppSpec, String> + 'static) {
         self.0.apps.set_vet(Rc::new(vet));
+    }
+    /// Decides what WebAssembly apps scripts run (`ui.app(id, { wasm })`),
+    /// the app's own and every plugin's (`WasmLaunch::plugin`): `vet` is
+    /// given the module (resolved; a plugin's is inside its folder) and the
+    /// limits asked for, and returns what to run: lower or higher limits, a
+    /// data folder (`WasmSpec::data_dir`), the time of day; or an `Err`,
+    /// the script's error. It is asked again each time a script reaches a
+    /// running session, where an `Err` closes it. Without one, what is
+    /// asked runs, with nothing granted. A plugin also needs
+    /// `Capability::Wasm` (or `Apps`). The last one set applies, at once.
+    pub fn vet_wasm(&self, vet: impl Fn(&WasmLaunch) -> Result<WasmSpec, String> + 'static) {
+        self.0.apps.set_vet_wasm(Rc::new(vet));
     }
     /// Keep names under `prefix` (`"zeron"`: `zeron` and `zeron.…`) for the
     /// app's own scripts: a plugin may neither offer a `ui.slot` so named nor

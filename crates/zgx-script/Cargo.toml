@@ -44,6 +44,10 @@ gif = ["zgx-gpu/gif"]
 # host). Off by default: a host decides whether its scripts start programs.
 # zgx-run turns it on.
 apps = ["dep:zgx-surface"]
+# `ui.app(id, { wasm = "app.wasm" })`: WebAssembly apps run in the host's
+# process, sandboxed, drawing with WebGPU on its own device (zgx-wasm).
+# Off by default (it links a WebAssembly engine). zgx-run turns it on.
+wasm = ["apps", "dep:zgx-wasm"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]
 # Devtools for agents (`zgx_script::inspect`): a running app answers
@@ -59,6 +63,7 @@ zgx-3d = { path = "../zgx-3d", version = "0.1.10", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
 zgx-surface = { path = "../zgx-surface", version = "0.1.10", optional = true, features = ["host"] }
+zgx-wasm = { path = "../zgx-wasm", version = "0.1.10", optional = true }
 mlua = { package = "zgx-mlua", version = "0.12.7", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
 # `.luaurc` aliases for `require("@alias/...")`.

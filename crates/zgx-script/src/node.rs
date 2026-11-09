@@ -1128,7 +1128,7 @@ pub(crate) enum Kind {
     /// `ui.surface { app = ui.app(id, …) }`: a program's frames, its input
     /// forwarded.
     #[cfg(feature = "apps")]
-    Surface(zgx_surface::host::App),
+    Surface(crate::apps::Session),
     Checkbox {
         label: String,
         value: Signal<Value>,

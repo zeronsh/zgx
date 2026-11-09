@@ -1,0 +1,755 @@
+/// A zgx WebAssembly app: a component a zgx host runs in its own process,
+/// on a thread of its own, sandboxed, shown as an element (`ui.surface`).
+///
+/// The host calls `init` once, then `event` for each input and `frame` once
+/// per display refresh while the element shows (or after `request-frame`).
+/// The app draws a frame with the GPU (`gpu.current-texture`, on the host's
+/// own device: nothing is copied) or the CPU (`host.present-pixels`).
+/// docs/wasm-apps.md is the reference.
+package zgx:app@0.1.0;
+
+/// What the host and the app tell each other.
+interface types {
+    /// The element: its size in device pixels, device pixels a point, and its
+    /// display's refresh rate in Hz (0 until known).
+    record surface-info {
+        width: u32,
+        height: u32,
+        scale: f32,
+        refresh: f32,
+    }
+
+    flags modifiers {
+        shift,
+        control,
+        alt,
+        meta,
+    }
+
+    /// A key pressed or let go, while the element has focus.
+    record key-event {
+        /// The physical key, as the DOM's `KeyboardEvent.code`: "KeyW",
+        /// "Space", "ShiftLeft", "ArrowUp", whatever the layout.
+        code: string,
+        down: bool,
+        /// Held down, repeating.
+        repeat: bool,
+        modifiers: modifiers,
+    }
+
+    variant button {
+        left,
+        right,
+        middle,
+        back,
+        forward,
+        other(u16),
+    }
+
+    /// A button pressed or let go, at a point in device pixels from the
+    /// element's top left.
+    record button-event {
+        button: button,
+        down: bool,
+        x: f32,
+        y: f32,
+    }
+
+    /// Device pixels from the element's top left.
+    record point {
+        x: f32,
+        y: f32,
+    }
+
+    /// Raw motion while the pointer is locked: about a point a count.
+    record motion {
+        dx: f32,
+        dy: f32,
+    }
+
+    enum wheel-unit {
+        /// Device pixels (what zgx sends).
+        pixels,
+        /// Lines (reserved).
+        lines,
+    }
+
+    /// Positive `dy` scrolls down, as the DOM's `deltaY`.
+    record wheel-event {
+        dx: f32,
+        dy: f32,
+        unit: wheel-unit,
+    }
+
+    variant input-event {
+        key(key-event),
+        /// Typed text, or an input method's commit, apart from keys.
+        text(string),
+        pointer-move(point),
+        pointer-motion(motion),
+        button(button-event),
+        wheel(wheel-event),
+        pointer-leave,
+        /// The lock began or ended (asked for, Escape, focus lost).
+        pointer-lock(bool),
+        focus(bool),
+        /// Whether any of the element shows. Hidden, no frames are asked.
+        visible(bool),
+        /// A new size or scale.
+        resize(surface-info),
+        /// The display's refresh rate, in Hz: as it is first known and as
+        /// the window moves to another display.
+        refresh(f32),
+        /// The host's GPU device changed: every GPU object made before is
+        /// dead. Make them again in the next frame.
+        gpu-reset,
+    }
+
+    enum cursor {
+        %default,
+        pointer,
+        text,
+        crosshair,
+        %move,
+        grab,
+        grabbing,
+        not-allowed,
+        wait,
+        progress,
+        help,
+        ew-resize,
+        ns-resize,
+        nesw-resize,
+        nwse-resize,
+        hidden,
+    }
+
+    enum log-level {
+        error,
+        warn,
+        info,
+        debug,
+    }
+}
+
+/// What the app asks of its element.
+interface host {
+    use types.{cursor, log-level};
+
+    /// Lock the pointer (granted only within a second of a press or key, as
+    /// the web's) or let it go; `pointer-lock` says when it holds.
+    lock-pointer: func(lock: bool);
+    /// The cursor over the element.
+    set-cursor: func(cursor: cursor);
+    /// The session's title (`app.title` in Luau).
+    set-title: func(title: string);
+    /// A line of the session's log.
+    log: func(level: log-level, message: string);
+    /// Whether `frame` is called every display refresh while the element
+    /// shows (the default), or only after `request-frame`.
+    set-animating: func(on: bool);
+    /// One more `frame`, at the next refresh the element shows.
+    request-frame: func();
+    /// This frame's pixels from the CPU, in place of the GPU texture: RGBA8,
+    /// premultiplied alpha, rows tightly packed, top row first, `width` by
+    /// `height` (stretched over the element).
+    present-pixels: func(pixels: list<u8>, width: u32, height: u32) -> result<_, string>;
+}
+
+/// WebGPU on the host's own device: a subset of the W3C API, its names and
+/// rules (WGSL shaders, the same validation). Every object is the session's
+/// and goes with it; the host caps their count and memory.
+interface gpu {
+    flags buffer-usage {
+        map-read,
+        map-write,
+        copy-src,
+        copy-dst,
+        index,
+        vertex,
+        uniform,
+        storage,
+        indirect,
+    }
+
+    flags texture-usage {
+        copy-src,
+        copy-dst,
+        texture-binding,
+        storage-binding,
+        render-attachment,
+    }
+
+    flags shader-stage {
+        vertex,
+        fragment,
+        compute,
+    }
+
+    flags color-write {
+        red,
+        green,
+        blue,
+        alpha,
+    }
+
+    enum texture-format {
+        r8unorm,
+        r8snorm,
+        r8uint,
+        r8sint,
+        rg8unorm,
+        rgba8unorm,
+        rgba8unorm-srgb,
+        bgra8unorm,
+        bgra8unorm-srgb,
+        r16float,
+        rg16float,
+        rgba16float,
+        r32float,
+        rg32float,
+        rgba32float,
+        r32uint,
+        r32sint,
+        rgba32uint,
+        rgb10a2unorm,
+        depth16unorm,
+        depth24plus,
+        depth24plus-stencil8,
+        depth32float,
+    }
+
+    enum texture-dimension {
+        d1,
+        d2,
+        d3,
+    }
+
+    enum texture-view-dimension {
+        d1,
+        d2,
+        d2-array,
+        cube,
+        cube-array,
+        d3,
+    }
+
+    enum texture-aspect {
+        all,
+        stencil-only,
+        depth-only,
+    }
+
+    enum address-mode {
+        clamp-to-edge,
+        repeat,
+        mirror-repeat,
+    }
+
+    enum filter-mode {
+        nearest,
+        linear,
+    }
+
+    enum compare-function {
+        never,
+        less,
+        equal,
+        less-equal,
+        greater,
+        not-equal,
+        greater-equal,
+        always,
+    }
+
+    enum vertex-format {
+        uint8x2,
+        uint8x4,
+        sint8x2,
+        sint8x4,
+        unorm8x2,
+        unorm8x4,
+        snorm8x2,
+        snorm8x4,
+        uint16x2,
+        uint16x4,
+        sint16x2,
+        sint16x4,
+        unorm16x2,
+        unorm16x4,
+        snorm16x2,
+        snorm16x4,
+        float16x2,
+        float16x4,
+        float32,
+        float32x2,
+        float32x3,
+        float32x4,
+        uint32,
+        uint32x2,
+        uint32x3,
+        uint32x4,
+        sint32,
+        sint32x2,
+        sint32x3,
+        sint32x4,
+    }
+
+    enum vertex-step-mode {
+        vertex,
+        instance,
+    }
+
+    enum primitive-topology {
+        point-list,
+        line-list,
+        line-strip,
+        triangle-list,
+        triangle-strip,
+    }
+
+    enum index-format {
+        uint16,
+        uint32,
+    }
+
+    enum front-face {
+        ccw,
+        cw,
+    }
+
+    enum cull-mode {
+        none,
+        front,
+        back,
+    }
+
+    enum blend-factor {
+        zero,
+        one,
+        src,
+        one-minus-src,
+        src-alpha,
+        one-minus-src-alpha,
+        dst,
+        one-minus-dst,
+        dst-alpha,
+        one-minus-dst-alpha,
+        src-alpha-saturated,
+        constant,
+        one-minus-constant,
+    }
+
+    enum blend-operation {
+        add,
+        subtract,
+        reverse-subtract,
+        min,
+        max,
+    }
+
+    enum store-op {
+        store,
+        discard,
+    }
+
+    enum buffer-binding-type {
+        uniform,
+        storage,
+        read-only-storage,
+    }
+
+    enum sampler-binding-type {
+        filtering,
+        non-filtering,
+        comparison,
+    }
+
+    enum texture-sample-type {
+        float,
+        unfilterable-float,
+        depth,
+        sint,
+        uint,
+    }
+
+    enum storage-texture-access {
+        write-only,
+        read-only,
+        read-write,
+    }
+
+    record color {
+        r: f64,
+        g: f64,
+        b: f64,
+        a: f64,
+    }
+
+    record extent {
+        width: u32,
+        height: u32,
+        depth-or-array-layers: u32,
+    }
+
+    record origin {
+        x: u32,
+        y: u32,
+        z: u32,
+    }
+
+    /// The device's limits that apps most often need, and the host's caps.
+    record limits {
+        max-texture-dimension-2d: u32,
+        max-texture-dimension-3d: u32,
+        max-buffer-size: u64,
+        max-bind-groups: u32,
+        max-vertex-buffers: u32,
+        max-uniform-buffer-binding-size: u64,
+        max-storage-buffer-binding-size: u64,
+        max-compute-workgroup-size-x: u32,
+        max-compute-workgroup-size-y: u32,
+        max-compute-workgroup-size-z: u32,
+        max-compute-workgroups-per-dimension: u32,
+        min-uniform-buffer-offset-alignment: u32,
+        min-storage-buffer-offset-alignment: u32,
+        /// What the session may hold: buffers and textures together, in
+        /// bytes, and objects of every kind.
+        max-session-bytes: u64,
+        max-session-objects: u32,
+    }
+
+    record adapter-info {
+        name: string,
+        /// "vulkan", "metal", "dx12" or "gl".
+        backend: string,
+    }
+
+    resource buffer {
+        size: func() -> u64;
+        usage: func() -> buffer-usage;
+    }
+
+    record texture-view-descriptor {
+        label: option<string>,
+        format: option<texture-format>,
+        dimension: option<texture-view-dimension>,
+        aspect: texture-aspect,
+        base-mip-level: u32,
+        mip-level-count: option<u32>,
+        base-array-layer: u32,
+        array-layer-count: option<u32>,
+    }
+
+    resource texture {
+        create-view: func(descriptor: option<texture-view-descriptor>) -> result<texture-view, string>;
+        width: func() -> u32;
+        height: func() -> u32;
+        depth-or-array-layers: func() -> u32;
+        format: func() -> texture-format;
+    }
+
+    resource texture-view;
+    resource sampler;
+    resource shader-module;
+    resource bind-group-layout;
+    resource pipeline-layout;
+    resource bind-group;
+
+    resource render-pipeline {
+        get-bind-group-layout: func(index: u32) -> result<bind-group-layout, string>;
+    }
+
+    resource compute-pipeline {
+        get-bind-group-layout: func(index: u32) -> result<bind-group-layout, string>;
+    }
+
+    resource command-buffer;
+
+    record buffer-descriptor {
+        label: option<string>,
+        size: u64,
+        usage: buffer-usage,
+    }
+
+    record texture-descriptor {
+        label: option<string>,
+        size: extent,
+        mip-level-count: u32,
+        sample-count: u32,
+        dimension: texture-dimension,
+        format: texture-format,
+        usage: texture-usage,
+        view-formats: list<texture-format>,
+    }
+
+    record sampler-descriptor {
+        label: option<string>,
+        address-mode-u: address-mode,
+        address-mode-v: address-mode,
+        address-mode-w: address-mode,
+        mag-filter: filter-mode,
+        min-filter: filter-mode,
+        mipmap-filter: filter-mode,
+        lod-min-clamp: f32,
+        lod-max-clamp: f32,
+        compare: option<compare-function>,
+        max-anisotropy: u16,
+    }
+
+    record buffer-binding-layout {
+        kind: buffer-binding-type,
+        has-dynamic-offset: bool,
+        min-binding-size: option<u64>,
+    }
+
+    record texture-binding-layout {
+        sample-type: texture-sample-type,
+        view-dimension: texture-view-dimension,
+        multisampled: bool,
+    }
+
+    record storage-texture-binding-layout {
+        access: storage-texture-access,
+        format: texture-format,
+        view-dimension: texture-view-dimension,
+    }
+
+    variant binding-type {
+        buffer(buffer-binding-layout),
+        sampler(sampler-binding-type),
+        texture(texture-binding-layout),
+        storage-texture(storage-texture-binding-layout),
+    }
+
+    record bind-group-layout-entry {
+        binding: u32,
+        visibility: shader-stage,
+        binding-type: binding-type,
+    }
+
+    record buffer-binding {
+        buffer: borrow<buffer>,
+        offset: u64,
+        size: option<u64>,
+    }
+
+    variant binding-resource {
+        buffer(buffer-binding),
+        sampler(borrow<sampler>),
+        texture-view(borrow<texture-view>),
+    }
+
+    record bind-group-entry {
+        binding: u32,
+        %resource: binding-resource,
+    }
+
+    record vertex-attribute {
+        format: vertex-format,
+        offset: u64,
+        shader-location: u32,
+    }
+
+    record vertex-buffer-layout {
+        array-stride: u64,
+        step-mode: vertex-step-mode,
+        attributes: list<vertex-attribute>,
+    }
+
+    record vertex-state {
+        module: borrow<shader-module>,
+        /// The module's only vertex entry point if none.
+        entry-point: option<string>,
+        buffers: list<vertex-buffer-layout>,
+    }
+
+    record primitive-state {
+        topology: primitive-topology,
+        strip-index-format: option<index-format>,
+        front-face: front-face,
+        cull-mode: cull-mode,
+        unclipped-depth: bool,
+    }
+
+    record depth-stencil-state {
+        format: texture-format,
+        depth-write-enabled: bool,
+        depth-compare: compare-function,
+        depth-bias: s32,
+        depth-bias-slope-scale: f32,
+        depth-bias-clamp: f32,
+    }
+
+    record multisample-state {
+        count: u32,
+        mask: u64,
+        alpha-to-coverage-enabled: bool,
+    }
+
+    record blend-component {
+        operation: blend-operation,
+        src-factor: blend-factor,
+        dst-factor: blend-factor,
+    }
+
+    record blend-state {
+        color: blend-component,
+        alpha: blend-component,
+    }
+
+    record color-target-state {
+        format: texture-format,
+        blend: option<blend-state>,
+        write-mask: color-write,
+    }
+
+    record fragment-state {
+        module: borrow<shader-module>,
+        entry-point: option<string>,
+        targets: list<option<color-target-state>>,
+    }
+
+    record render-pipeline-descriptor {
+        label: option<string>,
+        /// Laid out from the shaders if none (`get-bind-group-layout`).
+        layout: option<borrow<pipeline-layout>>,
+        vertex: vertex-state,
+        primitive: primitive-state,
+        depth-stencil: option<depth-stencil-state>,
+        multisample: multisample-state,
+        fragment: option<fragment-state>,
+    }
+
+    record compute-pipeline-descriptor {
+        label: option<string>,
+        layout: option<borrow<pipeline-layout>>,
+        module: borrow<shader-module>,
+        entry-point: option<string>,
+    }
+
+    record buffer-copy {
+        buffer: borrow<buffer>,
+        offset: u64,
+        bytes-per-row: option<u32>,
+        rows-per-image: option<u32>,
+    }
+
+    record texture-copy {
+        texture: borrow<texture>,
+        mip-level: u32,
+        origin: origin,
+        aspect: texture-aspect,
+    }
+
+    record render-pass-color-attachment {
+        view: borrow<texture-view>,
+        resolve-target: option<borrow<texture-view>>,
+        /// Cleared to this colour first; the texture's contents if none.
+        clear: option<color>,
+        store: store-op,
+    }
+
+    record render-pass-depth-attachment {
+        view: borrow<texture-view>,
+        /// Cleared to this depth first; kept if none.
+        depth-clear: option<f32>,
+        depth-store: store-op,
+        depth-read-only: bool,
+    }
+
+    record render-pass-descriptor {
+        label: option<string>,
+        color-attachments: list<option<render-pass-color-attachment>>,
+        depth-stencil-attachment: option<render-pass-depth-attachment>,
+    }
+
+    /// A render pass being recorded: `end` (or dropping it) finishes it.
+    resource render-pass {
+        set-pipeline: func(pipeline: borrow<render-pipeline>);
+        set-bind-group: func(index: u32, group: option<borrow<bind-group>>, dynamic-offsets: list<u32>);
+        set-vertex-buffer: func(slot: u32, buffer: borrow<buffer>, offset: u64, size: option<u64>);
+        set-index-buffer: func(buffer: borrow<buffer>, format: index-format, offset: u64, size: option<u64>);
+        set-viewport: func(x: f32, y: f32, width: f32, height: f32, min-depth: f32, max-depth: f32);
+        set-scissor-rect: func(x: u32, y: u32, width: u32, height: u32);
+        set-blend-constant: func(color: color);
+        set-stencil-reference: func(reference: u32);
+        draw: func(vertex-count: u32, instance-count: u32, first-vertex: u32, first-instance: u32);
+        draw-indexed: func(index-count: u32, instance-count: u32, first-index: u32, base-vertex: s32, first-instance: u32);
+        draw-indirect: func(indirect: borrow<buffer>, offset: u64);
+        draw-indexed-indirect: func(indirect: borrow<buffer>, offset: u64);
+        end: func();
+    }
+
+    /// A compute pass being recorded: `end` (or dropping it) finishes it.
+    resource compute-pass {
+        set-pipeline: func(pipeline: borrow<compute-pipeline>);
+        set-bind-group: func(index: u32, group: option<borrow<bind-group>>, dynamic-offsets: list<u32>);
+        dispatch-workgroups: func(x: u32, y: u32, z: u32);
+        dispatch-workgroups-indirect: func(indirect: borrow<buffer>, offset: u64);
+        end: func();
+    }
+
+    resource command-encoder {
+        /// Errors of what is recorded show as `finish`'s or `submit`'s.
+        begin-render-pass: func(descriptor: render-pass-descriptor) -> result<render-pass, string>;
+        begin-compute-pass: func(label: option<string>) -> result<compute-pass, string>;
+        copy-buffer-to-buffer: func(source: borrow<buffer>, source-offset: u64, destination: borrow<buffer>, destination-offset: u64, size: u64);
+        copy-buffer-to-texture: func(source: buffer-copy, destination: texture-copy, size: extent);
+        copy-texture-to-buffer: func(source: texture-copy, destination: buffer-copy, size: extent);
+        copy-texture-to-texture: func(source: texture-copy, destination: texture-copy, size: extent);
+        clear-buffer: func(buffer: borrow<buffer>, offset: u64, size: option<u64>);
+        /// What was recorded, to `submit`. The encoder is spent.
+        finish: static func(this: command-encoder) -> result<command-buffer, string>;
+    }
+
+    /// Whether the host has a device now: always inside `frame`, maybe not
+    /// before the first (a host drawing without a GPU never has one).
+    ready: func() -> bool;
+    get-adapter-info: func() -> option<adapter-info>;
+    get-limits: func() -> limits;
+    /// The format `current-texture` has: bgra8unorm, viewable as
+    /// bgra8unorm-srgb where the device can (`texture-view-descriptor.format`).
+    preferred-format: func() -> texture-format;
+    /// This frame's texture, the element's size: draw all of it
+    /// (premultiplied alpha), and it shows once `frame` returns. Only inside
+    /// `frame`; the same texture for each call in one.
+    current-texture: func() -> result<texture, string>;
+
+    create-buffer: func(descriptor: buffer-descriptor) -> result<buffer, string>;
+    /// A buffer holding `contents` (padded to 4 bytes).
+    create-buffer-with-data: func(label: option<string>, usage: buffer-usage, contents: list<u8>) -> result<buffer, string>;
+    create-texture: func(descriptor: texture-descriptor) -> result<texture, string>;
+    create-sampler: func(descriptor: sampler-descriptor) -> result<sampler, string>;
+    /// WGSL; its compile errors are the `err`.
+    create-shader-module: func(label: option<string>, wgsl: string) -> result<shader-module, string>;
+    create-bind-group-layout: func(label: option<string>, entries: list<bind-group-layout-entry>) -> result<bind-group-layout, string>;
+    create-pipeline-layout: func(label: option<string>, bind-group-layouts: list<borrow<bind-group-layout>>) -> result<pipeline-layout, string>;
+    create-bind-group: func(label: option<string>, layout: borrow<bind-group-layout>, entries: list<bind-group-entry>) -> result<bind-group, string>;
+    create-render-pipeline: func(descriptor: render-pipeline-descriptor) -> result<render-pipeline, string>;
+    create-compute-pipeline: func(descriptor: compute-pipeline-descriptor) -> result<compute-pipeline, string>;
+    create-command-encoder: func(label: option<string>) -> result<command-encoder, string>;
+
+    write-buffer: func(buffer: borrow<buffer>, offset: u64, data: list<u8>) -> result<_, string>;
+    write-texture: func(destination: texture-copy, data: list<u8>, bytes-per-row: option<u32>, rows-per-image: option<u32>, size: extent) -> result<_, string>;
+    /// Run what was recorded; the encoders' and passes' errors are the `err`.
+    submit: func(buffers: list<command-buffer>) -> result<_, string>;
+    /// `size` bytes of a `map-read` buffer from `offset`, once the GPU work
+    /// before it is done (waiting up to two seconds).
+    read-buffer: func(buffer: borrow<buffer>, offset: u64, size: u64) -> result<list<u8>, string>;
+}
+
+/// What a zgx WebAssembly app is.
+world app {
+    import host;
+    import gpu;
+    use types.{surface-info, input-event};
+
+    /// Called once, first, with the element as it is laid out.
+    export init: func(info: surface-info) -> result<_, string>;
+    /// Draw a frame. `time`: seconds since the session began, as the frame
+    /// is drawn (the display's clock, not the call's).
+    export frame: func(time: f64);
+    /// One input or change of the element's.
+    export event: func(event: input-event);
+}

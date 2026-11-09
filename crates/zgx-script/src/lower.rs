@@ -3021,7 +3021,7 @@ fn kind_view(
         Kind::WebView(spec) => web_view_of(spec, vm, low),
         Kind::Terminal(term) => zgx::terminal::terminal(term),
         #[cfg(feature = "apps")]
-        Kind::Surface(app) => zgx_surface::host::surface(app),
+        Kind::Surface(app) => app.element(),
         #[cfg(feature = "scene3d")]
         Kind::Scene3d(spec) => crate::scene3d::lower(spec, vm, &low.assets, need(&mut cx)),
         Kind::Glass(spec) => glass_of(spec, vm),

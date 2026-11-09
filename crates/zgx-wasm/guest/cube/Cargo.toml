@@ -1,0 +1,12 @@
+[package]
+name = "cube"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+zgx-app = { path = "../zgx-app" }

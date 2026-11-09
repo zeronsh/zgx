@@ -49,6 +49,10 @@ pub enum GuardKind {
     /// the spec asked for as JSON, `{"command", "args"?, "cwd"?, "env"?}`
     /// (`AppSpec::to_json`). Refused, `ui.app` raises and nothing starts.
     App,
+    /// A WebAssembly app a script runs or reaches again (`ui.app { wasm }`):
+    /// named by its module's resolved path. Refused, `ui.app` raises and
+    /// nothing runs.
+    Wasm,
     /// What a script types into a terminal (`:input`, `:paste`, `:binding`):
     /// named by the session's id.
     TermInput,
