@@ -2359,13 +2359,15 @@ impl Host {
                         ui.input.focus(&ui.scene, self.touch_focus);
                     }
                 }
-                // UIKit gives each view its own touch; zgx's one press goes to
-                // the finger with something to act on.
+                // UIKit gives each view its own touch, and one table's rows one
+                // between them.
                 #[cfg(target_os = "ios")]
                 crate::touch::Step::SecondFinger { first, second } => {
                     let ui = &self.context.ui;
-                    if !ui.pressable_at(first.0, first.1) && ui.pressable_at(second.0, second.1) {
-                        let next = self.touch.second_takes_press(std::time::Instant::now());
+                    let keep_first = ui.pressable_at(first.0, first.1);
+                    if ui.pressable_at(second.0, second.1) && !ui.presses_share(first, second) {
+                        let now = std::time::Instant::now();
+                        let next = self.touch.second_takes_press(keep_first, now);
                         self.touch_steps(next)?;
                     }
                 }

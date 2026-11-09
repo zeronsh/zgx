@@ -160,6 +160,9 @@ pub(crate) struct Touches {
     /// A press waits for `Feel::press_delay` first, over a scroll view that
     /// scrolls across, down, or both (`set_press_delay`).
     press_delay: Option<(bool, bool)>,
+    /// A finger on a control, its press paused while another finger's runs:
+    /// zgx has one press, and UIKit a touch per view (`second_takes_press`).
+    waiting: Option<(u64, (f32, f32))>,
     feel: Feel,
 }
 
@@ -177,6 +180,7 @@ impl Default for Touches {
             fling: None,
             held: false,
             press_delay: None,
+            waiting: None,
             feel: FEEL,
         }
     }
@@ -254,6 +258,7 @@ impl Touches {
                 }
                 match self.mode {
                     Mode::Idle => {
+                        self.waiting = None;
                         // A finger landing stops a fling.
                         self.fling = None;
                         self.held = false;
@@ -278,8 +283,12 @@ impl Touches {
                             }),
                         ]
                     }
-                    // The press goes on, the first finger's, unless it has
-                    // nothing to act on.
+                    Mode::Delayed { .. } | Mode::Pressed { .. }
+                        if !self.feel.second_finger_pans && self.waiting.is_some() =>
+                    {
+                        Vec::new()
+                    }
+                    // The host says whether this finger has a press of its own.
                     Mode::Delayed { start, .. } | Mode::Pressed { start, .. }
                         if !self.feel.second_finger_pans =>
                     {
@@ -317,6 +326,13 @@ impl Touches {
                 };
                 contact.1 = (x, y);
                 let first = self.contacts.first().is_some_and(|(c, _)| *c == id);
+                // It moved off what it held: a pan, which UIKit cancels it for.
+                if let Some((held, at)) = self.waiting
+                    && held == id
+                    && (x - at.0).hypot(y - at.1) >= self.feel.slop
+                {
+                    self.waiting = None;
+                }
                 match self.mode {
                     // Past the slop along an axis its scroll view can't
                     // scroll, it is no scroll: what was pressed drags, as
@@ -340,6 +356,7 @@ impl Touches {
                             return Vec::new();
                         }
                         self.mode = Mode::Deciding;
+                        self.waiting = None;
                         self.pan = (x, y);
                         self.trail = vec![(now, (x, y))];
                         vec![Step::TryPan {
@@ -376,6 +393,16 @@ impl Touches {
                 let cancelled = phase == TouchPhase::Cancelled;
                 let first = self.contacts.first().is_some_and(|(c, _)| *c == id);
                 self.contacts.retain(|(c, _)| *c != id);
+                if let Some((held, at)) = self.waiting
+                    && held == id
+                {
+                    self.waiting = None;
+                    return if cancelled {
+                        Vec::new()
+                    } else {
+                        self.click_beside(at)
+                    };
+                }
                 // The press's finger lifting ends it, whoever else is down.
                 let ends_press = first
                     && !self.feel.second_finger_pans
@@ -396,6 +423,9 @@ impl Touches {
                     return Vec::new();
                 }
                 let mode = std::mem::replace(&mut self.mode, Mode::Idle);
+                let back_to = self.waiting.take().filter(|_| {
+                    !cancelled && matches!(mode, Mode::Delayed { .. } | Mode::Pressed { .. })
+                });
                 let mut steps = match mode {
                     Mode::Delayed { .. } if cancelled => Vec::new(),
                     // A tap: pressed and released at once, as a cell highlights.
@@ -469,6 +499,11 @@ impl Touches {
                 };
                 // No finger hovers: what it pressed shows no hover after.
                 steps.push(Step::Dispatch(PointerLeave));
+                // The press this one paused goes on.
+                if let Some((_, at)) = back_to {
+                    self.mode = Mode::Pressed { start: at, at: now };
+                    steps.extend(press(at));
+                }
                 steps
             }
         }
@@ -476,17 +511,19 @@ impl Touches {
 
     /// When a finger resting within the slop has been held long enough
     /// (`hold`), for the host to wake then.
-    /// The finger that just landed takes the press (`Step::SecondFinger`): its
-    /// lift ends it, and the first's does nothing, as a view a resting thumb
-    /// isn't on takes its own touch in UIKit.
+    /// The finger that just landed takes the press (`Step::SecondFinger`). As
+    /// UIKit gives each view its own touch, its lift clicks what it is on, and
+    /// the first's clicks what that is on where `keep_first` says it is on
+    /// something: its press pauses until then (`waiting`).
     #[cfg(any(target_os = "ios", test))]
-    pub(crate) fn second_takes_press(&mut self, now: Instant) -> Vec<Step> {
+    pub(crate) fn second_takes_press(&mut self, keep_first: bool, now: Instant) -> Vec<Step> {
         let Some(landed) = self.contacts.pop() else {
             return Vec::new();
         };
         let at = landed.1;
         self.contacts.insert(0, landed);
         self.held = false;
+        self.waiting = self.contacts.get(1).copied().filter(|_| keep_first);
         match self.mode {
             Mode::Delayed { .. } => {
                 self.mode = Mode::Delayed { start: at, at: now };
@@ -498,6 +535,26 @@ impl Touches {
                 steps.extend(press(at));
                 steps
             }
+            _ => Vec::new(),
+        }
+    }
+    /// A paused press's finger lifted while another's press runs: its click,
+    /// and that press again.
+    fn click_beside(&mut self, at: (f32, f32)) -> Vec<Step> {
+        let mut click = press(at);
+        click.push(Step::Dispatch(InputEvent::PointerUp {
+            x: at.0,
+            y: at.1,
+            button: PointerButton::Primary,
+        }));
+        match self.mode {
+            Mode::Pressed { start, .. } => {
+                let mut steps = vec![Step::Unpress];
+                steps.append(&mut click);
+                steps.extend(press(start));
+                steps
+            }
+            Mode::Delayed { .. } => click,
             _ => Vec::new(),
         }
     }
@@ -878,7 +935,7 @@ mod tests {
         touches.touch(1, Started, (10., 700.), false, t);
         touches.touch(2, Started, (10., 200.), false, later(300));
         // The thumb's press to nothing goes, and this one's comes.
-        let mut steps = touches.second_takes_press(later(300));
+        let mut steps = touches.second_takes_press(false, later(300));
         assert_eq!(steps.remove(0), Step::Unpress);
         assert!(events(steps).iter().any(|e| matches!(
             e,
@@ -906,6 +963,81 @@ mod tests {
         assert!(touches.idle());
     }
 
+    /// Whether `steps` press at height `y`.
+    fn presses(steps: &[Step], y: f32) -> bool {
+        steps
+            .iter()
+            .any(|step| matches!(step, Step::Dispatch(PointerDown { y: at, .. }) if *at == y))
+    }
+    /// Whether `steps` lift at height `y`.
+    fn lifts(steps: &[Step], y: f32) -> bool {
+        steps
+            .iter()
+            .any(|step| matches!(step, Step::Dispatch(PointerUp { y: at, .. }) if *at == y))
+    }
+
+    #[test]
+    fn on_ios_two_fingers_on_two_controls_each_click_on_their_own_lift() {
+        let t = Instant::now();
+        let later = |ms| t + Duration::from_millis(ms);
+        let two_down = || {
+            let mut touches = Touches::with_feel(IOS);
+            assert!(presses(
+                &touches.touch(1, Started, (10., 700.), false, t),
+                700.
+            ));
+            touches.touch(2, Started, (10., 200.), false, later(200));
+            let steps = touches.second_takes_press(true, later(200));
+            assert_eq!(steps[0], Step::Unpress);
+            assert!(presses(&steps, 200.));
+            touches
+        };
+        // The second lifts first, as a tap: its click, and the first's press
+        // again, which clicks as it lifts.
+        let mut touches = two_down();
+        let up = touches.touch(2, Ended, (10., 200.), false, later(260));
+        assert!(lifts(&up, 200.));
+        assert!(presses(&up, 700.), "the first's press goes on: {up:?}");
+        assert!(!lifts(&up, 700.));
+        let up = touches.touch(1, Ended, (10., 700.), false, later(760));
+        assert!(lifts(&up, 700.));
+        assert!(touches.idle());
+        // The first lifts first: its click at its lift, the second's press
+        // going on to click at its own.
+        let mut touches = two_down();
+        let up = touches.touch(1, Ended, (10., 700.), false, later(300));
+        assert!(presses(&up, 700.) && lifts(&up, 700.), "{up:?}");
+        assert!(presses(&up, 200.), "the second's goes on: {up:?}");
+        assert!(!lifts(&up, 200.));
+        let up = touches.touch(2, Ended, (10., 200.), false, later(400));
+        assert!(lifts(&up, 200.));
+        assert!(!presses(&up, 700.));
+        assert!(touches.idle());
+        // The first moved off what it held: no click of its own afterwards.
+        let mut touches = two_down();
+        assert!(
+            touches
+                .touch(1, Moved, (10., 640.), false, later(230))
+                .is_empty()
+        );
+        let up = touches.touch(2, Ended, (10., 200.), false, later(260));
+        assert!(lifts(&up, 200.) && !presses(&up, 700.), "{up:?}");
+        // The second moved away: a pan, which takes the first's press too.
+        let mut touches = two_down();
+        touches.touch(2, Moved, (10., 100.), false, later(230));
+        let up = touches.touch(2, Ended, (10., 100.), false, later(260));
+        assert!(!presses(&up, 700.), "{up:?}");
+        // A third finger is nothing to them.
+        let mut touches = two_down();
+        assert!(
+            touches
+                .touch(3, Started, (10., 400.), false, later(230))
+                .is_empty()
+        );
+        let up = touches.touch(2, Ended, (10., 200.), false, later(260));
+        assert!(lifts(&up, 200.) && presses(&up, 700.), "{up:?}");
+    }
+
     #[test]
     fn on_ios_a_finger_takes_a_press_still_delayed_from_one_resting_on_nothing() {
         let t = Instant::now();
@@ -914,7 +1046,7 @@ mod tests {
         touches.set_press_delay(Some((false, true)));
         touches.touch(1, Started, (10., 700.), false, t);
         touches.touch(2, Started, (10., 200.), false, later(50));
-        assert!(touches.second_takes_press(later(50)).is_empty());
+        assert!(touches.second_takes_press(false, later(50)).is_empty());
         // Delayed from its own landing, and pressed where it landed.
         assert!(touches.due_press(later(100)).is_empty());
         let down = events(touches.due_press(later(50) + IOS.press_delay));
