@@ -458,3 +458,77 @@ fn a_player_unseen_past_its_end_shows_its_last_frame_stopped() {
 fn shown_playing(shown: &Shown) -> bool {
     shown.player.playing.with_untracked(|p| *p)
 }
+
+#[test]
+fn a_player_keeps_frames_only_paused_and_gives_them_back_at_rest() {
+    let dir = temp_dir("player-cache");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let mut held = None;
+    let path = dir.to_path_buf();
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    // A frame of 100 by 50, RGBA.
+    let frame_bytes = 100 * 50 * 4;
+    player.keep_frames_for(Duration::from_millis(300));
+    let mut wait_for = |what: &dyn Fn() -> bool, why: &str| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !what() {
+            stage.step().unwrap();
+            assert!(Instant::now() < deadline, "{why}");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    // Paused, scrubbed to three frames: it keeps them.
+    // Each seek waits for its picture: seeks asked together are drawn as
+    // the last of them alone.
+    player.open("Bar", json!({}), 0);
+    wait_for(
+        &|| player.image.with_untracked(Option::is_some),
+        "no frame came",
+    );
+    for frame in [10, 20] {
+        player.seek(frame);
+        wait_for(
+            &|| player.frame.with_untracked(|f| *f) == frame,
+            "no frame came",
+        );
+    }
+    wait_for(
+        &|| player.cached_bytes() == 3 * frame_bytes,
+        "kept no frames scrubbing",
+    );
+    // Playing: given back, and nothing it plays is kept.
+    player.play(true);
+    wait_for(&|| player.cached_bytes() == 0, "kept frames playing");
+    wait_for(
+        &|| player.frame.with_untracked(|f| *f) >= 30,
+        "it didn't play",
+    );
+    assert_eq!(player.cached_bytes(), 0, "kept a played frame");
+    // Paused and scrubbed again, then left alone: given back.
+    player.play(false);
+    player.seek(5);
+    wait_for(&|| player.cached_bytes() == frame_bytes, "kept no frame");
+    let rest = Instant::now();
+    wait_for(&|| player.cached_bytes() == 0, "kept frames at rest");
+    assert!(
+        rest.elapsed() >= Duration::from_millis(250),
+        "gave back too soon"
+    );
+}

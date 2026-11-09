@@ -11,6 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 use zgx::image::ImageData;
@@ -28,6 +29,8 @@ pub(crate) enum Ask {
     Watch(bool),
     /// The script changed: build it again, staying at the frame it's at.
     Reload,
+    /// How long it keeps its drawn frames once nothing is asked of it.
+    KeepFor(Duration),
     Quit,
 }
 
@@ -62,15 +65,28 @@ pub enum Event {
 /// How many bytes of drawn frames the thread keeps, for scrubbing back without
 /// playing the composition from its start.
 const CACHE_BYTES: usize = 512 << 20;
+/// How long it keeps them once nothing is asked of it: at rest, a player
+/// holds no frames.
+const CACHE_KEPT: Duration = Duration::from_secs(5);
 
-/// Frames drawn for this script, as they were.
-#[derive(Default)]
+/// Frames drawn for this script, as they were: those shown while paused or
+/// scrubbing, not those played (played on, a frame isn't asked for again).
+/// `held` says how many bytes, for the player to read.
 struct Cache {
     frames: HashMap<u64, Arc<[u8]>>,
     order: VecDeque<u64>,
     bytes: usize,
+    held: Arc<AtomicUsize>,
 }
 impl Cache {
+    fn new(held: Arc<AtomicUsize>) -> Self {
+        Self {
+            frames: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+            held,
+        }
+    }
     fn get(&mut self, frame: u64) -> Option<Arc<[u8]>> {
         self.frames.get(&frame).cloned()
     }
@@ -87,9 +103,11 @@ impl Cache {
                 self.bytes -= gone.len();
             }
         }
+        self.held.store(self.bytes, Ordering::Relaxed);
     }
     fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self::new(self.held.clone());
+        self.held.store(0, Ordering::Relaxed);
     }
 }
 
@@ -140,7 +158,8 @@ impl Preview {
     }
     /// Show `frame`: drawn before, or by moving there, from the start if it's
     /// behind where the stage stands.
-    fn show(&mut self, frame: u64) -> Result<(), String> {
+    /// Draw `frame` (or take it from the cache) and tell it; `keep`, keep it.
+    fn show(&mut self, frame: u64, keep: bool) -> Result<(), String> {
         if self.stage.is_none() {
             self.build()?;
         }
@@ -170,7 +189,9 @@ impl Preview {
             self.say(Event::Tracks(tracks));
         }
         let pixels: Arc<[u8]> = pixels.into();
-        self.cache.put(frame, pixels.clone());
+        if keep {
+            self.cache.put(frame, pixels.clone());
+        }
         self.say(Event::Frame {
             frame,
             width,
@@ -198,6 +219,7 @@ pub(crate) fn run(
     asks: Receiver<Ask>,
     tell: Sender<Event>,
     wake: Box<dyn Fn() + Send>,
+    held: Arc<AtomicUsize>,
 ) {
     let wake: Rc<dyn Fn()> = Rc::from(wake as Box<dyn Fn()>);
     let mut preview = Preview {
@@ -206,7 +228,7 @@ pub(crate) fn run(
         composition: None,
         props: json!({}),
         stage: None,
-        cache: Cache::default(),
+        cache: Cache::new(held),
         tell,
         wake,
         tracks: 0,
@@ -219,6 +241,7 @@ pub(crate) fn run(
     // due then. `stale`: a frame it moved to and didn't draw.
     let mut watched = true;
     let mut stale = false;
+    let mut keep_for = CACHE_KEPT;
     loop {
         // Until the next frame is due, or for ever: an idle preview waits.
         // Unseen and playing, only its end matters (not looping), or nothing.
@@ -238,6 +261,15 @@ pub(crate) fn run(
             Some(due) => match asks.recv_timeout(due.saturating_duration_since(Instant::now())) {
                 Ok(ask) => Some(ask),
                 Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => return,
+            },
+            // At rest with frames kept: kept a while, then given back.
+            None if preview.cache.bytes > 0 => match asks.recv_timeout(keep_for) {
+                Ok(ask) => Some(ask),
+                Err(RecvTimeoutError::Timeout) => {
+                    preview.cache.clear();
+                    continue;
+                }
                 Err(RecvTimeoutError::Disconnected) => return,
             },
             None => match asks.recv() {
@@ -288,6 +320,8 @@ pub(crate) fn run(
                 }
                 Ask::Play(on) => {
                     if on {
+                        // Played on, no frame is asked for again.
+                        preview.cache.clear();
                         if at >= preview.last_frame() {
                             at = 0;
                             seek = Some(0);
@@ -306,6 +340,7 @@ pub(crate) fn run(
                     }
                     watched = on;
                 }
+                Ask::KeepFor(time) => keep_for = time,
                 Ask::Reload => {
                     preview.cache.clear();
                     result = preview.build();
@@ -347,7 +382,7 @@ pub(crate) fn run(
                         .max(frame * u64::from(preview.composition.is_none())),
                 );
                 if watched {
-                    result = preview.show(at);
+                    result = preview.show(at, playing.is_none());
                     stale = false;
                 } else {
                     stale = true;
@@ -379,6 +414,8 @@ pub struct Player {
     pub error: Signal<Option<String>>,
     /// The picture it shows.
     pub image: Signal<Option<Arc<ImageData>>>,
+    /// Bytes of drawn frames its thread keeps.
+    cached: Arc<AtomicUsize>,
 }
 impl Player {
     /// A player of the script at `path` (a file, or a directory holding
@@ -390,6 +427,8 @@ impl Player {
         let (tell, told) = channel::<Event>();
         let (wake_up, woken) = zgx::task::latest::<()>();
         let path = path.to_owned();
+        let cached = Arc::new(AtomicUsize::new(0));
+        let held = cached.clone();
         std::thread::Builder::new()
             .name("zgx-video player".into())
             .spawn(move || {
@@ -401,6 +440,7 @@ impl Player {
                     Box::new(move || {
                         wake_up.send(());
                     }),
+                    held,
                 );
             })
             .map_err(|error| error.to_string())?;
@@ -413,7 +453,19 @@ impl Player {
             tracks: runtime.signal(Vec::new()),
             error: runtime.signal(None),
             image: runtime.signal(None),
+            cached,
         }))
+    }
+    /// Bytes of drawn frames its thread keeps now: for tests.
+    #[doc(hidden)]
+    pub fn cached_bytes(&self) -> usize {
+        self.cached.load(Ordering::Relaxed)
+    }
+    /// How long it keeps drawn frames once nothing is asked of it (5 s):
+    /// for tests.
+    #[doc(hidden)]
+    pub fn keep_frames_for(&self, time: Duration) {
+        let _ = self.asks.send(Ask::KeepFor(time));
     }
     /// Show composition `id` with `props` over its defaults, at `frame`.
     pub fn open(&self, id: &str, props: Json, frame: u64) {
