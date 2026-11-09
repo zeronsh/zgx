@@ -8,12 +8,7 @@ mod md_chunk;
 use zgx::profile::Phase;
 
 /// As `md_chunk_flat`'s, with the phases drawing adds.
-const STILL_GROWING: &[(Phase, &str)] = &[
-    (Phase::Layout, "layout"),
-    // The paint walk over every block of the column, shown or not, to find
-    // the few a chunk's damage reaches (render lane).
-    (Phase::Paint, "render"),
-];
+const STILL_GROWING: &[(Phase, &str)] = &[(Phase::Layout, "layout")];
 
 #[test]
 fn a_drawn_chunk_costs_the_same_however_long_the_reply() {

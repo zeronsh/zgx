@@ -73,8 +73,59 @@ impl std::hash::Hasher for NodeHasher {
 /// Separate damage rectangles a flush keeps before marking damage on a grid
 /// of `DAMAGE_CELL` cells instead (see `DamageGrid`).
 const DAMAGE_RECTS: usize = 64;
+/// A node of `SEARCHED_CHILDREN` children or more whose ink is its children's
+/// union translated, nothing of its own (`Scene::ink_is_held`), as its ink
+/// was last worked out (`Scene::long_children`): the union of all its children
+/// but the last `KEPT_TAIL` (a streamed reply's last blocks come and go and
+/// change kind; those before them stay), as edges (taken with more children
+/// in any order, the same to the bit); how many children that is, and the
+/// last of them (that it is still there tells a change in the list behind
+/// it from one in the tail); and how far their inks reach past their boxes
+/// (`Scene::long_children`), negative if their boxes don't run in order.
+struct LongChildren {
+    /// How far any child's ink reaches past its box, if their boxes run in
+    /// order (`searched`); negative if not.
+    reach: f32,
+    /// The union kept, if its ink is one: worked out again, its ink is that
+    /// union with the inks of the children invalidated since, if each grew
+    /// where it was (`grown_ink`: a streamed reply's column as its last block
+    /// grows), not one over every child. A child's ink worked out by anything
+    /// but its parent (the old ink the union took is gone then), and a change
+    /// in the list behind the tail, drop it (`drop_kept_ink`).
+    kept: Option<KeptInk>,
+}
+struct KeptInk {
+    prefix: Option<[f32; 4]>,
+    count: usize,
+    last: Option<NodeId>,
+    reach: f32,
+}
+/// How many children at the end of a node's list its kept union leaves out,
+/// to work out each time: a streamed reply's last blocks are replaced as
+/// they change kind.
+const KEPT_TAIL: usize = 8;
+/// `ink`'s left, top, right and bottom edges.
+#[inline(always)]
+fn ink_edges(ink: Rect) -> [f32; 4] {
+    [ink.x, ink.y, ink.x + ink.width, ink.y + ink.height]
+}
+/// The union of edges `a` and `b` (`ink_edges`).
+#[inline(always)]
+fn edges_union(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[2].max(b[2]),
+        a[3].max(b[3]),
+    ]
+}
+/// The rectangle of edges `e`.
+#[inline(always)]
+fn edges_rect(e: [f32; 4]) -> Rect {
+    Rect::new(e[0], e[1], e[2] - e[0], e[3] - e[1])
+}
 /// How many children a node has before a damaged paint walk finds those
-/// meeting its damage by search (`Scene::child_reach`): fewer, the plain
+/// meeting its damage by search (`Scene::long_children`): fewer, the plain
 /// filter costs less than the search.
 const SEARCHED_CHILDREN: usize = 64;
 /// The side of a damage grid cell, in viewport units.
@@ -3165,7 +3216,20 @@ pub struct Scene {
     /// then finds the children that can meet its damage by search
     /// (`searched`). Kept beside the nodes: few have so many children, and
     /// a field every node carries cost every node.
-    child_reach: std::cell::RefCell<std::collections::HashMap<NodeId, f32, crate::KeyHasher>>,
+    long_children:
+        std::cell::RefCell<std::collections::HashMap<NodeId, LongChildren, crate::KeyHasher>>,
+    /// Whether any node kept its union (`KeptInk`): the paths that drop one
+    /// look for none without.
+    kept_any: std::cell::Cell<bool>,
+    /// Tests: work every ink out over every child (`KeptInk` unused).
+    #[cfg(test)]
+    pub(crate) rescan_inks: bool,
+    /// Tests: inks worked out from a kept union (`grown_ink`).
+    #[cfg(test)]
+    pub(crate) grown_inks: std::cell::Cell<u64>,
+    /// Tests: inks asked for (`ink`), cached or worked out.
+    #[cfg(test)]
+    pub(crate) inks_asked: std::cell::Cell<u64>,
     /// The last point hit tested, the revisions it was hit at and what it
     /// hit (`hit_test_all`): a pointer move's dispatch and its cursor ask the
     /// same, and most moves between frames ask where nothing changed.
@@ -3385,9 +3449,16 @@ impl Scene {
             reference_walks: false,
             #[cfg(test)]
             linear_walks: false,
-            child_reach: std::cell::RefCell::new(std::collections::HashMap::with_hasher(
+            long_children: std::cell::RefCell::new(std::collections::HashMap::with_hasher(
                 crate::key_hasher(),
             )),
+            kept_any: std::cell::Cell::new(false),
+            #[cfg(test)]
+            rescan_inks: false,
+            #[cfg(test)]
+            grown_inks: Default::default(),
+            #[cfg(test)]
+            inks_asked: Default::default(),
             hit_memo: Default::default(),
             cursor_styles: 0,
             contents_styles: Default::default(),
@@ -3510,7 +3581,7 @@ impl Scene {
             offset.y += node.transform.y;
             parent = node.parent;
         }
-        self.ink(id)
+        self.ink_alone(id)
             .map(|ink| ink.translated(offset))
             .filter(|ink| ink.width > 0. && ink.height > 0.)
     }
@@ -3833,7 +3904,7 @@ impl Scene {
                 .map_or(0, |at| at + 1);
             for later in &children[after..] {
                 if self
-                    .ink(*later)
+                    .ink_alone(*later)
                     .is_some_and(|ink| ink.translated(offset).intersects(rect))
                     && self.paints(*later)
                 {
@@ -3974,7 +4045,7 @@ impl Scene {
     #[doc(hidden)]
     pub fn layer_ink(&self, item: &PaintItem<'_>) -> Option<Rect> {
         let node = self.node(item.id);
-        let ink = self.ink(item.id)?;
+        let ink = self.ink_alone(item.id)?;
         Some(ink.translated(Transform {
             x: item.bounds.x - node.bounds.x - node.transform.x,
             y: item.bounds.y - node.bounds.y - node.transform.y,
@@ -5940,6 +6011,11 @@ impl Scene {
         }
         self.node_mut(parent).children.get_mut()[from..].copy_from_slice(children);
         self.invalidate_layout(parent);
+        // Children removed or moved: its kept ink union goes unless only
+        // its tail changed (`KeptInk`).
+        if self.kept_any.get() {
+            self.children_moved(parent);
+        }
         self.children_changed(parent);
         // In another order, another may be hit on top.
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
@@ -6895,6 +6971,11 @@ impl Scene {
             self.inert = inert;
         }
         self.invalidate_layout(parent);
+        // Children removed or moved: its kept ink union goes unless only
+        // its tail changed (`KeptInk`).
+        if self.kept_any.get() {
+            self.children_moved(parent);
+        }
         self.children_changed(parent);
         // Hidden windows may retain damage for an arbitrarily long time while
         // virtual rows are replaced. Amortize stale-generation cleanup so that
@@ -6953,6 +7034,11 @@ impl Scene {
         self.overflow_fades.retain(|(id, _)| live(id));
         self.inert.retain(live);
         self.invalidate_layout(parent);
+        // Children removed or moved: its kept ink union goes unless only
+        // its tail changed (`KeptInk`).
+        if self.kept_any.get() {
+            self.children_moved(parent);
+        }
         self.children_changed(parent);
         ids
     }
@@ -6970,9 +7056,9 @@ impl Scene {
     /// What the scene keeps about `node`, gone, but in the lists `kill`
     /// filters.
     fn forget(&mut self, id: NodeId, node: &Node) {
-        let reaches = self.child_reach.get_mut();
-        if !reaches.is_empty() {
-            reaches.remove(&id);
+        let long = self.long_children.get_mut();
+        if !long.is_empty() {
+            long.remove(&id);
         }
         self.selectable.forget(id);
         self.views.forget(id);
@@ -7761,7 +7847,7 @@ impl Scene {
                 _ => 0.,
             };
             let shadow = self.drop_shadow(id).copied();
-            let ink = self.ink(id).map(|ink| {
+            let ink = self.ink_alone(id).map(|ink| {
                 let ink = ink.expand(bleed);
                 shadow.map_or(ink, |shadow| ink.union(shadow.ink(ink)))
             });
@@ -9755,6 +9841,8 @@ impl Scene {
     }
     /// See `Node::ink`. Computed on demand and cached until invalidated.
     fn ink(&self, id: NodeId) -> Option<Rect> {
+        #[cfg(test)]
+        self.inks_asked.set(self.inks_asked.get() + 1);
         let node = self.node(id);
         if node.bounds_valid.get() & INK_VALID != 0 {
             return node.ink.get();
@@ -9810,19 +9898,84 @@ impl Scene {
         node.bounds_valid.set(INK_VALID | BOUNDS_VALID);
         ink
     }
-    /// `ink`'s union of the inks of `id`'s many `children` (`SEARCHED_CHILDREN`
-    /// or more), noting whether their boxes run down in order and how far
-    /// their ink reaches past them (`child_reach`). Out of line: the many
-    /// nodes of few children keep `ink`'s loop as it was.
+    /// `ink`, asked by anything but `id`'s parent working its own out: the
+    /// old ink its parent's kept union took for it goes (`KeptInk`). `ink`
+    /// itself looks for none of this: every node's ink is asked there, and
+    /// nearly always no union is kept.
+    #[inline(always)]
+    fn ink_alone(&self, id: NodeId) -> Option<Rect> {
+        if self.kept_any.get() {
+            self.ink_apart(id);
+        }
+        self.ink(id)
+    }
+    /// `ink_alone`, where some node keeps a union.
+    #[cold]
+    #[inline(never)]
+    fn ink_apart(&self, id: NodeId) {
+        let node = self.node(id);
+        if node.bounds_valid.get() & INK_VALID == 0
+            && let Some(parent) = node.parent
+            // (Only nodes of many children keep one.)
+            // SAFETY: only its length is read, as `children_raw` reads it.
+            && unsafe { &*self.tree_node(parent).children.get() }.len() >= SEARCHED_CHILDREN
+        {
+            self.drop_kept_ink(parent);
+        }
+    }
+    /// A paint walk starts at `start`, some node keeping a union: the walk
+    /// asks each child's ink by `ink` below a parent whose own it worked
+    /// out, so all are valid, but for `start`'s children. Worked out here,
+    /// by `start`; `start` hidden, they are asked apart from it, so its own
+    /// union goes.
+    #[cold]
+    #[inline(never)]
+    fn walk_starts(&self, start: NodeId) {
+        if self.ink_alone(start).is_none() {
+            self.drop_kept_ink(start);
+        }
+    }
+    /// `ink`'s union of the inks of `id`'s many `children`
+    /// (`SEARCHED_CHILDREN` or more): from its kept union if it holds one
+    /// that still serves (`grown_ink`), else over them all. Out of line: the
+    /// many nodes of few children keep `ink`'s loop as it was.
     #[inline(never)]
     fn many_children_held(&self, id: NodeId, children: &[NodeId]) -> Option<Rect> {
+        let kept = self.ink_is_held(id, self.node(id));
+        if kept && let Some(held) = self.grown_ink(id, children) {
+            return held;
+        }
+        self.every_child_held(id, children, kept)
+    }
+    /// `ink`'s union of the inks of `id`'s many `children` (`SEARCHED_CHILDREN`
+    /// or more), noting whether their boxes run down in order and how far
+    /// their ink reaches past them (`long_children`).
+    fn every_child_held(&self, id: NodeId, children: &[NodeId], kept: bool) -> Option<Rect> {
         let mut held: Option<Rect> = None;
+        let mut edges: Option<[f32; 4]> = None;
         let mut ordered = true;
         let (mut top, mut bottom, mut reach) = (f32::NEG_INFINITY, f32::NEG_INFINITY, 0f32);
-        for child in children {
+        // Kept: the union and reach of all but the tail (`KeptInk`).
+        let count = children.len().saturating_sub(KEPT_TAIL);
+        let (mut prefix, mut prefix_reach) = (None, -1.);
+        for (index, child) in children.iter().enumerate() {
+            if kept && index == count {
+                prefix = edges;
+                prefix_reach = if ordered && reach.is_finite() {
+                    reach
+                } else {
+                    -1.
+                };
+            }
             let ink = crate::deep(0, || self.ink(*child));
             if let Some(child) = ink {
-                held = Some(held.map_or(child, |ink| ink.union(child)));
+                match kept {
+                    true => {
+                        let child = ink_edges(child);
+                        edges = Some(edges.map_or(child, |e| edges_union(e, child)));
+                    }
+                    false => held = Some(held.map_or(child, |ink| ink.union(child))),
+                }
             }
             if ordered {
                 // A child the tree led to, its ink just worked out.
@@ -9841,8 +9994,199 @@ impl Scene {
         } else {
             -1.
         };
-        self.child_reach.borrow_mut().insert(id, reach);
+        let mut long = LongChildren { reach, kept: None };
+        if kept {
+            held = edges.map(edges_rect);
+            long.kept = Some(KeptInk {
+                prefix,
+                count,
+                last: count.checked_sub(1).map(|at| children[at]),
+                reach: prefix_reach,
+            });
+            self.kept_any.set(true);
+        }
+        self.long_children.borrow_mut().insert(id, long);
         held
+    }
+    /// The union of held `id`'s (`ink_is_held`) many `children`, from its kept
+    /// union of all but the tail (`KeptInk`), taking in those of its
+    /// children invalidated since if each grew where it was (its ink holds
+    /// what the union took for it, its box still runs in order between its
+    /// neighbours'), and the tail's worked out again. `None` where it is
+    /// worked out over every child: no union kept (dropped:
+    /// `drop_kept_ink`), the list behind the tail changed, or a child
+    /// behind it shrank, hid, or moved (a block growing pushes those after
+    /// it).
+    #[inline(never)]
+    fn grown_ink(&self, id: NodeId, children: &[NodeId]) -> Option<Option<Rect>> {
+        let entry = self.long_children.borrow_mut().get_mut(&id)?.kept.take()?;
+        #[cfg(test)]
+        if self.rescan_inks {
+            return None;
+        }
+        // The children behind the tail still there, in their places.
+        let last = entry
+            .count
+            .checked_sub(1)
+            .map(|at| children.get(at).copied());
+        if entry.count > children.len() || last.is_some_and(|at| at != entry.last) {
+            return None;
+        }
+        let mut prefix = entry.prefix;
+        let mut prefix_reach = entry.reach;
+        // Children the tree led to, their parent's list in order.
+        let shown = |child: NodeId| {
+            let held = self.tree_node(child);
+            held.bounds.translated(held.transform)
+        };
+        let in_order = |index: usize, at: Rect| {
+            (index == 0 || {
+                let before = shown(children[index - 1]);
+                before.y <= at.y && before.y + before.height <= at.y + at.height
+            }) && (index + 1 == children.len() || {
+                let after = shown(children[index + 1]);
+                at.y <= after.y && at.y + at.height <= after.y + after.height
+            })
+        };
+        let past = |reach: f32, at: Rect, ink: Rect| {
+            reach
+                .max(at.y - ink.y)
+                .max(ink.y + ink.height - (at.y + at.height))
+        };
+        // Behind the tail: only those invalidated, if each grew in place.
+        let grown = children[..entry.count]
+            .iter()
+            .enumerate()
+            .try_for_each(|(index, &child)| {
+                let node = self.tree_node(child);
+                if node.bounds_valid.get() & INK_VALID != 0 {
+                    return Some(());
+                }
+                // What the union took for it: its ink as cached, invalidated
+                // since but not worked out again (that would have dropped the
+                // union).
+                let was = node.ink.get().map(ink_edges);
+                let ink = crate::deep(0, || self.ink(child));
+                if let Some(was) = was {
+                    let now = ink.map(ink_edges)?;
+                    if now[0] > was[0] || now[1] > was[1] || now[2] < was[2] || now[3] < was[3] {
+                        return None;
+                    }
+                }
+                if prefix_reach >= 0. {
+                    let at = shown(child);
+                    if !in_order(index, at) {
+                        return None;
+                    }
+                    if let Some(ink) = ink {
+                        prefix_reach = past(prefix_reach, at, ink);
+                    }
+                }
+                if let Some(ink) = ink.map(ink_edges) {
+                    prefix = Some(prefix.map_or(ink, |held| edges_union(held, ink)));
+                }
+                Some(())
+            });
+        grown?;
+        // The rest, worked out again: those leaving the tail join the kept
+        // union.
+        let count = children.len().saturating_sub(KEPT_TAIL).max(entry.count);
+        let (mut tail, mut reach) = (None, prefix_reach);
+        for (index, &child) in children.iter().enumerate().skip(entry.count) {
+            let ink = crate::deep(0, || self.ink(child));
+            if reach >= 0. {
+                let at = shown(child);
+                reach = match in_order(index, at) {
+                    true => ink.map_or(reach, |ink| past(reach, at, ink)),
+                    false => -1.,
+                };
+            }
+            if let Some(ink) = ink.map(ink_edges) {
+                tail = Some(tail.map_or(ink, |held| edges_union(held, ink)));
+            }
+            if index + 1 == count {
+                (prefix, prefix_reach) = (
+                    match (prefix, tail) {
+                        (Some(a), Some(b)) => Some(edges_union(a, b)),
+                        (a, b) => a.or(b),
+                    },
+                    reach,
+                );
+                tail = None;
+            }
+        }
+        let held = match (prefix, tail) {
+            (Some(a), Some(b)) => Some(edges_union(a, b)),
+            (a, b) => a.or(b),
+        };
+        let reach = if reach.is_finite() { reach } else { -1. };
+        let kept = KeptInk {
+            prefix,
+            count,
+            last: count.checked_sub(1).map(|at| children[at]),
+            reach: if prefix_reach.is_finite() {
+                prefix_reach
+            } else {
+                -1.
+            },
+        };
+        let long = LongChildren {
+            reach,
+            kept: Some(kept),
+        };
+        self.long_children.borrow_mut().insert(id, long);
+        #[cfg(test)]
+        self.grown_inks.set(self.grown_inks.get() + 1);
+        Some(held.map(edges_rect))
+    }
+    /// `parent`'s kept union (`KeptInk`) no longer what it holds: a child's
+    /// ink worked out apart from it, or its children removed or moved in the
+    /// list.
+    #[inline(never)]
+    fn drop_kept_ink(&self, parent: NodeId) {
+        if let Some(long) = self.long_children.borrow_mut().get_mut(&parent) {
+            long.kept = None;
+        }
+    }
+    /// `parent`'s children removed or moved: its kept union (`KeptInk`)
+    /// goes unless only its tail changed, the children behind it still
+    /// there in their places (the last of them where it was).
+    #[inline(never)]
+    fn children_moved(&mut self, parent: NodeId) {
+        let node = self.node(parent);
+        // SAFETY: only read, as `children_raw` reads it; a removal's
+        // tombstone in it (`pending_children`) takes a place as the child
+        // did, so the children behind it are where they were or not.
+        let children = unsafe { &*node.children.get() };
+        let Some(long) = self.long_children.get_mut().get_mut(&parent) else {
+            return;
+        };
+        let intact = long
+            .kept
+            .as_ref()
+            .is_none_or(|entry| match entry.count.checked_sub(1) {
+                None => true,
+                Some(at) => children.get(at).copied() == entry.last,
+            });
+        if !intact {
+            long.kept = None;
+        }
+    }
+    /// Whether `node`'s ink is its children's union translated by its own
+    /// translation, nothing of its own in it (`ink`): a plain container
+    /// shown, painting nothing itself and clipping, shading, blurring and
+    /// turning nothing.
+    #[inline(always)]
+    fn ink_is_held(&self, id: NodeId, node: &Node) -> bool {
+        matches!(node.kind, NodeKind::Container(_))
+            && node.effects.blur_radius <= 0.0
+            && node.effects.opacity > 0.0
+            && own_visible(&node.style)
+            && clip_axes(&node.style) == (false, false)
+            && !node.layer_shaded()
+            && !node.filtered()
+            && !node.transformed()
+            && !self.platform_nodes.contains(&id)
     }
     /// Pixels this node itself can touch, matching what damage covers.
     fn own_ink(&self, id: NodeId) -> Option<Rect> {
@@ -12975,7 +13319,7 @@ impl Scene {
     }
     /// Of `node`'s `children`, those whose ink can meet `reach` (a damaged
     /// walk's damage, all of it, in the window) at `transform` (its
-    /// ancestors' translation): where they run down in order (`child_reach`),
+    /// ancestors' translation): where they run down in order (`long_children`),
     /// the run between the first whose box, grown by their ink's reach, ends
     /// at or past it and the last that starts at or before it. Every child
     /// left out has its ink in its grown box, so misses it. All of them
@@ -12999,7 +13343,7 @@ impl Scene {
         if node.bounds_valid.get() & INK_VALID == 0 {
             return children;
         }
-        let Some(grown) = self.child_reach.borrow().get(&id).copied() else {
+        let Some(grown) = self.long_children.borrow().get(&id).map(|long| long.reach) else {
             return children;
         };
         if grown < 0. {
@@ -13164,6 +13508,9 @@ impl Scene {
         let start = root.unwrap_or(self.root);
         if from.is_none() && !self.layout_visible(start) {
             return Vec::new();
+        }
+        if self.kept_any.get() {
+            self.walk_starts(start);
         }
         let mut transform = Transform::default();
         let mut parent = self.node(start).parent;
@@ -13806,6 +14153,256 @@ impl<'a> Iterator for PaintIter<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A long column's ink worked out from its kept union and the children
+    /// that grew where they were (`grown_ink`) is, to the bit, the ink worked
+    /// out over every child (`rescan_inks`), and so is every walk's: as its
+    /// last block grows, blocks are appended and the last is replaced (from
+    /// the kept union, its tail worked out again), a block behind the tail
+    /// grows and pushes those after it (worked out over every child: they
+    /// moved), and blocks shrink, go, hide and scroll.
+    #[test]
+    fn a_kept_ink_union_is_the_ink_worked_out_over_every_child() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let block = |n: u8| {
+            NodeKind::Quad(QuadStyle {
+                fill: Color(n, 70, 90, 255),
+                shadow: n.is_multiple_of(4).then_some(BoxShadow {
+                    color: Color(0, 0, 0, 100),
+                    offset: Transform { x: 2., y: 4. },
+                    blur_radius: 5.,
+                    spread: 1.,
+                }),
+                ..Default::default()
+            })
+        };
+        let damage = [
+            Rect::new(0., 0., 400., 40.),
+            Rect::new(0., 300., 400., 500.),
+        ];
+        let run = |rescan: bool| {
+            let mut scene = Scene::new(400., 900.);
+            scene.rescan_inks = rescan;
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            let column = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+            let mut blocks: Vec<NodeId> = (0..70u8)
+                .map(|n| scene.append(column, block(n), sized(180., 5. + (n % 5) as f32)))
+                .collect();
+            let mut frames = Vec::new();
+            let mut grown = Vec::new();
+            let frame = |scene: &mut Scene, frames: &mut Vec<_>, grown: &mut Vec<u64>| {
+                scene.flush();
+                let before = scene.grown_inks.get();
+                let bits = |r: Rect| [r.x, r.y, r.width, r.height].map(f32::to_bits);
+                let inks: Vec<_> = [root, column]
+                    .into_iter()
+                    .chain(scene.children_raw(scene.node(column)).clone())
+                    .map(|id| scene.ink_alone(id).map(bits))
+                    .collect();
+                let items: Vec<_> = scene
+                    .layer_items_within(None, Some(&damage))
+                    .iter()
+                    .map(|item| (item.id, bits(item.bounds)))
+                    .collect();
+                frames.push((inks, items));
+                grown.push(scene.grown_inks.get() - before);
+            };
+            frame(&mut scene, &mut frames, &mut grown);
+            // The last block grows where it is; then two appended.
+            let last = *blocks.last().unwrap();
+            scene.set_style(last, sized(180., 30.));
+            frame(&mut scene, &mut frames, &mut grown);
+            for n in 70..72u8 {
+                blocks.push(scene.append(column, block(n), sized(160., 9.)));
+            }
+            frame(&mut scene, &mut frames, &mut grown);
+            // The last block replaced (a streamed block changing kind): the
+            // tail, worked out again, the union behind it kept.
+            scene.remove(*blocks.last().unwrap());
+            blocks.pop();
+            blocks.push(scene.append(column, block(72), sized(170., 12.)));
+            frame(&mut scene, &mut frames, &mut grown);
+            // A block grows behind the tail, pushing those after it.
+            scene.set_style(blocks[25], sized(180., 25.));
+            frame(&mut scene, &mut frames, &mut grown);
+            // Shrinks, goes, hides, scrolls.
+            scene.set_style(blocks[20], sized(180., 2.));
+            frame(&mut scene, &mut frames, &mut grown);
+            scene.remove(blocks[10]);
+            frame(&mut scene, &mut frames, &mut grown);
+            scene.set_style(
+                blocks[20],
+                Style {
+                    layout_options: Some(Arc::new(crate::layout::LayoutOptions {
+                        visible: Some(false),
+                        ..Default::default()
+                    })),
+                    ..sized(180., 7.)
+                },
+            );
+            frame(&mut scene, &mut frames, &mut grown);
+            scene.set_transform(column, Transform { x: 0., y: -60.5 });
+            frame(&mut scene, &mut frames, &mut grown);
+            (frames, grown)
+        };
+        let ((kept, grown), (rescanned, none)) = (run(false), run(true));
+        assert_eq!(kept, rescanned);
+        assert!(none.iter().all(|n| *n == 0));
+        // From the kept union: the last block grown, the blocks appended,
+        // the last replaced.
+        assert!(grown[1] > 0 && grown[2] > 0 && grown[3] > 0, "{grown:?}");
+        // Not where blocks behind the tail were pushed, shrank, went or hid.
+        assert_eq!(grown[4..8], [0, 0, 0, 0], "{grown:?}");
+    }
+    /// A child's ink asked apart from its long column (`ink_alone`), by a
+    /// paint walk starting at the column, or at a column hidden, leaves no
+    /// union kept that it isn't in: the column's ink and the walks' items
+    /// are those worked out over every child (`rescan_inks`).
+    #[test]
+    fn a_child_s_ink_asked_apart_leaves_its_column_no_stale_union() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let block = || {
+            NodeKind::Quad(QuadStyle {
+                fill: Color(9, 70, 90, 255),
+                ..Default::default()
+            })
+        };
+        let damage = [Rect::new(0., 0., 400., 900.)];
+        let run = |rescan: bool| {
+            let mut scene = Scene::new(400., 900.);
+            scene.rescan_inks = rescan;
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            let column = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+            let blocks: Vec<NodeId> = (0..70)
+                .map(|_| scene.append(column, block(), sized(100., 6.)))
+                .collect();
+            let bits = |r: Rect| [r.x, r.y, r.width, r.height].map(f32::to_bits);
+            let mut seen = Vec::new();
+            scene.flush();
+            seen.push(scene.ink_alone(column).map(bits));
+            // Asked apart, first: wider, where it is, behind the tail.
+            scene.set_style(blocks[30], sized(150., 6.));
+            scene.flush();
+            seen.push(scene.ink_alone(blocks[30]).map(bits));
+            seen.push(scene.ink_alone(column).map(bits));
+            // A walk starting at the column, its children asked by its filter.
+            scene.set_style(blocks[31], sized(170., 6.));
+            scene.flush();
+            let items = scene.layer_items_within(Some(column), Some(&damage)).len();
+            seen.push(Some([items as u32; 4]));
+            seen.push(scene.ink_alone(column).map(bits));
+            // Hidden, as its child widens; a walk from it; shown again.
+            let hidden = Style {
+                layout_options: Some(Arc::new(crate::layout::LayoutOptions {
+                    visible: Some(false),
+                    ..Default::default()
+                })),
+                ..Style::default()
+            };
+            scene.set_style(column, hidden);
+            scene.set_style(blocks[32], sized(190., 6.));
+            scene.flush();
+            let items = scene.layer_items_within(Some(column), Some(&damage)).len();
+            seen.push(Some([items as u32; 4]));
+            scene.set_style(column, Style::default());
+            scene.flush();
+            seen.push(scene.ink_alone(column).map(bits));
+            seen
+        };
+        let (kept, rescanned) = (run(false), run(true));
+        assert_eq!(kept, rescanned);
+        assert_eq!(kept[2].unwrap()[2], 150f32.to_bits());
+        assert_eq!(kept[4].unwrap()[2], 170f32.to_bits());
+        assert_eq!(kept.last().unwrap().unwrap()[2], 190f32.to_bits());
+    }
+    /// A streamed reply's chunk paints for what it adds, however long the
+    /// reply: a column followed to its end in a scroll view (content moved,
+    /// the column in it), a block appended each chunk, asks as many inks for
+    /// its damaged walk with 800 blocks as with 100 (`searched` finds the
+    /// few its damage meets, `grown_ink` takes the new block into the kept
+    /// union). Filtering every child and working every ink out over every
+    /// child (`linear_walks`, `rescan_inks`), it asks more the longer.
+    #[test]
+    fn a_streamed_chunk_asks_as_many_inks_however_long_the_reply() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let per_chunk = |blocks: usize, plain: bool| {
+            let mut scene = Scene::new(400., 300.);
+            scene.linear_walks = plain;
+            scene.rescan_inks = plain;
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            let view = scene.append(
+                root,
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    clip: true,
+                    ..sized(300., 300.)
+                },
+            );
+            let content = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+            let column = scene.append(
+                content,
+                NodeKind::Container(Layout::Column),
+                Style::default(),
+            );
+            let block = |scene: &mut Scene, n: usize| {
+                let fill = Color((n % 200) as u8, 60, 90, 255);
+                scene.append(
+                    column,
+                    NodeKind::Rect(fill),
+                    sized(200., 8. + (n % 3) as f32),
+                );
+            };
+            for n in 0..blocks {
+                block(&mut scene, n);
+            }
+            let mut asked = Vec::new();
+            for n in blocks..blocks + 6 {
+                block(&mut scene, n);
+                scene.flush();
+                // Followed: its end at the view's bottom.
+                let tall = scene.bounds(column).height;
+                scene.set_transform(
+                    content,
+                    Transform {
+                        x: 0.,
+                        y: 300. - tall,
+                    },
+                );
+                let damage = scene.flush().damage;
+                let before = scene.inks_asked.get();
+                let items = scene.layer_items_within(None, Some(&damage));
+                assert!(!items.is_empty());
+                asked.push(scene.inks_asked.get() - before);
+            }
+            // (The first chunks make what the rest keep.)
+            asked[2..].to_vec()
+        };
+        let sizes = [100, 200, 400, 800];
+        let streamed: Vec<_> = sizes.iter().map(|&n| per_chunk(n, false)).collect();
+        assert!(
+            streamed.iter().all(|asked| *asked == streamed[0]),
+            "inks asked a chunk at {sizes:?} blocks: {streamed:?}"
+        );
+        let plain: Vec<_> = sizes.iter().map(|&n| per_chunk(n, true)).collect();
+        assert!(
+            plain[3][0] > 4 * plain[0][0],
+            "filtering every child, inks asked a chunk at {sizes:?} blocks: {plain:?}"
+        );
+    }
     /// A block appended to a column that grows where it stands (a streamed
     /// reply's, inside another) damages its own box alone: neither column
     /// paints anything of its own, and no other block moves.
