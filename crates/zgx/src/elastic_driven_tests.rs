@@ -163,3 +163,26 @@ fn a_views_keyboard_ride_reaches_its_driver() {
         assert_eq!(driver.keyboard_ride(), want);
     }
 }
+
+#[test]
+fn a_paging_view_tells_the_platforms_scroller_and_others_dont() {
+    let mut ui = Ui::new(100., 100.);
+    let (pages, free) = (ui.signal(0.), ui.signal(0.));
+    ui.mount(
+        div()
+            .child(
+                scroll_x(pages)
+                    .paging(true)
+                    .w(100.)
+                    .h(50.)
+                    .child(div().w(400.).h(50.)),
+            )
+            .child(scroll(free).w(100.).h(50.).child(div().w(100.).h(400.))),
+    );
+    ui.prepare_frame();
+    let paging = ui.scroll_driver_at(50., 25.).expect("the pages");
+    assert!(paging.metrics().unwrap().horizontal);
+    assert!(paging.metrics().unwrap().paging);
+    let free = ui.scroll_driver_at(50., 75.).expect("the free view");
+    assert!(!free.metrics().unwrap().paging);
+}

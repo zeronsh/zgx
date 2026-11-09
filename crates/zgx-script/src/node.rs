@@ -1050,6 +1050,8 @@ pub(crate) enum Kind {
         follow: bool,
         /// `scrollbar = true`: an interactive scrollbar over its edge.
         scrollbar: bool,
+        /// `paging = true`: it comes to rest on whole pages (iOS).
+        paging: bool,
         /// `overscroll = "contain"`: a wheel over it stays with it.
         contain: bool,
         /// `keyboard_ride = "native" | "attached"`: how it moves a focused
@@ -3411,6 +3413,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "offset",
     "follow",
     "scrollbar",
+    "paging",
     "keyboard",
     "src",
     "code",
@@ -5038,6 +5041,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     Some(t) => t.get::<Option<bool>>("scrollbar")?.unwrap_or(false),
                     None => false,
                 };
+                let paging = match &table {
+                    Some(t) => t.get::<Option<bool>>("paging")?.unwrap_or(false),
+                    None => false,
+                };
                 let node = fill(
                     lua,
                     Node::new(
@@ -5047,6 +5054,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             horizontal,
                             follow,
                             scrollbar,
+                            paging,
                             // Set as `fill` walks the table (`late_field`).
                             contain: false,
                             ride: None,

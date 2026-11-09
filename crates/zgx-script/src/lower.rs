@@ -2987,6 +2987,7 @@ fn kind_view(
             horizontal,
             follow,
             scrollbar,
+            paging,
             contain,
             ride,
             padding,
@@ -3004,6 +3005,7 @@ fn kind_view(
                 scroll(offset)
             };
             let view = view.follow_end(*follow);
+            let view = if *paging { view.paging(true) } else { view };
             let view = if *contain {
                 view.overscroll_contain()
             } else {

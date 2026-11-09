@@ -4178,6 +4178,9 @@ export type ScrollProps = {
 	-- An interactive scrollbar over the trailing edge (none by default).
 	scrollbar: boolean?,
 	follow: boolean?,
+	-- Comes to rest only on whole pages, each its own length along the way
+	-- it scrolls, as UIKit's paging scroll views (iOS; elsewhere later).
+	paging: boolean?,
 	-- "contain": a wheel or trackpad gesture over it stays with it at its
 	-- edges (CSS's overscroll-behavior), the scroll views around it never
 	-- moving; "auto" (the default) hands what it can't scroll on to them.

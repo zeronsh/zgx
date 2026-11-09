@@ -70,6 +70,9 @@ pub(crate) struct Driven {
     end_room: Rc<Cell<f32>>,
     #[cfg(any(target_os = "ios", test))]
     held: Option<Signal<Option<f32>>>,
+    /// It comes to rest on whole pages (`View::paging`).
+    #[cfg(any(target_os = "ios", test))]
+    pub(crate) paging: bool,
 }
 impl Driven {
     pub(crate) fn new(ui: &mut Ui) -> Self {
@@ -77,6 +80,7 @@ impl Driven {
         return Self {
             end_room: Rc::default(),
             held: Some(ui.signal(None)),
+            paging: false,
         };
         #[cfg(not(any(target_os = "ios", test)))]
         {
@@ -624,6 +628,9 @@ pub struct ScrollMetrics {
     pub offset: f32,
     /// How far past either end it shows (`ScrollDriver::drive`).
     pub stretch: f32,
+    /// It comes to rest on whole pages, each its own length (`View::paging`).
+    #[cfg(any(target_os = "ios", test))]
+    pub paging: bool,
 }
 
 impl ScrollDriver {
@@ -636,6 +643,8 @@ impl ScrollDriver {
             extent: view.extent.with_untracked(|s| *s),
             offset: view.offset.with_untracked(|o| *o),
             stretch: view.shown.with_untracked(|s| *s),
+            #[cfg(any(target_os = "ios", test))]
+            paging: view.driven.paging,
         })
     }
     /// Keep drawing it at `at` as its offset goes on (the host moves what is

@@ -511,6 +511,9 @@ pub(crate) struct Rare {
     /// `View::keyboard_ride`: how it moves a field clear of a keyboard (iOS).
     #[cfg(any(target_os = "ios", test))]
     keyboard_ride: Option<crate::elastic::KeyboardRide>,
+    /// `View::paging`: it comes to rest on whole pages (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    paging: bool,
     /// `View::overscroll_contain`: a wheel over it stays with it.
     overscroll_contain: bool,
     animation: Option<animation::Animated>,
@@ -620,6 +623,10 @@ impl Rare {
         #[cfg(any(target_os = "ios", test))]
         if self.keyboard_ride.is_some() {
             inner.keyboard_ride = self.keyboard_ride;
+        }
+        #[cfg(any(target_os = "ios", test))]
+        if self.paging {
+            inner.paging = true;
         }
         if self.overscroll_contain {
             inner.overscroll_contain = true;
@@ -940,6 +947,19 @@ impl View {
         }
         #[cfg(not(any(target_os = "ios", test)))]
         let _ = (&mut self, ride);
+        self
+    }
+    /// Let a scroll view come to rest only on whole pages, a page its own
+    /// length along the way it scrolls, as `UIScrollView.pagingEnabled`:
+    /// on iOS UIKit's own snap and threshold. Elsewhere not yet: it scrolls
+    /// freely.
+    pub fn paging(mut self, paging: bool) -> Self {
+        #[cfg(any(target_os = "ios", test))]
+        {
+            self.rare_mut().paging = paging;
+        }
+        #[cfg(not(any(target_os = "ios", test)))]
+        let _ = (&mut self, paging);
         self
     }
     /// Keep a scroll viewport at its end while its content grows, as long as
@@ -4966,6 +4986,16 @@ fn mount_element(
     }
     root
 }
+/// A scroll view's own say, from its opening to `mount_scroll`.
+struct ScrollOpen {
+    offset: Signal<f32>,
+    horizontal: bool,
+    /// `View::overscroll_contain`: a wheel at its edge stays here.
+    contain: bool,
+    /// `View::paging` (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    paging: bool,
+}
 /// An element mounted up to its children: what the rest of its mounting
 /// needs once they are in (`mount_element`).
 struct Opened {
@@ -4982,7 +5012,7 @@ struct Opened {
     root: NodeId,
     child_parent: NodeId,
     submenu_indicator: bool,
-    scroll_offset: Option<(Signal<f32>, bool, bool)>,
+    scroll_offset: Option<ScrollOpen>,
     scroll_nodes: Option<(NodeId, NodeId)>,
     scrollbar: bool,
     follow_end: bool,
@@ -5397,7 +5427,13 @@ fn open_element(
             });
             ui.semantics.borrow_mut().set(root, semantics);
             let contain = rare.as_deref().is_some_and(|r| r.overscroll_contain);
-            scroll_offset = Some((offset, horizontal, contain));
+            scroll_offset = Some(ScrollOpen {
+                offset,
+                horizontal,
+                contain,
+                #[cfg(any(target_os = "ios", test))]
+                paging: rare.as_deref().is_some_and(|r| r.paging),
+            });
             root
         }
         Kind::VirtualList(build) => {
@@ -5915,7 +5951,7 @@ fn open_element(
             },
         );
     }
-    let scroll_nodes = scroll_offset.as_ref().map(|(_, horizontal, _)| {
+    let scroll_nodes = scroll_offset.as_ref().map(|ScrollOpen { horizontal, .. }| {
         let viewport = ui.container(root, Layout::Overlay, Default::default());
         let content = ui.container(
             viewport,
@@ -6036,12 +6072,8 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
         let indicator = mount(ui, root, text("›"), environment.clone());
         ui.semantics.borrow_mut().remove(indicator);
     }
-    if let (Some((offset, horizontal, contain)), Some((viewport, content))) =
-        (scroll_offset, scroll_nodes)
-    {
-        mount_scroll(
-            ui, root, viewport, content, offset, horizontal, scrollbar, follow_end, contain,
-        );
+    if let (Some(scroll), Some((viewport, content))) = (scroll_offset, scroll_nodes) {
+        mount_scroll(ui, root, viewport, content, scroll, scrollbar, follow_end);
     }
     if let Some(mut compute) = compute {
         let weak = ui.downgrade();
@@ -6522,13 +6554,16 @@ fn mount_scroll(
     root: NodeId,
     viewport: NodeId,
     content: NodeId,
-    offset: Signal<f32>,
-    horizontal: bool,
+    scroll: ScrollOpen,
     scrollbar: bool,
     follow_end: bool,
-    // `View::overscroll_contain`: a wheel at its edge stays here.
-    contain: bool,
 ) {
+    let ScrollOpen {
+        offset,
+        horizontal,
+        contain,
+        ..
+    } = scroll;
     use crate::scene::{Style, Transform};
     let main_size = move |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
     // The offset counts from the start: right to left, a horizontal
@@ -6550,7 +6585,12 @@ fn mount_scroll(
     let extent = ui.observe_content_size(content);
     // What a trackpad stretches it by past an edge (`elastic`): zero unless
     // the host scrolls elastically.
-    let driven = crate::elastic::Driven::new(ui);
+    #[cfg_attr(not(any(target_os = "ios", test)), allow(unused_mut))]
+    let mut driven = crate::elastic::Driven::new(ui);
+    #[cfg(any(target_os = "ios", test))]
+    {
+        driven.paging = scroll.paging;
+    }
     let stretch = crate::elastic::register(
         ui,
         root,

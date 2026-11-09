@@ -1324,6 +1324,8 @@ fn configure(state: &State, view: &AnyObject, driver: ScrollDriver, at: Option<C
     // SAFETY: UIScrollView's setters, on the main thread.
     unsafe {
         let _: () = msg_send![view, setFrame: frame];
+        // UIKit's own paging: its snap spring and the speed that turns a page.
+        let _: () = msg_send![view, setPagingEnabled: metrics.paging];
         // UIKit's own indicator, along the way it scrolls, over the view.
         let _: () = msg_send![view, setShowsVerticalScrollIndicator: !metrics.horizontal];
         let _: () = msg_send![view, setShowsHorizontalScrollIndicator: metrics.horizontal];
@@ -1436,6 +1438,8 @@ fn configure_both(state: &State, view: &AnyObject, across: ScrollDriver, down: S
             size,
         };
         let _: () = msg_send![view, setFrame: frame];
+        // Until the finger picks one, neither pages.
+        let _: () = msg_send![view, setPagingEnabled: false];
         let _: () = msg_send![view, setAlwaysBounceVertical: true];
         let _: () = msg_send![view, setContentSize: content];
         let offset = CGPoint {
