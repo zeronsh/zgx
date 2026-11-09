@@ -375,6 +375,9 @@ pub(crate) fn run(
         // The latest of what's waiting: scrubbing runs ahead of drawing.
         let mut asked = ask.into_iter().collect::<Vec<_>>();
         asked.extend(asks.try_iter());
+        // Where to show: the last frame asked for. An ask that only shows
+        // the frame it's at again (seen, another form, built anew) keeps a
+        // frame asked for before it in the same batch.
         let mut seek = None;
         let mut result = Ok(());
         for ask in asked {
@@ -431,7 +434,7 @@ pub(crate) fn run(
                     // Seen again: playing, it draws the frame due now
                     // (below); else the one it moved to unseen.
                     if on && !watched && stale && playing.is_none() {
-                        seek = Some(at);
+                        seek.get_or_insert(at);
                     }
                     watched = on;
                 }
@@ -443,20 +446,20 @@ pub(crate) fn run(
                     if preview.surfaces != on {
                         preview.surfaces = on;
                         if preview.composition.is_some() {
-                            seek = Some(at);
+                            seek.get_or_insert(at);
                         }
                     }
                 }
                 Ask::Pixels(on) => {
                     if preview.pixels_wanted != on {
                         preview.pixels_wanted = on;
-                        seek = Some(at);
+                        seek.get_or_insert(at);
                     }
                 }
                 Ask::Reload => {
                     preview.cache.clear();
                     result = preview.build();
-                    seek = Some(at);
+                    seek.get_or_insert(at);
                 }
             }
         }

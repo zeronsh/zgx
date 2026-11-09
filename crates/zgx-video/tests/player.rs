@@ -801,3 +801,38 @@ fn a_views_player_keeps_scrubbed_frames_as_pixel_buffers_until_rest() {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
+
+/// Asks that show the frame it's at again (a reload, a view asking for
+/// pixel buffers, seen again) keep a frame asked for just before them: an
+/// open at 40 and a reload asked together show 40, not the frame it was at.
+#[test]
+fn a_frame_asked_for_survives_a_reload_asked_with_it() {
+    let dir = temp_dir("player-seek-kept");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let path = dir.to_path_buf();
+    for _ in 0..10 {
+        let mut held = None;
+        let mut stage = Stage::new(
+            StageOptions {
+                width: 100.,
+                height: 50.,
+                fps: 60.,
+                scale: 1.,
+                background: Color(255, 255, 255, 255),
+                ..Default::default()
+            },
+            |setting| {
+                let player = Player::new(setting.runtime, &path, 1.)?;
+                // Asked together: its thread takes both in one go.
+                player.open("Bar", json!({ "color": "#00ff00" }), 40);
+                player.reload();
+                let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+                held = Some(player);
+                Ok(view)
+            },
+        )
+        .unwrap();
+        let player = held.unwrap();
+        drawn_at(&mut stage, &player, 40);
+    }
+}
