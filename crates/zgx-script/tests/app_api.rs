@@ -129,6 +129,19 @@ fn a_recorder_with_capture_keys_takes_every_key_while_focused() {
 }
 
 #[test]
+fn capture_keys_needs_no_key_handler_of_its_own() {
+    // A field whose keys its children or the host read: `capture_keys` alone.
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.row { id = "recorder", focusable = true, capture_keys = true, w = 100, h = 30 },
+        }"##,
+    );
+    h.click("recorder");
+    assert!(h.ui.input.captures_keys(&h.ui.scene.borrow()));
+    assert_eq!(h.error(), None);
+}
+
+#[test]
 fn a_failed_load_keeps_the_published_commands() {
     let runtime = zgx::reactive::Runtime::new();
     let dir = std::env::temp_dir().join(format!("zgx-commands-{}", std::process::id()));

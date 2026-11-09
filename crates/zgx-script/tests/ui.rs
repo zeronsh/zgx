@@ -253,6 +253,68 @@ fn script_scrolls_fade_only_where_content_runs_past() {
 }
 
 #[test]
+fn truncate_means_one_line_only_where_lines_does_not_say() {
+    use zgx::text_layout::TextOverflow;
+    let mut h = Harness::inline(
+        r##"local on = ui.state("on", true)
+        local two = ui.state("two", 2)
+        local text = "The quick brown fox jumps over the lazy dog, and on and on it goes"
+        return ui.column {
+            ui.button { id = "flip", on_click = function()
+                on:set(not on:get())
+                two:set(3)
+            end, "flip" },
+            ui.text { id = "alone", w = 120, truncate = true, text },
+            ui.text { id = "both", w = 120, lines = 2, truncate = true, text },
+            ui.text { id = "both-backwards", w = 120, truncate = true, lines = 2, text },
+            ui.text { id = "lines-only", w = 120, wrap = true, lines = 2, text },
+            ui.text { id = "state-truncate", w = 120, lines = 2, truncate = on, text },
+            ui.text { id = "state-lines", w = 120, truncate = true, lines = two, text },
+            ui.text { id = "function-truncate", w = 120, lines = 2,
+                truncate = function() return on:get() end, text },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    let of = |h: &mut Harness, id: &str| {
+        let mut stack = vec![h.find(id).unwrap()];
+        let scene = h.ui.scene.borrow();
+        while let Some(node) = stack.pop() {
+            if let zgx::scene::NodeKind::Text { .. } = scene.kind(node) {
+                let options = scene.style(node).text_options;
+                return (options.line_clamp.map_or(0, |n| n.get()), options.overflow);
+            }
+            stack.extend(scene.children(node).iter().copied());
+        }
+        panic!("{id} has no text");
+    };
+    let ellipsis = TextOverflow::Ellipsis;
+    assert_eq!(of(&mut h, "both"), (2, ellipsis));
+    assert_eq!(of(&mut h, "both-backwards"), (2, ellipsis));
+    // `truncate` alone is one line, half as tall as two.
+    assert_eq!(of(&mut h, "alone").1, ellipsis);
+    let (one, two) = (h.bounds("alone").height, h.bounds("both").height);
+    assert!(
+        (two - 2. * one).abs() < 1.,
+        "one line {one}, two lines {two}"
+    );
+    assert_eq!(of(&mut h, "lines-only").0, 2);
+    assert_ne!(of(&mut h, "lines-only").1, ellipsis);
+    assert_eq!(of(&mut h, "state-truncate"), (2, ellipsis));
+    assert_eq!(of(&mut h, "state-lines"), (2, ellipsis));
+    assert_eq!(of(&mut h, "function-truncate"), (2, ellipsis));
+
+    h.click("flip");
+    h.frames(2);
+    // Off, the clamp stays and the ellipsis goes; a changed `lines` is kept.
+    assert_eq!(of(&mut h, "state-truncate").0, 2);
+    assert_ne!(of(&mut h, "state-truncate").1, ellipsis);
+    assert_eq!(of(&mut h, "function-truncate").0, 2);
+    assert_ne!(of(&mut h, "function-truncate").1, ellipsis);
+    assert_eq!(of(&mut h, "state-lines"), (3, ellipsis));
+}
+
+#[test]
 fn inputs_take_letter_spacing() {
     let mut h = Harness::inline(
         r##"local v = ui.state("v", "Weekly dependency updates")
@@ -409,6 +471,32 @@ fn a_pixelated_image_draws_its_picture_pixelated() {
             "{id}"
         );
     }
+}
+
+/// `paging = true` on a scroll view: a wheel goes for the next page, on a spring,
+/// rather than moving it by the wheel's distance at once.
+#[test]
+fn a_scroll_view_takes_paging() {
+    let scrolled = |paging: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"return ui.scroll_x {{ id = "pager", w = 100, h = 50, {paging}
+                ui.div {{ w = 500, h = 50 }} }}"##
+        ));
+        h.ui.prepare_frame();
+        h.ui.dispatch(zgx::input::InputEvent::Scroll {
+            x: 10.,
+            y: 10.,
+            delta_x: 30.,
+            delta_y: 0.,
+        });
+        h.ui.prepare_frame();
+        let pager = h.find("pager").unwrap();
+        let (offset, ..) = h.ui.scroll_report(pager).unwrap();
+        (offset, h.ui.next_interaction_deadline().is_some())
+    };
+    assert_eq!(scrolled(""), (30., false));
+    assert_eq!(scrolled("paging = true,"), (0., true));
+    assert_eq!(scrolled("paging = false,"), (30., false));
 }
 
 /// `border_style = "dotted"` dots the border; `outline_style` and

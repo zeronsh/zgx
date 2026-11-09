@@ -759,6 +759,15 @@ impl Semantics {
             .filter(|(id, _)| !self.buried(**id))
             .map(|(id, entry)| (*id, &entry.node))
     }
+    /// The nodes whose own information changed since the store's `revision`
+    /// was `since`, and it, in no particular order. A look at every node, each
+    /// a comparison.
+    pub fn changed_since(&self, since: u64) -> impl Iterator<Item = (NodeId, &SemanticNode)> {
+        self.nodes
+            .iter()
+            .filter(move |(id, entry)| entry.revision > since && !self.buried(**id))
+            .map(|(id, entry)| (*id, &entry.node))
+    }
     /// Counts changes to the store: unchanged, nothing needs sending.
     pub fn revision(&self) -> u64 {
         self.revision

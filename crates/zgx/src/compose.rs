@@ -240,6 +240,12 @@ pub(crate) struct ListOptions {
     pub(crate) contain: bool,
     pub(crate) edges: Option<Box<ListEdges>>,
 }
+impl ListOptions {
+    /// `View::list_ahead`.
+    pub(crate) fn ahead(&self) -> Option<f32> {
+        self.edges.as_ref().and_then(|edges| edges.ahead)
+    }
+}
 /// What a virtual list reports of its edges: its end and its start coming
 /// in reach (`View::on_end`, `View::on_start`) and whether it rests at its
 /// end (`View::on_at_end`). Boxed: few lists have any.
@@ -248,6 +254,8 @@ pub(crate) struct ListEdges {
     end: Option<EdgeWatch>,
     start: Option<EdgeWatch>,
     at_end: Option<Box<dyn FnMut(bool)>>,
+    /// `View::list_ahead`.
+    ahead: Option<f32>,
     /// `View::virtualize_in_ancestor`: it scrolls with the scroll view
     /// around it, building the rows that view shows.
     pub(crate) ancestor: bool,
@@ -307,6 +315,7 @@ pub(crate) fn watch_edges(
         start,
         mut at_end,
         ancestor: _,
+        ahead: _,
     } = edges;
     let runtime = ui.runtime.clone();
     let weak = ui.downgrade();
@@ -523,6 +532,8 @@ pub(crate) struct Rare {
     overscroll_contain: bool,
     /// `View::wheel_across`: a mouse wheel moves it sideways.
     wheel_across: bool,
+    /// `View::paging`: it comes to rest on whole pages.
+    paging: bool,
     animation: Option<animation::Animated>,
     keyboard_navigation: Option<bool>,
     /// `View::on_end`, `on_start`, `at_end`: a virtual list's edges.
@@ -633,6 +644,9 @@ impl Rare {
         }
         if self.wheel_across {
             inner.wheel_across = true;
+        }
+        if self.paging {
+            inner.paging = true;
         }
         if self.drag_preview.is_some() {
             inner.drag_preview = self.drag_preview;
@@ -953,6 +967,15 @@ impl View {
         self.rare_mut().wheel_across = true;
         self
     }
+    /// Let a scroll view come to rest only on whole pages, a page its own
+    /// length along the way it scrolls, as `UIScrollView.pagingEnabled`: a
+    /// gesture's lift picks the next page if it is quick and the nearest if not,
+    /// never more than one from where it began; a mouse wheel goes a page a
+    /// notch; anything else that moves it settles on the nearest page.
+    pub fn paging(mut self, paging: bool) -> Self {
+        self.rare_mut().paging = paging;
+        self
+    }
     /// Keep a scroll viewport at its end while its content grows, as long as
     /// it was at the end (a chat transcript); scrolling away releases it.
     pub fn follow_end(mut self, follow: bool) -> Self {
@@ -990,6 +1013,14 @@ impl View {
     /// to the latest" button shows while it does not. For a virtual list.
     pub fn on_at_end(mut self, changed: impl FnMut(bool) + 'static) -> Self {
         self.edges_mut().at_end = Some(Box::new(changed));
+        self
+    }
+    /// How many of its viewports of rows a virtual list builds ahead of each
+    /// edge of its view in a window's spare time (`crate::spare`), 1 unless
+    /// set, and keeps as it scrolls away. 0: it builds what shows and its
+    /// overscan alone, and drops the rest.
+    pub fn list_ahead(mut self, viewports: f32) -> Self {
+        self.edges_mut().ahead = Some(viewports);
         self
     }
     fn edges_mut(&mut self) -> &mut ListEdges {
@@ -3440,6 +3471,36 @@ pub(crate) fn list_reveal(
     ui.retain(root, forget);
     reveal
 }
+/// `keys`, with what spare time adds (`crate::spare`).
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn merge_kept<K: Eq + std::hash::Hash + Clone>(
+    kept: &mut crate::spare::Kept<K>,
+    keys: &mut Vec<(K, usize)>,
+    weak: &WeakUi,
+    entries: &HashMap<K, (NodeId, Signal<usize>, Placed), rustc_hash::FxBuildHasher>,
+    key: &mut dyn FnMut(usize) -> K,
+    view: crate::spare::KeptView,
+    row_height: f32,
+    runtime: &Runtime,
+) {
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    kept.pass();
+    let last = view.count.saturating_sub(1);
+    *keys = runtime.untracked(|| {
+        kept.merge(
+            &ui,
+            view,
+            std::mem::take(keys),
+            key,
+            &|y| Some(((y.max(0.) as f64 / row_height as f64) as usize).min(last)),
+            &|_| true,
+            &|key| entries.get(key).map(|entry| entry.0),
+        )
+    });
+}
 /// Fixed-height keyed rows; only the visible range plus overscan is mounted.
 /// `count` and `key` track reactive reads. `build` runs once per mounted key;
 /// its index signal updates when that key moves. Offscreen rows are disposed,
@@ -3464,6 +3525,13 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     let count = move || (count.borrow_mut())();
     View::new(Kind::VirtualList(Box::new(
         move |ui, root, environment, options: ListOptions| {
+            // With spare time its overscan is spare time's too: the frame
+            // builds what shows alone.
+            let tick = ui.signal(0_u64);
+            let mut kept = ui
+                .list_ahead(options.ahead(), tick)
+                .map(|ahead| crate::spare::Kept::new(ahead, overscan));
+            let overscan = if kept.is_some() { 0 } else { overscan };
             let ListOptions {
                 scrollbar,
                 keyboard_navigation,
@@ -3633,6 +3701,26 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let range = model.visible_range(position, height);
                 keys.clear();
                 keys.extend(range.map(|index| (key(index), index)));
+                if let Some(kept) = &mut kept {
+                    merge_kept(
+                        kept,
+                        &mut keys,
+                        &weak,
+                        &entries,
+                        &mut key,
+                        crate::spare::KeptView {
+                            top: position,
+                            height,
+                            count: length,
+                            width,
+                            structure: length as u64,
+                            settled: false,
+                            focus_goes: keyboard_navigation,
+                        },
+                        row_height,
+                        &runtime,
+                    );
+                }
                 // Rows kept are stamped with this run: one shown twice is a
                 // key repeated, and those left unstamped go below.
                 run += 1;
@@ -5288,7 +5376,7 @@ struct Opened {
     root: NodeId,
     child_parent: NodeId,
     submenu_indicator: bool,
-    scroll_offset: Option<(Signal<f32>, bool, bool, bool)>,
+    scroll_offset: Option<ScrollOpen>,
     scroll_nodes: Option<(NodeId, NodeId)>,
     scrollbar: bool,
     follow_end: bool,
@@ -5711,7 +5799,13 @@ fn open_element(
             ui.semantics.borrow_mut().set(root, semantics);
             let contain = rare.as_deref().is_some_and(|r| r.overscroll_contain);
             let across = rare.as_deref().is_some_and(|r| r.wheel_across);
-            scroll_offset = Some((offset, horizontal, contain, across));
+            scroll_offset = Some(ScrollOpen {
+                offset,
+                horizontal,
+                contain,
+                across,
+                paging: rare.as_deref().is_some_and(|r| r.paging),
+            });
             root
         }
         Kind::VirtualList(build) => {
@@ -6225,7 +6319,7 @@ fn open_element(
             },
         );
     }
-    let scroll_nodes = scroll_offset.as_ref().map(|(_, horizontal, _, _)| {
+    let scroll_nodes = scroll_offset.as_ref().map(|ScrollOpen { horizontal, .. }| {
         let viewport = ui.container(root, Layout::Overlay, Default::default());
         let content = ui.container(
             viewport,
@@ -6346,12 +6440,8 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
         let indicator = mount(ui, root, text("›"), environment.clone());
         ui.semantics.borrow_mut().remove(indicator);
     }
-    if let (Some((offset, horizontal, contain, across)), Some((viewport, content))) =
-        (scroll_offset, scroll_nodes)
-    {
-        mount_scroll(
-            ui, root, viewport, content, offset, horizontal, scrollbar, follow_end, contain, across,
-        );
+    if let (Some(scroll), Some((viewport, content))) = (scroll_offset, scroll_nodes) {
+        mount_scroll(ui, root, viewport, content, scroll, scrollbar, follow_end);
     }
     if let Some(mut compute) = compute {
         let weak = ui.downgrade();
@@ -6824,22 +6914,35 @@ pub(crate) fn reveal_in_list(
         ui.prepare_frame();
     }
 }
+/// A scroll view's own say, from its opening to `mount_scroll`.
+struct ScrollOpen {
+    offset: Signal<f32>,
+    horizontal: bool,
+    /// `View::overscroll_contain`: a wheel at its edge stays here.
+    contain: bool,
+    /// `View::wheel_across`: a mouse wheel moves it sideways.
+    across: bool,
+    /// `View::paging`.
+    paging: bool,
+}
 #[allow(clippy::too_many_arguments)]
 fn mount_scroll(
     ui: &mut Ui,
     root: NodeId,
     viewport: NodeId,
     content: NodeId,
-    offset: Signal<f32>,
-    horizontal: bool,
+    scroll: ScrollOpen,
     scrollbar: bool,
     follow_end: bool,
-    // `View::overscroll_contain`: a wheel at its edge stays here.
-    contain: bool,
-    // `View::wheel_across`: a mouse wheel moves it sideways.
-    across: bool,
 ) {
     use crate::scene::{Style, Transform};
+    let ScrollOpen {
+        offset,
+        horizontal,
+        contain,
+        across,
+        paging,
+    } = scroll;
     let main_size = move |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
     // The offset counts from the start: right to left, a horizontal
     // view's start is its right, and moving on reveals what is left of it.
@@ -6868,6 +6971,18 @@ fn mount_scroll(
         extent.clone(),
         offset.clone(),
     );
+    // `View::paging`: its record, which what scrolls it goes through.
+    let paged = paging.then(|| {
+        let paged =
+            crate::paging::register(ui, horizontal, size.clone(), extent.clone(), offset.clone());
+        let (watching, weak) = (paged.clone(), ui.downgrade());
+        ui.bind(root, move || {
+            if let Some(ui) = weak.upgrade() {
+                crate::paging::observe(&ui, &watching);
+            }
+        });
+        paged
+    });
     if scrollbar {
         let main_extent = ui.signal(main_size(extent.get()));
         let read_extent = extent.clone();
@@ -6982,6 +7097,14 @@ fn mount_scroll(
                 Some(ui) if rtl_of(&ui.scene.borrow()) => -delta,
                 _ => delta,
             };
+            if let Some(paged) = &paged
+                && let Some(ui) = weak.upgrade()
+                && paged.scrolled(&ui, delta)
+            {
+                cx.prevent_default();
+                cx.scrolled(horizontal);
+                return;
+            }
             let before = wheel_offset.get();
             let limit =
                 (main_size(wheel_extent.get()) as f64 - main_size(wheel_size.get()) as f64).max(0.);

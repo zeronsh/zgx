@@ -1,0 +1,4 @@
+---
+section: performance
+---
+- **Lists build the rows about to show off the scroll frame, and keep them** (zgx, zgx-desktop, zgx-script): a window spends the first half of each refresh, before the frame's own work, on the rows within a viewport of each edge of a list's view, the way it's going first, so a scroll frame finds them built, measured and laid out; rows that leave stay for 4 viewports more (256 rows and 8,000 nodes at most), so scrolling back builds nothing. A list that never scrolls builds what it always did, and 30 seconds after a window's last frame a list goes back to that, its memory freed, covered or not. `ahead` says how many viewports (`0`: as before). A list's rows in view are still built at once; its `overscan` is the least built ahead. `zgx inspect frames` shows this time as `spare` entries, and leaves it out of a replay's numbers.

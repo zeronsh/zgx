@@ -44,6 +44,17 @@ use super::{logical_to_physical_rounded, DeviceId, WaylandError, WindowId};
 
 type WaylandDispatcher = calloop::Dispatcher<'static, WaylandSource<WinitState>, WinitState>;
 
+thread_local! {
+    /// Whether a queue of the application's own on this connection holds events
+    /// (`platform::wayland::wake_for_own_queue`).
+    static OWN_QUEUE_HEARD: Cell<Option<fn() -> bool>> = const { Cell::new(None) };
+}
+
+/// See `platform::wayland::wake_for_own_queue`.
+pub(crate) fn wake_for_own_queue(heard: fn() -> bool) {
+    OWN_QUEUE_HEARD.set(Some(heard));
+}
+
 /// The Wayland event loop.
 pub struct EventLoop<T: 'static> {
     /// Has `run` or `run_on_demand` been called or a call to `pump_events` that starts the loop
@@ -109,7 +120,8 @@ impl<T: 'static> EventLoop<T> {
                 let result = queue.dispatch_pending(winit_state);
                 if result.is_ok()
                     && (!winit_state.events_sink.is_empty()
-                        || !winit_state.window_compositor_updates.is_empty())
+                        || !winit_state.window_compositor_updates.is_empty()
+                        || OWN_QUEUE_HEARD.get().is_some_and(|heard| heard()))
                 {
                     winit_state.dispatched_events = true;
                 }
