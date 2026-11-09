@@ -867,6 +867,78 @@ fn a_script_font_feature_makes_no_inline_box() {
     );
 }
 
+/// An element in `ui.rich` is an inline box: an ordinary element in the
+/// line, with its own state and click, moving the text after it, reading
+/// and copying as what it holds, or as it says.
+#[test]
+fn an_element_in_rich_text_is_an_inline_box() {
+    let mut h = Harness::inline(
+        r##"
+        local clicks = ui.state("clicks", 0)
+        return ui.column { w = 400,
+            ui.rich { id = "p", selectable = true, text_size = 10,
+                "Ask ",
+                ui.row { id = "chip", px = 4, bg = "#223344", rounded = 4,
+                    on_click = ui.add(clicks),
+                    ui.text { "Wing {clicks}", id = "label", text_size = 10 } },
+                " and ",
+                ui.inline_box { ui.row { id = "second", w = 20, h = 8 },
+                    align = "middle", alt = "Sol" },
+                " now" } }
+        "##,
+    );
+    h.frames(2);
+    let (chip, second, label) = (h.bounds("chip"), h.bounds("second"), h.bounds("label"));
+    assert!(chip.width > 8. && chip.x > 0., "{chip:?}");
+    assert!(
+        second.x > chip.x + chip.width,
+        "in order: {chip:?} {second:?}"
+    );
+    let p = h.find("p").unwrap();
+    let text = {
+        let scene = h.ui.scene.borrow();
+        let paragraph = scene.children(p)[0];
+        match scene.kind(paragraph) {
+            zgx::scene::NodeKind::RichText { text } => text.clone(),
+            _ => panic!("a paragraph"),
+        }
+    };
+    assert_eq!(text.text(), "Ask \u{FFFC} and \u{FFFC} now");
+    let boxes = text.inline_boxes();
+    assert_eq!(boxes.len(), 2);
+    assert_eq!(boxes[1].align, zgx::rich_text::InlineAlign::Middle);
+    assert!((boxes[0].width - chip.width).abs() < 0.01);
+    // Its label's baseline is the line's.
+    assert!((label.y - chip.y).abs() < 0.01);
+    // It holds its state, and a click reaches it.
+    h.ui.set_assistive_technology(true);
+    assert_eq!(h.text("label"), "Wing 0");
+    h.click("chip");
+    h.frames(2);
+    assert_eq!(h.text("label"), "Wing 1");
+    assert!(h.bounds("chip").width >= chip.width);
+    // A reader takes each in its place, as it is now though no size changed.
+    let paragraph = h.ui.scene.borrow().children(p)[0];
+    let read =
+        h.ui.semantics
+            .borrow()
+            .get(paragraph)
+            .map(|n| n.label.clone());
+    assert_eq!(read.as_deref(), Some("Ask Wing 1 and Sol now"));
+}
+
+#[test]
+fn a_bad_inline_box_says_so() {
+    let error = zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.rich { ui.inline_box { "text" } }"#,
+        )
+    });
+    assert!(error.is_err_and(|e| e.contains("holds an element")));
+}
+
 #[test]
 fn a_span_icon_sits_in_the_line_before_its_text() {
     use zgx::scene::NodeKind;

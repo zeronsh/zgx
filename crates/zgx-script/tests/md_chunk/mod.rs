@@ -45,16 +45,34 @@ return ui.column {
 }
 "###;
 
+/// Whether code runs are drawn as chips: inline boxes in their paragraphs
+/// (`md_chunk_flat_inline`), not spans.
+pub static CHIPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The script, its column in a scroll view the window's height that stays
 /// at its end as it grows if `followed` (a chat following its reply): each
 /// chunk then shows where it lands.
 fn script(followed: bool) -> String {
+    let span =
+        "table.insert(props, ui.span { r.x, literal = true, weight = if r.b then 600 else nil })";
+    assert!(SCRIPT.contains(span));
+    let script = if CHIPS.load(std::sync::atomic::Ordering::Relaxed) {
+        SCRIPT.replacen(
+            span,
+            &format!(
+                "if r.c then table.insert(props, ui.row {{ px = 3, rounded = 3, bg = \"$surface.sunken\", ui.text {{ r.x, literal = true }} }}) else {span} end"
+            ),
+            1,
+        )
+    } else {
+        SCRIPT.to_string()
+    };
     if !followed {
-        return SCRIPT.into();
+        return script;
     }
     let open = "return ui.column {";
-    assert!(SCRIPT.contains(open));
-    let wrapped = SCRIPT.replacen(
+    assert!(script.contains(open));
+    let wrapped = script.replacen(
         open,
         "return ui.scroll { follow = true, w = 640, h = 900, ui.column {",
         1,

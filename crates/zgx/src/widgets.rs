@@ -4017,6 +4017,7 @@ impl Ui {
                         self.input.focus(&self.scene, Some(id));
                     }
                     self.sync_selection();
+                    self.refresh_inline_labels();
                     self.storage.unsettled.set(None);
                     return Ok(());
                 }
@@ -4254,6 +4255,35 @@ impl Ui {
         };
         for signal in told {
             signal.update(|revision| *revision = revision.wrapping_add(1));
+        }
+    }
+    /// With a reader attached, each paragraph with inline boxes reads as what
+    /// they hold now: their text can change with nothing laid out differently,
+    /// and nothing else says so. No reader, or no such paragraph: nothing.
+    fn refresh_inline_labels(&self) {
+        if self.storage.inline_moved.borrow().is_empty() || !self.assistive_technology() {
+            return;
+        }
+        let nodes: Vec<NodeId> = self.storage.inline_moved.borrow().keys().copied().collect();
+        for node in nodes {
+            let text = {
+                let scene = self.scene.borrow();
+                if !scene.contains(node) {
+                    continue;
+                }
+                scene.inline_plain_text(node)
+            };
+            let same = self
+                .semantics
+                .borrow()
+                .get(node)
+                .is_some_and(|n| n.label == text);
+            if !same {
+                self.semantics.borrow_mut().update(node, |n| {
+                    n.label = text.clone();
+                    n.value = Some(text);
+                });
+            }
         }
     }
     /// Text's lines moved in a box that did not (`Scene::set_text_balance`):

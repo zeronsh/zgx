@@ -5442,6 +5442,12 @@ export type SpanProps = {
 -- strings as they are (a span's own `literal` wins).
 -- The run a paragraph's `context_menu` was asked on (`e.span`): its place
 -- among the paragraph's runs from 1, where it links, and its text.
+export type InlineBoxProps = {
+	[number]: Node,
+	-- As CSS's `vertical-align`, or how far above the baseline.
+	align: ("baseline" | "middle" | "text_top" | "text_bottom" | "top" | "bottom" | number)?,
+	alt: string?,
+}
 export type SpanTarget = { index: number, href: string?, text: string }
 export type RichProps = {
 	-- Size and position.
@@ -5853,7 +5859,7 @@ export type RichProps = {
 	-- Open the context menu under the node, from its left edge (a tab's),
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
-	[number]: Span | Text | SpanProps,
+	[number]: Span | Node | Text | SpanProps,
 	literal: boolean?,
 	-- As an element's, told the run under the click or the focused link
 	-- (`e.span`, nil off the runs). Asked first on its links: nil back for
@@ -21529,6 +21535,10 @@ declare ui: {
 	scroll_x: (props: ScrollProps?) -> Node,
 	text: (content: Text | TextProps) -> Node,
 	span: (content: Text | SpanProps) -> Span,
+	-- An element in a line of `ui.rich`, atomic as CSS's inline-block: how it
+	-- sits, and what it reads and copies as rather than the text it holds. An
+	-- element among `ui.rich`'s runs is one on the baseline.
+	inline_box: (props: InlineBoxProps) -> Span,
 	rich: (props: RichProps) -> Node,
 	image: (props: ImageProps) -> Node,
 	-- A picture's size in pixels, read from its file's header (nothing is

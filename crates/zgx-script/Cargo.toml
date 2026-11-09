@@ -116,6 +116,11 @@ path = "tests/md_chunk_flat.rs"
 
 [[test]]
 # Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
+name = "md_chunk_flat_inline"
+path = "tests/md_chunk_flat_inline.rs"
+
+[[test]]
+# Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
 name = "md_chunk_flat_render"
 path = "tests/md_chunk_flat_render.rs"
 

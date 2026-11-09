@@ -60,6 +60,27 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | `ui.span { "text", … }` | a styled run |
 | a string or function | a run in the paragraph's style (templates work) |
 | a table, `{ "text", bold = true }` | a span's options in place: the same as `ui.span { … }` |
+| an element, `ui.row { … }` | an inline box: the element in the line, atomic as CSS's inline-block, on the baseline |
+| `ui.inline_box { element, align = "middle", alt = "@wing" }` | an inline box that says how it sits (`baseline`, `middle`, `text_top`, `text_bottom`, `top`, `bottom`, or a number: how far above the baseline) and what it reads and copies as, rather than the text it holds |
+
+An inline box is an ordinary element, with its own state, events, hover and focus. A line breaks around it, never through it, and grows to hold it; a chip's label sits on the line's baseline. A selection takes it as one character.
+
+```lua
+local reviews = ui.state("reviews", 0)
+return ui.rich {
+	wrap = true,
+	"Ask ",
+	ui.row {
+		px = 4,
+		gap = 4,
+		rounded = 4,
+		bg = "$surface.raised",
+		on_click = ui.add(reviews),
+		ui.text { "Wing, {reviews} so far" },
+	},
+	" to review.",
+}
+```
 
 | Span option | Type | Default | |
 | --- | --- | --- | --- |

@@ -22,6 +22,29 @@ Empty spans are ignored. Equal resolved content suppresses damage; color-only
 changes preserve layout. The native host measures with the same mixed-run shaper
 used for GPU rendering. The headless core uses approximate grapheme advances.
 
+## Inline boxes
+
+Any view can sit in a line, atomic as CSS's inline-block (Flutter's `WidgetSpan`): a chip, an image, a button.
+
+```rust
+use zgx::compose::prelude::*;
+use zgx::rich_text::InlineAlign;
+let chip = row().px(4.).rounded(4.).on_click(|| {}).child(text("Wing"));
+let paragraph = rich_text().w(320.).text_wrap(true)
+    .child(text_span("Ask "))
+    .inline(chip)
+    .child(text_span(" to review "))
+    .inline(inline_box(row().w(12.).h(12.)).align(InlineAlign::Middle).alt("a file"));
+```
+
+A box is the paragraph's child, an ordinary view with its own events, hover, focus, state and accessibility. Layout measures it shrink-to-fit against the paragraph's width (its margins count) and places it in the same pass, so it never lags its text and scrolling moves it for nothing. A line breaks before and after a box, never through it, and grows to hold it as CSS's line box does: as far above and below the baseline as any text (its ascent and descent, with half its leading) or box reaches, then boxes at the line's top or bottom.
+
+`InlineAlign` is `vertical-align`: `Baseline` (the default: its first text's first baseline, a row taking its first child's and a column its last child's, or else its bottom), `Middle`, `TextTop`, `TextBottom`, `Top`, `Bottom`, or `Raise(px)`. Multi-line boxes differ from CSS here, which takes an inline-block's last baseline.
+
+Selection and copy take a box as one character: the caret steps over it, and a copy has its `alt` in its place, or the text it holds. A paragraph reads the same way to assistive technology. `rich_text_signal` paragraphs use `inline_span()`, one for each child in order (`rich_text_signal(…).child(view)`): the spans can change around their boxes, which stay mounted.
+
+Text without boxes pays nothing: `RichText` and the shaping and measuring of its lines are as they were. A box's size is part of its text's metrics. Resized, the paragraph's lines are laid out again, with no word shaped again.
+
 Low-level `rich_text::RichText` validates contiguous UTF-8 byte ranges covering
 its immutable text. A `TextRun` holds a resolved font, size and color. Ranges
 must be nonempty and end at character boundaries; sizes must be finite and

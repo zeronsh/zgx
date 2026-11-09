@@ -1456,6 +1456,55 @@ pub(crate) struct SpanRare {
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
+    /// It is an inline box: this element in the line (`ui.inline_box`, or an
+    /// element among `ui.rich`'s runs).
+    pub inline: Option<InlineBoxSpan>,
+}
+/// `ui.inline_box { node, align = "middle", alt = "@wing" }`.
+#[derive(Clone)]
+pub(crate) struct InlineBoxSpan {
+    pub node: Rc<Node>,
+    pub align: zgx::rich_text::InlineAlign,
+    pub alt: Option<std::sync::Arc<str>>,
+}
+/// A span that is inline box `node`, as `ui.rich` takes one.
+fn inline_box_span(
+    lua: &Lua,
+    node: Rc<Node>,
+    align: zgx::rich_text::InlineAlign,
+    alt: Option<std::sync::Arc<str>>,
+) -> mlua::Result<Span> {
+    let text = lua.create_string(zgx::rich_text::INLINE_BOX_TEXT)?;
+    let mut made = span(lua, mlua::Value::String(text), true)?;
+    rare_mut(&mut made).inline = Some(InlineBoxSpan { node, align, alt });
+    Ok(made)
+}
+/// `ui.inline_box`'s `align`: a name, or how far above the baseline.
+fn inline_align(value: mlua::Value) -> mlua::Result<zgx::rich_text::InlineAlign> {
+    use zgx::rich_text::InlineAlign as A;
+    Ok(match value {
+        mlua::Value::Nil => A::Baseline,
+        mlua::Value::Integer(by) => A::Raise(by as f32),
+        mlua::Value::Number(by) => A::Raise(by as f32),
+        mlua::Value::String(name) => match &*name.to_str()? {
+            "baseline" => A::Baseline,
+            "middle" => A::Middle,
+            "text_top" => A::TextTop,
+            "text_bottom" => A::TextBottom,
+            "top" => A::Top,
+            "bottom" => A::Bottom,
+            other => {
+                return Err(mlua::Error::runtime(format!(
+                    "ui.inline_box: `align` \"{other}\": baseline, middle, text_top, text_bottom, top, bottom, or a number"
+                )));
+            }
+        },
+        _ => {
+            return Err(mlua::Error::runtime(
+                "ui.inline_box: `align` is a name or a number",
+            ));
+        }
+    })
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -5173,6 +5222,20 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     ui.set(
+        "inline_box",
+        lua.create_function(|lua, table: Table| {
+            let node = match table.get::<mlua::Value>(1)? {
+                mlua::Value::UserData(ud) if ud.is::<NodeUd>() => ud.borrow::<NodeUd>()?.0.clone(),
+                _ => return Err(mlua::Error::runtime("ui.inline_box holds an element")),
+            };
+            let align = inline_align(table.get("align")?)?;
+            let alt = table.get::<Option<String>>("alt")?.map(Into::into);
+            Ok(SpanUd(RefCell::new(Some(inline_box_span(
+                lua, node, align, alt,
+            )?))))
+        })?,
+    )?;
+    ui.set(
         "rich",
         lua.create_function(|lua, table: Table| {
             // Runs written as strings or tables take the paragraph's
@@ -5189,16 +5252,26 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             .take()
                             .ok_or_else(|| mlua::Error::runtime("a span can be used once"))?,
                     ),
+                    // An element among the runs: an inline box on the baseline.
+                    mlua::Value::UserData(ud) if ud.is::<NodeUd>() => {
+                        let node = ud.borrow::<NodeUd>()?.0.clone();
+                        spans.push(inline_box_span(lua, node, Default::default(), None)?);
+                    }
                     other => spans.push(span(lua, other, literal)?),
                 }
             }
             for i in (1..=table.raw_len()).rev() {
                 table.raw_remove(i)?;
             }
-            node_ud(
-                lua,
-                fill(lua, Node::new(owner(lua)?, Kind::Rich(spans)), Some(&table))?,
-            )
+            // Its inline boxes are its children, in order.
+            let boxes: Vec<Rc<Node>> = spans
+                .iter()
+                .filter_map(|span| span.rare.as_ref()?.inline.as_ref())
+                .map(|inline| inline.node.clone())
+                .collect();
+            let mut node = fill(lua, Node::new(owner(lua)?, Kind::Rich(spans)), Some(&table))?;
+            node.children = boxes;
+            node_ud(lua, node)
         })?,
     )?;
     for name in ["image", "svg"] {
