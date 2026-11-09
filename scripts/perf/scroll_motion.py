@@ -107,8 +107,10 @@ class Motion:
         if finger:
             self.finger_intervals += 1
         if gap > 1.5*period and distance <= 1:
-            self.slow_steps += 1  # no intermediate whole-pixel position existed
-            return True, False
+            self.slow_steps += 1
+            if not coast:
+                return True, False  # finger input can be pixel-limited
+            # An observed moving coast is refresh-paced, even at a one-pixel step.
         late = gap > 1.5*period
         if late:
             if finger:self.finger_late += 1

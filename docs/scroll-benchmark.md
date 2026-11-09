@@ -87,8 +87,8 @@ device pixel do not require a new picture every refresh. The analyzer derives
 motion windows from the tape, accumulates fractional device-pixel motion and
 counts long intervals only inside dense moving input. It reports idle intervals
 separately. These are **input-demand windows**, not a claim of optical pixel
-tracking or OS hardware-event latency. Autonomous momentum after the tape's
-moving-input region is retained in raw feedback but excluded from the late gate. For
+tracking or OS hardware-event latency. The app’s observed moving coast remains in the gate after finger input ends;
+system momentum events ignored by the host do not extend that demand. For
 pixel-limited `slow` and isolated `notches`, a 120 Hz interval distribution is
 not meaningful: sparse cells instead require at least 80% of the planned
 quantized pixel updates to appear, ten traced moving frames, and all the same
@@ -447,9 +447,9 @@ translation and the host’s coast state. The setup maps the target to its uniqu
 renderer view from the initial offset; missing/ambiguous mapping, stale coast
 context or unclassified long intervals fail coverage rather than certify a pass.
 Non-rendering frames carry the last position. Position ranges across canceled
-frames still detect skipped intermediate movement. Long one-pixel coast steps
-are reported separately from late intervals; the scorer cannot invent an
-intermediate integer position. Finger and coast late counts are separate.
+frames still detect skipped intermediate movement. Moving coast intervals must meet the refresh deadline even when the step is
+one pixel. Long one-pixel steps are also reported separately; only pixel-limited
+finger input can use that exemption. Finger and coast late counts are separate.
 Historical raw-input-demand tables are explicitly qualified and cannot be used
 as app missed-refresh certification. Capture snapshots include `scroll_motion.py`;
 comparison fingerprints include it, preventing a silent rescore mid-batch.

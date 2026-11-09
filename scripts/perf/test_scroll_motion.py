@@ -23,13 +23,18 @@ class MotionEvidence(unittest.TestCase):
         frames[0]['notes'].append('scroll @8 position 0 -200 px')
         self.assertIsNone(select_view({'scroll':'offset 100 of 0 to 1000'},frames,2))
 
-    def test_real_coast_jump_is_late_but_one_pixel_slow_step_is_not(self):
+    def test_moving_coast_requires_each_refresh_even_for_one_pixel(self):
         a=(.001,.001,1,0);b=(.018,.018,2,0)
         m=Motion([self.frame(1,0),self.frame(2,-10)],7)
         self.assertEqual(m.interval(a,b,False,1000/120),(True,True))
         m=Motion([self.frame(1,0),self.frame(2,-1)],7)
-        self.assertEqual(m.interval(a,b,False,1000/120),(True,False))
+        self.assertEqual(m.interval(a,b,False,1000/120),(True,True))
         self.assertEqual(m.summary()['coast_slow_step_intervals'],1)
+
+    def test_pixel_limited_fingers_do_not_require_each_refresh(self):
+        m=Motion([self.frame(1,0,False),self.frame(2,-1,False)],7)
+        self.assertEqual(m.interval((.001,.001,1,0),(.018,.018,2,0),True,1000/120),(True,False))
+        self.assertEqual(m.summary()['finger_late_intervals'],0)
 
     def test_finger_and_coast_late_counts_are_separate(self):
         m=Motion([self.frame(1,0),self.frame(2,-10),self.frame(3,-20)],7)
