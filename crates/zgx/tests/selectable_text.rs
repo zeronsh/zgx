@@ -2048,8 +2048,8 @@ fn a_press_that_shakes_within_the_drag_threshold_selects_nothing() {
 
 /// A selection in a virtual list's row that scrolled away comes back with
 /// that row, found by its key: rows added above it meanwhile (a chat's
-/// older messages arriving) never move it onto another row's text. (Its
-/// old place showing another row, with its own out of view, it ends.)
+/// older messages arriving) never move it onto another row's text, and it
+/// lasts while its rows are only moved. Rows removed, it ends.
 #[test]
 fn a_parked_selection_comes_back_on_its_own_row_after_rows_are_added_above() {
     let mut ui = Ui::new(400., 300.);
@@ -2090,13 +2090,26 @@ fn a_parked_selection_comes_back_on_its_own_row_after_rows_are_added_above() {
     ui.prepare_frame();
     assert_eq!(ui.selected_text(), "ow 1\nRow");
     // Away again, ten more above, and back at the top: rows -20 to -16
-    // show, none of them selected.
+    // show, none of them selected, and the selection is still its rows'.
     offset.set(1_000.);
     ui.prepare_frame();
     keys.set((-20..100).collect());
     ui.prepare_frame();
     offset.set(0.);
     ui.prepare_frame();
-    assert_eq!(ui.selected_text(), "", "not on other rows");
-    assert!(highlighted(&ui).is_empty());
+    assert!(highlighted(&ui).is_empty(), "not on other rows");
+    assert_eq!(ui.selected_text(), "ow 1\nRow");
+    // Where they are now (rows 21 and 22), they show selected.
+    offset.set(400.);
+    ui.prepare_frame();
+    assert!(!highlighted(&ui).is_empty());
+    assert_eq!(ui.selected_text(), "ow 1\nRow");
+    // Away, and its rows removed from the list: it ends.
+    offset.set(1_000.);
+    ui.prepare_frame();
+    keys.set((-20..100).filter(|key| !(1..=2).contains(key)).collect());
+    ui.prepare_frame();
+    offset.set(0.);
+    ui.prepare_frame();
+    assert!(!ui.has_text_selection(), "{:?}", ui.selected_text());
 }

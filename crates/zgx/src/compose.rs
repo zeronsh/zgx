@@ -3142,6 +3142,35 @@ impl<K: 'static> RowSource<K> {
         let build = self.build.clone();
         move |index, key, cx| (build.borrow_mut())(index, key, cx)
     }
+    /// Where a row's key is in the list now, of `len()` rows (`None` while
+    /// it can't be read): at the index it was last seen at if it's still
+    /// there, else found down the list (`selection::RowFind`). Read
+    /// untracked; asked while the list reads its keys, it stays where it was.
+    pub(crate) fn find(
+        &self,
+        len: impl Fn() -> Option<usize> + 'static,
+    ) -> crate::selection::RowFind
+    where
+        K: Eq,
+    {
+        let (key, mounted_in) = (self.key.clone(), self.mounted_in.clone());
+        Rc::new(move |wanted: &dyn std::any::Any, seen: usize| {
+            let wanted = wanted.downcast_ref::<K>()?;
+            let runtime = mounted_in
+                .borrow()
+                .as_ref()
+                .map(|(runtime, _)| runtime.clone())?;
+            runtime.untracked(|| {
+                let (Some(len), Ok(mut key)) = (len(), key.try_borrow_mut()) else {
+                    return Some(seen);
+                };
+                if seen < len && key(seen) == *wanted {
+                    return Some(seen);
+                }
+                (0..len).find(|&index| key(index) == *wanted)
+            })
+        })
+    }
     /// Row `index`'s text, of `len()` rows: the row built as the list builds
     /// it, not mounted (what it makes ends at once), and read (`view_text`).
     pub(crate) fn text(
@@ -3279,6 +3308,10 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     let text = rows.text({
         let count = count.clone();
         move || count.try_borrow_mut().map_or(0, |mut count| count())
+    });
+    let find = rows.find({
+        let count = count.clone();
+        move || count.try_borrow_mut().ok().map(|mut count| count())
     });
     let (mut key, mut build, mounted_in) = (rows.key(), rows.build(), rows.mounted_in.clone());
     let count = move || (count.borrow_mut())();
@@ -3495,12 +3528,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                             let mut cx = Context::new(runtime.clone(), environment.clone());
                             let view = build(index_signal.clone(), key.clone(), &mut cx);
                             let row = ui.container(content, Layout::Overlay, Default::default());
-                            crate::selection::mount_row(
-                                &mut ui,
-                                row,
-                                &index_signal,
-                                std::hash::BuildHasher::hash_one(&rustc_hash::FxBuildHasher, key),
-                            );
+                            crate::selection::mount_row(&mut ui, row, &index_signal, key, &find);
                             let node = mount(&mut ui, row, view, environment.clone());
                             cx.finish(&mut ui, node);
                             if let Some(navigation) = &navigation {

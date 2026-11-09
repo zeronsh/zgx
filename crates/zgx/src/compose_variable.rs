@@ -436,6 +436,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
         let heights = heights.clone();
         move || heights.index.try_borrow().map_or(0, |index| index.count())
     });
+    let find = rows.find({
+        let heights = heights.clone();
+        move || heights.index.try_borrow().ok().map(|index| index.count())
+    });
     let (mut key, mut build, mounted_in) = (rows.key(), rows.build(), rows.mounted_in.clone());
     View::new(Kind::VirtualList(Box::new(
         move |ui, root, environment, options: crate::compose::ListOptions| {
@@ -965,12 +969,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                             Layout::Overlay,
                             row_style(width, *row_height, measured),
                         );
-                        crate::selection::mount_row(
-                            &mut ui,
-                            row,
-                            &index_signal,
-                            std::hash::BuildHasher::hash_one(&rustc_hash::FxBuildHasher, key),
-                        );
+                        crate::selection::mount_row(&mut ui, row, &index_signal, key, &find);
                         let node = mount(&mut ui, row, view, environment.clone());
                         cx.finish(&mut ui, node);
                         if let Some(navigation) = &navigation {
