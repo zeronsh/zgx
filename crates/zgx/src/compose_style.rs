@@ -745,6 +745,7 @@ pub(crate) fn mount_style_with_intrinsic(
     leaf: bool,
 ) -> Signal<Typography> {
     let mut base = base;
+    let transition = transition_of(&base);
     let mut reactive = variants.reactive;
     // A node setting no typography (nor through a variant or a dynamic
     // style) shows its parent's: it passes that signal on, not a copy.
@@ -971,13 +972,10 @@ pub(crate) fn mount_style_with_intrinsic(
     let mut parent_subscribed = false;
     // Static: it reads no layout, so a mount need not draw its inputs first.
     let mount_pure = dynamic.is_none() && reactive.is_none() && disabled.is_none();
-    // A view whose properties transition (`crate::transition`): read once,
-    // here, so a view without one binds its effect as it always has.
-    let transition = base
-        .rare()
-        .cold
-        .as_ref()
-        .and_then(|cold| cold.transition.clone());
+    // A view whose properties transition (`crate::transition`), read only by
+    // one whose style can change after it mounts (a variant, interaction, a
+    // dynamic or reactive style, tokens): another never eases. Its effect is
+    // wrapped once bound (`ease_style`): every view binds the same effect.
     let restyle = move || {
         let _span = crate::profile::nested(crate::profile::Phase::Style);
         // A `Ui` only for a full application: a run that changes paint or a
@@ -1608,40 +1606,87 @@ pub(crate) fn mount_style_with_intrinsic(
             memo.boxed = None;
         }
     };
-    match transition {
-        None => ui.bind_marked(node, mount_pure, restyle),
-        Some(transition) => {
-            // What is drawn before the style is written, and after it the
-            // eased properties put back as they ease.
-            let mut restyle = restyle;
-            let weak = ui.downgrade();
-            // The first style is drawn as it is: nothing to ease from.
-            let mut mounted = false;
-            ui.bind_marked(node, mount_pure, move || {
-                if !std::mem::replace(&mut mounted, true) {
-                    restyle();
-                    return;
-                }
-                let before = weak
-                    .upgrade_storage()
-                    .map(|storage| crate::transition::drawn(&storage.scene.borrow(), node));
-                restyle();
-                if let (Some(storage), Some(before)) = (weak.upgrade_storage(), before)
-                    && storage.scene.borrow().contains(node)
-                {
-                    let theme = storage.themes.root().clone();
-                    storage.transitions.settle(
-                        &mut storage.scene.borrow_mut(),
-                        &theme,
-                        node,
-                        &transition,
-                        before,
-                    );
-                }
-            });
-        }
+    ui.bind_marked(node, mount_pure, restyle);
+    if let Some(transition) = transition {
+        ease_style(ui, node, transition);
     }
     typography
+}
+
+/// The transition `base` sets, if any.
+#[inline(always)]
+fn transition_of(base: &Styles) -> Option<std::sync::Arc<crate::transition::Transition>> {
+    base.rare_set()?.cold.as_ref()?.transition.clone()
+}
+
+/// A view with a transition: its style effect, just bound, run around (what
+/// is drawn kept before each run after the first, and the eased properties
+/// put back after it as they ease).
+#[cold]
+#[inline(never)]
+fn ease_style(
+    ui: &mut Ui,
+    node: NodeId,
+    transition: std::sync::Arc<crate::transition::Transition>,
+) {
+    let weak = ui.downgrade();
+    ui.wrap_last_binding(node, |restyle, ran| {
+        let eases = Eases {
+            transition,
+            weak,
+            node,
+            mounted: std::cell::Cell::new(ran),
+            drawn: std::cell::Cell::new([None; 3]),
+        };
+        std::rc::Rc::new(std::cell::RefCell::new(move || {
+            let eased = eases.before();
+            (*restyle.borrow_mut())();
+            if eased {
+                eases.after();
+            }
+        }))
+    });
+}
+
+/// A view's transition (`crate::transition`), around each run of its style
+/// effect.
+struct Eases {
+    transition: std::sync::Arc<crate::transition::Transition>,
+    weak: crate::widgets::WeakUi,
+    node: NodeId,
+    /// The first style is drawn as it is: nothing to ease from.
+    mounted: std::cell::Cell<bool>,
+    /// What was drawn before the run under way.
+    drawn: std::cell::Cell<[Option<crate::transition::Value>; 3]>,
+}
+impl Eases {
+    /// Keeps what is drawn before a run (not the first): whether it did.
+    fn before(&self) -> bool {
+        if !self.mounted.replace(true) {
+            return false;
+        }
+        let Some(storage) = self.weak.upgrade_storage() else {
+            return false;
+        };
+        self.drawn
+            .set(crate::transition::drawn(&storage.scene.borrow(), self.node));
+        true
+    }
+    /// After it, each eased property whose target changed starts or turns.
+    fn after(&self) {
+        if let Some(storage) = self.weak.upgrade_storage()
+            && storage.scene.borrow().contains(self.node)
+        {
+            let theme = storage.themes.root().clone();
+            storage.transitions.get_or_init(Default::default).settle(
+                &mut storage.scene.borrow_mut(),
+                &theme,
+                self.node,
+                &self.transition,
+                self.drawn.get(),
+            );
+        }
+    }
 }
 
 /// What a node showed before its style first applied: what properties no
