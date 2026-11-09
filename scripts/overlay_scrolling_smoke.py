@@ -43,8 +43,12 @@ Gio.bus_own_name(Gio.BusType.SESSION, "org.freedesktop.portal.Desktop", Gio.BusN
                  acquired, None, None)
 GLib.MainLoop().run()
 '''
-# The vertical scrollbar's thumb, in scrollbars_smoke's colours and place.
-THUMB = ((94, 165, 255), (229, 237, 247))
+# The vertical scrollbar's thumb, in scrollbars_smoke's colours (GNOME's
+# slider, the text at 20% over the rows, or the text with focus), down the
+# middle of both GNOME's indicator (3 wide, scrolling) and its thumb where
+# scrollbars always show (8 wide).
+THUMB = ((100, 115, 131), (229, 237, 247))
+COLUMN = 209
 
 
 def main():
@@ -106,7 +110,7 @@ def main():
                 def thumb(stage):
                     shot = ImageGrab.grab(xdisplay=env["DISPLAY"])
                     shot.save(args.output / f"{setting}-{stage}.png")
-                    return sum(shot.getpixel((x + 212, y + row))[:3] in THUMB for row in range(76, 220))
+                    return sum(shot.getpixel((x + COLUMN, y + row))[:3] in THUMB for row in range(76, 220))
 
                 # The pointer off the scrollbars, which a hovered one keeps.
                 xdo("mousemove", "--window", window, 400, 300)
@@ -118,8 +122,8 @@ def main():
                 time.sleep(.2)
                 scrolled = thumb("scrolled")
                 xdo("mousemove", "--window", window, 400, 300)
-                # A second after it stops, then a fade.
-                time.sleep(2.5)
+                # Two seconds after it stops, then GNOME's 1 s fade.
+                time.sleep(3.5)
                 after = thumb("after")
                 assert app.poll() is None, "the example exited"
                 return {"rest": rest, "scrolled": scrolled, "after": after}

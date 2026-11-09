@@ -66,7 +66,9 @@ def main():
             key("r")
             screenshot=ImageGrab.grab(xdisplay=display)
             screenshot.save(args.output / f"scrollbars-{stage}.png")
-            thumb_colors=((94,165,255),(229,237,247))
+            # GNOME's thumb: its slider the text at 20% over the content,
+            # or scrollbar.thumb.active (the text) while it has focus.
+            thumb_colors=((100,115,131),(229,237,247))
             vertical=[y for y in range(76,220) if screenshot.getpixel((origin_x+212,origin_y+y))[:3] in thumb_colors]
             horizontal=[x for x in range(248,472) if screenshot.getpixel((origin_x+x,origin_y+136))[:3] in thumb_colors]
             samples.append({"stage":stage,"vertical_thumb_pixels":len(vertical),"horizontal_thumb_pixels":len(horizontal)})
@@ -74,9 +76,11 @@ def main():
                 empty_pixels = [screenshot.getpixel((origin_x+x,origin_y+y))[:3] for x,y in ((212,200),(460,136))]
                 if vertical or horizontal or any(pixel != (32,48,64) for pixel in empty_pixels):
                     raise AssertionError("scrollbar remained visible without overflow")
-            # Thumbs span viewport²/content less a 2px inset at each end:
-            # 144²/320-4 and 224²/640-4. Rounded ends blend one pixel each.
-            elif not (58<=len(vertical)<=62 and 72<=len(horizontal)<=76):
+            # Thumbs span the track (the viewport less GNOME's 4 at each
+            # end) times viewport/content, less a 2px inset at each end:
+            # 136*144/320-4 and 216*224/640-4. Rounded ends blend one pixel
+            # each.
+            elif not (55<=len(vertical)<=59 and 70<=len(horizontal)<=74):
                 raise AssertionError(f"missing native scrollbar thumbs: {samples[-1]}")
         def drag(x,y,end_x,end_y):
             xdo("mousemove","--window",window,x,y,"mousedown",1)

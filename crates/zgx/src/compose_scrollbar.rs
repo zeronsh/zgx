@@ -35,8 +35,14 @@ struct Look {
     /// Widening: how long the pointer rests on it first, how long after it
     /// leaves it narrows, and how long either takes. `None`: at once.
     widen: Option<(Duration, Duration, Duration)>,
-    /// Brighter under the pointer (zgx's), or the same colour (Windows').
-    brightens: bool,
+    /// How much more opaque its thumb is under the pointer (1: the same).
+    brighten: f32,
+    /// The widening's and the fade's curves, from progress 0..1.
+    widen_curve: fn(f32) -> f32,
+    fade_curve: fn(f32) -> f32,
+    /// Whether its track shows where scrollbars always show (GTK's has
+    /// none).
+    track_always: bool,
     /// Arrow buttons at its ends, each this long, shown as it widens
     /// (Windows'); `None`, none.
     arrows: Option<f32>,
@@ -56,7 +62,10 @@ const BUILT_IN: Look = Look {
     linger: Duration::from_millis(1000),
     fade: Duration::from_millis(200),
     widen: None,
-    brightens: true,
+    brighten: 1.75,
+    widen_curve: linear,
+    fade_curve: linear,
+    track_always: true,
     arrows: None,
     repeat: (Duration::ZERO, Duration::ZERO),
 };
@@ -88,17 +97,60 @@ const WINDOWS: Look = Look {
         Duration::from_millis(500),
         Duration::from_millis(167),
     )),
-    brightens: false,
+    brighten: 1.,
+    widen_curve: winui_curve,
+    fade_curve: linear,
+    track_always: true,
     arrows: Some(12.),
     // RepeatButton's `Delay` (500, its default) and the scrollbar's
     // `Interval` (50).
     repeat: (Duration::from_millis(500), Duration::from_millis(50)),
 };
-const LOOK: Look = if cfg!(windows) { WINDOWS } else { BUILT_IN };
+/// GNOME's, as libadwaita and GTK draw an overlay scrollbar
+/// (`widgets/_scrolling.scss`, `gtkscrolledwindow.c`): an indicator 3 wide
+/// that widens to 8 as soon as the pointer is on it, over 200 ms linearly
+/// (its CSS transition), fully round, at least 40 long, 4 from the edge,
+/// its slider the text at 20% (40% under the pointer) over a trough at 10%
+/// while widened; fading out over 1000 ms on an ease-out cubic 2 s after
+/// scrolling stops. Where scrollbars always show, 8 wide with no trough.
+const GNOME: Look = Look {
+    thumb: 3.,
+    thumb_wide: 8.,
+    inset: 2.,
+    radius: f32::INFINITY,
+    track: 12.,
+    margin: 4.,
+    min_thumb: 40.,
+    linger: Duration::from_millis(2000),
+    fade: Duration::from_millis(1000),
+    widen: Some((Duration::ZERO, Duration::ZERO, Duration::from_millis(200))),
+    brighten: 2.,
+    widen_curve: linear,
+    fade_curve: ease_out_cubic,
+    track_always: false,
+    arrows: None,
+    repeat: (Duration::ZERO, Duration::ZERO),
+};
+const LOOK: Look = if cfg!(windows) {
+    WINDOWS
+} else if cfg!(target_os = "linux") {
+    GNOME
+} else {
+    BUILT_IN
+};
+
+fn linear(p: f32) -> f32 {
+    p.clamp(0., 1.)
+}
+
+/// An ease-out cubic (GTK's indicator fade): 1 − (1 − p)³.
+fn ease_out_cubic(p: f32) -> f32 {
+    1. - (1. - p.clamp(0., 1.)).powi(3)
+}
 
 /// WinUI's widening curve, `cubic-bezier(0, 0, 0, 1)`: x = t³ and
 /// y = 3t² − 2t³, so at progress `p`, t = ∛p.
-fn widen_curve(p: f32) -> f32 {
+fn winui_curve(p: f32) -> f32 {
     let t = p.clamp(0., 1.).cbrt();
     t * t * (3. - 2. * t)
 }
@@ -235,7 +287,7 @@ pub(crate) fn advance_fades(ui: &Ui, now: Instant) -> bool {
         if done >= 1. {
             fade.hide();
         } else {
-            fade.alpha.set(1. - done);
+            fade.alpha.set(1. - (LOOK.fade_curve)(done));
             fade.next.set(Some(now + ui.refresh_interval()));
         }
         stepped = true;
@@ -325,7 +377,7 @@ fn step_widening(fade: &Fade, now: Instant, duration: Duration, interval: Durati
         fade.moving.set(None);
         fade.step.set(None);
     } else {
-        fade.widened.set(from + (to - from) * widen_curve(p));
+        fade.widened.set(from + (to - from) * (LOOK.widen_curve)(p));
         fade.step.set(Some(now + interval));
     }
     true
@@ -761,6 +813,7 @@ pub(crate) fn mount(
         let track_alpha = match LOOK.widen {
             Some(_) if overlay_mode => alpha * widened,
             _ if overlay_mode && !active => 0.,
+            _ if !LOOK.track_always => 0.,
             _ => alpha,
         };
         scene.set_kind(
@@ -770,10 +823,10 @@ pub(crate) fn mount(
         let thumb_color = theme.color(tok::SCROLLBAR_THUMB);
         let color = if focused.get() {
             theme.color(tok::SCROLLBAR_THUMB_ACTIVE)
-        } else if active && LOOK.brightens {
-            // Brighter: the colour's alpha raised by three quarters.
+        } else if active && LOOK.brighten != 1. {
+            // Brighter: the colour's alpha raised (`Look::brighten`).
             let Color(r, g, b, a) = thumb_color;
-            Color(r, g, b, (a as f32 * 1.75).min(255.) as u8)
+            Color(r, g, b, (a as f32 * LOOK.brighten).min(255.) as u8)
         } else {
             thumb_color
         };

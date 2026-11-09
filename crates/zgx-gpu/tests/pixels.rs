@@ -1792,12 +1792,21 @@ fn overlay_scrollbar_thumb_translates_and_clears_when_content_shrinks() {
             ),
     );
     let mut previous_extent = 0.;
-    for (position, height, thumb_y) in [
-        (0., 400., Some(8)),
-        (168., 400., Some(28)),
-        (336., 400., Some(48)),
-        (0., 40., None),
-        (0., 400., Some(8)),
+    // The platform's thumb at rest, in a track at the content's edge (120):
+    // zgx's 6 across an 8 track and at least 24 long; GNOME's 8 across a 12
+    // track and at least 40. Either rounded, its ends 2 in.
+    let (track, across, least) = if cfg!(target_os = "linux") {
+        (12, 8, 40)
+    } else {
+        (8, 6, 24)
+    };
+    let left = 120 - track + (track - across) / 2;
+    for (position, height, shown) in [
+        (0., 400., true),
+        (168., 400., true),
+        (336., 400., true),
+        (0., 40., false),
+        (0., 400., true),
     ] {
         extent.set(height);
         offset.set(position);
@@ -1821,21 +1830,22 @@ fn overlay_scrollbar_thumb_translates_and_clears_when_content_shrinks() {
             .filter(|(_, p)| **p == accent)
             .map(|(i, _)| (i % 128, i / 128))
             .collect();
-        match thumb_y {
-            // A rounded thumb 6 px across the 8 px track, its ends 2 px in
-            // from the 24 px its position spans.
-            Some(y) => {
-                assert!(
-                    visible.contains(&(116, y + 12)),
-                    "thumb at {y}: {visible:?}"
-                );
-                assert!(
-                    visible
-                        .iter()
-                        .all(|(x, row)| *x >= 113 && *x < 119 && *row >= y + 2 && *row < y + 22)
-                );
-            }
-            None => assert!(visible.is_empty()),
+        if shown {
+            // Along the 64 the padding leaves, over the 336 it scrolls.
+            let y = 8 + ((64 - least) as f32 * position / 336.) as usize;
+            assert!(
+                visible.contains(&(left + across / 2, y + least / 2)),
+                "thumb at {y}: {visible:?}"
+            );
+            assert!(
+                visible.iter().all(|(x, row)| *x >= left
+                    && *x < left + across
+                    && *row >= y + 2
+                    && *row < y + least - 2),
+                "thumb at {y}: {visible:?}"
+            );
+        } else {
+            assert!(visible.is_empty());
         }
     }
 }

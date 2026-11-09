@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// GNOME's test steps from its deadlines alone.
+#[cfg(not(target_os = "linux"))]
+use std::time::Instant;
 use zgx::{
     compose::prelude::*,
     input::InputEvent,
@@ -80,8 +83,8 @@ fn a_scrollbar_shows_at_rest_unless_scrollbars_are_overlays() {
     assert!(thumb(&ui).0 > 0.);
 }
 
-// zgx's own timing; Windows' is WinUI's (below).
-#[cfg(not(windows))]
+// zgx's own timing; Windows' is WinUI's and Linux's GNOME's (below).
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn an_overlay_scrollbar_shows_as_the_user_scrolls_then_fades() {
     let mut ui = Ui::new(300., 200.);
@@ -118,8 +121,8 @@ fn an_overlay_scrollbar_shows_as_the_user_scrolls_then_fades() {
     );
 }
 
-// zgx's own timing; Windows' is WinUI's (below).
-#[cfg(not(windows))]
+// zgx's own timing; Windows' is WinUI's and Linux's GNOME's (below).
+#[cfg(not(any(windows, target_os = "linux")))]
 #[test]
 fn the_pointer_on_an_overlay_scrollbar_keeps_it() {
     let mut ui = Ui::new(300., 200.);
@@ -268,4 +271,48 @@ fn a_windows_scrollbars_arrow_button_held_repeats() {
         None,
         "let go: nothing scheduled"
     );
+}
+
+/// GNOME's scrollbar (GTK's): an indicator 3 wide that widens to 8 at once
+/// as the pointer comes on it (over 200 ms), narrows as it leaves, and goes
+/// 2 s after scrolling stops, fading over a second; each wait a single
+/// wake, nothing scheduled at rest.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_gnome_scrollbar_widens_under_the_pointer_and_fades_after_scrolling() {
+    let mut ui = Ui::new(300., 200.);
+    ui.set_overlay_scrollbars(true);
+    mount(&mut ui);
+    wheel(&mut ui);
+    assert_eq!(thumb(&ui).0, 3., "a thin indicator");
+    let bounds = ui.scene.borrow().bounds(bar(&ui));
+    let (x, y) = (bounds.x + bounds.width / 2., bounds.y + 5.);
+    ui.dispatch(InputEvent::PointerMove { x, y });
+    ui.prepare_frame();
+    let widen = ui.next_interaction_deadline().expect("it widens");
+    ui.advance_interactions(widen).unwrap();
+    ui.advance_interactions(widen + Duration::from_millis(100))
+        .unwrap();
+    let midway = thumb(&ui).0;
+    assert!(3. < midway && midway < 8., "widening: {midway}");
+    ui.advance_interactions(widen + Duration::from_millis(250))
+        .unwrap();
+    assert_eq!(thumb(&ui).0, 8., "wide");
+    assert_eq!(ui.next_interaction_deadline(), None, "held, at rest");
+    ui.dispatch(InputEvent::PointerMove { x: 50., y: 50. });
+    ui.prepare_frame();
+    let narrow = ui.next_interaction_deadline().expect("it narrows");
+    ui.advance_interactions(narrow).unwrap();
+    ui.advance_interactions(narrow + Duration::from_millis(250))
+        .unwrap();
+    assert_eq!(thumb(&ui).0, 3., "narrow again");
+    let hide = ui.next_interaction_deadline().expect("it will fade");
+    ui.advance_interactions(hide + Duration::from_millis(500))
+        .unwrap();
+    let fading = thumb(&ui).2;
+    assert!(fading > 0, "fading over a second");
+    ui.advance_interactions(hide + Duration::from_millis(1100))
+        .unwrap();
+    assert_eq!(thumb(&ui).0, 0., "gone");
+    assert_eq!(ui.next_interaction_deadline(), None, "nothing scheduled");
 }
