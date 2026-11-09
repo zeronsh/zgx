@@ -7,7 +7,9 @@
 //! animation and relative or Unicode-placeholder placements: a program
 //! asking (`a=q`) is told, and sends the pixels in the codes instead. The
 //! screen model keeps where each placement is (`Term::place`) and moves it
-//! with its lines; the pictures' pixels are here, shared with the view.
+//! with its lines; the pictures are here, shared with the view. One sent as
+//! a PNG keeps its file (`ImageData::kept`), decoded only as it is drawn: in
+//! the scrollback it holds the file's bytes rather than its pixels.
 //! Sixel images (`crate::sixel`) are kept and placed here too.
 
 use alacritty_terminal::{
@@ -368,7 +370,7 @@ impl Graphics {
         term: &mut Term<T>,
         images: &Images,
     ) {
-        let bytes = image.pixels().len();
+        let bytes = image.bytes();
         self.serial += 1;
         let held = Held {
             number,
@@ -500,7 +502,8 @@ fn append(loading: &mut Loading, payload: &[u8], more: bool) -> Result<(), &'sta
     Ok(())
 }
 
-/// A transmission's pixels, as RGBA.
+/// A transmission as a picture: RGB and RGBA its pixels, as RGBA; a PNG its
+/// file, decoded when drawn.
 fn decode(keys: &Keys, data: Vec<u8>) -> Result<ImageData, &'static str> {
     let data = match keys.compression {
         0 => data,
@@ -514,7 +517,7 @@ fn decode(keys: &Keys, data: Vec<u8>) -> Result<ImageData, &'static str> {
         }
         _ => return Err("EINVAL:unknown compression"),
     };
-    let (width, height, pixels) = match keys.format {
+    let file = match keys.format {
         24 | 32 => {
             let (width, height) = (keys.width, keys.height);
             if width == 0 || height == 0 || width > MAX_SIDE || height > MAX_SIDE {
@@ -540,19 +543,33 @@ fn decode(keys: &Keys, data: Vec<u8>) -> Result<ImageData, &'static str> {
                     .flat_map(|&[r, g, b]| [r, g, b, 255])
                     .collect()
             };
-            (width, height, pixels)
+            return ImageData::new(width, height, pixels).map_err(|_| "EINVAL:bad size");
         }
-        100 => png(&data)?,
+        100 => data,
         _ => return Err("EINVAL:unknown format"),
     };
-    ImageData::new(width, height, pixels).map_err(|_| "EINVAL:bad size")
+    let (mut reader, width, height) = png_reader(&file)?;
+    // Asked whether it would show, the whole file is read to say.
+    if keys.action == b'q' {
+        png(&mut reader)?;
+    }
+    drop(reader);
+    ImageData::kept(width, height, file.into(), png_pixels).map_err(|_| "EINVAL:bad size")
 }
 
-fn png(data: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
-    let bad = |_| "EBADPNG:bad PNG";
+/// A kept PNG's pixels, as it is drawn.
+fn png_pixels(file: &[u8]) -> Result<Arc<[u8]>, String> {
+    let (mut reader, ..) = png_reader(file)?;
+    Ok(png(&mut reader)?.into())
+}
+
+type PngReader<'a> = png::Reader<std::io::Cursor<&'a [u8]>>;
+
+/// A PNG's reader and size, from its header alone.
+fn png_reader(data: &[u8]) -> Result<(PngReader<'_>, u32, u32), &'static str> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(data));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
-    let mut reader = decoder.read_info().map_err(bad)?;
+    let reader = decoder.read_info().map_err(|_| "EBADPNG:bad PNG")?;
     let (width, height) = (reader.info().width, reader.info().height);
     if width > MAX_SIDE || height > MAX_SIDE {
         return Err("EINVAL:bad size");
@@ -561,6 +578,12 @@ fn png(data: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
     if width as usize * height as usize * 4 > QUOTA {
         return Err("EFBIG:picture too large");
     }
+    Ok((reader, width, height))
+}
+
+/// A PNG's pixels, as RGBA.
+fn png(reader: &mut PngReader<'_>) -> Result<Vec<u8>, &'static str> {
+    let bad = |_| "EBADPNG:bad PNG";
     let mut buffer = vec![0; reader.output_buffer_size().ok_or("EINVAL:bad size")?];
     let frame = reader.next_frame(&mut buffer).map_err(bad)?;
     buffer.truncate(frame.buffer_size());
@@ -581,7 +604,7 @@ fn png(data: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
         png::ColorType::Grayscale => buffer.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return Err("EBADPNG:bad PNG"),
     };
-    Ok((width, height, pixels))
+    Ok(pixels)
 }
 
 /// Place `image` at the cursor, as `keys` say, and move the cursor past it
@@ -958,6 +981,36 @@ mod tests {
         assert_eq!(fx.graphics.held.capacity(), 0);
         assert!(fx.graphics.loading.is_none());
         assert!(fx.term.placements().is_empty());
+    }
+
+    /// A picture sent as a PNG holds its file, not its pixels, until it is
+    /// drawn: a large one of one colour counts a few hundred bytes against
+    /// the quota. Its pixels are what the file says when asked for. A file
+    /// whose header is good and whose pixels aren't is only known then, but
+    /// a program asking first (`a=q`) is told.
+    #[test]
+    fn a_png_holds_its_file_until_it_is_drawn() {
+        let mut fx = Fixture::new();
+        let side = 400;
+        let mut file = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut file, side, side);
+            encoder.set_color(png::ColorType::Rgba);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&rgba(400, 400)).unwrap();
+        }
+        assert!(file.len() < 10_000, "{}", file.len());
+        assert_eq!(fx.run("a=t,f=100,i=1", &file), "\x1b_Gi=1;OK\x1b\\");
+        assert_eq!(fx.graphics.bytes, file.len());
+        let image = fx.images.lock().unwrap()[&1].clone();
+        assert_eq!((image.width(), image.height()), (400, 400));
+        assert_eq!(image.pixels()[..4], [255, 0, 0, 255]);
+        // Its header cut short: refused, as ever.
+        assert!(fx.run("a=t,f=100,i=2", &file[..20]).contains(";EBADPNG:"));
+        // Its pixels cut short: taken, unless asked.
+        let cut = &file[..file.len() - 40];
+        assert_eq!(fx.run("a=t,f=100,i=3", cut), "\x1b_Gi=3;OK\x1b\\");
+        assert!(fx.run("a=q,f=100,i=4", cut).contains(";EBADPNG:"));
     }
 
     /// Over the quota, the oldest pictures go, those not on the screen
