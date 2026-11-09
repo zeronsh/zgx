@@ -1276,6 +1276,8 @@ fn filtered(
             shown(copy, &low)
         },
     )
+    // A box of its own around the node, as it has always been.
+    .not_contents()
 }
 /// The places of `ids` in the order `value` lists them: those it names
 /// first, the rest after them as they were (an order filter moves
@@ -2939,6 +2941,7 @@ fn kind_view(
             scrollbar,
             contain,
             wheel_across,
+            paging,
             padding,
         } => {
             let offset = match offset {
@@ -2964,6 +2967,7 @@ fn kind_view(
             } else {
                 view
             };
+            let view = if *paging { view.paging(true) } else { view };
             let view = match padding {
                 Some(padding) => with_scroll_padding(view, padding, vm),
                 None => view,
@@ -3843,6 +3847,20 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
     styled(view, node, vm, low, cx, element)
 }
 
+/// `window_drag` and `focus_on_press`, rare: apart from the node's common
+/// path.
+#[cold]
+#[inline(never)]
+fn press_flagged(mut view: View, flags: u8) -> View {
+    if flags & crate::node::KEEPS_FOCUS != 0 {
+        view = view.focus_on_press(false);
+    }
+    if flags & crate::node::WINDOW_DRAG != 0 {
+        view = view.window_drag();
+    }
+    view
+}
+
 /// What a node sets on its view, after its children: styles, handlers,
 /// observers. Apart from `build` for its frame, as `kind_view`.
 #[cfg_attr(debug_assertions, inline(never))]
@@ -4153,8 +4171,8 @@ fn styled(
     if let Some(focusable) = node.focusable {
         view = view.focusable(focusable);
     }
-    if node.window_drag {
-        view = view.window_drag();
+    if node.press_flags != 0 {
+        view = press_flagged(view, node.press_flags);
     }
     if let Some(selectable) = node.selectable {
         view = view.selectable(selectable);
@@ -7484,6 +7502,9 @@ fn list_edges(mut list: View, rare: &crate::node::ListRare, vm: &Rc<Vm>) -> View
     if rare.ancestor {
         list = list.virtualize_in_ancestor();
     }
+    if let Some(ahead) = rare.ahead {
+        list = list.list_ahead(ahead);
+    }
     if let Some(padding) = &rare.scroll_padding {
         list = with_scroll_padding(list, padding, vm);
     }
@@ -8519,9 +8540,15 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     }
                 }
                 let rare = span.rare.as_deref();
-                if let Some(build) = rare.and_then(|rare| rare.menu.as_ref()) {
-                    let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
-                    out = out.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
+                if let Some(rare) = rare {
+                    if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
+                        out = out.padding_end(end);
+                    }
+                    if let Some(build) = rare.menu.as_ref() {
+                        let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
+                        out = out
+                            .context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
+                    }
                 }
                 if let Some(href) = &span.href {
                     out = out.href(href.clone());
@@ -8545,6 +8572,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         size: icon.size,
                         gap: icon.gap,
                         tint,
+                        bg: icon.bg.as_ref().and_then(crate::node::themed_color),
+                        radius: icon.radius,
+                        pad: icon.pad,
                     });
                 }
                 out
@@ -9150,7 +9180,9 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Font, Lit::Str(v)) => s.font_family(font_family(v)),
         (Wrap, Lit::Bool(v)) => s.text_wrap(*v),
         (Wrap, Lit::Str(_)) => s.text_balance(true),
-        (Truncate, Lit::Bool(true)) => s.truncate(),
+        // The ellipsis alone: text with one and no clamp keeps one line, so
+        // `lines` wins however the two are set, in whichever order.
+        (Truncate, Lit::Bool(true)) => s.text_overflow(zgx::text_layout::TextOverflow::Ellipsis),
         (Lines, Lit::Num(v)) => s.line_clamp(*v as u32),
         (LineHeight, Lit::Num(v)) => s.line_height(*v),
         (LetterSpacing, Lit::Num(v)) => s.letter_spacing(*v),

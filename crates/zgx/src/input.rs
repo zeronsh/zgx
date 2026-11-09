@@ -568,6 +568,26 @@ thread_local! {
     static LOCKS_ENGAGED: Cell<u32> = const { Cell::new(0) };
 }
 
+/// A wheel gesture's scroll view (`State::scroll_latch`).
+#[derive(Clone, Copy, Debug)]
+struct ScrollLatch {
+    node: NodeId,
+    /// The axis the gesture began along: horizontal or not.
+    axis: bool,
+    /// When it last scrolled.
+    at: Instant,
+    /// Where the pointer was as it last scrolled.
+    pointer: (f32, f32),
+    /// How far the gesture has lately gone the other way, in a row
+    /// (`scroll_turn`).
+    turn: f32,
+}
+
+/// How far the pointer moves before a mouse wheel's next notch is no longer
+/// the latched gesture's: past a hand's tremor, short of another view. (A
+/// notch has no gesture to end, as a trackpad's next swipe does.)
+const WHEEL_MOVED: f32 = 2.;
+
 /// How far a latched gesture must go the other way, summed over the scrolls
 /// in a row that each go mostly that way, to be a turn rather than a finger's
 /// drift. A sum, not one scroll's: a turn is as far whatever the rate the
@@ -760,6 +780,10 @@ struct State {
     /// A few at most: a list, not a map (a map's instance shared with another
     /// set's outlined that one's insert).
     hollow: Vec<NodeId>,
+    /// Boxes a press on (or inside) leaves focus where it is
+    /// (`View::focus_on_press`): a list as `hollow` is. Empty, a press
+    /// doesn't look for one.
+    keeping_focus: Vec<NodeId>,
     /// Nodes that take every key while focus is in them (`set_capture_keys`):
     /// a shortcut recorder. A few at most.
     capturing: Vec<NodeId>,
@@ -829,12 +853,12 @@ struct State {
     spring_delay: Option<Option<std::time::Duration>>,
     /// The physical key of the key event being dispatched (`set_key_code`).
     key_code: Option<Rc<str>>,
-    /// The scroll view a wheel gesture is latched to, the axis it began along
-    /// (horizontal or not), when it last scrolled, and how far the gesture
-    /// has lately gone the other way: the rest of the gesture goes to it
-    /// alone, its drift included, until a pause, the next gesture or a press
-    /// (`scroll_gesture`), or until it clearly turns (`ScrollTurn`).
-    scroll_latch: Option<(NodeId, bool, Instant, f32)>,
+    /// The scroll view a wheel gesture is latched to: the rest of the gesture
+    /// goes to it alone, its drift included, until a pause, the next gesture
+    /// or a press (`scroll_gesture`), until it clearly turns (`ScrollTurn`),
+    /// or, for a mouse wheel's notch, until the pointer has moved
+    /// (`WHEEL_MOVED`).
+    scroll_latch: Option<ScrollLatch>,
     /// The modifier keys last known held (from the platform's pointer and
     /// key events): what an activation (a click) was made with.
     modifiers: Modifiers,
@@ -927,8 +951,13 @@ impl Drop for InputBinding {
             if s.entries.get(&self.node).is_some_and(Vec::is_empty) {
                 s.entries.remove(&self.node);
                 // A hollow node has options: only one removed can be.
-                if s.options.remove(&self.node).is_some() && !s.hollow.is_empty() {
-                    s.hollow.retain(|node| *node != self.node);
+                if s.options.remove(&self.node).is_some() {
+                    if !s.hollow.is_empty() {
+                        s.hollow.retain(|node| *node != self.node);
+                    }
+                    if !s.keeping_focus.is_empty() {
+                        s.keeping_focus.retain(|node| *node != self.node);
+                    }
                 }
                 disabled_observer = s.disabled_observers.get(&self.node).cloned();
                 if s.focused == Some(self.node) {
@@ -1512,6 +1541,47 @@ impl InputDispatcher {
             state.hollow.push(node);
         }
     }
+    /// Mark `node` (registered: `set_options`): a press on it or inside it
+    /// leaves focus where it is.
+    pub(crate) fn set_keeps_focus(&self, node: NodeId) {
+        let mut state = self.state.borrow_mut();
+        if !state.keeping_focus.contains(&node) {
+            state.keeping_focus.push(node);
+        }
+    }
+    /// Whether a press at (`x`, `y`) on `target` leaves focus where it is:
+    /// it's inside a node that keeps focus (`set_keeps_focus`), as the press's
+    /// target (a listener in it) or as what's under the pointer (its blank
+    /// room, nothing listening there); a node the pointer passes through is
+    /// neither. Some node does, or this isn't asked.
+    #[cold]
+    #[inline(never)]
+    fn press_keeps_focus(
+        &self,
+        scene: &Rc<RefCell<Scene>>,
+        target: Option<NodeId>,
+        x: f32,
+        y: f32,
+    ) -> bool {
+        let scene = scene.borrow();
+        let keeps = |from: Option<NodeId>| {
+            let state = self.state.borrow();
+            let mut node = from;
+            while let Some(id) = node {
+                if state.keeping_focus.contains(&id) {
+                    return true;
+                }
+                node = scene.parent(id);
+            }
+            false
+        };
+        let under = scene.hit_test_all(x, y).into_iter().find(|hit| {
+            !self.boxless(&scene, *hit) && !self.options(*hit).is_some_and(|o| o.pass_through)
+        });
+        // (The target, only while it's still in the scene: a listener may
+        // have removed it as it took the press.)
+        keeps(target.filter(|id| scene.contains(*id))) || keeps(under)
+    }
     /// Whether the pointer passes through `node`, which takes input as
     /// `options` say, to what is under it: `pass_through`, or hollow with
     /// nothing in it displayed (`Scene::displays_content`).
@@ -1544,8 +1614,13 @@ impl InputDispatcher {
         }
         let observer = s.disabled_observers.remove(&node);
         // A hollow node has options: only one removed can be.
-        if s.options.remove(&node).is_some() && !s.hollow.is_empty() {
-            s.hollow.retain(|hollow| *hollow != node);
+        if s.options.remove(&node).is_some() {
+            if !s.hollow.is_empty() {
+                s.hollow.retain(|hollow| *hollow != node);
+            }
+            if !s.keeping_focus.is_empty() {
+                s.keeping_focus.retain(|keeping| *keeping != node);
+            }
         }
         s.groups.remove(&node);
         if removed.is_some() {
@@ -1592,7 +1667,7 @@ impl InputDispatcher {
                 .chain(s.hover.iter().copied())
                 .chain(s.hover_told.iter().copied())
                 .chain(s.file_hovered.iter().copied())
-                .chain(s.scroll_latch.map(|(id, ..)| id))
+                .chain(s.scroll_latch.map(|latch| latch.node))
                 .chain(s.drag.iter().flat_map(drag::DragSession::nodes))
                 .chain(s.drag_ending)
                 .chain(s.visit.as_ref().and_then(drag::Visit::node))
@@ -3109,28 +3184,35 @@ impl InputDispatcher {
         // to, alone, as macOS latches one: it neither chains to the views
         // around it at an edge nor moves to one that slides under the
         // pointer. A pause ends the gesture, as does a trackpad's next one
-        // (`scroll_gesture`).
+        // (`scroll_gesture`); a mouse wheel's notch after the pointer moved
+        // is one of its own.
         if let InputEvent::Scroll {
-            delta_x, delta_y, ..
+            x,
+            y,
+            delta_x,
+            delta_y,
         } = &event
         {
             let now = Instant::now();
-            let (delta_x, delta_y) = (*delta_x, *delta_y);
-            let latched = self
-                .state
-                .borrow()
-                .scroll_latch
-                .and_then(|(node, axis, at, turn)| {
-                    let turn = scroll_turn(axis, turn, delta_x, delta_y)?;
-                    (now.saturating_duration_since(at) < SCROLL_LATCH
-                        && scene.borrow().contains(node)
-                        && self.enabled(&scene.borrow(), node))
-                    .then_some((node, axis, turn))
-                });
-            if let Some((node, axis, turn)) = latched {
+            let (x, y, delta_x, delta_y) = (*x, *y, *delta_x, *delta_y);
+            let wheel = mouse_wheel_shift().is_some();
+            let latched = self.state.borrow().scroll_latch.and_then(|latch| {
+                let turn = scroll_turn(latch.axis, latch.turn, delta_x, delta_y)?;
+                (now.saturating_duration_since(latch.at) < SCROLL_LATCH
+                    && !(wheel && (x - latch.pointer.0).hypot(y - latch.pointer.1) > WHEEL_MOVED)
+                    && scene.borrow().contains(latch.node)
+                    && self.enabled(&scene.borrow(), latch.node))
+                .then_some(ScrollLatch { turn, ..latch })
+            });
+            if let Some(latch) = latched {
+                let node = latch.node;
                 let ctx =
                     self.route_pointer(scene, node, event, modifiers.unwrap_or_default(), 0, true);
-                self.state.borrow_mut().scroll_latch = Some((node, axis, now, turn));
+                self.state.borrow_mut().scroll_latch = Some(ScrollLatch {
+                    at: now,
+                    pointer: (x, y),
+                    ..latch
+                });
                 return DispatchResult {
                     target: Some(node),
                     default_prevented: ctx.prevented,
@@ -3300,14 +3382,23 @@ impl InputDispatcher {
                 }
             }
             if let InputEvent::Scroll {
-                delta_x, delta_y, ..
+                x,
+                y,
+                delta_x,
+                delta_y,
             } = event
             {
                 let horizontal = delta_x.abs() > delta_y.abs();
                 self.state.borrow_mut().scroll_latch = ctx
                     .prevented_by
                     .filter(|_| ctx.prevented)
-                    .map(|node| (node, horizontal, Instant::now(), 0.));
+                    .map(|node| ScrollLatch {
+                        node,
+                        axis: horizontal,
+                        at: Instant::now(),
+                        pointer: (x, y),
+                        turn: 0.,
+                    });
             }
             if let Some((source, payload, pressed_at)) = ctx.drag_request.clone()
                 && let InputEvent::PointerMove { x, y } = event
@@ -3337,8 +3428,9 @@ impl InputDispatcher {
         if !prevented {
             match &event {
                 InputEvent::PointerDown {
+                    x,
+                    y,
                     button: PointerButton::Primary,
-                    ..
                 } => {
                     self.state.borrow_mut().pressed = target;
                     let mut node = target.filter(|id| self.enabled(&scene.borrow(), *id));
@@ -3350,7 +3442,11 @@ impl InputDispatcher {
                         }
                         node = scene.borrow().parent(id);
                     }
-                    if !keep_focus && (target.is_some() || self.focus_scope().is_none()) {
+                    if !keep_focus
+                        && (target.is_some() || self.focus_scope().is_none())
+                        && (self.state.borrow().keeping_focus.is_empty()
+                            || !self.press_keeps_focus(scene, target, *x, *y))
+                    {
                         self.focus(scene, focus);
                     }
                 }
@@ -3795,6 +3891,57 @@ mod tests {
         d.dispatch(&scene, down(10.0, 10.0));
         assert_eq!(d.focused(), None);
         d.dispatch(&scene, up(10.0, 10.0));
+    }
+    #[test]
+    fn a_press_target_removed_during_dispatch_is_looked_past_for_one_keeping_focus() {
+        let (scene, a, b) = setup();
+        let d = InputDispatcher::new();
+        d.set_options(b, NodeInput::default());
+        d.set_keeps_focus(b);
+        let s = scene.clone();
+        let _binding = d.register(
+            a,
+            NodeInput {
+                focusable: true,
+                ..Default::default()
+            },
+            move |event| {
+                if matches!(event.event, InputEvent::PointerDown { .. }) {
+                    s.borrow_mut().remove(a);
+                }
+            },
+        );
+        d.dispatch(&scene, down(10.0, 10.0));
+        assert_eq!(d.focused(), None);
+        d.dispatch(&scene, up(10.0, 10.0));
+    }
+    #[test]
+    fn a_node_stops_keeping_focus_as_it_goes() {
+        let (scene, a, b) = setup();
+        let d = InputDispatcher::new();
+        let keeping = || d.state.borrow().keeping_focus.len();
+        d.set_options(a, NodeInput::default());
+        d.set_keeps_focus(a);
+        d.set_keeps_focus(a);
+        assert_eq!(keeping(), 1);
+        let binding = d.register(b, NodeInput::default(), |_| {});
+        d.set_keeps_focus(b);
+        assert_eq!(keeping(), 2);
+        drop(binding);
+        assert_eq!(keeping(), 1);
+        d.unregister(a);
+        assert_eq!(keeping(), 0);
+        // With none, a press inside a focusable node focuses it.
+        let _a = d.register(
+            a,
+            NodeInput {
+                focusable: true,
+                ..Default::default()
+            },
+            |_| {},
+        );
+        d.dispatch(&scene, down(10.0, 10.0));
+        assert_eq!(d.focused(), Some(a));
     }
     #[test]
     fn capture_target_bubble_and_raii() {

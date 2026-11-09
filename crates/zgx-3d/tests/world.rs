@@ -1502,6 +1502,40 @@ fn a_morphing_mesh_casts_its_shadow_where_it_is_blended() {
 }
 
 #[test]
+fn a_mesh_without_triangles_draws_nothing_and_breaks_nothing() {
+    let mut material = Material::rgb(0x336699);
+    material.unlit = true;
+    let (world, _) = one(Geometry::cuboid(1., 1., 1.), material);
+    let empty = Geometry::new(Vec::new(), Vec::new()).unwrap();
+    assert!(empty.is_empty());
+    world.add(Object::mesh(empty, Material::default()));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let [r, g, b, _] = window.pixel(50, 50);
+    assert!(r.abs_diff(0x33) <= 2 && g.abs_diff(0x66) <= 2 && b.abs_diff(0x99) <= 2);
+}
+
+#[test]
+fn a_geometry_goes_with_its_last_object() {
+    let geometry = facing_square();
+    let alive = geometry.watch();
+    let (world, id) = one(geometry, Material::rgb(0xffffff));
+    assert!(alive());
+    let Some(mut window) = Window::new(&world) else {
+        world.remove(id);
+        assert!(!alive());
+        return;
+    };
+    window.draw();
+    assert!(alive());
+    world.remove(id);
+    window.draw();
+    assert!(!alive(), "what's drawn holds no geometry past its object");
+}
+
+#[test]
 fn a_double_sided_mesh_shows_from_behind() {
     // A square seen from its back: culled, and shown once double-sided, its
     // back lit as its front is.

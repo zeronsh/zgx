@@ -378,6 +378,10 @@ pub struct Config {
 
     /// OSC52 support mode.
     pub osc52: Osc52,
+
+    /// zgx: whether device attributes announce sixel graphics (4). Off where
+    /// the embedder can't show them, so programs don't send them.
+    pub sixel: bool,
 }
 
 impl Default for Config {
@@ -389,6 +393,7 @@ impl Default for Config {
             vi_mode_cursor_style: Default::default(),
             kitty_keyboard: Default::default(),
             osc52: Default::default(),
+            sixel: true,
         }
     }
 }
@@ -1620,7 +1625,11 @@ impl<T: EventListener> Handler for Term<T> {
                 trace!("Reporting primary device attributes");
                 // zgx: a VT220 with sixel graphics (4) and ANSI colour (22),
                 // as foot answers: programs look for the 4 to send sixels.
-                let text = String::from("\x1b[?62;4;22c");
+                // Without them, as a VT220 with colour and no graphics.
+                let text = match self.config.sixel {
+                    true => String::from("\x1b[?62;4;22c"),
+                    false => String::from("\x1b[?62;22c"),
+                };
                 self.event_proxy.send_event(Event::PtyWrite(text));
             }
             Some('>') => {

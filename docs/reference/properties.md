@@ -19,7 +19,7 @@ The types: `Color` is `"#rgb"`, `"#rrggbb"`, `"#rrggbbaa"`, `"rgb(…)"`, `"rgba
 | Property | Type | Default | |
 | --- | --- | --- | --- |
 | `w`, `h` | `Length` | its content's size | border-box: the border and padding are inside |
-| `size` | `Pair` | | `w` and `h` at once |
+| `size` | `Pair` | | `w` and `h` at once, on a box (`div`, `column`, `row`, `grid`, `overlay`, `scroll`, `presence`); a number is both. It does nothing on anything else (`zgx lint`: `size-inert`), and on `ui.split` it is the state its divider follows |
 | `min_w`, `max_w`, `min_h`, `max_h` | `Length` | | also [size math](#size-math) and [content sizes](#content-sizes) |
 | `w_full`, `h_full` | `boolean` | `false` | `w = "100%"`, `h = "100%"` |
 | `aspect` | `number` | | width over height; supplies the missing side |
@@ -365,7 +365,7 @@ return ui.div {
 | `align` | `"start" \| "left" \| "center" \| "right"` | `"start"` | |
 | `font` | `string` | the system's | `"mono"` (`"monospace"`), `"sans"` (`"sans-serif"`), `"serif"`, or a family name the host registered |
 | `wrap` | `boolean \| "balance"` | `false` | wrap at the box's width. `"balance"` also balances the lines (CSS's `text-wrap: balance`): they break at the narrowest width that keeps as many, so a heading's last line isn't left short, for up to six lines, the box as it was. It's inherited: on a container, the text in it balances |
-| `truncate` | `boolean` | `false` | one line ending in "…" |
+| `truncate` | `boolean` | `false` | end the text with "…" where it overflows: on one line, or on the last of `lines` when that is set, here or on a parent |
 | `lines` | `number` | all | clamp to that many lines |
 | `line_height` | `number` | the font's | points |
 | `letter_spacing` | `number` | `0` | points |

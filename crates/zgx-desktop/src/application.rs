@@ -1141,6 +1141,8 @@ impl Application {
             native: HashMap::new(),
             drag_over: Cell::new(None),
             carrying: None,
+            focus_moved: false,
+            app_was_active: true,
             #[cfg(target_os = "linux")]
             last_focused: None,
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -1813,6 +1815,9 @@ struct Host {
     /// When kept images' decoded pixels go, `TRIM_DELAY` past the last
     /// upload, whether or not the window keeps presenting (an animated page).
     release_images_at: Option<std::time::Instant>,
+    /// When lists let go of rows kept out of view, `KEPT_REST` past the
+    /// last frame presented.
+    release_rows_at: Option<std::time::Instant>,
     /// `trim_at` is for the glyph atlas (`ATLAS_TRIM_DELAY`).
     trim_atlas: bool,
     /// When to save the window's frame (`frame_autosave`, Linux): once its
@@ -1944,6 +1949,8 @@ impl Host {
         // No reader has asked for the window's tree yet: names and values
         // made from state wait for one (`InitialTreeRequested`).
         ui.set_assistive_technology(false);
+        // What a refresh has to spare goes to what comes next (`Host::draw`).
+        ui.host_spare_time();
         // A layout that doesn't settle is reported, and the app goes on.
         ui.contain_layout_feedback();
         // Each issue logged once, and kept for this window's banner alone.
@@ -2234,6 +2241,7 @@ impl Host {
             refresh_frame: false,
             trim_at: None,
             release_images_at: None,
+            release_rows_at: None,
             trim_atlas: false,
             frame_save_at: None,
             startup_trim: StartupTrim::Pending,
@@ -2296,6 +2304,10 @@ impl Host {
         for step in steps {
             match step {
                 crate::touch::Step::Dispatch(event) => self.dispatch(event)?,
+                crate::touch::Step::PanLifted => {
+                    let ui = &self.context.ui;
+                    ui.paging_gesture(zgx::input::ScrollGesture::Ended);
+                }
                 crate::touch::Step::Unpress => {
                     self.dispatch(InputEvent::PointerCancel)?;
                     let ui = &self.context.ui;
@@ -2304,12 +2316,21 @@ impl Host {
                     }
                 }
                 crate::touch::Step::TryPan { x, y, dx, dy } => {
+                    // A gesture's, not a wheel's: a paged view follows it.
+                    self.context
+                        .ui
+                        .paging_gesture(zgx::input::ScrollGesture::Began);
                     let panned = self.dispatch_prevented(InputEvent::Scroll {
                         x,
                         y,
                         delta_x: dx,
                         delta_y: dy,
                     })?;
+                    if !panned {
+                        self.context
+                            .ui
+                            .paging_gesture(zgx::input::ScrollGesture::Ended);
+                    }
                     let next = self.touch.decided(panned);
                     self.touch_steps(next)?;
                 }
@@ -2490,6 +2511,12 @@ impl Host {
             FullScreenPhase::WillEnter | FullScreenPhase::WillExit
         ) {
             self.full_screen_seq = seq;
+            // Into or out of full screen, its popups go at once, as AppKit's:
+            // no frame comes through the transition to take them down.
+            self.context.ui.dismiss_popups();
+            if let Some(window) = &self.window {
+                self.popups.hide_all(window);
+            }
         } else if phase == FullScreenPhase::Settled && seq != self.full_screen_seq {
             return;
         }
@@ -2536,6 +2563,11 @@ impl Host {
     /// and it stops presenting until it shows again.
     fn occlude(&mut self) {
         self.context.ui.dismiss_popups();
+        // With no frame to come, what shows goes now: a menu or a tooltip
+        // isn't its window's child, to go with it (macOS).
+        if let Some(window) = &self.window {
+            self.popups.hide_all(window);
+        }
         self.context.ui.cancel_interactions();
         self.native_occluded = true;
         self.context.ui.set_presented(false);
@@ -2672,6 +2704,7 @@ impl Host {
         {
             self.recover_renderer();
         }
+        self.spend_spare_time()?;
         match self.draw_frame() {
             Err(error)
                 if error
@@ -2705,6 +2738,28 @@ impl Host {
             }
             other => other,
         }
+    }
+    /// The first half of a refresh just delivered, on the rows about to come
+    /// into view (`zgx::spare`): the frame then draws what that changed, its
+    /// wait for its point in the refresh that much shorter. What the frame
+    /// has to do itself is done first, as its own. A draw that isn't a
+    /// refresh's (input, drawn at once) has no time to spare.
+    fn spend_spare_time(&mut self) -> Result<(), Box<dyn Error>> {
+        if !self.context.ui.spare_work_wanted() || !self.frames_presented() {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        let Some(started) = self
+            .frame_heartbeat
+            .filter(|at| now.duration_since(*at) < self.frame_interval / 2)
+        else {
+            return Ok(());
+        };
+        self.context.ui.try_prepare_frame()?;
+        self.context
+            .ui
+            .run_spare_work(started, self.frame_interval)?;
+        Ok(())
     }
     fn draw_frame(&mut self) -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "macos")]
@@ -2801,6 +2856,11 @@ impl Host {
         let scene = self.context.ui.scene.clone();
         let mut scene = scene.borrow_mut();
         let report = scene.flush();
+        // Reading it is a list a client's update needs and no other update:
+        // not with none reading the tree.
+        if self.context.ui.assistive_technology() {
+            self.tree.note_flush(&scene);
+        }
         let popup_revisions = scene.popups().iter().fold(0u64, |sum, root| {
             sum.wrapping_add(scene.layer_revision(*root))
         });
@@ -3118,6 +3178,7 @@ impl Host {
                     self.present_ready = false;
                     let now = std::time::Instant::now();
                     self.trim_at = Some(now + TRIM_DELAY);
+                    self.release_rows_at = Some(now + zgx::spare::KEPT_REST);
                     if renderer.take_images_uploaded() {
                         self.release_images_at = Some(now + TRIM_DELAY);
                     }
@@ -5139,6 +5200,16 @@ impl Host {
                 if gesture == Some(zgx::input::ScrollGesture::Ended) {
                     crate::coast::fingers_down(false);
                 }
+                // A touchpad's scroll is a gesture to a paged view, not a wheel's
+                // notches (Wayland says when: libinput's axis stop). Paged views
+                // alone hear it: elsewhere it scrolls as ever.
+                #[cfg(target_os = "linux")]
+                if matches!(delta, MouseScrollDelta::PixelDelta(_))
+                    && phase == winit::event::TouchPhase::Started
+                {
+                    let ui = &self.context.ui;
+                    ui.paging_gesture(zgx::input::ScrollGesture::Began);
+                }
                 if let Some(
                     gesture @ (zgx::input::ScrollGesture::Began
                     | zgx::input::ScrollGesture::MomentumBegan),
@@ -5241,6 +5312,16 @@ impl Host {
                     let wheel = matches!(delta, MouseScrollDelta::LineDelta(x, y) if !continuous_lines(x, y));
                     self.dispatch_wheel(event, wheel)?;
                     self.after_scroll();
+                }
+                #[cfg(target_os = "linux")]
+                if matches!(delta, MouseScrollDelta::PixelDelta(_))
+                    && matches!(
+                        phase,
+                        winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled
+                    )
+                {
+                    let ui = &self.context.ui;
+                    ui.paging_gesture(zgx::input::ScrollGesture::Ended);
                 }
                 if let Some(
                     gesture @ (zgx::input::ScrollGesture::Ended
@@ -6113,7 +6194,8 @@ impl Host {
         }
         // A fling coasts a step each refresh, and stops at the end of what
         // it scrolls.
-        if self.touch.flinging()
+        let coasting = self.touch.flinging();
+        if coasting
             && (self.frame_arrived || !self.frames_presented())
             && let Some((x, y, delta_x, delta_y)) = self
                 .touch
@@ -6126,6 +6208,16 @@ impl Host {
             })?
         {
             self.touch.stop();
+        }
+        // Its momentum, as a trackpad's: a paged view has gone to its page, and
+        // what coasts after moves nothing until it stops.
+        if self.touch.take_coast_began() {
+            let ui = &self.context.ui;
+            ui.paging_gesture(zgx::input::ScrollGesture::MomentumBegan);
+        }
+        if coasting && !self.touch.flinging() {
+            let ui = &self.context.ui;
+            ui.paging_gesture(zgx::input::ScrollGesture::MomentumEnded);
         }
         if let StartupTrim::At(at) = self.startup_trim
             && std::time::Instant::now() >= at
@@ -6148,6 +6240,15 @@ impl Host {
             zgx::image::release_decoded();
         }
         if self
+            .release_rows_at
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.release_rows_at = None;
+            self.context.ui.release_kept_rows()?;
+            // And what that freed goes back to the system.
+            self.trim_at = Some(std::time::Instant::now());
+        }
+        if self
             .trim_at
             .is_some_and(|at| std::time::Instant::now() >= at)
         {
@@ -6157,8 +6258,10 @@ impl Host {
                     renderer.trim_atlas();
                 }
             } else {
-                // Garbage scripts made (`zgx::idle`), first: what it frees,
-                // the trims below give back.
+                // What a large removal left where no frame came to free it,
+                // and garbage scripts made (`zgx::idle`), first: what they
+                // free, the trims below give back.
+                while self.context.ui.reclaim(zgx::widgets::RECLAIM_BUDGET) {}
                 zgx::idle::trim(&self.context.ui.runtime);
                 if let Some(renderer) = &mut self.renderer {
                     renderer.trim();
@@ -6391,11 +6494,27 @@ impl Host {
         }
         self.scroll.active(now) || self.touch.flinging()
     }
+    /// The idle trim arms as a frame presents. With no frame coming, what asks
+    /// for it arms it here: `zgx::idle::request`, and a large removal's nodes,
+    /// which frames free, in a window that isn't presenting any. Once: the
+    /// trim frees them, and nothing arms it again.
+    fn arm_trim_without_frames(&mut self) {
+        let ui = &self.context.ui;
+        let asked = zgx::idle::take_request(&ui.runtime);
+        if (asked || (ui.reclaiming() && !self.frames_presented()))
+            && (self.trim_at.is_none() || self.trim_atlas)
+        {
+            self.trim_at = Some(std::time::Instant::now() + TRIM_DELAY);
+            self.trim_atlas = false;
+        }
+    }
     /// Start, stop or schedule this window's frame source to match demand.
     fn sync_frames(&mut self) {
         let now = std::time::Instant::now();
         let scrolling = self.scroll_live(now);
-        let wanted = (self.frames.wants_frame() || scrolling) && self.frames_presented();
+        let wanted =
+            (self.frames.wants_frame() || scrolling || self.context.ui.spare_work_wanted())
+                && self.frames_presented();
         if !wanted {
             self.frame_heartbeat = None;
             self.frame_deadline = None;
@@ -6730,6 +6849,10 @@ struct WindowManager {
     /// The window last focused: the one another launch raises (Linux).
     #[cfg(target_os = "linux")]
     last_focused: Option<u64>,
+    /// Whether a window's focus moved this turn, and whether any of them had
+    /// it when last read (`app_active`). Forward until the first says not.
+    focus_moved: bool,
+    app_was_active: bool,
     /// The last pointer move heard and not yet handled (Linux, Windows):
     /// see `ApplicationHandler::window_event`.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -7835,6 +7958,11 @@ impl WindowManager {
         if matches!(event, WindowEvent::Focused(true)) {
             self.last_focused = Some(token);
         }
+        // Read as this turn ends: one of its windows giving way to another
+        // isn't the app going to the back (`app_active`).
+        if matches!(event, WindowEvent::Focused(_)) {
+            self.focus_moved = true;
+        }
         #[cfg(target_os = "linux")]
         if self.x11_drag_input(event_loop, token, id, &event) {
             return;
@@ -7880,7 +8008,23 @@ impl WindowManager {
             host.full_screen(phase, duration, seq);
         }
     }
+    /// Tell each window's interface whether the app is at the back, as focus
+    /// moved: popups wait for it to come forward (`Ui::set_app_active`).
+    fn app_active(&mut self) {
+        if !std::mem::take(&mut self.focus_moved) {
+            return;
+        }
+        let active = self.hosts.values().any(|host| host.native_focused);
+        if self.app_was_active != active {
+            self.app_was_active = active;
+            for host in self.hosts.values() {
+                host.context.ui.set_app_active(active);
+                host.context.window.request_redraw();
+            }
+        }
+    }
     fn about_to_wait_turn(&mut self, event_loop: &ActiveEventLoop) {
+        self.app_active();
         #[cfg(target_os = "macos")]
         self.apply_full_screen();
         // A close request must terminate even while native surfaces are suspended.
@@ -8021,6 +8165,7 @@ impl WindowManager {
                     return;
                 }
             }
+            host.arm_trim_without_frames();
             #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
             host.sync_page_cursor(event_loop);
         }
@@ -8039,6 +8184,7 @@ impl WindowManager {
                     host.touch.hold_deadline(),
                     host.trim_at,
                     host.release_images_at,
+                    host.release_rows_at,
                     host.frame_save_at,
                     host.accessibility_pacer.deadline(),
                     host.wheel_tape.borrow().deadline(),
@@ -9539,6 +9685,8 @@ mod tests {
             native: HashMap::new(),
             drag_over: Cell::new(None),
             carrying: None,
+            focus_moved: false,
+            app_was_active: true,
             #[cfg(target_os = "linux")]
             last_focused: None,
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -9955,6 +10103,8 @@ mod tests {
             native: HashMap::new(),
             drag_over: Cell::new(None),
             carrying: None,
+            focus_moved: false,
+            app_was_active: true,
             last_focused: None,
             pending_move: HeldMove::default(),
             factory,
@@ -10212,6 +10362,8 @@ mod tests {
             native: HashMap::new(),
             drag_over: Cell::new(None),
             carrying: None,
+            focus_moved: false,
+            app_was_active: true,
             pending_move: HeldMove::default(),
             factory,
             active: false,

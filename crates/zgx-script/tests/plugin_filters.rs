@@ -303,6 +303,38 @@ fn an_order_filter_moves_children() {
     );
 }
 
+/// An order filter holds its node in a box of its own, what a plugin's filter
+/// has always laid out as: the node's `grow` stays inside it, unlike a node
+/// with no such filter.
+#[test]
+fn an_order_filter_keeps_its_node_in_a_box() {
+    const GROWS: &str = r##"
+return ui.column { w_full = true, h_full = true,
+    ui.column { id = "toolbar", grow = 1,
+        ui.div { id = "a", w = 40, h = 10 },
+        ui.div { id = "b", w = 40, h = 10 },
+    },
+    ui.div { id = "below", w = 40, h = 10 },
+}"##;
+    let bounds = |h: &mut Harness, id: &str| {
+        let node = h.find(id).unwrap();
+        h.ui.scene.borrow().bounds(node)
+    };
+    let mut h = with(
+        GROWS,
+        "same",
+        r##"ui.filter { target = "#toolbar", order = function(ids) return ids end }"##,
+        any(),
+    );
+    assert_eq!(h.error(), None);
+    h.frames(2);
+    assert_eq!(bounds(&mut h, "toolbar").height, 20.);
+    assert_eq!(bounds(&mut h, "below").y, 20.);
+    let mut plain = Harness::inline(GROWS);
+    plain.frames(2);
+    assert!(bounds(&mut plain, "toolbar").height > 20.);
+}
+
 #[test]
 fn an_order_follows_what_the_filter_reads() {
     const FLIPS: &str = r##"

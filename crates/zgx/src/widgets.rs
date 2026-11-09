@@ -1591,6 +1591,8 @@ pub(crate) struct UiStorage {
     dying: RefCell<std::collections::VecDeque<NodeId>>,
     /// A large subtree was removed since the last frame was prepared.
     removed: Cell<bool>,
+    /// What spare time is for (`crate::spare`).
+    spare: crate::spare::SpareWork,
     editors: RefCell<crate::scene::NodeMap<EditorHandle>>,
     /// What takes a person's paste, for the few editors asked to (`View::on_paste`).
     paste_hooks: RefCell<crate::scene::NodeMap<PasteHook>>,
@@ -1661,6 +1663,8 @@ pub(crate) struct UiStorage {
     last_pressed: Cell<Option<NodeId>>,
     /// Elastic scrolling (`Ui::set_elastic_scrolling`): off, never read.
     elastic: RefCell<crate::elastic::State>,
+    /// Scroll views that page (`View::paging`): none, never more than a look.
+    paging: RefCell<crate::paging::State>,
     /// Scrollbars hide until their view scrolls (`Ui::set_overlay_scrollbars`).
     overlay_scrollbars: Signal<bool>,
     /// Editors' caret width in points (`Ui::set_caret_width`).
@@ -1884,6 +1888,7 @@ impl Ui {
             owned: RefCell::default(),
             dying: RefCell::default(),
             removed: Cell::new(false),
+            spare: Default::default(),
             editors: RefCell::default(),
             paste_hooks: RefCell::default(),
             editor_layout: RefCell::new(None),
@@ -1920,6 +1925,7 @@ impl Ui {
             wheel_lines: Default::default(),
             last_pressed: Cell::new(None),
             elastic: Default::default(),
+            paging: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
             dispatching: Cell::new(false),
             wheel_in_window: Cell::new(false),
@@ -3023,6 +3029,16 @@ impl Ui {
             .chain(scene.ancestors(hit))
             .find_map(|node| lines.get(&node).copied())
     }
+    /// A touch pan's phase, for scroll views that page: they follow a pan as a
+    /// trackpad's gesture, not as a wheel's notches. Nothing else hears of it, so
+    /// a pan of any other view is what it would be without this.
+    #[doc(hidden)]
+    pub fn paging_gesture(&self, phase: crate::input::ScrollGesture) {
+        crate::paging::gesture(self, phase);
+    }
+    pub(crate) fn paging_state(&self) -> &RefCell<crate::paging::State> {
+        &self.storage.paging
+    }
     pub(crate) fn elastic_state(&self) -> &RefCell<crate::elastic::State> {
         &self.storage.elastic
     }
@@ -3034,6 +3050,14 @@ impl Ui {
     /// while they can't see it.
     pub fn observe_shown(&self) -> Signal<bool> {
         self.storage.presented.clone()
+    }
+    /// The app came forward or went to the back (any of its windows active,
+    /// or none; not a window of it giving way to another): a popup wanted
+    /// while it is at the back stays wanted, not shown, and shows as it comes
+    /// forward (`Scene::set_popups_held`). What is open as it goes closes as
+    /// ever (`Ui::dismiss_popups`). The host's to tell, as focus changes.
+    pub fn set_app_active(&self, active: bool) {
+        self.scene.borrow_mut().set_popups_held(!active);
     }
     /// Whether the window is the active one, its keys going to it
     /// (`Ui::set_window_active`), as it changes.
@@ -4358,6 +4382,7 @@ impl Ui {
         let event = match event {
             InputEvent::ScrollGesture(phase) => {
                 self.input.scroll_gesture(phase);
+                crate::paging::gesture(self, phase);
                 if elastic {
                     crate::elastic::gesture(self, phase);
                 }
@@ -4413,6 +4438,7 @@ impl Ui {
             self.next_selection_deadline(),
             crate::compose_scrollbar::next_fade(self),
             crate::elastic::next_step(self),
+            crate::paging::next_step(self),
             crate::caret_blink::next(self),
             crate::find::next_step(self),
         ]
@@ -4459,6 +4485,13 @@ impl Ui {
         };
         // A stretched scroll view springing back.
         let keys = if crate::elastic::advance(self, now) {
+            self.try_prepare_frame()?;
+            true
+        } else {
+            keys
+        };
+        // A paged scroll view going to its page.
+        let keys = if crate::paging::advance(self, now) {
             self.try_prepare_frame()?;
             true
         } else {
@@ -4543,6 +4576,24 @@ impl Ui {
         }
         drop(old);
         self.input.dispatch(&self.scene, InputEvent::PointerCancel);
+    }
+    /// Whether `scope`, a focus scope, shows in a portal owned from within
+    /// `row`: a popover opened from it.
+    pub(crate) fn opened_from(&self, scope: NodeId, row: NodeId) -> bool {
+        let scene = self.scene.borrow();
+        let inside = |node: NodeId, around: NodeId| {
+            node == around || (scene.contains(node) && scene.ancestors(node).any(|up| up == around))
+        };
+        inside(scope, row)
+            || self
+                .storage
+                .portals
+                .borrow()
+                .iter()
+                .any(|(owner, overlay)| inside(scope, *overlay) && inside(*owner, row))
+    }
+    pub(crate) fn spare(&self) -> &crate::spare::SpareWork {
+        &self.storage.spare
     }
     /// Whether nodes removed (`Ui::remove`) still hold what they held, to
     /// be freed over the next frames: frames call `reclaim` as they are

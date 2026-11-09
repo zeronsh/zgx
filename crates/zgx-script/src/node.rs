@@ -68,8 +68,9 @@ pub(crate) struct Node {
     /// `bg_shader`, `shader_params`, `layer_shader` and `layer_params`
     /// (boxed: few nodes have any).
     pub shaders: Option<Box<Shaders>>,
-    /// `window_drag = true`: a press on it moves the window.
-    pub window_drag: bool,
+    /// `window_drag = true` (`WINDOW_DRAG`) and `focus_on_press = false`
+    /// (`KEEPS_FOCUS`): rare, tested together where the node is styled.
+    pub press_flags: u8,
     /// `hook = false` or `private = true`: no plugin may target it
     /// (`ui.contribute { target }`), whatever matches it.
     pub private: bool,
@@ -663,6 +664,13 @@ pub(crate) struct LayoutAnim {
     pub hit: bool,
 }
 impl Node {
+    fn set_press_flag(&mut self, flag: u8, on: bool) {
+        if on {
+            self.press_flags |= flag;
+        } else {
+            self.press_flags &= !flag;
+        }
+    }
     /// The hook the app declares here (`hook = "name"`), if any.
     pub fn hook(&self) -> Option<&str> {
         self.a11y.as_ref()?.hook.as_deref()
@@ -687,7 +695,7 @@ impl Node {
             layout_id: None,
             mask: None,
             shaders: None,
-            window_drag: false,
+            press_flags: 0,
             private: false,
             selectable: None,
             selection_colors: None,
@@ -741,26 +749,28 @@ impl Node {
     /// Animations, scroll offsets, widget bindings and overlays need a
     /// component context.
     pub fn needs_context(&self) -> bool {
-        matches!(
-            self.kind,
+        (match self.kind {
             Kind::Scroll { .. }
-                | Kind::Checkbox { .. }
-                | Kind::Input { .. }
-                | Kind::Progress { .. }
-                | Kind::Slider { .. }
-                | Kind::Split { .. }
-                | Kind::List { .. }
-                | Kind::Modal { .. }
-                | Kind::Popover { .. }
-                | Kind::Menu { .. }
-                | Kind::Submenu { .. }
-                | Kind::Presence { .. }
-                | Kind::Each {
-                    motion: Some(_),
-                    ..
-                }
-        ) || self.kind.library_needs_context()
-            || self.kind.is_scene3d()
+            | Kind::Checkbox { .. }
+            | Kind::Input { .. }
+            | Kind::Progress { .. }
+            | Kind::Slider { .. }
+            | Kind::Split { .. }
+            | Kind::List { .. }
+            | Kind::Modal { .. }
+            | Kind::Popover { .. }
+            | Kind::Menu { .. }
+            | Kind::Submenu { .. }
+            | Kind::Presence { .. }
+            | Kind::Each {
+                motion: Some(_), ..
+            } => true,
+            // A 3D scene: its effects and bindings live in a component
+            // context. In this one test, no other for every node.
+            #[cfg(feature = "scene3d")]
+            Kind::Scene3d(_) => true,
+            _ => false,
+        }) || self.kind.library_needs_context()
             || self.props.iter().any(|(_, s)| matches!(s, Source::Anim(_)))
             // An icon's tint may be a theme token: it reads the scope.
             || matches!(self.kind, Kind::Svg { .. })
@@ -1017,6 +1027,8 @@ pub(crate) struct ListRare {
     /// start coming in reach calls. Taken as `fill` walks the table.
     pub(crate) start: Option<Function>,
     pub(crate) start_distance: Option<f32>,
+    /// `ahead`: viewports of rows built ahead (`View::list_ahead`).
+    pub(crate) ahead: Option<f32>,
     /// `estimate = { … }`, with `measured`: how a row's data makes its height.
     pub(crate) estimate: Option<Rc<crate::estimate::Rule>>,
     /// `at_end = state`: kept saying whether it rests at its end.
@@ -1087,6 +1099,8 @@ pub(crate) enum Kind {
         contain: bool,
         /// `wheel_across = true` (`ui.scroll_x`): a mouse wheel moves it.
         wheel_across: bool,
+        /// `paging = true`: it comes to rest on whole pages.
+        paging: bool,
         /// `scroll_padding`: kept clear as what it holds scrolls into view.
         padding: Option<Box<ScrollPadding>>,
     },
@@ -1117,9 +1131,6 @@ pub(crate) enum Kind {
     Canvas(Option<Function>, Option<Box<CanvasOptions>>),
     /// `ui.glass { ... }`: the system's glass where it has one.
     Glass(Box<GlassSpec>),
-    /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view.
-    #[cfg(feature = "scene3d")]
-    Scene3d(Rc<crate::scene3d::Scene3dSpec>),
     /// `ui.webview { ... }`: a native web view laid out like a div.
     WebView(Box<WebSpec>),
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
@@ -1304,6 +1315,12 @@ pub(crate) enum Kind {
         /// Only what this script (a plugin's name) contributes.
         from: Option<String>,
     },
+    /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view. Last: one in
+    /// the middle moves the others' discriminants, and what tests them for
+    /// every node (`styled`) takes more instructions with the feature on, a
+    /// scene on screen or not.
+    #[cfg(feature = "scene3d")]
+    Scene3d(Rc<crate::scene3d::Scene3dSpec>),
 }
 impl Kind {
     fn takes_children(&self) -> bool {
@@ -1327,18 +1344,23 @@ impl Kind {
     }
     /// A component of the library holding children (a disclosure's content,
     /// an accordion's sections), which it lowers itself.
+    /// Whether `size` is its width and height: a box's, not the field of a
+    /// widget or the leaf a script may mean a type size on (`fill_from`).
+    fn takes_size(&self) -> bool {
+        matches!(
+            self,
+            Kind::Column
+                | Kind::Row
+                | Kind::Div
+                | Kind::Overlay
+                | Kind::Scroll { .. }
+                | Kind::Presence { .. }
+        )
+    }
     pub(crate) fn library_takes_children(&self) -> bool {
         #[cfg(feature = "components")]
         if let Kind::Library(library) = self {
             return library.takes_children();
-        }
-        false
-    }
-    /// A 3D scene (its effects and bindings live in a component context).
-    fn is_scene3d(&self) -> bool {
-        #[cfg(feature = "scene3d")]
-        if let Kind::Scene3d(_) = self {
-            return true;
         }
         false
     }
@@ -1428,11 +1450,15 @@ fn rare_mut(span: &mut Span) -> &mut SpanRare {
 pub(crate) struct SpanRare {
     /// An icon before the text, in the line.
     pub icon: Option<SpanIcon>,
+    /// Room after the text, given apart from the room before it
+    /// (`padding = { before, after, down }`).
+    pub padding_end: Option<f32>,
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
 }
-/// `ui.span { icon = { src = …, size = 12, gap = 4, tint = … } }`.
+/// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
+/// radius = 4, pad = 2 } }`.
 #[derive(Clone)]
 pub(crate) struct SpanIcon {
     /// A file, `https://…`, or `code:<svg …>`.
@@ -1441,7 +1467,17 @@ pub(crate) struct SpanIcon {
     pub gap: f32,
     /// A colour, or `"currentColor"` (the span's text colour).
     pub tint: Option<Value>,
+    /// The well the icon sits on: its fill (a colour or token), its
+    /// corner, and its room round the icon on every side.
+    pub bg: Option<Value>,
+    pub radius: f32,
+    pub pad: f32,
 }
+
+/// `Node::press_flags`: a press on it moves the window.
+pub(crate) const WINDOW_DRAG: u8 = 1;
+/// `Node::press_flags`: a press on it leaves focus where it is.
+pub(crate) const KEEPS_FOCUS: u8 = 2;
 
 /// A node's tooltip (`tooltip`, `tooltip_placement`).
 #[derive(Default, Clone)]
@@ -3515,10 +3551,12 @@ const LATE_FIELDS: &[&str] = &[
     "at_caret",
     "on_start",
     "start_distance",
+    "ahead",
     "at_end",
     "on_paste",
     "overscroll",
     "wheel_across",
+    "paging",
     "capture_keys",
     "scroll_padding",
     "read_only",
@@ -3630,7 +3668,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 }
             }
         }
-        "on_start" | "start_distance" | "at_end" => {
+        "on_start" | "start_distance" | "ahead" | "at_end" => {
             if let Kind::List { rare, .. } = &mut node.kind {
                 let rare = rare.get_or_insert_default();
                 match name {
@@ -3639,6 +3677,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                         let distance: f32 = lua.unpack(value)?;
                         rare.start_distance = distance.is_finite().then_some(distance);
                     }
+                    "ahead" => rare.ahead = Some(lua.unpack(value)?),
                     _ => rare.at_end = Some(expect_state(&value, "`at_end`")?),
                 }
             }
@@ -3661,11 +3700,10 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
         }
         "capture_keys" => {
             if lua.unpack::<bool>(value)? {
-                node.events
-                    .get_or_insert_default()
-                    .rare
-                    .get_or_insert_default()
-                    .capture_keys = true;
+                let events = node.events.get_or_insert_default();
+                events.rare.get_or_insert_default().capture_keys = true;
+                // No handler sets it for this one (`any_input`).
+                events.input = true;
             }
         }
         "wheel_across" => {
@@ -3681,6 +3719,11 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                         "`wheel_across` is for a `ui.scroll_x`",
                     ));
                 }
+            }
+        }
+        "paging" => {
+            if let Kind::Scroll { paging, .. } = &mut node.kind {
+                *paging = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
             }
         }
         "overscroll" => {
@@ -4015,7 +4058,8 @@ fn fill_from(
                 }
             },
             "focusable" => node.focusable = Some(lua.unpack(value)?),
-            "window_drag" => node.window_drag = lua.unpack(value)?,
+            "window_drag" => node.set_press_flag(WINDOW_DRAG, lua.unpack(value)?),
+            "focus_on_press" => node.set_press_flag(KEEPS_FOCUS, !lua.unpack::<bool>(value)?),
             "selectable" => node.selectable = lua.unpack(value)?,
             "selection_color" | "selected_text_color" => {
                 let at = usize::from(key == "selected_text_color");
@@ -4458,6 +4502,14 @@ fn fill_from(
                 let range = (node.a11y.get_or_insert_default().range).get_or_insert_default();
                 range.value_text = Some(source(lua, Ty::Str, "value_text", value)?);
             }
+            // A box's width and height at once. On a split it is the state
+            // its divider follows, and on anything else it does nothing
+            // (`size-inert`), as it did everywhere: those scripts go on working.
+            // So does a box a component hands its own `size = "sm"` along to.
+            "size" if node.kind.takes_size() && !matches!(value, mlua::Value::String(_)) => {
+                let source = source_linted(lua, Prop::Size.ty(), "size", value, lint)?;
+                node.props.push((Prop::Size, source));
+            }
             name if WIDGET_FIELDS.contains(&name) => {}
             name => {
                 let Some(prop) = Prop::parse(name) else {
@@ -4745,12 +4797,20 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 // `padding = 4` (across) or `{ 4, 0.5 }` (across, down).
                 b"padding" => {
+                    // `x`, `{ x, y }`, or `{ start, end, y }` (across before
+                    // the text and after it, then down).
                     span.padding = match lua.unpack(given)? {
                         Value::Num(x) => [x as f32, 0.],
-                        Value::List(l) => [
-                            l.first().and_then(Value::as_f64).unwrap_or(0.) as f32,
-                            l.get(1).and_then(Value::as_f64).unwrap_or(0.) as f32,
-                        ],
+                        Value::List(l) => {
+                            let at =
+                                |i: usize| l.get(i).and_then(Value::as_f64).unwrap_or(0.) as f32;
+                            if l.len() >= 3 {
+                                rare_mut(&mut span).padding_end = Some(at(1));
+                                [at(0), at(2)]
+                            } else {
+                                [at(0), at(1)]
+                            }
+                        }
                         _ => [0.; 2],
                     }
                 }
@@ -4792,11 +4852,15 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         }
                     };
                     let tint = icon.get::<Value>("tint")?;
+                    let bg = icon.get::<Value>("bg")?;
                     rare_mut(&mut span).icon = Some(SpanIcon {
                         src,
                         size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
                         gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
                         tint: (!matches!(tint, Value::Nil)).then_some(tint),
+                        bg: (!matches!(bg, Value::Nil)).then_some(bg),
+                        radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
+                        pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
                     });
                 }
                 b"on_click" => span.click = Some(handler(given)?),
@@ -5042,6 +5106,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             // Set as `fill` walks the table (`late_field`).
                             contain: false,
                             wheel_across: false,
+                            paging: false,
                             padding: None,
                         },
                     ),
@@ -7140,8 +7205,9 @@ fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Ins
 mod tests {
     /// The constructors' own fields are matched before style properties
     /// (`fill_from`), so a name in both is the constructor's: `size` is the
-    /// one. A new field named like a style property fails here until it is
-    /// given a meaning on purpose.
+    /// one, a style property on a box alone (`Kind::takes_size`). A new field
+    /// named like a style property fails here until it is given a meaning on
+    /// purpose.
     #[test]
     fn constructor_fields_named_like_style_properties_keep_their_meaning() {
         use super::{Kind, LATE_FIELDS, Node, Prop, WIDGET_FIELDS, fill_from};
@@ -7161,13 +7227,18 @@ mod tests {
             .load("return { size = { 10, 20 }, w = 30 }")
             .eval()
             .unwrap();
-        let mut node = Node::new(Default::default(), Kind::Div);
-        fill_from(&lua, &mut node, &table, None, crate::DesignLint::Off).unwrap();
-        let props: Vec<_> = node.props.iter().map(|(prop, _)| prop.name()).collect();
+        let filled = |kind| {
+            let mut node = Node::new(Default::default(), kind);
+            fill_from(&lua, &mut node, &table, None, crate::DesignLint::Off).unwrap();
+            let mut props: Vec<_> = node.props.iter().map(|(prop, _)| prop.name()).collect();
+            props.sort();
+            props
+        };
+        assert_eq!(filled(Kind::Div), ["size", "w"], "size is a box's");
         assert_eq!(
-            props,
+            filled(Kind::Button),
             ["w"],
-            "size is the constructor's, not a style property"
+            "size is no style property on anything else"
         );
     }
 

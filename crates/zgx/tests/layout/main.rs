@@ -32,6 +32,8 @@ mod layout_alone;
 mod layout_automatic_minimum;
 #[path = "../layout_box_model.rs"]
 mod layout_box_model;
+#[path = "../layout_changed_as_built.rs"]
+mod layout_changed_as_built;
 #[path = "../layout_feedback.rs"]
 mod layout_feedback;
 #[path = "../layout_fit_content.rs"]
@@ -46,6 +48,8 @@ mod layout_width_changes;
 mod panel_layout;
 #[path = "../percent_fields.rs"]
 mod percent_fields;
+#[path = "../percent_through_regions.rs"]
+mod percent_through_regions;
 #[path = "../resize_regions.rs"]
 mod resize_regions;
 #[path = "../rtl_layout.rs"]

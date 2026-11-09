@@ -220,6 +220,8 @@ fn connect(window: &Window) -> Option<Client> {
     if state.compositor.is_none() || state.wm_base.is_none() {
         return None;
     }
+    #[cfg(zgx_winit_patched)]
+    winit::platform::wayland::wake_for_own_queue(queue_heard);
     Some(Client {
         connection,
         queue,
@@ -232,6 +234,20 @@ fn connect(window: &Window) -> Option<Client> {
 /// `xdg_wm_base`, and winit gives its `xdg_surface`.
 pub(super) fn available(window: &Window) -> bool {
     with_client(window, |_| Some(())).is_some()
+}
+
+/// Whether zgx's queue holds events: winit, having read them for it and heard
+/// nothing for its windows (a pointer over a popup isn't on them), would go back
+/// to sleep on them.
+#[cfg(zgx_winit_patched)]
+fn queue_heard() -> bool {
+    CLIENT.with(|client| {
+        client.try_borrow().ok().is_some_and(|client| {
+            client
+                .as_deref()
+                .is_some_and(|client| client.queue.prepare_read().is_none())
+        })
+    })
 }
 
 /// Dispatch what zgx's queue heard (where the event loop turns: winit read

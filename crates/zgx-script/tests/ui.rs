@@ -253,6 +253,68 @@ fn script_scrolls_fade_only_where_content_runs_past() {
 }
 
 #[test]
+fn truncate_means_one_line_only_where_lines_does_not_say() {
+    use zgx::text_layout::TextOverflow;
+    let mut h = Harness::inline(
+        r##"local on = ui.state("on", true)
+        local two = ui.state("two", 2)
+        local text = "The quick brown fox jumps over the lazy dog, and on and on it goes"
+        return ui.column {
+            ui.button { id = "flip", on_click = function()
+                on:set(not on:get())
+                two:set(3)
+            end, "flip" },
+            ui.text { id = "alone", w = 120, truncate = true, text },
+            ui.text { id = "both", w = 120, lines = 2, truncate = true, text },
+            ui.text { id = "both-backwards", w = 120, truncate = true, lines = 2, text },
+            ui.text { id = "lines-only", w = 120, wrap = true, lines = 2, text },
+            ui.text { id = "state-truncate", w = 120, lines = 2, truncate = on, text },
+            ui.text { id = "state-lines", w = 120, truncate = true, lines = two, text },
+            ui.text { id = "function-truncate", w = 120, lines = 2,
+                truncate = function() return on:get() end, text },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    let of = |h: &mut Harness, id: &str| {
+        let mut stack = vec![h.find(id).unwrap()];
+        let scene = h.ui.scene.borrow();
+        while let Some(node) = stack.pop() {
+            if let zgx::scene::NodeKind::Text { .. } = scene.kind(node) {
+                let options = scene.style(node).text_options;
+                return (options.line_clamp.map_or(0, |n| n.get()), options.overflow);
+            }
+            stack.extend(scene.children(node).iter().copied());
+        }
+        panic!("{id} has no text");
+    };
+    let ellipsis = TextOverflow::Ellipsis;
+    assert_eq!(of(&mut h, "both"), (2, ellipsis));
+    assert_eq!(of(&mut h, "both-backwards"), (2, ellipsis));
+    // `truncate` alone is one line, half as tall as two.
+    assert_eq!(of(&mut h, "alone").1, ellipsis);
+    let (one, two) = (h.bounds("alone").height, h.bounds("both").height);
+    assert!(
+        (two - 2. * one).abs() < 1.,
+        "one line {one}, two lines {two}"
+    );
+    assert_eq!(of(&mut h, "lines-only").0, 2);
+    assert_ne!(of(&mut h, "lines-only").1, ellipsis);
+    assert_eq!(of(&mut h, "state-truncate"), (2, ellipsis));
+    assert_eq!(of(&mut h, "state-lines"), (2, ellipsis));
+    assert_eq!(of(&mut h, "function-truncate"), (2, ellipsis));
+
+    h.click("flip");
+    h.frames(2);
+    // Off, the clamp stays and the ellipsis goes; a changed `lines` is kept.
+    assert_eq!(of(&mut h, "state-truncate").0, 2);
+    assert_ne!(of(&mut h, "state-truncate").1, ellipsis);
+    assert_eq!(of(&mut h, "function-truncate").0, 2);
+    assert_ne!(of(&mut h, "function-truncate").1, ellipsis);
+    assert_eq!(of(&mut h, "state-lines"), (3, ellipsis));
+}
+
+#[test]
 fn inputs_take_letter_spacing() {
     let mut h = Harness::inline(
         r##"local v = ui.state("v", "Weekly dependency updates")
@@ -409,6 +471,32 @@ fn a_pixelated_image_draws_its_picture_pixelated() {
             "{id}"
         );
     }
+}
+
+/// `paging = true` on a scroll view: a wheel goes for the next page, on a spring,
+/// rather than moving it by the wheel's distance at once.
+#[test]
+fn a_scroll_view_takes_paging() {
+    let scrolled = |paging: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"return ui.scroll_x {{ id = "pager", w = 100, h = 50, {paging}
+                ui.div {{ w = 500, h = 50 }} }}"##
+        ));
+        h.ui.prepare_frame();
+        h.ui.dispatch(zgx::input::InputEvent::Scroll {
+            x: 10.,
+            y: 10.,
+            delta_x: 30.,
+            delta_y: 0.,
+        });
+        h.ui.prepare_frame();
+        let pager = h.find("pager").unwrap();
+        let (offset, ..) = h.ui.scroll_report(pager).unwrap();
+        (offset, h.ui.next_interaction_deadline().is_some())
+    };
+    assert_eq!(scrolled(""), (30., false));
+    assert_eq!(scrolled("paging = true,"), (0., true));
+    assert_eq!(scrolled("paging = false,"), (30., false));
 }
 
 /// `border_style = "dotted"` dots the border; `outline_style` and
@@ -629,6 +717,55 @@ fn presses_count_their_clicks_and_keys_carry_their_physical_code() {
 }
 
 #[test]
+fn a_press_inside_what_keeps_focus_leaves_it_where_it_is() {
+    let mut h = Harness::inline(
+        r##"local n = ui.state("n", 0)
+        return ui.column {
+            ui.input { id = "field", w = 120, value = ui.state("v", "hello") },
+            ui.column { id = "list", focus_on_press = false, w = 120, gap = 4,
+                ui.button { id = "row", w = 120, h = 20, on_click = function() n:set(n:peek() + 1) end, "row" },
+                ui.div { id = "blank", w = 120, h = 20 },
+            },
+            ui.text { id = "count", function() return tostring(n:get()) end },
+            ui.button { id = "elsewhere", w = 120, h = 20, "elsewhere" },
+            -- A press layer under a row the pointer passes through.
+            ui.div { relative = true, w = 120, h = 20,
+                ui.div { absolute = true, left = 0, right = 0, top = 0, bottom = 0,
+                    focus_on_press = false, on_press = function() end },
+                ui.row { id = "over", pointer_events = "none", w = 120, h = 20 },
+            },
+        }"##,
+    );
+    h.frames(2);
+    h.click("field");
+    assert_eq!(h.ui.input.focused(), h.find("field"));
+    // A row in the list: its click comes, the field keeps the keys.
+    h.click("row");
+    h.frames(1);
+    assert_eq!(h.text("count"), "1", "the row's click came");
+    assert_eq!(
+        h.ui.input.focused(),
+        h.find("field"),
+        "the field kept the keys"
+    );
+    // Its blank room: the same.
+    h.click("blank");
+    assert_eq!(h.ui.input.focused(), h.find("field"));
+    // A press layer under a row the pointer passes through: the press is
+    // the layer's, and focus stays.
+    h.click("field");
+    h.click("over");
+    assert_eq!(
+        h.ui.input.focused(),
+        h.find("field"),
+        "the layer under kept it"
+    );
+    // Outside it, a press moves focus as ever.
+    h.click("elsewhere");
+    assert_eq!(h.ui.input.focused(), h.find("elsewhere"));
+}
+
+#[test]
 fn focus_styles_show_for_the_keyboard_not_a_click() {
     use zgx::input::{InputEvent, Key, Modifiers};
     let mut h = Harness::inline(
@@ -761,6 +898,147 @@ fn a_span_icon_sits_in_the_line_before_its_text() {
     assert!(
         label.is_none_or(|l| !l.contains('\u{2060}')),
         "no placeholder read out"
+    );
+}
+
+#[test]
+fn a_span_icon_sits_on_its_well_behind_it_and_the_wash_spans_the_chip() {
+    use zgx::scene::{Color, NodeKind};
+    let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><rect width='12' height='12'/></svg>"#;
+    let measure = |extra: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"return ui.column {{ w = 300, ui.rich {{ id = "p",
+                ui.span {{ "notes.rs", literal = true, bg = "#ff0000", padding = {{ 2, 2 }}, radius = 5{extra} }} }} }}"##
+        ));
+        h.frames(2);
+        let p = h.find("p").unwrap();
+        let scene = h.ui.scene.borrow();
+        let origin = scene.bounds(p);
+        let (mut well, mut glyph, mut width, mut runs) = (None, None, 0., Vec::new());
+        let mut stack = vec![p];
+        while let Some(n) = stack.pop() {
+            match scene.kind(n) {
+                NodeKind::Panel { quad: q, .. } => {
+                    let b = scene.bounds(n);
+                    well = Some((b.x - origin.x, b.width, b.height, q.fill, q.radius));
+                    // The icon its child: drawn over it.
+                    let inside = scene.children(n);
+                    assert_eq!(inside.len(), 1, "the icon in the well");
+                    let g = scene.bounds(inside[0]);
+                    glyph = Some((g.x - b.x, g.y - b.y, g.width));
+                }
+                NodeKind::Svg(_) => {
+                    // (One outside a well: the icon alone.)
+                    glyph = glyph.or(Some((-1., -1., scene.bounds(n).width)));
+                }
+                NodeKind::RichText { text } => {
+                    width = scene.bounds(n).width;
+                    runs = text
+                        .runs()
+                        .iter()
+                        .map(|r| (r.background, r.radius))
+                        .collect();
+                }
+                _ => {}
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        (well, glyph, width, runs)
+    };
+    let icon = format!("icon = {{ code = \"{svg}\", size = 12, gap = 3");
+    let (no_well, alone, plain, _) = measure(&format!(", {icon} }}"));
+    assert!(no_well.is_none(), "no bg: no well, as before");
+    assert_eq!(alone.map(|g| g.0), Some(-1.), "the icon alone");
+    let (well, glyph, chip, runs) = measure(&format!(
+        ", {icon}, bg = \"#00ff00\", radius = 4, pad = 2 }}"
+    ));
+    let (x, w, h, fill, radius) = well.expect("the well drawn");
+    assert_eq!(
+        (x.round(), w, h),
+        (2., 16., 16.),
+        "at the padding, the icon and its room round it"
+    );
+    assert_eq!(fill, Color(0, 255, 0, 255));
+    assert_eq!(radius, 4.);
+    assert_eq!(
+        glyph,
+        Some((2., 2., 12.)),
+        "the icon `pad` in from the well's corner"
+    );
+    assert!(
+        (chip - plain - 4.).abs() < 0.5,
+        "the line keeps room for the well (2 × pad): {plain} → {chip}"
+    );
+    // The span's wash on every run of the chip (the well's room, the
+    // text, the padding after): joined, one wash under the well and text.
+    assert!(!runs.is_empty());
+    assert!(
+        runs.iter()
+            .all(|(bg, r)| *bg == Some(Color(255, 0, 0, 255)) && *r == 5.),
+        "{runs:?}"
+    );
+}
+
+#[test]
+fn a_span_takes_other_room_before_and_after_its_text() {
+    use zgx::scene::NodeKind;
+    let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><rect width='12' height='12'/></svg>"#;
+    let measure = |extra: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"return ui.column {{ w = 300, ui.rich {{ id = "p",
+                ui.span {{ "notes.rs", literal = true, bg = "#ff0000"{extra} }} }} }}"##
+        ));
+        h.frames(2);
+        let p = h.find("p").unwrap();
+        let scene = h.ui.scene.borrow();
+        let (mut well_x, mut width, mut washed) = (None, 0., true);
+        let mut stack = vec![p];
+        while let Some(n) = stack.pop() {
+            match scene.kind(n) {
+                NodeKind::Panel { .. } => well_x = Some(scene.bounds(n).x - scene.bounds(p).x),
+                NodeKind::RichText { text } => {
+                    width = scene.bounds(n).width;
+                    washed = text.runs().iter().all(|r| r.background.is_some());
+                }
+                _ => {}
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        (well_x, width, washed)
+    };
+    let (_, plain, _) = measure("");
+    // `{ start, end, y }` with an icon on a well: the well `start` in, the
+    // line its room, then the text, then `end`.
+    let (well_x, chip, washed) = measure(&format!(
+        ", padding = {{ 1, 7, 2 }}, icon = {{ code = \"{svg}\", size = 12, gap = 2, bg = \"#00ff00\", pad = 2 }}"
+    ));
+    assert_eq!(
+        well_x.map(f32::round),
+        Some(1.),
+        "a point in from the start"
+    );
+    assert!(
+        (chip - plain - (1. + 16. + 2. + 7.)).abs() < 0.5,
+        "1 + well 16 + 2 + text + 7: {plain} → {chip}"
+    );
+    assert!(washed, "one wash across every run");
+    // No icon: the room before and after, apart.
+    let (_, apart, washed) = measure(", padding = { 3, 9, 0 }");
+    assert!(
+        (apart - plain - 12.).abs() < 0.5,
+        "3 + text + 9: {plain} → {apart}"
+    );
+    assert!(washed);
+    // The old forms as they were: `{ x, y }` and `x`, the same both sides.
+    let (_, both, _) = measure(", padding = { 4, 2 }");
+    assert!(
+        (both - plain - 8.).abs() < 0.5,
+        "4 + text + 4: {plain} → {both}"
+    );
+    let (_, one, _) = measure(", padding = 5");
+    assert!(
+        (one - plain - 10.).abs() < 0.5,
+        "5 + text + 5: {plain} → {one}"
     );
 }
 
@@ -1355,7 +1633,7 @@ fn a_key_closes_a_tooltip_and_escape_an_interactive_card() {
         h.frames(1);
     };
     to(&mut h, "a");
-    wait_ms(&mut h, 550);
+    wait_ms(&mut h, tooltip_waits().0 + 300);
     assert!(visible(&mut h, "tip"));
     press(&mut h, Key::Character("x".into()));
     assert!(!visible(&mut h, "tip"), "a key closes it, at once");
@@ -1363,7 +1641,7 @@ fn a_key_closes_a_tooltip_and_escape_an_interactive_card() {
     to(&mut h, "away");
     wait_ms(&mut h, 1100);
     to(&mut h, "b");
-    wait_ms(&mut h, 550);
+    wait_ms(&mut h, tooltip_waits().0 + 300);
     assert!(visible(&mut h, "card"));
     press(&mut h, Key::Character("x".into()));
     assert!(visible(&mut h, "card"), "an interactive card takes typing");
