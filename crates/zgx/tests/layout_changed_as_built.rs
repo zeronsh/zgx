@@ -74,7 +74,8 @@ fn container_style(random: &mut Random, top: bool) -> Style {
     }
     style
 }
-fn tree(random: &mut Random, long: bool) -> Vec<Part> {
+/// The tree, and which of its parts is the long column, if `long`.
+fn tree(random: &mut Random, long: bool) -> (Vec<Part>, Option<usize>) {
     let mut parts = vec![Part {
         parent: 0,
         layout: Some(Layout::Column),
@@ -110,19 +111,24 @@ fn tree(random: &mut Random, long: bool) -> Vec<Part> {
         add_text(&mut parts, parent, format!("t{at}"));
     }
     // A long one, as a reply streamed into: its own code keeps its children.
+    // Its width its own, or what its holder stretches it to: either way one
+    // its layout keeps its earlier children's places in.
+    let mut long_column = None;
     if long {
         let holder = holders[random.next(holders.len())];
         let style = Style {
             gap: 1.5,
             align: Align::Stretch,
+            width: (random.next(2) == 0).then_some(220.0),
             ..Style::default()
         };
         let column = container(&mut parts, holder, Layout::Column, style);
         for at in 0..70 {
             add_text(&mut parts, column, format!("row {at}"));
         }
+        long_column = Some(column);
     }
-    parts
+    (parts, long_column)
 }
 fn add_text(parts: &mut Vec<Part>, parent: usize, words: String) {
     parts.push(Part {
@@ -138,7 +144,7 @@ fn add_text(parts: &mut Vec<Part>, parent: usize, words: String) {
 }
 fn run(seed: u64, long: bool) {
     let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    let mut parts = tree(&mut random, long);
+    let (mut parts, long_column) = tree(&mut random, long);
     let viewport = (300.0, 4000.0);
     let (mut scene, mut ids) = build(&parts, viewport);
     let live_texts = |parts: &[Part]| -> Vec<usize> {
@@ -153,9 +159,53 @@ fn run(seed: u64, long: bool) {
     };
     for step in 0..40 {
         let mut what = format!("seed {seed} step {step}:");
+        // Half the steps, as a reply streams: only the long column's end.
+        let streaming = long_column.is_some() && random.next(2) == 0;
         for _ in 0..1 + random.next(4) {
-            let texts = live_texts(&parts);
+            let mut texts = live_texts(&parts);
             let holders = live_holders(&parts);
+            // Mostly, as a chat changes, somewhere other than its rows (which
+            // are most of the texts): a change before its end has it laid
+            // out whole, and three such in a row stop it looking at its end.
+            if let Some(column) = long_column
+                && random.next(4) != 0
+            {
+                let others: Vec<_> = texts
+                    .iter()
+                    .copied()
+                    .filter(|at| parts[*at].parent != column)
+                    .collect();
+                if !others.is_empty() {
+                    texts = others;
+                }
+            }
+            // Streamed into, as a reply is: its last row grows, or one arrives.
+            if let Some(column) = long_column
+                && (streaming || random.next(3) == 0)
+            {
+                let last = (1..parts.len())
+                    .rev()
+                    .find(|at| parts[*at].parent == column && !parts[*at].gone);
+                match (random.next(3), last) {
+                    (0 | 1, Some(at)) => {
+                        what.push_str(&format!(" stream {at}"));
+                        parts[at].words.push_str(" and more words");
+                        scene.set_text(ids[at].unwrap(), parts[at].words.as_str());
+                    }
+                    _ => {
+                        let at = parts.len();
+                        what.push_str(&format!(" arrive {at}"));
+                        add_text(&mut parts, column, format!("row {at}"));
+                        let id = scene.append(
+                            ids[column].unwrap(),
+                            kind(&parts[at]),
+                            parts[at].style.clone(),
+                        );
+                        ids.push(Some(id));
+                    }
+                }
+                continue;
+            }
             match random.next(10) {
                 // Text longer, past a wrap or not, shorter, or the same length.
                 0..=5 if !texts.is_empty() => {
