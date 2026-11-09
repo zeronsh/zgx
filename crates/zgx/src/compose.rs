@@ -468,11 +468,22 @@ pub struct View {
     events: Vec<EventListener>,
     focusable: Option<bool>,
     id: Option<String>,
-    contents: bool,
+    contents: Contents,
     mounted: Vec<Box<dyn FnOnce(NodeHandle)>>,
     /// What few views set, boxed: views move by value through every
     /// builder call and mount level, and most carry none of it.
     rare: Option<Box<Rare>>,
+}
+/// Whose box a view lays out as (`View::contents`).
+#[derive(Clone, Copy, PartialEq)]
+enum Contents {
+    /// Its own.
+    Own,
+    /// Its last child's, in its place.
+    Child,
+    /// Its child's unless it is styled, and so asked for a box of its own:
+    /// what a region showing one view at a time starts as (`switch`).
+    ChildIfUnstyled,
 }
 /// Ranges of a text marked with a colour (`View::decorations`).
 type Decorations = Vec<(std::ops::Range<usize>, crate::scene::Color)>;
@@ -866,7 +877,7 @@ impl View {
             events: Vec::new(),
             focusable: None,
             id: None,
-            contents: false,
+            contents: Contents::Own,
             mounted: Vec::new(),
 
             rare: None,
@@ -881,14 +892,14 @@ impl View {
     /// origin. For a region that shows one view at a time (`switch`) and
     /// should not be a layout box of its own; see `Scene::set_contents`.
     pub fn contents(mut self) -> Self {
-        self.contents = true;
+        self.contents = Contents::Child;
         self
     }
     /// Undo `contents`: a box of its own again, for a host that puts a
     /// region it built in a flow of its own choosing after all (with
     /// `display_contents`, its children in its parent's).
     pub fn not_contents(mut self) -> Self {
-        self.contents = false;
+        self.contents = Contents::Own;
         self
     }
     /// A checkbox's mixed state, while `mixed` is true: a dash in place of
@@ -1928,7 +1939,9 @@ impl View {
         if self.focusable.is_some() {
             inner.focusable = self.focusable;
         }
-        inner.contents |= self.contents;
+        if self.contents != Contents::Own {
+            inner.contents = self.contents;
+        }
         inner.styles.merge(&self.styles);
         inner.children.extend(self.children);
         fn merge_variant(base: &mut Option<Box<Styles>>, patch: Option<Box<Styles>>) {
@@ -2938,7 +2951,10 @@ pub fn scrollbar(offset: Signal<f32>, mut extent: impl FnMut() -> f32 + 'static)
         crate::compose_scrollbar::mount(ui, root, offset, size, length, false);
     })))
 }
-/// A conditional region. Equal selector values retain their component and local state.
+/// A conditional region. Equal selector values retain their component and
+/// local state. It lays out as what it shows, in its place (`View::contents`):
+/// a percentage in that view resolves against this region's parent. Styled
+/// (`switch(..).w_full()`), it is a box of its own that holds the view.
 pub fn switch<K: PartialEq + Clone + 'static>(
     select: impl FnMut() -> K + 'static,
     build: impl FnMut(K, &mut Context) -> View + 'static,
@@ -2960,7 +2976,7 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
     mut select: impl FnMut() -> K + 'static,
     mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
-    View::new(Kind::Region(Box::new(move |ui, root, environment| {
+    let mut region = View::new(Kind::Region(Box::new(move |ui, root, environment| {
         let weak = ui.downgrade();
         let runtime = ui.runtime.clone();
         let mut selected: Option<K> = None;
@@ -2996,7 +3012,9 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
             });
             selected = Some(key);
         });
-    })))
+    })));
+    region.contents = Contents::ChildIfUnstyled;
+    region
 }
 /// Keyed children retain their local state and subscriptions across reorder.
 /// Duplicate keys are rejected before mutating the mounted children.
@@ -5738,7 +5756,10 @@ fn open_element(
         }
         _ => unreachable!(),
     };
-    if view.contents {
+    if view.contents != Contents::Own
+        && (view.contents == Contents::Child
+            || (view.styles.set_bits() == 0 && view.reactive_style.is_none()))
+    {
         ui.scene.borrow_mut().set_contents(root, true);
     }
     if let Some(active) = rare.as_deref_mut().and_then(|r| r.active_descendant.take()) {
