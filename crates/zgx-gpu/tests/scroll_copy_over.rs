@@ -1213,3 +1213,278 @@ fn a_dithered_picture_in_the_content_still_blocks() {
         assert_eq!(copies, 0, "dithered at {scale}x copied");
     }
 }
+
+/// Text that gets narrower without scrolling: paragraphs rewrapped as their
+/// column narrows (a sidebar opening beside a transcript), a line shortened
+/// in place, and a word overflowing its box, then wrapped. Every frame drawn
+/// from its damage, a second renderer's whole, by the byte: what a line drew
+/// past its new box goes too.
+fn narrowing(
+    name: &str,
+    scale: f32,
+    fit: bool,
+    change: impl Fn(usize, &Signal<f32>, &Signal<usize>),
+) {
+    narrowing_in(name, scale, fit, false, false, false, change);
+}
+
+/// Line `i` of a story, shortened while `version` isn't 0: plain text, or
+/// rich text of spans (a reply's markdown) if `rich`.
+fn story_line(line: &'static str, i: usize, version: Signal<usize>, rich: bool) -> View {
+    let shown = move || match version.get() {
+        0 => line.to_string(),
+        // Shorter: the line ends well before it did.
+        _ => line.chars().take(line.len() / (2 + i % 2)).collect(),
+    };
+    match rich {
+        false => text_signal(shown).text_size(14.).text_color(rgb(0xe8e8f0)),
+        true => rich_text_signal(move || {
+            let words = shown();
+            let cut = (words.char_indices())
+                .nth(words.chars().count() / 3)
+                .map_or(words.len(), |(at, _)| at);
+            let (head, tail) = words.split_at(cut);
+            vec![
+                text_span(head.to_string())
+                    .text_size(14.)
+                    .text_color(rgb(0xe8e8f0)),
+                text_span(tail.to_string())
+                    .text_size(14.)
+                    .text_color(rgb(0xc8d0f0)),
+            ]
+        }),
+    }
+}
+
+/// `narrowing`, its lines rows of a measured list if `listed`, rich if
+/// `rich`.
+fn narrowing_in(
+    name: &str,
+    scale: f32,
+    fit: bool,
+    listed: bool,
+    rich: bool,
+    long: bool,
+    change: impl Fn(usize, &Signal<f32>, &Signal<usize>),
+) {
+    const LINES: [&str; 4] = [
+        "She came in and sat down. Arthur poured her tea, and Daniel went into the garden.",
+        "“He was complaining about mine.”",
+        "Supercalifragilisticexpialidociously-long-unbroken-word-overflowing",
+        "“What?” she said, and then nothing more for a while, looking at the window.",
+    ];
+    let (w, h) = ((W * scale) as u32, (H * scale) as u32);
+    let mut gpu = GpuRenderer::new(w, h).unwrap();
+    let mut whole = GpuRenderer::new(w, h).unwrap();
+    // A frame drawn whole from a kept frame, patched: a window's after most
+    // of it changed.
+    let mut patched_whole = GpuRenderer::new(w, h).unwrap();
+    let mut ui = Ui::new(W, H);
+    ui.scene.borrow_mut().set_pixel_scale(scale);
+    for gpu in [&mut gpu, &mut whole, &mut patched_whole] {
+        gpu.set_scale_factor(scale);
+        gpu.debug_enable_single_pass();
+    }
+    // (The reference: drawn afresh each frame, through no kept frame.)
+    whole.debug_never_keep();
+    gpu.install_text(&mut ui.scene.borrow_mut());
+    let width = ui.signal(W - 20.);
+    let version = ui.signal(0_usize);
+    let mut page = column().p(10.).gap(6.).items_start().reactive_style({
+        let width = width.clone();
+        move || Styles::new().w(width.get())
+    });
+    // Past `COLUMN_KEPT_FROM` (64) lines when `long`: the column keeps its
+    // children's ink as one union.
+    let copies = if long { 20 } else { 1 };
+    for (i, line) in LINES.iter().cycle().take(LINES.len() * copies).enumerate() {
+        let version = version.clone();
+        let text = story_line(line, i, version, rich);
+        // As wide as the column, or as its own lines (`fit`).
+        page = page.child(if fit { text } else { text.w_full() });
+    }
+    let page = if listed {
+        // The same lines, each a row of a measured list as wide as the page.
+        let (version, width) = (version.clone(), width.clone());
+        let heights = VariableHeights::new(&ui.runtime, 0, 30.).anchor_end();
+        let offset = ui.signal(0_f32);
+        measured_rows(
+            offset,
+            heights,
+            2,
+            || (0..LINES.len()).collect(),
+            |_, _| 30.,
+            move |_, i, _| {
+                let version = version.clone();
+                let line = LINES[i];
+                let text = story_line(line, i, version, rich);
+                column()
+                    .w_full()
+                    .pb(6.)
+                    .items_start()
+                    .child(if fit { text } else { text.w_full() })
+            },
+        )
+        .h(H - 20.)
+        .m(10.)
+        .reactive_style(move || Styles::new().w(width.get()))
+    } else {
+        page
+    };
+    ui.mount(
+        overlay()
+            .w(W)
+            .h(H)
+            .bg(rgb(0x000000))
+            .child(div().w(W).h(H).bg(rgb(0x14181f)).child(page)),
+    );
+    let full = Rect::new(0., 0., W, H);
+    let mut patched = 0;
+    let mut frame = |ui: &mut Ui, label: &str| {
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        patched += gpu
+            .render(&ui.scene.borrow(), &damage)
+            .unwrap()
+            .patched_items;
+        let partial = gpu.debug_present_offscreen().unwrap();
+        whole.render(&ui.scene.borrow(), &[full]).unwrap();
+        let fresh = whole.debug_present_offscreen().unwrap();
+        patched += (patched_whole.render(&ui.scene.borrow(), &[full]).unwrap()).patched_items;
+        let patched_frame = patched_whole.debug_present_offscreen().unwrap();
+        let wrong = patched_frame
+            .chunks(4)
+            .zip(fresh.chunks(4))
+            .position(|(a, b)| a != b);
+        let w_ = w as usize;
+        assert!(
+            wrong.is_none(),
+            "{name} at {scale}x, fit {fit}, listed {listed}, rich {rich}, long {long}, {label}: \
+             drawn whole from its kept frame, a stale pixel at points {:?}",
+            wrong.map(|p| ((p % w_) as f32 / scale, (p / w_) as f32 / scale)),
+        );
+        let w = w as usize;
+        let first = partial
+            .chunks(4)
+            .zip(fresh.chunks(4))
+            .position(|(a, b)| a != b);
+        let count = partial
+            .chunks(4)
+            .zip(fresh.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert!(
+            first.is_none(),
+            "{name} at {scale}x, fit {fit}, listed {listed}, rich {rich}, long {long}, {label}: {count} stale pixels, the first at points {:?} \
+             (damage {damage:?})",
+            first.map(|p| ((p % w) as f32 / scale, (p / w) as f32 / scale)),
+        );
+    };
+    frame(&mut ui, "first");
+    frame(&mut ui, "settled");
+    for step in 0..12 {
+        change(step, &width, &version);
+        frame(&mut ui, &format!("step {step}"));
+    }
+    let _ = frame;
+    // (Lines shortened in place patch a kept frame: else nothing here
+    // checked those.)
+    if name.contains("shortened") && !name.contains("narrowing") && !rich {
+        assert!(patched > 0, "{name} at {scale}x: no frame was patched");
+    }
+}
+
+#[test]
+fn text_getting_narrower_leaves_nothing_where_it_was() {
+    let _gpu = gpu_fixture();
+    for scale in [2., 1.] {
+        for fit in [true, false] {
+            // A few points at a time (a scrollbar's room), then many.
+            narrowing("a narrowing column", scale, fit, |step, width, _| {
+                width.set(W - 20. - step as f32 * if step < 6 { 4. } else { 13. });
+            });
+            narrowing("lines shortened", scale, fit, |step, _, version| {
+                version.set(step % 2);
+            });
+            narrowing(
+                "narrowing and shortened",
+                scale,
+                fit,
+                |step, width, version| {
+                    width.set(W - 20. - (step % 4) as f32 * 23.);
+                    version.set(step / 3 % 2);
+                },
+            );
+            narrowing_in(
+                "a narrowing list",
+                scale,
+                fit,
+                true,
+                false,
+                false,
+                |step, width, _| {
+                    width.set(W - 20. - step as f32 * if step < 6 { 4. } else { 13. });
+                },
+            );
+            narrowing_in(
+                "a list's lines shortened",
+                scale,
+                fit,
+                true,
+                false,
+                false,
+                |step, _, version| {
+                    version.set(step % 2);
+                },
+            );
+            for listed in [false, true] {
+                narrowing_in(
+                    "rich text narrowing",
+                    scale,
+                    fit,
+                    listed,
+                    true,
+                    false,
+                    |step, width, _| {
+                        width.set(W - 20. - step as f32 * if step < 6 { 4. } else { 13. });
+                    },
+                );
+                narrowing_in(
+                    "rich text shortened",
+                    scale,
+                    fit,
+                    listed,
+                    true,
+                    false,
+                    |step, _, version| {
+                        version.set(step % 2);
+                    },
+                );
+            }
+            for rich in [false, true] {
+                narrowing_in(
+                    "a long column narrowing",
+                    scale,
+                    fit,
+                    false,
+                    rich,
+                    true,
+                    |step, width, _| {
+                        width.set(W - 20. - step as f32 * if step < 6 { 4. } else { 13. });
+                    },
+                );
+                narrowing_in(
+                    "a long column's lines shortened",
+                    scale,
+                    fit,
+                    false,
+                    rich,
+                    true,
+                    |step, _, version| {
+                        version.set(step % 2);
+                    },
+                );
+            }
+        }
+    }
+}
