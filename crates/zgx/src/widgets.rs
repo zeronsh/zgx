@@ -3035,6 +3035,14 @@ impl Ui {
     pub fn observe_shown(&self) -> Signal<bool> {
         self.storage.presented.clone()
     }
+    /// The app came forward or went to the back (any of its windows active,
+    /// or none; not a window of it giving way to another): a popup wanted
+    /// while it is at the back stays wanted, not shown, and shows as it comes
+    /// forward (`Scene::set_popups_held`). What is open as it goes closes as
+    /// ever (`Ui::dismiss_popups`). The host's to tell, as focus changes.
+    pub fn set_app_active(&self, active: bool) {
+        self.scene.borrow_mut().set_popups_held(!active);
+    }
     /// Whether the window is the active one, its keys going to it
     /// (`Ui::set_window_active`), as it changes.
     pub fn observe_window_active(&self) -> Signal<bool> {

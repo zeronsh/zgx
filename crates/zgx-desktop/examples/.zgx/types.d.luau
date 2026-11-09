@@ -4661,8 +4661,8 @@ export type ScrollProps = {
 	overscroll: ("auto" | "contain")?,
 	-- `ui.scroll_x`: a mouse wheel, which has no sideways axis, moves it: with
 	-- Shift always (never the page), and without once the pointer has been
-	-- moved onto it, going on to the views around it after a pause at its
-	-- edge. A trackpad's
+	-- moved onto it, going on to the views around it at its edge after a
+	-- pause or once the pointer moves. A trackpad's
 	-- swipe mostly down leaves it still.
 	wheel_across: boolean?,
 	-- What a focused control or a find keeps clear of scrolling into view
@@ -6881,7 +6881,9 @@ export type Object3DProps = {
 }
 -- How a surface takes light (metallic-roughness): `color` and `emissive`
 -- colours (hex, names, `$tokens`), `metallic` and `roughness` 0 to 1,
--- `opacity` 0 to 1, `unlit` shows its colour as it is.
+-- `opacity` 0 to 1, `unlit` shows its colour as it is, `double_sided`
+-- draws its back faces too (an open shell, a cut-away): a plain boolean,
+-- read once as the mesh is made.
 export type Material3D = {
 	color: Reactive<Color>?,
 	metallic: Reactive<number>?,
@@ -6889,6 +6891,22 @@ export type Material3D = {
 	emissive: Reactive<Color>?,
 	opacity: Reactive<number>?,
 	unlit: boolean?,
+	double_sided: boolean?,
+}
+-- A mesh's own triangles, flat lists of numbers read once: `positions`
+-- three a vertex; `indices` three a triangle, from 1, counter-clockwise
+-- from its front (unsaid, each three vertices are one); `normals` and
+-- `colors` (sRGB 0 to 1, three or four) a vertex's each; `face_normals`
+-- and `face_colors` a triangle's each instead, drawing it flat, as `flat`
+-- does without them.
+export type Triangles3D = {
+	positions: { number },
+	indices: { number }?,
+	normals: { number }?,
+	colors: { number }?,
+	face_normals: { number }?,
+	face_colors: { number }?,
+	flat: boolean?,
 }
 -- Where a click landed on a mesh, in the scene's frame, and how far that is
 -- from the camera.
@@ -6899,8 +6917,9 @@ export type MeshProps = Object3DProps & {
 	on_click: ((hit: Hit3D) -> ())?,
 	on_hover: ((over: boolean) -> ())?,
 	-- Its shape (default "box"), sized by `size` (box: {x, y, z}; plane:
-	-- {x, _, z}), `radius`, `height`, `tube` (torus) and `segments`.
-	geometry: ("box" | "sphere" | "plane" | "cylinder" | "cone" | "torus")?,
+	-- {x, _, z}), `radius`, `height`, `tube` (torus) and `segments`; or
+	-- its own triangles.
+	geometry: ("box" | "sphere" | "plane" | "cylinder" | "cone" | "torus" | Triangles3D)?,
 	size: (number | { read [number]: number })?,
 	radius: number?,
 	height: number?,
@@ -6929,6 +6948,10 @@ export type ModelProps = {
 	-- The animation it plays, round and round: a clip's name, or its place
 	-- in the file (from 1).
 	animation: (string | number)?,
+	-- Seconds into `animation` to pose it at, in place of playing it: a
+	-- video's frame, a slider's or a scrubbed timeline's says where it is.
+	-- The same time gives the same pose. Requires `animation`.
+	time: Reactive<number>?,
 	-- As a group's: it hears its meshes'.
 	on_click: ((hit: Hit3D) -> ())?,
 	on_hover: ((over: boolean) -> ())?,

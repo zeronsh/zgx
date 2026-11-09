@@ -198,7 +198,7 @@ return ui.component(function()
 		gap = 6,
 		ui.text {
 			id = "typing",
-			size = 12,
+			text_size = 12,
 			color = "$text.tertiary",
 			function()
 				local who = state.typing:get()[state.current:get()]

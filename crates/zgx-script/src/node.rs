@@ -749,26 +749,28 @@ impl Node {
     /// Animations, scroll offsets, widget bindings and overlays need a
     /// component context.
     pub fn needs_context(&self) -> bool {
-        matches!(
-            self.kind,
+        (match self.kind {
             Kind::Scroll { .. }
-                | Kind::Checkbox { .. }
-                | Kind::Input { .. }
-                | Kind::Progress { .. }
-                | Kind::Slider { .. }
-                | Kind::Split { .. }
-                | Kind::List { .. }
-                | Kind::Modal { .. }
-                | Kind::Popover { .. }
-                | Kind::Menu { .. }
-                | Kind::Submenu { .. }
-                | Kind::Presence { .. }
-                | Kind::Each {
-                    motion: Some(_),
-                    ..
-                }
-        ) || self.kind.library_needs_context()
-            || self.kind.is_scene3d()
+            | Kind::Checkbox { .. }
+            | Kind::Input { .. }
+            | Kind::Progress { .. }
+            | Kind::Slider { .. }
+            | Kind::Split { .. }
+            | Kind::List { .. }
+            | Kind::Modal { .. }
+            | Kind::Popover { .. }
+            | Kind::Menu { .. }
+            | Kind::Submenu { .. }
+            | Kind::Presence { .. }
+            | Kind::Each {
+                motion: Some(_), ..
+            } => true,
+            // A 3D scene: its effects and bindings live in a component
+            // context. In this one test, no other for every node.
+            #[cfg(feature = "scene3d")]
+            Kind::Scene3d(_) => true,
+            _ => false,
+        }) || self.kind.library_needs_context()
             || self.props.iter().any(|(_, s)| matches!(s, Source::Anim(_)))
             // An icon's tint may be a theme token: it reads the scope.
             || matches!(self.kind, Kind::Svg { .. })
@@ -1125,9 +1127,6 @@ pub(crate) enum Kind {
     Canvas(Option<Function>, Option<Box<CanvasOptions>>),
     /// `ui.glass { ... }`: the system's glass where it has one.
     Glass(Box<GlassSpec>),
-    /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view.
-    #[cfg(feature = "scene3d")]
-    Scene3d(Rc<crate::scene3d::Scene3dSpec>),
     /// `ui.webview { ... }`: a native web view laid out like a div.
     WebView(Box<WebSpec>),
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
@@ -1312,6 +1311,12 @@ pub(crate) enum Kind {
         /// Only what this script (a plugin's name) contributes.
         from: Option<String>,
     },
+    /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view. Last: one in
+    /// the middle moves the others' discriminants, and what tests them for
+    /// every node (`styled`) takes more instructions with the feature on, a
+    /// scene on screen or not.
+    #[cfg(feature = "scene3d")]
+    Scene3d(Rc<crate::scene3d::Scene3dSpec>),
 }
 impl Kind {
     fn takes_children(&self) -> bool {
@@ -1335,18 +1340,23 @@ impl Kind {
     }
     /// A component of the library holding children (a disclosure's content,
     /// an accordion's sections), which it lowers itself.
+    /// Whether `size` is its width and height: a box's, not the field of a
+    /// widget or the leaf a script may mean a type size on (`fill_from`).
+    fn takes_size(&self) -> bool {
+        matches!(
+            self,
+            Kind::Column
+                | Kind::Row
+                | Kind::Div
+                | Kind::Overlay
+                | Kind::Scroll { .. }
+                | Kind::Presence { .. }
+        )
+    }
     pub(crate) fn library_takes_children(&self) -> bool {
         #[cfg(feature = "components")]
         if let Kind::Library(library) = self {
             return library.takes_children();
-        }
-        false
-    }
-    /// A 3D scene (its effects and bindings live in a component context).
-    fn is_scene3d(&self) -> bool {
-        #[cfg(feature = "scene3d")]
-        if let Kind::Scene3d(_) = self {
-            return true;
         }
         false
     }
@@ -4481,6 +4491,14 @@ fn fill_from(
                 let range = (node.a11y.get_or_insert_default().range).get_or_insert_default();
                 range.value_text = Some(source(lua, Ty::Str, "value_text", value)?);
             }
+            // A box's width and height at once. On a split it is the state
+            // its divider follows, and on anything else it does nothing
+            // (`size-inert`), as it did everywhere: those scripts go on working.
+            // So does a box a component hands its own `size = "sm"` along to.
+            "size" if node.kind.takes_size() && !matches!(value, mlua::Value::String(_)) => {
+                let source = source_linted(lua, Prop::Size.ty(), "size", value, lint)?;
+                node.props.push((Prop::Size, source));
+            }
             name if WIDGET_FIELDS.contains(&name) => {}
             name => {
                 let Some(prop) = Prop::parse(name) else {
@@ -7175,8 +7193,9 @@ fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Ins
 mod tests {
     /// The constructors' own fields are matched before style properties
     /// (`fill_from`), so a name in both is the constructor's: `size` is the
-    /// one. A new field named like a style property fails here until it is
-    /// given a meaning on purpose.
+    /// one, a style property on a box alone (`Kind::takes_size`). A new field
+    /// named like a style property fails here until it is given a meaning on
+    /// purpose.
     #[test]
     fn constructor_fields_named_like_style_properties_keep_their_meaning() {
         use super::{Kind, LATE_FIELDS, Node, Prop, WIDGET_FIELDS, fill_from};
@@ -7196,13 +7215,18 @@ mod tests {
             .load("return { size = { 10, 20 }, w = 30 }")
             .eval()
             .unwrap();
-        let mut node = Node::new(Default::default(), Kind::Div);
-        fill_from(&lua, &mut node, &table, None, crate::DesignLint::Off).unwrap();
-        let props: Vec<_> = node.props.iter().map(|(prop, _)| prop.name()).collect();
+        let filled = |kind| {
+            let mut node = Node::new(Default::default(), kind);
+            fill_from(&lua, &mut node, &table, None, crate::DesignLint::Off).unwrap();
+            let mut props: Vec<_> = node.props.iter().map(|(prop, _)| prop.name()).collect();
+            props.sort();
+            props
+        };
+        assert_eq!(filled(Kind::Div), ["size", "w"], "size is a box's");
         assert_eq!(
-            props,
+            filled(Kind::Button),
             ["w"],
-            "size is the constructor's, not a style property"
+            "size is no style property on anything else"
         );
     }
 

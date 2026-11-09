@@ -1066,7 +1066,7 @@ return ui.div {
 			function()
 				return count:get() .. " tasks · the floor is lava"
 			end,
-			size = 13,
+			text_size = 13,
 			color = "#8e8a90",
 			mt = 4,
 		},

@@ -678,3 +678,37 @@ fn a_chosen_item_flashes_first_where_menus_do() {
         assert_eq!(*spawned.borrow(), 1, "a flash");
     }
 }
+
+/// On Linux a menu's panel casts libadwaita's popover shadow (a faint
+/// outline and two soft layers); elsewhere none of zgx's own.
+#[cfg(not(windows))]
+#[test]
+fn a_menus_panel_casts_gnomes_shadow_on_linux() {
+    use zgx::scene::NodeKind;
+    let mut ui = Ui::new(500., 400.);
+    let open = ui.signal(true);
+    let view = ui.mount(
+        column().p(20.).child(
+            menu("Edit", open, button().id("anchor").size(80., 28.))
+                .id("panel")
+                .child(menu_item("Cut")),
+        ),
+    );
+    ui.prepare_frame();
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    let NodeKind::Panel { quad, .. } = scene.kind(view.find("panel").unwrap()) else {
+        panic!("a panel");
+    };
+    let shadows = quad.shadows();
+    if cfg!(target_os = "linux") {
+        assert_eq!(shadows.len(), 3);
+        assert_eq!(
+            (shadows[0].spread, shadows[0].blur_radius),
+            (1., 0.),
+            "its outline"
+        );
+    } else {
+        assert!(shadows.is_empty());
+    }
+}

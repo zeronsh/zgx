@@ -100,6 +100,17 @@ impl SurfaceCache {
         self.retired.retain(|(epoch, _)| *epoch > completed);
         self.cache.flush(0);
     }
+    /// Lets go of what's retired, as a window goes idle: no frame may come to
+    /// (`retain`), and the GPU has little left to finish. The flush comes after
+    /// wgpu's textures have really gone (a poll): the cache holds a surface
+    /// for as long as a texture of it, past the flush that found one alive.
+    pub fn rest(&mut self) {
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        let completed = self.completed.load(Ordering::Acquire);
+        self.retired.retain(|(epoch, _)| *epoch > completed);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        self.cache.flush(0);
+    }
     pub fn contains(&self, id: u64) -> bool {
         self.entries.contains_key(&id)
     }

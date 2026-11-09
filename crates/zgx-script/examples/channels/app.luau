@@ -114,7 +114,7 @@ return ui.overlay {
 			justify = "center",
 			items = "center",
 			pointer_events = false,
-			ui.text { "Drop files to upload", size = 18, weight = 600 },
+			ui.text { "Drop files to upload", text_size = 18, weight = 600 },
 		}
 	),
 }

@@ -362,6 +362,17 @@ fn style_with(
         align_self: options.align_self.map(align),
         align_content: options.align_content.map(content),
         justify_content: Some(match style.justify {
+            // In a grid `stretch` is CSS's own: free width goes to the `auto`
+            // tracks. Not an explicit grid made from an overlay, where it is
+            // only the default `overlay()` sets, nor the leaf a child is in
+            // its parent's tree.
+            Justify::Stretch
+                if !leaf
+                    && layout != Layout::Overlay
+                    && options.display == Some(ViewDisplay::Grid) =>
+            {
+                t::JustifyContent::Stretch
+            }
             // As CSS's `justify-content: stretch` acts in flexbox.
             Justify::Start | Justify::Stretch => t::JustifyContent::Start,
             Justify::End => t::JustifyContent::End,
@@ -804,37 +815,48 @@ impl Scene {
             mapped.grid_row = grid_lines(row);
         }
     }
-    pub(super) fn uses_advanced_layout(&self, id: NodeId) -> bool {
-        // By reference: most nodes have no options, and a copy is ~170 bytes.
-        let node = self.node(id);
-        let own = node.style.layout_options.as_deref().is_some_and(|options| {
+    /// Whether `node`'s own options have it laid out by taffy.
+    #[inline(always)]
+    pub(super) fn own_options_take_advanced_layout(node: &Node) -> bool {
+        node.style.layout_options.as_deref().is_some_and(|options| {
             matches!(options.display, Some(ViewDisplay::Grid | ViewDisplay::None))
                 || options.wrap.is_some()
                 || options.reverse == Some(true)
                 || options.gap_x.is_some()
                 || options.gap_y.is_some()
                 || options.align_content.is_some()
-        });
-        own || node.style.align == Align::Baseline
-            || self.children_raw(node).iter().any(|child| {
-                // A live node's child.
-                self.tree_node(*child)
-                    .style
-                    .layout_options
-                    .as_deref()
-                    .is_some_and(|options| {
-                        let mut options = *options;
-                        options.visible = None;
-                        options.clip_x = None;
-                        options.clip_y = None;
-                        // Its own alignment across: laid out here too, but
-                        // for a baseline.
-                        if options.align_self != Some(Align::Baseline) {
-                            options.align_self = None;
-                        }
-                        !options.is_empty()
-                    })
+        })
+    }
+    /// Whether `child`'s options have its parent laid out by taffy.
+    #[inline(always)]
+    pub(super) fn child_takes_advanced_layout(&self, child: NodeId) -> bool {
+        // A live node's child.
+        self.tree_node(child)
+            .style
+            .layout_options
+            .as_deref()
+            .is_some_and(|options| {
+                let mut options = *options;
+                options.visible = None;
+                options.clip_x = None;
+                options.clip_y = None;
+                // Its own alignment across: laid out here too, but
+                // for a baseline.
+                if options.align_self != Some(Align::Baseline) {
+                    options.align_self = None;
+                }
+                !options.is_empty()
             })
+    }
+    pub(super) fn uses_advanced_layout(&self, id: NodeId) -> bool {
+        // By reference: most nodes have no options, and a copy is ~170 bytes.
+        let node = self.node(id);
+        Self::own_options_take_advanced_layout(node)
+            || node.style.align == Align::Baseline
+            || self
+                .children_raw(node)
+                .iter()
+                .any(|child| self.child_takes_advanced_layout(*child))
     }
     /// Whether `id` lays its children out in its place, its special bit
     /// asked first: most children have none.
