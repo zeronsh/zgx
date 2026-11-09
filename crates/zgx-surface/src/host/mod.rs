@@ -276,7 +276,8 @@ impl App {
             awaiting: Arc::default(),
             polling: RefCell::default(),
             resize: RefCell::default(),
-            visible: Cell::new(None),
+            // A client takes its surface as shown until told otherwise.
+            visible: Cell::new(Some(true)),
             exited,
             closed: Cell::new(false),
         });
@@ -405,21 +406,26 @@ impl App {
     /// The element showing it mounted.
     fn mounted(&self, handle: NodeHandle) {
         *self.0.bounds.borrow_mut() = handle.observe_bounds();
-        let visible = handle.observe_visibility();
-        let shown = handle.observe_shown();
         *self.0.node.borrow_mut() = Some(handle.clone());
-        let weak = Rc::downgrade(&self.0);
-        let effect: Effect = self.0.runtime.effect(move || {
-            let on =
-                visible.as_ref().is_none_or(Signal::get) && shown.as_ref().is_none_or(Signal::get);
-            if let Some(app) = weak.upgrade() {
-                app.set_visible(on);
-            }
-        });
-        handle.retain(Mounted {
-            app: Rc::downgrade(&self.0),
-            node: handle.node(),
-            _effect: effect,
+        let (app, held) = (Rc::downgrade(&self.0), handle.clone());
+        // Whether it shows, once laid out (before, it shows nowhere yet).
+        handle.after_layout(move || {
+            let visible = held.observe_visibility();
+            let shown = held.observe_shown();
+            let Some(inner) = app.upgrade() else { return };
+            let weak = app.clone();
+            let effect: Effect = inner.runtime.effect(move || {
+                let on = visible.as_ref().is_none_or(Signal::get)
+                    && shown.as_ref().is_none_or(Signal::get);
+                if let Some(app) = weak.upgrade() {
+                    app.set_visible(on);
+                }
+            });
+            held.retain(Mounted {
+                app,
+                node: held.node(),
+                _effect: effect,
+            });
         });
     }
 
@@ -441,9 +447,6 @@ impl App {
             }
             InputEvent::PointerDown { x, y, button } | InputEvent::PointerUp { x, y, button } => {
                 let down = matches!(input, InputEvent::PointerDown { .. });
-                if down && let Some(node) = self.0.node.borrow().as_ref() {
-                    node.focus();
-                }
                 let (x, y) = at(*x, *y);
                 HostMessage::Button {
                     button: button_of(*button),

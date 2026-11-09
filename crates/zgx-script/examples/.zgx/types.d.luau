@@ -1486,6 +1486,35 @@ declare extern type Term with
 	-- End the session (its process is hung up).
 	function close(self): ()
 end
+-- `ui.app(id, opts)`: a program started (no shell) with an external
+-- surface's connection, shown by `ui.surface { app = a }`. Sessions outlive
+-- reloads: the run that asks for `id` again gets the same one. A plugin's
+-- ids are its own; it needs the `apps` grant. Its fields are tracked.
+declare extern type App with
+	id: string
+	-- "starting" until it connects, then "running"; "exited" or "failed".
+	status: "starting" | "running" | "exited" | "failed"
+	-- What the program set as its title; "" until it does.
+	title: string
+	pid: number?
+	-- Its exit code once it exited (nil if a signal ended it).
+	exit_code: number?
+	-- Why it couldn't start, with "failed".
+	error: string?
+	-- End the session: the program is told to close, and killed if it
+	-- hasn't exited a moment later.
+	function close(self): ()
+end
+export type AppOptions = {
+	-- The program: a path, or a name looked up on PATH. No shell.
+	command: string,
+	args: { string }?,
+	-- Where it starts ("~" is home); nil is the app's own directory.
+	cwd: string?,
+	env: { [string]: string }?,
+	-- Its exit code (nil if a signal ended it); the latest run's is called.
+	on_exit: ((code: number?) -> ...unknown)?,
+}
 export type TermOptions = {
 	-- A command line; nil runs the login shell.
 	command: string?,
@@ -19856,6 +19885,420 @@ export type TerminalProps = {
 	[number]: never,
 	term: Term,
 }
+-- `app`'s frames, its input forwarded while focused (keys) or under the
+-- pointer; it may lock the pointer just after a press.
+export type SurfaceProps = {
+	-- Size and position.
+	w: Props_w,
+	h: Props_h,
+	size: Props_size,
+	min_w: Props_min_w,
+	max_w: Props_max_w,
+	min_h: Props_min_h,
+	max_h: Props_max_h,
+	w_full: Props_w_full,
+	h_full: Props_h_full,
+	aspect: Props_aspect,
+	absolute: Props_absolute,
+	relative: Props_relative,
+	top: Props_top,
+	left: Props_left,
+	inset_start: Props_inset_start,
+	inset_end: Props_inset_end,
+	right: Props_right,
+	bottom: Props_bottom,
+	-- Spacing.
+	p: Props_p,
+	px: Props_px,
+	py: Props_py,
+	pt: Props_pt,
+	pr: Props_pr,
+	pb: Props_pb,
+	pl: Props_pl,
+	ps: Props_ps,
+	pe: Props_pe,
+	m: Props_m,
+	mx: Props_mx,
+	my: Props_my,
+	mt: Props_mt,
+	mr: Props_mr,
+	mb: Props_mb,
+	ml: Props_ml,
+	ms: Props_ms,
+	me: Props_me,
+	gap: Props_gap,
+	gap_x: Props_gap_x,
+	gap_y: Props_gap_y,
+	-- Flex and grid.
+	direction: Props_direction,
+	dir: Props_dir,
+	grow: Props_grow,
+	shrink: Props_shrink,
+	basis: Props_basis,
+	flex_wrap: Props_flex_wrap,
+	wrap_reverse: Props_wrap_reverse,
+	items: Props_items,
+	justify: Props_justify,
+	self: Props_self,
+	content: Props_content,
+	grid: Props_grid,
+	display: Props_display,
+	cols: Props_cols,
+	rows: Props_rows,
+	areas: Props_areas,
+	flow: Props_flow,
+	area: Props_area,
+	grid_column: Props_grid_column,
+	grid_row: Props_grid_row,
+	col_start: Props_col_start,
+	row_start: Props_row_start,
+	col_span: Props_col_span,
+	row_span: Props_row_span,
+	col_span_full: Props_col_span_full,
+	row_span_full: Props_row_span_full,
+	overflow: Props_overflow,
+	overflow_x: Props_overflow_x,
+	overflow_y: Props_overflow_y,
+	z: Props_z,
+	-- Inside a scroll view, hold this far below its top as it scrolls past,
+	-- inside the parent (CSS's `position: sticky` with `top`).
+	sticky_top: Props_sticky_top,
+	hidden: Props_hidden,
+	invisible: Props_invisible,
+	-- Paint.
+	bg: Props_bg,
+	gradient: Props_gradient,
+	radial: Props_radial,
+	mask_gradient: Props_mask_gradient,
+	mask_radial: Props_mask_radial,
+	text_gradient: Props_text_gradient,
+	text_radial: Props_text_radial,
+	color: Props_color,
+	bg_image: Props_bg_image,
+	bg_fit: Props_bg_fit,
+	rounded: Props_rounded,
+	corners: Props_corners,
+	rounded_tl: Props_rounded_tl,
+	rounded_tr: Props_rounded_tr,
+	rounded_br: Props_rounded_br,
+	rounded_bl: Props_rounded_bl,
+	border: Props_border,
+	border_sides: Props_border_sides,
+	border_color: Props_border_color,
+	border_over: Props_border_over,
+	-- A function may return nil: a solid border.
+	border_dash: Props_border_dash,
+	border_style: Props_border_style,
+	outline: Props_outline,
+	outline_color: Props_outline_color,
+	outline_offset: Props_outline_offset,
+	outline_style: Props_outline_style,
+	outline_dash: Props_outline_dash,
+	shadow: Props_shadow,
+	text_shadow: Props_text_shadow,
+	drop_shadow: Props_drop_shadow,
+	inset_shadow: Props_inset_shadow,
+	opacity: Props_opacity,
+	brightness: Props_brightness,
+	contrast: Props_contrast,
+	saturate: Props_saturate,
+	hue_rotate: Props_hue_rotate,
+	sepia: Props_sepia,
+	invert: Props_invert,
+	blend: Props_blend,
+	blur: Props_blur,
+	backdrop_blur: Props_backdrop_blur,
+	fade: Props_fade,
+	fade_x: Props_fade_x,
+	fade_sides: Props_fade_sides,
+	fade_overflow: Props_fade_overflow,
+	snap: Props_snap,
+	zoom: Props_zoom,
+	zoom_fixed: Props_zoom_fixed,
+	clip_inset: Props_clip_inset,
+	clip_feather: Props_clip_feather,
+	layer: Props_layer,
+	object_position: Props_object_position,
+	fit: Props_fit,
+	image_rendering: Props_image_rendering,
+	slice: Props_slice,
+	tint: Props_tint,
+	decode: Props_decode,
+	dither: Props_dither,
+	characters: Props_characters,
+	cursor: Props_cursor,
+	-- Text.
+	text_size: Props_text_size,
+	weight: Props_weight,
+	bold: Props_bold,
+	italic: Props_italic,
+	align: Props_align,
+	font: Props_font,
+	wrap: Props_wrap,
+	truncate: Props_truncate,
+	lines: Props_lines,
+	line_height: Props_line_height,
+	letter_spacing: Props_letter_spacing,
+	-- Tabular figures: every digit the same width.
+	tabular: Props_tabular,
+	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
+	-- a tag on, or `tag=value` (0 off). Replaces `tabular`: give "tnum" here too.
+	font_features: Props_font_features,
+	-- Underlined text (inherited, as CSS's `text-decoration`), and how far
+	-- below the baseline the line sits.
+	underline: Props_underline,
+	underline_offset: Props_underline_offset,
+	-- The language its text is in (HTML's `lang`, a BCP 47 tag: "ja",
+	-- "zh-TW"), inherited: Han characters take its fonts (a Chinese quote's
+	-- in a Japanese app), over the app's locale and a line's kana, and
+	-- assistive technology reads it in that language.
+	lang: Props_lang,
+	-- Its rounded box, where it is each frame, read by layer shaders asking
+	-- for this tag (`ui.layer_shader(src, { geometry = "tag" })`).
+	geometry: Props_geometry,
+	-- Transforms: after layout, about `origin` (fractions of the node).
+	x: Props_x,
+	y: Props_y,
+	scale: Props_scale,
+	scale_x: Props_scale_x,
+	scale_y: Props_scale_y,
+	rotate: Props_rotate,
+	skew: Props_skew,
+	skew_x: Props_skew_x,
+	skew_y: Props_skew_y,
+	rotate_x: Props_rotate_x,
+	rotate_y: Props_rotate_y,
+	perspective: Props_perspective,
+	origin: Props_origin,
+	-- The subtree's theme: a theme's name (`"zgx-light"`), or tokens to
+	-- override (`{ accent = "#e5484d" }`, with `theme = name` to start from).
+	theme: Props_theme,
+	-- Values the components and rows built in this subtree read with
+	-- `ui.use_context(name)`, as React's context gives them: a state, a
+	-- table, a function. Nearer ones win.
+	provide: Props_provide,
+	-- Identity, for selectors, refs and animations.
+	id: Props_id,
+	-- Space-separated class names.
+	class: Props_class,
+	-- Styles chosen from a `ui.variants` definition: `button { tone =
+	-- "ghost" }`, or the recipe itself for its defaults. The element's own
+	-- properties win over them.
+	variants: Props_variants,
+	ref: Props_ref,
+	focusable: Props_focusable,
+	-- While focus is in it, every key goes to what is focused: no shortcut
+	-- or menu item takes one (a field recording a shortcut). As focus
+	-- leaves, shortcuts work again.
+	capture_keys: Props_capture_keys,
+	-- What assistive technology takes it for (ARIA's `role`), instead of
+	-- what it is: a clickable row as an "option", a row of buttons as a
+	-- "toolbar". It keeps what it does.
+	role: Props_role,
+	-- A section title of this level, 1 to 6 (`h1`…`h6`): screen readers
+	-- list headings and move between them.
+	heading: Props_heading,
+	-- Whether this option, tab or item is the chosen one (`aria-selected`).
+	selected: Props_selected,
+	-- Whether a switch, checkbox or radio of the app's own is on
+	-- (`aria-checked`), and whether what a control opens shows
+	-- (`aria-expanded`): a custom disclosure's.
+	checked: Props_checked,
+	expanded: Props_expanded,
+	-- Announce changes to the text in it (`aria-live`): a count, a "Sent"
+	-- note, a message arriving.
+	live: Props_live,
+	-- Read after its name, as a hint (`aria-description`); a state or a
+	-- function follows what it says (a sheet grabber's "expand" or "collapse").
+	description: Props_description,
+	-- What it reads as besides its name (`aria-valuetext`): a slider's value
+	-- in words, or any element's, as a Settings row's detail.
+	value_text: Props_value_text,
+	-- What is wrong with its value (`aria-invalid`), followed: nil while it
+	-- is fine. Assistive technology hears it with the field.
+	error: Props_error,
+	-- Left out of the accessibility tree with what it holds (`aria-hidden`):
+	-- decoration, or what is said elsewhere.
+	aria_hidden: Props_aria_hidden,
+	-- While it shows, assistive technology reads it alone, not what lies behind
+	-- it (aria-modal): a sheet or dialog the app builds itself.
+	aria_modal: Props_aria_modal,
+	-- One Tab stop for the focusable things inside; the arrows along this
+	-- axis (and Home, End) move among them, as ARIA's composite widgets
+	-- behave. `role = "listbox"` is vertical, "toolbar" and "tablist"
+	-- horizontal, without asking.
+	focus_group: Props_focus_group,
+	-- A press on it (or on what inside takes no input) moves the window; a
+	-- double click zooms it. Buttons and inputs inside keep their clicks.
+	-- CSS pointer-events: "none" (or false) lets the pointer through to what
+	-- is under the node (presses, hover, the wheel, drops, a native view);
+	-- descendants with handlers still take it. A state or function follows.
+	pointer_events: Props_pointer_events,
+	-- "target": while `x`, `y`, `scale`, `rotate` or `opacity` animate
+	-- (`ui.tween`, `ui.spring`, `anime`) or a layout animation moves it, it and what
+	-- it holds take clicks and hover where they're going, not where they
+	-- show. "shown" (the default) hits where it shows.
+	hit: Props_hit,
+	window_drag: Props_window_drag,
+	-- A hook plugins target (`ui.contribute { target = "hook:name" }`):
+	-- a stable point the app declares. `false` keeps every plugin off the
+	-- element (a password field, a destructive confirm), as `private` does.
+	hook: Props_hook,
+	private: Props_private,
+	-- The pointer selects the text in it and everything it holds, as on a
+	-- web page (CSS `user-select: text`): drag, double/triple press, Shift,
+	-- ⌘A / Ctrl+A, ⌘C / Ctrl+C. `false` keeps a part out. Off unless set.
+	selectable: Props_selectable,
+	-- A selectable node's highlight and selected-text colours (CSS
+	-- `::selection`), over the theme's `$selection` and `$selection.text`
+	-- tokens; a state or function follows.
+	selection_color: Props_selection_color,
+	selected_text_color: Props_selected_text_color,
+	selection_radius: Props_selection_radius,
+	-- Shown over it while the pointer rests on it (after 300 ms; at once
+	-- within a second of another): text in the theme's look, or a node of
+	-- the app's own. Above it, centred, unless `tooltip_placement` says.
+	tooltip: Props_tooltip,
+	tooltip_placement: Props_tooltip_placement,
+	-- A hover card the pointer can move into and click in: it stays while
+	-- the pointer is over the node or the card.
+	tooltip_interactive: Props_tooltip_interactive,
+	-- Milliseconds the pointer rests before it shows (300; once one
+	-- shows, the next shows at once). Keyboard focus shows it too.
+	tooltip_delay: Props_tooltip_delay,
+	-- A condition (true disables), or the styles it shows while disabled.
+	disabled: Props_disabled,
+	hover: Props_hover,
+	active: Props_active,
+	focus: Props_focus,
+	-- Its descendants' `queries` read its size, as CSS's `container-type`.
+	-- Its content doesn't size its width: give it one, a percentage or
+	-- `grow`, or let its parent stretch it.
+	container: Props_container,
+	-- Styles while the container above is within bounds, as CSS
+	-- `@container` rules, in order (the last that holds wins): `{ {
+	-- min_width = 900, style = { hidden = false } } }`. They follow its size
+	-- as layout changes it, in that frame, without running the script.
+	queries: Props_queries,
+	-- Size animation ("height", "width", "size"; `true` is "height") or
+	-- position animation ("position"). A `layout_id` node mounting as
+	-- another with the same id unmounts (or while it is mounted) moves and
+	-- scales from that one's box.
+	layout: Props_layout,
+	layout_id: Props_layout_id,
+	layout_ease: Props_layout_ease,
+	-- Milliseconds.
+	layout_duration: Props_layout_duration,
+	layout_enter: Props_layout_enter,
+	layout_clip: Props_layout_clip,
+	-- The content shows through the bitmap's alpha: `mask = bitmap`, or
+	-- `{ bitmap, w = …, h = …, x = …, y = …, sweep = … }`.
+	mask: Props_mask,
+	bg_shader: Props_bg_shader,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	shader_params: Props_shader_params,
+	-- The subtree, cached as a layer, composites through it: each pixel of
+	-- the box passes through its `layer` function.
+	layer_shader: Props_layer_shader,
+	-- Up to four vec4s: lists of numbers, or colors (0 to 1).
+	layer_params: Props_layer_params,
+	-- How many points past the box the layer shader paints (a glow, a ripple): cut by the clips around the node, not its own.
+	layer_bleed: Props_layer_bleed,
+	-- How many points past the box and bleed its `zgx_backdrop(p)` reads.
+	layer_reach: Props_layer_reach,
+	-- The engine steps the layer shader's time on the frame clock while the node shows and it's not reduced motion: no script per step.
+	layer_clock: Props_layer_clock,
+	-- The same for a `bg_shader`'s time.
+	shader_clock: Props_shader_clock,
+	-- While false: no layer shader, no layer, no clock.
+	layer_on: Props_layer_on,
+	-- Events.
+	on_click: Props_on_click,
+	-- Primary pointer down and up.
+	on_press: Props_on_press,
+	on_release: Props_on_release,
+	-- The middle (or another extra) button pressed and released on it: a
+	-- browser tab closes on it, a link opens in the background.
+	on_aux_click: Props_on_aux_click,
+	-- The primary button clicked twice on one spot, as the DOM's `dblclick`.
+	on_double_click: Props_on_double_click,
+	-- Back or forward on the platform's gesture over it (a trackpad's swipe
+	-- between pages, where nothing under the fingers scrolls that way).
+	on_navigate: Props_on_navigate,
+	-- Files dropped on it from outside the window (Finder, Explorer): the
+	-- innermost node with one takes them.
+	on_file_drop: Props_on_file_drop,
+	-- Files dragged from outside the window come over it (true), then
+	-- leave, are dropped or the drag ends (false).
+	on_file_hover: Props_on_file_hover,
+	on_hover: Props_on_hover,
+	on_pointer_move: Props_on_pointer_move,
+	-- It took the pointer's lock (`el:lock_pointer()`: true) or lost it
+	-- (false): let go, Escape, the window losing focus, or another took it.
+	on_pointer_lock: Props_on_pointer_lock,
+	-- Return true to consume the key.
+	on_key: Props_on_key,
+	on_key_up: Props_on_key_up,
+	on_focus: Props_on_focus,
+	on_blur: Props_on_blur,
+	-- Return true to take the gesture from the scroll views around it.
+	on_wheel: Props_on_wheel,
+	on_pinch: Props_on_pinch,
+	-- Its zoom, bound to this state: Control-wheel or a pinch over it zooms it (0.25 to 5).
+	zoomable: Props_zoomable,
+	on_mount: Props_on_mount,
+	-- When layout gives it a new size, and at its first layout.
+	on_resize: Props_on_resize,
+	-- When any of it comes into view or all of it leaves (inside every
+	-- clip and scroll viewport above it), and at its first layout: for
+	-- building what only matters on screen.
+	on_visible: Props_on_visible,
+	-- Drag and drop within the window. Payloads are what `on_drag`
+	-- returns: the script's own plain values, so they are `any` here.
+	-- A source: `on_drag` returns the payload once the pointer moves 4
+	-- points; `drag_preview` builds what follows the pointer.
+	on_drag: Props_on_drag,
+	drag_preview: Props_drag_preview,
+	-- Where the preview goes: its point `drag_preview_anchor` (fractions
+	-- of its size, `{ 0.5, 0 }` its top middle) `drag_preview_offset`
+	-- points from the pointer. `{ 0.5, 0 }` and `{ 0, 16 }` hang it below
+	-- the pointer, leaving what the drag is over in view; without either,
+	-- it keeps the grab point under the pointer.
+	drag_preview_anchor: Props_drag_preview_anchor,
+	drag_preview_offset: Props_drag_preview_offset,
+	on_drag_end: Props_on_drag_end,
+	-- What the drag carries to other apps as it leaves the window (macOS):
+	-- Finder takes files, Mail text, a browser links.
+	drag_export: Props_drag_export,
+	-- Released outside every window of the app (macOS): a tab torn off its
+	-- window. `grab_x`/`grab_y` are where the source was held.
+	on_drag_outside: Props_on_drag_outside,
+	-- The drag moves its window instead, with no preview (macOS): a
+	-- window's only tab. Dropped on another window's destination it drops
+	-- there; elsewhere the window stays where it was let go.
+	drag_moves_window: Props_drag_moves_window,
+	-- A destination: `drop_when` filters payloads (default: all).
+	drop_when: Props_drop_when,
+	on_drag_over: Props_on_drag_over,
+	on_drag_leave: Props_on_drag_leave,
+	on_drop: Props_on_drop,
+	-- Spring-loading: an accepted drag has rested on it for the system's
+	-- delay (0.5 s by default), or Space was pressed. Open what it stands
+	-- for (show a tab); return `false` to decline. Once per stay.
+	on_drag_spring: Props_on_drag_spring,
+	-- A secondary click (control-click on macOS) shows the returned
+	-- `menu_item`s, `submenu`s and separators as a menu at the pointer;
+	-- returning nil (or nothing) shows none.
+	context_menu: Props_context_menu,
+	-- The context menu panel's look: bg, rounded, p, gap, backdrop_blur,
+	-- border, shadow, w, …
+	context_menu_style: Props_context_menu_style,
+	-- Open the context menu under the node, from its left edge (a tab's),
+	-- rather than at the pointer.
+	context_menu_below: Props_context_menu_below,
+	[number]: never,
+	app: App,
+}
 -- `from`: only what that plugin (by name) contributes.
 export type SlotProps = {
 	-- Size and position.
@@ -21304,6 +21747,10 @@ declare ui: {
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
+	-- The session for `id`, started with `opts` the first time (or again
+	-- once it ended); without options only looked up (nil if none).
+	app: ((id: string, opts: AppOptions) -> App) & ((id: string) -> App?),
+	surface: (props: SurfaceProps) -> Node,
 	command: (opts: CommandOptions) -> (),
 	-- Keys ("cmd+shift+z") as this platform shows them: "⇧⌘Z" on macOS,
 	-- "Ctrl+Shift+Z" elsewhere (`cmd` is Command on macOS, Control

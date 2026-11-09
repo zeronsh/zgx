@@ -790,6 +790,8 @@ impl Node {
             Kind::Scene3d(_) => "scene3d",
             Kind::WebView(_) => "webview",
             Kind::Terminal(_) => "terminal",
+            #[cfg(feature = "apps")]
+            Kind::Surface(_) => "surface",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
             Kind::Progress { .. } => "progress",
@@ -1123,6 +1125,10 @@ pub(crate) enum Kind {
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
     /// where the node is.
     Terminal(zgx::terminal::Terminal),
+    /// `ui.surface { app = ui.app(id, …) }`: a program's frames, its input
+    /// forwarded.
+    #[cfg(feature = "apps")]
+    Surface(zgx_surface::host::App),
     Checkbox {
         label: String,
         value: Signal<Value>,

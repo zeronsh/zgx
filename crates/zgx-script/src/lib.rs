@@ -27,6 +27,8 @@
 mod actions;
 mod anim;
 mod anime;
+mod apps;
+pub use apps::AppLaunch;
 pub mod app_config;
 pub mod app_types;
 mod bundle;
@@ -976,6 +978,10 @@ pub enum Capability {
     Folders,
     /// `ui.term`: terminal sessions, to read and to type into.
     Terminals,
+    /// `ui.app` and `ui.surface`: programs started (no shell) and shown,
+    /// their input forwarded. Each start is also asked of the host's
+    /// vetting hook (`ScriptHost::vet_apps`), if it set one.
+    Apps,
     /// `ui.web` and `ui.webview`: web pages.
     Web,
     /// `ui.window`: windows of its own, which could pose as the app's or
@@ -1710,6 +1716,8 @@ struct Inner {
     decisions: Rc<lower::Decisions>,
     /// Terminal sessions (`ui.term`): they outlive reloads.
     terms: Rc<term::Terms>,
+    /// Programs started and shown (`ui.app`): they outlive reloads too.
+    apps: Rc<apps::Apps>,
     /// Web pages by id (`ui.web(id)`): they outlive reloads too.
     webs: Rc<node::Webs>,
     /// App commands (`ui.command`) the last successful load declared.
@@ -1894,6 +1902,7 @@ impl ScriptHost {
             overrides: RefCell::default(),
             decisions: Rc::new(lower::Decisions::new(runtime)),
             terms: Rc::default(),
+            apps: Rc::default(),
             webs: Rc::default(),
             commands: Rc::new(command::Commands::new(runtime)),
             windows: Rc::new(windows::Windows::new(runtime)),
@@ -2437,6 +2446,9 @@ impl ScriptHost {
     /// once they have). Plugins read from the disk, a bundled app's too. A
     /// plugin that fails to load is left out and its error reported.
     pub fn set_plugins(&self, plugins: Vec<Plugin>) {
+        // A plugin removed ends the programs it started (`ui.app`).
+        let kept: Vec<String> = plugins.iter().map(|p| p.name.clone()).collect();
+        self.0.apps.keep_plugins(&kept);
         let mut grants = self.0.grants.borrow_mut();
         let mut managed = self.0.managed.borrow_mut();
         for old in managed.drain(..) {
@@ -2479,6 +2491,13 @@ impl ScriptHost {
         let key = key.into();
         self.0.read_only_shared.borrow_mut().insert(key.clone());
         self.0.exposed_shared.borrow_mut().insert(key, capability);
+    }
+    /// Asks `vet` before any script starts a program (`ui.app`), the app's
+    /// own and every plugin's (`AppLaunch::plugin` names it): an `Err`
+    /// stops it, its text the script's error, and nothing starts. A plugin
+    /// also needs `Capability::Apps`. The last one set applies, at once.
+    pub fn vet_apps(&self, vet: impl Fn(&AppLaunch) -> Result<(), String> + 'static) {
+        self.0.apps.set_vet(Rc::new(vet));
     }
     /// Keep names under `prefix` (`"zeron"`: `zeron` and `zeron.…`) for the
     /// app's own scripts: a plugin may neither offer a `ui.slot` so named nor
@@ -3594,6 +3613,7 @@ impl ScriptHost {
         let engine = self.0.engine.clone();
         let persist = self.0.persist.clone();
         let timers = self.0.timers.clone();
+        let apps = self.0.apps.clone();
         let host = self.clone();
         // A host with rules is asked of the links in its view.
         let links = rules::of(&self.0).map(|rules| rules::link_guard(rules, self.0.error.clone()));
@@ -3603,9 +3623,10 @@ impl ScriptHost {
                 cx.tasks().spawn(engine.run((*frames).clone()));
             }
             // `ui.persist` saves on a timer from here, and `ui.every` runs.
-            if cx.try_service::<zgx::compose::TaskRunner>().is_some() {
+            if let Some(runner) = cx.try_service::<zgx::compose::TaskRunner>() {
                 persist.set_tasks(cx.tasks());
                 timers.set_tasks(cx.tasks());
+                apps.set_runner(&runner);
             }
             // The clipboard and file dialogs, from the window.
             if let Some(platform) = cx.try_service::<zgx::platform::PlatformService>() {
@@ -4237,6 +4258,10 @@ impl ScriptHost {
         lazy.ui(&["json", "number", "sort"], data::install);
         let terms = self.0.terms.clone();
         lazy.ui(&["term"], move |lua, ui| term::install(lua, ui, terms));
+        let apps = self.0.apps.clone();
+        lazy.ui(&["app", "surface"], move |lua, ui| {
+            apps::install(lua, ui, apps)
+        });
         let webs = self.0.webs.clone();
         lazy.ui(&["web"], move |lua, ui| node::install_web(lua, ui, webs));
         let commands = self.0.commands.clone();

@@ -39,6 +39,11 @@ svg = ["zgx-gpu/svg"]
 png = ["zgx-gpu/png"]
 jpeg = ["zgx-gpu/jpeg"]
 gif = ["zgx-gpu/gif"]
+# `ui.app` and `ui.surface`: programs started and shown in the window,
+# their frames shared on the GPU where the platform allows (zgx-surface's
+# host). Off by default: a host decides whether its scripts start programs.
+# zgx-run turns it on.
+apps = ["dep:zgx-surface"]
 # Windows: Vulkan where Direct3D 12 has no adapter (see zgx-gpu).
 vulkan = ["zgx-gpu/vulkan"]
 # Devtools for agents (`zgx_script::inspect`): a running app answers
@@ -53,6 +58,7 @@ zgx-components = { path = "../zgx-components", version = "0.1.10", optional = tr
 zgx-3d = { path = "../zgx-3d", version = "0.1.10", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
+zgx-surface = { path = "../zgx-surface", version = "0.1.10", optional = true, features = ["host"] }
 mlua = { package = "zgx-mlua", version = "0.12.7", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
 # `.luaurc` aliases for `require("@alias/...")`.
