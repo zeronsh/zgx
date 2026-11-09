@@ -13982,14 +13982,21 @@ impl Scene {
     pub fn has_backdrop_blur(&self) -> bool {
         !self.blur_nodes.is_empty() || !self.backdrop_readers().is_empty()
     }
-    /// Whether a backdrop filter or a shader reading the backdrop lies in
-    /// `id`'s subtree. Renderer plumbing, not a stable API.
+    /// Whether something in `id`'s subtree draws from outside it, which a
+    /// copy of its pixels can't carry: a backdrop filter, or a layer shader
+    /// reading the backdrop or where it is in the window, or running on as
+    /// frames draw. Renderer plumbing, not a stable API.
     #[doc(hidden)]
-    pub fn backdrop_read_within(&self, id: NodeId) -> bool {
-        self.blur_nodes
-            .iter()
-            .chain(self.backdrop_readers())
-            .any(|node| self.is_within(*node, id))
+    pub fn reads_window_within(&self, id: NodeId) -> bool {
+        self.blur_nodes.iter().any(|node| self.is_within(*node, id))
+            || self.layer_shaders.iter().any(|(node, layer)| {
+                layer.shader.as_ref().is_some_and(|shader| {
+                    shader.reads_backdrop() || shader.reads_window() || shader.runs_each_frame()
+                })
+                // (Killed nodes keep theirs until they are freed.)
+                && self.contains(*node)
+                && self.is_within(*node, id)
+            })
     }
     /// Each backdrop filter that shows, as far as it can reach: its box in
     /// the window (around its transformed corners under a transform), left
@@ -15123,6 +15130,27 @@ mod tests {
             plain[3][0] > 4 * plain[0][0],
             "filtering every child, inks asked a chunk at {sizes:?} blocks: {plain:?}"
         );
+    }
+    #[test]
+    fn a_killed_nodes_shader_reads_nothing() {
+        let mut scene = Scene::new(100., 100.);
+        let root = scene.root();
+        let holder = scene.append(root, NodeKind::Container(Layout::Overlay), Style::default());
+        let shaded = scene.append(
+            holder,
+            NodeKind::Container(Layout::Overlay),
+            Style::default(),
+        );
+        scene.set_layer_shader(
+            shaded,
+            Some(crate::decoration::FillShader::new(
+                "fn layer(input: LayerInput) -> vec4<f32> { return vec4(zgx_window(input.p), 0., 1.); }",
+                None,
+            )),
+        );
+        assert!(scene.reads_window_within(holder));
+        scene.kill(shaded);
+        assert!(!scene.reads_window_within(holder));
     }
     /// A block appended to a column that grows where it stands (a streamed
     /// reply's, inside another) damages its own box alone: neither column

@@ -102,6 +102,11 @@ pub struct FillShader {
     /// Whether its source calls `zgx_backdrop` (a layer shader's read of
     /// what lies behind it: `Scene::set_layer_shader`).
     reads_backdrop: bool,
+    /// Whether what it draws depends on where things are in the window
+    /// (`FillShader::reads_window`).
+    reads_window: bool,
+    /// Whether its inputs change as frames draw (`FillShader::runs_each_frame`).
+    runs_each_frame: bool,
     /// What a layer shader reads besides its layer (`FillShader::with_inputs`).
     inputs: Option<Box<ShaderInputs>>,
 }
@@ -179,6 +184,8 @@ impl FillShader {
         Arc::new(Self {
             id: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             reads_backdrop: source.contains("zgx_backdrop"),
+            reads_window: names_window(&source),
+            runs_each_frame: false,
             source,
             fps: fps.filter(|fps| fps.is_finite() && *fps > 0.),
             inputs: None,
@@ -195,7 +202,12 @@ impl FillShader {
         inputs: ShaderInputs,
     ) -> Arc<Self> {
         let mut shader = Self::new(source, fps);
-        Arc::get_mut(&mut shader).expect("just made").inputs = Some(Box::new(inputs));
+        let made = Arc::get_mut(&mut shader).expect("just made");
+        made.reads_window |= inputs.geometry.is_some()
+            || inputs.passes.iter().any(|pass| names_window(&pass.source));
+        made.runs_each_frame =
+            !inputs.views.is_empty() || inputs.passes.iter().any(|pass| !pass.once);
+        made.inputs = Some(Box::new(inputs));
         shader
     }
     /// What it reads besides its layer (`with_inputs`).
@@ -219,6 +231,25 @@ impl FillShader {
     pub fn reads_backdrop(&self) -> bool {
         self.reads_backdrop
     }
+    /// Whether, as a layer shader, what it draws depends on where things are
+    /// in the window, so that it doesn't move with its node: its source or a
+    /// pass's names `zgx_window`, `zgx_rect` or a pass's `area`, or it reads
+    /// tagged nodes' boxes.
+    pub fn reads_window(&self) -> bool {
+        self.reads_window
+    }
+    /// Whether what it samples changes with each frame rendered that shows
+    /// its box, damaged or not: a pass that isn't `once`, or a GPU view.
+    pub fn runs_each_frame(&self) -> bool {
+        self.runs_each_frame
+    }
+}
+/// Whether WGSL `source` names what places it in the window.
+fn names_window(source: &str) -> bool {
+    source.contains("zgx_window")
+        || source.contains("zgx_rect")
+        || source.contains("zgx_origin")
+        || source.contains(".area")
 }
 impl PartialEq for FillShader {
     fn eq(&self, other: &Self) -> bool {
