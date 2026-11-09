@@ -187,6 +187,18 @@ struct Hosted {
     frame: Shared,
     told: Rc<RefCell<Told>>,
 }
+/// A render's scripts' limits. A window's time budgets stop a script that
+/// would stall it; a render stalls nothing, and a composition may mount a
+/// whole app (its first build alone takes longer than a window allows a
+/// call), so they are long: what stops a script here is one that never
+/// ends.
+pub const RENDER_LIMITS: zgx_script::Limits = zgx_script::Limits {
+    memory: 4 << 30,
+    plugin_memory: 256 << 20,
+    load: std::time::Duration::from_secs(120),
+    call: std::time::Duration::from_secs(60),
+};
+
 fn host(
     runtime: &zgx::reactive::Runtime,
     entry: &Path,
@@ -199,7 +211,8 @@ fn host(
     let base = entry.parent().map(Path::to_owned).unwrap_or_default();
     let host = ScriptHost::new(runtime, entry)
         .package("video", video)
-        .package("fx", fx);
+        .package("fx", fx)
+        .limits(RENDER_LIMITS);
     host.lint_strip(false);
     let told: Rc<RefCell<Told>> = Rc::default();
     let setting = json!({ "selected": selected, "input": input }).to_string();
