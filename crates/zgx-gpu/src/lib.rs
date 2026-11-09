@@ -2571,6 +2571,10 @@ struct Deferred {
     direct: bool,
     /// The polyline strokes' points (group 2), if it draws any.
     points: Option<wgpu::BindGroup>,
+    /// Drawn from the kept frame, its instances in paint order up to this
+    /// (`kept_ordered`): batched as the kept frame's are when encoded, after
+    /// the kept frame has taken its upload back.
+    kept: Option<u32>,
 }
 /// A batch of backdrop filters' last step: each blur drawn back over the
 /// original pixels, one draw per filter and damaged output (see
@@ -4339,6 +4343,12 @@ pub struct GpuRenderer {
     kept_upload: Option<(upload::KeptQuads, usize)>,
     /// And how many of its quads lie in paint order (`Kept::ordered`).
     kept_ordered: u32,
+    /// While a deferred frame drawn from the kept frame is encoded
+    /// (`Deferred::kept`): its `kept_ordered`.
+    encoding_kept: std::cell::Cell<Option<u32>>,
+    /// Keep no frame to patch (`debug_never_keep`): a reference drawing
+    /// every frame afresh.
+    never_keep: bool,
     /// Texts a kept frame patched (at most `SHAPED_LIKE`): the ones a kept
     /// frame gives spare room to grow into (`text_room`).
     changed_texts: rustc_hash::FxHashSet<NodeId>,
@@ -5057,6 +5067,8 @@ impl GpuRenderer {
             box_quads: Vec::new(),
             kept_upload: None,
             kept_ordered: 0,
+            encoding_kept: std::cell::Cell::new(None),
+            never_keep: false,
             changed_texts: Default::default(),
             box_draws: Vec::new(),
             draw_made: false,
@@ -5491,6 +5503,13 @@ impl GpuRenderer {
     #[cfg(target_os = "macos")]
     pub fn shows_carets(&self) -> bool {
         self.layer_present.is_some()
+    }
+    /// Test hook: keep no frame to patch, drawing each afresh (a reference
+    /// for frames patched into a kept one).
+    #[doc(hidden)]
+    pub fn debug_never_keep(&mut self) {
+        self.never_keep = true;
+        self.kept = None;
     }
     /// The colour the target clears to where nothing is drawn.
     pub fn set_background(&mut self, color: Color) {
@@ -6002,6 +6021,7 @@ impl GpuRenderer {
         // patching goes on after a change it can't patch, or one after
         // frames it would have patched.
         let keep = !maintained
+            && !self.never_keep
             && !loops_baked
             && self.plane.is_none()
             && !self.in_layer
@@ -10363,6 +10383,7 @@ impl GpuRenderer {
                     first,
                     direct,
                     points: points_bind.clone(),
+                    kept: self.kept_upload.is_some().then_some(self.kept_ordered),
                 });
                 break;
             }
@@ -11409,6 +11430,18 @@ impl GpuRenderer {
         picks: Picks<'_>,
         stats: &mut GpuStats,
     ) {
+        self.encoding_kept.set(frame.kept);
+        self.encode_damage_of(pass, frame, picks, stats);
+        self.encoding_kept.set(None);
+    }
+    /// `encode_damage`, its kept frame's batching set.
+    fn encode_damage_of(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        frame: &Deferred,
+        picks: Picks<'_>,
+        stats: &mut GpuStats,
+    ) {
         pass.set_vertex_buffer(0, frame.vertices.slice(..));
         pass.set_bind_group(0, &self.bind, &[]);
         pass.set_bind_group(1, frame.viewport.as_ref(), &[]);
@@ -11842,7 +11875,9 @@ impl GpuRenderer {
     /// The draws within `region` from instance `first` on, as batches:
     /// consecutive draws sharing a clip, texture source and shading join.
     fn batches(&self, region: Rect, draws: &[Draw], first: u32, emit: impl FnMut(Batch)) {
-        match self.kept_upload.is_some() {
+        // The kept frame's draws, now or deferred (`Deferred::kept`): out of
+        // instance order past `kept_ordered`, which the kept rules allow for.
+        match self.kept_upload.is_some() || self.encoding_kept.get().is_some() {
             true => self.batches_of::<true>(region, draws, first, emit),
             false => self.batches_of::<false>(region, draws, first, emit),
         }
@@ -11912,7 +11947,7 @@ impl GpuRenderer {
                     || start == open.end
                     || start > open.end
                         && start - open.end < SKIPPED_SPLIT
-                        && draw.end <= self.kept_ordered)
+                        && draw.end <= self.encoding_kept.get().unwrap_or(self.kept_ordered))
             {
                 // Another shading joins when what it promotes (quads drawn
                 // with a costlier shader than theirs) stays small.
