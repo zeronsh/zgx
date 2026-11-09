@@ -10,3 +10,5 @@
 Each arm has three interleaved baseline/candidate trials, identical transcript anchors and native/zgx controls. All raw per-frame data, source/build proofs and callback logs are in evidence.tar.gz. These are failed performance gates, not certification.
 
 Archive SHA256: a221a1614a9f5cf9c8fed0525c30353bc4f73417c96f4415e5751318eb011a03
+
+Correction: original row/main columns above filtered on scroll-path notes and undercounted baseline work. [Motion-window reanalysis](motion-reanalysis.md) supersedes those columns; presentation lateness is unchanged. [Raw corrected analysis](motion-reanalysis.json) includes phase distributions and worst frames.

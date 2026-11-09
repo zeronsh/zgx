@@ -1,0 +1,2663 @@
+[
+  {
+    "arm": "clock-p0",
+    "role": "base",
+    "trial": 0,
+    "old_rows": 43,
+    "old_over4": 43,
+    "motion": {
+      "frames": 5501,
+      "main_ms": {
+        "p50": 0.704,
+        "p99": 10.171,
+        "max": 31.685
+      },
+      "main_over_4ms": 67,
+      "rows_built": 66,
+      "gpu_ms": {
+        "p50": 3.609125,
+        "p99": 5.2445,
+        "max": 6.019625
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.183,
+          "p99": 0.685,
+          "max": 1.348,
+          "mean": 0.20545246318851126,
+          "total": 1130.1940000000004,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.143,
+          "p99": 0.457,
+          "max": 0.687,
+          "mean": 0.15225831666969683,
+          "total": 837.5730000000023,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.511,
+          "p99": 6.723,
+          "max": 10.202,
+          "mean": 4.509662606798757,
+          "total": 24807.653999999962,
+          "over4ms": 3883
+        },
+        "wait": {
+          "p50": 0.532,
+          "p99": 6.272,
+          "max": 6.592,
+          "mean": 1.1275933466642913,
+          "total": 6202.891000000267,
+          "over4ms": 459
+        },
+        "rest": {
+          "p50": 0.369,
+          "p99": 9.475,
+          "max": 30.835,
+          "mean": 0.6101730594437358,
+          "total": 3356.5619999999903,
+          "over4ms": 66
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 42058.28,
+        "events": 1,
+        "frame": 3552,
+        "frame_micros": 34525,
+        "gpu_micros": 1907.625,
+        "layout": {
+          "measured": 3118,
+          "micros": 6453,
+          "top": [
+            {
+              "micros": 360,
+              "node": 2693,
+              "self_micros": 316,
+              "what": "@2693"
+            },
+            {
+              "micros": 363,
+              "node": 1533,
+              "self_micros": 295,
+              "what": "@1533 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 566,
+              "node": 1533,
+              "self_micros": 278,
+              "what": "@1533 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 465,
+              "node": 2693,
+              "self_micros": 277,
+              "what": "@2693"
+            },
+            {
+              "micros": 260,
+              "node": 1967,
+              "self_micros": 260,
+              "what": "@1967 (rich text)"
+            },
+            {
+              "micros": 256,
+              "node": 2693,
+              "self_micros": 256,
+              "what": "@2693"
+            },
+            {
+              "micros": 248,
+              "node": 2693,
+              "self_micros": 248,
+              "what": "@2693"
+            },
+            {
+              "micros": 241,
+              "node": 1533,
+              "self_micros": 241,
+              "what": "@1533 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 229,
+              "node": 1533,
+              "self_micros": 229,
+              "what": "@1533 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 220,
+              "node": 2775,
+              "self_micros": 220,
+              "what": "@2775"
+            },
+            {
+              "micros": 148,
+              "node": 3763,
+              "self_micros": 148,
+              "what": "@3763 (rich text)"
+            },
+            {
+              "micros": 137,
+              "node": 2693,
+              "self_micros": 137,
+              "what": "@2693"
+            }
+          ]
+        },
+        "micros": 23377,
+        "notes": [
+          "list built row",
+          "scroll @366 copied its pixels"
+        ],
+        "phases": [
+          {
+            "instructions": 66842995,
+            "micros": 17266,
+            "phase": "script"
+          },
+          {
+            "instructions": 56275903,
+            "micros": 7024,
+            "phase": "layout"
+          },
+          {
+            "instructions": 24406896,
+            "micros": 6511,
+            "phase": "update"
+          },
+          {
+            "instructions": 32735,
+            "micros": 4637,
+            "phase": "wait"
+          },
+          {
+            "instructions": 238586,
+            "micros": 2840,
+            "phase": "present"
+          },
+          {
+            "instructions": 4292104,
+            "micros": 636,
+            "phase": "paint"
+          },
+          {
+            "instructions": 716416,
+            "micros": 214,
+            "phase": "encode"
+          },
+          {
+            "instructions": 27643,
+            "micros": 15,
+            "phase": "submit"
+          },
+          {
+            "instructions": 48300,
+            "micros": 10,
+            "phase": "damage"
+          },
+          {
+            "instructions": 6803,
+            "micros": 9,
+            "phase": "input"
+          }
+        ],
+        "run_list": [],
+        "runs": 2040,
+        "wait_micros": 4637,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized",
+          "611 unnamed"
+        ],
+        "trace_gpu_micros": 4449
+      }
+    },
+    "all_work": {
+      "rows": 68,
+      "main_over4": 69,
+      "main": {
+        "p50": 0.708,
+        "p99": 4.22,
+        "max": 31.685
+      }
+    }
+  },
+  {
+    "arm": "clock-p0",
+    "role": "variant",
+    "trial": 0,
+    "old_rows": 70,
+    "old_over4": 89,
+    "motion": {
+      "frames": 5306,
+      "main_ms": {
+        "p50": 0.645,
+        "p99": 10.581,
+        "max": 33.196
+      },
+      "main_over_4ms": 78,
+      "rows_built": 62,
+      "gpu_ms": {
+        "p50": 3.836583,
+        "p99": 5.036125,
+        "max": 5.63925
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.132,
+          "p99": 1.957,
+          "max": 5.268,
+          "mean": 0.19190708631737563,
+          "total": 1018.2589999999951,
+          "over4ms": 6
+        },
+        "encode": {
+          "p50": 0.105,
+          "p99": 0.245,
+          "max": 1.535,
+          "mean": 0.1097167357708257,
+          "total": 582.1570000000012,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.783,
+          "p99": 6.704,
+          "max": 7.668,
+          "mean": 4.618508480964946,
+          "total": 24505.806000000008,
+          "over4ms": 3976
+        },
+        "wait": {
+          "p50": 0.233,
+          "p99": 6.289,
+          "max": 6.68,
+          "mean": 1.0526479457218734,
+          "total": 5585.3500000002605,
+          "over4ms": 482
+        },
+        "rest": {
+          "p50": 0.398,
+          "p99": 8.358999999999998,
+          "max": 30.375999999999998,
+          "mean": 0.6357968337730885,
+          "total": 3373.5380000000077,
+          "over4ms": 62
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 71069.84,
+        "events": 1,
+        "frame": 5072,
+        "frame_micros": 37280,
+        "gpu_micros": 3436.292,
+        "layout": {
+          "measured": 3508,
+          "micros": 8224,
+          "top": [
+            {
+              "micros": 442,
+              "node": 2449,
+              "self_micros": 375,
+              "what": "@2449 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 352,
+              "node": 1782,
+              "self_micros": 352,
+              "what": "@1782"
+            },
+            {
+              "micros": 677,
+              "node": 2449,
+              "self_micros": 345,
+              "what": "@2449 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 413,
+              "node": 2443,
+              "self_micros": 345,
+              "what": "@2443"
+            },
+            {
+              "micros": 315,
+              "node": 2443,
+              "self_micros": 315,
+              "what": "@2443"
+            },
+            {
+              "micros": 567,
+              "node": 2443,
+              "self_micros": 311,
+              "what": "@2443"
+            },
+            {
+              "micros": 310,
+              "node": 2449,
+              "self_micros": 310,
+              "what": "@2449 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 304,
+              "node": 2443,
+              "self_micros": 304,
+              "what": "@2443"
+            },
+            {
+              "micros": 285,
+              "node": 2449,
+              "self_micros": 285,
+              "what": "@2449 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 270,
+              "node": 4225,
+              "self_micros": 270,
+              "what": "@4225 (rich text)"
+            },
+            {
+              "micros": 225,
+              "node": 3575,
+              "self_micros": 225,
+              "what": "@3575 (overlay)"
+            },
+            {
+              "micros": 160,
+              "node": 2449,
+              "self_micros": 160,
+              "what": "@2449 (div .md-table-grid ds/markdown.luau:984)"
+            }
+          ]
+        },
+        "micros": 20350,
+        "notes": [
+          "list built row",
+          "scroll @366 composited its picture, moved 139 px",
+          "scroll @366 rastered 2384 px rows"
+        ],
+        "phases": [
+          {
+            "instructions": 46222715,
+            "micros": 11599,
+            "phase": "script"
+          },
+          {
+            "instructions": 64875807,
+            "micros": 9407,
+            "phase": "layout"
+          },
+          {
+            "instructions": 28597661,
+            "micros": 9269,
+            "phase": "update"
+          },
+          {
+            "instructions": 272125,
+            "micros": 4083,
+            "phase": "present"
+          },
+          {
+            "instructions": 5524635,
+            "micros": 2721,
+            "phase": "paint"
+          },
+          {
+            "instructions": 16416,
+            "micros": 1447,
+            "phase": "wait"
+          },
+          {
+            "instructions": 560132,
+            "micros": 99,
+            "phase": "encode"
+          },
+          {
+            "instructions": 424142,
+            "micros": 84,
+            "phase": "damage"
+          },
+          {
+            "instructions": 7617,
+            "micros": 11,
+            "phase": "input"
+          },
+          {
+            "instructions": 27607,
+            "micros": 6,
+            "phase": "submit"
+          }
+        ],
+        "run_list": [],
+        "runs": 2190,
+        "wait_micros": 1447,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized\u00d73",
+          "647 unnamed"
+        ],
+        "trace_gpu_micros": 2703
+      }
+    },
+    "all_work": {
+      "rows": 70,
+      "main_over4": 89,
+      "main": {
+        "p50": 0.64,
+        "p99": 6.202,
+        "max": 33.196
+      }
+    }
+  },
+  {
+    "arm": "clock-p1",
+    "role": "base",
+    "trial": 0,
+    "old_rows": 32,
+    "old_over4": 372,
+    "motion": {
+      "frames": 4960,
+      "main_ms": {
+        "p50": 0.754,
+        "p99": 10.708,
+        "max": 30.073
+      },
+      "main_over_4ms": 357,
+      "rows_built": 61,
+      "gpu_ms": {
+        "p50": 4.059208,
+        "p99": 5.322917,
+        "max": 6.149125
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.222,
+          "p99": 8.019,
+          "max": 12.257,
+          "mean": 0.6626098790322568,
+          "total": 3286.5449999999937,
+          "over4ms": 254
+        },
+        "encode": {
+          "p50": 0.138,
+          "p99": 0.359,
+          "max": 0.73,
+          "mean": 0.1459346774193545,
+          "total": 723.8359999999984,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.01,
+          "max": 0.18,
+          "mean": 0.0020179435483871056,
+          "total": 10.009000000000045,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0,
+          "mean": 0.0,
+          "total": 0.0,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.37300000000000005,
+          "p99": 9.247000000000002,
+          "max": 28.761,
+          "mean": 0.5965401209677429,
+          "total": 2958.8390000000045,
+          "over4ms": 61
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 74103.29,
+        "events": 1,
+        "frame": 5565,
+        "frame_micros": 30079,
+        "gpu_micros": 2106.875,
+        "layout": {
+          "measured": 3508,
+          "micros": 9412,
+          "top": [
+            {
+              "micros": 507,
+              "node": 4657,
+              "self_micros": 428,
+              "what": "@4657 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 732,
+              "node": 4657,
+              "self_micros": 403,
+              "what": "@4657 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 399,
+              "node": 1646,
+              "self_micros": 399,
+              "what": "@1646"
+            },
+            {
+              "micros": 469,
+              "node": 1884,
+              "self_micros": 396,
+              "what": "@1884"
+            },
+            {
+              "micros": 359,
+              "node": 1884,
+              "self_micros": 359,
+              "what": "@1884"
+            },
+            {
+              "micros": 641,
+              "node": 1884,
+              "self_micros": 348,
+              "what": "@1884"
+            },
+            {
+              "micros": 347,
+              "node": 1884,
+              "self_micros": 347,
+              "what": "@1884"
+            },
+            {
+              "micros": 342,
+              "node": 4657,
+              "self_micros": 342,
+              "what": "@4657 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 328,
+              "node": 1183,
+              "self_micros": 328,
+              "what": "@1183 (rich text)"
+            },
+            {
+              "micros": 325,
+              "node": 4657,
+              "self_micros": 325,
+              "what": "@4657 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 286,
+              "node": 4151,
+              "self_micros": 286,
+              "what": "@4151 (rich text)"
+            },
+            {
+              "micros": 253,
+              "node": 4189,
+              "self_micros": 253,
+              "what": "@4189"
+            }
+          ]
+        },
+        "micros": 18011,
+        "notes": [
+          "list built row",
+          "scroll @366 copied its pixels"
+        ],
+        "phases": [
+          {
+            "instructions": 63703870,
+            "micros": 10149,
+            "phase": "layout"
+          },
+          {
+            "instructions": 42653583,
+            "micros": 9814,
+            "phase": "script"
+          },
+          {
+            "instructions": 25884531,
+            "micros": 8729,
+            "phase": "update"
+          },
+          {
+            "instructions": 4595111,
+            "micros": 987,
+            "phase": "paint"
+          },
+          {
+            "instructions": 718209,
+            "micros": 325,
+            "phase": "encode"
+          },
+          {
+            "instructions": 29848,
+            "micros": 35,
+            "phase": "submit"
+          },
+          {
+            "instructions": 6898,
+            "micros": 22,
+            "phase": "input"
+          },
+          {
+            "instructions": 50802,
+            "micros": 12,
+            "phase": "damage"
+          },
+          {
+            "instructions": 1886,
+            "micros": 6,
+            "phase": "present"
+          }
+        ],
+        "run_list": [],
+        "runs": 2190,
+        "wait_micros": 0,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized\u00d73",
+          "647 unnamed"
+        ],
+        "trace_gpu_micros": 2724
+      }
+    },
+    "all_work": {
+      "rows": 65,
+      "main_over4": 422,
+      "main": {
+        "p50": 0.765,
+        "p99": 9.019,
+        "max": 30.073
+      }
+    }
+  },
+  {
+    "arm": "clock-p1",
+    "role": "variant",
+    "trial": 0,
+    "old_rows": 73,
+    "old_over4": 457,
+    "motion": {
+      "frames": 5022,
+      "main_ms": {
+        "p50": 0.685,
+        "p99": 13.255,
+        "max": 31.802
+      },
+      "main_over_4ms": 406,
+      "rows_built": 66,
+      "gpu_ms": {
+        "p50": 4.28325,
+        "p99": 5.057875,
+        "max": 5.861125
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.165,
+          "p99": 7.892,
+          "max": 9.779,
+          "mean": 0.6528894862604542,
+          "total": 3278.811000000001,
+          "over4ms": 318
+        },
+        "encode": {
+          "p50": 0.103,
+          "p99": 0.278,
+          "max": 1.842,
+          "mean": 0.10828853046594974,
+          "total": 543.8249999999996,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.008,
+          "max": 0.174,
+          "mean": 0.002245121465551607,
+          "total": 11.275000000000169,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0,
+          "mean": 0.0,
+          "total": 0,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.391,
+          "p99": 11.222999999999997,
+          "max": 29.660999999999998,
+          "mean": 0.6652648347271973,
+          "total": 3340.959999999985,
+          "over4ms": 66
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 80645.69,
+        "events": 1,
+        "frame": 6075,
+        "frame_micros": 31806,
+        "gpu_micros": 3553.25,
+        "layout": {
+          "measured": 3213,
+          "micros": 7022,
+          "top": [
+            {
+              "micros": 457,
+              "node": 1044,
+              "self_micros": 390,
+              "what": "@1044"
+            },
+            {
+              "micros": 387,
+              "node": 3628,
+              "self_micros": 387,
+              "what": "@3628 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 699,
+              "node": 3628,
+              "self_micros": 376,
+              "what": "@3628 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 428,
+              "node": 3628,
+              "self_micros": 364,
+              "what": "@3628 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 599,
+              "node": 1044,
+              "self_micros": 328,
+              "what": "@1044"
+            },
+            {
+              "micros": 317,
+              "node": 3628,
+              "self_micros": 317,
+              "what": "@3628 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 297,
+              "node": 3624,
+              "self_micros": 297,
+              "what": "@3624 (rich text)"
+            },
+            {
+              "micros": 230,
+              "node": 2172,
+              "self_micros": 230,
+              "what": "@2172 (overlay)"
+            },
+            {
+              "micros": 208,
+              "node": 1473,
+              "self_micros": 208,
+              "what": "@1473 (rich text)"
+            },
+            {
+              "micros": 164,
+              "node": 3628,
+              "self_micros": 164,
+              "what": "@3628 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 159,
+              "node": 1044,
+              "self_micros": 159,
+              "what": "@1044"
+            },
+            {
+              "micros": 158,
+              "node": 1044,
+              "self_micros": 158,
+              "what": "@1044"
+            }
+          ]
+        },
+        "micros": 20997,
+        "notes": [
+          "list built row",
+          "scroll @366 composited its picture, moved 47 px",
+          "scroll @366 rastered 2384 px rows"
+        ],
+        "phases": [
+          {
+            "instructions": 44146710,
+            "micros": 11720,
+            "phase": "script"
+          },
+          {
+            "instructions": 27137407,
+            "micros": 9806,
+            "phase": "update"
+          },
+          {
+            "instructions": 46999716,
+            "micros": 8017,
+            "phase": "layout"
+          },
+          {
+            "instructions": 5120930,
+            "micros": 2031,
+            "phase": "paint"
+          },
+          {
+            "instructions": 551873,
+            "micros": 110,
+            "phase": "encode"
+          },
+          {
+            "instructions": 410643,
+            "micros": 92,
+            "phase": "damage"
+          },
+          {
+            "instructions": 31612,
+            "micros": 14,
+            "phase": "submit"
+          },
+          {
+            "instructions": 7276,
+            "micros": 12,
+            "phase": "input"
+          },
+          {
+            "instructions": 1886,
+            "micros": 3,
+            "phase": "present"
+          }
+        ],
+        "run_list": [],
+        "runs": 2096,
+        "wait_micros": 0,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized\u00d72",
+          "633 unnamed"
+        ],
+        "trace_gpu_micros": 1967
+      }
+    },
+    "all_work": {
+      "rows": 73,
+      "main_over4": 468,
+      "main": {
+        "p50": 0.685,
+        "p99": 9.591,
+        "max": 31.802
+      }
+    }
+  },
+  {
+    "arm": "clock-p1",
+    "role": "base",
+    "trial": 1,
+    "old_rows": 42,
+    "old_over4": 362,
+    "motion": {
+      "frames": 5177,
+      "main_ms": {
+        "p50": 0.734,
+        "p99": 10.396,
+        "max": 30.082
+      },
+      "main_over_4ms": 321,
+      "rows_built": 60,
+      "gpu_ms": {
+        "p50": 4.224417000000001,
+        "p99": 5.377792,
+        "max": 6.302792
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.216,
+          "p99": 7.84,
+          "max": 22.223,
+          "mean": 0.548471701757775,
+          "total": 2839.4380000000015,
+          "over4ms": 248
+        },
+        "encode": {
+          "p50": 0.137,
+          "p99": 0.294,
+          "max": 0.615,
+          "mean": 0.14326366621595552,
+          "total": 741.6760000000017,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.009,
+          "max": 1.938,
+          "mean": 0.002543944369325916,
+          "total": 13.170000000000266,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0.001,
+          "mean": 1.9316206297083254e-07,
+          "total": 0.001,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.365,
+          "p99": 9.328,
+          "max": 29.265,
+          "mean": 0.5765908827506274,
+          "total": 2985.010999999998,
+          "over4ms": 60
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 40246.05,
+        "events": 1,
+        "frame": 3477,
+        "frame_micros": 30085,
+        "gpu_micros": 2490.125,
+        "layout": {
+          "measured": 3003,
+          "micros": 4594,
+          "top": [
+            {
+              "micros": 305,
+              "node": 2307,
+              "self_micros": 263,
+              "what": "@2307"
+            },
+            {
+              "micros": 298,
+              "node": 1466,
+              "self_micros": 258,
+              "what": "@1466 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 256,
+              "node": 1631,
+              "self_micros": 256,
+              "what": "@1631 (rich text)"
+            },
+            {
+              "micros": 433,
+              "node": 1466,
+              "self_micros": 252,
+              "what": "@1466 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 241,
+              "node": 1466,
+              "self_micros": 241,
+              "what": "@1466 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 403,
+              "node": 2307,
+              "self_micros": 232,
+              "what": "@2307"
+            },
+            {
+              "micros": 230,
+              "node": 1466,
+              "self_micros": 230,
+              "what": "@1466 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 148,
+              "node": 1184,
+              "self_micros": 148,
+              "what": "@1184 (rich text)"
+            },
+            {
+              "micros": 144,
+              "node": 4442,
+              "self_micros": 144,
+              "what": "@4442 (overlay)"
+            },
+            {
+              "micros": 114,
+              "node": 2307,
+              "self_micros": 114,
+              "what": "@2307"
+            },
+            {
+              "micros": 113,
+              "node": 2307,
+              "self_micros": 113,
+              "what": "@2307"
+            },
+            {
+              "micros": 112,
+              "node": 1466,
+              "self_micros": 112,
+              "what": "@1466 (div .md-table-grid ds/markdown.luau:984)"
+            }
+          ]
+        },
+        "micros": 23682,
+        "notes": [
+          "list built row",
+          "scroll @366 copied its pixels"
+        ],
+        "phases": [
+          {
+            "instructions": 70334346,
+            "micros": 17364,
+            "phase": "script"
+          },
+          {
+            "instructions": 24677371,
+            "micros": 6821,
+            "phase": "update"
+          },
+          {
+            "instructions": 45219882,
+            "micros": 5034,
+            "phase": "layout"
+          },
+          {
+            "instructions": 4449000,
+            "micros": 632,
+            "phase": "paint"
+          },
+          {
+            "instructions": 724072,
+            "micros": 185,
+            "phase": "encode"
+          },
+          {
+            "instructions": 31524,
+            "micros": 19,
+            "phase": "submit"
+          },
+          {
+            "instructions": 6692,
+            "micros": 18,
+            "phase": "input"
+          },
+          {
+            "instructions": 49616,
+            "micros": 9,
+            "phase": "damage"
+          },
+          {
+            "instructions": 1886,
+            "micros": 3,
+            "phase": "present"
+          }
+        ],
+        "run_list": [],
+        "runs": 2092,
+        "wait_micros": 0,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized",
+          "633 unnamed"
+        ],
+        "trace_gpu_micros": 3852
+      }
+    },
+    "all_work": {
+      "rows": 64,
+      "main_over4": 391,
+      "main": {
+        "p50": 0.736,
+        "p99": 8.906,
+        "max": 30.082
+      }
+    }
+  },
+  {
+    "arm": "clock-p1",
+    "role": "variant",
+    "trial": 1,
+    "old_rows": 72,
+    "old_over4": 492,
+    "motion": {
+      "frames": 5063,
+      "main_ms": {
+        "p50": 0.672,
+        "p99": 13.755,
+        "max": 38.623
+      },
+      "main_over_4ms": 430,
+      "rows_built": 63,
+      "gpu_ms": {
+        "p50": 4.269875,
+        "p99": 5.032417000000001,
+        "max": 5.965583
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.165,
+          "p99": 7.935,
+          "max": 12.423,
+          "mean": 0.6542302982421513,
+          "total": 3312.368000000012,
+          "over4ms": 309
+        },
+        "encode": {
+          "p50": 0.099,
+          "p99": 0.274,
+          "max": 2.451,
+          "mean": 0.10822378036737149,
+          "total": 547.9370000000018,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.008,
+          "max": 1.38,
+          "mean": 0.0024967410626111648,
+          "total": 12.641000000000327,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 4.646,
+          "mean": 0.0009176377641714398,
+          "total": 4.646,
+          "over4ms": 1
+        },
+        "rest": {
+          "p50": 0.38000000000000006,
+          "p99": 11.225,
+          "max": 37.68500000000001,
+          "mean": 0.6482705905589556,
+          "total": 3282.1939999999922,
+          "over4ms": 63
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 80066.97,
+        "events": 4,
+        "frame": 6229,
+        "frame_micros": 38624,
+        "gpu_micros": 2662.625,
+        "layout": {
+          "measured": 3728,
+          "micros": 6850,
+          "top": [
+            {
+              "micros": 382,
+              "node": 2063,
+              "self_micros": 325,
+              "what": "@2063"
+            },
+            {
+              "micros": 369,
+              "node": 4005,
+              "self_micros": 316,
+              "what": "@4005"
+            },
+            {
+              "micros": 312,
+              "node": 4230,
+              "self_micros": 312,
+              "what": "@4230"
+            },
+            {
+              "micros": 559,
+              "node": 4005,
+              "self_micros": 307,
+              "what": "@4005"
+            },
+            {
+              "micros": 546,
+              "node": 2063,
+              "self_micros": 303,
+              "what": "@2063"
+            },
+            {
+              "micros": 295,
+              "node": 4005,
+              "self_micros": 295,
+              "what": "@4005"
+            },
+            {
+              "micros": 293,
+              "node": 2063,
+              "self_micros": 293,
+              "what": "@2063"
+            },
+            {
+              "micros": 285,
+              "node": 2063,
+              "self_micros": 285,
+              "what": "@2063"
+            },
+            {
+              "micros": 276,
+              "node": 4005,
+              "self_micros": 276,
+              "what": "@4005"
+            },
+            {
+              "micros": 156,
+              "node": 4005,
+              "self_micros": 156,
+              "what": "@4005"
+            },
+            {
+              "micros": 141,
+              "node": 2063,
+              "self_micros": 141,
+              "what": "@2063"
+            },
+            {
+              "micros": 140,
+              "node": 2063,
+              "self_micros": 140,
+              "what": "@2063"
+            }
+          ]
+        },
+        "micros": 29180,
+        "notes": [
+          "list built row",
+          "scroll @366 composited its picture, moved 64 px",
+          "scroll @366 rastered 1320 px rows"
+        ],
+        "phases": [
+          {
+            "instructions": 76744990,
+            "micros": 20852,
+            "phase": "script"
+          },
+          {
+            "instructions": 31061164,
+            "micros": 8830,
+            "phase": "update"
+          },
+          {
+            "instructions": 64962227,
+            "micros": 7954,
+            "phase": "layout"
+          },
+          {
+            "instructions": 4854591,
+            "micros": 841,
+            "phase": "paint"
+          },
+          {
+            "instructions": 559355,
+            "micros": 97,
+            "phase": "encode"
+          },
+          {
+            "instructions": 79474,
+            "micros": 18,
+            "phase": "damage"
+          },
+          {
+            "instructions": 14621,
+            "micros": 17,
+            "phase": "input"
+          },
+          {
+            "instructions": 32294,
+            "micros": 14,
+            "phase": "submit"
+          },
+          {
+            "instructions": 1880,
+            "micros": 3,
+            "phase": "present"
+          }
+        ],
+        "run_list": [],
+        "runs": 2319,
+        "wait_micros": 0,
+        "writes": [
+          "chat.transcript.offset\u00d72",
+          "ds/transcript.luau::transcript_sized\u00d72",
+          "686 unnamed"
+        ],
+        "trace_gpu_micros": 4261
+      }
+    },
+    "all_work": {
+      "rows": 72,
+      "main_over4": 505,
+      "main": {
+        "p50": 0.668,
+        "p99": 9.231,
+        "max": 38.623
+      }
+    }
+  },
+  {
+    "arm": "clock-p0",
+    "role": "base",
+    "trial": 1,
+    "old_rows": 40,
+    "old_over4": 40,
+    "motion": {
+      "frames": 5403,
+      "main_ms": {
+        "p50": 0.673,
+        "p99": 7.853,
+        "max": 26.801
+      },
+      "main_over_4ms": 60,
+      "rows_built": 60,
+      "gpu_ms": {
+        "p50": 3.719875,
+        "p99": 5.3582920000000005,
+        "max": 5.931
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.178,
+          "p99": 0.666,
+          "max": 1.117,
+          "mean": 0.19686192855820903,
+          "total": 1063.6450000000034,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.139,
+          "p99": 0.327,
+          "max": 0.562,
+          "mean": 0.14275717194151413,
+          "total": 771.3170000000009,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.636,
+          "p99": 6.627,
+          "max": 13.352,
+          "mean": 4.611601887840088,
+          "total": 24916.484999999997,
+          "over4ms": 4036
+        },
+        "wait": {
+          "p50": 0.322,
+          "p99": 6.233,
+          "max": 6.45,
+          "mean": 0.9895554321673684,
+          "total": 5346.568000000291,
+          "over4ms": 402
+        },
+        "rest": {
+          "p50": 0.3510000000000001,
+          "p99": 7.037000000000001,
+          "max": 26.019000000000002,
+          "mean": 0.5392683694243936,
+          "total": 2913.6669999999986,
+          "over4ms": 60
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 35161.8,
+        "events": 1,
+        "frame": 2884,
+        "frame_micros": 31173,
+        "gpu_micros": 3439.875,
+        "layout": {
+          "measured": 3036,
+          "micros": 7448,
+          "top": [
+            {
+              "micros": 374,
+              "node": 1762,
+              "self_micros": 374,
+              "what": "@1762"
+            },
+            {
+              "micros": 385,
+              "node": 4001,
+              "self_micros": 329,
+              "what": "@4001"
+            },
+            {
+              "micros": 375,
+              "node": 4134,
+              "self_micros": 318,
+              "what": "@4134 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 564,
+              "node": 4134,
+              "self_micros": 298,
+              "what": "@4134 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 550,
+              "node": 4001,
+              "self_micros": 296,
+              "what": "@4001"
+            },
+            {
+              "micros": 264,
+              "node": 4001,
+              "self_micros": 264,
+              "what": "@4001"
+            },
+            {
+              "micros": 258,
+              "node": 4134,
+              "self_micros": 258,
+              "what": "@4134 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 256,
+              "node": 4001,
+              "self_micros": 256,
+              "what": "@4001"
+            },
+            {
+              "micros": 246,
+              "node": 4134,
+              "self_micros": 246,
+              "what": "@4134 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 235,
+              "node": 4262,
+              "self_micros": 235,
+              "what": "@4262 (rich text)"
+            },
+            {
+              "micros": 224,
+              "node": 1939,
+              "self_micros": 224,
+              "what": "@1939 (overlay)"
+            },
+            {
+              "micros": 185,
+              "node": 1048,
+              "self_micros": 185,
+              "what": "@1048 (rich text)"
+            }
+          ]
+        },
+        "micros": 17531,
+        "notes": [
+          "list built row",
+          "scroll @366 copied its pixels",
+          "ready after its refresh's point while scrolling: handed over at once, not held a refresh"
+        ],
+        "phases": [
+          {
+            "instructions": 40515669,
+            "micros": 10321,
+            "phase": "script"
+          },
+          {
+            "instructions": 54249951,
+            "micros": 8072,
+            "phase": "layout"
+          },
+          {
+            "instructions": 23255422,
+            "micros": 7590,
+            "phase": "update"
+          },
+          {
+            "instructions": 243261,
+            "micros": 4373,
+            "phase": "present"
+          },
+          {
+            "instructions": 3992934,
+            "micros": 608,
+            "phase": "paint"
+          },
+          {
+            "instructions": 587386,
+            "micros": 174,
+            "phase": "encode"
+          },
+          {
+            "instructions": 27583,
+            "micros": 13,
+            "phase": "submit"
+          },
+          {
+            "instructions": 7158,
+            "micros": 12,
+            "phase": "input"
+          },
+          {
+            "instructions": 46971,
+            "micros": 11,
+            "phase": "damage"
+          },
+          {
+            "instructions": 621,
+            "micros": 1,
+            "phase": "wait"
+          }
+        ],
+        "run_list": [],
+        "runs": 1930,
+        "wait_micros": 1,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized",
+          "575 unnamed"
+        ],
+        "trace_gpu_micros": 3676
+      }
+    },
+    "all_work": {
+      "rows": 60,
+      "main_over4": 60,
+      "main": {
+        "p50": 0.673,
+        "p99": 2.929,
+        "max": 26.801
+      }
+    }
+  },
+  {
+    "arm": "clock-p0",
+    "role": "variant",
+    "trial": 1,
+    "old_rows": 69,
+    "old_over4": 83,
+    "motion": {
+      "frames": 5417,
+      "main_ms": {
+        "p50": 0.628,
+        "p99": 10.369,
+        "max": 45.38
+      },
+      "main_over_4ms": 77,
+      "rows_built": 66,
+      "gpu_ms": {
+        "p50": 4.070708,
+        "p99": 4.987457999999999,
+        "max": 7.076417
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.131,
+          "p99": 1.24,
+          "max": 4.965,
+          "mean": 0.17439025290751303,
+          "total": 944.6719999999981,
+          "over4ms": 5
+        },
+        "encode": {
+          "p50": 0.104,
+          "p99": 0.257,
+          "max": 2.314,
+          "mean": 0.11066438988369962,
+          "total": 599.4690000000008,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.858,
+          "p99": 6.553,
+          "max": 11.186,
+          "mean": 4.648618792689675,
+          "total": 25181.567999999967,
+          "over4ms": 4092
+        },
+        "wait": {
+          "p50": 0.082,
+          "p99": 6.164,
+          "max": 6.56,
+          "mean": 0.9391380838102782,
+          "total": 5087.311000000277,
+          "over4ms": 395
+        },
+        "rest": {
+          "p50": 0.389,
+          "p99": 9.274,
+          "max": 44.483999999999995,
+          "mean": 0.6261196234077906,
+          "total": 3391.690000000002,
+          "over4ms": 66
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 40000.28,
+        "events": 4,
+        "frame": 3306,
+        "frame_micros": 50016,
+        "gpu_micros": 3869.167,
+        "layout": {
+          "measured": 6518,
+          "micros": 11205,
+          "top": [
+            {
+              "micros": 426,
+              "node": 4008,
+              "self_micros": 358,
+              "what": "@4008"
+            },
+            {
+              "micros": 393,
+              "node": 2373,
+              "self_micros": 333,
+              "what": "@2373 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 563,
+              "node": 4008,
+              "self_micros": 313,
+              "what": "@4008"
+            },
+            {
+              "micros": 584,
+              "node": 2373,
+              "self_micros": 313,
+              "what": "@2373 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 301,
+              "node": 2373,
+              "self_micros": 301,
+              "what": "@2373 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 333,
+              "node": 3774,
+              "self_micros": 291,
+              "what": "@3774"
+            },
+            {
+              "micros": 290,
+              "node": 2373,
+              "self_micros": 290,
+              "what": "@2373 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 327,
+              "node": 1838,
+              "self_micros": 284,
+              "what": "@1838"
+            },
+            {
+              "micros": 437,
+              "node": 1838,
+              "self_micros": 265,
+              "what": "@1838"
+            },
+            {
+              "micros": 258,
+              "node": 1838,
+              "self_micros": 258,
+              "what": "@1838"
+            },
+            {
+              "micros": 426,
+              "node": 3774,
+              "self_micros": 253,
+              "what": "@3774"
+            },
+            {
+              "micros": 249,
+              "node": 1838,
+              "self_micros": 249,
+              "what": "@1838"
+            }
+          ]
+        },
+        "micros": 30777,
+        "notes": [
+          "list built row",
+          "woke 25.59 ms after its frame's time",
+          "scroll @366 composited its picture, moved 348 px",
+          "scroll @366 rastered 1604 px rows"
+        ],
+        "phases": [
+          {
+            "instructions": 82668786,
+            "micros": 16392,
+            "phase": "script"
+          },
+          {
+            "instructions": 55922482,
+            "micros": 15181,
+            "phase": "update"
+          },
+          {
+            "instructions": 98935592,
+            "micros": 12778,
+            "phase": "layout"
+          },
+          {
+            "instructions": 275560,
+            "micros": 4637,
+            "phase": "present"
+          },
+          {
+            "instructions": 4713183,
+            "micros": 798,
+            "phase": "paint"
+          },
+          {
+            "instructions": 560406,
+            "micros": 98,
+            "phase": "encode"
+          },
+          {
+            "instructions": 445838,
+            "micros": 76,
+            "phase": "damage"
+          },
+          {
+            "instructions": 14666,
+            "micros": 50,
+            "phase": "input"
+          },
+          {
+            "instructions": 27577,
+            "micros": 7,
+            "phase": "submit"
+          }
+        ],
+        "run_list": [],
+        "runs": 4184,
+        "wait_micros": 0,
+        "writes": [
+          "chat.transcript.offset\u00d72",
+          "ds/transcript.luau::transcript_sized\u00d74",
+          "1168 unnamed"
+        ],
+        "trace_gpu_micros": 4586
+      }
+    },
+    "all_work": {
+      "rows": 69,
+      "main_over4": 83,
+      "main": {
+        "p50": 0.626,
+        "p99": 5.737,
+        "max": 45.38
+      }
+    }
+  },
+  {
+    "arm": "clock-p0",
+    "role": "base",
+    "trial": 2,
+    "old_rows": 39,
+    "old_over4": 41,
+    "motion": {
+      "frames": 5429,
+      "main_ms": {
+        "p50": 0.727,
+        "p99": 8.122,
+        "max": 29.567
+      },
+      "main_over_4ms": 62,
+      "rows_built": 60,
+      "gpu_ms": {
+        "p50": 3.743375,
+        "p99": 5.311875,
+        "max": 6.435625
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.188,
+          "p99": 0.733,
+          "max": 1.574,
+          "mean": 0.2129001657763863,
+          "total": 1155.8350000000012,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.145,
+          "p99": 0.429,
+          "max": 0.814,
+          "mean": 0.15296316080309477,
+          "total": 830.4370000000015,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.666,
+          "p99": 6.738,
+          "max": 8.135,
+          "mean": 4.608557192853203,
+          "total": 25019.85700000004,
+          "over4ms": 3984
+        },
+        "wait": {
+          "p50": 0.317,
+          "p99": 6.319,
+          "max": 6.612,
+          "mean": 1.1337043654448906,
+          "total": 6154.881000000311,
+          "over4ms": 541
+        },
+        "rest": {
+          "p50": 0.382,
+          "p99": 7.278,
+          "max": 28.532,
+          "mean": 0.6190023945477985,
+          "total": 3360.563999999998,
+          "over4ms": 60
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 77143.21,
+        "events": 1,
+        "frame": 5593,
+        "frame_micros": 34462,
+        "gpu_micros": 3369.958,
+        "layout": {
+          "measured": 3116,
+          "micros": 7212,
+          "top": [
+            {
+              "micros": 465,
+              "node": 1145,
+              "self_micros": 394,
+              "what": "@1145"
+            },
+            {
+              "micros": 442,
+              "node": 3989,
+              "self_micros": 373,
+              "what": "@3989 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 668,
+              "node": 3989,
+              "self_micros": 357,
+              "what": "@3989 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 353,
+              "node": 4144,
+              "self_micros": 353,
+              "what": "@4144"
+            },
+            {
+              "micros": 353,
+              "node": 3989,
+              "self_micros": 353,
+              "what": "@3989 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 639,
+              "node": 1145,
+              "self_micros": 346,
+              "what": "@1145"
+            },
+            {
+              "micros": 290,
+              "node": 3989,
+              "self_micros": 290,
+              "what": "@3989 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 281,
+              "node": 2609,
+              "self_micros": 281,
+              "what": "@2609 (rich text)"
+            },
+            {
+              "micros": 262,
+              "node": 3846,
+              "self_micros": 262,
+              "what": "@3846 (overlay)"
+            },
+            {
+              "micros": 169,
+              "node": 1145,
+              "self_micros": 169,
+              "what": "@1145"
+            },
+            {
+              "micros": 168,
+              "node": 1145,
+              "self_micros": 168,
+              "what": "@1145"
+            },
+            {
+              "micros": 162,
+              "node": 3989,
+              "self_micros": 162,
+              "what": "@3989 (div .md-table-grid ds/markdown.luau:984)"
+            }
+          ]
+        },
+        "micros": 19121,
+        "notes": [
+          "list built row",
+          "scroll @366 copied its pixels"
+        ],
+        "phases": [
+          {
+            "instructions": 42651169,
+            "micros": 10257,
+            "phase": "script"
+          },
+          {
+            "instructions": 25310961,
+            "micros": 9418,
+            "phase": "update"
+          },
+          {
+            "instructions": 47972531,
+            "micros": 7828,
+            "phase": "layout"
+          },
+          {
+            "instructions": 239687,
+            "micros": 4895,
+            "phase": "present"
+          },
+          {
+            "instructions": 32394,
+            "micros": 4044,
+            "phase": "wait"
+          },
+          {
+            "instructions": 6501065,
+            "micros": 1574,
+            "phase": "paint"
+          },
+          {
+            "instructions": 723859,
+            "micros": 433,
+            "phase": "encode"
+          },
+          {
+            "instructions": 6734,
+            "micros": 23,
+            "phase": "input"
+          },
+          {
+            "instructions": 27459,
+            "micros": 18,
+            "phase": "submit"
+          },
+          {
+            "instructions": 50750,
+            "micros": 16,
+            "phase": "damage"
+          }
+        ],
+        "run_list": [],
+        "runs": 2154,
+        "wait_micros": 4044,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized",
+          "645 unnamed"
+        ],
+        "trace_gpu_micros": 1710
+      }
+    },
+    "all_work": {
+      "rows": 64,
+      "main_over4": 66,
+      "main": {
+        "p50": 0.723,
+        "p99": 3.685,
+        "max": 29.567
+      }
+    }
+  },
+  {
+    "arm": "clock-p0",
+    "role": "variant",
+    "trial": 2,
+    "old_rows": 77,
+    "old_over4": 100,
+    "motion": {
+      "frames": 5421,
+      "main_ms": {
+        "p50": 0.648,
+        "p99": 13.145,
+        "max": 38.851
+      },
+      "main_over_4ms": 91,
+      "rows_built": 71,
+      "gpu_ms": {
+        "p50": 3.78775,
+        "p99": 4.984458,
+        "max": 5.7065
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.135,
+          "p99": 2.277,
+          "max": 5.102,
+          "mean": 0.20009278730861474,
+          "total": 1084.7030000000004,
+          "over4ms": 5
+        },
+        "encode": {
+          "p50": 0.105,
+          "p99": 0.282,
+          "max": 2.361,
+          "mean": 0.1098926397343664,
+          "total": 595.7280000000003,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.667,
+          "p99": 6.633,
+          "max": 8.615,
+          "mean": 4.601317100166013,
+          "total": 24943.739999999958,
+          "over4ms": 4086
+        },
+        "wait": {
+          "p50": 0.348,
+          "p99": 6.19,
+          "max": 6.604,
+          "mean": 1.109770153108332,
+          "total": 6016.064000000268,
+          "over4ms": 512
+        },
+        "rest": {
+          "p50": 0.3970000000000001,
+          "p99": 11.584999999999999,
+          "max": 36.370999999999995,
+          "mean": 0.6822038369304555,
+          "total": 3698.2269999999994,
+          "over4ms": 71
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 103165.36,
+        "events": 1,
+        "frame": 8114,
+        "frame_micros": 41618,
+        "gpu_micros": 2211.0,
+        "layout": {
+          "measured": 3113,
+          "micros": 5228,
+          "top": [
+            {
+              "micros": 406,
+              "node": 4617,
+              "self_micros": 348,
+              "what": "@4617"
+            },
+            {
+              "micros": 396,
+              "node": 1126,
+              "self_micros": 332,
+              "what": "@1126 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 638,
+              "node": 1126,
+              "self_micros": 324,
+              "what": "@1126 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 565,
+              "node": 4617,
+              "self_micros": 305,
+              "what": "@4617"
+            },
+            {
+              "micros": 270,
+              "node": 1126,
+              "self_micros": 270,
+              "what": "@1126 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 257,
+              "node": 1126,
+              "self_micros": 257,
+              "what": "@1126 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 156,
+              "node": 4617,
+              "self_micros": 156,
+              "what": "@4617"
+            },
+            {
+              "micros": 151,
+              "node": 1126,
+              "self_micros": 151,
+              "what": "@1126 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 150,
+              "node": 4617,
+              "self_micros": 150,
+              "what": "@4617"
+            },
+            {
+              "micros": 140,
+              "node": 1126,
+              "self_micros": 140,
+              "what": "@1126 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 155,
+              "node": 1126,
+              "self_micros": 108,
+              "what": "@1126 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 98,
+              "node": 1126,
+              "self_micros": 98,
+              "what": "@1126 (div .md-table-grid ds/markdown.luau:984)"
+            }
+          ]
+        },
+        "micros": 29651,
+        "notes": [
+          "list built row",
+          "scroll @366 composited its picture, moved 54 px",
+          "scroll @366 rastered 2384 px rows"
+        ],
+        "phases": [
+          {
+            "instructions": 72359922,
+            "micros": 21456,
+            "phase": "script"
+          },
+          {
+            "instructions": 27809355,
+            "micros": 8671,
+            "phase": "update"
+          },
+          {
+            "instructions": 45049603,
+            "micros": 6140,
+            "phase": "layout"
+          },
+          {
+            "instructions": 34051,
+            "micros": 5660,
+            "phase": "wait"
+          },
+          {
+            "instructions": 238884,
+            "micros": 2767,
+            "phase": "present"
+          },
+          {
+            "instructions": 5218279,
+            "micros": 2380,
+            "phase": "paint"
+          },
+          {
+            "instructions": 559031,
+            "micros": 100,
+            "phase": "encode"
+          },
+          {
+            "instructions": 428169,
+            "micros": 82,
+            "phase": "damage"
+          },
+          {
+            "instructions": 6654,
+            "micros": 16,
+            "phase": "input"
+          },
+          {
+            "instructions": 27556,
+            "micros": 6,
+            "phase": "submit"
+          }
+        ],
+        "run_list": [],
+        "runs": 2158,
+        "wait_micros": 5660,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized\u00d72",
+          "645 unnamed"
+        ],
+        "trace_gpu_micros": 1991
+      }
+    },
+    "all_work": {
+      "rows": 77,
+      "main_over4": 100,
+      "main": {
+        "p50": 0.647,
+        "p99": 12.073,
+        "max": 38.851
+      }
+    }
+  },
+  {
+    "arm": "clock-p1",
+    "role": "base",
+    "trial": 2,
+    "old_rows": 49,
+    "old_over4": 408,
+    "motion": {
+      "frames": 5144,
+      "main_ms": {
+        "p50": 0.734,
+        "p99": 11.341,
+        "max": 34.589
+      },
+      "main_over_4ms": 338,
+      "rows_built": 66,
+      "gpu_ms": {
+        "p50": 3.974125,
+        "p99": 5.269417000000001,
+        "max": 5.92875
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.208,
+          "p99": 7.767,
+          "max": 9.654,
+          "mean": 0.5297274494556758,
+          "total": 2724.9179999999965,
+          "over4ms": 237
+        },
+        "encode": {
+          "p50": 0.138,
+          "p99": 0.374,
+          "max": 0.774,
+          "mean": 0.1458882192846037,
+          "total": 750.4490000000013,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.01,
+          "max": 2.173,
+          "mean": 0.002450233281493016,
+          "total": 12.604000000000074,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 3.125,
+          "mean": 0.0006075038880248834,
+          "total": 3.125,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.36900000000000005,
+          "p99": 10.177,
+          "max": 33.278000000000006,
+          "mean": 0.6329385692068433,
+          "total": 3255.836000000002,
+          "over4ms": 66
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 42226.38,
+        "events": 1,
+        "frame": 3713,
+        "frame_micros": 34606,
+        "gpu_micros": 2361.958,
+        "layout": {
+          "measured": 2998,
+          "micros": 6485,
+          "top": [
+            {
+              "micros": 490,
+              "node": 1101,
+              "self_micros": 490,
+              "what": "@1101 (rich text)"
+            },
+            {
+              "micros": 619,
+              "node": 3895,
+              "self_micros": 363,
+              "what": "@3895 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 421,
+              "node": 2316,
+              "self_micros": 362,
+              "what": "@2316"
+            },
+            {
+              "micros": 415,
+              "node": 3895,
+              "self_micros": 359,
+              "what": "@3895 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 578,
+              "node": 2316,
+              "self_micros": 321,
+              "what": "@2316"
+            },
+            {
+              "micros": 296,
+              "node": 3895,
+              "self_micros": 296,
+              "what": "@3895 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 281,
+              "node": 3895,
+              "self_micros": 281,
+              "what": "@3895 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 254,
+              "node": 1596,
+              "self_micros": 254,
+              "what": "@1596 (rich text)"
+            },
+            {
+              "micros": 239,
+              "node": 1808,
+              "self_micros": 239,
+              "what": "@1808"
+            },
+            {
+              "micros": 163,
+              "node": 2316,
+              "self_micros": 163,
+              "what": "@2316"
+            },
+            {
+              "micros": 155,
+              "node": 3895,
+              "self_micros": 155,
+              "what": "@3895 (div .md-table-grid ds/markdown.luau:984)"
+            },
+            {
+              "micros": 152,
+              "node": 3895,
+              "self_micros": 152,
+              "what": "@3895 (div .md-table-grid ds/markdown.luau:984)"
+            }
+          ]
+        },
+        "micros": 25571,
+        "notes": [
+          "list built row",
+          "scroll @366 copied its pixels"
+        ],
+        "phases": [
+          {
+            "instructions": 55255927,
+            "micros": 17077,
+            "phase": "script"
+          },
+          {
+            "instructions": 24862321,
+            "micros": 9022,
+            "phase": "update"
+          },
+          {
+            "instructions": 46812526,
+            "micros": 7110,
+            "phase": "layout"
+          },
+          {
+            "instructions": 4532232,
+            "micros": 1010,
+            "phase": "paint"
+          },
+          {
+            "instructions": 713816,
+            "micros": 301,
+            "phase": "encode"
+          },
+          {
+            "instructions": 31438,
+            "micros": 31,
+            "phase": "submit"
+          },
+          {
+            "instructions": 6651,
+            "micros": 26,
+            "phase": "input"
+          },
+          {
+            "instructions": 2596,
+            "micros": 16,
+            "phase": "present"
+          },
+          {
+            "instructions": 49616,
+            "micros": 12,
+            "phase": "damage"
+          }
+        ],
+        "run_list": [],
+        "runs": 2092,
+        "wait_micros": 0,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized",
+          "633 unnamed"
+        ],
+        "trace_gpu_micros": 3370
+      }
+    },
+    "all_work": {
+      "rows": 70,
+      "main_over4": 444,
+      "main": {
+        "p50": 0.74,
+        "p99": 9.085,
+        "max": 34.589
+      }
+    }
+  },
+  {
+    "arm": "clock-p1",
+    "role": "variant",
+    "trial": 2,
+    "old_rows": 64,
+    "old_over4": 479,
+    "motion": {
+      "frames": 5125,
+      "main_ms": {
+        "p50": 0.681,
+        "p99": 12.914,
+        "max": 33.745
+      },
+      "main_over_4ms": 407,
+      "rows_built": 61,
+      "gpu_ms": {
+        "p50": 4.171583,
+        "p99": 5.021625,
+        "max": 5.55375
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.167,
+          "p99": 8.087,
+          "max": 12.677,
+          "mean": 0.6653642926829281,
+          "total": 3409.992000000006,
+          "over4ms": 303
+        },
+        "encode": {
+          "p50": 0.099,
+          "p99": 0.259,
+          "max": 1.2,
+          "mean": 0.10436663414634138,
+          "total": 534.8789999999996,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.008,
+          "max": 0.192,
+          "mean": 0.0021982439024390544,
+          "total": 11.266000000000155,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0.002,
+          "mean": 3.902439024390244e-07,
+          "total": 0.002,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.38,
+          "p99": 10.51,
+          "max": 30.957,
+          "mean": 0.6363697560975639,
+          "total": 3261.395000000015,
+          "over4ms": 61
+        }
+      },
+      "worst_main_frame": {
+        "ended_ms": 38762.8,
+        "events": 1,
+        "frame": 3305,
+        "frame_micros": 33751,
+        "gpu_micros": 3465.125,
+        "layout": {
+          "measured": 2822,
+          "micros": 6290,
+          "top": [
+            {
+              "micros": 364,
+              "node": 2347,
+              "self_micros": 364,
+              "what": "@2347"
+            },
+            {
+              "micros": 390,
+              "node": 3517,
+              "self_micros": 329,
+              "what": "@3517"
+            },
+            {
+              "micros": 390,
+              "node": 2016,
+              "self_micros": 323,
+              "what": "@2016"
+            },
+            {
+              "micros": 571,
+              "node": 2016,
+              "self_micros": 298,
+              "what": "@2016"
+            },
+            {
+              "micros": 528,
+              "node": 3517,
+              "self_micros": 288,
+              "what": "@3517"
+            },
+            {
+              "micros": 256,
+              "node": 2016,
+              "self_micros": 256,
+              "what": "@2016"
+            },
+            {
+              "micros": 256,
+              "node": 2016,
+              "self_micros": 256,
+              "what": "@2016"
+            },
+            {
+              "micros": 194,
+              "node": 2173,
+              "self_micros": 194,
+              "what": "@2173"
+            },
+            {
+              "micros": 191,
+              "node": 1550,
+              "self_micros": 191,
+              "what": "@1550"
+            },
+            {
+              "micros": 191,
+              "node": 1562,
+              "self_micros": 191,
+              "what": "@1562"
+            },
+            {
+              "micros": 142,
+              "node": 3517,
+              "self_micros": 142,
+              "what": "@3517"
+            },
+            {
+              "micros": 142,
+              "node": 3517,
+              "self_micros": 142,
+              "what": "@3517"
+            }
+          ]
+        },
+        "micros": 23064,
+        "notes": [
+          "list built row",
+          "scroll @366 composited its picture, moved 40 px",
+          "scroll @366 rastered 2384 px rows"
+        ],
+        "phases": [
+          {
+            "instructions": 51461138,
+            "micros": 15008,
+            "phase": "script"
+          },
+          {
+            "instructions": 24666972,
+            "micros": 8583,
+            "phase": "update"
+          },
+          {
+            "instructions": 43398194,
+            "micros": 7248,
+            "phase": "layout"
+          },
+          {
+            "instructions": 4945090,
+            "micros": 2616,
+            "phase": "paint"
+          },
+          {
+            "instructions": 559126,
+            "micros": 172,
+            "phase": "encode"
+          },
+          {
+            "instructions": 374084,
+            "micros": 82,
+            "phase": "damage"
+          },
+          {
+            "instructions": 31597,
+            "micros": 25,
+            "phase": "submit"
+          },
+          {
+            "instructions": 6898,
+            "micros": 11,
+            "phase": "input"
+          },
+          {
+            "instructions": 1886,
+            "micros": 7,
+            "phase": "present"
+          }
+        ],
+        "run_list": [],
+        "runs": 1906,
+        "wait_micros": 0,
+        "writes": [
+          "chat.transcript.offset",
+          "ds/transcript.luau::transcript_sized\u00d72",
+          "573 unnamed"
+        ],
+        "trace_gpu_micros": 3697
+      }
+    },
+    "all_work": {
+      "rows": 64,
+      "main_over4": 498,
+      "main": {
+        "p50": 0.676,
+        "p99": 9.188,
+        "max": 33.745
+      }
+    }
+  }
+]
