@@ -10,11 +10,7 @@ use zgx::profile::Phase;
 /// Phases a chunk still costs more in as the reply grows, and whose: each
 /// goes from here once it is flat (the test then fails until it does), and
 /// any phase not here growing fails it.
-const STILL_GROWING: &[(Phase, &str)] = &[
-    // The column measured and arranged whole as its last block grows
-    // (layout lane).
-    (Phase::Layout, "layout"),
-];
+const STILL_GROWING: &[(Phase, &str)] = &[];
 
 #[test]
 fn a_chunk_costs_the_same_however_long_the_reply() {
