@@ -310,6 +310,12 @@ fn past_budget(wall: Duration, cpu: Duration, budget: Duration, grain: Duration)
 /// How the last call stopped for its time on this thread was stopped: how
 /// late the watchdog woke, how long the interrupt took after, and the CPU
 /// the call had used (what a test bounding the stop says when it fails).
+/// How many times a size-animated box (`layout`) on this thread has looked
+/// for those inside it: what a test bounding a page of them mounting reads.
+#[doc(hidden)]
+pub fn layout_box_scans() -> u64 {
+    lower::layout_box_scans()
+}
 #[doc(hidden)]
 pub fn last_budget_stop() -> Option<interrupt::BudgetStop> {
     interrupt::last_stop()
