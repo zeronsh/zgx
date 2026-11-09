@@ -4233,6 +4233,12 @@ pub struct GpuRenderer {
     debug_scroll_copy: bool,
     /// Scroll moves applied as a copy of their pixels, ever.
     scroll_copied: std::cell::Cell<u64>,
+    /// This frame's notes on its scroll moves, kept while a paint check runs
+    /// (`record_scroll_notes`).
+    scroll_notes: std::cell::RefCell<Option<Vec<String>>>,
+    /// A paint check's reference: it draws every frame whole and plays no
+    /// loops, leaving the scene's as they are (`set_paint_reference`).
+    paint_reference: bool,
     /// A scroll this frame could have copied, had the pixels not been new.
     copy_next: std::cell::Cell<bool>,
     /// Frames presented to the drawable alone (`Deferred::direct`).
@@ -5009,6 +5015,8 @@ impl GpuRenderer {
             single_pass_frames: 0,
             debug_scroll_copy: false,
             scroll_copied: std::cell::Cell::new(0),
+            scroll_notes: std::cell::RefCell::new(None),
+            paint_reference: false,
             copy_next: std::cell::Cell::new(false),
             direct_frames: 0,
             metal_frames: 0,
@@ -5491,6 +5499,51 @@ impl GpuRenderer {
     #[cfg(target_os = "macos")]
     pub fn shows_carets(&self) -> bool {
         self.layer_present.is_some()
+    }
+    /// Its size in device pixels.
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+    /// Device pixels a point (`set_scale_factor`).
+    pub fn scale_factor(&self) -> f32 {
+        self.scale
+    }
+    /// The colour it clears the window to (`set_background`).
+    pub fn background(&self) -> Color {
+        self.background
+    }
+    /// Keep each frame's notes on its scroll moves for `take_scroll_notes`
+    /// (a paint check: `ZGX_PAINT_CHECK`), or stop.
+    #[doc(hidden)]
+    pub fn record_scroll_notes(&mut self, record: bool) {
+        *self.scroll_notes.get_mut() = record.then(Vec::new);
+    }
+    /// The notes kept since the last call (`record_scroll_notes`).
+    #[doc(hidden)]
+    pub fn take_scroll_notes(&self) -> Vec<String> {
+        self.scroll_notes
+            .borrow_mut()
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+    /// A renderer drawing another's frames whole, to check them: it plays no
+    /// loops (they draw in its frames) and changes nothing of the scene's.
+    #[doc(hidden)]
+    pub fn set_paint_reference(&mut self, reference: bool) {
+        self.paint_reference = reference;
+    }
+    /// A note on a scroll move (`zgx::profile::note`), kept for a paint check.
+    fn scroll_note(&self, why: impl FnOnce() -> String) {
+        let mut notes = self.scroll_notes.borrow_mut();
+        match notes.as_mut() {
+            Some(notes) => {
+                let why = why();
+                notes.push(why.clone());
+                zgx::profile::note(|| why);
+            }
+            None => zgx::profile::note(why),
+        }
     }
     /// The colour the target clears to where nothing is drawn.
     pub fn set_background(&mut self, color: Color) {
@@ -11271,7 +11324,7 @@ impl GpuRenderer {
                         // them, so their corners repaint, where they are and
                         // where the copy took their pixels.
                         Some(corners) => {
-                            zgx::profile::note(|| {
+                            self.scroll_note(|| {
                                 format!("scroll @{} copied its pixels", scroll.node.number())
                             });
                             for corner in corners {
@@ -11295,7 +11348,7 @@ impl GpuRenderer {
                             self.scroll_copied.set(self.scroll_copied.get() + 1);
                         }
                         None => {
-                            zgx::profile::note(|| {
+                            self.scroll_note(|| {
                                 format!(
                                     "scroll @{} repainted its view: a rounded clip around it \
                                      fades or is inset",
@@ -11306,7 +11359,7 @@ impl GpuRenderer {
                         }
                     },
                     Some(blocker) => {
-                        zgx::profile::note(|| {
+                        self.scroll_note(|| {
                             format!(
                                 "scroll @{} repainted its view: {}",
                                 scroll.node.number(),
@@ -11317,7 +11370,7 @@ impl GpuRenderer {
                     }
                 },
                 Err(why) => {
-                    zgx::profile::note(|| {
+                    self.scroll_note(|| {
                         format!(
                             "scroll @{} repainted its view: {}",
                             scroll.node.number(),
