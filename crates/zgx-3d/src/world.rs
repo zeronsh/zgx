@@ -1053,6 +1053,9 @@ impl World {
     /// Add `object`.
     pub fn add(&self, mut object: Object) -> ObjectId {
         object.transform = object.transform.sanitized();
+        // No triangles draw nothing, as a group does, and upload nothing (the
+        // GPU has no empty buffer to bind).
+        object.geometry = object.geometry.filter(|geometry| !geometry.is_empty());
         let mut id = None;
         self.change(|inner| {
             let (index, generation) = claim(&mut inner.objects, object);

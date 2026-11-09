@@ -291,6 +291,16 @@ impl Geometry {
     pub fn bounds(&self) -> (Vec3, Vec3) {
         self.0.bounds
     }
+    /// Whether it has no triangles: nothing to draw, or to upload.
+    pub fn is_empty(&self) -> bool {
+        self.0.indices.is_empty()
+    }
+    /// A test of whether anything still holds it: an object drawn with it,
+    /// or a clone.
+    pub fn watch(&self) -> impl Fn() -> bool + 'static + use<> {
+        let weak = Arc::downgrade(&self.0);
+        move || weak.strong_count() > 0
+    }
 
     /// A box `width` by `height` by `depth` about the origin.
     pub fn cuboid(width: f32, height: f32, depth: f32) -> Self {

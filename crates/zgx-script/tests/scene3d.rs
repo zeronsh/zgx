@@ -711,3 +711,234 @@ fn time_without_an_animation_says_so() {
         "{error}"
     );
 }
+
+/// A square of two triangles facing the camera at z = 0.5, its own
+/// geometry (`FACES` its per-triangle form), clicked as a box is.
+const OWN: &str = r##"
+local clicked = ui.state("clicked", "none")
+local square = {
+    positions = { -0.5, -0.5, 0.5,  0.5, -0.5, 0.5,  0.5, 0.5, 0.5,  -0.5, 0.5, 0.5 },
+    indices = { 1, 2, 3,  1, 3, 4 },
+    FACES
+}
+return ui.column {
+    ui.text { id = "clicked", "{clicked}" },
+    ui.scene3d {
+        id = "scene",
+        w = 200,
+        h = 200,
+        orbit = true,
+        camera = { position = { 0, 0, 4 }, fov = 40 },
+        ui.mesh {
+            geometry = square,
+            material = { double_sided = true },
+            on_click = function(hit) clicked:set(string.format("%.2f", hit.z)) end,
+        },
+    },
+}
+"##;
+
+#[test]
+fn a_mesh_of_its_own_triangles_shows_and_is_clicked() {
+    for faces in [
+        "",
+        "colors = { 1, 0, 0,  0, 1, 0,  0, 0, 1,  1, 1, 1 }",
+        "face_normals = { 0, 0, 1,  0, 0, 1 }, face_colors = { 1, 0, 0,  0, 0, 1 }",
+        "flat = true",
+        "flat = true, colors = { 1, 0, 0,  0, 1, 0,  0, 0, 1,  1, 1, 1 }",
+    ] {
+        let mut h = Harness::inline(&OWN.replace("FACES", faces));
+        assert_eq!(h.error(), None, "{faces}");
+        h.frame();
+        assert!(frame_id(&mut h, "scene").is_some(), "{faces}");
+        press(&mut h, "scene", (100., 100.), 0.);
+        assert_eq!(h.text("clicked"), "0.50", "{faces}");
+    }
+}
+
+#[test]
+fn a_mesh_of_its_own_triangles_is_checked() {
+    let made = |g: &str| raised(&format!("ui.mesh {{ geometry = {g} }}"));
+    assert!(made("{}").contains("positions"));
+    assert!(made("{ positions = { 0, 0 } }").contains("three a vertex"));
+    assert!(made(r#"{ positions = { 0, 0, "z" } }"#).contains("`positions`[3]"));
+    assert!(made("{ positions = { 0, 0, 0 }, indices = { 1, 1, 2 } }").contains("from 1 to 1"));
+    assert!(made("{ positions = { 0, 0, 0 }, indices = { 0, 1, 1 } }").contains("from 1 to 1"));
+    assert!(
+        made("{ positions = { 0,0,0, 1,0,0, 0,1,0 }, indices = { 1, 2 } }")
+            .contains("three a triangle")
+    );
+    assert!(
+        made("{ positions = { 0,0,0, 1,0,0, 0,1,0 }, colors = { 1, 0 } }")
+            .contains("three or four")
+    );
+    assert!(
+        made("{ positions = { 0,0,0, 1,0,0, 0,1,0 }, face_normals = { 0, 0 } }")
+            .contains("face_normals")
+    );
+    assert!(made("true").contains("geometry"));
+    // Numbers the renderer can't use: not a number, or too large for 32 bits.
+    let triangle = "0,0,0, 1,0,0, 0,1,0";
+    for bad in ["0/0", "math.huge", "-math.huge", "1e300"] {
+        let positions = format!("{{ positions = {{ {bad},0,0, 1,0,0, 0,1,0 }} }}");
+        assert!(made(&positions).contains("`positions`[1]"), "{bad}");
+        let normals =
+            format!("{{ positions = {{ {triangle} }}, normals = {{ {bad},0,1, 0,0,1, 0,0,1 }} }}");
+        assert!(made(&normals).contains("`normals`[1]"), "{bad}");
+        let colors =
+            format!("{{ positions = {{ {triangle} }}, colors = {{ {bad},0,1, 0,0,1, 0,0,1 }} }}");
+        assert!(made(&colors).contains("`colors`[1]"), "{bad}");
+        let index = format!("{{ positions = {{ {triangle} }}, indices = {{ {bad},1,2 }} }}");
+        assert!(made(&index).contains("`indices`[1]"), "{bad}");
+    }
+    // Large but finite: its normal overflows to no direction, not to NaN.
+    assert_eq!(
+        made("{ positions = { 1e30,0,0, 0,1e30,0, 0,0,1e30 } }"),
+        "no error"
+    );
+    // A flat mesh's normals are its faces'; a corner has one colour.
+    assert!(
+        made(&format!(
+            "{{ positions = {{ {triangle} }}, flat = true, normals = {{ 0,0,1, 0,0,1, 0,0,1 }} }}"
+        ))
+        .contains("`normals`")
+    );
+    assert!(
+        made(&format!(
+            "{{ positions = {{ {triangle} }}, colors = {{ 1,0,0, 1,0,0, 1,0,0 }}, face_colors = {{ 1,0,0 }} }}"
+        ))
+        .contains("not both")
+    );
+    // Booleans are booleans: a state wouldn't be followed.
+    assert!(
+        made(&format!(
+            "{{ positions = {{ {triangle} }}, flat = \"yes\" }}"
+        ))
+        .contains("`flat` is a boolean")
+    );
+    assert!(
+        raised("ui.mesh { material = { double_sided = ui.state(\"on\", true) } }")
+            .contains("`material.double_sided` is a boolean")
+    );
+    assert_eq!(made("{ positions = {} }"), "no error");
+    assert_eq!(made("{ positions = { 0,0,0, 1,0,0, 0,1,0 } }"), "no error");
+}
+
+/// A plugin granted nothing shows a scene of its own triangles, and hears
+/// clicks on them: `ui.scene3d` asks no capability.
+#[test]
+fn a_plugin_granted_nothing_shows_and_picks_its_own_mesh() {
+    use zgx_script::{Plugin, ScriptHost};
+    let dir = std::env::temp_dir().join(format!("zgx-scene3d-plugin-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("init.luau");
+    let plugin = OWN
+        .replace("FACES", "face_colors = { 1, 0, 0,  0, 0, 1 }")
+        .replace(
+            "return ui.column {",
+            "ui.contribute { target = \"#slot\", after = ui.column {",
+        )
+        .trim_end()
+        .to_owned()
+        + " }\n";
+    std::fs::write(&entry, plugin).unwrap();
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.column { ui.text { id = "slot", "app" } }"#,
+        );
+        host.set_plugins(vec![Plugin {
+            name: "cad".into(),
+            entry,
+            grants: vec![],
+        }]);
+        host
+    });
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    assert!(frame_id(&mut h, "scene").is_some(), "{}", h.tree());
+    press(&mut h, "scene", (100., 100.), 0.);
+    assert_eq!(h.text("clicked"), "0.50");
+}
+
+/// A mesh with no triangles (a boolean of two solids that don't meet) is a
+/// mesh that shows nothing, and clicks pass it.
+#[test]
+fn a_mesh_of_no_triangles_shows_nothing() {
+    let mut h = Harness::inline(
+        &OWN.replace("positions = {", "positions = {} or {")
+            .replace("indices = { 1, 2, 3,  1, 3, 4 },", "")
+            .replace("FACES", ""),
+    );
+    assert_eq!(h.error(), None);
+    h.frame();
+    assert!(frame_id(&mut h, "scene").is_some());
+    press(&mut h, "scene", (100., 100.), 0.);
+    assert_eq!(h.text("clicked"), "none");
+}
+
+/// What a plugin's meshes hold counts against its memory, though it lives
+/// outside its VM; what it lets go of is room again.
+#[test]
+fn a_plugin_meshes_count_against_its_memory() {
+    use zgx_script::{Limits, Plugin, ScriptHost};
+    let dir = std::env::temp_dir().join(format!("zgx-scene3d-budget-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("init.luau");
+    std::fs::write(
+        &entry,
+        r##"
+local result = ui.state("result", "")
+ui.contribute { target = "#slot", after = ui.text { id = "got", "{result}" } }
+local positions = table.create(3 * 3000, 0)
+local function mesh() return ui.mesh { geometry = { positions = positions } } end
+-- Each holds some 108 KB, nothing of it in the VM: 200 of them are far more
+-- than 4 MB holds, if they were held.
+local thrown = 0
+for i = 1, 200 do
+    local ok = pcall(mesh)
+    if not ok then break end
+    thrown = i
+end
+local kept, held, why = {}, 0, ""
+for i = 1, 200 do
+    local ok, made = pcall(mesh)
+    if not ok then why = tostring(made) break end
+    kept[i] = made
+    held = i
+end
+local short = string.find(why, "needs 0.1 MB: a plugin's memory is 4 MB", 1, true) ~= nil
+kept = {}
+local again = pcall(mesh)
+result:set(`{thrown} {held} {short} {again}`)
+"##,
+    )
+    .unwrap();
+    let mut h = Harness::new(move |runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.column { ui.text { id = "slot", "app" } }"#,
+        )
+        .limits(Limits {
+            plugin_memory: 4 << 20,
+            ..Default::default()
+        });
+        host.set_plugins(vec![Plugin {
+            name: "cad".into(),
+            entry,
+            grants: vec![],
+        }]);
+        host
+    });
+    h.frames(2);
+    let got = h.text("got");
+    let parts: Vec<&str> = got.split(' ').collect();
+    // Thrown away, each is collected to make room for the next.
+    assert_eq!(parts[0], "200", "{got}");
+    let held: usize = parts[1].parse().unwrap();
+    assert!((1..50).contains(&held), "{got}");
+    assert_eq!(parts[2], "true", "{got}");
+    assert_eq!(parts[3], "true", "{got}");
+}
