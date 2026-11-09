@@ -1,5 +1,6 @@
 //! WebAssembly apps for zgx: a plugin's component run inside the host's
-//! process, sandboxed, drawing with WebGPU on the host's own device, shown
+//! process, sandboxed, drawing with WebGPU on a device of its own whose
+//! frames zgx's device shares (no copy), shown
 //! as an element with all its input: the in-process counterpart of
 //! zgx-surface's external surfaces (another process).
 //!
@@ -13,13 +14,15 @@
 //! ```
 //!
 //! The component is built for `wasm32-wasip2` against the `zgx:app/app`
-//! world (`wit/app.wit`; `examples/wasm/zgx-app` is a Rust guest's SDK).
+//! world (`wit/app.wit`; `guest/zgx-app` is a Rust guest's SDK).
 //! It runs on a thread of its own, never the UI's: its frames are asked at
 //! the display's refresh while it shows, and what it draws shows at the
 //! next. It reaches nothing but its element and the GPU: no files (unless
 //! the host grants a folder), network, environment, time of day or other
 //! program, its memory and every call's time capped. A trap, an exit, a
-//! call running too long ends its session alone. docs/wasm-apps.md says
+//! call or GPU work running too long, a lost device ends its session alone;
+//! its shaders' loops are bounded and its submissions capped, so its GPU
+//! work can't hold zgx's frames. docs/wasm-apps.md says
 //! more.
 mod app;
 mod bundles;

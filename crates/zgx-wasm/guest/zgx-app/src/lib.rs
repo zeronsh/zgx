@@ -17,7 +17,7 @@
 //! zgx_app::app!(Hello);
 //! ```
 //!
-//! [`gpu`] is WebGPU on the host's own device (`util` has descriptors with
+//! [`gpu`] is WebGPU on a device of the app's own, on zgx's adapter (`util` has descriptors with
 //! WebGPU's defaults); [`host`] is the element (title, cursor, pointer
 //! lock, pacing, CPU pixels).
 pub mod bindings {

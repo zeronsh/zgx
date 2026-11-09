@@ -1,11 +1,14 @@
-//! `zgx:app/gpu`: WebGPU on the renderer's own device, for the guest.
+//! `zgx:app/gpu`: WebGPU on the session's own device (device.rs), for the
+//! guest.
 //!
-//! Each object the guest makes is a wgpu object of the host's device in the
-//! store's resource table: a frame drawn into `current-texture` is sampled
-//! by the element as it is, no copy. Everything is validated by wgpu, inside
+//! Each object the guest makes is a wgpu object of that device in the
+//! store's resource table: a frame drawn into `current-texture` is one of
+//! zgx's shared textures, sampled by the element as it is, no copy. Everything is validated by wgpu, inside
 //! error scopes of the guest's thread (errors are the guest's `err`s, or
 //! lines of its log), and before wgpu where a mistake would panic it (a
-//! buffer's range). The session's objects are capped in count and bytes.
+//! buffer's range, a bundle's descriptor). The session's objects are capped
+//! in count and bytes, and each encoder's work (draws, workgroups) against
+//! what a submission may run.
 use crate::{
     bundles::{QuerySet, RenderBundle},
     device::{Device, Scope},

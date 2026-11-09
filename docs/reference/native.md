@@ -78,7 +78,7 @@ A terminal's colours come from the theme where it shows, through the tokens `$te
 
 A program another process draws, its frames shown in a node and its input forwarded to it: a game, an emulator, a renderer of its own. The program is a client of zgx's external surfaces (`zgx-surface`; see [External surfaces](../external-surfaces.md) for how one is written): on Linux its frames are Vulkan images on zgx's own GPU, no pixel copied by a CPU; elsewhere, and for a client that can't share its GPU's memory, shared memory. zgx-run has it (zgx-script's `apps` feature); without it `ui.app` raises.
 
-Or a WebAssembly app, run in the app's own process, sandboxed, drawing with WebGPU on the window's GPU device (`wasm`; see [WebAssembly apps](../wasm-apps.md) for the interface a component implements, its sandbox and how a plugin ships one). zgx-run has it (zgx-script's `wasm` feature). Scripts treat both alike:
+Or a WebAssembly app, run in the app's own process, sandboxed, drawing with WebGPU on a GPU device of its own whose frames the window's device shares (`wasm`; see [WebAssembly apps](../wasm-apps.md) for the interface a component implements, its sandbox and how a plugin ships one). zgx-run has it (zgx-script's `wasm` feature). Scripts treat both alike:
 
 ```luau
 local cube = ui.app("cube", { wasm = "cube.wasm", memory = 256, timeout = 2 })

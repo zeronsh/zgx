@@ -824,8 +824,8 @@ interface gpu {
         finish: static func(this: command-encoder) -> result<command-buffer, string>;
     }
 
-    /// Whether the host has a device now: always inside `frame`, maybe not
-    /// before the first (a host drawing without a GPU never has one).
+    /// Whether the app's device is open: always inside `frame`, maybe not
+    /// before the first (a host drawing without a GPU never opens one).
     ready: func() -> bool;
     get-adapter-info: func() -> option<adapter-info>;
     get-limits: func() -> limits;
@@ -838,7 +838,8 @@ interface gpu {
     /// bgra8unorm-srgb where the device can (`texture-view-descriptor.format`).
     preferred-format: func() -> texture-format;
     /// This frame's texture, the element's size: draw all of it
-    /// (premultiplied alpha), and it shows once `frame` returns. Only inside
+    /// (premultiplied alpha), and it shows once `frame` returns and its GPU
+    /// work is done (within the host's watchdog). Only inside
     /// `frame`; the same texture for each call in one.
     current-texture: func() -> result<texture, string>;
 
