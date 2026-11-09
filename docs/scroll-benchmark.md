@@ -384,3 +384,9 @@ The manual workflow uploads only this allowlisted summary and keeps actual-app
 build and replay logs out of its public output. Unknown fields and free-text
 notes are omitted. Physical certification remains manual: run
 `scripts/perf/scroll.py` on a quiet Mac and attach the table.
+
+The independent Swift native brackets record the same commit/flip-to-shown
+latency and acquisition time. Their numeric summaries accompany the app
+results. A refresh-phase value is modulo the observed presented-time grid;
+it is not an absolute display-link timestamp. Late and on-time frames are
+kept separately when interpreting that phase.

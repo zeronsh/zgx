@@ -122,10 +122,12 @@ final class Floor: NSObject, NSApplicationDelegate {
     frame += 1
     let n = frame
     record("NATIVE_WAKE \(n) \(started) \(clock.timestamp) \(clock.targetTimestamp)")
+    let acquisition = CACurrentMediaTime()
     guard let drawable = metal.nextDrawable(), let buffer = queue.makeCommandBuffer() else {
       record("NATIVE_UNAVAILABLE \(n)")
       return
     }
+    record("NATIVE_ACQUIRE \(n) \((CACurrentMediaTime()-acquisition)*1000)")
     if mode == "tiles" { clear(textures[n % 3], buffer) }
     clear(drawable.texture, buffer, transparent: mode == "tiles")
     drawable.addPresentedHandler { shown in
@@ -139,15 +141,19 @@ final class Floor: NSObject, NSApplicationDelegate {
     if mode == "tiles" {
       buffer.commit()
       buffer.waitUntilCompleted()
+      let handover = CACurrentMediaTime()
       CATransaction.begin()
       CATransaction.setDisableActions(true)
       root.contents = surfaces[n % 3]
       drawable.present()
       CATransaction.commit()
       CATransaction.flush()
+      record("NATIVE_HANDOVER \(n) \(handover) \(CACurrentMediaTime())")
     } else {
       buffer.present(drawable)
+      let handover = CACurrentMediaTime()
       buffer.commit()
+      record("NATIVE_HANDOVER \(n) \(handover) \(CACurrentMediaTime())")
     }
     record("NATIVE_WORK \(n) \((CACurrentMediaTime()-started)*1000)")
   }

@@ -39,6 +39,22 @@ class ScrollMetrics(unittest.TestCase):
         self.assertEqual(result['present_to_display_ms']['p99'],9)
         self.assertEqual(result['handover_end_to_display_ms']['p99'],-1)
 
+    def test_native_handover_has_the_same_latency_and_late_split(self):
+        wakes={1:[1,1,1.008],2:[1.01,1.01,1.018]}
+        presents=[[1,1.009,1.008,1],[2,1.026,1.025,1.01]]
+        m=scroll.native_presentation_timings(presents,wakes,{1:[1.002,1.003],2:[1.012,1.013]},
+                                            {1:.1,2:.2},1000/120)
+        self.assertEqual(m['coverage']['clock_mismatch'],0)
+        self.assertEqual(m['coverage']['missing_handover'],0)
+        self.assertAlmostEqual(m['present_to_display_ms']['p50'],6)
+        self.assertEqual(m['groups']['late']['count'],1)
+        self.assertAlmostEqual(m['groups']['late']['present_to_display_ms']['max'],13)
+
+    def test_native_missing_handover_does_not_become_zero(self):
+        m=scroll.native_presentation_timings([[1,1.009,1.008,1]],{1:[1,1,1.008]}, {},{},1000/120)
+        self.assertEqual(m['coverage']['missing_handover'],1)
+        self.assertIsNone(m['present_to_display_ms']['p99'])
+
     def metrics(self, step, gesture='fling', skipped=0):
         events = scroll.parse_tape(scroll.tape(gesture, 120))
         presents = [(t / 1000, t / 1000) for t in range(step, 3990, step)]

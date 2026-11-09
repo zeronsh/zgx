@@ -36,6 +36,14 @@ def numeric_fields(source, keys):
     return {key: number(source.get(key)) for key in keys if key in source}
 
 
+def timing_summary(timing):
+    return {key: numeric_fields(timing[key], keys) for key, keys in (
+        ('acquisition_ms', QUANTILES), ('gpu_wait_ms', QUANTILES),
+        ('present_to_display_ms', QUANTILES), ('handover_end_to_display_ms', QUANTILES),
+        ('coverage', ('shown_records', 'handover_records', 'missing_handover', 'clock_mismatch')),
+    ) if isinstance(timing.get(key), dict)}
+
+
 def sanitize(row):
     result = {key: row[key] for key, choices in FIELDS.items()
               if isinstance(row.get(key), str) and row[key] in choices}
@@ -53,13 +61,21 @@ def sanitize(row):
         metrics['rss_kib'] = numeric_fields(source['rss_kib'], ('before', 'after', 'delta', 'peak'))
     timing = source.get('presentation_timings', {})
     if isinstance(timing, dict):
-        metrics['presentation_timings'] = {
-            key: numeric_fields(timing[key], keys) for key, keys in (
-                ('acquisition_ms', QUANTILES), ('gpu_wait_ms', QUANTILES),
-                ('present_to_display_ms', QUANTILES), ('handover_end_to_display_ms', QUANTILES),
-                ('coverage', ('shown_records', 'handover_records', 'missing_handover', 'clock_mismatch')),
-            ) if isinstance(timing.get(key), dict)}
+        metrics['presentation_timings'] = timing_summary(timing)
     result['metrics'] = metrics
+    for key in ('native_floor_before', 'native_floor_after'):
+        floor = row.get(key)
+        if not isinstance(floor, dict):
+            continue
+        clean = numeric_fields(floor, ('late_pct', 'late_frames', 'skipped_drawables', 'samples', 'gpu_p99_ms'))
+        if floor.get('status') in ('valid', 'invalid'):
+            clean['status'] = floor['status']
+        for spread in ('interval_ms', 'main_work_ms', 'display_period_ms'):
+            if isinstance(floor.get(spread), dict):
+                clean[spread] = numeric_fields(floor[spread], QUANTILES)
+        if isinstance(floor.get('presentation_timings'), dict):
+            clean['presentation_timings'] = timing_summary(floor['presentation_timings'])
+        result[key] = clean
     return result
 
 

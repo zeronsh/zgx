@@ -840,6 +840,40 @@ class RefreshModes:
                 dict(original=self.original, actions=self.actions), indent=2)+'\n')
 
 
+def native_presentation_timings(presents, wakes, handovers, acquisition, period):
+    samples=[]; previous=None
+    for n,callback,shown,started in sorted(presents,key=lambda value:value[2]):
+        n=int(n)
+        if n not in wakes or shown<=0:continue
+        handover=handovers.get(n)
+        aligned=None; latency=None; end_latency=None; phase=None
+        if handover is not None:
+            begin,end=handover
+            aligned=(wakes[n][0]-.002<=begin<=end and begin<=callback+.002
+                     and shown>=begin-.00001 and shown<=callback+.002)
+            if aligned:
+                latency=(shown-begin)*1000;end_latency=(shown-end)*1000
+                phase=((begin-shown)*1000)%period
+        samples.append(dict(frame=n,shown_s=shown,handover=handover,clock_aligned=aligned,
+                            acquisition_ms=acquisition.get(n),present_to_display_ms=latency,
+                            handover_end_to_display_ms=end_latency,observed_refresh_phase_ms=phase,
+                            late=None if previous is None else (shown-previous)*1000>1.5*period))
+        previous=shown
+    groups={}
+    for name,late in (('late',True),('on_time',False)):
+        selected=[s for s in samples if s['late'] is late and s['clock_aligned']]
+        groups[name]=dict(count=len(selected),present_to_display_ms=spread([s['present_to_display_ms'] for s in selected]),
+                          observed_refresh_phase_ms=spread([s['observed_refresh_phase_ms'] for s in selected]))
+    return dict(samples=samples,
+                acquisition_ms=spread([v for n,v in acquisition.items() if n in wakes]),
+                present_to_display_ms=spread([s['present_to_display_ms'] for s in samples if s['clock_aligned']]),
+                handover_end_to_display_ms=spread([s['handover_end_to_display_ms'] for s in samples if s['clock_aligned']]),
+                coverage=dict(shown_records=len(samples),handover_records=sum(s['handover'] is not None for s in samples),
+                              missing_handover=sum(s['handover'] is None for s in samples),
+                              clock_mismatch=sum(s['clock_aligned'] is False for s in samples)),
+                phase_definition='handover start modulo the observed shown refresh grid, not an absolute link tick',groups=groups)
+
+
 def native_floor(args, size, hz, scale, present, label):
     """Independent CADisplayLink/Metal window; no zgx pacing in this process."""
     out=args.output/label
@@ -862,7 +896,7 @@ def native_floor(args, size, hz, scale, present, label):
     except (subprocess.TimeoutExpired,subprocess.CalledProcessError) as error:
         return invalid(str(error))
     begin=end=None
-    wakes={}; gpu=[]; work=[]; presents=[]; unavailable=0
+    wakes={}; gpu=[]; work=[]; presents=[]; unavailable=0; handovers={}; acquisition={}
     for line in (out/'native.log').read_text().splitlines():
         parts=line.split()
         if not parts: continue
@@ -872,6 +906,8 @@ def native_floor(args, size, hz, scale, present, label):
         elif parts[0]=='NATIVE_PRESENT': presents.append(list(map(float,parts[1:])))
         elif parts[0]=='NATIVE_GPU': gpu.append((int(parts[1]),float(parts[2])))
         elif parts[0]=='NATIVE_WORK': work.append((int(parts[1]),float(parts[2])))
+        elif parts[0]=='NATIVE_HANDOVER': handovers[int(parts[1])]=list(map(float,parts[2:]))
+        elif parts[0]=='NATIVE_ACQUIRE': acquisition[int(parts[1])]=float(parts[2])
         elif parts[0]=='NATIVE_UNAVAILABLE': unavailable+=1
     if begin is None or end is None: return invalid('native floor missing sample anchors')
     sample={n:v for n,v in wakes.items() if begin<=v[0]<=end}
@@ -880,6 +916,7 @@ def native_floor(args, size, hz, scale, present, label):
     skipped=sum(p[2]<=0 for p in presents if int(p[0]) in sample)
     late=sum(gap>1.5*1000/hz for gap in gaps)
     m=dict(mode=mode,native_points=native_size,requested_scale=scale,hz=hz,
+           presentation_timings=native_presentation_timings(presents,sample,handovers,acquisition,1000/hz),
            late_frames=late,skipped_drawables=skipped,late_pct=100*late/max(1,len(gaps)),
            interval_ms=spread(gaps),main_work_ms=spread([v for n,v in work if n in sample]),
            gpu_p99_ms=percentile([v for n,v in gpu if n in sample],.99),
