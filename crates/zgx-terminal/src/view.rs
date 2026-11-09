@@ -1496,8 +1496,12 @@ impl TerminalBackend for EngineTerminal {
                 engine.task.borrow_mut().take();
                 engine.process_task.borrow_mut().take();
                 engine.poll_task.borrow_mut().take();
-                // Dropping the session hangs up its program.
+                // Dropping the session hangs up its program, and lets go of
+                // its screen and pictures: given back at the idle trim, which
+                // a frame arms, and none may come (a window covered, hidden
+                // or minimized, or with nothing to draw where it was).
                 engine.session.borrow_mut().take();
+                zgx::idle::request(&engine.runtime);
             }
         }
     }
@@ -1530,7 +1534,9 @@ impl Drop for EngineTerminal {
         self.0.task.borrow_mut().take();
         self.0.process_task.borrow_mut().take();
         self.0.poll_task.borrow_mut().take();
-        self.0.session.borrow_mut().take();
+        if self.0.session.borrow_mut().take().is_some() {
+            zgx::idle::request(&self.0.runtime);
+        }
     }
 }
 

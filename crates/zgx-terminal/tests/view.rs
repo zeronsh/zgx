@@ -1182,3 +1182,35 @@ fn output_read_before_the_first_layout_makes_the_rows() {
     );
     term.close();
 }
+
+/// Closing a terminal asks for the idle trim: its session lets go of its
+/// screen and pictures, and a window that shows no frame (covered, hidden,
+/// minimized) would otherwise keep them, freed but not given back, until it
+/// next draws. Output asks nothing of it.
+#[test]
+fn closing_a_terminal_asks_for_the_idle_trim() {
+    let ui = Ui::new(640., 360.);
+    let runtime = ui.runtime.clone();
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    replay.feed(b"output\r\n");
+    assert!(
+        !zgx::idle::take_request(&runtime),
+        "output asked for a trim"
+    );
+    term.close();
+    assert!(zgx::idle::take_request(&runtime), "closing asked for none");
+    // Once.
+    assert!(!zgx::idle::take_request(&runtime));
+    drop(app);
+}
