@@ -136,13 +136,28 @@ def main():
             if at_[0] > -5000:
                 path.append(at_)
         checks["slide path"] = path
-        # Home is the card's top-left (the preview has no shadow to offset).
-        home = at(20, 70)
-        distances = [abs(home[0] - sx) + abs(home[1] - sy) for sx, sy in [(ox, oy)] + path]
-        checks["slides back"] = (len(set(path)) >= 3 and distances == sorted(distances, reverse=True)
-                                 and distances[-1] <= distances[0] // 8)
         until("its window hidden", lambda: preview not in windows(), 2)
         until("the drag's end", lambda: "DRAG_END Red false" in log.read_text())
+        # Where it slid from and to, as the app moved it: the server moves it
+        # every few milliseconds for 200, and a loaded machine sees only a few
+        # of those places (one `xwininfo` each), not where it stopped.
+        slid = re.findall(r"popup slide from (-?\d+),(-?\d+) to (-?\d+),(-?\d+)", log.read_text())
+        landed = re.findall(r"popup slid home (-?\d+),(-?\d+)", log.read_text())
+        # Home is the card's top-left (the preview has no shadow to offset).
+        home = at(20, 70)
+        far = lambda sx, sy: abs(home[0] - sx) + abs(home[1] - sy)
+        if slid and landed:
+            fx, fy, tx, ty = map(int, slid[-1])
+            checks["slid"] = [(fx, fy), (tx, ty)]
+            # Each place it was seen at nearer home than the one before.
+            distances = [far(sx, sy) for sx, sy in [(fx, fy)] + path]
+            # From where it was let go, to its card, seen only nearing it.
+            checks["slides back"] = (abs(fx - ox) + abs(fy - oy) <= 8
+                                     and tuple(map(int, landed[-1])) == (tx, ty)
+                                     and far(tx, ty) <= far(fx, fy) // 8
+                                     and distances == sorted(distances, reverse=True))
+        else:
+            checks["slides back"] = False
         checks["window renders while it slides"] = draws()[0] - before[0]
 
         # Dropped on the destination: taken, the preview goes at once.
