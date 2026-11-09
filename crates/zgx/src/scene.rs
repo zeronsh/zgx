@@ -73,6 +73,10 @@ impl std::hash::Hasher for NodeHasher {
 /// Separate damage rectangles a flush keeps before marking damage on a grid
 /// of `DAMAGE_CELL` cells instead (see `DamageGrid`).
 const DAMAGE_RECTS: usize = 64;
+/// How many children a node has before a damaged paint walk finds those
+/// meeting its damage by search (`Scene::child_reach`): fewer, the plain
+/// filter costs less than the search.
+const SEARCHED_CHILDREN: usize = 64;
 /// The side of a damage grid cell, in viewport units.
 const DAMAGE_CELL: f32 = 8.;
 /// The most words a damage grid takes (512 KiB: a viewport 32,768 points a
@@ -3128,6 +3132,17 @@ pub struct Scene {
     pub(crate) no_move_context: bool,
     #[cfg(test)]
     pub(crate) move_context_kept: u64,
+    /// Tests: a damaged paint walk filters every child (`searched` unused).
+    #[cfg(test)]
+    pub(crate) linear_walks: bool,
+    /// Worked out with `ink`, for each node of `SEARCHED_CHILDREN` children
+    /// or more whose boxes (in its space, translated) run down in order,
+    /// tops and bottoms both never going back up (a column's rows): how far
+    /// any child's ink reaches above or below its box. A damaged paint walk
+    /// then finds the children that can meet its damage by search
+    /// (`searched`). Kept beside the nodes: few have so many children, and
+    /// a field every node carries cost every node.
+    child_reach: std::cell::RefCell<std::collections::HashMap<NodeId, f32, crate::KeyHasher>>,
     /// The last point hit tested, the revisions it was hit at and what it
     /// hit (`hit_test_all`): a pointer move's dispatch and its cursor ask the
     /// same, and most moves between frames ask where nothing changed.
@@ -3343,6 +3358,11 @@ impl Scene {
             no_move_context: false,
             #[cfg(test)]
             move_context_kept: 0,
+            #[cfg(test)]
+            linear_walks: false,
+            child_reach: std::cell::RefCell::new(std::collections::HashMap::with_hasher(
+                crate::key_hasher(),
+            )),
             hit_memo: Default::default(),
             cursor_styles: 0,
             contents_styles: Default::default(),
@@ -6849,6 +6869,10 @@ impl Scene {
     /// What the scene keeps about `node`, gone, but in the lists `kill`
     /// filters.
     fn forget(&mut self, id: NodeId, node: &Node) {
+        let reaches = self.child_reach.get_mut();
+        if !reaches.is_empty() {
+            reaches.remove(&id);
+        }
         self.selectable.forget(id);
         self.views.forget(id);
         self.cursor_styles -= usize::from(node.cursor.is_some());
@@ -9531,12 +9555,19 @@ impl Scene {
         // Its overflow clip cuts what it holds; a box's own paint (its
         // shadows) reaches past it, as the paint walks draw it.
         let own = self.own_ink(id);
-        let mut held: Option<Rect> = None;
-        for child in self.children_raw(node) {
-            if let Some(child) = crate::deep(0, || self.ink(*child)) {
-                held = Some(held.map_or(child, |ink| ink.union(child)));
+        let children = self.children_raw(node);
+        let held = match children.len() >= SEARCHED_CHILDREN {
+            false => {
+                let mut held: Option<Rect> = None;
+                for child in children {
+                    if let Some(child) = crate::deep(0, || self.ink(*child)) {
+                        held = Some(held.map_or(child, |ink| ink.union(child)));
+                    }
+                }
+                held
             }
-        }
+            true => self.many_children_held(id, children),
+        };
         let held = held.and_then(|ink| clipped_bounds(Some(ink), node.bounds, &node.style));
         let own = match &node.kind {
             NodeKind::Quad(_) | NodeKind::Panel { .. } => own,
@@ -9566,6 +9597,40 @@ impl Scene {
         node.ink.set(ink);
         node.bounds_valid.set(INK_VALID | BOUNDS_VALID);
         ink
+    }
+    /// `ink`'s union of the inks of `id`'s many `children` (`SEARCHED_CHILDREN`
+    /// or more), noting whether their boxes run down in order and how far
+    /// their ink reaches past them (`child_reach`). Out of line: the many
+    /// nodes of few children keep `ink`'s loop as it was.
+    #[inline(never)]
+    fn many_children_held(&self, id: NodeId, children: &[NodeId]) -> Option<Rect> {
+        let mut held: Option<Rect> = None;
+        let mut ordered = true;
+        let (mut top, mut bottom, mut reach) = (f32::NEG_INFINITY, f32::NEG_INFINITY, 0f32);
+        for child in children {
+            let ink = crate::deep(0, || self.ink(*child));
+            if let Some(child) = ink {
+                held = Some(held.map_or(child, |ink| ink.union(child)));
+            }
+            if ordered {
+                // A child the tree led to, its ink just worked out.
+                let held = self.tree_node(*child);
+                let shown = held.bounds.translated(held.transform);
+                let (y, end) = (shown.y, shown.y + shown.height);
+                ordered = y >= top && end >= bottom && y.is_finite() && end.is_finite();
+                (top, bottom) = (y, end);
+                if let Some(ink) = ink {
+                    reach = reach.max(y - ink.y).max(ink.y + ink.height - end);
+                }
+            }
+        }
+        let reach = if ordered && reach.is_finite() {
+            reach
+        } else {
+            -1.
+        };
+        self.child_reach.borrow_mut().insert(id, reach);
+        held
     }
     /// Pixels this node itself can touch, matching what damage covers.
     fn own_ink(&self, id: NodeId) -> Option<Rect> {
@@ -12673,6 +12738,51 @@ impl Scene {
             }
         }
     }
+    /// Of `node`'s `children`, those whose ink can meet `reach` (a damaged
+    /// walk's damage, all of it, in the window) at `transform` (its
+    /// ancestors' translation): where they run down in order (`child_reach`),
+    /// the run between the first whose box, grown by their ink's reach, ends
+    /// at or past it and the last that starts at or before it. Every child
+    /// left out has its ink in its grown box, so misses it. All of them
+    /// where they don't run in order.
+    #[inline(never)]
+    fn searched<'a>(
+        &self,
+        id: NodeId,
+        node: &Node,
+        children: &'a [NodeId],
+        transform: Transform,
+        reach: Rect,
+    ) -> &'a [NodeId] {
+        #[cfg(test)]
+        if self.linear_walks {
+            return children;
+        }
+        // (Many children, as its caller checked. Valid: the walk reached it
+        // through its parent's filter, which worked its ink out, or it is
+        // where the walk starts.)
+        if node.bounds_valid.get() & INK_VALID == 0 {
+            return children;
+        }
+        let Some(grown) = self.child_reach.borrow().get(&id).copied() else {
+            return children;
+        };
+        if grown < 0. {
+            return children;
+        }
+        let (from, to) = (reach.y - transform.y, reach.y + reach.height - transform.y);
+        // Children the tree led to, as their parent's list holds them.
+        let shown = |child: &NodeId| {
+            let held = self.tree_node(*child);
+            held.bounds.translated(held.transform)
+        };
+        let first = children.partition_point(|child| {
+            let shown = shown(child);
+            shown.y + shown.height + grown < from
+        });
+        let last = children.partition_point(|child| shown(child).y - grown <= to);
+        &children[first..last.max(first)]
+    }
     /// `layer_items_within` without damage (a whole repaint: a resize):
     /// the walk that passes by children outside the clips they're drawn
     /// in. Out of line, and a walk of its own: a damaged one prunes by
@@ -13051,7 +13161,12 @@ impl Scene {
                 };
                 let children = match POPUPS {
                     true => self.paint_order(id, node),
-                    false => self.children_raw(node),
+                    false => match (reach, self.children_raw(node)) {
+                        (Some(reach), all) if all.len() >= SEARCHED_CHILDREN => {
+                            self.searched(id, node, all, transform, reach)
+                        }
+                        (_, all) => all,
+                    },
                 };
                 stack.extend(
                     children
@@ -13479,6 +13594,122 @@ mod tests {
         let damage = scene.flush().damage;
         assert_eq!(scene.bounds(added), Rect::new(0., 600., 200., 20.));
         assert_eq!(damage, [Rect::new(0., 600., 200., 20.)]);
+    }
+    /// A damaged paint walk that finds a long column's children meeting its
+    /// damage by search (`searched`) walks to the item what filtering every
+    /// child does (`linear_walks`): rows whose shadows reach past their
+    /// boxes, a hidden row, a scroll offset, a list inside a row, and a list
+    /// with a row moved out of order (filtered whole), under damage of every
+    /// kind, after appends, a row growing and pushing those after it, and
+    /// scrolling.
+    #[test]
+    fn a_searched_walk_paints_what_filtering_every_child_does() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let shadowed = |n: u8| {
+            NodeKind::Quad(QuadStyle {
+                fill: Color(n, 60, 90, 255),
+                shadow: n.is_multiple_of(3).then_some(BoxShadow {
+                    color: Color(0, 0, 0, 120),
+                    offset: Transform { x: 0., y: 6. },
+                    blur_radius: 9.,
+                    spread: 2.,
+                }),
+                ..Default::default()
+            })
+        };
+        let damages: Vec<Vec<Rect>> = vec![
+            vec![Rect::new(0., 0., 400., 30.)],
+            vec![Rect::new(10., 140., 50., 3.)],
+            vec![Rect::new(0., 299., 400., 2.), Rect::new(100., 20., 5., 5.)],
+            vec![Rect::new(0., 395., 400., 40.)],
+            vec![Rect::new(300., 0., 100., 600.)],
+            vec![Rect::new(0., 610., 400., 50.)],
+            vec![Rect::new(0., 0., 400., 700.)],
+        ];
+        let run = |linear: bool| {
+            let mut scene = Scene::new(400., 700.);
+            scene.linear_walks = linear;
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            let clip = scene.append(
+                root,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    clip: true,
+                    ..sized(240., 600.)
+                },
+            );
+            let list = scene.append(clip, NodeKind::Container(Layout::Column), Style::default());
+            let mut rows = Vec::new();
+            for n in 0..80u8 {
+                let row = scene.append(list, shadowed(n), sized(200., 6. + (n % 7) as f32));
+                rows.push(row);
+            }
+            // A list inside a row.
+            let inner = scene.append(list, NodeKind::Container(Layout::Column), Style::default());
+            for n in 0..70u8 {
+                scene.append(
+                    inner,
+                    shadowed(n.wrapping_mul(5)),
+                    sized(120., 4. + (n % 3) as f32),
+                );
+            }
+            scene.set_style(
+                rows[17],
+                Style {
+                    layout_options: Some(Arc::new(crate::layout::LayoutOptions {
+                        visible: Some(false),
+                        ..Default::default()
+                    })),
+                    ..sized(200., 9.)
+                },
+            );
+            // A list with a row moved up past others: not in order.
+            let other = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+            scene.set_transform(other, Transform { x: 260., y: 0. });
+            let mut others = Vec::new();
+            for n in 0..70u8 {
+                others.push(scene.append(other, shadowed(n), sized(100., 12.)));
+            }
+            scene.set_transform(others[30], Transform { x: 0., y: -300. });
+            scene.flush();
+            let mut walks = Vec::new();
+            let mut walk = |scene: &mut Scene| {
+                scene.flush();
+                for damage in &damages {
+                    let items: Vec<_> = scene
+                        .layer_items_within(None, Some(damage))
+                        .iter()
+                        .map(|item| {
+                            let bits = |r: Rect| [r.x, r.y, r.width, r.height].map(f32::to_bits);
+                            (item.id, bits(item.bounds), item.clip.map(bits))
+                        })
+                        .collect();
+                    walks.push(items);
+                }
+            };
+            walk(&mut scene);
+            // Appended, grown (pushing the rows after it), scrolled.
+            for n in 80..90u8 {
+                scene.append(list, shadowed(n), sized(200., 8.));
+            }
+            walk(&mut scene);
+            scene.set_style(rows[40], sized(200., 60.));
+            walk(&mut scene);
+            scene.set_transform(list, Transform { x: 0., y: -137.5 });
+            walk(&mut scene);
+            scene.set_style(rows[5], sized(200., 2.));
+            scene.set_transform(list, Transform { x: 0., y: -20. });
+            walk(&mut scene);
+            walks
+        };
+        let (searched, filtered) = (run(false), run(true));
+        assert!(searched.iter().all(|items| !items.is_empty()));
+        assert_eq!(searched, filtered);
     }
     /// A move under the parent the last move was under takes that parent's
     /// context as kept (`move_context`): the damage of every frame is, to
