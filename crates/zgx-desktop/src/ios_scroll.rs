@@ -909,6 +909,25 @@ fn run_refresh(state: &State, control: &AnyObject) {
     state.window.request_redraw();
 }
 
+/// Where a view says what covers it, its indicator stays clear of that
+/// alone, as under a navigation bar; otherwise the system's automatic insets
+/// keep it clear of the safe area.
+fn set_indicator_insets(view: &AnyObject, insets: Option<zgx::scene::Insets>) {
+    let given = insets.unwrap_or_default();
+    let edges = UiEdgeInsets(
+        f64::from(given.top),
+        f64::from(given.left),
+        f64::from(given.bottom),
+        f64::from(given.right),
+    );
+    // SAFETY: UIScrollView's setters, on the main thread.
+    unsafe {
+        let _: () = msg_send![view, setAutomaticallyAdjustsScrollIndicatorInsets: insets.is_none()];
+        let _: () = msg_send![view, setVerticalScrollIndicatorInsets: edges];
+        let _: () = msg_send![view, setHorizontalScrollIndicatorInsets: edges];
+    }
+}
+
 /// `UIEdgeInsets`: top, left, bottom, right.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -1514,6 +1533,7 @@ fn configure(state: &State, view: &AnyObject, driver: ScrollDriver, at: Option<C
         // UIKit's own indicator, along the way it scrolls, over the view.
         let _: () = msg_send![view, setShowsVerticalScrollIndicator: !metrics.horizontal];
         let _: () = msg_send![view, setShowsHorizontalScrollIndicator: metrics.horizontal];
+        set_indicator_insets(view, metrics.indicator_insets);
         // A short list gives under a finger, as a table view does.
         let _: () = msg_send![view, setAlwaysBounceVertical: !metrics.horizontal];
         let _: () = msg_send![view, setContentSize: content];

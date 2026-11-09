@@ -1132,6 +1132,7 @@ impl Surfaces {
             let top = mounted.clip.as_ref().unwrap_or(&mounted.view);
             set_shown(top, !hidden);
         }
+        let moved = mounted.frame != Some(placement.frame);
         if let (Some(clip), Some(visible)) = (&mounted.clip, visible) {
             // What cuts it, not its own box: its lens and shadow show past that.
             let visible =
@@ -1183,6 +1184,15 @@ impl Surfaces {
             }
         }
         if let Content::Tabs(state, _) = &mounted.content {
+            if let Some(height) = &state.height
+                && moved
+            {
+                // SAFETY: UIView's method, on the main thread.
+                let fits: CGSize = unsafe { msg_send![&*mounted.view, sizeThatFits: CGSize::ZERO] };
+                // Here the scene is borrowed, and what reads it lays out.
+                let height = height.clone();
+                zgx::native_view::post(move || height.report(fits.height as f32));
+            }
             let selected = state.selected.get();
             // SAFETY: UITabBar's getters and setter, on the main thread.
             unsafe {
