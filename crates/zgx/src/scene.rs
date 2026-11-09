@@ -50,6 +50,8 @@ struct FlexRounds {
     limit: f32,
     gaps: f32,
 }
+/// A `Measurement::pass` no layout pass has (`Scene::expire_this_pass`).
+const EXPIRED_PASS: u64 = u64::MAX - 1;
 /// The children a column has as it looks at its end alone
 /// (`Scene::children_outgrown`): fewer cost little to lay out whole.
 const COLUMN_KEPT_FROM: usize = 64;
@@ -9262,23 +9264,24 @@ impl Scene {
     /// `id`, around a child just found not to stand: what it answered this
     /// pass, if it was laid out alone too (a stop this one is inside, which
     /// stood on what this one still answered from before), serves no more.
+    /// Of no pass (`EXPIRED_PASS`), not the one before: what keeps a pass to
+    /// compare with (`ColumnMemo`) mustn't find it.
     fn expire_this_pass(&mut self, id: NodeId) {
         let pass = self.layout_pass;
-        let earlier = pass.wrapping_sub(1);
         let node = self.tree_node_mut(id);
         if let Some(result) = &mut node.measurement
             && result.pass == pass
         {
-            result.pass = earlier;
+            result.pass = EXPIRED_PASS;
         }
         for result in &mut node.alternates {
             if result.pass == pass {
-                result.pass = earlier;
+                result.pass = EXPIRED_PASS;
             }
         }
         for size in &mut node.sizes {
             if size.pass == pass {
-                size.pass = earlier;
+                size.pass = EXPIRED_PASS;
             }
         }
     }
