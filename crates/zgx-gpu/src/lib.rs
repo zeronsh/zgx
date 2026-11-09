@@ -11902,6 +11902,14 @@ impl GpuRenderer {
                         && start == open.end
                         && scissors_alike(open.rect, rect, draw))
                 && open.source == source
+                // A batch draws one run of instances, so a draw joins where it
+                // ends. Instances can lie out of paint order (a text's quads
+                // kept from an earlier frame): one starting before the end
+                // cut the batch short and both drew nothing, and one past it
+                // spanned instances another batch drew, twice. Only the kept
+                // frame's, below, may span a gap, which it knows is
+                // scissored away.
+                && (start == open.end || KEPT && start > open.end)
                 // From the kept frame, the instances it would span to this
                 // draw (draws outside `region`, a kept text's spare room),
                 // set up by the GPU to be scissored away: under
@@ -11935,19 +11943,6 @@ impl GpuRenderer {
                     },
                 };
                 if let Some((merged, promoted)) = merged {
-                    // A batch draws one run of instances: a draw joining it
-                    // starts at or past its end (past it: draws between
-                    // lay outside the region, scissored away). One placed
-                    // before would cut the batch short, and both would draw
-                    // nothing.
-                    debug_assert!(
-                        start >= open.end,
-                        "draw {}..{} joins a batch {}..{} out of order",
-                        start,
-                        draw.end,
-                        open.start,
-                        open.end
-                    );
                     open.shading = merged;
                     open.promoted = promoted;
                     open.pixels += pixels;
