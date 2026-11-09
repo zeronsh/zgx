@@ -690,6 +690,27 @@ extern "C-unwind" fn edit_select_all(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     }
     state.window.request_redraw();
 }
+/// It takes the keyboard, however that came about: UIKit's caret and handles
+/// show.
+extern "C-unwind" fn become_first(this: &AnyObject, _: Sel) -> Bool {
+    // SAFETY: UIResponder's method, on the view's superclass, on the main
+    // thread UIKit calls this on.
+    let became: Bool = unsafe { msg_send![super(this, class!(UIView)), becomeFirstResponder] };
+    if became.as_bool() {
+        selection_display(this, Some(true));
+    }
+    became
+}
+/// It gives up the keyboard, however that came about (a sheet Look Up presents,
+/// as a UITextField's selection goes then too): they go.
+extern "C-unwind" fn resign_first(this: &AnyObject, _: Sel) -> Bool {
+    // SAFETY: as `become_first`.
+    let resigned: Bool = unsafe { msg_send![super(this, class!(UIView)), resignFirstResponder] };
+    if resigned.as_bool() {
+        selection_display(this, Some(false));
+    }
+    resigned
+}
 extern "C-unwind" fn can_perform(
     this: &AnyObject,
     _: Sel,
@@ -975,6 +996,14 @@ fn input_class() -> &'static AnyClass {
             );
             b.add_method(sel!(select:), edit_select as extern "C-unwind" fn(_, _, _));
             b.add_method(
+                sel!(becomeFirstResponder),
+                become_first as extern "C-unwind" fn(_, _) -> _,
+            );
+            b.add_method(
+                sel!(resignFirstResponder),
+                resign_first as extern "C-unwind" fn(_, _) -> _,
+            );
+            b.add_method(
                 sel!(canPerformAction:withSender:),
                 can_perform as extern "C-unwind" fn(_, _, _, _) -> _,
             );
@@ -1064,9 +1093,7 @@ impl TextInput {
                         let _: () = msg_send![&*parent, bringSubviewToFront: &*self.view];
                     }
                     let _: Bool = msg_send![&*self.view, becomeFirstResponder];
-                    selection_display(&self.view, Some(true));
                 } else {
-                    selection_display(&self.view, Some(false));
                     let _: Bool = msg_send![&*self.view, resignFirstResponder];
                 }
             }
