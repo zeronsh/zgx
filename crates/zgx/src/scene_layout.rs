@@ -404,6 +404,16 @@ fn style_with(
         output.align_items = Some(overlay_down(style.justify));
         output.justify_content = None;
     }
+    // In a grid `stretch` is CSS's own: free width goes to the `auto` tracks.
+    // Not an explicit grid made from an overlay, where it is only the default
+    // `overlay()` sets, nor the leaf a child is in its parent's tree.
+    if !leaf
+        && layout != Layout::Overlay
+        && options.display == Some(ViewDisplay::Grid)
+        && style.justify == Justify::Stretch
+    {
+        output.justify_content = Some(t::JustifyContent::Stretch);
+    }
     output
 }
 /// An overlay's vertical alignment of each child (see `Justify`).
