@@ -247,6 +247,14 @@ return ui.column {
     end },
     ui.text { id = "blocks", function() return tostring(#by_state:get()) end },
     ui.text { id = "length", function() return tostring(#reply:get()) end },
+    -- Read as a list every way: its length, an item, and ui.each's rows.
+    ui.text { id = "len", function() return tostring(by_state:len()) end },
+    ui.text { id = "first", function() return tostring(by_state:at(1).t) end },
+    ui.column {
+        ui.each(by_state, function(b: MarkdownBlock, i: number)
+            return ui.text { id = "row" .. i, b.t }
+        end),
+    },
 }"###,
     );
     h.settle();
@@ -258,6 +266,9 @@ return ui.column {
         let now: usize = h.text("blocks").parse().unwrap();
         assert!(now >= blocks, "chunk {chunk}: the blocks follow the state");
         blocks = now;
+        assert_eq!(h.text("len"), now.to_string(), "chunk {chunk}");
+        assert_eq!(h.text("first"), "h", "chunk {chunk}");
+        assert!(!h.text(&format!("row{now}")).is_empty(), "chunk {chunk}");
     }
     // Long by the end: the stream followed `state:append`'s edits.
     let length: usize = h.text("length").parse().unwrap();

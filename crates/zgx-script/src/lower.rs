@@ -2228,7 +2228,8 @@ impl Unkeyed {
             .count()
     }
 }
-/// The rows of a `ui.each` without a `key` for `list`: each item keeps the
+/// The rows of a `ui.each` without a `key` for a list, given its items from
+/// `from` on (`rest`): each item keeps the
 /// row of the same item last pass, wherever it moved (an insert or removal
 /// builds one row, not every row after it). Items are matched where they
 /// were first (a pointer compare each, in the usual pass), then the rest by
@@ -2244,15 +2245,15 @@ impl Unkeyed {
 /// what follows looks at the rest alone (a stream's last item and those
 /// appended). With `from` 0, the full pass.
 fn unkeyed_rows(
-    list: &[Value],
+    rest: &[Value],
     rows: &mut Rows,
     state: &mut Unkeyed,
     from: usize,
     live: bool,
     runtime: &zgx::reactive::Runtime,
 ) -> Vec<Rc<str>> {
-    let mut names: Vec<Option<Rc<str>>> = vec![None; list.len() - from];
-    for (index, item) in list.iter().enumerate().skip(from) {
+    let mut names: Vec<Option<Rc<str>>> = vec![None; rest.len()];
+    for (index, item) in (from..).zip(rest) {
         if let Some(name) = state.order.get(index)
             && rows[name].last == *item
         {
@@ -2275,7 +2276,7 @@ fn unkeyed_rows(
                 .or_default()
                 .push((*name).clone());
         }
-        for (item, name) in list[from..].iter().zip(names.iter_mut()) {
+        for (item, name) in rest.iter().zip(names.iter_mut()) {
             if name.is_none()
                 && let Some(found) = by_item.get_mut(&quick(item)).and_then(Vec::pop)
             {
@@ -2295,7 +2296,7 @@ fn unkeyed_rows(
                 .or_default()
                 .push((*name).clone());
         }
-        for (item, name) in list[from..].iter().zip(names.iter_mut()) {
+        for (item, name) in rest.iter().zip(names.iter_mut()) {
             if name.is_some() || by_contents.is_empty() {
                 continue;
             }
@@ -2308,7 +2309,7 @@ fn unkeyed_rows(
             }
         }
     }
-    for (index, item) in list.iter().enumerate().skip(from) {
+    for (index, item) in (from..).zip(rest) {
         if names[index - from].is_some() {
             continue;
         }
@@ -2937,6 +2938,7 @@ fn kind_view(
             follow,
             scrollbar,
             contain,
+            wheel_across,
             padding,
         } => {
             let offset = match offset {
@@ -2954,6 +2956,11 @@ fn kind_view(
             let view = view.follow_end(*follow);
             let view = if *contain {
                 view.overscroll_contain()
+            } else {
+                view
+            };
+            let view = if *wheel_across {
+                view.wheel_across()
             } else {
                 view
             };
@@ -3424,7 +3431,7 @@ fn kind_view(
             let (rows_in_keys, noted_in_keys) = (rows.clone(), noted.clone());
             let runtime = vm.runtime.clone();
             let (builder, vm, low) = (row_builder(builder, vm, low), vm.clone(), low.clone());
-            keyed(
+            zgx::compose::keyed_grown(
                 move || {
                     keys_from.with(|list| {
                         let mut noted = noted_in_keys.borrow_mut();
@@ -3440,7 +3447,7 @@ fn kind_view(
                                 &runtime,
                             )
                         {
-                            return identities;
+                            return zgx::compose::Keys::All(identities);
                         }
                         if key_fn.is_none() {
                             let mut unkeyed = unkeyed.borrow_mut();
@@ -3449,7 +3456,15 @@ fn kind_view(
                             // (a stream's last item, and those appended).
                             let from = unkeyed.kept(list);
                             unkeyed.items = list.clone();
-                            let list = list.list();
+                            // (A grown list's own, not made into one slice.)
+                            let grown: Vec<Value>;
+                            let rest = match crate::value::grown_list(list) {
+                                Some(list) => {
+                                    grown = list.iter_from(from).cloned().collect();
+                                    &grown[..]
+                                }
+                                None => &list.list()[from..],
+                            };
                             if from == 0 {
                                 noted.clear();
                                 unkeyed.identities.clear();
@@ -3459,13 +3474,20 @@ fn kind_view(
                                 }
                             }
                             let names =
-                                unkeyed_rows(list, &mut rows, &mut unkeyed, from, live, &runtime);
+                                unkeyed_rows(rest, &mut rows, &mut unkeyed, from, live, &runtime);
                             for (i, row) in names.into_iter().enumerate() {
                                 let identity = rows[&row].identity.clone();
                                 noted.insert(identity.clone(), (from + i, row));
                                 unkeyed.identities.push(identity);
                             }
-                            return unkeyed.identities.clone();
+                            // (Those before `from` are the keys passed last.)
+                            return match from {
+                                0 => zgx::compose::Keys::All(unkeyed.identities.clone()),
+                                unchanged => zgx::compose::Keys::Grown {
+                                    unchanged,
+                                    rest: unkeyed.identities[from..].to_vec(),
+                                },
+                            };
                         }
                         noted.clear();
                         let mut seen: HashMap<String, usize> = HashMap::new();
@@ -3524,13 +3546,13 @@ fn kind_view(
                                 identities: identities.clone(),
                             });
                         }
-                        identities
+                        zgx::compose::Keys::All(identities)
                     })
                 },
                 move |identity: Rc<str>, cx| {
                     let (index, row) = noted.borrow().get(&identity).cloned().unwrap_or_default();
-                    let item = items
-                        .with_untracked(|list| list.list().get(index).cloned().unwrap_or_default());
+                    let item =
+                        items.with_untracked(|list| list.item(index).cloned().unwrap_or_default());
                     if !live {
                         return build_scoped(&vm, cx, &low, &builder, (item, index + 1));
                     }
@@ -4740,6 +4762,13 @@ fn element_view(
         })
 }
 
+/// How much of a point a `layout` box's size may change by and be taken at
+/// once rather than eased: text measured again or a shrinking parent's
+/// share moves one by thousandths, more than layout's own tolerance for a
+/// size told again (zgx's `SIZE_NOISE`, a 1024th), and easing that would
+/// lay the box out each frame for nothing. Under any change anyone sees.
+const EASED_SIZE_NOISE: f32 = 0.01;
+
 /// The springy default for size changes, as for moves.
 fn layout_ease(layout: &LayoutAnim) -> (crate::anime::ease::Ease, f64) {
     crate::motion::Timing {
@@ -4946,7 +4975,12 @@ fn layout_box(inner: View, layout: &LayoutAnim, vm: &Rc<Vm>, low: &Rc<Lowering>)
                     // Entering grows from nothing; a first size otherwise holds.
                     None if enter => 0.,
                     None => continue,
-                    Some(before) if before == now => continue,
+                    // Rounding (text measured again, a shrinking parent's
+                    // share): easing it would lay the box out again each
+                    // frame for nothing.
+                    Some(before) if before == now || (before - now).abs() < EASED_SIZE_NOISE => {
+                        continue;
+                    }
                     Some(before) => before + current(prop).unwrap_or(0.),
                 };
                 let margin = (shown - now) as f64;
@@ -7940,7 +7974,7 @@ fn lower_item_list(
     let row = {
         let (items, builder, vm, low) = (items.clone(), builder.clone(), vm.clone(), low.clone());
         move |index: Signal<usize>, _: ListKey, cx: &mut Context| -> View {
-            let at = |list: &Value, i: usize| list.list().get(i).cloned().unwrap_or(Value::Nil);
+            let at = |list: &Value, i: usize| list.item(i).cloned().unwrap_or(Value::Nil);
             let runtime = cx.runtime();
             let first = index.with_untracked(|i| *i);
             let item = runtime.signal(items.with_untracked(|l| at(l, first)));
@@ -7989,7 +8023,7 @@ fn lower_item_list(
     };
     let count = {
         let items = items.clone();
-        move || items.with(|l| l.list().len())
+        move || items.with(|l| l.items().len())
     };
     let list_key = {
         let (items, key, vm) = (items.clone(), key.clone(), vm.clone());
@@ -8006,7 +8040,7 @@ fn lower_item_list(
             let Some(key) = &key else {
                 return ListKey::Index(index);
             };
-            let item = items.with(|l| l.list().get(index).cloned().unwrap_or(Value::Nil));
+            let item = items.with(|l| l.item(index).cloned().unwrap_or(Value::Nil));
             if let Some(known) = kept.borrow().get(&item) {
                 return known;
             }
@@ -8015,7 +8049,7 @@ fn lower_item_list(
             let mut kept = kept.borrow_mut();
             kept.whole_items = whole_items;
             // The items gone since stop being kept as the list's length.
-            if kept.keys.len() > 4 * items.with_untracked(|l| l.list().len()) + 64 {
+            if kept.keys.len() > 4 * items.with_untracked(|l| l.items().len()) + 64 {
                 kept.keys.clear();
             }
             kept.keep(&item, &found);
@@ -8033,7 +8067,7 @@ fn lower_item_list(
         );
         let runtime = need(&mut cx).runtime();
         move |index: usize| -> Option<String> {
-            let item = items.with_untracked(|l| l.list().get(index).cloned())?;
+            let item = items.with_untracked(|l| l.item(index).cloned())?;
             if let Some(text) = &explicit {
                 return Some(match vm.call::<Value>(text, index + 1) {
                     Ok(Value::Nil) => String::new(),
@@ -8077,7 +8111,7 @@ fn lower_item_list(
                 let (items, field) = (items.clone(), key_field.clone().unwrap());
                 let keys = move || {
                     items.with(|l| {
-                        let items = l.list().iter().enumerate();
+                        let items = l.items().iter().enumerate();
                         items.map(|(i, item)| field_key(item, &field, i)).collect()
                     })
                 };
@@ -9702,7 +9736,7 @@ fn a_list_keeping_its_first_items_passes_over_the_rest_as_the_full_pass_does() {
                 full.items = value.clone();
                 let from = state.kept(&value);
                 skipped += from;
-                let rest = unkeyed_rows(&list, &mut rows, &mut state, from, live, &runtime);
+                let rest = unkeyed_rows(&list[from..], &mut rows, &mut state, from, live, &runtime);
                 state.items = value;
                 assert_eq!(rest[..], names[from..], "seed {seed} step {step}: names");
                 assert_eq!(state.order, full.order, "seed {seed} step {step}: order");

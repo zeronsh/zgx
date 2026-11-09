@@ -74,6 +74,12 @@ checked never to change what is drawn):
     cargo run --release --manifest-path vendor/cosmic-text/check/Cargo.toml -- bench mono
     cargo run --release --manifest-path vendor/cosmic-text/check/Cargo.toml -- kept
 
+The faces this crate chooses for Chinese where upstream doesn't, on purpose
+("PingFang on macOS 26": PingFang through the platform, then Heiti SC or TC,
+where upstream takes Arial Unicode MS), are left out of both font systems, so
+both take the same face and the comparison stays exact; text in those faces
+is checked in zgx-gpu (`chinese_text_on_macos_draws`).
+
 A layout is counted apart where upstream shaped a glyph of infinite or no
 advance and this crate shaped none (`advances_finite!`): upstream divides
 by a face's zero units per em, macOS's GB18030Bitmap, which this crate
@@ -435,3 +441,9 @@ grid; zgx-gpu's `a_run_on_a_grid_takes_its_cells_whichever_font_draws_it`
 checks braille, a letterlike symbol, Thai, a combining accent and plain
 letters with the platform's fonts. The padding pass skips a grid, and a NaN
 compares and hashes by its bits, so grids of other cells are other keys. The crate depends on `unicode-width`.
+
+## Shaping's scratch at rest (zgx-cosmic-text 0.19.13)
+
+`FontSystem::rest` gives back `ShapeBuffer`'s buffers. They hold what the longest
+text shaped since left there, kept for reuse: a visual line's lists, one per line
+of that text, for as long as the app runs. zgx-gpu calls it as a window goes idle.

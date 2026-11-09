@@ -138,6 +138,21 @@ pub struct ShapeBuffer {
     pub(crate) han: u32,
 }
 
+impl ShapeBuffer {
+    /// zgx patch: gives back what the longest text shaped lately left in these
+    /// buffers, its lines' lists above all. They fill again as they're needed.
+    pub(crate) fn rest(&mut self) {
+        self.harfrust_buffer = None;
+        self.scripts = Vec::new();
+        self.spans = Vec::new();
+        self.words = Vec::new();
+        self.visual_lines = Vec::new();
+        self.cached_visual_lines = Vec::new();
+        self.order = Vec::new();
+        self.glyph_sets = Vec::new();
+    }
+}
+
 impl fmt::Debug for ShapeBuffer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad("ShapeBuffer { .. }")

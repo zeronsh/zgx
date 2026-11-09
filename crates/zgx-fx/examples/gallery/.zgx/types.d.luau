@@ -1310,7 +1310,7 @@ export type MarkdownBlock =
 	| { t: "ol", start: number, items: { { MarkdownBlock } } }
 	| { t: "quote", b: { MarkdownBlock } }
 	| { t: "hr" }
-	| { t: "table", head: { { MarkdownRun } }, rows: { { { MarkdownRun } } } }
+	| { t: "table", head: { { MarkdownRun } }, rows: { { { MarkdownRun } } }, align: { "start" | "center" | "end" | "" }? }
 	| { t: "img", src: string, alt: string }
 	-- A block `lazy` has not parsed yet: what it is by its first line
 	-- (`hint`), its lines and its bytes in the text (`from`, `to`, as
@@ -4482,6 +4482,12 @@ export type ScrollProps = {
 	-- edges (CSS's overscroll-behavior), the scroll views around it never
 	-- moving; "auto" (the default) hands what it can't scroll on to them.
 	overscroll: ("auto" | "contain")?,
+	-- `ui.scroll_x`: a mouse wheel, which has no sideways axis, moves it: with
+	-- Shift always (never the page), and without once the pointer has been
+	-- moved onto it, going on to the views around it after a pause at its
+	-- edge. A trackpad's
+	-- swipe mostly down leaves it still.
+	wheel_across: boolean?,
 	-- What a focused control or a find keeps clear of scrolling into view
 	-- (CSS's scroll-padding): a composer or a bar floating over its edges.
 	-- Points: one number for every side, or { top, bottom, left, right };

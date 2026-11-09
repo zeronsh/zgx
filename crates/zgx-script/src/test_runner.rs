@@ -472,6 +472,19 @@ impl UserData for Mounted {
             app.settle();
             Ok(())
         });
+        // `{ dx, dy }` points as a trackpad moves; `mouse = true` as a mouse
+        // wheel's notches, and `shift = true` with Shift held.
+        methods.add_method("wheel", |_, m, (target, how): (String, mlua::Table)| {
+            let mut app = m.app()?;
+            let node = Self::node(&mut app, &target)?;
+            let dx = how.get::<Option<f32>>("dx")?.unwrap_or(0.);
+            let dy = how.get::<Option<f32>>("dy")?.unwrap_or(0.);
+            let mouse = how.get::<Option<bool>>("mouse")?.unwrap_or(false);
+            let shift = how.get::<Option<bool>>("shift")?.unwrap_or(false);
+            crate::driver::wheel(&mut app.ui, node, dx, dy, mouse.then_some(shift));
+            app.settle();
+            Ok(())
+        });
         methods.add_method("command", |_, m, id: String| {
             let app = m.app()?;
             if !app.host.run_command(&id) {

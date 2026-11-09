@@ -797,6 +797,22 @@ pub fn scroll(ui: &mut Ui, node: NodeId, dy: f32) {
     });
 }
 
+/// Scroll under `node`'s middle by `dx` and `dy` points: a trackpad's motion,
+/// or with `wheel` (whether Shift is held) a mouse wheel's.
+pub fn wheel(ui: &mut Ui, node: NodeId, dx: f32, dy: f32, wheel: Option<bool>) {
+    let b = ui.scene.borrow().bounds(node);
+    let event = InputEvent::Scroll {
+        x: b.x + b.width / 2.,
+        y: b.y + b.height / 2.,
+        delta_x: dx,
+        delta_y: dy,
+    };
+    match wheel {
+        Some(shift) => zgx::input::mouse_wheel(shift, || ui.dispatch(event)),
+        None => ui.dispatch(event),
+    };
+}
+
 fn clip(text: &str, max: usize) -> String {
     let one_line = text.replace('\n', "⏎");
     if one_line.chars().count() <= max {

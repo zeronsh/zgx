@@ -5115,7 +5115,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-cosmic-text"
-version = "0.19.12"
+version = "0.19.13"
 dependencies = [
  "bitflags 2.13.2",
  "fontdb",
@@ -5341,6 +5341,7 @@ dependencies = [
  "memchr",
  "png 0.18.1",
  "polling",
+ "wgpu",
  "windows-sys 0.59.0",
  "zgx",
  "zgx-alacritty-terminal",

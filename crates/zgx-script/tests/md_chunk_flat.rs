@@ -11,11 +11,6 @@ use zgx::profile::Phase;
 /// goes from here once it is flat (the test then fails until it does), and
 /// any phase not here growing fails it.
 const STILL_GROWING: &[(Phase, &str)] = &[
-    // The parse's whole block list cloned and its table derived (flush lane).
-    (Phase::Script, "flush"),
-    // ui.each's and keyed's prefix scans, the rows' identities (flush lane);
-    // damage marked across every block (render lane).
-    (Phase::Update, "flush, render"),
     // The column measured and arranged whole as its last block grows
     // (layout lane).
     (Phase::Layout, "layout"),

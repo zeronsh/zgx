@@ -510,6 +510,8 @@ pub(crate) struct Rare {
     follow_end: Option<bool>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
     overscroll_contain: bool,
+    /// `View::wheel_across`: a mouse wheel moves it sideways.
+    wheel_across: bool,
     animation: Option<animation::Animated>,
     keyboard_navigation: Option<bool>,
     /// `View::on_end`, `on_start`, `at_end`: a virtual list's edges.
@@ -616,6 +618,9 @@ impl Rare {
         }
         if self.overscroll_contain {
             inner.overscroll_contain = true;
+        }
+        if self.wheel_across {
+            inner.wheel_across = true;
         }
         if self.drag_preview.is_some() {
             inner.drag_preview = self.drag_preview;
@@ -919,6 +924,21 @@ impl View {
     /// goes on to them.
     pub fn overscroll_contain(mut self) -> Self {
         self.rare_mut().overscroll_contain = true;
+        self
+    }
+    /// Let a mouse wheel, which has no sideways axis, move this `scroll_x`:
+    /// with Shift held, always and only it, at its edges too; without, once
+    /// the pointer has been moved onto it. A view that slid under a resting
+    /// pointer leaves the wheel alone, so a page being read isn't caught by
+    /// what scrolls past. Without Shift, at its edge the rest of the wheel's
+    /// gesture stops there, as at any scroll view's edge (the gesture is
+    /// latched to it), and after a pause the wheel goes on to the views around
+    /// it. A trackpad, which has a sideways axis, moves it as any `scroll_x`,
+    /// except that a swipe mostly down leaves it still rather than moving it by
+    /// the swipe's drift. A Mac reports Shift and the wheel as sideways motion
+    /// itself, which every `scroll_x` takes.
+    pub fn wheel_across(mut self) -> Self {
+        self.rare_mut().wheel_across = true;
         self
     }
     /// Keep a scroll viewport at its end while its content grows, as long as
@@ -1868,6 +1888,11 @@ impl View {
     /// it, only mounted rows copy. For a virtual list.
     pub fn row_text(mut self, text: impl Fn(usize) -> Option<String> + 'static) -> Self {
         self.rare_mut().row_text = Some(std::rc::Rc::new(text));
+        self
+    }
+    /// A virtual list's rows for a selection: their text and its keys.
+    pub(crate) fn list_rows(mut self, rows: crate::selection::RowText) -> Self {
+        self.rare_mut().row_text = Some(rows);
         self
     }
     /// A canvas's drawing placed by `view` (pan and zoom), following the
@@ -2943,6 +2968,29 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
 /// set. Application state written by a constructor is not rolled back.
 pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
     mut keys: impl FnMut() -> Vec<K> + 'static,
+    build: impl FnMut(K, &mut Context) -> View + 'static,
+) -> View {
+    keyed_grown(move || Keys::All(keys()), build)
+}
+/// A pass's keys for [`keyed_grown`]: all of them, or those after the
+/// first `unchanged`, which are the last pass's as it had them (a source
+/// that knows: a list grown at its end, its last item changed).
+pub enum Keys<K> {
+    /// Every key, in order.
+    All(Vec<K>),
+    /// The last pass's first `unchanged` keys, then `rest`.
+    Grown {
+        /// How many of the last pass's keys, from the first, stay.
+        unchanged: usize,
+        /// The keys after them.
+        rest: Vec<K>,
+    },
+}
+/// [`keyed`] whose keys say how many are the last pass's: a list growing at
+/// its end (a streamed reply's rows) is passed in what it adds, its keys
+/// neither compared, copied nor dropped whole.
+pub fn keyed_grown<K: Eq + std::hash::Hash + Clone + 'static>(
+    mut keys: impl FnMut() -> Keys<K> + 'static,
     mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
     View::new(Kind::Region(Box::new(move |ui, root, environment| {
@@ -2952,32 +3000,68 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
         // and that pass (a key met twice in one pass is a duplicate).
         let mut entries: HashMap<K, Keyed, crate::KeyHasher> =
             HashMap::with_hasher(crate::key_hasher());
-        // The last pass's keys and their children, in order.
-        let mut last: (Vec<K>, Vec<NodeId>) = (Vec::new(), Vec::new());
+        // The keys last given, and the children the last pass that finished
+        // put in order.
+        let (mut shown, mut order): (Vec<K>, Vec<NodeId>) = (Vec::new(), Vec::new());
         // This pass, and whether the last one finished: one that did not
-        // (a constructor panicked, the region went) left `entries` marked
-        // for keys `last` does not hold.
+        // (a constructor panicked, the region went) left `entries` and
+        // `order` as they were for keys `shown` no longer holds.
         let (mut pass, mut finished) = (0u64, true);
-        // A pass's children by key after the prefix, the keys with none yet
-        // (by place) and those built: kept from pass to pass, as is the
-        // order, so a pass allocates none of them.
-        let mut nodes: Vec<Option<NodeId>> = Vec::new();
+        // The last keys after the prefix (`gone`'s from `gone_at`), a pass's
+        // children by key after it, the keys with none yet (by place) and
+        // those built: kept from pass to pass, so a pass allocates none of
+        // them.
+        let (mut gone, mut nodes): (Vec<K>, Vec<Option<NodeId>>) = (Vec::new(), Vec::new());
         let (mut fresh, mut added): (Vec<usize>, Vec<(usize, NodeId)>) = (Vec::new(), Vec::new());
         ui.bind(root, move || {
-            let keys = keys();
-            // The same keys in the same order, every child still mounted (a
-            // list whose rows changed in place): nothing to add, remove or
-            // move, and no key hashed to find out.
-            if finished
-                && keys == last.0
-                && let Some(ui) = weak.upgrade()
-            {
-                let scene = ui.scene.borrow();
-                if !scene.contains(root) || last.1.iter().all(|node| scene.contains(*node)) {
-                    return;
+            // Every child the last pass placed still mounted: the root holds
+            // as many (it holds `keyed`'s children alone, and one removed
+            // from elsewhere leaves it).
+            let intact =
+                |ui: &Ui, order: &[NodeId]| ui.scene.borrow().children(root).len() == order.len();
+            // How many first keys are the last pass's, and those it had
+            // after them.
+            let (same, gone_at) = match keys() {
+                Keys::All(keys) => {
+                    // The same keys in the same order, every child still
+                    // mounted (a list whose rows changed in place): nothing
+                    // to add, remove or move, and no key hashed to find out.
+                    if finished
+                        && keys == shown
+                        && let Some(ui) = weak.upgrade()
+                        && (!ui.scene.borrow().contains(root) || intact(&ui, &order))
+                    {
+                        return;
+                    }
+                    let same = keys
+                        .iter()
+                        .zip(&shown)
+                        .take_while(|(now, then)| now == then)
+                        .count();
+                    // (The last keys kept whole, read from `same` on: none
+                    // moved.)
+                    gone = std::mem::replace(&mut shown, keys);
+                    (same, same)
                 }
-            }
+                Keys::Grown { unchanged, rest } => {
+                    let same = unchanged.min(shown.len());
+                    if finished
+                        && same == shown.len()
+                        && rest.is_empty()
+                        && let Some(ui) = weak.upgrade()
+                        && (!ui.scene.borrow().contains(root) || intact(&ui, &order))
+                    {
+                        return;
+                    }
+                    gone.clear();
+                    gone.extend(shown.drain(same..));
+                    shown.extend(rest);
+                    (same, 0)
+                }
+            };
+            let keys = &shown;
             let Some(mut ui) = weak.upgrade() else {
+                finished = false;
                 return;
             };
             // The last pass's keys first, as they were, then others (a list
@@ -2988,20 +3072,14 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
             // it, then and now) is well under the whole list's: an edit near
             // the front passes whole.
             let from = {
-                let prefix = keys
-                    .iter()
-                    .zip(&last.0)
-                    .take_while(|(now, then)| now == then)
-                    .count();
-                let rest = (last.0.len() - prefix) + 2 * (keys.len() - prefix);
-                let scene = ui.scene.borrow();
-                if prefix > 0
+                let rest = (gone.len() - gone_at) + 2 * (keys.len() - same);
+                if same > 0
                     && finished
                     && rest <= keys.len() / 2
-                    && entries.len() == last.0.len()
-                    && last.1[..prefix].iter().all(|node| scene.contains(*node))
+                    && entries.len() == same + gone.len() - gone_at
+                    && intact(&ui, &order)
                 {
-                    prefix
+                    same
                 } else {
                     0
                 }
@@ -3068,9 +3146,9 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                 // Every key shown now is held: only more than that left.
                 // Those go in the order they were in, the same every run (a
                 // map's iteration is not), as what their removal repaints
-                // follows it.
+                // follows it. (Those before `same` are shown still.)
                 if entries.len() > keys.len() {
-                    for (index, key) in last.0.iter().enumerate().skip(from) {
+                    for (index, key) in (same..).zip(&gone[gone_at..]) {
                         if entries.get(key).is_some_and(|entry| entry.pass != pass)
                             && let Some(entry) = entries.remove(key)
                         {
@@ -3089,18 +3167,19 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                         });
                     }
                 }
-                // (In place: the prefix's children are where they were.)
-                let order = &mut last.1;
                 order.truncate(from);
                 order.extend(
                     nodes
                         .iter()
                         .map(|node| node.expect("each key has its child")),
                 );
-                assert!(ui.scene.borrow_mut().reorder_children(root, order));
+                assert!(
+                    ui.scene
+                        .borrow_mut()
+                        .reorder_children_from(root, from, &order)
+                );
                 transaction.commit();
             });
-            last.0 = keys;
             finished = true;
         });
     })))
@@ -3142,31 +3221,78 @@ impl<K: 'static> RowSource<K> {
         let build = self.build.clone();
         move |index, key, cx| (build.borrow_mut())(index, key, cx)
     }
-    /// Row `index`'s text, of `len()` rows: the row built as the list builds
-    /// it, not mounted (what it makes ends at once), and read (`view_text`).
-    pub(crate) fn text(
+    /// The list's rows as a selection reads them, of `len()` rows (`None`
+    /// while that can't be read): a row's text, built as the list builds it
+    /// but not mounted (what it makes ends at once), and read (`view_text`);
+    /// a row's key, read as an end is set in it; and where a key is now. One
+    /// allocation, as a plain row text function is.
+    pub(crate) fn rows(
         &self,
-        len: impl Fn() -> usize + 'static,
-    ) -> impl Fn(usize) -> Option<String> + 'static {
-        let (key, build, mounted_in) = (
-            self.key.clone(),
-            self.build.clone(),
-            self.mounted_in.clone(),
-        );
-        move |index| {
-            if index >= len() {
-                return None;
-            }
-            let (runtime, environment) = mounted_in.borrow().clone()?;
-            // Built now (a copy during a row's build): copied as nothing.
-            let row = key.try_borrow_mut().ok().map(|mut key| key(index))?;
-            let mut cx = Context::new(runtime.clone(), environment);
-            let mut view = build
-                .try_borrow_mut()
-                .ok()
-                .map(|mut build| build(runtime.signal(index), row, &mut cx))?;
-            Some(view_text(&mut view))
+        len: impl Fn() -> Option<usize> + 'static,
+    ) -> crate::selection::RowText
+    where
+        K: Eq,
+    {
+        Rc::new(SourceRows {
+            key: self.key.clone(),
+            build: self.build.clone(),
+            mounted_in: self.mounted_in.clone(),
+            len,
+        })
+    }
+}
+/// A virtual list's rows as a selection reads them (`RowSource::rows`).
+struct SourceRows<K, L> {
+    key: Rc<RefCell<dyn FnMut(usize) -> K>>,
+    build: Rc<RefCell<RowBuilder<K>>>,
+    mounted_in: Rc<RefCell<Option<(Runtime, Environment)>>>,
+    len: L,
+}
+impl<K: Eq + 'static, L: Fn() -> Option<usize>> SourceRows<K, L> {
+    /// `read`, untracked, in the runtime the list mounted in.
+    fn untracked<R>(&self, read: impl FnOnce() -> Option<R>) -> Option<R> {
+        let runtime = self
+            .mounted_in
+            .borrow()
+            .as_ref()
+            .map(|(runtime, _)| runtime.clone())?;
+        runtime.untracked(read)
+    }
+}
+impl<K: Eq + 'static, L: Fn() -> Option<usize>> crate::selection::ListRows for SourceRows<K, L> {
+    fn text(&self, index: usize) -> Option<String> {
+        if index >= (self.len)().unwrap_or(0) {
+            return None;
         }
+        let (runtime, environment) = self.mounted_in.borrow().clone()?;
+        // Built now (a copy during a row's build): copied as nothing.
+        let row = self.key.try_borrow_mut().ok().map(|mut key| key(index))?;
+        let mut cx = Context::new(runtime.clone(), environment);
+        let mut view = self
+            .build
+            .try_borrow_mut()
+            .ok()
+            .map(|mut build| build(runtime.signal(index), row, &mut cx))?;
+        Some(view_text(&mut view))
+    }
+    fn key(&self, index: usize) -> Option<Rc<dyn std::any::Any>> {
+        self.untracked(|| {
+            let mut key = self.key.try_borrow_mut().ok()?;
+            Some(Rc::new(key(index)) as Rc<dyn std::any::Any>)
+        })
+    }
+    fn find(&self, wanted: &dyn std::any::Any, seen: usize) -> Option<usize> {
+        let wanted = wanted.downcast_ref::<K>()?;
+        self.untracked(|| {
+            // Asked while the list reads its keys: it stays where it was.
+            let (Some(len), Ok(mut key)) = ((self.len)(), self.key.try_borrow_mut()) else {
+                return Some(seen);
+            };
+            if seen < len && key(seen) == *wanted {
+                return Some(seen);
+            }
+            (0..len).find(|&index| key(index) == *wanted)
+        })
     }
 }
 /// The text `view` shows, as a copy of it takes it: its texts in order, a
@@ -3276,9 +3402,9 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     assert!(row_height.is_finite() && row_height > 0.0);
     let count = Rc::new(RefCell::new(count));
     let rows = RowSource::new(key, build);
-    let text = rows.text({
+    let source = rows.rows({
         let count = count.clone();
-        move || count.try_borrow_mut().map_or(0, |mut count| count())
+        move || count.try_borrow_mut().ok().map(|mut count| count())
     });
     let (mut key, mut build, mounted_in) = (rows.key(), rows.build(), rows.mounted_in.clone());
     let count = move || (count.borrow_mut())();
@@ -3609,7 +3735,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             });
         },
     )))
-    .row_text(text)
+    .list_rows(source)
 }
 // Roll back newly appended roots if a component constructor or initial binding
 // panics. Existing siblings are never removed by this guard. This is ownership
@@ -5044,7 +5170,7 @@ struct Opened {
     root: NodeId,
     child_parent: NodeId,
     submenu_indicator: bool,
-    scroll_offset: Option<(Signal<f32>, bool, bool)>,
+    scroll_offset: Option<(Signal<f32>, bool, bool, bool)>,
     scroll_nodes: Option<(NodeId, NodeId)>,
     scrollbar: bool,
     follow_end: bool,
@@ -5466,7 +5592,8 @@ fn open_element(
             });
             ui.semantics.borrow_mut().set(root, semantics);
             let contain = rare.as_deref().is_some_and(|r| r.overscroll_contain);
-            scroll_offset = Some((offset, horizontal, contain));
+            let across = rare.as_deref().is_some_and(|r| r.wheel_across);
+            scroll_offset = Some((offset, horizontal, contain, across));
             root
         }
         Kind::VirtualList(build) => {
@@ -5977,7 +6104,7 @@ fn open_element(
             },
         );
     }
-    let scroll_nodes = scroll_offset.as_ref().map(|(_, horizontal, _)| {
+    let scroll_nodes = scroll_offset.as_ref().map(|(_, horizontal, _, _)| {
         let viewport = ui.container(root, Layout::Overlay, Default::default());
         let content = ui.container(
             viewport,
@@ -6098,11 +6225,11 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
         let indicator = mount(ui, root, text("›"), environment.clone());
         ui.semantics.borrow_mut().remove(indicator);
     }
-    if let (Some((offset, horizontal, contain)), Some((viewport, content))) =
+    if let (Some((offset, horizontal, contain, across)), Some((viewport, content))) =
         (scroll_offset, scroll_nodes)
     {
         mount_scroll(
-            ui, root, viewport, content, offset, horizontal, scrollbar, follow_end, contain,
+            ui, root, viewport, content, offset, horizontal, scrollbar, follow_end, contain, across,
         );
     }
     if let Some(mut compute) = compute {
@@ -6580,6 +6707,8 @@ fn mount_scroll(
     follow_end: bool,
     // `View::overscroll_contain`: a wheel at its edge stays here.
     contain: bool,
+    // `View::wheel_across`: a mouse wheel moves it sideways.
+    across: bool,
 ) {
     use crate::scene::{Style, Transform};
     let main_size = move |size: (f32, f32)| if horizontal { size.0 } else { size.1 };
@@ -6630,9 +6759,19 @@ fn mount_scroll(
     let wheel_extent = extent.clone();
     let wheel_offset = offset.clone();
     let weak = ui.downgrade();
+    // `across`: the pointer was moved onto it, rather than it sliding under
+    // the pointer (which moves hover, but no pointer).
+    let pointed = std::cell::Cell::new(false);
     ui.on_event(root, false, move |cx| {
         if cx.phase == EventPhase::Capture {
             return;
+        }
+        if across {
+            match cx.event {
+                InputEvent::PointerMove { .. } => pointed.set(true),
+                InputEvent::PointerLeave => pointed.set(false),
+                _ => {}
+            }
         }
         if matches!(cx.event, InputEvent::Focus) && cx.target != root {
             let Some(ui) = weak.upgrade() else {
@@ -6687,8 +6826,25 @@ fn mount_scroll(
                 }
                 _ => (delta_x, delta_y),
             };
-            let delta = if horizontal { delta_x } else { delta_y };
+            // A mouse wheel going sideways; Shift's holds at the edges too.
+            let shift = crate::input::mouse_wheel_shift();
+            let wheeled = across
+                && delta_x == 0.
+                && delta_y != 0.
+                && shift.is_some_and(|shift| shift || pointed.get());
+            let delta = if wheeled {
+                delta_y
+            } else if horizontal {
+                delta_x
+            } else {
+                delta_y
+            };
             if !delta.is_finite() {
+                return;
+            }
+            // Mostly the other way, this swipe isn't this view's: it stays
+            // still, and the swipe goes to the views around it.
+            if across && !wheeled && delta_y.abs() > delta_x.abs() {
                 return;
             }
             // A wheel's horizontal delta is physical: to the right is back
@@ -6701,7 +6857,19 @@ fn mount_scroll(
             let limit =
                 (main_size(wheel_extent.get()) as f64 - main_size(wheel_size.get()) as f64).max(0.);
             let after = (before as f64 + delta as f64).clamp(0., limit) as f32;
-            if before != after {
+            if wheeled {
+                // The wheel's one axis is this view's now: nothing goes on,
+                // unless it's at its edge (and without Shift, says the wheel).
+                if before != after {
+                    wheel_offset.set(after);
+                }
+                if before != after || shift == Some(true) {
+                    cx.prevent_default();
+                    cx.stop_propagation();
+                } else if contain {
+                    cx.scrolled(horizontal);
+                }
+            } else if before != after {
                 wheel_offset.set(after);
                 cx.scrolled(horizontal);
             } else if contain && delta != 0. {

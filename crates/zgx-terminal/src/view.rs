@@ -101,7 +101,7 @@ struct Engine {
     /// Whether `pictured` holds, read as each paint begins; and the
     /// pictures a paint worked out, for its batch to show.
     any_pictures: Cell<bool>,
-    pictures_due: Cell<Option<Rc<[Picture]>>>,
+    pictures_due: Cell<Option<Vec<(i32, Picture)>>>,
     /// An input method's composition, drawn at the cursor.
     preedit: Signal<String>,
     /// What a screen reader is told of the latest output (a live region's
@@ -592,11 +592,23 @@ impl Engine {
 
     #[cold]
     #[inline(never)]
-    fn show_pictures(&self, pictures: Rc<[Picture]>) {
+    fn show_pictures(&self, pictures: Vec<(i32, Picture)>) {
         let any = !pictures.is_empty();
         if self.any_pictures.replace(any) != any {
             self.pictured.set(any);
         }
+        // At their lines in the rows' container (as `scroll_slots` has just
+        // left it). A scroll moves the row one way and `scrolled` the
+        // other, so what it carries along doesn't change at all.
+        let top = self.scrolled.with_untracked(|top| *top) as i32;
+        let cell = self.metrics.get().cell_height;
+        let pictures: Rc<[Picture]> = pictures
+            .into_iter()
+            .map(|(row, mut picture)| {
+                picture.rect[1] += PAD_Y + (row + top) as f32 * cell;
+                picture
+            })
+            .collect();
         if self.pictures.with_untracked(|shown| **shown != *pictures) {
             self.pictures.set(pictures);
         }
@@ -1859,11 +1871,14 @@ fn view(engine: Rc<Engine>) -> View {
 const UNDER: usize = usize::MAX;
 const OVER: usize = usize::MAX - 1;
 
-/// A picture as the view draws it, in points from the view's corner.
+/// A picture as the view draws it, in points.
 #[derive(Clone, Debug, PartialEq)]
 struct Picture {
+    /// Which it is, the same wherever it moves and whatever it comes to
+    /// show (`PictureKey`).
+    key: PictureKey,
     image: Arc<zgx::image::ImageData>,
-    /// Where it shows: x, y, width and height.
+    /// Where it shows, in the rows' container: x, y, width and height.
     rect: [f32; 4],
     /// Where the whole image is drawn, relative to `rect`, so that the
     /// part shown fills it.
@@ -1871,15 +1886,20 @@ struct Picture {
     z: i32,
 }
 
-/// The pictures on the screen (scrolled back or not), lowest first.
-fn shown_pictures(term: &crate::Term, session: &Session, metrics: Metrics) -> Rc<[Picture]> {
+/// A placement's picture, its number, and which of those it is (placements
+/// numbered 0 may repeat).
+type PictureKey = (u32, u32, u32);
+
+/// The pictures on the screen (scrolled back or not), lowest first, each
+/// with the screen row it starts at; its `rect`'s y is from that row's top.
+fn shown_pictures(term: &crate::Term, session: &Session, metrics: Metrics) -> Vec<(i32, Picture)> {
     let offset = term.grid().display_offset() as i32;
     let rows = term.screen_lines() as i32;
     // Programs size pictures by the cell in whole pixels they're told: in
     // points by it, a picture fills the cells it was made for.
     let points = |cell: f32| cell / (cell * PIXELS_PER_POINT).floor().max(1.);
     let (across, down) = (points(metrics.cell_width), points(metrics.cell_height));
-    let mut shown: Vec<Picture> = term
+    let mut shown: Vec<(i32, Picture)> = term
         .placements()
         .iter()
         .filter(|p| {
@@ -1899,9 +1919,7 @@ fn shown_pictures(term: &crate::Term, session: &Session, metrics: Metrics) -> Rc
             };
             let rect = [
                 PAD_X + p.point.column.0 as f32 * metrics.cell_width + p.offset[0] as f32 * across,
-                PAD_Y
-                    + (p.point.line.0 + offset) as f32 * metrics.cell_height
-                    + p.offset[1] as f32 * down,
+                p.offset[1] as f32 * down,
                 width,
                 height,
             ];
@@ -1912,64 +1930,85 @@ fn shown_pictures(term: &crate::Term, session: &Session, metrics: Metrics) -> Rc
                 image.width() as f32 * x_scale,
                 image.height() as f32 * y_scale,
             ];
-            Some(Picture {
-                image,
-                rect,
-                whole,
-                z: p.z,
-            })
+            Some((
+                p.point.line.0 + offset,
+                Picture {
+                    key: (p.image, p.id, 0),
+                    image,
+                    rect,
+                    whole,
+                    z: p.z,
+                },
+            ))
         })
         .collect();
+    for at in 1..shown.len() {
+        let key = shown[at].1.key;
+        let same = shown[..at]
+            .iter()
+            .filter(|(_, p)| p.key.0 == key.0 && p.key.1 == key.1);
+        shown[at].1.key.2 = same.count() as u32;
+    }
     // Placed later over placed earlier, at one z.
-    shown.sort_by_key(|p| p.z);
-    shown.into()
+    shown.sort_by_key(|(_, p)| p.z);
+    shown
 }
 
 /// The pictures under the text (negative z), or over it.
 fn pictures_view(engine: &Rc<Engine>, below: bool) -> View {
     let pictures = engine.pictures.clone();
-    let lookup = engine.pictures.clone();
-    let engine = engine.clone();
+    let shown = engine.pictures.clone();
     keyed(
         move || {
             pictures.with(|all| {
                 all.iter()
-                    .enumerate()
-                    .filter(|(_, p)| (p.z < 0) == below)
-                    .map(|(index, p)| {
-                        let bits = |n: [f32; 4]| n.map(f32::to_bits);
-                        (index, p.image.id(), bits(p.rect), bits(p.whole))
-                    })
+                    .filter(|p| (p.z < 0) == below)
+                    .map(|p| p.key)
                     .collect::<Vec<_>>()
             })
         },
-        move |(index, ..), _cx| {
-            let picture = lookup.with_untracked(|all| all[index].clone());
-            let [x, y, width, height] = picture.rect;
-            let [left, top, whole_width, whole_height] = picture.whole;
-            // At its place on the screen, in the rows' container: moved
-            // down as far as the container is moved up.
-            let scrolled = engine.scrolled.clone();
-            let cell = engine.metrics.get().cell_height;
-            div()
-                .absolute()
-                .left(x)
-                .top(y)
-                .w(width)
-                .h(height)
-                .reactive_style(move || Styles::new().translate(0., scrolled.get() as f32 * cell))
-                .overflow_hidden()
-                .accessible_hidden()
-                .child(
-                    image("", picture.image)
-                        .absolute()
-                        .left(left)
-                        .top(top)
-                        .w(whole_width)
-                        .h(whole_height),
-                )
-        },
+        move |key, _cx| picture_view(&shown, key),
     )
+}
+
+/// A picture's nodes: made once, as a row's are, and moved by offset. What
+/// it shows or where it stands follows `pictures`, which a scroll leaves as
+/// it is: the rows' container carries it.
+fn picture_view(pictures: &Signal<Rc<[Picture]>>, key: PictureKey) -> View {
+    let of = |pictures: Signal<Rc<[Picture]>>, key| {
+        move |read: &dyn Fn(&Picture) -> [f32; 4]| {
+            pictures.with(|all| all.iter().find(|p| p.key == key).map(read))
+        }
+    };
+    let box_style =
+        |[x, y, width, height]: [f32; 4]| Styles::new().translate(x, y).w(width).h(height);
+    let (rect, whole) = (of(pictures.clone(), key), of(pictures.clone(), key));
+    let source = pictures.clone();
+    let mut image = pictures.with_untracked(|all| {
+        let shown = all.iter().find(|p| p.key == key);
+        shown.expect("a key of those shown").image.clone()
+    });
+    div()
+        .absolute()
+        .left(0.)
+        .top(0.)
+        .overflow_hidden()
+        .accessible_hidden()
+        .reactive_style(move || rect(&|p| p.rect).map_or_else(Styles::new, box_style))
+        .child(
+            image_signal("", move || {
+                source.with(|all| {
+                    if let Some(shown) = all.iter().find(|p| p.key == key) {
+                        image = shown.image.clone();
+                    }
+                });
+                image.clone()
+            })
+            .absolute()
+            .left(0.)
+            .top(0.)
+            .reactive_style(move || whole(&|p| p.whole).map_or_else(Styles::new, box_style)),
+        )
 }
 
 fn row_view(engine: &Rc<Engine>, slot: usize) -> View {

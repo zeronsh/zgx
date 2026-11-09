@@ -464,7 +464,7 @@ pub(crate) fn each(
                 let first = st.first_end.is_none_or(|end| row.1 < end);
                 (index, motion.enter.is_some() && (!first || motion.initial))
             };
-            let item = items.with_untracked(|list| list.list().get(index).cloned());
+            let item = items.with_untracked(|list| list.item(index).cloned());
             let content = build_scoped(
                 &vm,
                 cx,

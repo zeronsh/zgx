@@ -389,7 +389,7 @@ impl Ui {
             FoundAt::Editor(node) => Some(self.editor(*node)?.editor.borrow().text().into_owned()),
             FoundAt::Row { list, row } => {
                 let text = crate::selection::list_row_text(self, *list)?;
-                text(*row)
+                text.text(*row)
             }
         }
     }
@@ -474,7 +474,7 @@ impl Ui {
             while !*done {
                 // A few rows between looks at the clock.
                 for _ in 0..64 {
-                    match text(*next) {
+                    match text.text(*next) {
                         Some(row) => {
                             found.extend(crate::find_text::matches(&row, &folded).into_iter().map(
                                 |range| Found {
@@ -727,7 +727,7 @@ impl Ui {
             }) => {
                 let scene = self.scene.borrow();
                 let nth = crate::selection::list_row_text(self, *list)
-                    .and_then(|text| text(*row))
+                    .and_then(|text| text.text(*row))
                     .map_or(0, |text| {
                         crate::find_text::matches(&text, &folded)
                             .iter()

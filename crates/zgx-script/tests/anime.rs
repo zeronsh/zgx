@@ -778,6 +778,46 @@ fn layout_boxes_spring_to_their_content() {
 }
 
 #[test]
+fn layout_boxes_take_a_change_under_a_hundredth_of_a_point_at_once() {
+    // Rounding (text measured again, a parent's share shrinking) moves a
+    // size by thousandths: taken at once, with nothing left animating. A
+    // change anyone could see still eases.
+    let mut h = Harness::inline(
+        r##"local height = ui.state("height", 20)
+        return ui.column {
+            ui.column { id = "box", layout = "height", layout_ease = "linear", layout_duration = 100,
+                ui.div { h = height, w = 50 } },
+            ui.div { id = "below", w = 10, h = 10 },
+            ui.button { id = "nudge", w = 10, h = 10, on_click = ui.set(height, 20.005) },
+            ui.button { id = "grow", w = 10, h = 10, on_click = ui.set(height, 30) },
+        }"##,
+    );
+    let y = |h: &mut Harness| {
+        let node = h.find("below").unwrap();
+        h.ui.scene.borrow().bounds(node).y
+    };
+    h.ui.prepare_frame();
+    h.settle();
+    h.ui.prepare_frame();
+    assert_eq!(y(&mut h), 20.);
+    h.click("nudge");
+    h.ui.prepare_frame();
+    h.settle();
+    h.frame();
+    h.ui.prepare_frame();
+    assert!((y(&mut h) - 20.005).abs() < 1e-4, "at once: {}", y(&mut h));
+    assert!(!h.clock.wants_frame(), "nothing eases");
+    h.click("grow");
+    h.ui.prepare_frame();
+    h.settle();
+    h.frame();
+    h.run_ms(50.);
+    h.ui.prepare_frame();
+    let mid = y(&mut h);
+    assert!(mid > 21. && mid < 29., "eases toward 30, at {mid}");
+}
+
+#[test]
 fn layout_boxes_take_a_reflow_at_once() {
     // Narrowing the box wraps its row onto a second line: the height changed
     // because the width did, not the content, so it is not animated.
