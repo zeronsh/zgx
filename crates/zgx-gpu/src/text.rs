@@ -180,8 +180,11 @@ fn system_weight(weight: u16) -> u16 {
     (below + (above - below) * part).round() as u16
 }
 /// iOS's system font's tracking at `size` points, in ems: the normal row of
-/// its `trak` table (SFUI.ttf, iOS 26), units of 1/2048 em, between its sizes.
-#[cfg(target_os = "ios")]
+/// its `trak` table (SFUI.ttf, iOS 26), units of 1/2048 em, between its sizes
+/// as CoreText takes them: in proportion, then to a whole unit toward zero
+/// (read from CTLine widths at 237 sizes, 6 to 140 points: 23.5 units at 34
+/// points is 23, -14.5 at 13.25 is -14).
+#[cfg(any(target_os = "ios", test))]
 fn system_tracking(size: f32) -> f32 {
     const TABLE: [(f32, f32); 21] = [
         (6., 82.),
@@ -214,7 +217,7 @@ fn system_tracking(size: f32) -> f32 {
         }
         None => 0.,
     };
-    units / 2048.
+    units.trunc() / 2048.
 }
 // Inlined where it is called, as it was before `spaced` took the rare part
 // out of it (LTO had stopped inlining it into the text cache).
@@ -2814,6 +2817,26 @@ mod wash_tests {
             .to_vec();
         assert_eq!(shown, [600, 600, 700, 700, 800, 900, 900]);
         assert!(shown.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+    #[test]
+    fn ios_tracking_is_core_texts_whole_units() {
+        // CoreText's tracking, solved from CTLine widths of a kern-free run
+        // (iOS 26.5), in 1/2048 em.
+        for (size, units) in [
+            (6., 82.),
+            (6.25, 78.),
+            (13.25, -14.),
+            (17., -52.),
+            (17.25, -51.),
+            (28.5, 27.),
+            (33., 24.),
+            (34., 23.),
+            (34.5, 22.),
+            (36., 21.),
+            (150., 0.),
+        ] {
+            assert_eq!(super::system_tracking(size) * 2048., units, "{size}");
+        }
     }
     #[test]
     fn ios_system_weights_are_uikits_faces() {
