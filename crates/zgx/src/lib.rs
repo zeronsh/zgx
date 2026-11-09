@@ -1,6 +1,10 @@
 //! Fine-grained reactive state and a retained, damage-tracked scene.
 //! The core has no platform dependencies and can be targeted by template compilers.
 #![warn(missing_docs)]
+// rustc's MIR inliner stops at this depth of calls inlined into calls: past
+// the default (128), hot functions lose inlining (`Scene::layer_items_walk`,
+// #1740) with no change of their own.
+#![recursion_limit = "256"]
 pub mod collections;
 pub mod reactive;
 pub mod scene;
