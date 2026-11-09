@@ -1618,7 +1618,9 @@ impl<T: EventListener> Handler for Term<T> {
         match intermediate {
             None => {
                 trace!("Reporting primary device attributes");
-                let text = String::from("\x1b[?6c");
+                // zgx: a VT220 with sixel graphics (4) and ANSI colour (22),
+                // as foot answers: programs look for the 4 to send sixels.
+                let text = String::from("\x1b[?62;4;22c");
                 self.event_proxy.send_event(Event::PtyWrite(text));
             }
             Some('>') => {

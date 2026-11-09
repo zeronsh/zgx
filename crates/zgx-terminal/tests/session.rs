@@ -222,13 +222,14 @@ fn exit_codes_and_reports_come_back_as_events() {
 #[cfg(unix)]
 #[test]
 fn queries_are_answered_and_the_foreground_is_known() {
-    // Device attributes (DA1): the screen model answers through the pty.
+    // Device attributes (DA1): the screen model answers through the pty,
+    // a VT220 with sixel graphics.
     let mut run = Scripted::run(
-        r#"exec sh -c 'stty raw -echo; printf "\033[c"; dd bs=1 count=4 2>/dev/null | od -An -c | tr -d " \n"; echo; exec sleep 30'"#,
+        r#"exec sh -c 'stty raw -echo; printf "\033[c"; dd bs=1 count=11 2>/dev/null | od -An -c | tr -d " \n"; echo; exec sleep 30'"#,
         30,
         4,
     );
-    run.until("the answer", |_, term| shows(term, r"033[?6"));
+    run.until("the answer", |_, term| shows(term, r"033[?62;4;22c"));
     let deadline = Instant::now() + Duration::from_secs(10);
     while zgx_terminal::process_name(run.session.foreground_pid()) != "sleep" {
         assert!(Instant::now() < deadline, "sleep never came to the front");
@@ -271,6 +272,26 @@ fn a_program_places_a_picture_and_is_answered() {
     let image = run.session.image(5).expect("kept");
     assert_eq!((image.width(), image.height()), (2, 2));
     assert_eq!(image.pixels(), [0, 0, 0, 255].repeat(4));
+}
+
+/// A sixel image a program prints is placed at the cursor, which then
+/// stays in its column (on the line of the image's last band).
+#[cfg(unix)]
+#[test]
+fn a_program_draws_a_sixel_image() {
+    // 4 red columns of six pixels.
+    let mut run = Scripted::run(r"printf 'ab\033Pq#1;2;100;0;0!4~\033\\cd'; sleep 30", 30, 4);
+    run.until("the text after it", |_, term| shows(term, "abcd"));
+    let term = run.session.term();
+    let placed: Vec<_> = term
+        .placements()
+        .iter()
+        .map(|p| (p.point.line.0, p.point.column.0, p.lines, p.columns))
+        .collect();
+    assert_eq!(placed, [(0, 2, 1, 1)]);
+    let image = run.session.image(term.placements()[0].image).expect("kept");
+    assert_eq!((image.width(), image.height()), (4, 6));
+    assert_eq!(image.pixels()[..4], [255, 0, 0, 255]);
 }
 
 #[cfg(windows)]

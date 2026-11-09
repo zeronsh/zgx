@@ -149,3 +149,11 @@ A screen with none allocates nothing and pays one comparison where its
 lines move (each move is out of line, `#[cold]`). The fork's
 `graphics::tests` check each case and that no placements hold no room.
 Also in 0.26.3.
+
+## Sixel graphics announced
+
+Primary device attributes (DA1, `CSI c`) answer `CSI ? 62 ; 4 ; 22 c`, a
+VT220 with sixel graphics and ANSI colour, as foot answers, rather than
+alacritty's `CSI ? 6 c`: programs sending sixel images (chafa, lsix,
+img2sixel's callers) look for the 4. zgx-terminal reads the images (DCS
+`q`, which vte passes over) and places them as pictures. Also in 0.26.3.
