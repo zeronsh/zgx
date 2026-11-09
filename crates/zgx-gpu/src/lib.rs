@@ -846,9 +846,6 @@ enum CopyBlocker {
     /// A layer under a fade whose bands can't draw as one with it
     /// (`bands::fades_apart`).
     FilteredUnderFade(NodeId),
-    /// A loop a layer plays, in the content.
-    #[cfg(target_os = "macos")]
-    Loop(NodeId),
     /// The view lies under two fades around it.
     TwoFades,
     /// A content item fades with this mask (`fade_edges`): the move copies
@@ -879,8 +876,6 @@ impl CopyBlocker {
                 "{} in it is a blurred, masked or shaded layer under a fade",
                 node(id)
             ),
-            #[cfg(target_os = "macos")]
-            Self::Loop(id) => format!("{} in it is a loop a layer plays", node(id)),
             Self::TwoFades => "it lies under two fades around it".into(),
             Self::Fade(id, _) => format!(
                 "{} in it fades with bands cut short as it scrolls (`fade_overflow`) or not \
@@ -988,12 +983,14 @@ fn copy_blocker(
         if item.mask().is_some() && !bands::fades_apart(scene, item) {
             return Some(CopyBlocker::FilteredUnderFade(item.id));
         }
-        // A loop a layer plays moves with the view's repaint, not its copy.
+        // A loop a layer plays isn't in the frames, and its layer goes where
+        // its node is whatever a frame walks (`sync_loops`): nothing of it
+        // to carry. But only a walk finds the view's edge cutting it, or
+        // something over it, for which the layer would show too much: its
+        // box repaints, for the walk to reach it.
         #[cfg(target_os = "macos")]
-        if let Some((node, _)) = scene.baked_loops().iter().find(|(node, _)| {
-            std::iter::successors(Some(*node), |at| scene.parent(*at)).any(|at| at == scroll.node)
-        }) {
-            return Some(CopyBlocker::Loop(*node));
+        if scene.baked_loops().iter().any(|(node, _)| *node == item.id) {
+            carried.extend(item.bounds.intersection(clip));
         }
         // (A subtree shares its extras: looked at once.)
         if let Some(extras) = &item.extras
@@ -20184,22 +20181,19 @@ mod copy_refusal_tests {
         assert!(note.contains("two fades"), "{note}");
     }
 
+    /// A loop in the content is no refusal (`baked_loops.rs` has it scrolling).
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_loop_in_the_content_says_so_and_names_its_node() {
-        let mut looping = None;
-        let (blocker, note) = refusal(
+    fn a_loop_in_the_content_is_no_refusal() {
+        let refused = refusal(
             |view| view,
             |scene, content| {
                 let node = scene.children(content)[0];
-                looping = Some(node);
                 let baked =
                     zgx::scene::BakedLoop::new(vec![(1., 0.), (0.5, 0.)], 30., Box::new(|| {}));
                 scene.set_baked_loop(node, Some(std::rc::Rc::new(baked)));
             },
-        )
-        .expect("refused");
-        assert_eq!(blocker, CopyBlocker::Loop(looping.expect("set")));
-        assert!(note.contains("loop"), "{note}");
+        );
+        assert_eq!(refused, None);
     }
 }
