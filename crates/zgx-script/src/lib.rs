@@ -1666,6 +1666,9 @@ struct Inner {
     /// by name (`package`): `@name/…`.
     packages: Vec<(String, PathBuf)>,
     limits: Limits,
+    /// The collector's goal for a large heap (`ScriptHost::large_heap_goal`),
+    /// in percent: none, Luau's own at every size.
+    large_heap_goal: Option<u16>,
     stores: RefCell<HashMap<String, Rc<Store>>>,
     shared: Rc<Store>,
     /// Keeps `ui.window.titlebar_area` and `controls` as the window's
@@ -1865,6 +1868,7 @@ impl ScriptHost {
             packages: Vec::new(),
             plugins: Vec::new(),
             limits: Limits::default(),
+            large_heap_goal: None,
             stores: RefCell::default(),
             elements: elements.clone(),
             engine: {
@@ -2285,6 +2289,20 @@ impl ScriptHost {
     /// Run scripts within `limits`: heap, and time to load and per call.
     pub fn limits(self, limits: Limits) -> Self {
         self.configure(|inner| inner.limits = limits)
+    }
+    /// Once a VM's heap passes 32 MB, its collector aims for `percent` of
+    /// the heap in use (Luau's own is 200: the heap may double before a
+    /// cycle); it goes back once the heap settles below 24 MB. The collector
+    /// can't see what a script's objects hold in Rust (a node's userdata, far
+    /// more than its own bytes), so a large heap left to double keeps rows
+    /// long gone and all they hold. A lower peak for more collection work: a
+    /// heap of 100 MB churned peaks about 23% lower at 150, for about 9% more
+    /// instructions in the script, and rests where it would. Off by default.
+    ///
+    /// No call pays to look: the VM's allocator notices the heap crossing,
+    /// and the goal changes as that call ends.
+    pub fn large_heap_goal(self, percent: u16) -> Self {
+        self.configure(|inner| inner.large_heap_goal = Some(percent))
     }
     /// Names the application: `ui.persist` saves under its data directory
     /// ([`app_data_dir`]), in `script-state`.
@@ -4160,7 +4178,12 @@ impl ScriptHost {
         lua.set_memory_limit(memory).map_err(fail)?;
         lua.set_app_data(MemoryLimit(memory));
         let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
-        let interrupt = interrupt::install(&lua, deadline.clone(), memory);
+        let interrupt = interrupt::install(
+            &lua,
+            deadline.clone(),
+            memory,
+            self.0.large_heap_goal.map(std::ffi::c_int::from),
+        );
         let watch = interrupt.watch();
         #[cfg(test)]
         tests::count_closing(&lua);
@@ -4488,6 +4511,7 @@ fn collect_garbage(inner: &Inner) {
         collect_fully(&vm.lua);
         value::sweep_idle(&vm.lua);
         collect_fully(&vm.lua);
+        vm.interrupt.heap_settled(vm.lua.used_memory());
     }
 }
 /// Full collections until one frees nothing more: a collection finalizes
@@ -4523,6 +4547,23 @@ fn trim_idle(inner: &Inner) {
 mod tests {
     use super::*;
 
+    /// A host asked for a large-heap goal tightens its VM's collector once a
+    /// call takes its heap past the line (here, the script's load); a host
+    /// that didn't (the default) leaves Luau's own.
+    #[test]
+    fn a_large_heap_goal_is_the_hosts_choice() {
+        let runtime = zgx::reactive::Runtime::new();
+        let script = "big = {} for i = 1, 1500000 do big[i] = tostring(i) end return ui.column {}";
+        let tight = |host: &ScriptHost| {
+            host.reload().expect("loads");
+            let current = host.0.current.borrow().clone().expect("loaded");
+            current._vms[0].interrupt.goal_is_tight()
+        };
+        let asked = ScriptHost::inline(&runtime, "large", script).large_heap_goal(150);
+        assert!(tight(&asked), "tightened past the line");
+        let default = ScriptHost::inline(&runtime, "large", script);
+        assert!(!tight(&default), "Luau's own without the option");
+    }
     /// A directory for one test, under its real path.
     fn real_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
@@ -4674,7 +4715,7 @@ mod tests {
         let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
         let vm = Vm {
             name: "panics".into(),
-            interrupt: interrupt::install(&lua, deadline.clone(), 0),
+            interrupt: interrupt::install(&lua, deadline.clone(), 0, None),
             lua,
             base: None,
             deadline,
