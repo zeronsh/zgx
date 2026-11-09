@@ -21980,6 +21980,10 @@ export type IosTextProps = {
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.
 	capture_keys: Props_capture_keys,
+	-- One of a table's rows: while a finger is on a row, a tap on another row of
+	-- its scroll view does nothing, as `UITableView`'s (iOS). Anything else takes
+	-- its own finger.
+	table_row: Props_table_row,
 	-- What assistive technology takes it for (ARIA's `role`), instead of
 	-- what it is: a clickable row as an "option", a row of buttons as a
 	-- "toolbar". It keeps what it does.
