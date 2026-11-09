@@ -1893,6 +1893,7 @@ fn apply_resolved(
                 || resolved.rare().shadows.is_some()
                 || resolved.rare().inset_shadows.is_some()
                 || resolved.rare().clip_feather.is_some()
+                || resolved.rare().corner_curve.is_some()
             {
                 let mut detail = quad.decoration.as_deref().cloned().unwrap_or_default();
                 if let Some(value) = &resolved.paint_background {
@@ -1915,6 +1916,9 @@ fn apply_resolved(
                 }
                 if let Some(value) = resolved.rare().clip_feather {
                     detail.clip_feather = value;
+                }
+                if let Some(value) = resolved.rare().corner_curve {
+                    detail.corner_curve = value;
                 }
                 quad.decoration = (detail != crate::decoration::Decoration::default())
                     .then(|| std::sync::Arc::new(detail));

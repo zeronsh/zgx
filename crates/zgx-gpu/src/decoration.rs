@@ -2,7 +2,7 @@
 use crate::GpuError;
 use zgx::{
     canvas::*,
-    decoration::{Background, BorderStyle, Corners},
+    decoration::{Background, BorderStyle, CornerCurve, Corners},
     scene::{Insets, QuadStyle, Rect},
 };
 fn radii(c: Corners, w: f32, h: f32) -> [(f32, f32); 4] {
@@ -28,6 +28,75 @@ fn radii(c: Corners, w: f32, h: f32) -> [(f32, f32); 4] {
     })
     .clamp(0., 1.);
     r.map(|r| (r * factor, r * factor))
+}
+/// Whether `style` asks for continuous corners.
+#[inline(always)]
+pub fn continuous(style: &QuadStyle) -> bool {
+    style
+        .decoration
+        .as_deref()
+        .is_some_and(|detail| detail.corner_curve == CornerCurve::Continuous)
+}
+/// How far along its sides a continuous corner starts, by its radius.
+const CONTINUOUS_REACH: f32 = 1.528_665;
+/// continuous.wgsl's field at `a`, for a way's progress `t` to the circle.
+fn supercircle(a: [f32; 2], t: [f32; 2]) -> f32 {
+    let (high, low) = (a[0].max(a[1]), a[0].min(a[1]));
+    let s = if high > 0. { (low / high).min(1.) } else { 0. };
+    let p = (((3.156_01 - 0.926_054 * s) * s - 3.641_22) * s + 1.268_03) * s + 0.268_531;
+    let round = a[0].hypot(a[1]) + 1. - 1. / (1. - s * s * p);
+    let v = a.map(|side| (side * CONTINUOUS_REACH - 0.528_665).max(0.));
+    let circle = v[0].hypot(v[1]) * 0.654_165_6 + 0.345_834_4;
+    let k = if a[1] > a[0] { t[0] } else { t[1] };
+    round + (circle - round) * k - 1.
+}
+/// Lines to a corner's curve.
+const CORNER_LINES: usize = 32;
+/// `rounded`, its corners what continuous.wgsl draws: found along rays from
+/// where the sides' straight parts end, for what can't draw on the quad path.
+fn rounded_continuous(rect: Rect, r: [(f32, f32); 4]) -> Path {
+    let (x, y, right, bottom) = (rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
+    let mut p = Path::builder();
+    let mut first = true;
+    // Each corner, with the way its sides run from it.
+    for (radius, corner, across, down) in [
+        (r[1].0, (right, y), -1., 1.),
+        (r[2].0, (right, bottom), -1., -1.),
+        (r[3].0, (x, bottom), 1., -1.),
+        (r[0].0, (x, y), 1., 1.),
+    ] {
+        let reach = radius * CONTINUOUS_REACH;
+        let t = [rect.width, rect.height]
+            .map(|size| (2.891_557 - 1.445_778_5 * size / reach.max(1e-6)).clamp(0., 1.));
+        // Clockwise round the box: a corner starts on its side across or down.
+        let flip = across * down < 0.;
+        for line in 0..=CORNER_LINES {
+            let angle = std::f32::consts::FRAC_PI_2 * line as f32 / CORNER_LINES as f32;
+            let (sin, cos) = angle.sin_cos();
+            let (a, b) = if flip { (sin, cos) } else { (cos, sin) };
+            // How far out along the ray, in `a`: the field rises along it.
+            let (mut low, mut high) = (0.0_f32, 2.0_f32);
+            for _ in 0..24 {
+                let middle = (low + high) * 0.5;
+                if supercircle([middle * a, middle * b], t) < 0. {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
+            }
+            let (px, py) = (
+                corner.0 + across * reach * (1. - low * a),
+                corner.1 + down * reach * (1. - low * b),
+            );
+            match first {
+                true => p.move_to(px, py),
+                false => p.line_to(px, py),
+            };
+            first = false;
+        }
+    }
+    p.close();
+    p.build().expect("finite normalized corners")
 }
 fn rounded(rect: Rect, r: [(f32, f32); 4]) -> Path {
     let (x, y, right, bottom) = (rect.x, rect.y, rect.x + rect.width, rect.y + rect.height);
@@ -82,7 +151,11 @@ pub fn canvas(style: &QuadStyle, width: f32, height: f32) -> Result<Canvas, GpuE
         return Err(GpuError("nonfinite decoration dimensions".into()));
     }
     let radius = radii(corners, width, height);
-    let outer = rounded(Rect::new(0., 0., width, height), radius);
+    let shape = match detail.corner_curve {
+        CornerCurve::Continuous => rounded_continuous,
+        CornerCurve::Circular => rounded,
+    };
+    let outer = shape(Rect::new(0., 0., width, height), radius);
     let mut canvas = Canvas::new();
     let background = match &detail.background {
         None => Brush::Solid(style.fill),
@@ -128,7 +201,7 @@ pub fn canvas(style: &QuadStyle, width: f32, height: f32) -> Result<Canvas, GpuE
             (height - top - bottom).max(0.),
         );
         if inner.width > 0. && inner.height > 0. {
-            ring.append(&rounded(
+            ring.append(&shape(
                 inner,
                 [
                     ((radius[0].0 - left).max(0.), (radius[0].1 - top).max(0.)),

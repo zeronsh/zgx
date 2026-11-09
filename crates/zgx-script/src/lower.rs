@@ -9137,6 +9137,10 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         }
         // Points inside its rounded clip that its content fades out over.
         (ClipFeather, Lit::Num(v)) => s.clip_feather(*v),
+        (CornerCurve, Lit::Str(name)) => s.corner_curve(match &**name {
+            "continuous" => zgx::decoration::CornerCurve::Continuous,
+            _ => zgx::decoration::CornerCurve::Circular,
+        }),
         // `{ top, right, bottom, left }`; 0 keeps an edge sharp.
         (FadeSides, Lit::Corners(c)) => {
             s.fade_sides(c.top_left, c.top_right, c.bottom_right, c.bottom_left)

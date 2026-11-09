@@ -159,8 +159,30 @@ fn main() {
     let blend = draw(|scene, id| scene.set_blend(id, BlendMode::Multiply)).unwrap_err();
     assert!(blend.contains("blend mode"), "{blend}");
 
+    // Continuous corners: the box drawn, its corners circular.
+    let continuous = draw(|scene, id| {
+        scene.set_kind(
+            id,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: QuadStyle {
+                    radius: 8.,
+                    fill: FILL,
+                    decoration: Some(std::sync::Arc::new(zgx::decoration::Decoration {
+                        corner_curve: zgx::decoration::CornerCurve::Continuous,
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                },
+            },
+        )
+    })
+    .expect("a frame with continuous corners draws");
+    assert!(continuous == plain, "drawn as the circular box it would be");
+
     let left_out = GpuRenderer::debug_d3d11_left_out();
     for kind in [
+        "continuous corners (drawn circular)",
         "drop shadows",
         "backdrop blurs (drawn opaque)",
         "backdrop reads (glass drawn opaque)",
