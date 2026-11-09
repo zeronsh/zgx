@@ -1,5 +1,7 @@
 # e875c5e0 generic scroll baseline
 
+**Cadence-scoring qualification (2026-11-09):** historical Wing percentages here used raw wheel-demand windows. On macOS, the recorder runs before the host drops system momentum events; nominal replay classification finds 69 such groups in Wing’s tape. Those ignored deltas must not demand new frames after the app’s own coast stops. Treat these percentages as unfiltered-input statistics, not certified app missed-refresh rates, pending coast-aware scoring. Per-frame measurements and recorded stalls remain evidence; aggregates whose population used raw demand also need qualification. No outliers are removed. Independent continuous native/idle references are unaffected by this input-filtering issue.
+
 These 16 single-trial cells are the original-engine baseline, with opt-in
 frame-indexed presentation/GPU instrumentation. Conditions: 120 Hz, 2×, opaque,
 M=960×720 and L=1440×960; tiles (`p0`) and drawables (`p1`) are separate.

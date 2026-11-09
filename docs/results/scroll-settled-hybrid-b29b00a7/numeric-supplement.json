@@ -1,0 +1,866 @@
+[
+  {
+    "case": "t01-01-prefetched-hybrid-base",
+    "arm": "prefetched-hybrid",
+    "role": "base",
+    "trial": 0,
+    "late_frames": 351,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 351,
+        "observed_handover_phase_ms": {
+          "p50": 6.53812497854233,
+          "p99": 8.316000332434974,
+          "max": 8.325208326180778
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.5585,
+          "p99": 25.542333,
+          "max": 25.794709
+        },
+        "gpu_wait_ms": {
+          "p50": 4.439,
+          "p99": 6.402,
+          "max": 6.599
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5295,
+        "observed_handover_phase_ms": {
+          "p50": 6.6593330204486865,
+          "p99": 7.816167026758196,
+          "max": 8.248915970325472
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.340667,
+          "p99": 22.494167,
+          "max": 22.796209
+        },
+        "gpu_wait_ms": {
+          "p50": 3.725,
+          "p99": 5.827,
+          "max": 6.284
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7851,
+      "handover_records": 7851,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.363542,
+      "p99": 25.307167,
+      "max": 25.794709
+    },
+    "rss_kib": {
+      "before": 251744,
+      "after": 268816,
+      "delta": 17072,
+      "rest_after": 268816,
+      "rest_seconds": 3.0,
+      "rest_delta_from_before": 17072
+    },
+    "motion_window_work": {
+      "frames": 5715,
+      "main_ms": {
+        "p50": 0.673,
+        "p99": 2.087,
+        "max": 3.864
+      },
+      "main_over_4ms": 0,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.1189169999999997,
+        "p99": 5.3670420000000005,
+        "max": 6.011042000000001
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.163,
+          "p99": 0.559,
+          "max": 1.268,
+          "mean": 0.17877970253718334,
+          "total": 1021.7260000000027,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.141,
+          "p99": 0.303,
+          "max": 0.697,
+          "mean": 0.1427646544181973,
+          "total": 815.8999999999976,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.079,
+          "p99": 6.611,
+          "max": 7.693,
+          "mean": 4.13126631671038,
+          "total": 23610.18699999982,
+          "over4ms": 2952
+        },
+        "wait": {
+          "p50": 0.979,
+          "p99": 6.18,
+          "max": 6.669,
+          "mean": 1.334139632545961,
+          "total": 7624.608000000167,
+          "over4ms": 346
+        },
+        "rest": {
+          "p50": 0.36,
+          "p99": 1.446,
+          "max": 2.348,
+          "mean": 0.39206281714785834,
+          "total": 2240.6390000000106,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 0,
+    "full_gate_main_ms": {
+      "p50": 0.673,
+      "p99": 2.137,
+      "max": 3.864
+    },
+    "cadence_model": "raw-input-demand-unfiltered",
+    "cadence_scoring_complete": false
+  },
+  {
+    "case": "t01-01-prefetched-hybrid-variant",
+    "arm": "prefetched-hybrid",
+    "role": "variant",
+    "trial": 0,
+    "late_frames": 213,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 213,
+        "observed_handover_phase_ms": {
+          "p50": 2.30612498521805,
+          "p99": 7.489041318496071,
+          "max": 8.29379134376844
+        },
+        "submit_to_shown_ms": {
+          "p50": 23.057084,
+          "p99": 30.972709,
+          "max": 32.00075
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 0.003,
+          "max": 0.748
+        },
+        "acquisition_ms": {
+          "p50": 0.004,
+          "p99": 0.029,
+          "max": 7.364
+        }
+      },
+      "on_time": {
+        "count": 5497,
+        "observed_handover_phase_ms": {
+          "p50": 2.0052500069141406,
+          "p99": 4.540749967098238,
+          "max": 6.879749000072481
+        },
+        "submit_to_shown_ms": {
+          "p50": 22.99475,
+          "p99": 24.094959,
+          "max": 24.203583
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 3.965,
+          "max": 5.791
+        },
+        "acquisition_ms": {
+          "p50": 0.003,
+          "p99": 6.13,
+          "max": 15.8
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7933,
+      "handover_records": 7933,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": 0.003,
+      "p99": 6.071,
+      "max": 1003.365
+    },
+    "submit_to_shown_ms": {
+      "p50": 22.96675,
+      "p99": 24.45125,
+      "max": 32.190959
+    },
+    "rss_kib": {
+      "before": 241760,
+      "after": 264384,
+      "delta": 22624,
+      "rest_after": 264384,
+      "rest_seconds": 3.0,
+      "rest_delta_from_before": 22624
+    },
+    "motion_window_work": {
+      "frames": 5076,
+      "main_ms": {
+        "p50": 0.667,
+        "p99": 7.873,
+        "max": 1005.986
+      },
+      "main_over_4ms": 418,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.602167,
+        "p99": 5.426958,
+        "max": 8.088542
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.172,
+          "p99": 7.559,
+          "max": 1003.838,
+          "mean": 0.9544093774625708,
+          "total": 4844.582000000009,
+          "over4ms": 416
+        },
+        "encode": {
+          "p50": 0.131,
+          "p99": 0.255,
+          "max": 0.691,
+          "mean": 0.13436189913317598,
+          "total": 682.0210000000013,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.009,
+          "max": 3.109,
+          "mean": 0.0037304964539007267,
+          "total": 18.93600000000009,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0,
+          "mean": 0.0,
+          "total": 0,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.33100000000000007,
+          "p99": 1.152,
+          "max": 2.3840000000000003,
+          "mean": 0.36256166272655593,
+          "total": 1840.362999999998,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 494,
+    "full_gate_main_ms": {
+      "p50": 0.668,
+      "p99": 7.817,
+      "max": 1005.986
+    },
+    "cadence_model": "raw-input-demand-unfiltered",
+    "cadence_scoring_complete": false
+  },
+  {
+    "case": "t02-01-prefetched-hybrid-base",
+    "arm": "prefetched-hybrid",
+    "role": "base",
+    "trial": 1,
+    "late_frames": 337,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 337,
+        "observed_handover_phase_ms": {
+          "p50": 6.567499011754991,
+          "p99": 8.316582312186561,
+          "max": 8.321041335662208
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.551876,
+          "p99": 25.584542,
+          "max": 26.419292
+        },
+        "gpu_wait_ms": {
+          "p50": 4.152,
+          "p99": 6.584,
+          "max": 7.017
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5306,
+        "observed_handover_phase_ms": {
+          "p50": 6.659540981054308,
+          "p99": 7.823957979679109,
+          "max": 8.251541018486025
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.340458,
+          "p99": 18.652501,
+          "max": 18.671875
+        },
+        "gpu_wait_ms": {
+          "p50": 3.926,
+          "p99": 5.907,
+          "max": 6.451
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7869,
+      "handover_records": 7869,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.365667,
+      "p99": 25.313584,
+      "max": 26.419292
+    },
+    "rss_kib": {
+      "before": 251456,
+      "after": 270688,
+      "delta": 19232,
+      "rest_after": 270688,
+      "rest_seconds": 3.0,
+      "rest_delta_from_before": 19232
+    },
+    "motion_window_work": {
+      "frames": 5636,
+      "main_ms": {
+        "p50": 0.684,
+        "p99": 2.175,
+        "max": 3.737
+      },
+      "main_over_4ms": 0,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.285,
+        "p99": 5.387708,
+        "max": 6.150375
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.166,
+          "p99": 0.688,
+          "max": 1.56,
+          "mean": 0.183249290276792,
+          "total": 1032.7929999999997,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.142,
+          "p99": 0.286,
+          "max": 0.683,
+          "mean": 0.14482753726046874,
+          "total": 816.2480000000019,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 4.359,
+          "p99": 6.594,
+          "max": 10.108,
+          "mean": 4.278295777146918,
+          "total": 24112.47500000003,
+          "over4ms": 3288
+        },
+        "wait": {
+          "p50": 0.646,
+          "p99": 6.159,
+          "max": 6.641,
+          "mean": 1.1540842796309756,
+          "total": 6504.419000000178,
+          "over4ms": 331
+        },
+        "rest": {
+          "p50": 0.36800000000000005,
+          "p99": 1.416,
+          "max": 2.947,
+          "mean": 0.401826650106458,
+          "total": 2264.6949999999974,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 0,
+    "full_gate_main_ms": {
+      "p50": 0.679,
+      "p99": 2.196,
+      "max": 3.737
+    },
+    "cadence_model": "raw-input-demand-unfiltered",
+    "cadence_scoring_complete": false
+  },
+  {
+    "case": "t02-01-prefetched-hybrid-variant",
+    "arm": "prefetched-hybrid",
+    "role": "variant",
+    "trial": 1,
+    "late_frames": 185,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 185,
+        "observed_handover_phase_ms": {
+          "p50": 1.9547500014305133,
+          "p99": 7.640375336011253,
+          "max": 7.7521663208802565
+        },
+        "submit_to_shown_ms": {
+          "p50": 23.187959,
+          "p99": 30.677334,
+          "max": 31.209417
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 0.003,
+          "max": 1.99
+        },
+        "acquisition_ms": {
+          "p50": 0.003,
+          "p99": 0.053,
+          "max": 0.157
+        }
+      },
+      "on_time": {
+        "count": 5549,
+        "observed_handover_phase_ms": {
+          "p50": 1.8894160091877001,
+          "p99": 4.6457919776439685,
+          "max": 7.330541998147966
+        },
+        "submit_to_shown_ms": {
+          "p50": 23.110584,
+          "p99": 24.099042,
+          "max": 24.219959
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 3.477,
+          "max": 5.837
+        },
+        "acquisition_ms": {
+          "p50": 0.003,
+          "p99": 6.13,
+          "max": 13.177
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7909,
+      "handover_records": 7909,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": 0.003,
+      "p99": 6.117,
+      "max": 1011.749
+    },
+    "submit_to_shown_ms": {
+      "p50": 23.07875,
+      "p99": 24.438292,
+      "max": 32.536834
+    },
+    "rss_kib": {
+      "before": 240272,
+      "after": 265472,
+      "delta": 25200,
+      "rest_after": 265472,
+      "rest_seconds": 3.0,
+      "rest_delta_from_before": 25200
+    },
+    "motion_window_work": {
+      "frames": 5056,
+      "main_ms": {
+        "p50": 0.638,
+        "p99": 7.831,
+        "max": 1012.924
+      },
+      "main_over_4ms": 343,
+      "rows_built": 2,
+      "gpu_ms": {
+        "p50": 2.428,
+        "p99": 5.190417,
+        "max": 7.676167
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.157,
+          "p99": 7.529,
+          "max": 1011.977,
+          "mean": 1.2438595727848105,
+          "total": 6288.9540000000015,
+          "over4ms": 339
+        },
+        "encode": {
+          "p50": 0.127,
+          "p99": 0.254,
+          "max": 0.633,
+          "mean": 0.13234018987341847,
+          "total": 669.1120000000038,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.008,
+          "max": 2.406,
+          "mean": 0.0031657436708860984,
+          "total": 16.006000000000114,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0,
+          "mean": 0.0,
+          "total": 0,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.32400000000000007,
+          "p99": 1.184,
+          "max": 2.679,
+          "mean": 0.3577846123417726,
+          "total": 1808.9590000000023,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 414,
+    "full_gate_main_ms": {
+      "p50": 0.638,
+      "p99": 7.813,
+      "max": 1012.924
+    },
+    "cadence_model": "raw-input-demand-unfiltered",
+    "cadence_scoring_complete": false
+  },
+  {
+    "case": "t03-01-prefetched-hybrid-base",
+    "arm": "prefetched-hybrid",
+    "role": "base",
+    "trial": 2,
+    "late_frames": 301,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 301,
+        "observed_handover_phase_ms": {
+          "p50": 6.607333004474642,
+          "p99": 8.300708343585335,
+          "max": 8.316041310628258
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.547834,
+          "p99": 25.648501,
+          "max": 25.970667
+        },
+        "gpu_wait_ms": {
+          "p50": 4.009,
+          "p99": 6.561,
+          "max": 7.298
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      },
+      "on_time": {
+        "count": 5420,
+        "observed_handover_phase_ms": {
+          "p50": 6.671542018651964,
+          "p99": 7.813124984502794,
+          "max": 8.328125000000002
+        },
+        "submit_to_shown_ms": {
+          "p50": 18.328458,
+          "p99": 18.649376,
+          "max": 18.66475
+        },
+        "gpu_wait_ms": {
+          "p50": 3.214,
+          "p99": 5.844,
+          "max": 6.264
+        },
+        "acquisition_ms": {
+          "p50": null,
+          "p99": null,
+          "max": null
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7943,
+      "handover_records": 7943,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": null,
+      "p99": null,
+      "max": null
+    },
+    "submit_to_shown_ms": {
+      "p50": 18.348792,
+      "p99": 25.310876,
+      "max": 26.224459
+    },
+    "rss_kib": {
+      "before": 252336,
+      "after": 277376,
+      "delta": 25040,
+      "rest_after": 277376,
+      "rest_seconds": 3.0,
+      "rest_delta_from_before": 25040
+    },
+    "motion_window_work": {
+      "frames": 5612,
+      "main_ms": {
+        "p50": 0.692,
+        "p99": 2.092,
+        "max": 3.253
+      },
+      "main_over_4ms": 0,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 2.680875,
+        "p99": 5.35275,
+        "max": 6.202292000000001
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.166,
+          "p99": 0.643,
+          "max": 1.334,
+          "mean": 0.181049358517462,
+          "total": 1016.0489999999968,
+          "over4ms": 0
+        },
+        "encode": {
+          "p50": 0.143,
+          "p99": 0.288,
+          "max": 0.682,
+          "mean": 0.14525053456878095,
+          "total": 815.1459999999987,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 3.744,
+          "p99": 6.601,
+          "max": 7.864,
+          "mean": 4.0106797933000795,
+          "total": 22507.93500000005,
+          "over4ms": 2656
+        },
+        "wait": {
+          "p50": 1.02,
+          "p99": 6.106,
+          "max": 6.636,
+          "mean": 1.2872453670705928,
+          "total": 7224.021000000166,
+          "over4ms": 296
+        },
+        "rest": {
+          "p50": 0.374,
+          "p99": 1.4009999999999998,
+          "max": 2.461,
+          "mean": 0.4030500712758361,
+          "total": 2261.916999999992,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 1,
+    "full_gate_main_ms": {
+      "p50": 0.69,
+      "p99": 2.106,
+      "max": 4.338
+    },
+    "cadence_model": "raw-input-demand-unfiltered",
+    "cadence_scoring_complete": false
+  },
+  {
+    "case": "t03-01-prefetched-hybrid-variant",
+    "arm": "prefetched-hybrid",
+    "role": "variant",
+    "trial": 2,
+    "late_frames": 166,
+    "late_groups_all_motion_frames": {
+      "late": {
+        "count": 166,
+        "observed_handover_phase_ms": {
+          "p50": 2.128583014011385,
+          "p99": 6.862000336249672,
+          "max": 7.767833342154823
+        },
+        "submit_to_shown_ms": {
+          "p50": 23.107584,
+          "p99": 30.996709,
+          "max": 31.669334
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 0.001,
+          "max": 0.003
+        },
+        "acquisition_ms": {
+          "p50": 0.003,
+          "p99": 0.053,
+          "max": 6.963
+        }
+      },
+      "on_time": {
+        "count": 5688,
+        "observed_handover_phase_ms": {
+          "p50": 2.0302910208702105,
+          "p99": 3.6030829846858996,
+          "max": 6.843333005905153
+        },
+        "submit_to_shown_ms": {
+          "p50": 22.969417,
+          "p99": 24.103584,
+          "max": 24.190459
+        },
+        "gpu_wait_ms": {
+          "p50": 0.0,
+          "p99": 4.025,
+          "max": 5.414
+        },
+        "acquisition_ms": {
+          "p50": 0.003,
+          "p99": 6.057,
+          "max": 13.802
+        }
+      }
+    },
+    "timing_coverage": {
+      "shown_records": 7968,
+      "handover_records": 7968,
+      "missing_handover": 0,
+      "clock_mismatch": 0
+    },
+    "acquisition_ms": {
+      "p50": 0.003,
+      "p99": 6.079,
+      "max": 1011.253
+    },
+    "submit_to_shown_ms": {
+      "p50": 22.940792,
+      "p99": 24.478251,
+      "max": 32.527001
+    },
+    "rss_kib": {
+      "before": 240624,
+      "after": 266096,
+      "delta": 25472,
+      "rest_after": 266096,
+      "rest_seconds": 3.0,
+      "rest_delta_from_before": 25472
+    },
+    "motion_window_work": {
+      "frames": 5200,
+      "main_ms": {
+        "p50": 0.691,
+        "p99": 7.808,
+        "max": 1013.128
+      },
+      "main_over_4ms": 471,
+      "rows_built": 0,
+      "gpu_ms": {
+        "p50": 3.543333,
+        "p99": 5.509582999999999,
+        "max": 6.494292000000001
+      },
+      "phases_ms": {
+        "paint": {
+          "p50": 0.174,
+          "p99": 7.461,
+          "max": 1011.642,
+          "mean": 1.2044001923076904,
+          "total": 6262.880999999989,
+          "over4ms": 469
+        },
+        "encode": {
+          "p50": 0.133,
+          "p99": 0.246,
+          "max": 0.919,
+          "mean": 0.13554211538461555,
+          "total": 704.8190000000009,
+          "over4ms": 0
+        },
+        "present": {
+          "p50": 0.002,
+          "p99": 0.008,
+          "max": 1.899,
+          "mean": 0.0029515384615385262,
+          "total": 15.348000000000336,
+          "over4ms": 0
+        },
+        "wait": {
+          "p50": 0,
+          "p99": 0,
+          "max": 0,
+          "mean": 0.0,
+          "total": 0,
+          "over4ms": 0
+        },
+        "rest": {
+          "p50": 0.3380000000000001,
+          "p99": 0.929,
+          "max": 2.2640000000000002,
+          "mean": 0.35805980769230855,
+          "total": 1861.9110000000046,
+          "over4ms": 0
+        }
+      }
+    },
+    "full_gate_main_over_4ms": 558,
+    "full_gate_main_ms": {
+      "p50": 0.676,
+      "p99": 7.794,
+      "max": 1013.128
+    },
+    "cadence_model": "raw-input-demand-unfiltered",
+    "cadence_scoring_complete": false
+  }
+]
