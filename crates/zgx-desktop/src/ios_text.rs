@@ -631,6 +631,17 @@ extern "C-unwind" fn edit_paste(_: &AnyObject, _: Sel, _: *mut AnyObject) {
         state.window.request_redraw();
     }
 }
+extern "C-unwind" fn edit_select(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+    let Some(state) = state() else { return };
+    let mut store = state.store.borrow_mut();
+    let (caret, _, _) = store.selection();
+    let units = store.text(0, store.len());
+    if let Some((start, end)) = crate::text_store::word_at(&units, caret) {
+        store.set_selection(start, end, false);
+    }
+    drop(store);
+    state.window.request_redraw();
+}
 extern "C-unwind" fn edit_select_all(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     let Some(state) = state() else { return };
     if let Some(editor) = state.store.borrow().editor() {
@@ -638,7 +649,12 @@ extern "C-unwind" fn edit_select_all(_: &AnyObject, _: Sel, _: *mut AnyObject) {
     }
     state.window.request_redraw();
 }
-extern "C-unwind" fn can_perform(this: &AnyObject, _: Sel, action: Sel, _: *mut AnyObject) -> Bool {
+extern "C-unwind" fn can_perform(
+    this: &AnyObject,
+    _: Sel,
+    action: Sel,
+    sender: *mut AnyObject,
+) -> Bool {
     let Some(state) = state() else {
         return Bool::NO;
     };
@@ -648,6 +664,10 @@ extern "C-unwind" fn can_perform(this: &AnyObject, _: Sel, action: Sel, _: *mut 
     let secure = store.editor().is_some_and(EditorHandle::is_secure);
     let can = if action == sel!(copy:) || action == sel!(cut:) {
         selected && !secure
+    } else if action == sel!(select:) {
+        // As a UITextField answers (read in a reference app): a caret offers
+        // Select and Select All, a selection neither.
+        !selected && store.len() > 0
     } else if action == sel!(paste:) {
         // SAFETY: UIPasteboard's getter, which reads no contents and so shows
         // no prompt.
@@ -656,10 +676,18 @@ extern "C-unwind" fn can_perform(this: &AnyObject, _: Sel, action: Sel, _: *mut 
             msg_send![&*board, hasStrings]
         }
     } else if action == sel!(selectAll:) {
-        store.len() > 0
-    } else {
-        let _ = this;
+        !selected && store.len() > 0
+    } else if secure {
         false
+    } else {
+        // The system's own for the rest (Look Up, Translate, Share, Replace),
+        // through the text services `UITextInteraction` put on this view.
+        drop(store);
+        // SAFETY: UIResponder's method, on the view's superclass, on the
+        // main thread UIKit calls this on.
+        return unsafe {
+            msg_send![super(this, class!(UIView)), canPerformAction: action, withSender: sender]
+        };
     };
     Bool::new(can)
 }
@@ -904,6 +932,7 @@ fn input_class() -> &'static AnyClass {
                 sel!(selectAll:),
                 edit_select_all as extern "C-unwind" fn(_, _, _),
             );
+            b.add_method(sel!(select:), edit_select as extern "C-unwind" fn(_, _, _));
             b.add_method(
                 sel!(canPerformAction:withSender:),
                 can_perform as extern "C-unwind" fn(_, _, _, _) -> _,

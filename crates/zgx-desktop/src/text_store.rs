@@ -576,8 +576,44 @@ fn seen(editor: &EditorHandle) -> Seen {
     }
 }
 
+/// The word to select at `caret` (UTF-16, as the store counts): the word
+/// holding it, or the one just before it; none where only spaces are around.
+/// `select:`, as a caret's Select in the edit menu takes (iOS).
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn word_at(units: &[u16], caret: usize) -> Option<(usize, usize)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = String::from_utf16_lossy(units);
+    let mut found = None;
+    let mut at = 0;
+    for piece in text.split_word_bounds() {
+        let len = piece.encode_utf16().count();
+        let word = piece.chars().any(char::is_alphanumeric);
+        if word && at <= caret && caret <= at + len {
+            found = Some((at, at + len));
+            // A word starting here is the caret's rather than one ending here.
+            if caret < at + len {
+                break;
+            }
+        }
+        at += len;
+    }
+    found
+}
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn select_takes_the_word_at_the_caret() {
+        let units: Vec<u16> = "Hello world 😀 x".encode_utf16().collect();
+        assert_eq!(super::word_at(&units, 2), Some((0, 5)));
+        // At a word's end, that word; at the next's start, the next.
+        assert_eq!(super::word_at(&units, 5), Some((0, 5)));
+        assert_eq!(super::word_at(&units, 6), Some((6, 11)));
+        assert_eq!(super::word_at(&units, 11), Some((6, 11)));
+        // Around no word, nothing; after an emoji, by UTF-16 units.
+        assert_eq!(super::word_at(&units, 12), None);
+        assert_eq!(super::word_at(&units, units.len()), Some((15, 16)));
+        assert_eq!(super::word_at(&[], 0), None);
+    }
     use super::{Change, TextStore};
     use zgx::{
         compose::prelude::*,
