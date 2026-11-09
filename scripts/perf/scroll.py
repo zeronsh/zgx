@@ -124,8 +124,40 @@ def app_work_ms(frame):
     return sum(p['micros'] for p in frame['phases'] if p['phase'] not in ('wait', 'present')) / 1000
 
 
+def picture_costs(frames):
+    groups = {name: [] for name in ('promotion', 'raster', 'composite_only')}
+    for frame in frames:
+        if frame.get('spare', False):continue
+        notes = frame.get('notes', [])
+        promotion = any(' made a picture' in note for note in notes)
+        raster = any(re.search(r' rastered \d+ px rows', note) for note in notes)
+        composite = any('composited its picture' in note for note in notes)
+        if promotion:groups['promotion'].append(frame)
+        if raster:groups['raster'].append(frame)
+        if composite and not promotion and not raster:groups['composite_only'].append(frame)
+    result = {}
+    for name, selected in groups.items():
+        worst = max(selected, key=app_work_ms, default=None)
+        result[name] = dict(count=len(selected), main_ms=spread([app_work_ms(f) for f in selected]),
+                            gpu_ms=spread([f['gpu_micros']/1000 for f in selected if f.get('gpu_micros') is not None]),
+                            worst_main_frame=worst)
+    return result
+
+
+def coalesce_presentations(records, period):
+    """Keep one displayed update per refresh; retain duplicate submissions."""
+    groups=[]
+    for record in sorted(records,key=lambda r:r[1]):
+        if groups and (record[1]-groups[-1][-1][1])*1000 < period/2:
+            groups[-1].append(record)
+        else:
+            groups.append([record])
+    shown=[max(group,key=lambda r:(r[2],r[0])) for group in groups]
+    return shown,groups
+
+
 def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=False,
-              main_budget=4., gpu_budget=4., sparse=False):
+              main_budget=4., gpu_budget=4., sparse=False, trace_to_host_ms=None):
     period = 1000 / hz
     windows = [(0, events[-1][0])] if reference and events else motion_windows(events, period, scale)
     # Feedback carries the exact trace index captured before presenting. An
@@ -133,7 +165,7 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     # attribution: missing frame identity is an explicit gate failure.
     records = [(r[0], r[1], int(r[2]) if len(r) > 2 else 0,
                 r[3] if len(r) > 3 else 0) for r in presents]
-    shown = sorted((r for r in records if r[1] > 0 and r[1]*1000 >= anchor), key=lambda r:r[1])
+    shown,display_groups = coalesce_presentations([r for r in records if r[1]>0 and r[1]*1000>=anchor],period)
     gaps, idle, late_records = [], [], []
     by_id = {f['frame']: f for f in frames}
 
@@ -162,15 +194,19 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
                     frames=[f['frame'] for f in candidates], main_max_ms=max(main, default=None),
                     gpu_max_ms=max(gpu, default=None), notes=notes)
 
-    for prev, current in zip(shown, shown[1:]):
+    double_then_skip=0
+    for group_index,(prev, current) in enumerate(zip(shown, shown[1:])):
         a, b = prev[1]*1000-anchor, current[1]*1000-anchor
         if not active_gap(a, b, windows, period):
             idle.append(b-a)
             continue
         gaps.append(b-a)
         if b-a > 1.5*period:
+            double_then_skip += len({int(r[2]) for r in display_groups[group_index]})>1
             ids = range(prev[2], current[2]+1) if prev[2] and current[2] >= prev[2] else []
-            late_records.append(attribute('late', b, ids))
+            record=attribute('late', b, ids)
+            record.update(previous_presented_ms=a,interval_ms=b-a)
+            late_records.append(record)
     skipped = [r for r in records if r[1] <= 0 and r[0]*1000 >= anchor]
     for r in skipped:
         late_records.append(attribute('skipped', r[0]*1000-anchor, [r[2]] if r[2] else []))
@@ -204,11 +240,34 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     # A canceled submission can coincide with the same visible gap. Count
     # actual late presentation intervals once; keep canceled submissions as
     # a separate diagnostic rather than counting the missed refresh twice.
+    render_estimates=[]; end_estimates=[]; estimate_errors=[]
+    if trace_to_host_ms is not None:
+        for r in shown:
+            f=by_id.get(r[2])
+            if f is None or 'ended_ms' not in f:continue
+            ended=trace_to_host_ms+f['ended_ms']
+            start=ended-f.get('frame_micros',0)/1000
+            render_estimates.append(r[1]*1000-start)
+            end_estimates.append(r[1]*1000-ended)
+            if r[3]>0:estimate_errors.append(r[3]*1000-start)
     causes = Counter(r['cause'] for r in late_records if r['kind']=='late')
     skipped_causes = Counter(r['cause'] for r in late_records if r['kind']=='skipped')
     app_late = sum(causes[c] for c in ('app', 'gpu', 'app_pacing'))
     total = len(gaps)
+    duration=events[-1][0] if events else 0
+    shown_in_tape=[r for r in shown if 0<=r[1]*1000-anchor<=duration]
     return dict(frames=len(frames), sparse=sparse,
+                picture_costs=picture_costs(frames),
+                worst_main_frame=max(scroll_frames,key=app_work_ms,default=None),
+                shown_frames_tape=len(shown_in_tape),
+                shown_frames_motion=sum(any(a<=r[1]*1000-anchor<=b for a,b in windows) for r in shown_in_tape),
+                tape_duration_ms=duration,
+                same_refresh_extra_frames=sum(max(0,len({r[2] for r in g})-1) for g in display_groups),
+                duplicate_feedback_records=sum(len(g)-len({r[2] for r in g}) for g in display_groups),
+                double_then_skip_intervals=double_then_skip,
+                render_start_to_shown_ms_estimate=spread(render_estimates),
+                frame_end_to_shown_ms_estimate=spread(end_estimates),
+                render_start_estimate_error_ms=spread(estimate_errors),
                 expected_pixel_updates=len(motion_windows(events,period,scale,merge=False)),
                 displayed_motion_frames=sum(f['frame'] in displayed_ids for f in scroll_frames), spare_frames=sum(f.get('spare',False) for f in frames),
                 spare_work_ms=spread([app_work_ms(f) for f in frames if f.get('spare',False)]),
@@ -328,6 +387,32 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                     source = args.zeron_source / 'ui'
                 shutil.copytree(source, stage/'app')
                 shutil.copy2(ROOT/'scripts/perf/zeron_fixture.luau',stage/'app/scroll_fixture.luau')
+                if getattr(args,'reset_row',0)>0:
+                    transcript=stage/'app/ds/transcript.luau'
+                    source_text=transcript.read_text()
+                    hook='on_mount = function(_el)\n'
+                    if source_text.count(hook)!=1:
+                        raise RuntimeError('unrecognized transcript mount hook for deterministic row reset')
+                    source_text=source_text.replace(hook,hook+"""                        -- Benchmark-only control; rendering and list data stay real.
+                        require("@app/scroll_control").go=function(row: number): boolean
+                            local el=list:peek()
+                            return el~=nil and el:scroll_to_row(row,{align="start"})
+                        end
+""")
+                    control='return { go=function(_row: number): boolean return false end }\n'
+                    (stage/'app/scroll_control.luau').write_text(control)
+                    fixture=stage/'app/scroll_fixture.luau'
+                    fixture_text=fixture.read_text().replace('return ui.overlay {', """local reset_control=require("./scroll_control")
+local bench_row=ui.shared("bench.reset_row",160)
+local bench_ok=ui.shared("bench.goto_ok",false)
+ui.command { id="bench.goto_row",run=function() bench_ok:set(reset_control.go(bench_row:peek())) end }
+return ui.overlay {""")
+                    fixture.write_text(fixture_text)
+                    (out/'scroll-fixture.luau').write_text(fixture_text)
+                    (out/'scroll-control.luau').write_text(control)
+                    transcript.write_text(source_text)
+                    (out/'transcript-fixture.luau').write_text(source_text)
+
             else:
                 shutil.copytree(source, stage / 'app')
             width, height = SIZES[size]
@@ -401,6 +486,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                     scroll = request(process.pid,'node',target='#transcript')['data']['scroll']
                     limit = float(re.search(r'of 0 to ([0-9.]+)',scroll).group(1))
                     request(process.pid,'set',name='bench_offset',value=limit*.35)
+                    if getattr(args,'reset_row',0)>0:
+                        request(process.pid,'set',name='bench.reset_row',value=args.reset_row)
                 else:
                     request(process.pid, 'set', name='translucent', value=background == 'translucent')
                 reset_offset = 90000
@@ -408,6 +495,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                     if real_app:
                         request(process.pid,'set',name='bench_offset',value=1e9)
                         request(process.pid,'command',id='bench.reset')
+                        if getattr(args,'reset_row',0)>0 and gesture!='stream':
+                            request(process.pid,'command',id='bench.goto_row')
                     else:
                         request(process.pid, 'set', name='offset', value=1e9)
                     time.sleep(.5)
@@ -419,6 +508,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                         request(process.pid,'set',name='bench_offset',value=reset_offset)
                 if real_app:
                     request(process.pid,'command',id='bench.reset')
+                    if getattr(args,'reset_row',0)>0 and gesture!='stream':
+                        request(process.pid,'command',id='bench.goto_row')
                 else:
                     request(process.pid, 'set', name='offset', value=reset_offset)
                 time.sleep(.5)
@@ -441,6 +532,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                     request(process.pid, 'replay', target='#transcript', tape=tape('fling',hz), timeout=15)
                     if real_app:
                         request(process.pid,'command',id='bench.reset')
+                        if getattr(args,'reset_row',0)>0 and gesture!='stream':
+                            request(process.pid,'command',id='bench.goto_row')
                     else:
                         request(process.pid, 'set', name='offset', value=reset_offset)
                 if scene == 'nested':
@@ -453,6 +546,12 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                         request(process.pid,'command',id='bench.stream')
                     else:
                         request(process.pid, 'set', name='stream_row', value=400)
+                if real_app:
+                    result['setup_anchor']=request(process.pid,'state',name='chat.transcript.anchor')['data']
+                    result['reset_row']=getattr(args,'reset_row',0)
+                    if getattr(args,'reset_row',0)>0 and gesture!='stream':
+                        ok=request(process.pid,'state',name='bench.goto_ok')['data'].get('bench.goto_ok')
+                        if ok is not True:raise RuntimeError('deterministic transcript row reset failed')
                 begin = request(process.pid, 'mark', name='sample')['data']
                 result['conditions'] = begin
                 if not {'refresh_ms', 'pixel_scale', 'host_ns'} <= begin.keys():
@@ -524,7 +623,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                 metrics = summarize(frames, presents, events, hz, scale, replay_starts[-1],
                                     dict(before=before, after=after, delta=after-before),
                                     reference=scene in ('idle','zeron-idle'), main_budget=args.max_main_ms, gpu_budget=args.max_gpu_ms,
-                                    sparse=gesture in ('slow','notches'))
+                                    sparse=gesture in ('slow','notches'),
+                                    trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'])
                 metrics['start_to_present_ms'] = spread([(p-s)*1000 for s,p in latency if s*1000 >= replay_starts[-1]])
                 result['latency_samples'] = latency
                 result['metrics'] = metrics
@@ -614,9 +714,19 @@ def native_floor(args, size, hz, scale, present, label):
     width,height=SIZES[size]
     native_size=[width*scale/args.native_scale,height*scale/args.native_scale]
     binary=ROOT/'target/scroll-native'
-    with (out/'native.log').open('w') as log:
-        subprocess.run([str(binary),*map(str,native_size),str(hz),mode,'10'],
-                       stdout=log,stderr=log,check=True,timeout=30)
+    binary_hash=sha(binary)
+    source_hash=sha(ROOT/'scripts/perf/scroll_native.swift')
+    def invalid(message):
+        result=dict(status='invalid',failures=[message],mode=mode,
+                    binary_sha256=binary_hash,source_sha256=source_hash)
+        (out/'run.json').write_text(json.dumps(result,indent=2)+'\n')
+        return result
+    try:
+        with (out/'native.log').open('w') as log:
+            subprocess.run([str(binary),*map(str,native_size),str(hz),mode,'10'],
+                           stdout=log,stderr=log,check=True,timeout=30)
+    except (subprocess.TimeoutExpired,subprocess.CalledProcessError) as error:
+        return invalid(str(error))
     begin=end=None
     wakes={}; gpu=[]; work=[]; presents=[]; unavailable=0
     for line in (out/'native.log').read_text().splitlines():
@@ -629,7 +739,7 @@ def native_floor(args, size, hz, scale, present, label):
         elif parts[0]=='NATIVE_GPU': gpu.append((int(parts[1]),float(parts[2])))
         elif parts[0]=='NATIVE_WORK': work.append((int(parts[1]),float(parts[2])))
         elif parts[0]=='NATIVE_UNAVAILABLE': unavailable+=1
-    if begin is None or end is None: raise RuntimeError('native floor missing sample anchors')
+    if begin is None or end is None: return invalid('native floor missing sample anchors')
     sample={n:v for n,v in wakes.items() if begin<=v[0]<=end}
     presented=sorted(p[2] for p in presents if int(p[0]) in sample and p[2]>0)
     gaps=[1000*(b-a) for a,b in zip(presented,presented[1:])]
@@ -643,12 +753,12 @@ def native_floor(args, size, hz, scale, present, label):
            wake_after_target_ms=spread([1000*(v[0]-v[2]) for v in sample.values()]),
            display_period_ms=spread([1000*(v[2]-v[1]) for v in sample.values()]),
            samples=len(presented),unavailable_drawables=unavailable,
-           binary_sha256=sha(binary),source_sha256=sha(ROOT/'scripts/perf/scroll_native.swift'))
-    if len(presented)<hz*8: raise RuntimeError('native floor lacks sustained feedback')
+           status='valid',failures=[],binary_sha256=binary_hash,source_sha256=source_hash)
+    if len(presented)<hz*8: return invalid('native floor lacks sustained feedback')
     if abs(m['display_period_ms']['p50']-1000/hz)>.5:
-        raise RuntimeError('native display clock differs from requested refresh')
+        return invalid('native display clock differs from requested refresh')
     if m['gpu_p99_ms'] is None or m['main_work_ms']['max'] is None:
-        raise RuntimeError('native floor lacks work/GPU evidence')
+        return invalid('native floor lacks work/GPU evidence')
     (out/'run.json').write_text(json.dumps(m,indent=2)+'\n')
     return m
 
@@ -671,6 +781,7 @@ def main():
     p.add_argument('--native-floor',action='store_true',help='bracket each zgx idle reference with independent Swift/Metal references')
     p.add_argument('--set-refresh', action='store_true', help='select matching native display modes and restore the original')
     p.add_argument('--scale', default='2')
+    p.add_argument('--reset-row',type=int,default=160,help='real-app message row to align before each run;0 retains legacy fractional reset')
     p.add_argument('--native-scale', type=float, default=2, help='display backing scale; requested render scales use app zoom')
     p.add_argument('--backgrounds', default='opaque,translucent')
     p.add_argument('--present', default='0,1', help='comma-separated 0 (tiles), 1 (drawables), auto')
@@ -687,7 +798,7 @@ def main():
     p.add_argument('--strict', action='store_true', help='headless: require zero row builds and copies on the shared scene')
     args = p.parse_args()
     for item in args.host_env:
-        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1'):
+        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500'):
             p.error('unsupported diagnostic host environment override')
     if args.command == 'headless':
         env = dict(os.environ)
@@ -721,10 +832,18 @@ def main():
                  runner=str(args.runner), runner_sha256=sha(args.runner),
                  reference_sha256=sha(args.reference_runner), platform=platform.platform(),
                  machine=platform.machine(), args={k: str(v) if isinstance(v, Path) else v for k,v in vars(args).items()})
+    native_proof=args.zeron_runner.parent/'build.json'
+    if native_proof.is_file():
+        proof=json.loads(native_proof.read_text())
+        if proof['binary_sha256']!=sha(args.zeron_runner):
+            p.error('actual-app binary differs from its build proof')
+        audit['native_build_proof']=proof
+        audit['live_engine_source_commit']=args.engine_commit
+        args.engine_commit=proof['zgx_commit']
     audit['engine_commit']=args.engine_commit
     audit['engine_source_diff']=subprocess.check_output(['git','diff','HEAD'],cwd=args.engine_source,text=True)
     if args.engine_pin:
-        audit['engine_delta_from_pin']=subprocess.check_output(['git','diff',args.engine_pin,'HEAD'],cwd=args.engine_source,text=True)
+        audit['engine_delta_from_pin']=subprocess.check_output(['git','diff',args.engine_pin,args.engine_commit],cwd=args.engine_source,text=True)
     sources = args.output / 'sources'
     sources.mkdir()
     for name in ('transcript_scroll', 'scroll_scenes'):
@@ -774,6 +893,9 @@ def main():
                 if args.native_floor:
                     ref['native_floor_before']=floor_before
                     ref['native_floor_after']=native_floor(args,size,hz,scale,present,f'native-after-{len(references)}')
+                    if any(ref[k].get('status')=='invalid' for k in ('native_floor_before','native_floor_after')):
+                        ref['failures'].append('independent native reference invalid')
+                        ref['status']='fail'
                 references[key] = ref
                 results.append(ref)
             if args.command=='reference':

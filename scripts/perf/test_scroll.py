@@ -104,6 +104,43 @@ class ScrollMetrics(unittest.TestCase):
         self.assertLessEqual(high-low,122)
         self.assertEqual(offset,0)
 
+    def test_picture_cost_groups_overlap_and_retain_the_worst_frame(self):
+        def frame(n, notes, work):
+            return dict(frame=n,notes=notes,phases=[dict(phase='paint',micros=work,instructions=100)],gpu_micros=500)
+        result=scroll.picture_costs([
+            frame(1,['scroll @1 made a picture','scroll @1 rastered 900 px rows'],30000),
+            frame(2,['scroll @1 composited its picture, moved 8 px'],1000),
+            frame(3,['scroll @1 rastered 10 px rows','scroll @1 composited its picture, moved 8 px'],2000)])
+        self.assertEqual(result['promotion']['count'],1)
+        self.assertEqual(result['raster']['count'],2)
+        self.assertEqual(result['composite_only']['count'],1)
+        self.assertEqual(result['raster']['main_ms']['max'],30)
+        self.assertEqual(result['raster']['worst_main_frame']['frame'],1)
+
+    def test_same_refresh_frames_do_not_hide_a_following_skip(self):
+        events=scroll.parse_tape(scroll.tape('fling',120))
+        frames=[dict(frame=i,notes=['scroll @1 copied its pixels'],
+                     phases=[dict(phase='paint',micros=1000,instructions=100)],gpu_micros=500)
+                for i in (1,2,3)]
+        m=scroll.summarize(frames,[(.01,.01,1,0),(.01,.01,2,0),(.03,.03,3,0)],events,120,2,0,{})
+        self.assertEqual(m['same_refresh_extra_frames'],1)
+        self.assertEqual(m['double_then_skip_intervals'],1)
+        self.assertEqual(m['active_intervals'],1)
+        self.assertEqual(m['late_pct'],100)
+
+    def test_duplicate_feedback_is_distinct_from_two_frames(self):
+        _,groups=scroll.coalesce_presentations([(.01,.01,1,0),(.011,.01,1,0),(.018,.018,2,0)],1000/120)
+        self.assertEqual(len(groups),2)
+        self.assertEqual(len({r[2] for r in groups[0]}),1)
+
+    def test_trace_clock_latency_estimates_are_labeled_and_calibrated(self):
+        frame=dict(frame=1,ended_ms=20,frame_micros=2000,notes=['scroll @1 copied its pixels'],
+                   phases=[dict(phase='paint',micros=1000,instructions=100)],gpu_micros=500)
+        m=scroll.summarize([frame],[(1.027,1.026,1,1.017)],scroll.parse_tape(scroll.tape('fling',120)),120,2,1000,{},trace_to_host_ms=1000)
+        self.assertAlmostEqual(m['render_start_to_shown_ms_estimate']['p99'],8)
+        self.assertAlmostEqual(m['frame_end_to_shown_ms_estimate']['p99'],6)
+        self.assertAlmostEqual(m['render_start_estimate_error_ms']['p99'],-1)
+
     def test_real_tape_is_preserved_and_longer_than_a_minute(self):
         events = scroll.parse_tape(scroll.tape('wing', 120))
         self.assertGreater(events[-1][0], 94000)
@@ -130,6 +167,15 @@ class NativeReference(unittest.TestCase):
             self.assertEqual(m['late_frames'],1)
             self.assertGreater(m['late_pct'],0)
             self.assertAlmostEqual(m['display_period_ms']['p50'],1000/120)
+
+
+    def test_native_timeout_is_preserved_as_invalid_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args=argparse.Namespace(output=Path(directory),native_scale=2)
+            with patch.object(scroll.subprocess,'run',side_effect=scroll.subprocess.TimeoutExpired('native',30)),patch.object(scroll,'sha',return_value='hash'):
+                m=scroll.native_floor(args,'W',120,2,'0','timeout')
+            self.assertEqual(m['status'],'invalid')
+            self.assertTrue((Path(directory)/'timeout/run.json').is_file())
 
 
 class CollectionIntegrity(unittest.TestCase):

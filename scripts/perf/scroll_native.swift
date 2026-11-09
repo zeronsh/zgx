@@ -29,6 +29,8 @@ final class Floor: NSObject, NSApplicationDelegate {
   var surfaces: [IOSurfaceRef] = []
   var textures: [MTLTexture] = []
   var frame = 0
+  var launched = 0.0
+  var sampleStart: Double?
 
   init(width: Double, height: Double, hz: Float, mode: String, duration: Double, delayMS: Double) {
     self.width = width
@@ -91,14 +93,7 @@ final class Floor: NSObject, NSApplicationDelegate {
     link = view.displayLink(target: self, selector: #selector(draw(_:)))
     link.preferredFrameRateRange = CAFrameRateRange(minimum: hz, maximum: hz, preferred: hz)
     link.add(to: .main, forMode: .common)
-    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-      record("NATIVE_BEGIN \(CACurrentMediaTime())")
-      DispatchQueue.main.asyncAfter(deadline: .now() + self.duration) {
-        self.link.invalidate()
-        record("NATIVE_END \(CACurrentMediaTime())")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.terminate(nil) }
-      }
-    }
+    launched = CACurrentMediaTime()
   }
 
   func clear(_ texture: MTLTexture, _ buffer: MTLCommandBuffer, transparent: Bool = false) {
@@ -112,6 +107,18 @@ final class Floor: NSObject, NSApplicationDelegate {
 
   @objc func draw(_ clock: CADisplayLink) {
     let started = CACurrentMediaTime()
+    // Control the sample from the frame clock too: a saturated drawable
+    // callback can starve a main-queue dispatch timer.
+    if sampleStart == nil && started - launched >= 3 {
+      sampleStart = started
+      record("NATIVE_BEGIN \(started)")
+    }
+    if let begin = sampleStart, started >= begin + duration {
+      link.invalidate()
+      record("NATIVE_END \(started)")
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { NSApp.terminate(nil) }
+      return
+    }
     frame += 1
     let n = frame
     record("NATIVE_WAKE \(n) \(started) \(clock.timestamp) \(clock.targetTimestamp)")

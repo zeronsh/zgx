@@ -153,7 +153,7 @@ Retained picture frames (`composited its picture`) are counted as scroll frames
 and reported separately from pixel copies. Drawable runs additionally gate
 render-start-to-shown p99 at 25 ms (`--max-present-latency-ms`), so queued but
 smooth frames cannot pass. This is render latency, not hardware input latency;
-tile-probe callbacks do not currently carry a render-start timestamp.
+tile callbacks also report a clearly labeled trace-clock estimate of render-start-to-shown and frame-end-to-shown. The estimate is calibrated against exact drawable timestamps when available; frame end is not claimed to be the exact Core Animation handover.
 
 The runner drains `frames n=400 since=<last-read-index> runs=0` every second
 and records a new mark. The cursor remains the last frame **read**, so a frame
@@ -254,8 +254,7 @@ For an instrumented sibling pin, pass `--engine-source CHECKOUT --engine-pin SHA
 The audit records that checkout's integration commit, working diff and complete
 delta from the declared canonical pin, separately from the harness source.
 `--host-env ZGX_VIEW_CLOCK=1 --host-env ZGX_SCROLL_LINK=1` enables the explicitly
-requested clock experiment on a supporting engine pin; only those two boolean
-keys are accepted, and every run records the overrides. With no overrides the
+requested clock experiment on a supporting engine pin. The explicit diagnostic allowlist also accepts `ZGX_SCROLL_DRAWABLES=1`, `ZGX_HANDOVER_ASAP=1`, and `ZGX_LEAD_US=4000` or `5500`; every run records the overrides. With no overrides the
 engine's defaults apply. `prepare_zeron.py` uses the existing perf builder's
 source-touch step before compiling so a reused target cache cannot supply an
 older path-crate artifact whose timestamp looks fresh.
@@ -280,3 +279,54 @@ Wing's whole tape; its inner scroll is tracked while replay targets the visible
 outer box. Streaming gestures orbit120 points near the visible tail instead
 of demanding frames after clamping against its end. Marker warmup uses no
 wheel events, so no gesture grace period can seed a different tick source.
+
+## Interleaved comparisons
+
+Use `scripts/perf/scroll_compare.py --manifest target/comparison.json
+--output target/comparison --trials 3` for a same-session engine comparison.
+The manifest has a `baseline` descriptor and an `arms` array. Each descriptor
+supplies `engine_source`, `engine_pin`, `zeron_source`, `zeron_runner` and an
+optional `env` array. Arms additionally name themselves and give a `condition`:
+
+```json
+{
+  "baseline": {"engine_source": "/checkout/base", "engine_pin": "BASE_SHA",
+    "zeron_source": "/checkout/zeron-base", "zeron_runner": "/binaries/base/zeron-zgx"},
+  "arms": [{"name": "candidate-tiles", "engine_source": "/checkout/candidate",
+    "engine_pin": "CANDIDATE_SHA", "zeron_source": "/checkout/zeron-candidate",
+    "zeron_runner": "/binaries/candidate/zeron-zgx", "env": [],
+    "condition": {"scene": "zeron", "gesture": "wing", "size": "W",
+      "present": "0", "hz": 120, "scale": 2, "background": "translucent"}}]
+}
+```
+
+Each arm runs baseline then candidate, three times, rotating arm order between
+trials. Every cell retains its zgx marker reference and independent native
+brackets. `condition.command = "reference"` runs only those short controls.
+The harness freezes the manifest and analyzer hash for resumable runs, prevents
+idle sleep on macOS, and reports mean, range, sample standard deviation and raw
+trial values. A missing or invalid trial cannot certify a cell; every trial's
+strict gate must pass independently. Paired late-percentage differences and
+shown-frame differences are retained. A negative mean shown-frame difference
+is flagged as a regression even if cadence improves. Shown counts cover exactly
+the same tape duration; same-refresh submissions, repeated feedback, and a
+same-refresh double followed by a skipped refresh have separate counters.
+
+The actual shell starts at row160 through its real `scroll_to_row` API, rather
+than a fraction of estimated total height. The temporary UI copy exports that
+control without changing installed files. Every baseline/candidate pair must
+have the same transcript anchor id and displacement. Height-cache changes can
+otherwise put variants at different content. `--reset-row 0` retains the old
+fractional-reset protocol solely for explicitly labeled diagnostics.
+
+The native reference starts and stops its sample on CADisplayLink itself.
+A missing sample boundary, timed-out process, mismatched display clock or
+missing GPU evidence produces an invalid reference saved alongside the raw log.
+It cannot disappear from the report or become a passing zero-late control.
+
+Picture-enabled engines can emit `made a picture` and `rastered R px rows`.
+`picture_costs` reports count and p50/p99/max main/GPU work separately for
+promotion, raster, and composite-only frames. Promotion and raster groups can
+overlap. The slowest main frame in each group retains its complete phases and
+notes, as does the slowest moving frame for the run. Empty groups mean no
+observed marker; they are not reported as zero-cost work.
