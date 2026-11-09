@@ -449,3 +449,12 @@ grid; zgx-gpu's `a_run_on_a_grid_takes_its_cells_whichever_font_draws_it`
 checks braille, a letterlike symbol, Thai, a combining accent and plain
 letters with the platform's fonts. The padding pass skips a grid, and a NaN
 compares and hashes by its bits, so grids of other cells are other keys. The crate depends on `unicode-width`.
+
+iOS's secure text draws what a secure `UITextField` does, read from its line
+fragments (`uikit_mask` in `shape.rs`): the system font's U+F79A, and for any
+other font the system font's U+2981 at the field's size, each at the face's
+advance at its axes rather than its defaults. Elsewhere it stays U+2022.
+
+iOS never hints (`hinted` in `swash.rs`): Core Text leaves outlines as drawn,
+and swash's hinting of a font with no instructions, as SF is, is skrifa's
+autohinter. Elsewhere hinting is as it was.
