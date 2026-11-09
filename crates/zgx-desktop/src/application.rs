@@ -2814,6 +2814,11 @@ impl Host {
         let scene = self.context.ui.scene.clone();
         let mut scene = scene.borrow_mut();
         let report = scene.flush();
+        // Reading it is a list a client's update needs and no other update:
+        // not with none reading the tree.
+        if self.context.ui.assistive_technology() {
+            self.tree.note_flush(&scene);
+        }
         let popup_revisions = scene.popups().iter().fold(0u64, |sum, root| {
             sum.wrapping_add(scene.layer_revision(*root))
         });
