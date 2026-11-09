@@ -3672,13 +3672,19 @@ impl Scene {
                         return None;
                     }
                     // Each corner of the box inside the curve, with a point to
-                    // spare (a continuous corner starts a little sooner).
+                    // spare there (a continuous corner starts a little
+                    // sooner); along a straight edge, up to the edge.
                     let arc = (radius - pad).max(0.);
                     let clear = (arc - 1.).max(0.);
                     let within = |x: f32, y: f32| {
-                        let dx = (inner.x + arc - x).max(x - (inner.x + inner.width - arc)).max(0.);
-                        let dy = (inner.y + arc - y).max(y - (inner.y + inner.height - arc)).max(0.);
-                        dx * dx + dy * dy <= clear * clear
+                        let dx = (inner.x + arc - x)
+                            .max(x - (inner.x + inner.width - arc))
+                            .max(0.);
+                        let dy = (inner.y + arc - y)
+                            .max(y - (inner.y + inner.height - arc))
+                            .max(0.);
+                        let reach = if dx > 0. && dy > 0. { clear } else { arc };
+                        dx * dx + dy * dy <= reach * reach
                     };
                     let (right, bottom) = (bounds.x + bounds.width, bounds.y + bounds.height);
                     if !(within(bounds.x, bounds.y)
@@ -3733,7 +3739,8 @@ impl Scene {
     }
     /// Whether `id` or anything it holds paints: its ink counts a box's bounds
     /// whatever it fills them with, and a box empty but for its layout or clip
-    /// (a track waiting for what it unrolls) covers nothing.
+    /// (a track waiting for what it unrolls) covers nothing. A layer shader
+    /// paints its box whatever it holds (a glow, a ripple).
     fn paints(&self, id: NodeId) -> bool {
         let node = self.node(id);
         if node.effects.opacity <= 0.0 || !own_visible(&node.style) {
@@ -3741,12 +3748,19 @@ impl Scene {
         }
         let empty = node.effects.blur_radius <= 0.0
             && !self.platform_nodes.contains(&id)
+            && !self
+                .layer_shader(id)
+                .is_some_and(|layer| layer.shader.is_some())
             && match &node.kind {
                 NodeKind::Container(_) => true,
                 NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paints_nothing(),
                 _ => false,
             };
-        !empty || self.children_raw(node).iter().any(|child| crate::deep(0, || self.paints(*child)))
+        !empty
+            || self
+                .children_raw(node)
+                .iter()
+                .any(|child| crate::deep(0, || self.paints(*child)))
     }
     /// The part of `id`'s box that shows: inside its clips and not fully
     /// transparent; `None` when nothing does. Under a popup root
@@ -13539,10 +13553,22 @@ mod tests {
         assert!(scene.plain_box(caret).is_some());
         // These change how the content shows.
         for changed in [
-            Effects { filter_blur: 2., ..Effects::default() },
-            Effects { opacity: 0.5, ..Effects::default() },
-            Effects { edge_fade: 4., ..Effects::default() },
-            Effects { saturate: 0.5, ..Effects::default() },
+            Effects {
+                filter_blur: 2.,
+                ..Effects::default()
+            },
+            Effects {
+                opacity: 0.5,
+                ..Effects::default()
+            },
+            Effects {
+                edge_fade: 4.,
+                ..Effects::default()
+            },
+            Effects {
+                saturate: 0.5,
+                ..Effects::default()
+            },
         ] {
             scene.set_effects(panel, changed);
             scene.flush();
@@ -13577,6 +13603,17 @@ mod tests {
         scene.flush();
         assert!(scene.painted_over(caret, rect));
         scene.remove(voice);
+        scene.flush();
+        assert!(!scene.painted_over(caret, rect));
+        // A layer shader paints it, holding nothing.
+        let glow = crate::decoration::FillShader::new(
+            "fn layer(input: LayerInput) -> vec4<f32> { return vec4(1.0); }",
+            None,
+        );
+        scene.set_layer_shader(track, Some(glow));
+        scene.flush();
+        assert!(scene.painted_over(caret, rect));
+        scene.set_layer_shader(track, None);
         scene.flush();
         assert!(!scene.painted_over(caret, rect));
         // So does its own paint.
@@ -13632,6 +13669,39 @@ mod tests {
         assert!(in_panel(17.).is_some());
         // Past the curve: the corner would cut it.
         assert!(in_panel(4.).is_none());
+        // Along a straight edge, the curve's spare point isn't asked for: a
+        // box at the edge between the corners is plain.
+        let mut scene = Scene::new(300.0, 200.0);
+        let panel = scene.append(
+            scene.root(),
+            rounded(),
+            Style {
+                width: Some(200.),
+                height: Some(100.),
+                clip: true,
+                ..Style::default()
+            },
+        );
+        let spacer = scene.append(
+            panel,
+            NodeKind::Container(Layout::Column),
+            Style {
+                height: Some(40.),
+                ..Style::default()
+            },
+        );
+        let _ = spacer;
+        let caret = scene.append(
+            panel,
+            NodeKind::Rect(Color(0, 0, 0, 255)),
+            Style {
+                width: Some(2.),
+                height: Some(20.),
+                ..Style::default()
+            },
+        );
+        scene.flush();
+        assert!(scene.plain_box(caret).is_some());
     }
 
     #[test]
