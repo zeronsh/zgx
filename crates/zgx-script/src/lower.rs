@@ -8,8 +8,8 @@ use crate::{
     anime::{Key as Property, target::Target, value::V},
     element::{Element, ElementUd},
     node::{
-        Action, Computed, Handler, Kind, LayoutAnim, Lit, Node, NodeUd, Prop, Pseudo, Scope,
-        Segment, Source, Span, Text, Ty, lit,
+        Action, Computed, Handler, Kind, LayoutAnim, Lit, Node, NodeUd, Prop, Pseudo, RichSpans,
+        Scope, Segment, Source, Span, Text, Ty, lit,
     },
     value::Value,
 };
@@ -7381,7 +7381,14 @@ fn described(
 fn node_text(node: &Node, vm: &Vm) -> String {
     match &node.kind {
         Kind::Text(text) => return render_text(text, vm),
-        Kind::Rich(spans) => return spans.iter().map(|s| render_text(&s.text, vm)).collect(),
+        Kind::Rich(RichSpans::Listed(spans)) => {
+            return spans.iter().map(|s| render_text(&s.text, vm)).collect();
+        }
+        Kind::Rich(RichSpans::Made { build, literal }) => {
+            return (made_spans(build, *literal, vm).iter())
+                .map(|s| render_text(&s.text, vm))
+                .collect();
+        }
         Kind::Show {
             when,
             then,
@@ -8345,269 +8352,315 @@ fn context_menu_items(
     }
 }
 
-fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
-    /// A span with its text and handler owned by the closure.
-    struct OwnedSpan {
-        text: Text,
-        style: SpanStyle,
-        font: Option<Rc<str>>,
-        lang: Option<Rc<str>>,
-        followed: Vec<(&'static str, Ty, Owned)>,
-        click: Option<Handler>,
-        href: Option<Arc<str>>,
-        rare: Option<Rc<crate::node::SpanRare>>,
-    }
-    #[derive(Clone, Copy)]
-    struct SpanStyle {
-        color: Option<zgx::theme::Themed<Color>>,
-        background: Option<zgx::theme::Themed<Color>>,
-        size: Option<f32>,
-        weight: Option<u16>,
-        italic: bool,
-        underline: Option<bool>,
-        strike: bool,
-        padding: [f32; 2],
-        radius: f32,
-        underline_offset: Option<f32>,
-        underline_style: Option<zgx::rich_text::LineStyle>,
-        underline_color: Option<zgx::theme::Themed<Color>>,
-        underline_thickness: Option<f32>,
-        hover: Option<(bool, Option<zgx::theme::Themed<Color>>)>,
-    }
-    let owned: Vec<OwnedSpan> = spans
-        .iter()
-        .map(|s| OwnedSpan {
-            text: match &s.text {
-                Text::Literal(l) => Text::Literal(l.clone()),
-                Text::Template(segments) => Text::Template(
-                    segments
-                        .iter()
-                        .map(|seg| match seg {
-                            Segment::Literal(l) => Segment::Literal(l.clone()),
-                            Segment::State(s, path) => Segment::State(s.clone(), path.clone()),
-                        })
-                        .collect(),
-                ),
-                Text::Computed(computed) => Text::Computed(computed.clone()),
-            },
-            style: SpanStyle {
-                color: s.color,
-                background: s.background,
-                size: s.size,
-                weight: s.weight,
-                italic: s.italic,
-                underline: s.underline,
-                strike: s.strike,
-                padding: s.padding,
-                radius: s.radius,
-                underline_offset: s.underline_offset,
-                underline_style: s.underline_style,
-                underline_color: s.underline_color,
-                underline_thickness: s.underline_thickness,
-                hover: s.hover,
-            },
-            font: s.font.clone(),
-            lang: s.lang.clone(),
-            followed: (s.followed.iter())
-                .map(|(name, ty, source)| (*name, *ty, resolve_owned(source)))
-                .collect(),
-            click: s.click.clone(),
-            href: s.href.clone(),
-            rare: s.rare.clone(),
-        })
-        .collect();
-    let (vm, actions, low) = (vm.clone(), low.actions.clone(), low.clone());
-    // Whether any span fades in: known here, so a paragraph none of whose
-    // spans does builds them as before, and only one that has one fades them
-    // after (`fade_spans`, out of line).
-    let fades = owned
-        .iter()
-        .any(|span| span.rare.as_ref().is_some_and(|rare| rare.fade.is_some()));
-    /// `spans`, made from `owned` one for one, with those whose spans fade in
-    /// fading.
-    #[cold]
-    #[inline(never)]
-    fn fade_spans(spans: Vec<TextSpan>, owned: &[OwnedSpan]) -> Vec<TextSpan> {
-        spans
-            .into_iter()
-            .zip(owned)
-            .map(
-                |(out, span)| match span.rare.as_ref().and_then(|rare| rare.fade) {
-                    Some(fade) => out.fade_in(fade),
-                    None => out,
-                },
-            )
-            .collect()
-    }
-    rich_text_signal(move || {
-        let spans: Vec<TextSpan> = owned
-            .iter()
-            .map(|span| {
-                // Copied only for the few that follow: a span's own is read
-                // where it lies.
-                let mut own = None;
-                // Tracked: a change builds the paragraph again.
-                for (name, ty, source) in &span.followed {
-                    let (style, font) = own.get_or_insert_with(|| (span.style, span.font.clone()));
-                    let lit = resolve(source, *ty, None, &vm);
-                    let themed = match &lit {
-                        Some(Lit::Color(color)) => Some(zgx::theme::Themed::Value(*color)),
-                        Some(Lit::Token(token)) => Some(zgx::theme::Themed::Token(*token)),
-                        _ => None,
-                    };
-                    let number = match lit {
-                        Some(Lit::Num(number)) => Some(number),
-                        _ => None,
-                    };
-                    let on = matches!(lit, Some(Lit::Bool(true)));
-                    match *name {
-                        "color" => style.color = themed,
-                        "bg" => style.background = themed,
-                        "text_size" => style.size = number,
-                        "weight" => style.weight = number.map(|weight| weight as u16),
-                        "bold" => style.weight = on.then_some(700),
-                        "italic" => style.italic = on,
-                        "underline" => style.underline = Some(on),
-                        "strike" => style.strike = on,
-                        _ => {
-                            if let Some(Lit::Str(name)) = lit {
-                                *font = Some(name);
-                            }
-                        }
-                    }
+/// `ui.rich`: a paragraph of runs, listed or made by its `spans` function.
+/// Either way one effect builds its runs, so a run's change, or the
+/// function's, writes them to the paragraph in place: its node, and its
+/// layout where the text only grew, are kept.
+fn lower_rich(spans: &RichSpans, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+    let (vm, low) = (vm.clone(), low.clone());
+    match spans {
+        RichSpans::Listed(spans) => {
+            let owned: Vec<OwnedSpan> = spans.iter().map(own_span).collect();
+            // Whether any span fades in: known here, so a paragraph none of
+            // whose spans does builds them as before, and only one that has
+            // one fades them after (`fade_spans`, out of line).
+            let fades = owned.iter().any(fades_in);
+            rich_text_signal(move || {
+                let spans = (owned.iter())
+                    .map(|span| text_span_of(span, &vm, &low))
+                    .collect();
+                if fades {
+                    fade_spans(spans, &owned)
+                } else {
+                    spans
                 }
-                let (style, font) = match &own {
-                    Some((style, font)) => (style, font),
-                    None => (&span.style, &span.font),
-                };
-                let SpanStyle {
-                    color,
-                    background,
-                    size,
-                    weight,
-                    italic,
-                    underline,
-                    strike,
-                    padding,
-                    radius,
-                    underline_offset,
-                    underline_style,
-                    underline_color,
-                    underline_thickness,
-                    hover,
-                } = *style;
-                let decoration = || {
-                    let d = zgx::rich_text::Decoration::new(underline_thickness.unwrap_or(1.))
-                        .line(underline_style.unwrap_or_default());
-                    match underline_offset {
-                        Some(offset) => d.offset(offset),
-                        None => d,
-                    }
-                };
-                let mut out: TextSpan = text_span(render_text(&span.text, &vm));
-                if let Some(c) = color {
-                    out = out.text_color(c);
-                }
-                if let Some(c) = background {
-                    out = out.background(c);
-                }
-                if let Some(s) = size {
-                    out = out.text_size(s);
-                }
-                if let Some(w) = weight {
-                    out = out.font_weight(w);
-                }
-                if italic {
-                    out = out.italic(true);
-                }
-                if let Some(lang) = &span.lang {
-                    out = out.lang(&**lang);
-                }
-                if underline == Some(true) {
-                    out = out.underline(decoration());
-                }
-                if let Some(color) = underline_color {
-                    out = out.underline_color(color);
-                }
-                if let Some((underlined, color)) = hover {
-                    out = out.hover(zgx::compose::SpanHover {
-                        underline: underlined.then(decoration),
-                        text_color: color,
-                    });
-                }
-                if strike {
-                    out = out.strikethrough(Default::default());
-                }
-                if let Some(font) = font {
-                    out = out.font_family(font_family(font));
-                }
-                if padding != [0.; 2] {
-                    out = out.padding(padding[0], padding[1]);
-                }
-                if radius > 0. {
-                    out = out.radius(radius);
-                }
-                if let Some(handler) = &span.click {
-                    let (handler, vm, actions) = (handler.clone(), vm.clone(), actions.clone());
-                    // Told the keys held, as an element's `on_click` is;
-                    // `true` back handled it, and its `href` stays shut.
-                    out = out.on_click_handled(move |held| {
-                        let keys = modifiers_table(&vm.lua, held).ok();
-                        run(&handler, &vm, &actions, keys)
-                            .is_some_and(|v| v.as_boolean() == Some(true))
-                    });
-                    // A link, otherwise underlined: `underline = false` too.
-                    if underline == Some(false) {
-                        out = out.no_underline();
-                    }
-                }
-                let rare = span.rare.as_deref();
-                if let Some(rare) = rare {
-                    if let Some(end) = rare.padding_end.filter(|end| *end != padding[0]) {
-                        out = out.padding_end(end);
-                    }
-                    if let Some(build) = rare.menu.as_ref() {
-                        let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
-                        out = out
-                            .context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
-                    }
-                }
-                if let Some(href) = &span.href {
-                    out = out.href(href.clone());
-                    if underline == Some(false) {
-                        out = out.no_underline();
-                    }
-                }
-                if let Some(icon) = rare.and_then(|rare| rare.icon.as_ref()) {
-                    // Tracked: a remote icon shows once it comes.
-                    let data = load_svg(&vm, &low, &icon.src);
-                    // `"currentColor"`: the span's text colour.
-                    let (svg, tint) = match &icon.tint {
-                        Some(crate::value::Value::Str(s)) if &**s == "currentColor" => {
-                            (Arc::new(data.current_color()), None)
-                        }
-                        Some(tint) => (data, crate::node::themed_color(tint)),
-                        None => (data, None),
-                    };
-                    out = out.icon(zgx::compose::SpanIcon {
-                        svg,
-                        size: icon.size,
-                        gap: icon.gap,
-                        tint,
-                        bg: icon.bg.as_ref().and_then(crate::node::themed_color),
-                        radius: icon.radius,
-                        pad: icon.pad,
-                    });
-                }
-                out
             })
-            .collect();
-        if fades {
-            fade_spans(spans, &owned)
-        } else {
-            spans
         }
+        RichSpans::Made { build, literal } => {
+            let (build, literal) = (build.clone(), *literal);
+            rich_text_signal(move || {
+                let owned: Vec<OwnedSpan> = (made_spans(&build, literal, &vm).iter())
+                    .map(own_span)
+                    .collect();
+                let spans = (owned.iter())
+                    .map(|span| text_span_of(span, &vm, &low))
+                    .collect();
+                if owned.iter().any(fades_in) {
+                    fade_spans(spans, &owned)
+                } else {
+                    spans
+                }
+            })
+        }
+    }
+}
+/// What a paragraph's `spans` function returns now, as runs: none, with
+/// the error reported, if it fails or returns something else.
+fn made_spans(build: &mlua::Function, literal: bool, vm: &Vm) -> Vec<Span> {
+    let spans = vm
+        .call::<mlua::Value>(build, ())
+        .and_then(|list| match list {
+            mlua::Value::Table(list) => crate::node::spans_of(&vm.lua, &list, literal),
+            mlua::Value::Nil => Ok(Vec::new()),
+            other => Err(mlua::Error::runtime(format!(
+                "ui.rich's `spans` returns a list of runs, not {}",
+                other.type_name()
+            ))),
+        });
+    spans.unwrap_or_else(|error| {
+        vm.report(error);
+        Vec::new()
     })
+}
+/// A span with its text and handler owned by the closure.
+struct OwnedSpan {
+    text: Text,
+    style: SpanStyle,
+    font: Option<Rc<str>>,
+    lang: Option<Rc<str>>,
+    followed: Vec<(&'static str, Ty, Owned)>,
+    click: Option<Handler>,
+    href: Option<Arc<str>>,
+    rare: Option<Rc<crate::node::SpanRare>>,
+}
+#[derive(Clone, Copy)]
+struct SpanStyle {
+    color: Option<zgx::theme::Themed<Color>>,
+    background: Option<zgx::theme::Themed<Color>>,
+    size: Option<f32>,
+    weight: Option<u16>,
+    italic: bool,
+    underline: Option<bool>,
+    strike: bool,
+    padding: [f32; 2],
+    radius: f32,
+    underline_offset: Option<f32>,
+    underline_style: Option<zgx::rich_text::LineStyle>,
+    underline_color: Option<zgx::theme::Themed<Color>>,
+    underline_thickness: Option<f32>,
+    hover: Option<(bool, Option<zgx::theme::Themed<Color>>)>,
+}
+/// Whether `span` fades in.
+fn fades_in(span: &OwnedSpan) -> bool {
+    span.rare.as_ref().is_some_and(|rare| rare.fade.is_some())
+}
+/// `spans`, made from `owned` one for one, with those whose spans fade in
+/// fading.
+#[cold]
+#[inline(never)]
+fn fade_spans(spans: Vec<TextSpan>, owned: &[OwnedSpan]) -> Vec<TextSpan> {
+    spans
+        .into_iter()
+        .zip(owned)
+        .map(
+            |(out, span)| match span.rare.as_ref().and_then(|rare| rare.fade) {
+                Some(fade) => out.fade_in(fade),
+                None => out,
+            },
+        )
+        .collect()
+}
+fn own_span(s: &Span) -> OwnedSpan {
+    OwnedSpan {
+        text: match &s.text {
+            Text::Literal(l) => Text::Literal(l.clone()),
+            Text::Template(segments) => Text::Template(
+                segments
+                    .iter()
+                    .map(|seg| match seg {
+                        Segment::Literal(l) => Segment::Literal(l.clone()),
+                        Segment::State(s, path) => Segment::State(s.clone(), path.clone()),
+                    })
+                    .collect(),
+            ),
+            Text::Computed(computed) => Text::Computed(computed.clone()),
+        },
+        style: SpanStyle {
+            color: s.color,
+            background: s.background,
+            size: s.size,
+            weight: s.weight,
+            italic: s.italic,
+            underline: s.underline,
+            strike: s.strike,
+            padding: s.padding,
+            radius: s.radius,
+            underline_offset: s.underline_offset,
+            underline_style: s.underline_style,
+            underline_color: s.underline_color,
+            underline_thickness: s.underline_thickness,
+            hover: s.hover,
+        },
+        font: s.font.clone(),
+        lang: s.lang.clone(),
+        followed: (s.followed.iter())
+            .map(|(name, ty, source)| (*name, *ty, resolve_owned(source)))
+            .collect(),
+        click: s.click.clone(),
+        href: s.href.clone(),
+        rare: s.rare.clone(),
+    }
+}
+/// A run as its paragraph draws it now: its followed options read (tracked:
+/// a change builds the paragraph's runs again).
+fn text_span_of(span: &OwnedSpan, vm: &Rc<Vm>, low: &Rc<Lowering>) -> TextSpan {
+    let actions = &low.actions;
+    // Copied only for the few that follow: a span's own is read
+    // where it lies.
+    let mut own = None;
+    // Tracked: a change builds the paragraph again.
+    for (name, ty, source) in &span.followed {
+        let (style, font) = own.get_or_insert_with(|| (span.style, span.font.clone()));
+        let lit = resolve(source, *ty, None, vm);
+        let themed = match &lit {
+            Some(Lit::Color(color)) => Some(zgx::theme::Themed::Value(*color)),
+            Some(Lit::Token(token)) => Some(zgx::theme::Themed::Token(*token)),
+            _ => None,
+        };
+        let number = match lit {
+            Some(Lit::Num(number)) => Some(number),
+            _ => None,
+        };
+        let on = matches!(lit, Some(Lit::Bool(true)));
+        match *name {
+            "color" => style.color = themed,
+            "bg" => style.background = themed,
+            "text_size" => style.size = number,
+            "weight" => style.weight = number.map(|weight| weight as u16),
+            "bold" => style.weight = on.then_some(700),
+            "italic" => style.italic = on,
+            "underline" => style.underline = Some(on),
+            "strike" => style.strike = on,
+            _ => {
+                if let Some(Lit::Str(name)) = lit {
+                    *font = Some(name);
+                }
+            }
+        }
+    }
+    let (style, font) = match &own {
+        Some((style, font)) => (style, font),
+        None => (&span.style, &span.font),
+    };
+    let SpanStyle {
+        color,
+        background,
+        size,
+        weight,
+        italic,
+        underline,
+        strike,
+        padding,
+        radius,
+        underline_offset,
+        underline_style,
+        underline_color,
+        underline_thickness,
+        hover,
+    } = *style;
+    let decoration = || {
+        let d = zgx::rich_text::Decoration::new(underline_thickness.unwrap_or(1.))
+            .line(underline_style.unwrap_or_default());
+        match underline_offset {
+            Some(offset) => d.offset(offset),
+            None => d,
+        }
+    };
+    let mut out: TextSpan = text_span(render_text(&span.text, vm));
+    if let Some(c) = color {
+        out = out.text_color(c);
+    }
+    if let Some(c) = background {
+        out = out.background(c);
+    }
+    if let Some(s) = size {
+        out = out.text_size(s);
+    }
+    if let Some(w) = weight {
+        out = out.font_weight(w);
+    }
+    if italic {
+        out = out.italic(true);
+    }
+    if let Some(lang) = &span.lang {
+        out = out.lang(&**lang);
+    }
+    if underline == Some(true) {
+        out = out.underline(decoration());
+    }
+    if let Some(color) = underline_color {
+        out = out.underline_color(color);
+    }
+    if let Some((underlined, color)) = hover {
+        out = out.hover(zgx::compose::SpanHover {
+            underline: underlined.then(decoration),
+            text_color: color,
+        });
+    }
+    if strike {
+        out = out.strikethrough(Default::default());
+    }
+    if let Some(font) = font {
+        out = out.font_family(font_family(font));
+    }
+    if padding != [0.; 2] {
+        out = out.padding(padding[0], padding[1]);
+    }
+    if radius > 0. {
+        out = out.radius(radius);
+    }
+    if let Some(handler) = &span.click {
+        let (handler, vm, actions) = (handler.clone(), vm.clone(), actions.clone());
+        // Told the keys held, as an element's `on_click` is;
+        // `true` back handled it, and its `href` stays shut.
+        out = out.on_click_handled(move |held| {
+            let keys = modifiers_table(&vm.lua, held).ok();
+            run(&handler, &vm, &actions, keys).is_some_and(|v| v.as_boolean() == Some(true))
+        });
+        // A link, otherwise underlined: `underline = false` too.
+        if underline == Some(false) {
+            out = out.no_underline();
+        }
+    }
+    let rare = span.rare.as_deref();
+    if let Some(end) = rare
+        .and_then(|rare| rare.padding_end)
+        .filter(|end| *end != padding[0])
+    {
+        out = out.padding_end(end);
+    }
+    if let Some(build) = rare.and_then(|rare| rare.menu.as_ref()) {
+        let (build, vm, low) = (build.clone(), vm.clone(), low.clone());
+        out = out.context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
+    }
+    if let Some(href) = &span.href {
+        out = out.href(href.clone());
+        if underline == Some(false) {
+            out = out.no_underline();
+        }
+    }
+    if let Some(icon) = rare.and_then(|rare| rare.icon.as_ref()) {
+        // Tracked: a remote icon shows once it comes.
+        let data = load_svg(vm, low, &icon.src);
+        // `"currentColor"`: the span's text colour.
+        let (svg, tint) = match &icon.tint {
+            Some(crate::value::Value::Str(s)) if &**s == "currentColor" => {
+                (Arc::new(data.current_color()), None)
+            }
+            Some(tint) => (data, crate::node::themed_color(tint)),
+            None => (data, None),
+        };
+        out = out.icon(zgx::compose::SpanIcon {
+            svg,
+            size: icon.size,
+            gap: icon.gap,
+            tint,
+            bg: icon.bg.as_ref().and_then(crate::node::themed_color),
+            radius: icon.radius,
+            pad: icon.pad,
+        });
+    }
+    out
 }
 
 /// The translation and local transform a node's literals set, if any.
