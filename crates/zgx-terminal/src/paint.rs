@@ -419,6 +419,13 @@ fn row_built<const STYLED: bool>(
         let wide = flags.contains(Flags::WIDE_CHAR);
         if wide || alone(c) {
             finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
+            // A Unicode placeholder shows a picture's cell, not a glyph
+            // (`crate::placeholder`), and reads as a blank.
+            if c == crate::placeholder::PLACEHOLDER {
+                paint.text.pop();
+                paint.text.push(' ');
+                continue;
+            }
             underlines |= underline;
             let mut text = String::new();
             text.push(c);

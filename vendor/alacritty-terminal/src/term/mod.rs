@@ -19,7 +19,7 @@ use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
 use crate::term::cell::{Cell, Flags, LineLength};
 use crate::term::color::Colors;
-use crate::term::graphics::{Placement, Placements};
+use crate::term::graphics::{Placement, Placements, VirtualPlacement};
 use crate::vi_mode::{ViModeCursor, ViMotion};
 use crate::vte::ansi::{
     self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
@@ -313,6 +313,10 @@ pub struct Term<T> {
     placements: Placements,
     inactive_placements: Placements,
 
+    /// zgx: pictures shown where placeholder text puts them, on either
+    /// screen (`VirtualPlacement`).
+    virtual_placements: Vec<VirtualPlacement>,
+
     /// Index into `charsets`, pointing to what ASCII is currently being mapped to.
     active_charset: CharsetIndex,
 
@@ -462,6 +466,7 @@ impl<T> Term<T> {
             inactive_grid,
             placements: Placements::default(),
             inactive_placements: Placements::default(),
+            virtual_placements: Vec::new(),
             scroll_region,
             event_proxy,
             damage,
@@ -738,6 +743,33 @@ impl<T> Term<T> {
     /// Keep the active screen's placements `keep` says to.
     pub fn retain_placements(&mut self, keep: impl FnMut(&Placement) -> bool) {
         if self.placements.retain(keep) {
+            self.mark_fully_damaged();
+        }
+    }
+
+    /// zgx: the pictures shown where placeholder text puts them.
+    #[inline]
+    pub fn virtual_placements(&self) -> &[VirtualPlacement] {
+        &self.virtual_placements
+    }
+
+    /// zgx: show a picture where placeholder text puts it, replacing the
+    /// virtual placement of its picture and number if there is one. The
+    /// screen is drawn again: placeholders may show it already.
+    pub fn place_virtual(&mut self, placement: VirtualPlacement) {
+        let same = |old: &VirtualPlacement| old.image == placement.image && old.id == placement.id;
+        match self.virtual_placements.iter_mut().find(|old| same(old)) {
+            Some(old) => *old = placement,
+            None => self.virtual_placements.push(placement),
+        }
+        self.mark_fully_damaged();
+    }
+
+    /// zgx: keep the virtual placements `keep` says to.
+    pub fn retain_virtual_placements(&mut self, keep: impl FnMut(&VirtualPlacement) -> bool) {
+        let before = self.virtual_placements.len();
+        self.virtual_placements.retain(keep);
+        if self.virtual_placements.len() != before {
             self.mark_fully_damaged();
         }
     }
@@ -2255,6 +2287,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.inactive_grid.reset();
         self.placements.clear();
         self.inactive_placements.clear();
+        self.virtual_placements = Vec::new();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();
