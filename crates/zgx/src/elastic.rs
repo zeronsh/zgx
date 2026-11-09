@@ -294,7 +294,9 @@ pub(crate) fn before_scroll(ui: &Ui, event: InputEvent) -> Option<InputEvent> {
     {
         let mut state = ui.elastic_state().borrow_mut();
         if state.fingers {
-            let now = Instant::now();
+            // The interface's time, as the lift that reads this speed:
+            // made offline on a virtual clock, the fingers move at its pace.
+            let now = crate::clock::now();
             state.speed[0].scrolled(delta_x, now);
             state.speed[1].scrolled(delta_y, now);
         }
