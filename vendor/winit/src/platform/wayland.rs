@@ -23,6 +23,17 @@ use crate::window::{Window, WindowAttributes};
 
 pub use crate::window::Theme;
 
+/// Keep the loop from sleeping on what `heard` says a queue of the application's
+/// own on winit's connection holds.
+///
+/// The loop reads the socket for every queue on it, then goes back to sleep if
+/// nothing came for its own windows, so the application is not called to
+/// dispatch its queue. After each read `heard` is asked, on the loop's thread,
+/// when winit has heard nothing else, and `true` runs a turn of the loop.
+pub fn wake_for_own_queue(heard: fn() -> bool) {
+    crate::platform_impl::wayland::wake_for_own_queue(heard);
+}
+
 /// Additional methods on [`ActiveEventLoop`] that are specific to Wayland.
 pub trait ActiveEventLoopExtWayland {
     /// True if the [`ActiveEventLoop`] uses Wayland.
