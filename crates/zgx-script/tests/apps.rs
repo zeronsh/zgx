@@ -409,7 +409,12 @@ fn the_surface_forwards_input_and_locks_the_pointer_on_request() {
         vec!["PointerMotion { dx: 7.0, dy: -2.0 }", "PointerLock(false)"],
         "Escape ends the lock and reaches no one"
     );
-    let _ = HostMessage::Close;
+    // Revoked, it forwards nothing more; its program is told to close.
+    app.borrow().as_ref().unwrap().revoke();
+    h.ui.dispatch(InputEvent::PointerMove { x: 20., y: 20. });
+    h.frames(2);
+    let got = drain();
+    assert_eq!(got, vec![format!("{:?}", HostMessage::Close)]);
 }
 
 /// The host's hook says what runs: the spec asked for (args, cwd, env and
@@ -488,11 +493,16 @@ return ui.column {
         "{}",
         h.text("x")
     );
-    assert!(
-        h.text("y").contains("ui.app `s`: taken back"),
-        "{}",
-        h.text("y")
-    );
+    // Refused, it ended: a lookup after finds nothing, and it was killed.
+    assert_eq!(h.text("y"), "nil");
+    let until = Instant::now() + Duration::from_secs(5);
+    while alive(pid) {
+        assert!(
+            Instant::now() < until,
+            "a refused session's program kept running"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// A plugin reaches only the sessions it started: not the app's, not
@@ -549,4 +559,57 @@ return ui.column { ui.text { id = "app", tostring(app.pid) }, ui.slot("bar", { i
         pids[0] != pids[1] && pids[1] != pids[2] && pids[0] != pids[2],
         "{pids:?}"
     );
+}
+
+/// A refusal of a session reached again ends it: its program is killed and
+/// the handles scripts kept to it are dead (reads, `ui.surface`).
+#[test]
+fn a_refused_session_ends_and_its_handles_die() {
+    let allowed = Rc::new(std::cell::Cell::new(true));
+    let mut h = Harness::new({
+        let allowed = allowed.clone();
+        move |runtime| {
+            let host = ScriptHost::inline(
+                runtime,
+                "app",
+                r#"
+local app = ui.app("s", { command = "sleep", args = { "30" } })
+local result = ui.state("result", "")
+return ui.column {
+    ui.text { id = "pid", tostring(app.pid) },
+    ui.text { id = "result", function() return result:get() end },
+    ui.button { id = "lookup", "Look", on_press = function()
+        local _, looked = pcall(ui.app, "s")
+        local _, read = pcall(function() return app.status end)
+        local _, shown = pcall(ui.surface, { app = app })
+        result:set(`{looked} | {read} | {shown}`)
+    end },
+}
+"#,
+            );
+            host.vet_apps(move |launch| match allowed.get() {
+                true => Ok(launch.asked.clone()),
+                false => Err("taken back".into()),
+            });
+            host
+        }
+    });
+    let pid: i32 = h.text("pid").parse().unwrap();
+    assert!(alive(pid));
+    allowed.set(false);
+    h.click("lookup");
+    h.settle();
+    let result = h.text("result");
+    let parts: Vec<&str> = result.split(" | ").collect();
+    assert!(parts[0].contains("ui.app `s`: taken back"), "{result}");
+    assert!(parts[1].contains("ui.app `s`: revoked"), "{result}");
+    assert!(parts[2].contains("ui.app `s`: revoked"), "{result}");
+    let until = Instant::now() + Duration::from_secs(5);
+    while alive(pid) {
+        assert!(
+            Instant::now() < until,
+            "a refused session's program kept running"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

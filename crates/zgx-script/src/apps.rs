@@ -224,21 +224,35 @@ mod running {
         pub(crate) app: App,
         apps: Weak<Apps>,
     }
+    impl AppUd {
+        /// Its session, unless revoked (then every read is an error).
+        fn live(&self) -> mlua::Result<&App> {
+            match self.app.is_revoked() {
+                true => Err(mlua::Error::runtime(format!(
+                    "ui.app `{}`: revoked",
+                    self.key.1
+                ))),
+                false => Ok(&self.app),
+            }
+        }
+    }
     impl UserData for AppUd {
         fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
             // Tracked: a text or computed reading one follows it.
             fields.add_field_method_get("id", |_, a| Ok(a.key.1.clone()));
-            fields.add_field_method_get("status", |_, a| Ok(a.app.status().with(AppStatus::name)));
-            fields.add_field_method_get("title", |_, a| Ok(a.app.title().get()));
-            fields.add_field_method_get("pid", |_, a| Ok(a.app.pid()));
+            fields.add_field_method_get("status", |_, a| {
+                Ok(a.live()?.status().with(AppStatus::name))
+            });
+            fields.add_field_method_get("title", |_, a| Ok(a.live()?.title().get()));
+            fields.add_field_method_get("pid", |_, a| Ok(a.live()?.pid()));
             fields.add_field_method_get("exit_code", |_, a| {
-                Ok(a.app.status().with(|s| match s {
+                Ok(a.live()?.status().with(|s| match s {
                     AppStatus::Exited(code) => *code,
                     _ => None,
                 }))
             });
             fields.add_field_method_get("error", |_, a| {
-                Ok(a.app.status().with(|s| match s {
+                Ok(a.live()?.status().with(|s| match s {
                     AppStatus::Failed(why) => Some(why.clone()),
                     _ => None,
                 }))
@@ -325,6 +339,55 @@ mod running {
         .map_err(|why| mlua::Error::runtime(format!("ui.app `{id}`: {why}")))
     }
 
+    /// A refusal of a session reached again ends it: its program is
+    /// killed, its entry goes, and every handle to it is dead (`revoke`).
+    fn refused_ends<T>(
+        apps: &Apps,
+        key: &Key,
+        app: &App,
+        checked: mlua::Result<T>,
+    ) -> mlua::Result<T> {
+        if checked.is_err() {
+            let mut entries = apps.sessions.entries.borrow_mut();
+            if entries.get(key).is_some_and(|e| e.app.ptr_eq(app)) {
+                let removed = entries.remove(key);
+                drop(entries);
+                drop(removed);
+            }
+            app.revoke();
+        }
+        checked
+    }
+
+    /// A handle used again (`ui.surface`): its session asked again as a
+    /// lookup is; refused, or revoked before, an error.
+    fn revalidate(lua: &Lua, ud: &AppUd) -> mlua::Result<()> {
+        if ud.app.is_revoked() {
+            return Err(mlua::Error::runtime(format!(
+                "ui.app `{}`: revoked",
+                ud.key.1
+            )));
+        }
+        let Some(apps) = ud.apps.upgrade() else {
+            return Ok(());
+        };
+        let asked = apps
+            .sessions
+            .entries
+            .borrow()
+            .get(&ud.key)
+            .filter(|e| e.app.ptr_eq(&ud.app))
+            .map(|e| e.asked.clone());
+        // Closed and forgotten: nothing runs to ask about.
+        let Some(asked) = asked else { return Ok(()) };
+        let running = !matches!(
+            ud.app.status().with_untracked(Clone::clone),
+            AppStatus::Exited(_) | AppStatus::Failed(_)
+        );
+        let checked = check(&apps, lua, &ud.key.0, &ud.key.1, &asked, running);
+        refused_ends(&apps, &ud.key, &ud.app, checked).map(drop)
+    }
+
     fn session(
         apps: &Rc<Apps>,
         lua: &Lua,
@@ -362,7 +425,12 @@ mod running {
             if !(ended && parsed.is_some()) {
                 // Reached again: what it runs is asked again, so a
                 // permission taken back holds.
-                check(apps, lua, &plugin, &id, &asked, !ended)?;
+                refused_ends(
+                    apps,
+                    &key,
+                    &app,
+                    check(apps, lua, &plugin, &id, &asked, !ended),
+                )?;
                 if let Some((_, exit)) = &parsed {
                     *entry_handlers.borrow_mut() = handlers(exit.clone());
                 }
@@ -430,7 +498,12 @@ mod running {
             "surface",
             lua.create_function(|lua, table: Table| {
                 let app = match table.get::<LuaValue>("app")? {
-                    LuaValue::UserData(ud) if ud.is::<AppUd>() => ud.borrow::<AppUd>()?.app.clone(),
+                    LuaValue::UserData(ud) if ud.is::<AppUd>() => {
+                        let ud = ud.borrow::<AppUd>()?;
+                        // Shown again: asked again, as a lookup is.
+                        revalidate(lua, &ud)?;
+                        ud.app.clone()
+                    }
                     other => {
                         return Err(mlua::Error::runtime(format!(
                             "ui.surface needs `app = ui.app(id, …)`, not {}",

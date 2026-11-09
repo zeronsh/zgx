@@ -196,6 +196,8 @@ pub(crate) struct AppInner {
     visible: Cell<Option<bool>>,
     exited: Arc<AtomicBool>,
     closed: Cell<bool>,
+    /// Revoked (`revoke`): its frames show no more, its input goes nowhere.
+    pub(crate) revoked: Cell<bool>,
 }
 
 impl App {
@@ -283,6 +285,7 @@ impl App {
             visible: Cell::new(Some(true)),
             exited,
             closed: Cell::new(false),
+            revoked: Cell::new(false),
         });
         App(inner)
     }
@@ -346,6 +349,18 @@ impl App {
     /// Whether it is closed (`close`, or never started).
     pub fn is_closed(&self) -> bool {
         self.0.closed.get()
+    }
+    /// End the session for good, as a permission taken back does: closed
+    /// as `close` does, and every element showing it shows nothing from
+    /// now on and forwards nothing.
+    pub fn revoke(&self) {
+        self.0.revoked.set(true);
+        self.0.close();
+        self.0.view.invalidate();
+    }
+    /// Whether it was revoked (`revoke`).
+    pub fn is_revoked(&self) -> bool {
+        self.0.revoked.get()
     }
     /// End the session: the program is told to close and killed if it
     /// hasn't exited a moment later.
@@ -438,6 +453,9 @@ impl App {
 
     /// The element's input, forwarded.
     fn input(&self, event: &mut EventContext) {
+        if self.0.revoked.get() {
+            return;
+        }
         let scale = self.0.scale.get();
         let origin = self
             .0

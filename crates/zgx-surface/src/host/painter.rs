@@ -95,7 +95,10 @@ impl Painter {
 
 impl Viewport for Painter {
     fn render(&mut self, frame: &mut ViewportFrame<'_>) {
-        let Some(app) = self.app.upgrade() else {
+        let Some(app) = self.app.upgrade().filter(|app| !app.revoked.get()) else {
+            // Gone or revoked: nothing of its frames is kept.
+            self.shown = None;
+            self.generation = None;
             clear(frame, None);
             return;
         };
