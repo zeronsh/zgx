@@ -10944,8 +10944,23 @@ impl GpuRenderer {
     /// land on whole pixels, and within the clip nothing but the content
     /// changes position: whatever lies under it is hidden by one opaque
     /// rectangle, and anything over it is repainted anyway.
+    #[inline]
     fn scroll_copies(&self, scene: &Scene, damage: &[Rect]) -> (Vec<ScrollCopy>, Vec<Rect>) {
+        // A frame with no scroll moved, nearly every one that isn't scrolling,
+        // doesn't reach the work below, which is a call and a big frame.
         let serial = scene.flush_serial();
+        if scene.scroll_moves().iter().all(|m| m.serial != serial) {
+            return (Vec::new(), Vec::new());
+        }
+        self.scroll_copies_of(scene, damage, serial)
+    }
+    #[inline(never)]
+    fn scroll_copies_of(
+        &self,
+        scene: &Scene,
+        damage: &[Rect],
+        serial: u64,
+    ) -> (Vec<ScrollCopy>, Vec<Rect>) {
         let mut copies = Vec::new();
         let mut repaint = Vec::new();
         let mut carried = Vec::new();
@@ -18263,7 +18278,14 @@ mod copy_blocker_tests {
                 .top(40.)
                 .size(30., 30.)
                 .bg(rgba(0xffffff00));
-            ui.mount(overlay().w(160.).h(120.).bg(rgb(0x000000)).child(rows).child(square));
+            ui.mount(
+                overlay()
+                    .w(160.)
+                    .h(120.)
+                    .bg(rgb(0x000000))
+                    .child(rows)
+                    .child(square),
+            );
             ui.prepare_frame();
             if rect {
                 let mut scene = ui.scene.borrow_mut();
@@ -18277,7 +18299,12 @@ mod copy_blocker_tests {
             let scene = ui.scene.borrow();
             let scroll = scene.scroll_moves().last().expect("it moved").clone();
             let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut Vec::new(), &mut None);
-            assert_eq!(blocker, None, "a clear {} paints nothing", if rect { "rect" } else { "square" });
+            assert_eq!(
+                blocker,
+                None,
+                "a clear {} paints nothing",
+                if rect { "rect" } else { "square" }
+            );
         }
     }
 
