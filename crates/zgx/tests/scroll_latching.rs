@@ -179,6 +179,43 @@ fn a_coast_stays_with_its_view_while_the_pointer_moves_off_it() {
 }
 
 #[test]
+fn a_wheel_notch_goes_to_the_view_the_pointer_moved_to() {
+    let mut ui = Ui::new(400., 400.);
+    let (a, b) = side_by_side(&mut ui);
+    let notch = |ui: &mut Ui, (x, y): (f32, f32)| {
+        zgx::input::mouse_wheel(false, || wheel(ui, x, y, 0., 30.));
+    };
+    point(&mut ui, A);
+    notch(&mut ui, A);
+    notch(&mut ui, A);
+    point(&mut ui, B);
+    notch(&mut ui, B);
+    assert_eq!((a.get(), b.get()), (60., 30.));
+}
+
+#[test]
+fn a_wheel_held_still_stays_latched_through_an_edge() {
+    let mut ui = Ui::new(400., 400.);
+    let (outer, inner) = (ui.signal(0.), ui.signal(0.));
+    ui.mount(
+        scroll(outer.clone()).w(300.).h(300.).child(
+            column()
+                .child(
+                    scroll(inner.clone()).w(300.).h(100.).child(
+                        column().children((0..10).map(|i| text(format!("Inner {i}")).h(20.))),
+                    ),
+                )
+                .children((0..40).map(|i| text(format!("Outer {i}")).h(20.))),
+        ),
+    );
+    ui.prepare_frame();
+    for _ in 0..5 {
+        zgx::input::mouse_wheel(false, || wheel(&mut ui, 50., 50., 0., 30.));
+    }
+    assert_eq!((inner.get(), outer.get()), (100., 0.));
+}
+
+#[test]
 fn a_swipe_over_a_nested_view_during_the_pages_coast_goes_to_it() {
     let mut ui = Ui::new(400., 400.);
     let (page, inner) = (ui.signal(0.), ui.signal(0.));
