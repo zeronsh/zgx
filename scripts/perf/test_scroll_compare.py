@@ -1,7 +1,32 @@
 import unittest
-from scroll_compare import stats,summarize
+from scroll_compare import stats,summarize,lead_phase_check,table
 
 class ComparisonEvidence(unittest.TestCase):
+    def phase_metrics(self, lead, aligned=True):
+        period=1000/120
+        return {'wait_ms':{'p50':0},'presentation_timings':{'samples':[
+            {'shown_s':1+n/120,'clock_aligned':aligned,
+             'handover':{'end_ns':int(((1+n/120)*1000-lead-2*period)*1e6),'micros':0}}
+            for n in range(12)]}}
+
+    def test_lead_phase_is_valid_even_when_wait_was_not_profiled(self):
+        result=lead_phase_check(self.phase_metrics(1.6),self.phase_metrics(4),4000,1000/120)
+        self.assertTrue(result['valid'])
+        self.assertAlmostEqual(result['delta_ms'],2.4,places=5)
+
+    def test_lead_requires_clock_evidence_and_the_intended_earlier_phase(self):
+        self.assertFalse(lead_phase_check(self.phase_metrics(1.6),self.phase_metrics(4,False),4000,1000/120)['valid'])
+        self.assertFalse(lead_phase_check(self.phase_metrics(1.6),self.phase_metrics(1.6),4000,1000/120)['valid'])
+        mixed=self.phase_metrics(4)
+        mixed['presentation_timings']['samples'][0]['clock_aligned']=False
+        self.assertFalse(lead_phase_check(self.phase_metrics(1.6),mixed,4000,1000/120)['valid'])
+
+    def test_reference_table_does_not_call_the_marker_a_wing_replay(self):
+        sample=dict(arm='clock',role='variant',valid=True,status='pass',
+                    condition={'scene':'zeron','gesture':'wing','command':'reference'},
+                    metrics=dict(late_pct=0,interval_ms={'p99':8.33},main_work_ms={'max':1}))
+        self.assertIn('zeron-idle / reference',table(summarize([sample],3)))
+
     def test_spread_keeps_raw_trials_and_sample_standard_deviation(self):
         s=stats([5,8,11])
         self.assertEqual(s['values'],[5,8,11])

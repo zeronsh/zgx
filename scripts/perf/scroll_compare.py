@@ -20,6 +20,28 @@ def stats(values):
                 stdev=statistics.stdev(values) if len(values)>1 else None, values=values)
 
 
+def lead_phase_check(base, variant, lead_us, period):
+    def leads(metrics):
+        values=[]
+        for sample in metrics.get('presentation_timings',{}).get('samples',[]):
+            if not sample.get('clock_aligned') or sample.get('handover') is None:continue
+            handover=sample['handover'];begin=handover['end_ns']/1e6-handover['micros']/1000
+            values.append((sample['shown_s']*1000-begin)%period)
+        return values
+    a,b=leads(base),leads(variant)
+    def covered(metrics,values):
+        samples=metrics.get('presentation_timings',{}).get('samples',[])
+        return len(values)>=max(10,.9*len(samples)) and not any(s.get('clock_aligned') is False for s in samples)
+    am=statistics.median(a) if a else None;bm=statistics.median(b) if b else None
+    intended=lead_us/1000
+    # The baseline CV-link align target is 1.6ms before refresh. Permit 1ms
+    # jitter in the observed shown grid, and require an earlier handover.
+    valid=(covered(base,a) and covered(variant,b) and abs(am-1.6)<=1 and abs(bm-intended)<=1
+           and bm-am>=.25 and abs((bm-am)-(intended-1.6))<=1)
+    return dict(valid=valid,baseline_lead_ms=am,variant_lead_ms=bm,intended_lead_ms=intended,
+                delta_ms=bm-am if a and b else None,baseline_samples=len(a),variant_samples=len(b),tolerance_ms=1)
+
+
 def summarize(samples, trials):
     rows=[]
     for arm in dict.fromkeys(s['arm'] for s in samples):
@@ -74,7 +96,10 @@ def table(rows):
     def number(v):return '—' if v is None else f'{v:.2f}'
     def spread(s):return f"{number(s['mean'])} [{number(s['min'])},{number(s['max'])}]"
     for r in rows:
-        c=r['condition']
+        c=dict(r['condition'])
+        if c.get('command')=='reference':
+            c['gesture']='reference'
+            if c.get('scene')=='zeron':c['scene']='zeron-idle'
         lines.append(f"| {r['arm']} | {r['role']} | {c.get('scene','zeron')} / {c.get('gesture','wing')} / {c.get('size','W')} / {c.get('present','0')} | {r['n']}/{r['required']} | {spread(r['late_pct'])}; {number(r['late_pct']['stdev'])} | {number(r['interval_p99_ms']['mean'])} | {spread(r['main_over_4ms'])} | {spread(r['shown_frames'])} | {number(r['paired_shown_delta']['mean'])} | {'pass' if r['all_gates_pass'] else 'fail' if r['complete'] else 'incomplete'} |")
     return '\n'.join(lines)+'\n'
 
@@ -157,12 +182,14 @@ def main():
                     sample=run_one(args,descriptor,arm,role,trial,position)
                     pair.append(sample);samples.append(sample)
                 if any(value.startswith('ZGX_LEAD_US=') for value in arm.get('env',[])):
-                    waits=[s['metrics'].get('wait_ms',{}).get('p50') for s in pair]
-                    shorter=all(v is not None for v in waits) and waits[1]<waits[0]-.25
-                    pair[1]['behavior_checks']['lead_hold_shorter_than_unset']=shorter
-                    if not shorter:
+                    lead=int(next(value.split('=')[1] for value in arm['env'] if value.startswith('ZGX_LEAD_US=')))
+                    proof=lead_phase_check(pair[0]['metrics'],pair[1]['metrics'],lead,1000/arm.get('condition',{}).get('hz',120))
+                    pair[1]['lead_phase_validation']=proof
+                    pair[1]['behavior_checks']['lead_handover_phase']=proof['valid']
+                    if not proof['valid']:
+
                         pair[1]['valid']=False;pair[1]['status']='invalid'
-                        pair[1]['failures'].append('lead arm did not shorten median wait versus paired baseline')
+                        pair[1]['failures'].append('lead arm did not hand over at its intended earlier refresh phase')
                 if arm.get('condition',{}).get('scene','zeron')=='zeron':
                     a,b=[anchor(s) for s in pair]
                     if a is None or b is None or a.get('id')!=b.get('id') or abs(a.get('dy',0)-b.get('dy',0))>.05:

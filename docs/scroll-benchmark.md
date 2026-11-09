@@ -128,8 +128,9 @@ Before each distinct size/refresh/scale/background/present-mode condition, a
 static window. Its tiny host (`scroll_reference`) advances the marker through
 `cx.frames.next()` on the actual display clock. A timer-driven heartbeat would
 add timer jitter to the supposed system floor. The reference disables the
-optional `refresh_grid` cadence-holding policy, which the real scene runs still
-test, and saves that switch in its evidence. A completely still idle window has no
+optional timer/latch `refresh_grid` policy and saves that switch in its
+evidence. The CV display-link path can still align its handover independently;
+its hold notes remain part of the host floor, not an OS-only reference. A completely still idle window has no
 presentations and cannot establish a floor. The reference uses the same host,
 presentation path and telemetry. Its late frames remain unattributed and are reported
 separately and linked from each matched scene run. If the reference fails its
@@ -354,15 +355,16 @@ child process. Inherited `ZGX_*` settings are intentionally stripped; use
 or failed behaviour checks invalidate a run. Pacing probes require the engine's
 `frame source:` mode notes, with at least95% in the expected steady mode
 (the complete histogram retains transition frames). ASAP and view-link arms
-must show no hold, lead arms must shorten median wait versus their paired
-baseline, and hybrid presentation must show drawable callbacks during scroll
+must show no hold, lead arms must hand over at their intended earlier phase
+versus their paired baseline, and hybrid presentation must show drawable callbacks during scroll
 and tile callbacks at rest. Historical unverified single clock trials are
 exploratory and cannot certify an arm.
 
 For a marker **pacing probe**, use `--reference-refresh-grid on` on both baseline
 and candidates. This deliberately exercises the latch, so LEAD_US can change
-its hold; the default off would bypass it. These marker numbers must not be
-compared with earlier minimum-host references taken with the grid off.
+its timer/latch hold. The switch does not disable the separate CV-link align
+hold; inspect its notes too. Compare controls in the same batch rather than
+crediting a grid switch for a difference from older runs.
 Independent native brackets remain separate and contain no zgx pacing policy.
 
 The actual shell also verifies `bench_effective_frost` against the requested background. A setting or platform policy that keeps the effective material opaque invalidates a requested frosted cell rather than silently changing the condition.
@@ -390,3 +392,12 @@ latency and acquisition time. Their numeric summaries accompany the app
 results. A refresh-phase value is modulo the observed presented-time grid;
 it is not an absolute display-link timestamp. Late and on-time frames are
 kept separately when interpreting that phase.
+
+LEAD validation uses exact handover timestamps modulo the observed shown-frame
+refresh grid, with at least ten clock-aligned samples, at least 90% handover coverage, and
+zero detected clock mismatches in each arm. Its median
+lead must be within 1 ms of the requested value and move earlier by the intended
+amount (also within 1 ms) versus the CV-link baseline's 1.6 ms target. Timer-source
+notes are required independently. Wait duration is not a substitute: the timer
+and link start at different phases, and older CV-link holds were recorded inside
+`present` without a `Wait` span. Phase labels are not absolute link timestamps.
