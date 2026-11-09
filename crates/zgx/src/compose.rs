@@ -4722,11 +4722,13 @@ fn paragraph_effect<const LOCATING: bool>(
             // text the padding after.
             let lead = if icon.is_some() { span.padding[0] } else { 0. };
             if let (Some(range), Some(icon)) = (icon_at, icon) {
+                // (A well takes its room round the icon too.)
+                let pad = if icon.bg.is_some() { icon.pad } else { 0. };
                 runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
                     strikethrough: None,
-                    padding: [(lead + icon.size + icon.gap) / 2., span.padding[1]],
+                    padding: [(lead + icon.size + 2. * pad + icon.gap) / 2., span.padding[1]],
                     radius: span.radius,
                     range: range.clone(),
                     font: font.clone(),
@@ -4754,6 +4756,13 @@ fn paragraph_effect<const LOCATING: bool>(
                     },
                     size: icon.size,
                     inset: lead,
+                    well: icon.bg.and_then(|bg| {
+                        let color = match bg {
+                            crate::theme::Themed::Value(color) => Some(color),
+                            crate::theme::Themed::Token(token) => theme.get(token).color(),
+                        }?;
+                        Some(crate::compose_rich::IconWell { color, radius: icon.radius, pad })
+                    }),
                 });
             }
             let text_end = content.len();

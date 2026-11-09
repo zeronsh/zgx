@@ -8404,6 +8404,9 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         size: icon.size,
                         gap: icon.gap,
                         tint,
+                        bg: icon.bg.as_ref().and_then(crate::node::themed_color),
+                        radius: icon.radius,
+                        pad: icon.pad,
                     });
                 }
                 out
