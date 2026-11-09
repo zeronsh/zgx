@@ -388,6 +388,8 @@ pub struct Buffer {
     monospace_width: Option<f32>,
     tab_width: u16,
     hinting: Hinting,
+    /// zgx: `set_leading`.
+    leading: f32,
     /// Dirty flags tracking which properties changed since last layout
     dirty: DirtyFlags,
 }
@@ -406,6 +408,7 @@ impl Clone for Buffer {
             monospace_width: self.monospace_width,
             tab_width: self.tab_width,
             hinting: self.hinting,
+            leading: self.leading,
             dirty: self.dirty,
         }
     }
@@ -437,6 +440,7 @@ impl Buffer {
             monospace_width: None,
             tab_width: 8,
             hinting: Hinting::default(),
+            leading: 0.0,
             dirty: DirtyFlags::empty(),
         }
     }
@@ -756,6 +760,7 @@ impl Buffer {
             self.monospace_width,
             self.tab_width,
             self.hinting,
+            self.leading,
         ))
     }
 
@@ -777,6 +782,22 @@ impl Buffer {
             self.dirty |= DirtyFlags::RELAYOUT;
             self.redraw = true;
         }
+    }
+
+    /// zgx: the part of a line's height that is leading, under its glyphs
+    /// (none by default): laying a line out, its glyphs keep the place they
+    /// have in the line height without it.
+    pub fn set_leading(&mut self, leading: f32) {
+        if leading != self.leading {
+            self.leading = leading;
+            self.dirty |= DirtyFlags::RELAYOUT;
+            self.redraw = true;
+        }
+    }
+
+    /// zgx: the part of a line's height that is leading (`set_leading`).
+    pub const fn leading(&self) -> f32 {
+        self.leading
     }
 
     /// Get the current [`Hinting`] strategy.
@@ -1832,5 +1853,37 @@ impl BorrowedWithFontSystem<'_, Buffer> {
         F: FnMut(i32, i32, u32, u32, Color),
     {
         self.inner.draw(self.font_system, cache, color, f);
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod leading_tests {
+    use crate::{Attrs, Buffer, FontSystem, Metrics, Shaping};
+
+    fn runs(fonts: &mut FontSystem, pitch: f32, leading: f32) -> Vec<(f32, f32, f32)> {
+        let mut buffer = Buffer::new(fonts, Metrics::new(10.0, pitch));
+        buffer.set_leading(leading);
+        buffer.set_text("a\nb\nc", &Attrs::new(), Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        buffer.layout_runs().map(|run| (run.line_top, run.line_y, run.line_height)).collect()
+    }
+
+    /// A pitch of 21.75, 1.75 of it leading: each line's glyphs where a line
+    /// of 20 alone puts them, its line a pitch below the last.
+    #[test]
+    fn leading_in_the_pitch_keeps_glyphs_where_the_line_alone_puts_them() {
+        let mut fonts = FontSystem::new();
+        let plain = runs(&mut fonts, 20.0, 0.0);
+        let led = runs(&mut fonts, 21.75, 1.75);
+        assert_eq!(plain.len(), 3);
+        for (i, (line, with)) in plain.iter().zip(&led).enumerate() {
+            let shift = i as f32 * 1.75;
+            assert_eq!(with.0, line.0 + shift);
+            assert!((with.1 - (line.1 + shift)).abs() < 1e-4, "{i}: {with:?} {line:?}");
+            assert_eq!(with.2, 21.75);
+        }
+        // Closing lines up, a negative leading, as caption 2's does.
+        let tight = runs(&mut fonts, 19.875, -0.125);
+        assert!((tight[1].1 - (plain[1].1 - 0.125)).abs() < 1e-4);
     }
 }

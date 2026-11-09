@@ -252,6 +252,7 @@ impl BufferLine {
         match_mono_width: Option<f32>,
         tab_width: u16,
         hinting: Hinting,
+        leading: f32,
     ) -> &[LayoutLine] {
         if self.layout_opt.is_unused() {
             let align = self.align;
@@ -281,6 +282,13 @@ impl BufferLine {
                 match_mono_width,
                 hinting,
             );
+            // zgx: leading lies in the line height and under the glyphs: as
+            // much more descent keeps them where the line alone puts them.
+            if leading != 0. {
+                for line in &mut layout {
+                    line.max_descent += leading;
+                }
+            }
             self.layout_opt.set_used(layout);
         }
         self.layout_opt.get().expect("layout not found")

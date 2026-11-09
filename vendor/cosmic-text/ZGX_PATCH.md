@@ -340,6 +340,18 @@ none, at the weight they were shaped at (PingFang is one variable face,
 Medium by default). There Chinese draws in PingFang itself again; elsewhere
 `hvgl` faces are passed by as above.
 
+## Leading in a line's height
+
+UIKit's text styles add a font's leading after each line but the last, with
+the glyphs where the line alone puts them. zgx gives such a text a line height
+that holds the leading (`LineHeight::with_leading`), and tells the buffer how
+much of it is leading (`Buffer::set_leading`, a parameter of
+`BufferLine::layout`). Laying a line out then adds it to the line's descent, so
+the centring in `LayoutRunIter` keeps the glyphs in the line part. Nothing is
+added to `Metrics`, `LayoutRun`, `LayoutRunIter` or a glyph, and only a line
+being laid out reads it, once. zgx-gpu takes the one leading after the last
+line off a text's size.
+
 ## A paragraph's words for a layout outside a line (zgx-cosmic-text 0.19.8)
 
 zgx-gpu lays out a paragraph that this crate shapes as one left-to-right span
