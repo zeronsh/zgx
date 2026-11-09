@@ -122,6 +122,9 @@ fn platform_families(fonts: &mut FontSystem) {
         }) {
             db.set_sans_serif_family("System Font");
         }
+        // Emoji advance as Core Text sets them at each size, as UIKit lays
+        // them out.
+        crate::core_text_glyphs::register_emoji_advances(fonts);
     }
     // cosmic-text's monospace is Noto Sans Mono, which few Linux systems
     // install: monospaced text then took any fixed-width face, and on one

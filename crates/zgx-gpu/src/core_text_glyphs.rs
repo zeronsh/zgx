@@ -85,6 +85,14 @@ unsafe extern "C" {
         rects: *mut CGRect,
         count: isize,
     ) -> CGRect;
+    #[cfg(target_os = "ios")]
+    fn CTFontGetAdvancesForGlyphs(
+        font: CFTypeRef,
+        orientation: u32,
+        glyphs: *const u16,
+        advances: *mut CGSize,
+        count: isize,
+    ) -> f64;
     fn CTFontDrawGlyphs(
         font: CFTypeRef,
         glyphs: *const u16,
@@ -443,6 +451,77 @@ fn draw(fonts: &mut FontSystem, key: CacheKey, color: bool) -> Option<SwashImage
         image.data = data;
         Some(image)
     })
+}
+/// A Core Foundation object shared between threads: the emoji faces'
+/// descriptors and fonts, which Core Text's immutable objects allow.
+#[cfg(target_os = "ios")]
+struct Shared(Owned);
+// SAFETY: Core Text's descriptors and fonts are immutable and thread-safe;
+// retain and release are atomic.
+#[cfg(target_os = "ios")]
+unsafe impl Send for Shared {}
+// SAFETY: as above.
+#[cfg(target_os = "ios")]
+unsafe impl Sync for Shared {}
+/// iOS's emoji faces' descriptors, and fonts made from them at each size.
+#[cfg(target_os = "ios")]
+#[derive(Default)]
+struct Emoji {
+    faces: HashMap<cosmic_text::fontdb::ID, Shared>,
+    fonts: HashMap<(cosmic_text::fontdb::ID, u32), Shared>,
+}
+#[cfg(target_os = "ios")]
+static EMOJI: std::sync::LazyLock<std::sync::Mutex<Emoji>> =
+    std::sync::LazyLock::new(Default::default);
+/// iOS's emoji faces take their advances from Core Text, which gives an
+/// emoji an advance of its own at each point size (23 points at 17, 38 at
+/// 34; read from CTRun advances in a reference app, iOS 26.5), as UIKit lays
+/// them out. Registered before their fonts are first made.
+#[cfg(target_os = "ios")]
+pub(crate) fn register_emoji_advances(fonts: &mut FontSystem) {
+    let ids: Vec<_> = fonts
+        .db()
+        .faces()
+        .filter(|face| {
+            face.families.iter().any(|(family, _)| {
+                family == ".Apple Color Emoji UI" || family == "Apple Color Emoji"
+            })
+        })
+        .map(|face| face.id)
+        .collect();
+    cosmic_text::platform_advance::register(&ids, emoji_advance);
+    for id in ids {
+        if let Some(found) = descriptor(fonts, id)
+            && let Ok(mut emoji) = EMOJI.lock()
+        {
+            emoji.faces.insert(id, Shared(found));
+        }
+    }
+}
+/// Core Text's advance of glyph `glyph` of emoji face `id` at `size` points.
+#[cfg(target_os = "ios")]
+fn emoji_advance(id: cosmic_text::fontdb::ID, glyph: u16, size: f32) -> Option<f32> {
+    let mut emoji = EMOJI.lock().ok()?;
+    let slot = (id, size.to_bits());
+    if !emoji.fonts.contains_key(&slot) {
+        let descriptor = emoji.faces.get(&id)?.0.0;
+        // SAFETY: the descriptor lives in the map; the font made is owned.
+        let font = unsafe {
+            CTFontCreateWithFontDescriptor(descriptor, f64::from(size), std::ptr::null())
+        };
+        if font.is_null() {
+            return None;
+        }
+        if emoji.fonts.len() >= FONTS {
+            emoji.fonts.clear();
+        }
+        emoji.fonts.insert(slot, Shared(Owned(font)));
+    }
+    let font = emoji.fonts.get(&slot)?.0.0;
+    // SAFETY: one glyph, its advance only; the font lives in the map.
+    let advance =
+        unsafe { CTFontGetAdvancesForGlyphs(font, HORIZONTAL, &glyph, std::ptr::null_mut(), 1) };
+    Some(advance as f32)
 }
 /// The colour space and bitmap layout a glyph is drawn in: alpha alone, or
 /// on iOS device RGB with alpha for a colour glyph.

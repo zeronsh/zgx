@@ -415,7 +415,10 @@ impl Words {
                 };
                 for glyph in included {
                     let glyph_font_size = glyph.metrics_opt.map_or(font_size, |m| m.font_size);
+                    #[cfg(not(target_os = "ios"))]
                     let x_advance = glyph_font_size.mul_add(glyph.x_advance, 0.0);
+                    #[cfg(target_os = "ios")]
+                    let x_advance = glyph.advance_at(glyph_font_size);
                     let mut laid = glyph.laid(
                         glyph_font_size,
                         glyph.metrics_opt.map(|m| m.line_height),
