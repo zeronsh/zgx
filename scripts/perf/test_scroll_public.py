@@ -23,6 +23,14 @@ class PublicSummaryTests(unittest.TestCase):
         self.assertEqual(result['host_env'], {'ZGX_VIEW_CLOCK': '0'})
         self.assertEqual(result['metrics']['frame_source_counts'], {'view link': 100})
 
+    def test_prefetch_and_rest_numbers_are_exported_without_private_details(self):
+        result = sanitize({'host_env': {'ZGX_DRAWABLE_PREFETCH': '0', 'SECRET': 'private'},
+                           'metrics': {'rss_kib': {'rest_after': 1234, 'rest_seconds': 3,
+                                                  'rest_delta_from_before': -10, 'path': 'private'}}})
+        self.assertEqual(result['host_env'], {'ZGX_DRAWABLE_PREFETCH': '0'})
+        self.assertEqual(result['metrics']['rss_kib'],
+                         {'rest_after': 1234, 'rest_seconds': 3, 'rest_delta_from_before': -10})
+
     def test_native_brackets_keep_numbers_and_discard_raw_samples(self):
         result = sanitize({'native_floor_before': {'status': 'valid', 'late_pct': 0,
                            'source': '/private/path', 'presentation_timings': {

@@ -41,6 +41,16 @@ class ComparisonEvidence(unittest.TestCase):
         self.assertFalse(variant['complete'])
         self.assertFalse(variant['all_gates_pass'])
 
+    def test_rest_memory_is_separate_from_motion_end_and_missing_is_unknown(self):
+        sample=dict(arm='prefetch',role='variant',valid=True,status='fail',condition={},
+                    metrics=dict(late_pct=1,interval_ms={'p99':16.67},main_work_ms={'max':1},
+                                 rss_kib={'after':9000,'rest_after':4000,'rest_delta_from_before':-500}))
+        row=summarize([sample],3)[1]
+        self.assertEqual(row['rss_rest_kib']['mean'],4000)
+        self.assertEqual(row['rss_rest_delta_kib']['mean'],-500)
+        del sample['metrics']['rss_kib']['rest_after']
+        self.assertIsNone(summarize([sample],3)[1]['rss_rest_kib']['mean'])
+
     def test_smoother_variant_showing_fewer_frames_loses_count_check(self):
         samples=[]
         for trial in range(3):

@@ -69,6 +69,8 @@ def summarize(samples, trials):
                              gpu_wait_p99_ms=stats([s['metrics'].get('presentation_timings',{}).get('gpu_wait_ms',{}).get('p99') for s in valid]),
                              present_to_display_p99_ms=stats([s['metrics'].get('presentation_timings',{}).get('present_to_display_ms',{}).get('p99') for s in valid]),
                              rss_delta_kib=stats([s['metrics'].get('rss_kib',{}).get('delta') for s in valid]),
+                             rss_rest_kib=stats([s['metrics'].get('rss_kib',{}).get('rest_after') for s in valid]),
+                             rss_rest_delta_kib=stats([s['metrics'].get('rss_kib',{}).get('rest_delta_from_before') for s in valid]),
                              all_gates_pass=bool(valid) and len(valid)==trials and all(s['status']=='pass' for s in valid)))
     for row in rows:
         pairs=[]
@@ -123,6 +125,7 @@ def run_one(args, descriptor, arm, role, trial, position):
           '--present',str(c.get('present','0')),'--repeats','1','--native-floor',
           '--reset-row',str(c.get('reset_row',160)), '--reference-refresh-grid',c.get('reference_refresh_grid','off'),'--output',str(output)]
     if c.get('set_refresh'):argv+=['--set-refresh']
+    if 'rest_seconds' in c:argv+=['--rest-seconds',str(c['rest_seconds'])]
     for key in ('engine_source','engine_pin','zeron_source','zeron_runner','runner','reference_runner','reference_source','scroll_source'):
         if key in descriptor:argv+=['--'+key.replace('_','-'),str(descriptor[key])]
     for value in descriptor.get('env',[]):argv+=['--host-env',value]

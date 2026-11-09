@@ -712,6 +712,16 @@ return ui.overlay {""")
                 if 'error:' in errors or 'types:' in errors:
                     raise RuntimeError(errors)
                 after = rss(process.pid)
+                memory = dict(before=before, after=after, delta=after-before)
+                if args.rest_seconds > 0 and scene not in ('idle', 'zeron-idle'):
+                    # No inspector request or synthetic input during settling.
+                    # A vanished process makes the cell invalid, never zero RSS.
+                    time.sleep(args.rest_seconds)
+                    if process.poll() is not None:
+                        raise RuntimeError('host exited during the rest-memory sample')
+                    memory['rest_after'] = rss(process.pid)
+                    memory['rest_seconds'] = args.rest_seconds
+                    memory['rest_delta_from_before'] = memory['rest_after'] - before
                 result['polls'] = polls
                 result['frames'] = frames
                 # Give asynchronous presentation callbacks time to arrive.
@@ -751,7 +761,7 @@ return ui.overlay {""")
                     raise RuntimeError('missing replay clock anchor')
                 result['replay_start_host_ms'] = replay_starts[-1]
                 metrics = summarize(frames, presents, events, hz, scale, replay_starts[-1],
-                                    dict(before=before, after=after, delta=after-before),
+                                    memory,
                                     reference=scene in ('idle','zeron-idle'), main_budget=args.max_main_ms, gpu_budget=args.max_gpu_ms,
                                     sparse=gesture in ('slow','notches'),
                                     trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'])
@@ -963,6 +973,7 @@ def main():
     p.add_argument('--present', default='0,1', help='comma-separated 0 (tiles), 1 (drawables), auto')
     p.add_argument('--repeats', type=int, default=3)
     p.add_argument('--warmup', type=float, default=3)
+    p.add_argument('--rest-seconds', type=float, default=0, help='sample RSS after an input-free settling period; no inspector polling during the wait')
     p.add_argument('--max-late', type=float, default=0.)
     p.add_argument('--max-rows', type=int, default=0)
     p.add_argument('--max-instructions', type=int, default=50_000_000)
@@ -973,8 +984,10 @@ def main():
     p.add_argument('--damage-check', action='store_true', help='correctness run; timings include full repaint verification')
     p.add_argument('--strict', action='store_true', help='headless: require zero row builds and copies on the shared scene')
     args = p.parse_args()
+    if not math.isfinite(args.rest_seconds) or not 0 <= args.rest_seconds <= 60:
+        p.error('--rest-seconds must be finite and between 0 and 60')
     for item in args.host_env:
-        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1','ZGX_SHADOW_WHOLE=1'):
+        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1','ZGX_SHADOW_WHOLE=1','ZGX_DRAWABLE_PREFETCH=0','ZGX_DRAWABLE_PREFETCH=1'):
             p.error('unsupported diagnostic host environment override')
     if args.command=='reference' and any(item.startswith('ZGX_LEAD_US=') for item in args.host_env) and args.reference_refresh_grid!='on':
         p.error('LEAD_US marker probes require --reference-refresh-grid on to exercise the hold')

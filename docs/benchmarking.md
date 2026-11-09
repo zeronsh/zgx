@@ -54,7 +54,9 @@ recorded and synthetic wheel tapes, exact viewport/scale/refresh conditions,
 actual Metal presentation feedback, per-frame instructions and GPU timings.
 Its target is zero app/GPU-attributed late frames, with main-thread work p99
 and max ≤4 ms at 120 Hz, GPU p99 below half a refresh, zero warmed row builds
-and zero full scroll-view repaints. Matched idle references report the system floor.
+and zero full scroll-view repaints. Matched zgx idle references measure the host/compositor floor,
+bracketed by independent native references. Unattributed late frames fail; low app work alone
+does not establish a system cause.
 `scripts/perf/scroll.py` runs the native replay gate or deterministic headless
 checks; the existing instruction gate also includes four scroll scenes.
 

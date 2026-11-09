@@ -411,3 +411,12 @@ control's expected modes separately and adjust expectations for the requested
 refresh rate; unsupported or mismatched source notes invalidate the cell.
 
 The desktop trace emits frame-source mode notes on macOS. CV-link alignment sleeps are recorded as Wait, separately from present. These trace-only diagnostics leave untraced idle windows idle; do not compare wait/present phase totals to older builds that put that alignment sleep inside present. Numeric exports retain only the known source modes and diagnostic flags.
+
+Drawable acquisition experiments accept `--host-env ZGX_DRAWABLE_PREFETCH=0`
+(or `1`) and verify the override in the actual child process. Pair hybrid
+scrolling with prefetch on and off in the same binary, with a tiles control.
+Use `--rest-seconds 3` to record RSS after an input-free settling period.
+No inspector requests run during that wait. `rest_after` and
+`rest_delta_from_before` are KiB; the latter compares against the warmed
+pre-replay RSS. This short sample tests immediate drawable release, not the
+list cache’s separate 30-second trim. It does not measure GPU allocations.

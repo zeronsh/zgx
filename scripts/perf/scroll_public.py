@@ -58,7 +58,7 @@ def sanitize(row):
         if isinstance(source.get(key), dict):
             metrics[key] = numeric_fields(source[key], QUANTILES)
     if isinstance(source.get('rss_kib'), dict):
-        metrics['rss_kib'] = numeric_fields(source['rss_kib'], ('before', 'after', 'delta', 'peak'))
+        metrics['rss_kib'] = numeric_fields(source['rss_kib'], ('before', 'after', 'delta', 'peak', 'rest_after', 'rest_seconds', 'rest_delta_from_before'))
     timing = source.get('presentation_timings', {})
     if isinstance(timing, dict):
         metrics['presentation_timings'] = timing_summary(timing)
@@ -71,7 +71,7 @@ def sanitize(row):
             'ZGX_VIEW_CLOCK': {'0', '1'}, 'ZGX_SCROLL_LINK': {'0', '1'},
             'ZGX_SCROLL_DRAWABLES': {'0', '1'}, 'ZGX_HANDOVER_ASAP': {'0', '1'},
             'ZGX_LEAD_US': {'4000', '5500'}, 'ZGX_GPU_STATS': {'1'},
-            'ZGX_SHADOW_WHOLE': {'1'},
+            'ZGX_SHADOW_WHOLE': {'1'}, 'ZGX_DRAWABLE_PREFETCH': {'0', '1'},
         }
         result['host_env'] = {key: value for key, value in flags.items()
                               if key in allowed and isinstance(value, str) and value in allowed[key]}
