@@ -765,6 +765,70 @@ fn a_span_icon_sits_in_the_line_before_its_text() {
 }
 
 #[test]
+fn a_span_icon_sits_on_its_well_behind_it_and_the_wash_spans_the_chip() {
+    use zgx::scene::{Color, NodeKind};
+    let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><rect width='12' height='12'/></svg>"#;
+    let measure = |extra: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"return ui.column {{ w = 300, ui.rich {{ id = "p",
+                ui.span {{ "notes.rs", literal = true, bg = "#ff0000", padding = {{ 2, 2 }}, radius = 5{extra} }} }} }}"##
+        ));
+        h.frames(2);
+        let p = h.find("p").unwrap();
+        let scene = h.ui.scene.borrow();
+        let origin = scene.bounds(p);
+        let (mut well, mut glyph, mut width, mut runs) = (None, None, 0., Vec::new());
+        let mut stack = vec![p];
+        while let Some(n) = stack.pop() {
+            match scene.kind(n) {
+                NodeKind::Panel { quad: q, .. } => {
+                    let b = scene.bounds(n);
+                    well = Some((b.x - origin.x, b.width, b.height, q.fill, q.radius));
+                    // The icon its child: drawn over it.
+                    let inside = scene.children(n);
+                    assert_eq!(inside.len(), 1, "the icon in the well");
+                    let g = scene.bounds(inside[0]);
+                    glyph = Some((g.x - b.x, g.y - b.y, g.width));
+                }
+                NodeKind::Svg(_) => {
+                    // (One outside a well: the icon alone.)
+                    glyph = glyph.or(Some((-1., -1., scene.bounds(n).width)));
+                }
+                NodeKind::RichText { text } => {
+                    width = scene.bounds(n).width;
+                    runs = text.runs().iter().map(|r| (r.background, r.radius)).collect();
+                }
+                _ => {}
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        (well, glyph, width, runs)
+    };
+    let icon = format!("icon = {{ code = \"{svg}\", size = 12, gap = 3");
+    let (no_well, alone, plain, _) = measure(&format!(", {icon} }}"));
+    assert!(no_well.is_none(), "no bg: no well, as before");
+    assert_eq!(alone.map(|g| g.0), Some(-1.), "the icon alone");
+    let (well, glyph, chip, runs) =
+        measure(&format!(", {icon}, bg = \"#00ff00\", radius = 4, pad = 2 }}"));
+    let (x, w, h, fill, radius) = well.expect("the well drawn");
+    assert_eq!((x.round(), w, h), (2., 16., 16.), "at the padding, the icon and its room round it");
+    assert_eq!(fill, Color(0, 255, 0, 255));
+    assert_eq!(radius, 4.);
+    assert_eq!(glyph, Some((2., 2., 12.)), "the icon `pad` in from the well's corner");
+    assert!(
+        (chip - plain - 4.).abs() < 0.5,
+        "the line keeps room for the well (2 × pad): {plain} → {chip}"
+    );
+    // The span's wash on every run of the chip (the well's room, the
+    // text, the padding after): joined, one wash under the well and text.
+    assert!(!runs.is_empty());
+    assert!(
+        runs.iter().all(|(bg, r)| *bg == Some(Color(255, 0, 0, 255)) && *r == 5.),
+        "{runs:?}"
+    );
+}
+
+#[test]
 fn a_padded_span_wraps_its_icon_and_text() {
     use zgx::scene::NodeKind;
     let svg = r#"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><rect width='12' height='12'/></svg>"#;

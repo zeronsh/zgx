@@ -75,8 +75,20 @@ pub(crate) struct InlineIcon {
     pub range: Range<usize>,
     pub svg: Arc<crate::svg::SvgData>,
     pub size: f32,
-    /// How far into the room it starts (the span's padding before it).
+    /// How far into the room it starts (the span's padding before it, and
+    /// its well's room round it).
     pub inset: f32,
+    /// The well it sits on (`SpanIcon::bg`), resolved: drawn under it,
+    /// `pad` larger on every side.
+    pub well: Option<IconWell>,
+}
+/// An inline icon's well: a rounded fill under it, `pad` past it on every
+/// side.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct IconWell {
+    pub color: crate::scene::Color,
+    pub radius: f32,
+    pub pad: f32,
 }
 /// A span's leading icon: `size` square, `gap` before the text, tinted
 /// with `tint` (a colour or token) if set, else as the SVG says (one that
@@ -91,6 +103,14 @@ pub struct SpanIcon {
     pub gap: f32,
     /// Its colour, or a colour token; `None` paints it as the SVG says.
     pub tint: Option<crate::theme::Themed<Color>>,
+    /// A well under it (a file chip's): its fill, a colour or a token;
+    /// `None`, none. The well is `pad` past the icon on every side, its
+    /// corner `radius`, and the span keeps room for it.
+    pub bg: Option<crate::theme::Themed<Color>>,
+    /// The well's corner radius.
+    pub radius: f32,
+    /// The well's room round the icon, on every side.
+    pub pad: f32,
 }
 /// What keeps an icon's room in the line: a word joiner (zero width, and
 /// no line break either side, so the icon stays with its text), padded.
@@ -1038,25 +1058,86 @@ pub(crate) fn mount_icons(
         for (index, (icon, rect)) in data.icons.iter().zip(rects.iter()).enumerate() {
             let rect = rect.unwrap_or_default();
             // At the room's start, centred on the line; placed from the
-            // owner's content box.
+            // owner's content box. With a well: the well there, the icon in
+            // it, `pad` in from its every side.
+            let pad = icon.well.map_or(0., |well| well.pad);
+            let side = icon.size + 2. * pad;
             let style = Style {
                 absolute: true,
-                width: Some(icon.size),
-                height: Some(icon.size),
+                width: Some(side),
+                height: Some(side),
                 margin: crate::scene::Insets {
                     left: bounds.x - owner_bounds.x + rect.x + icon.inset - padding.left,
-                    top: bounds.y - owner_bounds.y + rect.y + (rect.height - icon.size) / 2.
+                    top: bounds.y - owner_bounds.y + rect.y + (rect.height - side) / 2.
                         - padding.top,
                     ..Default::default()
                 },
                 ..Default::default()
             };
             let mut scene = ui.scene.borrow_mut();
+            // A well and its icon: a rounded box, the icon its child.
+            if let Some(well) = icon.well {
+                let quad = crate::scene::QuadStyle {
+                    fill: well.color,
+                    radius: well.radius,
+                    ..Default::default()
+                };
+                let glyph = Style {
+                    absolute: true,
+                    width: Some(icon.size),
+                    height: Some(icon.size),
+                    margin: crate::scene::Insets { left: pad, top: pad, ..Default::default() },
+                    ..Default::default()
+                };
+                let fits = index < mounted.len()
+                    && matches!(scene.kind(mounted[index]), NodeKind::Panel { .. })
+                    && scene.children(mounted[index]).len() == 1;
+                if !fits {
+                    let node = scene.append(
+                        owner,
+                        NodeKind::Panel { layout: crate::scene::Layout::Overlay, quad: quad.clone() },
+                        style.clone(),
+                    );
+                    scene.append(node, NodeKind::Svg(icon.svg.clone()), glyph.clone());
+                    if index < mounted.len() {
+                        let old = std::mem::replace(&mut mounted[index], node);
+                        drop(scene);
+                        ui.remove(old);
+                        scene = ui.scene.borrow_mut();
+                    } else {
+                        mounted.push(node);
+                    }
+                    continue;
+                }
+                let node = mounted[index];
+                if !matches!(scene.kind(node), NodeKind::Panel { quad: q, .. } if *q == quad) {
+                    scene.set_kind(node, NodeKind::Panel { layout: crate::scene::Layout::Overlay, quad });
+                }
+                if scene.style(node) != style {
+                    scene.set_style(node, style);
+                }
+                let inner = scene.children(node)[0];
+                if !matches!(scene.kind(inner), NodeKind::Svg(svg) if Arc::ptr_eq(svg, &icon.svg)) {
+                    scene.set_kind(inner, NodeKind::Svg(icon.svg.clone()));
+                }
+                if scene.style(inner) != glyph {
+                    scene.set_style(inner, glyph);
+                }
+                continue;
+            }
             if index == mounted.len() {
                 mounted.push(scene.append(owner, NodeKind::Svg(icon.svg.clone()), style));
             } else {
                 // Unchanged (the paragraph only moved): nothing to lay out.
                 let node = mounted[index];
+                if !matches!(scene.kind(node), NodeKind::Svg(_)) {
+                    // (It had a well: the icon alone now.)
+                    let fresh = scene.append(owner, NodeKind::Svg(icon.svg.clone()), style);
+                    drop(scene);
+                    ui.remove(node);
+                    mounted[index] = fresh;
+                    continue;
+                }
                 if !matches!(scene.kind(node), NodeKind::Svg(svg) if Arc::ptr_eq(svg, &icon.svg)) {
                     scene.set_kind(node, NodeKind::Svg(icon.svg.clone()));
                 }

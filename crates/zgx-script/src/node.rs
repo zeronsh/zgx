@@ -1367,7 +1367,8 @@ pub(crate) struct SpanRare {
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
 }
-/// `ui.span { icon = { src = …, size = 12, gap = 4, tint = … } }`.
+/// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
+/// radius = 4, pad = 2 } }`.
 #[derive(Clone)]
 pub(crate) struct SpanIcon {
     /// A file, `https://…`, or `code:<svg …>`.
@@ -1376,6 +1377,11 @@ pub(crate) struct SpanIcon {
     pub gap: f32,
     /// A colour, or `"currentColor"` (the span's text colour).
     pub tint: Option<Value>,
+    /// The well the icon sits on: its fill (a colour or token), its
+    /// corner, and its room round the icon on every side.
+    pub bg: Option<Value>,
+    pub radius: f32,
+    pub pad: f32,
 }
 
 /// A node's tooltip (`tooltip`, `tooltip_placement`).
@@ -4648,11 +4654,15 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         }
                     };
                     let tint = icon.get::<Value>("tint")?;
+                    let bg = icon.get::<Value>("bg")?;
                     rare_mut(&mut span).icon = Some(SpanIcon {
                         src,
                         size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
                         gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
                         tint: (!matches!(tint, Value::Nil)).then_some(tint),
+                        bg: (!matches!(bg, Value::Nil)).then_some(bg),
+                        radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
+                        pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
                     });
                 }
                 b"on_click" => span.click = Some(handler(given)?),
