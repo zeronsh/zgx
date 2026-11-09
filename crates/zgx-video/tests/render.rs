@@ -721,44 +721,35 @@ fn a_chunked_webm_keeps_its_alpha_and_its_sound() {
     assert_eq!(probe(&out, "codec_name,channels", "a").unwrap(), "opus,2");
 }
 
-/// A square a unit across, as a glTF binary.
-fn square_glb() -> Vec<u8> {
-    let positions: [f32; 12] = [-0.5, -0.5, 0., 0.5, -0.5, 0., 0.5, 0.5, 0., -0.5, 0.5, 0.];
-    let mut bin: Vec<u8> = positions.iter().flat_map(|v| v.to_le_bytes()).collect();
-    bin.extend([0_u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()));
-    bin.extend([0_u8; 4]);
-    let mut json = format!(
-        r#"{{"asset":{{"version":"2.0"}},"buffers":[{{"byteLength":{}}}],
-        "bufferViews":[{{"buffer":0,"byteLength":48}},{{"buffer":0,"byteOffset":48,"byteLength":12}}],
-        "accessors":[{{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-0.5,-0.5,0],"max":[0.5,0.5,0]}},
-            {{"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"}}],
-        "materials":[{{"emissiveFactor":[1,1,1],"pbrMetallicRoughness":{{"baseColorFactor":[1,1,1,1]}}}}],
-        "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"material":0}}]}}],
-        "nodes":[{{"mesh":0}}],"scenes":[{{"nodes":[0]}}]}}"#,
-        bin.len()
-    )
-    .into_bytes();
-    while !json.len().is_multiple_of(4) {
-        json.push(b' ');
-    }
-    let mut out = b"glTF".to_vec();
-    out.extend(2_u32.to_le_bytes());
-    out.extend(((12 + 8 + json.len() + 8 + bin.len()) as u32).to_le_bytes());
-    out.extend((json.len() as u32).to_le_bytes());
-    out.extend(b"JSON");
-    out.extend(json);
-    out.extend((bin.len() as u32).to_le_bytes());
-    out.extend(b"BIN\0");
-    out.extend(bin);
-    out
-}
-
 /// A frame doesn't wait for another thread: a model read off it would be
-/// missing from a still, and from each chunk's first frames.
+/// missing from a still, and from each chunk's first frames. Its buffer is a
+/// named pipe filled a second from now, so a read on another thread can't
+/// beat the frame, and a frame that reads it waits.
+#[cfg(unix)]
 #[test]
 fn a_models_first_frame_draws_it() {
-    let dir = temp_dir("render-model");
-    std::fs::write(dir.join("square.glb"), square_glb()).unwrap();
+    unsafe extern "C" {
+        fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+    }
+    // Its real path: a model's buffers are found only below that.
+    let held = temp_dir("render-model");
+    let dir = held.canonicalize().unwrap();
+    let pipe = dir.join("buffer.bin");
+    let _ = std::fs::remove_file(&pipe);
+    let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+    // SAFETY: A path that lives through the call.
+    assert_eq!(unsafe { mkfifo(name.as_ptr(), 0o600) }, 0);
+    std::fs::write(
+        dir.join("square.gltf"),
+        r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"buffer.bin","byteLength":60}],
+        "bufferViews":[{"buffer":0,"byteLength":48},{"buffer":0,"byteOffset":48,"byteLength":12}],
+        "accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-0.5,-0.5,0],"max":[0.5,0.5,0]},
+            {"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"}],
+        "materials":[{"emissiveFactor":[1,1,1],"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1]}}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]}],
+        "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}]}"#,
+    )
+    .unwrap();
     std::fs::write(
         dir.join("video.luau"),
         r##"
@@ -769,18 +760,26 @@ fn a_models_first_frame_draws_it() {
                 return ui.scene3d {
                     w_full = true, h_full = true,
                     camera = { position = { 0, 0, 3 } },
-                    ui.model { src = "square.glb", fit = 2 },
+                    ui.model { src = "square.gltf", fit = 2 },
                 }
             end,
         } }
         "##,
     )
     .unwrap();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let positions: [f32; 12] = [-0.5, -0.5, 0., 0.5, -0.5, 0., 0.5, 0.5, 0., -0.5, 0.5, 0.];
+        let mut bin: Vec<u8> = positions.iter().flat_map(|v| v.to_le_bytes()).collect();
+        bin.extend([0_u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()));
+        std::fs::write(pipe, bin).unwrap();
+    });
     let mut stage = script_stage(&dir, json!({}));
     let mut pixels = Vec::new();
     stage
         .draw_output(0, &mut pixels, std::time::Duration::from_secs(30))
         .unwrap();
+    writer.join().unwrap();
     let [r, g, b, _] = pixel(&pixels, 100, 50, 50);
     assert!(
         r > 40 && g > 40 && b > 40,
