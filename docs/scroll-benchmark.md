@@ -457,3 +457,11 @@ invalidates unfinished captures.
 Historical raw-input-demand tables are qualified and cannot certify app missed
 refreshes. Capture snapshots and comparison fingerprints include
 `scroll_motion.py`, preventing a silent rescore mid-batch.
+
+During continuous `scroll live` demand the cadence interval starts at the last
+presentation that moved the target. A background-only presentation cannot hide
+a held scroll position. An inactive trace state separates a new motion onset
+from the preceding idle gap. Motion outside applied input and app coast is
+flagged as app-animated; it fails settled non-streaming coverage and is reported
+separately for the explicit streaming condition. All live-scroll frames remain
+in the main/GPU work population, including background frames without move notes.

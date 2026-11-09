@@ -290,7 +290,7 @@ def coalesce_presentations(records, period):
 
 
 def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=False,
-              main_budget=4., gpu_budget=4., sparse=False, trace_to_host_ms=None, motion_view=None, initial_motion_frames=(), motion_axis=1):
+              main_budget=4., gpu_budget=4., sparse=False, trace_to_host_ms=None, motion_view=None, initial_motion_frames=(), motion_axis=1, allow_app_animation=False):
     period = 1000 / hz
     accepted, ignored = scroll_motion.accepted_events(events)
     windows = [(0, events[-1][0])] if reference and events else motion_windows(accepted, period, scale)
@@ -330,13 +330,21 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
                     gpu_max_ms=max(gpu, default=None), notes=notes)
 
     double_then_skip=0
-    for group_index,(prev, current) in enumerate(zip(shown, shown[1:])):
+    if not reference and movement.have_applied:
+        intervals = movement.presented_intervals(shown, period)
+    else:
+        def legacy_intervals():
+            for index, (previous, current) in enumerate(zip(shown, shown[1:])):
+                a, b = previous[1]*1000-anchor, current[1]*1000-anchor
+                finger = active_gap(a, b, windows, period)
+                if reference:
+                    demand, late = finger, finger and b-a > 1.5*period
+                else:
+                    demand, late = movement.interval(previous, current, finger, period)
+                yield index, previous, current, demand, late
+        intervals = legacy_intervals()
+    for group_index, prev, current, demanded, late in intervals:
         a, b = prev[1]*1000-anchor, current[1]*1000-anchor
-        finger = active_gap(a, b, windows, period)
-        if reference:
-            demanded, late = finger, finger and b-a > 1.5*period
-        else:
-            demanded, late = movement.interval(prev, current, finger, period)
         if not demanded:
             idle.append(b-a)
             continue
@@ -359,13 +367,14 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
         notes = f.get('notes', [])
         coasting = movement.states.get(f['frame'], (None, None))[1] is True
         dispatched = any((dx,dy)[motion_axis] != 0 for _,dx,dy,_ in movement.applied.get(f['frame'], ()))
-        moving = coasting or dispatched or any('copied its pixels' in n or 'repainted its view:' in n or
+        noted_move = f['frame'] in movement.moved_frames or any('copied its pixels' in n or 'repainted its view:' in n or
                      'composited its picture' in n for n in notes)
+        moving = coasting or dispatched or noted_move or movement.live.get(f['frame']) is True
         in_motion=in_motion_window(f,windows,trace_to_host_ms,anchor)
         if f.get('spare', False) or (not moving and not reference and (movement.have_applied or not in_motion)):
             continue
         frame_sources.update(n.removeprefix('frame source: ').split(' (',1)[0] for n in notes if n.startswith('frame source: '))
-        noted_frames+=moving or reference
+        noted_frames+=noted_move or reference
         if in_motion:motion_frames.append(f)
         scroll_frames.append(f)
         work.append(app_work_ms(f))
@@ -404,6 +413,9 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     duration=events[-1][0] if events else 0
     shown_in_tape=[r for r in shown if 0<=r[1]*1000-anchor<=duration]
     scoring = movement.summary() if not reference else dict(cadence_model='continuous-reference',cadence_scoring_complete=True)
+    scoring['unexpected_app_animation_intervals'] = 0 if reference or allow_app_animation else movement.app_animated
+    if scoring['unexpected_app_animation_intervals']:
+        scoring['cadence_scoring_complete'] = False
     return dict(**scoring, ignored_os_momentum_events=len(ignored),frames=len(frames), sparse=sparse,
                 presentation_timings=presentation_timings(scroll_frames,records,anchor,trace_to_host_ms),
                 picture_costs=picture_costs(frames),
@@ -839,7 +851,7 @@ return ui.overlay {""")
                                     memory,
                                     reference=scene in ('idle','zeron-idle'), main_budget=args.max_main_ms, gpu_budget=args.max_gpu_ms,
                                     sparse=gesture in ('slow','notches'),
-                                    trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'], motion_view=motion_view, initial_motion_frames=initial_motion_frames, motion_axis=0 if scene=='nested' else 1)
+                                    trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'], motion_view=motion_view, initial_motion_frames=initial_motion_frames, motion_axis=0 if scene=='nested' else 1, allow_app_animation=gesture=='stream')
                 if not metrics.get('cadence_scoring_complete',False):
                     metrics['late_pct'] = None
                     metrics['app_late_pct'] = None

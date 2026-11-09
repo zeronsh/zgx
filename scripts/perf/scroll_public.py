@@ -23,7 +23,7 @@ METRICS = (
     'double_then_skip_intervals', 'skipped_drawables', 'main_over_4ms', 'gpu_p99_ms',
     'copied_frames', 'repainted_frames', 'picture_frames', 'copy_pct', 'repaint_pct',
     'rows_built_in_scroll_frames', 'rows_prefetched', 'spare_frames',
-    'slow_step_intervals','finger_slow_step_intervals','applied_finger_entries','applied_coast_entries','ignored_os_momentum_events','coast_active_intervals','coast_slow_step_intervals',
+    'unexpected_app_animation_intervals','motion_onset_intervals','app_animated_intervals','slow_step_intervals','finger_slow_step_intervals','applied_finger_entries','applied_coast_entries','ignored_os_momentum_events','coast_active_intervals','coast_slow_step_intervals',
     'finger_active_intervals','finger_late_intervals','coast_late_intervals','coast_long_gap_intervals',
     'stationary_scroll_intervals','unclassified_motion_intervals','coast_context_missing_frames',
 )

@@ -68,6 +68,13 @@ def select_view(node, initial_frames, scale, horizontal=False):
     return candidates[0] if len(candidates) == 1 else None
 
 
+def live_state(frame):
+    values = [re.search(r'\bscroll live (true|false)\b', note)
+              for note in frame.get('notes', []) if note.startswith('frame source: ')]
+    values = [v[1] == 'true' for v in values if v]
+    return any(values) if values else None
+
+
 class Motion:
     def __init__(self, frames, view, initial_frames=(), *, axis=1, scale=1):
         self.view = view
@@ -75,6 +82,9 @@ class Motion:
         self.applied = {f['frame']: applied(f) for f in frames}
         self.have_applied = any(self.applied.values())
         self.states = {}
+        self.live = {}
+        self.moved_frames = set()
+        self.onsets = self.app_animated = 0
         self.unknown = 0
         self.slow_steps = 0
         self.finger_slow_steps = self.coast_slow_steps = 0
@@ -82,23 +92,30 @@ class Motion:
         self.coast_intervals = 0
         self.finger_intervals = self.finger_late = self.coast_late = 0
         self.coast_long_gaps = 0
-        point, coasting, last_context = None, None, None
+        point, coasting, live, last_context = None, None, None, None
         self.stale_render_context = 0
         measured_ids = {f['frame'] for f in frames}
         for frame in sorted([*initial_frames, *frames], key=lambda f: f['frame']):
+            old_point = point
             point = positions(frame).get(view, point)
+            if old_point is not None and point != old_point and frame['frame'] in measured_ids:
+                self.moved_frames.add(frame['frame'])
             state = coast_state(frame)
             if state is not None:
                 coasting = state
                 last_context = frame['frame']
             if positions(frame) and frame['frame'] in measured_ids and (last_context is None or frame['frame']-last_context > 4):
                 self.stale_render_context += 1
+            current_live = live_state(frame)
+            if current_live is not None:live = current_live
+            self.live[frame['frame']] = live
             self.states[frame['frame']] = (point, coasting)
         self.metadata = any(coast_state(f) is not None for f in frames)
+        self.have_live = any(live_state(f) is not None for f in frames)
         self.have_positions = view is not None and any(positions(f).get(view) is not None
                                                      for f in [*initial_frames, *frames])
 
-    def interval(self, previous, current, finger, period):
+    def interval(self, previous, current, finger, period, *, onset=False):
         """Return (visible demand, late); unknown coverage never becomes a pass."""
         ids = range(previous[2], current[2]+1) if previous[2] and current[2] >= previous[2] else []
         values = [self.states[i] for i in ids if i in self.states]
@@ -115,6 +132,8 @@ class Motion:
                          for source,dx,dy,_ in dispatched)
         gap = (current[1]-previous[1])*1000
         if not finger and not coast:
+            points = [point for point, _ in values if point is not None]
+            if len(set(points)) > 1:self.app_animated += 1
             return False, False
         points = [point for point, _ in values if point is not None]
         if not points or not self.have_positions:
@@ -127,6 +146,9 @@ class Motion:
             self.stationary += 1
             if finger and gap > 1.5*period and (not self.have_applied or finger_distance >= 1):
                 self.unknown += 1  # dispatched motion without a position change needs evidence
+            return False, False
+        if onset:
+            self.onsets += 1
             return False, False
         if coast and not finger:
             self.coast_intervals += 1
@@ -146,11 +168,28 @@ class Motion:
             elif coast:self.coast_late += 1
         return True, late
 
+    def presented_intervals(self, shown, period):
+        """Background presents must not hide a held scroll position."""
+        previous_index = 0
+        for index, current in enumerate(shown[1:], 1):
+            previous = shown[previous_index]
+            states = [self.live[i] for i in range(previous[2], current[2]) if i in self.live]
+            continuous = bool(states) and all(state is True for state in states)
+            demand, late = self.interval(previous, current, False, period, onset=not continuous)
+            if demand:
+                yield previous_index, previous, current, True, late
+                previous_index = index
+            else:
+                yield index-1, shown[index-1], current, False, False
+                if not continuous or self.live.get(current[2]) is not True:
+                    previous_index = index
+
     def summary(self):
         return dict(cadence_model='applied-input-and-observed-coast',
+                    motion_onset_intervals=self.onsets, app_animated_intervals=self.app_animated,
                     applied_finger_entries=sum(v[0] != 'coast' for values in self.applied.values() for v in values),
                     applied_coast_entries=sum(v[0] == 'coast' for values in self.applied.values() for v in values),
-                    cadence_scoring_complete=self.metadata and self.have_applied and self.have_positions and self.unknown == 0 and self.stale_render_context == 0,
+                    cadence_scoring_complete=self.metadata and self.have_live and self.have_applied and self.have_positions and self.unknown == 0 and self.stale_render_context == 0,
                     coast_context_missing_frames=self.stale_render_context,
                     finger_active_intervals=self.finger_intervals,
                     finger_late_intervals=self.finger_late,coast_late_intervals=self.coast_late,

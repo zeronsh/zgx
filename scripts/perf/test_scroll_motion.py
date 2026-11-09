@@ -58,6 +58,34 @@ class MotionEvidence(unittest.TestCase):
         m=Motion([self.frame(1,0),self.frame(2,-10)],7)
         self.assertFalse(m.summary()['cadence_scoring_complete'])
 
+    def test_background_presentation_cannot_mask_a_coast_stutter(self):
+        frames=[self.input_frame(1,0,'coast'),self.input_frame(2,-4,'coast'),
+                self.frame(3,-4,True),self.input_frame(4,-8,'coast')]
+        for f in frames:
+            f['notes'][1]=f['notes'][1].replace('coasting false','coasting true')
+        m=Motion(frames,7)
+        shown=[(.001,.001,1,0),(.009,.009,2,0),(.017,.017,3,0),(.025,.025,4,0)]
+        values=list(m.presented_intervals(shown,1000/120))
+        late=[v for v in values if v[4]]
+        self.assertEqual(len(late),1)
+        self.assertEqual((late[0][1][2],late[0][2][2]),(2,4))
+
+    def test_inactive_trace_breaks_cadence_before_a_new_gesture(self):
+        frames=[self.input_frame(1,0),self.frame(2,0,False),self.input_frame(3,-10)]
+        frames[1]['notes']=[n.replace('scroll live true','scroll live false') for n in frames[1]['notes']]
+        m=Motion(frames,7)
+        values=list(m.presented_intervals([(.001,.001,1,0),(1.001,1.001,3,0)],1000/120))
+        self.assertFalse(any(v[4] for v in values))
+        self.assertEqual(m.summary()['motion_onset_intervals'],1)
+
+    def test_app_animation_is_flagged_outside_finger_and_coast(self):
+        frames=[self.input_frame(1,0),self.frame(2,-10,False)]
+        m=Motion(frames,7)
+        self.assertEqual(m.interval((.001,.001,1,0),(.026,.026,2,0),False,1000/120),(False,False))
+        self.assertEqual(m.summary()['app_animated_intervals'],1)
+        self.assertEqual(m.summary()['finger_late_intervals'],0)
+        self.assertEqual(m.summary()['coast_late_intervals'],0)
+
     def test_target_mapping_is_unique_and_uses_device_scale(self):
         frames=[self.frame(1,-200)]
         self.assertEqual(select_view({'scroll':'offset 100 of 0 to 1000'},frames,2),7)
