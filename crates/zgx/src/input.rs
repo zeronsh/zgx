@@ -579,11 +579,6 @@ pub struct NodeInput {
     /// Its place in Tab order, as HTML's `tabindex`: positive indices first,
     /// in order, then 0s in document order; negative leaves Tab order.
     pub tab_index: i32,
-    /// A press on it (or anything inside it) leaves focus where it is, as
-    /// the web's `mousedown` with `preventDefault()`: a list hanging from a
-    /// field, its rows and tabs taking clicks while the field keeps the
-    /// keys and its caret.
-    pub press_keeps_focus: bool,
 }
 type Callback = Rc<RefCell<dyn FnMut(&mut EventContext)>>;
 /// `set_tab_hook`'s: the focused node, whether backward, and where Tab
@@ -704,14 +699,15 @@ struct State {
     navigators: Vec<NodeId>,
     entries: crate::scene::NodeMap<Vec<Entry>>,
     options: crate::scene::NodeMap<NodeInput>,
-    /// How many of `options` keep focus where it is on a press
-    /// (`press_keeps_focus`): with none, a press doesn't look for one.
-    keeping_focus: usize,
     /// Boxes the pointer passes through while nothing they hold is displayed
     /// (`View::hollow`): a presence's box over a page kept mounted but hidden.
     /// A few at most: a list, not a map (a map's instance shared with another
     /// set's outlined that one's insert).
     hollow: Vec<NodeId>,
+    /// Boxes a press on (or inside) leaves focus where it is
+    /// (`View::focus_on_press`): a list as `hollow` is. Empty, a press
+    /// doesn't look for one.
+    keeping_focus: Vec<NodeId>,
     /// Nodes that take every key while focus is in them (`set_capture_keys`):
     /// a shortcut recorder. A few at most.
     capturing: Vec<NodeId>,
@@ -817,11 +813,6 @@ impl Drop for State {
     }
 }
 impl State {
-    /// `keeping_focus` in step with a node's options going from `old` to `new`.
-    fn keep_focus_count(&mut self, old: Option<NodeInput>, new: NodeInput) {
-        self.keeping_focus += usize::from(new.press_keeps_focus);
-        self.keeping_focus -= usize::from(old.is_some_and(|old| old.press_keeps_focus));
-    }
     /// A lock is held, or the Escape that ended one is still down: every
     /// event goes by `dispatch_pointer_lock`.
     fn lock_engaged(&self) -> bool {
@@ -882,10 +873,12 @@ impl Drop for InputBinding {
             if s.entries.get(&self.node).is_some_and(Vec::is_empty) {
                 s.entries.remove(&self.node);
                 // A hollow node has options: only one removed can be.
-                if let Some(options) = s.options.remove(&self.node) {
-                    s.keeping_focus -= usize::from(options.press_keeps_focus);
+                if s.options.remove(&self.node).is_some() {
                     if !s.hollow.is_empty() {
                         s.hollow.retain(|node| *node != self.node);
+                    }
+                    if !s.keeping_focus.is_empty() {
+                        s.keeping_focus.retain(|node| *node != self.node);
                     }
                 }
                 disabled_observer = s.disabled_observers.get(&self.node).cloned();
@@ -1252,8 +1245,7 @@ impl InputDispatcher {
         let mut s = self.state.borrow_mut();
         s.next = s.next.checked_add(1).expect("input binding IDs exhausted");
         let token = s.next;
-        let old = s.options.insert(node, options);
-        s.keep_focus_count(old, options);
+        s.options.insert(node, options);
         if options.disabled {
             s.clicks.0 = None;
         }
@@ -1351,8 +1343,7 @@ impl InputDispatcher {
         }
         let observer = {
             let mut state = self.state.borrow_mut();
-            let old = state.options.insert(node, options);
-            state.keep_focus_count(old, options);
+            state.options.insert(node, options);
             if options.disabled {
                 state.clicks.0 = None;
             }
@@ -1455,6 +1446,47 @@ impl InputDispatcher {
             state.hollow.push(node);
         }
     }
+    /// Mark `node` (registered: `set_options`): a press on it or inside it
+    /// leaves focus where it is.
+    pub(crate) fn set_keeps_focus(&self, node: NodeId) {
+        let mut state = self.state.borrow_mut();
+        if !state.keeping_focus.contains(&node) {
+            state.keeping_focus.push(node);
+        }
+    }
+    /// Whether a press at (`x`, `y`) on `target` leaves focus where it is:
+    /// it's inside a node that keeps focus (`set_keeps_focus`), as the press's
+    /// target (a listener in it) or as what's under the pointer (its blank
+    /// room, nothing listening there); a node the pointer passes through is
+    /// neither. Some node does, or this isn't asked.
+    #[cold]
+    #[inline(never)]
+    fn press_keeps_focus(
+        &self,
+        scene: &Rc<RefCell<Scene>>,
+        target: Option<NodeId>,
+        x: f32,
+        y: f32,
+    ) -> bool {
+        let scene = scene.borrow();
+        let keeps = |from: Option<NodeId>| {
+            let state = self.state.borrow();
+            let mut node = from;
+            while let Some(id) = node {
+                if state.keeping_focus.contains(&id) {
+                    return true;
+                }
+                node = scene.parent(id);
+            }
+            false
+        };
+        let under = scene.hit_test_all(x, y).into_iter().find(|hit| {
+            !self.boxless(&scene, *hit) && !self.options(*hit).is_some_and(|o| o.pass_through)
+        });
+        // (The target, only while it's still in the scene: a listener may
+        // have removed it as it took the press.)
+        keeps(target.filter(|id| scene.contains(*id))) || keeps(under)
+    }
     /// Whether the pointer passes through `node`, which takes input as
     /// `options` say, to what is under it: `pass_through`, or hollow with
     /// nothing in it displayed (`Scene::displays_content`).
@@ -1487,10 +1519,12 @@ impl InputDispatcher {
         }
         let observer = s.disabled_observers.remove(&node);
         // A hollow node has options: only one removed can be.
-        if let Some(options) = s.options.remove(&node) {
-            s.keeping_focus -= usize::from(options.press_keeps_focus);
+        if s.options.remove(&node).is_some() {
             if !s.hollow.is_empty() {
                 s.hollow.retain(|hollow| *hollow != node);
+            }
+            if !s.keeping_focus.is_empty() {
+                s.keeping_focus.retain(|keeping| *keeping != node);
             }
         }
         s.groups.remove(&node);
@@ -3286,34 +3320,11 @@ impl InputDispatcher {
                         }
                         node = scene.borrow().parent(id);
                     }
-                    // A press inside a node that keeps focus where it is
-                    // (`press_keeps_focus`): focus stays. Inside it, as the
-                    // press's target (a listener in it), or as what's under
-                    // the pointer (its blank room, nothing listening there);
-                    // a node the pointer passes through is neither. Looked
-                    // for only while some node keeps focus and a press would
-                    // move it.
-                    let held = !keep_focus && self.state.borrow().keeping_focus > 0 && {
-                        let scene = scene.borrow();
-                        let keeps = |from: Option<NodeId>| {
-                            let mut node = from;
-                            while let Some(id) = node {
-                                if self.options(id).is_some_and(|o| o.press_keeps_focus) {
-                                    return true;
-                                }
-                                node = scene.parent(id);
-                            }
-                            false
-                        };
-                        let under = scene.hit_test_all(*x, *y).into_iter().find(|hit| {
-                            !self.boxless(&scene, *hit)
-                                && !self.options(*hit).is_some_and(|o| o.pass_through)
-                        });
-                        // (The target, only while it's still in the scene: a
-                        // listener may have removed it as it took the press.)
-                        keeps(target.filter(|id| scene.contains(*id))) || keeps(under)
-                    };
-                    if !keep_focus && !held && (target.is_some() || self.focus_scope().is_none()) {
+                    if !keep_focus
+                        && (target.is_some() || self.focus_scope().is_none())
+                        && (self.state.borrow().keeping_focus.is_empty()
+                            || !self.press_keeps_focus(scene, target, *x, *y))
+                    {
                         self.focus(scene, focus);
                     }
                 }
@@ -3763,13 +3774,8 @@ mod tests {
     fn a_press_target_removed_during_dispatch_is_looked_past_for_one_keeping_focus() {
         let (scene, a, b) = setup();
         let d = InputDispatcher::new();
-        d.set_options(
-            b,
-            NodeInput {
-                press_keeps_focus: true,
-                ..Default::default()
-            },
-        );
+        d.set_options(b, NodeInput::default());
+        d.set_keeps_focus(b);
         let s = scene.clone();
         let _binding = d.register(
             a,
@@ -3788,26 +3794,21 @@ mod tests {
         d.dispatch(&scene, up(10.0, 10.0));
     }
     #[test]
-    fn nodes_keeping_focus_are_counted_as_they_come_and_go() {
+    fn a_node_stops_keeping_focus_as_it_goes() {
         let (scene, a, b) = setup();
         let d = InputDispatcher::new();
-        let count = || d.state.borrow().keeping_focus;
-        let keeps = NodeInput {
-            press_keeps_focus: true,
-            ..Default::default()
-        };
-        d.set_options(a, keeps);
-        d.set_options(a, keeps);
-        assert_eq!(count(), 1);
+        let keeping = || d.state.borrow().keeping_focus.len();
         d.set_options(a, NodeInput::default());
-        assert_eq!(count(), 0);
-        let binding = d.register(b, keeps, |_| {});
-        d.set_options(a, keeps);
-        assert_eq!(count(), 2);
+        d.set_keeps_focus(a);
+        d.set_keeps_focus(a);
+        assert_eq!(keeping(), 1);
+        let binding = d.register(b, NodeInput::default(), |_| {});
+        d.set_keeps_focus(b);
+        assert_eq!(keeping(), 2);
         drop(binding);
-        assert_eq!(count(), 1);
+        assert_eq!(keeping(), 1);
         d.unregister(a);
-        assert_eq!(count(), 0);
+        assert_eq!(keeping(), 0);
         // With none, a press inside a focusable node focuses it.
         let _a = d.register(
             a,

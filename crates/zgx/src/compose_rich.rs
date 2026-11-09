@@ -129,8 +129,6 @@ pub struct TextSpan {
     pub(crate) underline_color: Option<crate::theme::Themed<Color>>,
     pub(crate) strikethrough: Option<crate::rich_text::Decoration>,
     pub(crate) padding: [f32; 2],
-    /// Room after the text, where it isn't `padding`'s across.
-    pub(crate) padding_end: Option<f32>,
     pub(crate) radius: f32,
     /// What few spans have (a hover style, an icon, a menu), apart: most
     /// carry none.
@@ -144,6 +142,9 @@ pub(crate) struct SpanExtras {
     pub menu: Option<SpanMenu>,
     /// Not underlined, though a link (`TextSpan::no_underline`).
     pub plain: bool,
+    /// Room after the text, where it isn't `padding`'s across
+    /// (`TextSpan::padding_end`).
+    pub padding_end: Option<f32>,
 }
 /// How a link span looks under the pointer (`TextSpan::hover`): CSS's
 /// `a:hover { text-decoration: underline }`.
@@ -166,7 +167,6 @@ pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {
         underline_color: None,
         strikethrough: None,
         padding: [0.; 2],
-        padding_end: None,
         radius: 0.,
         extras: None,
     }
@@ -197,7 +197,7 @@ impl TextSpan {
     /// the room before it alone): a chip whose icon sits close to its
     /// edge, its name with more room after it.
     pub fn padding_end(mut self, end: f32) -> Self {
-        self.padding_end = Some(end.max(0.));
+        self.extras.get_or_insert_default().padding_end = Some(end.max(0.));
         self
     }
     /// The span background's corner radius.

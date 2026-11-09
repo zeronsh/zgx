@@ -506,8 +506,6 @@ pub(crate) struct Rare {
     pub(crate) context_menu_below: Option<bool>,
     /// Whether the pointer stops at the view (`pointer_events`), followed.
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
-    /// A press on it leaves focus where it is (`focus_on_press(false)`).
-    press_keeps_focus: bool,
     scrollbar: Option<bool>,
     follow_end: Option<bool>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
@@ -552,8 +550,9 @@ pub(crate) struct Rare {
     line_numbers: Option<bool>,
     /// What a code editor adds to a text area (`View::highlighter`, …).
     code: Option<Box<CodeOptions>>,
-    /// `WINDOW_DRAG` (`View::window_drag`), `HOLLOW` (`View::hollow`) and an
-    /// editor's `AUTOCORRECT` and `SMART_PUNCTUATION`: rare, tested together
+    /// `WINDOW_DRAG` (`View::window_drag`), `HOLLOW` (`View::hollow`),
+    /// `KEEPS_FOCUS` (`View::focus_on_press`) and an editor's `AUTOCORRECT`
+    /// and `SMART_PUNCTUATION`: rare, tested together
     /// as the element mounts.
     mount_flags: u8,
     /// `View::selectable`.
@@ -634,9 +633,6 @@ impl Rare {
         }
         if self.pointer_events.is_some() {
             inner.pointer_events = self.pointer_events;
-        }
-        if self.press_keeps_focus {
-            inner.press_keeps_focus = true;
         }
         if self.read_only.is_some() {
             inner.read_only = self.read_only;
@@ -1227,7 +1223,7 @@ impl View {
     /// clicks still come. A list hanging from a field: its rows and tabs
     /// take clicks, the field keeping the keys and its caret.
     pub fn focus_on_press(mut self, moves: bool) -> Self {
-        self.rare_mut().press_keeps_focus = !moves;
+        self.set_mount_flag(KEEPS_FOCUS, !moves);
         self
     }
     /// A box laid out around content that may be put away: while nothing
@@ -4635,11 +4631,17 @@ fn paragraph_effect<const LOCATING: bool>(
             }
             let link = span.action.is_some() || span.href.is_some();
             // Most spans have none of these: one test for all three.
-            let (hover, icon, menu, plain) = match span.extras.take() {
-                None => (None, None, None, false),
+            let (hover, icon, menu, plain, padding_end) = match span.extras.take() {
+                None => (None, None, None, false, None),
                 Some(extras) => {
                     let extras = *extras;
-                    (extras.hover, extras.icon, extras.menu, extras.plain)
+                    (
+                        extras.hover,
+                        extras.icon,
+                        extras.menu,
+                        extras.plain,
+                        extras.padding_end,
+                    )
                 }
             };
             let hover = hover.as_ref();
@@ -4662,8 +4664,7 @@ fn paragraph_effect<const LOCATING: bool>(
             // An icon keeps its room before the text: a padded
             // placeholder run of its own. So does the room before the text
             // where it isn't the room after it (`padding_end`).
-            let end_room = span.padding_end.unwrap_or(span.padding[0]);
-            let apart = icon.is_some() || end_room != span.padding[0];
+            let apart = icon.is_some() || padding_end.is_some_and(|end| end != span.padding[0]);
             let icon_at = apart.then(|| {
                 let at = content.len();
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
@@ -4737,70 +4738,72 @@ fn paragraph_effect<const LOCATING: bool>(
             // room takes the padding before, a placeholder after the
             // text the padding after.
             let lead = if apart { span.padding[0] } else { 0. };
-            // (No icon, the room before alone: a placeholder that wide.)
-            if let (Some(range), true) = (icon_at.clone(), icon.is_none()) {
-                runs.push(crate::rich_text::TextRun {
-                    background: span.background,
-                    underline: None,
-                    strikethrough: None,
-                    padding: [lead / 2., span.padding[1]],
-                    radius: span.radius,
-                    range,
-                    font: font.clone(),
-                    font_size,
-                    color,
-                });
-            }
-            if let (Some(range), Some(icon)) = (icon_at, icon) {
-                // (A well takes its room round the icon too.)
-                let pad = if icon.bg.is_some() { icon.pad } else { 0. };
-                runs.push(crate::rich_text::TextRun {
-                    background: span.background,
-                    underline: None,
-                    strikethrough: None,
-                    padding: [
-                        (lead + icon.size + 2. * pad + icon.gap) / 2.,
-                        span.padding[1],
-                    ],
-                    radius: span.radius,
-                    range: range.clone(),
-                    font: font.clone(),
-                    font_size,
-                    color,
-                });
-                icons.push(crate::compose_rich::InlineIcon {
-                    range,
-                    svg: match icon.tint {
-                        Some(crate::theme::Themed::Value(tint)) => {
-                            std::sync::Arc::new(icon.svg.tinted(tint))
-                        }
-                        Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
-                            icon.svg.tinted(
-                                theme
-                                    .get(token)
-                                    .color()
-                                    .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
-                            ),
-                        ),
-                        None if icon.svg.follows_text_color() => {
-                            std::sync::Arc::new(icon.svg.tinted(color))
-                        }
-                        None => icon.svg,
-                    },
-                    size: icon.size,
-                    inset: lead,
-                    well: icon.bg.and_then(|bg| {
-                        let color = match bg {
-                            crate::theme::Themed::Value(color) => Some(color),
-                            crate::theme::Themed::Token(token) => theme.get(token).color(),
-                        }?;
-                        Some(crate::compose_rich::IconWell {
-                            color,
-                            radius: icon.radius,
-                            pad,
-                        })
+            if let Some(range) = icon_at {
+                match icon {
+                    // (No icon, the room before alone: a placeholder that wide.)
+                    None => runs.push(crate::rich_text::TextRun {
+                        background: span.background,
+                        underline: None,
+                        strikethrough: None,
+                        padding: [lead / 2., span.padding[1]],
+                        radius: span.radius,
+                        range,
+                        font: font.clone(),
+                        font_size,
+                        color,
                     }),
-                });
+                    Some(icon) => {
+                        // (A well takes its room round the icon too.)
+                        let pad = if icon.bg.is_some() { icon.pad } else { 0. };
+                        runs.push(crate::rich_text::TextRun {
+                            background: span.background,
+                            underline: None,
+                            strikethrough: None,
+                            padding: [
+                                (lead + icon.size + 2. * pad + icon.gap) / 2.,
+                                span.padding[1],
+                            ],
+                            radius: span.radius,
+                            range: range.clone(),
+                            font: font.clone(),
+                            font_size,
+                            color,
+                        });
+                        icons.push(crate::compose_rich::InlineIcon {
+                            range,
+                            svg: match icon.tint {
+                                Some(crate::theme::Themed::Value(tint)) => {
+                                    std::sync::Arc::new(icon.svg.tinted(tint))
+                                }
+                                Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                                    icon.svg.tinted(
+                                        theme
+                                            .get(token)
+                                            .color()
+                                            .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                                    ),
+                                ),
+                                None if icon.svg.follows_text_color() => {
+                                    std::sync::Arc::new(icon.svg.tinted(color))
+                                }
+                                None => icon.svg,
+                            },
+                            size: icon.size,
+                            inset: lead,
+                            well: icon.bg.and_then(|bg| {
+                                let color = match bg {
+                                    crate::theme::Themed::Value(color) => Some(color),
+                                    crate::theme::Themed::Token(token) => theme.get(token).color(),
+                                }?;
+                                Some(crate::compose_rich::IconWell {
+                                    color,
+                                    radius: icon.radius,
+                                    pad,
+                                })
+                            }),
+                        });
+                    }
+                }
             }
             let text_end = content.len();
             runs.push(crate::rich_text::TextRun {
@@ -4833,6 +4836,7 @@ fn paragraph_effect<const LOCATING: bool>(
                 color,
             });
             // The room after the text: a placeholder of its own.
+            let end_room = padding_end.unwrap_or(span.padding[0]);
             if apart && end_room > 0. {
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
                 runs.push(crate::rich_text::TextRun {
@@ -5082,7 +5086,6 @@ struct Opened {
     conditional: Vec<RegionBuilder>,
     row_text: Option<crate::selection::RowText>,
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
-    press_keeps_focus: bool,
     accessible_label: Option<String>,
     accessibility: Option<Box<Accessibility>>,
     mounted: Vec<Box<dyn FnOnce(NodeHandle)>>,
@@ -6049,7 +6052,6 @@ fn open_element(
             .unwrap_or_default(),
         row_text: rare.as_deref_mut().and_then(|r| r.row_text.take()),
         pointer_events: rare.as_deref_mut().and_then(|r| r.pointer_events.take()),
-        press_keeps_focus: rare.as_deref().is_some_and(|r| r.press_keeps_focus),
         accessible_label: rare.as_deref_mut().and_then(|r| r.accessible_label.take()),
         accessibility: rare.and_then(|r| r.accessibility.take()),
         mounted: view.mounted,
@@ -6123,7 +6125,6 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
         conditional,
         mut row_text,
         pointer_events,
-        press_keeps_focus,
         accessible_label,
         accessibility,
         mounted,
@@ -6185,8 +6186,7 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
     }
     let mut options = ui.input.options(root).unwrap_or_default();
     options.focusable = focusable;
-    options.press_keeps_focus |= press_keeps_focus;
-    if focusable_set || press_keeps_focus || ui.input.options(root).is_some() {
+    if focusable_set || ui.input.options(root).is_some() {
         ui.input.set_options(root, options);
     }
     if let Some(mut enabled) = pointer_events {
@@ -6253,8 +6253,11 @@ const SMART_PUNCTUATION: u8 = 8;
 /// `Rare::mount_flags`: its descendants' container queries read it
 /// (`View::container`).
 const CONTAINER: u8 = 16;
-/// `View::window_drag`, `View::hollow`, `View::container`, and an editor's
-/// `autocorrect` and `smart_punctuation`, rare: apart from the element's
+/// `Rare::mount_flags`: a press on it leaves focus where it is
+/// (`View::focus_on_press`).
+const KEEPS_FOCUS: u8 = 32;
+/// `View::window_drag`, `View::hollow`, `View::focus_on_press`,
+/// `View::container`, and an editor's `autocorrect` and `smart_punctuation`, rare: apart from the element's
 /// common path.
 #[cold]
 #[inline(never)]
@@ -6294,6 +6297,11 @@ fn mount_flagged(
         ui.input
             .set_options(root, ui.input.options(root).unwrap_or_default());
         ui.input.set_hollow(root);
+    }
+    if flags & KEEPS_FOCUS != 0 {
+        ui.input
+            .set_options(root, ui.input.options(root).unwrap_or_default());
+        ui.input.set_keeps_focus(root);
     }
 }
 /// `View::window_drag`: a primary press on `region`, or on a descendant
