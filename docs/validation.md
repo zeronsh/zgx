@@ -1345,3 +1345,28 @@ the display's period from the spacing of its display link's output times
 rate, intermittently, as a window started. The app is launched as a direct
 child from a temporary directory and sends no input. Passed on macOS 26 (M5,
 120 Hz), 2026-10-25: 113.7, 117.2 and 116.7 fps.
+
+## Popups and a window at the back
+
+A popup wanted while the app is at the back doesn't show, and showing one raises
+no window. `popup_hover` (zgx-desktop's example) has a tooltip, a hover card, a
+row whose hover state opens a menu and submenu, and a row showing a box in the
+window; each probe hovers it with the real pointer, another app's window in
+front. Hovering is heard, opens nothing, and focuses and raises nothing; what is
+wanted shows as the app comes forward; what is open closes as it goes back. In a
+window of the app that isn't active, with its other window in front, a tooltip
+shows and raises nothing.
+
+- Linux, in `scripts/linux_smokes.py` as `popup-hover`
+  (`scripts/popup_hover_smoke.py`): X11 under Openbox, and sway. On Wayland winit
+  hears focus through the seat's keyboard: a seat without one never says the app
+  went to the back, and the compositor alone keeps popups behind what is in front.
+- Windows, by hand on an unlocked console desktop:
+  `python scripts/windows_popup_hover_probe.py PATH/TO/popup_hover.exe`.
+- macOS, by hand: `scripts/macos_popup_hover` (`ref`, AppKit's own windows for
+  the same cases, and `drive`). It moves the real pointer, so it wants nobody at
+  the machine: `ZGX_HOVER_MIN_IDLE` minutes idle before it starts, and it stops
+  if a person's input follows; before each posted event, what is frontmost at the
+  point, of any layer, must be the target's. `drive <dir> <popup_hover> act` also
+  moves, resizes, miniaturizes, full-screens and closes the window with a popup
+  open, or changes its Space.
