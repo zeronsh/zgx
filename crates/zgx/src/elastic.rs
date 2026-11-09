@@ -707,11 +707,12 @@ impl ScrollDriver {
     }
 }
 
-/// The innermost scroll view at (`x`, `y`) that has room to scroll.
-pub(crate) fn driver_at(ui: &Ui, x: f32, y: f32) -> Option<ScrollDriver> {
+/// The innermost scroll view at (`x`, `y`) that has room to scroll, across
+/// (`Some(true)`), down (`Some(false)`) or either way (`None`).
+pub(crate) fn driver_at(ui: &Ui, x: f32, y: f32, along: Option<bool>) -> Option<ScrollDriver> {
     let scene = ui.scene.borrow();
     let state = ui.elastic_state().borrow();
-    driver_in(&scene, &state, x, y)
+    driver_in(&scene, &state, x, y, along)
 }
 
 pub(crate) fn driver_in(
@@ -719,8 +720,10 @@ pub(crate) fn driver_in(
     state: &State,
     x: f32,
     y: f32,
+    along: Option<bool>,
 ) -> Option<ScrollDriver> {
     let hit = scene.hit_test(x, y)?;
+    let axis = |view: &Rc<Elastic>| along.is_none_or(|horizontal| view.horizontal == horizontal);
     let around = || {
         std::iter::once(hit)
             .chain(scene.ancestors(hit))
@@ -731,12 +734,13 @@ pub(crate) fn driver_in(
                     .find(|(root, _)| *root == node)
                     .and_then(|(_, view)| view.upgrade())
             })
+            .filter(axis)
     };
     around()
         .find(|view| !view.fits())
         // A list shorter than its box still gives under a finger, on iOS.
         .or_else(|| {
-            if cfg!(target_os = "ios") {
+            if cfg!(target_os = "ios") && along != Some(true) {
                 around().find(|view| !view.horizontal)
             } else {
                 None

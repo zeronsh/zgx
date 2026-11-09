@@ -3012,20 +3012,32 @@ impl Ui {
     /// The innermost scroll view at (`x`, `y`) with room to scroll, for a
     /// platform's own scroller to drive.
     pub fn scroll_driver_at(&self, x: f32, y: f32) -> Option<crate::elastic::ScrollDriver> {
-        crate::elastic::driver_at(self, x, y)
+        crate::elastic::driver_at(self, x, y, None)
+    }
+    /// The innermost scroll view at (`x`, `y`) with room to scroll across
+    /// (`horizontal`) or down: the one UIKit's nested scroll views give a
+    /// finger that moves that way first.
+    pub fn scroll_driver_along(
+        &self,
+        x: f32,
+        y: f32,
+        horizontal: bool,
+    ) -> Option<crate::elastic::ScrollDriver> {
+        crate::elastic::driver_at(self, x, y, Some(horizontal))
     }
     /// What finds the innermost scroll view with room to scroll at a point,
-    /// for a platform's own scroller to drive.
+    /// across (`Some(true)`), down (`Some(false)`) or either way, for a
+    /// platform's own scroller to drive.
     pub fn scroll_driver_finder(
         &self,
-    ) -> impl Fn(f32, f32) -> Option<crate::elastic::ScrollDriver> + use<> {
+    ) -> impl Fn(f32, f32, Option<bool>) -> Option<crate::elastic::ScrollDriver> + use<> {
         let storage = Rc::downgrade(&self.storage);
         let scene = Rc::downgrade(&self.scene);
-        move |x, y| {
+        move |x, y, along| {
             let (storage, scene) = (storage.upgrade()?, scene.upgrade()?);
             let scene = scene.try_borrow().ok()?;
             let state = storage.elastic.try_borrow().ok()?;
-            crate::elastic::driver_in(&scene, &state, x, y)
+            crate::elastic::driver_in(&scene, &state, x, y, along)
         }
     }
     /// What finds the tallest scroll view with room to scroll, for a

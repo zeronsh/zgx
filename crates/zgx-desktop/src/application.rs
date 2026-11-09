@@ -5328,7 +5328,7 @@ impl Host {
                     && self.touch.idle()
                     && let Some(scroller) = &self.native_scroll
                 {
-                    scroller.finger_down(self.context.ui.scroll_driver_at(p.x, p.y), (p.x, p.y));
+                    scroller.finger_down((p.x, p.y));
                     self.touch.set_press_delay(scroller.tracked_axes());
                 }
                 if touch.phase == winit::event::TouchPhase::Started && self.touch.idle() {

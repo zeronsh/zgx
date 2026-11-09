@@ -52,3 +52,31 @@ fn a_tap_on_the_status_bar_finds_the_main_view() {
     let top = ui.main_scroll_driver()().expect("a view with room");
     assert!(top.same(&ui.scroll_driver_at(50., 50.).unwrap()));
 }
+
+/// A row that scrolls across, inside a page that scrolls down, as UIKit's
+/// nested scroll views measured in a reference app: a finger that first
+/// moves across past the slop scrolls the row, down the page.
+#[test]
+fn nested_views_give_a_finger_to_the_one_scrolling_its_way() {
+    let mut ui = Ui::new(100., 100.);
+    let (page, row) = (ui.signal(0.), ui.signal(0.));
+    ui.mount(
+        scroll(page).w(100.).h(100.).child(
+            div()
+                .w(100.)
+                .h(1000.)
+                .child(scroll_x(row).w(100.).h(40.).child(div().w(400.).h(40.))),
+        ),
+    );
+    ui.prepare_frame();
+    let across = ui.scroll_driver_along(50., 20., true).expect("the row");
+    let down = ui.scroll_driver_along(50., 20., false).expect("the page");
+    assert!(across.metrics().unwrap().horizontal);
+    assert!(!down.metrics().unwrap().horizontal);
+    assert!(!across.same(&down));
+    // Either way: the innermost, the row.
+    assert!(ui.scroll_driver_at(50., 20.).unwrap().same(&across));
+    // Below the row only the page scrolls, and nothing across.
+    assert!(ui.scroll_driver_along(50., 70., false).unwrap().same(&down));
+    assert!(ui.scroll_driver_along(50., 70., true).is_none());
+}
