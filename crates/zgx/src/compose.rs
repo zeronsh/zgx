@@ -53,6 +53,10 @@ impl TaskToken {
             check: finished,
         }))
     }
+    /// Whether its task has finished.
+    pub fn finished(&self) -> bool {
+        self.0.finished()
+    }
 }
 /// Provider bridging components to a native or headless executor.
 #[derive(Clone)]
@@ -2414,7 +2418,9 @@ pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
 pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
-pub use crate::compose_rich::{RichTextView, SpanHover, SpanIcon, TextSpan, rich_text, text_span};
+pub use crate::compose_rich::{
+    RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now, rich_text, text_span,
+};
 pub use crate::compose_tooltip::{Tooltip, TooltipTiming, set_tooltip_timing};
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
@@ -4805,6 +4811,7 @@ fn paragraph_effect<const LOCATING: bool>(
     weak: crate::widgets::WeakUi,
     content_state: Signal<crate::compose_rich::Content>,
     locating: Option<std::rc::Rc<std::cell::RefCell<Vec<crate::compose_rich::Run>>>>,
+    fading: Fading,
 ) -> impl FnMut() + 'static {
     move || {
         let base = typography.get();
@@ -4816,6 +4823,8 @@ fn paragraph_effect<const LOCATING: bool>(
         let mut links = Vec::new();
         let mut icons = Vec::new();
         let mut spanned = Vec::new();
+        // The runs fading in, by their place among `runs`.
+        let mut fades: Vec<(usize, crate::compose_rich::TextFade)> = Vec::new();
         for (index, mut span) in spans.into_iter().enumerate() {
             if span.text.is_empty() {
                 continue;
@@ -4825,8 +4834,8 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, menu, plain, room_after) = match span.extras.take() {
-                None => (None, None, None, false, -1.),
+            let (hover, icon, menu, plain, room_after, fade) = match span.extras.take() {
+                None => (None, None, None, false, -1., None),
                 Some(extras) => {
                     let extras = *extras;
                     let end = extras.padding_end.unwrap_or(span.padding[0]);
@@ -4837,6 +4846,7 @@ fn paragraph_effect<const LOCATING: bool>(
                         extras.menu,
                         extras.plain,
                         if apart { end } else { -1. },
+                        extras.fade,
                     )
                 }
             };
@@ -5000,6 +5010,9 @@ fn paragraph_effect<const LOCATING: bool>(
                 _ => {}
             }
             let text_end = content.len();
+            if let Some(fade) = fade {
+                fades.push((runs.len(), fade));
+            }
             runs.push(crate::rich_text::TextRun {
                 background: span.background,
                 underline: {
@@ -5051,11 +5064,16 @@ fn paragraph_effect<const LOCATING: bool>(
         let rich = crate::rich_text::RichText::new(content.as_str(), runs)
             .expect("normalized inline spans")
             .with_options(base.display);
+        // Runs fading in: drawn as they are now, then a frame at a time
+        // while they fade (`Fading`). Those done are their colour already.
+        let now = crate::compose_rich::fade_now();
+        fades.retain(|(_, fade)| fade.fading(now));
         // Recomputed but unchanged (its inputs animate for a sibling):
         // nothing to lay out, paint, describe or relabel.
         if content_state.with_untracked(|current| {
             *current.rich == rich && current.links == links && current.icons == icons
         }) {
+            fading.set(fades);
             return;
         }
         let Some(ui) = weak.upgrade() else {
@@ -5072,8 +5090,10 @@ fn paragraph_effect<const LOCATING: bool>(
             scene.set_style(paragraph, style);
             // The language each run's text is in, where any node says.
             let shown = scene.rich_with_languages(paragraph, rich.clone());
+            let shown = fading.faded(&shown, &fades, now);
             scene.set_leaf_kind(paragraph, NodeKind::RichText { text: shown });
         }
+        fading.set(fades);
         // Icons' placeholders aren't text to read out.
         let content = if icons.is_empty() {
             content
@@ -5087,6 +5107,117 @@ fn paragraph_effect<const LOCATING: bool>(
         });
         update_button_labels(&ui, root);
     }
+}
+
+/// A paragraph's runs fading in (`TextSpan::fade_in`): which, the
+/// paragraph as drawn without them, and what wakes the frame loop that
+/// recolours them (`mount_rich`). Each frame while they fade, the loop
+/// writes the paragraph again with its runs' colours as they are then:
+/// alike in shape, so nothing lays out and the renderer recolours glyphs.
+/// No script runs for it, and none of the paragraph's spans are made again.
+#[derive(Clone)]
+pub(crate) struct Fading(Rc<FadingInner>);
+struct FadingInner {
+    runs: RefCell<Vec<(usize, crate::compose_rich::TextFade)>>,
+    base: RefCell<Option<std::sync::Arc<crate::rich_text::RichText>>>,
+    wake: Signal<u64>,
+}
+impl Fading {
+    fn new(wake: Signal<u64>) -> Self {
+        Self(Rc::new(FadingInner {
+            runs: Default::default(),
+            base: Default::default(),
+            wake,
+        }))
+    }
+    /// The runs fading now; any wakes the loop.
+    fn set(&self, fades: Vec<(usize, crate::compose_rich::TextFade)>) {
+        let any = !fades.is_empty();
+        *self.0.runs.borrow_mut() = fades;
+        if any {
+            self.0.wake.update(|n| *n = n.wrapping_add(1));
+        }
+    }
+    /// `rich`, the paragraph drawn without its fades, as it shows at `now`.
+    fn faded(
+        &self,
+        rich: &std::sync::Arc<crate::rich_text::RichText>,
+        fades: &[(usize, crate::compose_rich::TextFade)],
+        now: f64,
+    ) -> std::sync::Arc<crate::rich_text::RichText> {
+        *self.0.base.borrow_mut() = Some(rich.clone());
+        if fades.is_empty() {
+            return rich.clone();
+        }
+        std::sync::Arc::new(rich.recoloured(
+            |i, color| match fades.iter().find(|(at, _)| *at == i) {
+                Some((_, fade)) => {
+                    let alpha = (color.3 as f32 * fade.at(now)).round().clamp(0., 255.);
+                    crate::scene::Color(color.0, color.1, color.2, alpha as u8)
+                }
+                None => color,
+            },
+        ))
+    }
+}
+
+/// The frame loop of a paragraph's fading runs (`Fading`): woken as runs
+/// start fading, a frame at a time until none does, then drawn as they
+/// end. Without a task runner or a frame clock (a host that draws no
+/// frames), fades show as they were when last built.
+fn mount_fades(
+    ui: &mut Ui,
+    root: NodeId,
+    paragraph: NodeId,
+    fading: &Fading,
+    environment: &Environment,
+) {
+    let (Some(runner), Some(frames)) = (
+        environment.services.get::<TaskRunner>(),
+        environment.services.get::<crate::frame::FrameClock>(),
+    ) else {
+        return;
+    };
+    let frames = (*frames).clone();
+    let task: Rc<RefCell<Option<TaskToken>>> = Default::default();
+    ui.retain(root, task.clone());
+    let weak = ui.downgrade();
+    let fading = fading.clone();
+    ui.bind(root, move || {
+        fading.0.wake.get();
+        if fading.0.runs.borrow().is_empty()
+            || task.borrow().as_ref().is_some_and(|t| !t.finished())
+        {
+            return;
+        }
+        let (frames, fading, weak) = (frames.clone(), fading.clone(), weak.clone());
+        *task.borrow_mut() = Some(runner.spawn(Box::pin(async move {
+            loop {
+                frames.next().await;
+                let now = crate::compose_rich::fade_now();
+                let fades = fading.0.runs.borrow().clone();
+                let Some(base) = fading.0.base.borrow().clone() else {
+                    return;
+                };
+                let Some(ui) = weak.upgrade() else {
+                    return;
+                };
+                let mut scene = ui.scene.borrow_mut();
+                if !scene.contains(paragraph) {
+                    return;
+                }
+                let shown = fading.faded(&base, &fades, now);
+                scene.set_leaf_kind(paragraph, NodeKind::RichText { text: shown });
+                drop(scene);
+                let left: Vec<_> = fades.into_iter().filter(|(_, f)| f.fading(now)).collect();
+                let done = left.is_empty();
+                *fading.0.runs.borrow_mut() = left;
+                if done {
+                    return;
+                }
+            }
+        })));
+    });
 }
 
 /// A paragraph's content before its first runs (`mount_rich`): one made
@@ -5152,6 +5283,8 @@ fn mount_rich(
     let weak = ui.downgrade();
     let typography = environment.typography.clone();
     let theme = environment.theme.clone();
+    let fading = Fading::new(ui.signal(0_u64));
+    mount_fades(ui, root, paragraph, &fading, environment);
     match locating {
         Some(kept) => ui.bind(
             root,
@@ -5165,6 +5298,7 @@ fn mount_rich(
                 weak,
                 content_state,
                 Some(kept),
+                fading,
             ),
         ),
         None => ui.bind(
@@ -5179,6 +5313,7 @@ fn mount_rich(
                 weak,
                 content_state,
                 None,
+                fading,
             ),
         ),
     }

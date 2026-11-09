@@ -1455,6 +1455,9 @@ pub(crate) struct SpanRare {
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
+    /// `fade_in = { start = ui.now(), ms = 200, power = 1.6 }`: its text
+    /// fading in, drawn in Rust a frame at a time (`TextSpan::fade_in`).
+    pub fade: Option<zgx::compose::TextFade>,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -4853,6 +4856,25 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         bg: (!matches!(bg, Value::Nil)).then_some(bg),
                         radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
                         pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
+                    });
+                }
+                // `fade_in = { start = ui.now(), ms = 200, power = 1.6 }`:
+                // from clear at `start` to its colour `ms` later, easing out
+                // by `power` (2 if not given).
+                b"fade_in" => {
+                    let fade: Table = lua.unpack(given)?;
+                    let (Some(start), Some(ms)) = (
+                        fade.get::<Option<f64>>("start")?,
+                        fade.get::<Option<f32>>("ms")?,
+                    ) else {
+                        return Err(mlua::Error::runtime(
+                            "a span's fade_in takes `start` (ui.now()'s milliseconds) and `ms`",
+                        ));
+                    };
+                    rare_mut(&mut span).fade = Some(zgx::compose::TextFade {
+                        start,
+                        ms: ms.max(0.),
+                        power: fade.get::<Option<f32>>("power")?.unwrap_or(2.).max(0.01),
                     });
                 }
                 b"on_click" => span.click = Some(handler(given)?),
