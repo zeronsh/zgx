@@ -1,5 +1,7 @@
 # External surfaces: another program's frames as an element
 
+(For a plugin's code run in zgx's own process, sandboxed, see [WebAssembly apps](wasm-apps.md).)
+
 An external surface shows what another process draws, with GPU work of its own (a game, an emulator, a renderer on another wgpu), as an ordinary element: sized, rounded, clipped, faded, popovers over it. Its input is the program's: keys while it has focus, the pointer over it, and a pointer lock it asks for. Where the platform allows the frames never touch a CPU: the host allocates the buffers on its GPU, the program draws into them, the host samples them.
 
 ```rust

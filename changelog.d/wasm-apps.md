@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **WebAssembly apps** (zgx-wasm, zgx-script, zgx-run): `ui.app(id, { wasm = "app.wasm" })` runs a component (`wasm32-wasip2`, the `zgx:app/app` world) inside the app's process on a thread of its own, sandboxed (no files, network, environment or time of day unless the host grants them; memory, each call's time and GPU use capped), and `ui.surface` shows it with all its input, as it does a program. It draws with WebGPU on the window's own device, no copy, or presents CPU pixels; a trap, an exit or a call running too long ends its session alone. A plugin needs `Capability::Wasm` (or `Apps`) and its module in its own folder; `ScriptHost::vet_wasm` and `GuardKind::Wasm` decide what runs. `crates/zgx-wasm/guest` has a Rust SDK and sample guests; `examples/wasm_apps` shows them. See docs/wasm-apps.md.

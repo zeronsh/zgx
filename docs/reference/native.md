@@ -78,6 +78,13 @@ A terminal's colours come from the theme where it shows, through the tokens `$te
 
 A program another process draws, its frames shown in a node and its input forwarded to it: a game, an emulator, a renderer of its own. The program is a client of zgx's external surfaces (`zgx-surface`; see [External surfaces](../external-surfaces.md) for how one is written): on Linux its frames are Vulkan images on zgx's own GPU, no pixel copied by a CPU; elsewhere, and for a client that can't share its GPU's memory, shared memory. zgx-run has it (zgx-script's `apps` feature); without it `ui.app` raises.
 
+Or a WebAssembly app, run in the app's own process, sandboxed, drawing with WebGPU on the window's GPU device (`wasm`; see [WebAssembly apps](../wasm-apps.md) for the interface a component implements, its sandbox and how a plugin ships one). zgx-run has it (zgx-script's `wasm` feature). Scripts treat both alike:
+
+```luau
+local cube = ui.app("cube", { wasm = "cube.wasm", memory = 256, timeout = 2 })
+return ui.surface { app = cube, w = "100%", h = 400, rounded = 12 }
+```
+
 ```luau
 local game = ui.app("game", {
 	command = "horizon-client",
@@ -98,17 +105,20 @@ return ui.surface {
 | Option | Type | Default | |
 | --- | --- | --- | --- |
 | `app` (`surface`) | `App` | required | the session to show |
-| `command` | `string` | required to start | the program: a path, or a name looked up on `PATH`. No shell |
+| `command` | `string` | required to start a program | the program: a path, or a name looked up on `PATH`. No shell |
+| `wasm` | `string` | required to start a WebAssembly app | its component (`wasm32-wasip2`, the `zgx:app/app` world), from the script's folder; a plugin's inside its own folder. Not with `command`, `args`, `cwd`, `env` |
+| `memory` | `number` | `1024` | a WebAssembly app's most memory, in MiB (1 to 4096); past it, it fails |
+| `timeout` | `number` | `5` | seconds any call into a WebAssembly app may run (0.01 to 60); past it, it is interrupted and fails |
 | `args` | `{ string }` | none | its arguments |
 | `cwd` | `string` | the app's own | where it starts; `"~"` is home |
 | `env` | `{ [string]: string }` | none | added to the environment |
 | `on_exit` | `(code: number?) -> ()` | none | it exited, with its code (nil when a signal ended it) |
 
-An `App`'s `id`, `status` (`"starting"` until the program connects, `"running"`, `"exited"`, `"failed"`), `title` (what the program set), `pid`, `exit_code` and `error` (why it couldn't start) are tracked like state. `app:close()` ends it: the program is told to close and killed if it hasn't exited 1.5 s later. Sessions belong to the host, so a reload keeps the program running; `ui.app(id)` without options only looks one up (nil if none), and options given for a session that ended start it again. A script reaches only the sessions it started: a plugin's `"game"` is neither the app's nor another plugin's.
+An `App`'s `id`, `kind` (`"process"` or `"wasm"`), `status` (`"starting"` until the program connects or the component is compiled, `"running"`, `"exited"`, `"failed"`), `title` (what the program set), `pid` (nil for a WebAssembly app), `exit_code` and `error` (why it couldn't start; a WebAssembly app's trap or time limit) are tracked like state. `app:close()` ends it: the program is told to close and killed if it hasn't exited 1.5 s later. Sessions belong to the host, so a reload keeps the program running; `ui.app(id)` without options only looks one up (nil if none), and options given for a session that ended start it again. A script reaches only the sessions it started: a plugin's `"game"` is neither the app's nor another plugin's.
 
 The node is focusable: a press focuses it, and while it has focus its keys are the program's (by physical key, as the DOM's `KeyboardEvent.code`), Command or Control chords going on to the app's shortcuts too. The pointer over it, its buttons and the wheel are the program's. The program may lock the pointer just after a press (a game looking about): the node takes the lock as `el:lock_pointer()` does, its `on_pointer_lock(locked)` hears it, and Escape always lets it go. A new size reaches the program once it has held for 120 ms; meanwhile its last frame shows stretched.
 
-What may run is the host's to decide. A plugin needs the `apps` grant (`Capability::Apps`); the host's hook (`ScriptHost::vet_apps`) is given the whole spec asked for and returns what to start (a resolved path, pinned arguments, a filtered environment) or an error, which `ui.app` raises; the app's own VM asks its guard too (`GuardKind::App`). Each is asked again whenever a script reaches a running session: refused, the program is killed and the handles to it raise.
+What may run is the host's to decide. A plugin needs the `apps` grant (`Capability::Apps`); the host's hook (`ScriptHost::vet_apps`) is given the whole spec asked for and returns what to start (a resolved path, pinned arguments, a filtered environment) or an error, which `ui.app` raises; the app's own VM asks its guard too (`GuardKind::App`). Each is asked again whenever a script reaches a running session: refused, the program is killed and the handles to it raise. A WebAssembly app needs the `wasm` grant (`Capability::Wasm`, or `apps`), and goes to the host's `ScriptHost::vet_wasm`, which says its limits and what it may reach beyond its sandbox (a data folder, the time of day), and to the guard as `GuardKind::Wasm`, by the module's path.
 
 ## Command options
 
