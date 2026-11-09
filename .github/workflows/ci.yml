@@ -377,7 +377,8 @@ jobs:
           python3 scripts/perf/gate.py "$BASE" --stage head
           if [ -f "$ZGX_GATE_BIN_CACHE/built-from" ]; then echo "binaries=yes" >> "$GITHUB_OUTPUT"; fi
       # One chunk of a streamed Markdown reply costs the same at 800 sections
-      # as at 100, within 1.25x (scripts/perf/flat_chunks.py; by phase,
+      # as at 100, within 1.25x, in zgx's own instructions (malloc's and
+      # Luau's collector's move ±15% run to run: scripts/perf/flat_chunks.py; by phase,
       # crates/zgx-script/tests/md_chunk_flat.rs): a pull request that makes
       # it grow fails at the Gate step, as one the gate refuses does. The
       # step itself carries on, so a slow or broken one leaves the gate's
