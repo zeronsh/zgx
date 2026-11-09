@@ -12657,6 +12657,11 @@ impl Scene {
         if scale <= 0. {
             return Err("the scene has no pixel scale".into());
         }
+        // A texture's rows aren't whole points there: text snapping to pixels
+        // from another origin can land a pixel off what painting draws.
+        if scale.fract() != 0. {
+            return Err(format!("its scale {scale} is fractional"));
+        }
         for node in std::iter::once(id).chain(self.ancestors(id)) {
             if self.is_layer(node) {
                 return Err(format!("{} around it is a layer", name(node)));
