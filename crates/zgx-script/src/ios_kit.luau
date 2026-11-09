@@ -995,7 +995,7 @@ end
 -- and closes again, on the keyboard's own spring so it finishes as the keyboard
 -- does. It grows with its lines, to `max_lines`, then scrolls inside. `value` (a
 -- state), `placeholder`, `on_send` (the text; a send button comes when there is
--- any), `on_plus`, `bottom`, `ref` (its editor's).
+-- any), `on_plus`, `bottom`, `ref` (its editor's), `spellcheck` (on by default).
 function ios.composer(props)
 	local value = props.value
 	local focused = ui.use_state(false)
@@ -1119,6 +1119,8 @@ function ios.composer(props)
 					label = props.placeholder or "Message",
 					placeholder = props.placeholder or "Message",
 					ref = props.ref,
+					-- UITextField and UITextView check spelling unless told not to.
+					spellcheck = if props.spellcheck == nil then true else props.spellcheck,
 					wrap = true,
 					p = 0,
 					bg = "#00000000",

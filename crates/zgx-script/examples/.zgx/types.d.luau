@@ -22056,6 +22056,8 @@ export type IosKit = {
 		value: State<string>,
 		placeholder: string?,
 		max_lines: number?,
+		-- Check spelling as UIKit's text views do, by default.
+		spellcheck: boolean?,
 		bottom: number?,
 		on_send: ((text: string) -> ())?,
 		on_plus: (() -> ())?,

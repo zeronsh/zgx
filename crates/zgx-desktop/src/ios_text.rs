@@ -279,9 +279,9 @@ extern "C-unwind" fn marked_text_style(_: &AnyObject, _: Sel) -> *mut AnyObject 
 extern "C-unwind" fn set_marked_text_style(_: &AnyObject, _: Sel, _: *mut AnyObject) {}
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct NSRange {
-    location: usize,
-    length: usize,
+pub(crate) struct NSRange {
+    pub(crate) location: usize,
+    pub(crate) length: usize,
 }
 // SAFETY: Foundation's `NSRange`.
 unsafe impl objc2::Encode for NSRange {

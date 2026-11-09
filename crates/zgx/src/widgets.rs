@@ -6114,22 +6114,47 @@ impl Ui {
                     layout.selection_within(range.clone(), scroll.1, scroll.1 + inner_height)
                 })
                 .filter_map(|r| {
+                    #[cfg(not(target_os = "ios"))]
                     let y = mark_y(r, 2., 2., scroll.1, inner_height);
+                    #[cfg(target_os = "ios")]
+                    let y = mark_y(
+                        r,
+                        uikit_mark_above(r.height, size),
+                        2.,
+                        scroll.1,
+                        inner_height,
+                    );
                     (y >= 0. && y < inner_height).then_some((r.x - scroll.0, y, r.width))
                 })
                 .collect();
+            // Each dot its own mark, as tall as it's wide.
+            #[cfg(target_os = "ios")]
+            let (marks, mark_height) = {
+                let dot = uikit_dot_size(size);
+                let dots: Vec<_> = marks
+                    .into_iter()
+                    .flat_map(|(x, y, w)| uikit_dots(x, w, dot).map(move |x| (x, y, dot)))
+                    .collect();
+                (dots, dot)
+            };
+            #[cfg(not(target_os = "ios"))]
+            let mark_height = 2.;
             let mut spelled = spell_nodes.borrow_mut();
             while spelled.len() > marks.len() {
                 s.remove(spelled.pop().unwrap());
             }
             if !marks.is_empty() {
                 draw_hint.themed.set(draw_hint.themed.get() | THEMED_DANGER);
+                #[cfg(not(target_os = "ios"))]
                 let danger = theme.color_untracked(tok::DANGER);
+                // UIColor.systemRed, whatever the app's own danger is.
+                #[cfg(target_os = "ios")]
+                let danger = uikit_system_red(theme.theme_kind().is_dark());
                 while spelled.len() < marks.len() {
                     spelled.push(s.append(preedit_layer, spelling_mark(danger), Style::default()));
                 }
                 for (id, (x, y, w)) in spelled.iter().zip(marks) {
-                    s.set_style(*id, fixed(w, 2.));
+                    s.set_style(*id, fixed(w, mark_height));
                     s.set_transform(*id, Transform { x, y });
                     if matches!(s.kind(*id), NodeKind::Quad(q) if q.border_color != danger) {
                         s.set_kind(*id, spelling_mark(danger));
@@ -7686,7 +7711,55 @@ impl Ui {
         });
     }
 }
+/// A misspelled word's mark on iOS: one of UITextField's round dots, its
+/// radius past what its box holds so it's a circle at any size.
+#[cfg(target_os = "ios")]
+fn spelling_mark(color: Color) -> NodeKind {
+    NodeKind::Quad(crate::scene::QuadStyle {
+        fill: color,
+        border_color: color,
+        radius: 100.,
+        ..Default::default()
+    })
+}
+/// UITextField's spelling dot at a text `size`, across (READ by size in a
+/// reference app, iOS 26.5: these steps, not a formula).
+#[cfg(any(target_os = "ios", test))]
+fn uikit_dot_size(size: f32) -> f32 {
+    match size {
+        size if size < 23. => 3.,
+        size if size < 31. => 4.,
+        size if size < 38. => 5.,
+        _ => 6.,
+    }
+}
+/// The left edge of each of UITextField's dots under a word at `x`, `width`
+/// wide: as many whole dots as fit with a point between, centred (READ, 11
+/// words and sizes).
+#[cfg(any(target_os = "ios", test))]
+fn uikit_dots(x: f32, width: f32, dot: f32) -> impl Iterator<Item = f32> {
+    let pitch = dot + 1.;
+    let count = ((width + 1.) / pitch).floor().max(0.) as u32;
+    let first = x + (width - (count as f32 * pitch - 1.)) / 2.;
+    (0..count).map(move |at| first + at as f32 * pitch)
+}
+/// How far above the bottom of a line `height` tall a dot's top goes: at the
+/// system font's baseline, the line centred on its box (`IOS_SYSTEM_LINE`).
+#[cfg(target_os = "ios")]
+fn uikit_mark_above(height: f32, size: f32) -> f32 {
+    (height - size * (2444. / 2048.)) / 2. + size * (494. / 2048.)
+}
+/// `UIColor.systemRed` (READ, iOS 26.5).
+#[cfg(target_os = "ios")]
+fn uikit_system_red(dark: bool) -> Color {
+    if dark {
+        Color(0xff, 0x42, 0x45, 0xff)
+    } else {
+        Color(0xff, 0x38, 0x3c, 0xff)
+    }
+}
 /// A misspelled word's mark: a dotted line, as macOS draws one.
+#[cfg(not(target_os = "ios"))]
 fn spelling_mark(color: Color) -> NodeKind {
     NodeKind::Quad(crate::scene::QuadStyle {
         border_color: color,
@@ -7948,6 +8021,49 @@ fn input_draw_pending(node: NodeId, scene: &Rc<RefCell<Scene>>) -> bool {
     })
 }
 
+#[cfg(test)]
+mod uikit_spelling_dots {
+    use super::{uikit_dot_size, uikit_dots};
+
+    #[test]
+    fn dots_are_sized_and_laid_out_as_a_text_field_reads() {
+        for (size, dot) in [
+            (11., 3.),
+            (17., 3.),
+            (22., 3.),
+            (23., 4.),
+            (30., 4.),
+            (31., 5.),
+            (36., 5.),
+            (40., 6.),
+            (60., 6.),
+        ] {
+            assert_eq!(uikit_dot_size(size), dot, "{size}");
+        }
+        // Words' widths and how many dots UITextField gave them.
+        for (width, dot, count) in [
+            (24.47, 3., 6),
+            (32.66, 3., 8),
+            (32.33, 3., 8),
+            (54.77, 3., 13),
+            (72.87, 3., 18),
+            (99.83, 3., 25),
+            (37.84, 3., 9),
+            (43.66, 3., 11),
+            (68.01, 3., 17),
+            (85.87, 4., 17),
+            (103.69, 5., 17),
+        ] {
+            let dots: Vec<f32> = uikit_dots(10., width, dot).collect();
+            assert_eq!(dots.len(), count, "{width} at {dot}");
+            // Centred under the word.
+            let left = dots[0] - 10.;
+            let right = 10. + width - (dots[count - 1] + dot);
+            assert!((left - right).abs() < 0.001, "{width}: {left} and {right}");
+        }
+        assert_eq!(uikit_dots(10., 1., 3.).count(), 0);
+    }
+}
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
