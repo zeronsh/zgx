@@ -355,11 +355,11 @@ impl UserData for WebUd {
 }
 /// JSON as script data (objects as maps, arrays as lists).
 pub(crate) fn json_value(json: &str) -> Value {
-    serde_json::from_str(json)
-        .map(from_json)
-        .unwrap_or_else(|_| Value::Str(json.into()))
+    crate::json::parse(json).unwrap_or_else(|_| Value::Str(json.into()))
 }
-/// Parsed JSON as a value.
+/// Parsed JSON as a value, through serde_json's tree: the old path, kept as
+/// the reader's test oracle.
+#[cfg(test)]
 pub(crate) fn from_json(v: serde_json::Value) -> Value {
     match v {
         serde_json::Value::Null => Value::Nil,
