@@ -1276,6 +1276,8 @@ fn filtered(
             shown(copy, &low)
         },
     )
+    // A box of its own around the node, as it has always been.
+    .not_contents()
 }
 /// The places of `ids` in the order `value` lists them: those it names
 /// first, the rest after them as they were (an order filter moves

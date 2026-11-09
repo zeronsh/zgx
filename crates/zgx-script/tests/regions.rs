@@ -619,3 +619,33 @@ return ui.overlay {{
         assert_eq!(h.error(), None);
     }
 }
+
+/// A list as tall as its parent builds its rows through what lays out in its
+/// place (`show`, `switch`, `presence`, a presence's box) as it does directly;
+/// `each` is a box of its own, as its rows lay out in, so given a height.
+#[test]
+fn a_list_as_tall_as_its_parent_builds_its_rows_through_a_region() {
+    let list = r#"ui.list { count = 100, height = 40, h_full = true, w_full = true, row = function(i)
+        return ui.div { id = "row-" .. tostring(i), h = 40 }
+    end }"#;
+    for region in [
+        list.to_string(),
+        format!("ui.show(true, {list})"),
+        format!("ui.switch(tab, {{ a = {list} }})"),
+        format!("ui.presence(tab, function() return {list} end)"),
+        format!(
+            "ui.presence(tab, function() return {list} end, {{ w_full = true, h_full = true }})"
+        ),
+        format!(
+            "ui.each(items, function() return {list} end, {{ key = function(k) return k end, h_full = true, w_full = true }})"
+        ),
+    ] {
+        let mut h = Harness::inline(&format!(
+            r#"local tab = ui.state("tab", "a")
+            local items = ui.state("items", {{ "one" }})
+            return ui.column {{ w_full = true, h_full = true, {region} }}"#
+        ));
+        h.run_frames(2);
+        assert!(h.find("row-1").is_some(), "{region}");
+    }
+}
