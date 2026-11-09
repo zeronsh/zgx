@@ -8345,6 +8345,15 @@ fn context_menu_items(
     }
 }
 
+/// `lower_rich`'s span fading in, out of its per-span closure: few spans fade.
+#[cold]
+#[inline(never)]
+fn span_fade_in(
+    span: zgx::compose::TextSpan,
+    fade: zgx::compose::TextFade,
+) -> zgx::compose::TextSpan {
+    span.fade_in(fade)
+}
 fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     /// A span with its text and handler owned by the closure.
     struct OwnedSpan {
@@ -8550,7 +8559,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                             .context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
                     }
                     if let Some(fade) = rare.fade {
-                        out = out.fade_in(fade);
+                        out = span_fade_in(out, fade);
                     }
                 }
                 if let Some(href) = &span.href {
