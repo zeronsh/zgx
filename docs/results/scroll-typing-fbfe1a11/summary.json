@@ -1,0 +1,119 @@
+{
+  "engine_pin": "fbfe1a111c408627066910d25b0592b19bcf6e17",
+  "binary_sha256": "fdf398c1da02397288db2be426500519d471d0d6f5810159fcb37815ce638ae3",
+  "width_pt": 1114,
+  "height_pt": 685,
+  "hz": 120,
+  "scale": 2,
+  "model_catalog": "settled",
+  "trials": [
+    {
+      "role": "timer-tiles",
+      "trial": 1,
+      "samples": 20,
+      "catalog_complete": true,
+      "catalog_complete_after": true,
+      "latency_ms": {
+        "p50": 28.317332983016968,
+        "p99": 49.74712499976158,
+        "max": 49.74712499976158
+      }
+    },
+    {
+      "role": "view-tiles",
+      "trial": 1,
+      "samples": 20,
+      "catalog_complete": true,
+      "catalog_complete_after": true,
+      "latency_ms": {
+        "p50": 33.6788330078125,
+        "p99": 46.87862500548363,
+        "max": 46.87862500548363
+      }
+    },
+    {
+      "role": "prefetched-hybrid",
+      "trial": 1,
+      "samples": 20,
+      "catalog_complete": true,
+      "catalog_complete_after": true,
+      "latency_ms": {
+        "p50": 34.24804198741913,
+        "p99": 49.644749969244,
+        "max": 49.644749969244
+      }
+    },
+    {
+      "role": "timer-tiles",
+      "trial": 2,
+      "samples": 20,
+      "catalog_complete": true,
+      "catalog_complete_after": true,
+      "latency_ms": {
+        "p50": 28.60887497663498,
+        "p99": 42.99520900845528,
+        "max": 42.99520900845528
+      }
+    },
+    {
+      "role": "view-tiles",
+      "trial": 2,
+      "samples": 20,
+      "catalog_complete": true,
+      "catalog_complete_after": true,
+      "latency_ms": {
+        "p50": 34.220332980155945,
+        "p99": 48.99412500858307,
+        "max": 48.99412500858307
+      }
+    },
+    {
+      "role": "prefetched-hybrid",
+      "trial": 2,
+      "samples": 20,
+      "catalog_complete": true,
+      "catalog_complete_after": true,
+      "latency_ms": {
+        "p50": 33.81479200720787,
+        "p99": 50.070624977350235,
+        "max": 50.070624977350235
+      }
+    },
+    {
+      "role": "timer-tiles",
+      "trial": 3,
+      "samples": 20,
+      "catalog_complete": true,
+      "catalog_complete_after": true,
+      "latency_ms": {
+        "p50": 30.14445799589157,
+        "p99": 44.15229198336601,
+        "max": 44.15229198336601
+      }
+    },
+    {
+      "role": "view-tiles",
+      "trial": 3,
+      "samples": 20,
+      "catalog_complete": true,
+      "catalog_complete_after": true,
+      "latency_ms": {
+        "p50": 35.20820799469948,
+        "p99": 50.97900000214577,
+        "max": 50.97900000214577
+      }
+    },
+    {
+      "role": "prefetched-hybrid",
+      "trial": 3,
+      "samples": 20,
+      "catalog_complete": true,
+      "catalog_complete_after": true,
+      "latency_ms": {
+        "p50": 33.545166015625,
+        "p99": 44.60358300805092,
+        "max": 44.60358300805092
+      }
+    }
+  ]
+}
