@@ -67,6 +67,7 @@ impl Shaping {
                 start_run,
                 end_run,
                 span_rtl,
+                true,
             ),
             #[cfg(feature = "shape-run-cache")]
             Self::Advanced => shape_run_cached(
@@ -125,6 +126,10 @@ pub struct ShapeBuffer {
     /// line rather than for every word.
     #[cfg(feature = "shape-run-cache")]
     line_spans: Vec<(Range<usize>, u32)>,
+    /// zgx patch: whether that list sets padding (`pad_cached`), found
+    /// with its spans.
+    #[cfg(feature = "shape-run-cache")]
+    line_padded: bool,
 
     /// zgx patch: a visual line's ranges in display order (`reorder`).
     order: Vec<Range<usize>>,
@@ -550,7 +555,10 @@ fn emoji_presentation_missing(line: &str, glyphs: &[ShapeGlyph], missing: &mut V
 
 /// zgx patch: out of line, so the word cache's path through `Shaping::run`
 /// keeps its code whatever shaping a new run adds.
+/// `spans_padded`: each span's padding added (`pad_spans`); else left
+/// for the caller (`shape_run_cached`: it depends on where the run is).
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 fn shape_run(
     glyphs: &mut Vec<ShapeGlyph>,
     font_system: &mut FontSystem,
@@ -559,6 +567,7 @@ fn shape_run(
     start_run: usize,
     end_run: usize,
     span_rtl: bool,
+    spans_padded: bool,
 ) {
     // Re-use the previous script buffer if possible.
     let mut scripts = {
@@ -759,7 +768,7 @@ fn shape_run(
     // cluster its cells: out of line, for a run with padding only. Most text
     // has none: then no glyph's attributes are looked up again.
     if attrs_list.has_padding() {
-        pad(&mut glyphs[glyph_start..], line, attrs_list, &attrs);
+        pad(&mut glyphs[glyph_start..], line, attrs_list, &attrs, spans_padded);
     }
 
     /*
@@ -778,13 +787,30 @@ fn shape_run(
 /// on a grid of cells (a terminal's, `Attrs::cell_grid`, kept in the padding
 /// as a NaN no padding is), each cluster takes exactly its cells.
 #[inline(never)]
-fn pad(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList, attrs: &Attrs) {
+fn pad(
+    glyphs: &mut [ShapeGlyph],
+    line: &str,
+    attrs_list: &AttrsList,
+    attrs: &Attrs,
+    spans_padded: bool,
+) {
     if let Some(spacing) = attrs.padding_opt {
         if spacing.0.is_nan() {
             snap_to_cells(glyphs, line, spacing);
             return;
         }
     }
+    if spans_padded {
+        pad_spans(glyphs, line, attrs_list);
+    }
+}
+
+/// zgx: `pad`'s span padding, by where each glyph is in `line`: not kept
+/// in the shape-run cache (`shape_run_cached`), whose key is a run's text
+/// and attributes alone, so a run shaped first at a padded span's start
+/// (padded before) was found again at its end (and kept that, rather than
+/// being padded after): `` `a + a` ``'s second `a` drew as its first.
+fn pad_spans(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList) {
     for glyph in glyphs.iter_mut() {
         let attrs = attrs_list.get_span(glyph.start);
         let Some(padding) = attrs.padding_opt else {
@@ -882,6 +908,7 @@ fn shape_run_cached(
             key.set_defaults(defaults.clone(), &mut font_system.shape_run_cache);
         }
         font_system.shape_buffer.run_key_line = list;
+        font_system.shape_buffer.line_padded = attrs_list.has_padding();
         let line_spans = &mut font_system.shape_buffer.line_spans;
         line_spans.clear();
         for (attrs_range, attrs) in attrs_list.spans.iter() {
@@ -913,6 +940,7 @@ fn shape_run_cached(
     if let Some(cache_glyphs) = font_system.shape_run_cache.get(&key) {
         // zgx patch: room for them at once, not a glyph at a time.
         glyphs.reserve(cache_glyphs.len());
+        let from = glyphs.len();
         for mut glyph in cache_glyphs.iter().cloned() {
             // Adjust glyph start and end to match run position
             glyph.start += start_run;
@@ -920,6 +948,9 @@ fn shape_run_cached(
             glyphs.push(glyph);
         }
         font_system.shape_buffer.run_key = Some(key);
+        if font_system.shape_buffer.line_padded {
+            pad_cached(&mut glyphs[from..], line, attrs_list, start_run..end_run);
+        }
         return;
     }
 
@@ -933,7 +964,9 @@ fn shape_run_cached(
         start_run,
         end_run,
         span_rtl,
+        false,
     );
+    let from = glyphs.len();
     glyphs.extend_from_slice(&cache_glyphs);
     for glyph in cache_glyphs.iter_mut() {
         // Adjust glyph start and end to remove run position
@@ -942,6 +975,31 @@ fn shape_run_cached(
     }
     font_system.shape_run_cache.insert(key.clone(), cache_glyphs);
     font_system.shape_buffer.run_key = Some(key);
+    if font_system.shape_buffer.line_padded {
+        pad_cached(&mut glyphs[from..], line, attrs_list, start_run..end_run);
+    }
+}
+
+/// zgx: a cached run's span padding, by where it is (`pad_spans`): as
+/// `shape_run` pads, but for a grid (snapped as it was shaped) or masked
+/// text (padded nowhere). Only the spans over the run are looked at: a
+/// line's many (a styled paragraph's) are not, for each of its words. Out
+/// of line, for a line that sets padding (`ShapeBuffer::line_padded`).
+#[cold]
+#[inline(never)]
+fn pad_cached(glyphs: &mut [ShapeGlyph], line: &str, attrs_list: &AttrsList, run: Range<usize>) {
+    if glyphs.is_empty() || !attrs_list.pads(run.clone()) {
+        return;
+    }
+    let attrs = attrs_list.get_span(run.start);
+    #[cfg(feature = "swash")]
+    if attrs.masked {
+        return;
+    }
+    if attrs.padding_opt.is_some_and(|spacing| spacing.0.is_nan()) {
+        return;
+    }
+    pad_spans(glyphs, line, attrs_list);
 }
 
 #[cfg(feature = "swash")]

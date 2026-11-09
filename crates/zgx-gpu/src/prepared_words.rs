@@ -91,13 +91,17 @@ pub(super) enum Grew<'a> {
 
 /// A run of a paragraph in one font, as cosmic-text shapes it: to byte
 /// `end`, in `font` at `size`. A rich text's span also sets its metrics
-/// (line height) and metadata (its first run), as `rich_buffer_unshaped`
-/// gives them; plain text's sets neither.
+/// (line height) and metadata, as `rich_buffer_unshaped` gives them (its
+/// metadata here one for all: nothing reads a paragraph's but the
+/// ellipsis's, which it has none of, and its words then hold whatever runs
+/// its paint splits into); plain text's sets neither. `padding`: a padded
+/// run's room before and after it, in ems (`Attrs::padding`).
 pub(super) struct Run<'a> {
     pub end: usize,
     pub font: &'a FontStyle,
     pub size: f32,
     pub span: Option<(f32, usize)>,
+    pub padding: f32,
 }
 
 /// What a word is shaped in: a style, its size, and a span's line height
@@ -264,44 +268,14 @@ impl WordCache {
             while runs[run].end <= start {
                 run += 1;
             }
-            // A word across runs is shaped in parts by cosmic-text.
-            if end > runs[run].end {
+            let shape = match end <= runs[run].end && runs[run].padding == 0. {
+                true => self.shape(fonts, ids[run], &text[start..end], blank, size),
+                // Across runs, or padded: in parts, as cosmic-text shapes it.
+                false => self.composed(fonts, text, (start, end), blank, size, (runs, &ids, run)),
+            };
+            let Some(shape) = shape else {
                 spare.extend(kept.recycle());
                 return None;
-            }
-            let id = ids[run];
-            let word = &text[start..end];
-            let mut hasher = FxHasher::default();
-            id.hash(&mut hasher);
-            blank.hash(&mut hasher);
-            word.hash(&mut hasher);
-            let hash = hasher.finish();
-            let shape = match self.shapes.get(&hash) {
-                Some((font, text, shape)) if *font == id && **text == *word => shape.clone(),
-                _ => {
-                    let shaped = ShapeWord::plain(fonts, word, &self.fonts[id as usize].1, blank);
-                    // A word whose glyphs set different line heights is
-                    // measured from shaped lines (`Compact::of`).
-                    let height = |glyph: &ShapeGlyph| glyph.metrics_opt.map(|m| m.line_height);
-                    let first = shaped.glyphs.first().and_then(height);
-                    if shaped.glyphs.iter().any(|glyph| height(glyph) != first) {
-                        spare.extend(kept.recycle());
-                        return None;
-                    }
-                    let shape = Arc::new(Shape {
-                        width: shaped.width(size),
-                        blank: shaped.blank,
-                        glyphs: shaped.glyphs.into_boxed_slice(),
-                    });
-                    let bytes = shape.glyphs.len() * size_of::<ShapeGlyph>() + word.len() + 64;
-                    if self.bytes + bytes > BUDGET {
-                        self.shapes.clear();
-                        self.bytes = 0;
-                    }
-                    self.bytes += bytes;
-                    self.shapes.insert(hash, (id, word.into(), shape.clone()));
-                    shape
-                }
             };
             kept.glyphs += shape.glyphs.len();
             kept.words.push((start, shape));
@@ -315,6 +289,144 @@ impl WordCache {
         kept.laid = None;
         Some((kept, taken))
     }
+}
+
+impl WordCache {
+    /// `word` shaped in font `id`, found or shaped once; None where its
+    /// glyphs set different line heights (it is measured from shaped lines:
+    /// `Compact::of`).
+    fn shape(
+        &mut self,
+        fonts: &mut FontSystem,
+        id: u32,
+        word: &str,
+        blank: bool,
+        size: f32,
+    ) -> Option<Arc<Shape>> {
+        let mut hasher = FxHasher::default();
+        id.hash(&mut hasher);
+        blank.hash(&mut hasher);
+        word.hash(&mut hasher);
+        let hash = hasher.finish();
+        if let Some((font, text, shape)) = self.shapes.get(&hash)
+            && *font == id
+            && **text == *word
+        {
+            return Some(shape.clone());
+        }
+        let shaped = ShapeWord::plain(fonts, word, &self.fonts[id as usize].1, blank);
+        if !one_line_height(&shaped.glyphs) {
+            return None;
+        }
+        let shape = Arc::new(Shape {
+            width: shaped.width(size),
+            blank: shaped.blank,
+            glyphs: shaped.glyphs.into_boxed_slice(),
+        });
+        let bytes = shape.glyphs.len() * size_of::<ShapeGlyph>() + word.len() + 64;
+        if self.bytes + bytes > BUDGET {
+            self.shapes.clear();
+            self.bytes = 0;
+        }
+        self.bytes += bytes;
+        self.shapes.insert(hash, (id, word.into(), shape.clone()));
+        Some(shape)
+    }
+    /// The word of `text` at `start..end` beginning in run `first` of
+    /// `runs` (fonts `ids`), as cosmic-text shapes a word that crosses runs
+    /// or is padded (`ShapeWord::build`, `pad`): each part in runs of one
+    /// font alone (parts in other fonts, `Attrs::compatible`, meeting where
+    /// a grapheme starts; runs in compatible fonts of another size, which
+    /// cosmic-text shapes as one, are not taken), then a padded run's first
+    /// glyph widened before and its last after (a chip split in two by a
+    /// fade, each half's). Its own shape, not kept: only a stream's last
+    /// words are made so again.
+    #[allow(clippy::type_complexity)]
+    fn composed(
+        &mut self,
+        fonts: &mut FontSystem,
+        text: &str,
+        (start, end): (usize, usize),
+        blank: bool,
+        size: f32,
+        (runs, ids, first): (&[Run<'_>], &[u32], usize),
+    ) -> Option<Arc<Shape>> {
+        let word = &text[start..end];
+        let mut glyphs: Vec<ShapeGlyph> = Vec::new();
+        let (mut at, mut run) = (start, first);
+        while at < end {
+            // This part: to the first run in another font.
+            let mut last = run;
+            while runs[last].end < end && ids[last + 1] == ids[run] {
+                last += 1;
+            }
+            let part_end = end.min(runs[last].end);
+            if part_end < end {
+                let (before, now) = (runs[last].font, runs[last + 1].font);
+                let compatible = before.family == now.family
+                    && before.weight == now.weight
+                    && before.italic == now.italic;
+                let grapheme =
+                    unicode_segmentation::UnicodeSegmentation::grapheme_indices(word, true)
+                        .any(|(i, _)| start + i == part_end);
+                if compatible || !grapheme {
+                    return None;
+                }
+            }
+            let part = self.shape(fonts, ids[run], &text[at..part_end], blank, size)?;
+            glyphs.extend(part.glyphs.iter().map(|glyph| {
+                let mut glyph = glyph.clone();
+                glyph.start += at - start;
+                glyph.end += at - start;
+                glyph
+            }));
+            at = part_end;
+            run = last + 1;
+        }
+        // As `pad`: a padded run's glyph at its start widened before it,
+        // one ending where it does after.
+        let mut run = first;
+        for glyph in &mut glyphs {
+            let byte = start + glyph.start;
+            while runs[run].end <= byte {
+                run += 1;
+            }
+            let padding = runs[run].padding;
+            if padding <= 0. {
+                continue;
+            }
+            let run_start = match run {
+                0 => 0,
+                _ => runs[run - 1].end,
+            };
+            if byte == run_start {
+                glyph.x_advance += padding;
+                glyph.x_offset += padding;
+            }
+            if start + glyph.end >= text.len() || start + glyph.end == runs[run].end {
+                glyph.x_advance += padding;
+            }
+        }
+        if !one_line_height(&glyphs) {
+            return None;
+        }
+        let width = glyphs
+            .iter()
+            .fold(0., |width, glyph| width + glyph.width(size));
+        Some(Arc::new(Shape {
+            width,
+            blank,
+            glyphs: glyphs.into_boxed_slice(),
+        }))
+    }
+}
+
+/// Whether `glyphs` set one line height (or none): a word whose glyphs set
+/// different ones is measured from shaped lines (`Compact::of`).
+fn one_line_height(glyphs: &[ShapeGlyph]) -> bool {
+    let height = |glyph: &ShapeGlyph| glyph.metrics_opt.map(|m| m.line_height);
+    let first = glyphs.first().and_then(height);
+    glyphs.iter().all(|glyph| height(glyph) == first)
 }
 
 /// Where a visual line starts or ends: a word, and a glyph in it.
@@ -339,6 +451,10 @@ impl Words {
             _ => None,
         };
         self.grew = Some((length, 0));
+    }
+    /// Its lines, if laid out at `width` (a wrap width, as `lay_out` takes).
+    pub fn lines_at(&self, width: Option<f32>) -> Option<&[LayoutLine]> {
+        (self.laid == Some(width)).then_some(&self.lines[..])
     }
     /// Its first lines that are those of the text of `length` bytes it
     /// grew from (`grew`), as that text laid them out at `width` (a wrap

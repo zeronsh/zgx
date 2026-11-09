@@ -493,3 +493,19 @@ line (`ShapeLine::boxes`). `inline_box_tests` check a box's room, a tall box
 growing only its line, breaking around a box, each alignment, a box kept in
 its span, a split line keeping its boxes, and a line said to hold boxes but
 holding none laid out exactly as one that isn't.
+
+## A padded span's padding outside the shape-run cache (unreleased)
+
+`pad` widened a padded span's first glyph (before it) and its last (after it)
+inside `shape_run`, whose result the shape-run cache keeps by the run's text
+and attributes alone, not where the run is in its span. A run shaped first at
+a span's start (padded before) was found again at its end, and drawn padded
+before rather than after: in an inline code chip `` `a + a` ``, the second
+`a` drew as the first, and which one depended on what was shaped earlier.
+`shape_run_cached` now caches a run unpadded and pads it, cached or not,
+where it is (`pad_cached`, `pad_spans`); a grid of cells is still snapped as
+it is shaped (it depends on the run alone), and masked text is padded
+nowhere, as before. zgx-gpu's
+`a_chips_last_word_is_padded_after_it_as_its_first_before_it` checks it,
+and zgx-gpu's word path pads a chip's words as this does
+(`rich_paragraphs_from_their_words_lay_out_as_their_line`).
