@@ -1902,8 +1902,16 @@ fn raster_step(magnification: f32, current: Option<i32>) -> i32 {
     };
     step.clamp(*RASTER_STEPS.start(), *RASTER_STEPS.end())
 }
+/// Step `step`'s raster scale, √2 to the `step`: whole steps of two exact
+/// (`SQRT_2.powi(2)` is a ULP under 2, and a layer magnified 2 times then
+/// read its texels a hair from their centres, which some GPUs' sampling
+/// rounds into the next texel).
 fn step_scale(step: i32) -> f32 {
-    std::f32::consts::SQRT_2.powi(step)
+    let twos = 2_f32.powi(step.div_euclid(2));
+    match step.rem_euclid(2) {
+        0 => twos,
+        _ => twos * std::f32::consts::SQRT_2,
+    }
 }
 /// A whole window's paint as `render_flat` made it, kept to patch where
 /// the scene repaints (`render_kept`): its quads and draws, and where each
@@ -18119,6 +18127,32 @@ impl surface::SurfaceSource for GpuRenderer {
         #[cfg(target_os = "macos")]
         if self.wide_until.is_some() {
             self.set_drawable_count(3);
+        }
+    }
+}
+
+#[cfg(test)]
+mod raster_step_tests {
+    use super::{RASTER_STEPS, step_scale};
+    /// Every whole step of two is that power of two exactly, so a layer
+    /// magnified 2 or 4 times, or shrunk as many, places its texel centres
+    /// on the halves its reads ask for; the steps between are those times √2.
+    /// (`SQRT_2.powi(2)` is a ULP under 2: a layer shader's read of its own
+    /// far texels at 2x came out 253 of 255 on an RTX 4090 and on WARP.)
+    #[test]
+    fn whole_steps_of_two_are_exact() {
+        for step in RASTER_STEPS {
+            let scale = step_scale(step);
+            match step % 2 == 0 {
+                true => assert_eq!(scale, 2_f32.powi(step / 2), "step {step}"),
+                false => {
+                    let between = 2_f64.powf(f64::from(step) / 2.);
+                    assert!(
+                        (f64::from(scale) - between).abs() <= between * 1e-7,
+                        "step {step}"
+                    );
+                }
+            }
         }
     }
 }
