@@ -340,6 +340,20 @@ none, at the weight they were shaped at (PingFang is one variable face,
 Medium by default). There Chinese draws in PingFang itself again; elsewhere
 `hvgl` faces are passed by as above.
 
+## Advances the platform sets: iOS's emoji
+
+Core Text gives an emoji an advance of its own at each point size (23 points
+at 17, 38 at 34), not the emoji font's one em, and UIKit lays emoji out by
+it. On iOS, `platform_advance::register` names faces whose glyphs take their
+advance from a hook (zgx-gpu asks Core Text) at the size they are measured or
+laid out at: `ShapeGlyph::width` and `advance_at`, and the line layout. A
+font made after the registration is flagged (`Font::platform_advance`), and
+so is each glyph shaped in it. Elsewhere none of it is compiled: the flag
+exists only on iOS and in this crate's tests
+(`a_registered_faces_glyphs_measure_and_lay_out_by_the_platforms_advance`).
+iOS's fallback list takes the emoji file's UI face (`.Apple Color Emoji UI`),
+UIKit's, before its plain one.
+
 ## A paragraph's words for a layout outside a line (zgx-cosmic-text 0.19.8)
 
 zgx-gpu lays out a paragraph that this crate shapes as one left-to-right span

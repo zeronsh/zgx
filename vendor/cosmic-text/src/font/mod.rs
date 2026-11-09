@@ -60,6 +60,10 @@ pub struct Font {
     /// zgx: whether its glyphs' shapes are only in a table swash can't draw
     /// (Apple's `hvgl`), for the platform's rasterizer.
     platform_outlines: bool,
+    /// zgx: whether its advances come from the platform (iOS's emoji,
+    /// `platform_advance`).
+    #[cfg(any(target_os = "ios", test))]
+    platform_advance: bool,
 }
 
 impl fmt::Debug for Font {
@@ -110,6 +114,13 @@ impl Font {
     /// Text. Only on macOS; elsewhere such a face gives no font.
     pub fn needs_platform_outlines(&self) -> bool {
         self.platform_outlines
+    }
+
+    /// zgx: whether its glyphs' advances come from the platform at each size
+    /// (iOS's emoji, `platform_advance::register`).
+    #[cfg(any(target_os = "ios", test))]
+    pub fn platform_advance(&self) -> bool {
+        self.platform_advance
     }
 
     /// zgx: whether it has color glyphs (`COLR`, `CBDT` or `sbix`), as an
@@ -281,6 +292,8 @@ impl Font {
             id: info.id,
             optical: has_optical,
             platform_outlines,
+            #[cfg(any(target_os = "ios", test))]
+            platform_advance: crate::platform_advance::has(info.id),
             monospace_fallback,
             #[cfg(feature = "swash")]
             swash: {

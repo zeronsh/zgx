@@ -125,6 +125,9 @@ mod edit;
 pub use self::font::*;
 mod font;
 
+#[cfg(any(target_os = "ios", test))]
+pub mod platform_advance;
+
 pub use self::layout::*;
 mod layout;
 
