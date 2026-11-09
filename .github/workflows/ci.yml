@@ -114,7 +114,7 @@ jobs:
       - name: The instruction gate counts each binary warm, with a cache of its own
         run: python3 scripts/perf/test_gate.py -v
       - name: Scroll measurement integrity
-        run: python3 scripts/perf/test_scroll.py -v
+        run: python3 -m unittest discover -s scripts/perf -p 'test_scroll*.py' -v
       - run: cargo fmt --all -- --check
       # Every Luau script in the repository (examples and probes too), as
       # stylua.toml and .styluaignore have them.

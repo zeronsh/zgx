@@ -126,13 +126,16 @@ def main():
     args=p.parse_args()
     if args.trials<3:p.error('comparisons require at least three interleaved trials')
     manifest=json.loads(args.manifest.read_text())
+    if not manifest.get('arms'):p.error('manifest must contain at least one arm')
+    names=[arm['name'] for arm in manifest['arms']]
+    if len(set(names))!=len(names):p.error('arm names must be unique')
     args.output.mkdir(parents=True,exist_ok=True)
     (args.output/'runs').mkdir(exist_ok=True);(args.output/'console').mkdir(exist_ok=True)
     frozen=args.output/'manifest.json'
     if frozen.exists() and json.loads(frozen.read_text())!=manifest:p.error('resume manifest differs from saved manifest')
     frozen.write_text(json.dumps(manifest,indent=2)+'\n')
     fingerprint=hashlib.sha256()
-    for name in ('scroll.py','scroll_native.swift','zeron_fixture.luau'):
+    for name in ('scroll.py','scroll_compare.py','scroll_native.swift','zeron_fixture.luau'):
         fingerprint.update((ROOT/'scripts/perf'/name).read_bytes())
     saved=args.output/'harness-sha256.txt'
     if saved.exists() and saved.read_text().strip()!=fingerprint.hexdigest():
