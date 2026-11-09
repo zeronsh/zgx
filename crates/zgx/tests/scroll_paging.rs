@@ -99,6 +99,60 @@ fn a_slow_lift_goes_to_the_nearest_page() {
     assert_eq!(p.at(), PAGE);
 }
 
+/// Fingers move `delta` a scroll, each `gaps` milliseconds after the last in
+/// turn, as an app busy drawing takes them in batches, and lift.
+fn uneven_swipe(p: &mut Pager, delta: f32, gaps: &[u64], scrolls: usize) {
+    p.phase(ScrollGesture::Began);
+    for gap in gaps.iter().cycle().take(scrolls) {
+        p.ran += Duration::from_millis(*gap);
+        p.clock.advance(p.ran, || {});
+        p.scroll(delta);
+    }
+    p.phase(ScrollGesture::Ended);
+}
+
+#[test]
+fn a_slow_lift_is_slow_however_unevenly_its_scrolls_arrive() {
+    // 2 points every 7.5 ms on average, 267 points a second: under the
+    // threshold, though the last gap alone says 667.
+    let mut p = Pager::new();
+    uneven_swipe(&mut p, 2., &[12, 3], 20);
+    p.run(1500);
+    assert_eq!(p.at(), 0.);
+    drop(p);
+    // In threes after a stall: 2 points every 10 ms.
+    let mut p = Pager::new();
+    uneven_swipe(&mut p, 2., &[26, 2, 2], 21);
+    p.run(1500);
+    assert_eq!(p.at(), 0.);
+}
+
+#[test]
+fn a_quick_lift_is_quick_however_unevenly_its_scrolls_arrive() {
+    // 6 points every 8 ms on average, 750 points a second.
+    let mut p = Pager::new();
+    uneven_swipe(&mut p, 6., &[13, 3], 8);
+    p.run(1500);
+    assert_eq!(p.at(), PAGE);
+}
+
+#[test]
+fn a_lift_after_turning_back_goes_by_the_turn_alone() {
+    // On quickly, then back slowly: the last moves are what it lifts at.
+    let mut p = Pager::new();
+    p.phase(ScrollGesture::Began);
+    for delta in [
+        12., 12., 12., 12., 12., 12., 12., 12., -2., -2., -2., -2., -2., -2.,
+    ] {
+        p.ran += Duration::from_millis(8);
+        p.clock.advance(p.ran, || {});
+        p.scroll(delta);
+    }
+    p.phase(ScrollGesture::Ended);
+    p.run(1500);
+    assert_eq!(p.at(), 0.);
+}
+
 #[test]
 fn a_quick_lift_goes_on_wherever_it_is() {
     // A `UIScrollView` from 10 points in at 0.36 points a millisecond, and from

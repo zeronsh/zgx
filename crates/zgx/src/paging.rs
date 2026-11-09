@@ -7,9 +7,10 @@
 //! that moves it (a key, a reveal of what took focus, a script) settles on the
 //! nearest page once it stops. A paged view has this record; a view that doesn't
 //! page has nothing, and nothing here runs for it.
-use crate::{elastic::Speed, input::ScrollGesture, reactive::Signal, widgets::Ui};
+use crate::{input::ScrollGesture, reactive::Signal, widgets::Ui};
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
+    collections::VecDeque,
     rc::{Rc, Weak},
     time::{Duration, Instant},
 };
@@ -32,6 +33,65 @@ const NOTCH_GAP: Duration = Duration::from_millis(180);
 /// The most of a stall's motion a step makes up, in milliseconds.
 const MOST_STEPS: u128 = 64;
 
+/// How far back a lift's speed is measured.
+const LIFT_WINDOW: Duration = Duration::from_millis(100);
+/// Fingers rested this long before lifting have no speed.
+const LIFT_LATEST: Duration = Duration::from_millis(200);
+
+/// The speed fingers lift at: what they moved over the last `LIFT_WINDOW`.
+/// Scrolls arrive when the app gets to them, in batches while it draws, so the
+/// gaps between them say little: a slow swipe's last gap could read as a flick.
+#[derive(Default)]
+struct LiftSpeed {
+    /// When what `recent` adds up to began.
+    from: Option<Instant>,
+    recent: VecDeque<(Instant, f32)>,
+}
+impl LiftSpeed {
+    fn starting(now: Instant) -> Self {
+        Self {
+            from: Some(now),
+            recent: VecDeque::new(),
+        }
+    }
+    fn scrolled(&mut self, delta: f32, now: Instant) {
+        if delta == 0. || !delta.is_finite() {
+            return;
+        }
+        // Turned back: the speed is the way it goes now.
+        if let Some(&(at, last)) = self.recent.back()
+            && last * delta < 0.
+        {
+            self.recent.clear();
+            self.from = Some(at);
+        }
+        self.from.get_or_insert(now);
+        self.recent.push_back((now, delta));
+        while let Some(&(at, _)) = self.recent.front()
+            && self.recent.len() > 1
+            && now.saturating_duration_since(at) > LIFT_WINDOW
+        {
+            self.from = Some(at);
+            self.recent.pop_front();
+        }
+    }
+    /// In points a second, at `now`.
+    fn at(&self, now: Instant) -> f32 {
+        let (Some(from), Some(&(last, _))) = (self.from, self.recent.back()) else {
+            return 0.;
+        };
+        if now.saturating_duration_since(last) > LIFT_LATEST {
+            return 0.;
+        }
+        let moved: f32 = self.recent.iter().map(|(_, delta)| delta).sum();
+        moved
+            / last
+                .saturating_duration_since(from)
+                .as_secs_f32()
+                .max(0.001)
+    }
+}
+
 /// One paged view.
 pub(crate) struct Paged {
     horizontal: bool,
@@ -42,7 +102,7 @@ pub(crate) struct Paged {
     origin: Cell<f32>,
     /// The gesture scrolled this view, and how fast (along its axis).
     touched: Cell<bool>,
-    speed: Cell<Speed>,
+    speed: RefCell<LiftSpeed>,
     /// The spring: where it goes, where it is and how fast (points a
     /// millisecond), and the time it has stepped to.
     target: Cell<Option<f32>>,
@@ -138,9 +198,7 @@ impl Paged {
         let now = crate::clock::now();
         if fingers {
             self.touched.set(true);
-            let mut speed = self.speed.get();
-            speed.scrolled(delta, now);
-            self.speed.set(speed);
+            self.speed.borrow_mut().scrolled(delta, now);
             return false;
         }
         if momentum || self.lifted.get() {
@@ -281,7 +339,7 @@ pub(crate) fn register(
         offset: offset.clone(),
         origin: Cell::new(0.),
         touched: Cell::new(false),
-        speed: Cell::new(Speed::default()),
+        speed: RefCell::default(),
         target: Cell::new(None),
         at: Cell::new(position),
         velocity: Cell::new(0.),
@@ -327,7 +385,7 @@ pub(crate) fn gesture(ui: &Ui, phase: ScrollGesture) {
                 // Caught as it moves: on from where it shows.
                 view.stop();
                 view.touched.set(false);
-                view.speed.set(Speed::starting(now));
+                *view.speed.borrow_mut() = LiftSpeed::starting(now);
                 view.origin.set(view.nearest(view.position()));
                 view.written.set(view.position());
             }
@@ -336,7 +394,7 @@ pub(crate) fn gesture(ui: &Ui, phase: ScrollGesture) {
             ui.paging_state().borrow_mut().fingers = false;
             for view in views(ui) {
                 let speed = match view.touched.take() {
-                    true => view.speed.get().at(now),
+                    true => view.speed.borrow().at(now),
                     false => 0.,
                 };
                 let page = view.page_for_lift(speed);

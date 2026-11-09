@@ -70,7 +70,8 @@ def main():
                 return Image.open(path).convert("RGB")
 
             def centre_colour(name):
-                return shot(name).getpixel((PAGE // 2, HEIGHT // 2))
+                # Up and left of the middle: the pointer, which a shot shows, rests there.
+                return shot(name).getpixel((PAGE // 2 - 40, HEIGHT // 2 - 40))
 
             def resting_on(page, name):
                 # It comes to rest within the spring's time, and stays.
@@ -96,16 +97,17 @@ def main():
             result = {}
             pointer.move_to(PAGE // 2, HEIGHT // 2, *OUTPUT)
             time.sleep(.3)
-            # Under 300 points a second (2 points a frame at 120 Hz: 240), 40 of 300.
-            pointer.swipe(dx=2, frames=20)
+            # Well under 300 points a second, whatever a software renderer does to
+            # when scrolls arrive: 1 point a frame at 120 Hz, 120 a second, 40 of 300.
+            pointer.swipe(dx=1, frames=40)
             resting_on(0, "slow-small")
             result["slow_small_stays"] = True
             # A flick: 6 points a frame, 720 points a second, 48 points along.
             pointer.swipe(dx=6, frames=8)
             resting_on(1, "flick")
             result["flick_goes_on"] = True
-            # Slow, past half: 2 points a frame for 170 of 300.
-            pointer.swipe(dx=2, frames=85)
+            # Slow, past half: 1 point a frame for 170 of 300.
+            pointer.swipe(dx=1, frames=170)
             resting_on(2, "slow-past-half")
             result["slow_past_half_goes_on"] = True
             # A flick back.
