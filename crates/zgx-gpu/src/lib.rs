@@ -5150,6 +5150,36 @@ impl GpuRenderer {
     pub fn memory(&self, report: &mut zgx::memory::Report) {
         let stats = self.debug_cache_stats();
         let (lines, measures) = self.text_cache.borrow().bytes();
+        {
+            // Fonts given as bytes are on the heap; the system's are mapped
+            // from their files, kept by the system and clean.
+            let fonts = self.fonts.borrow();
+            let (mut faces, mut seen) = (0, rustc_hash::FxHashSet::default());
+            let (mut held, mut mapped) = (0, 0);
+            for face in fonts.db().faces() {
+                faces += 1;
+                match &face.source {
+                    cosmic_text::fontdb::Source::Binary(data) => {
+                        if seen.insert(std::sync::Arc::as_ptr(data) as *const () as usize) {
+                            held += (**data).as_ref().len();
+                        }
+                    }
+                    cosmic_text::fontdb::Source::SharedFile(_, data) => {
+                        if seen.insert(std::sync::Arc::as_ptr(data) as *const () as usize) {
+                            mapped += (**data).as_ref().len();
+                        }
+                    }
+                    cosmic_text::fontdb::Source::File(_) => {}
+                }
+            }
+            report.add("text", "fonts given as bytes", Some(faces), Some(held));
+            report.add(
+                "text",
+                "fonts mapped from files (their size)",
+                None,
+                Some(mapped),
+            );
+        }
         let runs = &self.fonts.borrow().shape_run_cache;
         report.add(
             "text",

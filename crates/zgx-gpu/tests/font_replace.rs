@@ -117,3 +117,30 @@ fn replacing_a_font_takes_out_the_faces_of_its_families() {
         .replace_in(&mut fonts);
     assert_eq!(geist(&fonts), [600], "the old face is gone, the new one in");
 }
+
+/// A font given as bytes is held on the heap, and a memory report says how
+/// much: each face of it, its bytes once.
+#[test]
+fn a_font_given_as_bytes_shows_in_a_memory_report() {
+    let Ok(gpu) = GpuRenderer::new(16, 16) else {
+        return;
+    };
+    *gpu.text_system().borrow_mut() = cosmic_text::FontSystem::new_with_locale_and_db(
+        "en".into(),
+        cosmic_text::fontdb::Database::new(),
+    );
+    let given = |gpu: &GpuRenderer| {
+        let mut report = zgx::memory::Report::default();
+        gpu.memory(&mut report);
+        let line = (report.lines.iter())
+            .find(|line| line.area == "text" && line.name == "fonts given as bytes")
+            .expect("listed")
+            .clone();
+        (line.entries, line.bytes)
+    };
+    assert_eq!(given(&gpu), (Some(0), Some(0)));
+    FontData::new(MEDIUM.to_vec())
+        .unwrap()
+        .install(&mut gpu.text_system().borrow_mut());
+    assert_eq!(given(&gpu), (Some(1), Some(MEDIUM.len())));
+}

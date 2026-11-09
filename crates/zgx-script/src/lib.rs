@@ -2940,6 +2940,47 @@ impl ScriptHost {
             }
         }
         self.0.assets.memory(report);
+        self.states_memory(report);
+    }
+    /// The named states' values, each part counted once however many share
+    /// it: the largest one by one with their text and folded rows, the rest
+    /// together. Worked out only as a report asks.
+    #[cold]
+    fn states_memory(&self, report: &mut zgx::memory::Report) {
+        let mut seen = rustc_hash::FxHashSet::default();
+        let mut each: Vec<(String, Option<usize>, value::Holding)> = self
+            .named_states()
+            .into_iter()
+            .map(|(name, signal)| {
+                let mut holding = value::Holding::default();
+                let rows = signal.with_untracked(|value| {
+                    value.holding(&mut seen, &mut holding);
+                    match value {
+                        Value::List(items) => Some(items.len()),
+                        _ => None,
+                    }
+                });
+                (name, rows, holding)
+            })
+            .collect();
+        let all: usize = each.iter().map(|(.., held)| held.bytes).sum();
+        report.add("state", "all named states", Some(each.len()), Some(all));
+        each.sort_by_key(|(.., held)| std::cmp::Reverse(held.bytes));
+        for (name, rows, held) in each.into_iter().take(STATES_LISTED) {
+            if held.bytes < STATE_LISTED_FROM {
+                break;
+            }
+            report.add("state", name.clone(), rows, Some(held.bytes));
+            report.add("state", format!("{name}: text"), None, Some(held.text));
+            if held.folded > 0 {
+                report.add(
+                    "state",
+                    format!("{name}: folded rows"),
+                    Some(held.folded),
+                    None,
+                );
+            }
+        }
     }
     /// How many converted values the loaded scripts' VMs keep (each with
     /// its table, until nothing else holds the value): with
@@ -4503,6 +4544,10 @@ fn collect_fully(lua: &mlua::Lua) {
         held = now;
     }
 }
+/// States a memory report lists one by one (`states_memory`), the largest,
+/// and only from this size.
+const STATES_LISTED: usize = 12;
+const STATE_LISTED_FROM: usize = 64 * 1024;
 /// What the host gives back as it goes idle: its scripts' garbage, then the
 /// pictures no node shows (the image cache keeps up to its budget of them
 /// while the app is in use, so a page shown again is instant).
