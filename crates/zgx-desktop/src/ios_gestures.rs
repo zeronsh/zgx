@@ -393,6 +393,10 @@ pub(crate) fn install(
         for recognizer in [&edge, &pan, &row] {
             let _: () = msg_send![&**recognizer, addTarget: &*handler, action: sel!(panned:)];
             let _: () = msg_send![&**recognizer, setDelegate: &*handler];
+            // A finger's lift isn't held while another rests and this hasn't
+            // decided: UIKit's scroll pan holds none either (read: false), and a
+            // tap beside a resting thumb clicks at its own lift.
+            let _: () = msg_send![&**recognizer, setDelaysTouchesEnded: false];
             let _: () = msg_send![&*root, addGestureRecognizer: &**recognizer];
             if let Some(scroller) = &scroller_pan {
                 let _: () = msg_send![&**scroller, requireGestureRecognizerToFail: &**recognizer];
