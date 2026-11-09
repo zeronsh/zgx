@@ -11093,6 +11093,21 @@ impl GpuRenderer {
                     blocker => (copy, blocker),
                 }
             });
+            // Refused by what it holds or how it shows, not by this frame
+            // alone (a first frame, one not drawn): a picture next time.
+            let lasting = zgx::switches::SCROLL_COPY.on()
+                && !self.fresh
+                && self.rendered_serial == Some(serial - 1);
+            if self.scroll_pictures
+                && match &refused {
+                    Ok((_, blocker)) => {
+                        blocker.is_some() || scene.scroll_corners(scroll.node).is_none()
+                    }
+                    Err(_) => lasting,
+                }
+            {
+                scene.want_picture(scroll.node);
+            }
             match refused {
                 Ok((copy, blocker)) => match blocker {
                     None => match scene.scroll_corners(scroll.node) {

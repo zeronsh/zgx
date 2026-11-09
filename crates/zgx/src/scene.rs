@@ -3071,6 +3071,9 @@ pub struct Scene {
     picture_state: Option<Box<PictureState>>,
     /// The window's renderer draws pictures (`allow_pictures`).
     pictures_allowed: std::cell::Cell<bool>,
+    /// Scroll content the renderer could not copy (`want_picture`): a
+    /// picture where it moves next. Content a copy moves stays as it is.
+    pictures_wanted: std::cell::RefCell<Vec<NodeId>>,
     text_measurer: Option<Box<dyn TextMeasurer>>,
     text_shaper: Option<std::rc::Rc<dyn crate::text_layout::TextShaper>>,
     font_shaper: Option<std::rc::Rc<dyn crate::text_layout::FontTextShaper>>,
@@ -3349,6 +3352,7 @@ impl Scene {
             promoted_count: 0,
             picture_state: None,
             pictures_allowed: std::cell::Cell::new(false),
+            pictures_wanted: Default::default(),
             text_measurer: None,
             text_shaper: None,
             font_shaper: None,
@@ -12171,6 +12175,7 @@ impl Scene {
         if self.picture_state.is_some() {
             self.rest_pictures();
         }
+        *self.pictures_wanted.get_mut() = Vec::new();
         let mut keep = self.slots.len();
         while keep > 1 && self.slots[keep - 1].node.is_none() {
             keep -= 1;
@@ -12502,6 +12507,16 @@ impl Scene {
     pub fn allow_pictures(&self, allowed: bool) {
         self.pictures_allowed.set(allowed);
     }
+    /// Scroll content `id` moved and could not be copied: draw it from a
+    /// picture the next time it moves, if it can be one.
+    #[cold]
+    #[inline(never)]
+    pub fn want_picture(&self, id: NodeId) {
+        let mut wanted = self.pictures_wanted.borrow_mut();
+        if !wanted.contains(&id) {
+            wanted.push(id);
+        }
+    }
     /// Whether any scroll content is drawn from a picture.
     pub fn has_pictures(&self) -> bool {
         !self.pictures().is_empty()
@@ -12622,6 +12637,10 @@ impl Scene {
             if !self.pictures_allowed.get() || (dx == 0. && dy == 0. && !again) {
                 return false;
             }
+            // A view its renderer copies stays a copy: cheaper than a picture.
+            if !self.pictures_wanted.borrow().contains(&id) {
+                return false;
+            }
             if dx != 0. {
                 crate::profile::note(|| {
                     format!("scroll @{} no picture: it moved across", id.number())
@@ -12646,6 +12665,7 @@ impl Scene {
             }
             self.node_mut(id).isolated = true;
             self.isolation_count += 1;
+            self.pictures_wanted.borrow_mut().retain(|node| *node != id);
             self.picture_state.get_or_insert_default().pictures.push(id);
             pictured = true;
         }

@@ -501,3 +501,31 @@ fn a_fractional_scale_refuses_a_picture() {
         assert_eq!(gpu.debug_pictures(), 0);
     }
 }
+
+/// Content a copy moves stays a copy: cheaper than a picture, which repaints
+/// all its view shows each frame.
+#[test]
+fn content_a_copy_moves_takes_no_picture() {
+    let _gpu = gpu_fixture();
+    let mut ui = Ui::new(W, H);
+    ui.scene.borrow_mut().set_pixel_scale(1.);
+    let offset = ui.signal(0_f32);
+    ui.mount(list(offset.clone(), |key| {
+        div().w(200.).h(20.).bg(if key.is_multiple_of(2) {
+            rgb(0x5a7a9a)
+        } else {
+            rgb(0x9a5a7a)
+        })
+    }));
+    let mut gpu = GpuRenderer::new(W as u32, H as u32).unwrap();
+    gpu.set_scroll_pictures(true);
+    gpu.debug_allow_scroll_copies();
+    for _ in 0..6 {
+        offset.update(|o| *o += 8.);
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        assert_eq!(gpu.debug_pictures(), 0);
+    }
+    assert!(gpu.debug_scroll_copies() > 0, "it moved by copies");
+}
