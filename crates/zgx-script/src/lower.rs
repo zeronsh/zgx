@@ -508,6 +508,33 @@ fn removes_decision(hook: &crate::node::HookContribution, node: &Node) -> bool {
     }
     true
 }
+/// Whether a plugin adds anything at an element of `root`'s declared tree
+/// (a builder's root, as a script returned it).
+fn plugin_at(root: &mlua::Value, low: &Lowering) -> bool {
+    fn at(node: &Node, hooks: &Hooks, low: &Lowering) -> bool {
+        if !hooks.at(node, true, low).is_empty() || !hooks.marks_of(node).is_empty() {
+            return true;
+        }
+        if node.children.iter().any(|c| at(c, hooks, low)) {
+            return true;
+        }
+        match &node.kind {
+            Kind::Show {
+                then, otherwise, ..
+            } => at(then, hooks, low) || otherwise.as_deref().is_some_and(|o| at(o, hooks, low)),
+            Kind::Switch { cases, default, .. } => {
+                cases.iter().any(|(_, case)| at(case, hooks, low))
+                    || default.as_deref().is_some_and(|d| at(d, hooks, low))
+            }
+            _ => false,
+        }
+    }
+    let (Some(hooks), mlua::Value::UserData(root)) = (low.hooks.as_deref(), root) else {
+        return false;
+    };
+    root.borrow::<NodeUd>()
+        .is_ok_and(|root| at(&root.0, hooks, low))
+}
 /// Whether `node`'s declared tree has a decision control in it.
 fn holds_decision(node: &Node) -> bool {
     if matches!(node.kind, Kind::Decision(_)) || node.children.iter().any(|c| holds_decision(c)) {
@@ -8613,23 +8640,37 @@ impl crate::markdown::view::Look for ScriptLook {
             // cell, a code block) the next: `veil(text)` its chunks still
             // fading, as ds/markdown's veil gives them.
             if let Some(veil) = &at.veil {
-                let (veil, block, n) = (veil.clone(), at.block, std::cell::Cell::new(at.n - 1));
-                let chunks = lua.create_function(move |lua, text: mlua::LuaString| {
-                    n.set(n.get() + 1);
-                    let text = text.to_str()?;
-                    let out = lua.create_table()?;
-                    for c in crate::markdown::view::HookAt::chunks(&veil, block, n.get(), &text) {
-                        let t = lua.create_table()?;
-                        t.raw_set("from", c.from)?;
-                        t.raw_set("to", c.to)?;
-                        t.raw_set("started", c.started)?;
-                        t.raw_set("ms", c.ms)?;
-                        t.raw_set("boost", c.boost)?;
-                        out.raw_push(t)?;
-                    }
-                    Ok(out)
-                })?;
+                // (`part`: the part's place in the block, from 1, where it's
+                // asked again as the block grows; else each call the next.)
+                let (veil, block, base) = (veil.clone(), at.block, at.n - 1);
+                let n = std::cell::Cell::new(base);
+                let chunks = lua.create_function(
+                    move |lua, (text, part): (mlua::LuaString, Option<u32>)| {
+                        let place = match part {
+                            Some(part) => base + part,
+                            None => {
+                                n.set(n.get() + 1);
+                                n.get()
+                            }
+                        };
+                        let text = text.to_str()?;
+                        let out = lua.create_table()?;
+                        for c in crate::markdown::view::HookAt::chunks(&veil, block, place, &text) {
+                            let t = lua.create_table()?;
+                            t.raw_set("from", c.from)?;
+                            t.raw_set("to", c.to)?;
+                            t.raw_set("started", c.started)?;
+                            t.raw_set("ms", c.ms)?;
+                            t.raw_set("boost", c.boost)?;
+                            out.raw_push(t)?;
+                        }
+                        Ok(out)
+                    },
+                )?;
                 t.raw_set("veil", chunks)?;
+            }
+            if let Some(live) = &at.live {
+                t.raw_set("live", crate::value::State::new(live.clone()))?;
             }
             if let Some((q, cur, n)) = &at.find {
                 let find = lua.create_table()?;
@@ -8640,13 +8681,59 @@ impl crate::markdown::view::Look for ScriptLook {
             }
             Ok(t)
         })();
-        match made {
-            Ok(at) => build_scoped(vm, cx, &self.low, hook, (b.clone(), at)),
+        let made = match made {
+            Ok(made) => made,
             Err(error) => {
                 vm.report(error);
-                div()
+                return div();
             }
+        };
+        let Some(live) = at
+            .live
+            .clone()
+            .filter(|_| self.low.hooks.as_deref().is_some_and(|h| !h.is_empty()))
+        else {
+            return build_scoped(vm, cx, &self.low, hook, (b.clone(), made));
+        };
+        // A block growing in place that a plugin adds at or changes (it
+        // reads what the block gives as it's built): drawn whole again as
+        // the block changes, as one that doesn't grow, so what the plugin
+        // drew follows it.
+        let plugged = std::cell::Cell::new(false);
+        let view = build_scoped_seeing(vm, cx, &self.low, hook, (b.clone(), made), |root| {
+            plugged.set(plugin_at(root, &self.low));
+        });
+        if !plugged.get() {
+            return view;
         }
+        let look = ScriptLook {
+            look: self.look.clone(),
+            vm: self.vm.clone(),
+            low: self.low.clone(),
+        };
+        let (block, n, path, find, veil) = (
+            at.block,
+            at.n,
+            at.path.clone(),
+            at.find.clone(),
+            at.veil.clone(),
+        );
+        zgx::compose::switch(
+            move || live.get(),
+            move |b, cx| {
+                let at = crate::markdown::view::HookAt {
+                    block,
+                    n,
+                    path: path.clone(),
+                    find: find.clone(),
+                    veil: veil.clone(),
+                    live: None,
+                };
+                look.hooked(&b, &at, cx)
+            },
+        )
+        .w_full()
+        .min_w(0.)
     }
     fn has(&self, name: &str) -> bool {
         self.look.parts.contains_key(name)

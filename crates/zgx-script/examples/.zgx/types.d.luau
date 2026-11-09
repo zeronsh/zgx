@@ -5436,15 +5436,20 @@ export type MarkdownViewProps = {
 	-- tables, pictures, prose kinds it names no part for): `at.block` the
 	-- top-level block's place (from 1), `at.n` the block's place among its
 	-- parts, `at.path` its place in it, `at.find` a find's `{ q, cur, n }`
-	-- there, `at.veil(text)` the chunks of a part still fading (the view's
-	-- veil, each call the next part). Built whole, again as its value
-	-- changes.
+	-- there, `at.veil(text, part?)` the chunks of a part still fading (the
+	-- view's veil; `part` its place in the block, from 1, else each call
+	-- the next). Built whole, again as its value changes; a code block
+	-- (not math or mermaid) or a table is built once for its place, its
+	-- language and its columns, and handed `at.live`, its value as it is
+	-- now, to grow in place as it's written. One a plugin adds at is built
+	-- whole again as it changes, as what the plugin drew reads it.
 	block: ((b: MarkdownBlock, at: {
 		block: number,
 		n: number,
 		path: { number },
 		find: { q: string, cur: number, n: number }?,
-		veil: ((text: string) -> { { from: number, to: number, started: number, ms: number, boost: number } })?,
+		veil: ((text: string, part: number?) -> { { from: number, to: number, started: number, ms: number, boost: number } })?,
+		live: Readable<MarkdownBlock>?,
 	}) -> Node)?,
 	-- A paragraph with pictures among its words goes to `block` (the app
 	-- shows them); else they are links, by their alt or file name.

@@ -67,6 +67,10 @@ pub(crate) struct HookAt {
     /// (`HookAt::chunks`), sharing what each place has shown with the
     /// view's own paragraphs (a paragraph becoming a table's first cell).
     pub veil: Option<Rc<RefCell<Veil>>>,
+    /// A block that grows in place (`grows`): its value as it is now,
+    /// followed, so the app appends to what it drew rather than drawing it
+    /// again.
+    pub live: Option<Signal<Value>>,
 }
 impl HookAt {
     /// What of `text`, the block's part at place `n` (from 1) in its
@@ -99,9 +103,42 @@ fn hooked_kind(b: &Value, look: &dyn Look) -> bool {
     }
 }
 
+/// Whether block `b`, the look's to draw, grows in place as it's written
+/// (a code block, a table): built once for its place and this (a code
+/// block's language, a table's columns), and handed its value as it
+/// changes. Display math and a mermaid diagram are drawn whole again.
+fn grows(b: &Value) -> Option<u32> {
+    match b.field("t") {
+        Some(Value::Str(t)) if &**t == "code" => {
+            let lang = text_of(b.field("lang"));
+            if lang == "math" || lang.to_ascii_lowercase() == "mermaid" {
+                return None;
+            }
+            // (Its language, as a key: another fence is another block.)
+            Some(lang.bytes().fold(2166136261u32, |h, c| {
+                (h ^ u32::from(c)).wrapping_mul(16777619)
+            }))
+        }
+        Some(Value::Str(t)) if &**t == "table" => {
+            Some(b.field("head").map_or(0, |h| h.list().len() as u32))
+        }
+        _ => None,
+    }
+}
+
 /// Block `b` drawn by the look, where it is (`options`), made again as a
-/// find's query or current match changes in its top-level block.
+/// find's query or current match changes in its top-level block. `live`: a
+/// block that grows in place, its value followed.
 fn hooked_block(b: &Value, look: &Rc<dyn Look>, options: &ViewOptions, cx: &mut Context) -> View {
+    hooked_block_live(b, look, options, None, cx)
+}
+fn hooked_block_live(
+    b: &Value,
+    look: &Rc<dyn Look>,
+    options: &ViewOptions,
+    live: Option<Signal<Value>>,
+    cx: &mut Context,
+) -> View {
     let block = options.block_at.unwrap_or(0);
     let path = options.path.clone();
     let top = options.top.clone();
@@ -123,6 +160,7 @@ fn hooked_block(b: &Value, look: &Rc<dyn Look>, options: &ViewOptions, cx: &mut 
                 path: path.clone(),
                 find,
                 veil: veil.clone(),
+                live: live.clone(),
             }
         }
     };
@@ -906,8 +944,9 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
 /// kind (a paragraph, a heading of a level, a code block, a list), its
 /// contents following its value as the text grows. Those before it are
 /// settled (a parse keeps them as they were): built as they are, again
-/// only if their value changes (the last becoming settled, once), as a
-/// table always is.
+/// only if their value changes (the last becoming settled, once). A code
+/// block or table the look draws (`grows`) is built once for its place
+/// wherever it is, settled or not, and follows its value.
 /// `Kept`: its place, kind (`kind_id`), and a heading's level or an
 /// ordered list's start (0 for others). Plain numbers: a key holds no
 /// part of the block it was found for.
@@ -932,9 +971,13 @@ fn kind_id(kind: &str) -> Option<u8> {
     })
 }
 fn place(index: usize, last: bool, b: &Value, look: Option<&dyn Look>) -> Place {
-    // A block the look draws: built whole, again as its value changes.
+    // A block the look draws: built whole, again as its value changes; one
+    // that grows in place, once for its place.
     if look.is_some_and(|look| hooked_kind(b, look)) {
-        return Place::Whole(index, identity(b));
+        return match grows(b) {
+            Some(n) => Place::Kept(index as u32, 9, n),
+            None => Place::Whole(index, identity(b)),
+        };
     }
     let kind = match b.field("t") {
         Some(Value::Str(kind)) if last => kind_id(kind),
@@ -1491,7 +1534,8 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
     let kind = text_of(b.field("t"));
     if let Some(look) = options.look.clone() {
         if hooked_kind(&b, &*look) {
-            return hooked_block(&b, &look, options, cx);
+            let live = grows(&b).map(|_| cell.clone());
+            return hooked_block_live(&b, &look, options, live, cx);
         }
         if let Some(view) = look_block(&kind, &b, cell.clone(), &look, options, cx) {
             return view;
