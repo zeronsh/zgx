@@ -5399,6 +5399,17 @@ export type MarkdownViewProps = {
 	-- paragraph has shown is kept by it); `seed`: what is there as the view
 	-- is made shows at once.
 	veil: { key: string, seed: boolean? }?,
+	-- What a link elsewhere than the web (`target` its address) or words
+	-- naming an item carried (`target` "attachment:<name>") are drawn as:
+	-- a span's options over the run's kinds but a link's (a chip: `[1]`
+	-- its text, `bg`, `padding`, `radius`, `icon`…), or nil for words.
+	-- `link = true` keeps a link's click and menu. Asked as the runs are
+	-- made: what it reads changing makes them again. A chip is never cut
+	-- by the veil.
+	chip: ((target: string, text: string) -> { [any]: any }?)?,
+	-- The names of the items the text carries: words naming one,
+	-- "(attachment: <name>)", are asked of `chip`.
+	attached: { [string]: any }?,
 }
 -- `ui.markdown_view`'s `style`: a paragraph's options as `ui.rich`'s, and
 -- each kind of run's as `ui.span`'s (tokens, states and functions as

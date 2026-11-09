@@ -182,6 +182,8 @@ return ui.markdown_view { "{reply}", w = 520, text_size = 15 }
 
 A link whose address is still streaming in is styled as one but goes nowhere: neither is asked of it.
 
+`chip(target, text)` draws a run as a chip: asked of each link elsewhere than the web (`target` its address, `text` its words) and of words naming an item the text carries, `(attachment: <name>)` with `attached` holding the name (`target` `"attachment:<name>"`). It returns a span's options laid over the run's kinds (all but a link's: a chip is in the paragraph's ink unless it says otherwise), `[1]` its text if not the run's, or nil for words. `link = true` keeps a link's click and menu (a file's mention that opens). It is asked as the runs are made, so what it reads changing makes them again, a settled paragraph's too (a chip the page learns of late). A chip shows whole: the veil never cuts or fades it.
+
 `veil = { key, seed }` fades a streaming reply's new words in, colour only, so nothing moves or wraps for them: each paragraph remembers what it has shown, and what arrives is a chunk of its runs fading in once (their `fade_in`, drawn in Rust a frame at a time), over three times the average gap between chunks, between 120 and 400 ms, a little faster while three or more fade at once. `key` names the reply: a view made again under it (a row scrolled back) doesn't fade what it showed. `seed = true` shows what is there as the view is made at once (a chat opened mid-reply). Leave it out where motion is reduced.
 
 ```lua

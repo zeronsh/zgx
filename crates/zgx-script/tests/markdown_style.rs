@@ -395,3 +395,77 @@ fn a_veil_seeded_shows_what_is_there_at_once() {
     app.frames(2);
     assert!(alphas(&mut app, "md").iter().all(|(_, a)| *a == 255));
 }
+
+#[test]
+fn a_links_and_a_carried_items_chips_are_the_hooks_drawn_whole() {
+    let _clock = zgx::clock::VirtualClock::new();
+    let mut app = TestApp::inline(
+        r##"local asked = ui.state("asked", "")
+        local known = ui.state("known", false)
+        local reply = ui.state("reply", "")
+        return ui.column { w = 600, selectable = true,
+            ui.markdown_view { "{reply}", id = "md", w_full = true, style = { link = { color = "#33aaff" } },
+                attached = { ["plan.md"] = true },
+                veil = { key = "reply:chips" },
+                chip = function(target, text)
+                    asked:set(asked:peek() .. target .. "|" .. text .. ";")
+                    if target == "attachment:plan.md" then
+                        return { "plan.md", bg = "#303030", padding = { 1, 7, 2 }, radius = 5 }
+                    elseif target == "later" and known:get() then
+                        return { text, bg = "#404040", link = true }
+                    end
+                    return nil
+                end },
+        }"##,
+    );
+    app.frames(1);
+    app.host
+        .set_state(
+            "reply",
+            Value::from("See (attachment: plan.md) and (attachment: other.md), [later](later) and [web](https://a.test/)."),
+        )
+        .unwrap();
+    app.frames(2);
+    assert_eq!(app.error(), None);
+    let asked = |app: &TestApp| {
+        (app.host.states().into_iter())
+            .find(|(name, _)| name == "asked")
+            .map(|(_, v)| v.to_string())
+            .unwrap()
+    };
+    // Asked of the item carried and the link elsewhere; not of the web's,
+    // nor of words naming what isn't carried.
+    assert_eq!(
+        asked(&app),
+        "attachment:plan.md|(attachment: plan.md);later|later;"
+    );
+    let (_, text, runs) = paragraphs(&mut app, "md").remove(0);
+    // (A chip's text stands apart from its neighbours' with joiners.)
+    let words =
+        |r: &TextRun, text: &str| text[r.range.clone()].trim_matches('\u{2060}').to_string();
+    assert!(
+        text.contains("plan.md") && text.contains(" and (attachment: other.md)"),
+        "{text}"
+    );
+    let chip = runs.iter().find(|r| words(r, &text) == "plan.md").unwrap();
+    assert_eq!(
+        chip.background,
+        Some(zgx::scene::Color(0x30, 0x30, 0x30, 255))
+    );
+    assert_eq!((chip.radius, chip.padding[1]), (5., 2.));
+    // Not faded: a chip shows whole as it lands.
+    assert_eq!(chip.color.3, 255, "{chip:?}");
+    // Known later: asked again as what it read changes, now a chip.
+    app.host.set_state("known", Value::Bool(true)).unwrap();
+    app.frames(2);
+    let (_, text, runs) = paragraphs(&mut app, "md").remove(0);
+    let later = runs.iter().find(|r| words(r, &text) == "later").unwrap();
+    assert_eq!(
+        later.background,
+        Some(zgx::scene::Color(0x40, 0x40, 0x40, 255))
+    );
+    assert!(
+        later.underline.is_none(),
+        "a chip's ink, not a link's underline"
+    );
+}

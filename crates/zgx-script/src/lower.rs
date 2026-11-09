@@ -8383,11 +8383,7 @@ struct ScriptLook {
     vm: Rc<Vm>,
     low: Rc<Lowering>,
 }
-/// Where a link goes that is the web's: opened by its address (its menu,
-/// its cursor), where another target is the script's to open.
-fn web_address(target: &str) -> bool {
-    target.starts_with("https://") || target.starts_with("http://") || target.starts_with("mailto:")
-}
+use crate::markdown::web_address;
 impl crate::markdown::view::Look for ScriptLook {
     fn span(&self, run: &crate::markdown::view::Run) -> TextSpan {
         let (vm, look) = (&self.vm, &self.look);
@@ -8414,10 +8410,86 @@ impl crate::markdown::view::Look for ScriptLook {
         {
             span.href = Some(target.into());
         }
-        let mut out = text_span_of(&own_span(&span), vm, &self.low);
-        let Some(target) = target else {
-            return out;
+        let out = text_span_of(&own_span(&span), vm, &self.low);
+        match target {
+            Some(target) => self.linked(out, &span, target),
+            None => out,
+        }
+    }
+    fn chip(&self, run: &crate::markdown::view::Run) -> Option<TextSpan> {
+        let (vm, look) = (&self.vm, &self.look);
+        let hook = look.chip.as_ref()?;
+        // What the hook is asked of: the link's target, or the item carried.
+        let asked = match (run.attached, run.link) {
+            (Some(name), _) => format!("attachment:{name}"),
+            (None, Some(target)) => target.to_owned(),
+            (None, None) => return None,
         };
+        let chip = match vm.call::<Option<mlua::Table>>(hook, (asked.as_str(), run.text)) {
+            Ok(chip) => chip?,
+            Err(error) => {
+                vm.report(error);
+                return None;
+            }
+        };
+        // Its run's kinds but a link's (a chip is in the body's ink, not
+        // underlined), the chip's options over them.
+        let bits = usize::from(run.strong)
+            | usize::from(run.em) << 1
+            | usize::from(run.strike) << 2
+            | usize::from(run.code) << 3;
+        let made = (|| -> mlua::Result<crate::node::Span> {
+            let lua = &vm.lua;
+            let merged = lua.create_table()?;
+            for (kind, t) in look.runs.iter().enumerate() {
+                if bits & (1 << kind) != 0 {
+                    t.for_each::<mlua::Value, mlua::Value>(|k, v| merged.raw_set(k, v))?;
+                }
+            }
+            // (Its ink the chip's, or the paragraph's: never a kind's.)
+            merged.raw_set("color", mlua::Value::Nil)?;
+            chip.for_each::<mlua::Value, mlua::Value>(|k, v| merged.raw_set(k, v))?;
+            merged.raw_set("link", mlua::Value::Nil)?;
+            if merged.raw_get::<mlua::Value>(1)?.is_nil() {
+                merged.raw_set(1, run.text)?;
+            }
+            crate::node::span_of_table(lua, merged)
+        })();
+        let span = match made {
+            Ok(span) => span,
+            Err(error) => {
+                vm.report(error);
+                return None;
+            }
+        };
+        let out = text_span_of(&own_span(&span), vm, &self.low);
+        // A chip that is a link (a file's, a chat's) opens as one.
+        let linked = matches!(
+            chip.raw_get::<mlua::Value>("link"),
+            Ok(mlua::Value::Boolean(true))
+        );
+        match run.link.filter(|_| linked && !look.web_only) {
+            Some(target) => Some(self.linked(out, &span, target)),
+            None => Some(out),
+        }
+    }
+    fn paragraph(&self, view: View) -> View {
+        match &self.look.paragraph {
+            Some(node) => styled(view, node, &self.vm, &self.low, None, None),
+            None => view,
+        }
+    }
+    fn blocks(&self, view: View) -> View {
+        match &self.look.blocks {
+            Some(node) => styled(view, node, &self.vm, &self.low, None, None),
+            None => view.gap(10.),
+        }
+    }
+}
+impl ScriptLook {
+    /// `out`, a run linking to `target`, with the look's click and menu.
+    fn linked(&self, mut out: TextSpan, span: &crate::node::Span, target: &str) -> TextSpan {
+        let (vm, look) = (&self.vm, &self.look);
         if let Some(on_link) = &look.on_link {
             let (on_link, vm, target) = (on_link.clone(), vm.clone(), Rc::<str>::from(target));
             // Told the keys held, as a span's `on_click` is; `true` back
@@ -8453,18 +8525,6 @@ impl crate::markdown::view::Look for ScriptLook {
             });
         }
         out
-    }
-    fn paragraph(&self, view: View) -> View {
-        match &self.look.paragraph {
-            Some(node) => styled(view, node, &self.vm, &self.low, None, None),
-            None => view,
-        }
-    }
-    fn blocks(&self, view: View) -> View {
-        match &self.look.blocks {
-            Some(node) => styled(view, node, &self.vm, &self.low, None, None),
-            None => view.gap(10.),
-        }
     }
 }
 
