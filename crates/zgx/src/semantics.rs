@@ -222,6 +222,9 @@ pub struct SemanticNode {
     /// A text field for searching: marked so for assistive technology (iOS).
     #[cfg(target_os = "ios")]
     pub search: bool,
+    /// One of a table's rows (`View::table_row`): with the others of its
+    /// scroll view it takes one finger at a time (iOS).
+    pub table_row: bool,
     /// A checkable menu item that is one of a group: a radio item.
     pub radio: bool,
     /// The keys that do what it does, as its menu shows them ("⌘C").
@@ -264,6 +267,7 @@ impl SemanticNode {
             live: None,
             description: None,
             hidden: false,
+            table_row: false,
             radio: false,
             shortcut: None,
             active_descendant: None,

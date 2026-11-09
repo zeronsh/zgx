@@ -263,3 +263,44 @@ fn a_press_finds_what_acts_on_it_and_not_a_page_around_it() {
     assert!(ui.pressable_at(50., 20.), "the row that clicks");
     assert!(!ui.pressable_at(50., 60.), "the page around it");
 }
+
+#[test]
+fn rows_of_a_scroll_view_share_a_finger_and_nothing_else_does() {
+    let mut ui = Ui::new(200., 200.);
+    let (left, right) = (ui.signal(0.), ui.signal(0.));
+    let row = || div().w(100.).h(40.).on_click(|| {}).table_row();
+    ui.mount(
+        crate::compose::row()
+            .child(
+                scroll(left)
+                    .w(100.)
+                    .h(200.)
+                    .child(row())
+                    .child(row())
+                    // A control of its own, and one inside a row.
+                    .child(div().w(100.).h(40.).on_click(|| {}))
+                    .child(
+                        div()
+                            .w(100.)
+                            .h(40.)
+                            .on_click(|| {})
+                            .table_row()
+                            .child(div().w(100.).h(20.).on_click(|| {})),
+                    ),
+            )
+            .child(scroll(right).w(100.).h(200.).child(row())),
+    );
+    ui.prepare_frame();
+    let (one, two, button) = ((50., 20.), (50., 60.), (50., 100.));
+    let (inside, around) = ((50., 130.), (50., 150.));
+    let other_table = (150., 20.);
+    assert!(ui.presses_share(one, two), "two rows of one table");
+    assert!(ui.presses_share(one, around), "the row around a control");
+    assert!(!ui.presses_share(one, button), "a row and a button");
+    assert!(
+        !ui.presses_share(one, inside),
+        "a row and the button in one"
+    );
+    assert!(!ui.presses_share(one, other_table), "rows of two tables");
+    assert!(!ui.presses_share(one, (50., 190.)), "a row and nothing");
+}

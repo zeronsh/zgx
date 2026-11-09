@@ -1046,6 +1046,18 @@ impl View {
             self
         }
     }
+    /// One of a table's rows: `UITableView` follows one finger at a time, so
+    /// while a finger is on a row, a tap on another row of its scroll view
+    /// does nothing. Anything else takes its own finger, as a `UIButton` does.
+    /// Only iOS tells fingers apart: elsewhere it only says so.
+    pub fn table_row(self) -> Self {
+        self.on_mount(|handle| {
+            if let Some(ui) = handle.ui.upgrade() {
+                let mut semantics = ui.semantics.borrow_mut();
+                semantics.update(handle.node, |node| node.table_row = true);
+            }
+        })
+    }
     /// Keep a scroll viewport at its end while its content grows, as long as
     /// it was at the end (a chat transcript); scrolling away releases it.
     pub fn follow_end(mut self, follow: bool) -> Self {

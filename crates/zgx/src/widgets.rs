@@ -3053,16 +3053,37 @@ impl Ui {
     /// them leaves the press to the next finger (iOS).
     #[cfg(any(target_os = "ios", test))]
     pub fn pressable_at(&self, x: f32, y: f32) -> bool {
+        self.control_at(x, y).is_some()
+    }
+    /// Whether presses at `a` and `b` are for one finger between them: both on
+    /// rows of one scroll view, as a `UITableView`'s (`View::table_row`).
+    /// Anything else takes each its own (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    pub fn presses_share(&self, a: (f32, f32), b: (f32, f32)) -> bool {
+        let scene = self.scene.borrow();
+        let semantics = self.semantics.borrow();
+        let table_of = |(x, y): (f32, f32)| {
+            let control = self.control_at(x, y)?;
+            semantics.get(control)?.table_row.then_some(())?;
+            scene.ancestors(control).find(|node| {
+                semantics
+                    .get(*node)
+                    .is_some_and(|node| node.role == crate::semantics::Role::ScrollView)
+            })
+        };
+        table_of(a).is_some_and(|table| table_of(b) == Some(table))
+    }
+    /// The control a press at (`x`, `y`) reaches: the nearest to the point.
+    #[cfg(any(target_os = "ios", test))]
+    fn control_at(&self, x: f32, y: f32) -> Option<NodeId> {
         use crate::semantics::Role;
         let scene = self.scene.borrow();
         let semantics = self.semantics.borrow();
-        let Some(hit) = scene.hit_test(x, y) else {
-            return false;
-        };
+        let hit = scene.hit_test(x, y)?;
         std::iter::once(hit)
             .chain(scene.ancestors(hit))
-            .any(|node| {
-                semantics.get(node).is_some_and(|node| {
+            .find(|node| {
+                semantics.get(*node).is_some_and(|node| {
                     matches!(
                         node.role,
                         Role::Button
