@@ -224,6 +224,7 @@ pub struct SemanticNode {
     pub search: bool,
     /// One of a table's rows (`View::table_row`): with the others of its
     /// scroll view it takes one finger at a time (iOS).
+    #[cfg(any(target_os = "ios", test))]
     pub table_row: bool,
     /// A checkable menu item that is one of a group: a radio item.
     pub radio: bool,
@@ -267,6 +268,7 @@ impl SemanticNode {
             live: None,
             description: None,
             hidden: false,
+            #[cfg(any(target_os = "ios", test))]
             table_row: false,
             radio: false,
             shortcut: None,
