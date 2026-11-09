@@ -749,26 +749,28 @@ impl Node {
     /// Animations, scroll offsets, widget bindings and overlays need a
     /// component context.
     pub fn needs_context(&self) -> bool {
-        matches!(
-            self.kind,
+        (match self.kind {
             Kind::Scroll { .. }
-                | Kind::Checkbox { .. }
-                | Kind::Input { .. }
-                | Kind::Progress { .. }
-                | Kind::Slider { .. }
-                | Kind::Split { .. }
-                | Kind::List { .. }
-                | Kind::Modal { .. }
-                | Kind::Popover { .. }
-                | Kind::Menu { .. }
-                | Kind::Submenu { .. }
-                | Kind::Presence { .. }
-                | Kind::Each {
-                    motion: Some(_),
-                    ..
-                }
-        ) || self.kind.library_needs_context()
-            || self.kind.is_scene3d()
+            | Kind::Checkbox { .. }
+            | Kind::Input { .. }
+            | Kind::Progress { .. }
+            | Kind::Slider { .. }
+            | Kind::Split { .. }
+            | Kind::List { .. }
+            | Kind::Modal { .. }
+            | Kind::Popover { .. }
+            | Kind::Menu { .. }
+            | Kind::Submenu { .. }
+            | Kind::Presence { .. }
+            | Kind::Each {
+                motion: Some(_), ..
+            } => true,
+            // A 3D scene: its effects and bindings live in a component
+            // context. In this one test, no other for every node.
+            #[cfg(feature = "scene3d")]
+            Kind::Scene3d(_) => true,
+            _ => false,
+        }) || self.kind.library_needs_context()
             || self.props.iter().any(|(_, s)| matches!(s, Source::Anim(_)))
             // An icon's tint may be a theme token: it reads the scope.
             || matches!(self.kind, Kind::Svg { .. })
@@ -1125,9 +1127,6 @@ pub(crate) enum Kind {
     Canvas(Option<Function>, Option<Box<CanvasOptions>>),
     /// `ui.glass { ... }`: the system's glass where it has one.
     Glass(Box<GlassSpec>),
-    /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view.
-    #[cfg(feature = "scene3d")]
-    Scene3d(Rc<crate::scene3d::Scene3dSpec>),
     /// `ui.webview { ... }`: a native web view laid out like a div.
     WebView(Box<WebSpec>),
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
@@ -1312,6 +1311,12 @@ pub(crate) enum Kind {
         /// Only what this script (a plugin's name) contributes.
         from: Option<String>,
     },
+    /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view. Last: one in
+    /// the middle moves the others' discriminants, and what tests them for
+    /// every node (`styled`) takes more instructions with the feature on, a
+    /// scene on screen or not.
+    #[cfg(feature = "scene3d")]
+    Scene3d(Rc<crate::scene3d::Scene3dSpec>),
 }
 impl Kind {
     fn takes_children(&self) -> bool {
@@ -1352,14 +1357,6 @@ impl Kind {
         #[cfg(feature = "components")]
         if let Kind::Library(library) = self {
             return library.takes_children();
-        }
-        false
-    }
-    /// A 3D scene (its effects and bindings live in a component context).
-    fn is_scene3d(&self) -> bool {
-        #[cfg(feature = "scene3d")]
-        if let Kind::Scene3d(_) = self {
-            return true;
         }
         false
     }
