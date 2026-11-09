@@ -38,3 +38,5 @@ mod repaints;
 mod rounded_clip;
 #[path = "../svg.rs"]
 mod svg;
+#[path = "../transitions.rs"]
+mod transitions;

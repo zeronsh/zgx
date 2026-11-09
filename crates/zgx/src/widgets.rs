@@ -1685,6 +1685,9 @@ pub(crate) struct UiStorage {
     listening: Cell<bool>,
     /// Overlay scrollbars shown, to fade once their view stops scrolling.
     scrollbar_fades: RefCell<Vec<std::rc::Weak<crate::compose_scrollbar::Fade>>>,
+    /// Styles transitioning (`crate::transition`).
+    /// Made as the first starts: a window without any holds a word.
+    pub(crate) transitions: std::cell::OnceCell<Box<crate::transition::Transitions>>,
     /// Input is being dispatched: what scrolls now, the user scrolled.
     dispatching: Cell<bool>,
     /// A platform's wheel is being dispatched (`Ui::wheel_in_window`).
@@ -1924,6 +1927,7 @@ impl Ui {
             elastic: Default::default(),
             paging: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
+            transitions: Default::default(),
             dispatching: Cell::new(false),
             wheel_in_window: Cell::new(false),
             document_listeners: RefCell::new(Vec::new()),
@@ -2158,6 +2162,24 @@ impl Ui {
                 .effects
                 .push(effect);
         });
+    }
+    /// The callback of the effect last bound for `owner` (`bind_marked`)
+    /// replaced by what `wrap` makes of it, given it and whether it has run
+    /// (`Effect::wrap_callback`).
+    pub(crate) fn wrap_last_binding(
+        &self,
+        owner: NodeId,
+        wrap: impl FnOnce(Rc<RefCell<dyn FnMut()>>, bool) -> Rc<RefCell<dyn FnMut()>>,
+    ) {
+        if let Some(effect) = self
+            .storage
+            .owned
+            .borrow()
+            .get(&owner)
+            .and_then(|owned| owned.effects.last())
+        {
+            effect.wrap_callback(wrap);
+        }
     }
     /// [`Ui::bind`] for a text input's model or typography: `mount_pure`,
     /// as it reads no geometry before its draw lays out (`watch_geometry`).
@@ -4434,6 +4456,7 @@ impl Ui {
             self.next_editor_interaction_deadline(),
             self.next_selection_deadline(),
             crate::compose_scrollbar::next_fade(self),
+            self.storage.transitions.get().and_then(|t| t.next()),
             crate::elastic::next_step(self),
             crate::paging::next_step(self),
             crate::caret_blink::next(self),
@@ -4496,6 +4519,16 @@ impl Ui {
         };
         // A drag resting on a destination long enough to spring it open.
         let keys = if self.input.advance_spring(&self.scene, now) {
+            self.try_prepare_frame()?;
+            true
+        } else {
+            keys
+        };
+        // Styles transitioning (`crate::transition`).
+        let stepped = self.storage.transitions.get().is_some_and(|transitions| {
+            transitions.advance(&mut self.scene.borrow_mut(), now, self.refresh_interval())
+        });
+        let keys = if stepped {
             self.try_prepare_frame()?;
             true
         } else {

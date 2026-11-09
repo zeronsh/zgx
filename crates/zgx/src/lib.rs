@@ -5,6 +5,8 @@ pub mod collections;
 pub mod reactive;
 pub mod scene;
 pub mod task;
+/// Style transitions (docs/design/style-transitions.md).
+pub mod transition;
 pub mod view;
 pub mod virtual_list;
 

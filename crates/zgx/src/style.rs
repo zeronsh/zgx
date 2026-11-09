@@ -755,6 +755,8 @@ pub(crate) struct ColdStyles {
     pub(crate) outline_style: Option<crate::decoration::BorderStyle>,
     /// `Styled::outline_inner` (width and colour; `Some(None)`: none).
     pub(crate) outline_inner: Option<Option<(f32, Color)>>,
+    /// `Styled::transition`.
+    pub(crate) transition: Option<std::sync::Arc<crate::transition::Transition>>,
     /// `Styled::mask_gradient`, `text_gradient` and `drop_shadow`.
     pub(crate) layers: Option<std::sync::Arc<LayerStyles>>,
     /// `Styled::w_calc` and the like.
@@ -999,6 +1001,9 @@ impl RareStyles {
             }
             if theirs.outline_inner.is_some() {
                 mine.outline_inner = theirs.outline_inner;
+            }
+            if theirs.transition.is_some() {
+                mine.transition = theirs.transition.clone();
             }
             if let Some(theirs) = &theirs.layers {
                 let mine = std::sync::Arc::make_mut(mine.layers.get_or_insert_default());
@@ -2397,6 +2402,18 @@ pub trait Styled: Sized {
             .cold
             .get_or_insert_default()
             .outline_style = Some(style);
+        self
+    }
+    /// Ease the properties `transition` names from what is drawn to each new
+    /// value they take (a hover, a `reactive_style`, a theme), over its
+    /// duration on its curve, as CSS's `transition` does
+    /// (`crate::transition`; opacity, background and border colour).
+    fn transition(mut self, transition: crate::transition::Transition) -> Self {
+        self.styles_mut()
+            .rare_mut()
+            .cold
+            .get_or_insert_default()
+            .transition = Some(std::sync::Arc::new(transition));
         self
     }
     /// No outline.

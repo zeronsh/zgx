@@ -895,6 +895,17 @@ impl Effect {
             runtime.stopped.set(runtime.stopped.get() + 1);
         }
     }
+    /// Its callback replaced by what `wrap` makes of it, given it and whether
+    /// it has run: one to run around it (a style transition's, around a
+    /// style effect's, `compose_style`). Nothing once its runtime has gone.
+    pub(crate) fn wrap_callback(&self, wrap: impl FnOnce(Callback, bool) -> Callback) {
+        let Some(runtime) = self.runtime.upgrade() else {
+            return;
+        };
+        if let Some(record) = runtime.effects.borrow_mut().get_mut(&self.id) {
+            record.callback = wrap(record.callback.clone(), record.run > 0);
+        }
+    }
     /// A handle that runs this effect early, while it lives.
     pub fn refresher(&self) -> Refresh {
         Refresh {
