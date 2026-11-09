@@ -246,6 +246,10 @@ impl App {
         };
         let child = command.spawn()?;
         let pid = child.id();
+        if let Some(mach) = &mach {
+            // Its check-in is taken from this process alone.
+            mach.started(pid);
+        }
         #[cfg(unix)]
         let (sender, receiver) = spawning.started()?;
         #[cfg(windows)]
@@ -286,7 +290,7 @@ impl App {
             input: Arc::default(),
         };
         writer(sender, rx, out.input.clone());
-        let check_in = mach.clone().zip(pid);
+        let check_in = mach.clone();
         reader(
             receiver,
             shared.clone(),
@@ -295,7 +299,13 @@ impl App {
             check_in,
         );
         if let Some(child) = child {
-            waiter(child, shared.clone(), wake.clone(), exited.clone());
+            waiter(
+                child,
+                shared.clone(),
+                wake.clone(),
+                exited.clone(),
+                mach.clone(),
+            );
         }
         let inner = Rc::new_cyclic(|weak: &Weak<AppInner>| AppInner {
             runtime: runtime.clone(),
@@ -863,7 +873,7 @@ fn reader(
     shared: Arc<Mutex<Shared>>,
     out: Outbox,
     wake: zgx::task::LatestSender<()>,
-    check_in: Option<(Arc<HostChannel>, u32)>,
+    check_in: Option<Arc<HostChannel>>,
 ) {
     let _ = std::thread::Builder::new()
         .name("zgx-surface read".into())
@@ -884,9 +894,9 @@ fn reader(
                         // hello), and only the program this host started.
                         let iosurface = |o: &Offer| matches!(o, Offer::IoSurface { .. });
                         if hello.offers.iter().any(iosurface) {
-                            let accepted = check_in.as_ref().is_some_and(|(channel, pid)| {
+                            let accepted = check_in.as_ref().is_some_and(|channel| {
                                 channel
-                                    .accept(*pid, CHECK_IN)
+                                    .accept(CHECK_IN)
                                     .map_err(|e| eprintln!("zgx-surface: {e}"))
                                     .is_ok()
                             });
@@ -937,6 +947,7 @@ fn waiter(
     shared: Arc<Mutex<Shared>>,
     wake: zgx::task::LatestSender<()>,
     exited: Arc<AtomicBool>,
+    mach: Option<Arc<HostChannel>>,
 ) {
     let _ = std::thread::Builder::new()
         .name("zgx-surface wait".into())
@@ -956,6 +967,10 @@ fn waiter(
                 }
             }
             exited.store(true, Ordering::Release);
+            // Its check-in, if it never was taken, goes with it.
+            if let Some(mach) = &mach {
+                mach.ended();
+            }
             let code = child.wait().ok().and_then(|s| s.code());
             shared.lock().unwrap().notes.push(Note::Exited(code));
             wake.send(());

@@ -1,5 +1,6 @@
 //! IOSurfaces between a host and its client (macOS): their Mach ports over
-//! the session's Mach channel, only to the process the host started; and a
+//! the session's Mach channel, only to the session's own process (its token,
+//! its pid and pid version), malformed messages destroyed whole; and a
 //! client process (this test binary, started again with one test) drawing
 //! with wgpu Metal into IOSurfaces the host allocated, which the host reads
 //! back with no CPU copy between.
@@ -7,21 +8,19 @@
 use std::time::Duration;
 use zgx_surface::iosurface::{ClientChannel, HostChannel, Surface};
 
-// One test: in this process every check-in is this pid's, so two at once
-// could take each other's.
-#[test]
-fn a_generation_s_surfaces_cross_the_mach_channel_to_the_process_started() {
+/// A session whose program is this process, checked in.
+fn connected() -> (HostChannel, ClientChannel) {
     let host = HostChannel::new().unwrap();
-    let client = ClientChannel::connect(host.name()).unwrap();
-    // The check-in came from this process, not the one "started" (a pid
-    // past macOS's largest, so no process this binary starts has it).
-    let refused = host.accept(u32::MAX - 1, Duration::from_millis(200));
-    assert!(refused.is_err());
-    assert!(!host.is_connected());
-    host.accept(std::process::id(), Duration::from_secs(2))
-        .unwrap();
+    host.started(std::process::id());
+    let client = ClientChannel::connect(host.name(), &host.token()).unwrap();
+    host.accept(Duration::from_secs(2)).unwrap();
     assert!(host.is_connected());
+    (host, client)
+}
 
+#[test]
+fn a_generation_s_surfaces_cross_the_mach_channel_in_order() {
+    let (host, client) = connected();
     let old = Surface::new_bgra(8, 8).unwrap();
     host.send(1, &[&old]).unwrap();
     let surfaces: Vec<Surface> = (0..3)
@@ -37,6 +36,116 @@ fn a_generation_s_surfaces_cross_the_mach_channel_to_the_process_started() {
     assert_eq!((got[2].width(), got[2].height()), (66, 32));
     // Nothing more waits.
     assert!(client.receive(3, Duration::from_millis(50)).is_err());
+}
+
+#[test]
+fn a_check_in_reaches_only_the_session_whose_token_it_carries() {
+    let host = HostChannel::new().unwrap();
+    host.started(std::process::id());
+    let other = HostChannel::new().unwrap();
+    // Another session's token, and one no session has.
+    let _theirs = ClientChannel::connect(host.name(), &other.token()).unwrap();
+    let _no_one = ClientChannel::connect(host.name(), &"0".repeat(32)).unwrap();
+    assert!(host.accept(Duration::from_millis(200)).is_err());
+    assert!(!host.is_connected());
+    // Timed out, the session's token is forgotten: its own check-in, late,
+    // reaches no one.
+    let _late = ClientChannel::connect(host.name(), &host.token()).unwrap();
+    assert!(host.accept(Duration::from_millis(200)).is_err());
+}
+
+#[test]
+fn a_check_in_from_another_process_than_the_one_started_is_refused() {
+    let host = HostChannel::new().unwrap();
+    // Started as another process (a pid past macOS's largest): this one,
+    // holding the token as if it had read the child's environment, is not it.
+    host.started(u32::MAX - 1);
+    let _client = ClientChannel::connect(host.name(), &host.token()).unwrap();
+    assert!(host.accept(Duration::from_millis(200)).is_err());
+    assert!(!host.is_connected());
+}
+
+#[test]
+fn an_exited_program_s_session_takes_no_check_in() {
+    let host = HostChannel::new().unwrap();
+    host.started(std::process::id());
+    host.ended();
+    let _client = ClientChannel::connect(host.name(), &host.token()).unwrap();
+    assert!(host.accept(Duration::from_millis(200)).is_err());
+}
+
+/// Mach, as the test needs it beside the crate's own.
+mod raw {
+    pub type Port = u32;
+    unsafe extern "C" {
+        pub static bootstrap_port: Port;
+        pub static mach_task_self_: Port;
+        pub fn bootstrap_look_up(bp: Port, name: *const std::ffi::c_char, port: *mut Port) -> i32;
+        pub fn mach_port_allocate(task: Port, right: u32, name: *mut Port) -> i32;
+        pub fn mach_port_mod_refs(task: Port, name: Port, right: u32, delta: i32) -> i32;
+        pub fn mach_port_deallocate(task: Port, name: Port) -> i32;
+        pub fn mach_msg(
+            msg: *mut u32,
+            option: i32,
+            send_size: u32,
+            rcv_size: u32,
+            rcv_name: Port,
+            timeout: u32,
+            notify: Port,
+        ) -> i32;
+    }
+}
+
+#[test]
+fn a_malformed_check_in_is_destroyed_whole_and_the_rendezvous_goes_on() {
+    use raw::*;
+    let host = HostChannel::new().unwrap();
+    host.started(std::process::id());
+    let token: Vec<u32> = (0..4)
+        .map(|i| u32::from_str_radix(&host.token()[i * 8..i * 8 + 8], 16).unwrap())
+        .collect();
+    let name = std::ffi::CString::new(host.name()).unwrap();
+    // Safety: plain Mach calls on ports this test owns.
+    unsafe {
+        let task = mach_task_self_;
+        let mut service = 0;
+        assert_eq!(
+            bootstrap_look_up(bootstrap_port, name.as_ptr(), &mut service),
+            0
+        );
+        let mut port = 0;
+        assert_eq!(mach_port_allocate(task, 1, &mut port), 0);
+        // A check-in's shape, but its right a send-once one (made from
+        // `port`), which a check-in never carries: destroying the message
+        // destroys that right, and the kernel tells `port` so
+        // (MACH_NOTIFY_SEND_ONCE). Kept, no notice would come.
+        let mut message = vec![
+            19 | 0x8000_0000, // MACH_MSGH_BITS(COPY_SEND, 0) | COMPLEX
+            56,
+            service,
+            0,
+            0,
+            0x7a67_7301,
+            1,
+            port,
+            0,
+            21 << 16, // MACH_MSG_TYPE_MAKE_SEND_ONCE, a port descriptor
+        ];
+        message.extend(&token);
+        assert_eq!(
+            mach_msg(message.as_mut_ptr(), 1 | 0x10, 56, 0, 0, 2000, 0),
+            0
+        );
+        mach_port_deallocate(task, service);
+        let mut notice = vec![0u32; 64];
+        let received = mach_msg(notice.as_mut_ptr(), 2 | 0x100, 0, 256, port, 2000, 0);
+        assert_eq!(received, 0, "no notice: the send-once right was kept");
+        assert_eq!(notice[5], 0o107, "MACH_NOTIFY_SEND_ONCE");
+        mach_port_mod_refs(task, port, 1, -1);
+    }
+    // The rendezvous still takes the session's real check-in.
+    let _client = ClientChannel::connect(host.name(), &host.token()).unwrap();
+    host.accept(Duration::from_secs(2)).unwrap();
 }
 
 #[cfg(feature = "wgpu29")]
@@ -100,6 +209,7 @@ mod gpu {
         spawning.prepare(&mut command);
         mach.prepare(&mut command);
         let child = Child(command.spawn().unwrap());
+        mach.started(child.0.id());
         let (mut tx, mut rx) = spawning.started().unwrap();
 
         let Some(ClientMessage::Hello(hello)) = rx.recv_client().unwrap() else {
@@ -111,7 +221,7 @@ mod gpu {
             "{:?}",
             hello.offers
         );
-        mach.accept(child.0.id(), Duration::from_secs(5)).unwrap();
+        mach.accept(Duration::from_secs(5)).unwrap();
         tx.send_host(&HostMessage::Welcome(Welcome {
             version: PROTOCOL_VERSION,
             kind: BufferKind::IoSurface,

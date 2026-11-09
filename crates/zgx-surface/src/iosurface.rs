@@ -5,13 +5,19 @@
 //! beside it, set up as Chromium's `MachPortRendezvous` is: the host checks
 //! in a service of an unguessable name with the bootstrap server
 //! (`bootstrap_check_in`) and starts the program with the name in
-//! `ZGX_SURFACE_MACH`; the client looks it up (`bootstrap_look_up`) and
-//! sends the host a send right to a port of its own (`Client::connect` does
-//! this before its `Hello`). One service serves every session of the
-//! process (launchd keeps a name for the life of the process that checked
-//! it in); a check-in reaches only the session that started its sender (the
-//! message's audit token names the sender's pid, compared with the child's).
-//! From then on each generation of IOSurfaces goes to the client as one
+//! `ZGX_SURFACE_MACH`, and a token of the session's own (128 random bits)
+//! in `ZGX_SURFACE_MACH_TOKEN`; the client looks it up (`bootstrap_look_up`)
+//! and sends the host its token and a send right to a port of its own
+//! (`Client::connect` does this before its `Hello`). One service serves
+//! every session of the process (launchd keeps a name for the life of the
+//! process that checked it in). A check-in reaches only the session whose
+//! token it carries, and only from the process that session started: the
+//! message's audit token (pid and pid version) is compared with the child's,
+//! so a pid used again, or a process that read the token from the child's
+//! environment, is refused. A session's token is forgotten once its check-in
+//! is taken, its wait times out, its program exits or it goes; check-ins
+//! for no session's token are dropped as they come, and a message of any
+//! other shape is destroyed whole (`mach_msg_destroy`). From then on each generation of IOSurfaces goes to the client as one
 //! Mach message of their ports (`IOSurfaceCreateMachPort`), sent before the
 //! socket's `Buffers` naming them, so a client reading the `Buffers` finds
 //! the message waiting; it makes each port a surface again
@@ -29,12 +35,15 @@
 
 /// The environment variable a client's Mach channel is named by (macOS).
 pub const ENV_MACH: &str = "ZGX_SURFACE_MACH";
+/// The environment variable a client's session token is in (macOS): what
+/// its check-in carries, so the host gives it to that session alone.
+pub const ENV_MACH_TOKEN: &str = "ZGX_SURFACE_MACH_TOKEN";
 
 pub use imp::{ClientChannel, HostChannel, Surface};
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::ENV_MACH;
+    use super::{ENV_MACH, ENV_MACH_TOKEN};
     use objc2_core_foundation::{CFDictionary, CFNumber, CFRetained, CFString, CFType};
     use objc2_io_surface::{
         IOSurfaceRef, kIOSurfaceBytesPerElement, kIOSurfaceHeight, kIOSurfacePixelFormat,
@@ -143,6 +152,7 @@ mod imp {
             timeout: u32,
             notify: Port,
         ) -> Kern;
+        fn mach_msg_destroy(msg: *mut u32);
     }
     const MACH_PORT_RIGHT_RECEIVE: u32 = 1;
     const MACH_SEND_MSG: i32 = 0x1;
@@ -250,14 +260,14 @@ mod imp {
         check(kern, "mach_msg (send)")
     }
 
-    /// A message received: its id, the send rights it carried (this task's
-    /// now: whoever takes them deallocates them), its data words and its
-    /// sender's pid.
+    /// A message received and checked: its id, the send rights it carried
+    /// (this task's now: dropped with it unless taken), its data words and
+    /// its sender's audit token.
     struct Received {
         id: i32,
         ports: Vec<Port>,
         data: Vec<u32>,
-        pid: u32,
+        audit: [u32; 8],
     }
     impl Drop for Received {
         fn drop(&mut self) {
@@ -266,8 +276,42 @@ mod imp {
             }
         }
     }
+    /// What `receive` takes: a complex message of this crate's (a check-in
+    /// or a generation), port descriptors carrying send rights only, no reply
+    /// port or voucher, its size exactly its parts'.
+    fn well_formed(buf: &[u32], size: usize) -> bool {
+        let words = size / 4;
+        if !size.is_multiple_of(4) || words < HEADER_WORDS + 1 || words > buf.len() {
+            return false;
+        }
+        let (bits, reply, voucher, id) = (buf[0], buf[2], buf[4], buf[5] as i32);
+        if bits & MACH_MSGH_BITS_COMPLEX == 0 || reply != 0 || voucher != 0 {
+            return false;
+        }
+        if id != CHECK_IN && id != SURFACES {
+            return false;
+        }
+        let count = buf[HEADER_WORDS] as usize;
+        if count == 0 || count > MAX_SURFACES || words < HEADER_WORDS + 1 + count * DESCRIPTOR_WORDS
+        {
+            return false;
+        }
+        (0..count).all(|i| {
+            let at = HEADER_WORDS + 1 + i * DESCRIPTOR_WORDS;
+            let (name, kind) = (buf[at], buf[at + 2]);
+            let (disposition, descriptor) = ((kind >> 16) & 0xff, kind >> 24);
+            // The first descriptor of another type (out-of-line memory, port
+            // arrays: longer than a port's) ends the check: the message is
+            // destroyed whole, by the kernel's own reading of it.
+            name != 0
+                && descriptor == MACH_MSG_PORT_DESCRIPTOR
+                && disposition == MACH_MSG_TYPE_PORT_SEND
+        })
+    }
     /// The next message on `port`, waiting up to `timeout`; `None` if none
-    /// came.
+    /// came. One that isn't `well_formed` is destroyed whole
+    /// (`mach_msg_destroy`: its rights, out-of-line memory and voucher) and
+    /// is an error.
     fn receive(port: Port, timeout: Duration) -> io::Result<Option<Received>> {
         let mut buf = vec![0u32; 512];
         // Safety: `buf` is `rcv_size` bytes, 4-aligned; a larger message is
@@ -287,81 +331,142 @@ mod imp {
             return Ok(None);
         }
         check(kern, "mach_msg (receive)")?;
-        let (bits, size, reply) = (buf[0], buf[1] as usize, buf[2]);
-        if reply != 0 {
-            // None is asked for; whoever sent one gets no answer.
-            drop_send(reply);
+        let size = buf[1] as usize;
+        // The audit trailer follows the message: type, size, seqno, the
+        // sender's security token (2 words), then its audit token (8).
+        let trailer = size.div_ceil(4);
+        let audited = trailer + 13 <= buf.len() && buf[trailer + 1] >= 52;
+        if !audited || !well_formed(&buf, size) {
+            // Safety: a message the kernel just wrote into `buf`, whose
+            // rights and memory are this task's to free.
+            unsafe { mach_msg_destroy(buf.as_mut_ptr()) };
+            return Err(io::Error::other("a malformed Mach message was destroyed"));
         }
-        let mut received = Received {
+        let count = buf[HEADER_WORDS] as usize;
+        let ports = (0..count)
+            .map(|i| buf[HEADER_WORDS + 1 + i * DESCRIPTOR_WORDS])
+            .collect();
+        let data_at = HEADER_WORDS + 1 + count * DESCRIPTOR_WORDS;
+        let mut audit = [0; 8];
+        audit.copy_from_slice(&buf[trailer + 5..trailer + 13]);
+        Ok(Some(Received {
             id: buf[5] as i32,
-            ports: Vec::new(),
-            data: Vec::new(),
-            pid: 0,
-        };
-        let words = (size / 4).min(buf.len());
-        let mut at = HEADER_WORDS;
-        let mut unexpected = false;
-        if bits & MACH_MSGH_BITS_COMPLEX != 0 && words > at {
-            let count = buf[at] as usize;
-            at += 1;
-            for _ in 0..count {
-                if at + DESCRIPTOR_WORDS > words {
-                    unexpected = true;
-                    break;
-                }
-                let (name, kind) = (buf[at], buf[at + 2]);
-                at += DESCRIPTOR_WORDS;
-                let (disposition, descriptor) = ((kind >> 16) & 0xff, kind >> 24);
-                if descriptor != MACH_MSG_PORT_DESCRIPTOR {
-                    // Out-of-line memory or port arrays: never sent here
-                    // (and longer than a port descriptor: the rest can't be
-                    // read).
-                    unexpected = true;
-                    break;
-                }
-                match (name, disposition) {
-                    (0, _) => {}
-                    (_, MACH_MSG_TYPE_PORT_SEND) => received.ports.push(name),
-                    // A receive right (MACH_MSG_TYPE_PORT_RECEIVE): not ours
-                    // to keep.
-                    (_, 16) => {
-                        drop_receive(name);
-                        unexpected = true;
+            ports,
+            data: buf[data_at..size / 4].to_vec(),
+            audit,
+        }))
+    }
+
+    /// A session's secret, which its program checks in with: 128 random bits.
+    type Token = [u32; 4];
+    fn token_hex(token: &Token) -> String {
+        token.iter().map(|w| format!("{w:08x}")).collect()
+    }
+    fn token_from_hex(hex: &str) -> Option<Token> {
+        if hex.len() != 32 || !hex.is_ascii() {
+            return None;
+        }
+        let mut token = [0; 4];
+        for (i, word) in token.iter_mut().enumerate() {
+            *word = u32::from_str_radix(&hex[i * 8..i * 8 + 8], 16).ok()?;
+        }
+        Some(token)
+    }
+    /// A process as its audit token names it: its pid and pid version (which
+    /// a pid used again, or an exec, changes).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct Identity {
+        pid: u32,
+        /// 0 where the system doesn't say: then the pid alone.
+        version: u32,
+    }
+    impl Identity {
+        /// The running process `pid`'s.
+        fn of(pid: u32) -> Self {
+            // proc_uniqidentifierinfo (PROC_PIDUNIQIDENTIFIERINFO): uuid,
+            // uniqueid, puniqueid, then p_idversion (zero, reserved, before
+            // macOS 11), 56 bytes in all.
+            let mut info = [0u8; 56];
+            // Safety: `info` is the size given.
+            let written = unsafe {
+                libc::proc_pidinfo(
+                    pid as i32,
+                    17,
+                    0,
+                    info.as_mut_ptr().cast(),
+                    info.len() as i32,
+                )
+            };
+            let version = if written == info.len() as i32 {
+                u32::from_ne_bytes(info[32..36].try_into().unwrap())
+            } else {
+                0
+            };
+            Self { pid, version }
+        }
+        /// Whether `audit` (a message's sender) is this process.
+        fn sent(&self, audit: &[u32; 8]) -> bool {
+            audit[5] == self.pid && (self.version == 0 || audit[7] == self.version)
+        }
+    }
+
+    /// How long a session's check-in is waited for after its program
+    /// starts: `accept`'s wait (the host's is 2 s) and a margin. Later, the
+    /// session takes none.
+    const CHECK_IN_TTL: Duration = Duration::from_secs(10);
+    /// Check-ins kept for a session whose program's identity isn't known yet
+    /// (it checked in before `started`).
+    const MAX_EARLY: usize = 4;
+
+    /// A session waiting for its program's check-in.
+    #[derive(Default)]
+    struct Slot {
+        /// The program, once started.
+        identity: Option<Identity>,
+        /// Until when a check-in is taken.
+        deadline: Option<Instant>,
+        /// Check-ins that came before the identity was known.
+        early: Vec<(Port, [u32; 8])>,
+        /// The program's check-in: a send right to its port.
+        port: Option<Port>,
+    }
+    impl Slot {
+        fn offer(&mut self, port: Port, audit: [u32; 8]) {
+            match self.identity {
+                Some(identity) if identity.sent(&audit) => {
+                    if let Some(old) = self.port.replace(port) {
+                        drop_send(old);
                     }
-                    _ => {
-                        drop_send(name);
-                        unexpected = true;
-                    }
                 }
+                Some(_) => drop_send(port),
+                None if self.early.len() < MAX_EARLY => self.early.push((port, audit)),
+                None => drop_send(port),
             }
         }
-        if unexpected {
-            // `received` drops the send rights taken so far.
-            return Err(io::Error::other("an unexpected Mach message"));
+        fn expired(&self, now: Instant) -> bool {
+            self.deadline.is_some_and(|d| now >= d)
         }
-        received.data = buf[at.min(words)..words].to_vec();
-        // The audit trailer follows the message: type, size, seqno, the
-        // sender's security token (2 words), its audit token (8; the pid
-        // 6th).
-        let trailer = size.div_ceil(4);
-        if trailer + 13 <= buf.len() && buf[trailer + 1] >= 52 {
-            received.pid = buf[trailer + 3 + 2 + 5];
+    }
+    impl Drop for Slot {
+        fn drop(&mut self) {
+            for (port, _) in self.early.drain(..) {
+                drop_send(port);
+            }
+            if let Some(port) = self.port.take() {
+                drop_send(port);
+            }
         }
-        Ok(Some(received))
     }
 
     /// The process's rendezvous: one bootstrap service for every session
-    /// (launchd keeps a name checked in for the life of the process), its
-    /// check-ins kept by the sender's pid until the session that started
-    /// that process takes them.
+    /// (launchd keeps a name checked in for the life of the process). Only
+    /// sessions' own tokens are kept, each until its program checks in, its
+    /// wait times out, its program exits or the session goes.
     struct Rendezvous {
         name: String,
-        checked_in: Mutex<HashMap<u32, Port>>,
+        slots: Mutex<HashMap<Token, Slot>>,
         arrived: Condvar,
     }
-    /// Check-ins kept unclaimed at most (a check-in names a process the host
-    /// started and is taken at once; more is a process that found the name).
-    const MAX_UNCLAIMED: usize = 64;
     fn rendezvous() -> io::Result<&'static Rendezvous> {
         static RENDEZVOUS: OnceLock<Result<Rendezvous, String>> = OnceLock::new();
         RENDEZVOUS
@@ -385,54 +490,63 @@ mod imp {
                     .map_err(|e| e.to_string())?;
                 Ok(Rendezvous {
                     name,
-                    checked_in: Mutex::default(),
+                    slots: Mutex::default(),
                     arrived: Condvar::new(),
                 })
             })
             .as_ref()
             .map_err(|e| io::Error::other(e.clone()))
     }
-    /// The rendezvous's thread: each check-in kept by its sender's pid.
+    /// The rendezvous's thread: each check-in given to the session whose
+    /// token it carries; others dropped.
     fn listen(service: Port) {
         loop {
             let mut message = match receive(service, Duration::from_secs(3600)) {
                 Ok(Some(message)) => message,
                 Ok(None) => continue,
-                Err(error) => {
-                    eprintln!("zgx-surface: a Mach check-in was dropped: {error}");
-                    continue;
-                }
+                Err(_) => continue,
             };
-            if message.id != CHECK_IN || message.ports.len() != 1 || message.pid == 0 {
+            if message.id != CHECK_IN || message.ports.len() != 1 || message.data.len() != 4 {
                 continue;
             }
+            let token: Token = message.data[..4].try_into().unwrap();
             let Ok(rendezvous) = rendezvous() else { return };
-            let mut checked_in = rendezvous.checked_in.lock().unwrap();
-            if checked_in.len() >= MAX_UNCLAIMED && !checked_in.contains_key(&message.pid) {
+            let mut slots = rendezvous.slots.lock().unwrap();
+            let now = Instant::now();
+            slots.retain(|_, slot| !slot.expired(now));
+            let Some(slot) = slots.get_mut(&token) else {
                 continue;
-            }
-            let port = message.ports.pop().unwrap();
-            // A pid used again: the newer process's.
-            if let Some(old) = checked_in.insert(message.pid, port) {
-                drop_send(old);
-            }
+            };
+            slot.offer(message.ports.pop().unwrap(), message.audit);
             rendezvous.arrived.notify_all();
         }
     }
 
-    /// The host's side of a session's Mach channel: the process's
-    /// rendezvous until its client has checked in, then a send right to the
-    /// client's port.
+    /// The host's side of a session's Mach channel: its token at the
+    /// process's rendezvous until its program has checked in, then a send
+    /// right to the program's port.
     pub struct HostChannel {
         name: String,
+        token: Token,
         client: Mutex<Option<Port>>,
     }
     impl HostChannel {
-        /// A channel through the process's rendezvous (checked in with the
-        /// bootstrap server, under an unguessable name, the first time).
+        /// A session at the process's rendezvous (checked in with the
+        /// bootstrap server, under an unguessable name, the first time),
+        /// with a token of its own.
         pub fn new() -> io::Result<Self> {
+            let rendezvous = rendezvous()?;
+            let mut token = [0u32; 4];
+            // Safety: fills the buffer it is given.
+            unsafe { libc::arc4random_buf(token.as_mut_ptr().cast(), 16) };
+            rendezvous
+                .slots
+                .lock()
+                .unwrap()
+                .insert(token, Slot::default());
             Ok(Self {
-                name: rendezvous()?.name.clone(),
+                name: rendezvous.name.clone(),
+                token,
                 client: Mutex::new(None),
             })
         }
@@ -440,32 +554,78 @@ mod imp {
         pub fn name(&self) -> &str {
             &self.name
         }
-        /// Make `command` find the channel, named in `ENV_MACH`.
+        /// The session's token, as its program is given it.
+        pub fn token(&self) -> String {
+            token_hex(&self.token)
+        }
+        /// Make `command` find the channel: the rendezvous in `ENV_MACH`,
+        /// the session's token in `ENV_MACH_TOKEN`.
         pub fn prepare(&self, command: &mut std::process::Command) {
             command.env(ENV_MACH, &self.name);
+            command.env(ENV_MACH_TOKEN, self.token());
         }
-        /// Take the check-in of the process `pid` (the program the host
-        /// started, as the message's audit token says), waiting up to
-        /// `timeout`. Another process's check-in never reaches this session.
-        pub fn accept(&self, pid: u32, timeout: Duration) -> io::Result<()> {
+        fn with_slot<R>(&self, f: impl FnOnce(&mut HashMap<Token, Slot>) -> R) -> Option<R> {
+            let rendezvous = rendezvous().ok()?;
+            Some(f(&mut rendezvous.slots.lock().unwrap()))
+        }
+        /// The program started, as `pid`: only a check-in from that process
+        /// (its pid and pid version, read now) is taken, within
+        /// `CHECK_IN_TTL`.
+        pub fn started(&self, pid: u32) {
+            let identity = Identity::of(pid);
+            self.with_slot(|slots| {
+                if let Some(slot) = slots.get_mut(&self.token) {
+                    slot.identity = Some(identity);
+                    slot.deadline = Some(Instant::now() + CHECK_IN_TTL);
+                    for (port, audit) in std::mem::take(&mut slot.early) {
+                        slot.offer(port, audit);
+                    }
+                }
+            });
+            if let Ok(rendezvous) = rendezvous() {
+                rendezvous.arrived.notify_all();
+            }
+        }
+        /// Take the program's check-in, waiting up to `timeout`. Either way
+        /// the session's token is forgotten: a later check-in reaches no one.
+        pub fn accept(&self, timeout: Duration) -> io::Result<()> {
             let rendezvous = rendezvous()?;
             let deadline = Instant::now() + timeout;
-            let mut checked_in = rendezvous.checked_in.lock().unwrap();
-            loop {
-                if let Some(port) = checked_in.remove(&pid) {
+            let mut slots = rendezvous.slots.lock().unwrap();
+            let result = loop {
+                let now = Instant::now();
+                let Some(slot) = slots.get_mut(&self.token) else {
+                    break Err(io::Error::other("the session's check-in has expired"));
+                };
+                if slot.identity.is_none() {
+                    break Err(io::Error::other("the session's program hasn't started"));
+                }
+                if let Some(port) = slot.port.take() {
                     if let Some(old) = self.client.lock().unwrap().replace(port) {
                         drop_send(old);
                     }
-                    return Ok(());
+                    break Ok(());
                 }
-                let left = deadline.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    return Err(io::Error::new(
+                if now >= deadline || slot.expired(now) {
+                    break Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "the client didn't check in on the Mach channel",
                     ));
                 }
-                checked_in = rendezvous.arrived.wait_timeout(checked_in, left).unwrap().0;
+                slots = rendezvous
+                    .arrived
+                    .wait_timeout(slots, deadline - now)
+                    .unwrap()
+                    .0;
+            };
+            slots.remove(&self.token);
+            result
+        }
+        /// The program exited: its check-in, or its port, is dropped.
+        pub fn ended(&self) {
+            self.with_slot(|slots| slots.remove(&self.token));
+            if let Some(client) = self.client.lock().unwrap().take() {
+                drop_send(client);
             }
         }
         /// Whether a client has checked in.
@@ -506,9 +666,7 @@ mod imp {
     }
     impl Drop for HostChannel {
         fn drop(&mut self) {
-            if let Some(client) = self.client.get_mut().unwrap().take() {
-                drop_send(client);
-            }
+            self.ended();
         }
     }
 
@@ -518,24 +676,35 @@ mod imp {
         port: Port,
     }
     impl ClientChannel {
-        /// The channel `ENV_MACH` names, checked in; `None` if this process
-        /// wasn't started with one. The variable is removed, so programs it
-        /// starts don't take it.
+        /// The channel `ENV_MACH` and `ENV_MACH_TOKEN` name, checked in;
+        /// `None` if this process wasn't started with one. The variables are
+        /// removed, so programs it starts don't take them.
         pub fn from_env() -> io::Result<Option<Self>> {
-            let Some(name) = std::env::var_os(ENV_MACH) else {
+            let (Some(name), token) =
+                (std::env::var_os(ENV_MACH), std::env::var_os(ENV_MACH_TOKEN))
+            else {
                 return Ok(None);
             };
             // Safety: as `transport::connect_from_env`: a client connects as
             // it starts.
-            unsafe { std::env::remove_var(ENV_MACH) };
-            let name = name
-                .into_string()
-                .map_err(|_| io::Error::other("ZGX_SURFACE_MACH is not UTF-8"))?;
-            Self::connect(&name).map(Some)
+            unsafe {
+                std::env::remove_var(ENV_MACH);
+                std::env::remove_var(ENV_MACH_TOKEN);
+            }
+            let (Ok(name), Some(Ok(token))) = (name.into_string(), token.map(|t| t.into_string()))
+            else {
+                return Err(io::Error::other(
+                    "ZGX_SURFACE_MACH or ZGX_SURFACE_MACH_TOKEN is missing or not UTF-8",
+                ));
+            };
+            Self::connect(&name, &token).map(Some)
         }
-        /// Look up the host's service `name` and check in: send it a send
-        /// right to a port of this process's own.
-        pub fn connect(name: &str) -> io::Result<Self> {
+        /// Look up the host's rendezvous `name` and check in with the
+        /// session's `token`: send it a send right to a port of this
+        /// process's own.
+        pub fn connect(name: &str, token: &str) -> io::Result<Self> {
+            let token = token_from_hex(token)
+                .ok_or_else(|| io::Error::other("a malformed session token"))?;
             let c_name = CString::new(name).map_err(io::Error::other)?;
             let mut service = 0;
             // Safety: a name, and where the send right goes.
@@ -551,7 +720,12 @@ mod imp {
                 }
             };
             let sent = send(
-                message(service, CHECK_IN, &[(port, MACH_MSG_TYPE_MAKE_SEND)], &[]),
+                message(
+                    service,
+                    CHECK_IN,
+                    &[(port, MACH_MSG_TYPE_MAKE_SEND)],
+                    &token,
+                ),
                 SEND_TIMEOUT,
             );
             drop_send(service);
@@ -665,8 +839,20 @@ mod imp {
         pub fn prepare(&self, _command: &mut std::process::Command) {
             match *self {}
         }
+        /// The session's token.
+        pub fn token(&self) -> String {
+            match *self {}
+        }
+        /// The program started.
+        pub fn started(&self, _pid: u32) {
+            match *self {}
+        }
         /// Take the client's check-in.
-        pub fn accept(&self, _pid: u32, _timeout: Duration) -> io::Result<()> {
+        pub fn accept(&self, _timeout: Duration) -> io::Result<()> {
+            match *self {}
+        }
+        /// The program exited.
+        pub fn ended(&self) {
             match *self {}
         }
         /// Whether a client has checked in.
@@ -687,7 +873,7 @@ mod imp {
             Ok(None)
         }
         /// Unsupported here.
-        pub fn connect(_name: &str) -> io::Result<Self> {
+        pub fn connect(_name: &str, _token: &str) -> io::Result<Self> {
             Err(unsupported())
         }
         /// A generation's surfaces.
