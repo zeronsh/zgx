@@ -8500,6 +8500,46 @@ impl crate::markdown::view::Look for ScriptLook {
     fn finds(&self) -> bool {
         self.look.find.is_some()
     }
+    fn near(&self, at: usize, last: bool) -> bool {
+        let Some(window) = &self.look.window else {
+            return true;
+        };
+        match self.vm.call::<Option<bool>>(&window.near, (at, last)) {
+            Ok(near) => near.unwrap_or(true),
+            Err(error) => {
+                self.vm.report(error);
+                true
+            }
+        }
+    }
+    fn run_mounted(&self, at: usize, block: zgx::compose::NodeHandle) {
+        let Some(window) = &self.look.window else {
+            return;
+        };
+        let element = Element::new(&self.low.runtime, None, Rc::from([]), "div");
+        element.attach(block);
+        let vm = &self.vm;
+        if let Err(error) = vm
+            .runtime
+            .clone()
+            .batch(|| vm.call::<()>(&window.mounted, (at, crate::element::ElementUd(element))))
+        {
+            vm.report(error);
+        }
+    }
+    fn run_resized(&self, at: usize, height: f32, was: f32) {
+        let Some(window) = &self.look.window else {
+            return;
+        };
+        let vm = &self.vm;
+        if let Err(error) = vm
+            .runtime
+            .clone()
+            .batch(|| vm.call::<()>(&window.resized, (at, height, was)))
+        {
+            vm.report(error);
+        }
+    }
     fn tracks(&self) -> bool {
         self.look.track.is_some()
     }

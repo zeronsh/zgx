@@ -5424,6 +5424,17 @@ export type MarkdownViewProps = {
 	-- element); what it gives back is called as the box goes (a reader
 	-- keeping its place by the block it is on).
 	track: ((block: Element) -> (() -> ())?)?,
+	-- A long text held in runs of 16 top-level blocks: run `at` (from 1)
+	-- built while `near(at, last)` says so (tracked), else a box of the
+	-- height it last had (kept by `key`) or a guess; `mounted(at, element)`
+	-- its box as it mounts, `resized(at, height, was)` as its height
+	-- changes from what it was held at.
+	window: {
+		key: string,
+		near: (at: number, last: boolean) -> boolean,
+		mounted: (at: number, block: Element) -> (),
+		resized: (at: number, height: number, was: number) -> (),
+	}?,
 	find: {
 		query: () -> string,
 		current: () -> (number?, number?),
