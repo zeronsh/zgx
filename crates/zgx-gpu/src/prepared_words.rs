@@ -35,11 +35,58 @@ pub(super) struct Shape {
 pub(super) struct Words {
     // Shared by `Arc`: a `TextCache` is `Send` and `Sync`, as before words.
     pub words: Vec<(usize, Arc<Shape>)>,
+    /// Its words' glyphs, all told (`bytes`).
+    glyphs: usize,
     pub font_size: f32,
     align: Option<Align>,
     /// Laid out at this wrap width (`lay_out`), into `lines`.
     laid: Option<Option<f32>>,
     pub lines: Vec<LayoutLine>,
+    /// Line breaking's state after each word a line ended at, laid out at
+    /// `laid` (`visual_lines`): where it resumes for a text continuing this.
+    breaks: Vec<Break>,
+    /// Taken from the paragraph this one grew from (`WordCache::words`):
+    /// its lines laid out at this width hold to this state, and the next
+    /// `lay_out` at that width starts from it.
+    resume: Option<(Option<f32>, Break)>,
+    /// The length of the text it grew from, its lines taken with its words
+    /// (`Grew::Owned`), and how many of them its last `lay_out` kept: those
+    /// are that text's first lines at the same width, as they were.
+    pub grew: Option<(usize, usize)>,
+}
+
+/// Line breaking's state once it has read the words before `next`, a line
+/// having ended among the last it read: the same for any text whose words
+/// begin with those, so breaking such a text resumes here.
+#[derive(Clone, Copy)]
+pub(super) struct Break {
+    next: usize,
+    /// Lines ended before it.
+    lines: usize,
+    line: Option<(At, At, f32)>,
+    line_w: f32,
+    fitting: At,
+    range_width: f32,
+    before_last_blank: f32,
+}
+impl Break {
+    const START: Break = Break {
+        next: 0,
+        lines: 0,
+        line: None,
+        line_w: 0.,
+        fitting: (0, 0),
+        range_width: 0.,
+        before_last_blank: 0.,
+    };
+}
+
+/// The words of the paragraph a text grew from (`WordCache::words`):
+/// borrowed and copied from, or its own, taken from a text that goes as
+/// this is prepared (a stream's last state), its lines with it.
+pub(super) enum Grew<'a> {
+    Shared(&'a Words),
+    Owned(Box<Words>, usize),
 }
 
 /// A run of a paragraph in one font, as cosmic-text shapes it: to byte
@@ -131,8 +178,10 @@ impl WordCache {
     /// `grew`: the words of a paragraph in the same runs that `text` starts
     /// with (a stream's last state), and where they hold to
     /// (`Words::resume_at`): those before are taken, and only the rest of
-    /// `text` is read, its words looked up and shaped. With the words, how
-    /// many were taken so.
+    /// `text` is read, its words looked up and shaped. Taken whole where
+    /// its own (`Grew::Owned`, with that text's length): only its words
+    /// from there go, and its lines are laid out again only from where they
+    /// may change (`lay_out`). With the words, how many were taken so.
     // Boxed: an entry holds its words boxed (it stays small), and a spare
     // goes back into one without being boxed again.
     #[allow(clippy::vec_box, clippy::too_many_arguments)]
@@ -145,9 +194,12 @@ impl WordCache {
         base: &FontStyle,
         font_size: f32,
         spare: &mut Vec<Box<Words>>,
-        grew: Option<(&Words, usize)>,
+        grew: Option<(Grew<'_>, usize)>,
     ) -> Option<(Box<Words>, usize)> {
         if runs.iter().any(|run| !qualifies(run.font)) {
+            if let Some((Grew::Owned(words, _), _)) = grew {
+                spare.extend(words.recycle());
+            }
             return None;
         }
         let size = font_size.max(1.);
@@ -155,42 +207,58 @@ impl WordCache {
         let mut ranges: smallvec::SmallVec<[(usize, usize, bool); 16]> = smallvec::SmallVec::new();
         // (`plain_line` was asked first: `TextCache::words_of`.) Read from
         // where the words it grew from stop holding.
-        let taken = match grew {
-            None => {
-                if !cosmic_text::line_words(text, |range, blank| {
-                    ranges.push((range.start, range.end, blank));
-                }) {
-                    return None;
-                }
-                &[][..]
-            }
-            Some((grew, at)) => {
-                let from = grew.words[at].0;
-                if !cosmic_text::line_words(&text[from..], |range, blank| {
-                    ranges.push((from + range.start, from + range.end, blank));
-                }) {
-                    return None;
-                }
-                &grew.words[..at]
-            }
+        let from = match &grew {
+            None => 0,
+            Some((Grew::Shared(grew), at)) => grew.words[*at].0,
+            Some((Grew::Owned(grew, _), at)) => grew.words[*at].0,
         };
-        let mut kept = spare.pop().unwrap_or_else(|| {
+        if !cosmic_text::line_words(&text[from..], |range, blank| {
+            ranges.push((from + range.start, from + range.end, blank));
+        }) {
+            if let Some((Grew::Owned(words, _), _)) = grew {
+                spare.extend(words.recycle());
+            }
+            return None;
+        }
+        let new = || {
             Box::new(Words {
                 words: Vec::new(),
+                glyphs: 0,
                 font_size: size,
                 align: None,
                 laid: None,
                 lines: Vec::new(),
+                breaks: Vec::new(),
+                resume: None,
+                grew: None,
             })
-        });
-        let words = &mut kept.words;
-        words.clear();
-        // Room for all of it at once: reserved after the words taken, it
-        // would grow by doubling, and keep what it does not use.
-        words.reserve(taken.len() + ranges.len());
-        if !taken.is_empty() {
-            words.extend_from_slice(taken);
-        }
+        };
+        let (mut kept, taken) = match grew {
+            None => {
+                let mut kept = spare.pop().unwrap_or_else(new);
+                kept.words.clear();
+                kept.glyphs = 0;
+                kept.words.reserve(ranges.len());
+                (kept, 0)
+            }
+            Some((Grew::Shared(grew), at)) => {
+                let mut kept = spare.pop().unwrap_or_else(new);
+                let words = &mut kept.words;
+                words.clear();
+                // Room for all of it at once: reserved after the words taken,
+                // it would grow by doubling, and keep what it does not use.
+                words.reserve(at + ranges.len());
+                words.extend_from_slice(&grew.words[..at]);
+                kept.glyphs = kept.words.iter().map(|(_, word)| word.glyphs.len()).sum();
+                (kept, at)
+            }
+            // Its own: the words from `at` go, the rest stay where they are.
+            Some((Grew::Owned(mut kept, length), at)) => {
+                kept.keep(at, length);
+                kept.words.reserve(ranges.len());
+                (kept, at)
+            }
+        };
         let mut run = 0;
         for (start, end, blank) in ranges {
             while runs[run].end <= start {
@@ -198,8 +266,7 @@ impl WordCache {
             }
             // A word across runs is shaped in parts by cosmic-text.
             if end > runs[run].end {
-                words.clear();
-                spare.push(kept);
+                spare.extend(kept.recycle());
                 return None;
             }
             let id = ids[run];
@@ -218,8 +285,7 @@ impl WordCache {
                     let height = |glyph: &ShapeGlyph| glyph.metrics_opt.map(|m| m.line_height);
                     let first = shaped.glyphs.first().and_then(height);
                     if shaped.glyphs.iter().any(|glyph| height(glyph) != first) {
-                        words.clear();
-                        spare.push(kept);
+                        spare.extend(kept.recycle());
                         return None;
                     }
                     let shape = Arc::new(Shape {
@@ -237,12 +303,17 @@ impl WordCache {
                     shape
                 }
             };
-            words.push((start, shape));
+            kept.glyphs += shape.glyphs.len();
+            kept.words.push((start, shape));
         }
-        kept.font_size = size;
-        kept.align = crate::text::alignment(base);
+        // (Lines taken in another size or alignment are laid out again.)
+        let align = crate::text::alignment(base);
+        if (kept.font_size, kept.align) != (size, align) {
+            (kept.font_size, kept.align) = (size, align);
+            kept.resume = None;
+        }
         kept.laid = None;
-        Some((kept, taken.len()))
+        Some((kept, taken))
     }
 }
 
@@ -250,6 +321,42 @@ impl WordCache {
 type At = (usize, usize);
 
 impl Words {
+    /// Its first `at` words kept, as the start of a text continuing the one
+    /// of `length` bytes it holds the words of: the rest go, and its lines
+    /// laid out hold to the last line ended among the words kept (`resume`).
+    fn keep(&mut self, at: usize, length: usize) {
+        let gone: usize = self.words[at..]
+            .iter()
+            .map(|(_, word)| word.glyphs.len())
+            .sum();
+        self.glyphs -= gone;
+        self.words.truncate(at);
+        // A state once word `next - 1` is read read only words kept.
+        let held = self.breaks.iter().rposition(|done| done.next <= at);
+        self.breaks.truncate(held.map_or(0, |held| held + 1));
+        self.resume = match (self.laid, self.breaks.last()) {
+            (Some(width), Some(done)) => Some((width, *done)),
+            _ => None,
+        };
+        self.grew = Some((length, 0));
+    }
+    /// Its first lines that are those of the text of `length` bytes it
+    /// grew from (`grew`), as that text laid them out at `width` (a wrap
+    /// width, as `lay_out` takes): taken with its words, to be kept as they
+    /// are (`resume`), or kept by its last `lay_out`, at that width.
+    pub fn kept_lines(&self, length: usize, width: Option<f32>) -> Option<&[LayoutLine]> {
+        let (from, kept) = self.grew?;
+        if from != length {
+            return None;
+        }
+        let kept = match self.resume {
+            Some((at, done)) if at == width => done.lines,
+            Some(_) => return None,
+            None if self.laid == Some(width) => kept,
+            None => return None,
+        };
+        self.lines.get(..kept)
+    }
     /// The word of these, `text`'s (or a text `text` starts with), from
     /// which a text continuing `text` is read again: the last after spaces
     /// that follow a letter or digit. Before it, its words, and where its
@@ -276,13 +383,22 @@ impl Words {
     }
     /// Its visual lines at wrap width `width`, as `layout_to_buffer` breaks
     /// a line of one span (word, else glyph): each one's start and end and
-    /// width. The steps `Compact::size` takes.
-    fn visual_lines(&self, width: Option<f32>) -> smallvec::SmallVec<[(At, At, f32); 2]> {
+    /// width. The steps `Compact::size` takes. From `from` (a state it left
+    /// earlier at this width: the lines from its on), noting in `breaks`
+    /// (a stream's, which grew from another: `grew`) each state after a word
+    /// a line ended at.
+    fn visual_lines(
+        &self,
+        width: Option<f32>,
+        from: &Break,
+        breaks: &mut Vec<Break>,
+    ) -> smallvec::SmallVec<[(At, At, f32); 2]> {
+        let record = self.grew.is_some();
         let limit = width.unwrap_or(f32::INFINITY);
         let mut lines = smallvec::SmallVec::new();
         // The line being filled: its width, and the one range it takes.
-        let mut line: Option<(At, At, f32)> = None;
-        let mut line_w = 0_f32;
+        let mut line: Option<(At, At, f32)> = from.line;
+        let mut line_w = from.line_w;
         let add =
             |line: &mut Option<(At, At, f32)>, line_w: &mut f32, start: At, end: At, w: f32| {
                 if start != end {
@@ -299,10 +415,11 @@ impl Words {
             *line_w = 0.;
         };
         let words = &self.words;
-        let mut fitting = (0, 0);
-        let mut range_width = 0_f32;
-        let mut before_last_blank = 0_f32;
-        for (i, (_, word)) in words.iter().enumerate() {
+        let mut fitting = from.fitting;
+        let mut range_width = from.range_width;
+        let mut before_last_blank = from.before_last_blank;
+        for (i, (_, word)) in words.iter().enumerate().skip(from.next) {
+            let ended = lines.len();
             if line_w + (range_width + word.width) <= limit
                 || (word.blank && line_w + range_width <= limit)
             {
@@ -351,6 +468,23 @@ impl Words {
                     fitting = (i, 0);
                 }
             }
+            // (Words apart: a narrow width ends a line at each word.)
+            if record
+                && lines.len() != ended
+                && breaks
+                    .last()
+                    .is_none_or(|last| i + 1 >= last.next + super::BREAKS_APART)
+            {
+                breaks.push(Break {
+                    next: i + 1,
+                    lines: from.lines + lines.len(),
+                    line,
+                    line_w,
+                    fitting,
+                    range_width,
+                    before_last_blank,
+                });
+            }
         }
         add(
             &mut line,
@@ -369,13 +503,35 @@ impl Words {
             return;
         }
         self.laid = Some(width);
-        let visual = self.visual_lines(width);
+        // Its lines from the text it grew from, at this width, to where they
+        // may change: unless a line's place in it depends on the widest
+        // line (aligned in an unwrapped text).
+        let left = matches!(self.align, None | Some(Align::Left | Align::Justified));
+        let from = match self.resume.take() {
+            Some((at, from)) if at == width && (left || width.is_some()) => from,
+            _ => Break::START,
+        };
+        if let Some((_, kept)) = &mut self.grew {
+            *kept = from.lines;
+        }
+        let mut breaks = std::mem::take(&mut self.breaks);
+        breaks.truncate(
+            breaks
+                .iter()
+                .take_while(|done| done.next <= from.next)
+                .count(),
+        );
+        if from.next == 0 {
+            breaks.clear();
+        }
+        let visual = self.visual_lines(width, &from, &mut breaks);
+        self.breaks = breaks;
         let font_size = self.font_size;
         let line_width =
             width.unwrap_or_else(|| visual.iter().fold(0_f32, |w, line| w.max(line.2)));
         // Its lines from before are filled again, their lists kept.
         let mut lines = std::mem::take(&mut self.lines);
-        let mut made = 0;
+        let mut made = from.lines;
         for (start, end, w) in visual {
             let mut x = match self.align.unwrap_or(Align::Left) {
                 Align::Left | Align::Justified => 0.,
@@ -469,6 +625,9 @@ impl Words {
     /// go, its lines' glyph lists only if short.
     pub fn recycle(mut self: Box<Self>) -> Option<Box<Self>> {
         self.words.clear();
+        self.glyphs = 0;
+        self.breaks.clear();
+        (self.resume, self.grew, self.laid) = (None, None, None);
         self.lines.truncate(4);
         for line in &mut self.lines {
             if line.glyphs.capacity() > 256 {
@@ -480,8 +639,7 @@ impl Words {
     /// Estimated bytes it holds laid out: the same all its life, so the
     /// cache's count of them holds (a layout glyph for each of its glyphs).
     pub fn bytes(&self) -> usize {
-        let glyphs: usize = self.words.iter().map(|(_, word)| word.glyphs.len()).sum();
-        256 + self.words.len() * 16 + glyphs * size_of::<cosmic_text::LayoutGlyph>()
+        256 + self.words.len() * 16 + self.glyphs * size_of::<cosmic_text::LayoutGlyph>()
     }
 }
 
