@@ -191,6 +191,29 @@ pub fn frame() {
     }
 }
 
+/// What runs in `work` is spare time's (`crate::spare`), no frame's: a trace
+/// keeps it apart, for no frame waited for it.
+pub fn spare_time<R>(work: impl FnOnce() -> R) -> R {
+    #[cfg(feature = "trace")]
+    if enabled() && crate::trace::enabled() {
+        let frame = PROFILE.with(|profile| std::mem::take(&mut profile.borrow_mut().frame));
+        crate::trace::spare_begins();
+        let result = work();
+        let spent =
+            PROFILE.with(|profile| std::mem::replace(&mut profile.borrow_mut().frame, frame));
+        crate::trace::spare_ends(
+            PHASES
+                .iter()
+                .zip(spent)
+                .filter(|(_, t)| !t.time.is_zero())
+                .map(|(phase, t)| (phase.name(), t.instructions, t.time.as_secs_f32() * 1e6))
+                .collect(),
+        );
+        return result;
+    }
+    work()
+}
+
 /// Whether devtools trace frames now (`zgx inspect frames`): what [`note`]
 /// and [`gpu_time`] give is kept. Built without the `trace` feature, never.
 #[inline]

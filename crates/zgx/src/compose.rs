@@ -240,6 +240,12 @@ pub(crate) struct ListOptions {
     pub(crate) contain: bool,
     pub(crate) edges: Option<Box<ListEdges>>,
 }
+impl ListOptions {
+    /// Its share of spare time (`View::list_ahead`).
+    pub(crate) fn ahead(&self, ui: &Ui) -> Option<Rc<crate::spare::ListAhead>> {
+        ui.list_ahead(self.edges.as_ref().and_then(|edges| edges.ahead))
+    }
+}
 /// What a virtual list reports of its edges: its end and its start coming
 /// in reach (`View::on_end`, `View::on_start`) and whether it rests at its
 /// end (`View::on_at_end`). Boxed: few lists have any.
@@ -248,6 +254,8 @@ pub(crate) struct ListEdges {
     end: Option<EdgeWatch>,
     start: Option<EdgeWatch>,
     at_end: Option<Box<dyn FnMut(bool)>>,
+    /// `View::list_ahead`.
+    ahead: Option<f32>,
     /// `View::virtualize_in_ancestor`: it scrolls with the scroll view
     /// around it, building the rows that view shows.
     pub(crate) ancestor: bool,
@@ -307,6 +315,7 @@ pub(crate) fn watch_edges(
         start,
         mut at_end,
         ancestor: _,
+        ahead: _,
     } = edges;
     let runtime = ui.runtime.clone();
     let weak = ui.downgrade();
@@ -983,6 +992,14 @@ impl View {
     /// to the latest" button shows while it does not. For a virtual list.
     pub fn on_at_end(mut self, changed: impl FnMut(bool) + 'static) -> Self {
         self.edges_mut().at_end = Some(Box::new(changed));
+        self
+    }
+    /// How many of its viewports of rows a virtual list builds ahead of each
+    /// edge of its view in a window's spare time (`crate::spare`), 1 unless
+    /// set, and keeps as it scrolls away. 0: it builds what shows and its
+    /// overscan alone, and drops the rest.
+    pub fn list_ahead(mut self, viewports: f32) -> Self {
+        self.edges_mut().ahead = Some(viewports);
         self
     }
     fn edges_mut(&mut self) -> &mut ListEdges {
@@ -3399,6 +3416,52 @@ pub(crate) fn list_reveal(
     ui.retain(root, forget);
     reveal
 }
+type FixedRow = (NodeId, Signal<usize>, Placed);
+impl crate::spare::KeptRow for FixedRow {
+    fn node(&self) -> NodeId {
+        self.0
+    }
+    fn place(&self) -> &Signal<usize> {
+        &self.1
+    }
+    fn run(&self) -> u64 {
+        self.2.run
+    }
+    fn set_run(&mut self, run: u64) {
+        self.2.run = run;
+    }
+}
+/// Rows kept out of view where they say too (those shown are placed as ever).
+#[inline(never)]
+fn place_kept_fixed<K>(
+    entries: &mut HashMap<K, FixedRow, rustc_hash::FxBuildHasher>,
+    scene: &mut crate::scene::Scene,
+    model: &crate::virtual_list::VirtualList,
+    width: f32,
+    row_height: f32,
+) {
+    for (node, row, placed) in entries.values_mut() {
+        let index = row.with_untracked(|index| *index);
+        let at = Some((index, width.to_bits()));
+        if placed.at != at {
+            placed.at = at;
+            scene.set_style(
+                *node,
+                crate::scene::Style {
+                    align: crate::scene::Align::Stretch,
+                    ..crate::widgets::fixed(width, row_height)
+                },
+            );
+            scene.set_transform(
+                *node,
+                crate::scene::Transform {
+                    x: 0.0,
+                    y: model.row_offset(index),
+                },
+            );
+        }
+    }
+}
 /// Fixed-height keyed rows; only the visible range plus overscan is mounted.
 /// `count` and `key` track reactive reads. `build` runs once per mounted key;
 /// its index signal updates when that key moves. Offscreen rows are disposed,
@@ -3423,6 +3486,10 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     let count = move || (count.borrow_mut())();
     View::new(Kind::VirtualList(Box::new(
         move |ui, root, environment, options: ListOptions| {
+            // With spare time its overscan is spare time's too: the frame
+            // builds what shows alone.
+            let mut kept = crate::spare::Kept::new(options.ahead(ui), overscan);
+            let overscan = if kept.is_some() { 0 } else { overscan };
             let ListOptions {
                 scrollbar,
                 keyboard_navigation,
@@ -3546,6 +3613,9 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
             );
             let mut handled_reveal = 0;
             ui.bind(root, move || {
+                if let Some(kept) = &mut kept {
+                    kept.pass();
+                }
                 let length = count();
                 let (width, mut height) = size.get();
                 let model = crate::virtual_list::VirtualList::new(length, row_height, overscan);
@@ -3590,6 +3660,14 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     }
                 }
                 let range = model.visible_range(position, height);
+                if let Some(kept) = &mut kept {
+                    kept.around(position, height, length, range.clone(), false, &|y| {
+                        Some(
+                            ((y.max(0.) as f64 / row_height as f64) as usize)
+                                .min(length.saturating_sub(1)),
+                        )
+                    });
+                }
                 keys.clear();
                 keys.extend(range.map(|index| (key(index), index)));
                 // Rows kept are stamped with this run: one shown twice is a
@@ -3644,6 +3722,39 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                                 .push((key.clone(), (row, index_signal, Placed { run, at: None })));
                         }
                         entries.extend(added);
+                    }
+                    if let Some(kept) = &mut kept {
+                        let woken = kept.woken((
+                            length,
+                            width.to_bits(),
+                            height.to_bits(),
+                            requested.to_bits(),
+                        ));
+                        kept.keep(
+                            &mut ui,
+                            &mut entries,
+                            run,
+                            width,
+                            length as u64,
+                            woken,
+                            navigation.is_some(),
+                            &mut key,
+                            &|_| true,
+                            &mut |ui, key, index| {
+                                let index_signal = ui.signal(index);
+                                let mut cx = Context::new(runtime.clone(), environment.clone());
+                                let view = build(index_signal.clone(), key.clone(), &mut cx);
+                                let row =
+                                    ui.container(content, Layout::Overlay, Default::default());
+                                crate::selection::mount_row(ui, row, &index_signal);
+                                let node = mount(ui, row, view, environment.clone());
+                                cx.finish(ui, node);
+                                if let Some(navigation) = &navigation {
+                                    navigation.mount_row(ui, row, row_height);
+                                }
+                                (row, index_signal, Placed { run, at: None })
+                            },
+                        );
                     }
                     let mut removed_focus = false;
                     if entries.len() > keys.len() {
@@ -3712,6 +3823,10 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                                 );
                             }
                             order.push(*node);
+                        }
+                        if kept.is_some() {
+                            place_kept_fixed(&mut entries, &mut scene, &model, width, row_height);
+                            crate::spare::Kept::order(&entries, &mut order);
                         }
                         assert!(scene.reorder_children(content, &order));
                     }

@@ -80,6 +80,9 @@ pub struct Frame {
     /// layout, text, damage, paint, encode, submit, present): its name,
     /// instructions (0 where not counted) and microseconds.
     pub phases: Vec<(&'static str, u64, f32)>,
+    /// Not a frame: what a window did in the time frames left over
+    /// (`zgx::spare`). Nothing waited for it, and it is shown as nothing.
+    pub spare: bool,
     /// When it ended (was shown), in milliseconds since tracing began
     /// ([`now_ms`]'s clock): the time between frames is their pacing.
     pub ended_ms: f64,
@@ -137,6 +140,8 @@ struct Log {
     began: Option<Instant>,
     index: u64,
     current: Frame,
+    /// The frame under way while spare time runs (`spare_begins`).
+    held: Option<Frame>,
     frames: VecDeque<Frame>,
     causes: HashMap<u64, usize>,
     names: HashMap<u64, Rc<str>>,
@@ -307,6 +312,33 @@ pub fn end_frame(phases: Vec<(&'static str, u64, f32)>) {
         let mut frame = std::mem::take(&mut log.current);
         frame.phases = phases;
         frame.index = log.index;
+        let began = *log.began.get_or_insert_with(Instant::now);
+        frame.ended_ms = began.elapsed().as_secs_f64() * 1e3;
+        log.frames.push_back(frame);
+        while log.frames.len() > kept() {
+            log.frames.pop_front();
+        }
+    });
+}
+/// Spare time begins (`zgx::profile::spare_time`): the frame under way waits
+/// for it, what it has so far its own.
+pub fn spare_begins() {
+    LOG.with_borrow_mut(|log| log.held = Some(std::mem::take(&mut log.current)));
+}
+/// Spare time ended: an entry of its own, if it did anything, and the frame
+/// goes on.
+pub fn spare_ends(phases: Vec<(&'static str, u64, f32)>) {
+    LOG.with_borrow_mut(|log| {
+        let held = log.held.take().unwrap_or_default();
+        if phases.is_empty() && log.current.runs.is_empty() {
+            log.current = held;
+            return;
+        }
+        log.index += 1;
+        let mut frame = std::mem::replace(&mut log.current, held);
+        frame.phases = phases;
+        frame.index = log.index;
+        frame.spare = true;
         let began = *log.began.get_or_insert_with(Instant::now);
         frame.ended_ms = began.elapsed().as_secs_f64() * 1e3;
         log.frames.push_back(frame);
