@@ -1,6 +1,7 @@
 //! A client (or host) on wgpu 29: its adapter matched to the host's GPU,
 //! shared buffers as `wgpu::Texture`s, and a readback into shared memory
-//! where it can't share.
+//! where it can't share. Vulkan images on Linux, Direct3D 12 textures on
+//! Windows (`dxgi_offer`, `adapter_for_luid`; `import` takes either).
 //!
 //! A client on another wgpu (Horizon is on 30) copies this module and
 //! changes `wgpu` to its own, checking that what it reaches of wgpu-hal
@@ -103,7 +104,7 @@ pub fn device_ids_of(device: &wgpu::Device) -> Option<DeviceIds> {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 fn texture_descs(
     width: u32,
     height: u32,
@@ -144,13 +145,22 @@ fn texture_descs(
     )
 }
 
-/// A Vulkan buffer the host sent, as a texture on `device` (`FORMAT`,
-/// `USAGE`, viewable as `VIEW_FORMATS`): draw into it, finish the GPU's
-/// work, then present it.
+/// A buffer the host sent (Vulkan or Direct3D 12), as a texture on
+/// `device` (`FORMAT`, `USAGE`, viewable as `VIEW_FORMATS`): draw into it,
+/// finish the GPU's work, then present it.
 ///
 /// # Safety
-/// `device` is on the adapter the host's `Welcome` names (`adapter_for`).
+/// `device` is on the adapter the host's `Welcome` names (`adapter_for`,
+/// `adapter_for_luid`).
 pub unsafe fn import(device: &wgpu::Device, buffer: Buffer) -> io::Result<wgpu::Texture> {
+    match buffer.desc {
+        BufferDesc::Vulkan(_) => unsafe { import_vulkan(device, buffer) },
+        BufferDesc::Dxgi => unsafe { import_dxgi(device, buffer) },
+        _ => Err(unsupported("not a buffer shared on a GPU")),
+    }
+}
+
+unsafe fn import_vulkan(device: &wgpu::Device, buffer: Buffer) -> io::Result<wgpu::Texture> {
     #[cfg(target_os = "linux")]
     {
         let BufferDesc::Vulkan(desc) = &buffer.desc else {
@@ -311,5 +321,145 @@ impl Readback {
         }
         self.buffer.unmap();
         Ok(())
+    }
+}
+
+/// The LUID of a Direct3D 12 adapter; `None` on other backends.
+pub fn adapter_luid(adapter: &wgpu::Adapter) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        // Safety: only read through.
+        let hal = unsafe { adapter.as_hal::<wgpu::hal::api::Dx12>() }?;
+        // Safety: a plain query of a live adapter.
+        let desc = unsafe { hal.raw_adapter().GetDesc1() }.ok()?;
+        Some(crate::dxgi::luid_to_u64(desc.AdapterLuid))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = adapter;
+        None
+    }
+}
+
+/// What to offer a host for `adapters` (`Instance::enumerate_adapters`):
+/// Direct3D 12 textures on any of their adapters, if any is Direct3D 12.
+pub fn dxgi_offer(adapters: &[wgpu::Adapter]) -> Option<Offer> {
+    let mut luids: Vec<u64> = adapters.iter().filter_map(adapter_luid).collect();
+    luids.dedup();
+    (!luids.is_empty()).then_some(Offer::Dxgi { adapters: luids })
+}
+
+/// The Direct3D 12 adapter among `adapters` whose LUID is `luid`.
+pub fn adapter_for_luid(adapters: Vec<wgpu::Adapter>, luid: u64) -> Option<wgpu::Adapter> {
+    adapters
+        .into_iter()
+        .find(|adapter| adapter_luid(adapter) == Some(luid))
+}
+
+/// The LUID of `device`'s adapter, if it is Direct3D 12: such a device
+/// shares textures (`export_dxgi`).
+pub fn device_luid_of(device: &wgpu::Device) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        // Safety: only read through.
+        let hal = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }?;
+        Some(crate::dxgi::adapter_luid(hal.raw_device()))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = device;
+        None
+    }
+}
+
+/// A texture on a Direct3D 12 `device` another process can open: the
+/// texture, the NT handle to it and its description (`BufferDesc::Dxgi`).
+pub fn export_dxgi(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> io::Result<(wgpu::Texture, Handle, BufferDesc)> {
+    #[cfg(windows)]
+    {
+        let (_, desc_wgpu) = texture_descs(width, height);
+        let (resource, handle) = {
+            // Safety: used only to make the resource, which wgpu then owns.
+            let hal = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }
+                .ok_or_else(|| unsupported("not a Direct3D 12 device"))?;
+            crate::dxgi::export_resource(hal.raw_device(), width, height)?
+        };
+        Ok((
+            unsafe { dx12_texture(device, resource, &desc_wgpu) },
+            handle,
+            BufferDesc::Dxgi,
+        ))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (device, width, height);
+        Err(unsupported("Direct3D 12 textures are shared on Windows"))
+    }
+}
+
+/// `resource` (made as `desc` says) as a wgpu texture, which owns it.
+#[cfg(windows)]
+unsafe fn dx12_texture(
+    device: &wgpu::Device,
+    resource: windows::Win32::Graphics::Direct3D12::ID3D12Resource,
+    desc: &wgpu::TextureDescriptor<'_>,
+) -> wgpu::Texture {
+    // Safety: the caller's resource is a 2D texture of `desc`'s size,
+    // format family and usage.
+    let hal = unsafe {
+        wgpu::hal::dx12::Device::texture_from_raw(
+            resource,
+            desc.format,
+            desc.dimension,
+            desc.size,
+            desc.mip_level_count,
+            desc.sample_count,
+        )
+    };
+    unsafe { device.create_texture_from_hal::<wgpu::hal::api::Dx12>(hal, desc) }
+}
+
+unsafe fn import_dxgi(device: &wgpu::Device, buffer: Buffer) -> io::Result<wgpu::Texture> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Graphics::{
+            Direct3D12::D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+            Dxgi::Common::DXGI_FORMAT_B8G8R8A8_TYPELESS,
+        };
+        let handle = buffer
+            .handle
+            .ok_or_else(|| unsupported("a Direct3D 12 buffer without its handle"))?;
+        let resource = {
+            // Safety: used only to open the resource, which wgpu then owns.
+            let hal = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }
+                .ok_or_else(|| unsupported("not a Direct3D 12 device"))?;
+            // Safety: on the welcome's adapter, as the caller promises.
+            unsafe { crate::dxgi::open_resource(hal.raw_device(), &handle) }?
+        };
+        // The handle is closed here; the resource holds its own reference.
+        drop(handle);
+        // Safety: a plain query of a live resource.
+        let made = unsafe { resource.GetDesc() };
+        if made.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D
+            || made.Format != DXGI_FORMAT_B8G8R8A8_TYPELESS
+            || made.MipLevels != 1
+            || made.DepthOrArraySize != 1
+        {
+            return Err(unsupported(
+                "a Direct3D 12 buffer not made as dxgi makes them",
+            ));
+        }
+        let width = u32::try_from(made.Width).map_err(|_| unsupported("too wide"))?;
+        let (_, desc_wgpu) = texture_descs(width, made.Height);
+        Ok(unsafe { dx12_texture(device, resource, &desc_wgpu) })
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (device, buffer);
+        Err(unsupported("Direct3D 12 textures are shared on Windows"))
     }
 }

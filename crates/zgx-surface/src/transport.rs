@@ -146,6 +146,19 @@ pub fn pair() -> io::Result<((Sender, Receiver), (Sender, Receiver))> {
     let b = imp::split(b)?;
     Ok((wrap(a.0, a.1), wrap(b.0, b.1)))
 }
+/// Two connected ends, both in this process (tests; a host's own client):
+/// the host's first (its handles duplicated into this process), then the
+/// client's.
+#[cfg(windows)]
+pub fn pair() -> io::Result<((Sender, Receiver), (Sender, Receiver))> {
+    let (name, down, up) = imp::pipes()?;
+    let client = imp::open(&name)?;
+    // Safety: this process's own pseudo handle, duplicated into a real one.
+    let host = imp::host_ends(down, up, unsafe {
+        windows_sys::Win32::System::Threading::GetCurrentProcess()
+    } as _)?;
+    Ok((wrap(host.0, host.1), wrap(client.0, client.1)))
+}
 
 /// The host's end of a connection for a program it is about to start, and
 /// what the program inherits.
@@ -433,7 +446,7 @@ mod imp {
     use crate::Handle;
     use std::{
         io,
-        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
+        os::windows::io::{AsRawHandle, BorrowedHandle, FromRawHandle, OwnedHandle, RawHandle},
         sync::atomic::{AtomicU32, Ordering},
     };
     use windows_sys::Win32::{
@@ -459,13 +472,12 @@ mod imp {
 
     pub struct Sender {
         pipe: OwnedHandle,
-        /// The client's process (the host's sender): handles go into it.
+        /// The client's process (the host's sender), a handle of its own
+        /// (the `Child`'s closes as it is waited for): handles go into it.
         /// None on the client's side, which sends none.
-        process: Option<RawHandle>,
+        process: Option<OwnedHandle>,
         connected: bool,
     }
-    // Safety: a process handle is usable from any thread.
-    unsafe impl Send for Sender {}
     pub struct Receiver {
         pipe: OwnedHandle,
         connected: bool,
@@ -513,6 +525,8 @@ mod imp {
         up: Handle,
         process: RawHandle,
     ) -> io::Result<(Sender, Receiver)> {
+        // Safety: the caller's live process handle, only duplicated.
+        let process = unsafe { BorrowedHandle::borrow_raw(process) }.try_clone_to_owned()?;
         Ok((
             Sender {
                 pipe: down,
@@ -529,6 +543,10 @@ mod imp {
         let name = std::env::var(super::ENV_PIPE)
             .map_err(|_| io::Error::new(io::ErrorKind::NotFound, "ZGX_SURFACE_PIPE is not set"))?;
         unsafe { std::env::remove_var(super::ENV_PIPE) };
+        open(&name)
+    }
+    /// The client's ends of the pipes `name` names.
+    pub fn open(name: &str) -> io::Result<(Sender, Receiver)> {
         let open = |suffix: &str, access| {
             let path = wide(&format!("{name}.{suffix}"));
             check(unsafe {
@@ -575,7 +593,7 @@ mod imp {
             connect(&self.pipe, &mut self.connected)?;
             let mut frame = bytes.to_vec();
             for handle in handles {
-                let Some(process) = self.process else {
+                let Some(process) = &self.process else {
                     return Err(io::Error::new(
                         io::ErrorKind::Unsupported,
                         "a client sends no handles",
@@ -586,7 +604,7 @@ mod imp {
                     DuplicateHandle(
                         GetCurrentProcess(),
                         handle.as_raw_handle() as _,
-                        process as _,
+                        process.as_raw_handle() as _,
                         &mut theirs,
                         0,
                         FALSE,
