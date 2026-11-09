@@ -86,6 +86,33 @@ fn a_state_or_function_follows() {
 }
 
 #[test]
+fn justify_stretch_shares_free_width_among_auto_tracks_and_follows_its_state() {
+    let mut h = Harness::inline(
+        r##"local justify = ui.state("justify", "start")
+        ui.command { id = "stretch", run = function() justify:set("stretch") end }
+        ui.command { id = "start", run = function() justify:set("start") end }
+        return ui.div { grid = true, w = 600, cols = "max-content auto", justify = justify,
+            ui.div { id = "key", ui.div { w = 87, h = 20 } },
+            ui.div { id = "value", ui.div { w = 100, h = 20 } },
+        }"##,
+    );
+    let end = |h: &mut Harness| {
+        let value = h.tracks_rect("value");
+        value.x + value.width
+    };
+    h.frames(1);
+    near(end(&mut h), 187.);
+    assert!(h.host.run_command("stretch"));
+    h.frames(1);
+    near(h.tracks_rect("value").x, 87.);
+    near(end(&mut h), 600.);
+    assert!(h.host.run_command("start"));
+    h.frames(1);
+    near(end(&mut h), 187.);
+    assert_eq!(h.error(), None);
+}
+
+#[test]
 fn a_bad_literal_stops_the_script_saying_why() {
     let error = TestApp::try_new(|runtime| {
         ScriptHost::inline(

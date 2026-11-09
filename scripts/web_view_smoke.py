@@ -736,10 +736,20 @@ def compose(session, checks):
     session.wait(lambda: any(m[0].get("composition") == "start" for m in session.messages()), "no composition started", 15)
     session.key("space")
     session.wait(lambda: any(m[0].get("value") == "你好" for m in session.messages()), "你好 never reached the field", 15)
-    ended = [m[0] for m in session.messages() if m[0].get("composition") == "end"]
-    if not ended or ended[-1].get("data") != "你好":
-        raise AssertionError(f"composition ended as {ended}")
+    # The field shows the composition before it is committed: its end comes
+    # after, with what was committed.
+    shown_at = time.monotonic()
+    def ended():
+        return [m[0] for m in session.messages() if m[0].get("composition") == "end"]
+    last = session.wait(ended, "the composition never ended", 15)[-1]
+    if last.get("data") != "你好":
+        # What came after, for the failure to say: an empty end has been seen
+        # once, under load.
+        time.sleep(4)
+        heard = [m[0] for m in session.messages() if "composition" in m[0] or "value" in m[0]]
+        raise AssertionError(f"composition ended as {last}; the page heard {heard[-12:]}")
     checks["composed"] = "你好"
+    checks["ended after the field showed it, ms"] = round((time.monotonic() - shown_at) * 1000)
     return checks
 
 

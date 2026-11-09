@@ -38,6 +38,13 @@ python3 scripts/desktop_soak.py target/release/examples/desktop_soak --cycles 30
 
 It opens windows for the whole run (a cycle a second); leave the machine to it. `desktop_soak 400 --pause 100` pauses with its windows closed every 100 cycles, a still moment to compare the heap (`heap -s`, or with `MallocStackLogging=1` and a binary signed with `get-task-allow`, `malloc_history -allBySize`). That found two leaks per closed window, both fixed: its popup host stayed registered with the popup windows' watcher when it closed with a menu open, and its Metal layer, freed after the view it observes, left AppKit's records of the observation behind. Measured after the fixes on macOS, 600 cycles: descriptors, ports and threads flat, the footprint's quarter means 290.5, 303.7, 303.9 and 305.6 MB (warm-up, then within 2 MB); the live heap, paused, 17.4 MB at cycles 100, 200 and 300 within 0.3 MB, what grows being libdispatch's own cached blocks.
 
+`examples/rest_memory.rs` says what a window holds at rest after a list scrolled, by footprint category and the engine's memory report (macOS). Build a footprint measurement with `--features mimalloc`, the allocator apps have: the system allocator keeps about 28 MiB more of what's been freed, which no trim gets back. A window another covers gives nothing back until it next draws, so `scripts/rest_memory.py` says when a run wasn't presenting.
+
+```sh
+cargo build --release -p zgx-desktop --example rest_memory --features mimalloc
+python3 scripts/rest_memory.py target/release/examples/rest_memory
+```
+
 `examples/viewport.rs` draws a lit cube with wgpu in a GPU view (`docs/gpu-views.md`), for `scripts/viewport_smoke.py` (a Linux native smoke): one frame as it shows, one a refresh over 30 refreshes of spinning, none once it stops. `crates/zgx-gpu/tests/gpu_views.rs` checks frames' sizes, compositing (rounded clips, opacity, perspective) and that nothing else draws one; `crates/zgx/tests/gpu_views.rs` the frames and damage the core makes.
 
 `examples/failures.rs` fails twice while it animates, for `scripts/failures_smoke.py` (a Linux native smoke): a task panics, which the host contains and shows in a banner, then its GPU device is lost (`WindowHandle::debug_lose_gpu`), and it makes a new renderer and draws on. `crates/zgx-gpu/tests/device_loss.rs` checks the renderer's side; `crates/zgx-script/tests/failures.rs` a script's runtime error, a missing image and a missing font.
@@ -1345,3 +1352,28 @@ the display's period from the spacing of its display link's output times
 rate, intermittently, as a window started. The app is launched as a direct
 child from a temporary directory and sends no input. Passed on macOS 26 (M5,
 120 Hz), 2026-10-25: 113.7, 117.2 and 116.7 fps.
+
+## Popups and a window at the back
+
+A popup wanted while the app is at the back doesn't show, and showing one raises
+no window. `popup_hover` (zgx-desktop's example) has a tooltip, a hover card, a
+row whose hover state opens a menu and submenu, and a row showing a box in the
+window; each probe hovers it with the real pointer, another app's window in
+front. Hovering is heard, opens nothing, and focuses and raises nothing; what is
+wanted shows as the app comes forward; what is open closes as it goes back. In a
+window of the app that isn't active, with its other window in front, a tooltip
+shows and raises nothing.
+
+- Linux, in `scripts/linux_smokes.py` as `popup-hover`
+  (`scripts/popup_hover_smoke.py`): X11 under Openbox, and sway. On Wayland winit
+  hears focus through the seat's keyboard: a seat without one never says the app
+  went to the back, and the compositor alone keeps popups behind what is in front.
+- Windows, by hand on an unlocked console desktop:
+  `python scripts/windows_popup_hover_probe.py PATH/TO/popup_hover.exe`.
+- macOS, by hand: `scripts/macos_popup_hover` (`ref`, AppKit's own windows for
+  the same cases, and `drive`). It moves the real pointer, so it wants nobody at
+  the machine: `ZGX_HOVER_MIN_IDLE` minutes idle before it starts, and it stops
+  if a person's input follows; before each posted event, what is frontmost at the
+  point, of any layer, must be the target's. `drive <dir> <popup_hover> act` also
+  moves, resizes, miniaturizes, full-screens and closes the window with a popup
+  open, or changes its Space.

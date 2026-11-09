@@ -22,7 +22,6 @@ return function(): Node
 				local where = `Ln {caret.line}, Col {caret.column}`
 				return if selected > 0 then `{where} ({selected} selected)` else where
 			end,
-			size = 12,
 			color = "$text.secondary",
 		},
 		ui.text {
@@ -30,7 +29,6 @@ return function(): Node
 			function(): string
 				return state.status:get()
 			end,
-			size = 12,
 			color = "$text.tertiary",
 			grow = 1,
 			truncate = true,
@@ -40,7 +38,6 @@ return function(): Node
 			function(): string
 				return (highlight.names :: { [string]: string })[state.language:get()] or "Plain Text"
 			end,
-			size = 12,
 			color = "$text.secondary",
 		},
 		ui.checkbox { id = "status-wrap", label = "Wrap", value = state.wrap },

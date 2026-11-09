@@ -18,7 +18,7 @@ return ui.column {
 	ui.row {
 		gap = 8,
 		items = "center",
-		ui.text { "zgx 3D", size = 18 },
+		ui.text { "zgx 3D", text_size = 18 },
 		ui.button {
 			px = 12,
 			py = 6,

@@ -58,6 +58,61 @@ fn an_auto_track_is_the_size_of_what_it_holds() {
     near(bounds(&ui, &view, "field").width, 380.);
 }
 
+/// A grid 600 wide of `max-content auto`, holding content 87 and 100 wide.
+fn stretchable(grid: View) -> View {
+    grid.w(600.)
+        .grid_template_columns(tracks("max-content auto"))
+        .child(div().id("key").child(div().w(87.).h(20.)))
+        .child(div().id("value").child(div().w(100.).h(20.)))
+}
+
+#[test]
+fn justify_stretch_gives_a_grids_free_width_to_its_auto_track() {
+    let mut ui = Ui::new(800., 400.);
+    let view = ui.mount(stretchable(div().grid().justify_stretch()));
+    ui.prepare_frame();
+    near(bounds(&ui, &view, "key").width, 87.);
+    let value = bounds(&ui, &view, "value");
+    near(value.x, 87.);
+    near(value.x + value.width, 600.);
+}
+
+#[test]
+fn by_default_a_grids_auto_track_stays_the_size_of_its_content() {
+    let mut ui = Ui::new(800., 400.);
+    let view = ui.mount(stretchable(div().grid()));
+    ui.prepare_frame();
+    let value = bounds(&ui, &view, "value");
+    near(value.x, 87.);
+    near(value.x + value.width, 187.);
+}
+
+#[test]
+fn a_grid_made_from_an_overlay_keeps_its_tracks_at_their_content() {
+    // `overlay()` sets `justify_stretch` for its own children's sake.
+    let mut ui = Ui::new(800., 400.);
+    let view = ui.mount(stretchable(overlay().grid()));
+    ui.prepare_frame();
+    let value = bounds(&ui, &view, "value");
+    near(value.x, 87.);
+    near(value.x + value.width, 187.);
+}
+
+#[test]
+fn a_flex_row_treats_justify_stretch_as_start() {
+    let mut ui = Ui::new(800., 400.);
+    let view = ui.mount(
+        row()
+            .w(600.)
+            .justify_stretch()
+            .child(div().id("a").w(87.).h(20.))
+            .child(div().id("b").w(100.).h(20.)),
+    );
+    ui.prepare_frame();
+    near(bounds(&ui, &view, "b").x, 87.);
+    near(bounds(&ui, &view, "b").width, 100.);
+}
+
 #[test]
 fn minmax_holds_a_track_between_its_limits() {
     let mut ui = Ui::new(800., 400.);

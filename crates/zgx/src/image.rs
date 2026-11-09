@@ -753,13 +753,25 @@ fn send(job: Job) {
             .name("zgx image decode".into())
             .spawn(move || {
                 for (pixels, full, size) in receive {
-                    decode_at(&pixels, full, size, true);
+                    // Asked for larger since: that decode is queued behind
+                    // this one, and what this would make goes unused.
+                    if !superseded(&pixels, size) {
+                        decode_at(&pixels, full, size, true);
+                    }
                 }
             })
             .expect("a decoding thread");
         std::sync::Mutex::new(send)
     });
     let _ = sender.lock().unwrap_or_else(|p| p.into_inner()).send(job);
+}
+/// A larger decode of `pixels` than `size` has been queued since.
+fn superseded(pixels: &Pixels, size: (u32, u32)) -> bool {
+    let Some(kept) = pixels.kept.as_ref() else {
+        return false;
+    };
+    let pending = kept.pending.lock().unwrap_or_else(|p| p.into_inner());
+    pending.is_some_and(|(w, h)| w > size.0 || h > size.1)
 }
 /// Decode `pixels`' file whole, then premultiplied and shrunk to `size`,
 /// the whole decode dropped: held at that size.
@@ -808,7 +820,12 @@ fn decode_at(
             pixels: rgba.map_or(straight, Arc::from),
         }
     });
-    *kept.pending.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    // (A larger one queued since stays pending: asked for again, it would decode twice.)
+    let mut pending = kept.pending.lock().unwrap_or_else(|p| p.into_inner());
+    if pending.is_some_and(|(w, h)| w <= size.0 && h <= size.1) {
+        *pending = None;
+    }
+    drop(pending);
     let Some(done) = done else {
         kept.failed.store(true, Ordering::Relaxed);
         return None;

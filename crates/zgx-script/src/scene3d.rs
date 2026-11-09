@@ -19,8 +19,8 @@ use mlua::{Function, Lua, Table, UserData};
 use std::rc::Rc;
 use zgx::{compose::prelude::*, reactive::Signal, theme::Themed};
 use zgx_3d::{
-    Camera, Geometry, Light, Material, Object, ObjectId, Orbit, Quat, Transform, Vec3, World,
-    srgb_to_linear, vec3,
+    Camera, Geometry, Light, Material, Object, ObjectId, Orbit, Quat, Transform, Vec3, Vertex,
+    World, srgb_to_linear, vec3,
 };
 
 /// A number: as written, a state's, a function's, or a binding's.
@@ -50,6 +50,9 @@ pub(crate) struct MaterialSpec {
     emissive: Option<ColorSpec>,
     opacity: Option<Num>,
     unlit: bool,
+    /// Its back faces draw too (`World::set_double_sided`): an open shell,
+    /// a cut-away section.
+    double_sided: bool,
 }
 pub(crate) enum LightKind {
     Directional,
@@ -82,6 +85,10 @@ pub(crate) struct ModelSpec {
     /// The clip it plays, round and round: by name, or by its place (from
     /// 1, as Luau counts).
     animation: Option<ClipChoice>,
+    /// Seconds into its clip to pose it at, in place of playing it on its
+    /// own (a number, a state's or a function's): a video's frame, or a
+    /// slider's, says where it is.
+    time: Option<Num>,
 }
 #[cfg_attr(not(feature = "gltf"), allow(dead_code))]
 pub(crate) enum ClipChoice {
@@ -299,6 +306,7 @@ fn material(table: Option<Table>) -> mlua::Result<MaterialSpec> {
             emissive: None,
             opacity: None,
             unlit: false,
+            double_sided: false,
         });
     };
     Ok(MaterialSpec {
@@ -308,16 +316,28 @@ fn material(table: Option<Table>) -> mlua::Result<MaterialSpec> {
         emissive: opt_color(&table, "emissive")?,
         opacity: opt_num(&table, "opacity")?,
         unlit: table.get::<Option<bool>>("unlit")?.unwrap_or(false),
+        double_sided: boolean(&table, "double_sided", "ui.mesh `material.double_sided`")?,
     })
 }
 /// A literal number of `table`, or `default`.
 fn lit(table: &Table, key: &str, default: f32) -> mlua::Result<f32> {
     Ok(table.get::<Option<f32>>(key)?.unwrap_or(default))
 }
-fn geometry(table: &Table) -> mlua::Result<Geometry> {
-    let kind: String = table
-        .get::<Option<String>>("geometry")?
-        .unwrap_or_else(|| "box".into());
+fn geometry(lua: &Lua, table: &Table) -> mlua::Result<Geometry> {
+    // A name, read as one: anything else goes by the slower way, which holds a
+    // reference to what it read (a named shape took 3% more instructions).
+    let kind: String = match table.get::<Option<String>>("geometry") {
+        Ok(name) => name.unwrap_or_else(|| "box".into()),
+        Err(_) => match table.get::<mlua::Value>("geometry")? {
+            mlua::Value::Table(own) => return own_geometry(lua, &own),
+            other => {
+                return Err(wrong(format_args!(
+                    "ui.mesh `geometry` is a shape's name or {{ positions, indices, … }}, not {}",
+                    other.type_name()
+                )));
+            }
+        },
+    };
     let size = |default: f32| -> mlua::Result<[f32; 3]> {
         match table.get::<mlua::Value>("size")? {
             mlua::Value::Nil => Ok([default; 3]),
@@ -371,6 +391,305 @@ fn geometry(table: &Table) -> mlua::Result<Geometry> {
     })
 }
 
+/// The most vertices a script's own geometry has (as drawn: a flat one has
+/// three a triangle), so a mistaken table can't ask for gigabytes.
+const MOST_VERTICES: usize = 1 << 22;
+
+/// `key` of `table`, a boolean, `false` unsaid: not `true` for whatever else
+/// (a state, which it wouldn't follow).
+fn boolean(table: &Table, key: &str, what: &str) -> mlua::Result<bool> {
+    match table.get::<mlua::Value>(key)? {
+        mlua::Value::Nil => Ok(false),
+        mlua::Value::Boolean(on) => Ok(on),
+        other => Err(wrong(format_args!(
+            "{what} is a boolean, not {}",
+            other.type_name()
+        ))),
+    }
+}
+/// `numbers` of `table`, a flat list (`{ x, y, z, x, y, z, … }`), or
+/// `None` unsaid. Each is finite as the renderer takes it, a 32-bit float.
+fn flat_numbers(table: &Table, key: &str) -> mlua::Result<Option<Vec<f32>>> {
+    let list = match table.get::<mlua::Value>(key)? {
+        mlua::Value::Nil => return Ok(None),
+        mlua::Value::Table(list) => list,
+        other => {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry `{key}` is a list of numbers, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let n = list.raw_len();
+    if n > MOST_VERTICES * 4 {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry `{key}` has {n} numbers, more than it may"
+        )));
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 1..=n {
+        match list.raw_get::<mlua::Value>(i)? {
+            mlua::Value::Number(v) if (v as f32).is_finite() => out.push(v as f32),
+            mlua::Value::Integer(v) => out.push(v as f32),
+            mlua::Value::Number(v) => {
+                return Err(wrong(format_args!(
+                    "ui.mesh geometry `{key}`[{i}] is {v}: a finite number"
+                )));
+            }
+            other => {
+                return Err(wrong(format_args!(
+                    "ui.mesh geometry `{key}`[{i}] is a number, not {}",
+                    other.type_name()
+                )));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+/// Colours of a flat list, `count` of them: three numbers each (sRGB, 0 to
+/// 1) or four (with alpha), made linear as the renderer mixes them.
+fn colors_of(list: &[f32], count: usize, key: &str) -> mlua::Result<Vec<[f32; 4]>> {
+    let stride = if list.len() == count * 3 {
+        3
+    } else if list.len() == count * 4 {
+        4
+    } else {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry `{key}` has {} numbers: three or four for each of its {count}",
+            list.len()
+        )));
+    };
+    Ok(list
+        .chunks_exact(stride)
+        .map(|c| {
+            [
+                srgb_to_linear(c[0].clamp(0., 1.)),
+                srgb_to_linear(c[1].clamp(0., 1.)),
+                srgb_to_linear(c[2].clamp(0., 1.)),
+                if stride == 4 { c[3].clamp(0., 1.) } else { 1. },
+            ]
+        })
+        .collect())
+}
+/// `v` of length 1; up, if it has no direction to keep: a degenerate
+/// triangle's, or one too large for its length to be a number.
+fn unit(v: Vec3) -> [f32; 3] {
+    let length = v.length();
+    if length > 1e-12 && length.is_finite() {
+        let v = v * (1. / length);
+        [v.x, v.y, v.z]
+    } else {
+        [0., 1., 0.]
+    }
+}
+/// `ui.mesh { geometry = { positions, indices, normals, colors,
+/// face_normals, face_colors, flat } }`: the script's own triangles.
+///
+/// - `positions`: `{ x, y, z, … }`, three numbers a vertex.
+/// - `indices`: three a triangle, counter-clockwise from its front,
+///   counting vertices from 1 (as Luau does). Unsaid, each three vertices
+///   are a triangle.
+/// - `normals`: a vertex's each (three numbers); unsaid, smoothed from
+///   its triangles.
+/// - `colors`: a vertex's each, sRGB 0 to 1 (three, or four with alpha),
+///   multiplying the material's colour.
+/// - `face_normals`, `face_colors`: a triangle's each instead. Either, or
+///   `flat = true`, draws each triangle flat on vertices of its own.
+///
+/// What it holds lives outside the VM, so it's asked of what the script may
+/// hold (`Limits::memory`) and, for a plugin, counted with its VM's and its
+/// states' (`meter`) for as long as anything holds the geometry.
+fn own_geometry(lua: &Lua, spec: &Table) -> mlua::Result<Geometry> {
+    let Some(positions) = flat_numbers(spec, "positions")? else {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry needs `positions`: {{ x, y, z, … }}"
+        )));
+    };
+    if !positions.len().is_multiple_of(3) {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry `positions` has {} numbers, not three a vertex",
+            positions.len()
+        )));
+    }
+    let count = positions.len() / 3;
+    let corner = |i: usize| [positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]];
+    let at = |i: usize| Vec3::from(corner(i));
+    let indices: Vec<u32> = match flat_numbers(spec, "indices")? {
+        None => (0..count as u32).collect(),
+        Some(list) => {
+            let mut out = Vec::with_capacity(list.len());
+            for (k, &i) in list.iter().enumerate() {
+                if i.fract() != 0. || i < 1. || i as usize > count {
+                    return Err(wrong(format_args!(
+                        "ui.mesh geometry `indices`[{}] is {i}: a vertex from 1 to {count}",
+                        k + 1
+                    )));
+                }
+                out.push(i as u32 - 1);
+            }
+            out
+        }
+    };
+    if !indices.len().is_multiple_of(3) {
+        return Err(wrong(format_args!(
+            "ui.mesh geometry `indices` has {} entries, not three a triangle",
+            indices.len()
+        )));
+    }
+    let triangles = indices.len() / 3;
+    let face_normals = flat_numbers(spec, "face_normals")?;
+    let face_colors = flat_numbers(spec, "face_colors")?;
+    let flat = boolean(spec, "flat", "ui.mesh geometry `flat`")?
+        || face_normals.is_some()
+        || face_colors.is_some();
+    let face = |t: usize| {
+        let [a, b, c] = [0, 1, 2].map(|k| at(indices[t * 3 + k] as usize));
+        (b - a).cross(c - a)
+    };
+    let colors = flat_numbers(spec, "colors")?;
+    let weight = |vertices: usize, colored: bool| {
+        vertices * std::mem::size_of::<Vertex>()
+            + indices.len() * std::mem::size_of::<u32>()
+            + if colored {
+                vertices * std::mem::size_of::<[f32; 4]>()
+            } else {
+                0
+            }
+    };
+    let meter = lua
+        .app_data_ref::<crate::node::Env>()
+        .and_then(|env| env.meter.clone());
+    let room = |bytes: usize| match &meter {
+        Some(meter) => meter.room(bytes).map_err(|_| {
+            let mb = |bytes: usize| bytes as f64 / f64::from(1 << 20);
+            wrong(format_args!(
+                "ui.mesh geometry needs {:.1} MB: a plugin's memory is {:.0} MB at most \
+                 (`Limits::plugin_memory`), with {:.1} MB of it held",
+                mb(bytes),
+                mb(meter.limit()),
+                mb(meter.used()),
+            ))
+        }),
+        None => crate::room_for(lua, "ui.mesh geometry", bytes),
+    };
+    let (made, bytes) = if flat {
+        if triangles * 3 > MOST_VERTICES {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry has {triangles} triangles, more than it may"
+            )));
+        }
+        if let Some(n) = &face_normals
+            && n.len() != triangles * 3
+        {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry `face_normals` has {} numbers: three for each of its {triangles} triangles",
+                n.len()
+            )));
+        }
+        if flat_numbers(spec, "normals")?.is_some() {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry drawn flat has `face_normals`, or none, not `normals`"
+            )));
+        }
+        // A corner's each: a triangle's, or its vertex's.
+        let corners: Option<Vec<[f32; 4]>> = match (&face_colors, &colors) {
+            (Some(_), Some(_)) => {
+                return Err(wrong(format_args!(
+                    "ui.mesh geometry has `colors` or `face_colors`, not both"
+                )));
+            }
+            (Some(c), None) => Some(
+                colors_of(c, triangles, "face_colors")?
+                    .into_iter()
+                    .flat_map(|c| [c, c, c])
+                    .collect(),
+            ),
+            (None, Some(c)) => {
+                let colors = colors_of(c, count, "colors")?;
+                Some(indices.iter().map(|&i| colors[i as usize]).collect())
+            }
+            (None, None) => None,
+        };
+        let bytes = weight(triangles * 3, corners.is_some());
+        room(bytes)?;
+        let mut vertices = Vec::with_capacity(triangles * 3);
+        for t in 0..triangles {
+            let normal = match &face_normals {
+                Some(n) => unit(vec3(n[t * 3], n[t * 3 + 1], n[t * 3 + 2])),
+                None => unit(face(t)),
+            };
+            for k in 0..3 {
+                vertices.push(Vertex {
+                    position: corner(indices[t * 3 + k] as usize),
+                    normal,
+                    uv: [0., 0.],
+                });
+            }
+        }
+        let geometry = Geometry::new(vertices, (0..triangles as u32 * 3).collect())
+            .map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))?;
+        let made = match corners {
+            Some(corners) => geometry.with_colors(corners),
+            None => Ok(geometry),
+        };
+        (made, bytes)
+    } else {
+        if count > MOST_VERTICES {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry has {count} vertices, more than it may"
+            )));
+        }
+        let normals: Vec<[f32; 3]> = match flat_numbers(spec, "normals")? {
+            Some(n) if n.len() == count * 3 => n
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|&[x, y, z]| unit(vec3(x, y, z)))
+                .collect(),
+            Some(n) => {
+                return Err(wrong(format_args!(
+                    "ui.mesh geometry `normals` has {} numbers: three for each of its {count} vertices",
+                    n.len()
+                )));
+            }
+            None => {
+                // Smoothed: each triangle's area-weighted normal, summed.
+                let mut sum = vec![Vec3::ZERO; count];
+                for t in 0..triangles {
+                    let n = face(t);
+                    for k in 0..3 {
+                        let i = indices[t * 3 + k] as usize;
+                        sum[i] = sum[i] + n;
+                    }
+                }
+                sum.into_iter().map(unit).collect()
+            }
+        };
+        let colors = colors.map(|c| colors_of(&c, count, "colors")).transpose()?;
+        let bytes = weight(count, colors.is_some());
+        room(bytes)?;
+        let vertices = (0..count)
+            .map(|i| Vertex {
+                position: corner(i),
+                normal: normals[i],
+                uv: [0., 0.],
+            })
+            .collect();
+        let geometry = Geometry::new(vertices, indices)
+            .map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))?;
+        let made = match colors {
+            Some(colors) => geometry.with_colors(colors),
+            None => Ok(geometry),
+        };
+        (made, bytes)
+    };
+    let made = made.map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))?;
+    if let Some(meter) = &meter {
+        meter.hold_native(made.watch(), bytes);
+    }
+    Ok(made)
+}
+
 /// `ui.scene3d`, `ui.mesh`, `ui.light`, `ui.group`: one closure type for
 /// the four (one instantiation of mlua's callback for them all).
 pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
@@ -393,7 +712,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
 
 /// `ui.mesh { geometry, size, material, position, rotation, scale }`.
 fn mesh(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
-    let shape = Shape::Mesh(geometry(&table)?, material(table.get("material")?)?);
+    let shape = Shape::Mesh(geometry(lua, &table)?, material(table.get("material")?)?);
     placed(lua, &table, shape)
 }
 
@@ -464,6 +783,17 @@ fn model(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
             )));
         }
     };
+    let time = match table.get::<mlua::Value>("time")? {
+        mlua::Value::Nil => None,
+        value => {
+            if animation.is_none() {
+                return Err(wrong(format_args!(
+                    "ui.model `time` poses its `animation`: name one"
+                )));
+            }
+            Some(num(value, "`time`")?)
+        }
+    };
     placed(
         lua,
         &table,
@@ -471,6 +801,7 @@ fn model(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
             src,
             fit,
             animation,
+            time,
         }),
     )
 }
@@ -1234,11 +1565,13 @@ fn add(adding: &mut Adding, spec: &Rc<ObjectSpec>, parent: Option<ObjectId>, cx:
             follow(cx, Box::new(move || world.set_light(id, read())));
         }
         Shape::Mesh(..) | Shape::Group(_) | Shape::Model(_) => {
-            let (geometry, material) = match &spec.shape {
-                Shape::Mesh(geometry, material) => {
-                    (Some(geometry.clone()), Some(LiveMaterial::of(material, cx)))
-                }
-                _ => (None, None),
+            let (geometry, material, double_sided) = match &spec.shape {
+                Shape::Mesh(geometry, material) => (
+                    Some(geometry.clone()),
+                    Some(LiveMaterial::of(material, cx)),
+                    material.double_sided,
+                ),
+                _ => (None, None, false),
             };
             let object = Object {
                 geometry,
@@ -1251,6 +1584,9 @@ fn add(adding: &mut Adding, spec: &Rc<ObjectSpec>, parent: Option<ObjectId>, cx:
                 parent,
             };
             let id = world.add(object);
+            if double_sided {
+                world.set_double_sided(id, true);
+            }
             if spec.on_click.is_some() || spec.on_hover.is_some() {
                 adding.handled.push((id, spec.clone()));
             }
@@ -1469,12 +1805,29 @@ fn load_model(
             }
         }
     });
+    // Posed at the script's time: an effect following it, posing the clip
+    // there once the model is placed.
+    let posed = spec.time.as_ref().map(|time| {
+        let posed = Rc::new(Posed {
+            held: Default::default(),
+            at: Live::of(time, cx),
+            vm: Rc::downgrade(vm),
+            world: world.clone(),
+        });
+        let follows = posed.clone();
+        follow(cx, Box::new(move || follows.pose()));
+        posed
+    });
     if let Some(model) = kept {
         let placed = place_model(world, group, &model, fit);
         if let Some(clip) = clip {
-            let world = world.clone();
-            cx.tasks()
-                .spawn(play(world, placed, model, clip, frames, report));
+            if let Some(posed) = &posed {
+                posed.place(placed, &model, &clip, &report);
+            } else {
+                let world = world.clone();
+                cx.tasks()
+                    .spawn(play(world, placed, model, clip, frames, report));
+            }
         }
         return;
     }
@@ -1488,11 +1841,46 @@ fn load_model(
             return;
         }
     };
-    let (tell, mut heard) = zgx::task::latest::<Result<zgx_3d::Model, String>>();
     let (files, folder) = (
         assets.source(),
         crate::normalize(path.parent().unwrap_or(std::path::Path::new("."))),
     );
+    // A frame drawn whole (a video's: `zgx::image::whole_frames_on_this_thread`)
+    // shows the model it draws, as it shows its pictures: read here, before
+    // the frame is drawn, not on a thread that a render's frame won't wait
+    // for.
+    if zgx::image::whole_frames_on_this_thread() {
+        let read = zgx_3d::Model::from_bytes_with(&bytes, |uri| {
+            let beside = crate::normalize(&folder.join(uri));
+            crate::within(&folder, &beside)
+                .then(|| files.read(&beside).ok())
+                .flatten()
+        });
+        match read {
+            Ok(model) => {
+                MODELS.with(|models| {
+                    let mut models = models.borrow_mut();
+                    if models.len() >= MODELS_KEPT {
+                        models.clear();
+                    }
+                    models.insert(path, (changed, model.clone()));
+                });
+                let placed = place_model(world, group, &model, fit);
+                if let Some(clip) = clip {
+                    if let Some(posed) = &posed {
+                        posed.place(placed, &model, &clip, &report);
+                    } else {
+                        let world = world.clone();
+                        cx.tasks()
+                            .spawn(play(world, placed, model, clip, frames, report));
+                    }
+                }
+            }
+            Err(error) => report(error.to_string()),
+        }
+        return;
+    }
+    let (tell, mut heard) = zgx::task::latest::<Result<zgx_3d::Model, String>>();
     std::thread::spawn(move || {
         let read = zgx_3d::Model::from_bytes_with(&bytes, |uri| {
             let beside = crate::normalize(&folder.join(uri));
@@ -1518,7 +1906,11 @@ fn load_model(
                 });
                 let placed = place_model(&world, group, &model, fit);
                 if let Some(clip) = clip {
-                    play(world, placed, model, clip, frames, report).await;
+                    if let Some(posed) = &posed {
+                        posed.place(placed, &model, &clip, &report);
+                    } else {
+                        play(world, placed, model, clip, frames, report).await;
+                    }
                 }
             }
             Err(error) => report(error),
@@ -1536,31 +1928,79 @@ async fn play(
     frames: zgx::frame::FrameClock,
     report: impl Fn(String),
 ) {
-    let clip = match &name {
-        Some(name) => model.clip(name),
-        None => model.clips().get(index),
-    };
-    let Some(clip) = clip else {
-        let names: Vec<String> = model
-            .clips()
-            .iter()
-            .enumerate()
-            .map(|(i, c)| c.name().map_or_else(|| format!("{}", i + 1), str::to_owned))
-            .collect();
-        let asked = name.unwrap_or_else(|| format!("{}", index + 1));
-        report(if names.is_empty() {
-            format!("no animation {asked}: it has none")
-        } else {
-            format!("no animation {asked}: it has {}", names.join(", "))
-        });
+    let Some(clip) = choose_clip(&model, &(name, index), &report) else {
         return;
     };
+    let clip = &clip;
     let duration = clip.duration().max(1e-3);
     let start = frames.next().await.time;
     loop {
         let frame = frames.next().await;
         let seconds = frame.time.saturating_duration_since(start).as_secs_f32();
         placed.pose(&world, clip, seconds % duration);
+    }
+}
+/// `model`'s clip `choice` (a name, or else an index), or `None` with why
+/// told to `report`.
+#[cfg(feature = "gltf")]
+fn choose_clip(
+    model: &zgx_3d::Model,
+    (name, index): &(Option<String>, usize),
+    report: &impl Fn(String),
+) -> Option<zgx_3d::Clip> {
+    let clip = match name {
+        Some(name) => model.clip(name),
+        None => model.clips().get(*index),
+    };
+    if clip.is_none() {
+        let names: Vec<String> = model
+            .clips()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| c.name().map_or_else(|| format!("{}", i + 1), str::to_owned))
+            .collect();
+        let asked = name.clone().unwrap_or_else(|| format!("{}", index + 1));
+        report(if names.is_empty() {
+            format!("no animation {asked}: it has none")
+        } else {
+            format!("no animation {asked}: it has {}", names.join(", "))
+        });
+    }
+    clip.cloned()
+}
+/// A model's clip posed at the time its script gives (`ui.model`'s `time`):
+/// the model and clip once placed, the time, and where to pose them.
+#[cfg(feature = "gltf")]
+struct Posed {
+    held: std::cell::RefCell<Option<(zgx_3d::Placed, zgx_3d::Clip)>>,
+    at: Live,
+    vm: std::rc::Weak<Vm>,
+    world: World,
+}
+#[cfg(feature = "gltf")]
+impl Posed {
+    /// The clip on `placed`, posed now.
+    fn place(
+        &self,
+        placed: zgx_3d::Placed,
+        model: &zgx_3d::Model,
+        choice: &(Option<String>, usize),
+        report: &impl Fn(String),
+    ) {
+        if let Some(clip) = choose_clip(model, choice, report) {
+            *self.held.borrow_mut() = Some((placed, clip));
+            self.pose();
+        }
+    }
+    /// The time read (followed, in an effect) and the clip posed there.
+    fn pose(&self) {
+        let Some(vm) = self.vm.upgrade() else {
+            return;
+        };
+        let seconds = self.at.get(&vm);
+        if let Some((placed, clip)) = &*self.held.borrow() {
+            placed.pose(&self.world, clip, seconds.max(0.));
+        }
     }
 }
 /// `model` added under `group`: scaled to `fit` across and centred, if

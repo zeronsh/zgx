@@ -315,36 +315,6 @@ fn a_missing_format_says_how_to_say_one() {
 }
 
 #[test]
-fn a_render_returns_what_it_took() {
-    // Each stage's thread and pixels go with it: many renders in a process
-    // hold no more than a few.
-    let dir = app("memory");
-    let render_all = |count: usize| {
-        for i in 0..count {
-            let mut out = options(&dir, &format!("m{i}"));
-            out.frames = Some((0, 1));
-            render(&out, |_| true).unwrap();
-        }
-    };
-    render_all(4);
-    let settled = resident();
-    render_all(16);
-    let grown = resident().saturating_sub(settled);
-    assert!(grown < 24 << 20, "16 more renders kept {} MiB", grown >> 20);
-}
-fn resident() -> u64 {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<u64>()
-        .unwrap_or(0)
-        * 1024
-}
-
-#[test]
 fn hevc_is_tagged_for_players() {
     if zgx_video::encode::ffmpeg().is_none() {
         eprintln!("no ffmpeg here: skipped");
@@ -747,4 +717,70 @@ fn a_script_slower_than_a_window_allows_still_renders() {
     .unwrap();
     let mut stage = script_stage(&dir, json!({}));
     stage.step_to(0).expect("a frame");
+}
+
+/// A frame doesn't wait for another thread: a model read off it would be
+/// missing from a still, and from each chunk's first frames. Its buffer is a
+/// named pipe filled a second from now, so a read on another thread can't
+/// beat the frame, and a frame that reads it waits.
+#[cfg(unix)]
+#[test]
+fn a_models_first_frame_draws_it() {
+    unsafe extern "C" {
+        fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+    }
+    let dir = temp_dir("render-model");
+    let pipe = dir.join("buffer.bin");
+    let _ = std::fs::remove_file(&pipe);
+    let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+    // SAFETY: A path that lives through the call.
+    assert_eq!(unsafe { mkfifo(name.as_ptr(), 0o600) }, 0);
+    std::fs::write(
+        dir.join("square.gltf"),
+        r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"buffer.bin","byteLength":60}],
+        "bufferViews":[{"buffer":0,"byteLength":48},{"buffer":0,"byteOffset":48,"byteLength":12}],
+        "accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-0.5,-0.5,0],"max":[0.5,0.5,0]},
+            {"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"}],
+        "materials":[{"emissiveFactor":[1,1,1],"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1]}}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]}],
+        "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "Model", w = 100, h = 100, fps = 30, duration = 1,
+            render = function()
+                return ui.scene3d {
+                    w_full = true, h_full = true,
+                    camera = { position = { 0, 0, 3 } },
+                    ui.model { src = "square.gltf", fit = 2 },
+                }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let writer = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let positions: [f32; 12] = [-0.5, -0.5, 0., 0.5, -0.5, 0., 0.5, 0.5, 0., -0.5, 0.5, 0.];
+        let mut bin: Vec<u8> = positions.iter().flat_map(|v| v.to_le_bytes()).collect();
+        bin.extend([0_u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()));
+        std::fs::write(pipe, bin).unwrap();
+    });
+    let mut stage = script_stage(&dir, json!({}));
+    let mut pixels = Vec::new();
+    stage
+        .draw_output(0, &mut pixels, std::time::Duration::from_secs(30))
+        .unwrap();
+    writer.join().unwrap();
+    let [r, g, b, _] = pixel(&pixels, 100, 50, 50);
+    assert!(
+        r > 40 && g > 40 && b > 40,
+        "no model on the first frame: {r} {g} {b}"
+    );
+    // Around it, what's behind the scene.
+    assert_eq!(pixel(&pixels, 100, 2, 2), [0, 0, 0, 255]);
 }

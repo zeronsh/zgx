@@ -157,3 +157,65 @@ fn native_surface_component_retains_nodes_fits_padding_and_releases_bindings() {
     source.set(frame(false));
     assert!(!ui.scene.borrow().contains(image));
 }
+unsafe extern "C" {
+    fn CVPixelBufferGetIOSurface(buffer: *const std::ffi::c_void) -> *const std::ffi::c_void;
+}
+#[link(name = "IOSurface", kind = "framework")]
+unsafe extern "C" {
+    fn IOSurfaceGetID(surface: *const std::ffi::c_void) -> u32;
+    fn IOSurfaceLookup(id: u32) -> *const std::ffi::c_void;
+}
+/// Whether the IOSurface `id` still exists.
+fn surface_exists(id: u32) -> bool {
+    unsafe extern "C" {
+        fn CFRelease(object: *const std::ffi::c_void);
+    }
+    // SAFETY: Lookup returns a +1 reference or null.
+    unsafe {
+        let surface = IOSurfaceLookup(id);
+        if !surface.is_null() {
+            CFRelease(surface);
+        }
+        !surface.is_null()
+    }
+}
+/// A window may go idle on the frame that removed a surface: no frame comes
+/// after to let CoreVideo's cache of it go, so going idle does. (A video
+/// player's last picture otherwise stayed for the window's life.)
+#[test]
+fn a_surface_gone_from_the_scene_is_let_go_as_the_window_rests() {
+    let frame = frame(false);
+    // SAFETY: The buffer is IOSurface-backed; its surface lives as long.
+    let id = unsafe {
+        IOSurfaceGetID(CVPixelBufferGetIOSurface(
+            std::ptr::from_ref(frame.pixel_buffer()).cast(),
+        ))
+    };
+    let mut scene = Scene::new(32., 32.);
+    let node = scene.append(
+        scene.root(),
+        NodeKind::NativeSurface(frame),
+        Style {
+            width: Some(32.),
+            height: Some(32.),
+            ..Default::default()
+        },
+    );
+    let mut gpu = GpuRenderer::new(32, 32).unwrap();
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    // Shown, resting keeps it: the window may draw it again.
+    gpu.trim();
+    assert!(surface_exists(id), "let go of a surface still shown");
+    scene.remove(node);
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    // As a window rests, a while after its last frame: CoreVideo's cache
+    // keeps a texture a second, whatever a flush asks.
+    std::thread::sleep(std::time::Duration::from_millis(1200));
+    gpu.trim();
+    assert!(
+        !surface_exists(id),
+        "a window at rest kept a surface no node shows"
+    );
+}

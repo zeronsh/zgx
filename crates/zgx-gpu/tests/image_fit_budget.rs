@@ -1,9 +1,10 @@
 //! Full-size pictures drawn small, however they come: a texture of the size
 //! drawn, no issue raised, none left out, and no frame failing for them.
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
 use zgx::{image::ImageData, scene::*};
-use zgx_gpu::GpuRenderer;
+use zgx_gpu::{GpuRenderer, GpuStats};
 
 /// As a window's snapshot on a large display: about 52 MiB decoded.
 const W: u32 = 5100;
@@ -302,6 +303,124 @@ fn a_picture_past_the_budget_uploads_once() {
     }
 }
 
+/// Pictures past the budget whose pixels take a while: each uploads once, at
+/// its share, and decodes once for it. Those still waiting count: without them
+/// the rest looked as if they fit, and uploaded whole, to go again as they came.
+#[test]
+fn pictures_past_the_budget_take_their_shares_however_slowly_they_decode() {
+    const SIDE: (u32, u32) = (5000, 2500);
+    static DECODES: AtomicUsize = AtomicUsize::new(0);
+    fn slowly(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        DECODES.fetch_add(1, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(vec![200; (SIDE.0 * SIDE.1 * 4) as usize].into())
+    }
+    let window = WINDOWS[0];
+    let mut scene = Scene::new(window.0 as f32, window.1 as f32);
+    let stack = stack(&mut scene);
+    let size = (SIDE.0 as f32, SIDE.1 as f32);
+    for _ in 0..3 {
+        let card = scene.append(
+            stack,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..sized(DRAWN)
+            },
+        );
+        let image = ImageData::kept(SIDE.0, SIDE.1, Arc::from(&b"file"[..]), slowly).unwrap();
+        scene.append(card, NodeKind::Image(Arc::new(image)), sized(size));
+    }
+    let mut gpu = GpuRenderer::new(window.0, window.1).unwrap();
+    let uploads = settle(&mut gpu, &mut scene, window);
+    assert_eq!(uploads, 3, "uploads: each once");
+    assert_eq!(settle(&mut gpu, &mut scene, window), 0);
+    let stats = gpu.debug_cache_stats();
+    assert_eq!(stats.image_textures, 3);
+    assert_eq!(stats.images_softer, 3);
+    assert!(stats.image_bytes <= 64 << 20, "{}", stats.image_bytes);
+    assert_eq!(DECODES.load(Ordering::Relaxed), 3, "decodes: each once");
+    assert_eq!(gpu.take_issues(), Vec::<String>::new());
+}
+
+/// Pictures on screen, when a new one makes the share smaller: each is drawn as
+/// it was until what replaces it is ready, in every frame. A kept file whose
+/// pixels have gone waits on a decode for that, and evicted it would be blank
+/// meanwhile. The textures held for it go as it arrives.
+#[test]
+fn pictures_on_screen_stay_as_the_share_moves_until_their_replacements_are_ready() {
+    const SIDE: u32 = 2500;
+    const WINDOW: u32 = 2000;
+    const CORNERS: [(usize, usize); 3] = [(100, 100), (700, 700), (1300, 1300)];
+    fn slowly(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        std::thread::sleep(Duration::from_millis(100));
+        Ok(vec![200; (SIDE * SIDE * 4) as usize].into())
+    }
+    fn raw_one() -> ImageData {
+        ImageData::new(SIDE, SIDE, vec![200; (SIDE * SIDE * 4) as usize]).unwrap()
+    }
+    fn kept_one() -> ImageData {
+        ImageData::kept(SIDE, SIDE, Arc::from(&b"file"[..]), slowly).unwrap()
+    }
+    let all = Rect::new(0., 0., WINDOW as f32, WINDOW as f32);
+    for (name, make) in [("raw", raw_one as fn() -> ImageData), ("kept", kept_one)] {
+        let Ok(mut gpu) = GpuRenderer::new(WINDOW, WINDOW) else {
+            return;
+        };
+        let mut scene = Scene::new(WINDOW as f32, WINDOW as f32);
+        let root = stack(&mut scene);
+        let side = (SIDE as f32, SIDE as f32);
+        let add = |scene: &mut Scene, at: f32| {
+            let node = scene.append(root, NodeKind::Image(Arc::new(make())), sized(side));
+            scene.set_transform(node, Transform { x: at, y: at });
+        };
+        add(&mut scene, 0.);
+        add(&mut scene, 600.);
+        settle(&mut gpu, &mut scene, (WINDOW, WINDOW));
+        assert_eq!(gpu.debug_cache_stats().image_bytes, 50_000_000, "{name}");
+        // As a host does soon after they upload.
+        zgx::image::release_decoded();
+        add(&mut scene, 1200.);
+        let _ = scene.flush();
+        let (mut most, mut uploads, mut started, mut settled) = (0, 0, Instant::now(), 0);
+        while settled < 3 {
+            uploads += gpu.render(&scene, &[all]).expect("a frame").image_uploads;
+            let waiting = gpu.images_decoded();
+            let pixels = gpu.readback().unwrap();
+            for (x, y) in &CORNERS[..2] {
+                let alpha = pixels[(y * WINDOW as usize + x) * 4 + 3];
+                assert!(alpha > 0, "{name}: blank on screen at {x},{y}");
+            }
+            most = most.max(gpu.debug_cache_stats().image_bytes);
+            settled = if waiting { 0 } else { settled + 1 };
+            if waiting {
+                started = Instant::now();
+                std::thread::sleep(Duration::from_millis(4));
+            }
+            assert!(started.elapsed() < STALL, "{name}: never settled");
+        }
+        let pixels = gpu.readback().unwrap();
+        for (x, y) in CORNERS {
+            let alpha = pixels[(y * WINDOW as usize + x) * 4 + 3];
+            assert!(alpha > 0, "{name}: {x},{y} never showed");
+        }
+        let stats = gpu.debug_cache_stats();
+        assert_eq!(stats.image_textures, 3, "{name}");
+        assert!(stats.images_softer > 0, "{name}");
+        assert!(
+            stats.image_bytes <= 64 << 20,
+            "{name}: what was held for it went: {}",
+            stats.image_bytes
+        );
+        // (A raw one uploads as it comes, before the share moves, and again.)
+        assert!(uploads <= 4, "{name}: {uploads} uploads");
+        assert!(
+            most <= (64 << 20) + 50_000_000,
+            "{name}: at most the budget and what it replaced: {most}"
+        );
+    }
+}
+
 /// However many are past the budget, each shows and no frame fails. (Its last
 /// ones came to nothing, an error raised, with the budget used up.)
 #[test]
@@ -498,4 +617,118 @@ fn a_picture_scaled_down_by_its_parent_takes_what_it_shows() {
     assert!(stats.image_bytes <= 2 << 20, "{}", stats.image_bytes);
     assert_eq!(pixel(&mut gpu, window, (100, 50))[0], 200);
     assert_eq!(gpu.take_issues(), Vec::<String>::new());
+}
+
+/// Three pictures of 25 MB in a window of 2000: two fit the 64 MiB, three
+/// don't. Each has a corner only it covers.
+struct Crowded {
+    gpu: GpuRenderer,
+    scene: Scene,
+    nodes: Vec<NodeId>,
+}
+impl Crowded {
+    const SIDE: u32 = 2500;
+    const WINDOW: u32 = 2000;
+    const CORNERS: [(usize, usize); 3] = [(100, 100), (700, 700), (1300, 1300)];
+    fn new() -> Option<Self> {
+        let gpu = GpuRenderer::new(Self::WINDOW, Self::WINDOW).ok()?;
+        let mut scene = Scene::new(Self::WINDOW as f32, Self::WINDOW as f32);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        Some(Self {
+            gpu,
+            scene,
+            nodes: Vec::new(),
+        })
+    }
+    fn add(&mut self, parent: NodeId, at: f32) {
+        let side = Self::SIDE as f32;
+        let pixels = vec![200; (Self::SIDE * Self::SIDE * 4) as usize];
+        let picture = Arc::new(ImageData::new(Self::SIDE, Self::SIDE, pixels).unwrap());
+        let node = self
+            .scene
+            .append(parent, NodeKind::Image(picture), sized((side, side)));
+        self.scene.set_transform(node, Transform { x: at, y: at });
+        self.nodes.push(node);
+    }
+    fn frame(&mut self) -> GpuStats {
+        let _ = self.scene.flush();
+        let all = Rect::new(0., 0., Self::WINDOW as f32, Self::WINDOW as f32);
+        self.gpu.render(&self.scene, &[all]).expect("a frame")
+    }
+    /// Which corners show a picture.
+    fn showing(&mut self) -> [bool; 3] {
+        let pixels = self.gpu.readback().unwrap();
+        Self::CORNERS.map(|(x, y)| pixels[(y * Self::WINDOW as usize + x) * 4 + 3] > 0)
+    }
+}
+
+/// A picture on screen may not come through its upload in a frame (a frame
+/// paints what it kept), so it isn't marked drawn when a new one needs room:
+/// with none off screen to give way, the new one goes softer, and all show.
+/// Whichever way the new one arrives: beside the others (the frame prepares
+/// them too), or in a box of its own, before or after them (it prepares only
+/// that).
+#[test]
+fn a_new_picture_past_the_budget_goes_softer_and_those_on_screen_stay() {
+    for (own_box, first) in [(false, false), (true, false), (true, true)] {
+        let Some(mut w) = Crowded::new() else {
+            return;
+        };
+        let root = w.scene.root();
+        let boxed = |scene: &mut Scene| {
+            scene.append(root, NodeKind::Container(Layout::Overlay), Style::default())
+        };
+        let before = (own_box && first).then(|| boxed(&mut w.scene));
+        w.add(root, 0.);
+        w.add(root, 600.);
+        let after = (own_box && !first).then(|| boxed(&mut w.scene));
+        w.frame();
+        // A frame that paints what it kept, as a window's does.
+        w.frame();
+        w.add(before.or(after).unwrap_or(root), 1200.);
+        let case = format!("own box {own_box}, first {first}");
+        for frame in 0..2 {
+            w.frame();
+            assert_eq!(w.showing(), [true; 3], "{case}, frame {frame}");
+            let cache = w.gpu.debug_cache_stats();
+            assert_eq!(cache.image_textures, 3, "{case}: one gave way");
+            assert!(cache.images_softer > 0, "{case}: none went softer");
+            assert!(
+                cache.image_bytes <= 64 << 20,
+                "{case}: {} bytes",
+                cache.image_bytes
+            );
+        }
+    }
+}
+
+/// A picture scrolled off the window does give way, whole, to one on it: only
+/// those showing are spared.
+#[test]
+fn a_picture_off_the_window_gives_way_to_a_new_one() {
+    let Some(mut w) = Crowded::new() else {
+        return;
+    };
+    let root = w.scene.root();
+    w.add(root, 0.);
+    w.add(root, 600.);
+    let own = w
+        .scene
+        .append(root, NodeKind::Container(Layout::Overlay), Style::default());
+    w.frame();
+    // Off the window, and a frame on.
+    let first = w.nodes[0];
+    w.scene.set_transform(first, Transform { x: 0., y: 3000. });
+    w.frame();
+    w.add(own, 1200.);
+    w.frame();
+    assert_eq!(w.showing(), [false, true, true]);
+    let cache = w.gpu.debug_cache_stats();
+    assert_eq!(cache.image_textures, 2, "it kept its texture");
+    assert_eq!(cache.images_softer, 0, "drawn softer with room to be had");
+    // Back on the window, it uploads again.
+    w.scene.set_transform(first, Transform { x: 0., y: 0. });
+    assert_eq!(w.frame().image_uploads, 1);
+    assert_eq!(w.showing(), [true; 3]);
 }

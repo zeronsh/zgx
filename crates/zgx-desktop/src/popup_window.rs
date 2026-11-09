@@ -846,7 +846,7 @@ mod macos {
             window.setOpaque(false);
             window.setBackgroundColor(Some(&NSColor::clearColor()));
             window.setHasShadow(true);
-            // Over its parent and every other window, as AppKit's menus.
+            // Over every window, as AppKit's menus, till it shows as what it is.
             window.setLevel(NSPopUpMenuWindowLevel);
             // Shown at once, and only while zgx shows it (it closes popups
             // as the app deactivates).
@@ -1255,6 +1255,8 @@ mod macos {
     }
     /// The level drag images show at (`kCGDraggingWindowLevel`), over menus.
     const DRAGGING_LEVEL: isize = 500;
+    /// The level AppKit shows its tooltips at (`NSToolTipPanel`'s, read).
+    const TOOLTIP_LEVEL: isize = 103;
     /// Move `window`'s top-left to `origin` (global, top-down from the
     /// primary screen's top) through the window server alone, as AppKit
     /// moves its drag images, without AppKit's bookkeeping for a moved
@@ -1690,15 +1692,29 @@ mod macos {
                         PREVIEWS.with(|previews| previews.borrow_mut().push(number));
                         *ivars.parent.borrow_mut() = None;
                     } else {
-                        // SAFETY: both are live windows of this process, and
-                        // the panel is no ancestor of its parent (a panel
-                        // has no children); `hide` takes it off again.
-                        unsafe {
-                            parent
-                                .addChildWindow_ordered(&panel.window, NSWindowOrderingMode::Above)
-                        };
-                        // A child takes its parent's level; menus' is higher.
-                        panel.window.setLevel(NSPopUpMenuWindowLevel);
+                        // Stacked as AppKit stacks each: a popover a child of
+                        // its window, at its level; a menu and a tooltip at a
+                        // level of their own, no one's child. (A child above
+                        // its parent's level lifts the parent with it, over
+                        // the window in front: `scripts/macos_popup_hover`.)
+                        match scene.popup_role(root) {
+                            Some(zgx::scene::PopupRole::Popover) => {
+                                panel.window.setLevel(parent.level());
+                                // SAFETY: both are live windows of this process,
+                                // and the panel is no ancestor of its parent (a
+                                // panel has no children); `hide` takes it off.
+                                unsafe {
+                                    parent.addChildWindow_ordered(
+                                        &panel.window,
+                                        NSWindowOrderingMode::Above,
+                                    )
+                                };
+                            }
+                            Some(zgx::scene::PopupRole::Tooltip) => {
+                                panel.window.setLevel(TOOLTIP_LEVEL);
+                            }
+                            _ => panel.window.setLevel(NSPopUpMenuWindowLevel),
+                        }
                     }
                     panel.window.orderFront(None);
                 }

@@ -468,11 +468,22 @@ pub struct View {
     events: Vec<EventListener>,
     focusable: Option<bool>,
     id: Option<String>,
-    contents: bool,
+    contents: Contents,
     mounted: Vec<Box<dyn FnOnce(NodeHandle)>>,
     /// What few views set, boxed: views move by value through every
     /// builder call and mount level, and most carry none of it.
     rare: Option<Box<Rare>>,
+}
+/// Whose box a view lays out as (`View::contents`).
+#[derive(Clone, Copy, PartialEq)]
+enum Contents {
+    /// Its own.
+    Own,
+    /// Its last child's, in its place.
+    Child,
+    /// Its child's unless it is styled, and so asked for a box of its own:
+    /// what a region showing one view at a time starts as (`switch`).
+    ChildIfUnstyled,
 }
 /// Ranges of a text marked with a colour (`View::decorations`).
 type Decorations = Vec<(std::ops::Range<usize>, crate::scene::Color)>;
@@ -866,7 +877,7 @@ impl View {
             events: Vec::new(),
             focusable: None,
             id: None,
-            contents: false,
+            contents: Contents::Own,
             mounted: Vec::new(),
 
             rare: None,
@@ -881,14 +892,14 @@ impl View {
     /// origin. For a region that shows one view at a time (`switch`) and
     /// should not be a layout box of its own; see `Scene::set_contents`.
     pub fn contents(mut self) -> Self {
-        self.contents = true;
+        self.contents = Contents::Child;
         self
     }
     /// Undo `contents`: a box of its own again, for a host that puts a
     /// region it built in a flow of its own choosing after all (with
     /// `display_contents`, its children in its parent's).
     pub fn not_contents(mut self) -> Self {
-        self.contents = false;
+        self.contents = Contents::Own;
         self
     }
     /// A checkbox's mixed state, while `mixed` is true: a dash in place of
@@ -933,10 +944,10 @@ impl View {
     /// pointer leaves the wheel alone, so a page being read isn't caught by
     /// what scrolls past. Without Shift, at its edge the rest of the wheel's
     /// gesture stops there, as at any scroll view's edge (the gesture is
-    /// latched to it), and after a pause the wheel goes on to the views around
-    /// it. A trackpad, which has a sideways axis, moves it as any `scroll_x`,
-    /// except that a swipe mostly down leaves it still rather than moving it by
-    /// the swipe's drift. A Mac reports Shift and the wheel as sideways motion
+    /// latched to it), and after a pause, or once the pointer moves, the wheel
+    /// goes on to the views around it. A trackpad, which has a sideways axis,
+    /// moves it as any `scroll_x`, except that a swipe mostly down leaves it
+    /// still rather than moving it by the swipe's drift. A Mac reports Shift and the wheel as sideways motion
     /// itself, which every `scroll_x` takes.
     pub fn wheel_across(mut self) -> Self {
         self.rare_mut().wheel_across = true;
@@ -1928,7 +1939,9 @@ impl View {
         if self.focusable.is_some() {
             inner.focusable = self.focusable;
         }
-        inner.contents |= self.contents;
+        if self.contents != Contents::Own {
+            inner.contents = self.contents;
+        }
         inner.styles.merge(&self.styles);
         inner.children.extend(self.children);
         fn merge_variant(base: &mut Option<Box<Styles>>, patch: Option<Box<Styles>>) {
@@ -2069,6 +2082,8 @@ pub(crate) struct OverlayLook {
     pub(crate) popover_padding: f32,
     /// How far a menu item's shortcut sits from its label.
     pub(crate) shortcut_gap: f32,
+    /// The shadows a menu's and a popover's panel cast, if any.
+    pub(crate) panel_shadows: Option<&'static [crate::scene::BoxShadow]>,
     /// A text tooltip: its padding (across, above, below), corner radius
     /// and font size.
     pub(crate) tooltip_padding: (f32, f32, f32),
@@ -2091,6 +2106,7 @@ pub(crate) const BUILT_IN_OVERLAY: OverlayLook = OverlayLook {
     popover_radius: crate::theme::Themed::Token(tok::RADIUS_MD.0),
     popover_padding: 16.,
     shortcut_gap: 24.,
+    panel_shadows: None,
     tooltip_padding: (8., 4., 4.),
     tooltip_radius: crate::theme::Themed::Token(tok::RADIUS_SM.0),
     tooltip_font_size: crate::theme::Themed::Token(tok::FONT_SIZE_XS.0),
@@ -2138,6 +2154,7 @@ pub(crate) const LINUX_OVERLAY: OverlayLook = OverlayLook {
     popover_radius: crate::theme::Themed::Value(15.),
     popover_padding: 8.,
     shortcut_gap: 12.,
+    panel_shadows: Some(&GNOME_PANEL_SHADOWS),
     // A tooltip as libadwaita's (`widgets/_tooltip.scss`): dark and
     // translucent in either scheme, white text, a 1 border of white at 10%,
     // padded 10 by 6, rounded 9, its text the body's less a step. (When it
@@ -2154,6 +2171,23 @@ pub(crate) const LINUX_OVERLAY: OverlayLook = OverlayLook {
         crate::theme::Themed::Value(crate::scene::Color(255, 255, 255, 26)),
     ),
 };
+/// libadwaita's popover shadow (`popover > contents { box-shadow }`, its
+/// CSS blur halved to a Gaussian sigma): a 1 outline of black at 5%, then
+/// 1 down blurred 2.5 spread 1 at 9%, and 2 down blurred 7 spread 3 at 5%.
+const GNOME_PANEL_SHADOWS: [crate::scene::BoxShadow; 3] = [
+    panel_shadow(0., 0., 1., 13),
+    panel_shadow(1., 2.5, 1., 23),
+    panel_shadow(2., 7., 3., 13),
+];
+/// A black shadow `y` down, blurred `blur_radius`, grown `spread`.
+const fn panel_shadow(y: f32, blur_radius: f32, spread: f32, alpha: u8) -> crate::scene::BoxShadow {
+    crate::scene::BoxShadow {
+        color: crate::scene::Color(0, 0, 0, alpha),
+        offset: crate::scene::Transform { x: 0., y },
+        blur_radius,
+        spread,
+    }
+}
 pub(crate) const OVERLAY: OverlayLook = if cfg!(windows) {
     WINDOWS_OVERLAY
 } else if cfg!(target_os = "linux") {
@@ -2166,12 +2200,18 @@ pub(crate) const OVERLAY: OverlayLook = if cfg!(windows) {
 /// no border of its own it paints over the control (an inset stroke, taking
 /// no layout room), so focusing never moves its content; otherwise it
 /// colours the control's own border. On Windows, a ring outside it as
-/// WinUI draws one, taking no room either. (Made when first focused.)
+/// WinUI draws one, and on Linux an outline inset over it as GNOME draws
+/// one, taking no room either. (Made when first focused.)
 fn focus_ring(styles: &Styles) -> fn() -> Styles {
     // Windows draws keyboard focus outside the control, bordered or not, as
     // WinUI's focus visual does (`focus_outside`).
     if cfg!(windows) {
         return || widget_style(|w| &w.focus_outside);
+    }
+    // GNOME draws keyboard focus as an outline inset over the control,
+    // bordered or not (`focus_inset`).
+    if cfg!(target_os = "linux") {
+        return || widget_style(|w| &w.focus_inset);
     }
     match bordered(styles) {
         true => || widget_style(|w| &w.focus_recolor),
@@ -2911,7 +2951,10 @@ pub fn scrollbar(offset: Signal<f32>, mut extent: impl FnMut() -> f32 + 'static)
         crate::compose_scrollbar::mount(ui, root, offset, size, length, false);
     })))
 }
-/// A conditional region. Equal selector values retain their component and local state.
+/// A conditional region. Equal selector values retain their component and
+/// local state. It lays out as what it shows, in its place (`View::contents`):
+/// a percentage in that view resolves against this region's parent. Styled
+/// (`switch(..).w_full()`), it is a box of its own that holds the view.
 pub fn switch<K: PartialEq + Clone + 'static>(
     select: impl FnMut() -> K + 'static,
     build: impl FnMut(K, &mut Context) -> View + 'static,
@@ -2933,7 +2976,7 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
     mut select: impl FnMut() -> K + 'static,
     mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
-    View::new(Kind::Region(Box::new(move |ui, root, environment| {
+    let mut region = View::new(Kind::Region(Box::new(move |ui, root, environment| {
         let weak = ui.downgrade();
         let runtime = ui.runtime.clone();
         let mut selected: Option<K> = None;
@@ -2969,7 +3012,9 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
             });
             selected = Some(key);
         });
-    })))
+    })));
+    region.contents = Contents::ChildIfUnstyled;
+    region
 }
 /// Keyed children retain their local state and subscriptions across reorder.
 /// Duplicate keys are rejected before mutating the mounted children.
@@ -4256,6 +4301,10 @@ fn mount_portal_panel(
             (x, y) if x == y => card.p(x),
             (x, y) => card.px(x).py(y),
         };
+        let card = match (OVERLAY.panel_shadows, anchored) {
+            (Some(shadows), true) => card.shadows(shadows.to_vec()),
+            _ => card,
+        };
         card.bg(if is_menu {
             tok::MENU_BG
         } else if anchored {
@@ -4590,10 +4639,18 @@ fn mount_portal_panel(
     if anchored {
         let (screens, visible, position) = (screens, portal.visible.clone(), portal.position);
         let weak = ui.downgrade();
+        let role = match (is_menu || is_submenu, is_layer) {
+            (true, _) => crate::scene::PopupRole::Menu,
+            (_, true) => crate::scene::PopupRole::Tooltip,
+            _ => crate::scene::PopupRole::Popover,
+        };
         ui.bind(owner, move || {
             let popup = visible.get() && screens.with(|screens| !screens.is_empty());
             if let Some(ui) = weak.upgrade() {
                 let mut scene = ui.scene.borrow_mut();
+                if popup {
+                    scene.set_popup_role(position, role);
+                }
                 scene.set_popup(position, popup);
                 // Its trigger, which a platform placing it flips it around.
                 if popup && let Some(anchor) = anchor {
@@ -4623,6 +4680,10 @@ struct WidgetStyles {
     /// wide), its corners the control's grown by 3.
     #[cfg_attr(not(windows), allow(dead_code))]
     focus_outside: Styles,
+    /// GNOME's focus (libadwaita's `focus-ring`): an outline 2 wide inset
+    /// over the control's edge (offset −2), its corners the control's.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    focus_inset: Styles,
     menu_focus_recolor: Styles,
     menu_item: Styles,
     menu_hover: Styles,
@@ -4648,6 +4709,10 @@ impl WidgetStyles {
                 .outline_color(tok::FOCUS_RING)
                 .outline_offset(1.)
                 .outline_inner(1., tok::BACKGROUND),
+            focus_inset: Styles::new()
+                .outline_width(2.)
+                .outline_color(tok::FOCUS_RING)
+                .outline_offset(-2.),
             menu_focus_recolor: Styles::new()
                 .bg(tok::MENU_HOVER)
                 .border_color(tok::FOCUS_RING),
@@ -5699,7 +5764,10 @@ fn open_element(
         }
         _ => unreachable!(),
     };
-    if view.contents {
+    if view.contents != Contents::Own
+        && (view.contents == Contents::Child
+            || (view.styles.set_bits() == 0 && view.reactive_style.is_none()))
+    {
         ui.scene.borrow_mut().set_contents(root, true);
     }
     if let Some(active) = rare.as_deref_mut().and_then(|r| r.active_descendant.take()) {

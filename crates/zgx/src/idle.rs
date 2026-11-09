@@ -36,6 +36,21 @@ pub fn on_idle(runtime: &Runtime, trim: impl Fn() + 'static) -> IdleTrim {
     IdleTrim(trim)
 }
 
+/// Asks a host of `runtime` for its idle trim soon, whether or not a frame
+/// comes: a host arms its trim as a frame presents, so what's let go of in a
+/// window showing no frames (hidden, minimized or covered, or with nothing to
+/// draw) would otherwise wait until it next draws. Once, however often it's
+/// called before the host looks; nothing else wakes the host for it.
+pub fn request(runtime: &Runtime) {
+    runtime.idle_requested().set(true);
+}
+
+/// Whether [`request`] was called since the last look: a host's, once a turn
+/// of its loop.
+pub fn take_request(runtime: &Runtime) -> bool {
+    runtime.idle_requested().replace(false)
+}
+
 /// Runs what was registered with [`on_idle`]: hosts call this once as they
 /// go idle (zgx-desktop, as its frames stop), not per frame.
 pub fn trim(runtime: &Runtime) {
@@ -67,6 +82,15 @@ mod tests {
         drop(handle);
         trim(&runtime);
         assert_eq!(runs.get(), 2);
+    }
+    #[test]
+    fn a_request_is_taken_once() {
+        let runtime = Runtime::new();
+        assert!(!take_request(&runtime), "none until asked");
+        request(&runtime);
+        request(&runtime);
+        assert!(take_request(&runtime));
+        assert!(!take_request(&runtime), "once, however often it was asked");
     }
     #[test]
     fn effects_at_rest_give_back_slots_and_keep_what_is_live() {

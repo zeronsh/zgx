@@ -1545,7 +1545,7 @@ fn a_key_closes_a_tooltip_and_escape_an_interactive_card() {
         h.frames(1);
     };
     to(&mut h, "a");
-    wait_ms(&mut h, 550);
+    wait_ms(&mut h, tooltip_waits().0 + 300);
     assert!(visible(&mut h, "tip"));
     press(&mut h, Key::Character("x".into()));
     assert!(!visible(&mut h, "tip"), "a key closes it, at once");
@@ -1553,7 +1553,7 @@ fn a_key_closes_a_tooltip_and_escape_an_interactive_card() {
     to(&mut h, "away");
     wait_ms(&mut h, 1100);
     to(&mut h, "b");
-    wait_ms(&mut h, 550);
+    wait_ms(&mut h, tooltip_waits().0 + 300);
     assert!(visible(&mut h, "card"));
     press(&mut h, Key::Character("x".into()));
     assert!(visible(&mut h, "card"), "an interactive card takes typing");
