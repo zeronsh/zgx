@@ -479,77 +479,98 @@ impl ShapedText {
     }
     /// Returns visual rectangles, including disjoint spans for mixed-direction text.
     pub fn selection(&self, range: Range<usize>) -> Vec<Rect> {
-        let start = range.start.min(range.end);
-        let end = range.start.max(range.end).min(self.text.len());
-        if start >= end {
-            return Vec::new();
-        }
-        let mut rectangles: Vec<Rect> = Vec::new();
-        for run in self.buffer.layout_runs() {
-            let offset = self.line_offsets[run.line_i];
-            // An empty line in the selection: its line break, a little wide.
-            if run.glyphs.is_empty() && offset >= start && offset < end {
-                let width = zgx::text_layout::empty_line_width(run.line_height);
-                let cursor = TextCursor {
-                    byte_index: offset,
-                    affinity: Affinity::After,
-                };
-                let x = ShapedText::caret(self, cursor).map_or(0., |caret| caret.x);
-                rectangles.push(Rect::new(x, run.line_top, width, run.line_height));
-                continue;
-            }
-            let mut spans = Vec::new();
-            for glyph in run.glyphs {
-                if glyph.metadata == usize::MAX {
-                    continue;
-                }
-                let cluster_start = offset + glyph.start;
-                let cluster_end = offset + glyph.end;
-                if cluster_start >= end || cluster_end <= start {
-                    continue;
-                }
-                let cluster = &self.text[cluster_start..cluster_end];
-                let count = cluster.graphemes(true).count().max(1);
-                for (index, (local, grapheme)) in cluster.grapheme_indices(true).enumerate() {
-                    if cluster_start + local >= end
-                        || cluster_start + local + grapheme.len() <= start
-                    {
-                        continue;
-                    }
-                    let width = glyph.w / count as f32;
-                    let x = if glyph.level.is_rtl() {
-                        glyph.x + glyph.w - (index + 1) as f32 * width
-                    } else {
-                        glyph.x + index as f32 * width
-                    };
-                    // Strong negative tracking can reverse a glyph's advance.
-                    // Selection paint rectangles still need ordered edges.
-                    spans.push(Rect::new(
-                        x.min(x + width),
-                        run.line_top,
-                        width.abs(),
-                        run.line_height,
-                    ));
-                }
-            }
-            spans.sort_by(|a, b| a.x.total_cmp(&b.x));
-            for span in spans {
-                if let Some(last) = rectangles.last_mut()
-                    && last.y == span.y
-                    && last.x + last.width >= span.x - 0.01
-                {
-                    *last = last.union(span);
-                    continue;
-                }
-                rectangles.push(span);
-            }
-        }
-        rectangles
+        let empty = |offset: usize, run: &cosmic_text::LayoutRun<'_>| {
+            let width = zgx::text_layout::empty_line_width(run.line_height);
+            let cursor = TextCursor {
+                byte_index: offset,
+                affinity: Affinity::After,
+            };
+            let x = ShapedText::caret(self, cursor).map_or(0., |caret| caret.x);
+            Some(Rect::new(x, run.line_top, width, run.line_height))
+        };
+        selection_in(
+            self.buffer.layout_runs(),
+            &self.line_offsets,
+            &self.text,
+            range,
+            empty,
+        )
+        .unwrap_or_default()
     }
     /// Its line pitch.
     pub fn line_height(&self) -> f32 {
         self.line_height
     }
+}
+
+/// `ShapedText::selection` over laid-out `runs` of `text`, its lines
+/// starting at `offsets`: an empty line in the range as `empty` says (None:
+/// not known, and so none of it).
+pub fn selection_in<'a>(
+    runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
+    offsets: &[usize],
+    text: &str,
+    range: Range<usize>,
+    mut empty: impl FnMut(usize, &cosmic_text::LayoutRun<'a>) -> Option<Rect>,
+) -> Option<Vec<Rect>> {
+    let start = range.start.min(range.end);
+    let end = range.start.max(range.end).min(text.len());
+    if start >= end {
+        return Some(Vec::new());
+    }
+    let mut rectangles: Vec<Rect> = Vec::new();
+    for run in runs {
+        let offset = offsets[run.line_i];
+        // An empty line in the selection: its line break, a little wide.
+        if run.glyphs.is_empty() && offset >= start && offset < end {
+            rectangles.push(empty(offset, &run)?);
+            continue;
+        }
+        let mut spans = Vec::new();
+        for glyph in run.glyphs {
+            if glyph.metadata == usize::MAX {
+                continue;
+            }
+            let cluster_start = offset + glyph.start;
+            let cluster_end = offset + glyph.end;
+            if cluster_start >= end || cluster_end <= start {
+                continue;
+            }
+            let cluster = &text[cluster_start..cluster_end];
+            let count = cluster.graphemes(true).count().max(1);
+            for (index, (local, grapheme)) in cluster.grapheme_indices(true).enumerate() {
+                if cluster_start + local >= end || cluster_start + local + grapheme.len() <= start {
+                    continue;
+                }
+                let width = glyph.w / count as f32;
+                let x = if glyph.level.is_rtl() {
+                    glyph.x + glyph.w - (index + 1) as f32 * width
+                } else {
+                    glyph.x + index as f32 * width
+                };
+                // Strong negative tracking can reverse a glyph's advance.
+                // Selection paint rectangles still need ordered edges.
+                spans.push(Rect::new(
+                    x.min(x + width),
+                    run.line_top,
+                    width.abs(),
+                    run.line_height,
+                ));
+            }
+        }
+        spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+        for span in spans {
+            if let Some(last) = rectangles.last_mut()
+                && last.y == span.y
+                && last.x + last.width >= span.x - 0.01
+            {
+                *last = last.union(span);
+                continue;
+            }
+            rectangles.push(span);
+        }
+    }
+    Some(rectangles)
 }
 
 impl zgx::text_layout::TextLayout for ShapedText {
@@ -2002,6 +2023,53 @@ mod rich_tests {
         }
         FontSystem::new_with_locale_and_db("en-US".into(), db)
     }
+    /// A padded run (an inline code chip) is padded before its first glyph
+    /// and after its last, however its words were shaped before: the
+    /// shape-run cache keeps a run's glyphs unpadded, so `a` shaped at the
+    /// chip's start (padded before it) is not found again at its end.
+    #[test]
+    fn a_chips_last_word_is_padded_after_it_as_its_first_before_it() {
+        let mut fonts = bundled_test_fonts();
+        let text = "x a + a y";
+        let runs = vec![
+            TextRun {
+                range: 0..2,
+                ..Default::default()
+            },
+            TextRun {
+                range: 2..7,
+                font: FontStyle {
+                    family: zgx::text_layout::FontFamily::Monospace,
+                    ..FontStyle::default()
+                },
+                padding: [4., 0.],
+                ..Default::default()
+            },
+            TextRun {
+                range: 7..9,
+                ..Default::default()
+            },
+        ];
+        let rich = RichText::new(text, runs).unwrap();
+        // Twice: the second from the cache the first filled.
+        for _ in 0..2 {
+            let buffer = rich_buffer(&mut fonts, &rich, None, None);
+            let run = buffer.layout_runs().next().unwrap();
+            let a: Vec<_> = run
+                .glyphs
+                .iter()
+                .filter(|g| g.start == 2 || g.start == 6)
+                .collect();
+            assert_eq!(a.len(), 2);
+            let (first, last) = (a[0], a[1]);
+            assert!(
+                first.x_offset > 0. && last.x_offset == 0.,
+                "{first:?} {last:?}"
+            );
+            assert!(last.w > first.w - first.x_offset * first.font_size - 0.01);
+            assert_eq!(first.w.to_bits(), last.w.to_bits(), "each padded once");
+        }
+    }
     /// A family without the weight asked for draws in its own nearest
     /// face, as CSS's font matching does: Medium text in a family with
     /// Regular alone stays in that family rather than taking another's
@@ -2619,9 +2687,32 @@ pub fn rich_decorations_in<'a>(
     rich: &zgx::rich_text::RichText,
 ) -> Vec<RichDecoration> {
     let mut output = Vec::new();
+    rich_decorations_into(&mut output, runs, starts, rich);
+    output
+}
+/// `rich_decorations_in`, after `output`'s (those of the lines before):
+/// each line's are its own, a wash joining only its own line's.
+pub fn rich_decorations_into<'a>(
+    output: &mut Vec<RichDecoration>,
+    runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
+    starts: &[usize],
+    rich: &zgx::rich_text::RichText,
+) {
+    let all = rich.runs();
     for line in runs {
         let start = starts[line.line_i];
-        for (index, run) in rich.runs().iter().enumerate() {
+        // Only runs its glyphs are in (a paragraph's runs are many as it
+        // streams): from the one its first byte is in to its last's, the
+        // last run also taking what lies past it (`run_at`).
+        let bytes = line.glyphs.iter().map(|g| start + g.start);
+        let (Some(first), Some(last)) = (bytes.clone().min(), bytes.max()) else {
+            continue;
+        };
+        let from = all.partition_point(|run| run.range.end <= first);
+        let to = (all.partition_point(|run| run.range.start <= last))
+            .max(from + 1)
+            .min(all.len());
+        for (index, run) in all.iter().enumerate().take(to).skip(from) {
             if run.background.is_none() && run.underline.is_none() && run.strikethrough.is_none() {
                 continue;
             }
@@ -2668,7 +2759,7 @@ pub fn rich_decorations_in<'a>(
                     // background and its neighbour's, the same and touching
                     // on its line, are one wash (a chip's), not three.
                     if let Some(joined) =
-                        joined_wash(&mut output, rich, index, bounds, color, run.radius)
+                        joined_wash(output, rich, index, bounds, color, run.radius)
                     {
                         *joined = joined.union(bounds);
                         continue;
@@ -2708,7 +2799,6 @@ pub fn rich_decorations_in<'a>(
             }
         }
     }
-    output
 }
 
 #[cfg(test)]

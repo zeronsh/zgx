@@ -785,19 +785,19 @@ pub(crate) fn mount_links(
             } else {
                 // At the width its lines wrap at, where they show
                 // (balanced). A change of balance moves `engine`.
+                // From its laid-out lines where the scene has them
+                // (`rich_text_selections`), moved by the inset.
                 let scene = ui.scene.borrow();
                 let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
-                let layout = crate::text_layout::Inset::around(
-                    scene.shape_rich_text(&data.rich, Some(wrap)),
-                    inset,
-                );
+                let ranges: Vec<_> = data.links.iter().map(|link| link.range.clone()).collect();
+                let rects = scene.rich_text_selections(&data.rich, Some(wrap), &ranges);
                 drop(scene);
-                data.links
-                    .iter()
-                    .map(|link| {
-                        layout
-                            .selection(link.range.clone())
+                rects
+                    .into_iter()
+                    .map(|rects| {
+                        rects
                             .into_iter()
+                            .map(|rect| Rect::new(rect.x + inset, rect.y, rect.width, rect.height))
                             .filter_map(|rect| {
                                 rect.intersection(Rect::new(0., 0., bounds.width, bounds.height))
                             })
@@ -1111,14 +1111,19 @@ pub(crate) fn mount_icons(
             let scene = ui.scene.borrow();
             // As links' (above).
             let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
-            let layout = crate::text_layout::Inset::around(
-                scene.shape_rich_text(&data.rich, Some(wrap)),
-                inset,
-            );
-            rects = data
-                .icons
-                .iter()
-                .map(|icon| layout.selection(icon.range.clone()).into_iter().next())
+            let ranges: Vec<_> = data.icons.iter().map(|icon| icon.range.clone()).collect();
+            rects = scene
+                .rich_text_selections(&data.rich, Some(wrap), &ranges)
+                .into_iter()
+                .map(|rects| {
+                    let rect = rects.into_iter().next()?;
+                    Some(crate::scene::Rect::new(
+                        rect.x + inset,
+                        rect.y,
+                        rect.width,
+                        rect.height,
+                    ))
+                })
                 .collect();
             drop(scene);
             geometry_key = Some(key);
