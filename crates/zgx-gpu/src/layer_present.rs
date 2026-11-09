@@ -1434,7 +1434,7 @@ impl Layer {
         // Waited for already, off the main thread, while the last frame ran
         // its course; else (the first, after a resize) waited for here.
         let ready = drawables.prefetch.as_ref().and_then(|prefetch| {
-            prefetch.take().filter(|drawable| {
+            prefetch.wait_take().filter(|drawable| {
                 let texture = drawable.texture();
                 texture.width() as f64 == size.width && texture.height() as f64 == size.height
             })

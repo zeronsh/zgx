@@ -83,6 +83,22 @@ impl Drawables {
         self.shared.woken.store(false, Ordering::Release);
         state.ready.take().map(|drawable| drawable.0)
     }
+    /// The drawable handed over, or, while the thread waits for one, the one
+    /// it gets: a frame that needs its drawable now waits for that rather than
+    /// asking the layer itself, where the two would wait for one drawable and
+    /// the frame for the layer's timeout (a second).
+    pub(crate) fn wait_take(&self) -> Option<Drawable> {
+        let mut state = self.shared.lock();
+        while state.ready.is_none() && (state.wanted || state.waiting) && !state.stop {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|e| e.into_inner());
+        }
+        self.shared.woken.store(false, Ordering::Release);
+        state.ready.take().map(|drawable| drawable.0)
+    }
     /// Whether a drawable waits to be taken.
     pub(crate) fn ready(&self) -> bool {
         self.shared.lock().ready.is_some()
@@ -199,6 +215,8 @@ fn wait(
                 wake();
             }
         }
+        // A frame may be waiting for what this wait came to (`wait_take`).
+        shared.changed.notify_all();
     }
 }
 
@@ -250,6 +268,39 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         false
+    }
+
+    /// A frame that needs its drawable while the thread waits for one gets
+    /// the one the thread gets, as soon as the pool frees one: it never waits
+    /// in the layer beside the thread, where the two would wait for one
+    /// drawable and the frame for the layer's timeout.
+    #[test]
+    fn a_frame_waits_for_the_threads_drawable_not_beside_it() {
+        let Some(layer) = layer() else { return };
+        let Some(pool) = held_pool(&layer) else {
+            return;
+        };
+        let mut drawables = Drawables::new(layer, None);
+        drawables.want();
+        assert!(waits(&drawables), "the pool is held: the thread waits");
+        // One goes back to the pool a little later, from elsewhere.
+        let [first, second] = pool;
+        let given = Sendable(second);
+        let freeing = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(given);
+        });
+        let asked = Instant::now();
+        let drawable = drawables.wait_take();
+        let waited = asked.elapsed();
+        freeing.join().unwrap();
+        assert!(drawable.is_some(), "the thread's drawable");
+        assert!(waited < Duration::from_millis(500), "waited {waited:?}");
+        drop(first);
+        // Nothing wanted, nothing waits: it returns at once.
+        let asked = Instant::now();
+        assert!(drawables.wait_take().is_none());
+        assert!(asked.elapsed() < Duration::from_millis(50));
     }
 
     #[test]
