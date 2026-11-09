@@ -6,7 +6,9 @@
 //! - `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`, and
 //!   what [`Options::code`] adds), `ul` / `ol` (`start`, `items`: a list of
 //!   block lists), `quote` (`b`), `hr`, `table` (`head`: cells, `rows`:
-//!   rows of cells; a cell is runs), `img` (`src`, `alt`).
+//!   rows of cells; a cell is runs; `align`, only where the source aligns a
+//!   column: each column's side, `"start"`, `"center"`, `"end"`, or `""`
+//!   where it says none), `img` (`src`, `alt`).
 //!
 //! A list item's own text (a tight list's, never a paragraph) is a `p`
 //! with `tight`, which has no space under it.
@@ -28,7 +30,7 @@ pub use mend::PENDING_LINK_URL;
 
 use crate::Value;
 use mlua::IntoLua;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use std::rc::Rc;
 
 /// How text is read.
@@ -1162,6 +1164,25 @@ fn runs_value(runs: &[Run]) -> Value {
     )
 }
 
+/// A table's columns' sides, as a `table` block's `align` says them.
+fn table_align(align: &[Alignment]) -> Value {
+    Value::List(
+        align
+            .iter()
+            .map(|side| {
+                match side {
+                    Alignment::None => "",
+                    Alignment::Left => "start",
+                    Alignment::Center => "center",
+                    Alignment::Right => "end",
+                }
+                .into()
+            })
+            .collect::<Vec<Value>>()
+            .into(),
+    )
+}
+
 /// What is being built at each level of nesting.
 enum Frame {
     /// Blocks of a container (the document, a list item, a quote).
@@ -1176,6 +1197,8 @@ enum Frame {
         rows: Vec<Value>,
         row: Vec<Value>,
         in_head: bool,
+        /// Its columns' sides, when the source aligns any.
+        align: Option<Box<[Alignment]>>,
     },
 }
 
@@ -1441,11 +1464,15 @@ impl Builder<'_> {
                     items: Vec::new(),
                 }),
                 Tag::Item => self.frames.push(Frame::Blocks(Vec::new())),
-                Tag::Table(_) => self.frames.push(Frame::Table {
+                Tag::Table(align) => self.frames.push(Frame::Table {
                     head: Vec::new(),
                     rows: Vec::new(),
                     row: Vec::new(),
                     in_head: false,
+                    align: align
+                        .iter()
+                        .any(|side| *side != Alignment::None)
+                        .then(|| align.into_boxed_slice()),
                 }),
                 Tag::TableHead => {
                     if let Some(Frame::Table { in_head, .. }) = self.frames.last_mut() {
@@ -1566,12 +1593,21 @@ impl Builder<'_> {
                     }
                 }
                 TagEnd::Table => {
-                    if let Some(Frame::Table { head, rows, .. }) = self.frames.pop() {
-                        self.block(map(vec![
+                    if let Some(Frame::Table {
+                        head, rows, align, ..
+                    }) = self.frames.pop()
+                    {
+                        let mut fields = vec![
                             ("t", "table".into()),
                             ("head", Value::List(head.into())),
                             ("rows", Value::List(rows.into())),
-                        ]));
+                        ];
+                        // Only a table that aligns a column says so: one that
+                        // doesn't costs nothing more.
+                        if let Some(align) = align {
+                            fields.push(("align", table_align(&align)));
+                        }
+                        self.block(map(fields));
                     }
                 }
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
@@ -1704,6 +1740,33 @@ mod tests {
         let Value::List(row) = &rows[0] else { panic!() };
         let Value::List(cell) = &row[0] else { panic!() };
         assert_eq!(text(cell[0].field("img")).as_deref(), Some("p.png"));
+    }
+
+    #[test]
+    fn a_table_says_how_its_columns_align_only_when_its_source_does() {
+        let sides = |source: &str| {
+            let blocks = parse(source, &plain());
+            blocks[0].field("align").map(|align| {
+                let Value::List(sides) = align else { panic!() };
+                sides
+                    .iter()
+                    .map(|side| match side {
+                        Value::Str(side) => side.to_string(),
+                        _ => panic!(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            sides("| a | b | c | d |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |"),
+            Some(vec![
+                "start".into(),
+                "center".into(),
+                "end".into(),
+                String::new()
+            ])
+        );
+        assert_eq!(sides("| a | b |\n|---|---|\n| 1 | 2 |"), None);
     }
 
     #[test]
