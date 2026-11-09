@@ -128,8 +128,19 @@ def listed():
     return rows
 
 
+def fresh(root, target):
+    """The workspace's own crates built again from `root`. Another tree's (the
+    gate's base, `at`'s) share `target`, and a workspace member's artifacts
+    don't depend on its path: cargo would link the other tree's, stale."""
+    env = dict(os.environ, CARGO_TARGET_DIR=str(target))
+    triple = ["--target", TRIPLE] if TRIPLE else []
+    packages = [arg for crate in CRATES for arg in ("-p", crate)]
+    subprocess.run(["cargo", "clean", "-q", "--release", *triple, *packages], cwd=root, env=env, check=True)
+
+
 def measure(root, target, wanted, crates=CRATES):
     """Each wanted function's inlined callees and lines, crate by crate."""
+    fresh(root, target)
     got = {}
     for crate in crates:
         if not any(c == crate for c, _ in wanted):

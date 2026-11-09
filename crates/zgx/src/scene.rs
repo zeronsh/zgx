@@ -2008,6 +2008,9 @@ struct Local {
 /// What few scenes have, by node; each entry goes with its node.
 #[derive(Default)]
 struct ColdMaps {
+    /// Scroll content drawn from pictures (`picture_moved`), and what goes
+    /// with it: none until a renderer that draws them allows them.
+    pictures: Option<Box<PictureState>>,
     /// Track lists of grids that have them (`set_grid_template`): none kept
     /// for a list no node has any more.
     grid_templates: NodeMap<Arc<crate::grid_tracks::GridTemplate>>,
@@ -3436,6 +3439,25 @@ pub struct TextLine {
     pub carets: Vec<f32>,
     /// It runs right to left.
     pub rtl: bool,
+}
+/// Scroll content drawn from pictures (`Scene::picture_moved`), and what goes
+/// with it: apart from the scene, which holds none of it until a view scrolls
+/// in a renderer that draws them.
+#[derive(Default)]
+struct PictureState {
+    /// The window's renderer draws pictures (`set_pictures_allowed`).
+    allowed: bool,
+    /// Scroll content the renderer could not copy (`want_pictures`): a
+    /// picture where it moves next. Content a copy moves stays as it is.
+    wanted: Vec<NodeId>,
+    pictures: Vec<NodeId>,
+    /// Scroll content that can't be a picture, until the next rest, and why.
+    refused: Vec<(NodeId, String)>,
+    /// What changed in moved pictures this flush (`picture_changes`).
+    changes: Vec<(NodeId, Rect)>,
+    /// Children of pictures something in which changed since a renderer last
+    /// asked (`take_picture_rows`).
+    rows: std::cell::RefCell<Vec<NodeId>>,
 }
 /// Scroll content that moved rigidly by `(dx, dy)` within `clip`. The flush
 /// damaged only what copying the old pixels cannot provide (`exposed`, plus
@@ -13568,6 +13590,11 @@ impl Scene {
         }
         let _span = crate::profile::span(crate::profile::Phase::Damage);
         report.layout_nodes = std::mem::take(&mut self.pending_layout_nodes);
+        // (Before `dirty` is taken: a call while the loop's state is live
+        // costs the loop registers.)
+        if self.picture_state().is_some() {
+            self.check_pictures();
+        }
         let dirty = std::mem::take(&mut self.dirty);
         for id in &dirty {
             if !self.contains(*id) {
@@ -13630,6 +13657,9 @@ impl Scene {
                 }
             }
         }
+        if self.picture_state().is_some() {
+            self.picture_moves();
+        }
         self.resolve_moves();
         report.damage = match self.damage_grid.take() {
             Some(grid) if grid.full() => vec![self.viewport],
@@ -13671,6 +13701,9 @@ impl Scene {
     /// starts above every generation that went (`new_slot_generation`), so
     /// that a stale id never names it.
     pub fn rest(&mut self) {
+        if self.picture_state().is_some() {
+            self.rest_pictures();
+        }
         let mut keep = self.slots.len();
         while keep > 1 && self.slots[keep - 1].node.is_none() {
             keep -= 1;
@@ -14011,6 +14044,436 @@ impl Scene {
         }
         Some(corners)
     }
+    /// Say whether the window's renderer draws scroll content from pictures:
+    /// one that does keeps each scroll view's content in a texture of its own
+    /// while it scrolls and composites it, at a cost that doesn't depend on
+    /// what the content holds.
+    pub fn set_pictures_allowed(&mut self, allowed: bool) {
+        match allowed {
+            true => self.picture_state_mut().allowed = true,
+            false => {
+                if let Some(state) = self.cold.as_mut().and_then(|cold| cold.pictures.as_mut()) {
+                    state.allowed = false;
+                }
+            }
+        }
+    }
+    fn picture_state(&self) -> Option<&PictureState> {
+        self.cold.as_ref()?.pictures.as_deref()
+    }
+    fn picture_state_mut(&mut self) -> &mut PictureState {
+        self.cold
+            .get_or_insert_default()
+            .pictures
+            .get_or_insert_default()
+    }
+    /// Scroll content its renderer could not copy (`ids`): drawn from a
+    /// picture the next time it moves, if it can be one.
+    #[cold]
+    #[inline(never)]
+    pub fn want_pictures(&mut self, ids: Vec<NodeId>) {
+        if ids.is_empty() {
+            return;
+        }
+        let wanted = &mut self.picture_state_mut().wanted;
+        for id in ids {
+            if !wanted.contains(&id) {
+                wanted.push(id);
+            }
+        }
+    }
+    /// Whether any scroll content is drawn from a picture.
+    pub fn has_pictures(&self) -> bool {
+        !self.pictures().is_empty()
+    }
+    /// Whether `id` is scroll content drawn from a picture.
+    pub fn is_picture(&self, id: NodeId) -> bool {
+        self.pictures().contains(&id)
+    }
+    fn pictures(&self) -> &[NodeId] {
+        self.picture_state().map_or(&[], |state| &state.pictures)
+    }
+    /// Pictures are for scrolling: at rest, what they held paints as ever.
+    #[cold]
+    #[inline(never)]
+    fn rest_pictures(&mut self) {
+        let Some(state) = self.cold.as_mut().and_then(|cold| cold.pictures.take()) else {
+            return;
+        };
+        for id in state.pictures {
+            if self.contains(id) {
+                self.node_mut(id).isolated = false;
+                self.isolation_count -= 1;
+            }
+        }
+    }
+    /// A new flush's moves: what the last noted of them goes, and pictures gone.
+    #[cold]
+    #[inline(never)]
+    fn start_picture_moves(&mut self) {
+        let Some(mut state) = self.cold.as_mut().and_then(|cold| cold.pictures.take()) else {
+            return;
+        };
+        state.changes.clear();
+        state.pictures.retain(|id| self.contains(*id));
+        if let Some(cold) = &mut self.cold {
+            cold.pictures = Some(state);
+        }
+    }
+    /// What changed in picture `id` in the last flush if it moved in it,
+    /// where it is now (each change at both places a move leaves it, as for a
+    /// copy: `resolve_moves`). A flush it didn't move in has only its damage.
+    pub fn picture_changes(&self, id: NodeId) -> impl Iterator<Item = Rect> + '_ {
+        self.picture_state()
+            .into_iter()
+            .flat_map(|state| state.changes.iter())
+            .filter(move |(node, _)| *node == id)
+            .map(|(_, rect)| *rect)
+    }
+    /// Children of pictures something in which changed since the last call.
+    /// Layout within a row answers to what changed in it, so the row covers
+    /// it; what moves a row itself shows in where it now lies
+    /// (`picture_row_ink`).
+    pub fn take_picture_rows(&self) -> Vec<NodeId> {
+        self.picture_state().map_or_else(Vec::new, |state| {
+            std::mem::take(&mut *state.rows.borrow_mut())
+        })
+    }
+    /// All picture `id`'s child `row` can paint, where the window has it.
+    pub fn picture_row_ink(&self, id: NodeId, row: NodeId) -> Option<Rect> {
+        let content = self.node(id);
+        let at = self.bounds(id);
+        let (dx, dy) = (at.x - content.bounds.x, at.y - content.bounds.y);
+        self.ink(row)
+            .map(|ink| ink.translated(Transform { x: dx, y: dy }))
+    }
+    /// Where boxes fading down their height lie in picture `id`, in the
+    /// window. Such a box's band keeps to its clip, which the view cuts: while
+    /// a view's edge crosses it, it doesn't move with the content.
+    pub fn picture_fades(&self, id: NodeId) -> Vec<Rect> {
+        let mut fades = Vec::new();
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            if self
+                .node(node)
+                .style
+                .fade_edges
+                .iter()
+                .any(|band| *band > 0.)
+            {
+                fades.push(self.bounds(node));
+            }
+            stack.extend_from_slice(self.children(node));
+        }
+        fades
+    }
+    /// The paint items of picture `id` within `bands`, as the window's walk
+    /// makes them. `shown`: cut by the view (`clip`), as they show now; else
+    /// `clip`'s across and uncut down, as what lies past the view will draw
+    /// once wholly in it.
+    pub fn picture_items(
+        &self,
+        id: NodeId,
+        clip: Rect,
+        shown: bool,
+        bands: &[Rect],
+    ) -> Vec<PaintItem<'_>> {
+        const FAR: f32 = 1e7;
+        let mut transform = Transform::default();
+        let mut parent = self.node(id).parent;
+        while let Some(at) = parent {
+            let node = self.node(at);
+            transform.x += node.transform.x;
+            transform.y += node.transform.y;
+            parent = node.parent;
+        }
+        let from = Inherited {
+            transform,
+            opacity: 1.,
+            clip: Some(match shown {
+                true => clip,
+                false => Rect::new(clip.x, -FAR, clip.width, FAR * 2.),
+            }),
+            extras: None,
+            border: false,
+        };
+        let walk = Some((id, &from));
+        let mut inherited = Vec::new();
+        match self.plain_walks() {
+            true => self.layer_items_walk::<false, false, false, true>(
+                Some(id),
+                Some(bands),
+                &mut inherited,
+                walk,
+            ),
+            false => self.layer_items_walk::<true, false, false, true>(
+                Some(id),
+                Some(bands),
+                &mut inherited,
+                walk,
+            ),
+        }
+    }
+    /// This flush's scroll moves that are pictures' (`picture_moved`), taken
+    /// out of those `resolve_moves` makes copies or damage of.
+    #[cold]
+    #[inline(never)]
+    fn picture_moves(&mut self) {
+        self.start_picture_moves();
+        let mut pending = std::mem::take(&mut self.pending_moves);
+        pending.retain(|&(id, from, again)| {
+            if !self.contains(id) {
+                return true;
+            }
+            let to = self.node(id).transform;
+            !self.picture_moved(id, to.x - from.x, to.y - from.y, again)
+        });
+        self.pending_moves = pending;
+    }
+    /// Scroll content `id` moved by `dx`, `dy`: if it is a picture (it
+    /// becomes one here if it can), its view repaints from it, and what
+    /// changed in it is noted for the picture. False: it moves as ever.
+    #[cold]
+    #[inline(never)]
+    fn picture_moved(&mut self, id: NodeId, dx: f32, dy: f32, again: bool) -> bool {
+        let mut pictured = self.is_picture(id);
+        if pictured && dx != 0. {
+            self.demote_picture(id, "it moved across".into());
+            return false;
+        }
+        if !pictured {
+            if !self.picture_state().is_some_and(|state| state.allowed)
+                || (dx == 0. && dy == 0. && !again)
+            {
+                return false;
+            }
+            // A view its renderer copies stays a copy: cheaper than a picture.
+            if !self
+                .picture_state()
+                .is_some_and(|state| state.wanted.contains(&id))
+            {
+                return false;
+            }
+            if dx != 0. {
+                crate::profile::note(|| {
+                    format!("scroll @{} no picture: it moved across", id.number())
+                });
+                return false;
+            }
+            let refused = self
+                .picture_state()
+                .and_then(|state| state.refused.iter().find(|(node, _)| *node == id));
+            if let Some((_, why)) = refused {
+                crate::profile::note(|| format!("scroll @{} no picture: {why}", id.number()));
+                return false;
+            }
+            if let Err(why) = self.picture_fits(id) {
+                crate::profile::note(|| format!("scroll @{} no picture: {why}", id.number()));
+                self.picture_state_mut().refused.push((id, why));
+                return false;
+            }
+            self.node_mut(id).isolated = true;
+            self.isolation_count += 1;
+            self.picture_state_mut().wanted.retain(|node| *node != id);
+            self.picture_state_mut().pictures.push(id);
+            pictured = true;
+        }
+        debug_assert!(pictured);
+        let clip = self.world_clip(id).unwrap_or(self.viewport);
+        // Damage kept in a grid has no list to read: all it shows changed.
+        // So too for content moved more than once, whatever changed between.
+        if again || self.damage_grid.is_some() {
+            self.picture_state_mut().changes.push((id, clip));
+        } else {
+            let inside: Vec<Rect> = self
+                .damage
+                .iter()
+                .filter_map(|rect| rect.intersection(clip))
+                .collect();
+            let state = self.picture_state_mut();
+            for rect in inside {
+                state.changes.push((id, rect));
+                let shifted = rect.translated(Transform { x: dx, y: dy });
+                if let Some(rect) = shifted.intersection(clip) {
+                    state.changes.push((id, rect));
+                }
+            }
+        }
+        self.add_damage(clip);
+        true
+    }
+    /// Back to painting as ever: all its view shows repaints.
+    fn demote_picture(&mut self, id: NodeId, why: String) {
+        crate::profile::note(|| format!("scroll @{} no picture: {why}", id.number()));
+        let state = self.picture_state_mut();
+        state.pictures.retain(|node| *node != id);
+        state.refused.push((id, why));
+        self.node_mut(id).isolated = false;
+        self.isolation_count -= 1;
+        let clip = self.world_clip(id).unwrap_or(self.viewport);
+        self.add_damage(clip);
+    }
+    /// Whether scroll content `id` draws the same from a picture: it moves
+    /// rigidly in its view, on whole pixels, in the window's own space, and
+    /// nothing in it depends on what is behind it or on where the view is.
+    /// If not, why not, for devtools.
+    fn picture_fits(&self, id: NodeId) -> Result<(), String> {
+        let name = |node: NodeId| {
+            format!(
+                "@{} ({})",
+                node.number(),
+                crate::inspect::kind_name(self, node)
+            )
+        };
+        let scale = self.pixel_scale;
+        if scale <= 0. {
+            return Err("the scene has no pixel scale".into());
+        }
+        // A texture's rows aren't whole points there: text snapping to pixels
+        // from another origin can land a pixel off what painting draws.
+        if scale.fract() != 0. {
+            return Err(format!("its scale {scale} is fractional"));
+        }
+        for node in std::iter::once(id).chain(self.ancestors(id)) {
+            if self.is_layer(node) {
+                return Err(format!("{} around it is a layer", name(node)));
+            }
+            if self.popups.contains(&node) {
+                return Err(format!("{} around it is a popup", name(node)));
+            }
+        }
+        let Some(clip) = self.world_clip(id) else {
+            return Err("it has no clip".into());
+        };
+        let whole = |value: f32| ((value * scale) - (value * scale).round()).abs() < 1e-3;
+        if ![clip.x, clip.y, clip.x + clip.width, clip.y + clip.height]
+            .into_iter()
+            .all(whole)
+        {
+            return Err(format!("its view {clip:?} falls between device pixels"));
+        }
+        #[cfg(target_os = "macos")]
+        if let Some((node, _)) = self
+            .baked_loops
+            .iter()
+            .find(|(node, _)| self.is_within(*node, id))
+        {
+            return Err(format!("{} in it plays a baked loop", name(*node)));
+        }
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            if let Some(why) = self.picture_refuses(node) {
+                return Err(format!("{} in it {why}", name(node)));
+            }
+            stack.extend_from_slice(self.children(node));
+        }
+        Ok(())
+    }
+    /// What in node `id` keeps the scroll content it is in from a picture.
+    fn picture_refuses(&self, id: NodeId) -> Option<&'static str> {
+        let node = self.node(id);
+        #[cfg(target_os = "macos")]
+        if matches!(node.kind, NodeKind::NativeSurface(_)) {
+            return Some("is a native surface");
+        }
+        // A fade down the height of nothing it clips: its box is the view's
+        // (one of a box it clips is `picture_fades`).
+        if node.style.fade_edges.iter().any(|band| *band > 0.) && !clip_axes(&node.style).1 {
+            return Some("fades down the view's height");
+        }
+        if node.effects.edge_fade > 0. {
+            return Some("fades at its edges");
+        }
+        // What a window's pixel draws depends on where it is, or draws anew
+        // each frame: rastered once and moved, it would be wrong.
+        match &node.kind {
+            NodeKind::Image(image)
+                if !matches!(image.effect(), crate::image::ImageEffect::Plain) =>
+            {
+                return Some("is an image drawn by window position");
+            }
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }
+                if matches!(
+                    quad.decoration
+                        .as_deref()
+                        .and_then(|d| d.background.as_ref()),
+                    Some(crate::decoration::Background::Shader(_))
+                ) =>
+            {
+                return Some("is filled by a shader");
+            }
+            _ => {}
+        }
+        if node.blend != BlendMode::Normal {
+            return Some("blends with what is behind it");
+        }
+        if node.effects.blur_radius > 0. {
+            return Some("blurs what is behind it");
+        }
+        let cold = self.cold.as_ref()?;
+        if cold.backdrop_readers.contains(&id) {
+            return Some("reads what is behind it");
+        }
+        if cold.sticky.contains_key(&id) {
+            return Some("is sticky");
+        }
+        if self.layer_shader(id).is_some() {
+            return Some("composites through a layer shader");
+        }
+        None
+    }
+    /// What changed this flush may keep content from staying a picture, and
+    /// what it changed is noted by row, in or out of its view.
+    #[cold]
+    #[inline(never)]
+    fn check_pictures(&mut self) {
+        let dirty = std::mem::take(&mut self.dirty);
+        self.check_pictures_in(&dirty);
+        self.dirty = dirty;
+    }
+    fn check_pictures_in(&mut self, dirty: &[NodeId]) {
+        for picture in self.pictures().to_vec() {
+            if !self.contains(picture) {
+                continue;
+            }
+            for id in dirty {
+                if !self.contains(*id) {
+                    continue;
+                }
+                let mut at = *id;
+                while let Some(parent) = self.node(at).parent {
+                    if parent == picture {
+                        if let Some(state) = self.picture_state() {
+                            state.rows.borrow_mut().push(at);
+                        }
+                        break;
+                    }
+                    at = parent;
+                }
+            }
+            let refused = dirty
+                .iter()
+                .filter(|id| self.contains(**id) && self.is_within(**id, picture))
+                .find_map(|id| self.picture_refuses(*id).map(|why| (*id, why)));
+            let why = refused.map(|(id, why)| {
+                format!(
+                    "@{} ({}) in it {why}",
+                    id.number(),
+                    crate::inspect::kind_name(self, id)
+                )
+            });
+            #[cfg(target_os = "macos")]
+            let why = why.or_else(|| {
+                self.baked_loops
+                    .iter()
+                    .any(|(node, _)| self.is_within(*node, picture))
+                    .then(|| "something in it plays a baked loop".to_string())
+            });
+            if let Some(why) = why {
+                self.demote_picture(picture, why);
+            }
+        }
+    }
     /// Turn this frame's scroll translations into moves: damage what a copy
     /// cannot supply, or everything the content painted where a copy is
     /// unsafe (isolated ancestors, backdrop filters over the clip, nested or
@@ -14316,7 +14779,7 @@ impl Scene {
     ) -> Vec<PaintItem<'_>> {
         match self.plain_walks() {
             true => match damage {
-                Some(_) => self.layer_items_walk::<false, false, false>(
+                Some(_) => self.layer_items_walk::<false, false, false, false>(
                     root,
                     damage,
                     &mut Vec::new(),
@@ -14324,9 +14787,12 @@ impl Scene {
                 ),
                 None => self.layer_items_whole(root),
             },
-            false => {
-                self.layer_items_walk::<true, false, false>(root, damage, &mut Vec::new(), None)
-            }
+            false => self.layer_items_walk::<true, false, false, false>(
+                root,
+                damage,
+                &mut Vec::new(),
+                None,
+            ),
         }
     }
     /// Of `node`'s `children`, those whose ink can meet `reach` (a damaged
@@ -14380,7 +14846,7 @@ impl Scene {
     /// its damage already, and pays nothing for it.
     #[inline(never)]
     fn layer_items_whole(&self, root: Option<NodeId>) -> Vec<PaintItem<'_>> {
-        self.layer_items_walk::<false, false, true>(root, None, &mut Vec::new(), None)
+        self.layer_items_walk::<false, false, true, false>(root, None, &mut Vec::new(), None)
     }
     /// The window's paint items (as [`Scene::layer_items`] with `None`), and
     /// into `inherited` what each took from its ancestors, for
@@ -14388,8 +14854,8 @@ impl Scene {
     pub fn layer_items_recorded(&self, inherited: &mut Vec<Inherited>) -> Vec<PaintItem<'_>> {
         inherited.clear();
         match self.plain_walks() {
-            true => self.layer_items_walk::<false, true, false>(None, None, inherited, None),
-            false => self.layer_items_walk::<true, true, false>(None, None, inherited, None),
+            true => self.layer_items_walk::<false, true, false, false>(None, None, inherited, None),
+            false => self.layer_items_walk::<true, true, false, false>(None, None, inherited, None),
         }
     }
     /// The paint items of `id`'s subtree as the window's walk makes them,
@@ -14406,12 +14872,18 @@ impl Scene {
     ) -> Vec<PaintItem<'_>> {
         out.clear();
         match self.plain_walks() {
-            true => {
-                self.layer_items_walk::<false, true, false>(None, None, out, Some((id, inherited)))
-            }
-            false => {
-                self.layer_items_walk::<true, true, false>(None, None, out, Some((id, inherited)))
-            }
+            true => self.layer_items_walk::<false, true, false, false>(
+                None,
+                None,
+                out,
+                Some((id, inherited)),
+            ),
+            false => self.layer_items_walk::<true, true, false, false>(
+                None,
+                None,
+                out,
+                Some((id, inherited)),
+            ),
         }
     }
     /// Plain node `id`'s box as [`Scene::item_in`] places it, from what it
@@ -14480,7 +14952,15 @@ impl Scene {
     /// `RECORD`: what each item inherits goes into `inherited`.
     /// `from`: a subtree alone, from what its root inherited (`root` and
     /// `damage` are then `None`).
-    fn layer_items_walk<const POPUPS: bool, const RECORD: bool, const CLIPS: bool>(
+    // `PICTURE`: a scroll picture's walk (`picture_items`), the same walk
+    // made apart, so that its arguments (a root, bands) don't reach the
+    // window's walks, whose callers pass neither.
+    fn layer_items_walk<
+        const POPUPS: bool,
+        const RECORD: bool,
+        const CLIPS: bool,
+        const PICTURE: bool,
+    >(
         &self,
         root: Option<NodeId>,
         damage: Option<&[Rect]>,

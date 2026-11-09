@@ -96,7 +96,7 @@ local function reply(): string
 	return table.concat(out, "\n\n")
 end
 
-local messages: { Message } = table.create(400)
+local messages = table.create(400) :: { Message }
 for i = 1, 400 do
 	local mine = i % 2 == 1
 	messages[i] = {
