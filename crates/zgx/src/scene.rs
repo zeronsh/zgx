@@ -2413,6 +2413,17 @@ pub(crate) fn clips(style: &Style) -> bool {
             .as_deref()
             .is_some_and(|o| o.clip_x == Some(true) || o.clip_y == Some(true))
 }
+/// Whether a node is text that ends in an ellipsis where it overflows:
+/// CSS's `text-overflow: ellipsis`, which needs `overflow: hidden`, so it
+/// clips across as a scroll container does.
+fn truncates(node: &Node) -> bool {
+    use crate::text_layout::TextOverflow::Ellipsis;
+    match &node.kind {
+        NodeKind::Text { .. } => node.style.text_options.overflow == Ellipsis,
+        NodeKind::RichText { text } => text.options().overflow == Ellipsis,
+        _ => false,
+    }
+}
 use crate::text_layout::min_content_lines;
 /// `Node::reads`: known, reads the available width, the height; has a
 /// width or height percentage in its subtree; resolves its own against the
@@ -4603,15 +4614,17 @@ impl Scene {
     ) -> f32 {
         // A `contents` node's style is the one it lays out with (its last
         // child's, with the margins added); its content, and so whether it
-        // clips, is that child's.
-        if clips(&self.node(self.laid_out_as(id)).style) {
+        // clips, is that child's. Walked to once: this is the flex loop's.
+        let laid_out_as = self.laid_out_as(id);
+        let laid = self.node(laid_out_as);
+        if clips(&laid.style) {
             return 0.;
         }
         let style = &self.node(id).style;
         // An image or an icon that sets its size, or is sized by its
         // pixels, keeps it (CSS's replaced elements); its box holds no
         // content to measure.
-        if self.node(self.laid_out_as(id)).replaced
+        if laid.replaced
             && let Some(size) = if horizontal {
                 style.width
             } else {
@@ -4627,10 +4640,9 @@ impl Scene {
             // (`base`), with no probe; given a height, its content's height
             // at that width (a probe under its own constraints, so what it
             // holds answers from the layout's caches).
-            let laid = self.laid_out_as(id);
             if style.height.is_none()
                 && style.height_percent.is_none()
-                && !self.percentages_within(laid).1
+                && !self.percentages_within(laid_out_as).1
             {
                 return base;
             }
@@ -4639,6 +4651,11 @@ impl Scene {
             // need, walked as across.
             let content = self.min_content(id, asked, false);
             return base.min(content);
+        }
+        // Text that ends in an ellipsis clips what it cannot show, so a
+        // truncated label shrinks past its longest word, as on the web.
+        if truncates(laid) {
+            return 0.;
         }
         let specified = style.width;
         let content = self.min_content(id, asked, true);
