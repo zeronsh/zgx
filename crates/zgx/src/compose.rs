@@ -2943,6 +2943,29 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
 /// set. Application state written by a constructor is not rolled back.
 pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
     mut keys: impl FnMut() -> Vec<K> + 'static,
+    build: impl FnMut(K, &mut Context) -> View + 'static,
+) -> View {
+    keyed_grown(move || Keys::All(keys()), build)
+}
+/// A pass's keys for [`keyed_grown`]: all of them, or those after the
+/// first `unchanged`, which are the last pass's as it had them (a source
+/// that knows: a list grown at its end, its last item changed).
+pub enum Keys<K> {
+    /// Every key, in order.
+    All(Vec<K>),
+    /// The last pass's first `unchanged` keys, then `rest`.
+    Grown {
+        /// How many of the last pass's keys, from the first, stay.
+        unchanged: usize,
+        /// The keys after them.
+        rest: Vec<K>,
+    },
+}
+/// [`keyed`] whose keys say how many are the last pass's: a list growing at
+/// its end (a streamed reply's rows) is passed in what it adds, its keys
+/// neither compared, copied nor dropped whole.
+pub fn keyed_grown<K: Eq + std::hash::Hash + Clone + 'static>(
+    mut keys: impl FnMut() -> Keys<K> + 'static,
     mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
     View::new(Kind::Region(Box::new(move |ui, root, environment| {
@@ -2952,32 +2975,68 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
         // and that pass (a key met twice in one pass is a duplicate).
         let mut entries: HashMap<K, Keyed, crate::KeyHasher> =
             HashMap::with_hasher(crate::key_hasher());
-        // The last pass's keys and their children, in order.
-        let mut last: (Vec<K>, Vec<NodeId>) = (Vec::new(), Vec::new());
+        // The keys last given, and the children the last pass that finished
+        // put in order.
+        let (mut shown, mut order): (Vec<K>, Vec<NodeId>) = (Vec::new(), Vec::new());
         // This pass, and whether the last one finished: one that did not
-        // (a constructor panicked, the region went) left `entries` marked
-        // for keys `last` does not hold.
+        // (a constructor panicked, the region went) left `entries` and
+        // `order` as they were for keys `shown` no longer holds.
         let (mut pass, mut finished) = (0u64, true);
-        // A pass's children by key after the prefix, the keys with none yet
-        // (by place) and those built: kept from pass to pass, as is the
-        // order, so a pass allocates none of them.
-        let mut nodes: Vec<Option<NodeId>> = Vec::new();
+        // The last keys after the prefix (`gone`'s from `gone_at`), a pass's
+        // children by key after it, the keys with none yet (by place) and
+        // those built: kept from pass to pass, so a pass allocates none of
+        // them.
+        let (mut gone, mut nodes): (Vec<K>, Vec<Option<NodeId>>) = (Vec::new(), Vec::new());
         let (mut fresh, mut added): (Vec<usize>, Vec<(usize, NodeId)>) = (Vec::new(), Vec::new());
         ui.bind(root, move || {
-            let keys = keys();
-            // The same keys in the same order, every child still mounted (a
-            // list whose rows changed in place): nothing to add, remove or
-            // move, and no key hashed to find out.
-            if finished
-                && keys == last.0
-                && let Some(ui) = weak.upgrade()
-            {
-                let scene = ui.scene.borrow();
-                if !scene.contains(root) || last.1.iter().all(|node| scene.contains(*node)) {
-                    return;
+            // Every child the last pass placed still mounted: the root holds
+            // as many (it holds `keyed`'s children alone, and one removed
+            // from elsewhere leaves it).
+            let intact =
+                |ui: &Ui, order: &[NodeId]| ui.scene.borrow().children(root).len() == order.len();
+            // How many first keys are the last pass's, and those it had
+            // after them.
+            let (same, gone_at) = match keys() {
+                Keys::All(keys) => {
+                    // The same keys in the same order, every child still
+                    // mounted (a list whose rows changed in place): nothing
+                    // to add, remove or move, and no key hashed to find out.
+                    if finished
+                        && keys == shown
+                        && let Some(ui) = weak.upgrade()
+                        && (!ui.scene.borrow().contains(root) || intact(&ui, &order))
+                    {
+                        return;
+                    }
+                    let same = keys
+                        .iter()
+                        .zip(&shown)
+                        .take_while(|(now, then)| now == then)
+                        .count();
+                    // (The last keys kept whole, read from `same` on: none
+                    // moved.)
+                    gone = std::mem::replace(&mut shown, keys);
+                    (same, same)
                 }
-            }
+                Keys::Grown { unchanged, rest } => {
+                    let same = unchanged.min(shown.len());
+                    if finished
+                        && same == shown.len()
+                        && rest.is_empty()
+                        && let Some(ui) = weak.upgrade()
+                        && (!ui.scene.borrow().contains(root) || intact(&ui, &order))
+                    {
+                        return;
+                    }
+                    gone.clear();
+                    gone.extend(shown.drain(same..));
+                    shown.extend(rest);
+                    (same, 0)
+                }
+            };
+            let keys = &shown;
             let Some(mut ui) = weak.upgrade() else {
+                finished = false;
                 return;
             };
             // The last pass's keys first, as they were, then others (a list
@@ -2988,20 +3047,14 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
             // it, then and now) is well under the whole list's: an edit near
             // the front passes whole.
             let from = {
-                let prefix = keys
-                    .iter()
-                    .zip(&last.0)
-                    .take_while(|(now, then)| now == then)
-                    .count();
-                let rest = (last.0.len() - prefix) + 2 * (keys.len() - prefix);
-                let scene = ui.scene.borrow();
-                if prefix > 0
+                let rest = (gone.len() - gone_at) + 2 * (keys.len() - same);
+                if same > 0
                     && finished
                     && rest <= keys.len() / 2
-                    && entries.len() == last.0.len()
-                    && last.1[..prefix].iter().all(|node| scene.contains(*node))
+                    && entries.len() == same + gone.len() - gone_at
+                    && intact(&ui, &order)
                 {
-                    prefix
+                    same
                 } else {
                     0
                 }
@@ -3068,9 +3121,9 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                 // Every key shown now is held: only more than that left.
                 // Those go in the order they were in, the same every run (a
                 // map's iteration is not), as what their removal repaints
-                // follows it.
+                // follows it. (Those before `same` are shown still.)
                 if entries.len() > keys.len() {
-                    for (index, key) in last.0.iter().enumerate().skip(from) {
+                    for (index, key) in (same..).zip(&gone[gone_at..]) {
                         if entries.get(key).is_some_and(|entry| entry.pass != pass)
                             && let Some(entry) = entries.remove(key)
                         {
@@ -3089,18 +3142,19 @@ pub fn keyed<K: Eq + std::hash::Hash + Clone + 'static>(
                         });
                     }
                 }
-                // (In place: the prefix's children are where they were.)
-                let order = &mut last.1;
                 order.truncate(from);
                 order.extend(
                     nodes
                         .iter()
                         .map(|node| node.expect("each key has its child")),
                 );
-                assert!(ui.scene.borrow_mut().reorder_children(root, order));
+                assert!(
+                    ui.scene
+                        .borrow_mut()
+                        .reorder_children_from(root, from, &order)
+                );
                 transaction.commit();
             });
-            last.0 = keys;
             finished = true;
         });
     })))

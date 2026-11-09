@@ -5548,7 +5548,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 };
                 // Every row is built and laid out: thousands are slow to
                 // mount and lay out, where `ui.list` builds what shows.
-                let rows = items.with_untracked(|list| list.list().len());
+                let rows = items.with_untracked(|list| list.items().len());
                 if rows > LONG_EACH {
                     crate::warn(
                         lua,

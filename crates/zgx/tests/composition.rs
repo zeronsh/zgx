@@ -212,6 +212,108 @@ fn keyed_rows_ahead_of_an_append_or_a_changed_last_key_stay_as_they_were() {
     assert_eq!(content(&ui, row(2)), "42");
 }
 
+/// Keys a source says are the last pass's (`Keys::Grown`: a list grown at
+/// its end) are not compared, copied or looked up: appending to 400 rows
+/// compares few keys a pass, as at 4. The rows are those `keyed` builds
+/// from every key, a row removed from outside is built again, and a key in
+/// `rest` repeating one of theirs is refused.
+#[test]
+fn keyed_grown_passes_over_the_keys_it_is_told_stay() {
+    #[derive(Clone)]
+    struct Counted(i32, Rc<Cell<usize>>);
+    impl PartialEq for Counted {
+        fn eq(&self, other: &Self) -> bool {
+            self.1.set(self.1.get() + 1);
+            self.0 == other.0
+        }
+    }
+    impl Eq for Counted {}
+    impl std::hash::Hash for Counted {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            self.0.hash(state);
+        }
+    }
+    let compared = Rc::new(Cell::new(0));
+    let key = |n: i32| Counted(n, compared.clone());
+    let mut ui = Ui::new(400., 200.);
+    // What the source answers next: how many stay, then the rest.
+    let next: Rc<RefCell<(usize, Vec<Counted>)>> = Rc::new(RefCell::new((0, vec![key(0)])));
+    let tick = ui.signal(0);
+    let builds = Rc::new(Cell::new(0));
+    let handle = ui.mount(zgx::compose::keyed_grown(
+        {
+            let (next, tick) = (next.clone(), tick.clone());
+            move || {
+                tick.get();
+                let (unchanged, rest) = std::mem::take(&mut *next.borrow_mut());
+                zgx::compose::Keys::Grown { unchanged, rest }
+            }
+        },
+        {
+            let builds = builds.clone();
+            move |key: Counted, _| {
+                builds.set(builds.get() + 1);
+                text(key.0.to_string()).id(format!("row-{}", key.0))
+            }
+        },
+    ));
+    let shown = |ui: &Ui| -> Vec<String> {
+        let scene = ui.scene.borrow();
+        scene
+            .children(handle.node())
+            .iter()
+            .map(|n| content(ui, *n))
+            .collect()
+    };
+    let mut per_pass = Vec::new();
+    for n in 1..400 {
+        compared.set(0);
+        *next.borrow_mut() = (n as usize, vec![key(n)]);
+        tick.set(n);
+        per_pass.push(compared.get());
+    }
+    assert_eq!(builds.get(), 400);
+    // (A key or two, and the odd hash table probe's: not the rows ahead, of
+    // which the last passes have hundreds.)
+    let most = per_pass.iter().copied().max().unwrap();
+    let total: usize = per_pass.iter().sum();
+    assert!(
+        most <= 16 && total <= 2 * per_pass.len(),
+        "most {most}, in all {total}"
+    );
+    assert_eq!(
+        shown(&ui),
+        (0..400).map(|n| n.to_string()).collect::<Vec<_>>()
+    );
+    // The last key changed: its row alone built again.
+    *next.borrow_mut() = (399, vec![key(500)]);
+    tick.set(400);
+    assert_eq!(builds.get(), 401);
+    assert!(handle.find("row-399").is_none());
+    assert_eq!(shown(&ui)[399], "500");
+    // A row ahead removed from outside: built again, the rest kept.
+    let third = handle.find("row-3").unwrap();
+    let first = handle.find("row-0").unwrap();
+    ui.remove(third);
+    *next.borrow_mut() = (400, vec![key(501)]);
+    tick.set(401);
+    assert_eq!(builds.get(), 403);
+    assert_ne!(handle.find("row-3").unwrap(), third);
+    assert_eq!(handle.find("row-0"), Some(first));
+    assert_eq!(shown(&ui).len(), 401);
+    // A key after them repeating one of theirs: refused, nothing changed.
+    let before = shown(&ui);
+    *next.borrow_mut() = (401, vec![key(7)]);
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick.set(402)));
+    assert!(failed.is_err());
+    assert_eq!(shown(&ui), before);
+    // And the list goes on after it.
+    *next.borrow_mut() = (401, vec![key(502)]);
+    tick.set(403);
+    assert_eq!(shown(&ui)[401], "502");
+    assert_eq!(shown(&ui)[..401], before[..]);
+}
+
 /// A key twice is refused before anything changes wherever it is: two of
 /// the rows shown, two new ones (a few, or many), at any length.
 #[test]
