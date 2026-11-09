@@ -469,3 +469,73 @@ fn a_links_and_a_carried_items_chips_are_the_hooks_drawn_whole() {
         "a chip's ink, not a link's underline"
     );
 }
+
+#[test]
+fn a_finds_matches_are_marked_and_the_block_holding_the_current_one_revealed() {
+    let mut app = TestApp::inline(
+        r##"local q = ui.state("q", "")
+        local cur = ui.state("cur", 0)
+        local seen = ui.state("seen", "")
+        return ui.column { w = 600,
+            ui.markdown_view { id = "md", w_full = true,
+                "First **Word** and word.\n\nSecond `word` [chip](zeron:x).",
+                style = { mark = { bg = "#ffff00" }, mark_current = { bg = "#ff8800" } },
+                chip = function(target, text) return { text, bg = "#303030" } end,
+                find = {
+                    query = function() return q:get() end,
+                    current = function() if cur:get() > 0 then return 2, cur:get() end return nil end,
+                    reveal = function(block) seen:set(seen:peek() .. math.floor(block.y) .. ";") end,
+                } },
+        }"##,
+    );
+    app.frames(2);
+    let washed = |app: &mut TestApp| -> Vec<Vec<(String, Option<zgx::scene::Color>)>> {
+        paragraphs(app, "md")
+            .into_iter()
+            .map(|(_, text, runs)| {
+                runs.into_iter()
+                    .map(|r| (text[r.range.clone()].to_string(), r.background))
+                    .collect()
+            })
+            .collect()
+    };
+    let (yellow, orange) = (
+        Some(zgx::scene::Color(255, 255, 0, 255)),
+        Some(zgx::scene::Color(255, 136, 0, 255)),
+    );
+    app.host.set_state("q", Value::from("WORD")).unwrap();
+    app.frames(2);
+    let marks = washed(&mut app);
+    assert_eq!(
+        marks[0]
+            .iter()
+            .filter(|(_, bg)| *bg == yellow)
+            .map(|(t, _)| t.as_str())
+            .collect::<Vec<_>>(),
+        ["Word", "word"],
+        "case aside, across runs: {marks:?}"
+    );
+    // The current match: the second block's first (its code's).
+    app.host.set_state("q", Value::from("o")).unwrap();
+    app.host.set_state("cur", Value::Num(2.)).unwrap();
+    app.frames(3);
+    let marks = washed(&mut app);
+    let current: Vec<_> = marks[1].iter().filter(|(_, bg)| *bg == orange).collect();
+    assert_eq!(current.len(), 1, "{marks:?}");
+    // The chip ("chip" has no "o"): unwashed; with "h", washed whole.
+    app.host.set_state("q", Value::from("h")).unwrap();
+    app.frames(2);
+    let marks = washed(&mut app);
+    assert!(
+        marks[1]
+            .iter()
+            .any(|(t, bg)| t.contains("chip") && *bg == yellow),
+        "{marks:?}"
+    );
+    let seen = (app.host.states().into_iter())
+        .find(|(name, _)| name == "seen")
+        .map(|(_, v)| v.to_string())
+        .unwrap();
+    assert!(!seen.is_empty(), "the second block revealed");
+    assert_eq!(app.error(), None);
+}

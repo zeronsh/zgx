@@ -5551,6 +5551,18 @@ export type MarkdownViewProps = {
 	-- The names of the items the text carries: words naming one,
 	-- "(attachment: <name>)", are asked of `chip`.
 	attached: { [string]: any }?,
+	-- A find over the text: its query as typed (`query`, "" for none),
+	-- where its current match is (`current`: its top-level block and its
+	-- place among the block's matches, from 1, or nil), and what brings
+	-- the block holding it into view once it is laid out (`reveal`, told
+	-- the block's element). Matches are marked as `style.mark` and
+	-- `style.mark_current` say, case aside; a chip with one in it washed
+	-- whole.
+	find: {
+		query: () -> string,
+		current: () -> (number?, number?),
+		reveal: ((block: Element) -> ())?,
+	}?,
 }
 -- `ui.markdown_view`'s `style`: a paragraph's options as `ui.rich`'s, and
 -- each kind of run's as `ui.span`'s (tokens, states and functions as
@@ -5565,6 +5577,9 @@ export type MarkdownStyle = {
 	strike: SpanProps?,
 	code: SpanProps?,
 	link: SpanProps?,
+	-- A find's matches and its current one (`find`).
+	mark: SpanProps?,
+	mark_current: SpanProps?,
 }
 -- `ui.span`'s options are plain values.
 export type SpanProps = {

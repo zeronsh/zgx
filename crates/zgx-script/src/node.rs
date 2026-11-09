@@ -1501,6 +1501,9 @@ pub(crate) struct MarkdownLook {
     /// are drawn as, a span's options over the run's kinds (not a link's),
     /// or nil for words. `link = true` keeps a link's click and menu.
     pub chip: Option<Function>,
+    /// `find = { query, current, reveal }`: a find over the text, its
+    /// matches marked (`style.mark`, `style.mark_current`).
+    pub find: Option<MarkdownFind>,
     /// `links = "web"`: only web addresses are links; any other target is
     /// styled as one and goes nowhere (no click, menu or address).
     pub web_only: bool,
@@ -1508,9 +1511,26 @@ pub(crate) struct MarkdownLook {
     /// made as first asked: a run is a copy of its kinds' span.
     pub made: RefCell<Vec<Option<Span>>>,
 }
+/// `ui.markdown_view`'s `find`: its query as typed now (`query()`, "" for
+/// none), where the current match is (`current()`: its top-level block and
+/// its place among the block's matches, from 1; nil for none), and what
+/// brings the block holding it into view (`reveal(element)`).
+pub(crate) struct MarkdownFind {
+    pub query: Function,
+    pub current: Function,
+    pub reveal: Option<Function>,
+}
 /// How many kinds of run a markdown style names (`MarkdownLook::runs`).
-pub(crate) const RUN_KINDS: usize = 5;
-const RUN_KIND_NAMES: [&str; RUN_KINDS] = ["strong", "em", "strike", "code", "link"];
+pub(crate) const RUN_KINDS: usize = 7;
+const RUN_KIND_NAMES: [&str; RUN_KINDS] = [
+    "strong",
+    "em",
+    "strike",
+    "code",
+    "link",
+    "mark",
+    "mark_current",
+];
 
 /// A table's own fields, copied: what a look keeps of the script's, so a
 /// change the script makes after has no part in it.
@@ -1533,7 +1553,9 @@ fn default_run(lua: &Lua, kind: usize) -> mlua::Result<Table> {
             out.raw_set("padding", lua.create_sequence_from([3., 0.5])?)?;
             out.raw_set("radius", 3.)?;
         }
-        _ => out.raw_set("color", "$accent")?,
+        4 => out.raw_set("color", "$accent")?,
+        5 => out.raw_set("bg", "$find.match")?,
+        _ => out.raw_set("bg", "$find.current")?,
     }
     Ok(out)
 }
@@ -1545,6 +1567,14 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
     let on_link: Option<Function> = table.get("on_link")?;
     let link_menu: Option<Function> = table.get("link_menu")?;
     let chip: Option<Function> = table.get("chip")?;
+    let find = match table.get::<Option<Table>>("find")? {
+        Some(t) => Some(MarkdownFind {
+            query: t.get("query")?,
+            current: t.get("current")?,
+            reveal: t.get("reveal")?,
+        }),
+        None => None,
+    };
     let web_only = match table.get::<Option<String>>("links")?.as_deref() {
         None | Some("all") => false,
         Some("web") => true,
@@ -1554,10 +1584,16 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
             )));
         }
     };
-    for name in ["style", "on_link", "link_menu", "links", "chip"] {
+    for name in ["style", "on_link", "link_menu", "links", "chip", "find"] {
         table.raw_set(name, mlua::Value::Nil)?;
     }
-    if style.is_none() && on_link.is_none() && link_menu.is_none() && chip.is_none() && !web_only {
+    if style.is_none()
+        && on_link.is_none()
+        && link_menu.is_none()
+        && chip.is_none()
+        && find.is_none()
+        && !web_only
+    {
         return Ok(None);
     }
     let style = match style {
@@ -1575,7 +1611,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
             Ok(())
         } else {
             Err(mlua::Error::runtime(format!(
-                "ui.markdown_view's style has no `{}` (paragraph, gap, strong, em, strike, code, link)",
+                "ui.markdown_view's style has no `{}` (paragraph, gap, strong, em, strike, code, link, mark, mark_current)",
                 key.to_string().unwrap_or_default()
             )))
         }
@@ -1623,6 +1659,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         on_link,
         link_menu,
         chip,
+        find,
         web_only,
         made: RefCell::new(vec![None; 1 << RUN_KINDS]),
     })))
@@ -5440,7 +5477,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 look: None,
                 veil: markdown_veil(&table)?,
                 veil_state: None,
-                veil_at: None,
+                block_at: None,
                 attached: markdown_attached(&table)?,
             };
             let look = markdown_look(lua, &table)?;
