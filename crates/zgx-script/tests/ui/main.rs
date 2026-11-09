@@ -111,6 +111,8 @@ mod sticky;
 mod stream_in_scroll_and_list;
 #[path = "../sweep.rs"]
 mod sweep;
+#[path = "../text_fade.rs"]
+mod text_fade;
 #[path = "../text_props.rs"]
 mod text_props;
 #[path = "../theme.rs"]
