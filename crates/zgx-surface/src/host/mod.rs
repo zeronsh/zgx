@@ -121,6 +121,9 @@ enum Note {
 pub(crate) struct Shared {
     pub ring: HostRing,
     notes: Vec<Note>,
+    /// When the newest frame waiting to show was presented
+    /// (`ZGX_SURFACE_LOG`'s delay from present to drawn).
+    pub presented_at: Option<std::time::Instant>,
 }
 
 /// Messages to the client, written by a thread of their own so a client
@@ -310,6 +313,10 @@ impl App {
         *self.0.pump.borrow_mut() = Some(task);
         // What arrived before it was attached.
         self.0.wake.send(());
+    }
+    /// Whether `other` is this session (a clone of it).
+    pub fn ptr_eq(&self, other: &App) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
     }
     /// Its state: starting, running, exited or failed (tracked).
     pub fn status(&self) -> Signal<AppStatus> {
@@ -657,7 +664,11 @@ fn reader(
                 let note = match message {
                     ClientMessage::Hello(hello) => Note::Hello(hello),
                     ClientMessage::Present { generation, index } => {
-                        let presented = shared.lock().unwrap().ring.present(Slot { generation, index });
+                        let presented = {
+                            let mut shared = shared.lock().unwrap();
+                            shared.presented_at = Some(std::time::Instant::now());
+                            shared.ring.present(Slot { generation, index })
+                        };
                         match presented {
                             // A frame never shown, replaced: the client's again.
                             Ok(Some(skipped)) => out.send(HostMessage::Release {

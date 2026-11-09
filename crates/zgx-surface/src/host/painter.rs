@@ -26,6 +26,32 @@ pub(crate) struct Painter {
     resizing: Option<Instant>,
     /// The scale the client was last told.
     told_scale: f32,
+    log: Log,
+}
+
+/// `ZGX_SURFACE_LOG=1`: every 240 frames shown, how long they waited from
+/// the client's present to the host drawing them (then a refresh or so to
+/// the screen), on stderr.
+struct Log {
+    on: bool,
+    waits: Vec<f64>,
+}
+impl Log {
+    fn presented(&mut self, at: Option<Instant>, pending: bool) {
+        let (true, true, Some(at)) = (self.on, pending, at) else {
+            return;
+        };
+        self.waits.push(at.elapsed().as_secs_f64() * 1000.);
+        if self.waits.len() == 240 {
+            self.waits.sort_by(f64::total_cmp);
+            let mean = self.waits.iter().sum::<f64>() / self.waits.len() as f64;
+            eprintln!(
+                "SURFACE present-to-drawn ms: mean {mean:.2} median {:.2} p95 {:.2} max {:.2}",
+                self.waits[120], self.waits[228], self.waits[239]
+            );
+            self.waits.clear();
+        }
+    }
 }
 struct Shown {
     bind: wgpu::BindGroup,
@@ -59,6 +85,10 @@ impl Painter {
             shown: None,
             resizing: None,
             told_scale: 0.,
+            log: Log {
+                on: std::env::var_os("ZGX_SURFACE_LOG").is_some_and(|v| v != "0"),
+                waits: Vec::new(),
+            },
         }
     }
 }
@@ -185,7 +215,12 @@ impl Painter {
         };
         match buffers.kind {
             BufferKind::Vulkan => {
-                let newest = app.shared.lock().unwrap().ring.show_newest();
+                let newest = {
+                    let mut shared = app.shared.lock().unwrap();
+                    self.log
+                        .presented(shared.presented_at.take(), shared.ring.has_pending());
+                    shared.ring.show_newest()
+                };
                 let Some((slot, previous)) = newest else {
                     return;
                 };
@@ -210,7 +245,12 @@ impl Painter {
                 }
             }
             _ => {
-                let newest = app.shared.lock().unwrap().ring.take_newest();
+                let newest = {
+                    let mut shared = app.shared.lock().unwrap();
+                    self.log
+                        .presented(shared.presented_at.take(), shared.ring.has_pending());
+                    shared.ring.take_newest()
+                };
                 let Some(slot) = newest else { return };
                 let (Some(upload), Some(map)) =
                     (&buffers.upload, buffers.maps.get(slot.index as usize))
