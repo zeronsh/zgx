@@ -367,10 +367,11 @@ pub struct Attrs<'a> {
     /// `opsz` axis), in pixels: CSS's `font-optical-sizing: auto` sets it to
     /// the font size. 0 leaves the font's default.
     pub optical: u16,
-    /// zgx: of masked text, the line's last character is shown as itself: iOS
-    /// shows the character just typed in a secure field for a moment.
+    /// zgx: of masked text, the character at this byte of the line is shown as
+    /// itself, `u32::MAX` none: iOS shows the character just typed in a secure
+    /// field for a moment.
     #[cfg(target_os = "ios")]
-    pub reveal_last: bool,
+    pub reveal_at: u32,
     /// zgx: shown masked, a bullet for each character (a password), each
     /// bullet keeping its character's place in the text.
     pub masked: bool,
@@ -396,7 +397,7 @@ impl<'a> Attrs<'a> {
             padding_opt: None,
             optical: 0,
             #[cfg(target_os = "ios")]
-            reveal_last: false,
+            reveal_at: u32::MAX,
             masked: false,
             font_features: FontFeatures::new(),
             text_decoration: TextDecoration::new(),
@@ -457,10 +458,10 @@ impl<'a> Attrs<'a> {
         self
     }
 
-    /// zgx: show masked text's last character as itself (see `reveal_last`)
+    /// zgx: show one character of masked text as itself (see `reveal_at`)
     #[cfg(target_os = "ios")]
-    pub const fn reveal_last(mut self, reveal_last: bool) -> Self {
-        self.reveal_last = reveal_last;
+    pub const fn reveal_at(mut self, reveal_at: u32) -> Self {
+        self.reveal_at = reveal_at;
         self
     }
     /// zgx: show the text masked (see `masked`)
@@ -583,7 +584,7 @@ pub struct AttrsOwned {
     pub padding_opt: Option<LetterSpacing>,
     pub optical: u16,
     #[cfg(target_os = "ios")]
-    pub reveal_last: bool,
+    pub reveal_at: u32,
     pub masked: bool,
     pub font_features: FontFeatures,
     pub text_decoration: TextDecoration,
@@ -604,7 +605,7 @@ impl AttrsOwned {
             padding_opt: attrs.padding_opt,
             optical: attrs.optical,
             #[cfg(target_os = "ios")]
-            reveal_last: attrs.reveal_last,
+            reveal_at: attrs.reveal_at,
             masked: attrs.masked,
             font_features: attrs.font_features.clone(),
             text_decoration: attrs.text_decoration,
@@ -625,7 +626,7 @@ impl AttrsOwned {
             padding_opt: self.padding_opt,
             optical: self.optical,
             #[cfg(target_os = "ios")]
-            reveal_last: self.reveal_last,
+            reveal_at: self.reveal_at,
             masked: self.masked,
             font_features: self.font_features.clone(),
             text_decoration: self.text_decoration,

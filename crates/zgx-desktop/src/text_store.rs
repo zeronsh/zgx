@@ -454,6 +454,13 @@ impl TextStore {
     /// edits it didn't make (typing, the app writing its value, undo): to
     /// tell it (`OnTextChange`, `OnSelectionChange`). The whole text, once,
     /// for a text change: Windows takes a wider range than changed.
+    /// The text's revision (`clears_on_first_edit`).
+    #[cfg(target_os = "ios")]
+    pub(crate) fn revision(&self) -> u64 {
+        self.editor
+            .as_ref()
+            .map_or(0, |editor| seen(editor).revision)
+    }
     /// What's there now is what the platform knows, as it set it itself: not
     /// to be told back as a change at the next dispatch, which an idle field
     /// has only at the next touch, just as UIKit asks whether that's on the
@@ -619,6 +626,18 @@ pub(crate) fn word_at(units: &[u16], caret: usize) -> Option<(usize, usize)> {
     }
     found
 }
+/// Whether an edit in a secure field replaces all its text, as UITextField's
+/// does (read in a reference app, by first keystroke and by backspace): when it
+/// holds text the person didn't type, since `typed` is the field and revision
+/// they last left it at and `now` is where it is.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn clears_on_first_edit<N: PartialEq>(
+    typed: Option<(N, u64)>,
+    now: (N, u64),
+    len: usize,
+) -> bool {
+    len > 0 && typed != Some(now)
+}
 /// Where UIKit's caret goes for a text edge at `x` in its view (`scale` pixels
 /// to a point), as UITextField's and UITextView's `caretRectForPosition:` both
 /// answer: a point left of the edge on a whole pixel, inside the view.
@@ -651,6 +670,19 @@ pub(crate) fn first_tap_caret(units: &[u16], caret: usize) -> usize {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_secure_field_clears_text_the_person_did_not_type() {
+        use super::clears_on_first_edit as clears;
+        // Text set by the app: the first edit takes it all.
+        assert!(clears(None, (1, 5), 6));
+        // Their own, even after leaving and coming back: it stays.
+        assert!(!clears(Some((1, 5)), (1, 5), 2));
+        // Set by the app since, or another field's: cleared.
+        assert!(clears(Some((1, 5)), (1, 6), 2));
+        assert!(clears(Some((2, 5)), (1, 5), 2));
+        // Nothing to clear.
+        assert!(!clears(None, (1, 5), 0));
+    }
     #[test]
     fn the_caret_goes_where_uitextfield_says() {
         // Text edges in the field's view and UIKit's caret there (the view at

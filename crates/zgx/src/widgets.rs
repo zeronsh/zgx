@@ -289,9 +289,10 @@ struct EditorHint {
     contain: Cell<bool>,
     /// A password field: its text shows masked and never leaves it.
     secure: Cell<bool>,
-    /// A password field's last character, just typed, shown as itself.
+    /// The byte of a password field's character just typed, shown as itself;
+    /// `u32::MAX` none.
     #[cfg(target_os = "ios")]
-    reveal_last: Cell<bool>,
+    secure_reveal: Cell<u32>,
     /// What kind of text it takes (`View::input_mode`).
     input_mode: Cell<crate::text_edit::InputMode>,
     /// Misspelled words (`View::spellcheck`), as byte ranges: marked with a
@@ -523,7 +524,7 @@ impl EditorHint {
             contain: Cell::default(),
             secure: Cell::default(),
             #[cfg(target_os = "ios")]
-            reveal_last: Cell::default(),
+            secure_reveal: Cell::new(u32::MAX),
             input_mode: Cell::default(),
             misspelled: RefCell::default(),
             clause: Cell::default(),
@@ -848,11 +849,12 @@ impl EditorHandle {
     pub fn set_select_on_focus(&self, select: bool) {
         self.hint.select_on_focus.set(select);
     }
-    /// Show a password field's last character as itself, or stop: UITextField
-    /// shows the character just typed for two seconds.
+    /// Show a password field's character at `byte` as itself, or stop:
+    /// UITextField shows the character just typed for two seconds.
     #[cfg(target_os = "ios")]
-    pub fn set_reveal_last(&self, reveal: bool) {
-        if self.hint.reveal_last.replace(reveal) != reveal {
+    pub fn set_reveal_at(&self, byte: Option<usize>) {
+        let at = byte.map_or(u32::MAX, |byte| byte.min(u32::MAX as usize - 1) as u32);
+        if self.hint.secure_reveal.replace(at) != at {
             (self.refresh)();
         }
     }
@@ -5286,7 +5288,7 @@ impl Ui {
             let font = crate::text_layout::FontStyle {
                 masked: draw_hint.secure.get(),
                 #[cfg(target_os = "ios")]
-                reveal_last: draw_hint.reveal_last.get(),
+                reveal_at: draw_hint.secure_reveal.get(),
                 ..font
             };
             // The gutter: as wide as the last line's number (two digits at

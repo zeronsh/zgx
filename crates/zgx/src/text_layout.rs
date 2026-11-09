@@ -469,11 +469,11 @@ pub struct FontStyle {
     pub align: TextAlign,
     /// Explicit ordered families tried before platform fallback for missing glyphs.
     pub fallbacks: std::sync::Arc<[FontFamily]>,
-    /// Of masked text, the last character shown as itself: iOS shows the
-    /// character just typed in a secure field for a moment. Only iOS has it,
-    /// so no other build's text carries it.
+    /// Of masked text, the character at this byte shown as itself, `u32::MAX`
+    /// none: iOS shows the character just typed in a secure field for a moment.
+    /// Only iOS has it, so no other build's text carries it.
     #[cfg(target_os = "ios")]
-    pub reveal_last: bool,
+    pub reveal_at: u32,
     /// Shown masked, a bullet per character (a password field's text). Set
     /// by an editor on its own text; never inherited.
     pub masked: bool,
@@ -511,7 +511,7 @@ impl Default for FontStyle {
                 EMPTY.get_or_init(|| std::sync::Arc::from([])).clone()
             },
             #[cfg(target_os = "ios")]
-            reveal_last: false,
+            reveal_at: u32::MAX,
             masked: false,
             underline: None,
         }

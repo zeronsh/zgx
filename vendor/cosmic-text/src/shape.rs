@@ -646,17 +646,17 @@ fn shape_run(
         {
             // The character just typed, shown as itself in the field's own
             // font, shaped as any text is: the rest is the mask.
-            let masked_end = masked_end(attrs.reveal_last, line, start_run, end_run);
+            let revealed_range = revealed_in_run(attrs.reveal_at, line, start_run, end_run);
             let mut revealed = Vec::new();
-            if masked_end < end_run {
+            if let Some(range) = revealed_range.clone() {
                 let _ = shape_fallback(
                     font_iter.shape_caches(),
                     &mut revealed,
                     &font,
                     line,
                     attrs_list,
-                    masked_end,
-                    end_run,
+                    range.start,
+                    range.end,
                     span_rtl,
                 );
             }
@@ -679,7 +679,12 @@ fn shape_run(
             let advance = one.first().map(|glyph| glyph.x_advance);
             drop(font_iter);
             let glyph_start = glyphs.len();
-            shape_skip_glyphs_as(glyphs, &font, line, attrs_list, start_run, masked_end, Some(mask));
+            let (before_end, after_start) = revealed_range
+                .as_ref()
+                .map_or((end_run, end_run), |range| (range.start, range.end));
+            shape_skip_glyphs_as(glyphs, &font, line, attrs_list, start_run, before_end, Some(mask));
+            let before = glyphs.len();
+            shape_skip_glyphs_as(glyphs, &font, line, attrs_list, after_start, end_run, Some(mask));
             // The face's advance at its axes (skipping reads its defaults),
             // as a shaped run's is.
             if let Some(advance) = advance {
@@ -691,7 +696,8 @@ fn shape_run(
                             .map_or(0.0, |spacing| spacing.0);
                 }
             }
-            glyphs.append(&mut revealed);
+            // The revealed glyphs where their character is, among the mask's.
+            glyphs.splice(before..before, revealed);
             font_system.shape_buffer.scripts = scripts;
             return;
         }
@@ -1193,18 +1199,21 @@ fn shape_skip_glyphs_as(
     );
 }
 
-/// zgx: where a masked run's mask stops: at its end, or with `reveal_last`
-/// before the line's last character, if this run has it.
+/// zgx: the character `reveal_at` (a byte of `line`) of a masked run, if it
+/// falls in this run and on a character.
 #[cfg(any(target_os = "ios", test))]
-fn masked_end(reveal_last: bool, line: &str, start_run: usize, end_run: usize) -> usize {
-    if reveal_last && end_run == line.len() {
-        line[start_run..end_run]
-            .char_indices()
-            .next_back()
-            .map_or(end_run, |(at, _)| start_run + at)
-    } else {
-        end_run
+fn revealed_in_run(
+    reveal_at: u32,
+    line: &str,
+    start_run: usize,
+    end_run: usize,
+) -> Option<core::ops::Range<usize>> {
+    let at = reveal_at as usize;
+    if reveal_at == u32::MAX || at < start_run || at >= end_run || !line.is_char_boundary(at) {
+        return None;
     }
+    let len = line[at..].chars().next()?.len_utf8();
+    Some(at..(at + len).min(end_run))
 }
 
 /// zgx: what a secure `UITextField` draws for a character (read from its line
@@ -4201,17 +4210,21 @@ impl ShapeLine {
 
 #[cfg(test)]
 mod uikit_mask_tests {
-    use super::{masked_end, uikit_mask};
+    use super::{revealed_in_run, uikit_mask};
 
     #[test]
-    fn only_the_last_character_of_the_line_is_revealed() {
-        assert_eq!(masked_end(false, "abc", 0, 3), 3);
-        assert_eq!(masked_end(true, "abc", 0, 3), 2);
-        // A run short of the line's end keeps its mask.
-        assert_eq!(masked_end(true, "ab cd", 0, 2), 2);
-        // The last character whole, whatever its bytes.
-        assert_eq!(masked_end(true, "aé", 0, 3), 1);
-        assert_eq!(masked_end(true, "", 0, 0), 0);
+    fn only_the_character_at_the_byte_is_revealed() {
+        assert_eq!(revealed_in_run(u32::MAX, "abc", 0, 3), None);
+        assert_eq!(revealed_in_run(2, "abc", 0, 3), Some(2..3));
+        // Anywhere in the text: UITextField shows it where it was typed.
+        assert_eq!(revealed_in_run(0, "abc", 0, 3), Some(0..1));
+        // A run it isn't in keeps its mask.
+        assert_eq!(revealed_in_run(3, "ab cd", 0, 2), None);
+        assert_eq!(revealed_in_run(3, "ab cd", 3, 5), Some(3..4));
+        // The character whole, whatever its bytes; inside one, nothing.
+        assert_eq!(revealed_in_run(1, "aé", 0, 3), Some(1..3));
+        assert_eq!(revealed_in_run(2, "aé", 0, 3), None);
+        assert_eq!(revealed_in_run(0, "", 0, 0), None);
     }
 
     #[test]

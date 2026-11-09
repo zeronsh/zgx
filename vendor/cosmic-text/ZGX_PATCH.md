@@ -488,7 +488,7 @@ iOS never hints (`hinted` in `swash.rs`): Core Text leaves outlines as drawn,
 and swash's hinting of a font with no instructions, as SF is, is skrifa's
 autohinter. Elsewhere hinting is as it was.
 
-iOS's secure text can show its line's last character as itself
-(`Attrs::reveal_last`, in no other platform's build): UITextField shows the
-character just typed for two seconds. `masked_end` in `shape.rs` stops the mask
-before it, and it is shaped as any text is, in the field's own font.
+iOS's secure text can show one character as itself (`Attrs::reveal_at`, in no
+other platform's build): UITextField shows the character just typed for two
+seconds, where it was typed. `revealed_in_run` in `shape.rs` finds it, and it is
+shaped as any text is, in the field's own font, among the mask's glyphs.

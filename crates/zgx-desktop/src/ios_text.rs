@@ -41,6 +41,9 @@ struct State {
     origin: Cell<(f32, f32)>,
     /// An editor has the keyboard: touches on it are `UITextInteraction`'s.
     editing: Cell<bool>,
+    /// The secure field last typed in and its text's revision then: text the
+    /// person typed isn't cleared by their next edit (`clears_on_first_edit`).
+    secure_typed: Cell<Option<(zgx::scene::NodeId, u64)>>,
 }
 
 thread_local! {
@@ -208,10 +211,36 @@ extern "C-unwind" fn insert_text(_: &AnyObject, _: Sel, text: *mut AnyObject) {
         store.end_composition();
     }
     let (start, end, _) = store.selection();
+    let (start, end) = if first_edit_clears(&state, &store) {
+        (0, store.len())
+    } else {
+        (start, end)
+    };
     store.replace(start, end, &units);
-    reveal_typed(&store, start + units.len(), &text);
+    reveal_typed(&store, start, &text);
+    typed_securely(&state, &store);
     drop(store);
     state.window.request_redraw();
+}
+/// Whether this edit, in a secure field, replaces all of its text: the first
+/// after focus does, of text the person didn't type (`clears_on_first_edit`).
+fn first_edit_clears(state: &State, store: &TextStore) -> bool {
+    store.editor().is_some_and(|editor| {
+        editor.is_secure()
+            && crate::text_store::clears_on_first_edit(
+                state.secure_typed.get(),
+                (editor.node, store.revision()),
+                store.len(),
+            )
+    })
+}
+/// What's now in a secure field is the person's.
+fn typed_securely(state: &State, store: &TextStore) {
+    if let Some(editor) = store.editor().filter(|editor| editor.is_secure()) {
+        state
+            .secure_typed
+            .set(Some((editor.node, store.revision())));
+    }
 }
 thread_local! {
     /// How many reveals a secure field has begun or ended: a timer from an
@@ -226,15 +255,15 @@ fn next_reveal() -> u64 {
 }
 /// How long UITextField shows the character just typed (READ, 2.0 s).
 const REVEAL_SECONDS: f64 = 2.;
-/// In a secure field, show `typed`, now ending at `caret`, for a moment, if
-/// it's one character at the text's end; anything else hides what was shown.
-fn reveal_typed(store: &TextStore, caret: usize, typed: &str) {
+/// In a secure field, show `typed`, now at `start`, for a moment, if it's one
+/// character, where it was typed; anything else hides what was shown.
+fn reveal_typed(store: &TextStore, start: usize, typed: &str) {
     let Some(editor) = store.editor().filter(|editor| editor.is_secure()) else {
         return;
     };
-    let reveal = typed.chars().count() == 1 && caret == store.len();
+    let reveal = typed.chars().count() == 1;
     let reveal_id = next_reveal();
-    editor.set_reveal_last(reveal);
+    editor.set_reveal_at(reveal.then(|| String::from_utf16_lossy(&store.text(0, start)).len()));
     if !reveal {
         return;
     }
@@ -244,7 +273,7 @@ fn reveal_typed(store: &TextStore, caret: usize, typed: &str) {
             return;
         }
         if let Some(editor) = state.store.borrow().editor() {
-            editor.set_reveal_last(false);
+            editor.set_reveal_at(None);
         }
         state.window.request_redraw();
     });
@@ -263,7 +292,10 @@ extern "C-unwind" fn delete_backward(_: &AnyObject, _: Sel) {
     let Some(state) = state() else { return };
     let mut store = state.store.borrow_mut();
     let (start, end, _) = store.selection();
-    if start != end {
+    if first_edit_clears(&state, &store) {
+        let all = store.len();
+        store.replace(0, all, &[]);
+    } else if start != end {
         store.replace(start, end, &[]);
     } else if start > 0 {
         // Back one grapheme, as a field's delete key goes: an emoji whole.
@@ -277,8 +309,9 @@ extern "C-unwind" fn delete_backward(_: &AnyObject, _: Sel) {
     // Backspace hides the character shown, as UITextField's does.
     if let Some(editor) = store.editor().filter(|editor| editor.is_secure()) {
         next_reveal();
-        editor.set_reveal_last(false);
+        editor.set_reveal_at(None);
     }
+    typed_securely(&state, &store);
     drop(store);
     state.window.request_redraw();
 }
@@ -1116,6 +1149,7 @@ impl TextInput {
             told_len: Cell::new(0),
             origin: Cell::new((0., 0.)),
             editing: Cell::new(false),
+            secure_typed: Cell::new(None),
         });
         CURRENT.with(|current| *current.borrow_mut() = Some(state.clone()));
         // SAFETY: winit's view, alive with its window; UIKit's calls on the
