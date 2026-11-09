@@ -31,26 +31,25 @@ jobs:
           path: target/zeron-source
           token: ${{ secrets.ZERON_READ_TOKEN || github.token }}
       - name: Build isolated actual Zeron host
-        run: python3 scripts/perf/prepare_zeron.py --source target/zeron-source --output target/zeron-native/current
+        run: python3 scripts/perf/prepare_zeron.py --source target/zeron-source --output target/zeron-native/current > target/zeron-build-private.log 2>&1
       - name: Real Zeron headline gate
         id: real
         env:
           SCROLL_HZ: ${{ inputs.hz }}
           SCROLL_SCALES: ${{ inputs.scales }}
-        run: python3 scripts/perf/scroll.py run --native-floor --set-refresh --scenes zeron --gestures wing,flick,stream --hz "$SCROLL_HZ" --sizes W --scale "$SCROLL_SCALES" --backgrounds translucent --output target/scroll-real-ci
+        run: python3 scripts/perf/scroll.py run --native-floor --set-refresh --scenes zeron --gestures wing,flick,stream --hz "$SCROLL_HZ" --sizes W --scale "$SCROLL_SCALES" --backgrounds translucent --output target/scroll-real-ci > target/scroll-real-private.log 2>&1
       - name: Real-window replay gate
         if: success() || (failure() && steps.real.outcome == 'failure')
         env:
           SCROLL_HZ: ${{ inputs.hz }}
           SCROLL_SIZES: ${{ inputs.sizes }}
           SCROLL_SCALES: ${{ inputs.scales }}
-        run: python3 scripts/perf/scroll.py run --native-floor --set-refresh --scenes transcript,tables --gestures wing,flick,reversals,stream --hz "$SCROLL_HZ" --sizes "$SCROLL_SIZES" --scale "$SCROLL_SCALES" --output target/scroll-ci
+        run: python3 scripts/perf/scroll.py run --native-floor --set-refresh --scenes transcript,tables --gestures wing,flick,reversals,stream --hz "$SCROLL_HZ" --sizes "$SCROLL_SIZES" --scale "$SCROLL_SCALES" --output target/scroll-ci > target/scroll-private.log 2>&1
+      - name: Export numeric summaries only
+        if: always()
+        run: python3 scripts/perf/scroll_public.py target/scroll-ci/summary.json target/scroll-real-ci/summary.json --output target/scroll-public/summary.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: scroll-evidence
-          path: |
-            target/scroll-ci
-            target/scroll-real-ci
-            target/zeron-native/current/build.json
-            target/zeron-native/current/Cargo.lock
+          name: scroll-summary
+          path: target/scroll-public/summary.json

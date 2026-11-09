@@ -150,6 +150,61 @@ def material_matches(state, background):
     return state.get('bench_effective_frost') is (background=='translucent')
 
 
+def frame_timing_notes(frame):
+    acquisition=[]; gpu_wait=[]; handovers=[]
+    for note in frame.get('notes',[]):
+        match=re.fullmatch(r'next drawable waited ([0-9.]+) us',note)
+        if match:acquisition.append(float(match[1]))
+        match=re.fullmatch(r'waited ([0-9.]+) us for the GPU',note)
+        if match:gpu_wait.append(float(match[1]))
+        match=re.fullmatch(r'(handed over|submitted drawable) at (\d+) ns in ([0-9.]+) us',note)
+        if match:
+            handovers.append(dict(kind='drawable' if match[1]=='submitted drawable' else 'layer',
+                                  end_ns=int(match[2]),micros=float(match[3])))
+    return dict(acquisition_micros=sum(acquisition) if acquisition else None,
+                gpu_wait_micros=sum(gpu_wait) if gpu_wait else None,handovers=handovers)
+
+
+def presentation_timings(frames, records, anchor, trace_to_host_ms):
+    """Join same-frame timing notes; never substitute paint time for acquisition."""
+    by_id={frame['frame']:frame for frame in frames}
+    notes={index:frame_timing_notes(frame) for index,frame in by_id.items()}
+    samples=[]
+    for callback,shown,index,started in records:
+        if shown<=0 or shown*1000<anchor or index not in by_id:continue
+        timing=notes[index]; preferred='drawable' if started>0 else 'layer'
+        candidates=[value for value in timing['handovers'] if value['kind']==preferred]
+        if not candidates and preferred=='drawable':candidates=timing['handovers']
+        value=candidates[0] if len(candidates)==1 else None
+        sample=dict(frame=index,shown_s=shown,acquisition_micros=timing['acquisition_micros'],
+                    gpu_wait_micros=timing['gpu_wait_micros'],handover=value,
+                    clock_aligned=None,present_to_display_ms=None,handover_end_to_display_ms=None)
+        if value is not None:
+            # N is the API return; its measured duration reconstructs the
+            # start to within the note's one-microsecond quantization.
+            begin=value['end_ns']-value['micros']*1000
+            frame=by_id[index]
+            aligned=begin<=callback*1e9+2e6 and shown*1e9>=begin-1e4 and shown<=callback+.002
+            if started>0:aligned=aligned and begin>=started*1e9-2e6
+            if trace_to_host_ms is not None and 'ended_ms' in frame:
+                end=(trace_to_host_ms+frame['ended_ms'])*1e6
+                start=end-frame.get('frame_micros',0)*1000
+                aligned=aligned and start-2e6<=begin<=value['end_ns']<=end+2e6
+            sample['clock_aligned']=aligned
+            if aligned:
+                sample['present_to_display_ms']=(shown*1e9-begin)/1e6
+                sample['handover_end_to_display_ms']=(shown*1e9-value['end_ns'])/1e6
+        samples.append(sample)
+    return dict(samples=samples,
+                acquisition_ms=spread([v['acquisition_micros']/1000 for v in notes.values() if v['acquisition_micros'] is not None]),
+                gpu_wait_ms=spread([v['gpu_wait_micros']/1000 for v in notes.values() if v['gpu_wait_micros'] is not None]),
+                present_to_display_ms=spread([s['present_to_display_ms'] for s in samples if s['present_to_display_ms'] is not None]),
+                handover_end_to_display_ms=spread([s['handover_end_to_display_ms'] for s in samples if s['handover_end_to_display_ms'] is not None]),
+                coverage=dict(shown_records=len(samples),handover_records=sum(s['handover'] is not None for s in samples),
+                              missing_handover=sum(s['handover'] is None for s in samples),
+                              clock_mismatch=sum(s['clock_aligned'] is False for s in samples)))
+
+
 def verify_environment_text(text, overrides):
     return {item:bool(re.search(r'(?:^|\s)'+re.escape(item)+r'(?=\s|$)',text)) for item in overrides}
 
@@ -322,6 +377,7 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     duration=events[-1][0] if events else 0
     shown_in_tape=[r for r in shown if 0<=r[1]*1000-anchor<=duration]
     return dict(frames=len(frames), sparse=sparse,
+                presentation_timings=presentation_timings(scroll_frames,records,anchor,trace_to_host_ms),
                 picture_costs=picture_costs(frames),
                 motion_window_work=workload(motion_frames),
                 work_selection="motion-window frame intervals plus noted scroll frames; spare excluded",
@@ -878,7 +934,7 @@ def main():
     p.add_argument('--strict', action='store_true', help='headless: require zero row builds and copies on the shared scene')
     args = p.parse_args()
     for item in args.host_env:
-        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1'):
+        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1','ZGX_SHADOW_WHOLE=1'):
             p.error('unsupported diagnostic host environment override')
     if args.command=='reference' and any(item.startswith('ZGX_LEAD_US=') for item in args.host_env) and args.reference_refresh_grid!='on':
         p.error('LEAD_US marker probes require --reference-refresh-grid on to exercise the hold')

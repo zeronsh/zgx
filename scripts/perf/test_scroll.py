@@ -9,6 +9,36 @@ import scroll
 
 
 class ScrollMetrics(unittest.TestCase):
+    def timing_frame(self, notes, end=16, micros=15000):
+        return dict(frame=1,notes=notes,ended_ms=end,frame_micros=micros)
+
+    def test_acquisition_is_separate_and_direct_submit_is_preferred(self):
+        frame=self.timing_frame(['next drawable waited 5000 us','waited 1000 us for the GPU',
+                                 'handed over at 15000000 ns in 100 us',
+                                 'submitted drawable at 12000000 ns in 500 us'])
+        result=scroll.presentation_timings([frame],[(.0175,.017,1,.001)],0,0)
+        self.assertEqual(result['acquisition_ms']['p99'],5)
+        self.assertEqual(result['gpu_wait_ms']['p99'],1)
+        self.assertEqual(result['present_to_display_ms']['p99'],5.5)
+        self.assertEqual(result['samples'][0]['handover']['kind'],'drawable')
+        self.assertTrue(result['samples'][0]['clock_aligned'])
+
+    def test_missing_or_wrong_clock_handover_is_not_a_zero_latency(self):
+        empty=scroll.presentation_timings([self.timing_frame([])],[(.0175,.017,1,.001)],0,0)
+        self.assertIsNone(empty['present_to_display_ms']['p99'])
+        self.assertEqual(empty['coverage']['missing_handover'],1)
+        wrong=scroll.presentation_timings([self.timing_frame(['handed over at 1000000000000 ns in 10 us'])],
+                                         [(.0175,.017,1,0)],0,0)
+        self.assertEqual(wrong['coverage']['clock_mismatch'],1)
+        self.assertIsNone(wrong['present_to_display_ms']['p99'])
+
+    def test_handover_can_return_after_the_frame_has_already_shown(self):
+        frame=self.timing_frame(['submitted drawable at 18000000 ns in 10000 us'],20,19000)
+        result=scroll.presentation_timings([frame],[(.0175,.017,1,.001)],0,0)
+        self.assertTrue(result['samples'][0]['clock_aligned'])
+        self.assertEqual(result['present_to_display_ms']['p99'],9)
+        self.assertEqual(result['handover_end_to_display_ms']['p99'],-1)
+
     def metrics(self, step, gesture='fling', skipped=0):
         events = scroll.parse_tape(scroll.tape(gesture, 120))
         presents = [(t / 1000, t / 1000) for t in range(step, 3990, step)]

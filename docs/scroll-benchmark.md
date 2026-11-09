@@ -366,3 +366,21 @@ compared with earlier minimum-host references taken with the grid off.
 Independent native brackets remain separate and contain no zgx pacing policy.
 
 The actual shell also verifies `bench_effective_frost` against the requested background. A setting or platform policy that keeps the effective material opaque invalidates a requested frosted cell rather than silently changing the condition.
+
+### Acquisition and handover timing
+
+Tracing records window `nextDrawable` acquisition and tile GPU waiting separately
+from painting. The per-frame handover note and direct drawable submission note
+are joined to presented feedback by frame id. Handover-to-display values are
+reported only when the clocks and frame bounds agree; missing notes and clock
+mismatches are counted, never replaced with zero. The handover timestamp is the
+API return; the recorded call duration reconstructs its start. API return can
+follow the display timestamp, so return-to-display latency may be negative.
+
+Raw captures, screenshots, source snapshots and build logs remain private.
+To export reviewed conditions and numeric results only, run
+`python3 scripts/perf/scroll_public.py target/scroll-results/summary.json --output target/scroll-public/summary.json`.
+The manual workflow uploads only this allowlisted summary and keeps actual-app
+build and replay logs out of its public output. Unknown fields and free-text
+notes are omitted. Physical certification remains manual: run
+`scripts/perf/scroll.py` on a quiet Mac and attach the table.

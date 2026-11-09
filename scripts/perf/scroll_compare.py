@@ -43,6 +43,9 @@ def summarize(samples, trials):
                              exact_latency_p99_ms=stats([s['metrics'].get('start_to_present_ms',{}).get('p99') for s in valid]),
                              estimated_latency_p99_ms=stats([s['metrics'].get('render_start_to_shown_ms_estimate',{}).get('p99') for s in valid]),
                              frame_end_to_shown_p99_ms=stats([s['metrics'].get('frame_end_to_shown_ms_estimate',{}).get('p99') for s in valid]),
+                             acquisition_p99_ms=stats([s['metrics'].get('presentation_timings',{}).get('acquisition_ms',{}).get('p99') for s in valid]),
+                             gpu_wait_p99_ms=stats([s['metrics'].get('presentation_timings',{}).get('gpu_wait_ms',{}).get('p99') for s in valid]),
+                             present_to_display_p99_ms=stats([s['metrics'].get('presentation_timings',{}).get('present_to_display_ms',{}).get('p99') for s in valid]),
                              rss_delta_kib=stats([s['metrics'].get('rss_kib',{}).get('delta') for s in valid]),
                              all_gates_pass=bool(valid) and len(valid)==trials and all(s['status']=='pass' for s in valid)))
     for row in rows:
