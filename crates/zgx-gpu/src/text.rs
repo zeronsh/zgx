@@ -373,6 +373,8 @@ pub fn set_buffer_text(
     size: f32,
 ) {
     let base = attrs(font, size);
+    // Its lines' leading (none unless the font sets one).
+    buffer.set_leading(font.leading.pixels());
     if font.fallbacks.is_empty() {
         buffer.set_text(text, &base, Shaping::Advanced, alignment(font));
     } else {
@@ -1965,6 +1967,15 @@ pub(crate) fn rich_buffer_unshaped(
     });
     let mut buffer = Buffer::new_empty(Metrics::new(size, line_height));
     buffer.lines = recycled;
+    // Its lines' leading: the most of its runs' (none unless one sets it).
+    if let Some(leading) = rich
+        .runs()
+        .iter()
+        .map(|run| run.font.leading.pixels())
+        .reduce(f32::max)
+    {
+        buffer.set_leading(leading);
+    }
     let default_font = zgx::text_layout::FontStyle::default();
     let default_attrs = attrs(base.map_or(&default_font, |run| &run.font), size);
     let mut spans = Vec::new();

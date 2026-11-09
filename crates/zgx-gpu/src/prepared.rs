@@ -788,6 +788,10 @@ struct Entry {
     /// None if the text does not qualify.
     compact: Option<Compact>,
     metrics: Metrics,
+    /// The space between its lines (`FontStyle::leading`; the most of its
+    /// runs'). A text with any is laid out by cosmic-text to be measured,
+    /// neither from words nor compact: those sum lines alone.
+    leading: f32,
     /// The width `lines` are laid out at, if any.
     laid: Option<Option<f32>>,
     /// Inline: an entry is made for every new text, and keeps `SIZES`.
@@ -842,6 +846,9 @@ impl Entry {
     /// measures `min_content_lines`' copy unwrapped. None where its words
     /// are not the copy's.
     fn min_content(&self, text: &str) -> Option<(f32, f32)> {
+        if self.leading != 0. {
+            return None;
+        }
         // Words in order, with their byte ranges, widths, line heights and
         // spans; the height of the line empty, and how many spans it has.
         let mut words = Vec::new();
@@ -973,6 +980,7 @@ impl Entry {
                 self.lay_out(fonts, width);
                 let lines = self.lines.as_deref().expect("laid out");
                 LayoutRunIter::from_lines(lines, None, self.metrics.line_height, 0., 0)
+                    .leading(self.leading)
                     .fold((0_f32, 0_f32), |(w, h), run| {
                         (w.max(run.line_w), h.max(run.line_top + run.line_height))
                     })
@@ -1004,6 +1012,19 @@ impl Source<'_> {
             Source::Plain { text, .. } => text,
         }
     }
+    /// The space between its lines: its font's, or the most of its runs'.
+    #[inline]
+    fn leading(&self) -> f32 {
+        match self {
+            Source::Rich(rich) => rich
+                .runs()
+                .iter()
+                .map(|run| run.font.leading.pixels())
+                .reduce(f32::max)
+                .unwrap_or(0.),
+            Source::Plain { font, .. } => font.leading.pixels(),
+        }
+    }
 }
 
 /// What a caller needs of an entry.
@@ -1020,6 +1041,7 @@ pub struct Laid<'a> {
     /// A paragraph laid out from its words, in place of `lines`.
     words: Option<(&'a str, &'a [cosmic_text::LayoutLine])>,
     line_height: f32,
+    leading: f32,
     key: u64,
 }
 impl<'a> Laid<'a> {
@@ -1033,7 +1055,8 @@ impl<'a> Laid<'a> {
             Some((text, lines)) => {
                 LayoutRunIter::from_paragraph(text, lines, height, self.line_height)
             }
-            None => LayoutRunIter::from_lines(self.lines, height, self.line_height, 0., 0),
+            None => LayoutRunIter::from_lines(self.lines, height, self.line_height, 0., 0)
+                .leading(self.leading),
         }
     }
     /// Where each line starts in the source text.
@@ -1413,6 +1436,7 @@ impl TextCache {
                 .as_deref()
                 .map(|words| (&*entry.key.text, &words.lines[..])),
             line_height: entry.metrics.line_height,
+            leading: entry.leading,
             key: hash,
         }
     }
@@ -1590,7 +1614,10 @@ impl TextCache {
             true => self.grew_from(&key, &extended),
             false => None,
         };
-        if let Some((plain, base, taken)) = self.words_of(fonts, source, caret_row, grew) {
+        let leading = source.leading();
+        if leading == 0.
+            && let Some((plain, base, taken)) = self.words_of(fonts, source, caret_row, grew)
+        {
             return self.prepared_words(
                 key,
                 hash,
@@ -1617,7 +1644,10 @@ impl TextCache {
             for line in &mut lines {
                 line.shape(fonts, TAB_WIDTH);
             }
-            let compact = Compact::of(&lines, metrics.font_size, &mut self.slab);
+            let compact = match leading {
+                0. => Compact::of(&lines, metrics.font_size, &mut self.slab),
+                _ => None,
+            };
             // Text that is not drawn keeps no glyphs it can be measured without.
             let detached = need == Need::Detached && compact.is_some();
             let entry = Entry {
@@ -1626,6 +1656,7 @@ impl TextCache {
                 lines: (!detached).then_some(lines),
                 words: None,
                 metrics,
+                leading,
                 laid: None,
                 sizes: smallvec::SmallVec::new(),
                 used: self.clock,
@@ -1830,6 +1861,7 @@ impl TextCache {
                 lines: None,
                 words,
                 metrics,
+                leading: 0.,
                 laid: None,
                 sizes: smallvec::SmallVec::new(),
                 used: self.clock,
@@ -2120,6 +2152,64 @@ mod tests {
         RichText::new(text, runs).unwrap()
     }
 
+    /// Leading goes between lines and not after the last, and moves the
+    /// lines below it, whichever path measures and lays the text out: the
+    /// cache (plain and rich, wrapped and not) and `ShapedText`. None, and a
+    /// text is as it was.
+    #[test]
+    fn leading_goes_between_lines_in_every_measure_and_layout() {
+        let mut fonts = FontSystem::new();
+        let text: Arc<str> = "Hamburgefonstiv\nHamburgefonstiv\nHamburgefonstiv".into();
+        let font = |leading: f32| FontStyle {
+            line_height: LineHeight::px(20.),
+            leading: zgx::text_layout::Leading::px(leading),
+            ..FontStyle::default()
+        };
+        let (plain, led) = (font(0.), font(1.75));
+        let mut cache = TextCache::default();
+        let before = cache.measure_plain(&mut fonts, &text, 17., &plain, None);
+        assert_eq!(before.1, 60.);
+        let size = cache.measure_plain(&mut fonts, &text, 17., &led, None);
+        assert_eq!(size, (before.0, 60. + 2. * 1.75));
+        assert_eq!(
+            cache
+                .measure_plain_reach(&mut fonts, &text, 17., &led, Some(400.))
+                .0,
+            size
+        );
+        let tops = |laid: Laid<'_>| laid.runs(None).map(|run| run.line_top).collect::<Vec<_>>();
+        let plain_tops = tops(cache.layout_plain(&mut fonts, &text, 17., &plain, None));
+        assert_eq!(plain_tops, [0., 20., 40.]);
+        assert_eq!(
+            tops(cache.layout_plain(&mut fonts, &text, 17., &led, None)),
+            [0., 21.75, 43.5]
+        );
+        let rich_led = rich(&text, &[(text.len(), led.clone(), 17.)]);
+        assert_eq!(cache.measure(&mut fonts, &rich_led, None), size);
+        assert_eq!(
+            tops(cache.layout(&mut fonts, &rich_led, None)),
+            [0., 21.75, 43.5]
+        );
+        let shaped = ShapedText::with_font(&mut fonts, text.clone(), 17., None, &led);
+        assert_eq!(shaped.size(), size);
+        // Carets: each line its own height, the leading between.
+        for (line, top) in [(0, 0.), (1, 21.75), (2, 43.5)] {
+            let caret = shaped
+                .caret(crate::text::TextCursor {
+                    byte_index: line * 16,
+                    affinity: cosmic_text::Affinity::After,
+                })
+                .expect("caret");
+            assert_eq!((caret.y, caret.height), (top, 20.), "line {line}");
+        }
+        // Wrapped, the lines a paragraph wraps into are spaced too.
+        let one: Arc<str> = "Hamburgefonstiv Hamburgefonstiv Hamburgefonstiv".into();
+        let narrow = Some(150.);
+        let wrapped = cache.measure_plain(&mut fonts, &one, 17., &led, narrow);
+        let lines = cache.measure_plain(&mut fonts, &one, 17., &plain, narrow).1 / 20.;
+        assert!(lines >= 2.);
+        assert_eq!(wrapped.1, lines * 20. + (lines - 1.) * 1.75);
+    }
     /// A one-line text's list of lines is made with room for one, so the
     /// pool of them (`spare_lists`, which keeps only such lists) takes it
     /// back and the next one-line text reuses it (research B5a: lists made
