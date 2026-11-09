@@ -491,3 +491,136 @@ fn an_orbit_turns_by_keyboard_focused_and_a_flick_coasts_to_a_stop() {
     h.frames(10);
     assert_eq!(frame_id(&mut h, "scene"), settled, "still once stopped");
 }
+
+/// This thread's frames drawn whole, as a video's are, while it lives.
+#[cfg(feature = "gltf")]
+struct WholeFrames(bool);
+#[cfg(feature = "gltf")]
+impl WholeFrames {
+    fn on() -> Self {
+        Self(zgx::image::set_whole_frames_on_this_thread(true))
+    }
+}
+#[cfg(feature = "gltf")]
+impl Drop for WholeFrames {
+    fn drop(&mut self) {
+        zgx::image::set_whole_frames_on_this_thread(self.0);
+    }
+}
+
+/// A model that hears a click at its middle, saying so in `clicked`.
+#[cfg(feature = "gltf")]
+const CLICKED_MODEL: &str = r#"
+local clicked = ui.state("clicked", "none")
+return ui.column {
+    ui.text { id = "clicked", "{clicked}" },
+    ui.scene3d {
+        id = "scene", w = 200, h = 200,
+        camera = { position = { 0, 0, 3 } },
+        ui.model { src = "square.glb", fit = 2, on_click = function() clicked:set("clicked") end },
+    },
+}
+"#;
+
+#[cfg(feature = "gltf")]
+#[test]
+fn a_whole_frame_has_its_model_from_its_first_frame() {
+    let _whole = WholeFrames::on();
+    let mut h = beside_a_model("whole", CLICKED_MODEL);
+    assert_eq!(h.error(), None);
+    // No waiting: a video's frame doesn't wait for another thread.
+    h.frame();
+    press(&mut h, "scene", (100., 100.), 0.);
+    assert_eq!(h.text("clicked"), "clicked", "{}", h.tree());
+}
+
+/// Its buffer a named pipe, which a read of it waits on until the test writes
+/// there: read on the main thread, making the window would wait (until the
+/// writer gives up waiting for the test, and then it would show at once).
+#[cfg(all(feature = "gltf", unix))]
+#[test]
+fn a_window_reads_its_model_off_its_main_thread() {
+    unsafe extern "C" {
+        fn mkfifo(path: *const std::ffi::c_char, mode: u32) -> i32;
+    }
+    // Its real path: a model's buffers are found only below that (macOS's
+    // temporary directory is a link).
+    let dir = std::env::temp_dir()
+        .canonicalize()
+        .unwrap()
+        .join(format!("zgx-model-pipe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pipe = dir.join("buffer.bin");
+    let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+    // SAFETY: A path that lives through the call.
+    assert_eq!(unsafe { mkfifo(name.as_ptr(), 0o600) }, 0);
+    std::fs::write(
+        dir.join("square.gltf"),
+        r#"{"asset":{"version":"2.0"},"buffers":[{"uri":"buffer.bin","byteLength":60}],
+        "bufferViews":[{"buffer":0,"byteLength":48},{"buffer":0,"byteOffset":48,"byteLength":12}],
+        "accessors":[{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3"},
+            {"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"}],
+        "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],
+        "nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("app.luau"),
+        CLICKED_MODEL.replace("square.glb", "square.gltf"),
+    )
+    .unwrap();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let writer = std::thread::spawn(move || {
+        let _ = released.recv_timeout(std::time::Duration::from_secs(5));
+        let positions: [f32; 12] = [-0.5, -0.5, 0., 0.5, -0.5, 0., 0.5, 0.5, 0., -0.5, 0.5, 0.];
+        let mut bin: Vec<u8> = positions.iter().flat_map(|v| v.to_le_bytes()).collect();
+        bin.extend([0_u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()));
+        std::fs::write(pipe, bin).unwrap();
+    });
+    let mut h = Harness::new(|runtime| zgx_script::ScriptHost::new(runtime, dir.join("app.luau")));
+    assert_eq!(h.error(), None);
+    // The read is waiting on the pipe: a window goes on without its model.
+    h.frame();
+    press(&mut h, "scene", (100., 100.), 0.);
+    assert_eq!(h.text("clicked"), "none", "read on the main thread");
+    release.send(()).unwrap();
+    let heard = h.wait_until(|h| {
+        h.frame();
+        press(h, "scene", (100., 100.), 0.);
+        h.text("clicked") != "none"
+    });
+    assert!(heard, "never read: {} {:?}", h.tree(), h.error());
+    writer.join().unwrap();
+}
+
+#[cfg(feature = "gltf")]
+#[test]
+fn a_file_that_is_no_model_says_so_whichever_way_it_is_read() {
+    for whole in [true, false] {
+        let _whole = whole.then(WholeFrames::on);
+        let dir =
+            std::env::temp_dir().join(format!("zgx-model-bad-{whole}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("bad.glb"), b"not a model").unwrap();
+        std::fs::write(
+            dir.join("app.luau"),
+            r#"return ui.scene3d { w = 100, h = 100, ui.model { src = "bad.glb" } }"#,
+        )
+        .unwrap();
+        let mut h =
+            Harness::new(|runtime| zgx_script::ScriptHost::new(runtime, dir.join("app.luau")));
+        if whole {
+            // Told by the time it's mounted, with nothing to wait for.
+            assert!(h.error().is_some(), "said nothing: {}", h.tree());
+        } else {
+            assert!(
+                h.wait_until(|h| {
+                    h.frame();
+                    h.error().is_some()
+                }),
+                "said nothing"
+            );
+        }
+    }
+}

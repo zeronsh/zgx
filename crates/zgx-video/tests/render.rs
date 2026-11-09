@@ -720,3 +720,72 @@ fn a_chunked_webm_keeps_its_alpha_and_its_sound() {
     assert_eq!(probe(&out, "codec_name", "v").unwrap(), "vp9");
     assert_eq!(probe(&out, "codec_name,channels", "a").unwrap(), "opus,2");
 }
+
+/// A square a unit across, as a glTF binary.
+fn square_glb() -> Vec<u8> {
+    let positions: [f32; 12] = [-0.5, -0.5, 0., 0.5, -0.5, 0., 0.5, 0.5, 0., -0.5, 0.5, 0.];
+    let mut bin: Vec<u8> = positions.iter().flat_map(|v| v.to_le_bytes()).collect();
+    bin.extend([0_u16, 1, 2, 0, 2, 3].iter().flat_map(|i| i.to_le_bytes()));
+    bin.extend([0_u8; 4]);
+    let mut json = format!(
+        r#"{{"asset":{{"version":"2.0"}},"buffers":[{{"byteLength":{}}}],
+        "bufferViews":[{{"buffer":0,"byteLength":48}},{{"buffer":0,"byteOffset":48,"byteLength":12}}],
+        "accessors":[{{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-0.5,-0.5,0],"max":[0.5,0.5,0]}},
+            {{"bufferView":1,"componentType":5123,"count":6,"type":"SCALAR"}}],
+        "materials":[{{"emissiveFactor":[1,1,1],"pbrMetallicRoughness":{{"baseColorFactor":[1,1,1,1]}}}}],
+        "meshes":[{{"primitives":[{{"attributes":{{"POSITION":0}},"indices":1,"material":0}}]}}],
+        "nodes":[{{"mesh":0}}],"scenes":[{{"nodes":[0]}}]}}"#,
+        bin.len()
+    )
+    .into_bytes();
+    while !json.len().is_multiple_of(4) {
+        json.push(b' ');
+    }
+    let mut out = b"glTF".to_vec();
+    out.extend(2_u32.to_le_bytes());
+    out.extend(((12 + 8 + json.len() + 8 + bin.len()) as u32).to_le_bytes());
+    out.extend((json.len() as u32).to_le_bytes());
+    out.extend(b"JSON");
+    out.extend(json);
+    out.extend((bin.len() as u32).to_le_bytes());
+    out.extend(b"BIN\0");
+    out.extend(bin);
+    out
+}
+
+/// A frame doesn't wait for another thread: a model read off it would be
+/// missing from a still, and from each chunk's first frames.
+#[test]
+fn a_models_first_frame_draws_it() {
+    let dir = temp_dir("render-model");
+    std::fs::write(dir.join("square.glb"), square_glb()).unwrap();
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+        local video = require("@video")
+        return video.compositions { video.composition {
+            id = "Model", w = 100, h = 100, fps = 30, duration = 1,
+            render = function()
+                return ui.scene3d {
+                    w_full = true, h_full = true,
+                    camera = { position = { 0, 0, 3 } },
+                    ui.model { src = "square.glb", fit = 2 },
+                }
+            end,
+        } }
+        "##,
+    )
+    .unwrap();
+    let mut stage = script_stage(&dir, json!({}));
+    let mut pixels = Vec::new();
+    stage
+        .draw_output(0, &mut pixels, std::time::Duration::from_secs(30))
+        .unwrap();
+    let [r, g, b, _] = pixel(&pixels, 100, 50, 50);
+    assert!(
+        r > 40 && g > 40 && b > 40,
+        "no model on the first frame: {r} {g} {b}"
+    );
+    // Around it, what's behind the scene.
+    assert_eq!(pixel(&pixels, 100, 2, 2), [0, 0, 0, 255]);
+}
