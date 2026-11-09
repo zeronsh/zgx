@@ -12,6 +12,9 @@ by colours the shell prints.
   takes the next command at once: blue cells;
 - a program's underline styles in colours of their own (SGR 4:3 and 4:2,
   with 58) draw as a red wave and two green lines;
+- pictures a program prints reach the window's pixels: a kitty graphics
+  picture (2 by 2 pixels stretched over 8 by 2 cells) in cyan, as wide as
+  eight cells, and a sixel image in yellow;
 - resizing the window resizes the grid the shell sees: a bar `tput cols`
   wide shrinks with the window;
 - an idle, focused terminal does no work: the process's CPU time stays put
@@ -40,6 +43,12 @@ from platform_smoke import stop  # noqa: E402
 from web_view_smoke import spoken, start_orca  # noqa: E402
 
 MAGENTA, GREEN, BLUE, ORANGE = (255, 0, 255), (0, 255, 0), (0, 0, 255), (255, 128, 0)
+CYAN, YELLOW = (0, 255, 255), (255, 255, 0)
+# A kitty picture of 2 by 2 cyan pixels (RGB, base64) over 8 by 2 cells,
+# unanswered (q=2: an answer would reach the shell as typing); then a sixel
+# image of two bands of yellow, 48 pixels wide.
+PICTURES = ("clear; printf '\\033_Ga=T,f=24,s=2,v=2,c=8,r=2,q=2;AP//AP//AP//AP//\\033\\\\\\n"
+            "\\033Pq#1;2;100;100;0!48~-!48~\\033\\\\\\n'")
 
 
 def bar(colour):
@@ -166,6 +175,16 @@ def main():
                 raise AssertionError(f"underline styles: red rows {sorted(red)}, green rows {sorted(green)}")
             time.sleep(0.1)
         print(f"terminal: a curly underline ({len(red)} rows) and a double one ({len(bands)} lines) in their colours")
+
+        # Pictures, through the session's parsing, the view's picture layer
+        # and the renderer, to the window's pixels.
+        type_line(PICTURES)
+        kitty = until("a kitty picture", CYAN)
+        sixel = until("a sixel image", YELLOW)
+        if abs((kitty[2] - kitty[0]) - width) > 2:
+            raise AssertionError(f"the picture over eight cells is {kitty[2] - kitty[0]} px wide, the cells {width}")
+        print(f"terminal: a kitty picture ({kitty[2] - kitty[0]}x{kitty[3] - kitty[1]} px over 8 cells) "
+              f"and a sixel image ({sixel[2] - sixel[0]}x{sixel[3] - sixel[1]} px) drawn")
 
         orange = "clear; printf '\\033[48;2;255;128;0m%*s\\033[0m\\n' $(tput cols) ''"
         type_line(orange)
