@@ -7,6 +7,8 @@
 | combined-p1 | base | zeron / wing / W / 1 | 3/3 | 4.61 [3.98,5.03]; 0.56 | 25.00 | 558.33 [492.00,614.00] | 7840.33 [7806.00,7872.00] | 57.00 | fail |
 | combined-p1 | variant | zeron / wing / W / 1 | 3/3 | 4.59 [4.29,5.19]; 0.52 | 25.00 | 277.67 [247.00,324.00] | 7897.33 [7778.00,7976.00] | 57.00 | fail |
 
-Each arm has three interleaved baseline/candidate trials, identical transcript anchors and native/zgx controls. All raw per-frame data, source/build proofs and callback logs are in evidence.tar.gz. These are failed performance gates, not certification.
+Each arm has three interleaved baseline/candidate trials, identical transcript anchors and native/zgx controls. All raw per-frame data, source/build proofs and callback logs are retained privately on the test Mac. These are failed performance gates, not certification.
 
 Archive SHA256: dd07f7b3170512bcde7fe74d5c49f71a177e0c51b900ef910c397ab2ada967f0
+
+Raw captures and source/build evidence are private. A verified copy is retained on the test Mac as `evidence-private/scroll-combined-fd9210fc-interleaved.evidence.tar.gz`; this path is local and git-excluded. Only summaries, counters and analysis JSON are public.

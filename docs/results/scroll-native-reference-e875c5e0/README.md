@@ -28,7 +28,7 @@ It also had zero late frames on tiles and drawables. Work includes the sleep;
 its main-work maxima are above the default 4 ms headroom gate. This diagnoses
 slack and does not waive the headroom requirement. [Numbers](native-delay-2ms.json).
 
-`evidence.tar.gz` preserves complete raw run records, native logs, actual scene
+The privately retained evidence archive preserves complete raw run records, native logs, actual scene
 images/tree/state, audit/source snapshots, separate corrected analysis and native
 delay logs. Original `late_pct` in raw records used the earlier combined
 visible-gap-plus-cancellation formula. **Use the separate analysis headline:**
@@ -40,3 +40,5 @@ not included as accepted baseline evidence here.
 Run the documented suite with `--scenes zeron --sizes W --gestures wing
 --backgrounds translucent --present 0,1 --native-floor`; see
 [the measurement contract](../../scroll-benchmark.md).
+
+Raw captures and source/build evidence are private. A verified copy is retained on the test Mac as `evidence-private/scroll-native-reference-e875c5e0.evidence.tar.gz`; this path is local and git-excluded. Only summaries, counters and analysis JSON are public.
