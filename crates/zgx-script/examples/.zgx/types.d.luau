@@ -1640,12 +1640,14 @@ export type FullScreenTransition = { phase: "entering" | "leaving", duration: nu
 -- the keys off. `safe_area` is what the screen's edges and the system's bars
 -- leave of the window, `{ top, right, bottom, left }` in points: iOS's safe
 -- area, all 0 elsewhere. `keyboard` is how much of the bottom the on-screen
--- keyboard covers, in points.
+-- keyboard covers, in points. `tab_bar` is how much of it a mounted
+-- `ui.native_tabs` covers, the system's height on iOS, 0 with none.
 -- An extern type: a function and a table can't intersect, so that would be
 -- `never`, and `ui`, holding one, would stop reporting its unknown members.
 declare extern type WindowApi with
 	safe_area: State<{ top: number, right: number, bottom: number, left: number }>
 	keyboard: State<number>
+	tab_bar: State<number>
 	-- How far past an end the scroll view being moved shows: negative past its
 	-- start (iOS). A pull to refresh reads it.
 	overscroll: State<number>
@@ -4068,6 +4070,10 @@ export type ScrollProps = {
 	-- Comes to rest only on whole pages, each its own length along the way
 	-- it scrolls, as UIKit's paging scroll views (iOS; elsewhere later).
 	paging: boolean?,
+	-- How far inside its edges its scroll indicator stays, for what covers the
+	-- view, the safe area with it (iOS, where it replaces the automatic insets;
+	-- elsewhere nothing). A state or a function saying it is followed.
+	indicator_insets: (ScrollPadding | State<ScrollPadding> | (() -> ScrollPadding))?,
 	-- "contain": a wheel or trackpad gesture over it stays with it at its
 	-- edges (CSS's overscroll-behavior), the scroll views around it never
 	-- moving; "auto" (the default) hands what it can't scroll on to them.
@@ -21237,6 +21243,9 @@ export type IosKit = {
 		bg: Color?,
 		-- How a focused field rides a software keyboard (default "native").
 		keyboard_ride: ("native" | "attached")?,
+		-- What floats over its end above the safe area and a tab bar, as
+		-- `additionalSafeAreaInsets`.
+		inset_bottom: number?,
 		[number]: any,
 	}) -> Node,
 	stack: (props: { root: (nav: any) -> Node }) -> Node,

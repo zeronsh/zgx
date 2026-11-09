@@ -1173,8 +1173,9 @@ end
 -- a small one as it scrolls, as a navigation bar's does. `title`, `trailing` (a
 -- node), `on_refresh` (pull to refresh: a function given `done`), `keyboard_ride`
 -- (how a focused field clears the keyboard: "native", UIKit's own, by default,
--- or "attached", riding its edge), and the body's children. `nav` comes from
--- the stack, for the back button.
+-- or "attached", riding its edge), `inset_bottom` (what floats over its end above
+-- the safe area and a tab bar, as additionalSafeAreaInsets), and the body's
+-- children. `nav` comes from the stack, for the back button.
 function ios.page(props)
 	declare_titles()
 	-- Its stack's back button is named for it.
@@ -1182,7 +1183,15 @@ function ios.page(props)
 		props.nav.titled(props.title)
 	end
 	local safe = ui.window.safe_area
+	local tab_bar = ui.window.tab_bar
 	local offset = ui.use_state(0)
+	-- What covers its bottom, as UIKit's adjusted inset: the safe area, or a tab
+	-- bar's whole height, which holds the safe area (34, or 83: read in UIKit),
+	-- and what the page says floats over that.
+	local inset_bottom = props.inset_bottom or 0
+	local function covered_below()
+		return math.max(safe:get().bottom, tab_bar:get()) + inset_bottom
+	end
 	local children = {}
 	for index, child in ipairs(props) do
 		children[index] = child
@@ -1201,6 +1210,12 @@ function ios.page(props)
 			h = "100%",
 			offset = offset,
 			keyboard_ride = props.keyboard_ride,
+			-- UIKit's indicator stays under the small bar's edge however large the
+			-- title is (116, with 3 of its own: read in UIKit as a large title
+			-- collapses), and clear of what covers the bottom.
+			indicator_insets = function()
+				return { top = safe:get().top + BAR, bottom = covered_below() }
+			end,
 			-- The system's own: its spinner, its threshold, and it holds the page
 			-- down until `done`, which a page that forgets still gets in time.
 			on_mount = function(element)
@@ -1231,9 +1246,7 @@ function ios.page(props)
 				pt = function()
 					return safe:get().top + BAR
 				end,
-				pb = function()
-					return safe:get().bottom + 90
-				end,
+				pb = covered_below,
 				pl = function()
 					return safe:get().left
 				end,

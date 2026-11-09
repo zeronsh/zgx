@@ -305,6 +305,8 @@ local function TextPage(nav: any)
 			title = "Notes",
 			nav = nav,
 			keyboard_ride = ride,
+			-- The composer rests 100 up, 40 tall, over the bar's 83.
+			inset_bottom = 57,
 			ios.section {
 				header = "KEYBOARD",
 				footer = "Off: the page scrolls once, as UIKit's do. On: a field rides the keyboard's edge.",

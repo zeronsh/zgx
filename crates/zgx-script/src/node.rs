@@ -1059,8 +1059,8 @@ pub(crate) enum Kind {
         /// `keyboard_ride = "native" | "attached"`: how it moves a focused
         /// field clear of a software keyboard.
         ride: Option<zgx::elastic::KeyboardRide>,
-        /// `scroll_padding`: kept clear as what it holds scrolls into view.
-        padding: Option<Box<ScrollPadding>>,
+        /// `scroll_padding` and `indicator_insets`, which few have.
+        insets: Option<Box<ScrollInsets>>,
     },
     Text(Text),
     /// `ui.markdown_view { text }`: markdown drawn, parsed as the text
@@ -3534,6 +3534,7 @@ const LATE_FIELDS: &[&str] = &[
     "paging",
     "capture_keys",
     "scroll_padding",
+    "indicator_insets",
     "read_only",
     "selection_radius",
     "autocorrect",
@@ -3662,14 +3663,26 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
             let padding = match &value {
                 mlua::Value::Function(_) => ScrollPadding::Live(value),
                 _ if state_of(&value).is_some() => ScrollPadding::Live(value),
-                _ => ScrollPadding::Fixed(scroll_padding(lua, value)?),
+                _ => ScrollPadding::Fixed(scroll_padding(lua, value, "scroll_padding")?),
             };
             match &mut node.kind {
-                Kind::Scroll { padding: set, .. } => *set = Some(Box::new(padding)),
+                Kind::Scroll { insets, .. } => {
+                    insets.get_or_insert_default().padding = Some(padding);
+                }
                 Kind::List { rare, .. } => {
                     rare.get_or_insert_default().scroll_padding = Some(padding)
                 }
                 _ => {}
+            }
+        }
+        "indicator_insets" => {
+            let indicator = match &value {
+                mlua::Value::Function(_) => ScrollPadding::Live(value),
+                _ if state_of(&value).is_some() => ScrollPadding::Live(value),
+                _ => ScrollPadding::Fixed(scroll_padding(lua, value, "indicator_insets")?),
+            };
+            if let Kind::Scroll { insets, .. } = &mut node.kind {
+                insets.get_or_insert_default().indicator = Some(indicator);
             }
         }
         "capture_keys" => {
@@ -5081,7 +5094,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             contain: false,
                             wheel_across: false,
                             ride: None,
-                            padding: None,
+                            insets: None,
                         },
                     ),
                     table.as_ref(),
@@ -7148,11 +7161,18 @@ pub(crate) enum ScrollPadding {
     Fixed(zgx::scene::Insets),
     Live(mlua::Value),
 }
-/// What a live `scroll_padding` says now (read in an effect, which follows
-/// it): a function called, a state read.
+/// A scroll view's `scroll_padding` and `indicator_insets`.
+#[derive(Clone, Default)]
+pub(crate) struct ScrollInsets {
+    pub(crate) padding: Option<ScrollPadding>,
+    pub(crate) indicator: Option<ScrollPadding>,
+}
+/// What a live `scroll_padding` (or `indicator_insets`, `name`) says now
+/// (read in an effect, which follows it): a function called, a state read.
 pub(crate) fn scroll_padding_now(
     vm: &crate::Vm,
     source: &mlua::Value,
+    name: &str,
 ) -> mlua::Result<zgx::scene::Insets> {
     let value = match source {
         mlua::Value::Function(f) => vm.call::<mlua::Value>(f, ())?,
@@ -7161,20 +7181,20 @@ pub(crate) fn scroll_padding_now(
             None => other.clone(),
         },
     };
-    scroll_padding(&vm.lua, value)
+    scroll_padding(&vm.lua, value, name)
 }
 
 /// `scroll_padding = 8` (every side) or `{ top, bottom, left, right }`
 /// (each 0 unless given): what a scroll view keeps clear as what it holds
 /// scrolls into view, as CSS's `scroll-padding`.
-fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Insets> {
+fn scroll_padding(lua: &Lua, value: mlua::Value, name: &str) -> mlua::Result<zgx::scene::Insets> {
     let side = |n: f32| {
         if n.is_finite() && n >= 0. {
             Ok(n)
         } else {
-            Err(mlua::Error::runtime(
-                "`scroll_padding` takes points, 0 or more",
-            ))
+            Err(mlua::Error::runtime(format!(
+                "`{name}` takes points, 0 or more"
+            )))
         }
     };
     match value {
@@ -7191,7 +7211,9 @@ fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Ins
         }
         value => {
             let all = side(lua.unpack::<f32>(value).map_err(|_| {
-                mlua::Error::runtime("`scroll_padding` is a number or { top, bottom, left, right }")
+                mlua::Error::runtime(format!(
+                    "`{name}` is a number or {{ top, bottom, left, right }}"
+                ))
             })?)?;
             Ok(zgx::scene::Insets::all(all))
         }

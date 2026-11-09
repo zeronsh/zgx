@@ -530,6 +530,7 @@ fn every_kit_screen_fits_its_text_at_each_dynamic_type_size_to_ax5() {
         local message = ui.use_state("")
         return ios.page {
             title = "Settings",
+            inset_bottom = 90,
             ios.search { value = query },
             ios.section {
                 header = "Connections and the devices this phone reaches",
@@ -1306,4 +1307,120 @@ fn a_deleted_row_of_a_keyed_list_collapses_once_and_those_after_it_follow() {
     // And stays there: taking the item didn't move it a second time.
     h.frames(10);
     assert!((h.bounds("row4").y - 104.).abs() < 0.5);
+}
+
+/// A page of rows with a tab bar of `height` a button mounts and unmounts.
+fn page_under_a_bar(height: f32) -> Harness {
+    let h = Harness::inline(&format!(
+        r#"local ios = ui.ios
+        ui.window.safe_area:set({{ top = 62, right = 0, bottom = 34, left = 0 }})
+        local mounted = ui.state("mounted", false)
+        local chosen = ui.state("chosen", 1)
+        local Mail = ui.component(function()
+            local rows = {{}}
+            for index = 1, 60 do
+                rows[index] = ui.div {{ id = if index == 60 then "last" else nil, h = 44 }}
+            end
+            return ios.page {{ title = "Mail", table.unpack(rows) }}
+        end)
+        return ui.div {{
+            id = "screen",
+            w = "100%",
+            h = "100%",
+            Mail {{}},
+            ui.button {{
+                id = "toggle",
+                absolute = true,
+                top = 0,
+                left = 0,
+                w = 40,
+                h = 40,
+                on_click = function()
+                    mounted:set(not mounted:get())
+                end,
+            }},
+            ui.show(function()
+                return mounted:get()
+            end, ui.native_tabs {{
+                absolute = true,
+                left = 0,
+                right = 0,
+                bottom = 0,
+                h = {height},
+                value = chosen,
+                items = {{ {{ title = "One", symbol = "circle" }} }},
+            }}),
+        }}"#
+    ));
+    h.frames(2);
+    assert_eq!(h.error(), None);
+    h
+}
+
+/// How far above the window's bottom the page's content ends, scrolled to it.
+fn end_gap(h: &mut Harness) -> f32 {
+    h.scroll("screen", 100_000.);
+    h.frames(120);
+    let (screen, last) = (h.bounds("screen"), h.bounds("last"));
+    screen.y + screen.height - (last.y + last.height)
+}
+
+#[test]
+fn a_page_ends_clear_of_the_safe_area_or_of_a_mounted_tab_bar_as_uikits() {
+    let mut h = page_under_a_bar(83.);
+    // UIKit's adjusted bottom inset, read: 34 alone, 83 with a tab bar.
+    assert_eq!(end_gap(&mut h), 34.);
+    h.click("toggle");
+    h.frames(2);
+    assert_eq!(end_gap(&mut h), 83.);
+    h.click("toggle");
+    h.frames(2);
+    assert_eq!(end_gap(&mut h), 34., "the bar has gone");
+    // A new bar is told again, though it's the height the last one had.
+    h.click("toggle");
+    h.frames(2);
+    assert_eq!(end_gap(&mut h), 83.);
+}
+
+#[test]
+fn a_page_never_ends_inside_the_safe_area_under_a_short_bar() {
+    let mut h = page_under_a_bar(20.);
+    h.click("toggle");
+    h.frames(2);
+    assert_eq!(end_gap(&mut h), 34.);
+}
+
+#[test]
+fn a_scroll_view_takes_indicator_insets_as_it_takes_scroll_padding() {
+    for insets in [
+        "8",
+        "{ top = 116, bottom = 34 }",
+        "function() return { top = 116 } end",
+        "ui.state('insets', { top = 116 })",
+    ] {
+        let mut h = Harness::inline(&format!(
+            "return ui.scroll {{ indicator_insets = {insets}, ui.text {{ 'a row' }} }}"
+        ));
+        h.frames(1);
+        assert_eq!(h.error(), None, "{insets}");
+        assert!(h.texts().contains(&"a row".to_owned()), "{insets}");
+    }
+    for (insets, says) in [
+        ("-1", "`indicator_insets` takes points, 0 or more"),
+        (
+            "'wide'",
+            "`indicator_insets` is a number or { top, bottom, left, right }",
+        ),
+    ] {
+        let error = zgx_script::testing::TestApp::try_new(|runtime| {
+            zgx_script::ScriptHost::inline(
+                runtime,
+                "app",
+                format!("return ui.scroll {{ indicator_insets = {insets} }}"),
+            )
+        })
+        .err()
+        .expect(insets);
+        assert!(error.contains(says), "{error}");
+    }
 }

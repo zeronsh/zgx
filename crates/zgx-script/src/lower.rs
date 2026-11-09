@@ -2979,14 +2979,27 @@ fn native_kind_view(kind: &Kind, vm: &Rc<Vm>) -> View {
         Kind::Symbol(spec) => symbol_of(spec, vm),
         Kind::Tabs(items, value) => {
             let (read, write) = (value.clone(), value.clone());
-            zgx::native_control::native_tabs(
+            let tabs = zgx::native_control::native_tabs(
                 items.clone(),
                 // Luau's tabs count from 1.
                 move || read.with(Value::as_f64).unwrap_or(1.).max(1.) as usize - 1,
                 move |index| {
                     write.set(Value::Num(index as f64 + 1.));
                 },
-            )
+            );
+            // `ui.window.tab_bar`, which an `ios.page` ends clear of.
+            match crate::node::env(&vm.lua) {
+                Ok(env) => {
+                    let bar = env.shared.state(crate::windows::TAB_BAR, Value::Num(0.));
+                    zgx::compose::provide(
+                        zgx::native_control::TabBarHeight::new(move |height| {
+                            bar.set(Value::Num(f64::from(height)));
+                        }),
+                        tabs,
+                    )
+                }
+                Err(_) => tabs,
+            }
         }
         Kind::Toggle(label, value) => {
             let (read, write) = (value.clone(), value.clone());
@@ -3029,7 +3042,7 @@ fn kind_view(
             contain,
             wheel_across,
             ride,
-            padding,
+            insets,
         } => {
             let offset = match offset {
                 Some(offset) => bridge(need(&mut cx), offset, number, |x| Value::Num(x as f64)),
@@ -3063,8 +3076,8 @@ fn kind_view(
             };
             #[cfg(not(target_os = "ios"))]
             let _ = ride;
-            let view = match padding {
-                Some(padding) => with_scroll_padding(view, padding, vm),
+            let view = match insets {
+                Some(insets) => with_scroll_insets(view, insets, vm),
                 None => view,
             };
             if *scrollbar {
@@ -7639,12 +7652,39 @@ fn with_scroll_padding(view: View, padding: &crate::node::ScrollPadding, vm: &Rc
         crate::node::ScrollPadding::Live(source) => {
             let (source, vm) = (source.clone(), vm.clone());
             view.scroll_padding_with(move || {
-                crate::node::scroll_padding_now(&vm, &source).unwrap_or_else(|error| {
-                    vm.report(error);
-                    zgx::scene::Insets::default()
-                })
+                crate::node::scroll_padding_now(&vm, &source, "scroll_padding").unwrap_or_else(
+                    |error| {
+                        vm.report(error);
+                        zgx::scene::Insets::default()
+                    },
+                )
             })
         }
+    }
+}
+/// A scroll view's `scroll_padding` and `indicator_insets`.
+#[inline(never)]
+fn with_scroll_insets(view: View, insets: &crate::node::ScrollInsets, vm: &Rc<Vm>) -> View {
+    let view = match &insets.padding {
+        Some(padding) => with_scroll_padding(view, padding, vm),
+        None => view,
+    };
+    match insets.indicator.clone() {
+        Some(crate::node::ScrollPadding::Fixed(given)) => {
+            view.scroll_indicator_insets(move || given)
+        }
+        Some(crate::node::ScrollPadding::Live(source)) => {
+            let vm = vm.clone();
+            view.scroll_indicator_insets(move || {
+                crate::node::scroll_padding_now(&vm, &source, "indicator_insets").unwrap_or_else(
+                    |error| {
+                        vm.report(error);
+                        zgx::scene::Insets::default()
+                    },
+                )
+            })
+        }
+        None => view,
     }
 }
 /// A list's scrollbar and what happens at its edges.
