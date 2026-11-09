@@ -108,7 +108,6 @@ fn run_on(
         change(step);
         frame(ui, &format!("step {step}"));
     }
-    drop(frame);
     // (Its moves were copies, not repaints: else nothing here was checked.)
     assert!(
         gpu.debug_scroll_copies() > 0,

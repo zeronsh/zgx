@@ -5517,13 +5517,19 @@ export type SpanProps = {
 	-- An icon before the text, in the line (a file chip's file type):
 	-- `src` (a file, `https://…`) or `code` (SVG markup), `size` square
 	-- (12), `gap` from the text (4), centred on the line; `tint` a colour,
-	-- or `"currentColor"` for the span's.
+	-- or `"currentColor"` for the span's. `bg` sets it on a well of its own
+	-- (a colour or token), `pad` larger than it on every side (0), its
+	-- corner `radius` (0), drawn over the span's background and under the
+	-- icon; the line keeps the well's room.
 	icon: {
 		src: string?,
 		code: string?,
 		size: number?,
 		gap: number?,
 		tint: Color?,
+		bg: Color?,
+		radius: number?,
+		pad: number?,
 	}?,
 	-- A click (and a middle click, which passes as a ⌘-click) on the run,
 	-- a link: told the keys held. Returning `true` handled it: its `href`
@@ -5541,8 +5547,10 @@ export type SpanProps = {
 	-- Its text as it is, not a template (see TextProps).
 	literal: boolean?,
 	-- Room around it: across (before and after it, taking space in the
-	-- line), or `{ across, down }`; with `bg`, the background hugs the text
-	-- plus this (an inline code chip) instead of filling the line.
+	-- line), or `{ across, down }`, or `{ before, after, down }` (a chip
+	-- whose icon sits near its edge, its name with more room after it);
+	-- with `bg`, the background hugs the text plus this (an inline code
+	-- chip) instead of filling the line.
 	padding: (number | { number })?,
 	-- The background's corner radius.
 	radius: number?,
