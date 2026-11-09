@@ -1,0 +1,48 @@
+{
+  "baseline": {
+    "engine_source": "/Users/wing/Documents/GitHub/zgx-scrollbench-pin-base",
+    "engine_pin": "530d3f9f99e6a64a9af46f78f25b034cd27fbcb5",
+    "zeron_source": "/Users/wing/Documents/GitHub/zeron-scrollbench",
+    "zeron_runner": "/Users/wing/Documents/GitHub/zgx-scrollbench/target/zeron-native/530d3f9f/zeron-zgx"
+  },
+  "arms": [
+    {
+      "engine_source": "/Users/wing/Documents/GitHub/zgx-scrollbench-pin-combined",
+      "engine_pin": "fd9210fcb734d7645ee959af09de3580a4152c8d",
+      "zeron_source": "/Users/wing/Documents/GitHub/zeron-scrollbench-combined",
+      "zeron_runner": "/Users/wing/Documents/GitHub/zgx-scrollbench/target/zeron-native/fd9210fc/zeron-zgx",
+      "name": "combined-p0",
+      "condition": {
+        "scene": "zeron",
+        "gesture": "wing",
+        "size": "W",
+        "present": "0",
+        "hz": 120,
+        "scale": 2,
+        "background": "translucent",
+        "reset_row": 160,
+        "command": "run"
+      },
+      "env": []
+    },
+    {
+      "engine_source": "/Users/wing/Documents/GitHub/zgx-scrollbench-pin-combined",
+      "engine_pin": "fd9210fcb734d7645ee959af09de3580a4152c8d",
+      "zeron_source": "/Users/wing/Documents/GitHub/zeron-scrollbench-combined",
+      "zeron_runner": "/Users/wing/Documents/GitHub/zgx-scrollbench/target/zeron-native/fd9210fc/zeron-zgx",
+      "name": "combined-p1",
+      "condition": {
+        "scene": "zeron",
+        "gesture": "wing",
+        "size": "W",
+        "present": "1",
+        "hz": 120,
+        "scale": 2,
+        "background": "translucent",
+        "reset_row": 160,
+        "command": "run"
+      },
+      "env": []
+    }
+  ]
+}
