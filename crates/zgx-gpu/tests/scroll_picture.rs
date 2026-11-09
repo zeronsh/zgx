@@ -17,6 +17,17 @@ fn gpu_fixture() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The scene's flush, told first what `gpu` last found of scroll pictures,
+/// as the desktop host tells it (`GpuRenderer::pictures_for_scene`).
+fn flush(ui: &Ui, gpu: &mut GpuRenderer) -> zgx::scene::FrameReport {
+    let mut scene = ui.scene.borrow_mut();
+    if let Some((allowed, wanted)) = gpu.pictures_for_scene() {
+        scene.set_pictures_allowed(allowed);
+        scene.want_pictures(wanted);
+    }
+    scene.flush()
+}
+
 const W: f32 = 240.;
 const H: f32 = 180.;
 
@@ -92,10 +103,10 @@ fn run_within(
         plain_offset.update(|o| *o += dy);
         ui.prepare_frame();
         plain.prepare_frame();
-        let damage = ui.scene.borrow_mut().flush().damage;
+        let damage = flush(&ui, &mut gpu).damage;
         gpu.render(&ui.scene.borrow(), &damage).unwrap();
         let drawn = gpu.readback().unwrap();
-        plain.scene.borrow_mut().flush();
+        flush(&plain, &mut whole);
         whole.render(&plain.scene.borrow(), &[full]).unwrap();
         let expected = whole.readback().unwrap();
         held = held.max(gpu.debug_pictures());
@@ -384,7 +395,7 @@ fn a_fade_with_the_views_box_refuses_a_picture() {
     for _ in 0..4 {
         offset.update(|o| *o += 8.);
         ui.prepare_frame();
-        let damage = ui.scene.borrow_mut().flush().damage;
+        let damage = flush(&ui, &mut gpu).damage;
         gpu.render(&ui.scene.borrow(), &damage).unwrap();
         assert_eq!(gpu.debug_pictures(), 0);
     }
@@ -443,7 +454,7 @@ fn an_image_drawn_by_window_position_refuses_a_picture() {
     for _ in 0..4 {
         offset.update(|o| *o += 8.);
         ui.prepare_frame();
-        let damage = ui.scene.borrow_mut().flush().damage;
+        let damage = flush(&ui, &mut gpu).damage;
         gpu.render(&ui.scene.borrow(), &damage).unwrap();
         assert_eq!(gpu.debug_pictures(), 0);
     }
@@ -496,7 +507,7 @@ fn a_fractional_scale_refuses_a_picture() {
     for _ in 0..4 {
         offset.update(|o| *o += 8.);
         ui.prepare_frame();
-        let damage = ui.scene.borrow_mut().flush().damage;
+        let damage = flush(&ui, &mut gpu).damage;
         gpu.render(&ui.scene.borrow(), &damage).unwrap();
         assert_eq!(gpu.debug_pictures(), 0);
     }
@@ -523,7 +534,7 @@ fn content_a_copy_moves_takes_no_picture() {
     for _ in 0..6 {
         offset.update(|o| *o += 8.);
         ui.prepare_frame();
-        let damage = ui.scene.borrow_mut().flush().damage;
+        let damage = flush(&ui, &mut gpu).damage;
         gpu.render(&ui.scene.borrow(), &damage).unwrap();
         assert_eq!(gpu.debug_pictures(), 0);
     }

@@ -593,7 +593,6 @@ impl GpuRenderer {
         self.layers.insert(
             key,
             LayerCache {
-                picture: false,
                 texture: texture.clone(),
                 bind,
                 bounds: world,

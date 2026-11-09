@@ -1855,6 +1855,9 @@ struct Local {
 /// What few scenes have, by node; each entry goes with its node.
 #[derive(Default)]
 struct ColdMaps {
+    /// Scroll content drawn from pictures (`picture_moved`), and what goes
+    /// with it: none until a renderer that draws them allows them.
+    pictures: Option<Box<PictureState>>,
     /// Track lists of grids that have them (`set_grid_template`): none kept
     /// for a list no node has any more.
     grid_templates: NodeMap<Arc<crate::grid_tracks::GridTemplate>>,
@@ -3067,13 +3070,6 @@ pub struct Scene {
     filtered: std::cell::Cell<usize>,
     /// Nodes that ever had one, a content blur or a mask (`Node::promoted`).
     promoted_count: usize,
-    /// Scroll content drawn from pictures (`picture_moved`): none until one is.
-    picture_state: Option<Box<PictureState>>,
-    /// The window's renderer draws pictures (`allow_pictures`).
-    pictures_allowed: std::cell::Cell<bool>,
-    /// Scroll content the renderer could not copy (`want_picture`): a
-    /// picture where it moves next. Content a copy moves stays as it is.
-    pictures_wanted: std::cell::RefCell<Vec<NodeId>>,
     text_measurer: Option<Box<dyn TextMeasurer>>,
     text_shaper: Option<std::rc::Rc<dyn crate::text_layout::TextShaper>>,
     font_shaper: Option<std::rc::Rc<dyn crate::text_layout::FontTextShaper>>,
@@ -3223,6 +3219,11 @@ pub struct TextLine {
 /// in a renderer that draws them.
 #[derive(Default)]
 struct PictureState {
+    /// The window's renderer draws pictures (`set_pictures_allowed`).
+    allowed: bool,
+    /// Scroll content the renderer could not copy (`want_pictures`): a
+    /// picture where it moves next. Content a copy moves stays as it is.
+    wanted: Vec<NodeId>,
     pictures: Vec<NodeId>,
     /// Scroll content that can't be a picture, until the next rest, and why.
     refused: Vec<(NodeId, String)>,
@@ -3348,9 +3349,6 @@ impl Scene {
             transformed: 0,
             filtered: std::cell::Cell::new(0),
             promoted_count: 0,
-            picture_state: None,
-            pictures_allowed: std::cell::Cell::new(false),
-            pictures_wanted: Default::default(),
             text_measurer: None,
             text_shaper: None,
             font_shaper: None,
@@ -12065,7 +12063,7 @@ impl Scene {
         let _span = crate::profile::span(crate::profile::Phase::Damage);
         report.layout_nodes = std::mem::take(&mut self.pending_layout_nodes);
         let dirty = std::mem::take(&mut self.dirty);
-        if self.picture_state.is_some() {
+        if self.picture_state().is_some() {
             self.check_pictures(&dirty);
         }
         for id in &dirty {
@@ -12129,7 +12127,7 @@ impl Scene {
                 }
             }
         }
-        if self.pictures_allowed.get() || self.picture_state.is_some() {
+        if self.picture_state().is_some() {
             self.picture_moves();
         }
         self.resolve_moves();
@@ -12173,10 +12171,9 @@ impl Scene {
     /// starts above every generation that went (`new_slot_generation`), so
     /// that a stale id never names it.
     pub fn rest(&mut self) {
-        if self.picture_state.is_some() {
+        if self.picture_state().is_some() {
             self.rest_pictures();
         }
-        *self.pictures_wanted.get_mut() = Vec::new();
         let mut keep = self.slots.len();
         while keep > 1 && self.slots[keep - 1].node.is_none() {
             keep -= 1;
@@ -12505,17 +12502,38 @@ impl Scene {
     /// one that does keeps each scroll view's content in a texture of its own
     /// while it scrolls and composites it, at a cost that doesn't depend on
     /// what the content holds.
-    pub fn allow_pictures(&self, allowed: bool) {
-        self.pictures_allowed.set(allowed);
+    pub fn set_pictures_allowed(&mut self, allowed: bool) {
+        match allowed {
+            true => self.picture_state_mut().allowed = true,
+            false => {
+                if let Some(state) = self.cold.as_mut().and_then(|cold| cold.pictures.as_mut()) {
+                    state.allowed = false;
+                }
+            }
+        }
     }
-    /// Scroll content `id` moved and could not be copied: draw it from a
+    fn picture_state(&self) -> Option<&PictureState> {
+        self.cold.as_ref()?.pictures.as_deref()
+    }
+    fn picture_state_mut(&mut self) -> &mut PictureState {
+        self.cold
+            .get_or_insert_default()
+            .pictures
+            .get_or_insert_default()
+    }
+    /// Scroll content its renderer could not copy (`ids`): drawn from a
     /// picture the next time it moves, if it can be one.
     #[cold]
     #[inline(never)]
-    pub fn want_picture(&self, id: NodeId) {
-        let mut wanted = self.pictures_wanted.borrow_mut();
-        if !wanted.contains(&id) {
-            wanted.push(id);
+    pub fn want_pictures(&mut self, ids: Vec<NodeId>) {
+        if ids.is_empty() {
+            return;
+        }
+        let wanted = &mut self.picture_state_mut().wanted;
+        for id in ids {
+            if !wanted.contains(&id) {
+                wanted.push(id);
+            }
         }
     }
     /// Whether any scroll content is drawn from a picture.
@@ -12527,15 +12545,13 @@ impl Scene {
         self.pictures().contains(&id)
     }
     fn pictures(&self) -> &[NodeId] {
-        self.picture_state
-            .as_ref()
-            .map_or(&[], |state| &state.pictures)
+        self.picture_state().map_or(&[], |state| &state.pictures)
     }
     /// Pictures are for scrolling: at rest, what they held paints as ever.
     #[cold]
     #[inline(never)]
     fn rest_pictures(&mut self) {
-        let Some(state) = self.picture_state.take() else {
+        let Some(state) = self.cold.as_mut().and_then(|cold| cold.pictures.take()) else {
             return;
         };
         for id in state.pictures {
@@ -12549,19 +12565,21 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn start_picture_moves(&mut self) {
-        let Some(mut state) = self.picture_state.take() else {
+        let Some(mut state) = self.cold.as_mut().and_then(|cold| cold.pictures.take()) else {
             return;
         };
         state.changes.clear();
         state.pictures.retain(|id| self.contains(*id));
-        self.picture_state = Some(state);
+        if let Some(cold) = &mut self.cold {
+            cold.pictures = Some(state);
+        }
     }
     /// What changed in picture `id` in the last flush if it moved in it,
     /// where it is now (each change at both places a move leaves it, as for a
     /// copy: `resolve_moves`). A flush it didn't move in has only its damage.
     pub fn picture_changes(&self, id: NodeId) -> impl Iterator<Item = Rect> + '_ {
-        self.picture_state
-            .iter()
+        self.picture_state()
+            .into_iter()
             .flat_map(|state| state.changes.iter())
             .filter(move |(node, _)| *node == id)
             .map(|(_, rect)| *rect)
@@ -12571,7 +12589,7 @@ impl Scene {
     /// it; what moves a row itself shows in where it now lies
     /// (`picture_row_ink`).
     pub fn take_picture_rows(&self) -> Vec<NodeId> {
-        self.picture_state.as_ref().map_or_else(Vec::new, |state| {
+        self.picture_state().map_or_else(Vec::new, |state| {
             std::mem::take(&mut *state.rows.borrow_mut())
         })
     }
@@ -12633,18 +12651,21 @@ impl Scene {
             extras: None,
             border: false,
         };
+        // (The instantiations `layer_items_from` uses: a walk of their own
+        // would change how the window's are made.)
         let walk = Some((id, &from));
+        let mut inherited = Vec::new();
         match self.plain_walks() {
-            true => self.layer_items_walk::<false, false, false>(
+            true => self.layer_items_walk::<false, true, false>(
                 Some(id),
                 Some(bands),
-                &mut Vec::new(),
+                &mut inherited,
                 walk,
             ),
-            false => self.layer_items_walk::<true, false, false>(
+            false => self.layer_items_walk::<true, true, false>(
                 Some(id),
                 Some(bands),
-                &mut Vec::new(),
+                &mut inherited,
                 walk,
             ),
         }
@@ -12677,11 +12698,16 @@ impl Scene {
             return false;
         }
         if !pictured {
-            if !self.pictures_allowed.get() || (dx == 0. && dy == 0. && !again) {
+            if !self.picture_state().is_some_and(|state| state.allowed)
+                || (dx == 0. && dy == 0. && !again)
+            {
                 return false;
             }
             // A view its renderer copies stays a copy: cheaper than a picture.
-            if !self.pictures_wanted.borrow().contains(&id) {
+            if !self
+                .picture_state()
+                .is_some_and(|state| state.wanted.contains(&id))
+            {
                 return false;
             }
             if dx != 0. {
@@ -12691,8 +12717,7 @@ impl Scene {
                 return false;
             }
             let refused = self
-                .picture_state
-                .as_ref()
+                .picture_state()
                 .and_then(|state| state.refused.iter().find(|(node, _)| *node == id));
             if let Some((_, why)) = refused {
                 crate::profile::note(|| format!("scroll @{} no picture: {why}", id.number()));
@@ -12700,16 +12725,13 @@ impl Scene {
             }
             if let Err(why) = self.picture_fits(id) {
                 crate::profile::note(|| format!("scroll @{} no picture: {why}", id.number()));
-                self.picture_state
-                    .get_or_insert_default()
-                    .refused
-                    .push((id, why));
+                self.picture_state_mut().refused.push((id, why));
                 return false;
             }
             self.node_mut(id).isolated = true;
             self.isolation_count += 1;
-            self.pictures_wanted.borrow_mut().retain(|node| *node != id);
-            self.picture_state.get_or_insert_default().pictures.push(id);
+            self.picture_state_mut().wanted.retain(|node| *node != id);
+            self.picture_state_mut().pictures.push(id);
             pictured = true;
         }
         debug_assert!(pictured);
@@ -12717,17 +12739,14 @@ impl Scene {
         // Damage kept in a grid has no list to read: all it shows changed.
         // So too for content moved more than once, whatever changed between.
         if again || self.damage_grid.is_some() {
-            self.picture_state
-                .get_or_insert_default()
-                .changes
-                .push((id, clip));
+            self.picture_state_mut().changes.push((id, clip));
         } else {
             let inside: Vec<Rect> = self
                 .damage
                 .iter()
                 .filter_map(|rect| rect.intersection(clip))
                 .collect();
-            let state = self.picture_state.get_or_insert_default();
+            let state = self.picture_state_mut();
             for rect in inside {
                 state.changes.push((id, rect));
                 let shifted = rect.translated(Transform { x: dx, y: dy });
@@ -12742,7 +12761,7 @@ impl Scene {
     /// Back to painting as ever: all its view shows repaints.
     fn demote_picture(&mut self, id: NodeId, why: String) {
         crate::profile::note(|| format!("scroll @{} no picture: {why}", id.number()));
-        let state = self.picture_state.get_or_insert_default();
+        let state = self.picture_state_mut();
         state.pictures.retain(|node| *node != id);
         state.refused.push((id, why));
         self.node_mut(id).isolated = false;
@@ -12875,7 +12894,7 @@ impl Scene {
                 let mut at = *id;
                 while let Some(parent) = self.node(at).parent {
                     if parent == picture {
-                        if let Some(state) = &self.picture_state {
+                        if let Some(state) = self.picture_state() {
                             state.rows.borrow_mut().push(at);
                         }
                         break;

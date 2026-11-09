@@ -1677,8 +1677,6 @@ struct LayerCache {
     /// fill compiling: `images_awaited`): not its content, so drawn again
     /// rather than reused, whatever its revision says.
     incomplete: bool,
-    /// A scroll view's picture (`pictures.rs`), composited from its rows.
-    picture: bool,
     /// Where in the window all of it showed when last drawn (`shown`),
     /// while every frame since that damaged it also drew it: its pixels
     /// then differ from its content's only where the window's damage
@@ -6421,7 +6419,6 @@ impl GpuRenderer {
         self.layers.insert(
             id,
             LayerCache {
-                picture: false,
                 texture,
                 bind,
                 bounds,
@@ -8203,7 +8200,7 @@ impl GpuRenderer {
                 let mut fill_shading = None;
                 if item.isolated {
                     let layer = self.layers.get(&item.id).expect("prepared layer");
-                    if layer.picture {
+                    if layer.step == pictures::PICTURE_STEP {
                         let plain = self.picture_quads(&item, &mut clips, &mut quads);
                         draws.push(Draw {
                             // Colour times a texture sample, unless a fade or a
@@ -11094,7 +11091,7 @@ impl GpuRenderer {
             let lasting = zgx::switches::SCROLL_COPY.on()
                 && !self.fresh
                 && self.rendered_serial == Some(serial - 1);
-            if self.pictures.as_ref().is_some_and(|pictures| pictures.on)
+            if let Some(pictures) = self.pictures.as_ref().filter(|pictures| pictures.on)
                 && match &refused {
                     Ok((_, blocker)) => {
                         blocker.is_some() || scene.scroll_corners(scroll.node).is_none()
@@ -11102,7 +11099,10 @@ impl GpuRenderer {
                     Err(_) => lasting,
                 }
             {
-                scene.want_picture(scroll.node);
+                let mut wanted = pictures.wanted.borrow_mut();
+                if !wanted.contains(&scroll.node) {
+                    wanted.push(scroll.node);
+                }
             }
             match refused {
                 Ok((copy, blocker)) => match blocker {

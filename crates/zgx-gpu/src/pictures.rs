@@ -82,8 +82,15 @@ pub(crate) fn under(
 pub(crate) struct Pictures {
     /// Pictures may start (`set_scroll_pictures`).
     pub(crate) on: bool,
+    /// And may in this window, as last drawn (`sync_pictures`).
+    allowed: bool,
+    /// Scroll views a copy could not move, for the scene (`pictures_for_scene`).
+    pub(crate) wanted: std::cell::RefCell<Vec<NodeId>>,
     pub(crate) map: rustc_hash::FxHashMap<NodeId, Picture>,
 }
+/// A picture's layer's `step`, which no layer of the window's has: how its
+/// composite tells it apart (`render_flat`).
+pub(crate) const PICTURE_STEP: i32 = i32::MIN;
 
 pub(crate) struct Picture {
     /// The view, in the window's points.
@@ -125,6 +132,14 @@ impl GpuRenderer {
             }
             None => {}
         }
+    }
+    /// What the scene should know before its next flush: whether pictures
+    /// may start, and the scroll views a copy could not move. `None` until
+    /// pictures are turned on. The host gives both to the scene
+    /// (`Scene::set_pictures_allowed`, `Scene::want_pictures`).
+    pub fn pictures_for_scene(&mut self) -> Option<(bool, Vec<NodeId>)> {
+        let pictures = self.pictures.as_mut()?;
+        Some((pictures.allowed, std::mem::take(pictures.wanted.get_mut())))
     }
     /// How many pictures it holds (tests).
     pub fn debug_pictures(&self) -> usize {
@@ -216,7 +231,9 @@ impl GpuRenderer {
         let planes = self.views.as_ref().is_some_and(|views| views.has_planes());
         let on = self.pictures.as_ref().is_some_and(|pictures| pictures.on);
         let allowed = on && zgx::switches::SCROLL_PICTURE.on() && self.plane.is_none() && !planes;
-        scene.allow_pictures(allowed);
+        if let Some(pictures) = &mut self.pictures {
+            pictures.allowed = allowed;
+        }
         if !allowed && on && !scene.scroll_moves().is_empty() {
             zgx::profile::note(|| {
                 format!(
@@ -497,7 +514,7 @@ impl GpuRenderer {
                 root_origin: (root.x, root.y),
                 bytes,
                 uv: [1., 1.],
-                step: 0,
+                step: PICTURE_STEP,
                 factor: 1f32.to_bits(),
                 exact: false,
                 transformed: false,
@@ -505,7 +522,6 @@ impl GpuRenderer {
                 parked: false,
                 incomplete: false,
                 watched: None,
-                picture: true,
             },
         );
         let scale = self.scale;
