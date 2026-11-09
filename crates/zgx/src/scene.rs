@@ -3203,19 +3203,47 @@ type FontReach = dyn Fn(
 type FontMinContent =
     dyn Fn(&std::sync::Arc<str>, f32, &crate::text_layout::FontStyle) -> (f32, f32);
 type RichMinContent = dyn Fn(&crate::rich_text::RichText) -> (f32, f32);
-/// Where rich text that grew from a text of so many bytes, measured at a
-/// width, has lines that may differ from that text's (the top of the
-/// first), if the measurer knows (`Scene::set_rich_text_unchanged_above`).
-type RichUnchanged = dyn Fn(&crate::rich_text::RichText, usize, Option<f32>) -> Option<f32>;
-/// A paragraph grown at its end since the last flush, its damage left until
-/// it is laid out (`Scene::damage_appended`): the length of the text it
-/// grew from, and that text's box, clip and damage.
+/// Where rich text that grew from (or is) a text of so many bytes, styled
+/// alike before a byte, laid out at a width, has lines that may differ
+/// from that text's (the top of the first), if the measurer knows
+/// (`Scene::set_rich_text_unchanged_above`).
+type RichUnchanged = dyn Fn(&crate::rich_text::RichText, usize, usize, Option<f32>) -> Option<f32>;
+/// The rectangles ranges of rich text laid out at a width cover, if the
+/// measurer knows (`Scene::set_rich_text_selections`).
+type RichSelections = dyn Fn(
+    &crate::rich_text::RichText,
+    Option<f32>,
+    &[std::ops::Range<usize>],
+) -> Option<Vec<Vec<Rect>>>;
+/// A paragraph grown at its end or restyled since the last flush
+/// (`RichText::restyled_from`), its damage left until it is laid out
+/// (`Scene::damage_appended`): the length of the text it was, the byte
+/// from which it is styled otherwise, and that text's box, clip, damage,
+/// and the room its runs' backgrounds take above a line.
 struct Appended {
     id: NodeId,
     length: usize,
+    from: usize,
     bounds: Rect,
     clip: Option<Rect>,
     damage: Option<Rect>,
+    above: f32,
+}
+/// How far above a changed line of `text` its ink may reach into the line
+/// before: a line, as ink reaches past a line (`text_ink`), and a padded
+/// background's padding (an inline code chip's).
+fn reach_above(text: &crate::rich_text::RichText) -> f32 {
+    let (font_size, line, padding) =
+        text.runs()
+            .iter()
+            .fold((0_f32, 0_f32, 0_f32), |(size, line, padding), run| {
+                (
+                    size.max(run.font_size),
+                    line.max(run.font.line_height.resolve(run.font_size)),
+                    padding.max(run.padding[1]),
+                )
+            });
+    line + (font_size * 0.3).max(2.) + padding
 }
 /// A node `Scene::walk` visits.
 #[derive(Clone, Copy, Debug)]
@@ -3328,6 +3356,8 @@ pub struct Scene {
     rich_min_content: Option<Box<RichMinContent>>,
     /// Where grown rich text's lines may change (`set_rich_text_unchanged_above`).
     rich_unchanged: Option<Box<RichUnchanged>>,
+    /// Ranges' rectangles from laid-out rich text (`set_rich_text_selections`).
+    rich_selections: Option<Box<RichSelections>>,
     /// Paragraphs grown at their end, damaged once laid out (`Appended`).
     appended: Vec<Appended>,
     rich_measurer: crate::rich_text::TextMeasure,
@@ -3634,6 +3664,7 @@ impl Scene {
             font_min_content: None,
             rich_min_content: None,
             rich_unchanged: None,
+            rich_selections: None,
             appended: Vec::new(),
             rich_measurer: Default::default(),
             rich_shaper: None,
@@ -6767,6 +6798,43 @@ impl Scene {
             |shaper| shaper(rich, width),
         )
     }
+    /// Install where ranges of rich text laid out at a width lie: the
+    /// rectangles each covers, as the rich shaper's layout's `selection`
+    /// gives them (`shape_rich_text`), from what the measurer laid out
+    /// rather than shaped again; None where it can't tell.
+    pub fn set_rich_text_selections(
+        &mut self,
+        selections: impl Fn(
+            &crate::rich_text::RichText,
+            Option<f32>,
+            &[std::ops::Range<usize>],
+        ) -> Option<Vec<Vec<Rect>>>
+        + 'static,
+    ) {
+        self.rich_selections = Some(Box::new(selections));
+    }
+    /// The rectangles each of `ranges` of `rich` covers laid out at
+    /// `width`, as `shape_rich_text`'s layout's `selection` gives them:
+    /// from the measurer's laid-out text where it has them
+    /// (`set_rich_text_selections`), else shaped (a paragraph's links,
+    /// placed again each time it changes).
+    pub fn rich_text_selections(
+        &self,
+        rich: &crate::rich_text::RichText,
+        width: Option<f32>,
+        ranges: &[std::ops::Range<usize>],
+    ) -> Vec<Vec<Rect>> {
+        if let Some(selections) = &self.rich_selections
+            && let Some(found) = selections(rich, width, ranges)
+        {
+            return found;
+        }
+        let layout = self.shape_rich_text(rich, width);
+        ranges
+            .iter()
+            .map(|range| layout.selection(range.clone()))
+            .collect()
+    }
     /// Install wrapping plain text's measurement with the widths it holds
     /// for: its size at a limit, and the width up to which (from its widest
     /// line's) its lines break the same. Layout serves a width between from
@@ -6857,14 +6925,17 @@ impl Scene {
             self.invalidate_layout(id);
         }
     }
-    /// Install where rich text grown at its end has lines that may differ
-    /// from the text it grew from, measured at a width: given the grown text
-    /// (measured by the rich measurer), that text's length and the width,
-    /// the top of the first such line, if known. A paragraph streaming in is
-    /// then damaged from there down, not whole.
+    /// Install where rich text grown at its end, or restyled, has lines
+    /// that may differ from the text it was, laid out at a width: given the
+    /// text now (measured by the rich measurer), the length of the text it
+    /// was, the byte from which it is styled otherwise
+    /// (`RichText::restyled_from`) and the width, the top of the first such
+    /// line, if known. A paragraph streaming in, or fading its newest words
+    /// in, is then damaged from there down, not whole.
     pub fn set_rich_text_unchanged_above(
         &mut self,
-        unchanged: impl Fn(&crate::rich_text::RichText, usize, Option<f32>) -> Option<f32> + 'static,
+        unchanged: impl Fn(&crate::rich_text::RichText, usize, usize, Option<f32>) -> Option<f32>
+        + 'static,
     ) {
         self.rich_unchanged = Some(Box::new(unchanged));
     }
@@ -7348,7 +7419,19 @@ impl Scene {
         #[cfg(target_os = "macos")]
         let layout_unchanged = layout_unchanged
             || matches!((&self.node(id).kind,&kind),(NodeKind::NativeSurface(old),NodeKind::NativeSurface(new)) if (old.width(),old.height())==(new.width(),new.height()) || (self.node(id).style.width.is_some() && self.node(id).style.height.is_some()));
-        self.damage_subtree(id);
+        // Restyled rich text (a fade recolouring its newest words), or grown:
+        // damaged once laid out, from where it changes (`damage_appended`).
+        let restyled = match (&self.node(id).kind, &kind) {
+            (NodeKind::RichText { text: old }, NodeKind::RichText { text: new })
+                if self.node(id).measurement.is_some() =>
+            {
+                new.restyled_from(old).map(|from| (old.text().len(), from))
+            }
+            _ => None,
+        };
+        if !restyled.is_some_and(|(length, from)| self.defer_damage(id, length, from)) {
+            self.damage_subtree(id);
+        }
         if matches!((&self.node(id).kind, &kind), (NodeKind::Image(old), NodeKind::Image(new))
             if old.transform() != new.transform())
         {
@@ -9432,8 +9515,8 @@ impl Scene {
         }
         // Grown at its end: damaged once laid out, from where its lines may
         // change (`damage_appended`).
-        let grown = new.appends(old).then(|| old.text().len());
-        if !grown.is_some_and(|length| self.defer_damage(id, length)) {
+        let grown = new.restyled_from(old).map(|from| (old.text().len(), from));
+        if !grown.is_some_and(|(length, from)| self.defer_damage(id, length, from)) {
             self.damage_subtree(id);
         }
         self.node_mut(id).kind = kind;
@@ -9445,15 +9528,17 @@ impl Scene {
     /// what it painted: where the measurer can say where its lines may
     /// change, and it paints plainly (no transforms or filters about, no
     /// shadows or blur, inside its clip). Whether it was left.
-    fn defer_damage(&mut self, id: NodeId, length: usize) -> bool {
+    fn defer_damage(&mut self, id: NodeId, length: usize, from: usize) -> bool {
         if self.rich_unchanged.is_none()
             || self.transformed + self.filtered.get() > 0
             || self.damage_is_full()
         {
             return false;
         }
-        // Grown again before it was laid out: from the first.
-        if self.appended.iter().any(|appended| appended.id == id) {
+        // Changed again before it was laid out: from the first, styled
+        // alike to the first byte either change restyles.
+        if let Some(appended) = self.appended.iter_mut().find(|appended| appended.id == id) {
+            appended.from = appended.from.min(from);
             return true;
         }
         if !self.shown(id) || !self.plain_paint(id) {
@@ -9466,12 +9551,18 @@ impl Scene {
         let damage = self
             .painted(id, bounds, 0.)
             .and_then(|painted| clip.and_then(|clip| painted.intersection(clip)));
+        let above = match &self.node(id).kind {
+            NodeKind::RichText { text } => reach_above(text),
+            _ => 0.,
+        };
         self.appended.push(Appended {
             id,
             length,
+            from,
             bounds,
             clip,
             damage,
+            above,
         });
         true
     }
@@ -9532,20 +9623,8 @@ impl Scene {
             return None;
         }
         let unchanged = self.rich_unchanged.as_ref()?;
-        let top = unchanged(text, was.length, Some(bounds.width))?;
-        // From a line above it, and as far again as ink reaches past a line
-        // (`text_ink`): a glyph of a changed line may rise into the one
-        // above.
-        let (font_size, line) = text
-            .runs()
-            .iter()
-            .fold((0_f32, 0_f32), |(size, line), run| {
-                (
-                    size.max(run.font_size),
-                    line.max(run.font.line_height.resolve(run.font_size)),
-                )
-            });
-        let from = bounds.y + top - line - (font_size * 0.3).max(2.);
+        let top = unchanged(text, was.length, was.from, Some(bounds.width))?;
+        let from = bounds.y + top - reach_above(text).max(was.above);
         let now = self
             .painted(id, bounds, 0.)
             .and_then(|painted| clip.and_then(|clip| painted.intersection(clip)));
@@ -13458,6 +13537,12 @@ impl Scene {
         // A leaf, nothing transformed or filtered: what it painted is damaged
         // with what it will paint, once it is placed (see `leaf_damage`).
         let leaf = damage && childless && self.transformed + self.filtered.get() == 0;
+        // A paragraph grown or restyled, damaged once laid out where it was
+        // and is from where it changes (`damage_appended`): not whole here.
+        let damage = damage
+            && !(leaf
+                && !self.appended.is_empty()
+                && self.appended.iter().any(|appended| appended.id == id));
         // A moved leaf's damage where it was and where it lands, worked out
         // and added before its box changes: a leaf has no children, so no
         // other damage comes between, and nothing it paints changes.

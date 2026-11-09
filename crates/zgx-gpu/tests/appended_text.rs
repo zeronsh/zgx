@@ -305,3 +305,75 @@ fn a_paragraph_grown_past_a_line_break_draws_as_drawn_afresh() {
         (1000, false),
     );
 }
+
+#[path = "reply/mod.rs"]
+mod reply;
+
+/// Zeron's reply (`reply`): prose, prices, math and code in padded chips,
+/// bold, a link, appended a piece at a time, each fading in as a run of its
+/// own and merging back into its style's run once faded, two frames of
+/// fading (recolouring alone) for each appended: each frame as drawn
+/// afresh, most from the lines kept and damaged below the paragraph's top.
+#[test]
+fn a_streamed_reply_fading_in_draws_as_drawn_afresh() {
+    let size = (W, H);
+    let mut renderer = GpuRenderer::new(W as u32, H as u32).expect("a GPU");
+    let fresh_context = GpuRenderer::new(W as u32, H as u32).unwrap().context();
+    let mut stream = reply::Reply::new(5);
+    stream.append();
+    let (mut scene, paragraph) = reply::window(&renderer, size, stream.rich());
+    let report = scene.flush();
+    renderer.render(&scene, &report.damage).unwrap();
+    let (mut kept, mut below, mut frames) = (0, 0, 0);
+    let mut step = 0;
+    while !stream.done() || step % 3 != 0 {
+        match step % 3 {
+            0 => stream.append(),
+            _ => stream.tick(),
+        }
+        step += 1;
+        let top = scene.bounds(paragraph).y;
+        let rich = stream.rich();
+        scene.set_leaf_kind(
+            paragraph,
+            NodeKind::RichText {
+                text: Arc::new(rich.clone()),
+            },
+        );
+        let report = scene.flush();
+        if !report.damage.is_empty() && report.damage.iter().all(|d| d.y > top + 1.) {
+            below += 1;
+        }
+        kept += renderer
+            .render(&scene, &report.damage)
+            .unwrap()
+            .kept_text_lines;
+        frames += 1;
+        let drawn = renderer.readback().unwrap();
+        let expected = {
+            let mut full =
+                GpuRenderer::new_with_context(W as u32, H as u32, &fresh_context).unwrap();
+            full.text_cache().borrow_mut().clear();
+            let (mut scene, _) = reply::window(&full, size, rich);
+            scene.flush();
+            full.render(&scene, &[Rect::new(0., 0., W, H)]).unwrap();
+            full.readback().unwrap()
+        };
+        let differing = drawn
+            .chunks(4)
+            .zip(expected.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            differing, 0,
+            "{differing} pixels differ at frame {step}, {} bytes shown",
+            stream.shown
+        );
+    }
+    eprintln!("{frames} frames: {kept} lines kept, {below} damaged below its top");
+    assert!(kept > frames * 4, "{kept} lines kept in {frames} frames");
+    assert!(
+        below * 3 > frames * 2,
+        "{below} of {frames} damaged below its top"
+    );
+}
