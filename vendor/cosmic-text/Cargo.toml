@@ -142,7 +142,9 @@ version = "0.3.2"
 default-features = false
 
 [dependencies.swash]
-version = "0.2.6"
+version = "0.2.11"
+package = "zgx-swash"
+path = "../swash"
 features = [
     "render",
     "scale",
