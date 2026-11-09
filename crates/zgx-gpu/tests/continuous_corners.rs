@@ -201,40 +201,43 @@ fn corners_are_within_levels_of_calayers_own_pixels() {
         let [columns, rows] = numbers(parts[1])[..] else {
             panic!("{line}")
         };
-        let (mut gpu, mut scene, width) = window((320., 120.), scale as f32);
-        let style = match b > 0. {
-            true => QuadStyle {
-                fill: Color(0, 0, 0, 0),
-                border_width: b as f32,
-                border_color: INK,
-                ..box_style(r as f32, CornerCurve::Continuous)
-            },
-            false => box_style(r as f32, CornerCurve::Continuous),
-        };
-        add(&mut scene, style, (4., 4.), (w as f32, h as f32));
-        let drawn = draw(&mut gpu, &mut scene, width);
-        let origin = (4. * scale) as u32;
-        let mut listed = std::collections::HashMap::new();
-        for pixel in parts[2].split_whitespace() {
-            let values: Vec<u32> = pixel.split(',').map(|v| v.parse().unwrap()).collect();
-            listed.insert((values[0], values[1]), values[2] as f64);
-        }
-        let mut worst: f64 = 0.;
-        for row in 0..rows as u32 {
-            for column in 0..columns as u32 {
-                let got = drawn.alpha(origin + column, origin + row) * 255.;
-                match listed.get(&(column, row)) {
-                    Some(want) => worst = worst.max((got - want).abs()),
-                    // Whole or empty there: it says which by the law's side of it,
-                    // so a pixel this draws faintly on either side still counts.
-                    None => worst = worst.max(got.min(255. - got)),
+        for direct in [true, false] {
+            let (mut gpu, mut scene, width) = window((320., 120.), scale as f32);
+            gpu.set_direct_metal(direct);
+            let style = match b > 0. {
+                true => QuadStyle {
+                    fill: Color(0, 0, 0, 0),
+                    border_width: b as f32,
+                    border_color: INK,
+                    ..box_style(r as f32, CornerCurve::Continuous)
+                },
+                false => box_style(r as f32, CornerCurve::Continuous),
+            };
+            add(&mut scene, style, (4., 4.), (w as f32, h as f32));
+            let drawn = draw(&mut gpu, &mut scene, width);
+            let origin = (4. * scale) as u32;
+            let mut listed = std::collections::HashMap::new();
+            for pixel in parts[2].split_whitespace() {
+                let values: Vec<u32> = pixel.split(',').map(|v| v.parse().unwrap()).collect();
+                listed.insert((values[0], values[1]), values[2] as f64);
+            }
+            let mut worst: f64 = 0.;
+            for row in 0..rows as u32 {
+                for column in 0..columns as u32 {
+                    let got = drawn.alpha(origin + column, origin + row) * 255.;
+                    match listed.get(&(column, row)) {
+                        Some(want) => worst = worst.max((got - want).abs()),
+                        // Whole or empty there: it says which by the law's side of it,
+                        // so a pixel this draws faintly on either side still counts.
+                        None => worst = worst.max(got.min(255. - got)),
+                    }
                 }
             }
+            assert!(
+                worst <= 3.,
+                "{w}×{h} r{r} border {b} at {scale}x, direct {direct}: {worst} levels from CALayer's"
+            );
         }
-        assert!(
-            worst <= 3.,
-            "{w}×{h} r{r} border {b} at {scale}x: {worst} levels from CALayer's"
-        );
     }
 }
 
@@ -268,14 +271,21 @@ fn tells_curves_apart(
     let scale = 2.;
     let (column, row) = probe(SIDE as f64, R as f64, scale as f64);
     let (x, y) = ((AT * scale) as u32 + column, (AT * scale) as u32 + row);
-    for curve in [CornerCurve::Circular, CornerCurve::Continuous] {
-        let (mut gpu, mut scene, _) = window((SIDE + 2. * AT, SIDE + 2. * AT), scale);
-        let id = add(&mut scene, box_style(R, curve), (AT, AT), (SIDE, SIDE));
-        let drawn = path(&mut gpu, &mut scene, id);
-        let alpha = drawn.at(x, y)[3];
-        match curve {
-            CornerCurve::Circular => assert!(alpha > 0, "{what}: the circle missed"),
-            CornerCurve::Continuous => assert_eq!(alpha, 0, "{what}: drew the circle"),
+    for direct in [true, false] {
+        for curve in [CornerCurve::Circular, CornerCurve::Continuous] {
+            let (mut gpu, mut scene, _) = window((SIDE + 2. * AT, SIDE + 2. * AT), scale);
+            gpu.set_direct_metal(direct);
+            let id = add(&mut scene, box_style(R, curve), (AT, AT), (SIDE, SIDE));
+            let drawn = path(&mut gpu, &mut scene, id);
+            let alpha = drawn.at(x, y)[3];
+            match curve {
+                CornerCurve::Circular => {
+                    assert!(alpha > 0, "{what}, direct {direct}: the circle missed")
+                }
+                CornerCurve::Continuous => {
+                    assert_eq!(alpha, 0, "{what}, direct {direct}: drew the circle")
+                }
+            }
         }
     }
 }
@@ -287,12 +297,6 @@ fn width_of(_: &Scene) -> u32 {
 fn the_curve_survives_every_path_a_box_can_take() {
     let _gpu_fixture = gpu_fixture();
     tells_curves_apart("plain", |gpu, scene, _| {
-        let width = width_of(scene);
-        draw(gpu, scene, width)
-    });
-    // Metal has no such shader yet: its frames must go by wgpu, and match.
-    tells_curves_apart("direct Metal on", |gpu, scene, _| {
-        gpu.set_direct_metal(true);
         let width = width_of(scene);
         draw(gpu, scene, width)
     });
@@ -454,6 +458,74 @@ fn circular_boxes_beside_a_continuous_one_draw_what_they_draw_alone() {
             .collect::<Vec<u8>>()
     };
     assert!(frame(true) == frame(false));
+}
+
+/// Both of a Mac's paths draw the same bytes, as they do circular corners, and a
+/// frame of them after a change equals a full repaint.
+#[test]
+fn direct_metal_draws_what_wgpu_draws() {
+    let _gpu_fixture = gpu_fixture();
+    let scene_of = |gpu: &mut GpuRenderer, direct: bool| {
+        gpu.set_direct_metal(direct);
+        let mut scene = Scene::new(320., 140.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        add(
+            &mut scene,
+            box_style(16., CornerCurve::Continuous),
+            (6., 6.),
+            (64., 44.),
+        );
+        add(
+            &mut scene,
+            QuadStyle {
+                fill: Color(30, 90, 200, 200),
+                border_width: 2.,
+                border_color: Color(240, 240, 240, 255),
+                shadow: Some(shadow(Color(0, 0, 0, 140), 5.)),
+                ..box_style(21.5, CornerCurve::Continuous)
+            },
+            (90., 10.),
+            (100., 70.),
+        );
+        add(
+            &mut scene,
+            box_style(9., CornerCurve::Circular),
+            (210., 10.),
+            (40., 40.),
+        );
+        scene
+    };
+    for scale in [2., 3.] {
+        let (width, height) = ((320. * scale) as u32, (140. * scale) as u32);
+        let mut frames = Vec::new();
+        for direct in [true, false] {
+            let mut gpu = GpuRenderer::new(width, height).unwrap();
+            gpu.set_scale_factor(scale);
+            let mut scene = scene_of(&mut gpu, direct);
+            let damage = scene.flush().damage;
+            gpu.render(&scene, &damage).unwrap();
+            let first = gpu.readback().unwrap();
+            gpu.render(&scene, &[Rect::new(0., 0., 320., 140.)])
+                .unwrap();
+            assert!(
+                first == gpu.readback().unwrap(),
+                "direct {direct} repainted"
+            );
+            if cfg!(target_os = "macos") && direct {
+                assert!(gpu.debug_metal_frames() > 0, "drawn by wgpu instead");
+            }
+            frames.push(first);
+        }
+        let differ = frames[0]
+            .iter()
+            .zip(&frames[1])
+            .map(|(a, b)| a.abs_diff(*b))
+            .max();
+        assert!(
+            frames[0] == frames[1],
+            "at {scale}x the paths differ by {differ:?}"
+        );
+    }
 }
 
 /// A border is the box's curve less the curve at its radius less the border's

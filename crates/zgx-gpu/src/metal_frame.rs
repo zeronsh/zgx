@@ -65,6 +65,9 @@ pub(crate) struct MetalFrame {
     /// The image effects' pipeline (image_effects.wgsl), with the first
     /// image drawn with one (`None`: it did not compile).
     image_effects: std::cell::OnceCell<Option<Pipeline>>,
+    /// Continuous corners' pipeline (`CONTINUOUS_MSL`), with the first box
+    /// asking for them (`None`: it did not compile).
+    continuous: std::cell::OnceCell<Option<Pipeline>>,
     /// Pixelated images' pipelines, their sampler nearest (`full`, `basic`,
     /// `opaque`), compiled with the first (`None`: they did not compile).
     nearest: std::cell::OnceCell<Option<[Pipeline; 3]>>,
@@ -162,6 +165,7 @@ impl MetalFrame {
             effects: std::cell::OnceCell::new(),
             fills: Default::default(),
             image_effects: std::cell::OnceCell::new(),
+            continuous: std::cell::OnceCell::new(),
             nearest: std::cell::OnceCell::new(),
             polyline: std::cell::OnceCell::new(),
             warm: std::cell::OnceCell::new(),
@@ -283,6 +287,25 @@ impl MetalFrame {
                         &self.device,
                         "vs",
                         "zgx_image_effect",
+                        MTLPixelFormat::BGRA8Unorm,
+                        Blend::Over,
+                    )
+                    .ok()
+            })
+            .is_some()
+    }
+
+    /// Whether continuous corners can be drawn here: their pipeline, compiled
+    /// now if new.
+    pub(crate) fn continuous(&self) -> bool {
+        self.continuous
+            .get_or_init(|| {
+                Library::translated(&self.device, CONTINUOUS_MSL, Kind::Quads)
+                    .ok()?
+                    .pipeline(
+                        &self.device,
+                        "vs",
+                        "fs",
                         MTLPixelFormat::BGRA8Unorm,
                         Blend::Over,
                     )
@@ -498,14 +521,19 @@ impl MetalFrame {
                 .cloned()
                 .flatten()
                 .unwrap_or_else(|| self.full.clone()),
+            Shading::Continuous => self
+                .continuous
+                .get()
+                .cloned()
+                .flatten()
+                .unwrap_or_else(|| self.full.clone()),
             // Frames with layer shaders or blend modes take the wgpu path,
             // as layers' own frames (gradient text's) do.
             Shading::Filter(_)
             | Shading::Blend
             | Shading::FilterBlend(_)
             | Shading::SourceIn
-            | Shading::Behind
-            | Shading::Continuous => self.full.clone(),
+            | Shading::Behind => self.full.clone(),
         }
     }
 }
@@ -972,6 +1000,9 @@ const ENTRY_POINTS: &str = "// zgx entry points:";
 /// (`ZGX_BLESS=1 cargo test -p zgx-gpu --lib translated_shaders`).
 const DRAW_MSL: &str = include_str!("draw.metal");
 const COPY_MSL: &str = include_str!("copy_offset.metal");
+/// `crate::continuous_source` the same way: compiled only with the first box
+/// asking for continuous corners, whose window's first frame it would be.
+const CONTINUOUS_MSL: &str = include_str!("continuous.metal");
 
 /// A WGSL module in MSL with zgx's fixed slots (`Kind`) and any sampler
 /// inline, and its entry points' names there.
@@ -1207,6 +1238,12 @@ mod tests {
                 Kind::Copies,
                 COPY_MSL,
                 "copy_offset.metal",
+            ),
+            (
+                &crate::continuous_source(),
+                Kind::Quads,
+                CONTINUOUS_MSL,
+                "continuous.metal",
             ),
         ] {
             let now = ahead(wgsl, kind);
