@@ -169,6 +169,8 @@ struct Inner {
     /// field, not an extension: `extension` scans in order, and an entry
     /// ahead of `Themes` would tax every theme read.
     idle: RefCell<Vec<std::rc::Weak<dyn Fn()>>>,
+    /// A host's idle trim was asked for (`idle::request`).
+    idle_requested: Cell<bool>,
     /// What effects made while they ran (`Runtime::own`), by effect: few
     /// ever do, so a side map rather than a field each.
     owned: RefCell<Owned>,
@@ -813,6 +815,10 @@ impl Runtime {
     /// What `idle::on_idle` registered.
     pub(crate) fn idle_trims(&self) -> &RefCell<Vec<std::rc::Weak<dyn Fn()>>> {
         &self.inner.idle
+    }
+    /// Whether a host's idle trim is asked for (`idle::request`).
+    pub(crate) fn idle_requested(&self) -> &Cell<bool> {
+        &self.inner.idle_requested
     }
     /// The runtime's one value of type `T`, made by `init` the first time
     /// it is asked for, so that independent parts of an application (its
