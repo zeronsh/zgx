@@ -639,6 +639,25 @@ impl Semantics {
         self.revision = self.revision.wrapping_add(1);
         entry.revision = self.revision;
     }
+    /// Node `id`'s label and value both `text`, as a paragraph says what it
+    /// reads: equal ones change nothing, and nothing is copied to compare
+    /// (`update` copies the node). Missing nodes are ignored.
+    pub fn set_text_content(&mut self, id: NodeId, text: String) {
+        if self.buried(id) {
+            return;
+        }
+        let Some(entry) = self.nodes.get_mut(&id) else {
+            return;
+        };
+        let node = &mut entry.node;
+        if node.label == text && node.value.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        text.as_str().clone_into(&mut node.label);
+        node.value = Some(text);
+        self.revision = self.revision.wrapping_add(1);
+        entry.revision = self.revision;
+    }
     /// What is wrong with field `id`'s value (`aria-invalid` and
     /// `aria-errormessage`), or `None` while it is fine; an equal one
     /// changes nothing.
@@ -1002,6 +1021,36 @@ mod tests {
         let removed_revision = semantics.revision();
         semantics.update_text_input(id, "missing", (0, 0), false);
         assert_eq!(semantics.revision(), removed_revision);
+        assert!(semantics.get(id).is_none());
+    }
+    /// A paragraph's text sets its label and value together: a change moves
+    /// the revision once, the same text leaves it, and its other fields stay.
+    #[test]
+    fn text_content_sets_label_and_value_and_moves_the_revision_only_for_a_change() {
+        let scene = Scene::new(100., 100.);
+        let id = scene.root();
+        let mut semantics = Semantics::new();
+        let mut node = SemanticNode::new(Role::Label, "");
+        node.description = Some("kept".into());
+        semantics.set(id, node);
+        let revision = semantics.revision();
+        semantics.set_text_content(id, "Some words".into());
+        assert_eq!(semantics.revision(), revision + 1);
+        let entry_revision = semantics.node_revision(id);
+        let set = semantics.get(id).unwrap();
+        assert_eq!(set.label, "Some words");
+        assert_eq!(set.value.as_deref(), Some("Some words"));
+        assert_eq!(set.description.as_deref(), Some("kept"));
+        semantics.set_text_content(id, "Some words".into());
+        assert_eq!(semantics.revision(), revision + 1);
+        assert_eq!(semantics.node_revision(id), entry_revision);
+        semantics.set_text_content(id, "Some more words".into());
+        assert_eq!(semantics.revision(), revision + 2);
+        assert_eq!(semantics.get(id).unwrap().label, "Some more words");
+        semantics.remove(id);
+        let removed = semantics.revision();
+        semantics.set_text_content(id, "gone".into());
+        assert_eq!(semantics.revision(), removed);
         assert!(semantics.get(id).is_none());
     }
     #[test]
