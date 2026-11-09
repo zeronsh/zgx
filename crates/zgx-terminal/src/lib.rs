@@ -19,6 +19,7 @@
 #![warn(missing_docs)]
 
 pub mod front;
+mod graphics;
 mod keys;
 mod news;
 mod osc;

@@ -1,7 +1,8 @@
 //! The operating system commands the screen model leaves to its embedder,
 //! read from the same bytes it parses: the working directory (OSC 7),
 //! shell-integrated command ends (OSC 133), progress (OSC 9;4) and desktop
-//! notifications (OSC 9, OSC 777).
+//! notifications (OSC 9, OSC 777); and the kitty graphics protocol's
+//! commands (APC `G`), which it passes over.
 
 /// What one of those commands says.
 #[derive(Clone, Debug, PartialEq)]
@@ -16,11 +17,25 @@ pub(crate) enum Osc {
     Progress(crate::Progress),
     /// OSC 9 or OSC 777;notify: a desktop notification.
     Notification { title: String, body: String },
+    /// APC `G`: a graphics command, what follows the `G`.
+    Graphics(Vec<u8>),
 }
 
 /// Longer commands are another kind (a clipboard's contents, an image):
 /// nothing this reads is that long.
 const LIMIT: usize = 4096;
+/// A graphics command's most (a picture is sent in chunks of 4096
+/// characters; this allows a program sending one whole).
+const GRAPHICS_LIMIT: usize = 64 << 20;
+
+/// The bytes after an escape that start what is read here: an OSC (`]`)
+/// and an APC (`_`). A table, so telling one costs a load whatever the set.
+const STARTS: [bool; 256] = {
+    let mut starts = [false; 256];
+    starts[b']' as usize] = true;
+    starts[b'_' as usize] = true;
+    starts
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
@@ -30,6 +45,11 @@ enum State {
     Osc,
     /// An escape in a command: `\` ends it (ST).
     OscEscape,
+    /// In an application program command (APC), collecting it if it is a
+    /// graphics command.
+    Apc,
+    /// An escape in an application program command.
+    ApcEscape,
 }
 
 /// Follows the byte stream across reads, collecting operating system
@@ -37,7 +57,12 @@ enum State {
 pub(crate) struct Sniffer {
     state: State,
     command: Vec<u8>,
-    /// The command outgrew `LIMIT`: dropped when it ends.
+    /// The graphics command being collected (empty but in one).
+    graphics: Vec<u8>,
+    /// No byte of the application program command read yet.
+    apc_started: bool,
+    /// The command outgrew its limit, or isn't one kept: dropped when it
+    /// ends.
     overflow: bool,
 }
 impl Default for Sniffer {
@@ -45,6 +70,8 @@ impl Default for Sniffer {
         Self {
             state: State::Ground,
             command: Vec::new(),
+            graphics: Vec::new(),
+            apc_started: false,
             overflow: false,
         }
     }
@@ -58,19 +85,17 @@ impl Sniffer {
         while !rest.is_empty() {
             match self.state {
                 // Most escapes (colours, cursor moves) start nothing read
-                // here: told by the byte after, they are passed over in
-                // this loop, without the states.
+                // here: told by the byte after (`STARTS`), they are passed
+                // over in this loop, without the states. An escape after
+                // this one is found by the next search.
                 State::Ground => loop {
                     let Some(at) = memchr::memchr(0x1b, rest) else {
                         return;
                     };
-                    match rest.get(at + 1) {
-                        Some(b']' | 0x1b) | None => {
-                            self.state = State::Escape;
-                            rest = &rest[at + 1..];
-                            break;
-                        }
-                        Some(_) => rest = &rest[at + 2..],
+                    rest = &rest[at + 1..];
+                    if rest.first().is_none_or(|&next| STARTS[usize::from(next)]) {
+                        self.state = State::Escape;
+                        break;
                     }
                 },
                 State::Escape => {
@@ -78,6 +103,11 @@ impl Sniffer {
                         self.command.clear();
                         self.overflow = false;
                         State::Osc
+                    } else if rest[0] == b'_' {
+                        self.graphics.clear();
+                        self.overflow = false;
+                        self.apc_started = true;
+                        State::Apc
                     } else if rest[0] == 0x1b {
                         State::Escape
                     } else {
@@ -122,8 +152,52 @@ impl Sniffer {
                         self.state = State::Escape;
                     }
                 }
+                State::Apc => {
+                    // The parser ends one at ESC, CAN or SUB, as here.
+                    let end = rest
+                        .iter()
+                        .position(|&b| b == 0x1b || b == 0x18 || b == 0x1a);
+                    let body = &rest[..end.unwrap_or(rest.len())];
+                    if self.apc_started && !body.is_empty() {
+                        // Only graphics commands are kept.
+                        self.apc_started = false;
+                        self.overflow = body[0] != b'G';
+                    }
+                    if !self.overflow {
+                        if self.graphics.len() + body.len() > GRAPHICS_LIMIT {
+                            self.overflow = true;
+                            self.graphics = Vec::new();
+                        } else {
+                            self.graphics.extend_from_slice(body);
+                        }
+                    }
+                    match end.map(|at| rest[at]) {
+                        Some(0x1b) => self.state = State::ApcEscape,
+                        Some(_) => self.state = State::Ground,
+                        None => return,
+                    }
+                    rest = &rest[body.len() + 1..];
+                }
+                State::ApcEscape => {
+                    if rest[0] == b'\\' {
+                        if !self.overflow && !self.apc_started {
+                            let mut command = std::mem::take(&mut self.graphics);
+                            command.remove(0);
+                            found(offset(rest) + 1, Osc::Graphics(command));
+                        }
+                        self.state = State::Ground;
+                        rest = &rest[1..];
+                    } else {
+                        self.state = State::Escape;
+                    }
+                }
             }
         }
+    }
+    /// The room held for graphics commands.
+    #[cfg(test)]
+    pub(crate) fn graphics_held(&self) -> usize {
+        self.graphics.capacity()
     }
     fn finish(&mut self, found: impl FnOnce(Osc)) {
         if !self.overflow
@@ -286,6 +360,37 @@ mod tests {
             ]),
             [Osc::Pwd("/a".into()), Osc::Pwd("/b".into())]
         );
+    }
+
+    /// Graphics commands are read whole across reads, ended by ST; other
+    /// application program commands, and those cancelled, pass.
+    #[test]
+    fn graphics_commands_are_read_across_reads() {
+        assert_eq!(
+            sniff(&[b"a\x1b_Ga=T,f=100;iVBO", b"Rw0K\x1b", b"\\b\x1b_Gi=1\x1b\\"]),
+            [
+                Osc::Graphics(b"a=T,f=100;iVBORw0K".to_vec()),
+                Osc::Graphics(b"i=1".to_vec())
+            ]
+        );
+        assert_eq!(
+            sniff(&[
+                b"\x1b_",
+                b"Xother\x1b\\\x1b_Gcut\x18\x1b_Gesc\x1b[0m\x1b]7;/p\x07"
+            ]),
+            [Osc::Pwd("/p".into())]
+        );
+    }
+
+    /// Output with no graphics command holds no room for one.
+    #[test]
+    fn no_graphics_commands_hold_no_room() {
+        let mut sniffer = Sniffer::default();
+        sniffer.feed(
+            b"\x1b[31mred\x1b]0;title\x07\x1b]7;file://h/a\x07\x1b_Xapc\x1b\\",
+            |_, _| {},
+        );
+        assert_eq!(sniffer.graphics.capacity(), 0);
     }
 
     #[test]

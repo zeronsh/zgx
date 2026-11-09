@@ -149,8 +149,11 @@ SCENES = [
     # wrapping, a progress line rewritten), its output replayed on the
     # main thread a 4 KB read at a time: parsed, rows worked out, laid out
     # and measured, undrawn. Built apart (`ALONE`): its dev-dependencies
-    # would otherwise join the other benches' build.
-    ('terminal', 'zgx-terminal', 'terminal_bench', {}),
+    # would otherwise join the other benches' build. Without fastbins, as
+    # script-update: with them, a change moving where the heap lay made
+    # `malloc_consolidate` run or not, and one binary counted 2.2 M (0.3%)
+    # apart (arm64), where the change itself was 0.05%.
+    ('terminal', 'zgx-terminal', 'terminal_bench', {'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
     # 3D frames' CPU work, drawn by wgpu's no-op backend (no driver, no JIT):
     # textured meshes alone, what a feature costs those not using it, then
     # those among skinned, morphing, cut-out and placed ones.

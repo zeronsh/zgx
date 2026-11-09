@@ -5335,8 +5335,11 @@ dependencies = [
 name = "zgx-terminal"
 version = "0.1.10"
 dependencies = [
+ "base64 0.22.1",
+ "flate2",
  "libc",
  "memchr",
+ "png 0.18.1",
  "polling",
  "windows-sys 0.59.0",
  "zgx",

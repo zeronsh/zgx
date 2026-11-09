@@ -236,6 +236,43 @@ fn queries_are_answered_and_the_foreground_is_known() {
     }
 }
 
+/// A picture a program sends in its output (the kitty graphics protocol)
+/// is placed on the cells at the cursor and kept for the view, the cursor
+/// moves past it, and the program is answered through the pty.
+#[cfg(unix)]
+#[test]
+fn a_program_places_a_picture_and_is_answered() {
+    // 2 by 2 black pixels, RGB (twelve zero bytes in base64).
+    let mut run = Scripted::run(
+        r#"exec sh -c 'stty raw -echo; printf "ab\033_Ga=T,f=24,s=25,v=30,i=5,q=2;AAAAAAAAAAAAAAAA\033\\"; printf "\033_Ga=T,f=24,s=2,v=2,i=5;AAAAAAAAAAAAAAAA\033\\"; dd bs=1 count=11 2>/dev/null | tr "\033\\\\" "E/"; exec sleep 30'"#,
+        30,
+        4,
+    );
+    run.until("the answer", |_, term| {
+        rows(term).iter().any(|row| row.contains("E_Gi=5;OKE/"))
+    });
+    let term = run.session.term();
+    // The first, with too few pixels for 25 by 30, was refused (quietly);
+    // the second placed at the cursor, one cell.
+    let placed: Vec<_> = term
+        .placements()
+        .iter()
+        .map(|p| {
+            (
+                p.image,
+                p.point.line.0,
+                p.point.column.0,
+                p.lines,
+                p.columns,
+            )
+        })
+        .collect();
+    assert_eq!(placed, [(5, 0, 2, 1, 1)]);
+    let image = run.session.image(5).expect("kept");
+    assert_eq!((image.width(), image.height()), (2, 2));
+    assert_eq!(image.pixels(), [0, 0, 0, 255].repeat(4));
+}
+
 #[cfg(windows)]
 #[test]
 fn a_windows_program_writes_exact_cells_and_exits() {
