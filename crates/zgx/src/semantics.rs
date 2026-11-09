@@ -344,6 +344,38 @@ impl Drop for SemanticUpdate<'_> {
     }
 }
 impl Semantics {
+    /// Its line of a memory report: each node's entry and its strings, and
+    /// the tables beside them. Worked out only as a report asks.
+    #[cold]
+    pub fn memory(&self, report: &mut crate::memory::Report) {
+        use crate::memory::{map_bytes, vec_bytes};
+        let text = |s: &String| s.capacity();
+        let some = |s: &Option<String>| s.as_ref().map_or(0, String::capacity);
+        let strings: usize = self
+            .nodes
+            .values()
+            .map(|entry| {
+                let node = &entry.node;
+                text(&node.label)
+                    + some(&node.value)
+                    + some(&node.placeholder)
+                    + some(&node.description)
+                    + some(&node.shortcut)
+                    + node.table.as_ref().map_or(0, |_| size_of::<TablePlace>())
+            })
+            .sum();
+        let bytes = map_bytes(&self.nodes)
+            + strings
+            + vec_bytes(&self.buried)
+            + map_bytes(&self.long)
+            + map_bytes(&self.errors)
+            + self.errors.values().map(text).sum::<usize>()
+            + map_bytes(&self.text_nodes)
+            + map_bytes(&self.text_lines)
+            + self.text_lines.values().map(vec_bytes).sum::<usize>()
+            + map_bytes(&self.labelled_by);
+        report.add("semantics", "nodes", Some(self.nodes.len()), Some(bytes));
+    }
     /// An empty store.
     pub fn new() -> Self {
         Self::default()

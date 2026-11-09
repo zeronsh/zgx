@@ -2932,13 +2932,20 @@ impl ScriptHost {
         })
     }
     /// The scripts' lines of a memory report: each VM's heap as it stands
-    /// (no collection), and the pictures they show and keep.
+    /// (no collection), of it the pages pooled outside the program's heap
+    /// (every VM's together), and the pictures they show and keep.
     pub fn memory(&self, report: &mut zgx::memory::Report) {
         if let Some(loaded) = self.0.current.borrow().clone() {
             for vm in &loaded._vms {
                 report.add("luau", vm.name.clone(), None, Some(vm.lua.used_memory()));
             }
         }
+        report.add(
+            "luau",
+            "of which pooled pages (every VM)",
+            None,
+            Some(mlua::pooled_page_bytes()),
+        );
         self.0.assets.memory(report);
         self.states_memory(report);
     }

@@ -116,7 +116,9 @@ pub use crate::scope::Scope;
 #[doc(inline)]
 pub use crate::state::{Lua, LuaOptions, WeakLua};
 #[cfg(feature = "luau")]
-pub use crate::memory::{MemoryAlarm, free_pages, pool_pages, release_free_pages, set_memory_alarm};
+pub use crate::memory::{
+    MemoryAlarm, free_pages, pool_pages, pooled_page_bytes, release_free_pages, set_memory_alarm,
+};
 pub use crate::stdlib::StdLib;
 #[doc(inline)]
 pub use crate::string::LuaString;

@@ -466,6 +466,11 @@ impl FontSystem {
         Some(hyphenator(word, &self.locale))
     }
 
+    /// zgx: how many fonts are loaded (parsed and kept), for a memory report.
+    pub fn loaded_fonts(&self) -> usize {
+        self.font_cache.values().filter(|font| font.is_some()).count()
+    }
+
     /// Get the database.
     pub const fn db(&self) -> &fontdb::Database {
         &self.db

@@ -31,8 +31,10 @@ mod pages {
         ready: Vec<usize>,
         /// Free and given back to the OS.
         released: Vec<usize>,
+        /// Slots mapped, used or free.
+        slots: usize,
     }
-    static POOL: Mutex<Pool> = Mutex::new(Pool { ready: Vec::new(), released: Vec::new() });
+    static POOL: Mutex<Pool> = Mutex::new(Pool { ready: Vec::new(), released: Vec::new(), slots: 0 });
 
     fn pool() -> std::sync::MutexGuard<'static, Pool> {
         POOL.lock().unwrap_or_else(|e| e.into_inner())
@@ -62,6 +64,7 @@ mod pages {
             return ptr::null_mut();
         }
         let chunk = chunk as usize;
+        pool.slots += CHUNK / SLOT;
         pool.ready.extend((1..CHUNK / SLOT).rev().map(|i| chunk + i * SLOT));
         chunk as *mut u8
     }
@@ -72,7 +75,7 @@ mod pages {
 
     pub(super) fn release() {
         let mut pool = pool();
-        let Pool { ready, released } = &mut *pool;
+        let Pool { ready, released, .. } = &mut *pool;
         // Neighbouring slots go in one call.
         ready.sort_unstable();
         let mut slots = ready.iter().copied().peekable();
@@ -94,6 +97,11 @@ mod pages {
         let pool = pool();
         (pool.ready.len(), pool.released.len())
     }
+
+    pub(super) fn used() -> usize {
+        let pool = pool();
+        (pool.slots - pool.ready.len() - pool.released.len()) * SLOT
+    }
 }
 
 #[cfg(not(all(feature = "luau", any(target_os = "macos", target_os = "linux"))))]
@@ -106,6 +114,9 @@ mod pages {
     pub(super) fn release() {}
     pub(super) fn free() -> (usize, usize) {
         (0, 0)
+    }
+    pub(super) fn used() -> usize {
+        0
     }
 }
 
@@ -129,6 +140,12 @@ pub fn release_free_pages() {
 #[doc(hidden)]
 pub fn free_pages() -> (usize, usize) {
     pages::free()
+}
+
+/// zgx patch: the bytes of pooled Luau pages in use, for every VM of the
+/// process: memory outside the program's heap (`pool_pages`).
+pub fn pooled_page_bytes() -> usize {
+    pages::used()
 }
 
 unsafe fn allocate(pooled: bool, size: usize, layout: Layout) -> *mut c_void {

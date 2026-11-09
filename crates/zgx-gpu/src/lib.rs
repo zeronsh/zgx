@@ -5155,9 +5155,26 @@ impl GpuRenderer {
             // from their files, kept by the system and clean.
             let fonts = self.fonts.borrow();
             let (mut faces, mut seen) = (0, rustc_hash::FxHashSet::default());
-            let (mut held, mut mapped) = (0, 0);
+            let (mut held, mut mapped, mut listed) = (0, 0, 0);
             for face in fonts.db().faces() {
                 faces += 1;
+                // The database's entry: its names, and its file's path.
+                listed += size_of::<cosmic_text::fontdb::FaceInfo>()
+                    + face.families.capacity()
+                        * size_of::<(String, cosmic_text::fontdb::Language)>()
+                    + face
+                        .families
+                        .iter()
+                        .map(|(name, _)| name.capacity())
+                        .sum::<usize>()
+                    + face.post_script_name.capacity()
+                    + match &face.source {
+                        cosmic_text::fontdb::Source::File(path)
+                        | cosmic_text::fontdb::Source::SharedFile(path, _) => {
+                            path.as_os_str().len()
+                        }
+                        cosmic_text::fontdb::Source::Binary(_) => 0,
+                    };
                 match &face.source {
                     cosmic_text::fontdb::Source::Binary(data) => {
                         if seen.insert(std::sync::Arc::as_ptr(data) as *const () as usize) {
@@ -5172,6 +5189,13 @@ impl GpuRenderer {
                     cosmic_text::fontdb::Source::File(_) => {}
                 }
             }
+            report.add("text", "font database", Some(faces), Some(listed));
+            report.add(
+                "text",
+                "fonts loaded (parsed, uncounted)",
+                Some(fonts.loaded_fonts()),
+                None,
+            );
             report.add("text", "fonts given as bytes", Some(faces), Some(held));
             report.add(
                 "text",

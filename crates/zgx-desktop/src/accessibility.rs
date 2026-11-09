@@ -241,6 +241,46 @@ struct LineRuns {
     offsets: Vec<Vec<usize>>,
 }
 impl AccessibilityTree {
+    /// Its line of a memory report: the nodes projected for assistive
+    /// technology and the tables mapping them to the scene's (each node's
+    /// own properties, and the platform's copy of the tree a client reads,
+    /// are not counted). Worked out only as a report asks.
+    #[cold]
+    pub(crate) fn memory(&self, report: &mut zgx::memory::Report) {
+        use zgx::memory::{map_bytes, set_bytes, vec_bytes};
+        let long: usize = self
+            .long_runs
+            .values()
+            .map(|lines| {
+                map_bytes(lines)
+                    + lines
+                        .values()
+                        .map(|line| line.text.capacity() + vec_bytes(&line.ids))
+                        .sum::<usize>()
+            })
+            .sum();
+        let bytes = map_bytes(&self.ids)
+            + map_bytes(&self.cache)
+            + map_bytes(&self.projection_revisions)
+            + map_bytes(&self.text_runs)
+            + self.text_runs.values().map(vec_bytes).sum::<usize>()
+            + map_bytes(&self.text_positions)
+            + self
+                .text_positions
+                .values()
+                .map(|(_, at)| vec_bytes(at))
+                .sum::<usize>()
+            + set_bytes(&self.blocks)
+            + map_bytes(&self.long_runs)
+            + long
+            + map_bytes(&self.run_boxes);
+        report.add(
+            "accessibility",
+            "nodes projected (their properties uncounted)",
+            Some(self.cache.len()),
+            Some(bytes),
+        );
+    }
     /// An empty tree: the first update is a complete snapshot.
     pub fn new() -> Self {
         Self::default()

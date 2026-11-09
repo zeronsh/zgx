@@ -6,6 +6,16 @@ use taffy::{
     prelude as t,
     style_helpers::{line, span},
 };
+impl AdvancedLayoutCache {
+    /// About what it holds, for a memory report: its maps, and each taffy
+    /// node's style and layouts (taffy's own tables, estimated).
+    pub(super) fn heap_bytes(&self) -> usize {
+        let per_node = size_of::<t::Style>() + 3 * size_of::<t::Layout>();
+        crate::memory::map_bytes(&self.nodes)
+            + crate::memory::vec_bytes(&self.order)
+            + self.tree.total_node_count() * per_node
+    }
+}
 pub(super) struct AdvancedLayoutCache {
     tree: t::TaffyTree<NodeId>,
     root: t::NodeId,

@@ -3837,12 +3837,104 @@ impl Scene {
         self.slots.len() - self.free.len() - self.dead
     }
     /// The scene's lines of a memory report: nodes mounted, those removed
-    /// and not yet freed (`free_dead`), and the slots they all take.
+    /// and not yet freed (`free_dead`), the slots they all take, and what
+    /// nodes hold beyond their slots (child lists, layout results, boxed
+    /// extras, text) and the scene's tables beside them. Worked out only as
+    /// a report asks.
+    #[cold]
     pub fn memory(&self, report: &mut crate::memory::Report) {
+        use crate::memory::{map_bytes, vec_bytes};
         report.add("scene", "nodes mounted", Some(self.len()), None);
         report.add("scene", "nodes dying", Some(self.dead), None);
         let slots = self.slots.capacity() * size_of::<Slot>();
         report.add("scene", "slots", Some(self.slots.len()), Some(slots));
+        let (mut children, mut measured, mut measurements) = (0, 0, 0);
+        let (mut extras, mut advanced, mut texts, mut text) = (0, 0, 0, 0);
+        let mut seen = rustc_hash::FxHashSet::default();
+        for node in self.slots.iter().filter_map(|slot| slot.node.as_ref()) {
+            // SAFETY: a report runs outside layout, which alone changes the
+            // children through the cell.
+            children += vec_bytes(unsafe { &*node.head.children.get() });
+            let held = node
+                .measurement
+                .iter()
+                .chain(&node.alternates)
+                .map(|m| vec_bytes(&m.children))
+                .sum::<usize>()
+                + vec_bytes(&node.alternates)
+                + vec_bytes(&node.sizes);
+            measured += usize::from(held > 0);
+            measurements += held;
+            if let Some(cache) = &node.advanced_layout {
+                advanced += size_of::<advanced_layout::AdvancedLayoutCache>() + cache.heap_bytes();
+            }
+            extras += node.local.as_ref().map_or(0, |_| size_of::<Local>())
+                + node
+                    .image_mask
+                    .as_ref()
+                    .map_or(0, |_| size_of::<ImageMask>())
+                + node
+                    .clip_inset
+                    .as_ref()
+                    .map_or(0, |_| size_of::<ClipInset>())
+                + node
+                    .shader_uniforms
+                    .as_ref()
+                    .map_or(0, |_| size_of::<crate::decoration::ShaderUniforms>());
+            // Each text once, however many nodes share it.
+            if let NodeKind::Text { text: shown, .. } = &node.kind
+                && seen.insert(shown.as_ptr() as usize)
+            {
+                texts += 1;
+                text += shown.len() + 2 * size_of::<usize>();
+            }
+        }
+        report.add("scene", "child lists", None, Some(children));
+        report.add(
+            "scene",
+            "layout results",
+            Some(measured),
+            Some(measurements),
+        );
+        report.add("scene", "advanced layouts", None, Some(advanced));
+        report.add("scene", "node extras", None, Some(extras));
+        report.add("scene", "plain texts", Some(texts), Some(text));
+        let cold = self.cold.as_ref().map_or(0, |cold| {
+            size_of::<ColdMaps>()
+                + map_bytes(&cold.grid_templates)
+                + map_bytes(&cold.grid_places)
+                + map_bytes(&cold.stacked)
+                + cold.stacked.values().map(vec_bytes).sum::<usize>()
+                + map_bytes(&cold.raised)
+                + map_bytes(&cold.outside_fade)
+                + map_bytes(&cold.sticky)
+                + map_bytes(&cold.column_memos)
+                + vec_bytes(&cold.column_kept)
+                + map_bytes(&cold.size_calcs)
+        });
+        let tables = vec_bytes(&self.free)
+            + vec_bytes(&self.dirty)
+            + vec_bytes(&self.damage)
+            + vec_bytes(&self.popups)
+            + vec_bytes(&self.blur_nodes)
+            + vec_bytes(&self.overflow_fades)
+            + vec_bytes(&self.platform_nodes)
+            + vec_bytes(&self.scratch)
+            + vec_bytes(&self.layout_roots)
+            + vec_bytes(&self.held_alone)
+            + vec_bytes(&self.overfull)
+            + vec_bytes(&self.escaped)
+            + vec_bytes(&self.pending_moves)
+            + vec_bytes(&self.moves)
+            + vec_bytes(&self.repaints)
+            + vec_bytes(&self.inert)
+            + vec_bytes(&self.shrank)
+            + map_bytes(&self.contents_styles)
+            + map_bytes(&self.given_styles)
+            + map_bytes(&self.directions)
+            + map_bytes(&self.layer_shaders)
+            + cold;
+        report.add("scene", "tables", None, Some(tables));
     }
     /// The ids of the nodes in the scene, in slot order.
     fn ids(&self) -> impl Iterator<Item = NodeId> + '_ {

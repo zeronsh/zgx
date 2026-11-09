@@ -5981,6 +5981,7 @@ impl Host {
         if let Some(renderer) = &self.renderer {
             renderer.memory(&mut report);
         }
+        self.tree.memory(&mut report);
         self.popups.memory(&mut report);
         // Popups the scene has open but no window has drawn yet (the next
         // frame makes it): said, so a reading between the two isn't taken

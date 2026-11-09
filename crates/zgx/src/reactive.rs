@@ -10,6 +10,9 @@ use std::{
 type EffectId = u64;
 trait Dependency {
     fn unsubscribe(&self, id: EffectId);
+    /// What it takes beside its value (a memory report's): itself, in its
+    /// `Rc`, and its subscribers.
+    fn bytes(&self) -> usize;
 }
 /// One allocation: the closure lives in the `Rc` itself.
 type Callback = Rc<RefCell<dyn FnMut()>>;
@@ -808,6 +811,72 @@ impl Runtime {
         }
         self.inner.stopped.set(self.inner.stopped.get() + stopped);
     }
+    /// The runtime's lines of a memory report: its effects (each closure's
+    /// captures and what it reads), the signals they read (without their
+    /// values, which their holders count), and the values effects own.
+    /// Worked out only as a report asks; none if a run holds the tables.
+    #[cold]
+    pub fn memory(&self, report: &mut crate::memory::Report) {
+        use crate::memory::{map_bytes, vec_bytes};
+        let (Ok(effects), Ok(owned)) = (
+            self.inner.effects.try_borrow(),
+            self.inner.owned.try_borrow(),
+        ) else {
+            return;
+        };
+        let mut bytes = vec_bytes(&effects.slots) + vec_bytes(&effects.free);
+        let mut callbacks = rustc_hash::FxHashSet::default();
+        let mut signals = rustc_hash::FxHashSet::default();
+        let mut signal_bytes = 0;
+        for record in effects
+            .slots
+            .iter()
+            .filter_map(|(_, record)| record.as_ref())
+        {
+            // A callback shared by effects counts once.
+            if callbacks.insert(Rc::as_ptr(&record.callback) as *const () as usize) {
+                bytes += 2 * size_of::<usize>() + size_of_val(&*record.callback);
+            }
+            if record.dependencies.spilled() {
+                bytes += record.dependencies.capacity() * size_of::<Subscription>();
+            }
+            for dependency in &record.dependencies {
+                if signals.insert(dependency.key as usize)
+                    && let Some(source) = dependency.source.upgrade()
+                {
+                    signal_bytes += source.bytes();
+                }
+            }
+        }
+        bytes += self
+            .inner
+            .queued
+            .try_borrow()
+            .map_or(0, |queued| vec_bytes(&queued));
+        if let Ok(order) = self.inner.order.try_borrow() {
+            bytes += vec_bytes(&order.bits) + vec_bytes(&order.slots);
+        }
+        report.add("reactive", "effects", Some(effects.len()), Some(bytes));
+        report.add(
+            "reactive",
+            "signals read",
+            Some(signals.len()),
+            Some(signal_bytes),
+        );
+        let values = owned.values().map(Vec::len).sum();
+        let owned_bytes = map_bytes(&owned)
+            + owned
+                .values()
+                .map(|values| {
+                    vec_bytes(values)
+                        + values
+                            .iter()
+                            .map(|value| size_of_val(&**value))
+                            .sum::<usize>()
+                })
+                .sum::<usize>();
+        report.add("reactive", "owned values", Some(values), Some(owned_bytes));
+    }
     /// How many effects are alive (not stopped).
     pub fn effect_count(&self) -> usize {
         self.inner.effects.borrow().len() - self.inner.stopped.get()
@@ -964,6 +1033,14 @@ struct SignalInner<T> {
 impl<T> Dependency for SignalInner<T> {
     fn unsubscribe(&self, id: EffectId) {
         self.subscribers.borrow_mut().remove(&id);
+    }
+    fn bytes(&self) -> usize {
+        2 * size_of::<usize>()
+            + size_of::<Self>()
+            + self
+                .subscribers
+                .try_borrow()
+                .map_or(0, |subscribers| crate::memory::set_bytes(&subscribers))
     }
 }
 /// Effects held by [`Runtime::hold_effects`] until it drops.
