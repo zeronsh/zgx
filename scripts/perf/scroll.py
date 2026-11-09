@@ -151,6 +151,17 @@ def workload(frames):
                 worst_main_frame=max(frames,key=app_work_ms,default=None))
 
 
+def fixture_model_source(text, model_catalog):
+    marker = 'local settle_model_catalog = true'
+    if text.count(marker) != 1:
+        raise RuntimeError('unrecognized fixture catalog control')
+    return text.replace(marker, 'local settle_model_catalog = false') if model_catalog == 'loading' else text
+
+
+def catalog_matches(state, model_catalog):
+    return state.get('bench_catalog_complete') is (model_catalog == 'settled')
+
+
 def material_matches(state, background):
     return state.get('bench_effective_frost') is (background=='translucent')
 
@@ -517,7 +528,9 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                 if not source.is_dir():
                     source = args.zeron_source / 'ui'
                 shutil.copytree(source, stage/'app')
-                shutil.copy2(ROOT/'scripts/perf/zeron_fixture.luau',stage/'app/scroll_fixture.luau')
+                result['model_catalog'] = args.model_catalog
+                fixture_text = fixture_model_source((ROOT/'scripts/perf/zeron_fixture.luau').read_text(), args.model_catalog)
+                (stage/'app/scroll_fixture.luau').write_text(fixture_text)
                 if getattr(args,'reset_row',0)>0:
                     transcript=stage/'app/ds/transcript.luau'
                     source_text=transcript.read_text()
@@ -657,6 +670,8 @@ return ui.overlay {""")
                     (out/'fixture_state.json').write_text(json.dumps(state,indent=2)+'\n')
                     result['fixture_state'] = {k:v for k,v in state.items() if 'bench_' in k}
                     if not material_matches(result['fixture_state'],background):raise RuntimeError('actual shell material differs from requested background')
+                    if not catalog_matches(result['fixture_state'],args.model_catalog):raise RuntimeError('actual shell catalog differs from requested settlement')
+                    result['catalog_complete'] = result['fixture_state']['bench_catalog_complete']
                 if scene in ('idle','zeron-idle'):
                     # Never seed a reference with wheel state, even in warmup:
                     # gesture/coast grace periods can change the tick source.
@@ -713,6 +728,10 @@ return ui.overlay {""")
                         process.wait(timeout=5)
                         raise
                     result['replay'] = future.result()
+                if real_app:
+                    final_catalog = request(process.pid,'state',name='bench_catalog_complete')['data']
+                    result['catalog_complete_after'] = final_catalog.get('bench_catalog_complete')
+                    if not catalog_matches(final_catalog,args.model_catalog):raise RuntimeError('shell catalog settlement changed during replay')
                 errors = request(process.pid,'errors')['text']
                 if 'error:' in errors or 'types:' in errors:
                     raise RuntimeError(errors)
@@ -972,6 +991,7 @@ def main():
     p.add_argument('--native-floor',action='store_true',help='bracket each zgx idle reference with independent Swift/Metal references')
     p.add_argument('--set-refresh', action='store_true', help='select matching native display modes and restore the original')
     p.add_argument('--scale', default='2')
+    p.add_argument('--model-catalog',choices=['settled','loading'],default='settled',help='real-shell catalog condition; verified before and after replay')
     p.add_argument('--reset-row',type=int,default=160,help='real-app message row to align before each run;0 retains legacy fractional reset')
     p.add_argument('--native-scale', type=float, default=2, help='display backing scale; requested render scales use app zoom')
     p.add_argument('--backgrounds', default='opaque,translucent')

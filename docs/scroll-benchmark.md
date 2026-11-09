@@ -421,3 +421,12 @@ No inspector requests run during that wait. `rest_after` and
 `rest_delta_from_before` are KiB; the latter compares against the warmed
 pre-replay RSS. This short sample tests immediate drawable release, not the
 list cache’s separate 30-second trim. It does not measure GPU allocations.
+
+Real-shell runs default to `--model-catalog settled`. The benchmark wrapper
+marks its known fixture catalog complete and checks the actual observed state
+before and after each replay, including the idle marker. `--model-catalog loading`
+retains the model-chip loading animation as an explicit regression condition.
+An absent or changed state invalidates a run. Public summaries carry the intended
+enum and observed completion boolean. Earlier wrappers omitted catalog completion;
+their real-shell data must not certify a settled composer. Keep comparisons within
+the same catalog condition and rerun headline decisions on the settled fixture.

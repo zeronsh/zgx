@@ -14,6 +14,19 @@ class ScrollMetrics(unittest.TestCase):
         self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',True),{})
         self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',False),{})
 
+    def test_catalog_settlement_must_be_observed_and_missing_is_not_loading(self):
+        self.assertTrue(scroll.catalog_matches({'bench_catalog_complete':True},'settled'))
+        self.assertTrue(scroll.catalog_matches({'bench_catalog_complete':False},'loading'))
+        self.assertFalse(scroll.catalog_matches({},'loading'))
+        self.assertFalse(scroll.catalog_matches({'bench_catalog_complete':False},'settled'))
+        self.assertFalse(scroll.catalog_matches({'bench_catalog_complete':1},'settled'))
+
+    def test_loading_control_requires_the_known_fixture_marker(self):
+        source='local settle_model_catalog = true\nreturn real_shell'
+        self.assertIn('= false',scroll.fixture_model_source(source,'loading'))
+        self.assertEqual(scroll.fixture_model_source(source,'settled'),source)
+        with self.assertRaises(RuntimeError):scroll.fixture_model_source('outdated fixture','loading')
+
     def test_changed_default_is_verified_without_forcing_an_environment_flag(self):
         metrics={'frame_source_counts':{'view link':100},'render_frames':100}
         proof=scroll.behavior_checks(metrics,[],[],'0',True,True,'view link')

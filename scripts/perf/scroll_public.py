@@ -12,6 +12,7 @@ FIELDS = {
     'background': {'opaque', 'translucent'},
     'present': {'0', '1', 'auto'},
     'status': {'pass', 'fail', 'invalid'},
+    'model_catalog': {'settled', 'loading'},
 }
 SCALARS = ('hz', 'scale', 'repeat')
 METRICS = (
@@ -48,6 +49,9 @@ def sanitize(row):
     result = {key: row[key] for key, choices in FIELDS.items()
               if isinstance(row.get(key), str) and row[key] in choices}
     result.update(numeric_fields(row, SCALARS))
+    for key in ('catalog_complete', 'catalog_complete_after'):
+        if type(row.get(key)) is bool:
+            result[key] = row[key]
     for key in ('engine_pin', 'engine_commit', 'tape_sha256'):
         value = row.get(key)
         if isinstance(value, str) and len(value) in (40, 64) and all(c in '0123456789abcdef' for c in value):

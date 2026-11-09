@@ -31,6 +31,13 @@ class PublicSummaryTests(unittest.TestCase):
         self.assertEqual(result['metrics']['rss_kib'],
                          {'rest_after': 1234, 'rest_seconds': 3, 'rest_delta_from_before': -10})
 
+    def test_catalog_condition_keeps_only_known_enum_and_observed_boolean(self):
+        result=sanitize({'model_catalog':'settled','catalog_complete':True,'catalog_complete_after':False})
+        self.assertEqual(result['model_catalog'],'settled')
+        self.assertIs(result['catalog_complete'],True)
+        self.assertIs(result['catalog_complete_after'],False)
+        self.assertNotIn('catalog_complete',sanitize({'catalog_complete':'private text'}))
+
     def test_native_brackets_keep_numbers_and_discard_raw_samples(self):
         result = sanitize({'native_floor_before': {'status': 'valid', 'late_pct': 0,
                            'source': '/private/path', 'presentation_timings': {

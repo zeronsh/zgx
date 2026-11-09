@@ -124,6 +124,7 @@ def run_one(args, descriptor, arm, role, trial, position):
           '--scale',str(c.get('scale',2)),'--backgrounds',c.get('background','translucent'),
           '--present',str(c.get('present','0')),'--repeats','1','--native-floor',
           '--reset-row',str(c.get('reset_row',160)), '--reference-refresh-grid',c.get('reference_refresh_grid','off'),'--output',str(output)]
+    if 'model_catalog' in c:argv+=['--model-catalog',c['model_catalog']]
     if c.get('set_refresh'):argv+=['--set-refresh']
     if 'rest_seconds' in c:argv+=['--rest-seconds',str(c['rest_seconds'])]
     for key in ('engine_source','engine_pin','zeron_source','zeron_runner','runner','reference_runner','reference_source','scroll_source'):
