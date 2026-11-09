@@ -1461,27 +1461,44 @@ declare extern type Term with
 	function close(self): ()
 end
 -- `ui.app(id, opts)`: a program started (no shell) with an external
--- surface's connection, shown by `ui.surface { app = a }`. Sessions outlive
--- reloads: the run that asks for `id` again gets the same one. A plugin's
--- ids are its own; it needs the `apps` grant. Its fields are tracked.
+-- surface's connection, or a WebAssembly app run in this process
+-- (`wasm`), shown by `ui.surface { app = a }`. Sessions outlive reloads:
+-- the run that asks for `id` again gets the same one. A plugin's ids are
+-- its own; it needs the `apps` grant (or `wasm`, for a WebAssembly app).
+-- Its fields are tracked.
 declare extern type App with
 	id: string
-	-- "starting" until it connects, then "running"; "exited" or "failed".
+	-- "process" (`command`) or "wasm".
+	kind: "process" | "wasm"
+	-- "starting" until it connects (a WebAssembly app: is compiled), then
+	-- "running"; "exited" or "failed".
 	status: "starting" | "running" | "exited" | "failed"
 	-- What the program set as its title; "" until it does.
 	title: string
+	-- A program's process id; nil for a WebAssembly app.
 	pid: number?
-	-- Its exit code once it exited (nil if a signal ended it).
+	-- Its exit code once it exited (nil if a signal ended it, or closed).
 	exit_code: number?
-	-- Why it couldn't start, with "failed".
+	-- Why it couldn't start, or (a WebAssembly app) why it trapped or was
+	-- interrupted, with "failed".
 	error: string?
 	-- End the session: the program is told to close, and killed if it
 	-- hasn't exited a moment later.
 	function close(self): ()
 end
 export type AppOptions = {
-	-- The program: a path, or a name looked up on PATH. No shell.
-	command: string,
+	-- The program: a path, or a name looked up on PATH. No shell. Or
+	-- `wasm` instead.
+	command: string?,
+	-- A WebAssembly component (`wasm32-wasip2`, the `zgx:app/app` world)
+	-- run in this process, sandboxed, from the script's folder (a plugin's
+	-- inside its own); `command`, `args`, `cwd` and `env` are a program's.
+	wasm: string?,
+	-- A WebAssembly app's most memory, in MiB (1024; at most 4096).
+	memory: number?,
+	-- Seconds any call into a WebAssembly app may run before its session
+	-- fails (5; at most 60).
+	timeout: number?,
 	args: { string }?,
 	-- Where it starts ("~" is home); nil is the app's own directory.
 	cwd: string?,

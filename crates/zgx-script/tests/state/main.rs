@@ -79,5 +79,7 @@ mod streaming;
 mod ui_errors;
 #[path = "../upload.rs"]
 mod upload;
+#[path = "../wasm_apps.rs"]
+mod wasm_apps;
 #[path = "../windows.rs"]
 mod windows;

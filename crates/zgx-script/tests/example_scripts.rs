@@ -54,3 +54,9 @@ fn stream_runs() {
 fn scene3d() {
     runs("scene3d/app.luau", None);
 }
+
+#[cfg(feature = "wasm")]
+#[test]
+fn wasm_apps() {
+    runs("wasm_apps/app.luau", None);
+}

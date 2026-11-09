@@ -1,0 +1,10 @@
+[package]
+name = "zgx-app"
+description = "Write a zgx WebAssembly app in Rust: the `zgx:app/app` world's bindings and an `App` trait."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+wit-bindgen = "0.63"

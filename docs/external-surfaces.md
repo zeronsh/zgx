@@ -1,6 +1,8 @@
 # External surfaces: another program's frames as an element
 
-An external surface shows what another process draws, with GPU work of its own (a game, an emulator, a renderer on another wgpu), as an ordinary element: sized, rounded, clipped, faded, popovers over it. Its input is the program's: keys while it has focus, the pointer over it, and a pointer lock it asks for. On Linux and macOS the frames never touch a CPU: the host allocates the buffers on its GPU, the program draws into them, the host samples them.
+(For a plugin's code run in zgx's own process, sandboxed, see [WebAssembly apps](wasm-apps.md).)
+
+An external surface shows what another process draws, with GPU work of its own (a game, an emulator, a renderer on another wgpu), as an ordinary element: sized, rounded, clipped, faded, popovers over it. Its input is the program's: keys while it has focus, the pointer over it, and a pointer lock it asks for. On Linux, macOS and Windows the frames never touch a CPU: the host allocates the buffers on its GPU (Vulkan memory, IOSurfaces, Direct3D 12 shared textures), the program draws into them, the host samples them.
 
 ```rust
 use zgx::compose::prelude::*;
