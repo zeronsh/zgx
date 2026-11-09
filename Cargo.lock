@@ -5309,6 +5309,7 @@ dependencies = [
  "png 0.18.1",
  "pulldown-cmark",
  "rustc-hash 2.1.3",
+ "serde",
  "serde_json",
  "smallvec",
  "unicase",
