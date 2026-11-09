@@ -1,6 +1,6 @@
 # External surfaces: another program's frames as an element
 
-An external surface shows what another process draws, with GPU work of its own (a game, an emulator, a renderer on another wgpu), as an ordinary element: sized, rounded, clipped, faded, popovers over it. Its input is the program's: keys while it has focus, the pointer over it, and a pointer lock it asks for. Where the platform allows the frames never touch a CPU: the host allocates the buffers on its GPU, the program draws into them, the host samples them.
+An external surface shows what another process draws, with GPU work of its own (a game, an emulator, a renderer on another wgpu), as an ordinary element: sized, rounded, clipped, faded, popovers over it. Its input is the program's: keys while it has focus, the pointer over it, and a pointer lock it asks for. On Linux and macOS the frames never touch a CPU: the host allocates the buffers on its GPU, the program draws into them, the host samples them.
 
 ```rust
 use zgx::compose::prelude::*;
@@ -30,14 +30,17 @@ cargo run -p zgx-desktop --features surfaces --example external_surface -- --shm
 | `zgx-surface` | the protocol, its connection and the client (`Client`), shared memory (`shm`), the host's and client's rings (`ring`). No wgpu. |
 | `zgx-surface/vulkan` | ash 0.38 helpers: a device's ids, an exportable image, an import (`vulkan`) |
 | `zgx-surface/dxgi` | Direct3D 12 helpers on Windows (`windows` 0.62, wgpu-hal 29's): an adapter's LUID, a shared texture and its NT handle, an open (`dxgi`) |
+| `zgx-surface` on macOS | IOSurfaces (`iosurface::Surface`) and the Mach channel their ports travel over (`iosurface::{HostChannel, ClientChannel}`). No Metal. |
+| `zgx-surface/metal` | objc2-metal 0.3 helpers (macOS): the Metal devices by `registryID`, an IOSurface as a Metal texture (`metal`) |
 | `zgx-surface/wgpu29` | a wgpu 29 client's (and the host's) helpers: the adapter matching the host's GPU, buffers as `wgpu::Texture`s, a readback into shared memory (`wgpu29`) |
 | `zgx-surface/host` | the zgx side: `App`, `surface` (re-exported as `zgx_desktop::surface`, the desktop host's `surfaces` feature) |
 | `zgx-script/apps` | `ui.app` and `ui.surface` (zgx-run has it) |
 
 ## How it works
 
-1. **Start.** The host starts the program (no shell) with one end of a Unix socket pair inherited; `ZGX_SURFACE_FD` names it. On Windows it is two named pipes instead (`<name>.down`, `<name>.up`, `PIPE_REJECT_REMOTE_CLIENTS`), named in `ZGX_SURFACE_PIPE`. On Linux the program dies with the host however the host ends (`PR_SET_PDEATHSIG`); closing the session sends `Close` and kills it 1.5 s later if it hasn't exited (`SIGKILL`, or `TerminateProcess` on a process handle the session holds, so the pid is never another program's meanwhile).
-2. **Handshake.** The client says what it can take, best first (`Hello`): Vulkan images on any of its GPUs (by `deviceUUID` and `driverUUID`), Direct3D 12 textures on any of its adapters (by LUID), or shared memory. The host answers (`Welcome`) with the kind it will send and, for Vulkan, its own GPU's ids, or for Direct3D 12 its adapter's LUID, which the client draws on (`wgpu29::adapter_for`, `wgpu29::adapter_for_luid`). The host answers when it first draws the element, as it then knows its device.
+1. **Start.** The host starts the program (no shell) with one end of a Unix socket pair inherited; `ZGX_SURFACE_FD` names it. On Windows it is two named pipes instead (`<name>.down`, `<name>.up`, `PIPE_REJECT_REMOTE_CLIENTS`), named in `ZGX_SURFACE_PIPE`. On macOS `ZGX_SURFACE_MACH` also names the host's Mach rendezvous, for IOSurfaces ([below](#iosurfaces-and-the-mach-channel)). On Linux the program dies with the host however the host ends (`PR_SET_PDEATHSIG`); closing the session sends `Close` and kills it 1.5 s later if it hasn't exited (`SIGKILL`, or `TerminateProcess` on a process handle the session holds, so the pid is never another program's meanwhile).
+2. **Handshake.** The client says what it can take, best first (`Hello`): Vulkan images on any of its GPUs (by `deviceUUID` and `driverUUID`), IOSurfaces on any of its Metal devices (by `registryID`), Direct3D 12 textures on any of its adapters (by LUID), or shared memory. The host answers (`Welcome`) with the kind it will send and, for Vulkan or IOSurfaces, its own GPU's ids, or for Direct3D 12 its adapter's LUID, which the client draws on (`wgpu29::adapter_for`, `wgpu29::adapter_for_luid`). The host answers when it first draws the element, as it then knows its device.
+@@@@
 3. **Buffers.** The host makes a ring of three buffers at the element's size in device pixels and sends them (`Resize`, then `Buffers`, a generation). A new size makes a new generation once it has held for 120 ms; meanwhile the last frame shows stretched, so a window being dragged doesn't rebuild buffers every frame.
 4. **Frames.** The client takes a free buffer (`acquire`), draws into it, **finishes its GPU work** (v1 shares no semaphore: `device.poll` waiting for its submission) and presents it (`Present`). The host's GPU view draws the newest presented buffer over its box (one textured triangle, no CPU) at its next frame. A buffer presented over one not yet shown goes back at once (`Release`); the one showing goes back once a newer shows and the host's GPU work that read it is done (`on_submitted_work_done`, polled until it fires). A client that draws only with two buffers free (`Client::free_buffers() >= 2`) is paced to the frames shown and never draws one replaced unseen.
 5. **Idle.** A surface hidden (scrolled away, its window hidden) tells the client (`Visible(false)`): a client then draws nothing until it shows again (zgx's rule: idle windows do no work). An element not invalidated draws nothing: the host draws only when a frame is presented.
@@ -51,15 +54,28 @@ cargo run -p zgx-desktop --features surfaces --example external_surface -- --shm
 - **`dxgi` (Windows):** the host (zgx on Direct3D 12, its default there) makes each buffer a committed resource on a shared heap (`D3D12_HEAP_FLAG_SHARED`): 2D, `B8G8R8A8_TYPELESS` (viewed as BGRA8 unorm or sRGB, as wgpu-hal makes its own textures with view formats), one mip, a render target with **simultaneous access**, so its state decays to common after every submission on either side and neither process's wgpu needs the other's last barrier (the layout problem Vulkan has in v1 doesn't arise; the driver keeps it uncompressed). It makes an NT handle to it (`CreateSharedHandle`), wraps the resource as a wgpu texture (`dx12::Device::texture_from_raw`, `create_texture_from_hal`) and clears it once. The transport duplicates each handle into the client, which it started and holds a handle to (`DuplicateHandle`), and sends the duplicated values after the frame. The client opens each (`OpenSharedHandle`) on the adapter with the welcome's LUID, checks it is a texture made so, sizes it from the resource and wraps it the same way (`wgpu29::import`); the handle is closed then, the resource holding its own reference. `zgx_surface::dxgi` is the same on raw COM pointers, for a client on another wgpu; a Vulkan client imports it with `vulkan::import_d3d12_image` (`VK_KHR_external_memory_win32`, handle type `D3D12_RESOURCE`, dedicated) on the device whose `vulkan::device_luid` is the welcome's.
   - Sync is v1's: the client waits for its GPU before presenting, the host releases once its GPU work that read the buffer is done. A shared `ID3D12Fence` (`D3D12_FENCE_FLAG_SHARED`, signalled by the client's queue, waited on by the host's) would let neither wait on the CPU: v2.
   - A host on Vulkan on Windows (zgx-gpu's `vulkan` feature, tried after Direct3D 12) shares memory only (`shm`): it never offers `dxgi`. Exporting its images as `VK_KHR_external_memory_win32` handles would be the route.
-- **`iosurface` (macOS):** in the protocol, not implemented: see [the seam](#for-the-macos-and-windows-backends).
+- **`iosurface` (macOS):** the host makes each buffer an `IOSurface` (BGRA, four bytes a pixel, not global), a Metal texture over it on its own device (`newTextureWithDescriptor:iosurface:plane:`; `BGRA8Unorm`, render target, sampled, viewable as sRGB; shared storage on Apple silicon, managed on an Intel Mac's discrete GPU) wrapped as a wgpu texture (`texture_from_raw`, `create_texture_from_hal::<Metal>`), and clears it once. Their Mach ports go to the client over the session's Mach channel, then the `Buffers` naming them by id over the socket; the client makes each port a surface again and a texture on its own Metal device (`wgpu29::import`). Both sides are on the same GPU: the host's `Welcome` names its device's `registryID` (`DeviceIds::metal`), which the client's adapter is picked by (one GPU on Apple silicon; an Intel Mac may have two).
 
-| | Linux | Windows | macOS |
+| | Linux | macOS | Windows |
 | --- | --- | --- | --- |
-| Connection | socket pair, descriptors by `SCM_RIGHTS` | two named pipes, handles duplicated into the client | socket pair |
-| GPU buffers | `vulkan`: opaque file descriptors, matched by device and driver UUID | `dxgi`: Direct3D 12 shared NT handles, matched by adapter LUID (a Direct3D 12 host) | not yet (`iosurface`) |
-| Fallback | `shm` (memfd) | `shm` (file mapping) | `shm` (POSIX shared memory) |
-| Program ends with the host | `PR_SET_PDEATHSIG` | when its session closes (no job object yet) | when its session closes |
-| Verified | measured here (RTX 4090) | compile-checked; `dxgi_share` for CI's WARP, not yet run | — |
+| Connection | socket pair, descriptors by `SCM_RIGHTS` | socket pair, and a Mach channel beside it for IOSurfaces' ports | two named pipes, handles duplicated into the client |
+| GPU buffers | `vulkan`: Vulkan images, opaque file descriptors | `iosurface`: IOSurfaces, Mach ports | `dxgi`: Direct3D 12 shared NT handles (a Direct3D 12 host) |
+| Same GPU by | `deviceUUID` and `driverUUID` | `registryID` | adapter LUID |
+| Fallback | `shm` (memfd) | `shm` (POSIX shared memory) | `shm` (file mapping) |
+| Sync (v1) | the client waits for its submission; the host releases once its work reading it is done | the same | the same |
+| Program ends with the host | `PR_SET_PDEATHSIG` | when its session closes (`Close`, then `SIGKILL` 1.5 s later); not if the host is killed | when its session closes (`TerminateProcess`; no job object yet) |
+| Verified | measured here (RTX 4090) | compile-checked; `iosurface_share` for CI's macOS job, not yet run | compile-checked; `dxgi_share` for CI's WARP, not yet run |
+
+### IOSurfaces and the Mach channel
+
+A Unix socket carries no Mach ports, so on macOS a session has a Mach channel beside it, set up as Chromium's `MachPortRendezvous` is:
+
+1. The host checks in one bootstrap service for the process (`bootstrap_check_in`, a name with the host's pid and 128 random bits, made as the first program starts) and gives each program it starts the name in `ZGX_SURFACE_MACH`.
+2. The client (`Client::connect`, when it offers `IoSurface`) looks the name up (`bootstrap_look_up`) and sends a check-in carrying a send right to a port of its own, before its `Hello`.
+3. The rendezvous's thread keeps each check-in by its sender's pid, read from the message's audit token (`MACH_RCV_TRAILER_AUDIT`). A session takes only the check-in of the process it started: another process that found the name reaches no session. A client offering IOSurfaces that didn't check in within 2 s is treated as not offering them.
+4. Each generation's surfaces go to the client as one Mach message of their ports (`IOSurfaceCreateMachPort`, moved), its generation and their ids, sent before the socket's `Buffers`. `Client` takes it as that `Buffers` arrives (`IOSurfaceLookupFromMachPort`, matched by id) and fills in each `BufferDesc::IoSurface`'s `surface`.
+
+Not XPC: an anonymous listener's endpoint travels only over XPC, so it would need the same bootstrap name to start from. Not global IOSurface ids (`kIOSurfaceIsGlobal`): deprecated, and any process could open the surfaces by guessing an id. A sandboxed host or client needs the bootstrap lookup allowed (an App Sandbox `mach-lookup` exception for `dev.zgx.surface.`).
 
 ## The protocol (version 1)
 
@@ -67,7 +83,7 @@ A frame is its length (`u32`, of what follows it), its kind (`u16`), how many ha
 
 | Client → host | |
 | --- | --- |
-| `Hello { version, offers }` | first; `offers`: `Vulkan { devices: [DeviceIds] }`, `Shm`, `IoSurface`, `Dxgi { adapters: [LUID] }`, best first |
+| `Hello { version, offers }` | first; `offers`: `Vulkan { devices: [DeviceIds] }`, `Shm`, `IoSurface { devices: [registryID] }`, `Dxgi { adapters: [LUID] }`, best first |
 | `Present { generation, index }` | buffer `index` holds a finished frame: show it |
 | `SetCursor(cursor)` | `Default`, `Pointer`, `Text`, `Crosshair`, `Move`, `Grab`, `Grabbing`, `NotAllowed`, `Wait`, `Progress`, `Help`, `EwResize`, `NsResize`, `NeswResize`, `NwseResize`, `Hidden` (shown as the arrow while unlocked: zgx has no hidden cursor yet) |
 | `LockPointer(bool)` | lock the pointer (granted only within a second of a press or key, as the web's), or let it go |
@@ -75,8 +91,8 @@ A frame is its length (`u32`, of what follows it), its kind (`u16`), how many ha
 
 | Host → client | |
 | --- | --- |
-| `Welcome { version, kind, device, adapter }` | how buffers are shared; `device`: the host's GPU's ids for Vulkan; `adapter`: its adapter's LUID for Direct3D 12 (after `device` on the wire, absent from a host that sends none) |
-| `Buffers(Generation { generation, width, height, format, buffers })` | a new ring; each buffer `{ index, handle, desc }`, `desc` `Shm { offset, stride, len }`, `Vulkan(VulkanImage)` or `Dxgi` (an NT handle to the texture above, its size the generation's) |
+| `Welcome { version, kind, device, adapter }` | how buffers are shared; `device`: the host's GPU's ids for Vulkan, its Metal device for IOSurfaces (`DeviceIds::metal(registryID)`); `adapter`: its adapter's LUID for Direct3D 12 (after `device` on the wire, absent from a host that sends none) |
+| `Buffers(Generation { generation, width, height, format, buffers })` | a new ring; each buffer `{ index, handle, desc }`, `desc` `Shm { offset, stride, len }`, `Vulkan(VulkanImage)`, `IoSurface { id }` (its port over the Mach channel) or `Dxgi` (an NT handle to the texture above, its size the generation's) |
 | `Release { generation, index }` | the host no longer reads it |
 | `Resize { width, height, scale }` | the element's size in device pixels, and its scale |
 | `Visible(bool)` | whether any of it shows (it is shown until told otherwise) |
@@ -103,10 +119,11 @@ use zgx_surface::{Client, HostMessage, Offer, BufferKind, wgpu29::{self, wgpu}};
 let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
 let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
 let mut offers: Vec<Offer> = wgpu29::vulkan_offer(&adapters).into_iter().collect();
+offers.extend(wgpu29::iosurface_offer(&adapters));         // macOS
 offers.push(Offer::Shm);
-let mut client = Client::connect(offers)?;                 // ZGX_SURFACE_FD
+let mut client = Client::connect(offers)?;                 // ZGX_SURFACE_FD (and _MACH)
 let adapter = match (client.welcome().kind, client.welcome().device) {
-    (BufferKind::Vulkan, Some(ids)) => wgpu29::adapter_for(adapters, &ids).unwrap(),
+    (BufferKind::Vulkan | BufferKind::IoSurface, Some(ids)) => wgpu29::adapter_for(adapters, &ids).unwrap(),
     _ => todo!("any adapter, and the shm path"),
 };
 let (device, queue) = pollster::block_on(adapter.request_device(&Default::default()))?;
@@ -166,18 +183,14 @@ The Vulkan path's CPU doesn't grow with the frame's size: no CPU touches its pix
 
 Latency, with `ZGX_SURFACE_LOG=1` (the host's share: from the client's present to the host drawing the frame): when the host is otherwise idle it draws at once, 0.03 ms median (p95 0.04–0.08 ms); paced by a 100 Hz display it waits for the next refresh, 9.0 ms median (p95 9.3 ms). The compositor then shows it a refresh or so later: client to screen about 10–20 ms at 100 Hz, as a frame of zgx's own takes.
 
-## For the macOS and Windows backends
+A client on another wgpu takes IOSurfaces with `zgx_surface::metal::texture(raw_device, surface)` (objc2-metal 0.3, wgpu-hal's), wrapped with its wgpu-hal's `metal::Device::texture_from_raw` and `create_texture_from_hal::<Metal>`; one without wgpu or objc2 uses `Surface::as_ptr` (the `IOSurfaceRef`) itself.
 
-Windows has its backend (`dxgi`, above; `dxgi_generation` beside `vulkan_generation`, an arm in `choose` by adapter LUID and in `wgpu29::import`, `TerminateProcess` on close). It is compile-checked for `x86_64-pc-windows-gnu` and its round trip between two processes is a test for CI's Windows job, on WARP (`dxgi_share`); it hasn't yet run anywhere, on WARP, a GPU or a Windows desktop session. What it still lacks: a job object so the program dies with the host however the host ends, a shared fence, and `vulkan` exports for a Vulkan host.
+## The backends, and what's left
 
-What's there for macOS: the protocol (`BufferKind::IoSurface`, `Offer::IoSurface`, `BufferDesc::IoSurface { id }`), the Unix transport (macOS uses it as is), shared memory, and the client (`Client`). What it needs (Windows' steps kept as they were done):
+Each platform's backend is a kind of buffer the host makes in `crates/zgx-surface/src/host/painter.rs` (`vulkan_generation`, `iosurface_generation`, `dxgi_generation`), an arm in `choose` (Vulkan by device UUIDs, IOSurfaces by Metal `registryID`, Direct3D 12 by adapter LUID, then shared memory) and an arm in `wgpu29::import`.
 
-1. **The kind's buffers on the host:** in `crates/zgx-surface/src/host/painter.rs`, `size_generation` matches the kind; add `iosurface_generation` / `dxgi_generation` beside `vulkan_generation`, returning `Buffers` (the host's `wgpu::Texture`s by index) and the `Generation` to send.
-   - macOS: an `IOSurface` per buffer (BGRA, `IOSurfaceCreate` with `kIOSurfaceIsGlobal` off), the host's texture made from it on its Metal device (`newTextureWithDescriptor:iosurface:plane:`, then `create_texture_from_hal::<Metal>`; zgx-gpu's `iosurface.rs` does this for its own surfaces). Send it as a Mach port (`IOSurfaceCreateMachPort`): the Unix socket carries no Mach ports, so the transport needs a Mach channel beside the socket (a bootstrap-registered service named in the environment) or `xpc`; `BufferDesc::IoSurface { id }` is there for a global id meanwhile.
-   - Windows: a `D3D12` committed resource with `D3D12_HEAP_FLAG_SHARED` (or a D3D11 texture with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE`), shared as an NT handle (`CreateSharedHandle`), which the transport duplicates into the client. The client opens it (`OpenSharedHandle`, or Vulkan's `VK_KHR_external_memory_win32` via wgpu-hal's `texture_from_d3d11_shared_handle`) on the adapter whose LUID the host sends.
-2. **The choice:** `choose` in `painter.rs` picks the kind from the client's offers and what the device can share (`wgpu29::can_share` and `device_ids_of` are Vulkan's; add each backend's: an adapter LUID, a Metal registry id).
-3. **The host's process handling on Windows (done):** a session closing kills its program with `TerminateProcess` on a handle of its own to the process, and the exit waiter's `Child::wait` is `WaitForSingleObject`; the transport holds its own handle too, to duplicate buffers' handles into.
-4. **The client's import:** a `wgpu29::import` arm for each `BufferDesc`.
-5. **Sync:** the client waits for its GPU before presenting, as on Linux; a shared fence (`ID3D12Fence` shared, `MTLSharedEvent`) is the later improvement.
+- **Linux:** measured (above). Left: layouts and queue ownership transferred for drivers that compress colour images, and shared semaphores (v2).
+- **macOS:** compile-checked for `aarch64-apple-darwin` and `x86_64-apple-darwin`; the channel and a two-process round trip with wgpu Metal are tests for CI's macOS job (`iosurface_share`), not yet run on a Mac. Left: the program dying with the host however the host ends, and a shared `MTLSharedEvent` in place of the client's wait.
+- **Windows:** compile-checked for `x86_64-pc-windows-gnu`; its round trip between two processes is a test for CI's Windows job, on WARP (`dxgi_share`); it hasn't yet run anywhere, on WARP, a GPU or a Windows desktop session. Left: a job object so the program dies with the host however the host ends, a shared `ID3D12Fence`, and `vulkan` exports for a Vulkan host.
 
 The rest (rings, resize generations, input, pointer lock, the Luau API, permissions) is the same everywhere and needs nothing.

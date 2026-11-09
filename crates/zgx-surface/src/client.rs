@@ -21,6 +21,7 @@
 //! }
 //! ```
 use crate::{
+    iosurface::ClientChannel,
     protocol::{ClientMessage, Cursor, Hello, HostMessage, Offer, PROTOCOL_VERSION, Welcome},
     ring::{ClientRing, Slot},
     transport::{self, Receiver, Sender},
@@ -31,6 +32,10 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
+
+/// How long a generation's IOSurfaces may take to follow its `Buffers`
+/// (they are sent first: this is a stuck host).
+const MACH_WAIT: Duration = Duration::from_secs(2);
 
 type Waker = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
 
@@ -50,16 +55,42 @@ impl Client {
     /// `ZGX_SURFACE_PIPE` on Windows), offering `offers` (best first), and
     /// wait for its `Welcome`. The host answers once it can say how buffers
     /// will be shared, which is when it first shows the surface.
-    pub fn connect(offers: Vec<Offer>) -> io::Result<Client> {
+    ///
+    /// Offering `IoSurface` (macOS), it first checks in on the session's
+    /// Mach channel (`ZGX_SURFACE_MACH`); without one the offer is dropped.
+    pub fn connect(mut offers: Vec<Offer>) -> io::Result<Client> {
         let (sender, receiver) = transport::connect_from_env()?;
-        Self::connect_over(sender, receiver, offers)
+        let mut mach = None;
+        if offers.iter().any(|o| matches!(o, Offer::IoSurface { .. })) {
+            match ClientChannel::from_env() {
+                Ok(Some(channel)) => mach = Some(channel),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("zgx-surface: the Mach channel couldn't be checked in: {error}")
+                }
+            }
+            if mach.is_none() {
+                offers.retain(|o| !matches!(o, Offer::IoSurface { .. }));
+            }
+        }
+        Self::connect_with(sender, receiver, offers, mach)
     }
     /// As `connect`, over a connection already made (tests, a host's own
     /// client in the same process).
     pub fn connect_over(
+        sender: Sender,
+        receiver: Receiver,
+        offers: Vec<Offer>,
+    ) -> io::Result<Client> {
+        Self::connect_with(sender, receiver, offers, None)
+    }
+    /// As `connect_over`, with a Mach channel already checked in for
+    /// IOSurface buffers.
+    pub fn connect_with(
         mut sender: Sender,
         mut receiver: Receiver,
         offers: Vec<Offer>,
+        mach: Option<ClientChannel>,
     ) -> io::Result<Client> {
         sender.send_client(&ClientMessage::Hello(Hello {
             version: PROTOCOL_VERSION,
@@ -85,7 +116,15 @@ impl Client {
             .name("zgx-surface client".into())
             .spawn(move || {
                 loop {
-                    let message = receiver.recv_host().unwrap_or(None);
+                    let mut message = receiver.recv_host().unwrap_or(None);
+                    // IOSurfaces come over the Mach channel, sent before
+                    // the `Buffers` naming them.
+                    if let (Some(HostMessage::Buffers(generation)), Some(mach)) =
+                        (&mut message, &mach)
+                        && let Err(error) = mach.attach(generation, MACH_WAIT)
+                    {
+                        eprintln!("zgx-surface: {error}");
+                    }
                     let end = message.is_none();
                     if tx.send(message).is_err() {
                         return;

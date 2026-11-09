@@ -10,7 +10,7 @@
 //!   wheel zooms;
 //! - `--shm`: offer shared memory only (drawn on any adapter, read back and
 //!   copied), to compare with shared GPU memory (Vulkan images on Linux,
-//!   Direct3D 12 textures on Windows);
+//!   IOSurfaces on macOS, Direct3D 12 textures on Windows);
 //! - `--fps N`: draw at most N frames a second (default: as the host shows
 //!   them).
 //!
@@ -46,13 +46,14 @@ fn main() {
     if !shm_only {
         offers.extend(wgpu29::vulkan_offer(&adapters));
         offers.extend(wgpu29::dxgi_offer(&adapters));
+        offers.extend(wgpu29::iosurface_offer(&adapters));
     }
     offers.push(Offer::Shm);
     let mut client =
         Client::connect(offers).expect("spinner_client runs inside a zgx host (ZGX_SURFACE_FD)");
     let welcome = client.welcome().clone();
     let adapter = match (welcome.kind, &welcome.device) {
-        (BufferKind::Vulkan, Some(ids)) => {
+        (BufferKind::Vulkan | BufferKind::IoSurface, Some(ids)) => {
             wgpu29::adapter_for(adapters, ids).expect("the host's GPU")
         }
         (BufferKind::Dxgi, _) => {
@@ -103,7 +104,9 @@ fn main() {
                     };
                     for buffer in generation.buffers {
                         match &buffer.desc {
-                            BufferDesc::Vulkan(_) | BufferDesc::Dxgi => {
+                            BufferDesc::Vulkan(_)
+                            | BufferDesc::IoSurface { .. }
+                            | BufferDesc::Dxgi => {
                                 // Safety: on the adapter the welcome named.
                                 let texture = unsafe { wgpu29::import(&device, buffer) }
                                     .expect("importing a buffer");
@@ -115,7 +118,6 @@ fn main() {
                                 next.maps
                                     .push((Mapping::map(&handle, len).expect("mapping"), stride));
                             }
-                            _ => {}
                         }
                     }
                     if !next.maps.is_empty() {

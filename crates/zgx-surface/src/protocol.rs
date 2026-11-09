@@ -30,7 +30,9 @@ pub enum BufferKind {
     /// descriptor (`VK_KHR_external_memory_fd`), imported by a client on
     /// the same physical device. Linux.
     Vulkan,
-    /// An `IOSurface` (macOS): reserved, not yet implemented.
+    /// An `IOSurface` the host allocated (macOS), its Mach port sent over
+    /// the session's Mach channel (`iosurface`), made a Metal texture by a
+    /// client on the same GPU.
     IoSurface,
     /// A Direct3D 12 texture the host allocated on a shared heap, sent as
     /// an NT handle (duplicated into the client), opened by a client on the
@@ -66,6 +68,26 @@ pub struct DeviceIds {
     /// `driverUUID`.
     pub driver_uuid: [u8; 16],
 }
+/// What marks a `DeviceIds` as a Metal device's (`DeviceIds::metal`).
+const METAL: [u8; 16] = *b"Metal registryID";
+impl DeviceIds {
+    /// A Metal device by its `registryID`, as an `IoSurface` welcome names
+    /// the host's GPU: the id in `device_uuid`'s first 8 bytes, a marker as
+    /// `driver_uuid`.
+    pub fn metal(registry_id: u64) -> Self {
+        let mut device_uuid = [0; 16];
+        device_uuid[..8].copy_from_slice(&registry_id.to_le_bytes());
+        Self {
+            device_uuid,
+            driver_uuid: METAL,
+        }
+    }
+    /// The Metal `registryID` these name, if they name a Metal device.
+    pub fn metal_registry_id(&self) -> Option<u64> {
+        (self.driver_uuid == METAL)
+            .then(|| u64::from_le_bytes(self.device_uuid[..8].try_into().unwrap()))
+    }
+}
 
 /// What a client can take, in its order of preference (`Hello::offers`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,8 +99,13 @@ pub enum Offer {
         /// Each device it could open.
         devices: Vec<DeviceIds>,
     },
-    /// IOSurfaces (macOS), reserved.
-    IoSurface,
+    /// IOSurfaces (macOS), drawn on any of these Metal devices (their
+    /// `registryID`s). Offered only with the session's Mach channel checked
+    /// in (`Client::connect` does it).
+    IoSurface {
+        /// Each device's `registryID`.
+        devices: Vec<u64>,
+    },
     /// Direct3D 12 shared textures (Windows), on any of these adapters
     /// (their LUIDs, high part above low).
     Dxgi {
@@ -92,7 +119,7 @@ impl Offer {
         match self {
             Offer::Shm => BufferKind::Shm,
             Offer::Vulkan { .. } => BufferKind::Vulkan,
-            Offer::IoSurface => BufferKind::IoSurface,
+            Offer::IoSurface { .. } => BufferKind::IoSurface,
             Offer::Dxgi { .. } => BufferKind::Dxgi,
         }
     }
@@ -115,7 +142,8 @@ pub struct Welcome {
     /// The kind of every buffer it sends.
     pub kind: BufferKind,
     /// With `Vulkan`, the device the buffers live on: the client draws on
-    /// the adapter with these ids.
+    /// the adapter with these ids. With `IoSurface`, the host's Metal
+    /// device (`DeviceIds::metal`).
     pub device: Option<DeviceIds>,
     /// With `Dxgi`, the LUID of the adapter the buffers live on: the client
     /// draws on that adapter.
@@ -177,10 +205,15 @@ pub enum BufferDesc {
     },
     /// A Vulkan image.
     Vulkan(VulkanImage),
-    /// An IOSurface by its global id (macOS), reserved.
+    /// An IOSurface (macOS). Its Mach port travels over the session's Mach
+    /// channel, not the socket; `Client` fills in `surface` before handing
+    /// the generation on.
     IoSurface {
-        /// `IOSurfaceGetID`.
+        /// `IOSurfaceGetID`: which surface of the channel's message is this
+        /// buffer's.
         id: u32,
+        /// The surface, once received (never on the wire).
+        surface: Option<crate::iosurface::Surface>,
     },
     /// A Direct3D 12 texture (Windows): the handle is an NT handle to a
     /// committed resource, 2D, the generation's size, `B8G8R8A8_TYPELESS`
@@ -753,7 +786,7 @@ impl HostMessage {
                             out.bool(image.dedicated);
                             out.u32(image.handle_type);
                         }
-                        BufferDesc::IoSurface { id } => {
+                        BufferDesc::IoSurface { id, .. } => {
                             out.u8(2);
                             out.u32(*id);
                         }
@@ -897,7 +930,10 @@ impl HostMessage {
                                 handle_type: r.u32()?,
                             })
                         }
-                        2 => BufferDesc::IoSurface { id: r.u32()? },
+                        2 => BufferDesc::IoSurface {
+                            id: r.u32()?,
+                            surface: None,
+                        },
                         3 => BufferDesc::Dxgi,
                         _ => return Err(DecodeError::Invalid("buffer")),
                     };
@@ -978,7 +1014,13 @@ impl ClientMessage {
                 for offer in &hello.offers {
                     out.u8(offer.kind().code());
                     match offer {
-                        Offer::Shm | Offer::IoSurface => {}
+                        Offer::Shm => {}
+                        Offer::IoSurface { devices } => {
+                            out.u32(devices.len() as u32);
+                            for id in devices {
+                                out.u64(*id);
+                            }
+                        }
                         Offer::Vulkan { devices } => {
                             out.u32(devices.len() as u32);
                             for ids in devices {
@@ -1027,7 +1069,12 @@ impl ClientMessage {
                 for _ in 0..count {
                     offers.push(match BufferKind::from_code(r.u8()?)? {
                         BufferKind::Shm => Offer::Shm,
-                        BufferKind::IoSurface => Offer::IoSurface,
+                        BufferKind::IoSurface => {
+                            let count = r.count(8)?;
+                            Offer::IoSurface {
+                                devices: (0..count).map(|_| r.u64()).collect::<Result<_, _>>()?,
+                            }
+                        }
                         BufferKind::Vulkan => {
                             let count = r.count(32)?;
                             Offer::Vulkan {

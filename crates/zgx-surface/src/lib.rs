@@ -17,8 +17,9 @@
 //! - `dxgi` buffers (Windows): Direct3D 12 textures the host allocates on a
 //!   shared heap, sent as NT handles duplicated into the client, opened by
 //!   a client on the same adapter (by LUID). No pixel is copied by a CPU.
-//! - `iosurface` (macOS): named, not yet implemented (see
-//!   `docs/external-surfaces.md` for what it needs).
+//! - `iosurface` buffers (macOS): IOSurfaces the host allocates, their
+//!   Mach ports sent over a Mach channel beside the socket (`iosurface`),
+//!   made Metal textures by a client on the same GPU. No pixel is copied.
 //!
 //! This crate's core has no wgpu: a client on any wgpu version (or none)
 //! uses the protocol (`protocol`), its connection (`transport`, `Client`),
@@ -30,6 +31,9 @@ pub mod client;
 pub mod dxgi;
 #[cfg(feature = "host")]
 pub mod host;
+pub mod iosurface;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub mod metal;
 pub mod protocol;
 pub mod ring;
 pub mod shm;

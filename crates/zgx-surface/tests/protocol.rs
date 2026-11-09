@@ -112,7 +112,9 @@ fn client_messages_survive_their_encoding() {
                     ],
                 },
                 Offer::Dxgi { adapters: vec![42] },
-                Offer::IoSurface,
+                Offer::IoSurface {
+                    devices: vec![0x1_0000_0abc],
+                },
                 Offer::Shm,
             ],
         }),
@@ -172,7 +174,10 @@ fn a_generation_carries_its_handles_in_order() {
             zgx_surface::Buffer {
                 index: 1,
                 handle: None,
-                desc: BufferDesc::IoSurface { id: 77 },
+                desc: BufferDesc::IoSurface {
+                    id: 77,
+                    surface: None,
+                },
             },
             zgx_surface::Buffer {
                 index: 2,
