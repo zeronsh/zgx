@@ -257,6 +257,85 @@ impl LetterSpacing {
             .then(|| (bits & GRID_UNITS) as f32 / GRID_SCALE)
     }
 
+    /// zgx: the mark of an inline box's span (`Attrs::inline_box`), a
+    /// negative quiet NaN: no padding or grid is one.
+    pub const INLINE_BOX: Self = Self(f32::from_bits(INLINE_BOX));
+
+    /// zgx: whether this marks an inline box's span (`INLINE_BOX`).
+    pub fn is_inline_box(self) -> bool {
+        self.0.to_bits() == INLINE_BOX
+    }
+}
+
+/// zgx: an inline box's mark, a negative quiet NaN (`LetterSpacing::INLINE_BOX`).
+const INLINE_BOX: u32 = 0xffc0_0000;
+
+/// zgx: an inline box's size and alignment, in its span's features
+/// (`Attrs::inline_box`): its width, height and baseline (`f32` bits), how it
+/// aligns (0 to 6, in `InlineAlign`'s order) and what it is raised by.
+const BOX_WIDTH: FeatureTag = FeatureTag::new(b"_ibw");
+const BOX_HEIGHT: FeatureTag = FeatureTag::new(b"_ibh");
+const BOX_BASELINE: FeatureTag = FeatureTag::new(b"_ibb");
+const BOX_ALIGN: FeatureTag = FeatureTag::new(b"_iba");
+const BOX_RAISE: FeatureTag = FeatureTag::new(b"_ibr");
+
+/// zgx: a box laid out in a line as one atomic glyph (CSS's inline-block, an
+/// atomic inline): `width` across, `height` down, its own baseline
+/// `baseline` below its top, placed in the line as `align` says. A span
+/// marked with one (`Attrs::inline_box`) is never shaped: each of its
+/// characters is one such glyph, drawing nothing, whose room in the line is
+/// the box's. Its line grows to hold it, as CSS's line box does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InlineBox {
+    /// Its width, in pixels.
+    pub width: f32,
+    /// Its height, in pixels.
+    pub height: f32,
+    /// Its baseline, in pixels below its top (its height if it has none).
+    pub baseline: f32,
+    /// How it sits in its line.
+    pub align: InlineAlign,
+}
+
+/// zgx: how an inline box sits in its line (CSS's `vertical-align`).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum InlineAlign {
+    /// Its baseline on the line's.
+    #[default]
+    Baseline,
+    /// Its middle half the run font's x-height above the baseline.
+    Middle,
+    /// Its top at the run font's ascent.
+    TextTop,
+    /// Its bottom at the run font's descent.
+    TextBottom,
+    /// Its top at the line's top.
+    Top,
+    /// Its bottom at the line's bottom.
+    Bottom,
+    /// Its baseline this many pixels above the line's (below, if negative).
+    Raise(f32),
+}
+
+// Sizes are finite: zgx gives none other.
+impl Eq for InlineBox {}
+impl Eq for InlineAlign {}
+
+impl InlineBox {
+    /// Its extents above and below the baseline, in pixels, for a run font
+    /// `ascent` above it and `descent` below with `x_height`; zero for a box
+    /// placed at the line's top or bottom, which waits for the line's.
+    pub fn extents(&self, ascent: f32, descent: f32, x_height: f32) -> (f32, f32) {
+        let h = self.height;
+        match self.align {
+            InlineAlign::Baseline => (self.baseline, h - self.baseline),
+            InlineAlign::Middle => ((h + x_height) / 2., (h - x_height) / 2.),
+            InlineAlign::TextTop => (ascent, h - ascent),
+            InlineAlign::TextBottom => (h - descent, descent),
+            InlineAlign::Raise(by) => (self.baseline + by, h - self.baseline - by),
+            InlineAlign::Top | InlineAlign::Bottom => (0., 0.),
+        }
+    }
 }
 
 impl PartialEq for LetterSpacing {
@@ -273,8 +352,8 @@ impl Hash for LetterSpacing {
         const CANONICAL_NAN_BITS: u32 = 0x7fc0_0000;
 
         let bits = if self.0.is_nan() {
-            // zgx: a grid's payload is its cell.
-            if self.cell().is_some() {
+            // zgx: a grid's payload is its cell; an inline box has its own.
+            if self.cell().is_some() || self.is_inline_box() {
                 self.0.to_bits()
             } else {
                 CANONICAL_NAN_BITS
@@ -479,6 +558,63 @@ impl<'a> Attrs<'a> {
         self
     }
 
+    /// zgx: make the span inline box `inline`: marked in `padding_opt` as a
+    /// NaN no padding is (`LetterSpacing::INLINE_BOX`), its size and
+    /// alignment in its features as private tags (`_ibw` and the like, as
+    /// `_hyp`), which no font is given: a box's span is never shaped. Its
+    /// lines are marked as holding one with `Buffer::find_inline_boxes`.
+    /// Nothing else is bigger: a box lives in its run.
+    pub fn inline_box(mut self, inline: InlineBox) -> Self {
+        let (align, raise) = match inline.align {
+            InlineAlign::Baseline => (0, 0.),
+            InlineAlign::Middle => (1, 0.),
+            InlineAlign::TextTop => (2, 0.),
+            InlineAlign::TextBottom => (3, 0.),
+            InlineAlign::Top => (4, 0.),
+            InlineAlign::Bottom => (5, 0.),
+            InlineAlign::Raise(by) => (6, by),
+        };
+        let mut features = FontFeatures::new();
+        features
+            .set(BOX_WIDTH, inline.width.to_bits())
+            .set(BOX_HEIGHT, inline.height.to_bits())
+            .set(BOX_BASELINE, inline.baseline.to_bits())
+            .set(BOX_ALIGN, align)
+            .set(BOX_RAISE, f32::to_bits(raise));
+        self.padding_opt = Some(LetterSpacing::INLINE_BOX);
+        self.font_features = features;
+        self
+    }
+
+    /// zgx: the inline box this span is (`inline_box`), if it is one.
+    #[cold]
+    #[inline(never)]
+    pub fn inline_box_of(&self) -> Option<InlineBox> {
+        if !self.padding_opt?.is_inline_box() {
+            return None;
+        }
+        let read = |tag: FeatureTag| {
+            (self.font_features.features.iter())
+                .find(|feature| feature.tag == tag)
+                .map_or(0, |feature| feature.value)
+        };
+        let float = |tag| f32::from_bits(read(tag));
+        Some(InlineBox {
+            width: float(BOX_WIDTH),
+            height: float(BOX_HEIGHT),
+            baseline: float(BOX_BASELINE),
+            align: match read(BOX_ALIGN) {
+                1 => InlineAlign::Middle,
+                2 => InlineAlign::TextTop,
+                3 => InlineAlign::TextBottom,
+                4 => InlineAlign::Top,
+                5 => InlineAlign::Bottom,
+                6 => InlineAlign::Raise(float(BOX_RAISE)),
+                _ => InlineAlign::Baseline,
+            },
+        })
+    }
+
     /// Set [`FontFeatures`]
     pub fn font_features(mut self, font_features: FontFeatures) -> Self {
         self.font_features = font_features;
@@ -630,6 +766,14 @@ impl AttrsList {
             defaults: AttrsOwned::new(defaults),
             spans: RangeMap::new(),
         }
+    }
+
+    /// zgx: whether a span is an inline box (`Attrs::inline_box`).
+    #[cold]
+    #[inline(never)]
+    pub fn holds_inline_boxes(&self) -> bool {
+        self.spans_iter()
+            .any(|(_, attrs)| attrs.padding_opt.is_some_and(LetterSpacing::is_inline_box))
     }
 
     /// Get the default [Attrs]
