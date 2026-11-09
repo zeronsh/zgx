@@ -1117,7 +1117,7 @@ pub(crate) enum Kind {
         text: Text,
         options: crate::markdown::view::ViewOptions,
     },
-    Rich(Vec<Span>),
+    Rich(RichSpans),
     Image {
         label: String,
         src: Source,
@@ -1403,6 +1403,18 @@ pub(crate) enum Segment {
     Literal(String),
     /// A state, or a field of it (`"{user.name}"`: the path after its key).
     State(Signal<Value>, Rc<[Box<str>]>),
+}
+
+/// `ui.rich`'s runs.
+#[derive(Clone)]
+pub(crate) enum RichSpans {
+    /// Listed in it, made once.
+    Listed(Vec<Span>),
+    /// `spans = function() … end`: made by the function, called again (in
+    /// place: the paragraph and its layout are kept) when what it reads
+    /// changes. `literal` is the paragraph's, for runs written as strings
+    /// or tables.
+    Made { build: Function, literal: bool },
 }
 
 /// A rich text run.
@@ -4941,6 +4953,25 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
     Ok(span)
 }
 
+/// The runs a list holds, in order: `ui.span`s (each used once), strings
+/// and tables (made as `ui.span`'s are, taking the paragraph's `literal`).
+pub(crate) fn spans_of(lua: &Lua, list: &Table, literal: bool) -> mlua::Result<Vec<Span>> {
+    let mut spans = Vec::with_capacity(list.raw_len());
+    for item in list.sequence_values::<mlua::Value>() {
+        match item? {
+            mlua::Value::UserData(ud) if ud.is::<SpanUd>() => spans.push(
+                ud.borrow::<SpanUd>()?
+                    .0
+                    .borrow_mut()
+                    .take()
+                    .ok_or_else(|| mlua::Error::runtime("a span can be used once"))?,
+            ),
+            other => spans.push(span(lua, other, literal)?),
+        }
+    }
+    Ok(spans)
+}
+
 /// Installs the read-only `ui` global.
 /// `ui.override`, `ui.contribute` and `ui.filter`: what plugins (and an
 /// app's own extensions) hand the app, made once a script names one.
@@ -5225,19 +5256,24 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             // `literal` (a span may say otherwise).
             let literal = table.get::<Option<bool>>("literal")?.unwrap_or(false);
             table.raw_set("literal", mlua::Value::Nil)?;
-            let mut spans = Vec::new();
-            for item in table.sequence_values::<mlua::Value>() {
-                match item? {
-                    mlua::Value::UserData(ud) if ud.is::<SpanUd>() => spans.push(
-                        ud.borrow::<SpanUd>()?
-                            .0
-                            .borrow_mut()
-                            .take()
-                            .ok_or_else(|| mlua::Error::runtime("a span can be used once"))?,
-                    ),
-                    other => spans.push(span(lua, other, literal)?),
+            let spans = match table.get::<mlua::Value>("spans")? {
+                mlua::Value::Nil => RichSpans::Listed(spans_of(lua, &table, literal)?),
+                mlua::Value::Function(build) => {
+                    if table.raw_len() > 0 {
+                        return Err(mlua::Error::runtime(
+                            "ui.rich takes its runs listed or from `spans`, not both",
+                        ));
+                    }
+                    table.raw_set("spans", mlua::Value::Nil)?;
+                    RichSpans::Made { build, literal }
                 }
-            }
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.rich's `spans` is a function returning its runs, not {}",
+                        other.type_name()
+                    )));
+                }
+            };
             for i in (1..=table.raw_len()).rev() {
                 table.raw_remove(i)?;
             }

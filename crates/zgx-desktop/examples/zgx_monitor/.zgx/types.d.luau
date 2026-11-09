@@ -5959,6 +5959,10 @@ export type RichProps = {
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
 	[number]: Span | Text | SpanProps,
+	-- In place of listed runs: a function returning them, called again when
+	-- what it reads changes. The paragraph stays (its node, selection and
+	-- the layout of text that only grew); only its runs are new.
+	spans: (() -> { Span | Text | SpanProps }?)?,
 	literal: boolean?,
 	-- As an element's, told the run under the click or the focused link
 	-- (`e.span`, nil off the runs). Asked first on its links: nil back for
