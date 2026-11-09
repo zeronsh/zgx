@@ -72,7 +72,7 @@ fn piece(n: usize) -> String {
 }
 
 /// Each phase's instructions for one chunk, the median of `measured`
-/// chunks (the collector runs in some), once the reply holds `sections` (set
+/// chunks, once the reply holds `sections` (set
 /// whole, then a section streamed uncounted), the reply `followed` or not
 /// (`script`). `draw` gets each frame's scene
 /// and damage after its flush, the whole reply's first.
@@ -94,6 +94,12 @@ pub fn per_chunk(
     let damage = ui.scene.borrow_mut().flush().damage;
     draw(&ui.scene.borrow(), &damage);
     let mut chunk = || {
+        // Luau's collector run whole before each chunk, uncounted: a chunk
+        // then does the collecting its own allocations bring on, the same
+        // at every length, where a cycle's steps landing in some chunks and
+        // not others (more of them the larger the heap) moved the median.
+        host.collect_luau_only();
+        zgx::profile::take();
         assert!(host.run_command("append"));
         ui.prepare_frame();
         let damage = ui.scene.borrow_mut().flush().damage;
@@ -117,6 +123,11 @@ pub fn per_chunk(
 /// A phase flat as the reply grows costs at most this much more a chunk at
 /// the longest reply than at the shortest.
 const FLAT: f64 = 1.25;
+/// A phase listed as growing must still grow by more than this to stay
+/// listed: between it and `FLAT` either verdict stands, so a phase near the
+/// line does not flip from run to run, while one gone flat is taken off and
+/// one growing unlisted fails.
+const STILL_GROWS: f64 = 1.10;
 
 /// Each phase's cost a chunk at 100, 200, 400 and 800 sections, `followed`
 /// or not, drawn by
@@ -146,8 +157,12 @@ pub fn check<D: FnMut(&Scene, &[Rect])>(
         let row: Vec<u64> = runs.iter().map(|r| r[i].1).collect();
         let (first, last) = (row[0], row[row.len() - 1]);
         // (Phases of a few thousand instructions: noise, not growth.)
-        let grows = last > 20_000 && last as f64 > first as f64 * FLAT;
+        let grows_by = |by: f64| last > 20_000 && last as f64 > first as f64 * by;
         let listed = still_growing.iter().find(|(p, _)| p == phase);
+        let grows = match listed {
+            Some(_) => grows_by(STILL_GROWS),
+            None => grows_by(FLAT),
+        };
         let thousands: Vec<u64> = row.iter().map(|n| n / 1000).collect();
         eprintln!(
             "  {phase:?}: {thousands:?}{}",
