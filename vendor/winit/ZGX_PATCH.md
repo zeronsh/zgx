@@ -415,3 +415,13 @@ again change nothing, yet xkbcommon worked out the effective modifiers and
 LEDs anew: about 400 instructions a move. `XkbState` keeps the masks it last
 gave and skips the call when they're the same
 (`platform_impl/linux/common/xkb/state.rs`).
+
+## iOS: the loop runs while a finger tracks
+
+`platform_impl/ios/event_loop.rs` added its run loop observers in the default
+mode alone, so while UIKit tracked a drag or a scroll view decelerated
+(`UITrackingRunLoopMode`) the waker's timer fired with no iteration to run: an
+app's timers and wakes waited for the scroll to end (a live feed's inserts, a
+chat's messages). They're added in the common modes, as macOS's are.
+Frames there are the host's to pace: zgx's draws in `drawRect`, at Core
+Animation's commit, as before (`Host::update`).
