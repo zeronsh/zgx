@@ -21,6 +21,8 @@ mod guard_doors;
 mod io;
 #[path = "../large_data.rs"]
 mod large_data;
+#[path = "../markdown_incremental.rs"]
+mod markdown_incremental;
 #[path = "../module_overrides.rs"]
 mod module_overrides;
 #[path = "../notify.rs"]

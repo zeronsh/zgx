@@ -860,13 +860,46 @@ fn parser_flags() -> pulldown_cmark::Options {
     flags
 }
 
-/// Link reference definition lines (`[label]: destination`, up to three
-/// spaces in), conservatively.
+/// Link reference definition lines (`[label]: destination`), conservatively:
+/// after any quotes' and lists' markers (a definition in one defines for the
+/// whole text), up to three spaces in; or the end of a label begun on a line
+/// before.
 fn has_link_defs(text: &str) -> bool {
     text.lines().any(|line| {
-        let trimmed = line.trim_start();
-        line.len() - trimmed.len() <= 3 && trimmed.starts_with('[') && trimmed.contains("]:")
+        let Some(colon) = line.find("]:") else {
+            return false;
+        };
+        let inside = after_container_markers(line);
+        let trimmed = inside.trim_start();
+        (inside.len() - trimmed.len() <= 3 && trimmed.starts_with('['))
+            || !line[..colon].contains('[')
     })
+}
+/// `line` after the markers of the quotes and lists it opens with.
+fn after_container_markers(mut line: &str) -> &str {
+    loop {
+        let trimmed = line.trim_start();
+        let rest = if let Some(rest) = trimmed.strip_prefix('>') {
+            rest
+        } else if let Some(rest) = trimmed.strip_prefix(['-', '+', '*']) {
+            rest
+        } else {
+            let digits = trimmed.len()
+                - trimmed
+                    .trim_start_matches(|c: char| c.is_ascii_digit())
+                    .len();
+            match trimmed[digits..].strip_prefix(['.', ')']) {
+                Some(rest) if digits > 0 => rest,
+                _ => return line,
+            }
+        };
+        // A marker is followed by a space or the line's end; a quote's by
+        // anything.
+        if !trimmed.starts_with('>') && !rest.is_empty() && !rest.starts_with([' ', '\t']) {
+            return line;
+        }
+        line = rest;
+    }
 }
 
 /// `text` (which starts at `offset` in the whole) parsed into its top-level
@@ -899,7 +932,16 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool) -> Ve
     let mut start = 0;
     // Each strikethrough open, whether it's struck (`~~`) or plain (`~`).
     let mut tildes: Vec<bool> = Vec::new();
+    // Inside raw HTML, which isn't shown: the parser gives its indentation
+    // as text, which would join the next block's words.
+    let mut html = false;
     for (event, range) in Parser::new_ext(text, flags).into_offset_iter() {
+        match event {
+            Event::Start(Tag::HtmlBlock) => html = true,
+            Event::End(TagEnd::HtmlBlock) => html = false,
+            Event::Text(_) if html => continue,
+            _ => {}
+        }
         // Only `~~` strikes, as `mend` holds it. This is a deliberate choice,
         // not GFM's: the spec strikes a single `~` too (example 491;
         // cmark-gfm only turns that off behind an option). In text that
@@ -1438,6 +1480,10 @@ impl Builder<'_> {
 
     fn take_runs(&mut self) -> Value {
         let mut runs = std::mem::take(&mut self.runs);
+        // Its mark goes with them: read against the next block's words (a
+        // tight list item starts no paragraph to set it), it would call them
+        // blank.
+        self.line = (0, 0);
         // Trailing line breaks inside a block are not shown.
         if let Some(last) = runs.last_mut() {
             while last.text.ends_with('\n') {
@@ -1988,6 +2034,19 @@ mod tests {
         assert_eq!(
             runs[0].field("x").map(|v| v.to_json()),
             Some("\"one\\ntwo\"".into())
+        );
+    }
+
+    #[test]
+    fn an_indented_html_blocks_indent_stays_out_of_what_follows() {
+        let plain = plain();
+        assert_eq!(
+            parse(" <div\n\nwords", &plain),
+            parse("<div\n\nwords", &plain)
+        );
+        assert_eq!(
+            parse(" <div\n\n- item", &plain),
+            parse("<div\n\n- item", &plain)
         );
     }
 
