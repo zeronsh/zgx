@@ -3413,7 +3413,6 @@ const WIDGET_FIELDS: &[&str] = &[
     "offset",
     "follow",
     "scrollbar",
-    "paging",
     "keyboard",
     "src",
     "code",
@@ -3526,6 +3525,7 @@ const LATE_FIELDS: &[&str] = &[
     "on_paste",
     "overscroll",
     "keyboard_ride",
+    "paging",
     "capture_keys",
     "scroll_padding",
     "read_only",
@@ -3709,6 +3709,11 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
             };
             if let Kind::Scroll { ride: set, .. } = &mut node.kind {
                 *set = Some(ride);
+            }
+        }
+        "paging" => {
+            if let Kind::Scroll { paging, .. } = &mut node.kind {
+                *paging = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
             }
         }
         "at_caret" => {
@@ -5041,10 +5046,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     Some(t) => t.get::<Option<bool>>("scrollbar")?.unwrap_or(false),
                     None => false,
                 };
-                let paging = match &table {
-                    Some(t) => t.get::<Option<bool>>("paging")?.unwrap_or(false),
-                    None => false,
-                };
                 let node = fill(
                     lua,
                     Node::new(
@@ -5054,8 +5055,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             horizontal,
                             follow,
                             scrollbar,
-                            paging,
                             // Set as `fill` walks the table (`late_field`).
+                            paging: false,
                             contain: false,
                             ride: None,
                             padding: None,
