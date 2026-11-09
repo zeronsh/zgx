@@ -19,6 +19,7 @@ use crate::{
     widgets::{Ui, WeakUi},
 };
 use std::{
+    any::Any,
     cmp::Ordering,
     collections::HashMap,
     ops::Range,
@@ -120,7 +121,7 @@ struct RowAddress {
     /// The row's key in its list, when the list gave it one: the row is
     /// found by it again, wherever rows added or removed above have moved
     /// it, rather than by an index another row now has.
-    key: Option<u64>,
+    key: Option<RowKey>,
     path: Vec<u32>,
     /// The row's text as a copy takes it, when the end was set there, and
     /// where the end lies in it: a copy of an end whose row has scrolled
@@ -234,7 +235,7 @@ pub(crate) struct State {
     /// Virtual list rows in selectable regions, and their indices.
     rows: HashMap<NodeId, crate::reactive::Signal<usize>>,
     /// Those rows' keys (each list's key, hashed).
-    row_keys: HashMap<NodeId, u64>,
+    row_keys: HashMap<NodeId, RowKey>,
     /// Virtual lists' row text for copying rows they have not mounted
     /// (`View::row_text`), by the node holding their rows.
     row_texts: HashMap<NodeId, RowText>,
@@ -267,6 +268,51 @@ const MAX_PROVIDED_ROWS: usize = 1_000_000;
 
 /// A virtual list's plain text of row `index`, `None` past its end.
 pub(crate) type RowText = Rc<dyn Fn(usize) -> Option<String>>;
+
+/// Where a virtual list's row with this key (its list's key type) is now,
+/// last seen at the index given: there if it still is, else found down the
+/// list; `None` once no row has it (`RowSource::find`).
+pub(crate) type RowFind = Rc<dyn Fn(&dyn Any, usize) -> Option<usize>>;
+
+/// A virtual list row's key, compared by value (not by a hash), and how its
+/// list finds it again.
+#[derive(Clone)]
+pub(crate) struct RowKey {
+    key: Rc<dyn Any>,
+    same: fn(&dyn Any, &dyn Any) -> bool,
+    find: RowFind,
+}
+
+impl RowKey {
+    fn new<K: Eq + Clone + 'static>(key: &K, find: &RowFind) -> Self {
+        fn same<K: Eq + 'static>(a: &dyn Any, b: &dyn Any) -> bool {
+            a.downcast_ref::<K>()
+                .zip(b.downcast_ref::<K>())
+                .is_some_and(|(a, b)| a == b)
+        }
+        Self {
+            key: Rc::new(key.clone()),
+            same: same::<K>,
+            find: find.clone(),
+        }
+    }
+    /// Its row's index in its list now, last seen at `seen`.
+    fn index(&self, seen: usize) -> Option<usize> {
+        (self.find)(&*self.key, seen)
+    }
+}
+
+impl PartialEq for RowKey {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.key, &other.key) || (self.same)(&*self.key, &*other.key)
+    }
+}
+
+impl std::fmt::Debug for RowKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RowKey")
+    }
+}
 
 /// Removes a virtual list's row text once it is unmounted.
 struct RowTextGuard {
@@ -363,18 +409,30 @@ impl Drop for RowGuard {
     }
 }
 
-/// A virtual list mounted `row` at `index`, its key hashed as `key`: a
-/// selection in a selectable region outlives the row's nodes, coming back
-/// when the row does.
-pub(crate) fn mount_row(
+/// A virtual list mounted `row` at `index`, with its `key` (`find` finds
+/// it in the list): a selection in a selectable region outlives the row's
+/// nodes, coming back when the row does. (Only a selectable row keeps its
+/// key: other rows cost no more than the test.)
+#[inline]
+pub(crate) fn mount_row<K: Eq + Clone + 'static>(
     ui: &mut Ui,
     row: NodeId,
     index: &crate::reactive::Signal<usize>,
-    key: u64,
+    key: &K,
+    find: &RowFind,
 ) {
     if !ui.scene.borrow().is_selectable(row) {
         return;
     }
+    mount_selectable_row(ui, row, index, RowKey::new(key, find));
+}
+
+fn mount_selectable_row(
+    ui: &mut Ui,
+    row: NodeId,
+    index: &crate::reactive::Signal<usize>,
+    key: RowKey,
+) {
     {
         let state = ui.selection_state();
         let mut state = state.borrow_mut();
@@ -1031,6 +1089,24 @@ impl Ui {
         }
         if let End::Live(point) = focus {
             state.focus = Some(point);
+        }
+        // An unmounted row's end that its key found moved: kept where it is
+        // now.
+        if let End::Parked(row, _) = &anchor
+            && state
+                .anchor_row
+                .as_ref()
+                .is_some_and(|kept| kept.index != row.index)
+        {
+            state.anchor_row = Some(row.clone());
+        }
+        if let End::Parked(row, _) = &focus
+            && state
+                .focus_row
+                .as_ref()
+                .is_some_and(|kept| kept.index != row.index)
+        {
+            state.focus_row = Some(row.clone());
         }
         let root = state
             .root
@@ -2720,7 +2796,7 @@ fn row_of(
 /// Where `point` lies in a virtual list's row, as a `RowAddress`.
 fn row_address(
     rows: &HashMap<NodeId, crate::reactive::Signal<usize>>,
-    keys: &HashMap<NodeId, u64>,
+    keys: &HashMap<NodeId, RowKey>,
     scene: &Scene,
     point: TextPoint,
 ) -> Option<RowAddress> {
@@ -2735,7 +2811,7 @@ fn row_address(
             return Some(RowAddress {
                 content: parent,
                 index: index.with_untracked(|index| *index),
-                key: keys.get(&at).copied(),
+                key: keys.get(&at).cloned(),
                 path,
                 copied: row_copy(scene, at, point),
             });
@@ -2786,7 +2862,7 @@ fn row_copy(scene: &Scene, row: NodeId, point: TextPoint) -> Option<(Rc<str>, us
 /// The text node at `row`, if its row is mounted.
 fn resolve_row(
     rows: &HashMap<NodeId, crate::reactive::Signal<usize>>,
-    keys: &HashMap<NodeId, u64>,
+    keys: &HashMap<NodeId, RowKey>,
     scene: &Scene,
     row: &RowAddress,
 ) -> Option<NodeId> {
@@ -2795,8 +2871,8 @@ fn resolve_row(
     let mounted = scene
         .children(row.content)
         .iter()
-        .find(|child| match row.key {
-            Some(key) => keys.get(child) == Some(&key),
+        .find(|child| match &row.key {
+            Some(key) => keys.get(child) == Some(key),
             None => rows
                 .get(child)
                 .is_some_and(|index| index.with_untracked(|index| *index) == row.index),
@@ -2815,7 +2891,7 @@ fn resolve_row(
 /// `point` as it stands, found again in its row if that was recycled.
 fn revive(
     rows: &HashMap<NodeId, crate::reactive::Signal<usize>>,
-    keys: &HashMap<NodeId, u64>,
+    keys: &HashMap<NodeId, RowKey>,
     scene: &Scene,
     point: TextPoint,
     row: Option<&RowAddress>,
@@ -2831,18 +2907,24 @@ fn revive(
             node,
             offset: point.offset,
         }),
-        // Its index shows another row now (rows came or went above it while
-        // it was away), its own not in view: where it is can't be told, so
-        // it ends rather than come back on that row's text.
-        None if row.key.is_some()
-            && scene.children(row.content).iter().any(|child| {
-                rows.get(child)
-                    .is_some_and(|index| index.with_untracked(|index| *index) == row.index)
-            }) =>
-        {
-            End::Gone
-        }
-        None => End::Parked(row.clone(), point.offset),
+        // Not mounted. Rows may have come or gone above it while it was
+        // away: its key finds where it is now (at once if it hasn't moved),
+        // so it stays on its own row, never on the one at its old index. A
+        // key no row has any more ends it.
+        None => match &row.key {
+            Some(key) => match key.index(row.index) {
+                Some(index) if index == row.index => End::Parked(row.clone(), point.offset),
+                Some(index) => End::Parked(
+                    RowAddress {
+                        index,
+                        ..row.clone()
+                    },
+                    point.offset,
+                ),
+                None => End::Gone,
+            },
+            None => End::Parked(row.clone(), point.offset),
+        },
     }
 }
 
