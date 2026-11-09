@@ -6,10 +6,8 @@
 //! styled text, lists and quotes hold blocks, code blocks show their
 //! language and a Copy button, tables lay out their cells in rows. Colours
 //! and sizes are the theme's tokens.
-use super::{
-    Incremental, Options, PENDING_LINK_URL,
-    veil::{Chunk, Veil},
-};
+pub(crate) use super::veil::Chunk;
+use super::{Incremental, Options, PENDING_LINK_URL, veil::Veil};
 use crate::value::{Value, identity};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 use zgx::{
@@ -48,6 +46,100 @@ pub(crate) struct ViewOptions {
     pub(crate) path: Rc<[usize]>,
     /// In a quote: its words in the quote's ink.
     pub(crate) quoted: bool,
+}
+
+/// Where a block the look draws (`Look::hooked`) stands: its top-level
+/// block (from 1), its place among that block's parts the veil counts
+/// (from 1), its path in it, and a find's query (lower case), current
+/// match's place in the block and the matches before it there.
+pub(crate) struct HookAt {
+    pub block: usize,
+    pub n: u32,
+    pub path: Rc<[usize]>,
+    pub find: Option<(String, usize, usize)>,
+    /// The view's veil, if its words fade in: the block's parts fade by it
+    /// (`HookAt::chunks`), sharing what each place has shown with the
+    /// view's own paragraphs (a paragraph becoming a table's first cell).
+    pub veil: Option<Rc<RefCell<Veil>>>,
+}
+impl HookAt {
+    /// What of `text`, the block's part at place `n` (from 1) in its
+    /// top-level block, is still fading now: the veil's chunks.
+    pub fn chunks(veil: &RefCell<Veil>, block: usize, n: u32, text: &str) -> Vec<Chunk> {
+        veil.borrow_mut()
+            .chunks((block - 1, n), text, zgx::compose::fade_now())
+    }
+}
+
+/// Whether the look draws block `b` itself (`Look::hooks`): what the view
+/// doesn't draw in its style.
+fn hooked_kind(b: &Value, look: &dyn Look) -> bool {
+    if !look.hooks() {
+        return false;
+    }
+    match b.field("t") {
+        // (A paragraph with pictures among its words, where the app shows
+        // them: the app's.)
+        Some(Value::Str(t)) if &**t == "p" => {
+            look.pictures()
+                && b.field("s")
+                    .is_some_and(|s| s.list().iter().any(|r| r.field("img").is_some()))
+        }
+        Some(Value::Str(t)) if &**t == "h" => !look.has("h1"),
+        Some(Value::Str(t)) if &**t == "ul" || &**t == "ol" => !look.has("list"),
+        Some(Value::Str(t)) if &**t == "quote" => !look.has("quote"),
+        Some(Value::Str(t)) if &**t == "hr" => !look.has("rule"),
+        _ => true,
+    }
+}
+
+/// Block `b` drawn by the look, where it is (`options`), made again as a
+/// find's query or current match changes in its top-level block.
+fn hooked_block(b: &Value, look: &Rc<dyn Look>, options: &ViewOptions, cx: &mut Context) -> View {
+    let block = options.block_at.unwrap_or(0);
+    let path = options.path.clone();
+    let top = options.top.clone();
+    let veil = options.veil_state.clone();
+    let at = {
+        let (path, top, look) = (path.clone(), top.clone(), look.clone());
+        move || {
+            let (n, before) = match (&top, path.is_empty()) {
+                (Some(top), false) => top.with_untracked(|t| super::order::before(t, &path)),
+                _ => (0, Vec::new()),
+            };
+            let find = options_find(&*look, block).map(|(q, k)| {
+                let base = before.iter().map(|w| occurrences(w, &q).len()).sum();
+                (q, k, base)
+            });
+            HookAt {
+                block: block + 1,
+                n: n + 1,
+                path: path.clone(),
+                find,
+                veil: veil.clone(),
+            }
+        }
+    };
+    if !look.finds() {
+        let at = at();
+        return look.hooked(b, &at, cx);
+    }
+    let (b, look, chosen) = (b.clone(), look.clone(), look.clone());
+    // (As wide as what holds it: the app's block fills its place.)
+    zgx::compose::switch(
+        move || chosen.find(block),
+        move |_, cx| {
+            let at = at();
+            look.hooked(&b, &at, cx)
+        },
+    )
+    .w_full()
+    .min_w(0.)
+}
+/// A find's query (lower case) and current match's place in top-level
+/// block `block`, if it has a query.
+fn options_find(look: &dyn Look, block: usize) -> Option<(String, usize)> {
+    look.find(block).map(|(q, k)| (q.to_ascii_lowercase(), k))
 }
 
 /// `veil = { key = …, seed = … }`: the reply's key, which keeps what each
@@ -148,6 +240,15 @@ pub(crate) trait Look {
     fn reveal(&self, block: zgx::compose::NodeHandle);
     /// A paragraph (its runs' rich text) with the style's own options.
     fn paragraph(&self, view: View) -> View;
+    /// Whether the look draws some blocks itself (`block`): those the view
+    /// doesn't draw in it (code, tables, pictures, and prose kinds its
+    /// style names no part for).
+    fn hooks(&self) -> bool;
+    /// Whether the look shows a paragraph's pictures (`pictures`): such a
+    /// paragraph is its to draw.
+    fn pictures(&self) -> bool;
+    /// Block `b` as the look draws it (`block(b, at)`), made in `cx`.
+    fn hooked(&self, b: &Value, at: &HookAt, cx: &mut Context) -> View;
     /// Whether the style names part `name` (`h1`, `list`, `quote`, `rule`…).
     fn has(&self, name: &str) -> bool;
     /// `view` with the style's options for part `name` (none if it names
@@ -237,14 +338,23 @@ fn span_of(
 ) -> zgx::compose::TextSpan {
     let fields = RunFields::of(run);
     if let Some(look) = look {
-        let text: Rc<str> = match (text, fields.text) {
-            (Some(text), _) => text.into(),
-            (None, Some(Value::Str(s))) => s.clone(),
-            (None, other) => text_of(other).into(),
+        // A picture among the words, not drawn as one: the link it is, by
+        // its alt or its file's name, as an app keeps a picture it won't
+        // draw.
+        let img = match run.field("img") {
+            Some(Value::Str(src)) => Some(src.clone()),
+            _ => None,
         };
-        let link = match fields.link {
-            Some(Value::Str(href)) if &**href == PENDING_LINK_URL => Some(""),
-            Some(Value::Str(href)) => Some(&**href),
+        let text: Rc<str> = match (text, fields.text, &img) {
+            (Some(text), _, _) => text.into(),
+            (None, Some(Value::Str(s)), _) if !s.is_empty() || img.is_none() => s.clone(),
+            (None, _, Some(src)) => src.rsplit('/').next().unwrap_or(src).into(),
+            (None, other, None) => text_of(other).into(),
+        };
+        let link = match (fields.link, &img) {
+            (Some(Value::Str(href)), _) if &**href == PENDING_LINK_URL => Some(""),
+            (Some(Value::Str(href)), _) => Some(&**href),
+            (_, Some(src)) => Some(&**src),
             _ => None,
         };
         return look.span(&Run {
@@ -450,7 +560,7 @@ fn spans(
         let (from, to) = (pos, pos + p.text.len());
         pos = to;
         if p.run.field("img").is_some() {
-            out.push(span_of(p.run, Some(&p.text), bold, look, 0));
+            out.push(span_of(p.run, None, bold, look, 0));
             continue;
         }
         // A chip is one piece, one wash: never cut by a fade or a find; a
@@ -663,6 +773,11 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
 }
 
 fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
+    if let Some(look) = &options.look
+        && hooked_kind(b, &**look)
+    {
+        return hooked_block(b, look, options, cx);
+    }
     let kind = text_of(b.field("t"));
     match kind.as_str() {
         "h" => {
@@ -798,7 +913,11 @@ fn kind_id(kind: &str) -> Option<u8> {
         _ => return None,
     })
 }
-fn place(index: usize, last: bool, b: &Value) -> Place {
+fn place(index: usize, last: bool, b: &Value, look: Option<&dyn Look>) -> Place {
+    // A block the look draws: built whole, again as its value changes.
+    if look.is_some_and(|look| hooked_kind(b, look)) {
+        return Place::Whole(index, identity(b));
+    }
     let kind = match b.field("t") {
         Some(Value::Str(kind)) if last => kind_id(kind),
         _ => None,
@@ -840,7 +959,9 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
     // drew a block again only when its value changed): none is built again
     // as the one after it comes.
     let styled = options.look.is_some();
-    keyed(
+    let styled_list = styled;
+    let hook_look = options.look.clone();
+    let list = keyed(
         move || {
             list.with(|blocks| {
                 let blocks = blocks.list();
@@ -855,7 +976,7 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
                 blocks
                     .iter()
                     .enumerate()
-                    .map(|(i, b)| place(i, i == last || styled, b))
+                    .map(|(i, b)| place(i, i == last || styled, b, hook_look.as_deref()))
                     .collect()
             })
         },
@@ -916,7 +1037,14 @@ fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
             }
         },
     )
-    .w_full()
+    .w_full();
+    // In a look, its blocks as wide as it, as an app's column stretches what
+    // it holds (a picture's alt, a block of the app's own).
+    if styled_list {
+        list.items_stretch()
+    } else {
+        list
+    }
 }
 
 /// Top-level block `index`'s `view`, brought into view (`Look::reveal`) a
@@ -1180,7 +1308,7 @@ fn look_list(
             )
         },
     );
-    outer.part("list", list.role(Role::List))
+    outer.part("list", list.role(Role::List).items_stretch())
 }
 
 /// A paragraph of the runs field `field` of `cell` holds, following it.
@@ -1232,10 +1360,13 @@ fn para_runs(
 fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
     let b = cell.with_untracked(Clone::clone);
     let kind = text_of(b.field("t"));
-    if let Some(look) = options.look.clone()
-        && let Some(view) = look_block(&kind, &b, cell.clone(), &look, options, cx)
-    {
-        return view;
+    if let Some(look) = options.look.clone() {
+        if hooked_kind(&b, &*look) {
+            return hooked_block(&b, &look, options, cx);
+        }
+        if let Some(view) = look_block(&kind, &b, cell.clone(), &look, options, cx) {
+            return view;
+        }
     }
     match kind.as_str() {
         "h" => {
@@ -1364,6 +1495,51 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
     }
 }
 
+/// Pictures on lines of their own that follow one another, as one block
+/// `{ t = "pics", list = { … } }`: the same pictures the very same block
+/// each time (kept by the first one's), so one being written doesn't draw
+/// them again with every word.
+#[derive(Default)]
+struct Trays(std::collections::HashMap<usize, (Vec<usize>, Value)>);
+impl Trays {
+    fn together(&mut self, blocks: Vec<Value>) -> Vec<Value> {
+        let is_img = |b: &Value| matches!(b.field("t"), Some(Value::Str(t)) if &**t == "img");
+        if !blocks.windows(2).any(|w| is_img(&w[0]) && is_img(&w[1])) {
+            return blocks;
+        }
+        let mut out = Vec::with_capacity(blocks.len());
+        let mut i = 0;
+        while i < blocks.len() {
+            let mut j = i;
+            while j + 1 < blocks.len() && is_img(&blocks[j + 1]) && is_img(&blocks[i]) {
+                j += 1;
+            }
+            if j == i {
+                out.push(blocks[i].clone());
+                i += 1;
+                continue;
+            }
+            let members = &blocks[i..=j];
+            let ids: Vec<usize> = members.iter().map(identity).collect();
+            let first = identity(&blocks[i]);
+            let tray = match self.0.get(&first) {
+                Some((kept, tray)) if *kept == ids => tray.clone(),
+                _ => {
+                    let tray = super::map(vec![
+                        ("t", "pics".into()),
+                        ("list", Value::List(members.to_vec().into())),
+                    ]);
+                    self.0.insert(first, (ids, tray.clone()));
+                    tray
+                }
+            };
+            out.push(tray);
+            i = j + 1;
+        }
+        out
+    }
+}
+
 /// The view of `source()`'s markdown, following it: parsed again for what
 /// changed (its tail, as text is appended), each block built once for its
 /// place and kind, and only what a block's new value changes laid out and
@@ -1392,6 +1568,11 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
             options.veil_state = Some(state);
         }
         let parser = RefCell::new(Incremental::new(options.parse.clone()));
+        let trays = options
+            .look
+            .as_ref()
+            .filter(|look| look.hooks())
+            .map(|_| RefCell::new(Trays::default()));
         let top = cx.runtime().signal(Value::List(Vec::new().into()));
         let blocks = top.clone();
         cx.retain(cx.runtime().effect(move || {
@@ -1400,7 +1581,12 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
                 Source::Made(text) => parser.set_text(&text),
                 Source::Held(value) => parser.set_value(&value),
             }
-            let parsed = parser.blocks();
+            let mut parsed = parser.blocks();
+            // Pictures that follow one another, together (a look drawing
+            // them lays them on one tray).
+            if let Some(trays) = &trays {
+                parsed = trays.borrow_mut().together(parsed);
+            }
             blocks.mutate(|was| {
                 *was = Value::List(parsed.into());
                 true

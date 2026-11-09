@@ -611,3 +611,30 @@ fn a_styles_headings_lists_quotes_and_rules_are_its_elements() {
         2
     );
 }
+
+#[test]
+fn a_block_the_style_doesnt_draw_is_the_hooks() {
+    let mut app = TestApp::inline(
+        r##"local asked = ui.state("asked", "")
+        return ui.column { w = 600,
+            ui.markdown_view { id = "md", w_full = true, style = {},
+                "Words.\n\n```lua\nprint(1)\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n![one](a.png)\n![two](b.png)",
+                block = function(b, at)
+                    asked:set(asked:peek() .. b.t .. "@" .. at.block .. ":" .. at.n .. ";")
+                    return ui.text { id = "hooked-" .. b.t, b.t }
+                end },
+        }"##,
+    );
+    app.frames(2);
+    assert_eq!(app.error(), None);
+    let asked = (app.host.states().into_iter())
+        .find(|(name, _)| name == "asked")
+        .map(|(_, v)| v.to_string())
+        .unwrap();
+    // The paragraph the view's; code, the table and the pictures (together)
+    // the hook's, at their places.
+    assert_eq!(asked, "code@2:1;table@3:1;pics@4:1;");
+    for id in ["hooked-code", "hooked-table", "hooked-pics"] {
+        assert!(app.find(id).is_some(), "{id}:\n{}", app.tree());
+    }
+}

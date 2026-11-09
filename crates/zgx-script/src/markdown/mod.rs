@@ -1472,7 +1472,7 @@ fn link_of(href: &str, paths: bool) -> Link {
     }
 }
 
-fn map(fields: Vec<(&str, Value)>) -> Value {
+pub(crate) fn map(fields: Vec<(&str, Value)>) -> Value {
     let mut fields: Vec<(Rc<str>, Value)> = fields.into_iter().map(|(k, v)| (key(k), v)).collect();
     fields.sort_by(|a, b| a.0.cmp(&b.0));
     Value::Map(fields.into())

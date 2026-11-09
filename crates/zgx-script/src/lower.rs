@@ -8515,6 +8515,62 @@ impl crate::markdown::view::Look for ScriptLook {
             vm.report(error);
         }
     }
+    fn hooks(&self) -> bool {
+        self.look.block.is_some()
+    }
+    fn pictures(&self) -> bool {
+        self.look.pictures
+    }
+    fn hooked(&self, b: &Value, at: &crate::markdown::view::HookAt, cx: &mut Context) -> View {
+        let (vm, hook) = (&self.vm, self.look.block.as_ref().expect("hooks"));
+        let made = (|| -> mlua::Result<mlua::Table> {
+            let lua = &vm.lua;
+            let t = lua.create_table()?;
+            t.raw_set("block", at.block)?;
+            t.raw_set("n", at.n)?;
+            t.raw_set(
+                "path",
+                lua.create_sequence_from(at.path.iter().map(|i| i + 1))?,
+            )?;
+            // Its parts' place in the view's veil, each part (a table's
+            // cell, a code block) the next: `veil(text)` its chunks still
+            // fading, as ds/markdown's veil gives them.
+            if let Some(veil) = &at.veil {
+                let (veil, block, n) = (veil.clone(), at.block, std::cell::Cell::new(at.n - 1));
+                let chunks = lua.create_function(move |lua, text: mlua::LuaString| {
+                    n.set(n.get() + 1);
+                    let text = text.to_str()?;
+                    let out = lua.create_table()?;
+                    for c in crate::markdown::view::HookAt::chunks(&veil, block, n.get(), &text) {
+                        let t = lua.create_table()?;
+                        t.raw_set("from", c.from)?;
+                        t.raw_set("to", c.to)?;
+                        t.raw_set("started", c.started)?;
+                        t.raw_set("ms", c.ms)?;
+                        t.raw_set("boost", c.boost)?;
+                        out.raw_push(t)?;
+                    }
+                    Ok(out)
+                })?;
+                t.raw_set("veil", chunks)?;
+            }
+            if let Some((q, cur, n)) = &at.find {
+                let find = lua.create_table()?;
+                find.raw_set("q", q.as_str())?;
+                find.raw_set("cur", *cur)?;
+                find.raw_set("n", *n)?;
+                t.raw_set("find", find)?;
+            }
+            Ok(t)
+        })();
+        match made {
+            Ok(at) => build_scoped(vm, cx, &self.low, hook, (b.clone(), at)),
+            Err(error) => {
+                vm.report(error);
+                div()
+            }
+        }
+    }
     fn has(&self, name: &str) -> bool {
         self.look.parts.contains_key(name)
     }

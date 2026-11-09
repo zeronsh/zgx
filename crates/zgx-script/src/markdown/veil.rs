@@ -21,7 +21,7 @@ pub(crate) const POWER: f32 = 1.6;
 /// What of a paragraph's text arrived together: bytes `from..to`, fading
 /// from `started` (ms, as `ui.now()`) over `ms`, `boost` times as fast.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Chunk {
+pub struct Chunk {
     pub from: usize,
     pub to: usize,
     pub started: f64,
