@@ -82,6 +82,10 @@ pub(crate) struct ModelSpec {
     /// The clip it plays, round and round: by name, or by its place (from
     /// 1, as Luau counts).
     animation: Option<ClipChoice>,
+    /// Seconds into its clip to pose it at, in place of playing it on its
+    /// own (a number, a state's or a function's): a video's frame, or a
+    /// slider's, says where it is.
+    time: Option<Num>,
 }
 #[cfg_attr(not(feature = "gltf"), allow(dead_code))]
 pub(crate) enum ClipChoice {
@@ -464,6 +468,17 @@ fn model(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
             )));
         }
     };
+    let time = match table.get::<mlua::Value>("time")? {
+        mlua::Value::Nil => None,
+        value => {
+            if animation.is_none() {
+                return Err(wrong(format_args!(
+                    "ui.model `time` poses its `animation`: name one"
+                )));
+            }
+            Some(num(value, "`time`")?)
+        }
+    };
     placed(
         lua,
         &table,
@@ -471,6 +486,7 @@ fn model(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
             src,
             fit,
             animation,
+            time,
         }),
     )
 }
@@ -1469,12 +1485,29 @@ fn load_model(
             }
         }
     });
+    // Posed at the script's time: an effect following it, posing the clip
+    // there once the model is placed.
+    let posed = spec.time.as_ref().map(|time| {
+        let posed = Rc::new(Posed {
+            held: Default::default(),
+            at: Live::of(time, cx),
+            vm: Rc::downgrade(vm),
+            world: world.clone(),
+        });
+        let follows = posed.clone();
+        follow(cx, Box::new(move || follows.pose()));
+        posed
+    });
     if let Some(model) = kept {
         let placed = place_model(world, group, &model, fit);
         if let Some(clip) = clip {
-            let world = world.clone();
-            cx.tasks()
-                .spawn(play(world, placed, model, clip, frames, report));
+            if let Some(posed) = &posed {
+                posed.place(placed, &model, &clip, &report);
+            } else {
+                let world = world.clone();
+                cx.tasks()
+                    .spawn(play(world, placed, model, clip, frames, report));
+            }
         }
         return;
     }
@@ -1514,9 +1547,13 @@ fn load_model(
                 });
                 let placed = place_model(world, group, &model, fit);
                 if let Some(clip) = clip {
-                    let world = world.clone();
-                    cx.tasks()
-                        .spawn(play(world, placed, model, clip, frames, report));
+                    if let Some(posed) = &posed {
+                        posed.place(placed, &model, &clip, &report);
+                    } else {
+                        let world = world.clone();
+                        cx.tasks()
+                            .spawn(play(world, placed, model, clip, frames, report));
+                    }
                 }
             }
             Err(error) => report(error.to_string()),
@@ -1549,7 +1586,11 @@ fn load_model(
                 });
                 let placed = place_model(&world, group, &model, fit);
                 if let Some(clip) = clip {
-                    play(world, placed, model, clip, frames, report).await;
+                    if let Some(posed) = &posed {
+                        posed.place(placed, &model, &clip, &report);
+                    } else {
+                        play(world, placed, model, clip, frames, report).await;
+                    }
                 }
             }
             Err(error) => report(error),
@@ -1567,31 +1608,79 @@ async fn play(
     frames: zgx::frame::FrameClock,
     report: impl Fn(String),
 ) {
-    let clip = match &name {
-        Some(name) => model.clip(name),
-        None => model.clips().get(index),
-    };
-    let Some(clip) = clip else {
-        let names: Vec<String> = model
-            .clips()
-            .iter()
-            .enumerate()
-            .map(|(i, c)| c.name().map_or_else(|| format!("{}", i + 1), str::to_owned))
-            .collect();
-        let asked = name.unwrap_or_else(|| format!("{}", index + 1));
-        report(if names.is_empty() {
-            format!("no animation {asked}: it has none")
-        } else {
-            format!("no animation {asked}: it has {}", names.join(", "))
-        });
+    let Some(clip) = choose_clip(&model, &(name, index), &report) else {
         return;
     };
+    let clip = &clip;
     let duration = clip.duration().max(1e-3);
     let start = frames.next().await.time;
     loop {
         let frame = frames.next().await;
         let seconds = frame.time.saturating_duration_since(start).as_secs_f32();
         placed.pose(&world, clip, seconds % duration);
+    }
+}
+/// `model`'s clip `choice` (a name, or else an index), or `None` with why
+/// told to `report`.
+#[cfg(feature = "gltf")]
+fn choose_clip(
+    model: &zgx_3d::Model,
+    (name, index): &(Option<String>, usize),
+    report: &impl Fn(String),
+) -> Option<zgx_3d::Clip> {
+    let clip = match name {
+        Some(name) => model.clip(name),
+        None => model.clips().get(*index),
+    };
+    if clip.is_none() {
+        let names: Vec<String> = model
+            .clips()
+            .iter()
+            .enumerate()
+            .map(|(i, c)| c.name().map_or_else(|| format!("{}", i + 1), str::to_owned))
+            .collect();
+        let asked = name.clone().unwrap_or_else(|| format!("{}", index + 1));
+        report(if names.is_empty() {
+            format!("no animation {asked}: it has none")
+        } else {
+            format!("no animation {asked}: it has {}", names.join(", "))
+        });
+    }
+    clip.cloned()
+}
+/// A model's clip posed at the time its script gives (`ui.model`'s `time`):
+/// the model and clip once placed, the time, and where to pose them.
+#[cfg(feature = "gltf")]
+struct Posed {
+    held: std::cell::RefCell<Option<(zgx_3d::Placed, zgx_3d::Clip)>>,
+    at: Live,
+    vm: std::rc::Weak<Vm>,
+    world: World,
+}
+#[cfg(feature = "gltf")]
+impl Posed {
+    /// The clip on `placed`, posed now.
+    fn place(
+        &self,
+        placed: zgx_3d::Placed,
+        model: &zgx_3d::Model,
+        choice: &(Option<String>, usize),
+        report: &impl Fn(String),
+    ) {
+        if let Some(clip) = choose_clip(model, choice, report) {
+            *self.held.borrow_mut() = Some((placed, clip));
+            self.pose();
+        }
+    }
+    /// The time read (followed, in an effect) and the clip posed there.
+    fn pose(&self) {
+        let Some(vm) = self.vm.upgrade() else {
+            return;
+        };
+        let seconds = self.at.get(&vm);
+        if let Some((placed, clip)) = &*self.held.borrow() {
+            placed.pose(&self.world, clip, seconds.max(0.));
+        }
     }
 }
 /// `model` added under `group`: scaled to `fit` across and centred, if
