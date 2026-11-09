@@ -1,7 +1,9 @@
 //! Glass resource monitor: launches the kitchen sink, or another example with
 //! `--app <example>` (or attaches with `--pid <pid>`, or neither with
 //! `--app none`), and charts CPU, GPU and
-//! memory over the last minute for any process on the machine. GPU time per
+//! memory over the last minute for any process on the machine. `--attach
+//! <name>` launches nothing and narrows the sidebar to the processes of that
+//! name and everything they started, as its Attach menu does. GPU time per
 //! process comes from the GPU driver's per-client accounting (macOS: each
 //! `AGXDeviceUserClient`'s `AppUsage`), the way Activity Monitor reads it.
 //!
@@ -14,6 +16,33 @@
 //! This file samples: every process, every half second, published to the
 //! script as shared state (`procs`, `summary`), and the last minute of each
 //! process a panel shows (`history:<pid>`, for the pids in `watch`).
+//!
+//! On macOS an app can name its own processes here, as macOS gives no way to rename a
+//! running process for other tools (a browser's renderers, each drawing
+//! tabs), and count things of its own. It writes
+//! `<temp>/zgx-monitor/labels-<its pid>` (`std::env::temp_dir`: `$TMPDIR`),
+//! replacing the whole file each time, in UTF-8 lines of:
+//!
+//! - `<pid>\t<label>`: the sidebar and panels call process `<pid>` (the
+//!   app's or any of its children) `<label>` rather than its executable's
+//!   name; the last label stays once the app stops saying;
+//! - `#\t<label>\t<count>`: a total of the app's own (`Tabs`, 12), shown
+//!   in the sidebar's footer as `<label> <count>`, summed over the apps in
+//!   view (every one, or the attached tree) that write one so labelled.
+//!
+//! Other lines are skipped. While it runs, the monitor keeps
+//! `<temp>/zgx-monitor/heartbeat` at most 5 seconds old (`files::FRESH`),
+//! so an app need write only while that file is fresh and remove its own
+//! once it goes stale: labels can be private (page titles), and nothing then
+//! reaches disk while no monitor runs. A file counts only while its app runs
+//! and started before the file was last written, and names only processes
+//! started before then, so a pid reused since is not named: the monitor
+//! removes a file whose app has quit or whose pid another process has now.
+//!
+//! It runs the scripts in `--scripts <dir>`; shipped in an app bundle
+//! (`<name>.app/Contents/MacOS/<executable>`), in the bundle's
+//! `Contents/Resources/<executable>/`; otherwise this checkout's.
+//!
 //! Run: cargo run --release -p zgx-desktop --example zgx_monitor
 //! (build the target first: cargo build --release -p zgx-desktop --example kitchen_sink)
 
@@ -48,6 +77,10 @@ struct Sample {
 struct Track {
     start: u64,
     name: Rc<str>,
+    /// What the process's app calls it (a browser tab's title), if it says.
+    label: Option<Rc<str>>,
+    /// The parent when first seen.
+    parent: i32,
     cpu_ns: u64,
     /// Accumulated GPU time, if the process has ever used the GPU.
     gpu_ns: Option<u64>,
@@ -57,8 +90,17 @@ struct Track {
     samples: VecDeque<Sample>,
 }
 
+// Labels are read on macOS only.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[path = "zgx_monitor/files.rs"]
+mod files;
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/zgx_monitor/app.luau");
+    let script = files::script(
+        &std::env::args().collect::<Vec<_>>(),
+        std::env::current_exe().ok().as_deref(),
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/zgx_monitor"),
+    );
     let mut application = Application::new();
     // Geist, the interface's typeface (`font.sans` in zgx_monitor/glass.json).
     for bytes in [
@@ -83,9 +125,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Launch the target beside this binary unless attaching.
             let mut error = String::new();
             let child: Rc<RefCell<Option<Child>>> = Rc::default();
+            let attach = attach_name();
             let launched = match attach_pid() {
                 Some(pid) => Some(pid),
-                None if target() == "none" => None,
+                None if target() == "none" || attach.is_some() => None,
                 None => match launch_target() {
                     Ok(process) => {
                         let pid = process.id() as i32;
@@ -113,6 +156,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "launched",
                 launched.map_or(Value::Nil, |pid| num(pid as f32)),
             );
+            // The first panel shows the attached process, if it is running:
+            // the largest, when several go by that name.
+            let attach_pid = attach.as_deref().and_then(|name| {
+                usage::pids()
+                    .into_iter()
+                    .filter(|pid| usage::name(*pid) == name)
+                    .max_by_key(|pid| usage::read(*pid).map_or(0, |usage| usage.footprint))
+            });
+            host.shared("attach", attach.as_deref().unwrap_or(""));
+            host.shared(
+                "attach_pid",
+                attach_pid.map_or(Value::Nil, |pid| num(pid as f32)),
+            );
             host.shared("error", error.as_str());
             host.shared("interval", INTERVAL.as_millis() as f64);
             host.shared("capacity", CAPACITY as f64);
@@ -123,8 +179,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 host: host.clone(),
                 runtime: cx.ui.runtime.clone(),
                 tracks: Rc::default(),
+                labels: Rc::new(RefCell::new(files::LabelReader::new(
+                    std::env::temp_dir().join("zgx-monitor"),
+                ))),
                 procs: host.shared("procs", Value::List(Rc::new([]))),
                 summary: host.shared("summary", Value::Nil),
+                counts: host.shared("counts", Value::List(Rc::new([]))),
                 watch: host.shared("watch", Value::List(Rc::new([]))),
             };
             // A panel opening on a process shows its last minute at once,
@@ -186,6 +246,15 @@ fn attach_pid() -> Option<i32> {
         .and_then(|pid| pid.parse().ok())
 }
 
+/// The process name whose tree the sidebar starts narrowed to.
+fn attach_name() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    args.iter()
+        .position(|arg| arg == "--attach")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
+
 /// The example to launch: `--app <name>`, the kitchen sink by default;
 /// `--app none` launches nothing.
 fn target() -> String {
@@ -235,10 +304,14 @@ struct Sampler {
     host: ScriptHost,
     runtime: Runtime,
     tracks: Rc<RefCell<HashMap<i32, Track>>>,
-    /// `{ pid, name, cpu, gpu, mem, smooth }` for every live process.
+    /// The labels apps write for it.
+    labels: Rc<RefCell<files::LabelReader>>,
+    /// `{ pid, ppid, name, cpu, gpu, mem, smooth }` for every live process.
     procs: zgx_script::Shared,
     /// `{ count, cpu, gpu }`: the whole machine.
     summary: zgx_script::Shared,
+    /// `{ owner, label, count }`: what apps count of their own.
+    counts: zgx_script::Shared,
     /// The pids the script's panels show (it writes this).
     watch: zgx_script::Shared,
 }
@@ -255,7 +328,23 @@ impl Sampler {
     }
     fn sample(&self) {
         let watched = self.watched();
-        let procs = sample(&mut self.tracks.borrow_mut(), &watched);
+        let labels = if cfg!(target_os = "macos") {
+            self.labels.borrow_mut().read(usage::process)
+        } else {
+            files::Labels::default()
+        };
+        let procs = sample(&mut self.tracks.borrow_mut(), &watched, &labels.names);
+        let counts: Vec<Value> = labels
+            .counts
+            .into_iter()
+            .map(|(owner, label, count)| {
+                map([
+                    ("owner", num(owner as f32)),
+                    ("label", Value::Str(label)),
+                    ("count", num(count)),
+                ])
+            })
+            .collect();
         let cpu: f32 = procs.iter().map(|p| p.2).sum();
         let summary = map([
             ("count", num(procs.len() as f32)),
@@ -264,10 +353,12 @@ impl Sampler {
         ]);
         let rows: Vec<Value> = procs
             .into_iter()
-            .map(|(pid, name, cpu, gpu, memory_mb, smooth)| {
+            .map(|(pid, name, cpu, gpu, memory_mb, smooth, parent, label)| {
                 map([
                     ("pid", num(pid as f32)),
+                    ("ppid", num(parent as f32)),
                     ("name", Value::Str(name)),
+                    ("label", label.map_or(Value::Nil, Value::Str)),
                     ("cpu", num(cpu)),
                     ("gpu", num(gpu)),
                     ("mem", num(memory_mb)),
@@ -278,6 +369,7 @@ impl Sampler {
         self.runtime.batch(|| {
             self.procs.set(Value::List(rows.into()));
             self.summary.set(summary);
+            self.counts.set(Value::List(counts.into()));
             self.publish_history();
         });
     }
@@ -294,6 +386,7 @@ impl Sampler {
             };
             let history = map([
                 ("name", Value::Str(track.name.clone())),
+                ("label", track.label.clone().map_or(Value::Nil, Value::Str)),
                 ("cpu", series(|s| s.cpu)),
                 ("gpu", series(|s| s.gpu)),
                 ("mem", series(|s| s.memory_mb)),
@@ -305,12 +398,16 @@ impl Sampler {
     }
 }
 
-/// One reading per live process: pid, name, CPU, GPU, memory (MB) and the
-/// smoothed CPU.
+/// A process's reading: pid, name, CPU, GPU, memory (MB), the smoothed CPU,
+/// the parent's pid and the label its app gave it.
+type Reading = (i32, Rc<str>, f32, f32, f32, f32, i32, Option<Rc<str>>);
+
+/// One reading per live process.
 fn sample(
     tracks: &mut HashMap<i32, Track>,
     open: &HashSet<i32>,
-) -> Vec<(i32, Rc<str>, f32, f32, f32, f32)> {
+    labels: &HashMap<i32, Rc<str>>,
+) -> Vec<Reading> {
     let now = Instant::now();
     let mut seen = HashSet::new();
     let mut procs = Vec::new();
@@ -320,17 +417,21 @@ fn sample(
             continue;
         };
         seen.insert(pid);
+        let label = labels.get(&pid).cloned();
         let memory_mb = usage.footprint as f32 / (1024. * 1024.);
         let track = match tracks.get_mut(&pid) {
             // A reused pid is a different process.
             Some(track) if track.start == usage.start => track,
             _ => {
                 let name: Rc<str> = usage::name(pid).into();
+                let parent = usage::parent(pid);
                 tracks.insert(
                     pid,
                     Track {
                         start: usage.start,
                         name: name.clone(),
+                        label: label.clone(),
+                        parent,
                         cpu_ns: usage.cpu_ns,
                         gpu_ns: gpu_times.get(&pid).copied(),
                         at: now,
@@ -338,10 +439,14 @@ fn sample(
                         samples: VecDeque::new(),
                     },
                 );
-                procs.push((pid, name, 0., 0., memory_mb, 0.));
+                procs.push((pid, name, 0., 0., memory_mb, 0., parent, label));
                 continue;
             }
         };
+        // Kept once the app stops saying, as when it quits with its helpers still going.
+        if label.is_some() {
+            track.label = label.clone();
+        }
         let wall = now.duration_since(track.at).as_nanos().max(1) as f64;
         let cpu = (usage.cpu_ns.saturating_sub(track.cpu_ns) as f64 / wall * 100.) as f32;
         track.cpu_ns = usage.cpu_ns;
@@ -362,7 +467,16 @@ fn sample(
             gpu,
             memory_mb,
         });
-        procs.push((pid, track.name.clone(), cpu, gpu, memory_mb, track.smooth));
+        procs.push((
+            pid,
+            track.name.clone(),
+            cpu,
+            gpu,
+            memory_mb,
+            track.smooth,
+            track.parent,
+            track.label.clone(),
+        ));
     }
     // Exited processes keep their history while a panel shows them.
     tracks.retain(|pid, _| seen.contains(pid) || open.contains(pid));
@@ -372,7 +486,7 @@ fn sample(
 /// Per-process CPU time and physical footprint (what Activity Monitor shows).
 #[cfg(target_os = "macos")]
 mod usage {
-    use std::sync::OnceLock;
+    use std::{ffi::c_void, sync::OnceLock};
     #[repr(C)]
     #[derive(Default)]
     struct RusageInfoV2 {
@@ -396,6 +510,41 @@ mod usage {
         diskio_bytesread: u64,
         diskio_byteswritten: u64,
     }
+    /// `proc_bsdshortinfo`, up to the parent's pid being what's read of it.
+    #[repr(C)]
+    #[derive(Default)]
+    struct ShortInfo {
+        pid: u32,
+        ppid: u32,
+        pgid: u32,
+        status: u32,
+        comm: [u8; 16],
+        flags: u32,
+        ids: [u32; 6],
+        reserved: u32,
+    }
+    /// `proc_bsdinfo`, up to the start time being what's read of it.
+    #[repr(C)]
+    #[derive(Default)]
+    struct BsdInfo {
+        flags: u32,
+        status: u32,
+        xstatus: u32,
+        pid: u32,
+        ppid: u32,
+        ids: [u32; 6],
+        rfu: u32,
+        comm: [u8; 16],
+        name: [u8; 32],
+        nfiles: u32,
+        pgid: u32,
+        pjobc: u32,
+        tdev: u32,
+        tpgid: u32,
+        nice: i32,
+        start_seconds: u64,
+        start_microseconds: u64,
+    }
     #[repr(C)]
     #[derive(Default)]
     struct Timebase {
@@ -403,15 +552,20 @@ mod usage {
         denom: u32,
     }
     // SAFETY: libproc's and Mach's declarations (libproc.h, mach_time.h);
-    // `RusageInfoV2` is `rusage_info_v2` field for field.
+    // `RusageInfoV2` is `rusage_info_v2`, `ShortInfo` `proc_bsdshortinfo` and
+    // `BsdInfo` `proc_bsdinfo`, field for field.
     unsafe extern "C" {
         fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut RusageInfoV2) -> i32;
         fn proc_listallpids(buffer: *mut i32, size: i32) -> i32;
+        fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut c_void, size: i32) -> i32;
         fn proc_pidpath(pid: i32, buffer: *mut u8, size: u32) -> i32;
         fn proc_name(pid: i32, buffer: *mut u8, size: u32) -> i32;
         fn mach_timebase_info(info: *mut Timebase) -> i32;
     }
     const RUSAGE_INFO_V2: i32 = 2;
+    const PROC_PIDT_SHORTBSDINFO: i32 = 13;
+    const PROC_PIDTBSDINFO: i32 = 3;
+    const ESRCH: i32 = 3;
 
     pub struct Usage {
         pub cpu_ns: u64,
@@ -430,6 +584,32 @@ mod usage {
         pids.truncate(count.min(pids.len()));
         pids.retain(|pid| *pid > 0);
         pids
+    }
+    /// The parent's pid, or 0 if it can't be read.
+    pub fn parent(pid: i32) -> i32 {
+        let mut info = ShortInfo::default();
+        let size = size_of::<ShortInfo>() as i32;
+        // SAFETY: the buffer is a correctly sized, writable proc_bsdshortinfo.
+        let read =
+            unsafe { proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, (&raw mut info).cast(), size) };
+        if read == size { info.ppid as i32 } else { 0 }
+    }
+    /// Whether `pid` runs, and since when.
+    pub fn process(pid: i32) -> super::files::Process {
+        use super::files::Process;
+        let mut info = BsdInfo::default();
+        let size = size_of::<BsdInfo>() as i32;
+        // SAFETY: the buffer is a correctly sized, writable proc_bsdinfo.
+        let read = unsafe { proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+        if read == size {
+            let since = std::time::Duration::from_secs(info.start_seconds)
+                + std::time::Duration::from_micros(info.start_microseconds);
+            Process::Started(std::time::UNIX_EPOCH + since)
+        } else if std::io::Error::last_os_error().raw_os_error() == Some(ESRCH) {
+            Process::Gone
+        } else {
+            Process::Unknown
+        }
     }
     /// The executable's file name (proc_name truncates at 32 bytes).
     pub fn name(pid: i32) -> String {
@@ -482,7 +662,7 @@ mod usage {
     // "Device Utilization %". Both are readable without privileges.
     use std::{
         collections::HashMap,
-        ffi::{CStr, c_char, c_void},
+        ffi::{CStr, c_char},
     };
     type CfType = *const c_void;
     // SAFETY: IOKit's and CoreFoundation's declarations (IOKitLib.h,
@@ -741,6 +921,10 @@ mod usage {
     pub fn device_gpu() -> Option<f32> {
         None
     }
+    /// Labels are read on macOS only.
+    pub fn process(_pid: i32) -> super::files::Process {
+        super::files::Process::Unknown
+    }
     pub struct Usage {
         pub cpu_ns: u64,
         pub footprint: u64,
@@ -759,6 +943,20 @@ mod usage {
         std::fs::read_to_string(format!("/proc/{pid}/comm"))
             .map(|name| name.trim_end().to_owned())
             .unwrap_or_else(|_| format!("pid {pid}"))
+    }
+    /// The parent's pid, or 0 if it can't be read.
+    pub fn parent(pid: i32) -> i32 {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                stat.rsplit(')')
+                    .next()?
+                    .split_whitespace()
+                    .nth(1)?
+                    .parse()
+                    .ok()
+            })
+            .unwrap_or(0)
     }
     /// Linux: /proc/<pid>/stat CPU ticks (assumed 100 Hz) and resident memory.
     pub fn read(pid: i32) -> Option<Usage> {
@@ -784,6 +982,15 @@ mod tests {
         assert_eq!(usage::creator_pid("pid 395, WindowServer"), Some(395));
         assert_eq!(usage::creator_pid("pid 7,x"), Some(7));
         assert_eq!(usage::creator_pid("WindowServer"), None);
+    }
+
+    #[test]
+    fn parent_reads_this_process_parent() {
+        let pid = std::process::id() as i32;
+        assert_eq!(
+            usage::parent(pid),
+            std::os::unix::process::parent_id() as i32
+        );
     }
 
     #[test]

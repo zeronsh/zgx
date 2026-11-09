@@ -17,5 +17,7 @@ return {
 	split_down = icon('<rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 12h17"/>'),
 	expand = icon('<path d="M14 4.5h5.5V10M10 19.5H4.5V14M19.5 4.5 13.5 10.5M4.5 19.5l6-6"/>'),
 	collapse = icon('<path d="M19.5 10H14V4.5M4.5 14H10v5.5M14 10l5.5-5.5M10 14l-5.5 5.5"/>'),
+	target = icon('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/>'),
+	chevron = icon('<path d="m7 10 5 5 5-5"/>'),
 	pulse = icon('<path d="M3.5 12h4l2.5-6 4 12 2.5-6h4"/>'),
 }

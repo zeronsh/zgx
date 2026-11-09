@@ -19,6 +19,10 @@ local M = {}
 
 -- What the host (zgx_monitor.rs) publishes.
 M.launched = ui.shared("launched", nil :: number?):peek()
+-- `--attach <name>`, and the first process of that name when the monitor
+-- started.
+M.attach_name = ui.shared("attach", ""):peek()
+M.attach_pid = ui.shared("attach_pid", nil :: number?):peek()
 M.error = ui.shared("error", "")
 -- Milliseconds between samples, and how many a history keeps.
 M.interval = ui.shared("interval", 500):peek()
@@ -43,6 +47,9 @@ M.dragging = ui.state("dragging", {} :: Dragging)
 -- The panels' area's size.
 M.area = ui.state("area", { w = 0, h = 0 })
 
+-- The process name whose tree the sidebar lists, or "" for every process.
+M.attached = ui.state("attached", "")
+M.attach_open = ui.state("attach_open", false)
 M.query = ui.state("query", "")
 M.sort = ui.persist("sort", "cpu" :: Sort)
 -- The sidebar's width when open, whether it is, and the width it shows

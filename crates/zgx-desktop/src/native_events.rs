@@ -172,19 +172,11 @@ mod platform {
             }
             #[unsafe(method(handleDocuments:withReplyEvent:))]
             fn open_documents(&self, event: &NSAppleEventDescriptor, _: &NSAppleEventDescriptor) {
-                if let Some(list) = event.paramDescriptorForKeyword(DIRECT_OBJECT) {
-                    if !(0..=256).contains(&list.numberOfItems()) { return; }
-                    let urls = (1..=list.numberOfItems()).map(|index| {
-                        list.descriptorAtIndex(index)
-                            .and_then(|item| item.coerceToDescriptorType(FILE_URL))
-                            .and_then(|item| item.stringValue())
-                            .map(|url| url.to_string())
-                    }).collect::<Option<Vec<_>>>();
-                    // Preserve the batch as one transaction. A malformed entry
-                    // must not silently turn a multi-document open into a subset.
-                    if let Some(urls) = urls {
-                        self.deliver_urls(urls);
-                    }
+                if let Some(urls) = event
+                    .paramDescriptorForKeyword(DIRECT_OBJECT)
+                    .and_then(|list| document_urls(&list))
+                {
+                    self.deliver_urls(urls);
                 }
             }
             #[unsafe(method(handleReopen:withReplyEvent:))]
@@ -193,6 +185,25 @@ mod platform {
             }
         }
     );
+    /// An open-documents event's files as `file://` URLs. The batch is one
+    /// transaction: a malformed entry must not silently turn a multi-document
+    /// open into a subset.
+    pub(super) fn document_urls(list: &NSAppleEventDescriptor) -> Option<Vec<String>> {
+        if !(0..=256).contains(&list.numberOfItems()) {
+            return None;
+        }
+        (1..=list.numberOfItems())
+            .map(|index| {
+                // `fileURLValue`, not `stringValue`: a file URL descriptor's
+                // string is an HFS path ("Macintosh HD:Users:..."), not a URL.
+                list.descriptorAtIndex(index)
+                    .and_then(|item| item.coerceToDescriptorType(FILE_URL))
+                    .and_then(|item| item.fileURLValue())
+                    .and_then(|url| url.absoluteString())
+                    .map(|url| url.to_string())
+            })
+            .collect()
+    }
     impl EventHandler {
         fn deliver_urls(&self, urls: Vec<String>) {
             if !urls.is_empty()
@@ -608,6 +619,24 @@ mod tests {
         assert_eq!(urls[1], "myapp://open/thing");
         assert_eq!(platform::event(""), Some(ApplicationEvent::Reopen));
         assert_eq!(platform::event("not a url"), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_opened_documents_arrive_as_file_urls() {
+        use objc2_foundation::{NSAppleEventDescriptor, NSString, NSURL};
+        let list = NSAppleEventDescriptor::listDescriptor();
+        for path in ["/tmp/a b.html", "/tmp/c.xhtml"] {
+            let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+            list.insertDescriptor_atIndex(&NSAppleEventDescriptor::descriptorWithFileURL(&url), 0);
+        }
+        assert_eq!(
+            platform::document_urls(&list),
+            Some(vec![
+                "file:///tmp/a%20b.html".to_string(),
+                "file:///tmp/c.xhtml".to_string()
+            ])
+        );
     }
 
     #[test]

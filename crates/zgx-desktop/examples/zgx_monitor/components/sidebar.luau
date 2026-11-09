@@ -1,9 +1,11 @@
--- The sidebar: a filter, the sort, every process, and the machine's total.
+-- The sidebar: what it's attached to, a filter, the sort, the processes, and
+-- their total.
 local theme = require("../theme")
 local icons = require("../icons")
 local state = require("../state")
 local data = require("../data")
 local keys = require("../keys")
+local actions = require("../actions")
 local controls = require("./controls")
 local Row = require("./process_row")
 local format = require("@lib/format")
@@ -11,6 +13,79 @@ local format = require("@lib/format")
 local query, sort = state.query, state.sort
 
 local M = {}
+
+-- What the list covers, chosen from a menu: every process, or one app and
+-- everything it started.
+local function attacher(): Node
+	local open = state.attach_open
+	local function item(label: string, name: string, shown: string?): Node
+		return ui.menu_item {
+			label = label,
+			radio = true,
+			checked = function()
+				return state.attached:get() == name
+			end,
+			shortcut = shown,
+			on_click = function()
+				actions.attach(name)
+			end,
+		}
+	end
+	return ui.div {
+		mx = 10,
+		mb = 8,
+		ui.menu {
+			open = open,
+			label = "Attach to",
+			match_anchor_width = true,
+			p = 5,
+			gap = 0,
+			rounded = 12,
+			items = "stretch",
+			anchor = ui.button {
+				id = "attach",
+				w_full = true,
+				h = 32,
+				pl = 10,
+				pr = 8,
+				gap = 7,
+				items = "center",
+				rounded = 9,
+				bg = theme.wash,
+				border = 1,
+				border_color = theme.line,
+				hover = { bg = theme.hover },
+				focus = { border = 1 },
+				on_click = ui.toggle(open),
+				ui.svg { code = icons.target, w = 13, h = 13, tint = theme.tertiary, shrink = 0 },
+				ui.text {
+					function()
+						local name = state.attached:get()
+						return if name == "" then "All processes" else name
+					end,
+					grow = 1,
+					shrink = 1,
+					min_w = 0,
+					truncate = true,
+					text_size = 12.5,
+					weight = 500,
+					color = theme.text,
+				},
+				ui.svg { code = icons.chevron, w = 13, h = 13, tint = theme.tertiary, shrink = 0 },
+			},
+			-- Built as it opens, from the processes running then.
+			build = function()
+				local items: ContainerProps = { items = "stretch" }
+				table.insert(items, item("All processes", ""))
+				table.insert(items, ui.separator {})
+				for _, app in data.apps() do
+					table.insert(items, item(app.name, app.name, tostring(app.count)))
+				end
+				return ui.column(items)
+			end,
+		},
+	}
+end
 
 local function search(): Node
 	local focused = ui.state("search_focused", false)
@@ -155,27 +230,53 @@ end
 local function footer(): Node
 	return ui.row {
 		w_full = true,
-		h = 34,
+		h = function()
+			return if data.counted:get() ~= "" then 50 else 34
+		end,
 		shrink = 0,
 		px = 16,
 		gap = 8,
 		items = "center",
 		border_sides = { 1, 0, 0, 0 },
 		border_color = theme.line,
-		ui.text {
-			function()
-				local s: data.Summary = data.summary:get() or {}
-				local count, cpu = s.count or 0, s.cpu or 0
-				local text = `{count} processes · {format.percent(cpu)} CPU`
-				return if s.gpu then `{text} · {string.format("%.0f", s.gpu)}% GPU` else text
-			end,
+		ui.column {
 			grow = 1,
 			shrink = 1,
 			min_w = 0,
-			truncate = true,
-			text_size = 11,
-			tabular = true,
-			color = theme.tertiary,
+			gap = 3,
+			-- What the apps in view count of their own, when they say.
+			ui.show(
+				function()
+					return data.counted:get() ~= ""
+				end,
+				ui.text {
+					function()
+						return data.counted:get()
+					end,
+					truncate = true,
+					text_size = 11,
+					tabular = true,
+					color = theme.secondary,
+				}
+			),
+			ui.text {
+				function()
+					if state.attached:get() ~= "" then
+						local scope = data.scope:get()
+						return `{scope.count} processes · {format.percent(scope.cpu)} CPU · {format.percent(scope.gpu)} GPU · {format.memory(
+							scope.mem
+						)}`
+					end
+					local s: data.Summary = data.summary:get() or {}
+					local count, cpu = s.count or 0, s.cpu or 0
+					local text = `{count} processes · {format.percent(cpu)} CPU`
+					return if s.gpu then `{text} · {string.format("%.0f", s.gpu)}% GPU` else text
+				end,
+				truncate = true,
+				text_size = 11,
+				tabular = true,
+				color = theme.tertiary,
+			},
 		},
 	}
 end
@@ -195,6 +296,7 @@ function M.Sidebar(): Node
 			h_full = true,
 			shrink = 0,
 			items = "stretch",
+			attacher(),
 			search(),
 			sorting(),
 			list(),

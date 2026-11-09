@@ -5,7 +5,9 @@
 //!   replaced (the app's menus changed);
 //! - a shortcut pressed before the menu bar is made (it comes after the
 //!   first frame) still runs its item;
-//! - each of the app's menus shows once.
+//! - each of the app's menus shows once;
+//! - the app's own Window menu keeps AppKit's items around its own, and its
+//!   Help menu is AppKit's help menu.
 fn main() {
     #[cfg(target_os = "macos")]
     {
@@ -13,7 +15,8 @@ fn main() {
         use zgx::input::Key;
         use zgx_desktop::app_menu::{
             AppMenu, AppMenuEntry, MenuAccelerator, debug_key_before_menu_bar,
-            debug_menu_bar_services_filled, debug_menu_bar_titles, debug_menu_change,
+            debug_menu_bar_services_filled, debug_menu_bar_titles, debug_menu_bar_window_and_help,
+            debug_menu_change,
         };
         for install in ["installed", "replaced"] {
             assert!(
@@ -100,7 +103,87 @@ fn main() {
             titles[3..].contains(&"Services") && !items[0].1,
             "{items:?}"
         );
+        assert!(
+            debug_menu_bar_services_filled(&own("Check for Updates…", true)).unwrap(),
+            "with the app's own items first, AppKit fills another Services menu"
+        );
         println!("menu_services: the app's own items lead the application menu");
+
+        // The app's Window menu keeps Minimize and Zoom over its items and
+        // Bring All to Front under them; its Help menu is AppKit's help
+        // menu, which holds the menu search; full screen is AppKit's item.
+        let menus = [
+            AppMenu::new(
+                "View",
+                [AppMenuEntry::Standard(
+                    zgx_desktop::app_menu::StandardItem::ToggleFullScreen,
+                )],
+            ),
+            AppMenu::new("Window", [AppMenuEntry::item("Downloads", "downloads")]),
+            AppMenu::new("Help", [AppMenuEntry::item("Ask Help", "help")]),
+        ];
+        let (window, help) = debug_menu_bar_window_and_help(&menus).unwrap();
+        let at = |title: &str| window.iter().position(|t| t == title);
+        let order = ["Minimize", "Zoom", "Downloads", "Bring All to Front"].map(at);
+        assert!(
+            order.iter().all(Option::is_some) && order.is_sorted(),
+            "{window:?}"
+        );
+        assert_eq!(help.as_deref(), Some("Help"));
+        let titles = debug_menu_bar_titles(&menus).unwrap();
+        assert_eq!(titles, ["Application", "View", "Window", "Help"]);
+        // A bar without one has no help menu, not the last bar's.
+        let (_, help) = debug_menu_bar_window_and_help(&menus[..2]).unwrap();
+        assert_eq!(help, None);
+        // An item the app put in its Window menu itself is shown once: by
+        // its title, or (Minimize's) by its ⌘M; no separator is left at an
+        // end or doubled.
+        let window_of = |entries: Vec<AppMenuEntry>| {
+            debug_menu_bar_window_and_help(&[AppMenu::new("Window", entries)])
+                .unwrap()
+                .0
+        };
+        let count = |window: &[String], title: &str| window.iter().filter(|t| *t == title).count();
+        let tidy = |window: &[String]| {
+            window.first().is_some_and(|t| !t.is_empty())
+                && window.last().is_some_and(|t| !t.is_empty())
+                && !window
+                    .windows(2)
+                    .any(|pair| pair[0].is_empty() && pair[1].is_empty())
+        };
+        let minimize_key = MenuAccelerator::primary(Key::Character("m".into()));
+        let window = window_of(vec![
+            AppMenuEntry::item("Minimize", "minimize").accelerator(minimize_key.clone()),
+            AppMenuEntry::item("Zoom", "zoom"),
+            AppMenuEntry::item("Bring All to Front", "front"),
+        ]);
+        assert!(
+            ["Minimize", "Zoom", "Bring All to Front"]
+                .iter()
+                .all(|title| count(&window, title) == 1)
+                && tidy(&window),
+            "{window:?}"
+        );
+        let window = window_of(vec![
+            AppMenuEntry::item("Shrink", "shrink").accelerator(minimize_key),
+        ]);
+        assert!(
+            count(&window, "Minimize") == 0
+                && count(&window, "Zoom") == 1
+                && count(&window, "Bring All to Front") == 1
+                && tidy(&window),
+            "{window:?}"
+        );
+        // A bar without a Window menu of its own gets AppKit's, whole.
+        let window = window_of(Vec::new());
+        assert!(
+            ["Minimize", "Zoom", "Bring All to Front"]
+                .iter()
+                .all(|title| count(&window, title) == 1)
+                && tidy(&window),
+            "{window:?}"
+        );
+        println!("menu_services: the app's Window and Help menus are AppKit's");
 
         // The app's menus changing only their items' titles and states are
         // shown in place: AppKit keeps the bar it shows (a new main menu is

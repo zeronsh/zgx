@@ -80,6 +80,21 @@ return function(index: number): Node
 					actions.show(p.pid)
 				end
 			end,
+			context_menu = function()
+				local p = now()
+				if not p then
+					return nil
+				end
+				local name = p.name
+				return {
+					ui.menu_item {
+						label = `Attach to {name}`,
+						on_click = function()
+							actions.attach(name)
+						end,
+					},
+				}
+			end,
 			on_drag = function(): state.Payload?
 				local p = now()
 				if not p then
@@ -133,7 +148,7 @@ return function(index: number): Node
 				ui.text {
 					function()
 						local p = proc()
-						return if p then p.name else ""
+						return if p then p.label or p.name else ""
 					end,
 					truncate = true,
 					text_size = 12.5,
@@ -147,7 +162,10 @@ return function(index: number): Node
 							return ""
 						end
 						local gpu = if p.gpu >= 0.05 then ` · GPU {format.percent(p.gpu)}` else ""
-						local tag = if p.pid == state.launched then " · launched" else ""
+						local tag = if p.name == state.attached:get()
+							then " · attached"
+							elseif p.pid == state.launched then " · launched"
+							else ""
 						return `{p.pid} · {format.memory(p.mem)}{gpu}{tag}`
 					end,
 					truncate = true,
