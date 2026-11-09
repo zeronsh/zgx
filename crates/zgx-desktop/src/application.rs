@@ -1225,6 +1225,13 @@ static VIEW_CLOCK: std::sync::LazyLock<bool> =
 #[cfg(target_os = "macos")]
 static SCROLL_LINK: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_SCROLL_LINK").is_some_and(|v| v != "0"));
+/// `ZGX_HANDOVER_ASAP=1`: at a fast refresh, frames start at its boundary on
+/// the timer and hand over as soon as they are ready, a long way before the
+/// point where the window server decides which refresh shows them, where
+/// holding them to just before it left a little jitter choosing the refresh.
+#[cfg(target_os = "macos")]
+static HANDOVER_ASAP: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_HANDOVER_ASAP").is_some_and(|v| v != "0"));
 /// The slowest refresh period frames align at (below 60 Hz's 16.7 ms).
 #[cfg(any(target_os = "macos", test))]
 const ALIGN_PERIOD: std::time::Duration = std::time::Duration::from_millis(12);
@@ -6395,7 +6402,8 @@ impl Host {
         }
         let steady = self
             .presented_at
-            .is_some_and(|at| now.duration_since(at) < STEADY_GAP);
+            .is_some_and(|at| now.duration_since(at) < STEADY_GAP)
+            && !(*HANDOVER_ASAP && self.frame_interval < ALIGN_PERIOD);
         let refresh = self
             .display_link
             .as_ref()
@@ -6462,7 +6470,8 @@ impl Host {
             // updates, scrolling) a timer paces them on the grid the link last
             // reported, and the link (a thread spinning to each refresh) runs
             // again only to resync.
-            let animating = wanted && rate.is_none() && (!scrolling || *SCROLL_LINK);
+            let asap = *HANDOVER_ASAP && self.frame_interval < ALIGN_PERIOD;
+            let animating = wanted && rate.is_none() && (!scrolling || *SCROLL_LINK) && !asap;
             self.link_paced = animating;
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_full_rate(wanted && rate.is_none());
