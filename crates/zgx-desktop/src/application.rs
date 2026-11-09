@@ -6696,6 +6696,18 @@ impl Host {
                 .is_some_and(|link| link.running());
         #[cfg(not(any(target_os = "macos", windows)))]
         let paced = false;
+        // While UIKit tracks a finger or a scroll view decelerates, the loop runs
+        // at each touch and timer: a frame drawn at every pass comes unpaced
+        // (drawn-frame gaps p50 4.5 ms, p95 22 ms through a drag, not 16.7). It
+        // draws in `drawRect` instead, at Core Animation's commit, once a refresh.
+        #[cfg(target_os = "ios")]
+        if crate::ios_system::run_loop_tracking() {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            self.sync_frames();
+            return Ok(self.tasks.has_ready() || !self.pending.borrow().is_empty());
+        }
         // Scene damage accumulates until the refresh paints it in one frame.
         if !paced || due || self.frame_arrived || self.force || self.redraw_whole {
             #[cfg(target_os = "macos")]

@@ -363,6 +363,17 @@ static CHANGED: AtomicBool = AtomicBool::new(false);
 /// How much of the screen the keyboard is about to cover, in points, as bits.
 static KEYBOARD: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
+/// Whether the main run loop is outside its default mode: UIKit tracking a
+/// finger or a scroll view decelerating (`UITrackingRunLoopMode`).
+pub(crate) fn run_loop_tracking() -> bool {
+    // SAFETY: NSRunLoop's class method and getter, on the main thread.
+    unsafe {
+        let run_loop: Retained<AnyObject> = msg_send![class!(NSRunLoop), mainRunLoop];
+        let mode: Option<Retained<objc2_foundation::NSString>> = msg_send![&*run_loop, currentMode];
+        mode.is_some_and(|mode| mode.to_string() != "kCFRunLoopDefaultMode")
+    }
+}
+
 /// How the keyboard's last change moves: its seconds and `UIViewAnimationCurve`.
 static KEYBOARD_DURATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static KEYBOARD_CURVE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(7);
