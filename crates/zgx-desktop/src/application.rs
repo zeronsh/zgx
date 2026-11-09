@@ -2720,6 +2720,9 @@ impl Host {
                 }
             }
         }
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_scroll_pictures(true);
+        }
         self.sync_ime_cancellation();
         let Some(window) = self.window.clone() else {
             self.context.ui.cancel_interactions();

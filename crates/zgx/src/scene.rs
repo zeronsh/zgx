@@ -3067,6 +3067,19 @@ pub struct Scene {
     filtered: std::cell::Cell<usize>,
     /// Nodes that ever had one, a content blur or a mask (`Node::promoted`).
     promoted_count: usize,
+    /// Scroll content drawn from a picture of its own (`picture_moved`).
+    pictures: Vec<NodeId>,
+    /// The window's renderer draws pictures (`allow_pictures`).
+    pictures_allowed: std::cell::Cell<bool>,
+    /// Scroll content that can't be a picture, until the next `rest`.
+    pictures_refused: Vec<NodeId>,
+    /// What changed in moved pictures this flush (`picture_changes`).
+    picture_changes: Vec<(NodeId, Rect)>,
+    /// Children of pictures something in which changed since a renderer last
+    /// asked (`take_picture_rows`).
+    picture_rows: std::cell::RefCell<Vec<NodeId>>,
+    /// What a picture's walk starts clipped to (`picture_items`).
+    walk_clip: std::cell::Cell<Option<Rect>>,
     text_measurer: Option<Box<dyn TextMeasurer>>,
     text_shaper: Option<std::rc::Rc<dyn crate::text_layout::TextShaper>>,
     font_shaper: Option<std::rc::Rc<dyn crate::text_layout::FontTextShaper>>,
@@ -3327,6 +3340,12 @@ impl Scene {
             transformed: 0,
             filtered: std::cell::Cell::new(0),
             promoted_count: 0,
+            pictures: Vec::new(),
+            pictures_allowed: std::cell::Cell::new(false),
+            pictures_refused: Vec::new(),
+            picture_changes: Vec::new(),
+            picture_rows: Default::default(),
+            walk_clip: std::cell::Cell::new(None),
             text_measurer: None,
             text_shaper: None,
             font_shaper: None,
@@ -12041,6 +12060,9 @@ impl Scene {
         let _span = crate::profile::span(crate::profile::Phase::Damage);
         report.layout_nodes = std::mem::take(&mut self.pending_layout_nodes);
         let dirty = std::mem::take(&mut self.dirty);
+        if !self.pictures.is_empty() {
+            self.check_pictures(&dirty);
+        }
         for id in &dirty {
             if !self.contains(*id) {
                 continue;
@@ -12143,6 +12165,15 @@ impl Scene {
     /// starts above every generation that went (`new_slot_generation`), so
     /// that a stale id never names it.
     pub fn rest(&mut self) {
+        // Pictures are for scrolling: at rest, what they held paints as ever.
+        for id in std::mem::take(&mut self.pictures) {
+            if self.contains(id) {
+                self.node_mut(id).isolated = false;
+                self.isolation_count -= 1;
+            }
+        }
+        self.pictures_refused = Vec::new();
+        *self.picture_rows.borrow_mut() = Vec::new();
         let mut keep = self.slots.len();
         while keep > 1 && self.slots[keep - 1].node.is_none() {
             keep -= 1;
@@ -12467,12 +12498,216 @@ impl Scene {
         }
         Some(corners)
     }
+    /// Say whether the window's renderer draws scroll content from pictures:
+    /// one that does keeps each scroll view's content in a texture of its own
+    /// while it scrolls and composites it, at a cost that doesn't depend on
+    /// what the content holds.
+    pub fn allow_pictures(&self, allowed: bool) {
+        self.pictures_allowed.set(allowed);
+    }
+    /// Whether any scroll content is drawn from a picture.
+    pub fn has_pictures(&self) -> bool {
+        !self.pictures.is_empty()
+    }
+    /// Whether `id` is scroll content drawn from a picture.
+    pub fn is_picture(&self, id: NodeId) -> bool {
+        self.pictures.contains(&id)
+    }
+    /// What changed in picture `id` in the last flush if it moved in it,
+    /// where it is now (each change at both places a move leaves it, as for a
+    /// copy: `resolve_moves`). A flush it didn't move in has only its damage.
+    pub fn picture_changes(&self, id: NodeId) -> impl Iterator<Item = Rect> + '_ {
+        self.picture_changes
+            .iter()
+            .filter(move |(node, _)| *node == id)
+            .map(|(_, rect)| *rect)
+    }
+    /// Children of pictures something in which changed since the last call.
+    /// Layout within a row answers to what changed in it, so the row covers
+    /// it; what moves a row itself shows in where it now lies
+    /// (`picture_row_ink`).
+    pub fn take_picture_rows(&self) -> Vec<NodeId> {
+        std::mem::take(&mut *self.picture_rows.borrow_mut())
+    }
+    /// All picture `id`'s child `row` can paint, where the window has it.
+    pub fn picture_row_ink(&self, id: NodeId, row: NodeId) -> Option<Rect> {
+        let content = self.node(id);
+        let at = self.bounds(id);
+        let (dx, dy) = (at.x - content.bounds.x, at.y - content.bounds.y);
+        self.ink(row)
+            .map(|ink| ink.translated(Transform { x: dx, y: dy }))
+    }
+    /// The paint items of picture `id` within `bands`, as the window's walk
+    /// makes them but for the view's clip: `clip`'s across, none down, so
+    /// what lies past the view's edges draws as it will there.
+    pub fn picture_items(&self, id: NodeId, clip: Rect, bands: &[Rect]) -> Vec<PaintItem<'_>> {
+        const FAR: f32 = 1e7;
+        self.walk_clip
+            .set(Some(Rect::new(clip.x, -FAR, clip.width, FAR * 2.)));
+        self.layer_items_within(Some(id), Some(bands))
+    }
+    /// Scroll content `id` moved by `dx`, `dy`: if it is a picture (it
+    /// becomes one here if it can), its view repaints from it, and what
+    /// changed in it is noted for the picture. False: it moves as ever.
+    fn picture_moved(&mut self, id: NodeId, dx: f32, dy: f32, again: bool) -> bool {
+        let mut pictured = self.is_picture(id);
+        if pictured && dx != 0. {
+            self.demote_picture(id);
+            return false;
+        }
+        if !pictured {
+            if !self.pictures_allowed.get()
+                || dx != 0.
+                || (dy == 0. && !again)
+                || self.pictures_refused.contains(&id)
+            {
+                return false;
+            }
+            if !self.picture_fits(id) {
+                self.pictures_refused.push(id);
+                return false;
+            }
+            self.node_mut(id).isolated = true;
+            self.isolation_count += 1;
+            self.pictures.push(id);
+            pictured = true;
+        }
+        debug_assert!(pictured);
+        let clip = self.world_clip(id).unwrap_or(self.viewport);
+        // Damage kept in a grid has no list to read: all it shows changed.
+        // So too for content moved more than once, whatever changed between.
+        if again || self.damage_grid.is_some() {
+            self.picture_changes.push((id, clip));
+        } else {
+            let inside: Vec<Rect> = self
+                .damage
+                .iter()
+                .filter_map(|rect| rect.intersection(clip))
+                .collect();
+            for rect in inside {
+                self.picture_changes.push((id, rect));
+                let shifted = rect.translated(Transform { x: dx, y: dy });
+                if let Some(rect) = shifted.intersection(clip) {
+                    self.picture_changes.push((id, rect));
+                }
+            }
+        }
+        self.add_damage(clip);
+        true
+    }
+    /// Back to painting as ever: all its view shows repaints.
+    fn demote_picture(&mut self, id: NodeId) {
+        self.pictures.retain(|node| *node != id);
+        self.pictures_refused.push(id);
+        self.node_mut(id).isolated = false;
+        self.isolation_count -= 1;
+        let clip = self.world_clip(id).unwrap_or(self.viewport);
+        self.add_damage(clip);
+    }
+    /// Whether scroll content `id` draws the same from a picture: it moves
+    /// rigidly in its view, on whole pixels, in the window's own space, and
+    /// nothing in it depends on what is behind it or on where the view is.
+    fn picture_fits(&self, id: NodeId) -> bool {
+        let scale = self.pixel_scale;
+        if scale <= 0. || self.cold.as_ref().is_some_and(|c| !c.sticky.is_empty()) {
+            return false;
+        }
+        if std::iter::once(id)
+            .chain(self.ancestors(id))
+            .any(|node| self.is_layer(node) || self.popups.contains(&node))
+        {
+            return false;
+        }
+        let Some(clip) = self.world_clip(id) else {
+            return false;
+        };
+        let whole = |value: f32| ((value * scale) - (value * scale).round()).abs() < 1e-3;
+        if ![clip.x, clip.y, clip.x + clip.width, clip.y + clip.height]
+            .into_iter()
+            .all(whole)
+        {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if self
+            .baked_loops
+            .iter()
+            .any(|(node, _)| self.is_within(*node, id))
+        {
+            return false;
+        }
+        let mut stack = vec![id];
+        while let Some(node) = stack.pop() {
+            if self.picture_refuses(node) {
+                return false;
+            }
+            stack.extend_from_slice(self.children(node));
+        }
+        true
+    }
+    /// Whether node `id` keeps the scroll content it is in from a picture.
+    fn picture_refuses(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        // A fade down its clip's height: that clip is cut by the view, so the
+        // band stays at the view's edge, not on the content.
+        let fades_down = node.style.fade_edges.iter().any(|band| *band > 0.);
+        #[cfg(target_os = "macos")]
+        if matches!(node.kind, NodeKind::NativeSurface(_)) {
+            return true;
+        }
+        fades_down
+            || node.effects.edge_fade > 0.
+            || node.effects.blur_radius > 0.
+            || self.cold.as_ref().is_some_and(|cold| {
+                cold.backdrop_readers.contains(&id) || cold.sticky.contains_key(&id)
+            })
+    }
+    /// What changed this flush may keep content from staying a picture, and
+    /// what it changed is noted by row, in or out of its view.
+    #[cold]
+    #[inline(never)]
+    fn check_pictures(&mut self, dirty: &[NodeId]) {
+        for picture in self.pictures.clone() {
+            if !self.contains(picture) {
+                continue;
+            }
+            for id in dirty {
+                if !self.contains(*id) {
+                    continue;
+                }
+                let mut at = *id;
+                while let Some(parent) = self.node(at).parent {
+                    if parent == picture {
+                        self.picture_rows.borrow_mut().push(at);
+                        break;
+                    }
+                    at = parent;
+                }
+            }
+            let refused = dirty.iter().any(|id| {
+                self.contains(*id) && self.picture_refuses(*id) && self.is_within(*id, picture)
+            });
+            #[cfg(target_os = "macos")]
+            let refused = refused
+                || self
+                    .baked_loops
+                    .iter()
+                    .any(|(node, _)| self.is_within(*node, picture));
+            if refused {
+                self.demote_picture(picture);
+            }
+        }
+    }
     /// Turn this frame's scroll translations into moves: damage what a copy
     /// cannot supply, or everything the content painted where a copy is
     /// unsafe (isolated ancestors, backdrop filters over the clip, nested or
     /// overlapping moves, jumps past the viewport).
     fn resolve_moves(&mut self) {
         self.moves.clear();
+        self.picture_changes.clear();
+        let mut pictures = std::mem::take(&mut self.pictures);
+        pictures.retain(|id| self.contains(*id));
+        self.pictures = pictures;
         let pending = std::mem::take(&mut self.pending_moves);
         let mut moves = Vec::new();
         for (id, from, again) in pending {
@@ -12481,6 +12716,9 @@ impl Scene {
             }
             let to = self.node(id).transform;
             let (dx, dy) = (to.x - from.x, to.y - from.y);
+            if self.picture_moved(id, dx, dy, again) {
+                continue;
+            }
             // A layer's pixels are its own: a copy of the window's moves
             // nothing in it.
             let layered = std::iter::once(id)
@@ -12925,7 +13163,7 @@ impl Scene {
             parent = n.parent;
         }
         let clip = if root.is_some() {
-            None
+            self.walk_clip.take()
         } else {
             Some(self.viewport)
         };
