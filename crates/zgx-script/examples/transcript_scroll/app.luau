@@ -185,7 +185,7 @@ return ui.column {
 		bg = "#20202080",
 		border = 1,
 		border_color = "#ffffff20",
-		shadow = "lg",
+		shadow = { y = 8, blur = 24, color = "#00000040" },
 		p = 16,
 		ui.text { "Ask anything", color = "$text.tertiary" },
 	},
