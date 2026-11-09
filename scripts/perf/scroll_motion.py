@@ -101,7 +101,7 @@ class Motion:
             if finger and gap > 1.5*period:
                 self.unknown += 1  # lost input, clamping or cancellation needs evidence
             return False, False
-        if coast:
+        if coast and not finger:
             self.coast_intervals += 1
             self.coast_long_gaps += gap > 1.5*period
         if finger:

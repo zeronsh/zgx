@@ -405,7 +405,7 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
                 presentation_timings=presentation_timings(scroll_frames,records,anchor,trace_to_host_ms),
                 picture_costs=picture_costs(frames),
                 motion_window_work=workload(motion_frames),
-                work_selection="motion-window frame intervals plus noted scroll frames; spare excluded",
+                work_selection="accepted-input windows, observed app coast and noted scroll frames; spare excluded",
                 noted_scroll_frames=noted_frames,frame_source_counts=dict(frame_sources),
                 render_frames=sum(f.get('gpu_micros') is not None for f in scroll_frames),
                 worst_main_frame=max(scroll_frames,key=app_work_ms,default=None),

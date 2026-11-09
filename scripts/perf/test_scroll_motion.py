@@ -42,6 +42,8 @@ class MotionEvidence(unittest.TestCase):
         m.interval((.018,.018,2,0),(.035,.035,3,0),False,1000/120)
         self.assertEqual(m.summary()['finger_late_intervals'],1)
         self.assertEqual(m.summary()['coast_late_intervals'],1)
+        self.assertEqual(m.summary()['coast_active_intervals'],1)
+        self.assertEqual(m.summary()['finger_active_intervals'],1)
 
     def test_canceled_intermediate_position_still_proves_missing_motion(self):
         frames=[self.frame(1,0),self.frame(2,-10),self.frame(3,0)]
