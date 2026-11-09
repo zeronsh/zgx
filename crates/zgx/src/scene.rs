@@ -12728,6 +12728,21 @@ impl Scene {
             self.slots.truncate(keep);
         }
         self.slots.shrink_to_fit();
+        // Results held whole under other constraints, the places of their
+        // children and all: at rest, their sizes do for a probe, and what
+        // lays it out again is the next change's.
+        for slot in &mut self.slots {
+            let Some(node) = &mut slot.node else {
+                continue;
+            };
+            if !node.alternates.is_empty() {
+                let sizes = std::mem::take(&mut node.alternates)
+                    .iter()
+                    .map(ProbeSize::from)
+                    .collect();
+                keep_sizes(&mut node.sizes, sizes);
+            }
+        }
         // The lowest taken first from now on: what mounts next leaves the
         // slots above it free to go at the next rest.
         self.free.sort_unstable_by(|a, b| b.cmp(a));
@@ -16528,6 +16543,69 @@ mod measure_work_tests {
                 }
             }
         }
+    }
+    /// At rest a node keeps only the sizes of results it isn't showing, and
+    /// lays out to the same place from them whatever comes next.
+    #[test]
+    fn rest_keeps_the_sizes_of_results_and_lays_out_the_same() {
+        fn bounds_at(widths: &[f32], rest: bool) -> (Vec<Rect>, usize, usize) {
+            let mut scene = Scene::new(400., 300.);
+            let row = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Row),
+                Style::default(),
+            );
+            let cells: Vec<_> = (0..4)
+                .map(|at| {
+                    let cell = scene.append(
+                        row,
+                        NodeKind::Container(Layout::Column),
+                        Style {
+                            flex_grow: 1. + at as f32,
+                            ..Default::default()
+                        },
+                    );
+                    let leaf = scene.append(
+                        cell,
+                        NodeKind::Rect(Color(1, 2, 3, 255)),
+                        Style {
+                            height: Some(10. + at as f32),
+                            ..Default::default()
+                        },
+                    );
+                    (cell, leaf)
+                })
+                .collect();
+            let (mut held, mut kept) = (0, 0);
+            let mut seen = Vec::new();
+            for width in widths {
+                scene.resize(*width, 300.);
+                scene.flush();
+                held = held.max(scene.node(row).alternates.len());
+                if rest {
+                    scene.rest();
+                    for (cell, leaf) in &cells {
+                        for id in [row, *cell, *leaf] {
+                            assert!(scene.node(id).alternates.is_empty());
+                        }
+                    }
+                    kept = kept.max(scene.node(row).sizes.len());
+                }
+                seen.push(scene.bounds(row));
+                seen.extend(
+                    cells
+                        .iter()
+                        .flat_map(|(cell, leaf)| [scene.bounds(*cell), scene.bounds(*leaf)]),
+                );
+            }
+            (seen, held, kept)
+        }
+        let widths = [400., 300., 400., 250., 300., 400.];
+        let (plain, held, _) = bounds_at(&widths, false);
+        assert!(held > 0, "other results were held, for rest to let go of");
+        let (rested, _, kept) = bounds_at(&widths, true);
+        assert!(kept > 0, "their sizes stay");
+        assert_eq!(plain, rested);
     }
     #[test]
     fn a_hidden_subtree_is_measured_once_to_no_box() {
