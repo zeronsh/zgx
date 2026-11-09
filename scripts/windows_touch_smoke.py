@@ -12,9 +12,10 @@ this checks what zgx makes of them:
 - a finger held on selectable text selects the word, a drag extends it by
   words, and the lift opens the selection's menu; held on a button in the
   text, it selects and does not press it;
+- paging rests on whole pages while its plain neighbours pan and coast independently;
 - a pen is a mouse: its stroke over the list does not pan it.
 
-    cargo build -p zgx-desktop --example gallery --example workbench --example form --example selectable_text
+    cargo build -p zgx-desktop --example gallery --example workbench --example form --example selectable_text --example paging
     python scripts/windows_touch_smoke.py target/debug/examples
 """
 import argparse
@@ -131,12 +132,158 @@ def check(passed, what):
     print(f"ok: {what}")
 
 
+PAGE_COLOURS = [(192, 48, 48), (48, 160, 64), (48, 80, 192), (192, 160, 32)]
+
+
+def paging_cases(examples, plain_only=False):
+    """Read paging and plain-scroll offsets from the paging example's colours."""
+    import hashlib
+    import json
+    import statistics
+
+    failures = []
+
+    def expect(passed, case, **values):
+        print(json.dumps(dict(case=case, passed=bool(passed), **values)), flush=True)
+        if not passed:
+            failures.append(case)
+
+    proc, window = launch(examples, "paging")
+    try:
+        check(win.dpi(window) == 96, "paging pixel probe requires 96 DPI")
+        check(win.client_size(window) == (900, 300), "paging has its expected client size")
+
+        def page_pixels(capture):
+            return [win.pixel(capture, x, y) for x, y in ((3, 120), (150, 150), (296, 120))]
+
+        def view_hash(capture, axis):
+            width, _, pixels = capture
+            left = 300 if axis == "down" else 600
+            rows = [pixels[(y * width + left + 10) * 4:(y * width + left + 280) * 4]
+                    for y in range(10, 280)]
+            return hashlib.sha256(b"".join(rows)).hexdigest()
+
+        def offset(capture, axis):
+            samples = []
+            boundaries = []
+            previous = None
+            for position in range(3, 290):
+                x, y = (450, position) if axis == "down" else (600 + position, 150)
+                r, g, b = win.pixel(capture, x, y)
+                index = (r - 40) // 5
+                if r == g and b == 255 - r and (r - 40) % 5 == 0 and 0 <= index < 40:
+                    if previous is not None and index == previous + 1:
+                        samples.append(index * 40 - position)
+                        boundaries.append([position, index])
+                    previous = index
+            check(bool(samples), f"{axis}: stripe boundaries can be decoded")
+            return statistics.median(samples), boundaries
+
+        def gesture(start, end, steps, delay, hold_before_up=0, sample=None):
+            touch(window, [(0, *start, "down")])
+            began = time.monotonic()
+            for step in range(1, steps + 1):
+                time.sleep(max(0, began + step * delay - time.monotonic()))
+                x = start[0] + (end[0] - start[0]) * step / steps
+                y = start[1] + (end[1] - start[1]) * step / steps
+                touch(window, [(0, x, y, "move")])
+            duration = time.monotonic() - began
+            during = sample(win.capture(window)) if sample else None
+            if hold_before_up:
+                deadline = time.monotonic() + hold_before_up
+                while time.monotonic() < deadline:
+                    time.sleep(0.025)
+                    touch(window, [(0, *end, "move")])
+            else:
+                time.sleep(0.001)
+            touch(window, [(0, *end, "up")])
+            lifted = time.monotonic()
+            print(json.dumps(dict(gesture=dict(start=start, end=end, steps=steps,
+                requested_delay=delay, moving_seconds=duration,
+                speed=((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2) ** 0.5 / duration,
+                hold_before_up=hold_before_up, during=during))), flush=True)
+            return lifted, during
+
+        def after_lift(lifted, seconds):
+            time.sleep(max(0, lifted + seconds - time.monotonic()))
+            capture = win.capture(window)
+            return capture, time.monotonic() - lifted
+
+        if not plain_only:
+            actions = [
+                ("slow-small", (230, 150), (190, 150), 20, 0.01, 0.15, 0),
+                ("flick-next", (230, 150), (180, 150), 5, 0.008, 0, 1),
+                ("slow-past-half", (230, 150), (60, 150), 85, 0.01, 0.15, 2),
+                ("flick-back", (80, 150), (130, 150), 5, 0.008, 0, 1),
+                ("fast-flick-one-page", (230, 150), (130, 150), 5, 0.002, 0, 2),
+            ]
+            for name, start, end, steps, delay, hold_for, expected in actions:
+                before_pixels = page_pixels(win.capture(window))
+                lifted, during = gesture(start, end, steps, delay, hold_for, page_pixels)
+                expect(during != before_pixels, "paged/" + name + "/follows-finger",
+                       before=before_pixels, during=during)
+                first, first_at = after_lift(lifted, 1.5)
+                second, second_at = after_lift(lifted, 2.5)
+                wanted = [PAGE_COLOURS[expected]] * 3
+                actual_first = page_pixels(first)
+                actual_second = page_pixels(second)
+                expect(actual_first == wanted and actual_second == wanted, "paged/" + name,
+                    expected_page=expected, pixels_1500=actual_first, pixels_2500=actual_second,
+                    sample_times=[first_at, second_at], during=during)
+
+        paged_before = page_pixels(win.capture(window))
+        for axis in ("down", "across"):
+            start = (450, 230) if axis == "down" else (830, 150)
+            pan_end = (450, 170) if axis == "down" else (770, 150)
+            flick_end = (450, 150) if axis == "down" else (750, 150)
+            before, _ = offset(win.capture(window), axis)
+            lifted, during = gesture(start, pan_end, 30, 0.01, 0.15,
+                                      lambda capture: offset(capture, axis)[0])
+            capture, _ = after_lift(lifted, 0.3)
+            panned, pan_boundaries = offset(capture, axis)
+            expect(40 <= during - before <= 70 and abs(panned - during) <= 3,
+                   axis + "/pan-follows-finger", before=before, during=during,
+                   settled=panned, boundaries=pan_boundaries)
+            lifted, during = gesture(start, flick_end, 8, 0.008, sample=lambda capture: offset(capture, axis)[0])
+            values = {}
+            page_samples = [page_pixels(capture)]
+            for milliseconds in (80, 500, 2500, 2900):
+                capture, actual_at = after_lift(lifted, milliseconds / 1000)
+                value, boundaries = offset(capture, axis)
+                values[str(milliseconds)] = dict(offset=value, actual_seconds=actual_at, boundaries=boundaries,
+                                                  pixel_hash=view_hash(capture, axis))
+                page_samples.append(page_pixels(capture))
+            early = values["80"]["offset"]
+            late = values["500"]["offset"]
+            settled = values["2500"]["offset"]
+            last = values["2900"]["offset"]
+            expect(during > panned + 50, axis + "/flick-follows-finger", before=panned, during=during)
+            expect(late > early + 3, axis + "/coasts-after-lift", samples=values)
+            expect(abs(last - settled) <= 1 and values["2500"]["pixel_hash"] == values["2900"]["pixel_hash"],
+                   axis + "/comes-to-rest", samples=values)
+            expect(min(settled % 300, 300 - settled % 300) > 3,
+                   axis + "/rests-off-page-multiple", offset=settled, modulo_300=settled % 300)
+            expect(all(pixels == paged_before for pixels in page_samples), axis + "/paged-stayed",
+                   paged_before=paged_before, samples=page_samples)
+    finally:
+        finish(proc, window)
+    check(not failures, "paging checks passed: " + ", ".join(failures))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("examples", type=pathlib.Path)
-    examples = parser.parse_args().examples
+    parser.add_argument("--paging-only", action="store_true")
+    parser.add_argument("--plain-only", action="store_true")
+    parser.add_argument("--existing-only", action="store_true")
+    args = parser.parse_args()
+    examples = args.examples
     if not user32.InitializeTouchInjection(10, 1):
         raise ctypes.WinError(ctypes.get_last_error())
+
+    if args.paging_only or args.plain_only:
+        paging_cases(examples, plain_only=args.plain_only)
+        return
 
     proc, window = launch(examples, "gallery")
     try:
@@ -254,6 +401,8 @@ def main():
               "a finger held on a button in the text selects its word and does not press it")
     finally:
         finish(proc, window)
+    if not args.existing_only:
+        paging_cases(examples)
     print("touch smoke passed")
 
 

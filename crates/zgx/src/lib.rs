@@ -33,6 +33,7 @@ pub mod env;
 pub mod frame;
 pub mod idle;
 pub mod profile;
+pub mod spare;
 pub mod switches;
 #[cfg(feature = "trace")]
 pub mod trace;
@@ -46,6 +47,7 @@ pub(crate) mod editor_spell;
 pub(crate) mod elastic;
 pub mod find;
 mod find_text;
+pub(crate) mod paging;
 pub mod rich_text;
 mod scroll_keys;
 pub mod selection;

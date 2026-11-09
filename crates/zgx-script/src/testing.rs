@@ -311,12 +311,42 @@ impl TestApp {
     pub fn try_new(host: impl FnOnce(&Runtime) -> ScriptHost) -> Result<Self, String> {
         Self::try_wrapped(host, |view| view)
     }
+    /// As a window has it, with time its frames leave over: its lists build
+    /// ahead and keep rows (`zgx::spare`), as [`TestApp::spend_spare_time`]
+    /// or the test's own `ui.run_spare_work` lets them. With a clipboard and
+    /// file dialogs too, as [`TestApp::with_desktop`].
+    pub fn with_spare_time(host: impl FnOnce(&Runtime) -> ScriptHost) -> Self {
+        let desktop = Rc::new(FakeDesktop::default());
+        let service = zgx::platform::PlatformService(desktop.clone());
+        let mut app = Self::mounted(host, move |view| provide(service, view), true)
+            .unwrap_or_else(|error| panic!("{error}"));
+        app.desktop = Some(desktop);
+        app
+    }
+    /// All the spare time asked for: what lists have to build ahead is built.
+    pub fn spend_spare_time(&self) {
+        while self.ui.spare_work_wanted() {
+            self.ui
+                .run_spare_work(Instant::now(), std::time::Duration::from_secs(60))
+                .unwrap_or_else(|error| panic!("{error}"));
+        }
+    }
     /// [`TestApp::wrapped`], or the script's error when it fails to load.
     pub fn try_wrapped(
         host: impl FnOnce(&Runtime) -> ScriptHost,
         wrap: impl FnOnce(View) -> View,
     ) -> Result<Self, String> {
+        Self::mounted(host, wrap, false)
+    }
+    fn mounted(
+        host: impl FnOnce(&Runtime) -> ScriptHost,
+        wrap: impl FnOnce(View) -> View,
+        spare_time: bool,
+    ) -> Result<Self, String> {
         let mut ui = Ui::new(400., 300.);
+        if spare_time {
+            ui.host_spare_time();
+        }
         // A layout that doesn't settle is the app's error, as a window
         // shows it, its last layout kept: a test sees it (`error`), and
         // goes on.

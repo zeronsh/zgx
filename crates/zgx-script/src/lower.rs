@@ -2941,6 +2941,7 @@ fn kind_view(
             scrollbar,
             contain,
             wheel_across,
+            paging,
             padding,
         } => {
             let offset = match offset {
@@ -2966,6 +2967,7 @@ fn kind_view(
             } else {
                 view
             };
+            let view = if *paging { view.paging(true) } else { view };
             let view = match padding {
                 Some(padding) => with_scroll_padding(view, padding, vm),
                 None => view,
@@ -7500,6 +7502,9 @@ fn list_edges(mut list: View, rare: &crate::node::ListRare, vm: &Rc<Vm>) -> View
     if rare.ancestor {
         list = list.virtualize_in_ancestor();
     }
+    if let Some(ahead) = rare.ahead {
+        list = list.list_ahead(ahead);
+    }
     if let Some(padding) = &rare.scroll_padding {
         list = with_scroll_padding(list, padding, vm);
     }
@@ -9178,7 +9183,9 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Font, Lit::Str(v)) => s.font_family(font_family(v)),
         (Wrap, Lit::Bool(v)) => s.text_wrap(*v),
         (Wrap, Lit::Str(_)) => s.text_balance(true),
-        (Truncate, Lit::Bool(true)) => s.truncate(),
+        // The ellipsis alone: text with one and no clamp keeps one line, so
+        // `lines` wins however the two are set, in whichever order.
+        (Truncate, Lit::Bool(true)) => s.text_overflow(zgx::text_layout::TextOverflow::Ellipsis),
         (Lines, Lit::Num(v)) => s.line_clamp(*v as u32),
         (LineHeight, Lit::Num(v)) => s.line_height(*v),
         (LetterSpacing, Lit::Num(v)) => s.letter_spacing(*v),

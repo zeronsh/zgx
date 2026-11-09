@@ -94,6 +94,14 @@ def main():
                 raise AssertionError(f"timed out waiting for {what}: {checks}")
             time.sleep(.05)
 
+    def drawn(what, take, colour, area=None):
+        """A screenshot from `take` showing `colour` (in `area`, a box): a
+        popup's first frame comes some time after its configure."""
+        def shown():
+            image = take()
+            return image if box(image.crop(area) if area else image, colour) else None
+        return until(what, shown)
+
     def placed(name, image):
         """The menu's place against the window's content."""
         content = box(image, CONTENT)
@@ -140,14 +148,13 @@ def main():
 
         click(content[0] + px(FILE[0]), content[1] + px(FILE[1]))
         until(f"the menu on {name}", lambda: "popup configured" in log.read_text())
-        time.sleep(.3)
-        image = shot("open")
+        below = content[1] + px(FILE[1] + 15)
+        image = drawn(f"the menu drawn on {name}", lambda: shot("open"), MENU, (0, below, *output))
         # Its surface: the panel and its shadows' ink (GNOME's), round it.
         shown = re.search(r"popup show .* width: ([\d.]+), height: ([\d.]+) \} buffer (\d+)x(\d+) scale ([\d.]+)",
                           log.read_text())
         surface = (float(shown.group(1)), float(shown.group(2))) if shown else None
         buffer = (int(shown.group(3)), int(shown.group(4))) if shown else None
-        below = content[1] + px(FILE[1] + 15)
         menu = box(image.crop((0, below, image.width, image.height)), MENU)
         assert menu, f"{name}: no menu drawn"
         menu = (menu[0], menu[1] + below, menu[2], menu[3] + below)
@@ -212,9 +219,8 @@ def main():
         until(f"the menu on {name}", lambda: "popup configured" in log.read_text())
         scene_menu = until(f"the menu's box on {name}", lambda: re.search(r"^MENU (\S+)$", log.read_text(), re.M))
         mx, my, mw, mh = rect(scene_menu.group(1))
-        time.sleep(.3)
-        image = shot("open")
         below = content[1] + at(fy + fh + 2)
+        image = drawn(f"the menu drawn on {name}", lambda: shot("open"), MENU, (0, below, *OUTPUT))
         menu = box(image.crop((0, below, image.width, image.height)), MENU)
         assert menu, f"{name}: no menu drawn"
         menu = (menu[0], menu[1] + below, menu[2], menu[3] + below)
@@ -274,8 +280,8 @@ def main():
 
             click(*FILE)
             until("the menu", lambda: "popup configured" in log.read_text())
-            time.sleep(.3)
-            checks["sway: past the window, where the scene put it"] = placed("sway", shot("open"))
+            opened = drawn("the menu drawn", lambda: shot("open"), MENU, (0, content[1] + FILE[1] + 15, *OUTPUT))
+            checks["sway: past the window, where the scene put it"] = placed("sway", opened)
             menu = checks["sway"]["menu"]
             # Its last item, below the window.
             click(menu[0] - content[0] + 100, menu[3] - content[1] - 17)
@@ -300,12 +306,15 @@ def main():
                 box(shot("moved"), CONTENT)))
             click(*FILE)
             until("the flipped menu", lambda: log.read_text().count("popup configured") >= 3)
-            time.sleep(.3)
-            image = shot("flipped")
-            menu = box(image.crop((0, 0, image.width, content[1] + FILE[1] - 14)), MENU)
+            above = (0, 0, OUTPUT[0], content[1] + FILE[1] - 14)
+            image = drawn("the flipped menu drawn", lambda: shot("flipped"), MENU, above)
+            menu = box(image.crop(above), MENU)
             checks["sway: flipped"] = {"content": content, "menu": menu}
             checks["sway: flipped above its trigger"] = bool(menu) and menu[3] == content[1] + FILE[1] - 14 - 4
-            # Its first item, at the top of the flipped menu.
+            # Its first item, at the top of the flipped menu, once the app has
+            # gone quiet (its idle trim done, no deadline left to wake its
+            # loop): a click on a popup wakes it itself.
+            time.sleep(2.5)
             click(menu[0] - content[0] + 100, menu[1] - content[1] + 17)
             until("the choice", lambda: 'CHOSEN "Item 1"' in log.read_text())
             checks["sway: chosen in the flipped menu"] = True
@@ -328,7 +337,8 @@ def main():
             click(*FILE)
             until("the tall menu cut", lambda: "popup cut" in said())
             until("it shown anew", lambda: said().count("popup configured") >= 2)
-            time.sleep(.3)
+            expected = (content[0] + 16, 0, content[0] + 216, OUTPUT[1])
+            until("the tall menu drawn", lambda: box(shot("tall-open"), MENU) == expected)
             menu = box(shot("tall-open"), MENU)
             cut = re.search(r"popup cut .* to (\d+)x(\d+)", said())
             # Its panel (its window geometry), shown anew at that height;
@@ -337,7 +347,7 @@ def main():
             checks["sway: tall"] = {"menu": menu, "cut": cut.group(0), "configured heights": configured}
             checks["sway: a menu taller than the output is cut to it"] = (
                 cut.groups() == ("200", str(OUTPUT[1])) and int(configured[-1]) == OUTPUT[1]
-                and menu == (content[0] + 16, 0, content[0] + 216, OUTPUT[1]))
+                and menu == expected)
             pointer.move_to(menu[0] + 100, OUTPUT[1] // 2, *OUTPUT)
             time.sleep(.2)
             pointer.swipe(dy=60., frames=12)
@@ -370,8 +380,7 @@ def main():
             click(*FILE)
             until("the popover flipped", lambda: "popup flipped" in log.read_text())
             until("it shown anew", lambda: log.read_text().count("popup configured") >= 2)
-            time.sleep(.3)
-            image = shot("popover-flipped")
+            image = drawn("the flipped popover drawn", lambda: shot("popover-flipped"), POPOVER)
             popover = box(image, POPOVER)
             trigger_top, centre = content[1] + FILE[1] - 14, content[0] + FILE[0]
             # The arrow's tip: its last rows, a few pixels wide.
@@ -400,8 +409,7 @@ def main():
             # Over More, its second item, where the menu shows.
             pointer.move_to(menu[0] + 100, menu[1] + 8 + 36 + 4 + 18, *OUTPUT)
             until("the submenu", lambda: sub_log.read_text().count("popup configured") >= 2)
-            time.sleep(.3)
-            image = shot("submenu-open")
+            image = drawn("the submenu drawn", lambda: shot("submenu-open"), SUBMENU)
             child = box(image, SUBMENU)
             checks["sway: submenu"] = {"menu": menu, "submenu": child}
             checks["sway: submenu beside its flipped menu"] = (
