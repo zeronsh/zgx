@@ -35,9 +35,13 @@ def main():
         assert record["adapter"] == "components", record
         if mode == "idle":
             assert record["ticks"] == 0, record
+            # A list that never scrolled: what shows and its overscan.
+            assert 1 <= record["mounted_rows"] <= 32, record
+            idle = record["mounted_rows"]
         else:
             assert record["ticks"] > 0, record
-        assert 1 <= record["mounted_rows"] <= 32, record
+            # Scrolled, what it built ahead and keeps (`zgx::spare`'s cap).
+            assert idle <= record["mounted_rows"] <= 256, record
         assert 1.5 <= record["elapsed_seconds"] < 45, record
         results.append(dict(mode=mode, **record))
     (args.output / "results.json").write_text(json.dumps(results, indent=2) + "\n")

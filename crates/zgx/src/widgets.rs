@@ -1591,6 +1591,8 @@ pub(crate) struct UiStorage {
     dying: RefCell<std::collections::VecDeque<NodeId>>,
     /// A large subtree was removed since the last frame was prepared.
     removed: Cell<bool>,
+    /// What spare time is for (`crate::spare`).
+    spare: crate::spare::SpareWork,
     editors: RefCell<crate::scene::NodeMap<EditorHandle>>,
     /// What takes a person's paste, for the few editors asked to (`View::on_paste`).
     paste_hooks: RefCell<crate::scene::NodeMap<PasteHook>>,
@@ -1886,6 +1888,7 @@ impl Ui {
             owned: RefCell::default(),
             dying: RefCell::default(),
             removed: Cell::new(false),
+            spare: Default::default(),
             editors: RefCell::default(),
             paste_hooks: RefCell::default(),
             editor_layout: RefCell::new(None),
@@ -4573,6 +4576,24 @@ impl Ui {
         }
         drop(old);
         self.input.dispatch(&self.scene, InputEvent::PointerCancel);
+    }
+    /// Whether `scope`, a focus scope, shows in a portal owned from within
+    /// `row`: a popover opened from it.
+    pub(crate) fn opened_from(&self, scope: NodeId, row: NodeId) -> bool {
+        let scene = self.scene.borrow();
+        let inside = |node: NodeId, around: NodeId| {
+            node == around || (scene.contains(node) && scene.ancestors(node).any(|up| up == around))
+        };
+        inside(scope, row)
+            || self
+                .storage
+                .portals
+                .borrow()
+                .iter()
+                .any(|(owner, overlay)| inside(scope, *overlay) && inside(*owner, row))
+    }
+    pub(crate) fn spare(&self) -> &crate::spare::SpareWork {
+        &self.storage.spare
     }
     /// Whether nodes removed (`Ui::remove`) still hold what they held, to
     /// be freed over the next frames: frames call `reclaim` as they are
