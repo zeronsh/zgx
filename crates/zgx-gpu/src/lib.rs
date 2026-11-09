@@ -8982,7 +8982,9 @@ impl GpuRenderer {
                             } else {
                                 let mut b = Buffer::new_empty(Metrics::new(
                                     font_size.max(1.),
-                                    item.font.line_height.resolve(font_size),
+                                    item.font
+                                        .line_height
+                                        .resolve_in(&item.font.family, font_size),
                                 ));
                                 b.set_size(text::wrap_width(Some(wrap)), Some(bounds.height));
                                 text::set_buffer_text(

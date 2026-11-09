@@ -318,7 +318,10 @@ pub fn fallback_measure(rich: &RichText, width: Option<f32>) -> (f32, f32) {
             run_index += 1;
         }
         let run = &rich.runs[run_index];
-        let line = run.font.line_height.resolve(run.font_size);
+        let line = run
+            .font
+            .line_height
+            .resolve_in(&run.font.family, run.font_size);
         if grapheme == "\n" || grapheme == "\r\n" || grapheme == "\r" {
             if limit.is_some_and(|limit| row >= limit) {
                 return (

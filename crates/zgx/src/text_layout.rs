@@ -52,17 +52,31 @@ impl LineHeight {
         (self != Self::NORMAL).then(|| f32::from_bits(self.0))
     }
 
-    /// The line pitch for text `font_size` large.
+    /// The line pitch for text `font_size` large in the system's interface
+    /// font.
     pub fn resolve(self, font_size: f32) -> f32 {
+        self.resolve_in(&FontFamily::SansSerif, font_size)
+    }
+    /// The line pitch for text `font_size` large in `family`: on iOS the
+    /// system font's own line for its interface family (others keep 1.4
+    /// times the size until their faces' lines are read).
+    #[inline]
+    pub fn resolve_in(self, family: &FontFamily, font_size: f32) -> f32 {
         self.pixels().unwrap_or_else(|| {
             let size = if font_size.is_finite() {
                 font_size.max(1.)
             } else {
                 1.
             };
-            normal_line(size, cfg!(target_os = "ios"))
+            normal_line_in(family, size, cfg!(target_os = "ios"))
         })
     }
+}
+/// The normal line for `family`, iOS's system font's line where `ios` and it
+/// is the interface family.
+#[inline]
+fn normal_line_in(family: &FontFamily, size: f32, ios: bool) -> f32 {
+    normal_line(size, ios && matches!(family, FontFamily::SansSerif))
 }
 /// The system font's line on iOS, in ems: SF's ascent and descent (1950 and
 /// 494 of 2048, no line gap), which UIKit gives as `UIFont.lineHeight` at
@@ -697,7 +711,10 @@ impl FallbackTextLayout {
                 run_index += 1;
             }
             let run = &rich.runs()[run_index];
-            let line = run.font.line_height.resolve(run.font_size);
+            let line = run
+                .font
+                .line_height
+                .resolve_in(&run.font.family, run.font_size);
             let newline = grapheme.contains(['\r', '\n']);
             let advance = run.estimated_advance(grapheme, index);
             if newline || width.is_some_and(|w| x > 0. && x + advance > w.max(0.)) {
@@ -854,7 +871,7 @@ impl FallbackTextLayout {
             let height = if normal {
                 base.caret(0).height
             } else {
-                font.line_height.resolve(size)
+                font.line_height.resolve_in(&font.family, size)
             };
             let mut cells = Vec::new();
             let mut x = base.caret(0).x;
@@ -1039,7 +1056,7 @@ impl FallbackTextLayout {
         // order. Include the final advance, consistently with native tracking.
         let advance = (size as f64 * 0.6 + font.letter_spacing.pixels() as f64)
             .clamp(0., f32::MAX as f64) as f32;
-        let height = font.line_height.resolve(size);
+        let height = font.line_height.resolve_in(&font.family, size);
         let mut x = 0.;
         let mut y = 0.;
         let mut width = 0_f32;
@@ -1334,6 +1351,21 @@ mod tests {
         }
         assert_eq!(normal_line(10., false), 14.);
         assert_eq!(normal_line(f32::MAX, true), f32::MAX);
+        // Only the interface family: a monospaced, serif or named face keeps
+        // its line (UIKit's are each face's own, not read yet).
+        for family in [
+            FontFamily::Monospace,
+            FontFamily::Serif,
+            FontFamily::Named("Inter".into()),
+        ] {
+            assert_eq!(normal_line_in(&family, 17., true), 24.);
+        }
+        assert!((normal_line_in(&FontFamily::SansSerif, 17., true) - 20.2871).abs() < 1e-3);
+        assert_eq!(normal_line_in(&FontFamily::SansSerif, 17., false), 24.);
+        assert_eq!(
+            LineHeight::px(30.).resolve_in(&FontFamily::Monospace, 17.),
+            30.
+        );
     }
     #[test]
     fn explicit_pitch_keeps_wrapped_unicode_hit_selection_and_caret_aligned() {

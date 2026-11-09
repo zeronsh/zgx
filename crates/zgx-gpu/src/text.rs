@@ -421,7 +421,7 @@ impl ShapedText {
     ) -> Self {
         let text = text.into();
         let size = font_size.max(1.);
-        let line_height = font.line_height.resolve(size);
+        let line_height = font.line_height.resolve_in(&font.family, size);
         let mut buffer = Buffer::new_empty(Metrics::new(size, line_height));
         buffer.set_size(wrap_width(width), None);
         set_buffer_text(fonts, &mut buffer, &text, font, size);
@@ -461,10 +461,11 @@ impl ShapedText {
         width: Option<f32>,
     ) -> Self {
         let mut buffer = rich_buffer(fonts, rich, width, None);
-        let line_height = rich
-            .runs()
-            .first()
-            .map_or(1., |run| run.font.line_height.resolve(run.font_size));
+        let line_height = rich.runs().first().map_or(1., |run| {
+            run.font
+                .line_height
+                .resolve_in(&run.font.family, run.font_size)
+        });
         if rich.options() == Default::default()
             && rich.text().ends_with(['\r', '\n'])
             && ends_open(&buffer)
@@ -972,7 +973,10 @@ impl CpuTextRaster {
         font: &zgx::text_layout::FontStyle,
     ) -> Vec<(i32, i32, cosmic_text::SwashImage)> {
         let size = size.max(1.);
-        let mut buffer = Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
+        let mut buffer = Buffer::new_empty(Metrics::new(
+            size,
+            font.line_height.resolve_in(&font.family, size),
+        ));
         buffer.set_size(wrap_width(Some(width)), Some(height));
         set_buffer_text(&mut self.fonts, &mut buffer, text, font, size);
         buffer.shape_until_scroll(&mut self.fonts, false);
@@ -1710,7 +1714,9 @@ pub(crate) fn truncated(
         {
             let mut buffer = Buffer::new_empty(Metrics::new(
                 run.font_size,
-                run.font.line_height.resolve(run.font_size),
+                run.font
+                    .line_height
+                    .resolve_in(&run.font.family, run.font_size),
             ));
             buffer.set_size(wrap_width(width), None);
             set_buffer_text(fonts, &mut buffer, "", &run.font, run.font_size);
@@ -1935,7 +1941,10 @@ pub(crate) fn plain_buffer_unshaped(
     recycled: Vec<cosmic_text::BufferLine>,
 ) -> Buffer {
     let size = font_size.max(1.);
-    let mut buffer = Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
+    let mut buffer = Buffer::new_empty(Metrics::new(
+        size,
+        font.line_height.resolve_in(&font.family, size),
+    ));
     buffer.lines = recycled;
     set_buffer_text(fonts, &mut buffer, text, font, size);
     buffer
@@ -1948,7 +1957,9 @@ pub(crate) fn rich_buffer_unshaped(
 ) -> Buffer {
     let base = rich.runs().first();
     let size = base.map_or(1., |run| run.font_size.max(1.));
-    let line_height = base.map_or(1., |run| run.font.line_height.resolve(size));
+    let line_height = base.map_or(1., |run| {
+        run.font.line_height.resolve_in(&run.font.family, size)
+    });
     let mut buffer = Buffer::new_empty(Metrics::new(size, line_height));
     buffer.lines = recycled;
     let default_font = zgx::text_layout::FontStyle::default();
@@ -1985,7 +1996,9 @@ pub(crate) fn rich_buffer_unshaped(
         let attributes = attributes
             .metrics(Metrics::new(
                 run.font_size.max(1.),
-                run.font.line_height.resolve(run.font_size.max(1.)),
+                run.font
+                    .line_height
+                    .resolve_in(&run.font.family, run.font_size.max(1.)),
             ))
             .metadata(if Some(index) == ellipsis_run {
                 usize::MAX

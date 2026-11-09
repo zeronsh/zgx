@@ -9669,7 +9669,10 @@ impl Scene {
                     Some(measure) => measure(text, *font_size, limit, &node.font),
                     None => self.measure_text_with_font(text, *font_size, limit, &node.font),
                 }));
-                let line = node.font.line_height.resolve(*font_size);
+                let line = node
+                    .font
+                    .line_height
+                    .resolve_in(&node.font.family, *font_size);
                 (size, *font_size, line, node.font.align)
             }
             NodeKind::RichText { text } => {
@@ -9690,7 +9693,11 @@ impl Scene {
                 let line = text
                     .runs()
                     .iter()
-                    .map(|run| run.font.line_height.resolve(run.font_size))
+                    .map(|run| {
+                        run.font
+                            .line_height
+                            .resolve_in(&run.font.family, run.font_size)
+                    })
                     .fold(0., f32::max);
                 let align = text
                     .runs()
