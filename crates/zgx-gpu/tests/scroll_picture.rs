@@ -392,3 +392,62 @@ fn a_fade_with_the_views_box_refuses_a_picture() {
         assert_eq!(gpu.debug_pictures(), 0);
     }
 }
+
+/// A dithered image takes its dots from the window's pixels, not its own:
+/// moved in a picture they would swim with it. It refuses one.
+#[test]
+fn an_image_drawn_by_window_position_refuses_a_picture() {
+    let _gpu = gpu_fixture();
+    let flat = std::sync::Arc::new(
+        zgx::image::ImageData::new(8, 8, [200u8, 100, 50, 255].repeat(64)).unwrap(),
+    );
+    let mut ui = Ui::new(W, H);
+    ui.scene.borrow_mut().set_pixel_scale(1.);
+    let offset = ui.signal(0_f32);
+    ui.mount(
+        scroll(offset.clone())
+            .w(W)
+            .h(H)
+            .bg(rgb(0x101820))
+            .children((0..40).map(|key| {
+                div()
+                    .w(200.)
+                    .h(24.)
+                    .bg(rgb(0x5a7a9a))
+                    .child(text(format!("row {key}")))
+            })),
+    );
+    let content = {
+        let scene = ui.scene.borrow();
+        let mut stack = vec![scene.root()];
+        let mut found = None;
+        while let Some(id) = stack.pop() {
+            if scene.is_scroll_content(id) {
+                found = Some(id);
+            }
+            stack.extend_from_slice(scene.children(id));
+        }
+        found.expect("scroll content")
+    };
+    {
+        let mut scene = ui.scene.borrow_mut();
+        scene.append(
+            content,
+            zgx::scene::NodeKind::Image(std::sync::Arc::new(flat.dithered(2.))),
+            zgx::scene::Style {
+                width: Some(8.),
+                height: Some(8.),
+                ..Default::default()
+            },
+        );
+    }
+    let mut gpu = GpuRenderer::new(W as u32, H as u32).unwrap();
+    gpu.set_scroll_pictures(true);
+    for _ in 0..4 {
+        offset.update(|o| *o += 8.);
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        assert_eq!(gpu.debug_pictures(), 0);
+    }
+}
