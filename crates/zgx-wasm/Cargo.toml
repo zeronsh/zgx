@@ -24,6 +24,8 @@ tokio = { version = "1", default-features = false, features = ["io-util"] }
 # (loops.rs): the naga wgpu 29 uses, its modules handed to wgpu as they are.
 naga = { version = "29.0.4", default-features = false, features = ["wgsl-in"] }
 wgpu = { version = "29.0.4", default-features = false, features = ["naga-ir"] }
+# Compiled components cached by their module's hash (cache.rs).
+sha2 = "0.10"
 # Popping an error scope (ready at once on native backends).
 pollster = "0.4"
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }

@@ -26,7 +26,7 @@ use std::{
 };
 use wasmtime::{
     Engine, Store, StoreLimits, StoreLimitsBuilder, UpdateDeadline,
-    component::{Component, HasSelf, Linker, ResourceTable},
+    component::{HasSelf, Linker, ResourceTable},
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
@@ -421,9 +421,19 @@ fn run(
         Ok(bytes) => bytes,
         Err(error) => return Ended::Failed(format!("{path}: {error}")),
     };
-    // Validated and compiled here, on this thread.
-    let component = match Component::new(engine, &bytes) {
-        Ok(component) => component,
+    // Validated and compiled here, on this thread, or loaded compiled.
+    let component = match crate::cache::component(engine, &bytes) {
+        Ok((component, origin, took)) => {
+            log.line(format!(
+                "{} in {:.1} ms",
+                match origin {
+                    crate::cache::Origin::Compiled => "compiled",
+                    crate::cache::Origin::Cached => "loaded from the cache",
+                },
+                took.as_secs_f64() * 1000.
+            ));
+            component
+        }
         Err(error) => {
             return Ended::Failed(format!("{path}: not a component this host runs: {error}"));
         }

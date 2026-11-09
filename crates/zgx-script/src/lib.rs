@@ -29,6 +29,11 @@ mod anim;
 mod anime;
 mod apps;
 pub use apps::{AppLaunch, AppSpec, WasmLaunch, WasmSpec};
+/// Where WebAssembly apps' compiled components are kept, and how many
+/// bytes of them (zgx-wasm's `set_cache`): a start then loads rather than
+/// compiles a module seen before. `None` keeps none.
+#[cfg(feature = "wasm")]
+pub use zgx_wasm::{DEFAULT_CACHE_LIMIT as DEFAULT_WASM_CACHE_LIMIT, set_cache as set_wasm_cache};
 pub mod app_config;
 pub mod app_types;
 mod bundle;

@@ -23,6 +23,7 @@
 //! more.
 mod app;
 mod bundles;
+mod cache;
 mod device;
 mod gpu;
 mod loops;
@@ -32,6 +33,7 @@ mod runtime;
 mod shared;
 
 pub use app::{WasmApp, WasmOptions, WasmStatus, surface};
+pub use cache::{DEFAULT_LIMIT as DEFAULT_CACHE_LIMIT, set_cache};
 
 /// The longest side `present-pixels` takes.
 pub(crate) const MAX_PIXELS_SIDE: u32 = 8192;
