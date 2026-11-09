@@ -18,7 +18,7 @@
 //! the frame that is no layer (so nothing the scene says about that id
 //! makes it composite otherwise), held until the next frame has drawn any
 //! frame deferred before it.
-use crate::{Draw, GpuRenderer, LayerCache, Scissor, ScrollCopy};
+use crate::{Draw, GpuRenderer, LayerCache, Scissor, ScrollCopy, Seen};
 use std::rc::Rc;
 use zgx::scene::{FadeMask, NodeId, NodeKind, PaintExtras, PaintItem, Rect, Scene};
 
@@ -609,7 +609,12 @@ impl GpuRenderer {
                 exact: false,
                 cropped: false,
                 glyphs: 0.,
-                seen: ((0, None, 1.), (None, 1.)),
+                seen: Seen {
+                    frame: 0,
+                    magnification: 1.,
+                    before: 1.,
+                    grids: None,
+                },
                 phase: (0., 0.),
                 transformed: false,
                 used: self.layer_frame,

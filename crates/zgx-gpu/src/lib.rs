@@ -1706,12 +1706,20 @@ impl LayerCache {
         (w * self.uv[0]).round() as usize * (h * self.uv[1]).round() as usize * 4
     }
 }
-/// `LayerCache::seen`: (the frame, its grid, its magnification) and the
-/// grid and magnification of the frame before.
-type Seen = (
-    (u64, Option<zgx::affine::Affine>, f32),
-    (Option<zgx::affine::Affine>, f32),
-);
+/// `LayerCache::seen`: what a layer was in the frame last prepared, and in
+/// the frame before that. Its grids only for a layer that reads them (one
+/// magnified), so that no other carries them from frame to frame.
+struct Seen {
+    frame: u64,
+    magnification: f32,
+    before: f32,
+    grids: Option<Box<SeenGrids>>,
+}
+/// `Seen`'s grids.
+struct SeenGrids {
+    now: Option<zgx::affine::Affine>,
+    before: Option<zgx::affine::Affine>,
+}
 /// How a layer of the window's own shows there (`GpuRenderer::shown`).
 #[derive(Clone, Copy)]
 struct Shown<'a> {
@@ -1733,49 +1741,33 @@ impl Shown<'_> {
 /// that reads it (`Placing::placed`): every layer of every frame has one,
 /// and few are magnified.
 #[derive(Clone, Copy)]
-struct Placing {
-    map: zgx::affine::Affine,
-    clip: Option<Rect>,
+struct Placing<'a> {
+    item: &'a zgx::scene::PaintItem<'a>,
     /// Where the target's pixels start, in its points.
     origin: (f32, f32),
     scale: f32,
     /// What of the target can show.
     shows: Rect,
 }
-impl Placing {
-    /// Where `item`, a layer, lands in a target whose pixels start at
-    /// `origin` (its points) at `scale`, `shows` of which can show. `None`
-    /// in perspective.
-    fn of(
-        item: &zgx::scene::PaintItem<'_>,
-        origin: (f32, f32),
-        scale: f32,
-        shows: Rect,
-    ) -> Option<Self> {
-        let map = match item.projective() {
-            Some(map) => map.affine()?,
-            None => zgx::affine::Affine::IDENTITY,
-        };
-        Some(Self {
-            map,
-            clip: item.clip,
-            origin,
-            scale,
-            shows,
-        })
-    }
-    fn placed(self) -> Placed {
+impl Placing<'_> {
+    /// `None` in perspective.
+    #[cold]
+    #[inline(never)]
+    fn placed(&self) -> Option<Placed> {
         use zgx::affine::Affine;
-        let grid = self
-            .map
+        let map = match self.item.projective() {
+            Some(map) => map.affine()?,
+            None => Affine::IDENTITY,
+        };
+        let grid = map
             .then(Affine::translation(-self.origin.0, -self.origin.1))
             .then(Affine::scale(self.scale, self.scale));
-        let shows = match self.clip {
+        let shows = match self.item.clip {
             Some(clip) => clip.intersection(self.shows),
             None => Some(self.shows),
         };
-        let visible = shows.and_then(|shows| Some(self.map.inverse()?.bounds(shows)));
-        Placed { grid, visible }
+        let visible = shows.and_then(|shows| Some(map.inverse()?.bounds(shows)));
+        Some(Placed { grid, visible })
     }
 }
 /// Where a layer's texels land in the target it composites into, and what
@@ -6008,7 +6000,12 @@ impl GpuRenderer {
         for item in &items {
             if item.isolated && item.effects.opacity > 0. {
                 let shown = self.shown(item, damage, viewport);
-                let placing = Placing::of(item, self.layer_origin, self.scale, viewport);
+                let placing = Placing {
+                    item,
+                    origin: self.layer_origin,
+                    scale: self.scale,
+                    shows: viewport,
+                };
                 self.layer_shifted = false;
                 self.prepare_layer(
                     scene,
@@ -6016,7 +6013,7 @@ impl GpuRenderer {
                     1.,
                     true,
                     shown,
-                    placing,
+                    &placing,
                     &mut layer_stats,
                     LAYER_ROOM,
                 )?;
@@ -6254,7 +6251,7 @@ impl GpuRenderer {
         magnified: f32,
         exact_around: bool,
         shown: Option<Shown<'_>>,
-        placing: Option<Placing>,
+        placing: &Placing<'_>,
         stats: &mut GpuStats,
         room: usize,
     ) -> Result<(), GpuError> {
@@ -6289,41 +6286,51 @@ impl GpuRenderer {
         // glyphs and lines drawn afresh, on other pixels, each frame.
         // Still, it is drawn at its scale exactly (the first frame it
         // shows included).
+        // One look at what it holds: every layer comes here every frame.
+        let cached = self.layers.get(&id);
+        let (cropped, current, glyphs) = cached.map_or((false, None, 0.), |cache| {
+            (cache.cropped, Some(cache.step), cache.glyphs)
+        });
         // Where it lands, for one that reads it: magnified, or drawn in part
         // when it was.
-        let cropped = self.layers.get(&id).is_some_and(|cache| cache.cropped);
-        let placed = placing
-            .filter(|_| magnifying || cropped)
-            .map(Placing::placed);
+        let placed = (magnifying || cropped).then(|| placing.placed()).flatten();
         let grid = placed.map(|placed| placed.grid);
         let serial = scene.flush_serial();
-        let held = self.layers.get(&id).map(|cache| {
+        let held = cached.map(|cache| {
             // What it was in the frame before this one (a frame may prepare
             // it twice: `layer_shifted`).
-            let ((frame, seen_grid, seen_magnification), before) = cache.seen;
-            let before = match frame == serial {
-                true => before,
-                false => (seen_grid, seen_magnification),
+            let seen = &cache.seen;
+            let grids = seen.grids.as_deref();
+            let (before_grid, before) = match seen.frame == serial {
+                true => (grids.and_then(|grids| grids.before), seen.before),
+                false => (grids.and_then(|grids| grids.now), seen.magnification),
             };
-            let moving = match (grid, before.0) {
+            let moving = match (grid, before_grid) {
                 (Some(grid), Some(was)) => grid != was,
-                _ => before.1 != magnification,
+                _ => before != magnification,
             };
-            (moving, f32::from_bits(cache.factor), before)
+            (moving, f32::from_bits(cache.factor), before_grid, before)
         });
         let moving = held.is_some_and(|(moving, ..)| moving);
-        let seen: Seen = (
-            (serial, grid, magnification),
-            held.map_or((grid, magnification), |(.., before)| before),
-        );
-        let current = self.layers.get(&id).map(|cache| cache.step);
+        let before_grid = held.map_or(grid, |(.., was, _)| was);
+        let seen = Seen {
+            frame: serial,
+            magnification,
+            before: held.map_or(magnification, |(.., before)| before),
+            grids: (grid.is_some() || before_grid.is_some()).then(|| {
+                Box::new(SeenGrids {
+                    now: grid,
+                    before: before_grid,
+                })
+            }),
+        };
         let mut step = raster_step(magnification, current);
         let mut factor = match (exact || magnifying) && magnification != 1. {
             true if exact || !moving => magnification,
             true => match held {
                 // Fine enough (stretched by a hundredth at most) and not
                 // past √2 finer than it shows.
-                Some((_, kept, _))
+                Some((_, kept, ..))
                     if kept * 1.01 >= magnification
                         && kept <= magnification * std::f32::consts::SQRT_2 =>
                 {
@@ -6341,7 +6348,6 @@ impl GpuRenderer {
         }
         // No finer than its largest glyph fits the atlas, once a raster
         // found it too large (`glyph_too_large`): finer, it would not draw.
-        let glyphs = self.layers.get(&id).map_or(0., |cache| cache.glyphs);
         let glyph_room = GLYPH_ROOM / glyphs;
         let capped = magnifying && glyphs > 0. && factor > glyph_room;
         if capped {
@@ -6352,13 +6358,15 @@ impl GpuRenderer {
         // the budget at that scale, while the part in view does. Not where
         // something reaches past its pixels (a blur, a mask, a shader, a
         // drop shadow).
-        let reaches_past = scene.filter_blur(id) > 0.
-            || scene.mask(id).is_some()
-            || scene.layer_shader(id).is_some()
-            || scene.drop_shadow(id).is_some();
+        let reaches_past = || {
+            scene.filter_blur(id) > 0.
+                || scene.mask(id).is_some()
+                || scene.layer_shader(id).is_some()
+                || scene.drop_shadow(id).is_some()
+        };
         let visible = placed
             .and_then(|placed| placed.visible)
-            .filter(|_| !reaches_past);
+            .filter(|_| !reaches_past());
         let frame = self.layer_frame;
         // Still and at its scale, its texels on its target's pixels: drawn
         // again if they moved off them (it moved, and stopped).
@@ -6603,19 +6611,25 @@ impl GpuRenderer {
                     let visible = match placed {
                         Some(_) => visible,
                         None => placing
-                            .and_then(|placing| placing.placed().visible)
-                            .filter(|_| !reaches_past),
+                            .placed()
+                            .and_then(|placed| placed.visible)
+                            .filter(|_| !reaches_past()),
                     };
                     (visible.and_then(|visible| visible.intersection(bounds))).unwrap_or(bounds)
                 });
-                let placing = Placing::of(item, (bounds.x, bounds.y), scale, inside);
+                let placing = Placing {
+                    item,
+                    origin: (bounds.x, bounds.y),
+                    scale,
+                    shows: inside,
+                };
                 self.prepare_layer(
                     scene,
                     item.id,
                     magnification,
                     exact,
                     None,
-                    placing,
+                    &placing,
                     stats,
                     LAYER_ROOM,
                 )?;
