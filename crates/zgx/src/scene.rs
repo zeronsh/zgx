@@ -12068,6 +12068,14 @@ impl Scene {
     /// anything that next reads it. One arranged somewhere else, its kept
     /// children's places move with it, is arranged again. One whose result was
     /// replaced since by a whole layout has nothing to take back.
+    /// Whether columns resumed at their end set children aside, and whether
+    /// any column is streamed into: what a layout pass looks at for them.
+    #[inline(always)]
+    fn column_work(&self) -> (bool, bool) {
+        self.cold.as_deref().map_or((false, false), |cold| {
+            (!cold.column_kept.is_empty(), !cold.column_memos.is_empty())
+        })
+    }
     #[cold]
     #[inline(never)]
     fn return_kept_children(&mut self, report: Option<&mut FrameReport>) {
@@ -13306,8 +13314,13 @@ impl Scene {
             }
             false => full,
         };
-        if self.cold.is_some() {
+        // Columns streamed into (`column_end`): none in most scenes, which
+        // make no call.
+        let (kept, memos) = self.column_work();
+        if kept {
             self.return_kept_children(None);
+        }
+        if memos {
             self.restore_column_reads();
         }
         if full {
@@ -13361,7 +13374,7 @@ impl Scene {
         if !self.escaped.is_empty() {
             self.place_escaped(&mut report);
         }
-        if self.cold.is_some() {
+        if self.column_work().0 {
             self.return_kept_children(Some(&mut report));
         }
         // Probes this pass answered stay only as the next pass's few.
