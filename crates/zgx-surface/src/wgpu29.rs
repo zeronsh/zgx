@@ -3,9 +3,10 @@
 //! where it can't share.
 //!
 //! A client on another wgpu (Horizon is on 30) copies this module and
-//! changes `wgpu` to its own: what it reaches of wgpu-hal (`as_hal`,
-//! `texture_from_raw`, `create_texture_from_hal`) is the same from 29 to
-//! 30, and wgpu-hal's ash is this crate's (0.38).
+//! changes `wgpu` to its own, checking that what it reaches of wgpu-hal
+//! (`as_hal`, `texture_from_raw` with `TextureMemory::Dedicated`,
+//! `enabled_device_extensions`, `create_texture_from_hal`) has the same
+//! shape there and that its ash is this crate's (0.38).
 use crate::{
     Handle,
     protocol::{Buffer, BufferDesc, DeviceIds, Offer},

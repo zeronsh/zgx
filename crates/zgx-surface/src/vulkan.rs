@@ -4,8 +4,8 @@
 //! that memory into it (`import_image`). Both must be on the same physical
 //! device and driver (`device_ids` on each side, compared).
 //!
-//! Needs `VK_KHR_external_memory_fd` on both devices (wgpu-hal 29 and 30
-//! enable it where the driver has it) and Vulkan 1.1.
+//! Needs `VK_KHR_external_memory_fd` on both devices (wgpu-hal 29 enables
+//! it where the driver has it) and Vulkan 1.1.
 use crate::protocol::{DeviceIds, VulkanImage};
 use ash::vk;
 

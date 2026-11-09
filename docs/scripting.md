@@ -143,6 +143,7 @@ The component library's elements (`ui.data_grid`, `ui.tree`, `ui.calendar`, `ui.
 | `canvas { draw = function(c, w, h) … end }` | runs again when its size or the state it reads changes |
 | `canvas { each = state, draw_item = function(c, item, w, h) … end }` | draws each item on its own and keeps it: only items written since are drawn again |
 | `webview { src = "https://…", … }` | a native web page (WKWebView on macOS) laid out, rounded, clipped and faded like any node, with zgx content (frosted popovers too) drawn over it; see [Web views](#web-views) |
+| `surface { app = ui.app(id, { command = … }) }` | another program's frames (a game, a renderer of its own), its input forwarded, placed like any node; see [Apps](reference/native.md#apps) and [External surfaces](external-surfaces.md) |
 | `terminal { term = ui.term(id) }` | a terminal session, drawn by zgx (zgx-run's `terminal` feature, every platform) or a Ghostty surface (the `ghostty` feature, macOS), placed like any node; see [Terminals](#terminals) |
 | `checkbox`, `input`, `textarea`, `progress`, `slider` | `{ label, value = state }`; `slider` takes `min`, `max`; `input` and `textarea` take `placeholder` (text shown while the value is empty: a string, state or function), `placeholder_color` and `select_on_focus = true` (focus selects all the text: an address bar) |
 | `show(cond, node, else)` | `cond`: state, function or boolean. What it shows lays out as if it stood in its place (its `grow`, `self`, percentages and `absolute` insets reach the parent), as for `switch` and `presence` |
@@ -407,6 +408,7 @@ A plugin can also add next to any element of the app, or in its place, without a
 | `ui.fetch`, `ui.socket`, remote images | yes | with `Capability::Fetch`, and what the app's `fetch_policy` allows |
 | the clipboard, file dialogs | yes | with `Capability::Clipboard`, `Capability::Files` |
 | terminals (`ui.term`) | yes | with `Capability::Terminals` |
+| programs (`ui.app`, `ui.surface`) | yes, what the host's `vet_apps` lets run | with `Capability::Apps`, what the host's `vet_apps` lets run, and only the sessions it started |
 | web pages (`ui.web`, `ui.webview`) | yes | with `Capability::Web`: its own pages, with their own cookies and storage, not the app's |
 | windows of its own (`ui.window`) | yes | with `Capability::Windows` (one could pose as the app's, or the system's asking for a password); never the app's title bar (`ui.window.titlebar_area`, `controls`) |
 | files: modules, themes, images | from its directory | from its directory or below, links followed (one pointing outside is outside) |
