@@ -376,6 +376,9 @@ fn a_veiled_views_new_words_fade_in_once_at_the_pace_they_come() {
         runs[0].1 > 0 && runs[0].1 < 255 && runs[1].1 == 0,
         "{runs:?}"
     );
+    // The later piece goes on the run's span, drawn with it as one.
+    let pieces = paragraphs(&mut app, "md").remove(0).2;
+    assert!(!pieces[0].continues && pieces[1].continues, "{pieces:?}");
     // Past the longest fade (400 ms): all of it shown.
     clock.advance(at(500), || {});
     app.frames(1);

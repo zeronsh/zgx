@@ -496,7 +496,13 @@ fn spans(
             continue;
         }
         for (s, e, chunk) in super::veil::pieces(&chunks, from, to) {
-            let piece = span_of(p.run, Some(&p.text[s - from..e - from]), bold, look, 0);
+            let mut piece = span_of(p.run, Some(&p.text[s - from..e - from]), bold, look, 0);
+            // Each piece after its run's first goes on the run's span: a chip
+            // cut is padded and washed as the chip whole, a link underlined as
+            // one. (Never pieces of two runs, however alike.)
+            if s > from {
+                piece = piece.continues();
+            }
             out.push(match chunk {
                 Some(c) => piece.fade_in(c.fade()),
                 None => piece,
