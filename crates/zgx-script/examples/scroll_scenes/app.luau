@@ -6,10 +6,7 @@ local translucent = ui.state("translucent", false)
 -- Minimal idle reference: only this tiny marker changes each refresh. A
 -- completely static window presents nothing and cannot measure system pacing.
 if scene == "idle" then
-	local beat = ui.state("beat", false)
-	ui.every(1000 / (tonumber(ui.args[2]) or 120), function()
-		beat:set(not beat:peek())
-	end)
+	local beat = ui.shared("reference_beat", false)
 	return ui.column {
 		id = "transcript",
 		w_full = true,

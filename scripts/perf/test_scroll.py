@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Measurement integrity: half-rate, idle gaps, quantization and missing evidence."""
 import argparse
+from pathlib import Path
+import tempfile
+from unittest.mock import patch
 import unittest
 import scroll
 
@@ -56,10 +59,27 @@ class ScrollMetrics(unittest.TestCase):
         self.assertEqual(m['app_late_frames'],1)
         frame['phases'][0]['micros']=1000
         m = scroll.summarize([frame],[(.01,.01,1,0),(.03,.03,1,0)],events,120,2,0,{})
-        self.assertEqual(m['system_late_frames'],1)
+        self.assertEqual(m['system_late_frames'],0)
+        self.assertEqual(m['unattributed_late_frames'],1)
         frame['gpu_micros']=6000
         m = scroll.summarize([frame],[(.01,.01,1,0),(.03,.03,1,0)],events,120,2,0,{})
         self.assertEqual(m['late_attributions'][0]['cause'],'gpu')
+
+    def test_late_details_keep_present_wait_and_nearby_phase_changes(self):
+        events = [(0,'pixel',0,-20,'started'),(8,'pixel',0,-20,'moved'),
+                  (16,'pixel',0,-20,'moved'),(24,'pixel',0,-20,'moved')]
+        frame = dict(frame=1, notes=['scroll @1 composited its picture'],
+                     phases=[dict(phase='paint',micros=1000,instructions=1000),
+                             dict(phase='present',micros=7000,instructions=100),
+                             dict(phase='wait',micros=2000,instructions=10)],gpu_micros=500)
+        m=scroll.summarize([frame],[(.001,.001,1,0),(.024,.024,1,0)],events,120,2,0,{})
+        a=m['late_attributions'][0]
+        self.assertEqual(a['cause'],'unattributed')
+        self.assertEqual(a['phase_ms']['present'],7)
+        self.assertEqual(a['nearby_phase_changes'][0]['phase'],'started')
+        self.assertEqual(m['main_work_ms']['max'],1)
+        self.assertEqual(m['main_with_present_ms']['max'],8)
+        self.assertEqual(m['picture_frames'],1)
 
     def test_missing_frame_identity_is_not_called_system_noise(self):
         m = self.metrics(17)
@@ -77,6 +97,44 @@ class ScrollMetrics(unittest.TestCase):
         events = scroll.parse_tape(scroll.tape('wing', 120))
         self.assertGreater(events[-1][0], 94000)
         self.assertEqual(events[-1][-1], 'ended')
+
+
+class DisplayModes(unittest.TestCase):
+    def modes(self, directory):
+        modes = object.__new__(scroll.RefreshModes)
+        original = dict(id=1,width=1728,height=1117,pixel_width=3456,pixel_height=2234,hz=0)
+        modes.original = dict(current=original,modes=[original,dict(original,id=2,hz=60)])
+        modes.current, modes.actions = 1, []
+        modes.binary, modes.output = Path('/fake/scroll-display'), Path(directory)
+        return modes
+
+    def test_a_real_mode_is_selected_and_the_original_is_restored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            modes = self.modes(directory)
+            with patch.object(scroll.subprocess,'check_output',return_value='{}'), patch.object(scroll.time,'sleep'):
+                modes.select(60)
+            self.assertEqual(modes.current,2)
+            with patch.object(scroll.subprocess,'run') as run:
+                modes.restore()
+            self.assertEqual(run.call_args.args[0][-1],'1')
+            self.assertTrue((Path(directory)/'display-modes.json').is_file())
+
+    def test_current_mode_is_usable_even_if_not_in_enumeration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            modes=self.modes(directory)
+            modes.original['current']['hz']=120
+            modes.original['modes']=[]
+            with patch.object(scroll.subprocess,'check_output') as change:
+                modes.select(120)
+            change.assert_not_called()
+
+    def test_a_mode_with_different_dimensions_is_refused(self):
+        with tempfile.TemporaryDirectory() as directory:
+            modes = self.modes(directory)
+            modes.original['modes'][1]['pixel_width']=1920
+            with self.assertRaisesRegex(RuntimeError,'no actual 60 Hz mode'):
+                modes.select(60)
+            self.assertEqual(modes.current,1)
 
 
 if __name__ == '__main__':
