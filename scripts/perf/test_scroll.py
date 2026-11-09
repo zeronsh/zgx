@@ -9,6 +9,13 @@ import scroll
 
 
 class ScrollMetrics(unittest.TestCase):
+    def test_changed_default_is_verified_without_forcing_an_environment_flag(self):
+        metrics={'frame_source_counts':{'view link':100},'render_frames':100}
+        proof=scroll.behavior_checks(metrics,[],[],'0',True,True,'view link')
+        self.assertTrue(proof['frame_source_is_view link'])
+        wrong=scroll.behavior_checks(metrics,[],[],'0',True,True,'display link')
+        self.assertFalse(wrong['frame_source_is_display link'])
+
     def timing_frame(self, notes, end=16, micros=15000):
         return dict(frame=1,notes=notes,ended_ms=end,frame_micros=micros)
 

@@ -209,7 +209,7 @@ def verify_environment_text(text, overrides):
     return {item:bool(re.search(r'(?:^|\s)'+re.escape(item)+r'(?=\s|$)',text)) for item in overrides}
 
 
-def behavior_checks(metrics, overrides, presents, present, reference, require_source=False):
+def behavior_checks(metrics, overrides, presents, present, reference, require_source=False, expected_source=None):
     checks={}
     if 'ZGX_HANDOVER_ASAP=1' in overrides:
         checks['asap_no_hold']=metrics['wait_ms']['p99'] is not None and metrics['wait_ms']['p99']<=.5
@@ -221,11 +221,12 @@ def behavior_checks(metrics, overrides, presents, present, reference, require_so
     flags=dict(value.split('=',1) for value in overrides)
     pacing=any(flags.get(key)=='1' for key in ('ZGX_HANDOVER_ASAP','ZGX_VIEW_CLOCK','ZGX_SCROLL_LINK')) or 'ZGX_LEAD_US' in flags
     counts=metrics.get('frame_source_counts',{})
-    if pacing or require_source or counts:
+    if pacing or require_source or counts or expected_source:
         timer=flags.get('ZGX_HANDOVER_ASAP')=='1' or 'ZGX_LEAD_US' in flags or (not reference and flags.get('ZGX_SCROLL_LINK')!='1')
         expected='timer on the grid' if timer else 'view link' if flags.get('ZGX_VIEW_CLOCK')=='1' else 'display link'
         if not timer and (present=='1' or (present=='auto' and any(len(r)>3 and r[3]>0 for r in presents)) or (flags.get('ZGX_SCROLL_DRAWABLES')=='1' and not reference)):
             expected='view link'
+        if expected_source is not None:expected=expected_source
         total=sum(counts.values())
         checks['frame_source_is_'+expected]=total>=10 and total>=.8*metrics.get('render_frames',metrics.get('scroll_frames',0)) and counts.get(expected,0)>=.95*total
     return checks
@@ -757,7 +758,7 @@ return ui.overlay {""")
                 metrics['start_to_present_ms'] = spread([(p-s)*1000 for s,p in latency if s*1000 >= replay_starts[-1]])
                 result['latency_samples'] = latency
                 result['metrics'] = metrics
-                result['behavior_checks']=behavior_checks(metrics,args.host_env,presents,present,scene in ('idle','zeron-idle'),getattr(args,'require_frame_source',False))
+                result['behavior_checks']=behavior_checks(metrics,args.host_env,presents,present,scene in ('idle','zeron-idle'),getattr(args,'require_frame_source',False),getattr(args,'reference_source' if scene in ('idle','zeron-idle') else 'scroll_source',None))
                 if not all(result['behavior_checks'].values()):raise RuntimeError('diagnostic arm failed observed behaviour check: '+str(result['behavior_checks']))
                 result['failures'] = failures(metrics, args)
                 latency_p99 = metrics['start_to_present_ms']['p99']
@@ -950,6 +951,8 @@ def main():
     p.add_argument('--hz', default='120')
     p.add_argument('--host-env',action='append',default=[],help='diagnostic ZGX_VIEW_CLOCK=0|1 or ZGX_SCROLL_LINK=0|1; repeat for both')
     p.add_argument('--require-frame-source',action='store_true',help='invalidate a pacing arm without its observed source-mode note')
+    for name in ('reference-source','scroll-source'):
+        p.add_argument('--'+name,choices=['view link','display link','timer on the grid'],help='expected mode for an engine with a changed default; verified from frame notes')
     p.add_argument('--reference-refresh-grid',choices=['off','on'],default='off',help='on exercises latch holds in explicit pacing probes')
     p.add_argument('--native-floor',action='store_true',help='bracket each zgx idle reference with independent Swift/Metal references')
     p.add_argument('--set-refresh', action='store_true', help='select matching native display modes and restore the original')

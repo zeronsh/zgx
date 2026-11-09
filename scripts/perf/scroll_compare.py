@@ -122,7 +122,8 @@ def run_one(args, descriptor, arm, role, trial, position):
           '--scale',str(c.get('scale',2)),'--backgrounds',c.get('background','translucent'),
           '--present',str(c.get('present','0')),'--repeats','1','--native-floor',
           '--reset-row',str(c.get('reset_row',160)), '--reference-refresh-grid',c.get('reference_refresh_grid','off'),'--output',str(output)]
-    for key in ('engine_source','engine_pin','zeron_source','zeron_runner','runner','reference_runner'):
+    if c.get('set_refresh'):argv+=['--set-refresh']
+    for key in ('engine_source','engine_pin','zeron_source','zeron_runner','runner','reference_runner','reference_source','scroll_source'):
         if key in descriptor:argv+=['--'+key.replace('_','-'),str(descriptor[key])]
     for value in descriptor.get('env',[]):argv+=['--host-env',value]
     if descriptor.get('require_frame_source'):argv+=['--require-frame-source']

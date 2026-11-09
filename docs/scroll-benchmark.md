@@ -401,3 +401,11 @@ amount (also within 1 ms) versus the CV-link baseline's 1.6 ms target. Timer-sou
 notes are required independently. Wait duration is not a substitute: the timer
 and link start at different phases, and older CV-link holds were recorded inside
 `present` without a `Wait` span. Phase labels are not absolute link timestamps.
+
+For an engine whose default clock changed, a comparison descriptor can declare
+`reference_source` and `scroll_source` (CLI `--reference-source` and
+`--scroll-source`) as `view link`, `display link`, or `timer on the grid`.
+These expectations are checked against observed notes without forcing the
+candidate's default on through an environment flag. Declare the same-binary
+control's expected modes separately and adjust expectations for the requested
+refresh rate; unsupported or mismatched source notes invalidate the cell.
