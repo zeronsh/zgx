@@ -84,3 +84,34 @@ fn a_span_fades_in_from_clear_to_its_colour_with_no_script_per_frame() {
     );
     let _ = Color(0, 0, 0, 0);
 }
+
+/// A span with room after it unlike the room before (`padding = { 2, 12, 0 }`)
+/// is drawn as its room, then its text, then the room after: its text's run
+/// is the one that fades, and its room runs keep their colour.
+#[test]
+fn a_span_with_room_apart_fades_its_text_run() {
+    let mut app = TestApp::inline(
+        r##"
+return ui.rich {
+    ui.span { "Before. ", color = "#ff000080" },
+    ui.span { "Fading in.", color = "#ff000080", padding = { 2, 12, 0 }, fade_in = { start = ui.now(), ms = 300 } },
+    ui.span { " After.", color = "#ff000080" },
+}
+"##,
+    );
+    app.ui.scene.borrow_mut().resize(600., 200.);
+    app.frames(1);
+    assert_eq!(app.error(), None);
+    let runs = alphas(&mut app, "Fading in.");
+    assert!(
+        runs.len() > 3,
+        "the span's room is runs of its own: {runs:?}"
+    );
+    for (text, alpha) in &runs {
+        if text == "Fading in." {
+            assert!(*alpha < 0x40, "its text starts near clear: {runs:?}");
+        } else {
+            assert_eq!(*alpha, 0x80, "{text:?} doesn't fade: {runs:?}");
+        }
+    }
+}

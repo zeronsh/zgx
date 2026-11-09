@@ -4922,19 +4922,24 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, or room after the text other than before it, the
             // room is kept apart from the text's run: `room_after` is then
             // what follows the text. Negative (no room is), otherwise.
-            let (hover, icon, menu, plain, room_after, fade) = match span.extras.take() {
-                None => (None, None, None, false, -1., None),
+            let (hover, icon, menu, plain, room_after) = match span.extras.take() {
+                None => (None, None, None, false, -1.),
                 Some(extras) => {
                     let extras = *extras;
                     let end = extras.padding_end.unwrap_or(span.padding[0]);
                     let apart = extras.icon.is_some() || end != span.padding[0];
+                    // Its text's run comes next, after the room before it
+                    // when that's apart. Noted here, where only spans with
+                    // extras come, so a plain span pays nothing for fades.
+                    if let Some(fade) = extras.fade {
+                        fades.push((runs.len() + usize::from(apart), fade));
+                    }
                     (
                         extras.hover,
                         extras.icon,
                         extras.menu,
                         extras.plain,
                         if apart { end } else { -1. },
-                        extras.fade,
                     )
                 }
             };
@@ -5098,9 +5103,6 @@ fn paragraph_effect<const LOCATING: bool>(
                 _ => {}
             }
             let text_end = content.len();
-            if let Some(fade) = fade {
-                fades.push((runs.len(), fade));
-            }
             runs.push(crate::rich_text::TextRun {
                 background: span.background,
                 underline: {
@@ -5184,7 +5186,7 @@ fn paragraph_effect<const LOCATING: bool>(
             scene.set_style(paragraph, style);
             // The language each run's text is in, where any node says.
             let shown = scene.rich_with_languages(paragraph, rich.clone());
-            let shown = fading.faded(&shown, &fades, now);
+            let shown = fading.faded(shown, &fades, now);
             scene.set_leaf_kind(paragraph, NodeKind::RichText { text: shown });
         }
         fading.set(fades, &weak, root, paragraph);
@@ -5271,13 +5273,13 @@ impl Fading {
     #[inline]
     fn faded(
         &self,
-        rich: &std::sync::Arc<crate::rich_text::RichText>,
+        rich: std::sync::Arc<crate::rich_text::RichText>,
         fades: &[(usize, crate::compose_rich::TextFade)],
         now: f64,
     ) -> std::sync::Arc<crate::rich_text::RichText> {
         match &self.active {
-            Some(active) => active.runs.faded(rich, fades, now),
-            None => rich.clone(),
+            Some(active) => active.runs.faded(&rich, fades, now),
+            None => rich,
         }
     }
     /// The runs fading now.
@@ -5374,7 +5376,10 @@ mod fading_tests {
         let root = ui.scene.borrow().root();
         let mut fading = Fading::new(ServiceScope::new());
         let rich = empty_rich_text();
-        assert!(std::sync::Arc::ptr_eq(&fading.faded(&rich, &[], 0.), &rich));
+        assert!(std::sync::Arc::ptr_eq(
+            &fading.faded(rich.clone(), &[], 0.),
+            &rich
+        ));
         fading.set(Vec::new(), &weak, root, root);
         assert!(fading.active.is_none());
         // A run fading: held from then, with no frame loop where no host runs one.
@@ -5407,7 +5412,10 @@ mod fading_tests {
         fading.set(Vec::new(), &weak, root, root);
         let active = fading.active.as_ref().expect("kept");
         assert!(active.runs.runs.borrow().is_empty());
-        assert!(std::sync::Arc::ptr_eq(&fading.faded(&rich, &[], 0.), &rich));
+        assert!(std::sync::Arc::ptr_eq(
+            &fading.faded(rich.clone(), &[], 0.),
+            &rich
+        ));
         assert!(active.runs.base.borrow().is_none());
     }
 }
