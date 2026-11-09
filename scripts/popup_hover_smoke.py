@@ -121,7 +121,8 @@ def x11(binary, output, target):
 
 def x11_second_window(binary, output):
     """Its other window active: a tooltip in the one that isn't shows, the app
-    being forward, and raises nothing over the active one."""
+    being forward, and raises nothing over the active one. A hover card opens
+    with its view told nothing: the pointer stayed on it."""
     processes = []
     env = dict(os.environ, WINIT_X11_SCALE_FACTOR="1", POPUP_HOVER_SECOND="1", POPUP_HOVER_AT="100,100",
                ZGX_PRESENT_LOG="1", XDG_RUNTIME_DIR=tempfile.mkdtemp(prefix="zgx-hover-"))
@@ -138,6 +139,7 @@ def x11_second_window(binary, output):
         app = subprocess.Popen([str(binary)], env=env, stdout=log.open("w"), stderr=subprocess.STDOUT)
         processes.append(app)
         x, y = at(log, "tip")
+        card = at(log, "card")
         deadline = time.monotonic() + 20
         while len(ids := re.findall(r"0x[0-9a-f]+", run("xprop", "-root", "_NET_CLIENT_LIST"))) < 2:
             assert time.monotonic() < deadline, "its two windows did not show"
@@ -151,7 +153,12 @@ def x11_second_window(binary, output):
         run("xdotool", "mousemove", str(pointer[0] - 3), str(pointer[1]))
         run("xdotool", "mousemove", str(pointer[0]), str(pointer[1]))
         time.sleep(1.5)
-        return {"said": said(log, 0), "active is second": int(run("xdotool", "getactivewindow") or "0") == int(second, 16)}
+        tip = said(log, 0)
+        since = len(log.read_text(errors="replace").splitlines())
+        run("xdotool", "mousemove", str(origin[0] + round(card[0])), str(origin[1] + round(card[1])))
+        time.sleep(1.5)
+        return {"said": tip, "card said": said(log, since),
+                "active is second": int(run("xdotool", "getactivewindow") or "0") == int(second, 16)}
     finally:
         for process in reversed(processes):
             stop(process)
@@ -270,6 +277,8 @@ def main():
         wrong.append("second window lost its focus")
     if not any("popup show" in line for line in second["said"]):
         wrong.append("a tooltip in its window that isn't active didn't show")
+    if [line for line in second["card said"] if line.startswith("HOVER card")] != ["HOVER card enter"]:
+        wrong.append(f"a card opening told its view more than its enter: {second['card said']}")
     assert not wrong, wrong
     print("PASS: at the back a hover is heard, opens nothing, raises and focuses nothing; "
           "what was wanted shows as the app comes forward, and in its other window")

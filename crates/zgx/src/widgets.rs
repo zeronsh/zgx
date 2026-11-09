@@ -3972,6 +3972,7 @@ impl Ui {
         } else {
             LAYOUT_PASSES
         };
+        let mut hover_stale = false;
         for _ in 0..passes {
             self.scene.borrow_mut().prepare_layout();
             self.input.validate_drag(&self.scene);
@@ -3983,6 +3984,13 @@ impl Ui {
             let geometry_changed =
                 self.storage.bounds_geometry_revision.get() != Some(geometry_revision);
             if !layout_changed && !geometry_changed {
+                // What is under the pointer, once layout is done: a popup
+                // between its layout and its placement is under no one's
+                // pointer. What hovering changes is laid out in the next pass.
+                if std::mem::take(&mut hover_stale) {
+                    self.input.refresh_hover(&self.scene);
+                    continue;
+                }
                 if !self.run_after_layout() {
                     // Settled: a removed focused node's focus falls to its
                     // ancestor, unless something (a list revealing a row)
@@ -4009,7 +4017,7 @@ impl Ui {
             if hidden_focus {
                 self.input.focus(&self.scene, None);
             }
-            self.input.refresh_hover(&self.scene);
+            hover_stale = true;
             self.storage
                 .editor_layout_revision
                 .set(Some(layout_revision));
