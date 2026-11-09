@@ -184,10 +184,18 @@ binary is built separately with `inspect`, so tracing does not change the
 features of existing benchmarks. macOS phase counters supply the absolute
 per-frame ceiling; zero/unsupported hardware counters do not supply a native pass.
 
-The `Scroll performance` workflow runs the native suite on a self-hosted Mac
-labelled `zgx-perf-gpu`. It accepts a pin commit, rates, sizes and render scales,
-and uploads the complete evidence even on failure. A hosted macOS VM without
-a visible 120 Hz GPU desktop cannot provide this certification.
+The physical 120 Hz gate is manual: run `scripts/perf/scroll.py` on a quiet Mac
+and attach the table. A ship waits on that report; normal CI does not provide
+physical display certification. No self-hosted runner is installed for this
+public repository on personal Macs.
+
+The `Scroll performance` workflow template has `workflow_dispatch` as its
+**only** trigger: no `pull_request`, `push`, or `schedule`. Its optional
+`runs-on: [self-hosted, macOS, zgx-perf-gpu]` job never starts or sits pending
+because of a PR. Do not dispatch it without an explicitly arranged runner.
+It accepts a pin commit, rates, sizes and render scales, and uploads evidence
+even on failure. A hosted macOS VM without a visible 120 Hz GPU desktop cannot
+provide this certification.
 
 For a sibling fix, check out or cherry-pick its engine commit into a separate
 worktree, retain this suite and the exact fixture/tapes, rebuild, and repeat the
