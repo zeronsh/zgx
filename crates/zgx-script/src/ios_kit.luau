@@ -747,6 +747,8 @@ local SwipeRow = ui.component(function(props)
 							end
 						end
 						if armed ~= was then
+							-- UIKit's are private (`_UIDiscreteFeedback` type 6 at volume 0.7 arming,
+							-- type 9 at 0.55 not): the nearest a public generator gives, unmatched.
 							ui.haptic("selection")
 						end
 						-- Past the limit (the confirmation, or the open width), a power.
