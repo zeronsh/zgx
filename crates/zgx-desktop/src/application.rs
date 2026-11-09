@@ -3126,6 +3126,7 @@ impl Host {
                         });
                         // One wakeup, not `sleep_until`'s two: running late
                         // only moves it nearer the point, still before it.
+                        let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                         std::thread::sleep(wait);
                     }
                 })?;
