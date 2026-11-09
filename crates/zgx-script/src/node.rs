@@ -68,8 +68,9 @@ pub(crate) struct Node {
     /// `bg_shader`, `shader_params`, `layer_shader` and `layer_params`
     /// (boxed: few nodes have any).
     pub shaders: Option<Box<Shaders>>,
-    /// `window_drag = true`: a press on it moves the window.
-    pub window_drag: bool,
+    /// `window_drag = true` (`WINDOW_DRAG`) and `focus_on_press = false`
+    /// (`KEEPS_FOCUS`): rare, tested together where the node is styled.
+    pub press_flags: u8,
     /// `hook = false` or `private = true`: no plugin may target it
     /// (`ui.contribute { target }`), whatever matches it.
     pub private: bool,
@@ -663,6 +664,13 @@ pub(crate) struct LayoutAnim {
     pub hit: bool,
 }
 impl Node {
+    fn set_press_flag(&mut self, flag: u8, on: bool) {
+        if on {
+            self.press_flags |= flag;
+        } else {
+            self.press_flags &= !flag;
+        }
+    }
     /// The hook the app declares here (`hook = "name"`), if any.
     pub fn hook(&self) -> Option<&str> {
         self.a11y.as_ref()?.hook.as_deref()
@@ -687,7 +695,7 @@ impl Node {
             layout_id: None,
             mask: None,
             shaders: None,
-            window_drag: false,
+            press_flags: 0,
             private: false,
             selectable: None,
             selection_colors: None,
@@ -1428,11 +1436,15 @@ fn rare_mut(span: &mut Span) -> &mut SpanRare {
 pub(crate) struct SpanRare {
     /// An icon before the text, in the line.
     pub icon: Option<SpanIcon>,
+    /// Room after the text, given apart from the room before it
+    /// (`padding = { before, after, down }`).
+    pub padding_end: Option<f32>,
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
 }
-/// `ui.span { icon = { src = …, size = 12, gap = 4, tint = … } }`.
+/// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
+/// radius = 4, pad = 2 } }`.
 #[derive(Clone)]
 pub(crate) struct SpanIcon {
     /// A file, `https://…`, or `code:<svg …>`.
@@ -1441,7 +1453,17 @@ pub(crate) struct SpanIcon {
     pub gap: f32,
     /// A colour, or `"currentColor"` (the span's text colour).
     pub tint: Option<Value>,
+    /// The well the icon sits on: its fill (a colour or token), its
+    /// corner, and its room round the icon on every side.
+    pub bg: Option<Value>,
+    pub radius: f32,
+    pub pad: f32,
 }
+
+/// `Node::press_flags`: a press on it moves the window.
+pub(crate) const WINDOW_DRAG: u8 = 1;
+/// `Node::press_flags`: a press on it leaves focus where it is.
+pub(crate) const KEEPS_FOCUS: u8 = 2;
 
 /// A node's tooltip (`tooltip`, `tooltip_placement`).
 #[derive(Default, Clone)]
@@ -4015,7 +4037,8 @@ fn fill_from(
                 }
             },
             "focusable" => node.focusable = Some(lua.unpack(value)?),
-            "window_drag" => node.window_drag = lua.unpack(value)?,
+            "window_drag" => node.set_press_flag(WINDOW_DRAG, lua.unpack(value)?),
+            "focus_on_press" => node.set_press_flag(KEEPS_FOCUS, !lua.unpack::<bool>(value)?),
             "selectable" => node.selectable = lua.unpack(value)?,
             "selection_color" | "selected_text_color" => {
                 let at = usize::from(key == "selected_text_color");
@@ -4745,12 +4768,20 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 // `padding = 4` (across) or `{ 4, 0.5 }` (across, down).
                 b"padding" => {
+                    // `x`, `{ x, y }`, or `{ start, end, y }` (across before
+                    // the text and after it, then down).
                     span.padding = match lua.unpack(given)? {
                         Value::Num(x) => [x as f32, 0.],
-                        Value::List(l) => [
-                            l.first().and_then(Value::as_f64).unwrap_or(0.) as f32,
-                            l.get(1).and_then(Value::as_f64).unwrap_or(0.) as f32,
-                        ],
+                        Value::List(l) => {
+                            let at =
+                                |i: usize| l.get(i).and_then(Value::as_f64).unwrap_or(0.) as f32;
+                            if l.len() >= 3 {
+                                rare_mut(&mut span).padding_end = Some(at(1));
+                                [at(0), at(2)]
+                            } else {
+                                [at(0), at(1)]
+                            }
+                        }
                         _ => [0.; 2],
                     }
                 }
@@ -4792,11 +4823,15 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         }
                     };
                     let tint = icon.get::<Value>("tint")?;
+                    let bg = icon.get::<Value>("bg")?;
                     rare_mut(&mut span).icon = Some(SpanIcon {
                         src,
                         size: icon.get::<Option<f32>>("size")?.unwrap_or(12.),
                         gap: icon.get::<Option<f32>>("gap")?.unwrap_or(4.),
                         tint: (!matches!(tint, Value::Nil)).then_some(tint),
+                        bg: (!matches!(bg, Value::Nil)).then_some(bg),
+                        radius: icon.get::<Option<f32>>("radius")?.unwrap_or(0.).max(0.),
+                        pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
                     });
                 }
                 b"on_click" => span.click = Some(handler(given)?),

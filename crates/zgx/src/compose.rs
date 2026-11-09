@@ -552,8 +552,9 @@ pub(crate) struct Rare {
     line_numbers: Option<bool>,
     /// What a code editor adds to a text area (`View::highlighter`, …).
     code: Option<Box<CodeOptions>>,
-    /// `WINDOW_DRAG` (`View::window_drag`), `HOLLOW` (`View::hollow`) and an
-    /// editor's `AUTOCORRECT` and `SMART_PUNCTUATION`: rare, tested together
+    /// `WINDOW_DRAG` (`View::window_drag`), `HOLLOW` (`View::hollow`),
+    /// `KEEPS_FOCUS` (`View::focus_on_press`) and an editor's `AUTOCORRECT`
+    /// and `SMART_PUNCTUATION`: rare, tested together
     /// as the element mounts.
     mount_flags: u8,
     /// `View::selectable`.
@@ -1235,6 +1236,14 @@ impl View {
     /// `pointer_events`, followed: it changes as what `enabled` reads does.
     pub fn pointer_events_when(mut self, enabled: impl FnMut() -> bool + 'static) -> Self {
         self.rare_mut().pointer_events = Some(Box::new(enabled));
+        self
+    }
+    /// `false`: a press on the view (or anything in it) leaves focus where
+    /// it is, as the web's `mousedown` with `preventDefault()` does. Its
+    /// clicks still come. A list hanging from a field: its rows and tabs
+    /// take clicks, the field keeping the keys and its caret.
+    pub fn focus_on_press(mut self, moves: bool) -> Self {
+        self.set_mount_flag(KEEPS_FOCUS, !moves);
         self
     }
     /// A box laid out around content that may be put away: while nothing
@@ -4748,11 +4757,22 @@ fn paragraph_effect<const LOCATING: bool>(
             }
             let link = span.action.is_some() || span.href.is_some();
             // Most spans have none of these: one test for all three.
-            let (hover, icon, menu, plain) = match span.extras.take() {
-                None => (None, None, None, false),
+            // With an icon, or room after the text other than before it, the
+            // room is kept apart from the text's run: `room_after` is then
+            // what follows the text. Negative (no room is), otherwise.
+            let (hover, icon, menu, plain, room_after) = match span.extras.take() {
+                None => (None, None, None, false, -1.),
                 Some(extras) => {
                     let extras = *extras;
-                    (extras.hover, extras.icon, extras.menu, extras.plain)
+                    let end = extras.padding_end.unwrap_or(span.padding[0]);
+                    let apart = extras.icon.is_some() || end != span.padding[0];
+                    (
+                        extras.hover,
+                        extras.icon,
+                        extras.menu,
+                        extras.plain,
+                        if apart { end } else { -1. },
+                    )
                 }
             };
             let hover = hover.as_ref();
@@ -4773,8 +4793,9 @@ fn paragraph_effect<const LOCATING: bool>(
                 span.background = span.background.or(span.styles.background);
             }
             // An icon keeps its room before the text: a padded
-            // placeholder run of its own.
-            let icon_at = icon.is_some().then(|| {
+            // placeholder run of its own. So does the room before the text
+            // where it isn't the room after it (`padding_end`).
+            let icon_at = (room_after >= 0.).then(|| {
                 let at = content.len();
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
                 at..content.len()
@@ -4846,41 +4867,72 @@ fn paragraph_effect<const LOCATING: bool>(
             // With an icon, the span's padding goes around both: its
             // room takes the padding before, a placeholder after the
             // text the padding after.
-            let lead = if icon.is_some() { span.padding[0] } else { 0. };
-            if let (Some(range), Some(icon)) = (icon_at, icon) {
-                runs.push(crate::rich_text::TextRun {
+            match (icon, icon_at) {
+                // (No icon, the room before alone: a placeholder that wide.)
+                (None, Some(range)) => runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
                     strikethrough: None,
-                    padding: [(lead + icon.size + icon.gap) / 2., span.padding[1]],
+                    padding: [span.padding[0] / 2., span.padding[1]],
                     radius: span.radius,
-                    range: range.clone(),
+                    range,
                     font: font.clone(),
                     font_size,
                     color,
-                });
-                icons.push(crate::compose_rich::InlineIcon {
-                    range,
-                    svg: match icon.tint {
-                        Some(crate::theme::Themed::Value(tint)) => {
-                            std::sync::Arc::new(icon.svg.tinted(tint))
-                        }
-                        Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
-                            icon.svg.tinted(
-                                theme
-                                    .get(token)
-                                    .color()
-                                    .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                }),
+                (Some(icon), Some(range)) => {
+                    let lead = span.padding[0];
+                    // (A well takes its room round the icon too.)
+                    let pad = if icon.bg.is_some() { icon.pad } else { 0. };
+                    runs.push(crate::rich_text::TextRun {
+                        background: span.background,
+                        underline: None,
+                        strikethrough: None,
+                        padding: [
+                            (lead + icon.size + 2. * pad + icon.gap) / 2.,
+                            span.padding[1],
+                        ],
+                        radius: span.radius,
+                        range: range.clone(),
+                        font: font.clone(),
+                        font_size,
+                        color,
+                    });
+                    icons.push(crate::compose_rich::InlineIcon {
+                        range,
+                        svg: match icon.tint {
+                            Some(crate::theme::Themed::Value(tint)) => {
+                                std::sync::Arc::new(icon.svg.tinted(tint))
+                            }
+                            Some(crate::theme::Themed::Token(token)) => std::sync::Arc::new(
+                                icon.svg.tinted(
+                                    theme
+                                        .get(token)
+                                        .color()
+                                        .unwrap_or(crate::scene::Color(0, 0, 0, 0)),
+                                ),
                             ),
-                        ),
-                        None if icon.svg.follows_text_color() => {
-                            std::sync::Arc::new(icon.svg.tinted(color))
-                        }
-                        None => icon.svg,
-                    },
-                    size: icon.size,
-                    inset: lead,
-                });
+                            None if icon.svg.follows_text_color() => {
+                                std::sync::Arc::new(icon.svg.tinted(color))
+                            }
+                            None => icon.svg,
+                        },
+                        size: icon.size,
+                        inset: lead,
+                        well: icon.bg.and_then(|bg| {
+                            let color = match bg {
+                                crate::theme::Themed::Value(color) => Some(color),
+                                crate::theme::Themed::Token(token) => theme.get(token).color(),
+                            }?;
+                            Some(crate::compose_rich::IconWell {
+                                color,
+                                radius: icon.radius,
+                                pad,
+                            })
+                        }),
+                    });
+                }
+                _ => {}
             }
             let text_end = content.len();
             runs.push(crate::rich_text::TextRun {
@@ -4901,7 +4953,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     }
                 },
                 strikethrough: span.strikethrough,
-                padding: if lead > 0. {
+                padding: if room_after >= 0. {
                     [0., span.padding[1]]
                 } else {
                     span.padding
@@ -4912,13 +4964,14 @@ fn paragraph_effect<const LOCATING: bool>(
                 font_size,
                 color,
             });
-            if lead > 0. {
+            // The room after the text: a placeholder of its own.
+            if room_after > 0. {
                 content.push_str(crate::compose_rich::ICON_PLACEHOLDER);
                 runs.push(crate::rich_text::TextRun {
                     background: span.background,
                     underline: None,
                     strikethrough: None,
-                    padding: [lead / 2., span.padding[1]],
+                    padding: [room_after / 2., span.padding[1]],
                     radius: span.radius,
                     range: text_end..content.len(),
                     font,
@@ -6329,8 +6382,11 @@ const SMART_PUNCTUATION: u8 = 8;
 /// `Rare::mount_flags`: its descendants' container queries read it
 /// (`View::container`).
 const CONTAINER: u8 = 16;
-/// `View::window_drag`, `View::hollow`, `View::container`, and an editor's
-/// `autocorrect` and `smart_punctuation`, rare: apart from the element's
+/// `Rare::mount_flags`: a press on it leaves focus where it is
+/// (`View::focus_on_press`).
+const KEEPS_FOCUS: u8 = 32;
+/// `View::window_drag`, `View::hollow`, `View::focus_on_press`,
+/// `View::container`, and an editor's `autocorrect` and `smart_punctuation`, rare: apart from the element's
 /// common path.
 #[cold]
 #[inline(never)]
@@ -6370,6 +6426,11 @@ fn mount_flagged(
         ui.input
             .set_options(root, ui.input.options(root).unwrap_or_default());
         ui.input.set_hollow(root);
+    }
+    if flags & KEEPS_FOCUS != 0 {
+        ui.input
+            .set_options(root, ui.input.options(root).unwrap_or_default());
+        ui.input.set_keeps_focus(root);
     }
 }
 /// `View::window_drag`: a primary press on `region`, or on a descendant
