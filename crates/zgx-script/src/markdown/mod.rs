@@ -863,7 +863,30 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool) -> Ve
     let mut tops = Vec::new();
     let mut depth = 0usize;
     let mut start = 0;
+    // Each strikethrough open, whether it's struck (`~~`) or plain (`~`).
+    let mut tildes: Vec<bool> = Vec::new();
     for (event, range) in Parser::new_ext(text, flags).into_offset_iter() {
+        // Only `~~` strikes, as `mend` holds it. This is a deliberate choice,
+        // not GFM's: the spec strikes a single `~` too (example 491;
+        // cmark-gfm only turns that off behind an option). In text that
+        // names paths, one tilde is usually a home directory (`~/.config`),
+        // and two in a line would strike everything between them.
+        let event = match event {
+            Event::Start(Tag::Strikethrough) => {
+                let struck = text[range.clone()].starts_with("~~");
+                tildes.push(struck);
+                if struck {
+                    event
+                } else {
+                    Event::Text("~".into())
+                }
+            }
+            Event::End(TagEnd::Strikethrough) => match tildes.pop() {
+                Some(false) => Event::Text("~".into()),
+                _ => event,
+            },
+            event => event,
+        };
         let opens = matches!(event, Event::Start(_));
         let closes = matches!(event, Event::End(_));
         if depth == 0 {
@@ -1741,6 +1764,34 @@ mod tests {
             blocks[2].field("lang").map(|v| v.to_json()),
             Some("\"rust\"".into())
         );
+    }
+
+    #[test]
+    fn one_tilde_is_text_and_two_strike() {
+        // A path's tilde, twice in a line, as a prompt has it.
+        let text = "Work in ~/Documents/tmp, not the app's settings (~/.config), and ~~not this~~.";
+        let blocks = parse(text, &plain());
+        let runs = blocks[0].field("s").unwrap().list();
+        let shown: String = runs
+            .iter()
+            .map(|r| match r.field("x") {
+                Some(Value::Str(x)) => x.to_string(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            "Work in ~/Documents/tmp, not the app's settings (~/.config), and not this."
+        );
+        let struck: Vec<String> = runs
+            .iter()
+            .filter(|r| r.field("s").is_some())
+            .map(|r| match r.field("x") {
+                Some(Value::Str(x)) => x.to_string(),
+                _ => String::new(),
+            })
+            .collect();
+        assert_eq!(struck, ["not this"], "only the `~~` run strikes");
     }
 
     #[test]

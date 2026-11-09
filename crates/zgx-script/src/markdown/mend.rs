@@ -323,9 +323,11 @@ fn delim(
     last_content: &mut Option<usize>,
 ) {
     let end = i + run;
-    // GFM strikethrough is `~~` only; longer tilde runs are literal. A run of
-    // one may still be the half-streamed first tilde of a closing `~~`, so it
-    // proceeds to the matcher (but never opens).
+    // Strikethrough here is `~~` only, a deliberate choice: GFM also strikes
+    // a single `~` (example 491), but one tilde in a path (`~/.config`)
+    // shouldn't strike, and `parse` holds it the same way. Longer tilde runs
+    // are literal. A run of one may still be the half-streamed first tilde of
+    // a closing `~~`, so it proceeds to the matcher (but never opens).
     if c == '~' && run > 2 {
         *last_content = Some(end - 1);
         return;
