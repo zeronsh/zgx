@@ -1151,6 +1151,38 @@ impl TextInput {
             }
         }
     }
+    /// A tap just focused this editor: a caret it left inside a word goes to
+    /// one of the word's edges, as UITextField's first tap does. Later taps are
+    /// `UITextInteraction`'s, which already do.
+    pub(crate) fn first_tap(&self) {
+        let store = self.state.store.borrow();
+        if store.editor().is_none_or(EditorHandle::is_secure) {
+            return;
+        }
+        let (start, end, _) = store.selection();
+        if start != end {
+            return;
+        }
+        let units = store.text(0, store.len());
+        let target = crate::text_store::first_tap_caret(&units, start);
+        drop(store);
+        if target != start {
+            // Told, for UIKit's caret to follow it: the store doesn't report
+            // what this side changes.
+            tell(
+                &self.state,
+                &self.view,
+                sel!(selectionWillChange:),
+                sel!(selectionDidChange:),
+                || {
+                    self.state
+                        .store
+                        .borrow_mut()
+                        .set_selection(target, target, false);
+                },
+            );
+        }
+    }
     /// Keep the view over the focused editor (`bounds`, in the window's points).
     pub(crate) fn place(&self, bounds: zgx::scene::Rect) {
         if self.state.origin.get() == (bounds.x, bounds.y)
