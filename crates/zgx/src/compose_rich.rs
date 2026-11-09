@@ -1096,7 +1096,11 @@ pub(crate) fn mount_icons(
                     absolute: true,
                     width: Some(icon.size),
                     height: Some(icon.size),
-                    margin: crate::scene::Insets { left: pad, top: pad, ..Default::default() },
+                    margin: crate::scene::Insets {
+                        left: pad,
+                        top: pad,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 };
                 let fits = index < mounted.len()
@@ -1105,7 +1109,10 @@ pub(crate) fn mount_icons(
                 if !fits {
                     let node = scene.append(
                         owner,
-                        NodeKind::Panel { layout: crate::scene::Layout::Overlay, quad: quad.clone() },
+                        NodeKind::Panel {
+                            layout: crate::scene::Layout::Overlay,
+                            quad: quad.clone(),
+                        },
                         style.clone(),
                     );
                     scene.append(node, NodeKind::Svg(icon.svg.clone()), glyph.clone());
@@ -1121,7 +1128,13 @@ pub(crate) fn mount_icons(
                 }
                 let node = mounted[index];
                 if !matches!(scene.kind(node), NodeKind::Panel { quad: q, .. } if *q == quad) {
-                    scene.set_kind(node, NodeKind::Panel { layout: crate::scene::Layout::Overlay, quad });
+                    scene.set_kind(
+                        node,
+                        NodeKind::Panel {
+                            layout: crate::scene::Layout::Overlay,
+                            quad,
+                        },
+                    );
                 }
                 if scene.style(node) != style {
                     scene.set_style(node, style);

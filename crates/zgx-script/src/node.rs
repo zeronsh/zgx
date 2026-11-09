@@ -4612,7 +4612,8 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                     span.padding = match lua.unpack(given)? {
                         Value::Num(x) => [x as f32, 0., x as f32],
                         Value::List(l) => {
-                            let at = |i: usize| l.get(i).and_then(Value::as_f64).unwrap_or(0.) as f32;
+                            let at =
+                                |i: usize| l.get(i).and_then(Value::as_f64).unwrap_or(0.) as f32;
                             if l.len() >= 3 {
                                 [at(0), at(2), at(1)]
                             } else {

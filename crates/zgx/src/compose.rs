@@ -4512,7 +4512,10 @@ fn paragraph_effect<const LOCATING: bool>(
                     background: span.background,
                     underline: None,
                     strikethrough: None,
-                    padding: [(lead + icon.size + 2. * pad + icon.gap) / 2., span.padding[1]],
+                    padding: [
+                        (lead + icon.size + 2. * pad + icon.gap) / 2.,
+                        span.padding[1],
+                    ],
                     radius: span.radius,
                     range: range.clone(),
                     font: font.clone(),
@@ -4545,7 +4548,11 @@ fn paragraph_effect<const LOCATING: bool>(
                             crate::theme::Themed::Value(color) => Some(color),
                             crate::theme::Themed::Token(token) => theme.get(token).color(),
                         }?;
-                        Some(crate::compose_rich::IconWell { color, radius: icon.radius, pad })
+                        Some(crate::compose_rich::IconWell {
+                            color,
+                            radius: icon.radius,
+                            pad,
+                        })
                     }),
                 });
             }
