@@ -612,7 +612,12 @@ fn double_click_time() -> Option<std::time::Duration> {
             .double_click
             .map(|ms| std::time::Duration::from_millis(ms.into()))
     }
-    #[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+    // UIKit's tap interval (`touch::IOS`): iOS has no setting for it.
+    #[cfg(target_os = "ios")]
+    {
+        crate::touch::FEEL.double_tap
+    }
+    #[cfg(not(any(target_os = "macos", windows, target_os = "linux", target_os = "ios")))]
     {
         None
     }

@@ -1512,8 +1512,11 @@ impl NativeScroller {
             (None, slot) => *slot = None,
         }
     }
-    /// Whether UIKit tracks scrolling for this finger: zgx offers it no pan.
-    pub(crate) fn tracks(&self) -> bool {
-        self.state.driver.borrow().is_some()
+    /// Whether UIKit tracks scrolling for this finger (zgx offers it no pan),
+    /// and if so whether it scrolls across and down.
+    pub(crate) fn tracked_axes(&self) -> Option<(bool, bool)> {
+        let driver = self.state.driver.borrow();
+        let horizontal = driver.as_ref()?.metrics().is_some_and(|m| m.horizontal);
+        Some((horizontal, !horizontal))
     }
 }

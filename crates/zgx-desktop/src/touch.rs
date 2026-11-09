@@ -4,9 +4,9 @@
 //!
 //! A pen is a mouse. A finger presses where it lands, as in a browser, and
 //! then:
-//! - lifts where it was: a click; held there first (`HOLD`), the secondary
+//! - lifts where it was: a click; held there first (`Feel::hold`), the secondary
 //!   button's click, as Windows' press-and-hold right-clicks;
-//! - moves: once past `SLOP` the move is offered to the scroll views under
+//! - moves: once past `Feel::slop` the move is offered to the scroll views under
 //!   it as a scroll. One that scrolls makes it a pan, the press is cancelled
 //!   and the content follows the finger, coasting on after it lifts
 //!   (`Fling`); none, and it is a drag of what it pressed (a slider, a
@@ -18,13 +18,47 @@ use std::time::{Duration, Instant};
 use winit::event::TouchPhase;
 use zgx::input::{InputEvent, PointerButton};
 
-/// How far a finger moves before it pans or drags, in logical pixels.
-const SLOP: f32 = 8.;
-/// How long a finger rests before lifting right-clicks.
-const HOLD: Duration = Duration::from_millis(600);
-/// How long a press waits, over a scroll view UIKit tracks (iOS), to see
-/// whether it is the start of a scroll: `UIScrollView`'s `delaysContentTouches`.
-const PRESS_DELAY: Duration = Duration::from_millis(150);
+/// A platform's touch distances and times (`FEEL`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Feel {
+    /// How far a finger moves before it pans or drags, in logical pixels;
+    /// further, a held press is no longer held.
+    pub(crate) slop: f32,
+    /// How long a finger rests before it is held: lifting then right-clicks.
+    pub(crate) hold: Duration,
+    /// How long a press waits, over a scroll view UIKit tracks (iOS), to see
+    /// whether it is the start of a scroll.
+    pub(crate) press_delay: Duration,
+    /// How soon after a tap another counts as its double, if the platform
+    /// says (else the input's double-click time stands).
+    pub(crate) double_tap: Option<Duration>,
+}
+/// Windows', Linux's and macOS's touchscreens: zgx's own.
+#[cfg_attr(target_os = "ios", allow(dead_code))]
+const DESKTOP: Feel = Feel {
+    slop: 8.,
+    hold: Duration::from_millis(600),
+    press_delay: Duration::from_millis(150),
+    double_tap: None,
+};
+/// UIKit's, read from UIKitCore at runtime (iOS 26.5): the scroll view pan's
+/// `_hysteresis` (10, also `UILongPressGestureRecognizer.allowableMovement`),
+/// `minimumPressDuration` (0.5 s), the `UIDelayedAction` that
+/// `delaysContentTouches` arms (0.15 s), and `UITapRecognizer`'s
+/// `_maximumIntervalBetweenSuccessiveTaps` (0.35 s).
+#[cfg_attr(not(any(target_os = "ios", test)), allow(dead_code))]
+pub(crate) const IOS: Feel = Feel {
+    slop: 10.,
+    hold: Duration::from_millis(500),
+    press_delay: Duration::from_millis(150),
+    double_tap: Some(Duration::from_millis(350)),
+};
+/// This platform's.
+pub(crate) const FEEL: Feel = if cfg!(target_os = "ios") {
+    IOS
+} else {
+    DESKTOP
+};
 /// How long a fling's speed takes to fall to 1/e.
 const COAST: f32 = 0.325;
 /// Slower than this (logical pixels a second), a lift does not fling, and a
@@ -55,7 +89,7 @@ pub(crate) enum Step {
 enum Mode {
     Idle,
     Pen,
-    /// A finger down whose press waits for `PRESS_DELAY`.
+    /// A finger down whose press waits for `Feel::press_delay`.
     Delayed {
         start: (f32, f32),
         at: Instant,
@@ -101,8 +135,10 @@ pub(crate) struct Touches {
     fling: Option<Fling>,
     /// The press has been held long enough, and the host told (`hold`).
     held: bool,
-    /// A press waits for `PRESS_DELAY` first (`set_press_delay`).
-    press_delay: bool,
+    /// A press waits for `Feel::press_delay` first, over a scroll view that
+    /// scrolls across, down, or both (`set_press_delay`).
+    press_delay: Option<(bool, bool)>,
+    feel: Feel,
 }
 
 impl Default for Touches {
@@ -118,7 +154,8 @@ impl Default for Touches {
             wheel_sum: None,
             fling: None,
             held: false,
-            press_delay: false,
+            press_delay: None,
+            feel: FEEL,
         }
     }
 }
@@ -195,7 +232,7 @@ impl Touches {
                         self.fling = None;
                         self.held = false;
                         self.trail.clear();
-                        if self.press_delay {
+                        if self.press_delay.is_some() {
                             self.mode = Mode::Delayed {
                                 start: (x, y),
                                 at: now,
@@ -244,10 +281,16 @@ impl Touches {
                 contact.1 = (x, y);
                 let first = self.contacts.first().is_some_and(|(c, _)| *c == id);
                 match self.mode {
-                    // Further than UIKit takes to decide on a pan, it wasn't
-                    // one: what was pressed drags.
+                    // Past the slop along an axis its scroll view can't
+                    // scroll, it is no scroll: what was pressed drags, as
+                    // UIKit sends a scroll view's delayed touches then. Along
+                    // one it can, UIKit's pan takes the finger and cancels it.
                     Mode::Delayed { start, at } => {
-                        if !first || (x - start.0).hypot(y - start.1) < 2. * SLOP {
+                        let (across, down) = self.press_delay.unwrap_or_default();
+                        let slop = self.feel.slop;
+                        let leaves = (!across && (x - start.0).abs() > slop)
+                            || (!down && (y - start.1).abs() > slop);
+                        if !first || !leaves {
                             return Vec::new();
                         }
                         self.mode = Mode::Pressed { start, at };
@@ -256,7 +299,7 @@ impl Touches {
                         steps
                     }
                     Mode::Pressed { start, .. } => {
-                        if !first || (x - start.0).hypot(y - start.1) < SLOP {
+                        if !first || (x - start.0).hypot(y - start.1) < self.feel.slop {
                             return Vec::new();
                         }
                         self.mode = Mode::Deciding;
@@ -317,7 +360,7 @@ impl Touches {
                         steps
                     }
                     _ if cancelled => vec![Step::Dispatch(PointerCancel)],
-                    Mode::Pressed { at, .. } if now.duration_since(at) >= HOLD => {
+                    Mode::Pressed { at, .. } if now.duration_since(at) >= self.feel.hold => {
                         let secondary = PointerButton::Secondary;
                         vec![
                             Step::Dispatch(PointerCancel),
@@ -384,24 +427,33 @@ impl Touches {
     /// (`hold`), for the host to wake then.
     pub(crate) fn hold_deadline(&self) -> Option<Instant> {
         match self.mode {
-            Mode::Delayed { at, .. } => Some(at + PRESS_DELAY),
-            Mode::Pressed { at, .. } if !self.held => Some(at + HOLD),
+            Mode::Delayed { at, .. } => Some(at + self.feel.press_delay),
+            Mode::Pressed { at, .. } if !self.held => Some(at + self.feel.hold),
             _ => None,
         }
     }
 
     /// Whether a press waits to see if it is the start of a scroll, from the
-    /// next finger on.
+    /// next finger on: over a scroll view that scrolls across, down, or both.
     #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
-    pub(crate) fn set_press_delay(&mut self, delay: bool) {
-        self.press_delay = delay;
+    pub(crate) fn set_press_delay(&mut self, scrolls: Option<(bool, bool)>) {
+        self.press_delay = scrolls;
+    }
+
+    /// With another platform's distances and times (tests of iOS's anywhere).
+    #[cfg(test)]
+    fn with_feel(feel: Feel) -> Self {
+        Self {
+            feel,
+            ..Self::default()
+        }
     }
 
     /// The press, once its delay has passed with no scroll beginning.
     #[cfg_attr(not(target_os = "ios"), allow(dead_code))]
     pub(crate) fn due_press(&mut self, now: Instant) -> Vec<Step> {
         match self.mode {
-            Mode::Delayed { start, at } if now >= at + PRESS_DELAY => {
+            Mode::Delayed { start, at } if now >= at + self.feel.press_delay => {
                 self.mode = Mode::Pressed { start, at };
                 press(start)
             }
@@ -742,17 +794,18 @@ mod tests {
 
     #[test]
     fn a_delayed_press_waits_for_a_scroll_and_a_tap_goes_at_once() {
-        let mut touches = Touches::default();
-        touches.set_press_delay(true);
+        let mut touches = Touches::with_feel(IOS);
+        // Over a list that scrolls down.
+        touches.set_press_delay(Some((false, true)));
         let t = Instant::now();
         // Nothing yet; its delay wakes the host.
         assert!(touches.touch(1, Started, (10., 20.), false, t).is_empty());
-        assert_eq!(touches.hold_deadline(), Some(t + PRESS_DELAY));
+        assert_eq!(touches.hold_deadline(), Some(t + IOS.press_delay));
         assert!(touches.due_press(t + Duration::from_millis(100)).is_empty());
         // Past it, the press.
-        let down = events(touches.due_press(t + PRESS_DELAY));
+        let down = events(touches.due_press(t + IOS.press_delay));
         assert!(matches!(down[1], PointerDown { .. }));
-        let up = events(touches.touch(1, Ended, (10., 20.), false, t + PRESS_DELAY));
+        let up = events(touches.touch(1, Ended, (10., 20.), false, t + IOS.press_delay));
         assert!(matches!(up[0], PointerUp { .. }));
 
         // A tap inside the delay: pressed and released together.
@@ -783,12 +836,61 @@ mod tests {
                 .any(|step| matches!(step, Step::Dispatch(PointerDown { .. } | PointerCancel)))
         );
 
-        // Dragged further with no pan taking it: what it pressed drags.
+        // Down the way the list scrolls, however far, it waits for UIKit's
+        // pan: no press.
         let t = t + Duration::from_secs(1);
         assert!(touches.touch(1, Started, (10., 20.), false, t).is_empty());
-        let steps = touches.touch(1, Moved, (40., 20.), false, t + Duration::from_millis(30));
+        assert!(
+            touches
+                .touch(1, Moved, (10., 60.), false, t + Duration::from_millis(30))
+                .is_empty()
+        );
+        touches.touch(
+            1,
+            Cancelled,
+            (10., 60.),
+            false,
+            t + Duration::from_millis(40),
+        );
+
+        // Across, which it can't scroll, past UIKit's 10 points: what it
+        // pressed drags, as UIKit sends the delayed touches then.
+        let t = t + Duration::from_secs(1);
+        assert!(touches.touch(1, Started, (10., 20.), false, t).is_empty());
+        assert!(
+            touches
+                .touch(1, Moved, (19.5, 20.), false, t + Duration::from_millis(20))
+                .is_empty()
+        );
+        let steps = touches.touch(1, Moved, (20.5, 20.), false, t + Duration::from_millis(30));
         assert!(matches!(steps[1], Step::Dispatch(PointerDown { .. })));
         assert!(matches!(steps[2], Step::TryPan { .. }));
+    }
+
+    #[test]
+    fn ios_holds_at_half_a_second_and_desktops_keep_theirs() {
+        // UIKit's long press and pan, read at runtime: 0.5 s, 10 points.
+        assert_eq!(IOS.hold, Duration::from_millis(500));
+        assert_eq!(IOS.slop, 10.);
+        assert_eq!(IOS.double_tap, Some(Duration::from_millis(350)));
+        assert_eq!(DESKTOP.hold, Duration::from_millis(600));
+        assert_eq!(DESKTOP.slop, 8.);
+        let mut touches = Touches::with_feel(IOS);
+        let t = Instant::now();
+        touches.touch(1, Started, (40., 10.), false, t);
+        assert_eq!(touches.hold(t + Duration::from_millis(499)), None);
+        assert_eq!(
+            touches.hold(t + Duration::from_millis(500)),
+            Some((40., 10.))
+        );
+        // 9 points off is still a press within the slop: lifted, a click.
+        let mut touches = Touches::with_feel(IOS);
+        touches.touch(1, Started, (40., 10.), false, t);
+        assert!(
+            touches
+                .touch(1, Moved, (49., 10.), false, t + Duration::from_millis(20))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -814,7 +916,7 @@ mod tests {
         assert_eq!(up[1], PointerLeave);
 
         touches.touch(2, Started, (10., 20.), false, t);
-        let held = events(touches.touch(2, Ended, (10., 20.), false, t + HOLD));
+        let held = events(touches.touch(2, Ended, (10., 20.), false, t + FEEL.hold));
         assert_eq!(held[0], PointerCancel);
         assert!(matches!(
             held[1],
@@ -837,15 +939,15 @@ mod tests {
         let t = Instant::now();
         let mut touches = Touches::default();
         touches.touch(1, Started, (40., 10.), false, t);
-        assert_eq!(touches.hold_deadline(), Some(t + HOLD));
-        assert_eq!(touches.hold(t + HOLD / 2), None);
-        assert_eq!(touches.hold(t + HOLD), Some((40., 10.)));
+        assert_eq!(touches.hold_deadline(), Some(t + FEEL.hold));
+        assert_eq!(touches.hold(t + FEEL.hold / 2), None);
+        assert_eq!(touches.hold(t + FEEL.hold), Some((40., 10.)));
         // Once.
-        assert_eq!(touches.hold(t + HOLD * 2), None);
+        assert_eq!(touches.hold(t + FEEL.hold * 2), None);
         touches.selecting();
-        let moved = events(touches.touch(1, Moved, (80., 10.), false, t + HOLD * 2));
+        let moved = events(touches.touch(1, Moved, (80., 10.), false, t + FEEL.hold * 2));
         assert_eq!(moved, vec![PointerMove { x: 80., y: 10. }]);
-        let up = events(touches.touch(1, Ended, (80., 10.), false, t + HOLD * 3));
+        let up = events(touches.touch(1, Ended, (80., 10.), false, t + FEEL.hold * 3));
         assert!(matches!(
             up[0],
             PointerUp {
@@ -870,8 +972,8 @@ mod tests {
         // Not on text: the hold passes, and the lift right-clicks as before.
         let mut touches = Touches::default();
         touches.touch(2, Started, (5., 5.), false, t);
-        assert!(touches.hold(t + HOLD).is_some());
-        let up = events(touches.touch(2, Ended, (5., 5.), false, t + HOLD));
+        assert!(touches.hold(t + FEEL.hold).is_some());
+        let up = events(touches.touch(2, Ended, (5., 5.), false, t + FEEL.hold));
         assert_eq!(up[0], PointerCancel);
     }
 

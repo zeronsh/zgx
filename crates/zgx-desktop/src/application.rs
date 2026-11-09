@@ -2328,7 +2328,11 @@ impl Host {
                     // UIKit tracks this finger; if it decides on a pan, it
                     // cancels the touch. Until then it drags what it pressed.
                     #[cfg(target_os = "ios")]
-                    if self.native_scroll.as_ref().is_some_and(|s| s.tracks()) {
+                    if self
+                        .native_scroll
+                        .as_ref()
+                        .is_some_and(|s| s.tracked_axes().is_some())
+                    {
                         let next = self.touch.decided(false);
                         self.touch_steps(next)?;
                         continue;
@@ -5325,7 +5329,7 @@ impl Host {
                     && let Some(scroller) = &self.native_scroll
                 {
                     scroller.finger_down(self.context.ui.scroll_driver_at(p.x, p.y), (p.x, p.y));
-                    self.touch.set_press_delay(scroller.tracks());
+                    self.touch.set_press_delay(scroller.tracked_axes());
                 }
                 if touch.phase == winit::event::TouchPhase::Started && self.touch.idle() {
                     self.touch_focus = self.context.ui.input.focused();
