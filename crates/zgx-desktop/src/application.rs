@@ -1823,6 +1823,8 @@ struct Host {
     startup_trim: StartupTrim,
     /// Timer tick (no native source) or watchdog deadline (native source).
     frame_deadline: Option<std::time::Instant>,
+    /// `frame_deadline` is the native source's watchdog (`arm_watchdog`).
+    frame_watchdog: bool,
     /// When frames started being wanted, or the last native tick since.
     frame_heartbeat: Option<std::time::Instant>,
     /// A Wayland redraw is pending on the compositor's frame callback.
@@ -2248,6 +2250,7 @@ impl Host {
             #[cfg(target_os = "macos")]
             frame_starts: std::collections::VecDeque::new(),
             frame_deadline: None,
+            frame_watchdog: false,
             frame_heartbeat: None,
             frame_redraw_requested: false,
             focus_memory: crate::focus_memory::FocusMemory::default(),
@@ -6313,7 +6316,10 @@ impl Host {
             return;
         }
         self.frame_arrived = true;
-        self.frame_deadline = None;
+        // A native tick leaves the watchdog where it is (`arm_watchdog`).
+        if !self.frame_watchdog {
+            self.frame_deadline = None;
+        }
         self.frame_heartbeat = Some(std::time::Instant::now());
         if self.frames_presented() {
             self.frames.deliver(frame);
@@ -6345,6 +6351,19 @@ impl Host {
     }
     fn poll_frame_deadline(&mut self, now: std::time::Instant) {
         if self.frame_deadline.is_some_and(|deadline| now >= deadline) {
+            // The watchdog, left where it was as the native source ticked
+            // (`arm_watchdog`): due `WATCHDOG` after its last tick.
+            #[cfg(any(target_os = "macos", windows))]
+            if self.frame_watchdog
+                && let Some(due) = self
+                    .frame_heartbeat
+                    .map(|beat| beat + crate::frame_source::WATCHDOG)
+                && due > now
+            {
+                self.frame_deadline = Some(due);
+                return;
+            }
+            self.frame_deadline = None;
             #[cfg(target_os = "macos")]
             self.late_sample.start(now);
             let frame = self.frame_timer.frame(now, self.frame_interval);
@@ -6418,6 +6437,18 @@ impl Host {
         {
             self.trim_at = Some(std::time::Instant::now() + TRIM_DELAY);
             self.trim_atlas = false;
+        }
+    }
+    /// The native source's watchdog: due `WATCHDOG` after its last tick
+    /// (`frame_heartbeat`). Left where it is as ticks come, each frame, and
+    /// moved on only as it falls due (`poll_frame_deadline`): moved each
+    /// tick, the event loop armed its timer again each frame.
+    #[cfg(any(target_os = "macos", windows))]
+    fn arm_watchdog(&mut self, now: std::time::Instant) {
+        let heartbeat = *self.frame_heartbeat.get_or_insert(now);
+        if !self.frame_watchdog || self.frame_deadline.is_none() {
+            self.frame_deadline = Some(heartbeat + crate::frame_source::WATCHDOG);
+            self.frame_watchdog = true;
         }
     }
     /// Start, stop or schedule this window's frame source to match demand.
@@ -6514,6 +6545,7 @@ impl Host {
                         let next =
                             self.frame_timer
                                 .next_deadline_every(now, self.frame_interval, every);
+                        self.frame_watchdog = false;
                         self.frame_deadline = Some(if scrolling && every == 1 {
                             self.late_sample.deadline(now, next, self.frame_interval)
                         } else {
@@ -6522,8 +6554,7 @@ impl Host {
                     }
                 } else {
                     link.set_preferred_rate(rate);
-                    let heartbeat = *self.frame_heartbeat.get_or_insert(now);
-                    self.frame_deadline = Some(heartbeat + crate::frame_source::WATCHDOG);
+                    self.arm_watchdog(now);
                 }
             }
             return;
@@ -6555,8 +6586,7 @@ impl Host {
                 link.set_preferred_rate(rate);
                 link.set_running(wanted);
                 if wanted {
-                    let heartbeat = *self.frame_heartbeat.get_or_insert(now);
-                    self.frame_deadline = Some(heartbeat + crate::frame_source::WATCHDOG);
+                    self.arm_watchdog(now);
                 }
                 return;
             }
@@ -6574,6 +6604,7 @@ impl Host {
             return;
         }
         if self.frame_deadline.is_none() {
+            self.frame_watchdog = false;
             self.frame_deadline = Some(self.frame_timer.next_deadline(now, self.frame_interval));
         }
     }
