@@ -172,6 +172,7 @@ impl GpuRenderer {
                 || picture.rows != rows
         });
         if stale {
+            zgx::profile::note(|| format!("scroll @{} made a picture", id.number()));
             self.new_picture(scene, id, clip, columns, rows);
         }
         let height = i64::from(self.layers[&id].texture.height());
@@ -340,6 +341,15 @@ impl GpuRenderer {
             }
         }
         let valid = valid.clone();
+        if !wanted.is_empty() {
+            zgx::profile::note(|| {
+                let rastered: i64 = wanted
+                    .iter()
+                    .map(|band| (band.end.min(valid.end) - band.start.max(valid.start)).max(0))
+                    .sum();
+                format!("scroll @{} rastered {rastered} px rows", id.number())
+            });
+        }
         for band in wanted {
             let band = band.start.max(valid.start)..band.end.min(valid.end);
             // What shows, as it shows; what lies past the view, as it will.
