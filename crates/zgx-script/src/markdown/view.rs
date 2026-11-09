@@ -36,6 +36,10 @@ pub(crate) struct ViewOptions {
     pub(crate) veil_state: Option<Rc<RefCell<Veil>>>,
     /// The top-level block being built, for the veil's places.
     pub(crate) veil_at: Option<usize>,
+    /// `attached`: the names of what the text carries; words naming one
+    /// (`(attachment: <name>)`) are a run of their own the look may draw
+    /// as its chip.
+    pub attached: Option<Rc<std::collections::HashSet<String>>>,
 }
 
 /// `veil = { key = …, seed = … }`: the reply's key, which keeps what each
@@ -69,6 +73,9 @@ pub(crate) struct Run<'a> {
     pub code: bool,
     /// A link's: its target, or `Some("")` while its address streams.
     pub link: Option<&'a str>,
+    /// Words naming an item the text carries (`(attachment: <name>)`, where
+    /// the view's `attached` holds the name): the name.
+    pub attached: Option<&'a str>,
 }
 
 /// What draws a markdown view's prose where the script gave a look
@@ -77,6 +84,10 @@ pub(crate) struct Run<'a> {
 pub(crate) trait Look {
     /// A run as a span.
     fn span(&self, run: &Run) -> zgx::compose::TextSpan;
+    /// A run the look may draw as a chip (a link elsewhere than the web, an
+    /// item carried, named), as one, whole: a chip is never cut by a fade.
+    /// None for a run drawn as words.
+    fn chip(&self, run: &Run) -> Option<zgx::compose::TextSpan>;
     /// A paragraph (its runs' rich text) with the style's own options.
     fn paragraph(&self, view: View) -> View;
     /// The top-level blocks' list with the style's room between them (the
@@ -179,6 +190,7 @@ fn span_of(
             strike: fields.strike,
             code: fields.code,
             link,
+            attached: None,
         });
     }
     let mut out = zgx::compose::text_span(match text {
@@ -211,39 +223,134 @@ fn span_of(
     out
 }
 
-/// A paragraph's runs as spans; with a veil, each run cut where a fading
-/// chunk starts and ends, its pieces fading in.
+/// A run, or a piece of one: its text, and the item it names, if any.
+struct Piece<'a> {
+    run: &'a Value,
+    text: Rc<str>,
+    attached: Option<Rc<str>>,
+}
+const ATTACHED: &str = "(attachment: ";
+/// `runs`, with the words naming an item carried (`(attachment: <name>)`,
+/// `attached` holding the name) pieces of their own, keeping their run's
+/// look; words outside links, code and pictures alone.
+fn pieces<'a>(
+    runs: &'a [Value],
+    attached: Option<&std::collections::HashSet<String>>,
+) -> Vec<Piece<'a>> {
+    let mut out = Vec::with_capacity(runs.len());
+    for run in runs {
+        let text = match run.field("img") {
+            // (A picture among the words: a byte no word holds.)
+            Some(_) => Rc::from("\0"),
+            None => run_text(run),
+        };
+        let plain = || {
+            !matches!(run.field("a"), Some(Value::Str(_)))
+                && !matches!(run.field("c"), Some(Value::Bool(true)))
+                && run.field("img").is_none()
+        };
+        let Some(names) = attached.filter(|_| text.contains(ATTACHED) && plain()) else {
+            out.push(Piece {
+                run,
+                text,
+                attached: None,
+            });
+            continue;
+        };
+        let (mut at, mut copied) = (0, 0);
+        while let Some(found) = text[at..].find(ATTACHED) {
+            let start = at + found;
+            let name_at = start + ATTACHED.len();
+            let name_len = text[name_at..]
+                .find([')', '\n'])
+                .unwrap_or(text.len() - name_at);
+            let closed = text[name_at + name_len..].starts_with(')');
+            if name_len == 0 || !closed {
+                // (No name closed here: the next one along.)
+                at = start + 1;
+                continue;
+            }
+            let end = name_at + name_len + 1;
+            let name = &text[name_at..name_at + name_len];
+            if names.contains(name) {
+                if start > copied {
+                    out.push(Piece {
+                        run,
+                        text: text[copied..start].into(),
+                        attached: None,
+                    });
+                }
+                out.push(Piece {
+                    run,
+                    text: text[start..end].into(),
+                    attached: Some(name.into()),
+                });
+                copied = end;
+            }
+            at = end;
+        }
+        if copied == 0 {
+            out.push(Piece {
+                run,
+                text,
+                attached: None,
+            });
+        } else if copied < text.len() {
+            out.push(Piece {
+                run,
+                text: text[copied..].into(),
+                attached: None,
+            });
+        }
+    }
+    out
+}
+
+/// A paragraph's runs as spans: those the look draws as chips whole, and,
+/// with a veil, the rest cut where a fading chunk starts and ends, its
+/// pieces fading in.
 fn spans(
     runs: &[Value],
     bold: bool,
     look: Option<&dyn Look>,
     fading: Option<&Fading>,
+    attached: Option<&std::collections::HashSet<String>>,
 ) -> Vec<zgx::compose::TextSpan> {
-    let Some(Fading(veil, at)) = fading else {
-        return runs.iter().map(|r| span(r, bold, look)).collect();
+    if fading.is_none() && attached.is_none() {
+        return runs
+            .iter()
+            .map(
+                |r| match look.and_then(|look| chip_of(r, None, bold, look)) {
+                    Some(chip) => chip,
+                    None => span(r, bold, look),
+                },
+            )
+            .collect();
+    }
+    let pieces = pieces(runs, attached);
+    let chunks: Vec<Chunk> = match fading {
+        Some(Fading(veil, at)) => {
+            let words: String = pieces.iter().map(|p| &*p.text).collect();
+            veil.borrow_mut()
+                .chunks(*at, &words, zgx::compose::fade_now())
+        }
+        None => Vec::new(),
     };
-    // The paragraph's words, a picture among them a byte no word holds.
-    let texts: Vec<Rc<str>> = runs
-        .iter()
-        .map(|r| match r.field("img") {
-            Some(_) => Rc::from("\0"),
-            None => run_text(r),
-        })
-        .collect();
-    let chunks: Vec<Chunk> =
-        veil.borrow_mut()
-            .chunks(*at, &texts.concat(), zgx::compose::fade_now());
-    let mut out = Vec::with_capacity(runs.len());
+    let mut out = Vec::with_capacity(pieces.len());
     let mut pos = 0;
-    for (r, text) in runs.iter().zip(&texts) {
-        let (from, to) = (pos, pos + text.len());
+    for p in &pieces {
+        let (from, to) = (pos, pos + p.text.len());
         pos = to;
-        if chunks.is_empty() || r.field("img").is_some() {
-            out.push(span(r, bold, look));
+        if let Some(chip) = look.and_then(|look| chip_of(p.run, Some(p), bold, look)) {
+            out.push(chip);
+            continue;
+        }
+        if chunks.is_empty() || p.run.field("img").is_some() {
+            out.push(span_of(p.run, Some(&p.text), bold, look));
             continue;
         }
         for (s, e, chunk) in super::veil::pieces(&chunks, from, to) {
-            let piece = span_of(r, Some(&text[s - from..e - from]), bold, look);
+            let piece = span_of(p.run, Some(&p.text[s - from..e - from]), bold, look);
             out.push(match chunk {
                 Some(c) => piece.fade_in(c.fade()),
                 None => piece,
@@ -251,6 +358,40 @@ fn spans(
         }
     }
     out
+}
+
+/// The run (or piece) as the look's chip, if it draws one: only a link
+/// elsewhere than the web, or words naming an item carried, is asked.
+fn chip_of(
+    run: &Value,
+    piece: Option<&Piece>,
+    bold: bool,
+    look: &dyn Look,
+) -> Option<zgx::compose::TextSpan> {
+    let attached = piece.and_then(|p| p.attached.as_deref());
+    let link = match run.field("a") {
+        Some(Value::Str(href)) if &**href != PENDING_LINK_URL && !super::web_address(href) => {
+            Some(&**href)
+        }
+        _ => None,
+    };
+    if attached.is_none() && link.is_none() {
+        return None;
+    }
+    let fields = RunFields::of(run);
+    let text = match piece {
+        Some(p) => p.text.clone(),
+        None => run_text(run),
+    };
+    look.chip(&Run {
+        text: &text,
+        strong: bold || fields.bold,
+        em: fields.italic,
+        strike: fields.strike,
+        code: fields.code,
+        link: if attached.is_some() { None } else { link },
+        attached,
+    })
 }
 
 /// A settled block (one before the last: a parse keeps it as it is),
@@ -270,7 +411,7 @@ fn faded_runs(
     fading: Option<&Fading>,
 ) -> zgx::compose::RichTextView {
     let spans = list
-        .map(|l| spans(l.list(), bold, look, fading))
+        .map(|l| spans(l.list(), bold, look, fading, None))
         .unwrap_or_default();
     zgx::compose::rich_text().children(spans).text_wrap(true)
 }
@@ -446,14 +587,20 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
         }
         "img" => text(text_of(b.field("alt"))).text_color(themed("text.secondary")),
         _ => {
-            let fading = options.fading(1);
-            let runs: View = faded_runs(
-                b.field("s"),
-                false,
-                options.look.as_deref(),
-                fading.as_ref(),
-            )
-            .into();
+            // In a look, made by a function as a live one is: what its runs
+            // read (a chip's answer, an ink following a setting) makes them
+            // again, the paragraph kept.
+            let runs: View = match &options.look {
+                Some(_) => faded_runs_with(
+                    cx.runtime().signal(b.clone()),
+                    "s",
+                    false,
+                    options.look.clone(),
+                    options.fading(1),
+                    options.attached.clone(),
+                ),
+                None => faded_runs(b.field("s"), false, None, None).into(),
+            };
             match &options.look {
                 Some(look) => look.paragraph(runs),
                 None => runs,
@@ -703,10 +850,29 @@ fn faded_runs_of(
     look: Option<Rc<dyn Look>>,
     fading: Option<Fading>,
 ) -> View {
+    faded_runs_with(cell, field, bold, look, fading, None)
+}
+/// `faded_runs_of`, with the names of what the text carries.
+fn faded_runs_with(
+    cell: Signal<Value>,
+    field: &'static str,
+    bold: bool,
+    look: Option<Rc<dyn Look>>,
+    fading: Option<Fading>,
+    attached: Option<Rc<std::collections::HashSet<String>>>,
+) -> View {
     zgx::compose::rich_text_signal(move || {
         cell.with(|b| {
             b.field(field)
-                .map(|runs| spans(runs.list(), bold, look.as_deref(), fading.as_ref()))
+                .map(|runs| {
+                    spans(
+                        runs.list(),
+                        bold,
+                        look.as_deref(),
+                        fading.as_ref(),
+                        attached.as_deref(),
+                    )
+                })
                 .unwrap_or_default()
         })
     })
@@ -832,7 +998,14 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         "img" => zgx::compose::text_signal(move || cell.with(|b| text_of(b.field("alt"))))
             .text_color(themed("text.secondary")),
         _ => {
-            let runs = faded_runs_of(cell, "s", false, options.look.clone(), options.fading(1));
+            let runs = faded_runs_with(
+                cell,
+                "s",
+                false,
+                options.look.clone(),
+                options.fading(1),
+                options.attached.clone(),
+            );
             match &options.look {
                 Some(look) => look.paragraph(runs),
                 None => runs,

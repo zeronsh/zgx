@@ -1496,6 +1496,11 @@ pub(crate) struct MarkdownLook {
     pub on_link: Option<Function>,
     /// `link_menu(target, e)`: a link's context menu, as `context_menu`'s.
     pub link_menu: Option<Function>,
+    /// `chip(target, text)`: what a link elsewhere than the web (target
+    /// its address) or words naming an item carried (`attachment:<name>`)
+    /// are drawn as, a span's options over the run's kinds (not a link's),
+    /// or nil for words. `link = true` keeps a link's click and menu.
+    pub chip: Option<Function>,
     /// `links = "web"`: only web addresses are links; any other target is
     /// styled as one and goes nowhere (no click, menu or address).
     pub web_only: bool,
@@ -1539,6 +1544,7 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
     let style: Option<Table> = table.get("style")?;
     let on_link: Option<Function> = table.get("on_link")?;
     let link_menu: Option<Function> = table.get("link_menu")?;
+    let chip: Option<Function> = table.get("chip")?;
     let web_only = match table.get::<Option<String>>("links")?.as_deref() {
         None | Some("all") => false,
         Some("web") => true,
@@ -1548,10 +1554,10 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
             )));
         }
     };
-    for name in ["style", "on_link", "link_menu", "links"] {
+    for name in ["style", "on_link", "link_menu", "links", "chip"] {
         table.raw_set(name, mlua::Value::Nil)?;
     }
-    if style.is_none() && on_link.is_none() && link_menu.is_none() && !web_only {
+    if style.is_none() && on_link.is_none() && link_menu.is_none() && chip.is_none() && !web_only {
         return Ok(None);
     }
     let style = match style {
@@ -1616,9 +1622,30 @@ fn markdown_look(lua: &Lua, table: &Table) -> mlua::Result<Option<Rc<MarkdownLoo
         runs: runs.try_into().expect("one table a kind"),
         on_link,
         link_menu,
+        chip,
         web_only,
         made: RefCell::new(vec![None; 1 << RUN_KINDS]),
     })))
+}
+
+/// `ui.markdown_view`'s `attached`: the names of what the text carries
+/// (a table by name), taken out of its table.
+fn markdown_attached(table: &Table) -> mlua::Result<Option<Rc<std::collections::HashSet<String>>>> {
+    let attached: Option<Table> = table.get("attached")?;
+    table.raw_set("attached", mlua::Value::Nil)?;
+    let Some(attached) = attached else {
+        return Ok(None);
+    };
+    let mut names = std::collections::HashSet::new();
+    attached.for_each::<mlua::Value, mlua::Value>(|k, v| {
+        if let mlua::Value::String(name) = k
+            && !matches!(v, mlua::Value::Nil | mlua::Value::Boolean(false))
+        {
+            names.insert(name.to_str()?.to_owned());
+        }
+        Ok(())
+    })?;
+    Ok(Some(Rc::new(names)))
 }
 
 /// `ui.markdown_view`'s `veil = { key = …, seed = … }`, taken out of its
@@ -1641,6 +1668,11 @@ fn markdown_veil(table: &Table) -> mlua::Result<Option<crate::markdown::view::Ve
             "ui.markdown_view's veil is { key = …, seed = … }",
         )),
     }
+}
+
+/// A span of a table of `ui.span`'s options (its text `[1]`, literal).
+pub(crate) fn span_of_table(lua: &Lua, table: Table) -> mlua::Result<Span> {
+    span(lua, mlua::Value::Table(table), true)
 }
 
 /// The span a run of the kinds `bits` has (`MarkdownLook::runs`, bit `k`
@@ -5409,6 +5441,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 veil: markdown_veil(&table)?,
                 veil_state: None,
                 veil_at: None,
+                attached: markdown_attached(&table)?,
             };
             let look = markdown_look(lua, &table)?;
             let mut args = TextArgs::default();

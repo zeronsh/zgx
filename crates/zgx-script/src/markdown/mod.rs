@@ -1229,6 +1229,12 @@ struct Run {
     img: Option<String>,
 }
 
+/// Where a link goes that is the web's (`http:`, `https:`, `mailto:`):
+/// opened by its address, where another target is the app's to open.
+pub(crate) fn web_address(target: &str) -> bool {
+    target.starts_with("https://") || target.starts_with("http://") || target.starts_with("mailto:")
+}
+
 /// A byte of a bare web address (`Options::autolink`): a letter or digit,
 /// or one of `-._~:/?#[]@!$&'()*+,;=%`.
 fn url_byte(b: u8) -> bool {
