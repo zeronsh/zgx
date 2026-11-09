@@ -1732,7 +1732,7 @@ struct Shown<'a> {
 }
 impl Shown<'_> {
     /// Where `content` shows in the window, if all of it does.
-    #[inline]
+    #[inline(always)]
     fn window(&self, content: Rect) -> Option<Rect> {
         let window = self.map.bounds(content);
         within(self.clip, window).then_some(window)
@@ -6383,7 +6383,11 @@ impl GpuRenderer {
                 };
                 cache.used = self.layer_frame;
                 cache.parked = false;
-                cache.watched = shown.and_then(|shown| shown.window(cache.content));
+                // A match, not a closure: kept in line.
+                cache.watched = match shown {
+                    Some(shown) => shown.window(cache.content),
+                    None => None,
+                };
                 stats.layer_cache_hits += 1;
                 return Ok(());
             }
