@@ -319,3 +319,56 @@ return ui.column {
     // The last block's row: its block, its runs and theirs.
     assert!(short <= 8, "a chunk converts {short} tables");
 }
+
+/// A reply that has finished, said so: what it held for its next chunk goes at
+/// the next rest, with nothing built again and what is on show left as it is.
+/// And one not said to have finished keeps all of it.
+#[test]
+fn a_finished_replys_table_goes_at_rest_and_a_paused_ones_stays() {
+    const REPLY: &str = r#"local reply = ui.state("reply", "")
+local builds = ui.state("builds", 0)
+local blocks = ui.computed(function()
+    return ui.markdown(reply:get(), { key = "reply" })
+end)
+ui.command { id = "finish", run = function() ui.markdown_ended("reply") end }
+return ui.column {
+    ui.each(blocks, function(b)
+        builds:set(builds:peek() + 1)
+        return ui.text { b.t, literal = true }
+    end),
+    ui.text { id = "builds", "{builds}" },
+}"#;
+    let held = |finish: bool| {
+        let mut h = Harness::inline(REPLY);
+        let text = "Words arriving as a reply streams, with **bold** in them.\n\n".repeat(400);
+        h.host
+            .set_state("reply", Value::from(text.as_str()))
+            .unwrap();
+        h.frames(1);
+        let more = format!("{text}More words.\n\n");
+        h.host
+            .set_state("reply", Value::from(more.as_str()))
+            .unwrap();
+        h.frames(1);
+        zgx::idle::trim(&h.ui.runtime);
+        if finish {
+            assert!(!zgx::idle::take_request(&h.ui.runtime));
+            assert!(h.host.run_command("finish"));
+            assert!(
+                zgx::idle::take_request(&h.ui.runtime),
+                "the host is told, whether or not a frame comes"
+            );
+            h.frames(1);
+        }
+        let built = h.text("builds");
+        zgx::idle::trim(&h.ui.runtime);
+        h.frames(1);
+        assert_eq!(h.text("builds"), built, "nothing is built again");
+        h.host.script_memory()
+    };
+    let (kept, gone) = (held(false), held(true));
+    assert!(
+        gone + (64 << 10) <= kept,
+        "said to have finished {gone} bytes of script heap, not said {kept}"
+    );
+}

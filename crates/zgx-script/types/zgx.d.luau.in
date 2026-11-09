@@ -3782,6 +3782,10 @@ declare ui: {
 	-- reply's id), text growing under it parses only its new end, and its
 	-- earlier blocks are the same tables as before.
 	markdown: <T>(text: T, opts: MarkdownOptions?) -> TextOrState<T, { MarkdownBlock }, ReadOnlyState<{ MarkdownBlock }>>,
+	-- The text under `key` won't grow again (a reply that has finished): what
+	-- its next chunk would have needed goes as the app next rests. What is on
+	-- show stays. Asked for again before then, it goes on; after, it parses afresh.
+	markdown_ended: (key: string) -> (),
 	-- Markdown drawn: paragraphs, headings, lists, quotes, tables, and code
 	-- blocks with a Copy button, in the theme's colours and sizes,
 	-- selectable. As its text changes it parses only what changed and

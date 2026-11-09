@@ -280,6 +280,8 @@ const NOT_ELEMENTS: &[&str] = &[
     "tween",
     // Blocks to draw, not an element: what it reads in a computed is followed.
     "markdown",
+    // Says a text is over: draws nothing.
+    "markdown_ended",
     "spring",
     "spring_to",
     "loop",

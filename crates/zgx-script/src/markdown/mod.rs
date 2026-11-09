@@ -588,6 +588,12 @@ fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Resu
     let flags = (call.options.breaks, call.options.paths);
     Ok(match &call.key {
         Some(key) => {
+            // Asked again, it isn't over.
+            let mut ended = parsed.ended.borrow_mut();
+            if !ended.is_empty() {
+                ended.retain(|gone| gone != key);
+            }
+            drop(ended);
             let mut streams = parsed.streams.borrow_mut();
             let fresh = !matches!(streams.get(key), Some((f, ..)) if *f == flags);
             if fresh {
@@ -770,6 +776,16 @@ pub(crate) fn rest(lua: &mlua::Lua) {
     *parsed.texts.borrow_mut() = Texts::new();
     let mut streams = parsed.streams.borrow_mut();
     let mut order = parsed.stream_order.borrow_mut();
+    // Those said to have ended (`ended`), but for one still parsing lazily:
+    // what is on show of it would wait for blocks no one would parse.
+    parsed.ended.borrow_mut().retain(|key| {
+        if (streams.get(key)).is_some_and(|(_, stream, ..)| stream.has_pending()) {
+            return true;
+        }
+        streams.remove(key);
+        order.retain(|(other, _)| other != key);
+        false
+    });
     let now = std::time::Instant::now();
     while order
         .front()
@@ -781,6 +797,24 @@ pub(crate) fn rest(lua: &mlua::Lua) {
     }
     streams.shrink_to_fit();
     order.shrink_to_fit();
+}
+
+/// `ui.markdown_ended(key)`: the text under `key` won't grow again, so what its
+/// next chunk would have needed goes at the next rest. What is on show stays.
+pub(crate) fn ended(lua: &mlua::Lua, key: String) -> mlua::Result<()> {
+    if let Some(parsed) = lua.app_data_ref::<Parsed>()
+        && parsed.streams.borrow().contains_key(&key)
+    {
+        let mut ended = parsed.ended.borrow_mut();
+        if !ended.contains(&key) {
+            ended.push(key);
+        }
+        // Whether or not a frame comes (a window hidden or covered).
+        if let Ok(env) = crate::node::env(lua) {
+            zgx::idle::request(&env.runtime);
+        }
+    }
+    Ok(())
 }
 
 /// A stream left this long has ended, or parses again if it goes on. (A
@@ -808,6 +842,8 @@ struct Parsed {
     streams: std::cell::RefCell<Streams>,
     /// Streams by last use, oldest first.
     stream_order: std::cell::RefCell<std::collections::VecDeque<(String, std::time::Instant)>>,
+    /// Streams said to have ended, to go at the next rest (`ended`).
+    ended: std::cell::RefCell<Vec<String>>,
 }
 /// `key` was just used: last in the order, and the oldest streams go past
 /// `KEPT`.
@@ -1768,6 +1804,54 @@ mod tests {
             0,
             "quiet this long, it has ended, or parses again if it goes on"
         );
+    }
+    /// A keyed stream asked for, as a script's string.
+    fn streamed(lua: &mlua::Lua, text: &str) {
+        let options = lua.create_table().unwrap();
+        options.set("key", "message-1").unwrap();
+        let text = mlua::Value::String(lua.create_string(text).unwrap());
+        script(lua, (text, Some(options))).expect("its blocks");
+    }
+    fn streams_held(lua: &mlua::Lua) -> usize {
+        let parsed = lua.app_data_ref::<Parsed>().expect("installed");
+        parsed.streams.borrow().len()
+    }
+    #[test]
+    fn a_stream_said_to_have_ended_goes_at_the_next_rest_and_only_then() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        streamed(&lua, "Some words");
+        rest(&lua);
+        assert_eq!(
+            streams_held(&lua),
+            1,
+            "not said to have ended: it may go on"
+        );
+        ended(&lua, "message-1".into()).unwrap();
+        assert_eq!(streams_held(&lua), 1, "until the next rest");
+        rest(&lua);
+        assert_eq!(streams_held(&lua), 0);
+        let parsed = lua.app_data_ref::<Parsed>().expect("installed");
+        assert!(parsed.stream_order.borrow().is_empty());
+        assert!(parsed.ended.borrow().is_empty());
+    }
+    #[test]
+    fn a_stream_asked_for_again_after_it_was_said_to_have_ended_stays() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        streamed(&lua, "Some words");
+        ended(&lua, "message-1".into()).unwrap();
+        streamed(&lua, "Some words and more");
+        rest(&lua);
+        assert_eq!(streams_held(&lua), 1, "it went on");
+    }
+    #[test]
+    fn saying_a_key_no_stream_has_has_ended_holds_nothing() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        ended(&lua, "never-asked-for".into()).unwrap();
+        let parsed = lua.app_data_ref::<Parsed>().expect("installed");
+        assert!(parsed.ended.borrow().is_empty());
     }
     fn paths() -> Options {
         Options {

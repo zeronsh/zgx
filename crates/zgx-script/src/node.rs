@@ -6182,6 +6182,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set("raw", lua.create_function(crate::design::raw)?)?;
     ui.set("markdown", lua.create_function(crate::markdown::script)?)?;
     ui.set(
+        "markdown_ended",
+        lua.create_function(crate::markdown::ended)?,
+    )?;
+    ui.set(
         "on_mount",
         lua.create_function(|lua, f: Function| {
             let env = env(lua)?;
