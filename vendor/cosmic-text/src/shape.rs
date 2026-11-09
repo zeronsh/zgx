@@ -627,10 +627,49 @@ fn shape_run(
     // keeping its character's bytes, so carets and selections are unchanged.
     #[cfg(feature = "swash")]
     if attrs.masked {
-        drop(font_iter);
-        shape_skip_glyphs_as(glyphs, &font, line, attrs_list, start_run, end_run, Some('\u{2022}'));
-        font_system.shape_buffer.scripts = scripts;
-        return;
+        #[cfg(target_os = "ios")]
+        {
+            let (font, mask) = uikit_mask(font, &mut font_iter, |font| {
+                font.as_swash().charmap().map('\u{F79A}') != 0
+            });
+            let mut one = Vec::with_capacity(1);
+            let mut utf8 = [0; 4];
+            let mask_str = mask.encode_utf8(&mut utf8);
+            let _ = shape_fallback(
+                font_iter.shape_caches(),
+                &mut one,
+                &font,
+                mask_str,
+                &AttrsList::new(&Attrs::new()),
+                0,
+                mask_str.len(),
+                false,
+            );
+            let advance = one.first().map(|glyph| glyph.x_advance);
+            drop(font_iter);
+            let glyph_start = glyphs.len();
+            shape_skip_glyphs_as(glyphs, &font, line, attrs_list, start_run, end_run, Some(mask));
+            // The face's advance at its axes (skipping reads its defaults),
+            // as a shaped run's is.
+            if let Some(advance) = advance {
+                for glyph in &mut glyphs[glyph_start..] {
+                    glyph.x_advance = advance
+                        + attrs_list
+                            .get_span(glyph.start)
+                            .letter_spacing_opt
+                            .map_or(0.0, |spacing| spacing.0);
+                }
+            }
+            font_system.shape_buffer.scripts = scripts;
+            return;
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            drop(font_iter);
+            shape_skip_glyphs_as(glyphs, &font, line, attrs_list, start_run, end_run, Some('\u{2022}'));
+            font_system.shape_buffer.scripts = scripts;
+            return;
+        }
     }
 
     let glyph_start = glyphs.len();
@@ -1120,6 +1159,26 @@ fn shape_skip_glyphs_as(
                 }
             }),
     );
+}
+
+/// zgx: what a secure `UITextField` draws for a character (read from its line
+/// fragments): the system font's own circle, U+F79A; in any other font (Menlo,
+/// Georgia, New York) the system font's smaller spot, U+2981, at the field's
+/// size, whichever font has one of its own. Only the system font has the
+/// circle, and fallback on iOS comes to it. With none at all, the bullet.
+#[cfg(any(target_os = "ios", test))]
+fn uikit_mask<F>(
+    font: F,
+    mut fallback: impl Iterator<Item = F>,
+    is_system: impl Fn(&F) -> bool,
+) -> (F, char) {
+    if is_system(&font) {
+        return (font, '\u{F79A}');
+    }
+    match fallback.find(&is_system) {
+        Some(system) => (system, '\u{2981}'),
+        None => (font, '\u{2022}'),
+    }
 }
 
 fn override_fake_italic(
@@ -4091,6 +4150,23 @@ impl ShapeLine {
         scratch.cached_visual_lines = cached_visual_lines;
         scratch.glyph_sets = cached_glyph_sets;
         scratch.order = order;
+    }
+}
+
+#[cfg(test)]
+mod uikit_mask_tests {
+    use super::uikit_mask;
+
+    #[test]
+    fn a_secure_field_masks_as_uikit_reads() {
+        let system = |font: &&str| *font == "SF";
+        assert_eq!(uikit_mask("SF", [].into_iter(), system), ("SF", '\u{F79A}'));
+        // Any other font: the system font's spot, past whatever comes first.
+        assert_eq!(
+            uikit_mask("Menlo", ["Geneva", "SF", "Arial"].into_iter(), system),
+            ("SF", '\u{2981}')
+        );
+        assert_eq!(uikit_mask("Menlo", ["Geneva"].into_iter(), system), ("Menlo", '\u{2022}'));
     }
 }
 
