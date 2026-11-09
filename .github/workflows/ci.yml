@@ -564,6 +564,11 @@ jobs:
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold
           ZGX_EXPECT_COLD_CACHE: "1"
+      # An external surface's Direct3D 12 textures shared with another
+      # process (this test binary started again as the client, the NT
+      # handles duplicated into it), on WARP: the host reads the colour the
+      # client drew. And the protocol's encoding.
+      - run: "cargo test -p zgx-surface --features wgpu29 --test surface --locked -- dxgi_share:: protocol::"
       # The app-shader HLSL generator's register map and the FXC child's
       # job and cache key (dx12_fill, fxc_child: Windows-only modules).
       - run: cargo test -p zgx-gpu --lib --locked -- dx12_fill fxc_child

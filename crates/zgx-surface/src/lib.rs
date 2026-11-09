@@ -14,8 +14,11 @@
 //!   client on the same device. No pixel is copied by a CPU.
 //! - `shm` buffers (everywhere): shared memory the client writes pixels
 //!   into and the host uploads.
-//! - `iosurface` (macOS) and `dxgi` (Windows): named, not yet implemented
-//!   (see `docs/external-surfaces.md` for what they need).
+//! - `dxgi` buffers (Windows): Direct3D 12 textures the host allocates on a
+//!   shared heap, sent as NT handles duplicated into the client, opened by
+//!   a client on the same adapter (by LUID). No pixel is copied by a CPU.
+//! - `iosurface` (macOS): named, not yet implemented (see
+//!   `docs/external-surfaces.md` for what it needs).
 //!
 //! This crate's core has no wgpu: a client on any wgpu version (or none)
 //! uses the protocol (`protocol`), its connection (`transport`, `Client`),
@@ -23,6 +26,8 @@
 //! `wgpu29` turns buffers into wgpu 29 textures; a client on another wgpu
 //! copies that module.
 pub mod client;
+#[cfg(all(windows, feature = "dxgi"))]
+pub mod dxgi;
 #[cfg(feature = "host")]
 pub mod host;
 pub mod protocol;

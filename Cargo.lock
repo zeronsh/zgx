@@ -5331,6 +5331,7 @@ dependencies = [
  "libc",
  "pollster",
  "wgpu",
+ "windows",
  "windows-sys 0.59.0",
  "zgx",
  "zgx-gpu",

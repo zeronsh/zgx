@@ -9,7 +9,8 @@
 //! - keys: C changes the colour, Space stops and starts the spin, the
 //!   wheel zooms;
 //! - `--shm`: offer shared memory only (drawn on any adapter, read back and
-//!   copied), to compare with Vulkan's shared images;
+//!   copied), to compare with shared GPU memory (Vulkan images on Linux,
+//!   Direct3D 12 textures on Windows);
 //! - `--fps N`: draw at most N frames a second (default: as the host shows
 //!   them).
 //!
@@ -42,8 +43,9 @@ fn main() {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapters = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()));
     let mut offers = Vec::new();
-    if !shm_only && let Some(offer) = wgpu29::vulkan_offer(&adapters) {
-        offers.push(offer);
+    if !shm_only {
+        offers.extend(wgpu29::vulkan_offer(&adapters));
+        offers.extend(wgpu29::dxgi_offer(&adapters));
     }
     offers.push(Offer::Shm);
     let mut client =
@@ -52,6 +54,10 @@ fn main() {
     let adapter = match (welcome.kind, &welcome.device) {
         (BufferKind::Vulkan, Some(ids)) => {
             wgpu29::adapter_for(adapters, ids).expect("the host's GPU")
+        }
+        (BufferKind::Dxgi, _) => {
+            let luid = welcome.adapter.expect("the host's adapter");
+            wgpu29::adapter_for_luid(adapters, luid).expect("the host's adapter")
         }
         _ => pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
             .expect("an adapter"),
@@ -97,7 +103,7 @@ fn main() {
                     };
                     for buffer in generation.buffers {
                         match &buffer.desc {
-                            BufferDesc::Vulkan(_) => {
+                            BufferDesc::Vulkan(_) | BufferDesc::Dxgi => {
                                 // Safety: on the adapter the welcome named.
                                 let texture = unsafe { wgpu29::import(&device, buffer) }
                                     .expect("importing a buffer");

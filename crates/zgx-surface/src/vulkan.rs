@@ -265,3 +265,99 @@ pub unsafe fn import_image(
     }
     Ok((image, memory))
 }
+
+/// A physical device's adapter LUID (`VkPhysicalDeviceIDProperties`), as
+/// the protocol carries it (`Offer::Dxgi`): `None` where the driver has
+/// none (not on Windows).
+///
+/// # Safety
+/// `physical` is one of `instance`'s, which is Vulkan 1.1 or later.
+pub unsafe fn device_luid(instance: &ash::Instance, physical: vk::PhysicalDevice) -> Option<u64> {
+    let mut ids = vk::PhysicalDeviceIDProperties::default();
+    let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut ids);
+    unsafe { instance.get_physical_device_properties2(physical, &mut properties) };
+    (ids.device_luid_valid != 0).then(|| u64::from_le_bytes(ids.device_luid))
+}
+
+/// A Vulkan client's import of a `dxgi` buffer (Windows): the image the
+/// host's Direct3D 12 texture is (`FORMAT`, viewable as `VIEW_FORMATS`,
+/// `usage()`, optimal tiling) made on `device`, bound to the resource's
+/// memory (`VK_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE_BIT`, dedicated).
+/// The image and memory are the caller's to destroy and free (wgpu-hal's
+/// `texture_from_raw` with `TextureMemory::Dedicated`); the handle may be
+/// closed after, as the import holds its own reference.
+///
+/// # Safety
+/// `device` was made from `physical` of `instance`, on the adapter the
+/// host's `Welcome` names (`device_luid`), with
+/// `VK_KHR_external_memory_win32` enabled (wgpu-hal 29 enables it where the
+/// driver has it).
+#[cfg(windows)]
+pub unsafe fn import_d3d12_image(
+    instance: &ash::Instance,
+    device: &ash::Device,
+    physical: vk::PhysicalDevice,
+    width: u32,
+    height: u32,
+    handle: &crate::Handle,
+) -> Result<(vk::Image, vk::DeviceMemory), vk::Result> {
+    use std::os::windows::io::AsRawHandle;
+    let handle_type = vk::ExternalMemoryHandleTypeFlags::D3D12_RESOURCE;
+    let raw = handle.as_raw_handle() as vk::HANDLE;
+    let desc = VulkanImage {
+        format: FORMAT.as_raw(),
+        view_formats: VIEW_FORMATS.iter().map(|f| f.as_raw()).collect(),
+        flags: vk::ImageCreateFlags::MUTABLE_FORMAT.as_raw(),
+        usage: usage().as_raw(),
+        tiling: vk::ImageTiling::OPTIMAL.as_raw(),
+        width,
+        height,
+        allocation_size: 0,
+        memory_type_index: 0,
+        dedicated: true,
+        handle_type: handle_type.as_raw(),
+    };
+    let mut external = vk::ExternalMemoryImageCreateInfo::default().handle_types(handle_type);
+    let mut list = vk::ImageFormatListCreateInfo::default();
+    let image = {
+        let info = create_info(&desc, &VIEW_FORMATS, &mut external, &mut list);
+        unsafe { device.create_image(&info, None) }?
+    };
+    let fail = |error| {
+        unsafe { device.destroy_image(image, None) };
+        error
+    };
+    let requirements = unsafe { device.get_image_memory_requirements(image) };
+    let win32 = ash::khr::external_memory_win32::Device::new(instance, device);
+    let mut handle_properties = vk::MemoryWin32HandlePropertiesKHR::default();
+    unsafe { win32.get_memory_win32_handle_properties(handle_type, raw, &mut handle_properties) }
+        .map_err(fail)?;
+    let types = unsafe { instance.get_physical_device_memory_properties(physical) };
+    let bits = requirements.memory_type_bits & handle_properties.memory_type_bits;
+    let Some(type_index) = (0..types.memory_type_count).find(|&i| {
+        bits & (1 << i) != 0
+            && types.memory_types[i as usize]
+                .property_flags
+                .contains(vk::MemoryPropertyFlags::DEVICE_LOCAL)
+    }) else {
+        return Err(fail(vk::Result::ERROR_INVALID_EXTERNAL_HANDLE));
+    };
+    let mut dedicated = vk::MemoryDedicatedAllocateInfo::default().image(image);
+    let mut import = vk::ImportMemoryWin32HandleInfoKHR::default()
+        .handle_type(handle_type)
+        .handle(raw);
+    let allocate = vk::MemoryAllocateInfo::default()
+        .allocation_size(requirements.size)
+        .memory_type_index(type_index)
+        .push_next(&mut import)
+        .push_next(&mut dedicated);
+    let memory = unsafe { device.allocate_memory(&allocate, None) }.map_err(fail)?;
+    if let Err(error) = unsafe { device.bind_image_memory(image, memory, 0) } {
+        unsafe {
+            device.destroy_image(image, None);
+            device.free_memory(memory, None);
+        }
+        return Err(error);
+    }
+    Ok((image, memory))
+}

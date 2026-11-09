@@ -32,7 +32,9 @@ pub enum BufferKind {
     Vulkan,
     /// An `IOSurface` (macOS): reserved, not yet implemented.
     IoSurface,
-    /// A DXGI shared handle (Windows): reserved, not yet implemented.
+    /// A Direct3D 12 texture the host allocated on a shared heap, sent as
+    /// an NT handle (duplicated into the client), opened by a client on the
+    /// same adapter (by LUID). Windows.
     Dxgi,
 }
 impl BufferKind {
@@ -77,8 +79,8 @@ pub enum Offer {
     },
     /// IOSurfaces (macOS), reserved.
     IoSurface,
-    /// DXGI shared handles (Windows), on any of these adapters (LUIDs),
-    /// reserved.
+    /// Direct3D 12 shared textures (Windows), on any of these adapters
+    /// (their LUIDs, high part above low).
     Dxgi {
         /// Each adapter's LUID.
         adapters: Vec<u64>,
@@ -115,6 +117,9 @@ pub struct Welcome {
     /// With `Vulkan`, the device the buffers live on: the client draws on
     /// the adapter with these ids.
     pub device: Option<DeviceIds>,
+    /// With `Dxgi`, the LUID of the adapter the buffers live on: the client
+    /// draws on that adapter.
+    pub adapter: Option<u64>,
 }
 
 /// A buffer's pixels: premultiplied alpha, rows top to bottom.
@@ -177,7 +182,11 @@ pub enum BufferDesc {
         /// `IOSurfaceGetID`.
         id: u32,
     },
-    /// A DXGI shared handle (Windows), reserved.
+    /// A Direct3D 12 texture (Windows): the handle is an NT handle to a
+    /// committed resource, 2D, the generation's size, `B8G8R8A8_TYPELESS`
+    /// (viewed as BGRA8 unorm or its sRGB), one mip, a render target with
+    /// simultaneous access. The client opens it (`OpenSharedHandle`) on the
+    /// adapter the welcome names.
     Dxgi,
 }
 
@@ -696,6 +705,12 @@ impl HostMessage {
                 if let Some(ids) = &welcome.device {
                     out.ids(ids);
                 }
+                // After the device: a reader that doesn't know it stops
+                // before it.
+                out.bool(welcome.adapter.is_some());
+                if let Some(luid) = welcome.adapter {
+                    out.u64(luid);
+                }
             }
             HostMessage::Buffers(generation) => {
                 out = Out::new(BUFFERS);
@@ -830,10 +845,17 @@ impl HostMessage {
                 let version = r.u32()?;
                 let kind = BufferKind::from_code(r.u8()?)?;
                 let device = if r.bool()? { Some(r.ids()?) } else { None };
+                // Absent from a host that sends none.
+                let adapter = if !r.bytes.is_empty() && r.bool()? {
+                    Some(r.u64()?)
+                } else {
+                    None
+                };
                 HostMessage::Welcome(Welcome {
                     version,
                     kind,
                     device,
+                    adapter,
                 })
             }
             BUFFERS => {

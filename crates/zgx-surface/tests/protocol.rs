@@ -2,7 +2,7 @@
 //! know is skipped, and a broken one is an error, never a panic.
 use zgx_surface::{
     BufferDesc, BufferKind, Button, ClientMessage, Cursor, DeviceIds, Generation, HostMessage,
-    KeyEvent, Modifiers, Offer, PixelFormat, VulkanImage, WheelUnit,
+    KeyEvent, Modifiers, Offer, PixelFormat, WheelUnit,
     protocol::{DecodeError, Hello, Welcome},
 };
 
@@ -25,11 +25,19 @@ fn host_messages_survive_their_encoding() {
             version: 1,
             kind: BufferKind::Vulkan,
             device: Some(ids),
+            adapter: None,
         }),
         HostMessage::Welcome(Welcome {
             version: 1,
             kind: BufferKind::Shm,
             device: None,
+            adapter: None,
+        }),
+        HostMessage::Welcome(Welcome {
+            version: 1,
+            kind: BufferKind::Dxgi,
+            device: None,
+            adapter: Some(0x0000_0001_0000_d00d),
         }),
         HostMessage::Release {
             generation: 4,
@@ -130,6 +138,7 @@ fn client_messages_survive_their_encoding() {
 #[test]
 fn a_generation_carries_its_handles_in_order() {
     use std::os::fd::AsRawFd;
+    use zgx_surface::VulkanImage;
     let (a, _) = zgx_surface::shm::Mapping::create(64).unwrap();
     let (b, _) = zgx_surface::shm::Mapping::create(128).unwrap();
     let image = VulkanImage {

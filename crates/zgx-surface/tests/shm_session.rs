@@ -199,6 +199,7 @@ fn frames_go_round_the_ring_and_a_resize_starts_a_generation() {
             version: PROTOCOL_VERSION,
             kind: BufferKind::Shm,
             device: None,
+            adapter: None,
         }))
         .unwrap();
     host.generation((32, 16));
@@ -275,6 +276,7 @@ fn the_client_hears_the_host_close() {
             version: PROTOCOL_VERSION,
             kind: BufferKind::Shm,
             device: None,
+            adapter: None,
         }))
         .unwrap();
     drop(sender);

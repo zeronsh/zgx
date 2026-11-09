@@ -20,7 +20,7 @@ pub(crate) struct Painter {
     app: Weak<AppInner>,
     gpu: Option<Blit>,
     generation: Option<Buffers>,
-    /// What shows: a generation's buffer (Vulkan) or upload (shm).
+    /// What shows: a generation's buffer (Vulkan, Direct3D 12) or upload (shm).
     shown: Option<Shown>,
     /// When the box first had a size its generation isn't.
     resizing: Option<Instant>,
@@ -63,7 +63,7 @@ struct Buffers {
     generation: u32,
     size: (u32, u32),
     kind: BufferKind,
-    /// Vulkan: the shared textures, by index.
+    /// Vulkan, Direct3D 12: the shared textures, by index.
     textures: Vec<wgpu::Texture>,
     /// shm: each buffer's mapping, and the texture they are uploaded into.
     maps: Vec<Mapping>,
@@ -111,12 +111,13 @@ impl Viewport for Painter {
         if app.kind.get().is_none()
             && let Some(hello) = app.hello.borrow_mut().take()
         {
-            let (kind, device) = choose(&hello.offers, frame.device);
+            let (kind, device, adapter) = choose(&hello.offers, frame.device);
             app.kind.set(Some(kind));
             app.out.send(HostMessage::Welcome(Welcome {
                 version: PROTOCOL_VERSION,
                 kind,
                 device,
+                adapter,
             }));
         }
         if let Some(kind) = app.kind.get() {
@@ -179,9 +180,14 @@ impl Painter {
             }
         }
         self.resizing = None;
-        let kind = if kind == BufferKind::Vulkan && !crate::wgpu29::can_share(frame.device) {
-            // Welcomed as Vulkan on a device that has gone (a new renderer
-            // on another backend): nothing it can share.
+        let gone = match kind {
+            BufferKind::Vulkan => !crate::wgpu29::can_share(frame.device),
+            BufferKind::Dxgi => crate::wgpu29::device_luid_of(frame.device).is_none(),
+            _ => false,
+        };
+        let kind = if gone {
+            // Welcomed as Vulkan or Direct3D 12 on a device that has gone (a
+            // new renderer on another backend): nothing it can share.
             return;
         } else {
             kind
@@ -189,6 +195,7 @@ impl Painter {
         let generation = app.shared.lock().unwrap().ring.next_generation(RING);
         let made = match kind {
             BufferKind::Vulkan => vulkan_generation(frame, generation, size),
+            BufferKind::Dxgi => dxgi_generation(frame, generation, size),
             _ => shm_generation(frame, generation, size),
         };
         let (buffers, message) = match made {
@@ -218,7 +225,7 @@ impl Painter {
             return;
         };
         match buffers.kind {
-            BufferKind::Vulkan => {
+            BufferKind::Vulkan | BufferKind::Dxgi => {
                 let newest = {
                     let mut shared = app.shared.lock().unwrap();
                     self.log
@@ -309,22 +316,33 @@ fn release(slot: Slot) -> HostMessage {
 
 /// How to share with a client offering `offers` (best first), from this
 /// device: Vulkan images where it is on one of the client's GPUs and can
-/// export them, else shared memory.
-fn choose(offers: &[Offer], device: &wgpu::Device) -> (BufferKind, Option<crate::DeviceIds>) {
+/// export them, Direct3D 12 textures where it is Direct3D 12 on one of the
+/// client's adapters (by LUID), else shared memory. With it, the device's
+/// ids (Vulkan) or its adapter's LUID (Direct3D 12) for the welcome.
+fn choose(
+    offers: &[Offer],
+    device: &wgpu::Device,
+) -> (BufferKind, Option<crate::DeviceIds>, Option<u64>) {
     let forced_shm = std::env::var_os("ZGX_SURFACE_SHM").is_some_and(|v| v != "0");
     let ours = (!forced_shm && crate::wgpu29::can_share(device))
         .then(|| crate::wgpu29::device_ids_of(device))
         .flatten();
+    let luid = (!forced_shm)
+        .then(|| crate::wgpu29::device_luid_of(device))
+        .flatten();
     for offer in offers {
         match offer {
             Offer::Vulkan { devices } if ours.is_some_and(|ids| devices.contains(&ids)) => {
-                return (BufferKind::Vulkan, ours);
+                return (BufferKind::Vulkan, ours, None);
             }
-            Offer::Shm => return (BufferKind::Shm, None),
+            Offer::Dxgi { adapters } if luid.is_some_and(|luid| adapters.contains(&luid)) => {
+                return (BufferKind::Dxgi, None, luid);
+            }
+            Offer::Shm => return (BufferKind::Shm, None, None),
             _ => {}
         }
     }
-    (BufferKind::Shm, None)
+    (BufferKind::Shm, None, None)
 }
 
 type Made = (Buffers, Generation);
@@ -334,10 +352,34 @@ fn vulkan_generation(
     generation: u32,
     size: (u32, u32),
 ) -> std::io::Result<Made> {
+    gpu_generation(frame, generation, size, BufferKind::Vulkan)
+}
+
+/// Direct3D 12 textures on shared heaps, their NT handles duplicated into
+/// the client as the generation is sent (Windows).
+fn dxgi_generation(
+    frame: &ViewportFrame<'_>,
+    generation: u32,
+    size: (u32, u32),
+) -> std::io::Result<Made> {
+    gpu_generation(frame, generation, size, BufferKind::Dxgi)
+}
+
+/// A generation of textures on the host's GPU, shared as `kind`.
+fn gpu_generation(
+    frame: &ViewportFrame<'_>,
+    generation: u32,
+    size: (u32, u32),
+    kind: BufferKind,
+) -> std::io::Result<Made> {
+    let export = match kind {
+        BufferKind::Dxgi => crate::wgpu29::export_dxgi,
+        _ => crate::wgpu29::export,
+    };
     let mut textures = Vec::new();
     let mut buffers = Vec::new();
     for index in 0..RING {
-        let (texture, handle, desc) = crate::wgpu29::export(frame.device, size.0, size.1)?;
+        let (texture, handle, desc) = export(frame.device, size.0, size.1)?;
         textures.push(texture);
         buffers.push(crate::protocol::Buffer {
             index,
@@ -381,7 +423,7 @@ fn vulkan_generation(
         Buffers {
             generation,
             size,
-            kind: BufferKind::Vulkan,
+            kind,
             textures,
             maps: Vec::new(),
             upload: None,

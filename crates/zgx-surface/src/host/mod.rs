@@ -168,6 +168,8 @@ pub(crate) struct AppInner {
     status: Signal<AppStatus>,
     title: Signal<String>,
     pid: Option<u32>,
+    /// Ends its program, if it has one (`close`, after its grace).
+    killer: Option<Killer>,
     on_exit: RefCell<Vec<ExitListener>>,
     /// The element showing it, while one is mounted.
     node: RefCell<Option<NodeHandle>>,
@@ -255,6 +257,7 @@ impl App {
         let shared: Arc<Mutex<Shared>> = Arc::default();
         let (wake, woken) = zgx::task::latest::<()>();
         let exited = Arc::new(AtomicBool::new(false));
+        let killer = child.as_ref().and_then(Killer::of);
         let (tx, rx) = mpsc::channel::<(HostMessage, bool)>();
         let out = Outbox {
             tx,
@@ -277,6 +280,7 @@ impl App {
             status: runtime.signal(AppStatus::Starting),
             title: runtime.signal(String::new()),
             pid,
+            killer,
             on_exit: RefCell::default(),
             node: RefCell::default(),
             bounds: RefCell::default(),
@@ -627,7 +631,11 @@ impl AppInner {
             return;
         }
         let now = std::time::Instant::now();
-        if self.refresh_checked.get().is_some_and(|at| now.duration_since(at) < Duration::from_secs(2)) {
+        if self
+            .refresh_checked
+            .get()
+            .is_some_and(|at| now.duration_since(at) < Duration::from_secs(2))
+        {
             return;
         }
         let (Some(runner), Some(clock)) = (self.runner(), self.frames.borrow().clone()) else {
@@ -649,7 +657,10 @@ impl AppInner {
         let task = runner.spawn(Box::pin(async move {
             let frame = clock.next().await;
             if log {
-                eprintln!("zgx-surface: the display refreshes at {} Hz", frame.refresh_rate());
+                eprintln!(
+                    "zgx-surface: the display refreshes at {} Hz",
+                    frame.refresh_rate()
+                );
             }
             let Some(app) = weak.upgrade() else { return };
             app.refreshing.borrow_mut().take();
@@ -725,8 +736,8 @@ impl AppInner {
         if let Some(node) = self.node.borrow().as_ref() {
             node.unlock_pointer();
         }
-        let (pid, exited) = (self.pid, self.exited.clone());
-        if let Some(pid) = pid {
+        let (killer, exited) = (self.killer.clone(), self.exited.clone());
+        if let Some(killer) = killer {
             let _ = std::thread::Builder::new()
                 .name("zgx-surface close".into())
                 .spawn(move || {
@@ -738,7 +749,7 @@ impl AppInner {
                         std::thread::sleep(Duration::from_millis(25));
                     }
                     if !exited.load(Ordering::Acquire) {
-                        kill(pid);
+                        killer.kill();
                     }
                 });
         }
@@ -750,15 +761,46 @@ impl Drop for AppInner {
     }
 }
 
-#[cfg(unix)]
-fn kill(pid: u32) {
-    // Safety: a signal to the process this session started, not yet reaped
-    // (the waiter sets `exited` before it is).
-    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+/// What ends a session's program: its pid on Unix, a handle of its own to
+/// its process on Windows (held, so its pid is never another's meanwhile).
+#[derive(Clone)]
+struct Killer {
+    #[cfg(unix)]
+    pid: u32,
+    #[cfg(windows)]
+    process: Arc<std::os::windows::io::OwnedHandle>,
 }
-#[cfg(not(unix))]
-fn kill(_pid: u32) {
-    // Windows: TerminateProcess on the child's handle (follow-up work).
+impl Killer {
+    fn of(child: &std::process::Child) -> Option<Killer> {
+        #[cfg(unix)]
+        return Some(Killer { pid: child.id() });
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsHandle;
+            let process = child.as_handle().try_clone_to_owned().ok()?;
+            Some(Killer {
+                process: Arc::new(process),
+            })
+        }
+    }
+    #[cfg(unix)]
+    fn kill(&self) {
+        // Safety: a signal to the process this session started, not yet
+        // reaped (the waiter sets `exited` before it is).
+        unsafe { libc::kill(self.pid as libc::pid_t, libc::SIGKILL) };
+    }
+    #[cfg(windows)]
+    fn kill(&self) {
+        use std::os::windows::io::AsRawHandle;
+        // Safety: this session's handle to its program's process; one that
+        // has exited fails harmlessly.
+        unsafe {
+            windows_sys::Win32::System::Threading::TerminateProcess(
+                self.process.as_raw_handle() as _,
+                1,
+            )
+        };
+    }
 }
 
 /// The thread writing messages to the client.
@@ -911,7 +953,9 @@ fn typed(key: &zgx::input::Key, modifiers: zgx::input::Modifiers) -> Option<Stri
         return None;
     }
     match key {
-        zgx::input::Key::Character(text) if !text.chars().any(char::is_control) => Some(text.clone()),
+        zgx::input::Key::Character(text) if !text.chars().any(char::is_control) => {
+            Some(text.clone())
+        }
         zgx::input::Key::Space => Some(" ".to_owned()),
         _ => None,
     }

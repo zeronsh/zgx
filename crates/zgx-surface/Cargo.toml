@@ -16,10 +16,13 @@ description = "External surfaces for zgx: another process's frames shown as an e
 # Vulkan images shared between processes (`vulkan`): ash 0.38, the version
 # wgpu-hal 29 uses, so its handles are wgpu's.
 vulkan = ["dep:ash"]
+# Direct3D 12 textures shared between processes (`dxgi`, Windows): the
+# `windows` 0.62 wgpu-hal 29 uses, so its interfaces are wgpu's.
+dxgi = ["dep:windows"]
 # A client on wgpu 29 (`wgpu29`): its adapter picked to match the host's GPU,
 # shared buffers made `wgpu::Texture`s, and reading back into shared memory
 # where it can't share. A client on another wgpu copies the module.
-wgpu29 = ["vulkan", "dep:wgpu"]
+wgpu29 = ["vulkan", "dxgi", "dep:wgpu"]
 # The zgx side (`host`): starting a program with the surface's socket, its
 # frames as a GPU view's, and the element forwarding input to it.
 host = ["wgpu29", "dep:zgx", "dep:zgx-gpu"]
@@ -37,6 +40,8 @@ libc = "0.2"
 wgpu = { version = "29.0.4", optional = true, default-features = false, features = ["vulkan"] }
 
 [target.'cfg(windows)'.dependencies]
+wgpu = { version = "29.0.4", optional = true, default-features = false, features = ["dx12"] }
+windows = { version = "0.62", optional = true, default-features = false, features = ["Win32_Foundation", "Win32_Security", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Memory", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]

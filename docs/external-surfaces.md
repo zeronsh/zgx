@@ -29,14 +29,15 @@ cargo run -p zgx-desktop --features surfaces --example external_surface -- --shm
 | --- | --- |
 | `zgx-surface` | the protocol, its connection and the client (`Client`), shared memory (`shm`), the host's and client's rings (`ring`). No wgpu. |
 | `zgx-surface/vulkan` | ash 0.38 helpers: a device's ids, an exportable image, an import (`vulkan`) |
+| `zgx-surface/dxgi` | Direct3D 12 helpers on Windows (`windows` 0.62, wgpu-hal 29's): an adapter's LUID, a shared texture and its NT handle, an open (`dxgi`) |
 | `zgx-surface/wgpu29` | a wgpu 29 client's (and the host's) helpers: the adapter matching the host's GPU, buffers as `wgpu::Texture`s, a readback into shared memory (`wgpu29`) |
 | `zgx-surface/host` | the zgx side: `App`, `surface` (re-exported as `zgx_desktop::surface`, the desktop host's `surfaces` feature) |
 | `zgx-script/apps` | `ui.app` and `ui.surface` (zgx-run has it) |
 
 ## How it works
 
-1. **Start.** The host starts the program (no shell) with one end of a Unix socket pair inherited; `ZGX_SURFACE_FD` names it. On Linux the program dies with the host however the host ends (`PR_SET_PDEATHSIG`); closing the session sends `Close` and kills it 1.5 s later if it hasn't exited.
-2. **Handshake.** The client says what it can take, best first (`Hello`): Vulkan images on any of its GPUs (by `deviceUUID` and `driverUUID`), or shared memory. The host answers (`Welcome`) with the kind it will send and, for Vulkan, its own GPU's ids, which the client draws on (`wgpu29::adapter_for`). The host answers when it first draws the element, as it then knows its device.
+1. **Start.** The host starts the program (no shell) with one end of a Unix socket pair inherited; `ZGX_SURFACE_FD` names it. On Windows it is two named pipes instead (`<name>.down`, `<name>.up`, `PIPE_REJECT_REMOTE_CLIENTS`), named in `ZGX_SURFACE_PIPE`. On Linux the program dies with the host however the host ends (`PR_SET_PDEATHSIG`); closing the session sends `Close` and kills it 1.5 s later if it hasn't exited (`SIGKILL`, or `TerminateProcess` on a process handle the session holds, so the pid is never another program's meanwhile).
+2. **Handshake.** The client says what it can take, best first (`Hello`): Vulkan images on any of its GPUs (by `deviceUUID` and `driverUUID`), Direct3D 12 textures on any of its adapters (by LUID), or shared memory. The host answers (`Welcome`) with the kind it will send and, for Vulkan, its own GPU's ids, or for Direct3D 12 its adapter's LUID, which the client draws on (`wgpu29::adapter_for`, `wgpu29::adapter_for_luid`). The host answers when it first draws the element, as it then knows its device.
 3. **Buffers.** The host makes a ring of three buffers at the element's size in device pixels and sends them (`Resize`, then `Buffers`, a generation). A new size makes a new generation once it has held for 120 ms; meanwhile the last frame shows stretched, so a window being dragged doesn't rebuild buffers every frame.
 4. **Frames.** The client takes a free buffer (`acquire`), draws into it, **finishes its GPU work** (v1 shares no semaphore: `device.poll` waiting for its submission) and presents it (`Present`). The host's GPU view draws the newest presented buffer over its box (one textured triangle, no CPU) at its next frame. A buffer presented over one not yet shown goes back at once (`Release`); the one showing goes back once a newer shows and the host's GPU work that read it is done (`on_submitted_work_done`, polled until it fires). A client that draws only with two buffers free (`Client::free_buffers() >= 2`) is paced to the frames shown and never draws one replaced unseen.
 5. **Idle.** A surface hidden (scrolled away, its window hidden) tells the client (`Visible(false)`): a client then draws nothing until it shows again (zgx's rule: idle windows do no work). An element not invalidated draws nothing: the host draws only when a frame is presented.
@@ -47,7 +48,18 @@ cargo run -p zgx-desktop --features surfaces --example external_surface -- --shm
   - Opaque descriptors were chosen over dma-buf with DRM modifiers: on this NVIDIA driver both work, opaque needs no modifier negotiation, and both sides are the same GPU anyway. A dma-buf would be the route to a compositor or a video decoder.
   - **Image layouts and queue ownership are not transferred in v1**: each side's wgpu tracks its own idea of the image's layout. NVIDIA's driver doesn't care; a driver that compresses colour images (AMD's DCC, Intel's CCS) may need the images in the `GENERAL` layout, or explicit acquire and release barriers with `VK_QUEUE_FAMILY_EXTERNAL`, with semaphores (`VK_KHR_external_semaphore_fd`) in place of the client's wait. That is v2.
 - **`shm` (everywhere):** each buffer is shared memory (a memfd on Linux, POSIX shared memory elsewhere on Unix, a file mapping on Windows), BGRA8 rows. The client writes pixels (`wgpu29::Readback` reads its frame back into it); the host uploads the newest (`Queue::write_texture`) as it draws. Two CPU copies a frame: the client's readback and the host's upload.
-- **`iosurface` (macOS), `dxgi` (Windows):** in the protocol, not implemented: see [the seam](#for-the-macos-and-windows-backends).
+- **`dxgi` (Windows):** the host (zgx on Direct3D 12, its default there) makes each buffer a committed resource on a shared heap (`D3D12_HEAP_FLAG_SHARED`): 2D, `B8G8R8A8_TYPELESS` (viewed as BGRA8 unorm or sRGB, as wgpu-hal makes its own textures with view formats), one mip, a render target with **simultaneous access**, so its state decays to common after every submission on either side and neither process's wgpu needs the other's last barrier (the layout problem Vulkan has in v1 doesn't arise; the driver keeps it uncompressed). It makes an NT handle to it (`CreateSharedHandle`), wraps the resource as a wgpu texture (`dx12::Device::texture_from_raw`, `create_texture_from_hal`) and clears it once. The transport duplicates each handle into the client, which it started and holds a handle to (`DuplicateHandle`), and sends the duplicated values after the frame. The client opens each (`OpenSharedHandle`) on the adapter with the welcome's LUID, checks it is a texture made so, sizes it from the resource and wraps it the same way (`wgpu29::import`); the handle is closed then, the resource holding its own reference. `zgx_surface::dxgi` is the same on raw COM pointers, for a client on another wgpu; a Vulkan client imports it with `vulkan::import_d3d12_image` (`VK_KHR_external_memory_win32`, handle type `D3D12_RESOURCE`, dedicated) on the device whose `vulkan::device_luid` is the welcome's.
+  - Sync is v1's: the client waits for its GPU before presenting, the host releases once its GPU work that read the buffer is done. A shared `ID3D12Fence` (`D3D12_FENCE_FLAG_SHARED`, signalled by the client's queue, waited on by the host's) would let neither wait on the CPU: v2.
+  - A host on Vulkan on Windows (zgx-gpu's `vulkan` feature, tried after Direct3D 12) shares memory only (`shm`): it never offers `dxgi`. Exporting its images as `VK_KHR_external_memory_win32` handles would be the route.
+- **`iosurface` (macOS):** in the protocol, not implemented: see [the seam](#for-the-macos-and-windows-backends).
+
+| | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| Connection | socket pair, descriptors by `SCM_RIGHTS` | two named pipes, handles duplicated into the client | socket pair |
+| GPU buffers | `vulkan`: opaque file descriptors, matched by device and driver UUID | `dxgi`: Direct3D 12 shared NT handles, matched by adapter LUID (a Direct3D 12 host) | not yet (`iosurface`) |
+| Fallback | `shm` (memfd) | `shm` (file mapping) | `shm` (POSIX shared memory) |
+| Program ends with the host | `PR_SET_PDEATHSIG` | when its session closes (no job object yet) | when its session closes |
+| Verified | measured here (RTX 4090) | compile-checked; `dxgi_share` for CI's WARP, not yet run | — |
 
 ## The protocol (version 1)
 
@@ -63,8 +75,8 @@ A frame is its length (`u32`, of what follows it), its kind (`u16`), how many ha
 
 | Host → client | |
 | --- | --- |
-| `Welcome { version, kind, device }` | how buffers are shared; `device`: the host's GPU's ids for Vulkan |
-| `Buffers(Generation { generation, width, height, format, buffers })` | a new ring; each buffer `{ index, handle, desc }`, `desc` `Shm { offset, stride, len }` or `Vulkan(VulkanImage)` |
+| `Welcome { version, kind, device, adapter }` | how buffers are shared; `device`: the host's GPU's ids for Vulkan; `adapter`: its adapter's LUID for Direct3D 12 (after `device` on the wire, absent from a host that sends none) |
+| `Buffers(Generation { generation, width, height, format, buffers })` | a new ring; each buffer `{ index, handle, desc }`, `desc` `Shm { offset, stride, len }`, `Vulkan(VulkanImage)` or `Dxgi` (an NT handle to the texture above, its size the generation's) |
 | `Release { generation, index }` | the host no longer reads it |
 | `Resize { width, height, scale }` | the element's size in device pixels, and its scale |
 | `Visible(bool)` | whether any of it shows (it is shown until told otherwise) |
@@ -156,13 +168,15 @@ Latency, with `ZGX_SURFACE_LOG=1` (the host's share: from the client's present t
 
 ## For the macOS and Windows backends
 
-What's there: the protocol (`BufferKind::IoSurface`, `BufferKind::Dxgi`, `Offer::IoSurface`, `Offer::Dxgi { adapters }`, `BufferDesc::IoSurface { id }`, `BufferDesc::Dxgi`), the Unix transport (macOS uses it as is), the Windows transport (named pipes `<name>.down` and `<name>.up` named in `ZGX_SURFACE_PIPE`, handles duplicated into the client and their values following their frame; compile-checked for `x86_64-pc-windows-gnu`, never run), shared memory on both (`shm`: a file mapping on Windows), and the client (`Client`). What each needs:
+Windows has its backend (`dxgi`, above; `dxgi_generation` beside `vulkan_generation`, an arm in `choose` by adapter LUID and in `wgpu29::import`, `TerminateProcess` on close). It is compile-checked for `x86_64-pc-windows-gnu` and its round trip between two processes is a test for CI's Windows job, on WARP (`dxgi_share`); it hasn't yet run anywhere, on WARP, a GPU or a Windows desktop session. What it still lacks: a job object so the program dies with the host however the host ends, a shared fence, and `vulkan` exports for a Vulkan host.
+
+What's there for macOS: the protocol (`BufferKind::IoSurface`, `Offer::IoSurface`, `BufferDesc::IoSurface { id }`), the Unix transport (macOS uses it as is), shared memory, and the client (`Client`). What it needs (Windows' steps kept as they were done):
 
 1. **The kind's buffers on the host:** in `crates/zgx-surface/src/host/painter.rs`, `size_generation` matches the kind; add `iosurface_generation` / `dxgi_generation` beside `vulkan_generation`, returning `Buffers` (the host's `wgpu::Texture`s by index) and the `Generation` to send.
    - macOS: an `IOSurface` per buffer (BGRA, `IOSurfaceCreate` with `kIOSurfaceIsGlobal` off), the host's texture made from it on its Metal device (`newTextureWithDescriptor:iosurface:plane:`, then `create_texture_from_hal::<Metal>`; zgx-gpu's `iosurface.rs` does this for its own surfaces). Send it as a Mach port (`IOSurfaceCreateMachPort`): the Unix socket carries no Mach ports, so the transport needs a Mach channel beside the socket (a bootstrap-registered service named in the environment) or `xpc`; `BufferDesc::IoSurface { id }` is there for a global id meanwhile.
    - Windows: a `D3D12` committed resource with `D3D12_HEAP_FLAG_SHARED` (or a D3D11 texture with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE`), shared as an NT handle (`CreateSharedHandle`), which the transport duplicates into the client. The client opens it (`OpenSharedHandle`, or Vulkan's `VK_KHR_external_memory_win32` via wgpu-hal's `texture_from_d3d11_shared_handle`) on the adapter whose LUID the host sends.
 2. **The choice:** `choose` in `painter.rs` picks the kind from the client's offers and what the device can share (`wgpu29::can_share` and `device_ids_of` are Vulkan's; add each backend's: an adapter LUID, a Metal registry id).
-3. **The host's process handling on Windows:** `host::kill` is a no-op there (it should `TerminateProcess` the child's handle) and the exit waiter uses `Child::wait`; `App::spawn` already hands the child's handle to the transport.
+3. **The host's process handling on Windows (done):** a session closing kills its program with `TerminateProcess` on a handle of its own to the process, and the exit waiter's `Child::wait` is `WaitForSingleObject`; the transport holds its own handle too, to duplicate buffers' handles into.
 4. **The client's import:** a `wgpu29::import` arm for each `BufferDesc`.
 5. **Sync:** the client waits for its GPU before presenting, as on Linux; a shared fence (`ID3D12Fence` shared, `MTLSharedEvent`) is the later improvement.
 
