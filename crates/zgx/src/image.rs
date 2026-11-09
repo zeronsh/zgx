@@ -1,7 +1,7 @@
 //! Immutable decoded straight-alpha RGBA8 images shared between scene nodes.
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) fn next_identity() -> Result<u64, &'static str> {
@@ -85,6 +85,13 @@ impl Drop for Pixels {
     }
 }
 extern "C" fn drop_kept(kept: &mut std::mem::ManuallyDrop<Option<Kept>>) {
+    if let Some(kept) = &**kept {
+        let held = kept.held.lock().unwrap_or_else(|p| p.into_inner());
+        HELD.fetch_sub(
+            held.as_ref().map_or(0, |h| h.pixels.len()),
+            Ordering::Relaxed,
+        );
+    }
     // SAFETY: once, from `Pixels::drop`; nothing reads it after.
     unsafe { std::mem::ManuallyDrop::drop(kept) }
 }
@@ -187,6 +194,12 @@ struct Kept {
     held: std::sync::Mutex<Option<Held>>,
     /// The size a decode under way makes, if one is.
     pending: std::sync::Mutex<Option<(u32, u32)>>,
+    /// When `held` was last asked for (`USES`), for which goes first past the
+    /// budget (`set_decoded_budget`).
+    used: AtomicU64,
+    /// How many renderers hold it as a texture (`ImageData::resident`): its
+    /// copy then only duplicates one, and goes first past the budget.
+    resident: std::sync::atomic::AtomicU32,
     /// When it decodes (`Decoding`, as a `u8`).
     decoding: std::sync::atomic::AtomicU8,
     /// Its file didn't decode: not tried again (each try would draw again).
@@ -572,6 +585,8 @@ impl ImageData {
                 scaled,
                 held: std::sync::Mutex::new(None),
                 pending: std::sync::Mutex::new(None),
+                used: AtomicU64::new(0),
+                resident: std::sync::atomic::AtomicU32::new(0),
                 decoding: std::sync::atomic::AtomicU8::new(Decoding::Auto as u8),
                 failed: std::sync::atomic::AtomicBool::new(false),
                 pinned: std::sync::OnceLock::new(),
@@ -652,6 +667,15 @@ impl ImageData {
     pub fn keeps_file(&self) -> bool {
         self.pixels.kept.is_some()
     }
+    /// A renderer now holds it as a texture, until the returned guard drops
+    /// (with the texture): its decoded copy, if a kept file's, then goes
+    /// before others past the budget (`set_decoded_budget`). `None` for an
+    /// image that keeps no file.
+    pub fn resident(&self) -> Option<Resident> {
+        let kept = self.pixels.kept.as_ref()?;
+        kept.resident.fetch_add(1, Ordering::Relaxed);
+        Some(Resident(Arc::downgrade(&self.pixels)))
+    }
     /// Its pixels at least `size` large (a renderer's drawn size), shrunk
     /// and premultiplied, if they are decoded; else `None`, and they are
     /// decoded off this thread, the wake (`set_decoded_wake`) told once
@@ -665,6 +689,8 @@ impl ImageData {
             && held.width >= size.0
             && held.height >= size.1
         {
+            kept.used
+                .store(USES.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
             return Some(held.clone());
         }
         if kept.failed.load(Ordering::Relaxed) {
@@ -697,14 +723,112 @@ pub fn release_decoded() -> usize {
     list.retain(|weak| match weak.upgrade() {
         Some(pixels) => {
             if let Some(kept) = &*pixels.kept {
-                let mut held = kept.held.lock().unwrap_or_else(|p| p.into_inner());
-                freed += held.take().map_or(0, |held| held.pixels.len());
+                freed += hold(kept, None);
             }
             true
         }
         None => false,
     });
     freed
+}
+/// What kept files' decoded copies hold together, pinned ones aside.
+static HELD: AtomicUsize = AtomicUsize::new(0);
+/// What they may hold before those used least recently go (`set_decoded_budget`).
+static BUDGET: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// A count of uses of decoded copies, for which was used least recently.
+static USES: AtomicU64 = AtomicU64::new(1);
+/// Decodes of kept files so far (`decodes`).
+static DECODES: AtomicU64 = AtomicU64::new(0);
+/// What kept files' decoded copies may hold together, pinned ones aside:
+/// past it, as a decode lands, those used least recently go. A renderer holds
+/// what it uploaded as textures, so a copy serves only to upload again (a
+/// texture given back, then drawn again, decodes again). Below it, nothing
+/// changes: an app showing few pictures never decodes twice. Unbounded until a
+/// host sets it for its windows (zgx-desktop: sixteen frames of its largest, 64
+/// to 192 MiB); a window at rest gives every copy back as well
+/// (`release_decoded`).
+pub fn set_decoded_budget(bytes: usize) {
+    BUDGET.store(bytes, Ordering::Relaxed);
+}
+/// The budget `set_decoded_budget` set.
+pub fn decoded_budget() -> usize {
+    BUDGET.load(Ordering::Relaxed)
+}
+/// How many decodes of kept files there have been in this process: with a
+/// count of pictures shown, how many decoded again. For tests and benches.
+pub fn decodes() -> u64 {
+    DECODES.load(Ordering::Relaxed)
+}
+/// Put `held` in place of `kept`'s copy, counting it: the bytes the copy it
+/// replaces held.
+fn hold(kept: &Kept, held: Option<Held>) -> usize {
+    let new = held.as_ref().map_or(0, |h| h.pixels.len());
+    let old = std::mem::replace(
+        &mut *kept.held.lock().unwrap_or_else(|p| p.into_inner()),
+        held,
+    )
+    .map_or(0, |h| h.pixels.len());
+    HELD.fetch_add(new, Ordering::Relaxed);
+    HELD.fetch_sub(old, Ordering::Relaxed);
+    old
+}
+/// Past the budget: give back copies until it is under, those a renderer
+/// holds as textures first (each a duplicate), then those used least
+/// recently; never `keep`'s (just decoded) nor one whose decode is under way.
+#[cold]
+#[inline(never)]
+fn shed(keep: &Pixels) {
+    let mut held: Vec<(bool, u64, Arc<Pixels>)> = {
+        let mut list = registry();
+        list.retain(|weak| weak.strong_count() > 0);
+        list.iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .filter(|pixels| !std::ptr::eq(&**pixels, keep))
+            .filter_map(|pixels| {
+                let kept = pixels.kept.as_ref()?;
+                let has = kept
+                    .held
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_some();
+                let decoding = kept
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_some();
+                let used = kept.used.load(Ordering::Relaxed);
+                let shown = kept.resident.load(Ordering::Relaxed) > 0;
+                (has && !decoding).then_some((!shown, used, pixels))
+            })
+            .collect()
+    };
+    held.sort_unstable_by_key(|(evicted, used, _)| (*evicted, *used));
+    let budget = BUDGET.load(Ordering::Relaxed);
+    for (.., pixels) in held {
+        if HELD.load(Ordering::Relaxed) <= budget {
+            break;
+        }
+        if let Some(kept) = &*pixels.kept {
+            hold(kept, None);
+        }
+    }
+}
+/// A renderer holding a kept file as a texture (`ImageData::resident`):
+/// while it lives, the file's decoded copy only duplicates that texture.
+pub struct Resident(std::sync::Weak<Pixels>);
+impl Drop for Resident {
+    fn drop(&mut self) {
+        if let Some(pixels) = self.0.upgrade()
+            && let Some(kept) = &*pixels.kept
+        {
+            kept.resident.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+impl std::fmt::Debug for Resident {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Resident")
+    }
 }
 /// What kept files' decoded pixels hold now (pinned ones too).
 pub fn decoded_bytes() -> usize {
@@ -830,7 +954,13 @@ fn decode_at(
         kept.failed.store(true, Ordering::Relaxed);
         return None;
     };
-    *kept.held.lock().unwrap_or_else(|p| p.into_inner()) = Some(done.clone());
+    hold(kept, Some(done.clone()));
+    kept.used
+        .store(USES.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+    DECODES.fetch_add(1, Ordering::Relaxed);
+    if HELD.load(Ordering::Relaxed) > BUDGET.load(Ordering::Relaxed) {
+        shed(pixels);
+    }
     // Off the main thread: whoever waited draws again.
     let wake = wake
         .then(|| WAKE.lock().unwrap_or_else(|p| p.into_inner()).clone())
@@ -995,6 +1125,76 @@ mod kept_tests {
         // Borrowed: whole, straight, and kept.
         assert_eq!(image.pixels().len(), 8 * 4 * 4);
         assert_eq!(image.pixels_arc().len(), 8 * 4 * 4);
+    }
+
+    /// Past the budget, a decode landing gives back the copies used least
+    /// recently, never its own; under it, nothing goes. And a copy goes from
+    /// the count with its image.
+    #[test]
+    fn decoded_copies_past_the_budget_go_least_recently_used_first() {
+        let _alone = alone();
+        release_decoded();
+        let before = (decoded_budget(), decodes());
+        let file = || ImageData::kept(8, 4, Arc::from(&b"file"[..]), decode).unwrap();
+        let (a, b, c) = (file(), file(), file());
+        // Two copies fit (each 8 by 4, 128 bytes): small, they decode here.
+        set_decoded_budget(2 * 128 + 64);
+        assert!(a.pixels_at((8, 4)).is_some());
+        assert!(b.pixels_at((8, 4)).is_some());
+        assert_eq!(decoded_bytes(), 2 * 128, "under it: both kept");
+        // `a` used again: `b` is now the least recent.
+        assert!(a.pixels_at((8, 4)).is_some());
+        assert_eq!(decodes(), before.1 + 2, "used again, not decoded");
+        assert!(c.pixels_at((8, 4)).is_some());
+        assert_eq!(decoded_bytes(), 2 * 128, "past it: one went");
+        let held = |image: &ImageData| {
+            let kept = image.pixels.kept.as_ref().unwrap();
+            kept.held.lock().unwrap().is_some()
+        };
+        assert!(
+            held(&a) && !held(&b) && held(&c),
+            "the least recently used went"
+        );
+        drop(a);
+        assert_eq!(HELD.load(Ordering::Relaxed), 128, "gone with its image");
+        set_decoded_budget(before.0);
+        release_decoded();
+        assert_eq!(HELD.load(Ordering::Relaxed), 0);
+    }
+
+    /// A copy whose image a renderer holds as a texture duplicates it: past
+    /// the budget it goes before an older one whose texture has gone, and
+    /// once the texture goes, it counts as any other.
+    #[test]
+    fn copies_of_resident_textures_go_first() {
+        let _alone = alone();
+        release_decoded();
+        let budget = decoded_budget();
+        let file = || ImageData::kept(8, 4, Arc::from(&b"file"[..]), decode).unwrap();
+        let (a, b, c, d) = (file(), file(), file(), file());
+        let held = |image: &ImageData| {
+            let kept = image.pixels.kept.as_ref().unwrap();
+            kept.held.lock().unwrap().is_some()
+        };
+        set_decoded_budget(2 * 128 + 64);
+        assert!(a.pixels_at((8, 4)).is_some());
+        assert!(b.pixels_at((8, 4)).is_some());
+        // `b` drawn as a texture: its copy a duplicate, though newer than `a`'s.
+        let texture = b.resident().expect("a kept file");
+        assert!(c.pixels_at((8, 4)).is_some());
+        assert!(held(&a) && !held(&b) && held(&c), "the duplicate went");
+        // Its texture gone, `b` decodes again and is like any other: `a`,
+        // the least recently used, goes now.
+        drop(texture);
+        assert!(b.pixels_at((8, 4)).is_some());
+        assert!(!held(&a) && held(&b) && held(&c));
+        assert!(d.pixels_at((8, 4)).is_some());
+        assert!(
+            held(&b) && !held(&c) && held(&d),
+            "the least recently used of those left"
+        );
+        set_decoded_budget(budget);
+        release_decoded();
     }
 
     /// Read whole for a moment (a copy to the clipboard), a kept file holds
