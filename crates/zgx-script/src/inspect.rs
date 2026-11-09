@@ -2150,7 +2150,7 @@ fn connection(stream: impl std::io::Read + Write, queue: Queue, token: Option<St
 #[cfg(unix)]
 fn listen(dir: &std::path::Path, pid: u32, about: &str, queue: Queue) -> std::io::Result<PathBuf> {
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
-    let path = dir.join(format!("{pid}.sock"));
+    let path = crate::inspect_client::socket_path(dir, pid)?;
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
