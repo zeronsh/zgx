@@ -209,9 +209,9 @@ pub fn write_wav(path: &Path, samples: &[f32]) -> std::io::Result<()> {
     std::fs::write(path, bytes)
 }
 
-/// The sounds `clips` name, mixed into a temporary WAV for an encoder; `None`
-/// if there are none. The caller removes it.
-pub fn mixed_file(clips: &[AudioClip], fps: f64, frames: u64) -> Result<Option<PathBuf>, String> {
+/// The sounds `clips` name, decoded and mixed over `frames` frames at `fps`
+/// ([`mix`]); `None` if there are none.
+pub fn mixed(clips: &[AudioClip], fps: f64, frames: u64) -> Result<Option<Vec<f32>>, String> {
     if clips.is_empty() {
         return Ok(None);
     }
@@ -226,7 +226,17 @@ pub fn mixed_file(clips: &[AudioClip], fps: f64, frames: u64) -> Result<Option<P
             sounds.insert(clip.src.clone(), std::rc::Rc::new(sound));
         }
     }
-    let mixed = mix(clips, fps, frames, |path| sounds.get(path).cloned());
+    Ok(Some(mix(clips, fps, frames, |path| {
+        sounds.get(path).cloned()
+    })))
+}
+
+/// The sounds `clips` name, mixed into a temporary WAV for an encoder; `None`
+/// if there are none. The caller removes it.
+pub fn mixed_file(clips: &[AudioClip], fps: f64, frames: u64) -> Result<Option<PathBuf>, String> {
+    let Some(mixed) = mixed(clips, fps, frames)? else {
+        return Ok(None);
+    };
     // A name of its own: renders in one process at once (a host's, a test
     // run's) each mix to a file the others don't remove.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

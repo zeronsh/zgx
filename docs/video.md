@@ -185,7 +185,7 @@ On an Apple M-series Mac shared with other work, the showcase with 4-sample moti
 
 ## Studio
 
-`zgx video studio <dir>` opens the compositions in a window. The window itself is a zgx app (`crates/zgx-video/studio/app.luau`) with a composition list, the preview, a timeline of the sequences shown so far with a playhead to drag, playback at real speed (Space; ← and → step a frame), a props panel that redraws as props change, a render queue (each render added waits its turn and shows its progress, and any queued or running one can be stopped), and reloading as the script is saved. Its frames come from a thread with a virtual clock of its own, through the same code a render uses, so the preview shows what a render writes. While it isn't playing, that thread waits for a message and does no work. `--screenshot out.png --frames N` draws the studio headless.
+`zgx video studio <dir>` opens the compositions in a window. The window itself is a zgx app (`crates/zgx-video/studio/app.luau`) with a composition list, the preview, a timeline of the sequences shown so far with a playhead to drag, playback at real speed with its sound (Space; ← and → step a frame; a Sound switch silences it), a props panel that redraws as props change, a render queue (each render added waits its turn and shows its progress, and any queued or running one can be stopped), and reloading as the script is saved. Its frames come from a thread with a virtual clock of its own, through the same code a render uses, so the preview shows what a render writes. While it isn't playing, that thread waits for a message and does no work. Its sound is the mix a render makes, made again on a thread of its own as the script, the composition or its props change, and heard from the frame it plays (on macOS; elsewhere the preview is silent for now). `--screenshot out.png --frames N` draws the studio headless.
 
 ## A player in any app
 
@@ -198,7 +198,7 @@ player.play(true);
 cx.render(div().size(640., 360.).child(player.view().size(640., 360.)));
 ```
 
-`open(id, props, frame)`, `seek`, `play`, `looping`, `watch` and `reload` drive it. `frame`, `playing`, `composition`, `tracks`, `error` and `image` are its state, as signals. For a Luau app, `player.expose(&host, "clip")` gives the script `ui.image { src = "host:clip" }` to show it, `ui.call("clip.listen")` to follow it, `ui.invoke("clip.open" | "clip.seek" | "clip.play" | "clip.loop" | "clip.watch", …)` to drive it, and `ui.shared("clip")` for its frame, whether it plays, its composition and its error.
+`open(id, props, frame)`, `seek`, `play`, `looping`, `watch`, `reload` and `sound` drive it. `sound(true)` plays its sounds through the speakers as it plays (off to begin with): the mix a render makes, made again as its composition, props or script change, started from the frame due as it's played, sought or looped, and stopped with it, so a player at rest does no work (on macOS; silent elsewhere for now). `frame`, `playing`, `composition`, `tracks`, `error` and `image` are its state, as signals. For a Luau app, `player.expose(&host, "clip")` gives the script `ui.image { src = "host:clip" }` to show it, `ui.call("clip.listen")` to follow it, `ui.invoke("clip.open" | "clip.seek" | "clip.play" | "clip.loop" | "clip.watch" | "clip.sound", …)` to drive it, and `ui.shared("clip")` for its frame, whether it plays, its composition and its error.
 
 ```lua
 -- The script side of a host that called `player.expose(&host, "clip")`.

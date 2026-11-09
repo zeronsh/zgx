@@ -85,6 +85,8 @@ pub fn attach(host: &ScriptHost, path: &Path, scale: f32) -> Result<Rc<Studio>, 
     // The studio follows the player's events into its own state; the
     // player's signals, which nothing here reads, keep a runtime of their own.
     let player = Player::new(&zgx::reactive::Runtime::new(), &path, scale)?;
+    // Heard as it plays, as a render's file would be.
+    player.sound(true);
     let studio = Rc::new(Studio {
         player,
         state,
@@ -153,6 +155,12 @@ pub fn attach(host: &ScriptHost, path: &Path, scale: f32) -> Result<Rc<Studio>, 
         let on = json_of(&arg).as_bool().unwrap_or(true);
         this.merge(json!({ "looping": on }));
         this.player.looping(on);
+    });
+    let this = studio.clone();
+    host.action("studio.sound", move |arg| {
+        let on = json_of(&arg).as_bool().unwrap_or(true);
+        this.merge(json!({ "sound": on }));
+        this.player.sound(on);
     });
     let this = studio.clone();
     host.async_action("studio.render", move |arg| {

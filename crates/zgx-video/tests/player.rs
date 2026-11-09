@@ -836,3 +836,110 @@ fn a_frame_asked_for_survives_a_reload_asked_with_it() {
         drawn_at(&mut stage, &player, 40);
     }
 }
+
+#[test]
+fn a_player_with_sound_on_plays_the_mix_a_render_makes_as_it_plays() {
+    let dir = temp_dir("player-sound");
+    // Two seconds of a ramp (quiet: a test run may have speakers), placed
+    // half a second in.
+    let tone: Vec<f32> = (0..96_000)
+        .flat_map(|i| {
+            let v = (i % 480) as f32 / 480.;
+            [v, -v]
+        })
+        .collect();
+    zgx_video::audio::write_wav(&dir.join("tone.wav"), &tone).unwrap();
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+local video = require("@video")
+return video.compositions { video.composition {
+    id = "Sound", w = 40, h = 20, fps = 30, duration = 90,
+    render = function()
+        return ui.div { w_full = true, h_full = true, bg = "#000000",
+            video.audio { src = "tone.wav", from = 15, volume = 0.02 } }
+    end,
+} }
+"##,
+    )
+    .unwrap();
+    let runtime = zgx::reactive::Runtime::new();
+    let player = Player::new(&runtime, &dir, 1.).unwrap();
+    player.open("Sound", json!({}), 0);
+    let until = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    // Off (as it starts), it makes no mix.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(player.sounding().0.is_none());
+    player.sound(true);
+    until("no mix made", &|| player.sounding().0.is_some());
+    let mix = player.sounding().0.unwrap();
+    // What a render's file holds: three seconds, silent for the first half,
+    // then the tone at its volume.
+    let (clips, fps) = zgx_video::render::placed_audio(&zgx_video::RenderOptions {
+        script: dir.to_path_buf(),
+        composition: Some("Sound".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    let rendered = zgx_video::audio::mixed(&clips, fps, 90).unwrap().unwrap();
+    assert_eq!(&*mix, rendered.as_slice());
+    assert_eq!(mix.len(), 3 * 48_000 * 2);
+    assert_eq!(mix[24_000 * 2 - 2], 0.);
+    assert!((mix[(24_000 + 100) * 2] - tone[200] * 0.02).abs() < 1e-6);
+    // Played, its speakers play; stopped, they stop.
+    player.play(true);
+    until("its speakers didn't play", &|| player.sounding().1);
+    player.play(false);
+    until("its speakers didn't stop", &|| !player.sounding().1);
+    // Off, its mix is let go.
+    player.sound(false);
+    until("its mix was kept", &|| player.sounding().0.is_none());
+}
+
+#[test]
+fn props_changed_many_times_over_make_the_mix_of_the_last() {
+    let dir = temp_dir("player-sound-props");
+    let tone: Vec<f32> = vec![0.5; 48_000 * 2];
+    zgx_video::audio::write_wav(&dir.join("tone.wav"), &tone).unwrap();
+    std::fs::write(
+        dir.join("video.luau"),
+        r##"
+local video = require("@video")
+return video.compositions { video.composition {
+    id = "Level", w = 40, h = 20, fps = 30, duration = 30, props = { level = 1 },
+    render = function(props)
+        return ui.div { w_full = true, h_full = true,
+            video.audio { src = "tone.wav", volume = props.level / 100 } }
+    end,
+} }
+"##,
+    )
+    .unwrap();
+    let runtime = zgx::reactive::Runtime::new();
+    let player = Player::new(&runtime, &dir, 1.).unwrap();
+    player.sound(true);
+    // Props dragged through many values: the mix is the last one's.
+    for level in 1..=20 {
+        player.open("Level", json!({ "level": level }), 0);
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let (Some(mix), _) = player.sounding()
+            && (mix[0] - 0.5 * 0.2).abs() < 1e-6
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the mix is {:?}",
+            player.sounding().0.map(|mix| mix[0])
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
