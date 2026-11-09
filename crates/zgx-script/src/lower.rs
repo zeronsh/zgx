@@ -2937,6 +2937,7 @@ fn kind_view(
             follow,
             scrollbar,
             contain,
+            wheel_across,
             padding,
         } => {
             let offset = match offset {
@@ -2954,6 +2955,11 @@ fn kind_view(
             let view = view.follow_end(*follow);
             let view = if *contain {
                 view.overscroll_contain()
+            } else {
+                view
+            };
+            let view = if *wheel_across {
+                view.wheel_across()
             } else {
                 view
             };
