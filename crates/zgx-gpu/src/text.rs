@@ -272,7 +272,9 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         // What UIKit does for its system font, unasked: a face's tracking at
         // this size. Text with a spacing of its own keeps it.
         #[cfg(target_os = "ios")]
-        if matches!(font.family, FontFamily::SansSerif) {
+        if font.masked || matches!(font.family, FontFamily::SansSerif) {
+            // A secure field's dots are the system font's whatever the
+            // field's font (`uikit_mask` in the fork), so their tracking is.
             return attrs.letter_spacing(system_tracking(size));
         }
         attrs
