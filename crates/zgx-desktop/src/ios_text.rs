@@ -811,7 +811,8 @@ extern "C-unwind" fn can_perform(
         }
     } else if action == sel!(selectAll:) {
         !selected && store.len() > 0
-    } else if secure {
+    } else if secure || action == sel!(share:) {
+        // `share:` too: a UITextField answers no, and yes to `_share:`.
         false
     } else {
         // The system's own for the rest (Look Up, Translate, Share, Replace),
