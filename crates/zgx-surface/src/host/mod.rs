@@ -190,6 +190,13 @@ pub(crate) struct AppInner {
     closed: Cell<bool>,
     /// Revoked (`revoke`): its frames show no more, its input goes nowhere.
     pub(crate) revoked: Cell<bool>,
+    /// The program holds the pointer (a game looking about): its keys are its
+    /// own alone, chords included (Control is a game's crouch or sprint, and
+    /// Control+W must not close the app). Escape still ends the lock.
+    locked: Cell<bool>,
+    /// The element has keyboard focus: modifier keys alone are the
+    /// program's then.
+    focused: Cell<bool>,
 }
 
 impl App {
@@ -278,6 +285,8 @@ impl App {
             exited,
             closed: Cell::new(false),
             revoked: Cell::new(false),
+            locked: Cell::new(false),
+            focused: Cell::new(false),
         });
         App(inner)
     }
@@ -435,10 +444,41 @@ impl App {
                     app.set_visible(on);
                 }
             });
+            // A modifier pressed or let go alone is no key event of zgx's
+            // (only the modifiers held change), yet a game's Shift is
+            // crouch and its Control sprint: while it has focus, each
+            // change is the program's as that key's press or release.
+            let held_now = zgx::input::held_modifiers(&inner.runtime);
+            let weak = app.clone();
+            let last = Cell::new(held_now.with_untracked(|m| *m));
+            let modifiers: Effect = inner.runtime.effect(move || {
+                let now = held_now.get();
+                let was = last.replace(now);
+                let Some(app) = weak.upgrade() else { return };
+                if !app.focused.get() || app.revoked.get() {
+                    return;
+                }
+                for (code, before, after) in [
+                    ("ShiftLeft", was.shift, now.shift),
+                    ("ControlLeft", was.control, now.control),
+                    ("AltLeft", was.alt, now.alt),
+                    ("MetaLeft", was.meta, now.meta),
+                ] {
+                    if before != after {
+                        app.out.input(HostMessage::Key(KeyEvent {
+                            code: code.to_owned(),
+                            down: after,
+                            repeat: false,
+                            modifiers: modifiers_of(now),
+                        }));
+                    }
+                }
+            });
             held.retain(Mounted {
                 app,
                 node: held.node(),
                 _effect: effect,
+                _modifiers: modifiers,
             });
         });
     }
@@ -493,8 +533,9 @@ impl App {
                     modifiers: modifiers_of(*modifiers),
                 });
                 // Its keys are the program's (Tab doesn't move focus out);
-                // the app's shortcuts (Command, Control) stay the app's.
-                if !modifiers.primary_shortcut() {
+                // the app's shortcuts (Command, Control) stay the app's,
+                // unless the program holds the pointer: then they're its own.
+                if self.0.locked.get() || !modifiers.primary_shortcut() {
                     event.prevent_default();
                 }
                 message
@@ -506,9 +547,18 @@ impl App {
                 modifiers: modifiers_of(*modifiers),
             }),
             InputEvent::Text(text) | InputEvent::ImeCommit(text) => HostMessage::Text(text.clone()),
-            InputEvent::Focus => HostMessage::Focus(true),
-            InputEvent::Blur => HostMessage::Focus(false),
-            InputEvent::PointerLockChange(locked) => HostMessage::PointerLock(*locked),
+            InputEvent::Focus => {
+                self.0.focused.set(true);
+                HostMessage::Focus(true)
+            }
+            InputEvent::Blur => {
+                self.0.focused.set(false);
+                HostMessage::Focus(false)
+            }
+            InputEvent::PointerLockChange(locked) => {
+                self.0.locked.set(*locked);
+                HostMessage::PointerLock(*locked)
+            }
             InputEvent::PointerLeave => HostMessage::PointerLeave,
             _ => return,
         };
@@ -521,6 +571,7 @@ struct Mounted {
     app: Weak<AppInner>,
     node: zgx::scene::NodeId,
     _effect: Effect,
+    _modifiers: Effect,
 }
 impl Drop for Mounted {
     fn drop(&mut self) {
