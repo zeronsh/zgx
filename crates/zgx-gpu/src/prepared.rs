@@ -91,13 +91,12 @@ struct Key {
 impl Key {
     fn of(rich: &RichText, caret_row: bool) -> Self {
         let mut spans: smallvec::SmallVec<[Span; 1]> = smallvec::SmallVec::new();
-        for run in rich.runs() {
+        for (index, run) in rich.runs().iter().enumerate() {
             match spans.last_mut() {
                 Some((range, font, size, padding))
                     if *font == run.font
                         && *size == run.font_size
-                        && *padding == 0.
-                        && run.padding[0] == 0.
+                        && ((*padding == 0. && run.padding[0] == 0.) || rich.continues(index))
                         && range.end == run.range.start =>
                 {
                     range.end = run.range.end;
@@ -2128,11 +2127,11 @@ impl TextCache {
                         }
                         let mut end = index + 1;
                         while end < runs.len()
-                            && run.padding[0] == 0.
                             && runs[end].font == run.font
                             && runs[end].font_size == run.font_size
                             && runs[end].range.start == runs[end - 1].range.end
-                            && runs[end].padding[0] == 0.
+                            && ((run.padding[0] == 0. && runs[end].padding[0] == 0.)
+                                || rich.continues(end))
                         {
                             end += 1;
                         }
