@@ -184,8 +184,30 @@ impl PaintCheck {
             .collect();
         #[cfg(not(target_os = "macos"))]
         let masks = Vec::new();
+        // The nodes the flushes since the last frame repainted, and how.
+        let (flushes, repaints) = scene.repaints();
+        let mut repainted = String::new();
+        for &(id, flags) in repaints.iter().take(60) {
+            use std::fmt::Write;
+            let _ = match scene.contains(id) {
+                true => writeln!(
+                    repainted,
+                    "  @{} {} flags {flags:#04x} box {:?} shows {:?}",
+                    id.number(),
+                    zgx::inspect::kind_name(scene, id),
+                    scene.bounds(id),
+                    scene.visible_bounds(id),
+                ),
+                false => writeln!(repainted, "  @{} gone, flags {flags:#04x}", id.number()),
+            };
+        }
+        if repaints.len() > 60 {
+            repainted.push_str(&format!("  … {} more\n", repaints.len() - 60));
+        }
         let report = format!(
-            "damage {damage:?}\nscroll moves {moves:?}\nscroll copies {}\nnotes {notes:#?}\n",
+            "damage {damage:?}\nscroll moves {moves:?}\nscroll copies {}\nnotes {notes:#?}\n\
+             repainted by flushes {flushes:?} (PAINT 1, MOVED 2, COMPOSITE 4, CHILDREN 8, \
+             PAINT_ONLY 32, BOX_ONLY 64):\n{repainted}",
             stats.scroll_copies
         );
         self.pending = Some(Frame {
