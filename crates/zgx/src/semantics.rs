@@ -170,6 +170,9 @@ pub struct SemanticNode {
     pub role: Role,
     /// Its accessible name.
     pub label: String,
+    /// Its value as text (a text field's contents, a paragraph's text):
+    /// kept with the node, as every paragraph has one.
+    pub value: Option<String>,
     /// A checkbox's state: on, off, or `None` for not a checkbox.
     pub checked: Option<bool>,
     /// A checkbox neither on nor off (`View::mixed`): what `checked` says
@@ -205,8 +208,6 @@ pub struct SemanticNode {
 /// A [`SemanticNode`]'s fields that few nodes have.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticRare {
-    /// Its value as text (a text field's contents).
-    pub value: Option<String>,
     /// Committed-text UTF-8 byte offsets, preserving anchor/focus direction.
     pub text_selection: Option<(usize, usize)>,
     /// Accessible ownership for a portal whose physical parent differs. Native
@@ -242,7 +243,6 @@ pub struct SemanticRare {
 }
 /// None set, for a node with none to read as.
 static NO_RARE: SemanticRare = SemanticRare {
-    value: None,
     text_selection: None,
     logical_parent: None,
     min: None,
@@ -291,6 +291,7 @@ impl SemanticNode {
         Self {
             role,
             label: label.into(),
+            value: None,
             named: false,
             checked: None,
             mixed: false,
@@ -653,7 +654,7 @@ impl Semantics {
         if node.label == text && node.value.as_deref() == Some(text.as_str()) {
             return;
         }
-        text.as_str().clone_into(&mut node.label);
+        node.label = text.clone();
         node.value = Some(text);
         self.revision = self.revision.wrapping_add(1);
         entry.revision = self.revision;
@@ -838,35 +839,35 @@ mod tests {
     fn rare_fields_take_no_room_until_set_and_compare_by_what_they_hold() {
         let mut node = SemanticNode::new(Role::Button, "Save");
         assert!(node.rare.0.is_none());
-        assert_eq!(node.value, None);
+        assert_eq!(node.description, None);
         assert_eq!(node.numeric_value, None);
         assert!(node.rare.0.is_none(), "reading makes nothing");
         let plain = node.clone();
-        node.value = Some("x".into());
+        node.description = Some("x".into());
         node.numeric_value = Some(7.);
         assert!(node.rare.0.is_some());
-        assert_eq!(node.value.as_deref(), Some("x"));
+        assert_eq!(node.description.as_deref(), Some("x"));
         assert_eq!(node.numeric_value, Some(7.));
         assert_ne!(node, plain);
         assert_eq!(node.clone(), node);
-        node.value = None;
+        node.description = None;
         node.numeric_value = None;
         assert_eq!(node, plain, "made and emptied is never made");
         // A copy shares them until one of the two assigns, and that leaves the
         // other as it was.
-        node.value = Some("x".into());
+        node.description = Some("x".into());
         let mut copy = node.clone();
         assert!(Rc::ptr_eq(
             node.rare.0.as_ref().unwrap(),
             copy.rare.0.as_ref().unwrap()
         ));
-        copy.value = Some("y".into());
-        assert_eq!(node.value.as_deref(), Some("x"));
-        assert_eq!(copy.value.as_deref(), Some("y"));
+        copy.description = Some("y".into());
+        assert_eq!(node.description.as_deref(), Some("x"));
+        assert_eq!(copy.description.as_deref(), Some("y"));
         assert_ne!(node, copy);
         // What every labelled node pays, in a table of them.
         assert!(
-            std::mem::size_of::<SemanticEntry>() <= 56,
+            std::mem::size_of::<SemanticEntry>() <= 80,
             "{} bytes",
             std::mem::size_of::<SemanticEntry>()
         );
