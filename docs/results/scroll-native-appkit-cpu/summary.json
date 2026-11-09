@@ -1,0 +1,35 @@
+{
+  "condition": "ordinary AppKit NSScrollView/NSTextView, W1114x685pt,2x,120Hz requested, exact synthetic flick displacement replayed on CADisplayLink; CPU-only, no presented-time lateness claim",
+  "trials": [
+    {
+      "trial": 0,
+      "valid": true,
+      "applied_events": 482,
+      "offset": 25052.176113999994,
+      "expected_offset": 25052.176113999994,
+      "duration_ms": 4016.683083355427,
+      "windowserver_cpu_mean": 27.88149857280158,
+      "cpu_samples": 8
+    },
+    {
+      "trial": 1,
+      "valid": true,
+      "applied_events": 482,
+      "offset": 25052.176113999994,
+      "expected_offset": 25052.176113999994,
+      "duration_ms": 4016.6538333296776,
+      "windowserver_cpu_mean": 30.44053573837675,
+      "cpu_samples": 7
+    },
+    {
+      "trial": 2,
+      "valid": true,
+      "applied_events": 482,
+      "offset": 25052.176113999994,
+      "expected_offset": 25052.176113999994,
+      "duration_ms": 4016.651166677475,
+      "windowserver_cpu_mean": 29.7192370519389,
+      "cpu_samples": 7
+    }
+  ]
+}
