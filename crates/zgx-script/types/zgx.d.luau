@@ -5909,7 +5909,8 @@ export type Object3DProps = {
 -- How a surface takes light (metallic-roughness): `color` and `emissive`
 -- colours (hex, names, `$tokens`), `metallic` and `roughness` 0 to 1,
 -- `opacity` 0 to 1, `unlit` shows its colour as it is, `double_sided`
--- draws its back faces too (an open shell, a cut-away).
+-- draws its back faces too (an open shell, a cut-away): a plain boolean,
+-- read once as the mesh is made.
 export type Material3D = {
 	color: Reactive<Color>?,
 	metallic: Reactive<number>?,

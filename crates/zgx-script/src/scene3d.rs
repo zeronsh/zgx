@@ -312,24 +312,27 @@ fn material(table: Option<Table>) -> mlua::Result<MaterialSpec> {
         emissive: opt_color(&table, "emissive")?,
         opacity: opt_num(&table, "opacity")?,
         unlit: table.get::<Option<bool>>("unlit")?.unwrap_or(false),
-        double_sided: table.get::<Option<bool>>("double_sided")?.unwrap_or(false),
+        double_sided: boolean(&table, "double_sided", "ui.mesh `material.double_sided`")?,
     })
 }
 /// A literal number of `table`, or `default`.
 fn lit(table: &Table, key: &str, default: f32) -> mlua::Result<f32> {
     Ok(table.get::<Option<f32>>(key)?.unwrap_or(default))
 }
-fn geometry(table: &Table) -> mlua::Result<Geometry> {
-    let kind: String = match table.get::<mlua::Value>("geometry")? {
-        mlua::Value::Nil => "box".into(),
-        mlua::Value::String(name) => name.to_str()?.to_owned(),
-        mlua::Value::Table(own) => return own_geometry(&own),
-        other => {
-            return Err(wrong(format_args!(
-                "ui.mesh `geometry` is a shape's name or {{ positions, indices, … }}, not {}",
-                other.type_name()
-            )));
-        }
+fn geometry(lua: &Lua, table: &Table) -> mlua::Result<Geometry> {
+    // A name, read as one: anything else goes by the slower way, which holds a
+    // reference to what it read (a named shape took 3% more instructions).
+    let kind: String = match table.get::<Option<String>>("geometry") {
+        Ok(name) => name.unwrap_or_else(|| "box".into()),
+        Err(_) => match table.get::<mlua::Value>("geometry")? {
+            mlua::Value::Table(own) => return own_geometry(lua, &own),
+            other => {
+                return Err(wrong(format_args!(
+                    "ui.mesh `geometry` is a shape's name or {{ positions, indices, … }}, not {}",
+                    other.type_name()
+                )));
+            }
+        },
     };
     let size = |default: f32| -> mlua::Result<[f32; 3]> {
         match table.get::<mlua::Value>("size")? {
@@ -388,8 +391,20 @@ fn geometry(table: &Table) -> mlua::Result<Geometry> {
 /// three a triangle), so a mistaken table can't ask for gigabytes.
 const MOST_VERTICES: usize = 1 << 22;
 
+/// `key` of `table`, a boolean, `false` unsaid: not `true` for whatever else
+/// (a state, which it wouldn't follow).
+fn boolean(table: &Table, key: &str, what: &str) -> mlua::Result<bool> {
+    match table.get::<mlua::Value>(key)? {
+        mlua::Value::Nil => Ok(false),
+        mlua::Value::Boolean(on) => Ok(on),
+        other => Err(wrong(format_args!(
+            "{what} is a boolean, not {}",
+            other.type_name()
+        ))),
+    }
+}
 /// `numbers` of `table`, a flat list (`{ x, y, z, x, y, z, … }`), or
-/// `None` unsaid.
+/// `None` unsaid. Each is finite as the renderer takes it, a 32-bit float.
 fn flat_numbers(table: &Table, key: &str) -> mlua::Result<Option<Vec<f32>>> {
     let list = match table.get::<mlua::Value>(key)? {
         mlua::Value::Nil => return Ok(None),
@@ -410,8 +425,13 @@ fn flat_numbers(table: &Table, key: &str) -> mlua::Result<Option<Vec<f32>>> {
     let mut out = Vec::with_capacity(n);
     for i in 1..=n {
         match list.raw_get::<mlua::Value>(i)? {
-            mlua::Value::Number(v) => out.push(v as f32),
+            mlua::Value::Number(v) if (v as f32).is_finite() => out.push(v as f32),
             mlua::Value::Integer(v) => out.push(v as f32),
+            mlua::Value::Number(v) => {
+                return Err(wrong(format_args!(
+                    "ui.mesh geometry `{key}`[{i}] is {v}: a finite number"
+                )));
+            }
             other => {
                 return Err(wrong(format_args!(
                     "ui.mesh geometry `{key}`[{i}] is a number, not {}",
@@ -447,9 +467,11 @@ fn colors_of(list: &[f32], count: usize, key: &str) -> mlua::Result<Vec<[f32; 4]
         })
         .collect())
 }
+/// `v` of length 1; up, if it has no direction to keep: a degenerate
+/// triangle's, or one too large for its length to be a number.
 fn unit(v: Vec3) -> [f32; 3] {
     let length = v.length();
-    if length > 1e-12 {
+    if length > 1e-12 && length.is_finite() {
         let v = v * (1. / length);
         [v.x, v.y, v.z]
     } else {
@@ -469,7 +491,11 @@ fn unit(v: Vec3) -> [f32; 3] {
 ///   multiplying the material's colour.
 /// - `face_normals`, `face_colors`: a triangle's each instead. Either, or
 ///   `flat = true`, draws each triangle flat on vertices of its own.
-fn own_geometry(spec: &Table) -> mlua::Result<Geometry> {
+///
+/// What it holds lives outside the VM, so it's asked of what the script may
+/// hold (`Limits::memory`) and, for a plugin, counted with its VM's and its
+/// states' (`meter`) for as long as anything holds the geometry.
+fn own_geometry(lua: &Lua, spec: &Table) -> mlua::Result<Geometry> {
     let Some(positions) = flat_numbers(spec, "positions")? else {
         return Err(wrong(format_args!(
             "ui.mesh geometry needs `positions`: {{ x, y, z, … }}"
@@ -509,14 +535,40 @@ fn own_geometry(spec: &Table) -> mlua::Result<Geometry> {
     let triangles = indices.len() / 3;
     let face_normals = flat_numbers(spec, "face_normals")?;
     let face_colors = flat_numbers(spec, "face_colors")?;
-    let flat = spec.get::<Option<bool>>("flat")?.unwrap_or(false)
+    let flat = boolean(spec, "flat", "ui.mesh geometry `flat`")?
         || face_normals.is_some()
         || face_colors.is_some();
     let face = |t: usize| {
         let [a, b, c] = [0, 1, 2].map(|k| at(indices[t * 3 + k] as usize));
         (b - a).cross(c - a)
     };
-    let made = if flat {
+    let colors = flat_numbers(spec, "colors")?;
+    let weight = |vertices: usize, colored: bool| {
+        vertices * std::mem::size_of::<Vertex>()
+            + indices.len() * std::mem::size_of::<u32>()
+            + if colored {
+                vertices * std::mem::size_of::<[f32; 4]>()
+            } else {
+                0
+            }
+    };
+    let meter = lua
+        .app_data_ref::<crate::node::Env>()
+        .and_then(|env| env.meter.clone());
+    let room = |bytes: usize| match &meter {
+        Some(meter) => meter.room(bytes).map_err(|_| {
+            let mb = |bytes: usize| bytes as f64 / f64::from(1 << 20);
+            wrong(format_args!(
+                "ui.mesh geometry needs {:.1} MB: a plugin's memory is {:.0} MB at most \
+                 (`Limits::plugin_memory`), with {:.1} MB of it held",
+                mb(bytes),
+                mb(meter.limit()),
+                mb(meter.used()),
+            ))
+        }),
+        None => crate::room_for(lua, "ui.mesh geometry", bytes),
+    };
+    let (made, bytes) = if flat {
         if triangles * 3 > MOST_VERTICES {
             return Err(wrong(format_args!(
                 "ui.mesh geometry has {triangles} triangles, more than it may"
@@ -530,10 +582,32 @@ fn own_geometry(spec: &Table) -> mlua::Result<Geometry> {
                 n.len()
             )));
         }
-        let colors = face_colors
-            .as_deref()
-            .map(|c| colors_of(c, triangles, "face_colors"))
-            .transpose()?;
+        if flat_numbers(spec, "normals")?.is_some() {
+            return Err(wrong(format_args!(
+                "ui.mesh geometry drawn flat has `face_normals`, or none, not `normals`"
+            )));
+        }
+        // A corner's each: a triangle's, or its vertex's.
+        let corners: Option<Vec<[f32; 4]>> = match (&face_colors, &colors) {
+            (Some(_), Some(_)) => {
+                return Err(wrong(format_args!(
+                    "ui.mesh geometry has `colors` or `face_colors`, not both"
+                )));
+            }
+            (Some(c), None) => Some(
+                colors_of(c, triangles, "face_colors")?
+                    .into_iter()
+                    .flat_map(|c| [c, c, c])
+                    .collect(),
+            ),
+            (None, Some(c)) => {
+                let colors = colors_of(c, count, "colors")?;
+                Some(indices.iter().map(|&i| colors[i as usize]).collect())
+            }
+            (None, None) => None,
+        };
+        let bytes = weight(triangles * 3, corners.is_some());
+        room(bytes)?;
         let mut vertices = Vec::with_capacity(triangles * 3);
         for t in 0..triangles {
             let normal = match &face_normals {
@@ -550,12 +624,11 @@ fn own_geometry(spec: &Table) -> mlua::Result<Geometry> {
         }
         let geometry = Geometry::new(vertices, (0..triangles as u32 * 3).collect())
             .map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))?;
-        match colors {
-            Some(colors) => {
-                geometry.with_colors(colors.into_iter().flat_map(|c| [c, c, c]).collect())
-            }
+        let made = match corners {
+            Some(corners) => geometry.with_colors(corners),
             None => Ok(geometry),
-        }
+        };
+        (made, bytes)
     } else {
         if count > MOST_VERTICES {
             return Err(wrong(format_args!(
@@ -564,8 +637,10 @@ fn own_geometry(spec: &Table) -> mlua::Result<Geometry> {
         }
         let normals: Vec<[f32; 3]> = match flat_numbers(spec, "normals")? {
             Some(n) if n.len() == count * 3 => n
-                .chunks_exact(3)
-                .map(|n| unit(vec3(n[0], n[1], n[2])))
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|&[x, y, z]| unit(vec3(x, y, z)))
                 .collect(),
             Some(n) => {
                 return Err(wrong(format_args!(
@@ -586,9 +661,9 @@ fn own_geometry(spec: &Table) -> mlua::Result<Geometry> {
                 sum.into_iter().map(unit).collect()
             }
         };
-        let colors = flat_numbers(spec, "colors")?
-            .map(|c| colors_of(&c, count, "colors"))
-            .transpose()?;
+        let colors = colors.map(|c| colors_of(&c, count, "colors")).transpose()?;
+        let bytes = weight(count, colors.is_some());
+        room(bytes)?;
         let vertices = (0..count)
             .map(|i| Vertex {
                 position: corner(i),
@@ -598,12 +673,17 @@ fn own_geometry(spec: &Table) -> mlua::Result<Geometry> {
             .collect();
         let geometry = Geometry::new(vertices, indices)
             .map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))?;
-        match colors {
+        let made = match colors {
             Some(colors) => geometry.with_colors(colors),
             None => Ok(geometry),
-        }
+        };
+        (made, bytes)
     };
-    made.map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))
+    let made = made.map_err(|e| wrong(format_args!("ui.mesh geometry: {e}")))?;
+    if let Some(meter) = &meter {
+        meter.hold_native(made.watch(), bytes);
+    }
+    Ok(made)
 }
 
 /// `ui.scene3d`, `ui.mesh`, `ui.light`, `ui.group`: one closure type for
@@ -628,7 +708,7 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
 
 /// `ui.mesh { geometry, size, material, position, rotation, scale }`.
 fn mesh(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
-    let shape = Shape::Mesh(geometry(&table)?, material(table.get("material")?)?);
+    let shape = Shape::Mesh(geometry(lua, &table)?, material(table.get("material")?)?);
     placed(lua, &table, shape)
 }
 
