@@ -5336,6 +5336,7 @@ name = "zgx-terminal"
 version = "0.1.10"
 dependencies = [
  "libc",
+ "memchr",
  "polling",
  "windows-sys 0.59.0",
  "zgx",
