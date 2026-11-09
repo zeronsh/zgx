@@ -2259,6 +2259,34 @@ ui.text { "d", text_size = 14 }
         );
     }
 
+    /// A string is one token, whatever it holds: a script handed to a renderer
+    /// of its own means what that renderer means by `size`.
+    #[test]
+    fn a_size_inside_a_string_or_a_comment_is_not_reported() {
+        let source = r##"
+local a = "ui.text { 'x', size = 14 }"
+local b = 'ui.text { "x", size = 14 }'
+local c = [[
+    ui.text { "x", size = 14 }
+    ui.button { "y", size = 24 }
+]]
+local d = [==[ ui.text { "x", size = 14 } ]] still inside ]==]
+local e = `ui.text \{ "x", size = 14 \}`
+local f = `{name}: ui.text \{ size = 14 \} {other}`
+local g = `{ui.text { "x", size = 14 }}`
+-- ui.text { "x", size = 14 }
+--[[ ui.text { "x", size = 14 } ]]
+--[==[ ui.button { "y", size = 24 } ]==]
+ui.text { [[ size = 14 ]], text_size = 14 }
+ui.text { "size = 14", text_size = 14 }
+"##;
+        assert_eq!(rules(source), Vec::<(u32, String)>::new());
+        // After all of them, a real one is still seen, on its own line.
+        let real = format!("{source}ui.text {{ \"x\", size = 14 }}\n");
+        let line = real.lines().count() as u32;
+        assert_eq!(rules(&real), [(line, "size-inert".to_string())]);
+    }
+
     #[test]
     fn a_zoom_beside_a_zoomable_is_reported() {
         let source = r##"
