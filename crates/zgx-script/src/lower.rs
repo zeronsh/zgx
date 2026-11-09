@@ -9579,18 +9579,13 @@ fn pin_in_place(scene: &mut zgx::scene::Scene, entry: zgx::scene::NodeId) {
 /// `arranged` its content itself (`items`, `justify`: `ARRANGES`), an
 /// overlay, which lays out as that grid does without a taffy run:
 /// presences with sizing of their own nest a few deep around each
-/// paragraph of a chat. It reads its content's own alignment (`self`)
-/// down, as the grid does (`Scene::set_aligns_down`); its own `items`
-/// would align across, where the grid's align down.
+/// paragraph of a chat. Its `items` would align across, where the grid's
+/// align down.
 fn cell(arranged: bool) -> View {
     if arranged {
         column().grid().grid_cols(1).grid_rows(1).items_stretch()
     } else {
-        overlay().on_mount(|cell| {
-            if let Some(scene) = cell.scene() {
-                scene.borrow_mut().set_aligns_down(cell.node(), true);
-            }
-        })
+        overlay()
     }
 }
 

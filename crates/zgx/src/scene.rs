@@ -1906,8 +1906,6 @@ struct ColdMaps {
     outline_inners: NodeMap<(f32, Color)>,
     /// Boxes whose width their content doesn't size (`set_contained`).
     contained: NodeMap<Contained>,
-    /// Overlays whose children align themselves down (`set_aligns_down`).
-    aligns_down: NodeMap<AlignsDown>,
     /// Text filled with a gradient (`set_text_gradient`).
     text_gradients: NodeMap<TextGradient>,
     /// Gradient masks (`set_mask_gradient`), each with the size its mask
@@ -1988,8 +1986,6 @@ impl HitTarget {
 struct Flat;
 /// A box whose width its content doesn't size (`Scene::set_contained`).
 struct Contained;
-/// An overlay whose children align themselves down (`Scene::set_aligns_down`).
-struct AlignsDown;
 /// A node holding at `top` below its scroll view's top (`Scene::set_sticky`).
 #[derive(Clone, Copy)]
 struct Sticky {
@@ -5036,68 +5032,6 @@ impl Scene {
         self.sync_cold(id);
         self.invalidate_layout(id);
     }
-    /// Lay `id`, an overlay, out as a one-column grid with its items
-    /// stretched lays out its children in its one cell: each child's own
-    /// alignment (`align_self`) places it down rather than across, where
-    /// it fills the overlay or aligns as the overlay's `align` says. A
-    /// child that sets none aligns down as the overlay's `justify` says,
-    /// as in any overlay. While a child in its flow aligns itself, the
-    /// overlay lays out through taffy, as that grid (`aligned_down`);
-    /// otherwise as any overlay. Only it pays for that: it is a cold node.
-    pub fn set_aligns_down(&mut self, id: NodeId, on: bool) {
-        if self.aligns_down(id) == on || !self.contains(id) {
-            return;
-        }
-        let maps = self.cold.get_or_insert_default();
-        match on {
-            true => {
-                maps.aligns_down.insert(id, AlignsDown);
-            }
-            false => {
-                maps.aligns_down.remove(&id);
-            }
-        }
-        self.sync_cold(id);
-        // Taffy's mapping of its children reads it: mapped anew.
-        self.node_mut(id).advanced_layout = None;
-        self.invalidate_layout(id);
-    }
-    /// Whether `id`'s children align themselves down (`set_aligns_down`).
-    pub fn aligns_down(&self, id: NodeId) -> bool {
-        self.tree_node(id).special.has(COLD)
-            && self
-                .cold
-                .as_ref()
-                .is_some_and(|cold| cold.aligns_down.contains_key(&id))
-    }
-    /// `id`'s layout, if it is an overlay whose children align themselves
-    /// down (`set_aligns_down`) and one in its flow does: laid out through
-    /// taffy, which reads it so (`stacked_style`).
-    pub(crate) fn aligned_down(&self, id: NodeId) -> Option<Layout> {
-        let node = self.tree_node(id);
-        if !node.special.has(COLD) {
-            return None;
-        }
-        let layout = match node.kind {
-            NodeKind::Container(layout) | NodeKind::Panel { layout, .. } => layout,
-            _ => return None,
-        };
-        if layout != Layout::Overlay || !self.aligns_down(id) {
-            return None;
-        }
-        self.children_raw(node)
-            .iter()
-            .any(|child| {
-                let style = &self.tree_node(*child).style;
-                !style.absolute
-                    && style
-                        .layout_options
-                        .as_deref()
-                        .and_then(|options| options.align_self)
-                        .is_some_and(|own| own != Align::Stretch)
-            })
-            .then_some(layout)
-    }
     /// Whether `id`'s width is its own, not its content's (`set_contained`).
     pub fn is_contained(&self, id: NodeId) -> bool {
         self.cold
@@ -7206,7 +7140,6 @@ impl Scene {
                 || cold.outline_styles.contains_key(&id)
                 || cold.outline_inners.contains_key(&id)
                 || cold.contained.contains_key(&id)
-                || cold.aligns_down.contains_key(&id)
                 || cold.mask_gradients.contains_key(&id)
                 || cold.text_gradients.contains_key(&id)
                 || cold.languages.contains_key(&id)
@@ -7904,7 +7837,6 @@ impl Scene {
             maps.outline_inners.remove(&id);
             maps.steps.remove(&id);
             maps.contained.remove(&id);
-            maps.aligns_down.remove(&id);
             maps.mask_gradients.remove(&id);
             maps.text_gradients.remove(&id);
             if maps.languages.remove(&id).is_some() {
@@ -11383,9 +11315,6 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn measure_special(&mut self, id: NodeId, constraints: Constraints) -> Option<(f32, f32)> {
-        if let Some(layout) = self.aligned_down(id) {
-            return Some(self.measure_advanced(id, layout, constraints));
-        }
         if constraints.force_width.is_none()
             && self.is_contained(id)
             && let Some(size) = self.measure_contained(id, constraints)
