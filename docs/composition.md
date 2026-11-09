@@ -753,7 +753,7 @@ the rest bubbles to an enclosing vertical scroller. A gesture stays with the vie
 it latched to, its drift included, until a pause or a clear turn to the other
 axis. `.wheel_across()` lets a mouse wheel, which has no sideways axis, move one
 too: with Shift always (never the page), and without once the pointer has been
-moved onto it, going on to the views around it at its edge. A viewport that slid
+moved onto it, going on to the views around it after a pause at its edge. A viewport that slid
 under a resting pointer leaves the wheel to the page, and a swipe mostly down
 leaves it still. Accessibility scroll actions use
 the viewport's declared axis. Focus reveal follows that same axis, including

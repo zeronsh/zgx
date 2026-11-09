@@ -555,25 +555,39 @@ struct ScrollLatch {
     at: Instant,
     /// Where the pointer was as it last scrolled.
     pointer: (f32, f32),
+    /// How far the gesture has lately gone the other way, in a row
+    /// (`scroll_turn`).
+    turn: f32,
 }
 
 /// How far the pointer moves before a mouse wheel's next notch is no longer
 /// the latched gesture's: past a hand's tremor, short of another view.
 const WHEEL_MOVED: f32 = 2.;
 
-/// How far a scroll must move along the other axis to be a turn rather than a
-/// finger's drift.
+/// How far a latched gesture must go the other way, summed over the scrolls
+/// in a row that each go mostly that way, to be a turn rather than a finger's
+/// drift. A sum, not one scroll's: a turn is as far whatever the rate the
+/// platform reports a gesture's motion at.
 const SCROLL_TURN: f32 = 8.;
 
-/// Whether a scroll has left a gesture along `horizontal`: clearly moving the
-/// other way, at least twice as far as along it.
-fn axis_turned(horizontal: bool, delta_x: f32, delta_y: f32) -> bool {
+/// A gesture latched along `horizontal`, `turn` points gone the other way in
+/// a row so far, after this scroll: how far it has gone the other way in a row
+/// now (a scroll mostly along it starts again from none), or `None` once that
+/// is a turn. A scroll going the other way goes at least twice as far as along.
+fn scroll_turn(horizontal: bool, turn: f32, delta_x: f32, delta_y: f32) -> Option<f32> {
     let (own, other) = if horizontal {
         (delta_x, delta_y)
     } else {
         (delta_y, delta_x)
     };
-    other.abs() >= SCROLL_TURN && other.abs() >= 2. * own.abs()
+    let turn = if own == 0. && other == 0. {
+        turn
+    } else if other.abs() >= 2. * own.abs() {
+        turn + other.abs()
+    } else {
+        0.
+    };
+    (turn < SCROLL_TURN).then_some(turn)
 }
 
 thread_local! {
@@ -818,7 +832,7 @@ struct State {
     key_code: Option<Rc<str>>,
     /// The scroll view a wheel gesture is latched to: the rest of the
     /// gesture goes to it alone, its drift included, until it clearly turns
-    /// (`axis_turned`), a new one begins, or it ends (`ScrollLatch`).
+    /// (`scroll_turn`), a new one begins, or it ends (`ScrollLatch`).
     scroll_latch: Option<ScrollLatch>,
     /// The modifier keys last known held (from the platform's pointer and
     /// key events): what an activation (a click) was made with.
@@ -921,6 +935,13 @@ impl InputDispatcher {
             .navigators
             .retain(|n| *n != node && scene.contains(*n));
         state.navigators.push(node);
+    }
+    /// Ends the wheel gesture under way, as a pause does (`SCROLL_LATCH`):
+    /// what scrolls next is what's under the pointer. For tests, which would
+    /// otherwise sleep past the pause.
+    #[doc(hidden)]
+    pub fn pause_scrolling(&self) {
+        self.state.borrow_mut().scroll_latch = None;
     }
     /// Whether `target` or a view around it takes navigation
     /// (`take_navigation`). Reads only.
@@ -2749,12 +2770,13 @@ impl InputDispatcher {
             let now = Instant::now();
             let (x, y, delta_x, delta_y) = (*x, *y, *delta_x, *delta_y);
             let wheel = mouse_wheel_shift().is_some();
-            let latched = self.state.borrow().scroll_latch.filter(|latch| {
-                !axis_turned(latch.axis, delta_x, delta_y)
-                    && now.saturating_duration_since(latch.at) < SCROLL_LATCH
+            let latched = self.state.borrow().scroll_latch.and_then(|latch| {
+                let turn = scroll_turn(latch.axis, latch.turn, delta_x, delta_y)?;
+                (now.saturating_duration_since(latch.at) < SCROLL_LATCH
                     && !(wheel && (x - latch.pointer.0).hypot(y - latch.pointer.1) > WHEEL_MOVED)
                     && scene.borrow().contains(latch.node)
-                    && self.enabled(&scene.borrow(), latch.node)
+                    && self.enabled(&scene.borrow(), latch.node))
+                .then_some(ScrollLatch { turn, ..latch })
             });
             if let Some(latch) = latched {
                 let node = latch.node;
@@ -2949,6 +2971,7 @@ impl InputDispatcher {
                         axis: horizontal,
                         at: Instant::now(),
                         pointer: (x, y),
+                        turn: 0.,
                     });
             }
             if let Some((source, payload, pressed_at)) = ctx.drag_request.clone()

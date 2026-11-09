@@ -3947,7 +3947,8 @@ export type ScrollProps = {
 	overscroll: ("auto" | "contain")?,
 	-- `ui.scroll_x`: a mouse wheel, which has no sideways axis, moves it: with
 	-- Shift always (never the page), and without once the pointer has been
-	-- moved onto it, going on to the views around it at its edge. A trackpad's
+	-- moved onto it, going on to the views around it after a pause at its
+	-- edge. A trackpad's
 	-- swipe mostly down leaves it still.
 	wheel_across: boolean?,
 	-- What a focused control or a find keeps clear of scrolling into view
