@@ -2141,6 +2141,56 @@ mod rich_tests {
             assert_eq!(first.w.to_bits(), last.w.to_bits(), "each padded once");
         }
     }
+    /// A chip's words are where they are whatever was shaped before: a
+    /// fade splitting a chip at its spaces (`a` and ` + a` runs of their
+    /// own, each padded) shaped its blank at a padded run's start, and the
+    /// cache kept it padded, so every later chip's blank in that style drew
+    /// 4 points wider (Zeron's chips grew as their replies faded in). Now
+    /// the same as shaped afresh, padded at the chip's own ends alone.
+    #[test]
+    fn a_chip_shaped_after_its_split_pieces_is_as_shaped_afresh() {
+        let code = FontStyle {
+            family: zgx::text_layout::FontFamily::Monospace,
+            ..FontStyle::default()
+        };
+        let chip = |range: std::ops::Range<usize>| TextRun {
+            range,
+            font: code.clone(),
+            font_size: 14.,
+            padding: [4., 1.],
+            ..Default::default()
+        };
+        let plain = |range| TextRun {
+            range,
+            font_size: 16.,
+            ..Default::default()
+        };
+        let text = "x a + a y, `x + x` too";
+        let whole =
+            RichText::new(text, vec![plain(0..2), chip(2..7), plain(7..text.len())]).unwrap();
+        // As a fade splits it: a run of its own from its first space.
+        let split = RichText::new(
+            text,
+            vec![plain(0..2), chip(2..3), chip(3..7), plain(7..text.len())],
+        )
+        .unwrap();
+        let glyphs = |fonts: &mut FontSystem, rich: &RichText| -> Vec<_> {
+            let buffer = rich_buffer(fonts, rich, Some(684.), None);
+            buffer
+                .layout_runs()
+                .flat_map(|run| {
+                    run.glyphs
+                        .iter()
+                        .map(|g| (g.start, [g.x, g.w, g.x_offset].map(f32::to_bits)))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let fresh = glyphs(&mut bundled_test_fonts(), &whole);
+        let mut fonts = bundled_test_fonts();
+        glyphs(&mut fonts, &split);
+        assert_eq!(glyphs(&mut fonts, &whole), fresh, "after its split pieces");
+    }
     /// A family without the weight asked for draws in its own nearest
     /// face, as CSS's font matching does: Medium text in a family with
     /// Regular alone stays in that family rather than taking another's
