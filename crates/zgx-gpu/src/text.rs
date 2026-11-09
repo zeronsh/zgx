@@ -2002,9 +2002,10 @@ pub(crate) fn rich_buffer_unshaped(
             && runs[end].font == run.font
             && runs[end].font_size == run.font_size
             && runs[end].range.start == runs[end - 1].range.end
-            // A padded run's room goes around it alone (an inline box is one).
-            && run.padding[0] == 0.
-            && runs[end].padding[0] == 0.
+            // A padded run's room goes around it alone (an inline box is
+            // one), or around the span it goes on (`RichText::continues`:
+            // cut by a fade).
+            && ((run.padding[0] == 0. && runs[end].padding[0] == 0.) || rich.continues(end))
         {
             end += 1;
         }
@@ -2139,6 +2140,144 @@ mod rich_tests {
             );
             assert!(last.w > first.w - first.x_offset * first.font_size - 0.01);
             assert_eq!(first.w.to_bits(), last.w.to_bits(), "each padded once");
+        }
+    }
+    /// A paragraph whose spans a fade cut into runs at its pieces (Zeron's
+    /// veil: a piece every 24 bytes, anywhere, a chip's span cut after a
+    /// space or inside a word, a link's too), its fades done, draws as the
+    /// paragraph whole: each chip padded at its ends alone, one wash a line,
+    /// one underline: shaped (cosmic-text's line, and the prepared text's
+    /// words) and decorated alike.
+    #[test]
+    fn a_paragraph_cut_into_pieces_draws_as_whole() {
+        let code = FontStyle {
+            family: zgx::text_layout::FontFamily::Monospace,
+            ..FontStyle::default()
+        };
+        // Zeron's paragraph: its parts, plain (0), chip (1), bold (2), link (3).
+        let parts = [
+            (
+                "The plan costs $5 and $10 a seat, or \\$3 with the discount; the bound is ",
+                0,
+            ),
+            ("$O(n \\log n)$", 1),
+            (" for part 28, and ", 0),
+            ("the rest", 2),
+            (" follows from it. A ", 0),
+            ("link", 3),
+            (" and ", 0),
+            ("inline code", 1),
+            (" too.", 0),
+        ];
+        let text: String = parts.iter().map(|(part, _)| *part).collect();
+        let style = |kind: u8, range: std::ops::Range<usize>| {
+            let mut run = TextRun {
+                range,
+                font_size: 16.,
+                color: Color(228, 228, 232, 255),
+                ..Default::default()
+            };
+            match kind {
+                1 => {
+                    run.font = code.clone();
+                    run.font_size = 14.;
+                    run.background = Some(Color(255, 255, 255, 26));
+                    run.padding = [4., 1.];
+                    run.radius = 4.5;
+                }
+                2 => {
+                    run.font = FontStyle {
+                        weight: 650,
+                        ..FontStyle::default()
+                    }
+                }
+                3 => run.underline = Some(zgx::rich_text::Decoration::new(1.)),
+                _ => {}
+            }
+            run
+        };
+        // Its runs, each part cut where a piece ends (none: whole).
+        let runs = |cuts: &[usize]| {
+            let mut runs = Vec::new();
+            let mut start = 0;
+            for (part, kind) in parts {
+                let end = start + part.len();
+                let mut at = start;
+                for cut in cuts
+                    .iter()
+                    .copied()
+                    .filter(|cut| *cut > start && *cut < end)
+                {
+                    runs.push(style(kind, at..cut));
+                    at = cut;
+                }
+                runs.push(style(kind, at..end));
+                start = end;
+            }
+            RichText::new(text.clone(), runs).unwrap()
+        };
+        let drawn = |fonts: &mut FontSystem, rich: &RichText, width: f32| {
+            let buffer = rich_buffer(fonts, rich, Some(width), None);
+            let glyphs: Vec<_> = buffer
+                .layout_runs()
+                .flat_map(|run| {
+                    let y = run.line_y;
+                    run.glyphs
+                        .iter()
+                        .map(move |g| {
+                            (
+                                g.start,
+                                g.glyph_id,
+                                [g.x, g.w, g.x_offset, y].map(f32::to_bits),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let decorations: Vec<_> = rich_decorations(&buffer, rich)
+                .iter()
+                .map(|d| (d.background, d.strike, d.color, d.radius, d.bounds))
+                .collect();
+            (glyphs, decorations)
+        };
+        let mut fonts = bundled_test_fonts();
+        let whole = runs(&[]);
+        // Pieces of 24 bytes, and at once a chip's after its space and
+        // inside a word (`in|line`) and the link's middle.
+        let every: Vec<usize> = (1..text.len() / 24 + 1).map(|i| i * 24).collect();
+        let chip = text.find("$O(n").unwrap();
+        let inline = text.find("inline").unwrap();
+        let link = text.find("link").unwrap();
+        for cuts in [every, vec![chip + 4, inline + 2, link + 2]] {
+            let cut = runs(&cuts);
+            for width in [684., 520., 300.] {
+                assert_eq!(
+                    drawn(&mut fonts, &cut, width),
+                    drawn(&mut fonts, &whole, width),
+                    "cut at {cuts:?}, {width} wide"
+                );
+                // The prepared text, from its words, alike.
+                let mut cache = crate::prepared::TextCache::default();
+                let mut lines =
+                    |cache: &mut crate::prepared::TextCache, rich: &RichText| -> Vec<_> {
+                        cache
+                            .layout(&mut fonts, rich, Some(width))
+                            .runs(None)
+                            .flat_map(|run| {
+                                run.glyphs
+                                    .iter()
+                                    .map(|g| (g.start, [g.x, g.w, g.x_offset].map(f32::to_bits)))
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect()
+                    };
+                let from_cut = lines(&mut cache, &cut);
+                let from_whole = lines(&mut crate::prepared::TextCache::default(), &whole);
+                assert_eq!(
+                    from_cut, from_whole,
+                    "prepared, cut at {cuts:?}, {width} wide"
+                );
+            }
         }
     }
     /// A chip's words are where they are whatever was shaped before: a
@@ -2780,9 +2919,11 @@ fn joined_wash<'o>(
         !text.is_empty() && text.chars().all(|c| c == '\u{2060}')
     };
     let before = output.iter_mut().rev().find(|d| d.background)?;
+    // A placeholder's beside it, or a padded span cut into runs going on
+    // (`RichText::continues`: a fade's pieces).
     let joins = index > 0
         && before.run + 1 == index
-        && (spacer(&runs[index]) || spacer(&runs[index - 1]))
+        && (spacer(&runs[index]) || spacer(&runs[index - 1]) || rich.continues(index))
         && before.color == color
         && before.radius == radius
         && (before.bounds.y - bounds.y).abs() < 0.01
@@ -2791,6 +2932,57 @@ fn joined_wash<'o>(
             || (before.bounds.x - (bounds.x + bounds.width)).abs() < 0.5);
     if joins {
         // The next run joins it as the run it now ends with.
+        before.run = index;
+        Some(&mut before.bounds)
+    } else {
+        None
+    }
+}
+/// `joined` going on to `bounds`, which ends at `right`: one wash or line,
+/// its right edge where the last glyph's ends (as the run drawn whole
+/// has it, not worked out again from its width), its top and height kept.
+fn join(joined: &mut Rect, bounds: Rect, right: f32) {
+    if bounds.x >= joined.x {
+        joined.width = right - joined.x;
+    } else {
+        *joined = joined.union(bounds);
+    }
+}
+/// The line (underline or strikethrough, `strike`) of the run before
+/// `index` that `bounds` goes on from on its line: drawn alike (its colour,
+/// its run's line style, its place and thickness) and touching it. As
+/// `joined_wash` joins washes.
+fn joined_line<'o>(
+    output: &'o mut [RichDecoration],
+    rich: &zgx::rich_text::RichText,
+    index: usize,
+    bounds: Rect,
+    color: zgx::scene::Color,
+    strike: bool,
+) -> Option<&'o mut Rect> {
+    let before = output
+        .iter_mut()
+        .rev()
+        .find(|d| !d.background && d.strike == strike)?;
+    let style = |run: Option<&zgx::rich_text::TextRun>| {
+        run.and_then(|run| {
+            if strike {
+                run.strikethrough
+            } else {
+                run.underline
+            }
+        })
+        .map(|line| line.line_style())
+    };
+    let runs = rich.runs();
+    let joins = index > 0
+        && before.run + 1 == index
+        && style(runs.get(index - 1)) == style(runs.get(index))
+        && before.color == color
+        && (before.bounds.y - bounds.y).abs() < 0.01
+        && (before.bounds.height - bounds.height).abs() < 0.01
+        && (bounds.x - (before.bounds.x + before.bounds.width)).abs() < 0.5;
+    if joins {
         before.run = index;
         Some(&mut before.bounds)
     } else {
@@ -2882,7 +3074,7 @@ pub fn rich_decorations_into<'a>(
                     if let Some(joined) =
                         joined_wash(output, rich, index, bounds, color, run.radius)
                     {
-                        *joined = joined.union(bounds);
+                        join(joined, bounds, right);
                         continue;
                     }
                     output.push(RichDecoration {
@@ -2907,9 +3099,19 @@ pub fn rich_decorations_into<'a>(
                     (run.strikethrough, line.line_y - run.font_size * 0.3, true),
                 ] {
                     if let Some(style) = decoration {
+                        let bounds = Rect::new(left, y, right - left, style.thickness());
+                        let color = style.color.unwrap_or(run.color);
+                        // The run before's line, going on (a link cut into
+                        // runs by a fade): one line, as it is drawn whole.
+                        if let Some(joined) =
+                            joined_line(output, rich, index, bounds, color, strike)
+                        {
+                            join(joined, bounds, right);
+                            continue;
+                        }
                         output.push(RichDecoration {
-                            bounds: Rect::new(left, y, right - left, style.thickness()),
-                            color: style.color.unwrap_or(run.color),
+                            bounds,
+                            color,
                             background: false,
                             radius: 0.,
                             run: index,

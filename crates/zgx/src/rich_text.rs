@@ -442,6 +442,33 @@ impl RichText {
                         == b.strikethrough.map(|d| (d.thickness(), d.line))
             })
     }
+    /// Whether run `index` goes on from the run before as one padded span:
+    /// both padded alike, in one font, size, background and corner radius,
+    /// neither a placeholder's (a span's room or icon, word joiners alone).
+    /// A span cut into runs (a fade's pieces) is padded at its ends alone,
+    /// as it is whole, not where it was cut.
+    pub fn continues(&self, index: usize) -> bool {
+        let (Some(before), Some(run)) = (
+            index.checked_sub(1).and_then(|i| self.runs.get(i)),
+            self.runs.get(index),
+        ) else {
+            return false;
+        };
+        let placeholder = |run: &TextRun| {
+            self.text[run.range.clone()]
+                .chars()
+                .all(|c| c == '\u{2060}')
+        };
+        run.padding[0] != 0.
+            && run.padding == before.padding
+            && run.font_size == before.font_size
+            && run.background == before.background
+            && run.radius == before.radius
+            && run.range.start == before.range.end
+            && run.font == before.font
+            && !placeholder(run)
+            && !placeholder(before)
+    }
     /// Whether `other` is this very text: its text and runs the same
     /// allocations (clones of one), and its options. Asked of a text the
     /// same frame asks about again (measured, drawn): its runs are not
