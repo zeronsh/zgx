@@ -1093,23 +1093,25 @@ fn glyph_texture(color: bool, scale: f32) -> f32 {
         1.
     }
 }
-/// Where UIKit's text puts a glyph at `exact` device pixels from its text's
-/// start, in a font `pixels` large: above 33 pixels on the whole pixel before
-/// it, at 33 or below on the half pixel before it (measured from runs of one
-/// letter in UILabel, UITextField and UITextView, iOS 26.5 simulator: one
-/// bitmap for all of them or two, split at a half, floor matching every
-/// position; the change lies between 33 and 33.75 pixels at 3x and between 33
-/// and 34 at 2x, so it counts pixels, not points. Not read from Core Text's
-/// source, nor yet seen on a phone). Below 16 pixels, a third bitmap appears
-/// that this doesn't follow. It was all the difference left in where UIKit and
-/// zgx drew a line's glyphs: quarter-pixel bins put them up to a pixel late.
-#[cfg_attr(not(any(target_os = "ios", test)), allow(dead_code))]
+/// Where CoreGraphics puts a glyph at `exact` device pixels from its text's
+/// start, in a font `pixels` large: on the whole pixel before it above 33 1/3
+/// pixels, the half before it down to 16 2/3, the third before it below. Read
+/// on iOS 26.5's simulator by drawing a glyph into a bitmap context at 96
+/// offsets per size: the same at 1x, 2x and 3x, and UILabel, UITextField and
+/// UITextView land as it says (UIKit asks for subpixel positioning and
+/// quantization at every size, so this is CoreGraphics' own). The edges are
+/// between 33.3125 and 33.34375, and 16.65625 and 16.6875. Quarter-pixel bins
+/// put zgx's glyphs up to a pixel late. A third falls in the nearest of
+/// those bins when drawn.
 fn core_text_glyph_x(exact: f32, pixels: f32) -> f32 {
-    if pixels > 33. {
-        exact.floor()
+    let steps = if pixels > 100. / 3. {
+        1.
+    } else if pixels > 50. / 3. {
+        2.
     } else {
-        (exact * 2.).floor() / 2.
-    }
+        3.
+    };
+    (exact * steps).floor() / steps
 }
 /// Whether a glyph of face `id` is placed by `core_text_glyph_x`: on iOS, all
 /// but the emoji, pictures Core Text draws where they fall (snapped, some land
@@ -17640,11 +17642,16 @@ mod core_text_glyph_x_tests {
         // UIKit's 17 point body at 3x is 51 pixels; rel from a run of H's.
         assert_eq!([x(0., 51.), x(36.557, 51.), x(73.114, 51.)], [0., 36., 73.]);
         assert_eq!(x(109.99, 51.), 109.);
-        // At and below 33 pixels, the half before it.
+        // At and below 33 1/3 pixels, the half before it.
         assert_eq!([x(24.686, 33.), x(49.372, 33.)], [24.5, 49.]);
         assert_eq!(x(24.4, 33.), 24.);
-        // The change, measured between 33 and 33.75 pixels.
-        assert_eq!(x(24.75, 33.75), 24.);
+        // The changes, read between 33.3125 and 33.34375, and 16.65625 and
+        // 16.6875 pixels.
+        assert_eq!(x(24.75, 33.3125), 24.5);
+        assert_eq!(x(24.75, 33.34375), 24.);
+        assert_eq!(x(24.75, 16.6875), 24.5);
+        assert_eq!(x(24.75, 16.65625), 24.0 + 2. / 3.);
+        assert_eq!(x(24.2, 8.), 24.);
     }
 }
 
