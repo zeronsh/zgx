@@ -24,6 +24,7 @@
 //! `ui.each` over them, a reconciling [`crate::Shared`]) skips them at a
 //! pointer's glance.
 mod mend;
+mod veil;
 pub(crate) mod view;
 
 pub use mend::PENDING_LINK_URL;
@@ -144,8 +145,10 @@ impl Incremental {
     pub fn last_parse_bytes(&self) -> usize {
         self.last_parse_bytes
     }
-    /// The text so far: an append takes the incremental path, anything else
-    /// parses afresh.
+    /// The text so far: an append takes the incremental path, an edit
+    /// near the end (a stream whose last words are read again: math
+    /// becoming code as its `$` closes) parses again from its block, and
+    /// anything else parses afresh.
     pub fn set_text(&mut self, text: &str) {
         self.taken = 0;
         if text.len() >= self.source.len() && text.starts_with(self.source.as_str()) {
@@ -156,8 +159,31 @@ impl Incremental {
             }
             self.append(delta);
         } else {
-            self.reset(text);
+            self.edit(text);
         }
+    }
+    /// `text`, which parts from the source somewhere: the top-level
+    /// elements wholly before the one it parts in (and the one before
+    /// that, as an append's) keep their blocks; the rest parse again.
+    fn edit(&mut self, text: &str) {
+        let common = text
+            .bytes()
+            .zip(self.source.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        // The element it parts in, and the one before.
+        let at = self.tops.partition_point(|t| t.start <= common);
+        // (Definitions act at a distance: a text with any parses whole.)
+        if self.full_only || self.pending_below > 0 || at < 3 || !self.defs.known.is_empty() {
+            self.reset(text);
+            return;
+        }
+        let boundary = self.tail_start(at - 2);
+        self.source = text.to_string();
+        // (The last element's mending went on from what it was: not
+        // grown, it mends afresh.)
+        self.mender = None;
+        self.reparse_from(boundary);
     }
     /// The text a state holds. A long text (`Value::Text`) that grew from
     /// the one taken last, by inserts at its end (`state:append`), is
@@ -360,6 +386,12 @@ impl Incremental {
             0 | 1 => 0,
             n => self.tail_start(n - 2),
         };
+        self.reparse_from(boundary);
+    }
+    /// The source from byte `boundary` (a line's start) parsed again; the
+    /// top-level elements before it kept, and any parsed again the same
+    /// keeping its value.
+    fn reparse_from(&mut self, boundary: usize) {
         let parsed = parse_at(
             &self.source[boundary..],
             boundary,
@@ -2279,6 +2311,45 @@ mod tests {
             blocks[2].field("lang").map(|v| v.to_json()),
             Some("\"rust\"".into())
         );
+    }
+
+    #[test]
+    fn an_edit_near_the_end_keeps_the_blocks_before_it_and_parses_as_a_whole_text_does() {
+        // Math read into code as its `$` closes: the stream's last words
+        // change in place, not only grow.
+        let head = "# Title\n\nOne paragraph.\n\n- a\n- b\n\nAnother one.\n\n";
+        let mut parser = Incremental::new(plain());
+        parser.set_text(&format!("{head}The bound is $x^2"));
+        let before = parser.blocks();
+        let edited = format!("{head}The bound is `$x^2$` and more");
+        parser.set_text(&edited);
+        let after = parser.blocks();
+        let fresh = |text: &str| {
+            let mut parser = Incremental::new(plain());
+            parser.set_text(text);
+            parser.blocks()
+        };
+        assert_eq!(after, fresh(&edited));
+        for (was, now) in before.iter().zip(&after).take(2) {
+            assert_eq!(
+                crate::value::identity(was),
+                crate::value::identity(now),
+                "kept"
+            );
+        }
+        // Every edit of every length near the end of a text of each kind of
+        // block parses as the whole edited text does.
+        let corpus = CORPUS;
+        for cut in (corpus.len() / 2..corpus.len()).step_by(7) {
+            if !corpus.is_char_boundary(cut) {
+                continue;
+            }
+            let mut parser = Incremental::new(plain());
+            parser.set_text(corpus);
+            let edited = format!("{}`x` *y*\n\n- z", &corpus[..cut]);
+            parser.set_text(&edited);
+            assert_eq!(parser.blocks(), fresh(&edited), "cut at {cut}");
+        }
     }
 
     #[test]

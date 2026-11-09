@@ -6,7 +6,10 @@
 //! styled text, lists and quotes hold blocks, code blocks show their
 //! language and a Copy button, tables lay out their cells in rows. Colours
 //! and sizes are the theme's tokens.
-use super::{Incremental, Options, PENDING_LINK_URL};
+use super::{
+    Incremental, Options, PENDING_LINK_URL,
+    veil::{Chunk, Veil},
+};
 use crate::value::{Value, identity};
 use std::{cell::RefCell, rc::Rc, time::Duration};
 use zgx::{
@@ -27,6 +30,32 @@ pub(crate) struct ViewOptions {
     /// if it gave one: its runs, its paragraphs and the room between its
     /// blocks drawn by it, not by the defaults here.
     pub look: Option<Rc<dyn Look>>,
+    /// `veil = { key, seed }`: words arriving fade in (`super::veil`).
+    pub veil: Option<VeilOptions>,
+    /// The veil kept by its key, once the view is made.
+    pub(crate) veil_state: Option<Rc<RefCell<Veil>>>,
+    /// The top-level block being built, for the veil's places.
+    pub(crate) veil_at: Option<usize>,
+}
+
+/// `veil = { key = …, seed = … }`: the reply's key, which keeps what each
+/// paragraph has shown, and whether what is there as the view is made
+/// shows at once.
+#[derive(Clone)]
+pub(crate) struct VeilOptions {
+    pub key: Rc<str>,
+    pub seed: bool,
+}
+
+/// A paragraph's place in the veil, if it fades in: the veil, and the
+/// paragraph's top-level block and its place in it.
+#[derive(Clone)]
+struct Fading(Rc<RefCell<Veil>>, (usize, u32));
+impl ViewOptions {
+    /// The veil's place for the top-level block's `n`th paragraph.
+    fn fading(&self, n: u32) -> Option<Fading> {
+        Some(Fading(self.veil_state.clone()?, (self.veil_at?, n)))
+    }
 }
 
 /// A run of a paragraph, as a look is asked to draw it: its text, its
@@ -115,11 +144,28 @@ impl<'a> RunFields<'a> {
 /// A run of text as a span: bold, italic, struck, code or a link; drawn
 /// by the look, if there is one.
 fn span(run: &Value, bold: bool, look: Option<&dyn Look>) -> zgx::compose::TextSpan {
+    span_of(run, None, bold, look)
+}
+/// A run's text: its words (a picture's alt).
+fn run_text(run: &Value) -> Rc<str> {
+    match run.field("x") {
+        Some(Value::Str(s)) => s.clone(),
+        other => text_of(other).into(),
+    }
+}
+/// `span`, of `text` (a piece of the run's) where given.
+fn span_of(
+    run: &Value,
+    text: Option<&str>,
+    bold: bool,
+    look: Option<&dyn Look>,
+) -> zgx::compose::TextSpan {
     let fields = RunFields::of(run);
     if let Some(look) = look {
-        let text: Rc<str> = match fields.text {
-            Some(Value::Str(s)) => s.clone(),
-            other => text_of(other).into(),
+        let text: Rc<str> = match (text, fields.text) {
+            (Some(text), _) => text.into(),
+            (None, Some(Value::Str(s))) => s.clone(),
+            (None, other) => text_of(other).into(),
         };
         let link = match fields.link {
             Some(Value::Str(href)) if &**href == PENDING_LINK_URL => Some(""),
@@ -135,7 +181,10 @@ fn span(run: &Value, bold: bool, look: Option<&dyn Look>) -> zgx::compose::TextS
             link,
         });
     }
-    let mut out = zgx::compose::text_span(text_of(fields.text));
+    let mut out = zgx::compose::text_span(match text {
+        Some(text) => text.to_owned(),
+        None => text_of(fields.text),
+    });
     if bold || fields.bold {
         out = out.font_bold();
     }
@@ -162,6 +211,48 @@ fn span(run: &Value, bold: bool, look: Option<&dyn Look>) -> zgx::compose::TextS
     out
 }
 
+/// A paragraph's runs as spans; with a veil, each run cut where a fading
+/// chunk starts and ends, its pieces fading in.
+fn spans(
+    runs: &[Value],
+    bold: bool,
+    look: Option<&dyn Look>,
+    fading: Option<&Fading>,
+) -> Vec<zgx::compose::TextSpan> {
+    let Some(Fading(veil, at)) = fading else {
+        return runs.iter().map(|r| span(r, bold, look)).collect();
+    };
+    // The paragraph's words, a picture among them a byte no word holds.
+    let texts: Vec<Rc<str>> = runs
+        .iter()
+        .map(|r| match r.field("img") {
+            Some(_) => Rc::from("\0"),
+            None => run_text(r),
+        })
+        .collect();
+    let chunks: Vec<Chunk> =
+        veil.borrow_mut()
+            .chunks(*at, &texts.concat(), zgx::compose::fade_now());
+    let mut out = Vec::with_capacity(runs.len());
+    let mut pos = 0;
+    for (r, text) in runs.iter().zip(&texts) {
+        let (from, to) = (pos, pos + text.len());
+        pos = to;
+        if chunks.is_empty() || r.field("img").is_some() {
+            out.push(span(r, bold, look));
+            continue;
+        }
+        for (s, e, chunk) in super::veil::pieces(&chunks, from, to) {
+            let piece = span_of(r, Some(&text[s - from..e - from]), bold, look);
+            out.push(match chunk {
+                Some(c) => piece.fade_in(c.fade()),
+                None => piece,
+            });
+        }
+    }
+    out
+}
+
 /// A settled block (one before the last: a parse keeps it as it is),
 /// built as it is, without following anything: a paragraph of runs.
 fn static_runs(
@@ -169,13 +260,17 @@ fn static_runs(
     bold: bool,
     look: Option<&dyn Look>,
 ) -> zgx::compose::RichTextView {
+    faded_runs(list, bold, look, None)
+}
+/// `static_runs`, fading in where the veil says.
+fn faded_runs(
+    list: Option<&Value>,
+    bold: bool,
+    look: Option<&dyn Look>,
+    fading: Option<&Fading>,
+) -> zgx::compose::RichTextView {
     let spans = list
-        .map(|l| {
-            l.list()
-                .iter()
-                .map(|r| span(r, bold, look))
-                .collect::<Vec<_>>()
-        })
+        .map(|l| spans(l.list(), bold, look, fading))
         .unwrap_or_default();
     zgx::compose::rich_text().children(spans).text_wrap(true)
 }
@@ -351,7 +446,14 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
         }
         "img" => text(text_of(b.field("alt"))).text_color(themed("text.secondary")),
         _ => {
-            let runs: View = static_runs(b.field("s"), false, options.look.as_deref()).into();
+            let fading = options.fading(1);
+            let runs: View = faded_runs(
+                b.field("s"),
+                false,
+                options.look.as_deref(),
+                fading.as_ref(),
+            )
+            .into();
             match &options.look {
                 Some(look) => look.paragraph(runs),
                 None => runs,
@@ -424,7 +526,7 @@ fn put(cell: &Signal<Value>, value: &Value) {
 
 /// The blocks `list` holds (a list of blocks), each built once for its
 /// place and following its value.
-fn block_list(list: Signal<Value>, options: &ViewOptions) -> View {
+fn block_list(list: Signal<Value>, options: &ViewOptions, top: bool) -> View {
     let cells: Rc<RefCell<Vec<Option<Signal<Value>>>>> = Rc::default();
     let (keeping, building, reading, options) =
         (cells.clone(), cells, list.clone(), options.clone());
@@ -453,17 +555,21 @@ fn block_list(list: Signal<Value>, options: &ViewOptions) -> View {
                 Place::Whole(i, _) => (i, false),
             };
             let b = reading.with_untracked(|l| l.list().get(index).cloned().unwrap_or(Value::Nil));
+            // (The veil's places count from the top-level blocks.)
+            let mut options = options.clone();
+            options.veil_at = top.then_some(index);
+            let options = &options;
             if !live {
                 if let Some(slot) = building.borrow_mut().get_mut(index) {
                     *slot = None;
                 }
-                return static_block(&b, &options, cx);
+                return static_block(&b, options, cx);
             }
             let cell = cx.runtime().signal(b);
             if let Some(slot) = building.borrow_mut().get_mut(index) {
                 *slot = Some(cell.clone());
             }
-            block(cell, &options, cx)
+            block(cell, options, cx)
         },
     )
     .w_full()
@@ -587,15 +693,20 @@ fn runs_of(
     bold: bool,
     look: Option<Rc<dyn Look>>,
 ) -> View {
+    faded_runs_of(cell, field, bold, look, None)
+}
+/// `runs_of`, fading in where the veil says.
+fn faded_runs_of(
+    cell: Signal<Value>,
+    field: &'static str,
+    bold: bool,
+    look: Option<Rc<dyn Look>>,
+    fading: Option<Fading>,
+) -> View {
     zgx::compose::rich_text_signal(move || {
         cell.with(|b| {
             b.field(field)
-                .map(|runs| {
-                    runs.list()
-                        .iter()
-                        .map(|r| span(r, bold, look.as_deref()))
-                        .collect()
-                })
+                .map(|runs| spans(runs.list(), bold, look.as_deref(), fading.as_ref()))
                 .unwrap_or_default()
         })
     })
@@ -658,7 +769,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                     }
                     let content = match blocks {
                         1 => single(item, &options, cx),
-                        _ => block_list(item, &options),
+                        _ => block_list(item, &options, false),
                     };
                     let marker = if ordered {
                         format!("{}.", start + i)
@@ -689,7 +800,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
             })
             .border_color(themed("border"))
             .text_color(themed("text.secondary"))
-            .child(block_list(field_cell(&cell, "b", cx), options)),
+            .child(block_list(field_cell(&cell, "b", cx), options, false)),
         "hr" => div().w_full().h(1.).my(4.).bg(themed("border.subtle")),
         "table" => {
             let line = |cells: Option<&Value>, bold: bool| {
@@ -721,7 +832,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         "img" => zgx::compose::text_signal(move || cell.with(|b| text_of(b.field("alt"))))
             .text_color(themed("text.secondary")),
         _ => {
-            let runs = runs_of(cell, "s", false, options.look.clone());
+            let runs = faded_runs_of(cell, "s", false, options.look.clone(), options.fading(1));
             match &options.look {
                 Some(look) => look.paragraph(runs),
                 None => runs,
@@ -743,6 +854,20 @@ pub(crate) enum Source {
 }
 pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOptions) -> View {
     zgx::compose::component(move |cx| {
+        let mut options = options.clone();
+        if let Some(veil) = &options.veil {
+            let state = super::veil::veil_of(&veil.key, veil.seed);
+            // Seeding until the view is made: a tick on, as a script's
+            // `ui.after(0)`.
+            if state.borrow().seeding {
+                let seeded = state.clone();
+                cx.tasks().spawn(async move {
+                    zgx::timer::sleep(Duration::ZERO).await;
+                    seeded.borrow_mut().seeding = false;
+                });
+            }
+            options.veil_state = Some(state);
+        }
         let parser = RefCell::new(Incremental::new(options.parse.clone()));
         let top = cx.runtime().signal(Value::List(Vec::new().into()));
         let blocks = top.clone();
@@ -758,7 +883,7 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
                 true
             });
         }));
-        let blocks = block_list(top, &options);
+        let blocks = block_list(top, &options, true);
         match &options.look {
             Some(look) => look.blocks(blocks),
             None => blocks.gap(10.),
