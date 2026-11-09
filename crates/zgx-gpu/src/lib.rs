@@ -1732,6 +1732,7 @@ struct Shown<'a> {
 }
 impl Shown<'_> {
     /// Where `content` shows in the window, if all of it does.
+    #[inline]
     fn window(&self, content: Rect) -> Option<Rect> {
         let window = self.map.bounds(content);
         within(self.clip, window).then_some(window)

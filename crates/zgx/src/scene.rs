@@ -4109,6 +4109,7 @@ impl Scene {
         node.isolated || node.transformed() || node.effect_layer()
     }
     /// `id`'s content blur (`Effects::filter_blur`).
+    #[inline]
     pub fn filter_blur(&self, id: NodeId) -> f32 {
         self.node(id).effects.filter_blur
     }
@@ -4122,6 +4123,7 @@ impl Scene {
         self.set_effects(id, effects);
     }
     /// `id`'s mask, if it has one.
+    #[inline]
     pub fn mask(&self, id: NodeId) -> Option<&ImageMask> {
         self.node(id).image_mask.as_deref()
     }
