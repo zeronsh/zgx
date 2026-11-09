@@ -553,10 +553,11 @@ impl App {
             }
             InputEvent::Blur => {
                 self.0.focused.set(false);
+                self.0.set_locked(false);
                 HostMessage::Focus(false)
             }
             InputEvent::PointerLockChange(locked) => {
-                self.0.locked.set(*locked);
+                self.0.set_locked(*locked);
                 HostMessage::PointerLock(*locked)
             }
             InputEvent::PointerLeave => HostMessage::PointerLeave,
@@ -584,6 +585,9 @@ impl Drop for Mounted {
             .as_ref()
             .is_some_and(|n| n.node() == self.node);
         if ours {
+            // Gone without a blur: it has neither focus nor the pointer.
+            app.focused.set(false);
+            app.set_locked(false);
             *app.node.borrow_mut() = None;
             *app.bounds.borrow_mut() = None;
             app.set_visible(false);
@@ -592,6 +596,16 @@ impl Drop for Mounted {
 }
 
 impl AppInner {
+    /// The program holds the pointer (or no longer does): while it does,
+    /// focus in its element takes every key, bindings and the menus'
+    /// shortcuts none (Control+W mid-sprint must not close the window);
+    /// Escape still ends the lock.
+    fn set_locked(&self, locked: bool) {
+        self.locked.set(locked);
+        if let Some(node) = self.node.borrow().as_ref() {
+            node.capture_keys(locked);
+        }
+    }
     fn set_visible(&self, visible: bool) {
         if self.visible.replace(Some(visible)) != Some(visible) {
             self.out.input(HostMessage::Visible(visible));
