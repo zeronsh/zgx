@@ -189,14 +189,16 @@ fn read_aliases(dir: &std::path::Path, files: Files) -> HashMap<String, PathBuf>
         })
         .unwrap_or_default()
 }
-/// Whether `path` is in `root` (a canonical directory): by its name, and,
-/// where it exists, by what it is, so a symbolic link inside the root to a
-/// file outside it (a plugin shipping one to `~/.ssh`) is outside too.
+/// Whether `path` is in `root`: by its name, and, where it exists, by what
+/// it is, so a symbolic link inside the root to a file outside it (a plugin
+/// shipping one to `~/.ssh`) is outside too.
 pub(crate) fn within(root: &std::path::Path, path: &std::path::Path) -> bool {
     path.starts_with(root)
-        && path
-            .canonicalize()
-            .map_or(true, |real| real.starts_with(root))
+        && path.canonicalize().map_or(true, |real| {
+            // Where it really is, against where the root really is: the root
+            // itself may lie under a link (macOS's temporary directory does).
+            real.starts_with(root) || root.canonicalize().is_ok_and(|root| real.starts_with(root))
+        })
 }
 /// `path` with `.` and `..` resolved in place, without touching the disk.
 pub(crate) fn normalize(path: &std::path::Path) -> PathBuf {
@@ -4520,6 +4522,64 @@ fn trim_idle(inner: &Inner) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A directory for one test, under its real path.
+    fn real_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("zgx-within-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn within_holds_through_a_linked_root_and_not_out_of_one() {
+        use std::os::unix::fs::symlink;
+        let dir = real_dir("linked");
+        let (real, outside) = (dir.join("real"), dir.join("outside"));
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(real.join("sub/in.luau"), "").unwrap();
+        std::fs::write(outside.join("secret.luau"), "").unwrap();
+        // A plain root: what's in it, and a link in it reaching out.
+        assert!(within(&real, &real.join("sub/in.luau")));
+        symlink(&outside, real.join("out")).unwrap();
+        assert!(!within(&real, &real.join("out/secret.luau")));
+        symlink(outside.join("secret.luau"), real.join("file")).unwrap();
+        assert!(!within(&real, &real.join("file")));
+        // A root under a link: what's in it is in it...
+        let root = dir.join("link");
+        symlink(&real, &root).unwrap();
+        assert!(within(&root, &root.join("sub/in.luau")));
+        // ...a link in it still reaches out...
+        assert!(!within(&root, &root.join("out/secret.luau")));
+        // ...and a link in it to its own files stays in.
+        symlink(real.join("sub"), real.join("back")).unwrap();
+        assert!(within(&root, &root.join("back/in.luau")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn within_takes_no_way_out_by_its_path_alone() {
+        let dir = real_dir("dots");
+        let root = dir.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.join("secret.luau"), "").unwrap();
+        std::fs::write(root.join("in.luau"), "").unwrap();
+        assert!(within(&root, &root.join("in.luau")));
+        // Beside it, by its own name or a name that starts the same.
+        assert!(!within(&root, &dir.join("secret.luau")));
+        assert!(!within(&root, &dir.join("root2/in.luau")));
+        // `..` out of it, resolved as a caller resolves it, and as it comes.
+        assert!(!within(&root, &normalize(&root.join("../secret.luau"))));
+        assert!(!within(&root, &root.join("../secret.luau")));
+        // Not there yet: its path says, as before.
+        assert!(within(&root, &root.join("missing.luau")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     thread_local! {
         /// Scripts' states closed on this thread.
