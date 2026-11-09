@@ -778,10 +778,10 @@ fn decode_at(
     let done = decoded.ok().map(|(mut w, mut h, mut straight)| {
         // Premultiplied in the decoder's own buffer: one image held, not two.
         match Arc::get_mut(&mut straight) {
-            Some(own) => premultiply(own),
+            Some(own) => resample::premultiply(own),
             None => {
                 let mut copy = straight.to_vec();
-                premultiply(&mut copy);
+                resample::premultiply(&mut copy);
                 straight = copy.into();
             }
         }
@@ -823,14 +823,6 @@ fn decode_at(
     }
     Some(done)
 }
-fn premultiply(rgba: &mut [u8]) {
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        let alpha = u16::from(pixel[3]);
-        for channel in &mut pixel[..3] {
-            *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
-        }
-    }
-}
 impl PartialEq for ImageData {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id && self.transform == other.transform && self.effect == other.effect
@@ -842,6 +834,38 @@ impl Eq for ImageData {}
 /// renderers and kept files' decodes share. Renderer plumbing.
 #[doc(hidden)]
 pub mod resample {
+    /// Straight RGBA pixels made premultiplied, in place, sixteen at a time: a
+    /// block all opaque (a photo's, a video's) is as it was, one all
+    /// transparent (around a canvas's marks) is zeros, and in the rest each
+    /// colour is times its alpha, `(c · a + 127) / 255`, exactly, as a multiply
+    /// and two shifts in 16 bits. No branch a pixel, so each part is
+    /// vectorized: one per pixel (an early return for opaque pixels) made a
+    /// canvas's a pixel at a time.
+    pub fn premultiply(pixels: &mut [u8]) {
+        for block in pixels.chunks_mut(64) {
+            let (mut all, mut any) = (255u8, 0u8);
+            for pixel in block.as_chunks::<4>().0 {
+                all &= pixel[3];
+                any |= pixel[3];
+            }
+            if all == 255 {
+                continue;
+            }
+            if any == 0 {
+                block.fill(0);
+                continue;
+            }
+            for pixel in block.as_chunks_mut::<4>().0 {
+                let alpha = u16::from(pixel[3]);
+                for channel in &mut pixel[..3] {
+                    // ⌊x / 255⌋ is (x + 1 + (x >> 8)) >> 8 for every x c · a + 127
+                    // reaches (at most 65,152, where the sum is 65,407: 16 bits).
+                    let x = u16::from(*channel) * alpha + 127;
+                    *channel = ((x + 1 + (x >> 8)) >> 8) as u8;
+                }
+            }
+        }
+    }
     /// Premultiplied RGBA `width` by `height` at half the size (rounding up),
     /// each texel the mean of the two by two it covers (an odd edge repeats).
     pub fn halve(pixels: &[u8], width: u32, height: u32) -> (Vec<u8>, u32, u32) {
