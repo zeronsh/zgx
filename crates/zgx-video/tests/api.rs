@@ -496,11 +496,11 @@ fn captions_show_their_cue_at_its_time_word_by_word() {
         r##"
         local video = require("@video")
         return video.compositions { video.composition {
-            id = "C", w = 300, h = 60, fps = 30, duration = 90,
+            id = "C", w = 800, h = 60, fps = 30, duration = 90,
             render = function()
                 local cues = video.captions_of("subs.srt")
                 assert(#cues == 1 and cues[1].text == "MMMM WWWW", "its cue")
-                return ui.column { w = 300, h = 60, bg = "#000000", items = "center",
+                return ui.column { w = 800, h = 60, bg = "#000000", items = "center",
                     video.captions { cues = cues, words = true, text_size = 40,
                         color = "#0000ff", active_color = "#ffff00", upcoming_color = "#00ff00" } }
             end,
@@ -508,16 +508,18 @@ fn captions_show_their_cue_at_its_time_word_by_word() {
         "##,
     )
     .unwrap();
+    // Far wider than the two words in any font: in a narrow box a wide font
+    // wraps them, and the first word lies across the middle.
     let mut stage = script_stage(&dir, json!({}));
     let mut pixels = Vec::new();
     // Pixels near a colour, left of the middle and right of it.
     let count = |pixels: &[u8], rgb: [u8; 3]| {
         let mut sides = (0, 0);
         for y in 0..60u32 {
-            for x in 0..300u32 {
-                let p = pixel(pixels, 300, x, y);
+            for x in 0..800u32 {
+                let p = pixel(pixels, 800, x, y);
                 if (0..3).all(|c| p[c].abs_diff(rgb[c]) < 60) {
-                    if x < 150 { sides.0 += 1 } else { sides.1 += 1 }
+                    if x < 400 { sides.0 += 1 } else { sides.1 += 1 }
                 }
             }
         }
