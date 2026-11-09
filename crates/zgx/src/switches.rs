@@ -44,6 +44,12 @@ pub static SCROLL_COPY: Switch = Switch::new(
     "scroll_copy",
     "scrolls copy what is drawn and paint the strip scrolled in; off, they repaint the view",
 );
+/// Scroll content is kept in a picture of its own while it scrolls, and
+/// composited (`zgx-gpu`'s scroll pictures); off, it copies or repaints.
+pub static SCROLL_PICTURE: Switch = Switch::new(
+    "scroll_picture",
+    "scroll content draws from a picture of its own while it scrolls; off, it copies or repaints",
+);
 /// Steady frames hand over at a set point before a refresh (macOS's refresh
 /// grid and its latch), and on Windows clear of the compositor's latch
 /// (`frame_source::latch_wait`); off, at once, as the display link's own
@@ -66,7 +72,13 @@ pub static BAKED_LOOPS: Switch = Switch::new(
 );
 
 /// Every switch.
-pub static ALL: [&Switch; 4] = [&SCROLL_COPY, &REFRESH_GRID, &PARTIAL_REPAINT, &BAKED_LOOPS];
+pub static ALL: [&Switch; 5] = [
+    &SCROLL_COPY,
+    &SCROLL_PICTURE,
+    &REFRESH_GRID,
+    &PARTIAL_REPAINT,
+    &BAKED_LOOPS,
+];
 
 /// The switch named `name`.
 pub fn find(name: &str) -> Option<&'static Switch> {
