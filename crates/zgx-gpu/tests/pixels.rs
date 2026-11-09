@@ -1799,11 +1799,15 @@ fn overlay_scrollbar_thumb_translates_and_clears_when_content_shrinks() {
     let mut previous_extent = 0.;
     // The platform's thumb at rest, in a track at the content's edge (120):
     // zgx's 6 across an 8 track and at least 24 long; GNOME's 8 across a 12
-    // track and at least 40. Either rounded, its ends 2 in.
-    let (track, across, least) = if cfg!(target_os = "linux") {
-        (12, 8, 40)
+    // track and at least 40; Windows' 6 across a 12 track and at least 30,
+    // between arrow buttons 12 long at each end. Each rounded, its ends 2 in.
+    // (track, across, least, arrows)
+    let (track, across, least, arrows) = if cfg!(target_os = "linux") {
+        (12, 8, 40, 0)
+    } else if cfg!(windows) {
+        (12, 6, 30, 12)
     } else {
-        (8, 6, 24)
+        (8, 6, 24, 0)
     };
     let left = 120 - track + (track - across) / 2;
     for (position, height, shown) in [
@@ -1827,6 +1831,7 @@ fn overlay_scrollbar_thumb_translates_and_clears_when_content_shrinks() {
             .unwrap();
         assert_eq!(partial, gpu.readback().unwrap());
         let accent = [94, 165, 255, 255];
+        // (Its arrows' carets, in the accent too, left out.)
         let visible: Vec<_> = partial
             .as_chunks::<4>()
             .0
@@ -1834,10 +1839,13 @@ fn overlay_scrollbar_thumb_translates_and_clears_when_content_shrinks() {
             .enumerate()
             .filter(|(_, p)| **p == accent)
             .map(|(i, _)| (i % 128, i / 128))
+            .filter(|(_, row)| *row >= 8 + arrows && *row < 8 + 64 - arrows)
             .collect();
         if shown {
-            // Along the 64 the padding leaves, over the 336 it scrolls.
-            let y = 8 + ((64 - least) as f32 * position / 336.) as usize;
+            // Along the 64 the padding leaves (less its arrows), over the
+            // 336 it scrolls.
+            let along = 64 - 2 * arrows;
+            let y = 8 + arrows + ((along - least) as f32 * position / 336.) as usize;
             assert!(
                 visible.contains(&(left + across / 2, y + least / 2)),
                 "thumb at {y}: {visible:?}"
@@ -2196,7 +2204,10 @@ fn overflowing_menu_keeps_keyboard_focus_pixels_inside_padded_viewport() {
         let focused = view.find(id).unwrap();
         assert_eq!(ui.input.focused(), Some(focused));
         let bounds = ui.scene.borrow().bounds(focused);
-        let index = ((bounds.y as usize + 8) * 128 + bounds.x as usize + 80) * 4;
+        // Its last column, however wide the platform's item margins leave
+        // it (Windows keeps 4 each side).
+        let right = (bounds.x + bounds.width) as usize - 1;
+        let index = ((bounds.y as usize + 8) * 128 + right) * 4;
         assert_eq!(&partial[index..index + 4], &[238, 170, 34, 255]);
         let panel = ui.scene.borrow().bounds(view.find("panel").unwrap());
         for y in [panel.y as usize + 2, (panel.y + panel.height) as usize - 2] {
@@ -2273,7 +2284,11 @@ fn submenu_side_flip_and_dismissal_match_full_repaint_without_layout() {
     let parent = view.find("parent").unwrap();
     let bounds = ui.scene.borrow().bounds(child);
     let parent_bounds = ui.scene.borrow().bounds(parent);
-    assert!(bounds.x >= parent_bounds.x + parent_bounds.width);
+    // Beside its parent: on Windows, its trigger inset by the item's margin
+    // and the submenu opened beside that, over the parent's edge by 4, as a
+    // Windows submenu laps its parent.
+    let overlap = if cfg!(windows) { 4. } else { 0. };
+    assert!(bounds.x >= parent_bounds.x + parent_bounds.width - overlap);
     let pixel = |pixels: &[u8], rect: Rect| {
         let i = ((rect.y as usize + 50) * 400 + rect.x as usize + 90) * 4;
         pixels[i..i + 4].to_vec()
@@ -2284,7 +2299,7 @@ fn submenu_side_flip_and_dismissal_match_full_repaint_without_layout() {
     assert_eq!(layout, 0);
     let bounds = ui.scene.borrow().bounds(child);
     let parent_bounds = ui.scene.borrow().bounds(parent);
-    assert!(bounds.x + bounds.width <= parent_bounds.x);
+    assert!(bounds.x + bounds.width <= parent_bounds.x + overlap);
     assert_eq!(pixel(&flipped, bounds), [238, 51, 34, 255]);
     ui.dispatch(InputEvent::KeyDown {
         key: Key::ArrowLeft,
