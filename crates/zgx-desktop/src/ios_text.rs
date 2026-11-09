@@ -209,8 +209,55 @@ extern "C-unwind" fn insert_text(_: &AnyObject, _: Sel, text: *mut AnyObject) {
     }
     let (start, end, _) = store.selection();
     store.replace(start, end, &units);
+    reveal_typed(&store, start + units.len(), &text);
     drop(store);
     state.window.request_redraw();
+}
+thread_local! {
+    /// How many reveals a secure field has begun or ended: a timer from an
+    /// earlier character finds this has moved on and does nothing.
+    static REVEALS: Cell<u64> = const { Cell::new(0) };
+}
+fn next_reveal() -> u64 {
+    REVEALS.with(|reveals| {
+        reveals.set(reveals.get() + 1);
+        reveals.get()
+    })
+}
+/// How long UITextField shows the character just typed (READ, 2.0 s).
+const REVEAL_SECONDS: f64 = 2.;
+/// In a secure field, show `typed`, now ending at `caret`, for a moment, if
+/// it's one character at the text's end; anything else hides what was shown.
+fn reveal_typed(store: &TextStore, caret: usize, typed: &str) {
+    let Some(editor) = store.editor().filter(|editor| editor.is_secure()) else {
+        return;
+    };
+    let reveal = typed.chars().count() == 1 && caret == store.len();
+    let reveal_id = next_reveal();
+    editor.set_reveal_last(reveal);
+    if !reveal {
+        return;
+    }
+    let block = block2::RcBlock::new(move |_: *mut AnyObject| {
+        let Some(state) = state() else { return };
+        if REVEALS.with(Cell::get) != reveal_id {
+            return;
+        }
+        if let Some(editor) = state.store.borrow().editor() {
+            editor.set_reveal_last(false);
+        }
+        state.window.request_redraw();
+    });
+    // SAFETY: the class method takes the interval, whether it repeats, and a
+    // block it copies; it answers a timer the run loop keeps until it fires.
+    let _: *mut AnyObject = unsafe {
+        msg_send![
+            class!(NSTimer),
+            scheduledTimerWithTimeInterval: REVEAL_SECONDS,
+            repeats: Bool::NO,
+            block: &*block
+        ]
+    };
 }
 extern "C-unwind" fn delete_backward(_: &AnyObject, _: Sel) {
     let Some(state) = state() else { return };
@@ -226,6 +273,11 @@ extern "C-unwind" fn delete_backward(_: &AnyObject, _: Sel) {
             .next_back()
             .map_or(0, |g| g.encode_utf16().count());
         store.replace(start - last, start, &[]);
+    }
+    // Backspace hides the character shown, as UITextField's does.
+    if let Some(editor) = store.editor().filter(|editor| editor.is_secure()) {
+        next_reveal();
+        editor.set_reveal_last(false);
     }
     drop(store);
     state.window.request_redraw();

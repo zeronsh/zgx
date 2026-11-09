@@ -629,6 +629,22 @@ fn shape_run(
     if attrs.masked {
         #[cfg(target_os = "ios")]
         {
+            // The character just typed, shown as itself in the field's own
+            // font, shaped as any text is: the rest is the mask.
+            let masked_end = masked_end(attrs.reveal_last, line, start_run, end_run);
+            let mut revealed = Vec::new();
+            if masked_end < end_run {
+                let _ = shape_fallback(
+                    font_iter.shape_caches(),
+                    &mut revealed,
+                    &font,
+                    line,
+                    attrs_list,
+                    masked_end,
+                    end_run,
+                    span_rtl,
+                );
+            }
             let (font, mask) = uikit_mask(font, &mut font_iter, |font| {
                 font.as_swash().charmap().map('\u{F79A}') != 0
             });
@@ -648,7 +664,7 @@ fn shape_run(
             let advance = one.first().map(|glyph| glyph.x_advance);
             drop(font_iter);
             let glyph_start = glyphs.len();
-            shape_skip_glyphs_as(glyphs, &font, line, attrs_list, start_run, end_run, Some(mask));
+            shape_skip_glyphs_as(glyphs, &font, line, attrs_list, start_run, masked_end, Some(mask));
             // The face's advance at its axes (skipping reads its defaults),
             // as a shaped run's is.
             if let Some(advance) = advance {
@@ -660,6 +676,7 @@ fn shape_run(
                             .map_or(0.0, |spacing| spacing.0);
                 }
             }
+            glyphs.append(&mut revealed);
             font_system.shape_buffer.scripts = scripts;
             return;
         }
@@ -1159,6 +1176,20 @@ fn shape_skip_glyphs_as(
                 }
             }),
     );
+}
+
+/// zgx: where a masked run's mask stops: at its end, or with `reveal_last`
+/// before the line's last character, if this run has it.
+#[cfg(any(target_os = "ios", test))]
+fn masked_end(reveal_last: bool, line: &str, start_run: usize, end_run: usize) -> usize {
+    if reveal_last && end_run == line.len() {
+        line[start_run..end_run]
+            .char_indices()
+            .next_back()
+            .map_or(end_run, |(at, _)| start_run + at)
+    } else {
+        end_run
+    }
 }
 
 /// zgx: what a secure `UITextField` draws for a character (read from its line
@@ -4155,7 +4186,18 @@ impl ShapeLine {
 
 #[cfg(test)]
 mod uikit_mask_tests {
-    use super::uikit_mask;
+    use super::{masked_end, uikit_mask};
+
+    #[test]
+    fn only_the_last_character_of_the_line_is_revealed() {
+        assert_eq!(masked_end(false, "abc", 0, 3), 3);
+        assert_eq!(masked_end(true, "abc", 0, 3), 2);
+        // A run short of the line's end keeps its mask.
+        assert_eq!(masked_end(true, "ab cd", 0, 2), 2);
+        // The last character whole, whatever its bytes.
+        assert_eq!(masked_end(true, "aé", 0, 3), 1);
+        assert_eq!(masked_end(true, "", 0, 0), 0);
+    }
 
     #[test]
     fn a_secure_field_masks_as_uikit_reads() {
