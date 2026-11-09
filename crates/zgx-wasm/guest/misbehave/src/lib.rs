@@ -26,12 +26,24 @@ const STALL: &str = r#"
 }
 "#;
 
+/// A shader with no bindings, for the probes of the caps.
+const PLAIN: &str = r#"
+@vertex fn vs() -> @builtin(position) vec4<f32> { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+@fragment fn fs() -> @location(0) vec4<f32> { return vec4<f32>(1.0); }
+"#;
+
 /// What the next frame does on the GPU.
 #[derive(Clone, Copy, PartialEq)]
 enum Gpu {
     Nothing,
     Stall,
     ManyDraws,
+    /// Two encoders of 80 draws each, submitted together.
+    Split,
+    /// An indirect dispatch.
+    Indirect,
+    /// Bundles past their caps, and bundle descriptors wgpu doesn't take.
+    Bundles,
 }
 
 struct Misbehave {
@@ -58,8 +70,12 @@ impl App for Misbehave {
         if what == Gpu::Nothing {
             return;
         }
-        let submitted = draw(what);
-        self.found = format!(" submit={submitted:?}");
+        self.found = match what {
+            Gpu::Split => format!(" split={:?}", split()),
+            Gpu::Indirect => format!(" indirect={:?}", indirect()),
+            Gpu::Bundles => format!(" {}", bundles()),
+            _ => format!(" submit={:?}", draw(what)),
+        };
         host::set_title(&format!("events={}{}", self.events, self.found));
     }
     fn event(&mut self, event: InputEvent) {
@@ -89,6 +105,18 @@ impl App for Misbehave {
             }
             "KeyD" => {
                 self.gpu = Gpu::ManyDraws;
+                host::request_frame();
+            }
+            "KeyK" => {
+                self.gpu = Gpu::Split;
+                host::request_frame();
+            }
+            "KeyI" => {
+                self.gpu = Gpu::Indirect;
+                host::request_frame();
+            }
+            "KeyB" => {
+                self.gpu = Gpu::Bundles;
                 host::request_frame();
             }
             "KeyF" => {
@@ -183,4 +211,145 @@ fn draw(what: Gpu) -> Result<(), String> {
         gpu::submit(vec![gpu::CommandEncoder::finish(encoder)?])?;
     }
     Ok(())
+}
+
+/// A pipeline drawing into a frame's texture, and that texture's view.
+fn setup() -> Result<(gpu::RenderPipeline, gpu::TextureView), String> {
+    let module = gpu::create_shader_module(Some("plain"), PLAIN)?;
+    let pipeline = gpu::create_render_pipeline(&gpu::RenderPipelineDescriptor {
+        label: None,
+        layout: None,
+        vertex: gpu::VertexState {
+            module: &module,
+            entry_point: Some("vs".into()),
+            buffers: Vec::new(),
+            constants: Vec::new(),
+        },
+        primitive: util::primitive(gpu::PrimitiveTopology::TriangleList, gpu::CullMode::None),
+        depth_stencil: None,
+        multisample: util::multisample(1),
+        fragment: Some(gpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs".into()),
+            targets: vec![Some(util::target(gpu::TextureFormat::Bgra8unorm))],
+            constants: Vec::new(),
+        }),
+    })?;
+    let view = gpu::current_texture()?.create_view(None)?;
+    Ok((pipeline, view))
+}
+
+/// `draws` draws recorded in a new encoder, finished.
+fn record(
+    pipeline: &gpu::RenderPipeline,
+    view: &gpu::TextureView,
+    draws: u32,
+) -> Result<gpu::CommandBuffer, String> {
+    let encoder = gpu::create_command_encoder(None)?;
+    {
+        let pass = encoder.begin_render_pass(&gpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: vec![Some(gpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                clear: None,
+                store: gpu::StoreOp::Store,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        })?;
+        pass.set_pipeline(pipeline);
+        for _ in 0..draws {
+            pass.draw(0, 1, 0, 0);
+        }
+        pass.end();
+    }
+    gpu::CommandEncoder::finish(encoder)
+}
+
+/// Two encoders under the cap each, over it together.
+fn split() -> Result<(), String> {
+    let (pipeline, view) = setup()?;
+    let first = record(&pipeline, &view, 80)?;
+    let second = record(&pipeline, &view, 80)?;
+    gpu::submit(vec![first, second])
+}
+
+/// An indirect dispatch, whose size the GPU reads.
+fn indirect() -> Result<(), String> {
+    let module =
+        gpu::create_shader_module(Some("indirect"), "@compute @workgroup_size(1) fn main() {}")?;
+    let pipeline = gpu::create_compute_pipeline(&gpu::ComputePipelineDescriptor {
+        label: None,
+        layout: None,
+        module: &module,
+        entry_point: Some("main".into()),
+        constants: Vec::new(),
+    })?;
+    let mut args = Vec::new();
+    for n in [65535u32, 65535, 65535] {
+        args.extend_from_slice(&n.to_le_bytes());
+    }
+    let buffer = gpu::create_buffer_with_data(None, gpu::BufferUsage::INDIRECT, &args)?;
+    let encoder = gpu::create_command_encoder(None)?;
+    {
+        let pass = encoder.begin_compute_pass(None, None)?;
+        pass.set_pipeline(&pipeline);
+        pass.dispatch_workgroups_indirect(&buffer, 0);
+        pass.end();
+    }
+    gpu::submit(vec![gpu::CommandEncoder::finish(encoder)?])
+}
+
+/// Each refused, never a panic: too many draws, too many commands, and
+/// descriptors wgpu doesn't take.
+fn bundles() -> String {
+    let encoder =
+        |samples: u32, color: Option<gpu::TextureFormat>, depth: Option<gpu::TextureFormat>| {
+            gpu::create_render_bundle_encoder(&gpu::RenderBundleEncoderDescriptor {
+                label: None,
+                color_formats: vec![color],
+                depth_stencil: depth.map(|format| gpu::RenderBundleDepthStencil {
+                    format,
+                    depth_read_only: false,
+                    stencil_read_only: false,
+                }),
+                sample_count: samples,
+            })
+        };
+    let bgra = Some(gpu::TextureFormat::Bgra8unorm);
+    let result = |r: Result<gpu::RenderBundle, String>| match r {
+        Ok(_) => "made".to_owned(),
+        Err(why) => format!("refused({why})"),
+    };
+    let Ok((pipeline, _view)) = setup() else {
+        return "setup-failed".into();
+    };
+    let draws = encoder(1, bgra, None).and_then(|e| {
+        e.set_pipeline(&pipeline);
+        for _ in 0..200 {
+            e.draw(0, 1, 0, 0);
+        }
+        gpu::RenderBundleEncoder::finish(e, None)
+    });
+    let commands = encoder(1, bgra, None).and_then(|e| {
+        for _ in 0..70_000 {
+            e.set_pipeline(&pipeline);
+        }
+        gpu::RenderBundleEncoder::finish(e, None)
+    });
+    let samples = encoder(3, bgra, None).and_then(|e| gpu::RenderBundleEncoder::finish(e, None));
+    let depth = encoder(1, bgra, Some(gpu::TextureFormat::Rgba8unorm))
+        .and_then(|e| gpu::RenderBundleEncoder::finish(e, None));
+    let color = encoder(1, Some(gpu::TextureFormat::Depth32float), None)
+        .and_then(|e| gpu::RenderBundleEncoder::finish(e, None));
+    format!(
+        "bundle-draws={} bundle-commands={} bundle-samples={} bundle-depth={} bundle-color={}",
+        result(draws),
+        result(commands),
+        result(samples),
+        result(depth),
+        result(color)
+    )
 }

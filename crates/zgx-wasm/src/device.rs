@@ -403,11 +403,6 @@ pub(crate) struct Gpu {
     /// submission's together, finishes within the watchdog of it.
     pub(crate) since: std::time::Instant,
     pub(crate) caps: WorkCaps,
-    /// Since the last submission: draws and workgroups recorded, and
-    /// whether a cap was passed (the submission is refused).
-    pub(crate) draws: u64,
-    pub(crate) workgroups: u64,
-    pub(crate) over: Option<String>,
     size: (u32, u32),
     pub(crate) in_frame: bool,
     current: Option<Current>,
@@ -462,9 +457,6 @@ impl Gpu {
             objects: 0,
             watchdog,
             caps,
-            draws: 0,
-            workgroups: 0,
-            over: None,
             size: (0, 0),
             in_frame: false,
             current: None,

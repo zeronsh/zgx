@@ -11,7 +11,15 @@ use crate::{
     device::{Device, Scope},
     runtime::{Guest, bindings::zgx::app::gpu as wit},
 };
-use std::{borrow::Cow, num::NonZeroU64, time::Duration};
+use std::{
+    borrow::Cow,
+    num::NonZeroU64,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use wasmtime::component::Resource;
 use zgx_gpu::wgpu;
 
@@ -37,10 +45,28 @@ pub struct PipelineLayout(pub(crate) wgpu::PipelineLayout);
 pub struct BindGroup(pub(crate) wgpu::BindGroup);
 pub struct RenderPipeline(pub(crate) wgpu::RenderPipeline);
 pub struct ComputePipeline(pub(crate) wgpu::ComputePipeline);
-pub struct CommandBuffer(wgpu::CommandBuffer);
-pub struct CommandEncoder(Option<wgpu::CommandEncoder>);
-pub struct RenderPass(Option<wgpu::RenderPass<'static>>);
-pub struct ComputePass(Option<wgpu::ComputePass<'static>>);
+/// What was recorded, and its work (draws and workgroups), counted.
+pub struct CommandBuffer(wgpu::CommandBuffer, Spent);
+/// An encoder and the work recorded in it (and its passes) so far.
+pub struct CommandEncoder(Option<wgpu::CommandEncoder>, Arc<Work>);
+pub struct RenderPass(Option<wgpu::RenderPass<'static>>, Arc<Work>);
+pub struct ComputePass(Option<wgpu::ComputePass<'static>>, Arc<Work>);
+
+/// An encoder's work, counted as it is recorded: carried into its command
+/// buffer and summed over the buffers a submission runs. Each encoder's,
+/// so no work recorded elsewhere, earlier or later, escapes the caps.
+#[derive(Default)]
+pub(crate) struct Work {
+    draws: AtomicU64,
+    workgroups: AtomicU64,
+    /// Why it holds more than a submission may run: it can't be finished.
+    refused: Mutex<Option<String>>,
+}
+#[derive(Clone, Copy, Default)]
+pub(crate) struct Spent {
+    draws: u64,
+    workgroups: u64,
+}
 
 /// What an object costs the session.
 pub(crate) trait Charged: Send + 'static {
@@ -81,7 +107,10 @@ impl Guest {
     ) -> Result<T, String> {
         let device = self.gpu.device.as_ref().ok_or(NO_DEVICE)?;
         let scope = Scope::push(&device.device);
-        let value = f(device);
+        // wgpu panics on some input it doesn't validate: the guest's error
+        // too, never the thread's.
+        let value = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(device)))
+            .unwrap_or_else(|_| Err("refused by wgpu (it panicked)".into()));
         let errors = scope.pop();
         let value = value?;
         match errors.into_iter().next() {
@@ -117,22 +146,38 @@ impl Guest {
         self.gpu.bytes = self.gpu.bytes.saturating_sub(value.bytes());
         Ok(value)
     }
-    /// Count `draws` and `workgroups` against the submission's caps: past
-    /// them the command is left out and the submission refused.
-    pub(crate) fn spend(&mut self, draws: u64, workgroups: u64, what: &str) -> bool {
-        let gpu = &mut self.gpu;
-        gpu.draws = gpu.draws.saturating_add(draws);
-        gpu.workgroups = gpu.workgroups.saturating_add(workgroups);
-        if gpu.draws > gpu.caps.draws || gpu.workgroups > gpu.caps.workgroups {
-            if gpu.over.is_none() {
-                gpu.over = Some(format!(
+    /// Count `draws` and `workgroups` into `work`, an encoder's: past a
+    /// submission's caps the command is left out, and the encoder can't be
+    /// finished.
+    pub(crate) fn spend(&self, work: &Work, draws: u64, workgroups: u64, what: &str) -> bool {
+        let caps = self.gpu.caps;
+        let drawn = work
+            .draws
+            .fetch_add(draws, Ordering::AcqRel)
+            .saturating_add(draws);
+        let dispatched = work
+            .workgroups
+            .fetch_add(workgroups, Ordering::AcqRel)
+            .saturating_add(workgroups);
+        if drawn > caps.draws || dispatched > caps.workgroups {
+            self.refuse(
+                work,
+                format!(
                     "{what}: past a submission's {} draws or {} workgroups",
-                    gpu.caps.draws, gpu.caps.workgroups
-                ));
-            }
+                    caps.draws, caps.workgroups
+                ),
+            );
             return false;
         }
         true
+    }
+    /// `work`'s encoder holds what can't run: it can't be finished.
+    pub(crate) fn refuse(&self, work: &Work, why: String) {
+        let mut refused = work.refused.lock().unwrap();
+        if refused.is_none() {
+            self.log.line(format!("gpu: {why}"));
+            *refused = Some(why);
+        }
     }
     /// A line of the log for what a method with no result got wrong.
     pub(crate) fn misuse(&self, what: &str, why: impl std::fmt::Display) {
@@ -416,7 +461,8 @@ impl wit::HostRenderPass for Guest {
             self.misuse("draw", "counts past 2³²");
             return Ok(());
         };
-        if !self.spend(1, 0, "draw") {
+        let work = self.table.get(&this)?.1.clone();
+        if !self.spend(&work, 1, 0, "draw") {
             return Ok(());
         }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
@@ -440,7 +486,8 @@ impl wit::HostRenderPass for Guest {
             self.misuse("draw-indexed", "counts past 2³²");
             return Ok(());
         };
-        if !self.spend(1, 0, "draw-indexed") {
+        let work = self.table.get(&this)?.1.clone();
+        if !self.spend(&work, 1, 0, "draw-indexed") {
             return Ok(());
         }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
@@ -455,7 +502,8 @@ impl wit::HostRenderPass for Guest {
         offset: u64,
     ) -> wasmtime::Result<()> {
         let buffer = self.buffer(&indirect)?;
-        if !self.spend(1, 0, "draw-indirect") {
+        let work = self.table.get(&this)?.1.clone();
+        if !self.spend(&work, 1, 0, "draw-indirect") {
             return Ok(());
         }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
@@ -470,7 +518,8 @@ impl wit::HostRenderPass for Guest {
         offset: u64,
     ) -> wasmtime::Result<()> {
         let buffer = self.buffer(&indirect)?;
-        if !self.spend(1, 0, "draw-indexed-indirect") {
+        let work = self.table.get(&this)?.1.clone();
+        if !self.spend(&work, 1, 0, "draw-indexed-indirect") {
             return Ok(());
         }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
@@ -490,7 +539,8 @@ impl wit::HostRenderPass for Guest {
             draws = draws.saturating_add(bundle.draws);
             held.push(bundle.bundle.clone());
         }
-        if !self.spend(draws, 0, "execute-bundles") {
+        let work = self.table.get(&this)?.1.clone();
+        if !self.spend(&work, draws, 0, "execute-bundles") {
             return Ok(());
         }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
@@ -559,7 +609,8 @@ impl wit::HostComputePass for Guest {
         z: u32,
     ) -> wasmtime::Result<()> {
         let groups = u64::from(x) * u64::from(y) * u64::from(z);
-        if !self.spend(0, groups, "dispatch-workgroups") {
+        let work = self.table.get(&this)?.1.clone();
+        if !self.spend(&work, 0, groups, "dispatch-workgroups") {
             return Ok(());
         }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
@@ -574,6 +625,26 @@ impl wit::HostComputePass for Guest {
         offset: u64,
     ) -> wasmtime::Result<()> {
         let buffer = self.buffer(&indirect)?;
+        // Its size is the GPU's to read: only a cap allowing the largest
+        // dispatch the device takes lets it run.
+        let largest = self.gpu.device.as_ref().map_or(u64::MAX, |d| {
+            u64::from(d.device.limits().max_compute_workgroups_per_dimension).pow(3)
+        });
+        let work = self.table.get(&this)?.1.clone();
+        if self.gpu.caps.workgroups < largest {
+            self.refuse(
+                &work,
+                format!(
+                    "dispatch-workgroups-indirect: refused, the session's cap of {} workgroups \
+                     is less than an indirect dispatch may ask ({largest})",
+                    self.gpu.caps.workgroups
+                ),
+            );
+            return Ok(());
+        }
+        if !self.spend(&work, 0, 1, "dispatch-workgroups-indirect") {
+            return Ok(());
+        }
         if let Some(pass) = &mut self.table.get_mut(&this)?.0 {
             pass.dispatch_workgroups_indirect(&buffer, offset);
         }
@@ -625,6 +696,7 @@ impl wit::HostCommandEncoder for Guest {
             Some(set) => Some(self.table.get(set)?.set.clone()),
             None => None,
         };
+        let work = self.table.get(&this)?.1.clone();
         let Some(encoder) = &mut self.table.get_mut(&this)?.0 else {
             return Ok(Err("begin-render-pass: the encoder is finished".into()));
         };
@@ -684,7 +756,7 @@ impl wit::HostCommandEncoder for Guest {
             ..Default::default()
         });
         let pass = pass.forget_lifetime();
-        self.hold(RenderPass(Some(pass)))
+        self.hold(RenderPass(Some(pass), work))
     }
     fn begin_compute_pass(
         &mut self,
@@ -700,6 +772,7 @@ impl wit::HostCommandEncoder for Guest {
             )),
             None => None,
         };
+        let work = self.table.get(&this)?.1.clone();
         let Some(encoder) = &mut self.table.get_mut(&this)?.0 else {
             return Ok(Err("begin-compute-pass: the encoder is finished".into()));
         };
@@ -715,7 +788,7 @@ impl wit::HostCommandEncoder for Guest {
                 }),
             })
             .forget_lifetime();
-        self.hold(ComputePass(Some(pass)))
+        self.hold(ComputePass(Some(pass), work))
     }
     fn resolve_query_set(
         &mut self,
@@ -859,11 +932,19 @@ impl wit::HostCommandEncoder for Guest {
         &mut self,
         this: Resource<CommandEncoder>,
     ) -> wasmtime::Result<Result<Resource<CommandBuffer>, String>> {
-        let Some(encoder) = self.release(this)?.0 else {
+        let CommandEncoder(encoder, work) = self.release(this)?;
+        let Some(encoder) = encoder else {
             return Ok(Err("finish: the encoder is finished".into()));
         };
+        if let Some(why) = work.refused.lock().unwrap().clone() {
+            return Ok(Err(format!("finish: refused, {why}")));
+        }
+        let spent = Spent {
+            draws: work.draws.load(Ordering::Acquire),
+            workgroups: work.workgroups.load(Ordering::Acquire),
+        };
         match self.checked(|_| Ok(encoder.finish())) {
-            Ok(buffer) => self.hold(CommandBuffer(buffer)),
+            Ok(buffer) => self.hold(CommandBuffer(buffer, spent)),
             Err(why) => Ok(Err(why)),
         }
     }
@@ -1252,7 +1333,7 @@ impl wit::Host for Guest {
                 }))
         });
         match made {
-            Ok(encoder) => self.hold(CommandEncoder(Some(encoder))),
+            Ok(encoder) => self.hold(CommandEncoder(Some(encoder), Arc::default())),
             Err(why) => Ok(Err(why)),
         }
     }
@@ -1302,15 +1383,21 @@ impl wit::Host for Guest {
         buffers: Vec<Resource<CommandBuffer>>,
     ) -> wasmtime::Result<Result<(), String>> {
         let mut commands = Vec::new();
+        let mut total = Spent::default();
         for buffer in buffers {
-            commands.push(self.release(buffer)?.0);
+            let CommandBuffer(commands_of, spent) = self.release(buffer)?;
+            total.draws = total.draws.saturating_add(spent.draws);
+            total.workgroups = total.workgroups.saturating_add(spent.workgroups);
+            commands.push(commands_of);
         }
-        // What was recorded since the last submission, counted: past the
+        // The buffers' work together, each counted as recorded: past the
         // caps, none of it runs.
-        self.gpu.draws = 0;
-        self.gpu.workgroups = 0;
-        if let Some(over) = self.gpu.over.take() {
-            return Ok(Err(format!("submit: refused, {over}")));
+        let caps = self.gpu.caps;
+        if total.draws > caps.draws || total.workgroups > caps.workgroups {
+            return Ok(Err(format!(
+                "submit: refused, {} draws and {} workgroups: past a submission's {} or {}",
+                total.draws, total.workgroups, caps.draws, caps.workgroups
+            )));
         }
         // One submission on the GPU at a time: a GPU turns to another
         // device's work between submissions (not inside one, on NVIDIA's

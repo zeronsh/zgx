@@ -10,6 +10,8 @@ use zgx_gpu::wgpu;
 
 /// Queries in a set, at most (WebGPU's).
 const MAX_QUERIES: u32 = 4096;
+/// Commands a bundle may record, at most.
+const MAX_BUNDLE_COMMANDS: usize = 65536;
 
 pub struct QuerySet {
     pub(crate) set: wgpu::QuerySet,
@@ -31,6 +33,11 @@ pub struct RenderBundleEncoder {
     sample_count: u32,
     commands: Vec<Command>,
     draws: u64,
+    /// What its commands hold of the host's memory, charged to the
+    /// session's GPU bytes as they are recorded.
+    bytes: u64,
+    /// Why it can't be finished: past a cap.
+    refused: Option<String>,
 }
 enum Command {
     Pipeline(wgpu::RenderPipeline),
@@ -44,7 +51,11 @@ enum Command {
 }
 impl crate::gpu::Charged for QuerySet {}
 impl crate::gpu::Charged for RenderBundle {}
-impl crate::gpu::Charged for RenderBundleEncoder {}
+impl crate::gpu::Charged for RenderBundleEncoder {
+    fn bytes(&self) -> u64 {
+        self.bytes
+    }
+}
 
 impl Guest {
     pub(crate) fn query_set(
@@ -86,38 +97,107 @@ impl Guest {
         &mut self,
         d: wit::RenderBundleEncoderDescriptor,
     ) -> wasmtime::Result<Result<Resource<RenderBundleEncoder>, String>> {
-        if self.gpu.device.is_none() {
+        let Some(device) = &self.gpu.device else {
             return Ok(Err(NO_DEVICE.into()));
+        };
+        let color_formats: Vec<Option<wgpu::TextureFormat>> =
+            d.color_formats.iter().map(|f| f.map(format)).collect();
+        let depth_stencil = d.depth_stencil.map(|ds| wgpu::RenderBundleDepthStencil {
+            format: format(ds.format),
+            depth_read_only: ds.depth_read_only,
+            stencil_read_only: ds.stencil_read_only,
+        });
+        // Checked here: wgpu panics on some descriptors it doesn't take.
+        let features = device.device.features();
+        let renderable = |f: wgpu::TextureFormat| {
+            f.guaranteed_format_features(features)
+                .allowed_usages
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        };
+        let max_colors = device.device.limits().max_color_attachments as usize;
+        let why = if !matches!(d.sample_count, 1 | 4) {
+            Some(format!("a sample count of {}: 1 or 4", d.sample_count))
+        } else if color_formats.len() > max_colors {
+            Some(format!(
+                "{} colour formats: the device takes {max_colors}",
+                color_formats.len()
+            ))
+        } else if color_formats
+            .iter()
+            .flatten()
+            .any(|f| f.is_depth_stencil_format() || !renderable(*f))
+        {
+            Some("a colour format no colour attachment has".into())
+        } else if depth_stencil
+            .as_ref()
+            .is_some_and(|ds| !ds.format.is_depth_stencil_format())
+        {
+            Some("a depth-stencil format that isn't one".into())
+        } else if color_formats.iter().all(Option::is_none) && depth_stencil.is_none() {
+            Some("no attachment at all".into())
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            return Ok(Err(format!("create-render-bundle-encoder: {why}")));
         }
         self.hold(RenderBundleEncoder {
             label: d.label,
-            color_formats: d.color_formats.iter().map(|f| f.map(format)).collect(),
-            depth_stencil: d.depth_stencil.map(|ds| wgpu::RenderBundleDepthStencil {
-                format: format(ds.format),
-                depth_read_only: ds.depth_read_only,
-                stencil_read_only: ds.stencil_read_only,
-            }),
+            color_formats,
+            depth_stencil,
             sample_count: d.sample_count,
             commands: Vec::new(),
             draws: 0,
+            bytes: 0,
+            refused: None,
         })
     }
+    /// `command` kept for the bundle, within its caps: as many commands,
+    /// a submission's draws, and the session's bytes.
     fn record(
         &mut self,
         this: &Resource<RenderBundleEncoder>,
         command: Command,
     ) -> wasmtime::Result<()> {
-        let encoder = self.table.get_mut(this)?;
-        if matches!(
+        let bytes = (std::mem::size_of::<Command>()
+            + match &command {
+                Command::BindGroup(_, _, offsets) => offsets.len() * 4,
+                _ => 0,
+            }) as u64;
+        let draw = u64::from(matches!(
             command,
             Command::Draw(..)
                 | Command::DrawIndexed(..)
                 | Command::DrawIndirect(..)
                 | Command::DrawIndexedIndirect(..)
-        ) {
-            encoder.draws += 1;
+        ));
+        let (max_draws, max_bytes, held) =
+            (self.gpu.caps.draws, self.gpu.max_bytes, self.gpu.bytes);
+        let encoder = self.table.get_mut(this)?;
+        if encoder.refused.is_some() {
+            return Ok(());
         }
+        let why = if encoder.commands.len() >= MAX_BUNDLE_COMMANDS {
+            Some(format!("past a bundle's {MAX_BUNDLE_COMMANDS} commands"))
+        } else if encoder.draws + draw > max_draws {
+            Some(format!("past a submission's {max_draws} draws"))
+        } else if held.saturating_add(bytes) > max_bytes {
+            Some(format!("past the session's {max_bytes} bytes"))
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            encoder.refused = Some(why.clone());
+            encoder.commands = Vec::new();
+            let freed = std::mem::take(&mut encoder.bytes);
+            self.gpu.bytes = self.gpu.bytes.saturating_sub(freed);
+            self.misuse("render-bundle-encoder", why);
+            return Ok(());
+        }
+        encoder.draws += draw;
+        encoder.bytes += bytes;
         encoder.commands.push(command);
+        self.gpu.bytes += bytes;
         Ok(())
     }
 }
@@ -261,6 +341,9 @@ impl wit::HostRenderBundleEncoder for Guest {
         label: Option<String>,
     ) -> wasmtime::Result<Result<Resource<RenderBundle>, String>> {
         let recorded = self.release(this)?;
+        if let Some(why) = &recorded.refused {
+            return Ok(Err(format!("finish: refused, {why}")));
+        }
         let draws = recorded.draws;
         let made = self.checked(|device| {
             let mut encoder =

@@ -611,12 +611,17 @@ fn limited(script: &str) -> Harness {
     Harness::new(move |runtime| {
         let host = ScriptHost::inline(runtime, "app", &script);
         host.vet_wasm(|launch| {
-            Ok(launch
+            let limited = launch
                 .asked
                 .clone()
-                .gpu_watchdog(std::time::Duration::from_millis(500))
                 .work_caps(100, 1 << 20)
-                .shader_loop_budget(1 << 16))
+                .shader_loop_budget(1 << 16);
+            // The watchdog is the wall clock's: the misbehaving guest's
+            // alone is short, so others' work never fails the other.
+            Ok(match launch.id.as_str() {
+                "bad" => limited.gpu_watchdog(std::time::Duration::from_millis(500)),
+                _ => limited,
+            })
         });
         host
     })
@@ -627,7 +632,7 @@ local bad = ui.app("bad", { wasm = "{BAD}" })
 local good = ui.app("good", { wasm = "{GOOD}" })
 return ui.column {
     ui.text { id = "bad", function() return `{bad.status}|{bad.error}|{bad.title}` end },
-    ui.text { id = "good", function() return `{good.status}|{good.title}` end },
+    ui.text { id = "good", function() return `{good.status}|{good.error}|{good.title}` end },
     ui.surface { id = "bad-surface", app = bad, w = 400, h = 120 },
     ui.surface { id = "good-surface", app = good, w = 160, h = 100 },
 }
@@ -703,21 +708,75 @@ fn a_stalling_shader_fails_its_session_and_zgx_keeps_drawing() {
     assert!(fps.starts_with("running"), "{fps}");
 }
 
-/// A submission past the host's caps (here 100 draws) is refused whole.
-#[test]
-fn a_submission_past_its_caps_is_refused() {
-    let Some((mut h, mut gpu)) = gpu_two() else {
-        return;
-    };
+/// What the misbehaving guest's title says after `code`, at its next
+/// frame (`marker` once it answered), the session still running.
+fn gpu_probe(code: &str, marker: &str) -> Option<String> {
+    let (mut h, mut gpu) = gpu_two()?;
     click(&mut h, "bad-surface");
-    key(&mut h, "KeyD", None);
-    render_until(&mut h, &mut gpu, 10, "the submission's answer", |h| {
-        h.text("bad").contains("submit=")
+    key(&mut h, code, None);
+    render_until(&mut h, &mut gpu, 10, marker, |h| {
+        h.text("bad").contains(marker)
     });
     let bad = h.text("bad");
     assert!(bad.starts_with("running"), "{bad}");
+    assert_eq!(h.error(), None);
+    Some(bad)
+}
+
+/// An encoder past the host's caps (here 100 draws) can't be finished.
+#[test]
+fn an_encoder_past_its_caps_is_refused() {
+    let Some(bad) = gpu_probe("KeyD", "submit=") else {
+        return;
+    };
     assert!(
-        bad.contains("submit=Err(\"submit: refused, draw: past a submission's 100 draws"),
+        bad.contains("submit=Err(\"finish: refused, draw: past a submission's 100 draws"),
         "{bad}"
     );
+}
+
+/// Work is counted by the encoder that records it and summed over what a
+/// submission runs: two encoders under the cap are refused together.
+#[test]
+fn encoders_submitted_together_are_capped_together() {
+    let Some(bad) = gpu_probe("KeyK", "split=") else {
+        return;
+    };
+    assert!(
+        bad.contains(
+            "split=Err(\"submit: refused, 160 draws and 0 workgroups: past a submission's 100"
+        ),
+        "{bad}"
+    );
+}
+
+/// An indirect dispatch's size is the GPU's to read: under a workgroup cap
+/// smaller than the device's largest dispatch, it is refused.
+#[test]
+fn an_indirect_dispatch_is_refused_under_a_workgroup_cap() {
+    let Some(bad) = gpu_probe("KeyI", "indirect=") else {
+        return;
+    };
+    assert!(
+        bad.contains("indirect=Err(\"finish: refused, dispatch-workgroups-indirect: refused"),
+        "{bad}"
+    );
+}
+
+/// Bundles keep to the caps (draws, commands, the session's bytes) and
+/// descriptors wgpu would panic on are refused before it sees them.
+#[test]
+fn bundles_keep_to_their_caps_and_bad_descriptors_are_refused() {
+    let Some(bad) = gpu_probe("KeyB", "bundle-color=") else {
+        return;
+    };
+    for want in [
+        "bundle-draws=refused(finish: refused, past a submission's 100 draws)",
+        "bundle-commands=refused(finish: refused, past a bundle's 65536 commands)",
+        "bundle-samples=refused(create-render-bundle-encoder: a sample count of 3: 1 or 4)",
+        "bundle-depth=refused(create-render-bundle-encoder: a depth-stencil format that isn't one)",
+        "bundle-color=refused(create-render-bundle-encoder: a colour format no colour attachment has)",
+    ] {
+        assert!(bad.contains(want), "{want} in {bad}");
+    }
 }
