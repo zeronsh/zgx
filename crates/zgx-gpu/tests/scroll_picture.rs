@@ -290,8 +290,8 @@ fn a_measured_list_re_anchoring_stays_as_painted() {
     let _gpu = gpu_fixture();
     // Far down at a jump, then up past rows never measured.
     let steps = [
-        4000_f32, 20., -40., -60., -60., -80., -100., -100., -60., -120., -40., -200., -300.,
-        -80., 60., -400.,
+        4000_f32, 20., -40., -60., -60., -80., -100., -100., -60., -120., -40., -200., -300., -80.,
+        60., -400.,
     ];
     for scale in SCALES {
         run("measured", scale, &steps, |ui, offset| {
