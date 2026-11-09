@@ -11,7 +11,11 @@ keywords = ["gui", "video", "animation", "motion-graphics", "luau"]
 categories = ["multimedia::video", "rendering"]
 
 [features]
-default = ["window"]
+default = ["window", "3d"]
+# 3D scenes in a video (zgx-script's `scene3d`: `ui.scene3d`, `ui.mesh`,
+# `ui.light`) and glTF models in them (`gltf`: `ui.model`), drawn with
+# zgx-3d.
+3d = ["zgx-script/gltf"]
 # `zgx video studio` in a window. Without it, the studio has only its headless
 # picture, and the crate doesn't link the desktop.
 window = ["dep:zgx-run"]

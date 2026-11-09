@@ -1488,11 +1488,42 @@ fn load_model(
             return;
         }
     };
-    let (tell, mut heard) = zgx::task::latest::<Result<zgx_3d::Model, String>>();
     let (files, folder) = (
         assets.source(),
         crate::normalize(path.parent().unwrap_or(std::path::Path::new("."))),
     );
+    // A frame drawn whole (a video's: `zgx::image::whole_frames_on_this_thread`)
+    // shows the model it draws, as it shows its pictures: read here, before
+    // the frame is drawn, not on a thread that a render's frame won't wait
+    // for.
+    if zgx::image::whole_frames_on_this_thread() {
+        let read = zgx_3d::Model::from_bytes_with(&bytes, |uri| {
+            let beside = crate::normalize(&folder.join(uri));
+            crate::within(&folder, &beside)
+                .then(|| files.read(&beside).ok())
+                .flatten()
+        });
+        match read {
+            Ok(model) => {
+                MODELS.with(|models| {
+                    let mut models = models.borrow_mut();
+                    if models.len() >= MODELS_KEPT {
+                        models.clear();
+                    }
+                    models.insert(path, (changed, model.clone()));
+                });
+                let placed = place_model(world, group, &model, fit);
+                if let Some(clip) = clip {
+                    let world = world.clone();
+                    cx.tasks()
+                        .spawn(play(world, placed, model, clip, frames, report));
+                }
+            }
+            Err(error) => report(error.to_string()),
+        }
+        return;
+    }
+    let (tell, mut heard) = zgx::task::latest::<Result<zgx_3d::Model, String>>();
     std::thread::spawn(move || {
         let read = zgx_3d::Model::from_bytes_with(&bytes, |uri| {
             let beside = crate::normalize(&folder.join(uri));
