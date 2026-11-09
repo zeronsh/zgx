@@ -435,3 +435,20 @@ grid; zgx-gpu's `a_run_on_a_grid_takes_its_cells_whichever_font_draws_it`
 checks braille, a letterlike symbol, Thai, a combining accent and plain
 letters with the platform's fonts. The padding pass skips a grid, and a NaN
 compares and hashes by its bits, so grids of other cells are other keys. The crate depends on `unicode-width`.
+
+## Leading between lines (zgx-cosmic-text 0.19.12)
+
+`Buffer::set_leading` (and `LayoutRunIter::leading` for runs made from lines
+or a paragraph outside a buffer): space after each line but the last, as
+UIKit's text styles add a font's leading (`UIFont.leading` of
+`preferredFont(forTextStyle:)`, 1.71 points at body). A line keeps its
+height and its glyphs' place in it; the next starts its height and the
+leading below, so a text's size (the last run's top and height) is n lines
+and n − 1 leadings, and carets and selections stay a line tall. `hit` gives
+the gap between two lines half to each. Nothing is added to `Metrics`,
+`LayoutRun` or any glyph (`Option<Metrics>` rides on every glyph): the
+iterator holds the value (88 → 96 bytes) and adds it once a line, `Buffer`
+holds it (104 → 112 bytes), and `hit` reads it once. Zero by default:
+text without leading lays out as before. Scrolling by lines
+(`shape_until_scroll`'s sums) does not count it. Its test is
+`leading_goes_between_lines_each_keeping_its_glyphs_place`.

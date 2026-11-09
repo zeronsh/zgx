@@ -2149,6 +2149,9 @@ export type Styles = {
 	lines: number?,
 	line_height: Num?,
 	letter_spacing: Num?,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Num?,
 	-- Tabular figures: every digit the same width.
 	tabular: boolean?,
 	font_features: string?,
@@ -2334,6 +2337,9 @@ export type StyleProps = {
 	lines: Reactive<number>?,
 	line_height: Reactive<Num>?,
 	letter_spacing: Reactive<Num>?,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Reactive<Num>?,
 	-- Tabular figures: every digit the same width.
 	tabular: Reactive<boolean>?,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -2793,6 +2799,9 @@ export type Props = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -3195,6 +3204,7 @@ export type Props_truncate = Reactive<boolean>?
 export type Props_lines = Reactive<number>?
 export type Props_line_height = Reactive<Num>?
 export type Props_letter_spacing = Reactive<Num>?
+export type Props_leading = Reactive<Num>?
 export type Props_tabular = Reactive<boolean>?
 export type Props_font_features = Reactive<string>?
 export type Props_underline = Reactive<boolean>?
@@ -3459,6 +3469,9 @@ export type ContainerProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -3892,6 +3905,9 @@ export type ScrollProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -4346,6 +4362,9 @@ export type TextProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -4764,6 +4783,9 @@ export type MarkdownViewProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -5252,6 +5274,9 @@ export type RichProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -5664,6 +5689,9 @@ export type ImageProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -6093,6 +6121,9 @@ export type SvgProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -6610,6 +6641,9 @@ export type Scene3DProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -7045,6 +7079,9 @@ export type CanvasProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -7489,6 +7526,9 @@ export type CheckboxProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -7911,6 +7951,9 @@ export type InputProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -8434,6 +8477,9 @@ export type ProgressProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -8847,6 +8893,9 @@ export type SliderProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -9275,6 +9324,9 @@ export type SegmentedProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -9699,6 +9751,9 @@ export type StepperProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -10124,6 +10179,9 @@ export type DisclosureProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -10560,6 +10618,9 @@ export type AccordionProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -10972,6 +11033,9 @@ export type SectionProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -11405,6 +11469,9 @@ export type SeparatorProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -11823,6 +11890,9 @@ export type TabsProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -12263,6 +12333,9 @@ export type TreeProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -12699,6 +12772,9 @@ export type DataGridProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -13131,6 +13207,9 @@ export type CalendarProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -13556,6 +13635,9 @@ export type DatePickerProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -13979,6 +14061,9 @@ export type TimeFieldProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -14401,6 +14486,9 @@ export type ComboboxProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -14831,6 +14919,9 @@ export type CommandPaletteProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -15249,6 +15340,9 @@ export type SelectProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -15674,6 +15768,9 @@ export type SplitProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -16155,6 +16252,9 @@ export type ListProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -16662,6 +16762,9 @@ export type LayerProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -17094,6 +17197,9 @@ export type ModalProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -17544,6 +17650,9 @@ export type PopoverProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -18004,6 +18113,9 @@ export type MenuItemProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -18421,6 +18533,9 @@ export type SubmenuProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -18859,6 +18974,9 @@ export type WebViewProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -19297,6 +19415,9 @@ export type TerminalProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -19707,6 +19828,9 @@ export type GlassProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -20131,6 +20255,9 @@ export type GlassGroupProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -20541,6 +20668,9 @@ export type SymbolProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -20960,6 +21090,9 @@ export type NativeSwitchProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -21264,8 +21397,24 @@ export type AlertOptions = {
 	buttons: { { title: string, style: ("default" | "cancel" | "destructive")? } },
 	on_choose: ((button: number) -> ())?,
 }
+export type IosTextStyle =
+	"largeTitle"
+	| "title1"
+	| "title2"
+	| "title3"
+	| "headline"
+	| "body"
+	| "callout"
+	| "subheadline"
+	| "footnote"
+	| "caption1"
+	| "caption2"
 export type IosKit = {
 	settle: (state: State<number>, target: number, done: (() -> ())?) -> () -> (),
+	-- Text in one of UIKit's text styles ("body" if none), as a UILabel in
+	-- `preferredFont(forTextStyle:)` sets it: size, weight, and its lines the
+	-- style's leading apart; read live from the system on iOS.
+	text: (props: TextProps & { style: IosTextStyle? }) -> Node,
 	section: (props: { header: string?, footer: string?, [number]: Node }) -> Node,
 	tile: (symbol: string, tint: Color) -> Node,
 	row: (props: {
@@ -21456,6 +21605,9 @@ export type NativeTabsProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -21873,6 +22025,9 @@ export type SlotProps = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -22337,6 +22492,9 @@ export type EachOptions = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",
@@ -22765,6 +22923,9 @@ export type PresenceOptions = {
 	lines: Props_lines,
 	line_height: Props_line_height,
 	letter_spacing: Props_letter_spacing,
+	-- Points between lines, after each but the last (a font's leading, as
+	-- UIKit's text styles add it): the first line keeps its own height.
+	leading: Props_leading,
 	-- Tabular figures: every digit the same width.
 	tabular: Props_tabular,
 	-- OpenType features (CSS's `font-feature-settings`): "ss01 cv02=3 liga=0",

@@ -206,6 +206,9 @@ pub struct LayoutRunIter<'b> {
     paragraph: Option<(&'b str, &'b [LayoutLine])>,
     height_opt: Option<f32>,
     line_height: f32,
+    /// zgx patch: space between lines, after each but the last
+    /// (`Buffer::set_leading`).
+    leading: f32,
     scroll: f32,
     line_i: usize,
     layout_i: usize,
@@ -222,6 +225,15 @@ impl<'b> LayoutRunIter<'b> {
             buffer.scroll.vertical,
             buffer.scroll.line,
         )
+        .leading(buffer.leading)
+    }
+
+    /// zgx patch: `leading` between lines (`Buffer::set_leading`): each line
+    /// its own height, the next one that and `leading` below.
+    #[must_use]
+    pub const fn leading(mut self, leading: f32) -> Self {
+        self.leading = leading;
+        self
     }
 
     pub const fn from_lines(
@@ -236,6 +248,7 @@ impl<'b> LayoutRunIter<'b> {
             paragraph: None,
             height_opt,
             line_height,
+            leading: 0.0,
             scroll,
             line_i: start,
             layout_i: 0,
@@ -258,6 +271,7 @@ impl<'b> LayoutRunIter<'b> {
             paragraph: Some((text, layout)),
             height_opt,
             line_height,
+            leading: 0.0,
             scroll: 0.0,
             line_i: 0,
             layout_i: 0,
@@ -289,7 +303,10 @@ impl<'b> LayoutRunIter<'b> {
                     return Some(None);
                 }
             }
-            self.line_top += line_height;
+            // zgx patch: and the leading after it, which the next line
+            // starts below (none follows the last: a size is the last
+            // line's top and its height).
+            self.line_top += line_height + self.leading;
             if line_y + layout_line.max_descent < 0.0 {
                 continue;
             }
@@ -390,6 +407,8 @@ pub struct Buffer {
     hinting: Hinting,
     /// Dirty flags tracking which properties changed since last layout
     dirty: DirtyFlags,
+    /// zgx patch: space between lines (`set_leading`).
+    leading: f32,
 }
 
 impl Clone for Buffer {
@@ -407,6 +426,7 @@ impl Clone for Buffer {
             tab_width: self.tab_width,
             hinting: self.hinting,
             dirty: self.dirty,
+            leading: self.leading,
         }
     }
 }
@@ -438,6 +458,7 @@ impl Buffer {
             tab_width: 8,
             hinting: Hinting::default(),
             dirty: DirtyFlags::empty(),
+            leading: 0.0,
         }
     }
 
@@ -762,6 +783,23 @@ impl Buffer {
     /// Get the current [`Metrics`]
     pub const fn metrics(&self) -> Metrics {
         self.metrics
+    }
+
+    /// zgx patch: space between lines in pixels, after each line but the
+    /// last, as UIKit's text styles add a font's leading: a line keeps its
+    /// height (its glyphs placed in it as without), the next starts this
+    /// much below it. Zero by default. Layout runs (drawing, carets, sizes)
+    /// and `hit` follow it; scrolling by lines does not count it.
+    pub fn set_leading(&mut self, leading: f32) {
+        if leading != self.leading {
+            self.leading = leading;
+            self.redraw = true;
+        }
+    }
+
+    /// zgx patch: the space between lines (`set_leading`).
+    pub const fn leading(&self) -> f32 {
+        self.leading
     }
 
     /// Set the current [`Metrics`].
@@ -1192,9 +1230,13 @@ impl Buffer {
 
         let mut runs = self.layout_runs().peekable();
         let mut first_run = true;
+        // zgx patch: the leading between two lines goes half to each.
+        let half = self.leading.max(0.0) / 2.0;
+        let mut above = 0.0;
         while let Some(run) = runs.next() {
-            let line_top = run.line_top;
-            let line_height = run.line_height;
+            let line_top = run.line_top - above;
+            let line_height = run.line_height + above + half;
+            above = half;
 
             if first_run && y < line_top {
                 first_run = false;
@@ -1832,5 +1874,45 @@ impl BorrowedWithFontSystem<'_, Buffer> {
         F: FnMut(i32, i32, u32, u32, Color),
     {
         self.inner.draw(self.font_system, cache, color, f);
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod leading_tests {
+    use crate::{Attrs, Buffer, FontSystem, Metrics, Shaping};
+
+    fn runs(fonts: &mut FontSystem, leading: f32) -> (Buffer, Vec<(f32, f32, f32)>) {
+        let mut buffer = Buffer::new(fonts, Metrics::new(10.0, 20.0));
+        buffer.set_leading(leading);
+        buffer.set_text("a\nb\nc", &Attrs::new(), Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        let runs = buffer
+            .layout_runs()
+            .map(|run| (run.line_top, run.line_y, run.line_height))
+            .collect();
+        (buffer, runs)
+    }
+
+    #[test]
+    fn leading_goes_between_lines_each_keeping_its_glyphs_place() {
+        let mut fonts = FontSystem::new();
+        let (_, plain) = runs(&mut fonts, 0.0);
+        let (buffer, led) = runs(&mut fonts, 1.75);
+        assert_eq!(plain.len(), 3);
+        for (i, (line, with)) in plain.iter().zip(&led).enumerate() {
+            let shift = i as f32 * 1.75;
+            // Each line keeps its height and its glyphs' place in it, the
+            // leading of every line above it lower.
+            assert_eq!(with.0, line.0 + shift);
+            assert_eq!(with.1, line.1 + shift);
+            assert_eq!(with.2, 20.0);
+        }
+        // Nothing after the last: the text is its last line's bottom.
+        let (top, _, height) = led[2];
+        assert_eq!(top + height, 3.0 * 20.0 + 2.0 * 1.75);
+        // The gap between two lines goes half to each.
+        assert_eq!(buffer.hit(1.0, 20.5).map(|c| c.line), Some(0));
+        assert_eq!(buffer.hit(1.0, 21.5).map(|c| c.line), Some(1));
+        assert_eq!(buffer.hit(1.0, -1.0).map(|c| (c.line, c.index)), Some((0, 0)));
     }
 }
