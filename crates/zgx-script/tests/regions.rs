@@ -174,6 +174,93 @@ fn a_presence_box_lays_out_as_a_one_cell_grid() {
     }
 }
 
+/// However it sets its width (or doesn't), a presence's box lays its content
+/// out and answers the room it has as a one-cell grid with stretched items
+/// does: its content wrapped or not, aligning itself, with margins or
+/// absolute, in a parent that sizes it, one sized by what it holds, and a
+/// row too narrow for it. A layout other than that grid has to hold here
+/// (an overlay differs where the width is left to the content, and moves a
+/// row's siblings by leaving taffy).
+#[test]
+fn a_presence_box_follows_its_room_as_a_one_cell_grid_does() {
+    let props = [
+        "p = 10",
+        "h = 60",
+        "w = 120, p = 10",
+        "w = width, p = 10",
+        "w = '50%', p = 10",
+        "w_full = true, p = 10",
+    ];
+    let contents = [
+        r#"ui.div { id = "content", w = 40, h = 20 }"#,
+        r#"ui.div { id = "content", w = 40, h = 20, self = "center" }"#,
+        r#"ui.div { id = "content", m = 8, h = 20, self = "center" }"#,
+        r#"ui.div { id = "content", absolute = true, top = 5, left = 7, w = 40, h = 20 }"#,
+        r#"ui.text { id = "content", "a few words that wrap in the box" }"#,
+        r#"ui.text { id = "content", "a few words that wrap in the box", wrap = true }"#,
+        r#"ui.text { id = "content", "a few words that wrap in the box", wrap = true, self = "end" }"#,
+        r#"ui.text { id = "content", "a verylongunbreakablewordthatsetstheline ok", wrap = true }"#,
+        r#"ui.text { id = "content", "a few words that wrap in the box", wrap = true, mx = 5 }"#,
+    ];
+    let parents = [
+        ("ui.column { w = room, items = 'start', %, }", ""),
+        (
+            "ui.column { items = 'start', ui.column { items = 'start', %, } }",
+            "",
+        ),
+        (
+            "ui.row { w = room, ui.div { id = 'beside', w = 90, h = 10 }, %, }",
+            "beside",
+        ),
+    ];
+    let mut wrong = Vec::new();
+    for content in contents {
+        for props in props {
+            for (parent, beside) in parents {
+                let rects = [
+                    format!("ui.presence(tab, function() return {content} end, {{ {props} }})"),
+                    format!(
+                        "ui.column {{ grid = true, cols = 1, rows = 1, items = 'stretch', {props}, {content} }}"
+                    ),
+                ]
+                .map(|boxed| {
+                    let parent = parent.replace('%', &boxed);
+                    let mut h = Harness::inline(&format!(
+                        r#"local tab = ui.state("tab", "a")
+                        local room = ui.state("room", 300)
+                        local width = ui.state("width", 120)
+                        return ui.column {{ w_full = true, h_full = true, items = "start",
+                            {parent},
+                            ui.button {{ id = "narrow", w = 4, h = 4, on_click = ui.set(room, 90) }},
+                            ui.button {{ id = "wide", w = 4, h = 4, on_click = ui.set(room, 300) }},
+                            ui.button {{ id = "wider", w = 4, h = 4, on_click = ui.set(width, 160) }},
+                        }}"#
+                    ));
+                    let mut shown = Vec::new();
+                    for button in ["", "narrow", "wide", "wider"] {
+                        if !button.is_empty() {
+                            h.click(button);
+                        }
+                        h.run_frames(2);
+                        shown.push(h.rect("content"));
+                        if !beside.is_empty() {
+                            shown.push(h.rect(beside));
+                        }
+                    }
+                    shown
+                });
+                if rects[0] != rects[1] {
+                    wrong.push(format!(
+                        "{props} in {parent}: {content}\n  presence {:?}\n  grid     {:?}",
+                        rects[0], rects[1]
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
 /// `mode = "wait"`: while the old content leaves, nothing takes its place
 /// and it stays where it was.
 #[test]

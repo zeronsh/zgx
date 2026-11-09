@@ -3746,7 +3746,6 @@ fn kind_view(
             *wait,
             *initial,
             node.props.iter().any(|(p, _)| BOX.contains(p)),
-            node.props.iter().any(|(p, _)| ARRANGES.contains(p)),
             vm,
             low,
         ),
@@ -9275,27 +9274,6 @@ const BOX: &[Prop] = &[
     Prop::RowSpanFull,
 ];
 
-/// What lays out a box's children: on a presence's box, read as a one-cell
-/// grid reads them (`cell`).
-const ARRANGES: &[Prop] = &[
-    Prop::Dir,
-    Prop::Direction,
-    Prop::FlexWrap,
-    Prop::WrapReverse,
-    Prop::Items,
-    Prop::Justify,
-    Prop::AlignContent,
-    Prop::Gap,
-    Prop::GapX,
-    Prop::GapY,
-    Prop::Grid,
-    Prop::Cols,
-    Prop::Rows,
-    Prop::Areas,
-    Prop::Flow,
-    Prop::Display,
-];
-
 /// `ui.presence`: content for the current value. When the value changes
 /// the new content mounts and plays `enter`; the old leaves the flow
 /// (positioned where it was, at the size it had) and plays `exit`, then
@@ -9311,7 +9289,6 @@ fn presence(
     wait: bool,
     initial: bool,
     boxed: bool,
-    arranged: bool,
     vm: &Rc<Vm>,
     low: &Rc<Lowering>,
 ) -> View {
@@ -9533,10 +9510,7 @@ fn presence(
         // Showing nothing, the box is not there for the pointer (a sheet's
         // full-window box over the panes while it is put away), nor while
         // what it shows is hidden (a page kept mounted over a web view).
-        cell(arranged)
-            .pointer_events_when(showing)
-            .hollow()
-            .child(region)
+        cell().pointer_events_when(showing).hollow().child(region)
     } else {
         region
     }
@@ -9575,18 +9549,9 @@ fn pin_in_place(scene: &mut zgx::scene::Scene, entry: zgx::scene::NodeId) {
 }
 
 /// A box whose one in-flow child fills it in both directions unless it
-/// sizes itself: a one-cell grid, whose items stretch. Unless the presence
-/// `arranged` its content itself (`items`, `justify`: `ARRANGES`), an
-/// overlay, which lays out as that grid does without a taffy run:
-/// presences with sizing of their own nest a few deep around each
-/// paragraph of a chat. Its `items` would align across, where the grid's
-/// align down.
-fn cell(arranged: bool) -> View {
-    if arranged {
-        column().grid().grid_cols(1).grid_rows(1).items_stretch()
-    } else {
-        overlay()
-    }
+/// sizes itself: a one-cell grid, whose items stretch.
+fn cell() -> View {
+    column().grid().grid_cols(1).grid_rows(1).items_stretch()
 }
 
 #[cfg(test)]
