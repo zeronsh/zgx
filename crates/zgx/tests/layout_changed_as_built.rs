@@ -1,0 +1,229 @@
+//! A scene changed step by step lays out as one built whole: several changes
+//! a flush, anywhere in a tree of rows, columns and text. Layout keeps what it
+//! can (what's cached, a child laid out alone, a column resumed at its end),
+//! and none of that may show. Each seed is one run of changes, compared at every
+//! flush; a failure names the seed and step, and what changed.
+use zgx::scene::{Align, Color, Layout, NodeId, NodeKind, Scene, Style};
+
+const LINE: f32 = 18.3;
+fn measure(text: &str, _: f32, limit: Option<f32>) -> (f32, f32) {
+    let width = text.len() as f32 * 7.0;
+    let room = limit.unwrap_or(width).max(7.0);
+    (width.min(room), (width / room).ceil().max(1.0) * LINE)
+}
+fn text(words: &str) -> NodeKind {
+    NodeKind::Text {
+        text: words.to_owned().into(),
+        color: Color(0, 0, 0, 255),
+        font_size: 16.0,
+    }
+}
+
+/// A node as built: by its parent's place in the list, parents first.
+#[derive(Clone)]
+struct Part {
+    parent: usize,
+    layout: Option<Layout>,
+    style: Style,
+    words: String,
+    gone: bool,
+}
+struct Random(u64);
+impl Random {
+    fn next(&mut self, n: usize) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        (self.0 >> 11) as usize % n.max(1)
+    }
+}
+fn kind(part: &Part) -> NodeKind {
+    match part.layout {
+        Some(layout) => NodeKind::Container(layout),
+        None => text(&part.words),
+    }
+}
+fn build(parts: &[Part], viewport: (f32, f32)) -> (Scene, Vec<Option<NodeId>>) {
+    let mut scene = Scene::new(viewport.0, viewport.1);
+    scene.set_text_measurer(measure);
+    let mut ids: Vec<Option<NodeId>> = vec![Some(scene.root())];
+    for part in &parts[1..] {
+        let id = match (part.gone, ids[part.parent]) {
+            (false, Some(parent)) => Some(scene.append(parent, kind(part), part.style.clone())),
+            _ => None,
+        };
+        ids.push(id);
+    }
+    scene.flush();
+    (scene, ids)
+}
+fn container_style(random: &mut Random, top: bool) -> Style {
+    let mut style = Style {
+        gap: [0.0, 2.5, 6.0][random.next(3)],
+        padding: [0.0, 1.5][random.next(2)],
+        align: [Align::Start, Align::Stretch, Align::Center][random.next(3)],
+        ..Style::default()
+    };
+    match random.next(6) {
+        0 => style.width = Some(120.0 + random.next(120) as f32),
+        1 if !top => style.flex_grow = 1.0,
+        _ => {}
+    }
+    if top {
+        style.width = Some(280.0);
+    }
+    style
+}
+fn tree(random: &mut Random, long: bool) -> Vec<Part> {
+    let mut parts = vec![Part {
+        parent: 0,
+        layout: Some(Layout::Column),
+        style: Style::default(),
+        words: String::new(),
+        gone: false,
+    }];
+    let container = |parts: &mut Vec<Part>, parent, layout, style| {
+        parts.push(Part {
+            parent,
+            layout: Some(layout),
+            style,
+            words: String::new(),
+            gone: false,
+        });
+        parts.len() - 1
+    };
+    let top_style = container_style(random, true);
+    let top = container(&mut parts, 0, Layout::Column, top_style);
+    let mut holders = vec![top];
+    for _ in 0..3 + random.next(4) {
+        let parent = holders[random.next(holders.len())];
+        let layout = if random.next(4) == 0 {
+            Layout::Row
+        } else {
+            Layout::Column
+        };
+        let style = container_style(random, false);
+        holders.push(container(&mut parts, parent, layout, style));
+    }
+    for at in 0..8 + random.next(8) {
+        let parent = holders[random.next(holders.len())];
+        add_text(&mut parts, parent, format!("t{at}"));
+    }
+    // A long one, as a reply streamed into: its own code keeps its children.
+    if long {
+        let holder = holders[random.next(holders.len())];
+        let style = Style {
+            gap: 1.5,
+            align: Align::Stretch,
+            ..Style::default()
+        };
+        let column = container(&mut parts, holder, Layout::Column, style);
+        for at in 0..70 {
+            add_text(&mut parts, column, format!("row {at}"));
+        }
+    }
+    parts
+}
+fn add_text(parts: &mut Vec<Part>, parent: usize, words: String) {
+    parts.push(Part {
+        parent,
+        layout: None,
+        style: Style {
+            text_wrap: true,
+            ..Style::default()
+        },
+        words,
+        gone: false,
+    });
+}
+fn run(seed: u64, long: bool) {
+    let mut random = Random(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut parts = tree(&mut random, long);
+    let viewport = (300.0, 4000.0);
+    let (mut scene, mut ids) = build(&parts, viewport);
+    let live_texts = |parts: &[Part]| -> Vec<usize> {
+        (1..parts.len())
+            .filter(|at| !parts[*at].gone && parts[*at].layout.is_none())
+            .collect()
+    };
+    let live_holders = |parts: &[Part]| -> Vec<usize> {
+        (1..parts.len())
+            .filter(|at| !parts[*at].gone && parts[*at].layout.is_some())
+            .collect()
+    };
+    for step in 0..40 {
+        let mut what = format!("seed {seed} step {step}:");
+        for _ in 0..1 + random.next(4) {
+            let texts = live_texts(&parts);
+            let holders = live_holders(&parts);
+            match random.next(10) {
+                // Text longer, past a wrap or not, shorter, or the same length.
+                0..=5 if !texts.is_empty() => {
+                    let at = texts[random.next(texts.len())];
+                    let words = match random.next(4) {
+                        0 => format!("{} more", parts[at].words),
+                        1 => "w ".repeat(1 + random.next(60)),
+                        2 => "ab".to_owned(),
+                        _ => parts[at].words.replace('t', "u"),
+                    };
+                    what.push_str(&format!(" text {at}"));
+                    parts[at].words = words;
+                    scene.set_text(ids[at].unwrap(), parts[at].words.as_str());
+                }
+                6 | 7 => {
+                    let parent = holders[random.next(holders.len())];
+                    let at = parts.len();
+                    what.push_str(&format!(" add {at} to {parent}"));
+                    add_text(&mut parts, parent, format!("new {at}"));
+                    let id = scene.append(
+                        ids[parent].unwrap(),
+                        kind(&parts[at]),
+                        parts[at].style.clone(),
+                    );
+                    ids.push(Some(id));
+                }
+                8 if texts.len() > 2 => {
+                    let at = texts[random.next(texts.len())];
+                    what.push_str(&format!(" remove {at}"));
+                    parts[at].gone = true;
+                    scene.remove(ids[at].take().unwrap());
+                }
+                _ => {
+                    // Skips the top: its width is what a boundary would be.
+                    let at = holders[random.next(holders.len())];
+                    what.push_str(&format!(" gap of {at}"));
+                    parts[at].style.gap += 1.0;
+                    scene.set_style(ids[at].unwrap(), parts[at].style.clone());
+                }
+            }
+        }
+        scene.flush();
+        let (fresh, fresh_ids) = build(&parts, viewport);
+        for (at, (id, fresh_id)) in ids.iter().zip(&fresh_ids).enumerate() {
+            let (Some(id), Some(fresh_id)) = (id, fresh_id) else {
+                continue;
+            };
+            assert_eq!(
+                scene.bounds(*id),
+                fresh.bounds(*fresh_id),
+                "{what}\nnode {at} ({:?} under {})",
+                parts[at].words,
+                parts[at].parent
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tree_changed_lays_out_as_one_built_whole() {
+    for seed in 1..=300 {
+        run(seed, false);
+    }
+}
+
+#[test]
+fn a_tree_with_a_long_column_changed_lays_out_as_one_built_whole() {
+    for seed in 1..=100 {
+        run(seed, true);
+    }
+}

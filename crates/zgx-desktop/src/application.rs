@@ -1141,6 +1141,8 @@ impl Application {
             native: HashMap::new(),
             drag_over: Cell::new(None),
             carrying: None,
+            focus_moved: false,
+            app_was_active: true,
             #[cfg(target_os = "linux")]
             last_focused: None,
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -2490,6 +2492,12 @@ impl Host {
             FullScreenPhase::WillEnter | FullScreenPhase::WillExit
         ) {
             self.full_screen_seq = seq;
+            // Into or out of full screen, its popups go at once, as AppKit's:
+            // no frame comes through the transition to take them down.
+            self.context.ui.dismiss_popups();
+            if let Some(window) = &self.window {
+                self.popups.hide_all(window);
+            }
         } else if phase == FullScreenPhase::Settled && seq != self.full_screen_seq {
             return;
         }
@@ -2536,6 +2544,11 @@ impl Host {
     /// and it stops presenting until it shows again.
     fn occlude(&mut self) {
         self.context.ui.dismiss_popups();
+        // With no frame to come, what shows goes now: a menu or a tooltip
+        // isn't its window's child, to go with it (macOS).
+        if let Some(window) = &self.window {
+            self.popups.hide_all(window);
+        }
         self.context.ui.cancel_interactions();
         self.native_occluded = true;
         self.context.ui.set_presented(false);
@@ -6157,8 +6170,10 @@ impl Host {
                     renderer.trim_atlas();
                 }
             } else {
-                // Garbage scripts made (`zgx::idle`), first: what it frees,
-                // the trims below give back.
+                // What a large removal left where no frame came to free it,
+                // and garbage scripts made (`zgx::idle`), first: what they
+                // free, the trims below give back.
+                while self.context.ui.reclaim(zgx::widgets::RECLAIM_BUDGET) {}
                 zgx::idle::trim(&self.context.ui.runtime);
                 if let Some(renderer) = &mut self.renderer {
                     renderer.trim();
@@ -6390,6 +6405,20 @@ impl Host {
             return true;
         }
         self.scroll.active(now) || self.touch.flinging()
+    }
+    /// The idle trim arms as a frame presents. With no frame coming, what asks
+    /// for it arms it here: `zgx::idle::request`, and a large removal's nodes,
+    /// which frames free, in a window that isn't presenting any. Once: the
+    /// trim frees them, and nothing arms it again.
+    fn arm_trim_without_frames(&mut self) {
+        let ui = &self.context.ui;
+        let asked = zgx::idle::take_request(&ui.runtime);
+        if (asked || (ui.reclaiming() && !self.frames_presented()))
+            && (self.trim_at.is_none() || self.trim_atlas)
+        {
+            self.trim_at = Some(std::time::Instant::now() + TRIM_DELAY);
+            self.trim_atlas = false;
+        }
     }
     /// Start, stop or schedule this window's frame source to match demand.
     fn sync_frames(&mut self) {
@@ -6730,6 +6759,10 @@ struct WindowManager {
     /// The window last focused: the one another launch raises (Linux).
     #[cfg(target_os = "linux")]
     last_focused: Option<u64>,
+    /// Whether a window's focus moved this turn, and whether any of them had
+    /// it when last read (`app_active`). Forward until the first says not.
+    focus_moved: bool,
+    app_was_active: bool,
     /// The last pointer move heard and not yet handled (Linux, Windows):
     /// see `ApplicationHandler::window_event`.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -7835,6 +7868,11 @@ impl WindowManager {
         if matches!(event, WindowEvent::Focused(true)) {
             self.last_focused = Some(token);
         }
+        // Read as this turn ends: one of its windows giving way to another
+        // isn't the app going to the back (`app_active`).
+        if matches!(event, WindowEvent::Focused(_)) {
+            self.focus_moved = true;
+        }
         #[cfg(target_os = "linux")]
         if self.x11_drag_input(event_loop, token, id, &event) {
             return;
@@ -7880,7 +7918,23 @@ impl WindowManager {
             host.full_screen(phase, duration, seq);
         }
     }
+    /// Tell each window's interface whether the app is at the back, as focus
+    /// moved: popups wait for it to come forward (`Ui::set_app_active`).
+    fn app_active(&mut self) {
+        if !std::mem::take(&mut self.focus_moved) {
+            return;
+        }
+        let active = self.hosts.values().any(|host| host.native_focused);
+        if self.app_was_active != active {
+            self.app_was_active = active;
+            for host in self.hosts.values() {
+                host.context.ui.set_app_active(active);
+                host.context.window.request_redraw();
+            }
+        }
+    }
     fn about_to_wait_turn(&mut self, event_loop: &ActiveEventLoop) {
+        self.app_active();
         #[cfg(target_os = "macos")]
         self.apply_full_screen();
         // A close request must terminate even while native surfaces are suspended.
@@ -8021,6 +8075,7 @@ impl WindowManager {
                     return;
                 }
             }
+            host.arm_trim_without_frames();
             #[cfg(all(target_os = "linux", feature = "webkitgtk"))]
             host.sync_page_cursor(event_loop);
         }
@@ -9539,6 +9594,8 @@ mod tests {
             native: HashMap::new(),
             drag_over: Cell::new(None),
             carrying: None,
+            focus_moved: false,
+            app_was_active: true,
             #[cfg(target_os = "linux")]
             last_focused: None,
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -9955,6 +10012,8 @@ mod tests {
             native: HashMap::new(),
             drag_over: Cell::new(None),
             carrying: None,
+            focus_moved: false,
+            app_was_active: true,
             last_focused: None,
             pending_move: HeldMove::default(),
             factory,
@@ -10212,6 +10271,8 @@ mod tests {
             native: HashMap::new(),
             drag_over: Cell::new(None),
             carrying: None,
+            focus_moved: false,
+            app_was_active: true,
             pending_move: HeldMove::default(),
             factory,
             active: false,

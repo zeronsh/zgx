@@ -229,6 +229,9 @@ const IMAGES_GONE_COUNT: usize = 256;
 type ImageTexture = (wgpu::BindGroup, usize, Option<wgpu::Texture>, (u32, u32));
 /// A kept file's pixels aren't decoded yet (`ImageData::pixels_at`).
 const IMAGE_PENDING: &str = "an image's pixels are decoding";
+/// The size in `images` of a texture on its way out (`images_outgoing`): smaller
+/// than anything asked for, so it never fits.
+const IMAGE_OUTGOING: (u32, u32) = (1, 1);
 /// The longest side a texture is cut to past the budget (`upload_image_at`):
 /// however full it is, a picture shows, and this little goes over it.
 const IMAGE_LEAST_SIDE: u32 = 64;
@@ -837,10 +840,17 @@ enum CopyBlocker {
     NoContent,
     /// Something not of the content paints between its items.
     Between(NodeId),
-    /// A content item reads what lies under it (a backdrop blur, a blend, a
-    /// shader reading the backdrop), plays a loop of its own, or the view
-    /// lies under two fades.
-    Effect(NodeId),
+    /// A content item reads what lies under it or the window (a backdrop blur,
+    /// a blend, a shader reading either), or its shader's inputs run on as
+    /// frames draw.
+    Reads(NodeId),
+    /// A dithered picture: its dots lie on the screen's grid.
+    Dots(NodeId),
+    /// A layer under a fade whose bands can't draw as one with it
+    /// (`bands::fades_apart`).
+    FilteredUnderFade(NodeId),
+    /// The view lies under two fades around it.
+    TwoFades,
     /// A content item fades with this mask (`fade_edges`): the move copies
     /// within its interior, if the mask holds still (`scroll_copies`).
     Fade(NodeId, zgx::scene::FadeMask),
@@ -857,11 +867,19 @@ impl CopyBlocker {
         match self {
             Self::NoContent => "none of its content paints in its view".into(),
             Self::Between(id) => format!("{} paints between its content's items", node(id)),
-            Self::Effect(id) => format!(
-                "{} in it reads what is under it, plays a loop of its own, or lies under two \
-                 fades around its view",
+            Self::Reads(id) => format!(
+                "{} in it reads what is under it or the window, or runs passes each frame",
                 node(id)
             ),
+            Self::Dots(id) => format!(
+                "{} in it is a dithered picture, its dots on the screen's grid",
+                node(id)
+            ),
+            Self::FilteredUnderFade(id) => format!(
+                "{} in it is a blurred, masked or shaded layer under a fade",
+                node(id)
+            ),
+            Self::TwoFades => "it lies under two fades around it".into(),
             Self::Fade(id, _) => format!(
                 "{} in it fades with bands cut short as it scrolls (`fade_overflow`) or not \
                  its view's own",
@@ -908,10 +926,10 @@ fn copy_blocker(
     // What the content has from around it, which holds still as it moves:
     // the extras its own node was given. Any other an item has is its own.
     let Some(around) = items[first..=last].iter().find(|i| i.id == scroll.node) else {
-        return Some(CopyBlocker::Effect(items[first].id));
+        return Some(CopyBlocker::NoContent);
     };
     if around.outer_mask().is_some() {
-        return Some(CopyBlocker::Effect(scroll.node));
+        return Some(CopyBlocker::TwoFades);
     }
     *fade = around.mask();
     let paints = |item: &zgx::scene::PaintItem<'_>| -> Option<Rect> {
@@ -955,14 +973,28 @@ fn copy_blocker(
         // What reads the pixels under it reads the view's, which hold still
         // where the content moves over them.
         if item.effects.blur_radius > 0. || (item.isolated && reads_under(scene, item.id)) {
-            return Some(CopyBlocker::Effect(item.id));
+            return Some(CopyBlocker::Reads(item.id));
         }
-        // A loop a layer plays moves with the view's repaint, not its copy.
+        // Dots on the screen's grid stay put as the picture slides under them.
+        if let NodeKind::Image(image) = item.kind
+            && image.effect() != zgx::image::ImageEffect::Plain
+        {
+            return Some(CopyBlocker::Dots(item.id));
+        }
+        // Under a fade, such a layer has its whole run fade item by item
+        // where it paints whole, and a copy's bands are walked without it.
+        if item.mask().is_some() && !bands::fades_apart(scene, item) {
+            return Some(CopyBlocker::FilteredUnderFade(item.id));
+        }
+        // A loop a layer plays isn't in the frames, and its layer goes where
+        // its node is whatever a frame walks (`sync_loops`): nothing of it
+        // to carry. But only a walk finds the view's edge cutting it, or
+        // something over it, for which the layer would show too much: all it
+        // can paint repaints, for the walk to reach it.
         #[cfg(target_os = "macos")]
-        if scene.baked_loops().iter().any(|(node, _)| {
-            std::iter::successors(Some(*node), |at| scene.parent(*at)).any(|at| at == scroll.node)
-        }) {
-            return Some(CopyBlocker::Effect(item.id));
+        if scene.baked_loops().iter().any(|(node, _)| *node == item.id) {
+            let ink = scene.layer_ink(item).unwrap_or(item.bounds);
+            carried.extend(ink.union(item.bounds).intersection(clip));
         }
         // (A subtree shares its extras: looked at once.)
         if let Some(extras) = &item.extras
@@ -1065,14 +1097,15 @@ fn copy_blocker(
     }
     None
 }
-/// Whether layer `id` draws from what lies under it: a blend, a shader
-/// reading the backdrop, or a backdrop filter anywhere in it.
+/// Whether layer `id` draws from outside itself: a blend, or anywhere in it a
+/// backdrop filter or a shader reading the backdrop or the window, or whose
+/// inputs run on as frames draw.
 fn reads_under(scene: &Scene, id: NodeId) -> bool {
     scene.blend(id) != zgx::scene::BlendMode::Normal
         || scene
             .layer_shader(id)
             .is_some_and(zgx::scene::LayerShader::reads_backdrop)
-        || scene.backdrop_read_within(id)
+        || scene.reads_window_within(id)
 }
 /// A fade in scroll content draws what it drew after the move only where its
 /// band's edge moved with it. Its box comes from its clip, so an edge the
@@ -4200,6 +4233,8 @@ pub struct GpuRenderer {
     debug_scroll_copy: bool,
     /// Scroll moves applied as a copy of their pixels, ever.
     scroll_copied: std::cell::Cell<u64>,
+    /// A scroll this frame could have copied, had the pixels not been new.
+    copy_next: std::cell::Cell<bool>,
     /// Frames presented to the drawable alone (`Deferred::direct`).
     direct_frames: u64,
     /// Frames encoded with Metal directly (`render_direct`).
@@ -4350,10 +4385,21 @@ pub struct GpuRenderer {
     /// The bytes of textures this frame asked for, their pixels decoding:
     /// each decodes to its share of the budget, not all of it.
     images_decoding: usize,
+    /// What each image last frame's pixels were decoding for would take whole:
+    /// not drawn, but sharing the budget with those drawn (`share_images`).
+    images_awaiting: FxHashMap<u64, usize>,
     /// Images and layers that went softer for their budgets: no issue, the
     /// budget doing its job, but `zgx inspect memory` shows them. Written only
     /// as that happens, and read only as asked (`debug_cache_stats`).
     images_softer: FxHashMap<u64, usize>,
+    /// Whether any went softer or is waiting: what a frame reads to know if the
+    /// budget has any sharing to do, kept as those two change (`images_share`).
+    images_to_share: bool,
+    /// Textures past the share as it last moved, each with its size: drawn
+    /// until what replaces it is ready, so a picture on screen whose pixels
+    /// must decode again isn't left blank. Each has `IMAGE_OUTGOING` for its size
+    /// in `images`, so a frame's check for what fits sends it the long way.
+    images_outgoing: FxHashMap<u64, (u32, u32)>,
     /// What one image's texture may take while images drawn together don't
     /// all fit: the large ones share what the small ones leave, evenly
     /// (`share_images`).
@@ -4963,6 +5009,7 @@ impl GpuRenderer {
             single_pass_frames: 0,
             debug_scroll_copy: false,
             scroll_copied: std::cell::Cell::new(0),
+            copy_next: std::cell::Cell::new(false),
             direct_frames: 0,
             metal_frames: 0,
             warms: 0,
@@ -5028,7 +5075,10 @@ impl GpuRenderer {
             image_frame: 0,
             frame_scene: None,
             images_decoding: 0,
+            images_awaiting: FxHashMap::default(),
             images_softer: FxHashMap::default(),
+            images_to_share: false,
+            images_outgoing: FxHashMap::default(),
             image_share: usize::MAX,
             layers_coarser: FxHashSet::default(),
             views: None,
@@ -5661,8 +5711,10 @@ impl GpuRenderer {
         }
         self.image_frame += 1;
         self.images_decoding = 0;
-        if !self.images_softer.is_empty() {
+        if self.images_to_share {
             self.share_images();
+            self.images_awaiting.clear();
+            self.images_share();
         }
         if self.image_frame == LAUNCH_FRAMES {
             // An app that never goes idle checks its font cache here, once.
@@ -5736,10 +5788,13 @@ impl GpuRenderer {
     /// The size of `image`'s texture, if it has one. For tests and devtools.
     #[doc(hidden)]
     pub fn debug_image_size(&self, image: &zgx::image::ImageData) -> Option<(u32, u32)> {
-        self.images.get(&image.id()).map(|entry| match entry.3 {
-            (0, 0) => (image.width(), image.height()),
-            held => held,
-        })
+        let held = |id: &u64, size| self.images_outgoing.get(id).copied().unwrap_or(size);
+        self.images
+            .get(&image.id())
+            .map(|entry| match held(&image.id(), entry.3) {
+                (0, 0) => (image.width(), image.height()),
+                held => held,
+            })
     }
     /// Whether a kept file's pixels were uploaded since the last call: their
     /// decoded copy may go (`zgx::image::release_decoded`).
@@ -10284,14 +10339,14 @@ impl GpuRenderer {
             if defer && end == draws.len() {
                 stats.render_passes += 1;
                 let blur = vertical.take();
-                // (Not while a view scrolls over pixels this frame made new:
-                // a frame left out of the target refuses the next one's copy,
-                // which paints whole and goes direct, and so on while it moves.)
+                // (Not when the next frame could copy: a frame left out of the
+                // target refuses it, which paints whole and goes direct, and
+                // so on while the view moves.)
                 let direct = whole
                     && self.whole_frames > 0
                     && segment == 0
                     && blur.is_none()
-                    && !(self.fresh && !scene.scroll_moves().is_empty());
+                    && !self.copy_next.get();
                 self.whole_frames = if whole {
                     self.whole_frames.saturating_add(1)
                 } else {
@@ -11090,6 +11145,7 @@ impl GpuRenderer {
         // A frame with no scroll moved, nearly every one that isn't scrolling,
         // doesn't reach the work below, which is a call and a big frame.
         let serial = scene.flush_serial();
+        self.copy_next.set(false);
         if scene.scroll_moves().iter().all(|m| m.serial != serial) {
             return (Vec::new(), Vec::new());
         }
@@ -11150,6 +11206,25 @@ impl GpuRenderer {
                 })
             };
             let pixels = pixels_of(scroll.clip);
+            // (Only single-pass frames go direct.)
+            if self.fresh
+                && self.single_pass_format.is_some()
+                && pixels.is_some()
+                && copyable
+                && zgx::switches::SCROLL_COPY.on()
+                && !self.copy_next.get()
+            {
+                let mut fade = None;
+                let clear =
+                    copy_blocker(scene, scroll, damage, self.scale, &mut carried, &mut fade)
+                        .is_none()
+                        && fade.is_none_or(|mask| {
+                            self.fade_copy(scene, scroll, mask, &pixels_of).is_some()
+                        })
+                        && scene.scroll_corners(scroll.node).is_some();
+                carried.clear();
+                self.copy_next.set(clear);
+            }
             // Why it repaints, for devtools (`zgx inspect frames`).
             let refused: Result<_, fn(&Scene) -> String> = match pixels {
                 _ if !zgx::switches::SCROLL_COPY.on() => {
@@ -12500,7 +12575,11 @@ impl GpuRenderer {
         }
         // Held smaller than drawn, the budget's doing: uploaded again only
         // if there's now room for more, not on every frame.
-        if let Some(entry) = self.images.get(&image.id()) {
+        let outgoing =
+            !self.images_outgoing.is_empty() && self.images_outgoing.contains_key(&image.id());
+        if let Some(entry) = self.images.get(&image.id())
+            && !outgoing
+        {
             let held = entry.3;
             let others = (self.images.iter())
                 .filter(|(id, _)| **id != image.id())
@@ -12521,8 +12600,13 @@ impl GpuRenderer {
         }
         match self.upload_image_at(image, size) {
             Ok(()) => {}
-            // Its pixels decoding: drawn once they are.
-            Err(error) if error.0 == IMAGE_PENDING => return Ok(false),
+            // Its pixels decoding: drawn once they are, or as it was till then.
+            Err(error) if error.0 == IMAGE_PENDING => {
+                if outgoing && let Some(drawn) = self.image_drawn.get_mut(&image.id()) {
+                    *drawn = self.image_frame;
+                }
+                return Ok(outgoing);
+            }
             Err(error) if IMAGE_MISSES.contains(&error.0.as_str()) => {
                 self.warn(&format!("{}: not drawn", error.0));
                 return Ok(false);
@@ -12541,19 +12625,45 @@ impl GpuRenderer {
     fn image_budget(&self) -> usize {
         (self.width as usize * self.height as usize * 4 * 4).max(IMAGE_TEXTURES)
     }
-    /// What images drawn last frame leave of the budget, shared: each takes
-    /// what it wants up to an even share of what the smaller leave. They come
-    /// to this over a frame or two, as they upload again, and only while some
-    /// are held softer: otherwise no image pays for it.
+    /// Whether a frame's budget has anything to share (`images_to_share`).
+    fn images_share(&mut self) {
+        self.images_to_share = !self.images_softer.is_empty()
+            || !self.images_awaiting.is_empty()
+            || !self.images_outgoing.is_empty();
+    }
+    /// What images drawn last frame, or waiting on their pixels then, leave of
+    /// the budget, shared: each takes what it wants up to an even share of what
+    /// the smaller leave. They come to this over a frame or two, as they upload
+    /// again, and only while some are held softer or waiting: otherwise no image
+    /// pays for it. (Left out, those waiting would leave the rest looking as if
+    /// they fit: uploaded whole, to go again once those arrive.)
     #[cold]
     fn share_images(&mut self) {
+        // On their way out and not asked for last frame (which drew them all:
+        // `repaint_all`, as they were marked): nothing to wait for.
+        if !self.images_outgoing.is_empty() {
+            let asked = self.image_frame - 1;
+            let (images, drawn) = (&mut self.images, &self.image_drawn);
+            self.images_outgoing.retain(|id, _| {
+                let keep = drawn.get(id).is_some_and(|at| *at >= asked);
+                if !keep {
+                    images.remove(id);
+                }
+                keep
+            });
+            let images = &self.images;
+            self.image_drawn.retain(|id, _| images.contains_key(id));
+        }
         let images = &self.images;
         self.images_softer.retain(|id, _| images.contains_key(id));
         // (The last frame that drew them: one kept draws none anew.)
         let last = self.image_drawn.values().copied().max().unwrap_or(0);
+        let awaiting = &self.images_awaiting;
         let mut wants: Vec<usize> = (self.images.iter())
+            .filter(|(id, _)| !awaiting.contains_key(*id))
             .filter(|(id, _)| self.image_drawn.get(id).is_some_and(|drawn| *drawn == last))
             .map(|(id, entry)| self.images_softer.get(id).copied().unwrap_or(entry.1))
+            .chain(awaiting.values().copied())
             .collect();
         wants.sort_unstable();
         let mut left = self.image_budget();
@@ -12577,11 +12687,18 @@ impl GpuRenderer {
             return;
         }
         self.image_share = share;
-        // Those over it upload again as they're drawn, as all may take more.
-        self.images
-            .retain(|_, entry| entry.1 <= share.saturating_add(share / 20));
-        let images = &self.images;
-        self.image_drawn.retain(|id, _| images.contains_key(id));
+        // Those over it upload again as they're drawn, as all may take more:
+        // drawn as they are until then (`images_outgoing`). And those it now
+        // leaves room for stay as they were.
+        let limit = share.saturating_add(share / 20);
+        for (id, entry) in &mut self.images {
+            if entry.1 > limit && entry.3 != IMAGE_OUTGOING {
+                self.images_outgoing.insert(*id, entry.3);
+                entry.3 = IMAGE_OUTGOING;
+            } else if entry.1 <= limit && entry.3 == IMAGE_OUTGOING {
+                entry.3 = self.images_outgoing.remove(id).unwrap_or((0, 0));
+            }
+        }
         self.repaint_all();
     }
     /// `wanted` under the texture limit, its shape kept.
@@ -12698,8 +12815,15 @@ impl GpuRenderer {
         let bytes = |(w, h): (u32, u32)| w as usize * h as usize * 4;
         // An image it replaces at another size gives its bytes back.
         let replaced = self.images.get(&image.id()).map_or(0, |entry| entry.1);
-        let mut held = self.images.values().map(|entry| entry.1).sum::<usize>() - replaced
-            + self.images_decoding;
+        // (Nor those on their way out, whose replacements count as they come.)
+        let outgoing: usize = (self.images_outgoing.keys())
+            .filter(|id| **id != image.id())
+            .filter_map(|id| self.images.get(id))
+            .map(|entry| entry.1)
+            .sum();
+        let mut held =
+            self.images.values().map(|entry| entry.1).sum::<usize>() - replaced - outgoing
+                + self.images_decoding;
         let whole = self.image_size_limited(image, wanted);
         let most = self.image_size_within(image, wanted, 0);
         if bytes(most) + held > budget {
@@ -12711,6 +12835,7 @@ impl GpuRenderer {
                 .image_drawn
                 .iter()
                 .filter(|(id, drawn)| **drawn < self.image_frame && !showing.contains(*id))
+                .filter(|(id, _)| !self.images_outgoing.contains_key(*id))
                 .map(|(id, drawn)| (*drawn, *id))
                 .collect();
             idle.sort_unstable();
@@ -12733,9 +12858,12 @@ impl GpuRenderer {
             let images = &self.images;
             self.images_softer.retain(|id, _| images.contains_key(id));
             self.images_softer.insert(image.id(), bytes(whole));
+            self.images_to_share = true;
         } else if !self.images_softer.is_empty() {
             self.images_softer.remove(&image.id());
+            self.images_share();
         }
+        let wants_whole = bytes(whole);
         let bytes = bytes((width, height));
         if self.images.len() >= MAX_IMAGES && !self.images.contains_key(&image.id()) {
             // Images not drawn this frame give way, the longest gone first;
@@ -12763,6 +12891,8 @@ impl GpuRenderer {
                 None => {
                     self.images_awaited = true;
                     self.images_decoding += bytes;
+                    self.images_awaiting.insert(image.id(), wants_whole);
+                    self.images_to_share = true;
                     return Err(GpuError(IMAGE_PENDING.into()));
                 }
             },
@@ -12820,6 +12950,7 @@ impl GpuRenderer {
             true => (0, 0),
             false => (width, height),
         };
+        self.images_outgoing.remove(&image.id());
         self.images
             .insert(image.id(), (bind, bytes, Some(texture), held_size));
         self.image_drawn.insert(image.id(), self.image_frame);
@@ -20141,5 +20272,86 @@ mod premultiply_tests {
         let expected = exact(&pixels);
         super::premultiply(&mut pixels);
         assert!(pixels == expected, "a block differs from the division");
+    }
+}
+#[cfg(test)]
+mod copy_refusal_tests {
+    use super::*;
+    use zgx::{compose::prelude::*, widgets::Ui};
+
+    /// A view holding two stripes, wrapped by `around`, moved once: what
+    /// `copy_blocker` makes of it after `prepare` has seen its content.
+    fn refusal(
+        around: impl FnOnce(View) -> View,
+        prepare: impl FnOnce(&mut Scene, NodeId),
+    ) -> Option<(CopyBlocker, String)> {
+        let mut ui = Ui::new(240., 180.);
+        let offset = ui.signal(0_f32);
+        let page = column()
+            .w(240.)
+            .child(div().w(240.).h(400.).bg(rgb(0x5a7a9a)))
+            .child(div().w(240.).h(400.).bg(rgb(0x9a5a7a)));
+        let view = scroll(offset.clone())
+            .w(240.)
+            .h(180.)
+            .bg(rgb(0x101820))
+            .child(page);
+        ui.mount(around(view));
+        let step = |ui: &mut Ui| {
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush().damage
+        };
+        step(&mut ui);
+        offset.set(8.);
+        step(&mut ui);
+        let content = ui.scene.borrow().scroll_moves()[0].node;
+        prepare(&mut ui.scene.borrow_mut(), content);
+        offset.set(16.);
+        let damage = step(&mut ui);
+        let scene = ui.scene.borrow();
+        let moved = scene.scroll_moves()[0].clone();
+        copy_blocker(&scene, &moved, &damage, 1., &mut Vec::new(), &mut None).map(|blocker| {
+            let note = blocker.describe(&scene);
+            (blocker, note)
+        })
+    }
+
+    #[test]
+    fn a_plain_view_has_no_refusal() {
+        assert_eq!(refusal(|view| view, |_, _| {}), None);
+    }
+
+    #[test]
+    fn a_view_under_two_fades_says_so() {
+        let (blocker, note) = refusal(
+            |view| {
+                div()
+                    .w(240.)
+                    .h(180.)
+                    .overflow_hidden()
+                    .fade_edges(10., 10.)
+                    .child(view.fade_edges(20., 20.))
+            },
+            |_, _| {},
+        )
+        .expect("refused");
+        assert_eq!(blocker, CopyBlocker::TwoFades);
+        assert!(note.contains("two fades"), "{note}");
+    }
+
+    /// A loop in the content is no refusal (`baked_loops.rs` has it scrolling).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_loop_in_the_content_is_no_refusal() {
+        let refused = refusal(
+            |view| view,
+            |scene, content| {
+                let node = scene.children(content)[0];
+                let baked =
+                    zgx::scene::BakedLoop::new(vec![(1., 0.), (0.5, 0.)], 30., Box::new(|| {}));
+                scene.set_baked_loop(node, Some(std::rc::Rc::new(baked)));
+            },
+        );
+        assert_eq!(refused, None);
     }
 }

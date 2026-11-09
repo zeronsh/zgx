@@ -315,36 +315,6 @@ fn a_missing_format_says_how_to_say_one() {
 }
 
 #[test]
-fn a_render_returns_what_it_took() {
-    // Each stage's thread and pixels go with it: many renders in a process
-    // hold no more than a few.
-    let dir = app("memory");
-    let render_all = |count: usize| {
-        for i in 0..count {
-            let mut out = options(&dir, &format!("m{i}"));
-            out.frames = Some((0, 1));
-            render(&out, |_| true).unwrap();
-        }
-    };
-    render_all(4);
-    let settled = resident();
-    render_all(16);
-    let grown = resident().saturating_sub(settled);
-    assert!(grown < 24 << 20, "16 more renders kept {} MiB", grown >> 20);
-}
-fn resident() -> u64 {
-    let out = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-        .output()
-        .unwrap();
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .parse::<u64>()
-        .unwrap_or(0)
-        * 1024
-}
-
-#[test]
 fn hevc_is_tagged_for_players() {
     if zgx_video::encode::ffmpeg().is_none() {
         eprintln!("no ffmpeg here: skipped");

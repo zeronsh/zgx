@@ -9175,7 +9175,9 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Font, Lit::Str(v)) => s.font_family(font_family(v)),
         (Wrap, Lit::Bool(v)) => s.text_wrap(*v),
         (Wrap, Lit::Str(_)) => s.text_balance(true),
-        (Truncate, Lit::Bool(true)) => s.truncate(),
+        // The ellipsis alone: text with one and no clamp keeps one line, so
+        // `lines` wins however the two are set, in whichever order.
+        (Truncate, Lit::Bool(true)) => s.text_overflow(zgx::text_layout::TextOverflow::Ellipsis),
         (Lines, Lit::Num(v)) => s.line_clamp(*v as u32),
         (LineHeight, Lit::Num(v)) => s.line_height(*v),
         (LetterSpacing, Lit::Num(v)) => s.letter_spacing(*v),

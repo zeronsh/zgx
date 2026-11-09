@@ -12,7 +12,7 @@ const STILL_GROWING: &[(Phase, &str)] = &[(Phase::Layout, "layout")];
 
 #[test]
 fn a_drawn_chunk_costs_the_same_however_long_the_reply() {
-    md_chunk::check(STILL_GROWING, true, || {
+    md_chunk::check("", STILL_GROWING, true, || {
         let mut gpu = zgx_gpu::GpuRenderer::new(640, 900).expect("a GPU");
         move |scene: &zgx::scene::Scene, damage: &[zgx::scene::Rect]| {
             gpu.render(scene, damage).unwrap();

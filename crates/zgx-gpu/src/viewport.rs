@@ -412,6 +412,9 @@ impl Views {
     }
 }
 
+/// What GPU views' textures may hold together, whatever pictures hold.
+const VIEW_TEXTURES: usize = 64 * 1024 * 1024;
+
 impl GpuRenderer {
     /// Draw `image`, a frame of a GPU view, into the view's texture (made, or
     /// remade at a new size) and cache it under the frame's id in place of
@@ -446,12 +449,45 @@ impl GpuRenderer {
             Some(kept) => kept,
             None => {
                 let bytes = size.0 as usize * size.1 as usize * 4;
-                if bytes + self.images.values().map(|entry| entry.1).sum::<usize>()
-                    > 64 * 1024 * 1024
-                {
-                    return Err(GpuError(
-                        "visible image and GPU view textures exceed their budget".into(),
-                    ));
+                let budget = VIEW_TEXTURES;
+                let mut held = self.images.values().map(|entry| entry.1).sum::<usize>();
+                if bytes + held > budget {
+                    // Images not showing give their textures back, least
+                    // recently drawn first: drawn again, they upload again.
+                    // (A video's clip leaves a frame's picture behind each
+                    // frame; a 3D view after it found the budget spent.) Not
+                    // those not marked drawn: a frame paints what it kept
+                    // without marking it (`images_showing`).
+                    let showing = self.images_showing();
+                    let mut idle: Vec<(u64, u64)> = (self.image_drawn.iter())
+                        .filter(|(id, _)| !showing.contains(*id))
+                        .map(|(id, drawn)| (*drawn, *id))
+                        .collect();
+                    idle.sort_unstable();
+                    for (_, id) in idle {
+                        if bytes + held <= budget {
+                            break;
+                        }
+                        self.image_drawn.remove(&id);
+                        if let Some(entry) = self.images.remove(&id) {
+                            held -= entry.1;
+                        }
+                    }
+                }
+                // Views answer to a budget of their own, not to pictures': a
+                // view is a target its box bounds and goes when it goes, and
+                // pictures showing may rightly hold all of theirs (a film's
+                // wallpaper, large on a magnified board), and aren't to go
+                // softer or blank for a view.
+                let views = self.views.as_ref().expect("made above");
+                let (shown, count) = (views.shown.values())
+                    .filter_map(|last| self.images.get(&last.image))
+                    .fold((0, 0), |(bytes, count), entry| (bytes + entry.1, count + 1));
+                if bytes + shown > VIEW_TEXTURES {
+                    return Err(GpuError(format!(
+                        "GPU view textures exceed their budget: a view of {bytes} bytes, \
+                         {shown} held by {count} other views"
+                    )));
                 }
                 let texture = self.view_texture(key, size);
                 let target = texture.create_view(&Default::default());

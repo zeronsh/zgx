@@ -1,6 +1,7 @@
 //! Full-size pictures drawn small, however they come: a texture of the size
 //! drawn, no issue raised, none left out, and no frame failing for them.
-use std::sync::{Arc, Condvar, Mutex, Once};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Once, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use zgx::{image::ImageData, scene::*};
 use zgx_gpu::{GpuRenderer, GpuStats};
@@ -98,8 +99,25 @@ type Make = fn(u32, u32, [u8; 4]) -> Arc<ImageData>;
 const MAKERS: [(&str, Make); 2] = [("raw", raw), ("kept", kept)];
 
 /// One fading out as the next fades in, in a popup's window and a large one.
+/// Held by each test: `zgx::image::release_decoded` gives back every kept
+/// file's pixels in the process, so a test releasing them would take another's
+/// from under it (a decoded copy it reads, or one its frames wait on). One that
+/// releases runs alone; the rest together.
+static KEPT_COPIES: RwLock<()> = RwLock::new(());
+fn decoded_kept() -> RwLockReadGuard<'static, ()> {
+    KEPT_COPIES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+fn releases_decoded() -> RwLockWriteGuard<'static, ()> {
+    KEPT_COPIES
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn two_snapshots_crossfading_take_the_size_they_are_drawn() {
+    let _decoded = decoded_kept();
     for window in WINDOWS {
         for (name, make) in MAKERS {
             let (a, b) = (
@@ -143,6 +161,7 @@ fn two_snapshots_crossfading_take_the_size_they_are_drawn() {
 /// unmasked while it does.
 #[test]
 fn a_mask_takes_the_size_it_is_drawn_and_fails_no_frame() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     for (name, make) in MAKERS {
         let mut scene = Scene::new(window.0 as f32, window.1 as f32);
@@ -199,6 +218,7 @@ fn a_mask_takes_the_size_it_is_drawn_and_fails_no_frame() {
 /// drawn larger: its texture is another then.
 #[test]
 fn a_fitted_mask_masks_in_the_right_place_and_follows_its_size() {
+    let _decoded = decoded_kept();
     // Its left half opaque.
     let (width, height) = (1000u32, 500u32);
     let mut pixels = vec![255u8; (width * height * 4) as usize];
@@ -247,6 +267,7 @@ fn a_fitted_mask_masks_in_the_right_place_and_follows_its_size() {
 /// uploaded once, not again on every frame.
 #[test]
 fn a_picture_past_the_budget_uploads_once() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (5000u32, 2500u32);
     for (name, make) in MAKERS {
@@ -302,10 +323,131 @@ fn a_picture_past_the_budget_uploads_once() {
     }
 }
 
+/// Pictures past the budget whose pixels take a while: each uploads once, at
+/// its share, and decodes once for it. Those still waiting count: without them
+/// the rest looked as if they fit, and uploaded whole, to go again as they came.
+#[test]
+fn pictures_past_the_budget_take_their_shares_however_slowly_they_decode() {
+    let _decoded = decoded_kept();
+    const SIDE: (u32, u32) = (5000, 2500);
+    static DECODES: AtomicUsize = AtomicUsize::new(0);
+    fn slowly(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        DECODES.fetch_add(1, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(vec![200; (SIDE.0 * SIDE.1 * 4) as usize].into())
+    }
+    let window = WINDOWS[0];
+    let mut scene = Scene::new(window.0 as f32, window.1 as f32);
+    let stack = stack(&mut scene);
+    let size = (SIDE.0 as f32, SIDE.1 as f32);
+    for _ in 0..3 {
+        let card = scene.append(
+            stack,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..sized(DRAWN)
+            },
+        );
+        let image = ImageData::kept(SIDE.0, SIDE.1, Arc::from(&b"file"[..]), slowly).unwrap();
+        scene.append(card, NodeKind::Image(Arc::new(image)), sized(size));
+    }
+    let mut gpu = GpuRenderer::new(window.0, window.1).unwrap();
+    let uploads = settle(&mut gpu, &mut scene, window);
+    assert_eq!(uploads, 3, "uploads: each once");
+    assert_eq!(settle(&mut gpu, &mut scene, window), 0);
+    let stats = gpu.debug_cache_stats();
+    assert_eq!(stats.image_textures, 3);
+    assert_eq!(stats.images_softer, 3);
+    assert!(stats.image_bytes <= 64 << 20, "{}", stats.image_bytes);
+    assert_eq!(DECODES.load(Ordering::Relaxed), 3, "decodes: each once");
+    assert_eq!(gpu.take_issues(), Vec::<String>::new());
+}
+
+/// Pictures on screen, when a new one makes the share smaller: each is drawn as
+/// it was until what replaces it is ready, in every frame. A kept file whose
+/// pixels have gone waits on a decode for that, and evicted it would be blank
+/// meanwhile. The textures held for it go as it arrives.
+#[test]
+fn pictures_on_screen_stay_as_the_share_moves_until_their_replacements_are_ready() {
+    let _decoded = releases_decoded();
+    const SIDE: u32 = 2500;
+    const WINDOW: u32 = 2000;
+    const CORNERS: [(usize, usize); 3] = [(100, 100), (700, 700), (1300, 1300)];
+    fn slowly(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        std::thread::sleep(Duration::from_millis(100));
+        Ok(vec![200; (SIDE * SIDE * 4) as usize].into())
+    }
+    fn raw_one() -> ImageData {
+        ImageData::new(SIDE, SIDE, vec![200; (SIDE * SIDE * 4) as usize]).unwrap()
+    }
+    fn kept_one() -> ImageData {
+        ImageData::kept(SIDE, SIDE, Arc::from(&b"file"[..]), slowly).unwrap()
+    }
+    let all = Rect::new(0., 0., WINDOW as f32, WINDOW as f32);
+    for (name, make) in [("raw", raw_one as fn() -> ImageData), ("kept", kept_one)] {
+        let Ok(mut gpu) = GpuRenderer::new(WINDOW, WINDOW) else {
+            return;
+        };
+        let mut scene = Scene::new(WINDOW as f32, WINDOW as f32);
+        let root = stack(&mut scene);
+        let side = (SIDE as f32, SIDE as f32);
+        let add = |scene: &mut Scene, at: f32| {
+            let node = scene.append(root, NodeKind::Image(Arc::new(make())), sized(side));
+            scene.set_transform(node, Transform { x: at, y: at });
+        };
+        add(&mut scene, 0.);
+        add(&mut scene, 600.);
+        settle(&mut gpu, &mut scene, (WINDOW, WINDOW));
+        assert_eq!(gpu.debug_cache_stats().image_bytes, 50_000_000, "{name}");
+        // As a host does soon after they upload.
+        zgx::image::release_decoded();
+        add(&mut scene, 1200.);
+        let _ = scene.flush();
+        let (mut most, mut uploads, mut started, mut settled) = (0, 0, Instant::now(), 0);
+        while settled < 3 {
+            uploads += gpu.render(&scene, &[all]).expect("a frame").image_uploads;
+            let waiting = gpu.images_decoded();
+            let pixels = gpu.readback().unwrap();
+            for (x, y) in &CORNERS[..2] {
+                let alpha = pixels[(y * WINDOW as usize + x) * 4 + 3];
+                assert!(alpha > 0, "{name}: blank on screen at {x},{y}");
+            }
+            most = most.max(gpu.debug_cache_stats().image_bytes);
+            settled = if waiting { 0 } else { settled + 1 };
+            if waiting {
+                started = Instant::now();
+                std::thread::sleep(Duration::from_millis(4));
+            }
+            assert!(started.elapsed() < STALL, "{name}: never settled");
+        }
+        let pixels = gpu.readback().unwrap();
+        for (x, y) in CORNERS {
+            let alpha = pixels[(y * WINDOW as usize + x) * 4 + 3];
+            assert!(alpha > 0, "{name}: {x},{y} never showed");
+        }
+        let stats = gpu.debug_cache_stats();
+        assert_eq!(stats.image_textures, 3, "{name}");
+        assert!(stats.images_softer > 0, "{name}");
+        assert!(
+            stats.image_bytes <= 64 << 20,
+            "{name}: what was held for it went: {}",
+            stats.image_bytes
+        );
+        // (A raw one uploads as it comes, before the share moves, and again.)
+        assert!(uploads <= 4, "{name}: {uploads} uploads");
+        assert!(
+            most <= (64 << 20) + 50_000_000,
+            "{name}: at most the budget and what it replaced: {most}"
+        );
+    }
+}
+
 /// However many are past the budget, each shows and no frame fails. (Its last
 /// ones came to nothing, an error raised, with the budget used up.)
 #[test]
 fn a_budget_used_up_leaves_no_picture_out() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (1400u32, 1400u32);
     let pixels: Arc<[u8]> = [20u8, 200, 20, 255]
@@ -345,6 +487,7 @@ fn a_budget_used_up_leaves_no_picture_out() {
 /// Kept files past the budget decode no larger than their textures will be.
 #[test]
 fn kept_files_past_the_budget_decode_no_more_than_they_show() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (4000u32, 2500u32);
     let mut scene = Scene::new(window.0 as f32, window.1 as f32);
@@ -376,6 +519,7 @@ fn kept_files_past_the_budget_decode_no_more_than_they_show() {
 /// is where a developer finds them.
 #[test]
 fn the_memory_report_names_what_went_softer() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (5000u32, 2500u32);
     let mut scene = Scene::new(window.0 as f32, window.1 as f32);
@@ -425,6 +569,7 @@ fn the_memory_report_names_what_went_softer() {
 /// their room back.
 #[test]
 fn pictures_past_the_budget_share_it_evenly() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (5000u32, 2500u32);
     let full = (width as f32, height as f32);
@@ -468,6 +613,7 @@ fn pictures_past_the_budget_share_it_evenly() {
 /// rasterizes at what shows, not at half of what it was laid out as.
 #[test]
 fn a_picture_scaled_down_by_its_parent_takes_what_it_shows() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[1];
     let mut scene = Scene::new(window.0 as f32, window.1 as f32);
     let stack = stack(&mut scene);
@@ -552,6 +698,7 @@ impl Crowded {
 /// that).
 #[test]
 fn a_new_picture_past_the_budget_goes_softer_and_those_on_screen_stay() {
+    let _decoded = decoded_kept();
     for (own_box, first) in [(false, false), (true, false), (true, true)] {
         let Some(mut w) = Crowded::new() else {
             return;
@@ -588,6 +735,7 @@ fn a_new_picture_past_the_budget_goes_softer_and_those_on_screen_stay() {
 /// those showing are spared.
 #[test]
 fn a_picture_off_the_window_gives_way_to_a_new_one() {
+    let _decoded = decoded_kept();
     let Some(mut w) = Crowded::new() else {
         return;
     };

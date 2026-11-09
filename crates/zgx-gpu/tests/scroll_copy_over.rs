@@ -677,7 +677,8 @@ fn a_fade_that_clips_nothing_stays_at_the_view() {
 
 /// Layers among the content, across the view's edges, each kind `kind` makes
 /// of a group of two boxes overlapping. Moves copy.
-fn layers_copy(name: &str, fade: bool, kind: impl Fn(View, usize) -> View + Copy) {
+fn layers_copy(name: &str, fade: bool, kind: impl Fn(View, usize) -> View) {
+    let kind = &kind;
     for scale in SCALES {
         let steps = 24;
         let copies = in_a_view(
@@ -727,8 +728,21 @@ fn group_layers_in_the_content() {
 fn blurred_layers_in_the_content() {
     let _gpu = gpu_fixture();
     layers_copy("blurred", false, |group, _| group.filter_blur(3.).left(30.));
-    layers_copy("faded blurred", true, |group, _| {
-        group.filter_blur(3.).left(30.)
+}
+
+/// Through a shader reading only its own layer, away from any fade: it moves
+/// with the content.
+#[test]
+fn shaded_layers_in_the_content() {
+    let _gpu = gpu_fixture();
+    let shader = zgx::decoration::FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+            return vec4(input.color.rgb, input.color.a * (0.5 + input.p.x / 400.));
+        }",
+        None,
+    );
+    layers_copy("shaded", false, move |group, _| {
+        group.layer_shader(shader.clone())
     });
 }
 
@@ -942,5 +956,260 @@ fn a_blend_in_the_content_still_blocks() {
             |_| {},
         );
         assert_eq!(copies, 0, "blend at {scale}x copied");
+    }
+}
+
+/// A layer shader cutting its layer at a line in the window: what it draws
+/// depends on where the window is, so moves don't copy it. (`zgx_rect`, and a
+/// pass's `area`, the same.)
+#[test]
+fn a_shader_reading_the_window_in_the_content_still_blocks() {
+    let _gpu = gpu_fixture();
+    let shader = zgx::decoration::FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+            if zgx_window(input.p).y > 90. { return vec4(0.); }
+            return input.color;
+        }",
+        None,
+    );
+    for scale in SCALES {
+        let copies = in_a_view(
+            "window shader",
+            scale,
+            false,
+            12,
+            8.,
+            |_| {
+                let mut page = column().w(W).gap(10.);
+                for _ in 0..12 {
+                    page = page.child(stripes(W, 30.).layer_shader(shader.clone()));
+                }
+                page
+            },
+            |_| {},
+        );
+        assert_eq!(copies, 0, "window shader at {scale}x copied");
+    }
+}
+
+/// Boxes stacking in a fading view's bands, and a blurred layer in the same
+/// view. A run holding such a layer fades item by item where it paints whole
+/// (`band_strips`), and a copy's bands, walked without that layer, would fade
+/// as one: the view repaints, and its bands look as they do every other frame.
+#[test]
+fn stacked_boxes_in_the_bands_with_a_blurred_layer_in_view() {
+    let _gpu = gpu_fixture();
+    for scale in SCALES {
+        let copies = in_a_view(
+            "stacked and blurred",
+            scale,
+            true,
+            20,
+            8.,
+            |_| {
+                let mut page = column().w(W).gap(6.);
+                for i in 0..24 {
+                    let card = div()
+                        .w(W)
+                        .h(44.)
+                        .bg(rgb(0xe8e0d0))
+                        .child(div().w(W - 40.).h(36.).bg(rgb(0x304060)));
+                    page = page.child(if i % 4 == 2 {
+                        card.filter_blur(3.)
+                    } else {
+                        card
+                    });
+                }
+                page
+            },
+            |_| {},
+        );
+        assert_eq!(copies, 0, "stacked and blurred at {scale}x copied");
+    }
+}
+
+/// A window-sized view that can't copy goes on drawing to the window alone:
+/// only a view that could copy needs the frame kept for the next.
+#[test]
+fn a_view_that_cant_copy_stays_direct() {
+    let _gpu = gpu_fixture();
+    let mut gpu = GpuRenderer::new(W as u32, H as u32).unwrap();
+    gpu.set_scale_factor(1.);
+    // (Off macOS, a see-through window's frames don't draw in a single pass.)
+    gpu.set_background(zgx::scene::Color(0, 0, 0, 255));
+    gpu.debug_enable_single_pass();
+    gpu.debug_allow_scroll_copies();
+    let mut ui = Ui::new(W, H);
+    let offset = ui.signal(0_f32);
+    let mut page = column().w(W);
+    for _ in 0..40 {
+        page = page.child(stripes(W, 40.));
+    }
+    // (Bands wider than it ever overflows: cut short, always refused.)
+    ui.mount(
+        overlay().w(W).h(H).bg(rgb(0x000000)).child(
+            scroll(offset.clone())
+                .w(W)
+                .h(H)
+                .bg(rgb(0x101820))
+                .fade_edges(4000., 4000.)
+                .fade_overflow(true)
+                .child(page),
+        ),
+    );
+    let steps = 20;
+    for _ in 0..steps {
+        offset.update(|o| *o += 8.);
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        gpu.debug_present_offscreen().unwrap();
+    }
+    assert_eq!(gpu.debug_scroll_copies(), 0);
+    let direct = gpu.debug_direct_frames();
+    assert!(direct as usize >= steps - 3, "{direct} of {steps} direct");
+}
+
+/// A layer shader over a pass keeping state from frame to frame: it runs each
+/// frame its box shows, damaged or not, so copied pixels would hold an old
+/// result beside the exposed strip's new one. Moves repaint.
+#[test]
+fn a_shader_with_a_pass_running_each_frame_still_blocks() {
+    let _gpu = gpu_fixture();
+    for scale in SCALES {
+        let shader = zgx::decoration::FillShader::with_inputs(
+            "fn layer(input: LayerInput) -> vec4<f32> {
+                return vec4(zgx_count(vec2(0.5)).r / 40.0, input.p.y / 800.0, 0.0, 1.0);
+            }",
+            None,
+            zgx::decoration::ShaderInputs {
+                passes: vec![zgx::decoration::ShaderPass {
+                    name: "count".into(),
+                    source: "fn run(input: PassInput) -> vec4<f32> {
+                        return vec4(zgx_count(vec2(0.5)).r + 1.0, 0.0, 0.0, 1.0);
+                    }"
+                    .into(),
+                    size: zgx::decoration::PassSize::Pixels(4, 4),
+                    format: zgx::decoration::PassFormat::Rgba16Float,
+                    feedback: true,
+                    steps: 1,
+                    once: false,
+                }],
+                ..Default::default()
+            },
+        );
+        // (Checked by its refusal: a second renderer's pass would have run
+        // more often, on the frames the first has nothing to draw.)
+        let (w, h) = ((W * scale) as u32, (H * scale) as u32);
+        let mut gpu = GpuRenderer::new(w, h).unwrap();
+        gpu.set_scale_factor(scale);
+        gpu.debug_allow_scroll_copies();
+        let mut ui = Ui::new(W, H);
+        let offset = ui.signal(0_f32);
+        ui.mount(
+            overlay().w(W).h(H).bg(rgb(0x000000)).child(
+                scroll(offset.clone()).w(W).h(H).bg(rgb(0x101820)).child(
+                    column()
+                        .w(W)
+                        .child(stripes(W, 30.))
+                        .child(div().w(W).h(800.).bg(rgb(0x808080)).layer_shader(shader)),
+                ),
+            ),
+        );
+        for step in 0..10 {
+            offset.set(step as f32 * 8.);
+            ui.prepare_frame();
+            let damage = ui.scene.borrow_mut().flush().damage;
+            gpu.render(&ui.scene.borrow(), &damage).unwrap();
+            gpu.debug_present_offscreen().unwrap();
+        }
+        let copies = gpu.debug_scroll_copies();
+        assert_eq!(copies, 0, "running pass at {scale}x copied");
+    }
+}
+
+/// A last scroll step keeping its frame for a copy doesn't keep the frames
+/// after it, once nothing scrolls: they go direct again.
+#[test]
+fn a_scroll_ending_leaves_whole_frames_direct() {
+    let _gpu = gpu_fixture();
+    let mut gpu = GpuRenderer::new(W as u32, H as u32).unwrap();
+    gpu.set_scale_factor(1.);
+    // (Off macOS, a see-through window's frames don't draw in a single pass.)
+    gpu.set_background(zgx::scene::Color(0, 0, 0, 255));
+    gpu.debug_enable_single_pass();
+    gpu.debug_allow_scroll_copies();
+    let mut ui = Ui::new(W, H);
+    let offset = ui.signal(0_f32);
+    let shade = ui.signal(0_u32);
+    let read = shade.clone();
+    let mut page = column().w(W);
+    for _ in 0..40 {
+        page = page.child(stripes(W, 40.));
+    }
+    ui.mount(
+        overlay().w(W).h(H).bg(rgb(0x000000)).child(
+            scroll(offset.clone())
+                .w(W)
+                .h(H)
+                .reactive_style(move || Styles::new().bg(rgb(0x101820 + read.get())))
+                .child(page),
+        ),
+    );
+    let frame = |ui: &mut Ui, gpu: &mut GpuRenderer| {
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        gpu.debug_present_offscreen().unwrap();
+    };
+    // Whole frames, the last direct: the next pixels are new.
+    for step in 1..=4 {
+        shade.set(step);
+        frame(&mut ui, &mut gpu);
+    }
+    let before = gpu.debug_direct_frames();
+    assert!(before > 0, "no frame went direct");
+    offset.set(8.);
+    frame(&mut ui, &mut gpu);
+    let before = gpu.debug_direct_frames().max(before);
+    let steps = 10;
+    for step in 0..steps {
+        shade.set(5 + step);
+        frame(&mut ui, &mut gpu);
+    }
+    let direct = gpu.debug_direct_frames() - before;
+    assert!(direct >= u64::from(steps) - 2, "{direct} of {steps} direct");
+}
+
+/// A dithered picture among a fading table's rows: its dots lie on the screen's
+/// grid as it slides under them, which a copy would carry with it.
+#[test]
+fn a_dithered_picture_in_the_content_still_blocks() {
+    let _gpu = gpu_fixture();
+    let flat = zgx::image::ImageData::new(8, 8, [200u8, 100, 50, 255].repeat(64)).unwrap();
+    let dithered = std::sync::Arc::new(flat.dithered(2.));
+    for scale in SCALES {
+        let copies = in_a_view(
+            "dithered",
+            scale,
+            false,
+            10,
+            // (Not a whole number of its pattern's repeats.)
+            6.,
+            |ui| {
+                column()
+                    .w(W)
+                    .child(
+                        scroll_x(ui.signal(0_f32))
+                            .w(W)
+                            .h(40.)
+                            .fade_edges_x(0., 24.)
+                            .child(stripes(600., 40.)),
+                    )
+                    .child(image("dots", dithered.clone()).w(W).h(600.))
+            },
+            |_| {},
+        );
+        assert_eq!(copies, 0, "dithered at {scale}x copied");
     }
 }

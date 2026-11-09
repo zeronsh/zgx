@@ -42,7 +42,7 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | `align` | `"start" \| "left" \| "center" \| "right"` | `"start"` | within the text's own box |
 | `wrap` | `boolean \| "balance"` | `false` | wrap at the box's width; `"balance"` balances the lines, as CSS's `text-wrap: balance` (see [properties](properties.md)) |
 | `lines` | `number` | none | at most this many lines |
-| `truncate` | `boolean` | `false` | end an overflowing line with "…" |
+| `truncate` | `boolean` | `false` | end the text with "…" where it overflows: on one line, or on the last of `lines` when that is set, here or on a parent |
 | `line_height` | `number` | the font's | points |
 | `letter_spacing` | `number` | `0` | points |
 | `tabular` | `boolean` | `false` | tabular figures (OpenType `tnum`): every digit one width, for numbers that change in place |

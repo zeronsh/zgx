@@ -365,7 +365,7 @@ return ui.div {
 | `align` | `"start" \| "left" \| "center" \| "right"` | `"start"` | |
 | `font` | `string` | the system's | `"mono"` (`"monospace"`), `"sans"` (`"sans-serif"`), `"serif"`, or a family name the host registered |
 | `wrap` | `boolean \| "balance"` | `false` | wrap at the box's width. `"balance"` also balances the lines (CSS's `text-wrap: balance`): they break at the narrowest width that keeps as many, so a heading's last line isn't left short, for up to six lines, the box as it was. It's inherited: on a container, the text in it balances |
-| `truncate` | `boolean` | `false` | one line ending in "…" |
+| `truncate` | `boolean` | `false` | end the text with "…" where it overflows: on one line, or on the last of `lines` when that is set, here or on a parent |
 | `lines` | `number` | all | clamp to that many lines |
 | `line_height` | `number` | the font's | points |
 | `letter_spacing` | `number` | `0` | points |

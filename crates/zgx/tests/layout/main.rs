@@ -32,6 +32,8 @@ mod layout_alone;
 mod layout_automatic_minimum;
 #[path = "../layout_box_model.rs"]
 mod layout_box_model;
+#[path = "../layout_changed_as_built.rs"]
+mod layout_changed_as_built;
 #[path = "../layout_feedback.rs"]
 mod layout_feedback;
 #[path = "../layout_fit_content.rs"]
