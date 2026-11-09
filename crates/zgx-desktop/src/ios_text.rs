@@ -312,7 +312,10 @@ extern "C-unwind" fn selected_text_range(_: &AnyObject, _: Sel) -> *mut AnyObjec
 extern "C-unwind" fn set_selected_text_range(_: &AnyObject, _: Sel, new: *mut AnyObject) {
     let Some(state) = state() else { return };
     let (start, end) = range_ends(new);
-    state.store.borrow_mut().set_selection(start, end, false);
+    let mut store = state.store.borrow_mut();
+    store.set_selection(start, end, false);
+    store.told();
+    drop(store);
     state.window.request_redraw();
 }
 extern "C-unwind" fn marked_text_range(_: &AnyObject, _: Sel) -> *mut AnyObject {
@@ -728,15 +731,28 @@ extern "C-unwind" fn edit_paste(_: &AnyObject, _: Sel, _: *mut AnyObject) {
         state.window.request_redraw();
     }
 }
-extern "C-unwind" fn edit_select(_: &AnyObject, _: Sel, _: *mut AnyObject) {
+extern "C-unwind" fn edit_select(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let Some(state) = state() else { return };
-    let mut store = state.store.borrow_mut();
-    let (caret, _, _) = store.selection();
-    let units = store.text(0, store.len());
-    if let Some((start, end)) = crate::text_store::word_at(&units, caret) {
-        store.set_selection(start, end, false);
+    let word = {
+        let store = state.store.borrow();
+        let (caret, _, _) = store.selection();
+        crate::text_store::word_at(&store.text(0, store.len()), caret)
+    };
+    if let Some((start, end)) = word {
+        // Told, for UIKit's highlight and handles to follow it.
+        tell(
+            &state,
+            this,
+            sel!(selectionWillChange:),
+            sel!(selectionDidChange:),
+            || {
+                let mut store = state.store.borrow_mut();
+                store.set_selection(start, end, false);
+                store.told();
+            },
+        );
+        selection_display(this, None);
     }
-    drop(store);
     state.window.request_redraw();
 }
 extern "C-unwind" fn edit_select_all(_: &AnyObject, _: Sel, _: *mut AnyObject) {
@@ -1179,10 +1195,9 @@ impl TextInput {
                 sel!(selectionWillChange:),
                 sel!(selectionDidChange:),
                 || {
-                    self.state
-                        .store
-                        .borrow_mut()
-                        .set_selection(target, target, false);
+                    let mut store = self.state.store.borrow_mut();
+                    store.set_selection(target, target, false);
+                    store.told();
                 },
             );
         }

@@ -454,6 +454,16 @@ impl TextStore {
     /// edits it didn't make (typing, the app writing its value, undo): to
     /// tell it (`OnTextChange`, `OnSelectionChange`). The whole text, once,
     /// for a text change: Windows takes a wider range than changed.
+    /// What's there now is what the platform knows, as it set it itself: not
+    /// to be told back as a change at the next dispatch, which an idle field
+    /// has only at the next touch, just as UIKit asks whether that's on the
+    /// caret.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn told(&mut self) {
+        if let Some(editor) = &self.editor {
+            self.seen = Some(seen(editor));
+        }
+    }
     pub(crate) fn changes(&mut self, old_len: usize) -> Vec<Change> {
         let cancelled = self.drop_cancelled();
         let Some(editor) = &self.editor else {

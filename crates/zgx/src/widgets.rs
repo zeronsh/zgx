@@ -6591,6 +6591,8 @@ impl Ui {
         *interaction_refresh.borrow_mut() = Some(Rc::downgrade(&arm));
         let draw = refresh.clone();
         let tab_indent = hint.clone();
+        #[cfg(target_os = "ios")]
+        let press_focused = focused.clone();
         self.on_event(root, true, move |cx| {
             if cx.phase != EventPhase::Target {
                 return;
@@ -6747,6 +6749,14 @@ impl Ui {
                         .borrow_mut()
                         .commit_preedit(&normalize_text(&t, multiline));
                 }
+                // Once focused, a touch is `UITextInteraction`'s: it reaches this
+                // too, up the responder chain, and moving the caret first left
+                // UIKit no tap on the caret to open its menu for.
+                #[cfg(target_os = "ios")]
+                InputEvent::PointerDown {
+                    button: PointerButton::Primary,
+                    ..
+                } if hint.platform_drawn() && *press_focused.borrow() => {}
                 InputEvent::PointerDown {
                     x,
                     y,
