@@ -3271,25 +3271,27 @@ impl InputDispatcher {
                         node = scene.borrow().parent(id);
                     }
                     // A press inside a node that keeps focus where it is
-                    // (`press_keeps_focus`): focus stays. (From what's
-                    // under the pointer, a listener or not: its blank room
-                    // too.)
+                    // (`press_keeps_focus`): focus stays. Inside it, as the
+                    // press's target (a listener in it), or as what's under
+                    // the pointer (its blank room, nothing listening there);
+                    // a node the pointer passes through is neither.
                     let held = {
                         let scene = scene.borrow();
-                        let mut node = scene
-                            .hit_test_all(*x, *y)
-                            .into_iter()
-                            .find(|hit| !self.boxless(&scene, *hit))
-                            .or(target);
-                        let mut held = false;
-                        while let Some(id) = node {
-                            if self.options(id).is_some_and(|o| o.press_keeps_focus) {
-                                held = true;
-                                break;
+                        let keeps = |from: Option<NodeId>| {
+                            let mut node = from;
+                            while let Some(id) = node {
+                                if self.options(id).is_some_and(|o| o.press_keeps_focus) {
+                                    return true;
+                                }
+                                node = scene.parent(id);
                             }
-                            node = scene.parent(id);
-                        }
-                        held
+                            false
+                        };
+                        let under = scene.hit_test_all(*x, *y).into_iter().find(|hit| {
+                            !self.boxless(&scene, *hit)
+                                && !self.options(*hit).is_some_and(|o| o.pass_through)
+                        });
+                        keeps(target) || keeps(under)
                     };
                     if !keep_focus && !held && (target.is_some() || self.focus_scope().is_none()) {
                         self.focus(scene, focus);
