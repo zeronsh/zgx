@@ -682,17 +682,22 @@ impl Engine {
     /// Each slot's line counted from the top of the screen again: lines
     /// counted from far back would be placed less exactly.
     fn rebase(&self) {
-        let slots = self.slots.borrow();
-        let lines = self.lines.borrow();
-        for (row, slot) in slots.iter().enumerate() {
-            if lines[*slot].with_untracked(|line| *line != row) {
-                lines[*slot].set(row);
+        let order: Rc<[usize]> = self.slots.borrow().iter().copied().collect();
+        {
+            let lines = self.lines.borrow();
+            for (row, slot) in order.iter().enumerate() {
+                if lines[*slot].with_untracked(|line| *line != row) {
+                    lines[*slot].set(row);
+                }
             }
         }
         if self.scrolled.with_untracked(|top| *top != 0) {
             self.scrolled.set(0);
         }
-        self.order.set(slots.iter().copied().collect());
+        // Nothing borrowed: outside a flush (the first read, before the
+        // first fit) this builds the new slots' rows at once, which take
+        // theirs from `rows` and `lines`.
+        self.order.set(order);
     }
 
     /// The screen scrolled by `shift` lines: each screen row is shown by the
