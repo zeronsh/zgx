@@ -2214,6 +2214,11 @@ export type NodeProps = {
 	variants: (Variants | ((choice: any) -> Variants))?,
 	ref: (Ref | { Ref })?,
 	focusable: boolean?,
+	-- `false`: a press on it (or anything inside it) leaves focus where it
+	-- is, as the web's `mousedown` with `preventDefault()`; its clicks still
+	-- come. A list hanging from a field: its rows and tabs take clicks, the
+	-- field keeping the keys and its caret.
+	focus_on_press: boolean?,
 	-- While focus is in it, every key goes to what is focused: no shortcut
 	-- or menu item takes one (a field recording a shortcut). As focus
 	-- leaves, shortcuts work again.

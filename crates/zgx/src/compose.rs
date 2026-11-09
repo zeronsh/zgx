@@ -506,6 +506,8 @@ pub(crate) struct Rare {
     pub(crate) context_menu_below: Option<bool>,
     /// Whether the pointer stops at the view (`pointer_events`), followed.
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
+    /// A press on it leaves focus where it is (`focus_on_press(false)`).
+    press_keeps_focus: bool,
     scrollbar: Option<bool>,
     follow_end: Option<bool>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
@@ -637,6 +639,9 @@ impl Rare {
         }
         if self.pointer_events.is_some() {
             inner.pointer_events = self.pointer_events;
+        }
+        if self.press_keeps_focus {
+            inner.press_keeps_focus = true;
         }
         if self.read_only.is_some() {
             inner.read_only = self.read_only;
@@ -1234,6 +1239,14 @@ impl View {
     /// `pointer_events`, followed: it changes as what `enabled` reads does.
     pub fn pointer_events_when(mut self, enabled: impl FnMut() -> bool + 'static) -> Self {
         self.rare_mut().pointer_events = Some(Box::new(enabled));
+        self
+    }
+    /// `false`: a press on the view (or anything in it) leaves focus where
+    /// it is, as the web's `mousedown` with `preventDefault()` does. Its
+    /// clicks still come. A list hanging from a field: its rows and tabs
+    /// take clicks, the field keeping the keys and its caret.
+    pub fn focus_on_press(mut self, moves: bool) -> Self {
+        self.rare_mut().press_keeps_focus = !moves;
         self
     }
     /// A box laid out around content that may be put away: while nothing
@@ -4827,6 +4840,7 @@ struct Opened {
     conditional: Vec<RegionBuilder>,
     row_text: Option<crate::selection::RowText>,
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
+    press_keeps_focus: bool,
     accessible_label: Option<String>,
     accessibility: Option<Box<Accessibility>>,
     mounted: Vec<Box<dyn FnOnce(NodeHandle)>>,
@@ -5782,6 +5796,7 @@ fn open_element(
             .unwrap_or_default(),
         row_text: rare.as_deref_mut().and_then(|r| r.row_text.take()),
         pointer_events: rare.as_deref_mut().and_then(|r| r.pointer_events.take()),
+        press_keeps_focus: rare.as_deref().is_some_and(|r| r.press_keeps_focus),
         accessible_label: rare.as_deref_mut().and_then(|r| r.accessible_label.take()),
         accessibility: rare.and_then(|r| r.accessibility.take()),
         mounted: view.mounted,
@@ -5855,6 +5870,7 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
         conditional,
         mut row_text,
         pointer_events,
+        press_keeps_focus,
         accessible_label,
         accessibility,
         mounted,
@@ -5916,7 +5932,8 @@ fn close_element(ui: &mut Ui, opened: Opened) -> NodeId {
     }
     let mut options = ui.input.options(root).unwrap_or_default();
     options.focusable = focusable;
-    if focusable_set || ui.input.options(root).is_some() {
+    options.press_keeps_focus |= press_keeps_focus;
+    if focusable_set || press_keeps_focus || ui.input.options(root).is_some() {
         ui.input.set_options(root, options);
     }
     if let Some(mut enabled) = pointer_events {

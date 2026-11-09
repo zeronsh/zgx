@@ -629,6 +629,40 @@ fn presses_count_their_clicks_and_keys_carry_their_physical_code() {
 }
 
 #[test]
+fn a_press_inside_what_keeps_focus_leaves_it_where_it_is() {
+    let mut h = Harness::inline(
+        r##"local n = ui.state("n", 0)
+        return ui.column {
+            ui.input { id = "field", w = 120, value = ui.state("v", "hello") },
+            ui.column { id = "list", focus_on_press = false, w = 120, gap = 4,
+                ui.button { id = "row", w = 120, h = 20, on_click = function() n:set(n:peek() + 1) end, "row" },
+                ui.div { id = "blank", w = 120, h = 20 },
+            },
+            ui.text { id = "count", function() return tostring(n:get()) end },
+            ui.button { id = "elsewhere", w = 120, h = 20, "elsewhere" },
+        }"##,
+    );
+    h.frames(2);
+    h.click("field");
+    assert_eq!(h.ui.input.focused(), h.find("field"));
+    // A row in the list: its click comes, the field keeps the keys.
+    h.click("row");
+    h.frames(1);
+    assert_eq!(h.text("count"), "1", "the row's click came");
+    assert_eq!(
+        h.ui.input.focused(),
+        h.find("field"),
+        "the field kept the keys"
+    );
+    // Its blank room: the same.
+    h.click("blank");
+    assert_eq!(h.ui.input.focused(), h.find("field"));
+    // Outside it, a press moves focus as ever.
+    h.click("elsewhere");
+    assert_eq!(h.ui.input.focused(), h.find("elsewhere"));
+}
+
+#[test]
 fn focus_styles_show_for_the_keyboard_not_a_click() {
     use zgx::input::{InputEvent, Key, Modifiers};
     let mut h = Harness::inline(

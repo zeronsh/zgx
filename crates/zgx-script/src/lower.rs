@@ -4077,6 +4077,9 @@ fn styled(
     if let Some(focusable) = node.focusable {
         view = view.focusable(focusable);
     }
+    if node.press_keeps_focus {
+        view = view.focus_on_press(false);
+    }
     if node.window_drag {
         view = view.window_drag();
     }

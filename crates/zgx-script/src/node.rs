@@ -69,6 +69,8 @@ pub(crate) struct Node {
     pub shaders: Option<Box<Shaders>>,
     /// `window_drag = true`: a press on it moves the window.
     pub window_drag: bool,
+    /// `focus_on_press = false`: a press on it leaves focus where it is.
+    pub press_keeps_focus: bool,
     /// `hook = false` or `private = true`: no plugin may target it
     /// (`ui.contribute { target }`), whatever matches it.
     pub private: bool,
@@ -627,6 +629,7 @@ impl Node {
             mask: None,
             shaders: None,
             window_drag: false,
+            press_keeps_focus: false,
             private: false,
             selectable: None,
             selection_colors: None,
@@ -3888,6 +3891,7 @@ fn fill_from(
             },
             "focusable" => node.focusable = Some(lua.unpack(value)?),
             "window_drag" => node.window_drag = lua.unpack(value)?,
+            "focus_on_press" => node.press_keeps_focus = !lua.unpack::<bool>(value)?,
             "selectable" => node.selectable = lua.unpack(value)?,
             "selection_color" | "selected_text_color" => {
                 let at = usize::from(key == "selected_text_color");
