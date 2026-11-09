@@ -27,6 +27,18 @@ impl Corners {
         }
     }
 }
+/// The shape of a box's rounded corners.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CornerCurve {
+    /// A quarter circle of the radius.
+    #[default]
+    Circular,
+    /// As `CALayer`'s `cornerCurve = continuous`, the corners of iOS: the
+    /// curve eases out of the sides, starting 1.53 radii along them, and
+    /// becomes the circular one as the box gets too small for that, each way
+    /// on its own.
+    Continuous,
+}
 /// How a border is drawn.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum BorderStyle {
@@ -519,4 +531,8 @@ pub struct Decoration {
     /// in the shader quads already run for rounded clips: no layer, no
     /// mask. 0 cuts.
     pub clip_feather: f32,
+    /// The shape of its corners: its fill, border, shadows and sharp inset
+    /// shadows follow it. What it clips, its blurred inset shadows, a backdrop
+    /// blur and a shader fill keep to the circular corner.
+    pub corner_curve: CornerCurve,
 }

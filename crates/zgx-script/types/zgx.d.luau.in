@@ -1911,6 +1911,7 @@ export type Styles = {
 	-- many points inside its rounded edge instead of being cut: with a large
 	-- `rounded` and an animated clip inset, a soft oval that opens.
 	clip_feather: number?,
+	corner_curve: ("circular" | "continuous")?,
 	layer: boolean?,
 	-- Where an image lies in its box, as fractions of the room to spare:
 	-- { 0.5, 0 } keeps a portrait's top under fit = "cover".
@@ -2114,6 +2115,7 @@ export type StyleProps = {
 	zoom_fixed: Reactive<boolean>?,
 	clip_inset: Reactive<Sides>?,
 	clip_feather: Reactive<number>?,
+	corner_curve: ("circular" | "continuous")?,
 	layer: Reactive<boolean>?,
 	object_position: Reactive<{ number }>?,
 	fit: Reactive<Fit>?,

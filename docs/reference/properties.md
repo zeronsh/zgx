@@ -341,6 +341,7 @@ return ui.div {
 | `layer_reach` | `number` | `0` | how many points past the box and bleed its `zgx_backdrop(p)` reads (a haze's or a lens's displacement); a read past that holds at its edge |
 | `clip_inset` | `Sides` | | paints only inside the box shrunk by `{ top, right, bottom, left }` (CSS `clip-path: inset()`); animate `clipTop`, `clipRight`, `clipBottom`, `clipLeft` |
 | `clip_feather` | `number` | `0` | where it clips (`overflow = "hidden"`), its content fades out over this many points inside its rounded edge rather than being cut there, in the fragment shader quads already run (no layer, no mask). Its corners follow its clip inset, held to half the inset box: with `rounded = 9999` and the clip inset animated from the middle out, a soft circle opens, compositing alone |
+| `corner_curve` | `"circular" \| "continuous"` | `"circular"` | the shape of its rounded corners. `"continuous"` is `CALayer`'s `cornerCurve = .continuous`, the function QuartzCore's shader runs: the curve eases out of the sides, starting 1.53 radii along them, and turns circular as the box gets too small for that. Its fill, border, shadows and sharp inset shadows follow it; what it clips, blurred inset shadows, a backdrop blur and a shader fill stay circular for now |
 
 ## Size and position animation
 

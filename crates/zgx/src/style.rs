@@ -852,6 +852,8 @@ pub(crate) struct RareStyles {
     pub(crate) inset_shadows: Option<Option<std::sync::Arc<[BoxShadow]>>>,
     /// `Styled::clip_feather`.
     pub(crate) clip_feather: Option<f32>,
+    /// `Styled::corner_curve`.
+    pub(crate) corner_curve: Option<crate::decoration::CornerCurve>,
     pub(crate) shadow: Option<Option<BoxShadow>>,
     pub(crate) letter_spacing: Option<crate::text_layout::LetterSpacing>,
     /// `Styled::text_underline`, `underline_offset`.
@@ -903,6 +905,7 @@ impl RareStyles {
         shadows: None,
         inset_shadows: None,
         clip_feather: None,
+        corner_curve: None,
         shadow: None,
         letter_spacing: None,
         underline: None,
@@ -1062,6 +1065,9 @@ impl RareStyles {
         }
         if other.clip_feather.is_some() {
             self.clip_feather = other.clip_feather;
+        }
+        if other.corner_curve.is_some() {
+            self.corner_curve = other.corner_curve;
         }
         if other.shadow.is_some() {
             self.shadow = other.shadow;
@@ -2431,6 +2437,11 @@ pub trait Styled: Sized {
     fn clip_feather(mut self, px: f32) -> Self {
         self.styles_mut().rare_mut().clip_feather =
             Some(if px.is_finite() { px.max(0.) } else { 0. });
+        self
+    }
+    /// The shape of its rounded corners (see `Decoration::corner_curve`).
+    fn corner_curve(mut self, curve: crate::decoration::CornerCurve) -> Self {
+        self.styles_mut().rare_mut().corner_curve = Some(curve);
         self
     }
     /// Shadows inside the box (CSS's `inset`): see `Decoration::inset_shadows`.

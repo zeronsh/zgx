@@ -411,6 +411,31 @@ fn a_pixelated_image_draws_its_picture_pixelated() {
     }
 }
 
+/// `corner_curve = "continuous"` is `CornerCurve::Continuous`; unset, none is
+/// asked for and the box needs no decoration.
+#[test]
+fn a_box_takes_its_corner_curve() {
+    use zgx::decoration::CornerCurve;
+    let mut h = Harness::inline(
+        r##"return ui.column {
+            ui.div { id = "continuous", w = 20, h = 20, rounded = 6, bg = "#000", corner_curve = "continuous" },
+            ui.div { id = "circular", w = 20, h = 20, rounded = 6, bg = "#000", corner_curve = "circular" },
+            ui.div { id = "plain", w = 20, h = 20, rounded = 6, bg = "#000" } }"##,
+    );
+    h.ui.prepare_frame();
+    let ids = ["continuous", "circular", "plain"].map(|id| h.find(id).unwrap());
+    let scene = h.ui.scene.borrow();
+    let curve = |id| match scene.kind(id) {
+        zgx::scene::NodeKind::Quad(q) | zgx::scene::NodeKind::Panel { quad: q, .. } => {
+            q.decoration.as_ref().map(|d| d.corner_curve)
+        }
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(curve(ids[0]), Some(CornerCurve::Continuous));
+    assert_eq!(curve(ids[1]), None, "the default needs no decoration");
+    assert_eq!(curve(ids[2]), None);
+}
+
 /// `border_style = "dotted"` dots the border; `outline_style` and
 /// `outline_dash` break the outline.
 #[test]
