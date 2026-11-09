@@ -1,7 +1,7 @@
 # Typing at rest on the experimental prefetched-hybrid pin
 
-Three trials per arm,20 native posted Unicode keys per trial, actual isolated
-Zeron composer,1114×685pt/120Hz/2×, frosted material and completed model catalog.
+Three trials per arm, 20 native posted Unicode keys per trial, actual isolated
+Zeron composer at 1114×685 pt, 120 Hz and 2×, frosted material and completed model catalog.
 The catalog was verified before and after all nine trials. Each key changed the
 scratch composer text and joined a shown paint retaining that text; superseded
 input submissions could join the next retaining paint. Every shown update used
@@ -15,7 +15,7 @@ tiles at rest. Raw captures and UI copies remain private.
 
 Engine pin fbfe1a11 includes the closed global view-clock experiment. The
 matching view-clock tile control isolates the scroll-drawables flag at rest;
-its typing is close to the hybrid here. The separate timer control is about5ms
+its typing is close to the hybrid here. The separate timer control is about 5 ms
 faster at p50. A production hybrid must preserve main’s timer clock at rest and
 pass a fresh typing comparison against timer tiles. These numbers do not waive
 that requirement or certify scroll cadence.
