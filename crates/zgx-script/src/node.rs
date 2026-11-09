@@ -1027,6 +1027,8 @@ pub(crate) struct ListRare {
     /// start coming in reach calls. Taken as `fill` walks the table.
     pub(crate) start: Option<Function>,
     pub(crate) start_distance: Option<f32>,
+    /// `ahead`: viewports of rows built ahead (`View::list_ahead`).
+    pub(crate) ahead: Option<f32>,
     /// `estimate = { … }`, with `measured`: how a row's data makes its height.
     pub(crate) estimate: Option<Rc<crate::estimate::Rule>>,
     /// `at_end = state`: kept saying whether it rests at its end.
@@ -3547,6 +3549,7 @@ const LATE_FIELDS: &[&str] = &[
     "at_caret",
     "on_start",
     "start_distance",
+    "ahead",
     "at_end",
     "on_paste",
     "overscroll",
@@ -3662,7 +3665,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 }
             }
         }
-        "on_start" | "start_distance" | "at_end" => {
+        "on_start" | "start_distance" | "ahead" | "at_end" => {
             if let Kind::List { rare, .. } = &mut node.kind {
                 let rare = rare.get_or_insert_default();
                 match name {
@@ -3671,6 +3674,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                         let distance: f32 = lua.unpack(value)?;
                         rare.start_distance = distance.is_finite().then_some(distance);
                     }
+                    "ahead" => rare.ahead = Some(lua.unpack(value)?),
                     _ => rare.at_end = Some(expect_state(&value, "`at_end`")?),
                 }
             }

@@ -53,6 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .flex_shrink(1.)
             .p(8.)
             .keyboard_navigation(true)
+            // This probe asserts the rows in view and overscan exactly.
+            .list_ahead(0.)
             .scrollbar(true)
             .bg(rgb(0x15202b));
             let view = cx.render(

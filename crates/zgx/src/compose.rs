@@ -240,6 +240,12 @@ pub(crate) struct ListOptions {
     pub(crate) contain: bool,
     pub(crate) edges: Option<Box<ListEdges>>,
 }
+impl ListOptions {
+    /// `View::list_ahead`.
+    pub(crate) fn ahead(&self) -> Option<f32> {
+        self.edges.as_ref().and_then(|edges| edges.ahead)
+    }
+}
 /// What a virtual list reports of its edges: its end and its start coming
 /// in reach (`View::on_end`, `View::on_start`) and whether it rests at its
 /// end (`View::on_at_end`). Boxed: few lists have any.
@@ -248,6 +254,8 @@ pub(crate) struct ListEdges {
     end: Option<EdgeWatch>,
     start: Option<EdgeWatch>,
     at_end: Option<Box<dyn FnMut(bool)>>,
+    /// `View::list_ahead`.
+    ahead: Option<f32>,
     /// `View::virtualize_in_ancestor`: it scrolls with the scroll view
     /// around it, building the rows that view shows.
     pub(crate) ancestor: bool,
@@ -307,6 +315,7 @@ pub(crate) fn watch_edges(
         start,
         mut at_end,
         ancestor: _,
+        ahead: _,
     } = edges;
     let runtime = ui.runtime.clone();
     let weak = ui.downgrade();
@@ -990,6 +999,14 @@ impl View {
     /// to the latest" button shows while it does not. For a virtual list.
     pub fn on_at_end(mut self, changed: impl FnMut(bool) + 'static) -> Self {
         self.edges_mut().at_end = Some(Box::new(changed));
+        self
+    }
+    /// How many of its viewports of rows a virtual list builds ahead of each
+    /// edge of its view in a window's spare time (`crate::spare`), 1 unless
+    /// set, and keeps as it scrolls away. 0: it builds what shows and its
+    /// overscan alone, and drops the rest.
+    pub fn list_ahead(mut self, viewports: f32) -> Self {
+        self.edges_mut().ahead = Some(viewports);
         self
     }
     fn edges_mut(&mut self) -> &mut ListEdges {
@@ -3440,6 +3457,36 @@ pub(crate) fn list_reveal(
     ui.retain(root, forget);
     reveal
 }
+/// `keys`, with what spare time adds (`crate::spare`).
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn merge_kept<K: Eq + std::hash::Hash + Clone>(
+    kept: &mut crate::spare::Kept<K>,
+    keys: &mut Vec<(K, usize)>,
+    weak: &WeakUi,
+    entries: &HashMap<K, (NodeId, Signal<usize>, Placed), rustc_hash::FxBuildHasher>,
+    key: &mut dyn FnMut(usize) -> K,
+    view: crate::spare::KeptView,
+    row_height: f32,
+    runtime: &Runtime,
+) {
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    kept.pass();
+    let last = view.count.saturating_sub(1);
+    *keys = runtime.untracked(|| {
+        kept.merge(
+            &ui,
+            view,
+            std::mem::take(keys),
+            key,
+            &|y| Some(((y.max(0.) as f64 / row_height as f64) as usize).min(last)),
+            &|_| true,
+            &|key| entries.get(key).map(|entry| entry.0),
+        )
+    });
+}
 /// Fixed-height keyed rows; only the visible range plus overscan is mounted.
 /// `count` and `key` track reactive reads. `build` runs once per mounted key;
 /// its index signal updates when that key moves. Offscreen rows are disposed,
@@ -3464,6 +3511,13 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
     let count = move || (count.borrow_mut())();
     View::new(Kind::VirtualList(Box::new(
         move |ui, root, environment, options: ListOptions| {
+            // With spare time its overscan is spare time's too: the frame
+            // builds what shows alone.
+            let tick = ui.signal(0_u64);
+            let mut kept = ui
+                .list_ahead(options.ahead(), tick)
+                .map(|ahead| crate::spare::Kept::new(ahead, overscan));
+            let overscan = if kept.is_some() { 0 } else { overscan };
             let ListOptions {
                 scrollbar,
                 keyboard_navigation,
@@ -3633,6 +3687,26 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                 let range = model.visible_range(position, height);
                 keys.clear();
                 keys.extend(range.map(|index| (key(index), index)));
+                if let Some(kept) = &mut kept {
+                    merge_kept(
+                        kept,
+                        &mut keys,
+                        &weak,
+                        &entries,
+                        &mut key,
+                        crate::spare::KeptView {
+                            top: position,
+                            height,
+                            count: length,
+                            width,
+                            structure: length as u64,
+                            settled: false,
+                            focus_goes: keyboard_navigation,
+                        },
+                        row_height,
+                        &runtime,
+                    );
+                }
                 // Rows kept are stamped with this run: one shown twice is a
                 // key repeated, and those left unstamped go below.
                 run += 1;
