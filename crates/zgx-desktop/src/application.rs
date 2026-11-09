@@ -1839,6 +1839,10 @@ struct Host {
     /// latest frames' starts, kept for its log only.
     #[cfg(target_os = "macos")]
     rephases: u64,
+    /// A tick whose drawable had not come (`GpuRenderer::drawable_pending`):
+    /// drawn when the plane waker says it has, not waited for on this thread.
+    #[cfg(target_os = "macos")]
+    drawable_deferred: Option<Frame>,
     #[cfg(target_os = "macos")]
     frame_starts: std::collections::VecDeque<std::time::Instant>,
     /// A display refresh arrived since the last paint. While the display link
@@ -2291,6 +2295,8 @@ impl Host {
             display_key: String::new(),
             #[cfg(target_os = "macos")]
             rephases: 0,
+            #[cfg(target_os = "macos")]
+            drawable_deferred: None,
             #[cfg(target_os = "macos")]
             frame_starts: std::collections::VecDeque::new(),
             frame_deadline: None,
@@ -6374,6 +6380,14 @@ impl Host {
             link.consumed();
         }
     }
+    /// The plane waker came: a tick deferred for its drawable is drawn now.
+    #[cfg(target_os = "macos")]
+    fn drawable_woken(&mut self) {
+        if let Some(frame) = self.drawable_deferred.take() {
+            zgx::profile::note(|| "frame drawn as its drawable came".into());
+            self.deliver_frame(frame);
+        }
+    }
     fn deliver_frame(&mut self, frame: Frame) {
         #[cfg(any(target_os = "macos", windows))]
         if let Some(link) = &self.display_link {
@@ -6394,6 +6408,22 @@ impl Host {
         {
             self.rephased(waited);
             return;
+        }
+        // Its drawable not come yet: drawn when it does (`drawable_woken`),
+        // the main thread free meanwhile, not waiting in Paint for it.
+        #[cfg(target_os = "macos")]
+        if self
+            .renderer
+            .as_ref()
+            .is_some_and(GpuRenderer::drawable_pending)
+        {
+            zgx::profile::note(|| "frame deferred: its drawable has not come".into());
+            self.drawable_deferred = Some(frame);
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.drawable_deferred = None;
         }
         self.frame_arrived = true;
         self.frame_deadline = None;
@@ -7849,6 +7879,7 @@ impl WindowManager {
                 #[cfg(target_os = "macos")]
                 if let Some(host) = self.hosts.get_mut(&token) {
                     host.draw_owed_planes();
+                    host.drawable_woken();
                 }
                 #[cfg(not(target_os = "macos"))]
                 let _ = self.hosts.get(&token);

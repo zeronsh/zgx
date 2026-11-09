@@ -794,6 +794,11 @@ struct Drawables {
     /// a frame takes one (`ZGX_DRAWABLE_PREFETCH=0`: on it, as it draws).
     prefetch: Option<crate::plane_drawables::Drawables>,
 }
+/// A frame whose drawable the thread still waits for is not drawn on its
+/// tick but when the drawable comes: the thread wakes the host
+/// (`ZGX_DRAWABLE_DEFER=0`: the frame waits for it, on the main thread).
+pub static DRAWABLE_DEFER: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_DRAWABLE_DEFER").is_none_or(|v| v != "0"));
 /// `ZGX_DRAWABLE_PREFETCH=0`: a frame waits for its drawable itself.
 static DRAWABLE_PREFETCH: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_DRAWABLE_PREFETCH").is_none_or(|v| v != "0"));
@@ -1380,6 +1385,7 @@ impl Layer {
         height: u32,
         feedback: bool,
         started: Option<f64>,
+        wake: Option<&crate::PlaneWaker>,
     ) -> Option<(crate::metal_frame::Texture, CFRetained<IOSurfaceRef>)> {
         let opaque = self.opaque.get();
         let drawables = self.drawables.get_or_insert_with(|| {
@@ -1406,8 +1412,10 @@ impl Layer {
             layer.setHidden(true);
             transaction(|| self.host.addSublayer(&layer));
             crate::present_log::log(|| "drawables-start".into());
-            let prefetch = DRAWABLE_PREFETCH
-                .then(|| crate::plane_drawables::Drawables::new(layer.clone(), None));
+            let prefetch = DRAWABLE_PREFETCH.then(|| {
+                let wake = wake.filter(|_| *DRAWABLE_DEFER).cloned();
+                crate::plane_drawables::Drawables::new(layer.clone(), wake)
+            });
             Drawables {
                 layer,
                 pending: None,
@@ -1459,6 +1467,18 @@ impl Layer {
         let surface = texture.iosurface()?;
         drawables.pending = Some(drawable);
         Some((texture, surface.into()))
+    }
+    /// Whether a frame drawn now would wait for its drawable
+    /// (`DRAWABLE_DEFER`): the host draws it when the drawable comes instead.
+    pub fn drawable_pending(&self) -> bool {
+        *DRAWABLE_DEFER
+            && self.drawables.as_ref().is_some_and(|drawables| {
+                drawables.shown
+                    && drawables
+                        .prefetch
+                        .as_ref()
+                        .is_some_and(|prefetch| prefetch.pending())
+            })
     }
     /// Whether drawables show (full-rate frames present through them).
     pub fn drawables_shown(&self) -> bool {

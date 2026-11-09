@@ -13819,12 +13819,20 @@ impl GpuRenderer {
             let frame_started = self
                 .frame_started
                 .map(|at| present_log::now_ns() as f64 / 1e9 - at.elapsed().as_secs_f64());
+            let wake = self.plane_wake.clone();
             let next = device.and_then(|device| {
                 present
                     .layer
                     .as_mut()
                     .expect("attached above")
-                    .next_drawable(&device, width, height, wants_feedback, frame_started)
+                    .next_drawable(
+                        &device,
+                        width,
+                        height,
+                        wants_feedback,
+                        frame_started,
+                        wake.as_ref(),
+                    )
             });
             next.map(|(texture, surface)| {
                 let id = surface.id();
@@ -15018,6 +15026,15 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn areas_on_gpu(&self) -> bool {
         self.context.inner.quads.areas
+    }
+    /// Whether the frame drawn now would wait for its drawable: the host
+    /// draws it when the plane waker says the drawable came, instead.
+    #[cfg(target_os = "macos")]
+    pub fn drawable_pending(&self) -> bool {
+        self.layer_present
+            .as_ref()
+            .and_then(|present| present.layer.as_ref())
+            .is_some_and(|layer| layer.drawable_pending())
     }
     /// Frames wait for drawables a refresh behind (macOS): the host skips
     /// one tick to put them back in phase. The last wait, once.

@@ -99,6 +99,12 @@ impl Drawables {
         self.shared.woken.store(false, Ordering::Release);
         state.ready.take().map(|drawable| drawable.0)
     }
+    /// Whether a frame taking its drawable now would wait for it: the thread
+    /// waits for one and has none to hand over.
+    pub(crate) fn pending(&self) -> bool {
+        let state = self.shared.lock();
+        state.ready.is_none() && (state.wanted || state.waiting) && !state.stop
+    }
     /// Whether a drawable waits to be taken.
     pub(crate) fn ready(&self) -> bool {
         self.shared.lock().ready.is_some()
@@ -301,6 +307,29 @@ mod tests {
         let asked = Instant::now();
         assert!(drawables.wait_take().is_none());
         assert!(asked.elapsed() < Duration::from_millis(50));
+    }
+
+    /// Pending while the thread waits and has nothing to hand over, and the
+    /// host woken once the drawable comes: what a deferred frame waits on.
+    #[test]
+    fn pending_until_the_drawable_comes_then_one_wake() {
+        let Some(layer) = layer() else { return };
+        let Some(pool) = held_pool(&layer) else {
+            return;
+        };
+        let (wake, wakes) = counting();
+        let mut drawables = Drawables::new(layer, Some(wake));
+        assert!(!drawables.pending(), "nothing wanted");
+        drawables.want();
+        assert!(waits(&drawables));
+        assert!(drawables.pending());
+        assert_eq!(wakes.load(Ordering::Relaxed), 0);
+        drop(pool);
+        assert!(until(|| drawables.ready()));
+        assert!(!drawables.pending(), "one to take");
+        assert!(until(|| wakes.load(Ordering::Relaxed) == 1));
+        assert!(drawables.take().is_some());
+        assert!(!drawables.pending(), "taken, none wanted");
     }
 
     #[test]
