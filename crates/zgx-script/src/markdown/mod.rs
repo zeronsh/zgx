@@ -6,7 +6,9 @@
 //! - `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`, and
 //!   what [`Options::code`] adds), `ul` / `ol` (`start`, `items`: a list of
 //!   block lists), `quote` (`b`), `hr`, `table` (`head`: cells, `rows`:
-//!   rows of cells; a cell is runs), `img` (`src`, `alt`).
+//!   rows of cells; a cell is runs; `align`, only where the source aligns a
+//!   column: each column's side, `"start"`, `"center"`, `"end"`, or `""`
+//!   where it says none), `img` (`src`, `alt`).
 //!
 //! A list item's own text (a tight list's, never a paragraph) is a `p`
 //! with `tight`, which has no space under it.
@@ -28,7 +30,7 @@ pub use mend::PENDING_LINK_URL;
 
 use crate::Value;
 use mlua::IntoLua;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use std::rc::Rc;
 
 /// How text is read.
@@ -859,6 +861,7 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool) -> Ve
         took: false,
         options,
         deeper: 0,
+        align: None,
     };
     let mut tops = Vec::new();
     let mut depth = 0usize;
@@ -1162,6 +1165,25 @@ fn runs_value(runs: &[Run]) -> Value {
     )
 }
 
+/// A table's columns' sides, as a `table` block's `align` says them.
+fn table_align(align: &[Alignment]) -> Value {
+    Value::List(
+        align
+            .iter()
+            .map(|side| {
+                match side {
+                    Alignment::None => "",
+                    Alignment::Left => "start",
+                    Alignment::Center => "center",
+                    Alignment::Right => "end",
+                }
+                .into()
+            })
+            .collect::<Vec<Value>>()
+            .into(),
+    )
+}
+
 /// What is being built at each level of nesting.
 enum Frame {
     /// Blocks of a container (the document, a list item, a quote).
@@ -1202,6 +1224,9 @@ struct Builder<'a> {
     /// Quotes, lists and items open beyond `NESTING`: read into the deepest
     /// container kept, as its blocks.
     deeper: usize,
+    /// The open table's columns' sides, when its source aligns any (a table
+    /// holds no table).
+    align: Option<Box<[Alignment]>>,
 }
 
 /// How deeply quotes and lists nest at most (in frames: a list level is
@@ -1211,6 +1236,38 @@ struct Builder<'a> {
 const NESTING: usize = 64;
 
 impl Builder<'_> {
+    /// A table opens, its columns aligned as `align` says. (Out of line,
+    /// as `close_table`: `event` stays as small as it was.)
+    #[inline(never)]
+    fn open_table(&mut self, align: Vec<Alignment>) {
+        self.align = align
+            .iter()
+            .any(|side| *side != Alignment::None)
+            .then(|| align.into_boxed_slice());
+        self.frames.push(Frame::Table {
+            head: Vec::new(),
+            rows: Vec::new(),
+            row: Vec::new(),
+            in_head: false,
+        });
+    }
+    /// The open table closes into its block: `align` only when its source
+    /// aligns a column.
+    #[inline(never)]
+    fn close_table(&mut self) {
+        let align = self.align.take();
+        if let Some(Frame::Table { head, rows, .. }) = self.frames.pop() {
+            let mut fields = vec![
+                ("t", "table".into()),
+                ("head", Value::List(head.into())),
+                ("rows", Value::List(rows.into())),
+            ];
+            if let Some(align) = align {
+                fields.push(("align", table_align(&align)));
+            }
+            self.block(map(fields));
+        }
+    }
     fn style(&self) -> Style {
         self.styles.last().copied().unwrap_or_default()
     }
@@ -1441,12 +1498,7 @@ impl Builder<'_> {
                     items: Vec::new(),
                 }),
                 Tag::Item => self.frames.push(Frame::Blocks(Vec::new())),
-                Tag::Table(_) => self.frames.push(Frame::Table {
-                    head: Vec::new(),
-                    rows: Vec::new(),
-                    row: Vec::new(),
-                    in_head: false,
-                }),
+                Tag::Table(align) => self.open_table(align),
                 Tag::TableHead => {
                     if let Some(Frame::Table { in_head, .. }) = self.frames.last_mut() {
                         *in_head = true;
@@ -1565,15 +1617,7 @@ impl Builder<'_> {
                         rows.push(Value::List(std::mem::take(row).into()));
                     }
                 }
-                TagEnd::Table => {
-                    if let Some(Frame::Table { head, rows, .. }) = self.frames.pop() {
-                        self.block(map(vec![
-                            ("t", "table".into()),
-                            ("head", Value::List(head.into())),
-                            ("rows", Value::List(rows.into())),
-                        ]));
-                    }
-                }
+                TagEnd::Table => self.close_table(),
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                     self.styles.pop();
                 }
@@ -1704,6 +1748,50 @@ mod tests {
         let Value::List(row) = &rows[0] else { panic!() };
         let Value::List(cell) = &row[0] else { panic!() };
         assert_eq!(text(cell[0].field("img")).as_deref(), Some("p.png"));
+    }
+
+    #[test]
+    fn a_table_says_how_its_columns_align_only_when_its_source_does() {
+        let sides = |source: &str| {
+            let blocks = parse(source, &plain());
+            blocks[0].field("align").map(|align| {
+                let Value::List(sides) = align else { panic!() };
+                sides
+                    .iter()
+                    .map(|side| match side {
+                        Value::Str(side) => side.to_string(),
+                        _ => panic!(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            sides("| a | b | c | d |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |"),
+            Some(vec![
+                "start".into(),
+                "center".into(),
+                "end".into(),
+                String::new()
+            ])
+        );
+        assert_eq!(sides("| a | b |\n|---|---|\n| 1 | 2 |"), None);
+        // The next table says its own: none after one that aligned.
+        let blocks = parse("| a |\n|--:|\n| 1 |\n\n| b |\n|---|\n| 2 |", &plain());
+        assert_eq!(kinds(&blocks), ["table", "table"]);
+        assert!(blocks[0].field("align").is_some());
+        assert!(blocks[1].field("align").is_none());
+        // In a list item.
+        let blocks = parse("- | a |\n  |:-:|\n  | 1 |", &plain());
+        let Some(Value::List(items)) = blocks[0].field("items") else {
+            panic!()
+        };
+        let Value::List(first) = &items[0] else {
+            panic!()
+        };
+        let Some(Value::List(align)) = first[0].field("align") else {
+            panic!()
+        };
+        assert!(matches!(&align[0], Value::Str(side) if &**side == "center"));
     }
 
     #[test]
