@@ -968,10 +968,29 @@ fn copy_blocker(
         let Some(rect) = paints(item) else {
             continue;
         };
-        if !repainted(rect) {
-            return Some(CopyBlocker::Over(item.id));
+        // All it can put on screen: a box's paint (its shadows and outline),
+        // or for text, an image or a canvas the ink the scene keeps for it,
+        // which may reach past its box (a glyph's overhang, a stroke).
+        let ink = match item.kind {
+            NodeKind::Quad(_) | NodeKind::Panel { .. } => rect,
+            _ => scene
+                .layer_ink(item)
+                .and_then(|ink| ink.intersection(item.clip?))
+                .and_then(|ink| ink.intersection(clip))
+                .map_or(rect, |ink| ink.union(rect)),
+        };
+        if !repainted(ink) {
+            // Something that stays put over the view (a composer floating
+            // on a transcript): the copy moves the view's pixels, its among
+            // them, so it repaints where it is, as the copy left what was
+            // under it, and where the copy put it. Only a blur reads past
+            // its own box, so a blurred one still repaints the whole view.
+            if item.isolated || item.effects.blur_radius > 0. {
+                return Some(CopyBlocker::Over(item.id));
+            }
+            carried.push(ink);
         }
-        carried.extend(carry(rect));
+        carried.extend(carry(ink));
     }
     // Content opaque across the whole clip (a list's rows) hides whatever
     // lies under it, before the move and after.
@@ -1006,12 +1025,97 @@ fn copy_blocker(
         {
             return None;
         }
+        // One colour across the whole clip, however see-through (a card's
+        // tint on the window's glass): the same under every pixel before
+        // the move and after, so the copy carries it unchanged.
+        if let Some(corners) = uniform_across(item, clip) {
+            for corner in corners {
+                carried.push(corner);
+                carried.extend(carry(corner));
+            }
+            continue;
+        }
         if !repainted(rect) {
             return Some(CopyBlocker::Under(item.id));
         }
         carried.extend(carry(rect));
     }
     None
+}
+/// Whether `item` paints one colour over all of `clip` but its rounded
+/// corners: a plain fill whose box holds the clip inside its border, with any
+/// shadow under it at full strength there and nothing over its content. It
+/// gives the corners' squares within the clip, which the copy can't carry
+/// and so repaint (where they are and where the copy puts them).
+fn uniform_across(item: &zgx::scene::PaintItem<'_>, clip: Rect) -> Option<Vec<Rect>> {
+    let (NodeKind::Quad(quad) | NodeKind::Panel { quad, .. }) = item.kind else {
+        return None;
+    };
+    let holds = |outer: Rect, inner: Rect| {
+        const E: f32 = 1e-3;
+        inner.x >= outer.x - E
+            && inner.y >= outer.y - E
+            && inner.x + inner.width <= outer.x + outer.width + E
+            && inner.y + inner.height <= outer.y + outer.height + E
+    };
+    let inset = |r: Rect, by: f32| {
+        Rect::new(
+            r.x + by,
+            r.y + by,
+            (r.width - 2. * by).max(0.),
+            (r.height - 2. * by).max(0.),
+        )
+    };
+    if quad.decoration.is_some()
+        || quad.border_over
+        || quad.outline.is_some_and(|outline| outline.visible())
+        || item.isolated
+        || item.mask().is_some()
+        || item.outer_mask().is_some()
+        || item.effects.edge_fade > 0.
+        || item.effects.blur_radius > 0.
+        || !item.clip.is_some_and(|own| holds(own, clip))
+    {
+        return None;
+    }
+    let b = item.bounds;
+    let border = if quad.border_width > 0. && quad.border_color.3 > 0 {
+        quad.border_width
+    } else {
+        0.
+    };
+    if !holds(inset(b, border), clip) {
+        return None;
+    }
+    let r = quad.radius.max(0.);
+    let shadows_full = quad.shadows().iter().all(|shadow| {
+        let grown = b.expand(shadow.spread.max(0.));
+        let moved = Rect::new(
+            grown.x + shadow.offset.x,
+            grown.y + shadow.offset.y,
+            grown.width,
+            grown.height,
+        );
+        let full = inset(moved, shadow.blur_radius.max(0.) * 3. + r);
+        holds(full, clip)
+    });
+    if !shadows_full {
+        return None;
+    }
+    // The rounded corners' squares the clip reaches.
+    let side = r + border;
+    Some(
+        [
+            Rect::new(b.x, b.y, side, side),
+            Rect::new(b.x + b.width - side, b.y, side, side),
+            Rect::new(b.x, b.y + b.height - side, side, side),
+            Rect::new(b.x + b.width - side, b.y + b.height - side, side, side),
+        ]
+        .into_iter()
+        .filter(|_| r > 0.)
+        .filter_map(|corner| corner.intersection(clip))
+        .collect(),
+    )
 }
 /// Whether rectangles spanning `clip` side to side (or top to bottom) cover
 /// it, meeting on whole device pixels: no seam lets anything beneath show.
@@ -3984,6 +4088,11 @@ pub struct GpuRenderer {
     copy_present: bool,
     /// Frames whose damage was drawn by `present_single_pass`.
     single_pass_frames: u64,
+    /// Test hook: an offscreen renderer copies scroll moves' pixels where the
+    /// platform would repaint them (`debug_allow_scroll_copies`).
+    debug_scroll_copy: bool,
+    /// Scroll moves applied as a copy of their pixels, ever.
+    scroll_copied: std::cell::Cell<u64>,
     /// Frames presented to the drawable alone (`Deferred::direct`).
     direct_frames: u64,
     /// Frames encoded with Metal directly (`render_direct`).
@@ -4741,6 +4850,8 @@ impl GpuRenderer {
             present_unpremultiplies,
             copy_present,
             single_pass_frames: 0,
+            debug_scroll_copy: false,
+            scroll_copied: std::cell::Cell::new(0),
             direct_frames: 0,
             metal_frames: 0,
             warms: 0,
@@ -10833,8 +10944,23 @@ impl GpuRenderer {
     /// land on whole pixels, and within the clip nothing but the content
     /// changes position: whatever lies under it is hidden by one opaque
     /// rectangle, and anything over it is repainted anyway.
+    #[inline]
     fn scroll_copies(&self, scene: &Scene, damage: &[Rect]) -> (Vec<ScrollCopy>, Vec<Rect>) {
+        // A frame with no scroll moved, nearly every one that isn't scrolling,
+        // doesn't reach the work below, which is a call and a big frame.
         let serial = scene.flush_serial();
+        if scene.scroll_moves().iter().all(|m| m.serial != serial) {
+            return (Vec::new(), Vec::new());
+        }
+        self.scroll_copies_of(scene, damage, serial)
+    }
+    #[inline(never)]
+    fn scroll_copies_of(
+        &self,
+        scene: &Scene,
+        damage: &[Rect],
+        serial: u64,
+    ) -> (Vec<ScrollCopy>, Vec<Rect>) {
         let mut copies = Vec::new();
         let mut repaint = Vec::new();
         let mut carried = Vec::new();
@@ -10850,6 +10976,7 @@ impl GpuRenderer {
         };
         #[cfg(not(own_surfaces))]
         let copyable = true;
+        let copyable = copyable || self.debug_scroll_copy;
         for scroll in scene.scroll_moves() {
             if scroll.serial != serial {
                 continue;
@@ -10949,6 +11076,7 @@ impl GpuRenderer {
                             }
                             repaint.append(&mut carried);
                             copies.push(copy);
+                            self.scroll_copied.set(self.scroll_copied.get() + 1);
                         }
                         None => {
                             zgx::profile::note(|| {
@@ -14456,6 +14584,16 @@ impl GpuRenderer {
     /// Frames drawn in one pass with their presentation.
     pub fn debug_single_pass_frames(&self) -> u64 {
         self.single_pass_frames
+    }
+    /// Test hook: copy scroll moves' pixels offscreen too, where the platform
+    /// would repaint them (macOS without a layer of its own), so a test can
+    /// check what a copy leaves on screen.
+    pub fn debug_allow_scroll_copies(&mut self) {
+        self.debug_scroll_copy = true;
+    }
+    /// How many scroll moves were applied as a copy of their pixels.
+    pub fn debug_scroll_copies(&self) -> u64 {
+        self.scroll_copied.get()
     }
     /// Test hook: full-rate frames draw into `CAMetalLayer` drawables, or
     /// not (`ZGX_PRESENT_DRAWABLE`); a `debug_for_layer` renderer then
@@ -18015,19 +18153,21 @@ mod copy_blocker_tests {
         widgets::Ui,
     };
 
-    /// A node painting over a scroll view keeps its scroll from being a copy
-    /// of the pixels drawn, and devtools' note names it; with nothing over
-    /// it, the same scroll copies. A clear square, or a clear rectangle (an
-    /// overlay scrollbar's track away from the pointer), paints nothing:
-    /// the scroll copies as with nothing over it.
+    /// Whether `carried` repaints the point `(x, y)`.
+    fn repaints(carried: &[Rect], x: f32, y: f32) -> bool {
+        carried
+            .iter()
+            .any(|r| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height)
+    }
+
+    /// A node that stays put over a scroll view no longer keeps its scroll
+    /// from copying the pixels drawn: it repaints where it is and where the
+    /// copy put it. A blurred one repaints with what's behind it, and the
+    /// list copies under it too; with nothing over it, the same scroll copies
+    /// with nothing to repaint.
     #[test]
-    fn a_node_over_a_scroll_view_is_named_as_what_keeps_it_from_copying() {
-        for (covered, clear, rect) in [
-            (false, false, false),
-            (true, false, false),
-            (true, true, false),
-            (true, true, true),
-        ] {
+    fn a_node_over_a_scroll_view_repaints_itself_and_the_view_copies() {
+        for cover in [None, Some(false), Some(true)] {
             let mut ui = Ui::new(160., 120.);
             let offset = ui.signal(0_f32);
             let rows = virtual_list(
@@ -18049,17 +18189,103 @@ mod copy_blocker_tests {
             .p(8.)
             .bg(rgb(0x101820));
             let mut root = overlay().w(160.).h(120.).bg(rgb(0x000000)).child(rows);
-            if covered {
-                root = root.child(
-                    div()
-                        .absolute()
-                        .left(40.)
-                        .top(40.)
-                        .size(30., 30.)
-                        .bg(rgba(if clear { 0xffffff00 } else { 0xffffff80 })),
-                );
+            if let Some(blurred) = cover {
+                let mut square = div()
+                    .absolute()
+                    .left(40.)
+                    .top(40.)
+                    .size(30., 30.)
+                    .bg(rgba(0xffffff80));
+                if blurred {
+                    square = square.backdrop_blur(6.);
+                }
+                root = root.child(square);
             }
             ui.mount(root);
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+            offset.set(14.);
+            ui.prepare_frame();
+            let damage = ui.scene.borrow_mut().flush().damage;
+            let scene = ui.scene.borrow();
+            let scroll = scene.scroll_moves().last().expect("it moved").clone();
+            let mut carried = Vec::new();
+            let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut carried, &mut None);
+            match cover {
+                None => {
+                    assert_eq!(blocker, None);
+                    assert!(carried.is_empty(), "{carried:?}");
+                }
+                Some(false) => {
+                    assert_eq!(
+                        blocker, None,
+                        "the square over the list repaints, the list copies"
+                    );
+                    assert!(repaints(&carried, 55., 55.), "where it is: {carried:?}");
+                    assert!(
+                        repaints(&carried, 55., 55. + scroll.dy),
+                        "where the copy put it: {carried:?}"
+                    );
+                }
+                Some(true) => {
+                    // (A blurred one repaints with what's behind it: it's in
+                    // the frame's damage, and the list copies under it.)
+                    assert_eq!(
+                        blocker, None,
+                        "the blurred square repaints, the list copies"
+                    );
+                    assert!(
+                        damage.iter().any(|d| d.x <= 40.
+                            && d.y <= 40.
+                            && d.x + d.width >= 70.
+                            && d.y + d.height >= 70.),
+                        "the blurred square is in the damage: {damage:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A clear square, or a clear rectangle (an overlay scrollbar's track
+    /// away from the pointer), over a scroll view paints nothing: the
+    /// scroll copies, as with nothing over it (main's case, kept).
+    #[test]
+    fn a_clear_node_over_a_scroll_view_lets_it_copy() {
+        for rect in [false, true] {
+            let mut ui = Ui::new(160., 120.);
+            let offset = ui.signal(0_f32);
+            let rows = virtual_list(
+                offset.clone(),
+                24.,
+                2,
+                || 1000,
+                |i| i,
+                |_, key, _| {
+                    div().size(144., 24.).bg(if key % 2 == 0 {
+                        rgb(0x223344)
+                    } else {
+                        rgb(0x334455)
+                    })
+                },
+            )
+            .w(160.)
+            .h(100.)
+            .p(8.)
+            .bg(rgb(0x101820));
+            let square = div()
+                .absolute()
+                .left(40.)
+                .top(40.)
+                .size(30., 30.)
+                .bg(rgba(0xffffff00));
+            ui.mount(
+                overlay()
+                    .w(160.)
+                    .h(120.)
+                    .bg(rgb(0x000000))
+                    .child(rows)
+                    .child(square),
+            );
             ui.prepare_frame();
             if rect {
                 let mut scene = ui.scene.borrow_mut();
@@ -18073,17 +18299,88 @@ mod copy_blocker_tests {
             let scene = ui.scene.borrow();
             let scroll = scene.scroll_moves().last().expect("it moved").clone();
             let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut Vec::new(), &mut None);
-            if covered && !clear {
-                let Some(blocker @ CopyBlocker::Over(_)) = blocker else {
-                    panic!("the square over the list keeps it from copying: {blocker:?}");
-                };
-                let said = blocker.describe(&scene);
+            assert_eq!(
+                blocker,
+                None,
+                "a clear {} paints nothing",
+                if rect { "rect" } else { "square" }
+            );
+        }
+    }
+
+    /// A list with no fill of its own on a see-through rounded card with an
+    /// edge copies: the card is one colour across the list's view but for its
+    /// corners, which repaint. Something of its own under the list (a square
+    /// on the card) still keeps it from copying.
+    #[test]
+    fn a_see_through_card_under_a_list_lets_it_copy() {
+        for marked in [false, true] {
+            let mut ui = Ui::new(200., 160.);
+            let offset = ui.signal(0_f32);
+            let rows = virtual_list(
+                offset.clone(),
+                24.,
+                2,
+                || 1000,
+                |i| i,
+                |_, key, _| {
+                    div().size(150., 12.).bg(if key % 2 == 0 {
+                        rgb(0x223344)
+                    } else {
+                        rgb(0x334455)
+                    })
+                },
+            )
+            .absolute()
+            .left(21.)
+            .top(21.)
+            .w(158.)
+            .h(118.);
+            let card = div()
+                .absolute()
+                .left(20.)
+                .top(20.)
+                .size(160., 120.)
+                .bg(rgba(0x2a2a2acc))
+                .border(1.)
+                .border_color(rgba(0xffffff20))
+                .rounded(12.);
+            let mut root = overlay().w(200.).h(160.).child(card);
+            if marked {
+                root = root.child(
+                    div()
+                        .absolute()
+                        .left(60.)
+                        .top(60.)
+                        .size(10., 10.)
+                        .bg(rgb(0xff0000)),
+                );
+            }
+            ui.mount(root.child(rows));
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+            offset.set(14.);
+            ui.prepare_frame();
+            let damage = ui.scene.borrow_mut().flush().damage;
+            let scene = ui.scene.borrow();
+            let scroll = scene.scroll_moves().last().expect("it moved").clone();
+            let mut carried = Vec::new();
+            let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut carried, &mut None);
+            if marked {
                 assert!(
-                    said.contains("draws over it") && said.starts_with('@'),
-                    "{said}"
+                    matches!(blocker, Some(CopyBlocker::Under(_))),
+                    "the square under the list keeps it from copying: {blocker:?}"
                 );
             } else {
-                assert_eq!(blocker, None);
+                assert_eq!(blocker, None, "the card is one colour under the list");
+                assert!(
+                    repaints(&carried, 22., 22.),
+                    "a corner repaints: {carried:?}"
+                );
+                assert!(
+                    !repaints(&carried, 100., 80.),
+                    "the middle copies: {carried:?}"
+                );
             }
         }
     }
@@ -18097,11 +18394,11 @@ mod raised_copy_tests {
         widgets::Ui,
     };
 
-    /// A node raised over a scroll view keeps its scroll from copying, as
-    /// a later sibling does, though it comes first in the document; not
-    /// raised it lies under the list, and the same scroll copies.
+    /// A node raised over a scroll view repaints over it, as a later sibling
+    /// does, though it comes first in the document; not raised it lies under
+    /// the list, hidden by its fill. The scroll copies either way.
     #[test]
-    fn a_raised_node_over_a_scroll_view_keeps_it_from_copying() {
+    fn a_raised_node_over_a_scroll_view_repaints_over_it() {
         for raised in [false, true] {
             let mut ui = Ui::new(160., 120.);
             let offset = ui.signal(0_f32);
@@ -18147,15 +18444,16 @@ mod raised_copy_tests {
             let damage = ui.scene.borrow_mut().flush().damage;
             let scene = ui.scene.borrow();
             let scroll = scene.scroll_moves().last().expect("it moved").clone();
-            let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut Vec::new(), &mut None);
-            if raised {
-                assert!(
-                    matches!(blocker, Some(CopyBlocker::Over(_))),
-                    "the raised square keeps it from copying: {blocker:?}"
-                );
-            } else {
-                assert_eq!(blocker, None);
-            }
+            let mut carried = Vec::new();
+            let blocker = copy_blocker(&scene, &scroll, &damage, 1., &mut carried, &mut None);
+            assert_eq!(blocker, None, "the list copies either way");
+            let square =
+                |r: &Rect| r.x <= 55. && 55. < r.x + r.width && r.y <= 55. && 55. < r.y + r.height;
+            assert_eq!(
+                carried.iter().any(square),
+                raised,
+                "raised, the square repaints over the list: {carried:?}"
+            );
         }
     }
 }
