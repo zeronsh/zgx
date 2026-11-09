@@ -861,6 +861,7 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool) -> Ve
         took: false,
         options,
         deeper: 0,
+        align: None,
     };
     let mut tops = Vec::new();
     let mut depth = 0usize;
@@ -1197,8 +1198,6 @@ enum Frame {
         rows: Vec<Value>,
         row: Vec<Value>,
         in_head: bool,
-        /// Its columns' sides, when the source aligns any.
-        align: Option<Box<[Alignment]>>,
     },
 }
 
@@ -1225,6 +1224,9 @@ struct Builder<'a> {
     /// Quotes, lists and items open beyond `NESTING`: read into the deepest
     /// container kept, as its blocks.
     deeper: usize,
+    /// The open table's columns' sides, when its source aligns any (a table
+    /// holds no table).
+    align: Option<Box<[Alignment]>>,
 }
 
 /// How deeply quotes and lists nest at most (in frames: a list level is
@@ -1234,6 +1236,38 @@ struct Builder<'a> {
 const NESTING: usize = 64;
 
 impl Builder<'_> {
+    /// A table opens, its columns aligned as `align` says. (Out of line,
+    /// as `close_table`: `event` stays as small as it was.)
+    #[inline(never)]
+    fn open_table(&mut self, align: Vec<Alignment>) {
+        self.align = align
+            .iter()
+            .any(|side| *side != Alignment::None)
+            .then(|| align.into_boxed_slice());
+        self.frames.push(Frame::Table {
+            head: Vec::new(),
+            rows: Vec::new(),
+            row: Vec::new(),
+            in_head: false,
+        });
+    }
+    /// The open table closes into its block: `align` only when its source
+    /// aligns a column.
+    #[inline(never)]
+    fn close_table(&mut self) {
+        let align = self.align.take();
+        if let Some(Frame::Table { head, rows, .. }) = self.frames.pop() {
+            let mut fields = vec![
+                ("t", "table".into()),
+                ("head", Value::List(head.into())),
+                ("rows", Value::List(rows.into())),
+            ];
+            if let Some(align) = align {
+                fields.push(("align", table_align(&align)));
+            }
+            self.block(map(fields));
+        }
+    }
     fn style(&self) -> Style {
         self.styles.last().copied().unwrap_or_default()
     }
@@ -1464,16 +1498,7 @@ impl Builder<'_> {
                     items: Vec::new(),
                 }),
                 Tag::Item => self.frames.push(Frame::Blocks(Vec::new())),
-                Tag::Table(align) => self.frames.push(Frame::Table {
-                    head: Vec::new(),
-                    rows: Vec::new(),
-                    row: Vec::new(),
-                    in_head: false,
-                    align: align
-                        .iter()
-                        .any(|side| *side != Alignment::None)
-                        .then(|| align.into_boxed_slice()),
-                }),
+                Tag::Table(align) => self.open_table(align),
                 Tag::TableHead => {
                     if let Some(Frame::Table { in_head, .. }) = self.frames.last_mut() {
                         *in_head = true;
@@ -1592,24 +1617,7 @@ impl Builder<'_> {
                         rows.push(Value::List(std::mem::take(row).into()));
                     }
                 }
-                TagEnd::Table => {
-                    if let Some(Frame::Table {
-                        head, rows, align, ..
-                    }) = self.frames.pop()
-                    {
-                        let mut fields = vec![
-                            ("t", "table".into()),
-                            ("head", Value::List(head.into())),
-                            ("rows", Value::List(rows.into())),
-                        ];
-                        // Only a table that aligns a column says so: one that
-                        // doesn't costs nothing more.
-                        if let Some(align) = align {
-                            fields.push(("align", table_align(&align)));
-                        }
-                        self.block(map(fields));
-                    }
-                }
+                TagEnd::Table => self.close_table(),
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                     self.styles.pop();
                 }
