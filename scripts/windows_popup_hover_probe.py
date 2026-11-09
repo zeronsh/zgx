@@ -509,6 +509,8 @@ def front_window():
 
     @WINDOW_PROC
     def procedure(hwnd, message, wparam, lparam):
+        if message == 0x0006 and (wparam & 0xFFFF):  # WM_ACTIVATE, active
+            user32.AllowSetForegroundWindow(os.getppid())
         return user32.DefWindowProcW(hwnd, message, wparam, lparam)
 
     class WindowClass(ctypes.Structure):
