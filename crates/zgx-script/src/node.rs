@@ -1027,6 +1027,8 @@ pub(crate) struct ListRare {
     /// start coming in reach calls. Taken as `fill` walks the table.
     pub(crate) start: Option<Function>,
     pub(crate) start_distance: Option<f32>,
+    /// `ahead`: viewports of rows built ahead (`View::list_ahead`).
+    pub(crate) ahead: Option<f32>,
     /// `estimate = { … }`, with `measured`: how a row's data makes its height.
     pub(crate) estimate: Option<Rc<crate::estimate::Rule>>,
     /// `at_end = state`: kept saying whether it rests at its end.
@@ -1097,6 +1099,8 @@ pub(crate) enum Kind {
         contain: bool,
         /// `wheel_across = true` (`ui.scroll_x`): a mouse wheel moves it.
         wheel_across: bool,
+        /// `paging = true`: it comes to rest on whole pages.
+        paging: bool,
         /// `scroll_padding`: kept clear as what it holds scrolls into view.
         padding: Option<Box<ScrollPadding>>,
     },
@@ -3547,10 +3551,12 @@ const LATE_FIELDS: &[&str] = &[
     "at_caret",
     "on_start",
     "start_distance",
+    "ahead",
     "at_end",
     "on_paste",
     "overscroll",
     "wheel_across",
+    "paging",
     "capture_keys",
     "scroll_padding",
     "read_only",
@@ -3662,7 +3668,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 }
             }
         }
-        "on_start" | "start_distance" | "at_end" => {
+        "on_start" | "start_distance" | "ahead" | "at_end" => {
             if let Kind::List { rare, .. } = &mut node.kind {
                 let rare = rare.get_or_insert_default();
                 match name {
@@ -3671,6 +3677,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                         let distance: f32 = lua.unpack(value)?;
                         rare.start_distance = distance.is_finite().then_some(distance);
                     }
+                    "ahead" => rare.ahead = Some(lua.unpack(value)?),
                     _ => rare.at_end = Some(expect_state(&value, "`at_end`")?),
                 }
             }
@@ -3693,11 +3700,10 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
         }
         "capture_keys" => {
             if lua.unpack::<bool>(value)? {
-                node.events
-                    .get_or_insert_default()
-                    .rare
-                    .get_or_insert_default()
-                    .capture_keys = true;
+                let events = node.events.get_or_insert_default();
+                events.rare.get_or_insert_default().capture_keys = true;
+                // No handler sets it for this one (`any_input`).
+                events.input = true;
             }
         }
         "wheel_across" => {
@@ -3713,6 +3719,11 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                         "`wheel_across` is for a `ui.scroll_x`",
                     ));
                 }
+            }
+        }
+        "paging" => {
+            if let Kind::Scroll { paging, .. } = &mut node.kind {
+                *paging = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
             }
         }
         "overscroll" => {
@@ -5095,6 +5106,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             // Set as `fill` walks the table (`late_field`).
                             contain: false,
                             wheel_across: false,
+                            paging: false,
                             padding: None,
                         },
                     ),

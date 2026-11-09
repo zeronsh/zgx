@@ -473,6 +473,32 @@ fn a_pixelated_image_draws_its_picture_pixelated() {
     }
 }
 
+/// `paging = true` on a scroll view: a wheel goes for the next page, on a spring,
+/// rather than moving it by the wheel's distance at once.
+#[test]
+fn a_scroll_view_takes_paging() {
+    let scrolled = |paging: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"return ui.scroll_x {{ id = "pager", w = 100, h = 50, {paging}
+                ui.div {{ w = 500, h = 50 }} }}"##
+        ));
+        h.ui.prepare_frame();
+        h.ui.dispatch(zgx::input::InputEvent::Scroll {
+            x: 10.,
+            y: 10.,
+            delta_x: 30.,
+            delta_y: 0.,
+        });
+        h.ui.prepare_frame();
+        let pager = h.find("pager").unwrap();
+        let (offset, ..) = h.ui.scroll_report(pager).unwrap();
+        (offset, h.ui.next_interaction_deadline().is_some())
+    };
+    assert_eq!(scrolled(""), (30., false));
+    assert_eq!(scrolled("paging = true,"), (0., true));
+    assert_eq!(scrolled("paging = false,"), (30., false));
+}
+
 /// `border_style = "dotted"` dots the border; `outline_style` and
 /// `outline_dash` break the outline.
 #[test]

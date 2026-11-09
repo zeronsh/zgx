@@ -2941,6 +2941,7 @@ fn kind_view(
             scrollbar,
             contain,
             wheel_across,
+            paging,
             padding,
         } => {
             let offset = match offset {
@@ -2966,6 +2967,7 @@ fn kind_view(
             } else {
                 view
             };
+            let view = if *paging { view.paging(true) } else { view };
             let view = match padding {
                 Some(padding) => with_scroll_padding(view, padding, vm),
                 None => view,
@@ -7499,6 +7501,9 @@ fn list_edges(mut list: View, rare: &crate::node::ListRare, vm: &Rc<Vm>) -> View
     }
     if rare.ancestor {
         list = list.virtualize_in_ancestor();
+    }
+    if let Some(ahead) = rare.ahead {
+        list = list.list_ahead(ahead);
     }
     if let Some(padding) = &rare.scroll_padding {
         list = with_scroll_padding(list, padding, vm);

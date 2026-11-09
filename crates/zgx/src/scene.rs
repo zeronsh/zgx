@@ -6189,6 +6189,10 @@ impl Scene {
         from: usize,
         children: &[NodeId],
     ) -> bool {
+        // A column that keeps its first children's places keeps none now.
+        if self.tree_node(parent).special == Special::Kept {
+            self.forget_column_end(parent);
+        }
         let current = &self.children_raw(self.tree_node(parent))[from..];
         let children = &children[from..];
         let place: NodeMap<usize> = current.iter().enumerate().map(|(i, id)| (*id, i)).collect();
@@ -11931,11 +11935,13 @@ impl Scene {
         if ids.len() < stable {
             return None;
         }
+        // Its children changed: past the end alone, or it can't keep them.
+        // A list changes in place only by an append at its end, a removal, or
+        // a reorder (which forgets what it kept: `reorder_changed_children`).
+        // A removal before the end moves the child at its end's place.
         if node.dirty & CHILDREN != 0
-            && last.children[..stable]
-                .iter()
-                .zip(ids)
-                .any(|((child, ..), id)| child != id)
+            && stable > 0
+            && ids[stable - 1] != last.children[stable - 1].0
         {
             return None;
         }
@@ -11958,9 +11964,11 @@ impl Scene {
                 return None;
             }
         }
-        // (With none yet, `column_end` looks at each child it would keep.)
+        // (With none yet, `column_end` looks at each child it would keep. Not
+        // while phases are counted: a walk of every child, which would count
+        // as layout growing with the column.)
         #[cfg(debug_assertions)]
-        if memo.sums.is_some() {
+        if memo.sums.is_some() && !crate::profile::enabled() {
             let scanned = last
                 .children
                 .iter()
@@ -12053,7 +12061,7 @@ impl Scene {
                 | if own_w { OWN_PERCENT_WIDTH } else { 0 }
                 | if own_h { OWN_PERCENT_HEIGHT } else { 0 };
             #[cfg(debug_assertions)]
-            {
+            if !crate::profile::enabled() {
                 #[cfg(test)]
                 let calls = self.read_bits_calls.get();
                 assert_eq!(self.read_bits(*id), bits, "what a kept column reads");
@@ -12103,7 +12111,9 @@ impl Scene {
                 }
             } else {
                 #[cfg(debug_assertions)]
-                self.check_kept_in_place(kept.id, now);
+                if !crate::profile::enabled() {
+                    self.check_kept_in_place(kept.id, now);
+                }
             }
         }
     }
@@ -12125,6 +12135,19 @@ impl Scene {
                     || (child.bounds.x, child.bounds.y) == (at.x + rect.x, at.y + rect.y),
                 "a kept child stands where it is placed"
             );
+        }
+    }
+    /// Column `id`'s children moved: what it kept of its last layout serves no
+    /// more, and its next lays it out whole (`column_end`, which then goes on
+    /// resuming).
+    fn forget_column_end(&mut self, id: NodeId) {
+        if let Some(memo) = self
+            .cold
+            .as_deref_mut()
+            .and_then(|cold| cold.column_memos.get_mut(&id))
+        {
+            memo.pass = u64::MAX;
+            memo.sums = None;
         }
     }
     /// Column `id` no longer looks at its end (`keep_column_end`).
@@ -12234,7 +12257,9 @@ impl Scene {
         let mut children = std::mem::take(&mut last.children);
         children.truncate(keep);
         #[cfg(debug_assertions)]
-        self.check_kept_column(id, &children, natural, inner_w, padding, gap, &aligned);
+        if !crate::profile::enabled() {
+            self.check_kept_column(id, &children, natural, inner_w, padding, gap, &aligned);
+        }
         // Its sums where its end begins: kept for this result's end, or added
         // up from the places it keeps.
         let start = match memo.sums {
@@ -16728,6 +16753,82 @@ mod tests {
                 .len(),
             100
         );
+    }
+    /// A column streamed into, its earlier children reordered or one removed
+    /// in the same flush as its end grows: what it kept can't stand, and it
+    /// lays out as a column built with what it holds.
+    #[test]
+    fn a_streamed_column_reordered_or_cut_lays_out_whole() {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        };
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let build = |words: &[String]| {
+            let mut scene = Scene::new(300.0, 4000.0);
+            scene.set_text_measurer(measurer);
+            let column = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(220.0),
+                    gap: 3.0,
+                    ..Style::default()
+                },
+            );
+            let ids: Vec<_> = words
+                .iter()
+                .map(|w| scene.append(column, text(w), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, column, ids)
+        };
+        // Words of different lengths, so a block moved changes heights.
+        let mut words: Vec<String> = (0..100)
+            .map(|i| "w ".repeat(1 + i % 7) + &i.to_string())
+            .collect();
+        let (mut scene, column, mut ids) = build(&words);
+        let grow = |scene: &mut Scene, words: &mut Vec<String>, ids: &[NodeId]| {
+            words.last_mut().unwrap().push_str(" more");
+            scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+        };
+        let same = |scene: &Scene, ids: &[NodeId], words: &[String]| {
+            let (fresh, fresh_column, fresh_ids) = build(words);
+            assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+            for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+                assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+            }
+        };
+        for _ in 0..2 {
+            grow(&mut scene, &mut words, &ids);
+            scene.flush();
+        }
+        // Two early blocks swap as its end grows.
+        ids.swap(3, 4);
+        words.swap(3, 4);
+        assert!(scene.reorder_children(column, &ids));
+        grow(&mut scene, &mut words, &ids);
+        scene.flush();
+        same(&scene, &ids, &words);
+        // It resumes from there.
+        grow(&mut scene, &mut words, &ids);
+        scene.flush();
+        same(&scene, &ids, &words);
+        // An early block goes as its end grows, and as a block arrives.
+        scene.remove(ids.remove(10));
+        words.remove(10);
+        grow(&mut scene, &mut words, &ids);
+        words.push("a block arriving".to_string());
+        ids.push(scene.append(column, text(words.last().unwrap()), wrap.clone()));
+        scene.flush();
+        same(&scene, &ids, &words);
+        grow(&mut scene, &mut words, &ids);
+        scene.flush();
+        same(&scene, &ids, &words);
     }
     /// A column streamed into at two widths, at rest after each chunk: rest
     /// keeps only the sizes of the width it isn't showing, and the column
