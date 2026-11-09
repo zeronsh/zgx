@@ -1,5 +1,7 @@
 # Marker pacing comparison
 
+**Fixture qualification (2026-11-09):** the benchmark wrapper used a shell fixture whose model catalog did not explicitly set `complete=true`. The actual model-chip loading path uses a 30 fps skeleton, and historical runs did not record or verify catalog completion. Treat the actual-Zeron cells and Zeron idle markers here as loading-state/unverified-settlement measurements, not certification of a settled composer. Paired comparisons used the same fixture condition, so their numbers remain descriptive; late percentage and GPU work may change after settlement. Independent Swift/native references and generic transcript scenes are unaffected. Settled-state ship decisions require fresh matched runs with catalog completion verified.
+
 Canonical engine f44e1cdc plus disclosed timing instrumentation, W 1114×685 pt, 120 Hz, 2×, tiles. All arms use the same binary; baseline has flags unset. This is a changing-marker reference, not a Wing tape replay. Three interleaved pairs per arm, with native brackets around every cell.
 
 | Arm | Role | Scene / gesture / size / present | Trials | Late mean [min,max]; SD % | Interval p99 mean ms | Main >4ms mean [min,max] | Shown mean [min,max] | Paired shown Δ | Gates |

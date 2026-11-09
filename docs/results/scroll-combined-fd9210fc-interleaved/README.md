@@ -1,5 +1,7 @@
 # scroll-combined-fd9210fc-interleaved
 
+**Fixture qualification (2026-11-09):** the benchmark wrapper used a shell fixture whose model catalog did not explicitly set `complete=true`. The actual model-chip loading path uses a 30 fps skeleton, and historical runs did not record or verify catalog completion. Treat the actual-Zeron cells and Zeron idle markers here as loading-state/unverified-settlement measurements, not certification of a settled composer. Paired comparisons used the same fixture condition, so their numbers remain descriptive; late percentage and GPU work may change after settlement. Independent Swift/native references and generic transcript scenes are unaffected. Settled-state ship decisions require fresh matched runs with catalog completion verified.
+
 | Arm | Role | Scene / gesture / size / present | Trials | Late mean [min,max]; SD % | Interval p99 mean ms | Main >4ms mean [min,max] | Shown mean [min,max] | Paired shown Δ | Gates |
 |---|---|---|---:|---|---:|---|---|---:|---|
 | combined-p0 | base | zeron / wing / W / 0 | 3/3 | 10.43 [9.10,11.96]; 1.44 | 25.00 | 68.00 [64.00,74.00] | 7406.00 [7308.00,7484.00] | 88.00 | fail |

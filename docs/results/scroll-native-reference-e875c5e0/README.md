@@ -1,5 +1,7 @@
 # Real Zeron baseline and independent native references
 
+**Fixture qualification (2026-11-09):** the benchmark wrapper used a shell fixture whose model catalog did not explicitly set `complete=true`. The actual model-chip loading path uses a 30 fps skeleton, and historical runs did not record or verify catalog completion. Treat the actual-Zeron cells and Zeron idle markers here as loading-state/unverified-settlement measurements, not certification of a settled composer. Paired comparisons used the same fixture condition, so their numbers remain descriptive; late percentage and GPU work may change after settlement. Independent Swift/native references and generic transcript scenes are unaffected. Settled-state ship decisions require fresh matched runs with catalog completion verified.
+
 Engine e875c5e0 with opt-in telemetry; actual Zeron native host source
 506e1af795452fd1c3a473c4ab16bfa6b6d348b7, isolated fixture geometry and
 reference hook. Only `scroll_fixture.luau` omits the disconnected chat publisher

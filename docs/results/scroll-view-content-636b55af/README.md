@@ -1,5 +1,7 @@
 # Content fixes and view-clock/hybrid scrolling on the real shell
 
+**Fixture qualification (2026-11-09):** the benchmark wrapper used a shell fixture whose model catalog did not explicitly set `complete=true`. The actual model-chip loading path uses a 30 fps skeleton, and historical runs did not record or verify catalog completion. Treat the actual-Zeron cells and Zeron idle markers here as loading-state/unverified-settlement measurements, not certification of a settled composer. Paired comparisons used the same fixture condition, so their numbers remain descriptive; late percentage and GPU work may change after settlement. Independent Swift/native references and generic transcript scenes are unaffected. Settled-state ship decisions require fresh matched runs with catalog completion verified.
+
 Canonical engine 636b55af131510ada1d0994926aa657356a8079c, with matched trace-only instrumentation. Actual Zeron shell fixture, Wing tape, W 1114×685 pt, 120 Hz, 2× renderer scale, frost. Each arm has three interleaved pairs against the same-binary tiles control with `ZGX_VIEW_CLOCK=0`. The default-clock candidate has flags unset. Hybrid sets `ZGX_SCROLL_DRAWABLES=1`, with the default view clock. Actual child flags and observed frame-source modes were verified; every cell has a zgx marker and independent native brackets.
 
 | Arm | Role | Scene / gesture / size / present | Trials | Late mean [min,max]; SD % | Interval p99 mean ms | Main >4ms mean [min,max] | Shown mean [min,max] | Paired shown Δ | Gates |
