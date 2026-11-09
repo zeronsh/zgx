@@ -338,6 +338,11 @@ fn thousand_streaming_frames_keep_caches_bounded_and_reuse_vertices() {
         let d = scene.flush().damage;
         gpu.render(&scene, &d).unwrap();
     }
+    // Below its four buffers the ring grows rather than waits whenever every
+    // buffer is still being read (d3d11_frame.rs `Ring::write_parts`), so a
+    // GPU busy with other work can add one at any frame here. Warm means the
+    // GPU has caught up: a readback waits for it, and the frame after reuses.
+    gpu.readback().unwrap();
     let initial = gpu.debug_cache_stats().vertex_buffer_bytes;
     // Vertices written in place (unified memory, Direct3D 12) go round a
     // ring of up to four buffers in flight; a staging copy keeps one. Each
@@ -1792,12 +1797,21 @@ fn overlay_scrollbar_thumb_translates_and_clears_when_content_shrinks() {
             ),
     );
     let mut previous_extent = 0.;
-    for (position, height, thumb_y) in [
-        (0., 400., Some(8)),
-        (168., 400., Some(28)),
-        (336., 400., Some(48)),
-        (0., 40., None),
-        (0., 400., Some(8)),
+    // The platform's thumb at rest, in a track at the content's edge (120):
+    // zgx's 6 across an 8 track and at least 24 long; GNOME's 8 across a 12
+    // track and at least 40. Either rounded, its ends 2 in.
+    let (track, across, least) = if cfg!(target_os = "linux") {
+        (12, 8, 40)
+    } else {
+        (8, 6, 24)
+    };
+    let left = 120 - track + (track - across) / 2;
+    for (position, height, shown) in [
+        (0., 400., true),
+        (168., 400., true),
+        (336., 400., true),
+        (0., 40., false),
+        (0., 400., true),
     ] {
         extent.set(height);
         offset.set(position);
@@ -1821,21 +1835,22 @@ fn overlay_scrollbar_thumb_translates_and_clears_when_content_shrinks() {
             .filter(|(_, p)| **p == accent)
             .map(|(i, _)| (i % 128, i / 128))
             .collect();
-        match thumb_y {
-            // A rounded thumb 6 px across the 8 px track, its ends 2 px in
-            // from the 24 px its position spans.
-            Some(y) => {
-                assert!(
-                    visible.contains(&(116, y + 12)),
-                    "thumb at {y}: {visible:?}"
-                );
-                assert!(
-                    visible
-                        .iter()
-                        .all(|(x, row)| *x >= 113 && *x < 119 && *row >= y + 2 && *row < y + 22)
-                );
-            }
-            None => assert!(visible.is_empty()),
+        if shown {
+            // Along the 64 the padding leaves, over the 336 it scrolls.
+            let y = 8 + ((64 - least) as f32 * position / 336.) as usize;
+            assert!(
+                visible.contains(&(left + across / 2, y + least / 2)),
+                "thumb at {y}: {visible:?}"
+            );
+            assert!(
+                visible.iter().all(|(x, row)| *x >= left
+                    && *x < left + across
+                    && *row >= y + 2
+                    && *row < y + least - 2),
+                "thumb at {y}: {visible:?}"
+            );
+        } else {
+            assert!(visible.is_empty());
         }
     }
 }
@@ -3991,13 +4006,23 @@ fn variable_virtual_rows_height_anchor_focus_and_resize_match_full_repaint() {
         for y in 0..height {
             if y < 8 || y >= height - 8 {
                 // Removing a focused row returns focus to the list, whose
-                // default focus variant paints a one-pixel outer border.
-                let padding =
-                    if ui.input.focused() == Some(mounted.node()) && (y == 0 || y == height - 1) {
-                        [94, 165, 255, 255]
-                    } else {
-                        [16, 32, 48, 255]
-                    };
+                // default focus ring is the platform's: a one-pixel border
+                // (zgx's), an outline 2 wide inset over it (GNOME's), or
+                // one outside it (Windows', past the window here).
+                let ring = if cfg!(windows) {
+                    0
+                } else if cfg!(target_os = "linux") {
+                    2
+                } else {
+                    1
+                };
+                let padding = if ui.input.focused() == Some(mounted.node())
+                    && (y < ring || y >= height - ring)
+                {
+                    [94, 165, 255, 255]
+                } else {
+                    [16, 32, 48, 255]
+                };
                 assert_eq!(
                     pixel(9, y),
                     &padding,
@@ -5003,8 +5028,8 @@ fn fade_insets_end_the_bands_inside_the_clip() {
 /// Whole-pixel scrolls shift the retained pixels and draw only the exposed
 /// strip; the result matches a fresh renderer exactly. A list fading at its
 /// edges copies its interior and repaints its bands. A sibling painting over
-/// the list, or a fractional shift, make a copy inexact, so those repaint
-/// instead.
+/// the list repaints all its ink over the copy, so the list copies under it
+/// too. A fractional shift makes a copy inexact, so that repaints instead.
 #[test]
 fn scroll_copies_match_a_fresh_render_and_decline_when_inexact() {
     let _gpu_fixture = gpu_fixture();
@@ -5096,9 +5121,9 @@ fn scroll_copies_match_a_fresh_render_and_decline_when_inexact() {
             // Its interior copies, its bands repaint (bands.rs).
             Case::Faded => assert!(copies >= 3, "{copies}"),
             Case::Rounded => assert!(copies >= 3, "{copies}"),
-            // Only 28→100 copies: its 72 px exposed strip repaints the whole
-            // overlay, which the smaller moves would have shifted.
-            Case::Covered => assert_eq!(copies, 1),
+            // The overlay repaints its own ink over what the copy moved
+            // (copy_blocker_tests), so the list copies as the plain one does.
+            Case::Covered => assert!(copies >= 3, "{copies}"),
         }
     }
 }

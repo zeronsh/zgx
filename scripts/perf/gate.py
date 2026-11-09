@@ -154,6 +154,12 @@ SCENES = [
     # `malloc_consolidate` run or not, and one binary counted 2.2 M (0.3%)
     # apart (arm64), where the change itself was 0.05%.
     ('terminal', 'zgx-terminal', 'terminal_bench', {'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
+    # Pictures in that terminal, drawn by wgpu's no-op backend: placed (RGBA
+    # in chunks, a PNG), scrolled, replaced under their ids and deleted;
+    # sixel images placed over one another. What `terminal` guards having no
+    # cost, this measures.
+    ('terminal-pictures', 'zgx-terminal', 'terminal_pictures_bench', {'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0',
+                                                                      'ZGX_GPU_NOOP': '1'}),
     # 3D frames' CPU work, drawn by wgpu's no-op backend (no driver, no JIT):
     # textured meshes alone, what a feature costs those not using it, then
     # those among skinned, morphing, cut-out and placed ones.
@@ -312,7 +318,8 @@ def build(checkout, target, into):
     # Cargo turns a feature on for everything one build selects, and
     # zgx-3d's and zgx-video's benches take wgpu's no-op backend: each built
     # apart, the other benches link the wgpu they always did. zgx-terminal's
-    # bench brings dev-dependencies of its own, apart for the same reason.
+    # benches bring dev-dependencies of their own, that backend among them,
+    # apart for the same reason.
     parts = [[s for s in scenes if s[1] not in ALONE]]
     parts += [[s for s in scenes if s[1] == alone] for alone in ALONE]
     for part in parts:

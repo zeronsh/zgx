@@ -142,18 +142,23 @@ def main():
         until(f"the menu on {name}", lambda: "popup configured" in log.read_text())
         time.sleep(.3)
         image = shot("open")
-        shown = re.search(r"popup show .* buffer (\d+)x(\d+) scale ([\d.]+)", log.read_text())
-        buffer = (int(shown.group(1)), int(shown.group(2))) if shown else None
+        # Its surface: the panel and its shadows' ink (GNOME's), round it.
+        shown = re.search(r"popup show .* width: ([\d.]+), height: ([\d.]+) \} buffer (\d+)x(\d+) scale ([\d.]+)",
+                          log.read_text())
+        surface = (float(shown.group(1)), float(shown.group(2))) if shown else None
+        buffer = (int(shown.group(3)), int(shown.group(4))) if shown else None
         below = content[1] + px(FILE[1] + 15)
         menu = box(image.crop((0, below, image.width, image.height)), MENU)
         assert menu, f"{name}: no menu drawn"
         menu = (menu[0], menu[1] + below, menu[2], menu[3] + below)
         expected = (px(PLACED[0]), px(PLACED[1]), px(MENU_SIZE[0]), px(MENU_SIZE[1]))
         measured = (menu[0] - content[0], menu[1] - content[1], menu[2] - menu[0], menu[3] - menu[1])
-        checks[name] = {"content": content, "menu": menu, "expected": expected, "buffer": buffer}
-        # Drawn in the output's pixels: one buffer pixel to each.
+        checks[name] = {"content": content, "menu": menu, "expected": expected, "surface": surface,
+                        "buffer": buffer}
+        # Drawn in the output's pixels: one buffer pixel to each of its
+        # surface's.
         checks[f"{name}: buffer in the output's pixels"] = (
-            buffer == (px(MENU_SIZE[0]), px(MENU_SIZE[1])) and float(shown.group(3)) == scale)
+            surface is not None and buffer == (px(surface[0]), px(surface[1])) and float(shown.group(5)) == scale)
         # Within a pixel: a fractional scale rounds the box's edges.
         checks[f"{name}: where the scene put it, its size"] = all(
             abs(a - b) <= 1 for a, b in zip(measured, expected))
@@ -326,10 +331,12 @@ def main():
             time.sleep(.3)
             menu = box(shot("tall-open"), MENU)
             cut = re.search(r"popup cut .* to (\d+)x(\d+)", said())
-            shown = re.findall(r"popup show .* height: ([\d.]+) ", said())
-            checks["sway: tall"] = {"menu": menu, "cut": cut.group(0), "shown heights": shown}
+            # Its panel (its window geometry), shown anew at that height;
+            # its surface holds its shadows' ink round it too.
+            configured = re.findall(r"popup configured at -?\d+,-?\d+ \d+x(\d+)", said())
+            checks["sway: tall"] = {"menu": menu, "cut": cut.group(0), "configured heights": configured}
             checks["sway: a menu taller than the output is cut to it"] = (
-                cut.groups() == ("200", str(OUTPUT[1])) and float(shown[-1]) == OUTPUT[1]
+                cut.groups() == ("200", str(OUTPUT[1])) and int(configured[-1]) == OUTPUT[1]
                 and menu == (content[0] + 16, 0, content[0] + 216, OUTPUT[1]))
             pointer.move_to(menu[0] + 100, OUTPUT[1] // 2, *OUTPUT)
             time.sleep(.2)

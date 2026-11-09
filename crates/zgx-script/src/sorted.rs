@@ -1135,6 +1135,12 @@ pub(crate) fn sorted(lua: &Lua, (list, spec): (mlua::Value, mlua::Value)) -> mlu
         };
         let items: Rc<[Value]> = match source.with(Clone::clone) {
             Value::List(items) => items,
+            grown @ Value::Folded(_) if crate::value::grown_list(&grown).is_some() => {
+                crate::value::grown_list(&grown)
+                    .expect("just found")
+                    .flat()
+                    .clone()
+            }
             Value::Nil => Rc::from([]),
             other => {
                 return vm.report(mlua::Error::runtime(format!(

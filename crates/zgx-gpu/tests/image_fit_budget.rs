@@ -1,6 +1,7 @@
 //! Full-size pictures drawn small, however they come: a texture of the size
 //! drawn, no issue raised, none left out, and no frame failing for them.
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, Once};
+use std::time::{Duration, Instant};
 use zgx::{image::ImageData, scene::*};
 use zgx_gpu::GpuRenderer;
 
@@ -43,19 +44,49 @@ fn stack(scene: &mut Scene) -> NodeId {
         Style::default(),
     )
 }
-/// Frames until nothing is decoding, each failing the test if it fails.
+/// How many decodes have finished in this process, and the wait for the next.
+static DECODED: (Mutex<u64>, Condvar) = (Mutex::new(0), Condvar::new());
+/// No decode finished in this long, in any test: the decoding thread has stuck.
+const STALL: Duration = Duration::from_secs(60);
+/// Frames until nothing is decoding, each failing the test if it fails. Every
+/// test running decodes on the one thread, a file at a time, so how long this
+/// waits says little of its own pictures: it fails only if no decode finishes.
 fn settle(gpu: &mut GpuRenderer, scene: &mut Scene, window: (u32, u32)) -> usize {
+    static COUNTING: Once = Once::new();
+    COUNTING.call_once(|| {
+        zgx::image::set_decoded_wake(|| {
+            *DECODED.0.lock().unwrap() += 1;
+            DECODED.1.notify_all();
+        })
+    });
     let all = Rect::new(0., 0., window.0 as f32, window.1 as f32);
     let _ = scene.flush();
     let mut uploads = 0;
-    for _ in 0..3000 {
+    let mut seen = *DECODED.0.lock().unwrap();
+    let mut since = Instant::now();
+    loop {
         uploads += gpu.render(scene, &[all]).expect("a frame").image_uploads;
         if !gpu.images_decoded() {
             return uploads;
         }
-        std::thread::sleep(std::time::Duration::from_millis(4));
+        // (Drawn again now and then regardless: a decode that fails tells no one.)
+        let decoded = *DECODED
+            .1
+            .wait_timeout_while(
+                DECODED.0.lock().unwrap(),
+                Duration::from_millis(50),
+                |decoded| *decoded == seen,
+            )
+            .unwrap()
+            .0;
+        if decoded != seen {
+            (seen, since) = (decoded, Instant::now());
+        }
+        assert!(
+            since.elapsed() < STALL,
+            "still decoding: none done in {STALL:?}"
+        );
     }
-    panic!("still decoding");
 }
 fn pixel(gpu: &mut GpuRenderer, window: (u32, u32), (x, y): (usize, usize)) -> [u8; 3] {
     let pixels = gpu.readback().unwrap();

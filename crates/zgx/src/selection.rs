@@ -19,6 +19,7 @@ use crate::{
     widgets::{Ui, WeakUi},
 };
 use std::{
+    any::Any,
     cmp::Ordering,
     collections::HashMap,
     ops::Range,
@@ -104,6 +105,10 @@ struct Gesture {
     /// Where the pointer is: held past a scroll viewport's edge, the
     /// viewport scrolls toward it.
     pointer: (f32, f32),
+    /// Where the press was, and the system's drag threshold while the
+    /// pointer hasn't gone past it: until it does, the press is a click
+    /// (a shaking hand, a trackpad's click) and selects nothing.
+    slop: Option<((f32, f32), f32)>,
 }
 
 /// Where a point in a virtual list's row lies in the list: the row's index
@@ -113,6 +118,10 @@ struct Gesture {
 struct RowAddress {
     content: NodeId,
     index: usize,
+    /// The row's key in its list, when the list gave it one: the row is
+    /// found by it again, wherever rows added or removed above have moved
+    /// it, rather than by an index another row now has.
+    key: Option<RowKey>,
     path: Vec<u32>,
     /// The row's text as a copy takes it, when the end was set there, and
     /// where the end lies in it: a copy of an end whose row has scrolled
@@ -128,12 +137,16 @@ enum End {
     Gone,
 }
 
-/// A press on a link or button in selectable text: a drag from it selects.
+/// A press on a link or button in selectable text: a drag from a link
+/// selects; a button keeps its press (a long press on either selects its
+/// word, `select_word_at`).
 #[derive(Clone, Copy)]
 struct Pending {
     root: NodeId,
     x: f32,
     y: f32,
+    /// A link's: a drag from it selects.
+    drags: bool,
 }
 
 /// What a text node was shaped from, telling when its layout is stale.
@@ -221,6 +234,7 @@ pub(crate) struct State {
     leaves: Vec<TextLeaf>,
     /// Virtual list rows in selectable regions, and their indices.
     rows: HashMap<NodeId, crate::reactive::Signal<usize>>,
+    /// Those rows' keys (each list's key, hashed).
     /// Virtual lists' row text for copying rows they have not mounted
     /// (`View::row_text`), by the node holding their rows.
     row_texts: HashMap<NodeId, RowText>,
@@ -251,8 +265,49 @@ pub(crate) struct State {
 /// Rows a copy takes from one list's row text at most.
 const MAX_PROVIDED_ROWS: usize = 1_000_000;
 
-/// A virtual list's plain text of row `index`, `None` past its end.
-pub(crate) type RowText = Rc<dyn Fn(usize) -> Option<String>>;
+/// A virtual list's rows as a selection reads them (`View::row_text`).
+pub(crate) type RowText = Rc<dyn ListRows>;
+
+/// A virtual list's rows as a selection reads them: their plain text and,
+/// for a list that has them, their keys (`RowSource::rows`). A function of
+/// a row's index is its text alone, so a list's row text stays one
+/// allocation, its keys in it.
+pub(crate) trait ListRows {
+    /// Row `index`'s plain text, `None` past its end.
+    fn text(&self, index: usize) -> Option<String>;
+    /// Row `index`'s key, if the list has keys.
+    fn key(&self, _index: usize) -> Option<Rc<dyn Any>> {
+        None
+    }
+    /// Where the row with `key` (the list's key type) is now, last seen at
+    /// `seen`: there if it still is, else found down the list; `None` once
+    /// no row has it.
+    fn find(&self, _key: &dyn Any, seen: usize) -> Option<usize> {
+        Some(seen)
+    }
+}
+
+impl<F: Fn(usize) -> Option<String>> ListRows for F {
+    fn text(&self, index: usize) -> Option<String> {
+        self(index)
+    }
+}
+
+/// A row's key, as its list gave it: what finds the row again.
+#[derive(Clone)]
+struct RowKey(Rc<dyn Any>);
+
+impl PartialEq for RowKey {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl std::fmt::Debug for RowKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RowKey")
+    }
+}
 
 /// Removes a virtual list's row text once it is unmounted.
 struct RowTextGuard {
@@ -512,8 +567,9 @@ pub(crate) fn mount_root(ui: &mut Ui, root: NodeId, mut style: SelectionStyle) {
                 // A control under the press keeps it (a slider drags, a
                 // button presses); a link or button gives it up to a drag.
                 if cx.capture_requested() && cx.target != root {
-                    if ui.yields_drag(root, cx.target) {
-                        ui.selection_state().borrow_mut().pending = Some(Pending { root, x, y });
+                    if let Some(drags) = ui.yields_drag(root, cx.target) {
+                        ui.selection_state().borrow_mut().pending =
+                            Some(Pending { root, x, y, drags });
                     }
                     return;
                 }
@@ -524,6 +580,13 @@ pub(crate) fn mount_root(ui: &mut Ui, root: NodeId, mut style: SelectionStyle) {
                     return;
                 }
                 if ui.press_selection(root, x, y, cx.click_count().max(1), modifiers) {
+                    // A single press selects only once it moves past the
+                    // system's drag threshold, as a Mac text view's does.
+                    if cx.click_count() <= 1
+                        && let Some(gesture) = ui.selection_state().borrow_mut().gesture.as_mut()
+                    {
+                        gesture.slop = Some(((x, y), cx.drag_threshold()));
+                    }
                     cx.capture_pointer();
                 }
             }
@@ -561,7 +624,7 @@ pub(crate) fn mount_root(ui: &mut Ui, root: NodeId, mut style: SelectionStyle) {
                 let pending = ui.selection_state().borrow().pending;
                 if let Some(pending) = pending.filter(|p| p.root == root) {
                     let (dx, dy) = (x - pending.x, y - pending.y);
-                    if dx.hypot(dy) <= cx.drag_threshold() {
+                    if !pending.drags || dx.hypot(dy) <= cx.drag_threshold() {
                         return;
                     }
                     ui.selection_state().borrow_mut().pending = None;
@@ -620,15 +683,22 @@ impl Ui {
             .any(|id| self.is_editor(id))
     }
     /// Whether the control under a press in `root` gives the pointer up to
-    /// a drag: a link or a button, not a slider or a scrollbar.
-    fn yields_drag(&self, root: NodeId, target: NodeId) -> bool {
+    /// a drag: a link (words in the text) does, `Some(true)`; a button keeps
+    /// it (a press on one is the button's, as on a Mac), `Some(false)`, but
+    /// a long press on it still selects its word; a slider or a scrollbar
+    /// isn't asked, `None`.
+    fn yields_drag(&self, root: NodeId, target: NodeId) -> Option<bool> {
         let scene = self.scene.borrow();
         let semantics = self.semantics.borrow();
         std::iter::once(target)
             .chain(scene.ancestors(target))
             .take_while(|id| *id != root)
             .find_map(|id| semantics.get(id).map(|node| node.role))
-            .is_some_and(|role| matches!(role, Role::Link | Role::Button))
+            .and_then(|role| match role {
+                Role::Link => Some(true),
+                Role::Button => Some(false),
+                _ => None,
+            })
     }
     /// Whether `x`, `y` in `root` falls inside its selection, not at an edge.
     fn on_selection(&self, root: NodeId, x: f32, y: f32) -> bool {
@@ -688,6 +758,7 @@ impl Ui {
                 edges,
                 dragged: false,
                 pointer: (x, y),
+                slop: None,
             });
             drop(state);
             return self.drag_selection(root, x, y);
@@ -711,6 +782,7 @@ impl Ui {
             edges: if extend { (anchor, anchor) } else { edges },
             dragged: false,
             pointer: (x, y),
+            slop: None,
         });
         state.units = (unit != Unit::Character).then_some((unit, edges, (anchor, edges.1)));
         drop(state);
@@ -724,8 +796,15 @@ impl Ui {
             let Some(gesture) = state.gesture.as_mut().filter(|g| g.root == root) else {
                 return false;
             };
-            gesture.dragged = true;
             gesture.pointer = (x, y);
+            // Not yet past the drag threshold: still a click.
+            if let Some(((px, py), threshold)) = gesture.slop {
+                if (x - px).hypot(y - py) <= threshold {
+                    return true;
+                }
+                gesture.slop = None;
+            }
+            gesture.dragged = true;
             (gesture.unit, gesture.edges)
         };
         let Some(hit) = self.point_at(root, x, y) else {
@@ -933,7 +1012,7 @@ impl Ui {
                            old: Option<TextPoint>,
                            kept: &Option<RowAddress>| match point {
                     Some(point) if Some(point) == old => kept.clone(),
-                    Some(point) => row_address(&state.rows, &scene, point),
+                    Some(point) => row_address(&state.rows, &state.row_texts, &scene, point),
                     None => None,
                 };
                 (
@@ -971,7 +1050,7 @@ impl Ui {
         let (anchor, focus) = {
             let scene = self.scene.borrow();
             let end = |point: Option<TextPoint>, row: &Option<RowAddress>| match point {
-                Some(point) => revive(&state.rows, &scene, point, row.as_ref()),
+                Some(point) => revive(&state.rows, &state.row_texts, &scene, point, row.as_ref()),
                 None => End::Gone,
             };
             (
@@ -984,6 +1063,24 @@ impl Ui {
         }
         if let End::Live(point) = focus {
             state.focus = Some(point);
+        }
+        // An unmounted row's end that its key found moved: kept where it is
+        // now.
+        if let End::Parked(row, _) = &anchor
+            && state
+                .anchor_row
+                .as_ref()
+                .is_some_and(|kept| kept.index != row.index)
+        {
+            state.anchor_row = Some(row.clone());
+        }
+        if let End::Parked(row, _) = &focus
+            && state
+                .focus_row
+                .as_ref()
+                .is_some_and(|kept| kept.index != row.index)
+        {
+            state.focus_row = Some(row.clone());
         }
         let root = state
             .root
@@ -1511,6 +1608,7 @@ impl Ui {
                 edges: (anchor, focus),
                 dragged: true,
                 pointer: (x, y),
+                slop: None,
             });
         }
         self.set_selection(Some(root), Some(anchor), Some(focus));
@@ -1581,7 +1679,7 @@ impl Ui {
         let scene = self.scene.borrow();
         let rows = &state.rows;
         let end = |point: Option<TextPoint>, row: &Option<RowAddress>| match point {
-            Some(point) => revive(rows, &scene, point, row.as_ref()),
+            Some(point) => revive(rows, &state.row_texts, &scene, point, row.as_ref()),
             None => End::Gone,
         };
         let (anchor, focus) = (
@@ -1681,7 +1779,7 @@ impl Ui {
                         }
                         (Some((row, from)), None) => row[from.min(row.len())..].to_owned(),
                         (None, Some((row, to))) => row[..to.min(row.len())].to_owned(),
-                        _ => match text(index) {
+                        _ => match text.text(index) {
                             Some(row) => row,
                             None => break,
                         },
@@ -2672,6 +2770,7 @@ fn row_of(
 /// Where `point` lies in a virtual list's row, as a `RowAddress`.
 fn row_address(
     rows: &HashMap<NodeId, crate::reactive::Signal<usize>>,
+    lists: &HashMap<NodeId, RowText>,
     scene: &Scene,
     point: TextPoint,
 ) -> Option<RowAddress> {
@@ -2683,9 +2782,16 @@ fn row_address(
     while let Some(parent) = scene.parent(at) {
         if let Some(index) = rows.get(&at) {
             path.reverse();
+            let index = index.with_untracked(|index| *index);
             return Some(RowAddress {
                 content: parent,
-                index: index.with_untracked(|index| *index),
+                index,
+                // Read from its list only here, as an end is set in it: a
+                // row costs nothing more as it mounts.
+                key: lists
+                    .get(&parent)
+                    .and_then(|list| list.key(index))
+                    .map(RowKey),
                 path,
                 copied: row_copy(scene, at, point),
             });
@@ -2757,6 +2863,7 @@ fn resolve_row(
 /// `point` as it stands, found again in its row if that was recycled.
 fn revive(
     rows: &HashMap<NodeId, crate::reactive::Signal<usize>>,
+    lists: &HashMap<NodeId, RowText>,
     scene: &Scene,
     point: TextPoint,
     row: Option<&RowAddress>,
@@ -2767,6 +2874,21 @@ fn revive(
     let Some(row) = row.filter(|row| scene.contains(row.content)) else {
         return End::Gone;
     };
+    // Rows may have come or gone above it while it was away: its key finds
+    // where it is now (one read when it hasn't moved), so it comes back on
+    // its own row, never on the one now at its old index. A key no row has
+    // any more ends it.
+    let moved = match (&row.key, lists.get(&row.content)) {
+        (Some(key), Some(list)) => match list.find(&*key.0, row.index) {
+            None => return End::Gone,
+            Some(index) => (index != row.index).then(|| RowAddress {
+                index,
+                ..row.clone()
+            }),
+        },
+        _ => None,
+    };
+    let row = moved.as_ref().unwrap_or(row);
     match resolve_row(rows, scene, row) {
         Some(node) => End::Live(TextPoint {
             node,

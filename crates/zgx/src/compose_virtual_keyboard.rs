@@ -123,11 +123,14 @@ impl Navigation {
                     let found = typed
                         .borrow_mut()
                         .find(text, rows.length, current, |index| {
-                            provided.as_ref().and_then(|text| text(index)).or_else(|| {
-                                let (_, _, item) =
-                                    rows.visible.iter().find(|(i, ..)| *i == index)?;
-                                Some(semantics.get(*item)?.label.clone())
-                            })
+                            provided
+                                .as_ref()
+                                .and_then(|text| text.text(index))
+                                .or_else(|| {
+                                    let (_, _, item) =
+                                        rows.visible.iter().find(|(i, ..)| *i == index)?;
+                                    Some(semantics.get(*item)?.label.clone())
+                                })
                         });
                     match found {
                         Some(index) => index,

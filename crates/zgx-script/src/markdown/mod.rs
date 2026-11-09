@@ -6,7 +6,9 @@
 //! - `p` (`s`: runs), `h` (`l`: level, `s`), `code` (`lang`, `text`, and
 //!   what [`Options::code`] adds), `ul` / `ol` (`start`, `items`: a list of
 //!   block lists), `quote` (`b`), `hr`, `table` (`head`: cells, `rows`:
-//!   rows of cells; a cell is runs), `img` (`src`, `alt`).
+//!   rows of cells; a cell is runs; `align`, only where the source aligns a
+//!   column: each column's side, `"start"`, `"center"`, `"end"`, or `""`
+//!   where it says none), `img` (`src`, `alt`).
 //!
 //! A list item's own text (a tight list's, never a paragraph) is a `p`
 //! with `tight`, which has no space under it.
@@ -28,7 +30,7 @@ pub use mend::PENDING_LINK_URL;
 
 use crate::Value;
 use mlua::IntoLua;
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use std::rc::Rc;
 
 /// How text is read.
@@ -87,9 +89,14 @@ pub struct Incremental {
     /// parses lazily is the size it was.)
     pending_below: u32,
     /// How many top-level elements, from the first, hold the very blocks
-    /// [`blocks_shared`](Self::blocks_shared) last answered: what changes
-    /// them lowers it.
+    /// last answered: what changes them lowers it.
     settled: usize,
+    /// The last answer of [`blocks_appended`](Self::blocks_appended), which
+    /// the next is grown from.
+    appended: Option<std::rc::Rc<crate::value::Appended>>,
+    /// How many blocks the top-level elements before each hold (`counts[i]`
+    /// for `tops[..i]`), as far as the settled ones: theirs stand.
+    counts: Vec<usize>,
 }
 
 /// A top-level element: where it starts, and the blocks it made (one, or
@@ -395,37 +402,61 @@ impl Incremental {
         }
         out
     }
-    /// [`blocks`](Self::blocks) as one shared list, made in place (a long
-    /// reply's answer is one allocation, not a vector and its copy), and
-    /// how many of its first blocks are the last answer's own values: those
-    /// of the elements nothing changed since.
-    pub fn blocks_shared(&mut self) -> (std::rc::Rc<[Value]>, usize) {
+    /// [`blocks`](Self::blocks) as one shared list, made in place: a long
+    /// reply's answer is one allocation, not a vector and its copy.
+    pub fn blocks_shared(&mut self) -> std::rc::Rc<[Value]> {
         let stable = self.tops.len().saturating_sub(1);
-        let (head, last) = self.tops.split_at(stable);
-        let tail: &[Value] = match &self.display_tail {
-            Some(tail) => tail,
-            None => last.first().map_or(&[], |top| &top.blocks),
-        };
-        let (mut len, mut shared) = (tail.len(), 0);
-        for (at, top) in head.iter().enumerate() {
-            if at == self.settled {
-                shared = len - tail.len();
-            }
-            len += top.blocks.len();
-        }
-        if self.settled >= stable {
-            shared = len - tail.len();
-        }
+        let (head, tail) = self.head_and_tail();
+        let len = head.iter().map(|t| t.blocks.len()).sum::<usize>() + tail.len();
         let mut list = std::rc::Rc::<[Value]>::new_uninit_slice(len);
         let slots = std::rc::Rc::get_mut(&mut list).expect("made here, held nowhere else");
         let blocks = head.iter().flat_map(|top| &top.blocks).chain(tail);
         for (slot, block) in slots.iter_mut().zip(blocks) {
             slot.write(block.clone());
         }
-        self.settled = stable;
+        (self.settled, self.appended) = (stable, None);
+        self.counts.clear();
         // SAFETY: `len` is what `head` and `tail` hold, so every slot was
         // written above.
-        (unsafe { list.assume_init() }, shared)
+        unsafe { list.assume_init() }
+    }
+    /// [`blocks`](Self::blocks) as a list grown from the last answer: the
+    /// chunks of it wholly within the elements nothing changed since are
+    /// its own, so an answer costs what changed (`value::Appended`).
+    pub fn blocks_appended(&mut self) -> std::rc::Rc<crate::value::Appended> {
+        let stable = self.tops.len().saturating_sub(1);
+        // The counts of the settled elements stand: the others' are counted.
+        self.counts.truncate(self.settled.min(stable) + 1);
+        if self.counts.is_empty() {
+            self.counts.push(0);
+        }
+        for at in self.counts.len() - 1..stable {
+            let count = self.counts[at] + self.tops[at].blocks.len();
+            self.counts.push(count);
+        }
+        let (head, tail) = self.head_and_tail();
+        let counts = &self.counts[..=stable];
+        let shared = counts[self.settled.min(stable)];
+        let len = counts[stable] + tail.len();
+        let list = crate::value::Appended::grown(self.appended.as_ref(), shared, len, |start| {
+            // The element block `start` is in (or the last's, past them).
+            let at = counts.partition_point(|&count| count <= start) - 1;
+            let rest = head[at..].iter().flat_map(|top| &top.blocks).chain(tail);
+            Box::new(rest.skip(start - counts[at]))
+        });
+        self.settled = stable;
+        self.appended = Some(list.clone());
+        list
+    }
+    /// The elements before the last, and the last's blocks as shown.
+    fn head_and_tail(&self) -> (&[Top], &[Value]) {
+        let stable = self.tops.len().saturating_sub(1);
+        let (head, last) = self.tops.split_at(stable);
+        let tail: &[Value] = match &self.display_tail {
+            Some(tail) => tail,
+            None => last.first().map_or(&[], |top| &top.blocks),
+        };
+        (head, tail)
     }
 }
 
@@ -572,8 +603,10 @@ fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Resu
                 (None, Source::Str(text)) => stream.set_text(text),
             }
             let pending = stream.has_pending();
-            let (list, shared) = stream.blocks_shared();
-            let blocks = Value::List(list);
+            let blocks = match table {
+                true => Value::List(stream.blocks_shared()),
+                false => crate::value::Appended::into_value(stream.blocks_appended()),
+            };
             if table {
                 // Its table from the last answer's, which holds the same
                 // blocks but the end: only what's new is converted and
@@ -589,12 +622,9 @@ fn answer(lua: &mlua::Lua, text: Source, call: &Call, table: bool) -> mlua::Resu
                     *kept = crate::value::table_of(lua, &blocks)?;
                 }
             } else {
-                // A state's: no table. What it shares with the last answer
-                // is noted, so what reads both passes over that.
-                if let (Some(Value::List(old)), Value::List(list)) = (&*last, &blocks) {
-                    crate::value::grown(list, old, shared);
-                }
-                (*last, *kept) = (Some(blocks.clone()), None);
+                // A state's: no table, nor one to derive the next from (its
+                // list is grown from the last itself).
+                (*last, *kept) = (None, None);
             }
             touch(
                 &mut parsed.stream_order.borrow_mut(),
@@ -731,12 +761,13 @@ pub(crate) fn install(lua: &mlua::Lua) {
     lua.set_app_data(Parsed::default());
 }
 
-/// A VM at rest: streams not asked for lately go. (The texts parsed stay: a
-/// chat opened again would parse them in its first frame.)
+/// A VM at rest: its parsed texts and the streams not asked for lately go. What
+/// is on show keeps its blocks; only something built again parses again.
 pub(crate) fn rest(lua: &mlua::Lua) {
     let Some(parsed) = lua.app_data_ref::<Parsed>() else {
         return;
     };
+    *parsed.texts.borrow_mut() = Texts::new();
     let mut streams = parsed.streams.borrow_mut();
     let mut order = parsed.stream_order.borrow_mut();
     let now = std::time::Instant::now();
@@ -752,7 +783,9 @@ pub(crate) fn rest(lua: &mlua::Lua) {
     order.shrink_to_fit();
 }
 
-/// A stream left this long has ended, or parses again if it goes on.
+/// A stream left this long has ended, or parses again if it goes on. (A
+/// minute: a reply pausing on a tool call keeps its parser, and its next
+/// chunk doesn't parse the whole reply again.)
 const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How many texts and streams a script's `ui.markdown` keeps.
@@ -859,6 +892,7 @@ fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool) -> Ve
         took: false,
         options,
         deeper: 0,
+        align: None,
     };
     let mut tops = Vec::new();
     let mut depth = 0usize;
@@ -1162,6 +1196,25 @@ fn runs_value(runs: &[Run]) -> Value {
     )
 }
 
+/// A table's columns' sides, as a `table` block's `align` says them.
+fn table_align(align: &[Alignment]) -> Value {
+    Value::List(
+        align
+            .iter()
+            .map(|side| {
+                match side {
+                    Alignment::None => "",
+                    Alignment::Left => "start",
+                    Alignment::Center => "center",
+                    Alignment::Right => "end",
+                }
+                .into()
+            })
+            .collect::<Vec<Value>>()
+            .into(),
+    )
+}
+
 /// What is being built at each level of nesting.
 enum Frame {
     /// Blocks of a container (the document, a list item, a quote).
@@ -1202,6 +1255,9 @@ struct Builder<'a> {
     /// Quotes, lists and items open beyond `NESTING`: read into the deepest
     /// container kept, as its blocks.
     deeper: usize,
+    /// The open table's columns' sides, when its source aligns any (a table
+    /// holds no table).
+    align: Option<Box<[Alignment]>>,
 }
 
 /// How deeply quotes and lists nest at most (in frames: a list level is
@@ -1211,6 +1267,38 @@ struct Builder<'a> {
 const NESTING: usize = 64;
 
 impl Builder<'_> {
+    /// A table opens, its columns aligned as `align` says. (Out of line,
+    /// as `close_table`: `event` stays as small as it was.)
+    #[inline(never)]
+    fn open_table(&mut self, align: Vec<Alignment>) {
+        self.align = align
+            .iter()
+            .any(|side| *side != Alignment::None)
+            .then(|| align.into_boxed_slice());
+        self.frames.push(Frame::Table {
+            head: Vec::new(),
+            rows: Vec::new(),
+            row: Vec::new(),
+            in_head: false,
+        });
+    }
+    /// The open table closes into its block: `align` only when its source
+    /// aligns a column.
+    #[inline(never)]
+    fn close_table(&mut self) {
+        let align = self.align.take();
+        if let Some(Frame::Table { head, rows, .. }) = self.frames.pop() {
+            let mut fields = vec![
+                ("t", "table".into()),
+                ("head", Value::List(head.into())),
+                ("rows", Value::List(rows.into())),
+            ];
+            if let Some(align) = align {
+                fields.push(("align", table_align(&align)));
+            }
+            self.block(map(fields));
+        }
+    }
     fn style(&self) -> Style {
         self.styles.last().copied().unwrap_or_default()
     }
@@ -1441,12 +1529,7 @@ impl Builder<'_> {
                     items: Vec::new(),
                 }),
                 Tag::Item => self.frames.push(Frame::Blocks(Vec::new())),
-                Tag::Table(_) => self.frames.push(Frame::Table {
-                    head: Vec::new(),
-                    rows: Vec::new(),
-                    row: Vec::new(),
-                    in_head: false,
-                }),
+                Tag::Table(align) => self.open_table(align),
                 Tag::TableHead => {
                     if let Some(Frame::Table { in_head, .. }) = self.frames.last_mut() {
                         *in_head = true;
@@ -1565,15 +1648,7 @@ impl Builder<'_> {
                         rows.push(Value::List(std::mem::take(row).into()));
                     }
                 }
-                TagEnd::Table => {
-                    if let Some(Frame::Table { head, rows, .. }) = self.frames.pop() {
-                        self.block(map(vec![
-                            ("t", "table".into()),
-                            ("head", Value::List(head.into())),
-                            ("rows", Value::List(rows.into())),
-                        ]));
-                    }
-                }
+                TagEnd::Table => self.close_table(),
                 TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough => {
                     self.styles.pop();
                 }
@@ -1631,6 +1706,68 @@ mod tests {
     }
     fn plain() -> Options {
         Options::default()
+    }
+    #[test]
+    fn at_rest_parsed_text_goes_and_the_same_text_parses_the_same() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        let text = "# Title\n\nSome *words* and a [link](https://example.com).";
+        // (The blocks themselves: `script` makes a new table of them each time.)
+        let call = Call::read(&None).expect("no options");
+        let ask = || answer(&lua, Source::Str(text), &call, false).expect("its blocks");
+        let first = ask();
+        let held = |lua: &mlua::Lua| {
+            lua.app_data_ref::<Parsed>()
+                .expect("installed")
+                .texts
+                .borrow()
+                .len()
+        };
+        assert_eq!(held(&lua), 1);
+        rest(&lua);
+        assert_eq!(
+            held(&lua),
+            0,
+            "nothing kept for a text no one is asking for"
+        );
+        assert_eq!(ask(), first);
+    }
+    #[test]
+    fn at_rest_a_stream_stays_until_it_has_been_quiet() {
+        let lua = mlua::Lua::new();
+        install(&lua);
+        let keyed = lua.create_table().unwrap();
+        keyed.set("key", "message-1").unwrap();
+        script(
+            &lua,
+            (
+                mlua::Value::String(lua.create_string("Some words").unwrap()),
+                Some(keyed),
+            ),
+        )
+        .expect("its blocks");
+        let streams = |lua: &mlua::Lua| {
+            lua.app_data_ref::<Parsed>()
+                .expect("installed")
+                .streams
+                .borrow()
+                .len()
+        };
+        rest(&lua);
+        assert_eq!(streams(&lua), 1, "it may go on: asked for a moment ago");
+        {
+            let parsed = lua.app_data_ref::<Parsed>().expect("installed");
+            let mut order = parsed.stream_order.borrow_mut();
+            let long_ago =
+                std::time::Instant::now() - STREAM_QUIET - std::time::Duration::from_secs(1);
+            order.iter_mut().for_each(|(_, used)| *used = long_ago);
+        }
+        rest(&lua);
+        assert_eq!(
+            streams(&lua),
+            0,
+            "quiet this long, it has ended, or parses again if it goes on"
+        );
     }
     fn paths() -> Options {
         Options {
@@ -1704,6 +1841,50 @@ mod tests {
         let Value::List(row) = &rows[0] else { panic!() };
         let Value::List(cell) = &row[0] else { panic!() };
         assert_eq!(text(cell[0].field("img")).as_deref(), Some("p.png"));
+    }
+
+    #[test]
+    fn a_table_says_how_its_columns_align_only_when_its_source_does() {
+        let sides = |source: &str| {
+            let blocks = parse(source, &plain());
+            blocks[0].field("align").map(|align| {
+                let Value::List(sides) = align else { panic!() };
+                sides
+                    .iter()
+                    .map(|side| match side {
+                        Value::Str(side) => side.to_string(),
+                        _ => panic!(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(
+            sides("| a | b | c | d |\n|:--|:-:|--:|---|\n| 1 | 2 | 3 | 4 |"),
+            Some(vec![
+                "start".into(),
+                "center".into(),
+                "end".into(),
+                String::new()
+            ])
+        );
+        assert_eq!(sides("| a | b |\n|---|---|\n| 1 | 2 |"), None);
+        // The next table says its own: none after one that aligned.
+        let blocks = parse("| a |\n|--:|\n| 1 |\n\n| b |\n|---|\n| 2 |", &plain());
+        assert_eq!(kinds(&blocks), ["table", "table"]);
+        assert!(blocks[0].field("align").is_some());
+        assert!(blocks[1].field("align").is_none());
+        // In a list item.
+        let blocks = parse("- | a |\n  |:-:|\n  | 1 |", &plain());
+        let Some(Value::List(items)) = blocks[0].field("items") else {
+            panic!()
+        };
+        let Value::List(first) = &items[0] else {
+            panic!()
+        };
+        let Some(Value::List(align)) = first[0].field("align") else {
+            panic!()
+        };
+        assert!(matches!(&align[0], Value::Str(side) if &**side == "center"));
     }
 
     #[test]
@@ -2163,15 +2344,21 @@ mod tests {
     #[test]
     fn an_answer_shares_with_the_last_the_blocks_it_says() {
         let mut stream = Incremental::new(plain());
-        let mut last: Option<std::rc::Rc<[Value]>> = None;
+        let mut last: Option<std::rc::Rc<crate::value::Appended>> = None;
         let mut check = |stream: &mut Incremental| {
-            let (list, shared) = stream.blocks_shared();
-            assert_eq!(list[..], stream.blocks()[..]);
+            let list = stream.blocks_appended();
+            assert!(list.iter().eq(stream.blocks().iter()));
+            assert_eq!(list.flat()[..], stream.blocks()[..]);
+            let mut shared = 0;
             if let Some(last) = &last {
+                shared = list.grown_from(last).expect("grown from the last answer");
                 assert!(shared <= last.len().min(list.len()));
-                for (now, then) in list[..shared].iter().zip(&last[..]) {
+                for (now, then) in list.iter().zip(last.iter()).take(shared) {
                     assert_ne!(crate::value::identity(now), 0);
                     assert_eq!(crate::value::identity(now), crate::value::identity(then));
+                }
+                for from in [0, shared, list.len()] {
+                    assert!(list.iter_from(from).eq(list.flat()[from..].iter()));
                 }
             }
             last = Some(list);
