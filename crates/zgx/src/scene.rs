@@ -3231,8 +3231,6 @@ struct PictureState {
     /// Children of pictures something in which changed since a renderer last
     /// asked (`take_picture_rows`).
     rows: std::cell::RefCell<Vec<NodeId>>,
-    /// What a picture's walk starts clipped to (`picture_items`).
-    walk_clip: std::cell::Cell<Option<Rect>>,
 }
 /// Scroll content that moved rigidly by `(dx, dy)` within `clip`. The flush
 /// damaged only what copying the old pixels cannot provide (`exposed`, plus
@@ -12131,6 +12129,9 @@ impl Scene {
                 }
             }
         }
+        if self.pictures_allowed.get() || self.picture_state.is_some() {
+            self.picture_moves();
+        }
         self.resolve_moves();
         report.damage = match self.damage_grid.take() {
             Some(grid) if grid.full() => vec![self.viewport],
@@ -12614,13 +12615,55 @@ impl Scene {
         bands: &[Rect],
     ) -> Vec<PaintItem<'_>> {
         const FAR: f32 = 1e7;
-        if let Some(state) = &self.picture_state {
-            state.walk_clip.set(Some(match shown {
+        let mut transform = Transform::default();
+        let mut parent = self.node(id).parent;
+        while let Some(at) = parent {
+            let node = self.node(at);
+            transform.x += node.transform.x;
+            transform.y += node.transform.y;
+            parent = node.parent;
+        }
+        let from = Inherited {
+            transform,
+            opacity: 1.,
+            clip: Some(match shown {
                 true => clip,
                 false => Rect::new(clip.x, -FAR, clip.width, FAR * 2.),
-            }));
+            }),
+            extras: None,
+            border: false,
+        };
+        let walk = Some((id, &from));
+        match self.plain_walks() {
+            true => self.layer_items_walk::<false, false, false>(
+                Some(id),
+                Some(bands),
+                &mut Vec::new(),
+                walk,
+            ),
+            false => self.layer_items_walk::<true, false, false>(
+                Some(id),
+                Some(bands),
+                &mut Vec::new(),
+                walk,
+            ),
         }
-        self.layer_items_within(Some(id), Some(bands))
+    }
+    /// This flush's scroll moves that are pictures' (`picture_moved`), taken
+    /// out of those `resolve_moves` makes copies or damage of.
+    #[cold]
+    #[inline(never)]
+    fn picture_moves(&mut self) {
+        self.start_picture_moves();
+        let mut pending = std::mem::take(&mut self.pending_moves);
+        pending.retain(|&(id, from, again)| {
+            if !self.contains(id) {
+                return true;
+            }
+            let to = self.node(id).transform;
+            !self.picture_moved(id, to.x - from.x, to.y - from.y, again)
+        });
+        self.pending_moves = pending;
     }
     /// Scroll content `id` moved by `dx`, `dy`: if it is a picture (it
     /// becomes one here if it can), its view repaints from it, and what
@@ -12869,9 +12912,6 @@ impl Scene {
     /// overlapping moves, jumps past the viewport).
     fn resolve_moves(&mut self) {
         self.moves.clear();
-        if self.picture_state.is_some() {
-            self.start_picture_moves();
-        }
         let pending = std::mem::take(&mut self.pending_moves);
         let mut moves = Vec::new();
         for (id, from, again) in pending {
@@ -12880,11 +12920,6 @@ impl Scene {
             }
             let to = self.node(id).transform;
             let (dx, dy) = (to.x - from.x, to.y - from.y);
-            if (self.pictures_allowed.get() || self.picture_state.is_some())
-                && self.picture_moved(id, dx, dy, again)
-            {
-                continue;
-            }
             // A layer's pixels are its own: a copy of the window's moves
             // nothing in it.
             let layered = std::iter::once(id)
@@ -13329,9 +13364,7 @@ impl Scene {
             parent = n.parent;
         }
         let clip = if root.is_some() {
-            self.picture_state
-                .as_ref()
-                .and_then(|state| state.walk_clip.take())
+            None
         } else {
             Some(self.viewport)
         };

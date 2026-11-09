@@ -77,6 +77,14 @@ pub(crate) fn under(
     }
 }
 
+/// A renderer's pictures, made the first time they are turned on.
+#[derive(Default)]
+pub(crate) struct Pictures {
+    /// Pictures may start (`set_scroll_pictures`).
+    pub(crate) on: bool,
+    pub(crate) map: rustc_hash::FxHashMap<NodeId, Picture>,
+}
+
 pub(crate) struct Picture {
     /// The view, in the window's points.
     clip: Rect,
@@ -107,23 +115,109 @@ pub(crate) struct Picture {
 impl GpuRenderer {
     /// Draw scroll content from pictures while it scrolls, or not.
     pub fn set_scroll_pictures(&mut self, on: bool) {
-        self.scroll_pictures = on;
+        match &mut self.pictures {
+            Some(pictures) => pictures.on = on,
+            None if on => {
+                self.pictures = Some(Box::new(Pictures {
+                    on,
+                    ..Default::default()
+                }))
+            }
+            None => {}
+        }
     }
     /// How many pictures it holds (tests).
     pub fn debug_pictures(&self) -> usize {
-        self.pictures.len()
+        self.pictures
+            .as_ref()
+            .map_or(0, |pictures| pictures.map.len())
+    }
+    fn picture_map(&self) -> &rustc_hash::FxHashMap<NodeId, Picture> {
+        &self.pictures.as_ref().expect("pictures on").map
+    }
+    fn picture_map_mut(&mut self) -> &mut rustc_hash::FxHashMap<NodeId, Picture> {
+        &mut self.pictures.as_mut().expect("pictures on").map
+    }
+    /// The window's pictures brought up to date, before its layers.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn prepare_pictures(
+        &mut self,
+        scene: &Scene,
+        items: &[PaintItem<'_>],
+        damage: &[Rect],
+        viewport: Rect,
+        stats: &mut GpuStats,
+    ) -> Result<(), GpuError> {
+        for (at, item) in items.iter().enumerate() {
+            if item.isolated && scene.is_picture(item.id) {
+                let clip = item.clip.unwrap_or(viewport);
+                let under = under(item, &items[..at], clip, self.background);
+                self.prepare_picture(scene, item.id, clip, under, damage, stats)?;
+            }
+        }
+        Ok(())
+    }
+    /// `paint_layer`, over `under`: a picture rasters over the colour under it.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_picture(
+        &mut self,
+        scene: &Scene,
+        mut items: Vec<zgx::scene::PaintItem<'_>>,
+        bounds: Rect,
+        texture: wgpu::Texture,
+        scale: f32,
+        damage: &[Rect],
+        fresh: bool,
+        under: Color,
+    ) -> (wgpu::Texture, Result<GpuStats, GpuError>) {
+        let view = texture.create_view(&Default::default());
+        // Whether this layer goes without something, apart from what the
+        // frame went without before it (`layer_incomplete`).
+        let awaited = std::mem::take(&mut self.images_awaited);
+        let target = std::mem::replace(&mut self.target, texture);
+        let old_view = std::mem::replace(&mut self.view, view);
+        let old_size = (self.width, self.height);
+        self.width = self.target.width();
+        self.height = self.target.height();
+        let background = self.background;
+        self.background = under;
+        let was_fresh = std::mem::replace(&mut self.fresh, fresh);
+        // Everything inside draws at the layer's raster scale: glyphs,
+        // canvases and nested layers rasterize as finely as it shows.
+        let device_scale = std::mem::replace(&mut self.scale, scale);
+        #[cfg(target_os = "macos")]
+        self.refuse_layered_loops(scene, &items);
+        zgx::scene::translate_items(&mut items, -bounds.x, -bounds.y);
+        // Nested layer images remain world-positioned in their cache; pass the offset
+        // separately so the same texture can be composed into any ancestor layer.
+        let old_origin = std::mem::replace(&mut self.layer_origin, (bounds.x, bounds.y));
+        let in_layer = std::mem::replace(&mut self.in_layer, true);
+        let root = std::mem::replace(&mut self.layer_root, items.first().map(|item| item.id));
+        let result = self.render_flat::<{ crate::FRAME }>(scene, items, damage, None, false);
+        self.layer_root = root;
+        self.in_layer = in_layer;
+        self.layer_origin = old_origin;
+        let texture = std::mem::replace(&mut self.target, target);
+        self.view = old_view;
+        self.width = old_size.0;
+        self.height = old_size.1;
+        self.scale = device_scale;
+        self.background = background;
+        self.fresh = was_fresh;
+        self.layer_incomplete = self.images_awaited;
+        self.images_awaited |= awaited;
+        (texture, result)
     }
     /// Tell the scene whether pictures may start, and let go of those over.
     #[cold]
     #[inline(never)]
     pub(crate) fn sync_pictures(&mut self, scene: &Scene) {
         let planes = self.views.as_ref().is_some_and(|views| views.has_planes());
-        let allowed = self.scroll_pictures
-            && zgx::switches::SCROLL_PICTURE.on()
-            && self.plane.is_none()
-            && !planes;
+        let on = self.pictures.as_ref().is_some_and(|pictures| pictures.on);
+        let allowed = on && zgx::switches::SCROLL_PICTURE.on() && self.plane.is_none() && !planes;
         scene.allow_pictures(allowed);
-        if !allowed && self.scroll_pictures && !scene.scroll_moves().is_empty() {
+        if !allowed && on && !scene.scroll_moves().is_empty() {
             zgx::profile::note(|| {
                 format!(
                     "scroll: no picture in this window (switched on: {}, native view plane: {}, \
@@ -133,9 +227,9 @@ impl GpuRenderer {
                 )
             });
         }
-        if !self.pictures.is_empty() {
+        if let Some(pictures) = self.pictures.as_mut().filter(|p| !p.map.is_empty()) {
             let layers = &mut self.layers;
-            self.pictures.retain(|id, _| {
+            pictures.map.retain(|id, _| {
                 let kept = scene.contains(*id) && scene.is_picture(*id);
                 if !kept {
                     layers.remove(id);
@@ -149,7 +243,10 @@ impl GpuRenderer {
     }
     /// A window at rest holds no picture (`Scene::rest` ends them).
     pub(crate) fn drop_pictures(&mut self) {
-        for (id, _) in self.pictures.drain() {
+        let Some(pictures) = &mut self.pictures else {
+            return;
+        };
+        for (id, _) in pictures.map.drain() {
             self.layers.remove(&id);
         }
     }
@@ -169,7 +266,7 @@ impl GpuRenderer {
         let top_of_content = scene.bounds(id).y;
         let columns = ((clip.width * scale).round() as u32).max(1);
         let rows = ((clip.height * scale).round() as u32).max(1);
-        let stale = self.pictures.get(&id).is_none_or(|picture| {
+        let stale = self.picture_map().get(&id).is_none_or(|picture| {
             picture.clip != clip
                 || picture.scale != scale
                 || picture.columns != columns
@@ -186,7 +283,7 @@ impl GpuRenderer {
         let top = ((clip.y - top_of_content) * scale).round() as i64;
         let view = top..top + i64::from(rows);
         let fresh = self.fresh;
-        let picture = self.pictures.get_mut(&id).expect("made above");
+        let picture = self.picture_map_mut().get_mut(&id).expect("made above");
         let moved = top - picture.top;
         picture.top = top;
         if moved != 0 {
@@ -408,14 +505,16 @@ impl GpuRenderer {
                 parked: false,
                 incomplete: false,
                 watched: None,
+                picture: true,
             },
         );
-        self.pictures.insert(
+        let scale = self.scale;
+        self.picture_map_mut().insert(
             id,
             Picture {
                 clip,
                 under: Color(0, 0, 0, 0),
-                scale: self.scale,
+                scale,
                 columns,
                 rows,
                 valid: 0..0,
@@ -471,12 +570,20 @@ impl GpuRenderer {
             self.prepare_effects(scene, &items)?;
             let cache = self.layers.remove(&id).expect("made by prepare_picture");
             self.banding = banding;
-            self.layer_under = self.pictures[&id].under;
-            let (texture, result) =
-                self.paint_layer(scene, items, bounds, cache.texture, scale, &[local], false);
+            let under = self.picture_map()[&id].under;
+            let (texture, result) = self.paint_picture(
+                scene,
+                items,
+                bounds,
+                cache.texture,
+                scale,
+                &[local],
+                false,
+                under,
+            );
             self.layers.insert(id, LayerCache { texture, ..cache });
             let incomplete = std::mem::take(&mut self.layer_incomplete);
-            if let Some(picture) = self.pictures.get_mut(&id) {
+            if let Some(picture) = self.picture_map_mut().get_mut(&id) {
                 picture.incomplete |= incomplete;
             }
             crate::add_layer_stats(stats, &result?);
@@ -495,7 +602,7 @@ impl GpuRenderer {
         regions: &mut Vec<Region>,
         quads: &mut Vec<Quad>,
     ) -> bool {
-        let picture = &self.pictures[&item.id];
+        let picture = &self.picture_map()[&item.id];
         let texture = &self.layers[&item.id].texture;
         let (width, height) = (texture.width() as f32, i64::from(texture.height()));
         let scale = self.scale;

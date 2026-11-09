@@ -1677,6 +1677,8 @@ struct LayerCache {
     /// fill compiling: `images_awaited`): not its content, so drawn again
     /// rather than reused, whatever its revision says.
     incomplete: bool,
+    /// A scroll view's picture (`pictures.rs`), composited from its rows.
+    picture: bool,
     /// Where in the window all of it showed when last drawn (`shown`),
     /// while every frame since that damaged it also drew it: its pixels
     /// then differ from its content's only where the window's damage
@@ -4129,12 +4131,8 @@ pub struct GpuRenderer {
     layers: FxHashMap<NodeId, LayerCache>,
     /// Scroll content kept in textures of its own while it scrolls
     /// (`pictures.rs`); each one's texture is its entry in `layers`.
-    pictures: FxHashMap<NodeId, pictures::Picture>,
-    /// Draw scroll content from pictures (`set_scroll_pictures`).
-    scroll_pictures: bool,
-    /// What a layer being painted starts from: clear, or the colour
-    /// under a picture (`paint_layer`).
-    layer_under: Color,
+    /// `None` until pictures are turned on (`set_scroll_pictures`).
+    pictures: Option<Box<pictures::Pictures>>,
     /// The items `render_flat` draws next came from a walk that passed a
     /// fade (`Scene::take_painted_fades`): their fade bands draw as one
     /// (bands.rs).
@@ -4878,9 +4876,7 @@ impl GpuRenderer {
             text_cache: context.text_cache(),
             swash: SwashCache::new(),
             layers: FxHashMap::default(),
-            pictures: FxHashMap::default(),
-            scroll_pictures: false,
-            layer_under: Color(0, 0, 0, 0),
+            pictures: None,
             banding: false,
             bands_off: false,
             bands_seen: false,
@@ -5716,7 +5712,9 @@ impl GpuRenderer {
         if self.scene_identity != Some(scene.identity()) {
             self.scene_identity = Some(scene.identity());
             self.layers.clear();
-            self.pictures.clear();
+            if let Some(pictures) = &mut self.pictures {
+                pictures.map.clear();
+            }
             self.shapes.clear();
             self.node_images.clear();
             self.outlines = None;
@@ -5724,7 +5722,7 @@ impl GpuRenderer {
             self.fresh = true;
             self.pruned_revision = None;
         }
-        if self.scroll_pictures {
+        if self.pictures.is_some() {
             self.sync_pictures(scene);
         }
         // Caches only go stale when nodes are added, removed or change kind.
@@ -5756,7 +5754,7 @@ impl GpuRenderer {
             None => self.scroll_copies(scene, damage),
         };
         self.copies = copies;
-        let pictured = self.scroll_pictures && scene.has_pictures();
+        let pictured = self.pictures.is_some() && scene.has_pictures();
         let extended;
         let damage = if repaint.is_empty() {
             damage
@@ -5915,14 +5913,14 @@ impl GpuRenderer {
         self.layer_frame += 1;
         // Where layers drawn from another corner show: damaged whole.
         let mut shifted = Vec::new();
-        for (at, item) in items.iter().enumerate() {
-            if pictured && item.isolated && scene.is_picture(item.id) {
-                let clip = item.clip.unwrap_or(viewport);
-                let under = pictures::under(item, &items[..at], clip, self.background);
-                self.prepare_picture(scene, item.id, clip, under, damage, &mut layer_stats)?;
-                continue;
-            }
-            if item.isolated && item.effects.opacity > 0. {
+        if pictured {
+            self.prepare_pictures(scene, &items, damage, viewport, &mut layer_stats)?;
+        }
+        for item in &items {
+            if item.isolated
+                && item.effects.opacity > 0.
+                && !(pictured && scene.is_picture(item.id))
+            {
                 let shown = self.shown(item, damage, viewport);
                 self.layer_shifted = false;
                 self.prepare_layer(
@@ -6423,6 +6421,7 @@ impl GpuRenderer {
         self.layers.insert(
             id,
             LayerCache {
+                picture: false,
                 texture,
                 bind,
                 bounds,
@@ -6469,7 +6468,7 @@ impl GpuRenderer {
         self.width = self.target.width();
         self.height = self.target.height();
         let background = self.background;
-        self.background = std::mem::replace(&mut self.layer_under, Color(0, 0, 0, 0));
+        self.background = Color(0, 0, 0, 0);
         let was_fresh = std::mem::replace(&mut self.fresh, fresh);
         // Everything inside draws at the layer's raster scale: glyphs,
         // canvases and nested layers rasterize as finely as it shows.
@@ -8202,26 +8201,23 @@ impl GpuRenderer {
                 let start = quads.len() as u32;
                 // A shader fill's draw uses its pipeline.
                 let mut fill_shading = None;
-                if item.isolated
-                    && !self.pictures.is_empty()
-                    && self.pictures.contains_key(&item.id)
-                {
-                    let plain = self.picture_quads(&item, &mut clips, &mut quads);
-                    draws.push(Draw {
-                        // Colour times a texture sample, unless a fade or a
-                        // rounded clip around it cuts it.
-                        shading: if plain { Shading::Basic } else { Shading::Full },
-                        start,
-                        end: quads.len() as u32,
-                        clip,
-                        bounds: quad_bounds(&quads[start as usize..]),
-                        source: TextureSource::Layer(item.id),
-                        blur: None,
-                    });
-                    continue;
-                }
                 if item.isolated {
                     let layer = self.layers.get(&item.id).expect("prepared layer");
+                    if layer.picture {
+                        let plain = self.picture_quads(&item, &mut clips, &mut quads);
+                        draws.push(Draw {
+                            // Colour times a texture sample, unless a fade or a
+                            // rounded clip around it cuts it.
+                            shading: if plain { Shading::Basic } else { Shading::Full },
+                            start,
+                            end: quads.len() as u32,
+                            clip,
+                            bounds: quad_bounds(&quads[start as usize..]),
+                            source: TextureSource::Layer(item.id),
+                            blur: None,
+                        });
+                        continue;
+                    }
                     let bounds = Rect::new(
                         layer.bounds.x - self.layer_origin.0,
                         layer.bounds.y - self.layer_origin.1,
@@ -11098,7 +11094,7 @@ impl GpuRenderer {
             let lasting = zgx::switches::SCROLL_COPY.on()
                 && !self.fresh
                 && self.rendered_serial == Some(serial - 1);
-            if self.scroll_pictures
+            if self.pictures.as_ref().is_some_and(|pictures| pictures.on)
                 && match &refused {
                     Ok((_, blocker)) => {
                         blocker.is_some() || scene.scroll_corners(scroll.node).is_none()
