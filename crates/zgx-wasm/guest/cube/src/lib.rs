@@ -42,12 +42,19 @@ struct Out {
     let h = normalize(l + v);
     let diffuse = max(dot(n, l), 0.0);
     let specular = pow(max(dot(n, h), 0.0), 48.0) * 0.6 * i.color.a;
-    let sky = mix(vec3<f32>(0.20, 0.16, 0.13), vec3<f32>(0.36, 0.44, 0.60), n.y * 0.5 + 0.5);
-    var c = i.color.rgb * (sky * 0.55 + diffuse * vec3<f32>(1.0, 0.94, 0.84) * 1.15) + vec3<f32>(specular);
-    let fog = clamp((length(scene.eye.xyz - i.world) - 9.0) / 20.0, 0.0, 1.0);
+    let sky = mix(vec3<f32>(0.10, 0.08, 0.07), vec3<f32>(0.22, 0.28, 0.40), n.y * 0.5 + 0.5);
+    var albedo = i.color.rgb;
+    // The floor (the least shiny): a checker fading into the fog.
+    if (i.color.a < 0.2) {
+        let cell = floor(i.world.xz * 1.25);
+        let check = abs(cell.x + cell.y) % 2.0;
+        albedo = albedo * mix(0.75, 1.15, check);
+    }
+    var c = albedo * (sky * 0.7 + diffuse * vec3<f32>(1.0, 0.93, 0.82) * 1.6) + vec3<f32>(specular);
+    let fog = clamp((length(scene.eye.xyz - i.world) - 8.0) / 16.0, 0.0, 1.0);
     c = mix(c, vec3<f32>(0.012, 0.014, 0.022), fog);
-    c = c / (c + vec3<f32>(0.75)) * 1.5;
-    return vec4<f32>(pow(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.2)), 1.0);
+    c = vec3<f32>(1.0) - exp(-c * 1.3);
+    return vec4<f32>(pow(c, vec3<f32>(1.0 / 2.2)), 1.0);
 }
 "#;
 
@@ -276,8 +283,10 @@ impl Cube {
             target_at[1] + self.distance * self.pitch.sin(),
             target_at[2] + self.distance * self.pitch.cos() * self.yaw.cos(),
         ];
+        // The narrower side sees as much: a tall element sees the scene too.
+        let fov_y = 2. * ((0.75f32 / 2.).tan() / aspect.min(1.)).atan();
         let view_proj = mul(
-            &perspective(0.75, aspect, 0.1, 100.),
+            &perspective(fov_y, aspect, 0.1, 100.),
             &look_at(eye, target_at, [0., 1., 0.]),
         );
         let mut uniforms = Vec::with_capacity(28);
@@ -362,9 +371,9 @@ impl Cube {
         }
         // The floor.
         push(
-            model([0., -0.9, 0.], 0., 0., [9., 0.08, 9.]),
-            [0.32, 0.30, 0.28],
-            0.15,
+            model([0., -0.9, 0.], 0., 0., [14., 0.08, 14.]),
+            [0.16, 0.16, 0.18],
+            0.1,
         );
         // A wall of what was typed, eight a row.
         for i in 0..self.typed.min(64) {
