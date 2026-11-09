@@ -2941,6 +2941,7 @@ fn kind_view(
             scrollbar,
             contain,
             wheel_across,
+            paging,
             padding,
         } => {
             let offset = match offset {
@@ -2966,6 +2967,7 @@ fn kind_view(
             } else {
                 view
             };
+            let view = if *paging { view.paging(true) } else { view };
             let view = match padding {
                 Some(padding) => with_scroll_padding(view, padding, vm),
                 None => view,

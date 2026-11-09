@@ -2298,6 +2298,10 @@ impl Host {
         for step in steps {
             match step {
                 crate::touch::Step::Dispatch(event) => self.dispatch(event)?,
+                crate::touch::Step::PanLifted => {
+                    let ui = &self.context.ui;
+                    ui.paging_gesture(zgx::input::ScrollGesture::Ended);
+                }
                 crate::touch::Step::Unpress => {
                     self.dispatch(InputEvent::PointerCancel)?;
                     let ui = &self.context.ui;
@@ -2306,12 +2310,21 @@ impl Host {
                     }
                 }
                 crate::touch::Step::TryPan { x, y, dx, dy } => {
+                    // A gesture's, not a wheel's: a paged view follows it.
+                    self.context
+                        .ui
+                        .paging_gesture(zgx::input::ScrollGesture::Began);
                     let panned = self.dispatch_prevented(InputEvent::Scroll {
                         x,
                         y,
                         delta_x: dx,
                         delta_y: dy,
                     })?;
+                    if !panned {
+                        self.context
+                            .ui
+                            .paging_gesture(zgx::input::ScrollGesture::Ended);
+                    }
                     let next = self.touch.decided(panned);
                     self.touch_steps(next)?;
                 }
@@ -5157,6 +5170,16 @@ impl Host {
                 if gesture == Some(zgx::input::ScrollGesture::Ended) {
                     crate::coast::fingers_down(false);
                 }
+                // A touchpad's scroll is a gesture to a paged view, not a wheel's
+                // notches (Wayland says when: libinput's axis stop). Paged views
+                // alone hear it: elsewhere it scrolls as ever.
+                #[cfg(target_os = "linux")]
+                if matches!(delta, MouseScrollDelta::PixelDelta(_))
+                    && phase == winit::event::TouchPhase::Started
+                {
+                    let ui = &self.context.ui;
+                    ui.paging_gesture(zgx::input::ScrollGesture::Began);
+                }
                 if let Some(
                     gesture @ (zgx::input::ScrollGesture::Began
                     | zgx::input::ScrollGesture::MomentumBegan),
@@ -5259,6 +5282,16 @@ impl Host {
                     let wheel = matches!(delta, MouseScrollDelta::LineDelta(x, y) if !continuous_lines(x, y));
                     self.dispatch_wheel(event, wheel)?;
                     self.after_scroll();
+                }
+                #[cfg(target_os = "linux")]
+                if matches!(delta, MouseScrollDelta::PixelDelta(_))
+                    && matches!(
+                        phase,
+                        winit::event::TouchPhase::Ended | winit::event::TouchPhase::Cancelled
+                    )
+                {
+                    let ui = &self.context.ui;
+                    ui.paging_gesture(zgx::input::ScrollGesture::Ended);
                 }
                 if let Some(
                     gesture @ (zgx::input::ScrollGesture::Ended
@@ -6131,7 +6164,8 @@ impl Host {
         }
         // A fling coasts a step each refresh, and stops at the end of what
         // it scrolls.
-        if self.touch.flinging()
+        let coasting = self.touch.flinging();
+        if coasting
             && (self.frame_arrived || !self.frames_presented())
             && let Some((x, y, delta_x, delta_y)) = self
                 .touch
@@ -6144,6 +6178,16 @@ impl Host {
             })?
         {
             self.touch.stop();
+        }
+        // Its momentum, as a trackpad's: a paged view has gone to its page, and
+        // what coasts after moves nothing until it stops.
+        if self.touch.take_coast_began() {
+            let ui = &self.context.ui;
+            ui.paging_gesture(zgx::input::ScrollGesture::MomentumBegan);
+        }
+        if coasting && !self.touch.flinging() {
+            let ui = &self.context.ui;
+            ui.paging_gesture(zgx::input::ScrollGesture::MomentumEnded);
         }
         if let StartupTrim::At(at) = self.startup_trim
             && std::time::Instant::now() >= at

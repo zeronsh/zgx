@@ -26,5 +26,7 @@ mod navigation_swipes;
 mod overlay_scrollbars;
 #[path = "../scroll_latching.rs"]
 mod scroll_latching;
+#[path = "../scroll_paging.rs"]
+mod scroll_paging;
 #[path = "../variable_virtual_list.rs"]
 mod variable_virtual_list;

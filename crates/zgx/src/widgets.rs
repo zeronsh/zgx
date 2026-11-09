@@ -1661,6 +1661,8 @@ pub(crate) struct UiStorage {
     last_pressed: Cell<Option<NodeId>>,
     /// Elastic scrolling (`Ui::set_elastic_scrolling`): off, never read.
     elastic: RefCell<crate::elastic::State>,
+    /// Scroll views that page (`View::paging`): none, never more than a look.
+    paging: RefCell<crate::paging::State>,
     /// Scrollbars hide until their view scrolls (`Ui::set_overlay_scrollbars`).
     overlay_scrollbars: Signal<bool>,
     /// Editors' caret width in points (`Ui::set_caret_width`).
@@ -1920,6 +1922,7 @@ impl Ui {
             wheel_lines: Default::default(),
             last_pressed: Cell::new(None),
             elastic: Default::default(),
+            paging: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
             dispatching: Cell::new(false),
             wheel_in_window: Cell::new(false),
@@ -3022,6 +3025,16 @@ impl Ui {
         std::iter::once(hit)
             .chain(scene.ancestors(hit))
             .find_map(|node| lines.get(&node).copied())
+    }
+    /// A touch pan's phase, for scroll views that page: they follow a pan as a
+    /// trackpad's gesture, not as a wheel's notches. Nothing else hears of it, so
+    /// a pan of any other view is what it would be without this.
+    #[doc(hidden)]
+    pub fn paging_gesture(&self, phase: crate::input::ScrollGesture) {
+        crate::paging::gesture(self, phase);
+    }
+    pub(crate) fn paging_state(&self) -> &RefCell<crate::paging::State> {
+        &self.storage.paging
     }
     pub(crate) fn elastic_state(&self) -> &RefCell<crate::elastic::State> {
         &self.storage.elastic
@@ -4366,6 +4379,7 @@ impl Ui {
         let event = match event {
             InputEvent::ScrollGesture(phase) => {
                 self.input.scroll_gesture(phase);
+                crate::paging::gesture(self, phase);
                 if elastic {
                     crate::elastic::gesture(self, phase);
                 }
@@ -4421,6 +4435,7 @@ impl Ui {
             self.next_selection_deadline(),
             crate::compose_scrollbar::next_fade(self),
             crate::elastic::next_step(self),
+            crate::paging::next_step(self),
             crate::caret_blink::next(self),
             crate::find::next_step(self),
         ]
@@ -4467,6 +4482,13 @@ impl Ui {
         };
         // A stretched scroll view springing back.
         let keys = if crate::elastic::advance(self, now) {
+            self.try_prepare_frame()?;
+            true
+        } else {
+            keys
+        };
+        // A paged scroll view going to its page.
+        let keys = if crate::paging::advance(self, now) {
             self.try_prepare_frame()?;
             true
         } else {
