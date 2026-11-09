@@ -560,7 +560,7 @@ fn decode(keys: &Keys, data: Vec<u8>) -> Result<ImageData, &'static str> {
 /// A kept PNG's pixels, as it is drawn.
 fn png_pixels(file: &[u8]) -> Result<Arc<[u8]>, String> {
     let (mut reader, ..) = png_reader(file)?;
-    Ok(png(&mut reader)?.into())
+    Ok(png(&mut reader)?)
 }
 
 type PngReader<'a> = png::Reader<std::io::Cursor<&'a [u8]>>;
@@ -581,12 +581,19 @@ fn png_reader(data: &[u8]) -> Result<(PngReader<'_>, u32, u32), &'static str> {
     Ok((reader, width, height))
 }
 
-/// A PNG's pixels, as RGBA.
-fn png(reader: &mut PngReader<'_>) -> Result<Vec<u8>, &'static str> {
+/// A PNG's pixels, as RGBA: an RGBA file's decoded where they are kept,
+/// into memory that comes zeroed, neither filled nor copied again.
+fn png(reader: &mut PngReader<'_>) -> Result<Arc<[u8]>, &'static str> {
     let bad = |_| "EBADPNG:bad PNG";
-    let mut buffer = vec![0; reader.output_buffer_size().ok_or("EINVAL:bad size")?];
-    let frame = reader.next_frame(&mut buffer).map_err(bad)?;
-    buffer.truncate(frame.buffer_size());
+    let size = reader.output_buffer_size().ok_or("EINVAL:bad size")?;
+    // SAFETY: zeroed bytes are valid `u8`s.
+    let mut buffer = unsafe { Arc::<[u8]>::new_zeroed_slice(size).assume_init() };
+    let own = Arc::get_mut(&mut buffer).expect("just made");
+    let frame = reader.next_frame(own).map_err(bad)?;
+    let buffer = match frame.buffer_size() {
+        n if n == size => buffer,
+        n => buffer[..n].into(),
+    };
     let pixels = match frame.color_type {
         png::ColorType::Rgba => buffer,
         png::ColorType::Rgb => buffer
