@@ -607,8 +607,10 @@ pub(crate) fn rest(lua: &mlua::Lua) {
     order.shrink_to_fit();
 }
 
-/// A stream left this long has ended, or parses again if it goes on.
-const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(5);
+/// A stream left this long has ended, or parses again if it goes on. (A
+/// minute: a reply pausing on a tool call keeps its parser, and its next
+/// chunk doesn't parse the whole reply again.)
+const STREAM_QUIET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// How many texts and streams a script's `ui.markdown` keeps.
 const KEPT: usize = 256;
