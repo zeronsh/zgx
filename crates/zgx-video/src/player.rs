@@ -78,7 +78,7 @@ const CACHE_KEPT: Duration = Duration::from_secs(5);
 /// A frame kept: its bytes (for a script), its pixel buffer (for a view on
 /// macOS, outside the pool's count once the pool's are held), or both, as
 /// what showed it wanted.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Kept {
     pixels: Option<Arc<[u8]>>,
     #[cfg(target_os = "macos")]
@@ -191,11 +191,10 @@ impl Preview {
         // script, a pixel buffer for a view.
         let bytes_wanted = !self.surfaces || self.pixels_wanted;
         if let Some(kept) = self.cache.get(frame) {
+            let serves = kept.pixels.is_some() || !bytes_wanted;
             #[cfg(target_os = "macos")]
-            let has_buffer = kept.buffer.is_some() || !self.surfaces;
-            #[cfg(not(target_os = "macos"))]
-            let has_buffer = true;
-            if has_buffer && (kept.pixels.is_some() || !bytes_wanted) {
+            let serves = serves && (kept.buffer.is_some() || !self.surfaces);
+            if serves {
                 #[cfg(target_os = "macos")]
                 if let Some(buffer) = kept.buffer.filter(|_| self.surfaces) {
                     let _ = self.surfaces_to.send((frame, buffer));
@@ -273,7 +272,8 @@ impl Preview {
                 Kept {
                     bytes: pixels.len(),
                     pixels: Some(pixels.clone()),
-                    ..Kept::default()
+                    #[cfg(target_os = "macos")]
+                    buffer: None,
                 },
             );
         }
