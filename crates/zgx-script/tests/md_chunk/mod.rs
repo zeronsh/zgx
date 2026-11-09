@@ -71,11 +71,12 @@ fn piece(n: usize) -> String {
     }
 }
 
-/// Each phase's instructions for one chunk, the median of `measured`
-/// chunks, once the reply holds `sections` (set
-/// whole, then a section streamed uncounted), the reply `followed` or not
-/// (`script`). `draw` gets each frame's scene
-/// and damage after its flush, the whole reply's first.
+/// Each phase's instructions for one chunk: the mean of `measured` chunks but
+/// the dearest. A cost in one chunk of three is a cost, which a median hides;
+/// one chunk's spike is noise, the most a loaded machine adds. Once the reply
+/// holds `sections` (set whole, then a section streamed uncounted), the reply
+/// `followed` or not (`script`). `draw` gets each frame's scene and damage
+/// after its flush, the whole reply's first.
 pub fn per_chunk(
     sections: usize,
     measured: usize,
@@ -97,7 +98,7 @@ pub fn per_chunk(
         // Luau's collector run whole before each chunk, uncounted: a chunk
         // then does the collecting its own allocations bring on, the same
         // at every length, where a cycle's steps landing in some chunks and
-        // not others (more of them the larger the heap) moved the median.
+        // not others (more of them the larger the heap) moved the count.
         host.collect_luau_only();
         zgx::profile::take();
         assert!(host.run_command("append"));
@@ -115,7 +116,11 @@ pub fn per_chunk(
         .map(|i| {
             let mut each: Vec<u64> = counted.iter().map(|c| c[i].1).collect();
             each.sort_unstable();
-            (counted[0][i].0, each[each.len() / 2])
+            each.pop();
+            (
+                counted[0][i].0,
+                each.iter().sum::<u64>() / each.len() as u64,
+            )
         })
         .collect()
 }
@@ -128,6 +133,8 @@ const FLAT: f64 = 1.25;
 /// line does not flip from run to run, while one gone flat is taken off and
 /// one growing unlisted fails.
 const STILL_GROWS: f64 = 1.10;
+/// How many times a failing verdict is measured again.
+const AGAIN: usize = 2;
 
 /// Each phase's cost a chunk at 100, 200, 400 and 800 sections, `followed`
 /// or not, drawn by
@@ -143,42 +150,84 @@ pub fn check<D: FnMut(&Scene, &[Rect])>(
     // thread reads the environment.
     unsafe { std::env::set_var("ZGX_PROFILE", "1") };
     let sizes = [100, 200, 400, 800];
-    let runs: Vec<Vec<(Phase, u64)>> = sizes
-        .iter()
-        .map(|&s| per_chunk(s, 9, followed, draw()))
-        .collect();
+    let mut measure = || -> Vec<Vec<(Phase, u64)>> {
+        sizes
+            .iter()
+            .map(|&s| per_chunk(s, 9, followed, draw()))
+            .collect()
+    };
+    let mut runs = measure();
     if runs[0].iter().all(|(_, n)| *n == 0) {
         eprintln!("no instruction counter here: nothing to compare");
         return;
     }
+    // Noise only adds instructions, and on a loaded machine can add a tenth
+    // of a phase to one size's count, once. A verdict about to fail is
+    // measured again, the lowest of each kept: real growth reads the same
+    // every time.
+    let mut wrong = wrong_phases(&runs, still_growing);
+    let first_read = wrong.clone();
+    for _ in 0..AGAIN {
+        if wrong.is_empty() {
+            break;
+        }
+        for (run, again) in runs.iter_mut().zip(measure()) {
+            for (kept, (_, n)) in run.iter_mut().zip(again) {
+                kept.1 = kept.1.min(n);
+            }
+        }
+        wrong = wrong_phases(&runs, still_growing);
+    }
+    // Shown, so a cost that comes and goes isn't lost to the lowest count.
+    if !first_read.is_empty() && wrong.is_empty() {
+        eprintln!("rescued by measuring again; the first read: {first_read:?}");
+    }
     eprintln!("per chunk, thousands of instructions, at {sizes:?} sections:");
-    let mut wrong = Vec::new();
     for (i, (phase, _)) in runs[0].iter().enumerate() {
-        let row: Vec<u64> = runs.iter().map(|r| r[i].1).collect();
-        let (first, last) = (row[0], row[row.len() - 1]);
-        // (Phases of a few thousand instructions: noise, not growth.)
-        let grows_by = |by: f64| last > 20_000 && last as f64 > first as f64 * by;
-        let listed = still_growing.iter().find(|(p, _)| p == phase);
-        let grows = match listed {
-            Some(_) => grows_by(STILL_GROWS),
-            None => grows_by(FLAT),
-        };
-        let thousands: Vec<u64> = row.iter().map(|n| n / 1000).collect();
+        let thousands: Vec<u64> = runs.iter().map(|r| r[i].1 / 1000).collect();
+        let (grows, listed) = verdict(&runs, i, still_growing);
         eprintln!(
             "  {phase:?}: {thousands:?}{}",
             match (grows, listed) {
-                (true, Some((_, whose))) => format!(" grows ({whose})"),
+                (true, Some(whose)) => format!(" grows ({whose})"),
                 (true, None) => " GROWS".into(),
                 (false, Some(_)) => " flat now: take it off STILL_GROWING".into(),
                 (false, None) => String::new(),
             }
         );
-        if grows != listed.is_some() {
-            wrong.push(*phase);
-        }
     }
     assert!(
         wrong.is_empty(),
         "phases not as STILL_GROWING says: {wrong:?}"
     );
+}
+
+/// Whether phase `i` grows from the shortest reply to the longest (by the
+/// line for whether it's listed), and whose it is if listed.
+fn verdict<'a>(
+    runs: &[Vec<(Phase, u64)>],
+    i: usize,
+    still_growing: &'a [(Phase, &str)],
+) -> (bool, Option<&'a str>) {
+    let phase = runs[0][i].0;
+    let (first, last) = (runs[0][i].1, runs[runs.len() - 1][i].1);
+    let listed = still_growing.iter().find(|(p, _)| *p == phase);
+    let by = if listed.is_some() { STILL_GROWS } else { FLAT };
+    // (Growing by a few thousand instructions a chunk is noise, not growth:
+    // the driver's submit, of about 23K, reads 32K now and then.)
+    let grows = last > first + 20_000 && last as f64 > first as f64 * by;
+    (grows, listed.map(|(_, whose)| *whose))
+}
+
+/// The phases not as `still_growing` says, with their counts.
+fn wrong_phases(runs: &[Vec<(Phase, u64)>], still_growing: &[(Phase, &str)]) -> Vec<String> {
+    (0..runs[0].len())
+        .filter_map(|i| {
+            let (grows, listed) = verdict(runs, i, still_growing);
+            (grows != listed.is_some()).then(|| {
+                let thousands: Vec<u64> = runs.iter().map(|r| r[i].1 / 1000).collect();
+                format!("{:?} {thousands:?}", runs[0][i].0)
+            })
+        })
+        .collect()
 }
