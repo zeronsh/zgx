@@ -1217,6 +1217,27 @@ const ALIGN_LATEST: std::time::Duration = std::time::Duration::from_micros(4500)
 /// Where an early frame waits until, before the refresh point.
 #[cfg(any(target_os = "macos", test))]
 const ALIGN_AT: std::time::Duration = std::time::Duration::from_micros(1600);
+/// `ZGX_VIEW_CLOCK=0`: at a fast refresh, frames the display paces (an
+/// animation's, a scroll's) tick from the display's `CVDisplayLink` and are
+/// held to hand over with its others, as before, rather than from the view's
+/// `CADisplayLink`, handed over at once (see `fast_on_view_clock`).
+#[cfg(target_os = "macos")]
+static VIEW_CLOCK: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_VIEW_CLOCK").is_none_or(|v| v != "0"));
+/// Whether frames the display paces at `period` tick from the view's
+/// `CADisplayLink`, handed over at once, as an app's own Metal view does:
+/// at a fast refresh (120 Hz). The window server shows them a refresh later
+/// than frames held to just before its decision point (handover to shown
+/// 23.7 ms rather than 18.1 at 120 Hz, a native window's 23.6), and misses
+/// none, where those held lose one in sixty (M1 Max, a window at rest
+/// changing a few pixels each refresh: 0% late against 1.6%; native 0.03%).
+/// At a slower refresh (60 Hz) frames keep their own timing: a scroll's
+/// starts as late as it still makes its refresh (`LateSample`), which the
+/// view's link, calling back as the refresh begins, would undo.
+#[cfg(target_os = "macos")]
+fn fast_on_view_clock(period: std::time::Duration) -> bool {
+    *VIEW_CLOCK && period < ALIGN_PERIOD
+}
 /// The slowest refresh period frames align at (below 60 Hz's 16.7 ms).
 #[cfg(any(target_os = "macos", test))]
 const ALIGN_PERIOD: std::time::Duration = std::time::Duration::from_millis(12);
@@ -3024,8 +3045,12 @@ impl Host {
                 let link = self
                     .display_link
                     .as_ref()
-                    .filter(|_| {
-                        grid.is_none() && !presents_itself && self.link_paced && self.refresh_frame
+                    .filter(|link| {
+                        grid.is_none()
+                            && !presents_itself
+                            && self.link_paced
+                            && self.refresh_frame
+                            && !link.on_view_clock()
                     })
                     .filter(|_| {
                         self.resized_at
@@ -6466,7 +6491,8 @@ impl Host {
             // updates, scrolling) a timer paces them on the grid the link last
             // reported, and the link (a thread spinning to each refresh) runs
             // again only to resync.
-            let animating = wanted && rate.is_none() && !scrolling;
+            let fast = fast_on_view_clock(self.frame_interval);
+            let animating = wanted && rate.is_none() && (!scrolling || fast);
             self.link_paced = animating;
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_full_rate(wanted && rate.is_none());
@@ -6484,7 +6510,10 @@ impl Host {
             // against 13.1 left alone). Skipping one on the display's link
             // paced as well, but the window server's GPU rose from 1.9% to
             // 8.0%, near a composited view's 9.1%.
-            link.set_view_clock(drawables);
+            // (On it at a fast refresh whether or not frames are wanted: the
+            // grid steady frames keep to is then the same link's, and a
+            // gesture's first frame finds it there already.)
+            link.set_view_clock(drawables || fast);
             // Once the link has reported the grid, the timer continues it:
             // a scroll starting after a pause, or the grid going stale, keeps
             // its frames on the timer while the link reports again (see
@@ -9055,6 +9084,17 @@ mod tests {
         );
         // Wholly off: nothing.
         assert_eq!(snapshot_region(rect(-50., 0., 40., 40.), 2.).2, 0);
+    }
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_view_clock_paces_fast_refreshes_alone() {
+        let ms = |ms: f64| std::time::Duration::from_secs_f64(ms / 1e3);
+        if *VIEW_CLOCK {
+            assert!(fast_on_view_clock(ms(8.33)), "120 Hz");
+            assert!(fast_on_view_clock(ms(10.)), "100 Hz");
+        }
+        assert!(!fast_on_view_clock(ms(16.67)), "60 Hz keeps its own timing");
+        assert!(!fast_on_view_clock(ms(13.33)), "75 Hz keeps its own timing");
     }
     #[test]
     fn only_early_frames_at_a_fast_refresh_wait_for_the_others_point() {
