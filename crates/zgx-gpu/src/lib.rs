@@ -229,6 +229,9 @@ const IMAGES_GONE_COUNT: usize = 256;
 type ImageTexture = (wgpu::BindGroup, usize, Option<wgpu::Texture>, (u32, u32));
 /// A kept file's pixels aren't decoded yet (`ImageData::pixels_at`).
 const IMAGE_PENDING: &str = "an image's pixels are decoding";
+/// The size in `images` of a texture on its way out (`images_outgoing`): smaller
+/// than anything asked for, so it never fits.
+const IMAGE_OUTGOING: (u32, u32) = (1, 1);
 /// The longest side a texture is cut to past the budget (`upload_image_at`):
 /// however full it is, a picture shows, and this little goes over it.
 const IMAGE_LEAST_SIDE: u32 = 64;
@@ -4360,6 +4363,11 @@ pub struct GpuRenderer {
     /// Whether any went softer or is waiting: what a frame reads to know if the
     /// budget has any sharing to do, kept as those two change (`images_share`).
     images_to_share: bool,
+    /// Textures past the share as it last moved, each with its size: drawn
+    /// until what replaces it is ready, so a picture on screen whose pixels
+    /// must decode again isn't left blank. Each has `IMAGE_OUTGOING` for its size
+    /// in `images`, so a frame's check for what fits sends it the long way.
+    images_outgoing: FxHashMap<u64, (u32, u32)>,
     /// What one image's texture may take while images drawn together don't
     /// all fit: the large ones share what the small ones leave, evenly
     /// (`share_images`).
@@ -5037,6 +5045,7 @@ impl GpuRenderer {
             images_awaiting: FxHashMap::default(),
             images_softer: FxHashMap::default(),
             images_to_share: false,
+            images_outgoing: FxHashMap::default(),
             image_share: usize::MAX,
             layers_coarser: FxHashSet::default(),
             views: None,
@@ -5746,10 +5755,13 @@ impl GpuRenderer {
     /// The size of `image`'s texture, if it has one. For tests and devtools.
     #[doc(hidden)]
     pub fn debug_image_size(&self, image: &zgx::image::ImageData) -> Option<(u32, u32)> {
-        self.images.get(&image.id()).map(|entry| match entry.3 {
-            (0, 0) => (image.width(), image.height()),
-            held => held,
-        })
+        let held = |id: &u64, size| self.images_outgoing.get(id).copied().unwrap_or(size);
+        self.images
+            .get(&image.id())
+            .map(|entry| match held(&image.id(), entry.3) {
+                (0, 0) => (image.width(), image.height()),
+                held => held,
+            })
     }
     /// Whether a kept file's pixels were uploaded since the last call: their
     /// decoded copy may go (`zgx::image::release_decoded`).
@@ -12510,7 +12522,11 @@ impl GpuRenderer {
         }
         // Held smaller than drawn, the budget's doing: uploaded again only
         // if there's now room for more, not on every frame.
-        if let Some(entry) = self.images.get(&image.id()) {
+        let outgoing =
+            !self.images_outgoing.is_empty() && self.images_outgoing.contains_key(&image.id());
+        if let Some(entry) = self.images.get(&image.id())
+            && !outgoing
+        {
             let held = entry.3;
             let others = (self.images.iter())
                 .filter(|(id, _)| **id != image.id())
@@ -12531,8 +12547,13 @@ impl GpuRenderer {
         }
         match self.upload_image_at(image, size) {
             Ok(()) => {}
-            // Its pixels decoding: drawn once they are.
-            Err(error) if error.0 == IMAGE_PENDING => return Ok(false),
+            // Its pixels decoding: drawn once they are, or as it was till then.
+            Err(error) if error.0 == IMAGE_PENDING => {
+                if outgoing && let Some(drawn) = self.image_drawn.get_mut(&image.id()) {
+                    *drawn = self.image_frame;
+                }
+                return Ok(outgoing);
+            }
             Err(error) if IMAGE_MISSES.contains(&error.0.as_str()) => {
                 self.warn(&format!("{}: not drawn", error.0));
                 return Ok(false);
@@ -12553,7 +12574,9 @@ impl GpuRenderer {
     }
     /// Whether a frame's budget has anything to share (`images_to_share`).
     fn images_share(&mut self) {
-        self.images_to_share = !self.images_softer.is_empty() || !self.images_awaiting.is_empty();
+        self.images_to_share = !self.images_softer.is_empty()
+            || !self.images_awaiting.is_empty()
+            || !self.images_outgoing.is_empty();
     }
     /// What images drawn last frame, or waiting on their pixels then, leave of
     /// the budget, shared: each takes what it wants up to an even share of what
@@ -12563,6 +12586,21 @@ impl GpuRenderer {
     /// they fit: uploaded whole, to go again once those arrive.)
     #[cold]
     fn share_images(&mut self) {
+        // On their way out and not asked for last frame (which drew them all:
+        // `repaint_all`, as they were marked): nothing to wait for.
+        if !self.images_outgoing.is_empty() {
+            let asked = self.image_frame - 1;
+            let (images, drawn) = (&mut self.images, &self.image_drawn);
+            self.images_outgoing.retain(|id, _| {
+                let keep = drawn.get(id).is_some_and(|at| *at >= asked);
+                if !keep {
+                    images.remove(id);
+                }
+                keep
+            });
+            let images = &self.images;
+            self.image_drawn.retain(|id, _| images.contains_key(id));
+        }
         let images = &self.images;
         self.images_softer.retain(|id, _| images.contains_key(id));
         // (The last frame that drew them: one kept draws none anew.)
@@ -12596,11 +12634,18 @@ impl GpuRenderer {
             return;
         }
         self.image_share = share;
-        // Those over it upload again as they're drawn, as all may take more.
-        self.images
-            .retain(|_, entry| entry.1 <= share.saturating_add(share / 20));
-        let images = &self.images;
-        self.image_drawn.retain(|id, _| images.contains_key(id));
+        // Those over it upload again as they're drawn, as all may take more:
+        // drawn as they are until then (`images_outgoing`). And those it now
+        // leaves room for stay as they were.
+        let limit = share.saturating_add(share / 20);
+        for (id, entry) in &mut self.images {
+            if entry.1 > limit && entry.3 != IMAGE_OUTGOING {
+                self.images_outgoing.insert(*id, entry.3);
+                entry.3 = IMAGE_OUTGOING;
+            } else if entry.1 <= limit && entry.3 == IMAGE_OUTGOING {
+                entry.3 = self.images_outgoing.remove(id).unwrap_or((0, 0));
+            }
+        }
         self.repaint_all();
     }
     /// `wanted` under the texture limit, its shape kept.
@@ -12717,8 +12762,15 @@ impl GpuRenderer {
         let bytes = |(w, h): (u32, u32)| w as usize * h as usize * 4;
         // An image it replaces at another size gives its bytes back.
         let replaced = self.images.get(&image.id()).map_or(0, |entry| entry.1);
-        let mut held = self.images.values().map(|entry| entry.1).sum::<usize>() - replaced
-            + self.images_decoding;
+        // (Nor those on their way out, whose replacements count as they come.)
+        let outgoing: usize = (self.images_outgoing.keys())
+            .filter(|id| **id != image.id())
+            .filter_map(|id| self.images.get(id))
+            .map(|entry| entry.1)
+            .sum();
+        let mut held =
+            self.images.values().map(|entry| entry.1).sum::<usize>() - replaced - outgoing
+                + self.images_decoding;
         let whole = self.image_size_limited(image, wanted);
         let most = self.image_size_within(image, wanted, 0);
         if bytes(most) + held > budget {
@@ -12730,6 +12782,7 @@ impl GpuRenderer {
                 .image_drawn
                 .iter()
                 .filter(|(id, drawn)| **drawn < self.image_frame && !showing.contains(*id))
+                .filter(|(id, _)| !self.images_outgoing.contains_key(*id))
                 .map(|(id, drawn)| (*drawn, *id))
                 .collect();
             idle.sort_unstable();
@@ -12844,6 +12897,7 @@ impl GpuRenderer {
             true => (0, 0),
             false => (width, height),
         };
+        self.images_outgoing.remove(&image.id());
         self.images
             .insert(image.id(), (bind, bytes, Some(texture), held_size));
         self.image_drawn.insert(image.id(), self.image_frame);

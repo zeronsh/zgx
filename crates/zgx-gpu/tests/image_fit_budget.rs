@@ -343,6 +343,84 @@ fn pictures_past_the_budget_take_their_shares_however_slowly_they_decode() {
     assert_eq!(gpu.take_issues(), Vec::<String>::new());
 }
 
+/// Pictures on screen, when a new one makes the share smaller: each is drawn as
+/// it was until what replaces it is ready, in every frame. A kept file whose
+/// pixels have gone waits on a decode for that, and evicted it would be blank
+/// meanwhile. The textures held for it go as it arrives.
+#[test]
+fn pictures_on_screen_stay_as_the_share_moves_until_their_replacements_are_ready() {
+    const SIDE: u32 = 2500;
+    const WINDOW: u32 = 2000;
+    const CORNERS: [(usize, usize); 3] = [(100, 100), (700, 700), (1300, 1300)];
+    fn slowly(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        std::thread::sleep(Duration::from_millis(100));
+        Ok(vec![200; (SIDE * SIDE * 4) as usize].into())
+    }
+    fn raw_one() -> ImageData {
+        ImageData::new(SIDE, SIDE, vec![200; (SIDE * SIDE * 4) as usize]).unwrap()
+    }
+    fn kept_one() -> ImageData {
+        ImageData::kept(SIDE, SIDE, Arc::from(&b"file"[..]), slowly).unwrap()
+    }
+    let all = Rect::new(0., 0., WINDOW as f32, WINDOW as f32);
+    for (name, make) in [("raw", raw_one as fn() -> ImageData), ("kept", kept_one)] {
+        let Ok(mut gpu) = GpuRenderer::new(WINDOW, WINDOW) else {
+            return;
+        };
+        let mut scene = Scene::new(WINDOW as f32, WINDOW as f32);
+        let root = stack(&mut scene);
+        let side = (SIDE as f32, SIDE as f32);
+        let add = |scene: &mut Scene, at: f32| {
+            let node = scene.append(root, NodeKind::Image(Arc::new(make())), sized(side));
+            scene.set_transform(node, Transform { x: at, y: at });
+        };
+        add(&mut scene, 0.);
+        add(&mut scene, 600.);
+        settle(&mut gpu, &mut scene, (WINDOW, WINDOW));
+        assert_eq!(gpu.debug_cache_stats().image_bytes, 50_000_000, "{name}");
+        // As a host does soon after they upload.
+        zgx::image::release_decoded();
+        add(&mut scene, 1200.);
+        let _ = scene.flush();
+        let (mut most, mut uploads, mut started, mut settled) = (0, 0, Instant::now(), 0);
+        while settled < 3 {
+            uploads += gpu.render(&scene, &[all]).expect("a frame").image_uploads;
+            let waiting = gpu.images_decoded();
+            let pixels = gpu.readback().unwrap();
+            for (x, y) in &CORNERS[..2] {
+                let alpha = pixels[(y * WINDOW as usize + x) * 4 + 3];
+                assert!(alpha > 0, "{name}: blank on screen at {x},{y}");
+            }
+            most = most.max(gpu.debug_cache_stats().image_bytes);
+            settled = if waiting { 0 } else { settled + 1 };
+            if waiting {
+                started = Instant::now();
+                std::thread::sleep(Duration::from_millis(4));
+            }
+            assert!(started.elapsed() < STALL, "{name}: never settled");
+        }
+        let pixels = gpu.readback().unwrap();
+        for (x, y) in CORNERS {
+            let alpha = pixels[(y * WINDOW as usize + x) * 4 + 3];
+            assert!(alpha > 0, "{name}: {x},{y} never showed");
+        }
+        let stats = gpu.debug_cache_stats();
+        assert_eq!(stats.image_textures, 3, "{name}");
+        assert!(stats.images_softer > 0, "{name}");
+        assert!(
+            stats.image_bytes <= 64 << 20,
+            "{name}: what was held for it went: {}",
+            stats.image_bytes
+        );
+        // (A raw one uploads as it comes, before the share moves, and again.)
+        assert!(uploads <= 4, "{name}: {uploads} uploads");
+        assert!(
+            most <= (64 << 20) + 50_000_000,
+            "{name}: at most the budget and what it replaced: {most}"
+        );
+    }
+}
+
 /// However many are past the budget, each shows and no frame fails. (Its last
 /// ones came to nothing, an error raised, with the budget used up.)
 #[test]
