@@ -219,6 +219,13 @@ fn system_tracking(size: f32) -> f32 {
     };
     units.trunc() / 2048.
 }
+/// The most leading of `rich`'s runs (`LineHeight::with_leading`), the part of
+/// its lines' height that is leading: none unless a run sets it.
+pub(crate) fn runs_leading(rich: &zgx::rich_text::RichText) -> f32 {
+    (rich.runs().iter())
+        .map(|run| run.font.line_height.leading())
+        .fold(0., f32::max)
+}
 // Inlined where it is called, as it was before `spaced` took the rare part
 // out of it (LTO had stopped inlining it into the text cache).
 #[inline(always)]
@@ -372,6 +379,7 @@ pub fn set_buffer_text(
     font: &zgx::text_layout::FontStyle,
     size: f32,
 ) {
+    buffer.set_leading(font.line_height.leading());
     let base = attrs(font, size);
     if font.fallbacks.is_empty() {
         buffer.set_text(text, &base, Shaping::Advanced, alignment(font));
@@ -510,11 +518,14 @@ impl ShapedText {
     }
     /// Its width and height.
     pub fn size(&self) -> (f32, f32) {
-        self.buffer
+        let (width, height) = self
+            .buffer
             .layout_runs()
             .fold((0_f32, 0_f32), |(w, h), run| {
                 (w.max(run.line_w), h.max(run.line_top + run.line_height))
-            })
+            });
+        // No leading after the last line.
+        (width, (height - self.buffer.leading()).max(0.))
     }
     /// The caret position at `x`, `y`, if the text has one there.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<TextCursor> {
@@ -1964,6 +1975,7 @@ pub(crate) fn rich_buffer_unshaped(
         run.font.line_height.resolve_in(&run.font.family, size)
     });
     let mut buffer = Buffer::new_empty(Metrics::new(size, line_height));
+    buffer.set_leading(runs_leading(rich));
     buffer.lines = recycled;
     let default_font = zgx::text_layout::FontStyle::default();
     let default_attrs = attrs(base.map_or(&default_font, |run| &run.font), size);
