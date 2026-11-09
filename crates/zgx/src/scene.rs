@@ -3625,7 +3625,9 @@ impl Scene {
             opacity: 1.,
             ..node.effects
         };
-        if !plain(node) || !unchanged(effects) {
+        // An ancestor's backdrop blur leaves its content sharp; the box's own
+        // blurs what's behind the box itself.
+        if !plain(node) || effects != Effects::default() {
             return None;
         }
         let bounds = self.bounds(id).intersection(self.world_clip(id)?)?;
@@ -13551,6 +13553,17 @@ mod tests {
         );
         scene.flush();
         assert!(scene.plain_box(caret).is_some());
+        // The box's own blurs what's behind it, where the host would draw.
+        scene.set_effects(
+            caret,
+            Effects {
+                blur_radius: 12.,
+                ..Effects::default()
+            },
+        );
+        scene.flush();
+        assert!(scene.plain_box(caret).is_none());
+        scene.set_effects(caret, Effects::default());
         // These change how the content shows.
         for changed in [
             Effects {
