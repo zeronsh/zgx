@@ -241,3 +241,11 @@ A standalone handover-slack diagnostic accepts an optional encoding-to-handover
 delay in milliseconds: `target/scroll-native 1114 685 120 tiles 10 2`. Its two-ms
 sleep is included in main work. Do not compare that diagnostic to the default
 headroom gate without labeling it.
+
+The marker sample itself injects no wheel events, including zero-delta
+began/ended events: those can perturb the input/presentation path. Use
+`python3 scripts/perf/scroll.py reference --scenes zeron --sizes W
+--backgrounds translucent --present 0,1 --repeats 1 --native-floor` to run only
+the bracketed marker references. The real-app host must already be built.
+At 1× renderer scale, odd logical sizes retain half-point native window
+dimensions so the native reference has exactly the same device-pixel extent.

@@ -38,7 +38,7 @@ def tape(gesture, hz):
     if gesture == 'wing':
         return (ROOT / 'scripts/perf/scroll-tapes/wing.tape').read_text()
     if gesture == 'reference':
-        return '# zgx wheel tape 1\n0 pixel 0 0 started\n10000 pixel 0 0 ended\n'
+        return '# zgx wheel tape 1\n0 pixel 0 0 moved\n10000 pixel 0 0 moved\n'
     events = [(0., 'pixel', 0., 0., 'started')]
     period = 1000 / hz
     for i in range(1, hz * 4 + 1):
@@ -210,6 +210,8 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     return dict(frames=len(frames), sparse=sparse,
                 expected_pixel_updates=len(motion_windows(events,period,scale,merge=False)),
                 displayed_motion_frames=sum(f['frame'] in displayed_ids for f in scroll_frames), spare_frames=sum(f.get('spare',False) for f in frames),
+                spare_work_ms=spread([app_work_ms(f) for f in frames if f.get('spare',False)]),
+                spare_total_ms=sum(app_work_ms(f) for f in frames if f.get('spare',False)),
                 rows_prefetched=sum(f.get('notes',[]).count('list built row') for f in frames if f.get('spare',False)), scroll_frames=len(scroll_frames), active_intervals=len(gaps),
                 late_frames=sum(r['kind']=='late' for r in late_records), skipped_drawables=len(skipped),
                 late_pct=100*sum(r['kind']=='late' for r in late_records)/total if total else None,
@@ -450,8 +452,14 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                     raise RuntimeError(f"unsupported display refresh: {begin['refresh_ms']:.3f} ms, requested {hz} Hz")
                 before = rss(process.pid)
                 with ThreadPoolExecutor(max_workers=1) as pool:
-                    future = pool.submit(request, process.pid, 'replay', target=target, tape=text,
-                                         timeout=events[-1][0] / 1000 + 20)
+                    if scene in ('idle','zeron-idle'):
+                        # A clock reference must not inject even zero-delta
+                        # began/ended events, which can disturb host pacing.
+                        future = pool.submit(time.sleep,events[-1][0]/1000)
+                        result['reference_no_input']=True
+                    else:
+                        future = pool.submit(request, process.pid, 'replay', target=target, tape=text,
+                                             timeout=events[-1][0] / 1000 + 20)
                     try:
                         frames, polls = collect(process.pid, future, begin, out, target)
                     except Exception:
@@ -496,6 +504,8 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                     f['gpu_micros'] = gpu_by_frame.get(f['frame'])
                 result['gpu_completion_micros'] = dict(gpu_by_frame)
                 result['presents'] = presents
+                if scene in ('idle','zeron-idle'):
+                    replay_starts=[begin['host_ns']/1e6]
                 if not replay_starts:
                     raise RuntimeError('missing replay clock anchor')
                 result['replay_start_host_ms'] = replay_starts[-1]
@@ -590,7 +600,7 @@ def native_floor(args, size, hz, scale, present, label):
     out.mkdir()
     mode='tiles' if present=='0' else 'drawables'
     width,height=SIZES[size]
-    native_size=[round(width*scale/args.native_scale),round(height*scale/args.native_scale)]
+    native_size=[width*scale/args.native_scale,height*scale/args.native_scale]
     binary=ROOT/'target/scroll-native'
     with (out/'native.log').open('w') as log:
         subprocess.run([str(binary),*map(str,native_size),str(hz),mode,'10'],
@@ -633,7 +643,7 @@ def native_floor(args, size, hz, scale, present, label):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('command', choices=['run', 'headless'])
+    p.add_argument('command', choices=['run', 'headless', 'reference'])
     p.add_argument('--runner', type=Path, default=ROOT / 'target/dist/zgx-run')
     p.add_argument('--zeron-source',type=Path,default=Path.home()/'Documents/GitHub/zeron-scrollbench')
     p.add_argument('--zeron-runner',type=Path,default=ROOT/'target/zeron-native/current/zeron-zgx')
@@ -709,13 +719,15 @@ def main():
     (args.output / 'audit.json').write_text(json.dumps(audit, indent=2) + '\n')
     results = []
     references = {}
+    if args.command=='reference':
+        args.gestures='reference'
     cells = itertools.product(range(args.repeats), args.scenes.split(','), args.gestures.split(','),
                               args.sizes.split(','), map(int, args.hz.split(',')), map(float, args.scale.split(',')),
                               args.backgrounds.split(','), args.present.split(','))
     refresh = RefreshModes(args.output) if args.set_refresh else None
     try:
         for repeat, scene, gesture, size, hz, scale, bg, present in cells:
-            if scene not in SCENES or gesture not in GESTURES or size not in SIZES or present not in ('0', '1', 'auto'):
+            if scene not in SCENES or gesture not in (*GESTURES,'reference') or size not in SIZES or present not in ('0', '1', 'auto'):
                 p.error('unknown scene, gesture, or size')
             if gesture == 'stream' and scene not in ('transcript','zeron'):
                 continue
@@ -740,6 +752,10 @@ def main():
                     ref['native_floor_after']=native_floor(args,size,hz,scale,present,f'native-after-{len(references)}')
                 references[key] = ref
                 results.append(ref)
+            if args.command=='reference':
+                (args.output/'summary.md').write_text(report(results))
+                (args.output/'summary.json').write_text(json.dumps(results,indent=2)+'\n')
+                continue
             r = run_cell(args, scene, gesture, size, hz, scale, bg, repeat, present)
             r['reference'] = references[key].get('metrics')
             if references[key]['status'] != 'pass':

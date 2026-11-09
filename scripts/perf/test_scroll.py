@@ -116,7 +116,8 @@ class NativeReference(unittest.TestCase):
                     stdout.write(f'NATIVE_GPU {n} 0.1\nNATIVE_WORK {n} 0.2\n')
                 stdout.write('NATIVE_END 11\n')
             with patch.object(scroll.subprocess,'run',side_effect=run),patch.object(scroll,'sha',return_value='hash'):
-                m=scroll.native_floor(args,'W',120,2,'0','native')
+                m=scroll.native_floor(args,'W',120,1,'0','native')
+            self.assertEqual(m['native_points'],[557,342.5])
             self.assertEqual(m['skipped_drawables'],1)
             self.assertEqual(m['late_frames'],1)
             self.assertGreater(m['late_pct'],0)
