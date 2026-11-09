@@ -4400,6 +4400,7 @@ fn styled(
         }
     }
     // Not input of its own: a row's click alone doesn't come by `with_rare`.
+    #[cfg(target_os = "ios")]
     if events.rare.as_ref().is_some_and(|rare| rare.table_row) {
         view = view.table_row();
     }

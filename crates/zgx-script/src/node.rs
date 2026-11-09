@@ -917,7 +917,8 @@ pub(crate) struct RareEvents {
     /// `capture_keys = true`: while focus is in it, every key goes to what
     /// is focused, no shortcut or menu taking one (a shortcut recorder).
     pub capture_keys: bool,
-    /// `table_row = true`: one of a table's rows (`View::table_row`).
+    /// `table_row = true`: one of a table's rows (`View::table_row`, iOS).
+    #[cfg(target_os = "ios")]
     pub table_row: bool,
 }
 impl Kind {
@@ -3738,13 +3739,17 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
             }
         }
         "table_row" => {
-            if lua.unpack::<bool>(value)? {
+            let row = lua.unpack::<bool>(value)?;
+            #[cfg(target_os = "ios")]
+            if row {
                 node.events
                     .get_or_insert_default()
                     .rare
                     .get_or_insert_default()
                     .table_row = true;
             }
+            #[cfg(not(target_os = "ios"))]
+            let _ = row;
         }
         "wheel_across" => {
             let across = lua.unpack::<bool>(value)?;

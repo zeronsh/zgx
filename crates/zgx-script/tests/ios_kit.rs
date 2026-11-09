@@ -1527,7 +1527,7 @@ fn ios_text_takes_a_text_styles_size_weight_and_leading() {
 }
 
 #[test]
-fn a_kit_row_is_a_table_row_and_a_plain_button_is_not() {
+fn a_kit_row_says_it_is_a_table_row_and_a_plain_button_does_not() {
     let mut h = Harness::inline(
         r#"local ios = ui.ios
         return ui.column {
@@ -1539,14 +1539,19 @@ fn a_kit_row_is_a_table_row_and_a_plain_button_is_not() {
     h.frames(1);
     assert_eq!(h.error(), None);
     let buttons = with_role(&mut h, Role::Button);
-    let is_row = |label: &str| {
-        buttons
-            .iter()
-            .find(|node| node.label == label)
-            .unwrap_or_else(|| panic!("no `{label}`"))
-            .table_row
-    };
-    assert!(is_row("Wi-Fi"));
-    assert!(!is_row("Plain"));
-    assert!(!is_row("Unsaid"));
+    assert_eq!(buttons.len(), 3, "{buttons:?}");
+    // The mark is iOS's alone: every text's semantics would pay for it elsewhere.
+    #[cfg(target_os = "ios")]
+    {
+        let is_row = |label: &str| {
+            buttons
+                .iter()
+                .find(|node| node.label == label)
+                .unwrap_or_else(|| panic!("no `{label}`"))
+                .table_row
+        };
+        assert!(is_row("Wi-Fi"));
+        assert!(!is_row("Plain"));
+        assert!(!is_row("Unsaid"));
+    }
 }
