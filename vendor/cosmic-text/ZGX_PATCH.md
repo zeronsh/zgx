@@ -447,3 +447,19 @@ compares and hashes by its bits, so grids of other cells are other keys. The cra
 `FontSystem::rest` gives back `ShapeBuffer`'s buffers. They hold what the longest
 text shaped since left there, kept for reuse: a visual line's lists, one per line
 of that text, for as long as the app runs. zgx-gpu calls it as a window goes idle.
+
+## A padded span's padding outside the shape-run cache (unreleased)
+
+`pad` widened a padded span's first glyph (before it) and its last (after it)
+inside `shape_run`, whose result the shape-run cache keeps by the run's text
+and attributes alone, not where the run is in its span. A run shaped first at
+a span's start (padded before) was found again at its end, and drawn padded
+before rather than after: in an inline code chip `` `a + a` ``, the second
+`a` drew as the first, and which one depended on what was shaped earlier.
+`shape_run_cached` now caches a run unpadded and pads it, cached or not,
+where it is (`pad_cached`, `pad_spans`); a grid of cells is still snapped as
+it is shaped (it depends on the run alone), and masked text is padded
+nowhere, as before. zgx-gpu's
+`a_chips_last_word_is_padded_after_it_as_its_first_before_it` checks it,
+and zgx-gpu's word path pads a chip's words as this does
+(`rich_paragraphs_from_their_words_lay_out_as_their_line`).
