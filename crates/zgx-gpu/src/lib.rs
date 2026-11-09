@@ -4241,10 +4241,16 @@ pub struct GpuRenderer {
     /// The bytes of textures this frame asked for, their pixels decoding:
     /// each decodes to its share of the budget, not all of it.
     images_decoding: usize,
+    /// What each image last frame's pixels were decoding for would take whole:
+    /// not drawn, but sharing the budget with those drawn (`share_images`).
+    images_awaiting: FxHashMap<u64, usize>,
     /// Images and layers that went softer for their budgets: no issue, the
     /// budget doing its job, but `zgx inspect memory` shows them. Written only
     /// as that happens, and read only as asked (`debug_cache_stats`).
     images_softer: FxHashMap<u64, usize>,
+    /// Whether any went softer or is waiting: what a frame reads to know if the
+    /// budget has any sharing to do, kept as those two change (`images_share`).
+    images_to_share: bool,
     /// What one image's texture may take while images drawn together don't
     /// all fit: the large ones share what the small ones leave, evenly
     /// (`share_images`).
@@ -4918,7 +4924,9 @@ impl GpuRenderer {
             images_gone: Default::default(),
             image_frame: 0,
             images_decoding: 0,
+            images_awaiting: FxHashMap::default(),
             images_softer: FxHashMap::default(),
+            images_to_share: false,
             image_share: usize::MAX,
             layers_coarser: FxHashSet::default(),
             views: None,
@@ -5551,8 +5559,10 @@ impl GpuRenderer {
         }
         self.image_frame += 1;
         self.images_decoding = 0;
-        if !self.images_softer.is_empty() {
+        if self.images_to_share {
             self.share_images();
+            self.images_awaiting.clear();
+            self.images_share();
         }
         if self.image_frame == LAUNCH_FRAMES {
             // An app that never goes idle checks its font cache here, once.
@@ -12417,19 +12427,28 @@ impl GpuRenderer {
     fn image_budget(&self) -> usize {
         (self.width as usize * self.height as usize * 4 * 4).max(IMAGE_TEXTURES)
     }
-    /// What images drawn last frame leave of the budget, shared: each takes
-    /// what it wants up to an even share of what the smaller leave. They come
-    /// to this over a frame or two, as they upload again, and only while some
-    /// are held softer: otherwise no image pays for it.
+    /// Whether a frame's budget has anything to share (`images_to_share`).
+    fn images_share(&mut self) {
+        self.images_to_share = !self.images_softer.is_empty() || !self.images_awaiting.is_empty();
+    }
+    /// What images drawn last frame, or waiting on their pixels then, leave of
+    /// the budget, shared: each takes what it wants up to an even share of what
+    /// the smaller leave. They come to this over a frame or two, as they upload
+    /// again, and only while some are held softer or waiting: otherwise no image
+    /// pays for it. (Left out, those waiting would leave the rest looking as if
+    /// they fit: uploaded whole, to go again once those arrive.)
     #[cold]
     fn share_images(&mut self) {
         let images = &self.images;
         self.images_softer.retain(|id, _| images.contains_key(id));
         // (The last frame that drew them: one kept draws none anew.)
         let last = self.image_drawn.values().copied().max().unwrap_or(0);
+        let awaiting = &self.images_awaiting;
         let mut wants: Vec<usize> = (self.images.iter())
+            .filter(|(id, _)| !awaiting.contains_key(*id))
             .filter(|(id, _)| self.image_drawn.get(id).is_some_and(|drawn| *drawn == last))
             .map(|(id, entry)| self.images_softer.get(id).copied().unwrap_or(entry.1))
+            .chain(awaiting.values().copied())
             .collect();
         wants.sort_unstable();
         let mut left = self.image_budget();
@@ -12547,9 +12566,12 @@ impl GpuRenderer {
             let images = &self.images;
             self.images_softer.retain(|id, _| images.contains_key(id));
             self.images_softer.insert(image.id(), bytes(whole));
+            self.images_to_share = true;
         } else if !self.images_softer.is_empty() {
             self.images_softer.remove(&image.id());
+            self.images_share();
         }
+        let wants_whole = bytes(whole);
         let bytes = bytes((width, height));
         if self.images.len() >= MAX_IMAGES && !self.images.contains_key(&image.id()) {
             // Images not drawn this frame give way, the longest gone first;
@@ -12576,6 +12598,8 @@ impl GpuRenderer {
                 None => {
                     self.images_awaited = true;
                     self.images_decoding += bytes;
+                    self.images_awaiting.insert(image.id(), wants_whole);
+                    self.images_to_share = true;
                     return Err(GpuError(IMAGE_PENDING.into()));
                 }
             },

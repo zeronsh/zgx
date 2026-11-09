@@ -1,5 +1,6 @@
 //! Full-size pictures drawn small, however they come: a texture of the size
 //! drawn, no issue raised, none left out, and no frame failing for them.
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once};
 use std::time::{Duration, Instant};
 use zgx::{image::ImageData, scene::*};
@@ -300,6 +301,46 @@ fn a_picture_past_the_budget_uploads_once() {
         );
         assert_eq!(gpu.take_issues(), Vec::<String>::new(), "{name}");
     }
+}
+
+/// Pictures past the budget whose pixels take a while: each uploads once, at
+/// its share, and decodes once for it. Those still waiting count: without them
+/// the rest looked as if they fit, and uploaded whole, to go again as they came.
+#[test]
+fn pictures_past_the_budget_take_their_shares_however_slowly_they_decode() {
+    const SIDE: (u32, u32) = (5000, 2500);
+    static DECODES: AtomicUsize = AtomicUsize::new(0);
+    fn slowly(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        DECODES.fetch_add(1, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(200));
+        Ok(vec![200; (SIDE.0 * SIDE.1 * 4) as usize].into())
+    }
+    let window = WINDOWS[0];
+    let mut scene = Scene::new(window.0 as f32, window.1 as f32);
+    let stack = stack(&mut scene);
+    let size = (SIDE.0 as f32, SIDE.1 as f32);
+    for _ in 0..3 {
+        let card = scene.append(
+            stack,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..sized(DRAWN)
+            },
+        );
+        let image = ImageData::kept(SIDE.0, SIDE.1, Arc::from(&b"file"[..]), slowly).unwrap();
+        scene.append(card, NodeKind::Image(Arc::new(image)), sized(size));
+    }
+    let mut gpu = GpuRenderer::new(window.0, window.1).unwrap();
+    let uploads = settle(&mut gpu, &mut scene, window);
+    assert_eq!(uploads, 3, "uploads: each once");
+    assert_eq!(settle(&mut gpu, &mut scene, window), 0);
+    let stats = gpu.debug_cache_stats();
+    assert_eq!(stats.image_textures, 3);
+    assert_eq!(stats.images_softer, 3);
+    assert!(stats.image_bytes <= 64 << 20, "{}", stats.image_bytes);
+    assert_eq!(DECODES.load(Ordering::Relaxed), 3, "decodes: each once");
+    assert_eq!(gpu.take_issues(), Vec::<String>::new());
 }
 
 /// However many are past the budget, each shows and no frame fails. (Its last
