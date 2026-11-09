@@ -263,14 +263,19 @@ impl DamageGrid {
     }
     /// The cells `rect` touches: columns and rows, end exclusive.
     fn span(&self, rect: Rect) -> (usize, usize, usize, usize) {
+        self.span_to(rect.x, rect.y, rect.x + rect.width, rect.y + rect.height)
+    }
+    /// `span`, of a rectangle by its edges.
+    #[inline(always)]
+    fn span_to(&self, x: f32, y: f32, right: f32, bottom: f32) -> (usize, usize, usize, usize) {
         let first = |value: f32| (value / DAMAGE_CELL).floor().max(0.) as usize;
         let end =
             |value: f32, count: usize| ((value / DAMAGE_CELL).ceil().max(0.) as usize).min(count);
         (
-            first(rect.x).min(self.columns),
-            first(rect.y).min(self.rows),
-            end(rect.x + rect.width, self.columns),
-            end(rect.y + rect.height, self.rows),
+            first(x).min(self.columns),
+            first(y).min(self.rows),
+            end(right, self.columns),
+            end(bottom, self.rows),
         )
     }
     /// The words of a row holding columns `left..right` (`left < right`),
@@ -286,6 +291,11 @@ impl DamageGrid {
     }
     fn mark(&mut self, rect: Rect) {
         self.mark_span(self.span(rect));
+        self.passed_full();
+    }
+    /// `mark`, of a rectangle by its edges.
+    fn mark_edges(&mut self, DamageEdges([x, y, right, bottom]): DamageEdges) {
+        self.mark_span(self.span_to(x, y, -right, -bottom));
         self.passed_full();
     }
     /// Move `full_before` past the words marks filled: one look a mark, so
@@ -477,6 +487,17 @@ impl From<Rect> for DamageEdges {
             -(rect.x + rect.width),
             -(rect.y + rect.height),
         ])
+    }
+}
+impl From<DamageEdges> for Rect {
+    #[inline]
+    fn from(DamageEdges([x, y, right, bottom]): DamageEdges) -> Self {
+        Self {
+            x,
+            y,
+            width: -right - x,
+            height: -bottom - y,
+        }
     }
 }
 
@@ -3221,7 +3242,13 @@ pub struct Scene {
     slots_settled: u8,
     root: NodeId,
     dirty: Vec<NodeId>,
-    damage: Vec<Rect>,
+    /// A frame's damage so far, each by its edges: a rectangle joining
+    /// compares with every one, far edges included, adding nothing.
+    damage: Vec<DamageEdges>,
+    /// Tests: `damage` as rectangles, joined as those are, for each to be
+    /// held to the bit against the edges.
+    #[cfg(test)]
+    damage_rects: Vec<Rect>,
     /// The last rectangles added to `damage` (each is held by one of its
     /// rectangles, which only grow): a change damages the same places again
     /// and again (before and after, then where layout moves it).
@@ -3539,6 +3566,8 @@ impl Scene {
             root,
             dirty: vec![root],
             damage: Vec::new(),
+            #[cfg(test)]
+            damage_rects: Vec::new(),
             recent_damage: [DamageEdges::default(); 4],
             damage_grid: None,
             #[cfg(test)]
@@ -8812,6 +8841,8 @@ impl Scene {
         // Everything repaints; a grid would be the old size.
         self.damage_grid = None;
         self.damage.clear();
+        #[cfg(test)]
+        self.damage_rects.clear();
         self.add_damage(self.viewport);
     }
     /// Set a translation, normalizing each non-finite coordinate to zero.
@@ -9560,8 +9591,13 @@ impl Scene {
     /// Whether this frame already repaints the whole viewport: more damage
     /// changes nothing, so callers skip working out where it would be.
     fn damage_is_full(&self) -> bool {
-        self.damage.first() == Some(&self.viewport)
-            || self.damage_grid.as_ref().is_some_and(DamageGrid::full)
+        let viewport = self.viewport;
+        self.damage.first().is_some_and(|edges| {
+            edges.0[0] == viewport.x
+                && edges.0[1] == viewport.y
+                && -edges.0[2] == viewport.x + viewport.width
+                && -edges.0[3] == viewport.y + viewport.height
+        }) || self.damage_grid.as_ref().is_some_and(DamageGrid::full)
     }
     /// What `damage_subtree_with` would add for leaf `id` (no children)
     /// where nothing is transformed or filtered, at its box `was` and at
@@ -9726,7 +9762,7 @@ impl Scene {
         // as the union of two that did: whole points, which quantize to
         // themselves.
         let rect = if GRID_FIRST { rect } else { quantized(rect) };
-        let Some(mut rect) = rect.intersection(self.viewport) else {
+        let Some(rect) = rect.intersection(self.viewport) else {
             return;
         };
         if GRID_FIRST && let Some(grid) = &mut self.damage_grid {
@@ -9749,42 +9785,66 @@ impl Scene {
             grid.mark(rect);
             return;
         }
+        #[cfg(test)]
+        self.join_damage_rects(rect);
         // Each rectangle it meets joins it, from the first again after each
         // (it grew): one tight scan a join, no index kept across the removal.
+        let mut rect = edges;
         while !self.damage.is_empty() {
-            // `rect.intersects(other)`, its own edges worked out once a scan.
-            let (x, y) = (rect.x, rect.y);
-            let (right, bottom) = (rect.x + rect.width, rect.y + rect.height);
-            let meets = move |other: &Rect| {
-                x < other.x + other.width
-                    && other.x < right
-                    && y < other.y + other.height
-                    && other.y < bottom
+            // `rect.intersects(other)`, the far edges signed: nothing to add.
+            let DamageEdges([x, y, right, bottom]) = rect;
+            let (x, y, right, bottom) = (-x, -y, -right, -bottom);
+            let meets = move |other: &DamageEdges| {
+                other.0[2] < x && other.0[0] < right && other.0[3] < y && other.0[1] < bottom
             };
             let Some(index) = self.damage.iter().position(meets) else {
                 break;
             };
-            rect = self.damage.swap_remove(index).union(rect);
+            let joined = self.damage.swap_remove(index);
+            rect = DamageEdges(std::array::from_fn(|edge| joined.0[edge].min(rect.0[edge])));
         }
         self.damage.push(rect);
+        #[cfg(test)]
+        self.assert_damage_rects();
         if self.damage.len() > DAMAGE_RECTS {
             self.damage_on_grid();
         }
+    }
+    /// Tests: `rect` joining `damage_rects`, as `damage` did by rectangles.
+    #[cfg(test)]
+    fn join_damage_rects(&mut self, mut rect: Rect) {
+        while let Some(index) = (self.damage_rects.iter()).position(|other| rect.intersects(*other))
+        {
+            rect = self.damage_rects.swap_remove(index).union(rect);
+        }
+        self.damage_rects.push(rect);
+    }
+    /// Tests: `damage`, to the bit, what rectangles gave.
+    #[cfg(test)]
+    fn assert_damage_rects(&self) {
+        let bits = |r: Rect| [r.x, r.y, r.width, r.height].map(f32::to_bits);
+        let edges: Vec<_> = self.damage.iter().map(|e| bits(Rect::from(*e))).collect();
+        let rects: Vec<_> = self.damage_rects.iter().map(|r| bits(*r)).collect();
+        assert_eq!(edges, rects);
     }
     /// Mark the damage on a grid, or join it into one rectangle where the
     /// viewport is too large for one.
     #[cold]
     fn damage_on_grid(&mut self) {
+        #[cfg(test)]
+        self.damage_rects.clear();
         match DamageGrid::new(self.viewport) {
             Some(mut grid) => {
                 for rect in self.damage.drain(..) {
-                    grid.mark(rect);
+                    grid.mark_edges(rect);
                 }
                 self.damage_grid = Some(grid);
             }
             None => {
-                let joined = self.damage.drain(..).reduce(Rect::union);
-                self.damage.extend(joined);
+                let joined = self.damage.drain(..).map(Rect::from).reduce(Rect::union);
+                self.damage.extend(joined.map(DamageEdges::from));
+                #[cfg(test)]
+                self.damage_rects.extend(joined);
             }
         }
     }
@@ -13655,7 +13715,9 @@ impl Scene {
                 for (rect, processed) in &mut blur_regions {
                     let touched = match &self.damage_grid {
                         Some(grid) => grid.touches(*rect),
-                        None => self.damage.iter().any(|damage| damage.intersects(*rect)),
+                        None => {
+                            (self.damage.iter()).any(|damage| Rect::from(*damage).intersects(*rect))
+                        }
                     };
                     if !*processed && touched {
                         self.add_damage(*rect);
@@ -13674,8 +13736,10 @@ impl Scene {
             Some(grid) => grid.rects(self.viewport),
             // A copy: the list keeps its room for the next frame's damage.
             None => {
-                let damage = self.damage.clone();
+                let damage = self.damage.iter().copied().map(Rect::from).collect();
                 self.damage.clear();
+                #[cfg(test)]
+                self.damage_rects.clear();
                 damage
             }
         };
@@ -14152,7 +14216,7 @@ impl Scene {
             let inside: Vec<Rect> = self
                 .damage
                 .iter()
-                .filter_map(|rect| rect.intersection(scroll.clip))
+                .filter_map(|rect| Rect::from(*rect).intersection(scroll.clip))
                 .collect();
             for rect in inside {
                 let shifted = rect.translated(Transform {
@@ -14191,7 +14255,8 @@ impl Scene {
         // was damaged outside it, and painted in it.)
         let before: Vec<Rect> = (self.damage.iter())
             .filter_map(|rect| {
-                rect.translated(Transform { x: -dx, y: -dy })
+                Rect::from(*rect)
+                    .translated(Transform { x: -dx, y: -dy })
                     .intersection(clip)
             })
             .collect();
@@ -15776,6 +15841,36 @@ mod tests {
         let (walked, before) = (run(false), run(true));
         assert!(walked.iter().filter(|f| !f.is_empty()).count() > 20);
         assert_eq!(walked, before);
+    }
+    /// Damage kept as edges is, to the bit, what rectangles gave
+    /// (`assert_damage_rects`, on every add in every test here): rectangles
+    /// of whole and fractional points, over viewports of whole and fractional
+    /// sizes, joining, overflowing onto the grid and flushed.
+    #[test]
+    fn damage_as_edges_is_what_rectangles_gave_to_the_bit() {
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        for (w, h) in [(800., 600.), (640.8, 480.4), (1234.57, 77.3), (3., 2.)] {
+            let mut scene = Scene::new(w, h);
+            for frame in 0..40 {
+                for _ in 0..(1 + frame * 3) {
+                    let at = |v: u32, of: f32| (v % 4096) as f32 / 4096. * of * 1.2 - of * 0.1;
+                    let rect = Rect::new(
+                        at(next(), w),
+                        at(next(), h),
+                        at(next(), w) * 0.15 + 0.25,
+                        at(next(), h) * 0.15 + 0.25,
+                    );
+                    scene.add_damage(rect);
+                }
+                scene.flush();
+            }
+        }
     }
     /// A damaged paint walk that finds a long column's children meeting its
     /// damage by search (`searched`) walks to the item what filtering every
