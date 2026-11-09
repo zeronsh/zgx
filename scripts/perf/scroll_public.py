@@ -13,6 +13,7 @@ FIELDS = {
     'present': {'0', '1', 'auto'},
     'status': {'pass', 'fail', 'invalid'},
     'model_catalog': {'settled', 'loading'},
+    'cadence_model': {'accepted-input-and-observed-coast','continuous-reference','raw-input-demand-unfiltered'},
 }
 SCALARS = ('hz', 'scale', 'repeat')
 METRICS = (
@@ -22,6 +23,9 @@ METRICS = (
     'double_then_skip_intervals', 'skipped_drawables', 'main_over_4ms', 'gpu_p99_ms',
     'copied_frames', 'repainted_frames', 'picture_frames', 'copy_pct', 'repaint_pct',
     'rows_built_in_scroll_frames', 'rows_prefetched', 'spare_frames',
+    'ignored_os_momentum_events','coast_active_intervals','coast_slow_step_intervals',
+    'finger_active_intervals','finger_late_intervals','coast_late_intervals','coast_long_gap_intervals',
+    'stationary_scroll_intervals','unclassified_motion_intervals','coast_context_missing_frames',
 )
 SPREADS = ('interval_ms', 'main_work_ms', 'main_with_present_ms', 'present_ms',
            'wait_ms', 'instructions', 'start_to_present_ms',
@@ -58,6 +62,13 @@ def sanitize(row):
             result[key] = value
     source = row.get('metrics', {})
     metrics = numeric_fields(source, METRICS)
+    if type(source.get('cadence_scoring_complete')) is bool:
+        metrics['cadence_scoring_complete'] = source['cadence_scoring_complete']
+        if not source['cadence_scoring_complete']:
+            for key in ('late_pct','app_late_pct'):
+                if key in metrics:metrics[key] = None
+    if source.get('cadence_model') in FIELDS['cadence_model']:
+        metrics['cadence_model'] = source['cadence_model']
     for key in SPREADS:
         if isinstance(source.get(key), dict):
             metrics[key] = numeric_fields(source[key], QUANTILES)

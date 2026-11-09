@@ -28,8 +28,8 @@ script errors and type errors invalidate a run.
 Defaults run three trials per scene/gesture/size/background. Use
 `--repeats 1 --scenes tables --gestures flick --sizes M --backgrounds opaque`
 for a quick reproduction. `--gestures slow` uses subpixel steps;
-`flick` and `fling` release the fingers and restart within 50 ms to enter
-the host’s momentum state, then decay velocity; `reversals` changes direction every quarter
+`flick` and `fling` send a 600 ms finger gesture ending at speed, then
+let the app generate its own coast; `reversals` changes direction every quarter
 second; `notches` sends line deltas; `stream` changes transcript row 400 near the bottom while
 scrolling. `wing` preserves the original 94.56-second tape byte for byte from
 [Wing's recording](https://gist.github.com/wing-anara/fa7628315d83138923947bd7a562645a).
@@ -438,3 +438,18 @@ fixing fixture settlement does not waive this regression case. To reproduce it
 locally, run the actual-shell command with `--gestures flick --model-catalog loading`
 and retain the default three trials. The workflow still has only
 `workflow_dispatch` as a trigger and exports numeric summaries only.
+
+Cadence scoring filters macOS system momentum from the recorded tape with the
+host’s phase rules. Recording happens before that filter. Only accepted finger
+deltas and the app’s observed coast demand motion; raw OS momentum must not
+extend a stopped coast. Profiling records each scroll content’s whole-device-pixel
+translation and the host’s coast state. The setup maps the target to its unique
+renderer view from the initial offset; missing/ambiguous mapping, stale coast
+context or unclassified long intervals fail coverage rather than certify a pass.
+Non-rendering frames carry the last position. Position ranges across canceled
+frames still detect skipped intermediate movement. Long one-pixel coast steps
+are reported separately from late intervals; the scorer cannot invent an
+intermediate integer position. Finger and coast late counts are separate.
+Historical raw-input-demand tables are explicitly qualified and cannot be used
+as app missed-refresh certification. Capture snapshots include `scroll_motion.py`;
+comparison fingerprints include it, preventing a silent rescore mid-batch.

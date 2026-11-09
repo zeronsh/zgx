@@ -139,7 +139,7 @@ def run_one(args, descriptor, arm, role, trial, position):
     found=[r for r in data if r['scene']==wanted]
     r=found[-1] if found else dict(status='invalid',failures=['missing requested result'])
     m=r.get('metrics',{})
-    valid=r['status']!='invalid' and m.get('active_intervals',0)>=30 and m.get('gpu_p99_ms') is not None
+    valid=r['status']!='invalid' and m.get('cadence_scoring_complete') is True and m.get('active_intervals',0)>=30 and m.get('gpu_p99_ms') is not None
     refs=[r for r in data if r['scene'] in ('idle','zeron-idle')]
     native_valid=bool(refs) and all(ref.get(k,{}).get('status')=='valid' for ref in refs for k in ('native_floor_before','native_floor_after'))
     sample=dict(arm=arm['name'],role=role,trial=trial,condition=c,descriptor=descriptor,
@@ -169,7 +169,7 @@ def main():
     if frozen.exists() and json.loads(frozen.read_text())!=manifest:p.error('resume manifest differs from saved manifest')
     frozen.write_text(json.dumps(manifest,indent=2)+'\n')
     fingerprint=hashlib.sha256()
-    for name in ('scroll.py','scroll_compare.py','scroll_native.swift','zeron_fixture.luau'):
+    for name in ('scroll.py','scroll_motion.py','scroll_compare.py','scroll_native.swift','zeron_fixture.luau'):
         fingerprint.update((ROOT/'scripts/perf'/name).read_bytes())
     saved=args.output/'harness-sha256.txt'
     if saved.exists() and saved.read_text().strip()!=fingerprint.hexdigest():

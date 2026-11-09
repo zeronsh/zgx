@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import scroll_motion
 
 ROOT = Path(__file__).resolve().parents[2]
 SIZES = {'S': (640, 480), 'M': (960, 720), 'L': (1440, 960), 'W': (1114, 685)}
@@ -41,7 +42,8 @@ def tape(gesture, hz):
         return '# zgx wheel tape 1\n0 pixel 0 0 moved\n10000 pixel 0 0 moved\n'
     events = [(0., 'pixel', 0., 0., 'started')]
     period = 1000 / hz
-    for i in range(1, hz * 4 + 1):
+    finger_frames = round(hz * .6) if gesture in ('flick', 'fling') else hz * 4
+    for i in range(1, finger_frames + 1):
         t = i * period
         dx = 0
         phase = 'moved'
@@ -49,12 +51,9 @@ def tape(gesture, hz):
         if gesture == 'slow':
             dy = -.2  # also tests quantized, intentionally unchanged pixels
         elif gesture in ('flick', 'fling'):
-            # The host infers momentum from a new Started less than 50ms
-            # after finger Ended. A decay with only Moved never enters it.
-            if i == max(2, round(hz * .15)):
-                events.append((t - period / 4, 'pixel', 0., 0., 'ended'))
-                phase = 'started'
-            dy = -(64 if gesture == 'fling' else 32) * math.exp(-i / (hz * 1.4))
+            # macOS supplies the coast itself; OS momentum events are ignored.
+            # Keep speed high at lift instead of sending a fabricated OS tail.
+            dy = -(64 if gesture == 'fling' else 32) * (.5 + .5*i/finger_frames)
         elif gesture == 'reversals':
             dy = -12 if (i // (hz // 4)) % 2 == 0 else 12
         elif gesture == 'notches':
@@ -65,7 +64,7 @@ def tape(gesture, hz):
             # Orbit near the streaming tail instead of pushing into its edge.
             dy = 2 if (i // (hz//2)) % 2 == 0 else -2
         events.append((t, unit, dx, dy, phase))
-    events.append((4010., 'pixel', 0., 0., 'ended'))
+    events.append(((finger_frames+1)*period, 'pixel', 0., 0., 'ended'))
     return '# zgx wheel tape 1\n' + ''.join(f'{t:.3f} {u} {x:.6f} {y:.6f} {p}\n' for t, u, x, y, p in events)
 
 
@@ -289,9 +288,11 @@ def coalesce_presentations(records, period):
 
 
 def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=False,
-              main_budget=4., gpu_budget=4., sparse=False, trace_to_host_ms=None):
+              main_budget=4., gpu_budget=4., sparse=False, trace_to_host_ms=None, motion_view=None, initial_motion_frames=()):
     period = 1000 / hz
-    windows = [(0, events[-1][0])] if reference and events else motion_windows(events, period, scale)
+    accepted, ignored = scroll_motion.accepted_events(events)
+    windows = [(0, events[-1][0])] if reference and events else motion_windows(accepted, period, scale)
+    movement = scroll_motion.Motion(frames, motion_view, initial_motion_frames)
     # Feedback carries the exact trace index captured before presenting. An
     # older runner's two-field record remains readable but cannot certify
     # attribution: missing frame identity is an explicit gate failure.
@@ -329,11 +330,16 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     double_then_skip=0
     for group_index,(prev, current) in enumerate(zip(shown, shown[1:])):
         a, b = prev[1]*1000-anchor, current[1]*1000-anchor
-        if not active_gap(a, b, windows, period):
+        finger = active_gap(a, b, windows, period)
+        if reference:
+            demanded, late = finger, finger and b-a > 1.5*period
+        else:
+            demanded, late = movement.interval(prev, current, finger, period)
+        if not demanded:
             idle.append(b-a)
             continue
         gaps.append(b-a)
-        if b-a > 1.5*period:
+        if late:
             double_then_skip += len({int(r[2]) for r in display_groups[group_index]})>1
             ids = range(prev[2], current[2]+1) if prev[2] and current[2] >= prev[2] else []
             record=attribute('late', b, ids)
@@ -349,7 +355,8 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     motion_frames=[];noted_frames=0;frame_sources=Counter()
     for f in frames:
         notes = f.get('notes', [])
-        moving = any('copied its pixels' in n or 'repainted its view:' in n or
+        coasting = movement.states.get(f['frame'], (None, None))[1] is True
+        moving = coasting or any('copied its pixels' in n or 'repainted its view:' in n or
                      'composited its picture' in n for n in notes)
         in_motion=in_motion_window(f,windows,trace_to_host_ms,anchor)
         if f.get('spare', False) or (not moving and not reference and not in_motion):
@@ -393,7 +400,8 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     total = len(gaps)
     duration=events[-1][0] if events else 0
     shown_in_tape=[r for r in shown if 0<=r[1]*1000-anchor<=duration]
-    return dict(frames=len(frames), sparse=sparse,
+    scoring = movement.summary() if not reference else dict(cadence_model='continuous-reference',cadence_scoring_complete=True)
+    return dict(**scoring, ignored_os_momentum_events=len(ignored),frames=len(frames), sparse=sparse,
                 presentation_timings=presentation_timings(scroll_frames,records,anchor,trace_to_host_ms),
                 picture_costs=picture_costs(frames),
                 motion_window_work=workload(motion_frames),
@@ -432,6 +440,8 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
 
 def failures(metrics, args):
     errors = []
+    if metrics.get('cadence_scoring_complete') is False:
+        errors.append('incomplete accepted-input/coast movement evidence; cadence cannot certify')
     if metrics['active_intervals'] < args.min_intervals and not metrics['sparse']:
         errors.append('insufficient actual presentation feedback during motion')
     if metrics['sparse'] and metrics['displayed_motion_frames'] < .8*metrics['expected_pixel_updates']:
@@ -702,6 +712,14 @@ return ui.overlay {""")
                     if getattr(args,'reset_row',0)>0 and gesture!='stream':
                         ok=request(process.pid,'state',name='bench.goto_ok')['data'].get('bench.goto_ok')
                         if ok is not True:raise RuntimeError('deterministic transcript row reset failed')
+                initial_motion_frames = []
+                motion_view = None
+                if scene not in ('idle','zeron-idle'):
+                    before_node = request(process.pid,'node',target=tracked_target)['data']
+                    initial_motion_frames = request(process.pid,'frames',n=40,runs=0)['data']
+                    motion_view = scroll_motion.select_view(before_node,initial_motion_frames,scale,scene=='nested')
+                    result['initial_motion_frames'] = initial_motion_frames
+                    result['motion_view'] = motion_view
                 begin = request(process.pid, 'mark', name='sample')['data']
                 result['conditions'] = begin
                 if not {'refresh_ms', 'pixel_scale', 'host_ns'} <= begin.keys():
@@ -788,7 +806,10 @@ return ui.overlay {""")
                                     memory,
                                     reference=scene in ('idle','zeron-idle'), main_budget=args.max_main_ms, gpu_budget=args.max_gpu_ms,
                                     sparse=gesture in ('slow','notches'),
-                                    trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'])
+                                    trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'], motion_view=motion_view, initial_motion_frames=initial_motion_frames)
+                if not metrics.get('cadence_scoring_complete',False):
+                    metrics['late_pct'] = None
+                    metrics['app_late_pct'] = None
                 metrics['start_to_present_ms'] = spread([(p-s)*1000 for s,p in latency if s*1000 >= replay_starts[-1]])
                 result['latency_samples'] = latency
                 result['metrics'] = metrics
@@ -1065,6 +1086,7 @@ def main():
     for name in ('transcript_scroll', 'scroll_scenes'):
         shutil.copytree(ROOT / 'crates/zgx-script/examples' / name, sources / name)
     shutil.copy2(Path(__file__), sources / 'scroll.py')
+    shutil.copy2(ROOT/'scripts/perf/scroll_motion.py',sources/'scroll_motion.py')
     shutil.copy2(ROOT/'scripts/perf/zeron_fixture.luau',sources/'zeron_fixture.luau')
     if args.zeron_runner.is_file():
         audit['zeron_binary_sha256']=sha(args.zeron_runner)

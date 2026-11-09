@@ -38,6 +38,11 @@ class PublicSummaryTests(unittest.TestCase):
         self.assertIs(result['catalog_complete_after'],False)
         self.assertNotIn('catalog_complete',sanitize({'catalog_complete':'private text'}))
 
+    def test_incomplete_movement_evidence_never_exports_zero_late_as_a_pass(self):
+        m=sanitize({'metrics':{'late_pct':0,'cadence_scoring_complete':False}})['metrics']
+        self.assertIsNone(m['late_pct'])
+        self.assertFalse(m['cadence_scoring_complete'])
+
     def test_native_brackets_keep_numbers_and_discard_raw_samples(self):
         result = sanitize({'native_floor_before': {'status': 'valid', 'late_pct': 0,
                            'source': '/private/path', 'presentation_timings': {

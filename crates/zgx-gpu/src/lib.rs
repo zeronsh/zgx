@@ -5862,6 +5862,22 @@ impl GpuRenderer {
         }
     }
     fn render_once(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
+        // Where each scroll view's content is as this frame draws it, in
+        // device pixels, for devtools (only while tracing: a walk of every
+        // node). Its translation is the offset, negated.
+        if zgx::profile::enabled() {
+            let scale = self.scale;
+            for (id, at) in scene.scroll_contents() {
+                zgx::profile::note(|| {
+                    format!(
+                        "scroll @{} position {} {} px",
+                        id.number(),
+                        (at.x * scale).round(),
+                        (at.y * scale).round()
+                    )
+                });
+            }
+        }
         // Layer shaders with inputs: their pipelines and this frame's passes,
         // before anything draws them.
         if scene.has_layer_inputs() {
@@ -11264,6 +11280,15 @@ impl GpuRenderer {
                     },
                     blocker => (copy, blocker),
                 }
+            });
+            // How far it moved this frame, in device pixels, for devtools.
+            zgx::profile::note(|| {
+                format!(
+                    "scroll @{} moved {} {} px",
+                    scroll.node.number(),
+                    (scroll.dx * self.scale).round(),
+                    (scroll.dy * self.scale).round()
+                )
             });
             match refused {
                 Ok((copy, blocker)) => match blocker {
