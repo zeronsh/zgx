@@ -1409,12 +1409,19 @@ impl Latch {
     /// Frames rendered at once after a held one missed its refresh.
     const REST: u8 = 120;
     /// When a frame complete at `now` presents, on the refresh grid through
-    /// `origin` with `period`.
+    /// `origin` with `period`. `live`: a scroll is live (`Host::scroll_live`),
+    /// and the frame never waits past its point: it keeps no later cadence,
+    /// and one ready after its point hands over at once. Waiting for the next
+    /// point instead held the main thread a refresh, and the next frame,
+    /// starting after, missed its own start: at 120 Hz, frames ready near
+    /// their point (5 ms of work) kept to every other refresh for the rest
+    /// of the gesture, as no 8 in a row came ready 1.5 ms early.
     fn decide(
         &mut self,
         now: std::time::Instant,
         origin: std::time::Instant,
         period: std::time::Duration,
+        live: bool,
     ) -> std::time::Instant {
         if let Some(started) = self.started.take() {
             self.work = now
@@ -1428,11 +1435,22 @@ impl Latch {
         let ready = now
             .checked_sub(std::mem::take(&mut self.held))
             .unwrap_or(now);
-        let (mut at, early, kept) = self.choose(ready, origin, period);
+        let (mut at, early, kept) = self.choose(ready, origin, period, live);
         let chosen = at;
         while at < now {
             at += period;
         }
+        // Ready past its own refresh's point, `at` is the next's, nearly a
+        // refresh away: a live scroll's hands over now instead, and shows on
+        // the refresh it just missed (the point is `LEAD` ahead of it, more
+        // than the window server needs) or the one `at` is for, as it would
+        // have; the main thread is free for the next frame meanwhile. `at`
+        // stays the cadence frames keep to once the scroll ends.
+        let missed = at.saturating_duration_since(now) > period.saturating_sub(Self::LEAD);
+        let hand_over = match live && missed {
+            true => now,
+            false => at,
+        };
         self.early = early;
         // Why it waits, for devtools (`zgx inspect frames`).
         if kept {
@@ -1453,6 +1471,13 @@ impl Latch {
                 )
             });
         }
+        if live && missed {
+            zgx::profile::note(|| {
+                "ready after its refresh's point while scrolling: handed over at once, not \
+                 held a refresh"
+                    .into()
+            });
+        }
         // Held into a later refresh than planned: hold none for a while.
         if self
             .planned
@@ -1470,16 +1495,18 @@ impl Latch {
             self.resting = Self::REST;
         }
         self.last = Some((ready, at));
-        at
+        hand_over
     }
     /// The point a frame ready at `ready` presents at, the count of frames
     /// comfortably early on a later cadence that it leaves, and whether that
-    /// cadence put it a refresh later than it could have shown.
+    /// cadence put it a refresh later than it could have shown. `live` (a
+    /// scroll): no later cadence holds it.
     fn choose(
         &self,
         ready: std::time::Instant,
         origin: std::time::Instant,
         period: std::time::Duration,
+        live: bool,
     ) -> (std::time::Instant, u8, bool) {
         // The phase of `ready` on the grid, either side of `origin`.
         let period_ns = period.as_nanos().max(1);
@@ -1496,13 +1523,14 @@ impl Latch {
         };
         // A later cadence (the last frame's, whole refreshes after it) holds
         // until frames come comfortably early, several in a row.
-        let late = self.last.is_some_and(|(last, at)| {
-            let refreshes = (ready.saturating_duration_since(last).as_secs_f64()
-                / period.as_secs_f64())
-            .round();
-            let cadence = at + period.mul_f64(refreshes);
-            cadence > first + period / 2 && cadence < first + period * 3 / 2
-        });
+        let late = !live
+            && self.last.is_some_and(|(last, at)| {
+                let refreshes = (ready.saturating_duration_since(last).as_secs_f64()
+                    / period.as_secs_f64())
+                .round();
+                let cadence = at + period.mul_f64(refreshes);
+                cadence > first + period / 2 && cadence < first + period * 3 / 2
+            });
         let early = if late && first - ready >= Self::KEEP {
             self.early + 1
         } else {
@@ -1535,7 +1563,7 @@ impl Latch {
         period: std::time::Duration,
     ) -> std::time::Instant {
         let ready = now + self.work;
-        let (point, _, _) = self.choose(ready, origin, period);
+        let (point, _, _) = self.choose(ready, origin, period, false);
         self.room = point
             .saturating_duration_since(ready)
             .saturating_sub(Self::KEEP);
@@ -2807,15 +2835,20 @@ impl Host {
             } else {
                 // Steady frames render at a time of their own within their
                 // wait for the refresh point (`Latch::hold`); a scroll's at a
-                // slow refresh started late already (`LateSample`), and render
-                // at once.
+                // slow refresh started late already (`LateSample`), and every
+                // live scroll's renders at once: held, one the GPU then takes
+                // longer over misses its refresh.
                 #[cfg(target_os = "macos")]
                 let started_late = starts_late(
                     self.frame_interval,
                     self.scroll.active(std::time::Instant::now()),
                 );
                 #[cfg(target_os = "macos")]
-                if let Some((origin, period)) = self.refresh_grid().filter(|_| !started_late) {
+                let live = self.scroll_live(std::time::Instant::now());
+                #[cfg(target_os = "macos")]
+                if let Some((origin, period)) =
+                    self.refresh_grid().filter(|_| !started_late && !live)
+                {
                     let at = self.latch.hold(std::time::Instant::now(), origin, period);
                     let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                     sleep_until(at);
@@ -2937,6 +2970,25 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 let grid = self.refresh_grid();
                 #[cfg(target_os = "macos")]
+                let live = self.scroll_live(std::time::Instant::now());
+                // A frame that presents itself (a live scroll's drawable,
+                // `GpuRenderer::set_scrolling`) shows once the GPU is done
+                // with it: waiting here would only hold the main thread, and
+                // the next frame's input with it.
+                #[cfg(target_os = "macos")]
+                let presents_itself = self
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|renderer| renderer.frame_presents_itself());
+                #[cfg(target_os = "macos")]
+                let grid = match presents_itself {
+                    true => {
+                        self.latch = Latch::default();
+                        None
+                    }
+                    false => grid,
+                };
+                #[cfg(target_os = "macos")]
                 let latch = &mut self.latch;
                 // A frame the link paces at full rate, ready early, waits
                 // to land on the refresh the others do (`align_wait`); not
@@ -2946,7 +2998,9 @@ impl Host {
                 let link = self
                     .display_link
                     .as_ref()
-                    .filter(|_| grid.is_none() && self.link_paced && self.refresh_frame)
+                    .filter(|_| {
+                        grid.is_none() && !presents_itself && self.link_paced && self.refresh_frame
+                    })
                     .filter(|_| {
                         self.resized_at
                             .is_none_or(|at| at.elapsed() >= RESIZE_SETTLE)
@@ -2988,7 +3042,7 @@ impl Host {
                     #[cfg(target_os = "macos")]
                     if let Some((origin, period)) = grid {
                         ready_at.set(Some(std::time::Instant::now()));
-                        let at = latch.decide(std::time::Instant::now(), origin, period);
+                        let at = latch.decide(std::time::Instant::now(), origin, period, live);
                         let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                         sleep_until(at);
                     }
@@ -6304,12 +6358,19 @@ impl Host {
         };
         Some((now - phase, period))
     }
+    /// Whether a scroll is live in the window: a gesture, its momentum
+    /// (macOS's coast) or a touch's fling.
+    fn scroll_live(&self, now: std::time::Instant) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.coast.active() {
+            return true;
+        }
+        self.scroll.active(now) || self.touch.flinging()
+    }
     /// Start, stop or schedule this window's frame source to match demand.
     fn sync_frames(&mut self) {
         let now = std::time::Instant::now();
-        let scrolling = self.scroll.active(now) || self.touch.flinging();
-        #[cfg(target_os = "macos")]
-        let scrolling = scrolling || self.coast.active();
+        let scrolling = self.scroll_live(now);
         let wanted = (self.frames.wants_frame() || scrolling) && self.frames_presented();
         if !wanted {
             self.frame_heartbeat = None;
@@ -6356,6 +6417,7 @@ impl Host {
             self.link_paced = animating;
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_full_rate(wanted && rate.is_none());
+                renderer.set_scrolling(scrolling);
             }
             // Drawables are paced by the view's own link, tiles by the
             // display's (see `frame_source::display_link`).
@@ -8949,7 +9011,7 @@ mod tests {
         let mut latch = Latch::default();
         // Ready before the point: it presents on this refresh's point.
         let ready = origin + period * 10 + ms(2.);
-        let at = latch.decide(ready, origin, period);
+        let at = latch.decide(ready, origin, period, false);
         assert!((phase(at) - point).abs() < 0.01 && at - ready < period);
         // A 60 Hz stream ready right at the point, some frames just after it
         // and some just before, keeps one cadence: every frame two refreshes
@@ -8957,7 +9019,7 @@ mod tests {
         let mut last = at;
         for (i, offset) in [0.1, -0.1, 0.2, -0.2, 0.05, -0.3].into_iter().enumerate() {
             let ready = origin + period * (12 + 2 * i as u32) + ms(point + offset);
-            let at = latch.decide(ready, origin, period);
+            let at = latch.decide(ready, origin, period, false);
             assert!((phase(at) - point).abs() < 0.01);
             if i > 0 {
                 assert_eq!(
@@ -8968,16 +9030,16 @@ mod tests {
             last = at;
         }
         // Comfortably early again, frame after frame: back to the coming point.
-        let mut at = latch.decide(origin + period * 30 + ms(point - 3.), origin, period);
+        let mut at = latch.decide(origin + period * 30 + ms(point - 3.), origin, period, false);
         for i in 0..Latch::RETURN as u32 {
             let ready = origin + period * (32 + 2 * i) + ms(point - 3.);
-            at = latch.decide(ready, origin, period);
+            at = latch.decide(ready, origin, period, false);
             assert!(at - ready < ms(3.1) || i + 1 < Latch::RETURN as u32);
         }
         assert!((phase(at) - point).abs() < 0.01);
         // Never more than a refresh's wait, never in the past.
         let ready = origin + period * 40 + ms(7.);
-        let at = latch.decide(ready, origin, period);
+        let at = latch.decide(ready, origin, period, false);
         assert!(at >= ready && at - ready < period);
     }
     #[cfg(target_os = "macos")]
@@ -8990,19 +9052,24 @@ mod tests {
         let point = (period - Latch::LEAD).as_secs_f64() * 1e3;
         let mut latch = Latch::default();
         // A 60 Hz stream ready just after its point sets a later cadence.
-        latch.decide(origin + period * 10 + ms(point + 0.1), origin, period);
+        latch.decide(
+            origin + period * 10 + ms(point + 0.1),
+            origin,
+            period,
+            false,
+        );
         // The next, ready just before its point, could show a refresh
         // sooner: the cadence keeps it, and says so (`decide`'s note).
         let ready = origin + period * 12 + ms(point - 0.1);
-        let (_, _, kept) = latch.choose(ready, origin, period);
+        let (_, _, kept) = latch.choose(ready, origin, period, false);
         assert!(kept);
-        latch.decide(ready, origin, period);
+        latch.decide(ready, origin, period, false);
         // Comfortably early, frame after frame, it gives way: none kept.
         let mut kept = true;
         for i in 0..=Latch::RETURN as u32 {
             let ready = origin + period * (14 + 2 * i) + ms(point - 3.);
-            kept = latch.choose(ready, origin, period).2;
-            latch.decide(ready, origin, period);
+            kept = latch.choose(ready, origin, period, false).2;
+            latch.decide(ready, origin, period, false);
         }
         assert!(!kept);
     }
@@ -9023,7 +9090,7 @@ mod tests {
             let could = origin + period * (10 + 2 * i) + ms(1.);
             let start = latch.hold(could, origin, period);
             latch.rendering(start);
-            let at = latch.decide(start + ms(0.5), origin, period);
+            let at = latch.decide(start + ms(0.5), origin, period, false);
             latch.ran(ms(gpu));
             assert!((phase(at) - point).abs() < 0.01);
             assert!(at - could < period);
@@ -9041,6 +9108,77 @@ mod tests {
         // Held up there too: no room for another step, back to the start.
         assert_eq!(frame(8, 1.2), Latch::STEP);
         assert_eq!(frame(9, 0.3), Duration::ZERO);
+    }
+    /// A live scroll's frames at 120 Hz, heavy and uneven (a long transcript
+    /// under glass): each starts at the first refresh after the last was
+    /// handed over, as the timer starts them, and is ready its work later.
+    /// Returns the share of refreshes showing a new frame, and the mean and
+    /// longest time from a frame's start (its input sampled) to its refresh.
+    #[cfg(target_os = "macos")]
+    fn scroll_at_120(live: bool, works: &[f64]) -> (f64, f64, f64) {
+        use std::time::{Duration, Instant};
+        let period = Duration::from_nanos(8_333_333);
+        let ms = |v: f64| Duration::from_secs_f64(v / 1e3);
+        let origin = Instant::now();
+        let refresh = |at: Instant| at.duration_since(origin).as_nanos() / period.as_nanos();
+        let mut latch = Latch::default();
+        let mut handed = origin + period * 10;
+        let mut shown = std::collections::BTreeSet::new();
+        let (mut total, mut longest) = (Duration::ZERO, Duration::ZERO);
+        for &work in works {
+            let start = origin + period * (refresh(handed) as u32 + 1);
+            let ready = start + ms(work);
+            let at = latch.decide(ready, origin, period, live);
+            // Live, it never waits past the point it is ready for.
+            assert!(at >= ready);
+            if live {
+                assert!(at - ready <= period - Latch::LEAD, "{work} ms");
+            }
+            // Shown on the first refresh `LEAD` after it is handed over.
+            let on = refresh(at + Latch::LEAD + period - Duration::from_nanos(1));
+            shown.insert(on);
+            let latency = origin + period * on as u32 - start;
+            total += latency;
+            longest = longest.max(latency);
+            handed = at;
+        }
+        let span = shown.last().unwrap() - shown.first().unwrap() + 1;
+        (
+            shown.len() as f64 / span as f64,
+            total.as_secs_f64() * 1e3 / works.len() as f64,
+            longest.as_secs_f64() * 1e3,
+        )
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_live_scroll_s_frames_never_wait_past_their_point() {
+        // Frames of 3.5 to 7 ms (the point is 6.3 ms into a refresh), after
+        // one of 12 ms, a deterministic spread.
+        let mut seed = 12345u64;
+        let mut works = vec![12.];
+        works.extend((0..600).map(|_| {
+            seed = (seed * 1_103_515_245 + 12_345) % (1 << 31);
+            3.5 + 3.5 * seed as f64 / (1u64 << 31) as f64
+        }));
+        // Held for a later cadence, they kept to every other refresh, a
+        // refresh older on screen.
+        let (rate, mean, _) = scroll_at_120(false, &works);
+        assert!(
+            rate < 0.55 && mean > 16.,
+            "held: {rate:.2} of refreshes, {mean:.1} ms"
+        );
+        // Handed over at once when they miss their point, most refreshes
+        // show a new one, and none is older than a refresh more.
+        let (rate, mean, longest) = scroll_at_120(true, &works);
+        assert!(rate > 0.8, "live: {rate:.2} of refreshes");
+        assert!(
+            mean < 10.5 && longest < 16.7 + 0.1,
+            "live: {mean:.1} ms, at most {longest:.1}"
+        );
+        // Light frames show on every refresh either way.
+        let light: Vec<f64> = works.iter().map(|w| 3. + (w - 3.5) * 1.5 / 3.5).collect();
+        assert!(scroll_at_120(false, &light[1..]).0 > 0.99);
+        assert!(scroll_at_120(true, &light[1..]).0 > 0.99);
     }
     #[test]
     fn window_commands_preserve_recreation_options() {
