@@ -62,6 +62,19 @@ def sanitize(row):
     timing = source.get('presentation_timings', {})
     if isinstance(timing, dict):
         metrics['presentation_timings'] = timing_summary(timing)
+    if isinstance(source.get('frame_source_counts'), dict):
+        metrics['frame_source_counts'] = numeric_fields(source['frame_source_counts'],
+            ('view link', 'display link', 'timer on the grid', 'input or other'))
+    flags = row.get('host_env')
+    if isinstance(flags, dict):
+        allowed = {
+            'ZGX_VIEW_CLOCK': {'0', '1'}, 'ZGX_SCROLL_LINK': {'0', '1'},
+            'ZGX_SCROLL_DRAWABLES': {'0', '1'}, 'ZGX_HANDOVER_ASAP': {'0', '1'},
+            'ZGX_LEAD_US': {'4000', '5500'}, 'ZGX_GPU_STATS': {'1'},
+            'ZGX_SHADOW_WHOLE': {'1'},
+        }
+        result['host_env'] = {key: value for key, value in flags.items()
+                              if key in allowed and isinstance(value, str) and value in allowed[key]}
     result['metrics'] = metrics
     for key in ('native_floor_before', 'native_floor_after'):
         floor = row.get(key)

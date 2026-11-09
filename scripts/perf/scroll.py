@@ -221,7 +221,7 @@ def behavior_checks(metrics, overrides, presents, present, reference, require_so
     flags=dict(value.split('=',1) for value in overrides)
     pacing=any(flags.get(key)=='1' for key in ('ZGX_HANDOVER_ASAP','ZGX_VIEW_CLOCK','ZGX_SCROLL_LINK')) or 'ZGX_LEAD_US' in flags
     counts=metrics.get('frame_source_counts',{})
-    if pacing or require_source or counts or expected_source:
+    if pacing or require_source or expected_source:
         timer=flags.get('ZGX_HANDOVER_ASAP')=='1' or 'ZGX_LEAD_US' in flags or (not reference and flags.get('ZGX_SCROLL_LINK')!='1')
         expected='timer on the grid' if timer else 'view link' if flags.get('ZGX_VIEW_CLOCK')=='1' else 'display link'
         if not timer and (present=='1' or (present=='auto' and any(len(r)>3 and r[3]>0 for r in presents)) or (flags.get('ZGX_SCROLL_DRAWABLES')=='1' and not reference)):

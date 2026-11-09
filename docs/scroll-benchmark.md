@@ -409,3 +409,5 @@ These expectations are checked against observed notes without forcing the
 candidate's default on through an environment flag. Declare the same-binary
 control's expected modes separately and adjust expectations for the requested
 refresh rate; unsupported or mismatched source notes invalidate the cell.
+
+The desktop trace emits frame-source mode notes on macOS. CV-link alignment sleeps are recorded as Wait, separately from present. These trace-only diagnostics leave untraced idle windows idle; do not compare wait/present phase totals to older builds that put that alignment sleep inside present. Numeric exports retain only the known source modes and diagnostic flags.

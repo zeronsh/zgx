@@ -2722,6 +2722,22 @@ impl Host {
     fn draw_frame(&mut self) -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "macos")]
         {
+            // What paced this frame, for devtools.
+            zgx::profile::note(|| {
+                let view = self
+                    .display_link
+                    .as_ref()
+                    .is_some_and(|link| link.on_view_clock());
+                format!(
+                    "frame source: {}",
+                    match (self.link_paced, self.vsync_paced, view) {
+                        (true, _, true) => "view link",
+                        (true, _, false) => "display link",
+                        (false, true, _) => "timer on the grid",
+                        (false, false, _) => "input or other",
+                    }
+                )
+            });
             let now = std::time::Instant::now();
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_frame_start(now);
@@ -3085,6 +3101,7 @@ impl Host {
                         });
                         // One wakeup, not `sleep_until`'s two: running late
                         // only moves it nearer the point, still before it.
+                        let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                         std::thread::sleep(wait);
                     }
                 })?;

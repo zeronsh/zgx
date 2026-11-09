@@ -17,6 +17,12 @@ class PublicSummaryTests(unittest.TestCase):
             'late_pct': 3.5, 'main_work_ms': {'p99': 2.1},
             'presentation_timings': {'coverage': {'clock_mismatch': 0}}}))
 
+    def test_flags_and_modes_do_not_copy_arbitrary_environment_or_notes(self):
+        result = sanitize({'host_env': {'ZGX_VIEW_CLOCK': '0', 'SECRET_TOKEN': 'private'},
+                           'metrics': {'frame_source_counts': {'view link': 100, '/private/source': 8}}})
+        self.assertEqual(result['host_env'], {'ZGX_VIEW_CLOCK': '0'})
+        self.assertEqual(result['metrics']['frame_source_counts'], {'view link': 100})
+
     def test_native_brackets_keep_numbers_and_discard_raw_samples(self):
         result = sanitize({'native_floor_before': {'status': 'valid', 'late_pct': 0,
                            'source': '/private/path', 'presentation_timings': {

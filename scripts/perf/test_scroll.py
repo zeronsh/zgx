@@ -9,6 +9,11 @@ import scroll
 
 
 class ScrollMetrics(unittest.TestCase):
+    def test_normal_gate_records_a_new_default_without_assuming_an_old_mode(self):
+        metrics={'frame_source_counts':{'view link':100},'render_frames':100}
+        self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',True),{})
+        self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',False),{})
+
     def test_changed_default_is_verified_without_forcing_an_environment_flag(self):
         metrics={'frame_source_counts':{'view link':100},'render_frames':100}
         proof=scroll.behavior_checks(metrics,[],[],'0',True,True,'view link')
