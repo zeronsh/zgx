@@ -4440,14 +4440,19 @@ fn styled(
                     match timers.as_ref() {
                         Some(timers) => {
                             let deliver = deliver.clone();
-                            let stop = timers.start(
-                                std::time::Duration::from_millis(1),
-                                false,
-                                move || {
-                                    deliver();
-                                    false
-                                },
-                            );
+                            // Its first report is due at once: an element that
+                            // mounts as the view jumps (a list's new rows) hears
+                            // it in the frame that shows it, and what it builds
+                            // lays out before that frame is drawn. A change
+                            // after waits a millisecond, past this frame.
+                            let wait = match told.get() {
+                                None => std::time::Duration::ZERO,
+                                Some(_) => std::time::Duration::from_millis(1),
+                            };
+                            let stop = timers.start(wait, false, move || {
+                                deliver();
+                                false
+                            });
                             *pending.borrow_mut() = Some(stop);
                         }
                         None => deliver(),
