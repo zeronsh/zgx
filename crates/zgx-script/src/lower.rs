@@ -6755,6 +6755,13 @@ fn gradient_of(gradient: &crate::node::GradientLit) -> zgx::decoration::Gradient
         },
     }
 }
+/// `resolve` for a `ui.map`: out of line, as few styles have one, to keep
+/// `resolve` the size it was.
+#[cold]
+#[inline(never)]
+fn mapped(spec: &crate::node::MapSpec, ty: Ty) -> Option<Lit> {
+    lit(&Value::Num(spec.value() as f64), ty)
+}
 fn resolve(source: &Owned, ty: Ty, scalar: Option<&Signal<f32>>, vm: &Vm) -> Option<Lit> {
     match source {
         Owned::Lit(l) => Some(l.clone()),
@@ -6765,7 +6772,7 @@ fn resolve(source: &Owned, ty: Ty, scalar: Option<&Signal<f32>>, vm: &Vm) -> Opt
             .find_map(|(p, l)| (p == prop).then(|| l.clone())),
         Owned::State(s) => s.with(|v| lit(v, ty).or_else(|| refused(v, ty, vm))),
         // Mapped in Rust from the states it reads: no script runs.
-        Owned::Map(spec) => lit(&Value::Num(spec.value() as f64), ty),
+        Owned::Map(spec) => mapped(spec, ty),
         // A colour or a number (most computed styles): read from what the
         // function returned as it is, without making a `Value` of it first.
         Owned::Computed(f, cache) if matches!(ty, Ty::Color | Ty::Num) => {
