@@ -344,3 +344,57 @@ fn endpoint_functions_follow_their_own_dependencies_independently() {
     assert_eq!(h.bounds("thumb").y, 19.);
     assert_eq!(h.calls() - calls, 1, "only the changed to endpoint runs");
 }
+
+#[test]
+fn removing_and_remounting_the_same_key_disposes_all_mapped_effects() {
+    let mut h = Harness::inline(include_str!("fixtures/mapped-remount.luau"));
+    h.frames(2);
+    let empty_effects = h.ui.runtime.effect_count();
+    let mut mounted_effects = None;
+    let mut previous = None;
+    for limit in [100., 200., 400.] {
+        let calls = h.calls();
+        set(&h, "limit", limit);
+        set(&h, "offset", 50.);
+        h.frame();
+        assert_eq!(h.calls(), calls, "removed endpoints have no subscriptions");
+        assert_eq!(h.ui.runtime.effect_count(), empty_effects);
+
+        h.host
+            .set_state("keys", Value::List(vec![Value::Str("a".into())].into()))
+            .unwrap();
+        h.frame();
+        let thumb = h.find("thumb-a").unwrap();
+        if let Some(previous) = previous {
+            assert_ne!(thumb, previous, "the remount has a new node generation");
+            assert!(!h.ui.scene.borrow().contains(previous));
+        }
+        assert_eq!(h.bounds("thumb-a").y, 4. + 5000. / limit as f32);
+        let effects = h.ui.runtime.effect_count();
+        assert_eq!(*mounted_effects.get_or_insert(effects), effects);
+
+        let calls = h.calls();
+        set(&h, "limit", limit * 2.);
+        h.frame();
+        assert_eq!(h.calls() - calls, 1, "only the current endpoint runs");
+        assert_eq!(h.bounds("thumb-a").y, 4. + 2500. / limit as f32);
+        let calls = h.calls();
+        set(&h, "offset", 75.);
+        h.frame();
+        assert_eq!(h.calls(), calls, "the remounted inset remains native");
+        assert_eq!(h.bounds("thumb-a").y, 4. + 3750. / limit as f32);
+
+        h.host
+            .set_state("keys", Value::List(Vec::new().into()))
+            .unwrap();
+        h.frame();
+        assert!(h.find("thumb-a").is_none());
+        assert!(!h.ui.scene.borrow().contains(thumb));
+        assert_eq!(
+            h.ui.runtime.effect_count(),
+            empty_effects,
+            "endpoint, affine, and mounted binding effects are all disposed"
+        );
+        previous = Some(thumb);
+    }
+}
