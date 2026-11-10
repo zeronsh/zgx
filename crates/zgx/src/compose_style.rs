@@ -1813,9 +1813,11 @@ fn apply_resolved(
         effects.saturate = value;
     }
     let mut scene = ui.scene.borrow_mut();
-    // An absolute node (a scrollbar's thumb in its rail) may stop its
-    // walk at its parent (`Scene::set_style_stopping`).
-    match style.absolute {
+    // An absolute node (a scrollbar's thumb in its rail, which a relative
+    // block above places) may stop its walk at its parent
+    // (`Scene::set_style_stopping`). A scene with no relative block has no
+    // such rail, and its absolute nodes' styles ask nothing more.
+    match style.absolute && scene.has_relative_nodes() {
         true => scene.set_style_stopping(node, style.clone()),
         false => scene.set_style(node, style.clone()),
     }

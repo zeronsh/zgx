@@ -7847,6 +7847,13 @@ impl Scene {
     pub(crate) fn set_style_stopping(&mut self, id: NodeId, style: Style) {
         self.restyle_as::<false, true>(id, style, true, id);
     }
+    /// Whether any node is `relative`: a box a relative block above places
+    /// (a scrollbar's rail over a transcript) can only be one then, and a
+    /// style with no such block has no stop to look for (`set_style_stopping`).
+    #[inline(always)]
+    pub(crate) fn has_relative_nodes(&self) -> bool {
+        self.relative_count != 0
+    }
     /// Whether any node has a `special` bit: what a style with nothing rare
     /// must still look at, in case it has lost something.
     #[inline(always)]
