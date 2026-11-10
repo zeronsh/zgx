@@ -18685,13 +18685,14 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
     // dots of a spinner) are fewer draws as one, for a few more pixels. The
     // pixels gained are bounded by the smaller region, so a large region
     // doesn't swallow every small one in reach, growing as it goes.
-    let area = |r: Rect| r.width * r.height * scale * scale;
-    let close = |a: Rect, b: Rect| {
+    // (In whole device pixels, where parts and unions are exact.)
+    let area = |r: PixelBox| r.area() as f32;
+    let close = |a: PixelBox, b: PixelBox| {
         let (a, b) = (area(a), area(b));
         a + b + a.min(b) * 0.5 + NEAR_PIXELS
     };
-    let close = |a: Rect, b: Rect| a.intersects(b) || area(a.union(b)) <= close(a, b);
-    let mut regions: Vec<Rect> = Vec::new();
+    let close = |a: PixelBox, b: PixelBox| area(a.union(b)) <= close(a, b);
+    let mut regions: Vec<PixelBox> = Vec::new();
     let rounded: Vec<Rect>;
     let damage = if damage.len() > MAX_REGIONS {
         rounded = cluster_damage(damage, viewport);
@@ -18699,10 +18700,16 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
     } else {
         damage
     };
+    // Regions overlapping whose union is no bargain (a glass's ink over a
+    // fade's band across the view) aren't merged for it: they'd grow to
+    // their whole span, as wide as the larger and as tall as both. Each is
+    // left whole here, and the overlap goes after (each later one less what
+    // came before it), so the regions drawn never overlap.
     for r in damage {
-        let Some(mut r) = rounded_damage(*r, viewport, scale) else {
+        let Some(r) = rounded_damage(*r, viewport, scale) else {
             continue;
         };
+        let mut r = PixelBox::of(r, scale);
         let mut i = 0;
         while i < regions.len() {
             if close(regions[i], r) {
@@ -18714,7 +18721,79 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
         }
         regions.push(r);
     }
-    regions
+    let mut apart: Vec<PixelBox> = Vec::with_capacity(regions.len());
+    for region in regions {
+        let mut parts = vec![region];
+        for before in &apart {
+            parts = parts
+                .into_iter()
+                .flat_map(|part| -> Vec<PixelBox> {
+                    match part.meet(*before) {
+                        Some(both) => part.outside(both).collect(),
+                        None => vec![part],
+                    }
+                })
+                .collect();
+        }
+        apart.extend(parts);
+    }
+    apart.into_iter().map(|r| r.rect(scale)).collect()
+}
+/// A rectangle in whole device pixels: left, top, right, bottom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PixelBox(i64, i64, i64, i64);
+impl PixelBox {
+    /// `rect`, on whole device pixels already (`rounded_damage`).
+    fn of(rect: Rect, scale: f32) -> Self {
+        let px = |v: f32| (v * scale).round() as i64;
+        Self(
+            px(rect.x),
+            px(rect.y),
+            px(rect.x + rect.width),
+            px(rect.y + rect.height),
+        )
+    }
+    fn rect(self, scale: f32) -> Rect {
+        let pt = |v: i64| v as f32 / scale;
+        Rect::new(
+            pt(self.0),
+            pt(self.1),
+            pt(self.2) - pt(self.0),
+            pt(self.3) - pt(self.1),
+        )
+    }
+    fn area(self) -> i64 {
+        (self.2 - self.0).max(0) * (self.3 - self.1).max(0)
+    }
+    fn union(self, other: Self) -> Self {
+        Self(
+            self.0.min(other.0),
+            self.1.min(other.1),
+            self.2.max(other.2),
+            self.3.max(other.3),
+        )
+    }
+    /// Where the two overlap, by a pixel or more.
+    fn meet(self, other: Self) -> Option<Self> {
+        let both = Self(
+            self.0.max(other.0),
+            self.1.max(other.1),
+            self.2.min(other.2),
+            self.3.min(other.3),
+        );
+        (both.2 > both.0 && both.3 > both.1).then_some(both)
+    }
+    /// This less `inner`, a part of it: up to four boxes around it.
+    fn outside(self, inner: Self) -> impl Iterator<Item = Self> {
+        [
+            Self(self.0, self.1, self.2, inner.1),
+            Self(self.0, inner.3, self.2, self.3),
+            Self(self.0, inner.1, inner.0, inner.3),
+            Self(inner.2, inner.1, self.2, inner.3),
+        ]
+        .into_iter()
+        .filter(|part| part.area() > 0)
+    }
 }
 
 /// Text shaping and measurement without a GPU: what a renderer installs on
@@ -19058,6 +19137,86 @@ mod shadow_blur_tests {
                 [(blurred.texels.1 / 2 * blurred.texels.0 + blurred.texels.0 / 2) as usize];
             assert!(middle < 255, "sigma {sigma}: lighter in the middle");
             assert!(sigma < 4. || step > 1, "a wide blur is averaged down");
+        }
+    }
+    /// A scroll frame under a composer and a pill in a chat whose foot fades
+    /// (1240x820 at 2x): the pill's ink over the fade's band across the view
+    /// stays apart from it, not their whole span repainted. Every rect is
+    /// covered, the regions don't overlap, and no more is drawn than the
+    /// rects themselves cover, but for what nearby small ones are worth
+    /// merging.
+    #[test]
+    fn damage_over_a_band_stays_apart_where_merging_would_widen_it() {
+        use crate::{Rect, merge_damage};
+        let viewport = Rect::new(0., 0., 1240., 820.);
+        let damage = [
+            Rect::new(0., 719., 1240., 61.),
+            Rect::new(0., 38., 1240., 24.),
+            Rect::new(536., 680., 168., 39.),
+            Rect::new(0., 672., 1240., 8.),
+            Rect::new(0., 711., 536., 8.),
+            Rect::new(704., 711., 536., 8.),
+            Rect::new(1235., 170., 3., 81.),
+            Rect::new(555.1, 695., 129.8, 30.),
+            Rect::new(290., 731., 660., 49.),
+        ];
+        let regions = merge_damage(&damage, viewport, 2.);
+        let area = |r: &Rect| r.width * r.height * 4.;
+        for (i, a) in regions.iter().enumerate() {
+            for b in &regions[i + 1..] {
+                assert!(a.intersection(*b).is_none(), "{a:?} and {b:?} overlap");
+            }
+        }
+        // Covered: every rect's pixels, sampled each device pixel.
+        for rect in &damage {
+            let (x0, y0) = ((rect.x * 2.).floor() as i32, (rect.y * 2.).floor() as i32);
+            let (x1, y1) = (
+                ((rect.x + rect.width) * 2.).ceil() as i32,
+                ((rect.y + rect.height) * 2.).ceil() as i32,
+            );
+            for y in (y0..y1).step_by(3) {
+                for x in (x0..x1).step_by(3) {
+                    let (px, py) = (x as f32 / 2. + 0.25, y as f32 / 2. + 0.25);
+                    assert!(
+                        regions.iter().any(|r| px >= r.x
+                            && px < r.x + r.width
+                            && py >= r.y
+                            && py < r.y + r.height),
+                        "{px},{py} of {rect:?} left out of {regions:?}"
+                    );
+                }
+            }
+        }
+        let drawn: f32 = regions.iter().map(area).sum();
+        // The rects' own union: the fade's band and the strips beside the
+        // pill as one, the pill's ink above it, the top band, the strip, the
+        // thumb (522,764 px). Their whole span from the pill down was 655,692.
+        assert!(drawn <= 530_000., "{drawn} px drawn: {regions:?}");
+        // At scales whose pixels aren't whole points, edges an f32 holds only
+        // nearly: the parts are exact pixels, so this ends, the same as ever.
+        for scale in [1.25, 1.5, 1.75] {
+            let regions = merge_damage(&damage, viewport, scale);
+            for (i, a) in regions.iter().enumerate() {
+                for b in &regions[i + 1..] {
+                    let both = a.intersection(*b);
+                    assert!(
+                        both.is_none_or(
+                            |both| both.width * scale < 0.5 || both.height * scale < 0.5
+                        ),
+                        "scale {scale}: {a:?} and {b:?} overlap"
+                    );
+                }
+            }
+            for rect in &damage {
+                let centre = (rect.x + rect.width / 2., rect.y + rect.height / 2.);
+                assert!(
+                    regions.iter().any(|r| centre.0 >= r.x
+                        && centre.0 < r.x + r.width
+                        && centre.1 >= r.y
+                        && centre.1 < r.y + r.height),
+                    "scale {scale}: {rect:?}'s centre left out"
+                );
+            }
         }
     }
     /// Sigma is keyed in eighths of a device pixel, at most 128 pixels; none,
