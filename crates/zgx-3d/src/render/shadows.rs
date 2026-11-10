@@ -1,7 +1,7 @@
 //! The sun's shadow map: its view of the opaque meshes, its pipelines and
 //! its texture.
 use super::{
-    DEPTH, Gpu, Variant,
+    DEPTH, Gpu, Run, Variant,
     materials::{Extent, layout_of, make_layout},
     pipelines::vertex_buffers,
     shader::wgsl,
@@ -227,6 +227,63 @@ pub(super) fn depth_map(device: &wgpu::Device, side: u32, label: &str) -> wgpu::
             view_formats: &[],
         })
         .create_view(&Default::default())
+}
+
+/// The shadow pass: opaque meshes' depth as the sun sees them, into `map`,
+/// each run's `instances` bound.
+pub(super) fn draw_shadows(
+    encoder: &mut wgpu::CommandEncoder,
+    gpu: &Gpu,
+    runs: &[Run],
+    map: &wgpu::TextureView,
+    instances: &wgpu::Buffer,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("3D shadows"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: map,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    pass.set_bind_group(0, &gpu.shadow_bind, &[]);
+    pass.set_vertex_buffer(1, instances.slice(..));
+    // Translucent meshes cast none.
+    for run in runs.iter().filter(|run| !run.glass) {
+        let buffers = &gpu.geometries[&run.geometry];
+        let (skinned, morphing) = (run.variant.skinned(), run.variant.morphing());
+        let key = shadow_key(run.variant);
+        let (masked, placed) = (key & CUT_OUT != 0, key & PLACED != 0);
+        match gpu.shadow_variants.get(&key) {
+            Some(pipeline) => {
+                pass.set_pipeline(pipeline);
+                let maps = gpu.bindings.get(&run.maps).filter(|_| masked);
+                pass.set_bind_group(1, maps.map_or(&gpu.empty_bind, |(binding, _)| binding), &[]);
+                if let Some((_, _, joints)) = gpu.palettes.as_ref().filter(|_| skinned || morphing)
+                {
+                    pass.set_bind_group(2, joints, &[]);
+                }
+                if let Some(skin) = buffers.skin.as_ref().filter(|_| skinned) {
+                    pass.set_vertex_buffer(2, skin.slice(..));
+                }
+                if let Some(uvs) = buffers.second_uvs.as_ref().filter(|_| placed) {
+                    pass.set_vertex_buffer(2 + u32::from(skinned), uvs.slice(..));
+                }
+                if let Some(morphs) = buffers.morphs.as_ref().filter(|_| morphing) {
+                    pass.set_bind_group(3, morphs, &[]);
+                }
+            }
+            None => pass.set_pipeline(&gpu.shadow),
+        }
+        pass.set_vertex_buffer(0, buffers.vertices.slice(..));
+        pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..buffers.count, 0, run.instances.clone());
+    }
 }
 
 #[cfg(test)]

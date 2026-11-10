@@ -1,8 +1,9 @@
 //! What a renderer keeps on the device: its pipelines, layouts, bindings,
 //! buffers by geometry, uploaded maps and targets.
 use super::{
-    Behind, Variant,
+    Variant,
     frame::{FrameUniforms, environment_layout, frame_binding},
+    graph::Graph,
     materials::{Extent, map_layout, texture_sampler},
     pipelines::main_pipelines,
     shader::wgsl,
@@ -85,9 +86,6 @@ pub(super) struct Gpu {
     /// Group 1 with what is behind as well, for meshes light passes
     /// through: made with the first.
     pub(super) glass_layout: Option<wgpu::BindGroupLayout>,
-    /// What is behind meshes light passes through, kept while a world has
-    /// any.
-    pub(super) behind: Option<Behind>,
     pub(super) wrapped_samplers: HashMap<[crate::Wrap; 2], wgpu::Sampler>,
     /// Each set of maps meshes draw with (`map_set`), bound.
     pub(super) bindings: HashMap<[u64; MAPS], (wgpu::BindGroup, u64)>,
@@ -96,9 +94,9 @@ pub(super) struct Gpu {
     pub(super) stand_ins: Option<[wgpu::TextureView; MAPS]>,
     pub(super) instances: Option<(wgpu::Buffer, usize)>,
     pub(super) geometries: HashMap<u64, Buffers>,
-    /// Its size, and its multisampled colour (none drawing one sample a
-    /// pixel: the frame's target itself) and depth.
-    pub(super) targets: Option<((u32, u32), Option<wgpu::TextureView>, wgpu::TextureView)>,
+    /// The frame's passes and their targets, what is behind meshes light
+    /// passes through among them.
+    pub(super) graph: Graph,
     /// Samples a pixel (`World::set_samples`).
     pub(super) samples: u32,
     pub(super) frame: u64,
@@ -311,14 +309,13 @@ impl Gpu {
             placed_layout: None,
             layered_layout: None,
             glass_layout: None,
-            behind: None,
             wrapped_samplers: HashMap::new(),
             views: HashMap::new(),
             bindings: HashMap::new(),
             stand_ins: None,
             instances: None,
             geometries: HashMap::new(),
-            targets: None,
+            graph: Graph::new(format, samples),
             samples,
             frame: 0,
         }

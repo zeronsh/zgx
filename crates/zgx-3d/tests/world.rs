@@ -523,6 +523,45 @@ fn a_mesh_light_passes_through_shows_what_is_behind_it() {
 }
 
 #[test]
+fn a_world_that_rested_draws_its_frames_as_one_that_never_did() {
+    // Glass: what is behind it is a temporary too, and its binding reads it.
+    let unlit = |rgb| {
+        let mut material = Material::rgb(rgb);
+        material.unlit = true;
+        material
+    };
+    let (world, behind) = one(facing_square(), unlit(0xff0000));
+    world.set_transform(behind, Transform::at([0., 0., -1.]));
+    let pane = world.add(Object::mesh(
+        facing_square(),
+        Material::rgb(0xffffff).with(0., 0.),
+    ));
+    world.set_transmission(pane, Some(Transmission::new(1.)));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    assert!(window.pixel(50, 50)[0] > 200, "red through it");
+    // The window goes idle: the world lets go of its temporaries. What is
+    // behind then changes: the glass shows it, not what was behind before.
+    window.gpu.trim();
+    world.set_material(behind, unlit(0x0000ff));
+    window.draw();
+    let rested = window.gpu.readback().unwrap();
+    let through = window.pixel(50, 50);
+    assert!(
+        through[2] > 200 && through[0] < 40,
+        "blue through it: {through:?}"
+    );
+    let mut fresh = Window::new(&world).unwrap();
+    fresh.draw();
+    assert!(
+        fresh.gpu.readback().unwrap() == rested,
+        "as a world never rested"
+    );
+}
+
+#[test]
 fn a_volume_takes_out_light_by_how_far_it_goes() {
     let (world, pane) = red_behind_glass(Material::rgb(0xffffff).with(0., 0.));
     let Some(mut window) = Window::new(&world) else {

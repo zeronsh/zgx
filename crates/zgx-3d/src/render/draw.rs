@@ -101,3 +101,63 @@ pub(super) fn draw_run(pass: &mut wgpu::RenderPass<'_>, gpu: &Gpu, run: &Run, bo
     bound.indices(pass, &buffers.indices);
     pass.draw_indexed(0..buffers.count, 0, run.instances.clone());
 }
+/// The meshes' pass: each run drawn into the frame's targets, resolved
+/// into `target` (multisampled) or straight into it, cleared to `clear`.
+pub(super) fn draw_main(
+    encoder: &mut wgpu::CommandEncoder,
+    gpu: &Gpu,
+    runs: &[Run],
+    target: &wgpu::TextureView,
+    frame_bind: &wgpu::BindGroup,
+    clear: wgpu::Color,
+) {
+    let Some(targets) = &gpu.graph.targets else {
+        return;
+    };
+    let (colour, depth_view) = (&targets.colour, &targets.depth);
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("3D"),
+        // Multisampled, resolved into the target; else into it.
+        color_attachments: &[Some(match colour {
+            Some(colour) => wgpu::RenderPassColorAttachment {
+                view: colour,
+                depth_slice: None,
+                resolve_target: Some(target),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear),
+                    store: wgpu::StoreOp::Discard,
+                },
+            },
+            None => wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(clear),
+                    store: wgpu::StoreOp::Store,
+                },
+            },
+        })],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth_view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.),
+                store: wgpu::StoreOp::Discard,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    });
+    let Some((instances_buffer, _)) = &gpu.instances else {
+        return;
+    };
+    pass.set_bind_group(0, frame_bind, &[]);
+    pass.set_vertex_buffer(1, instances_buffer.slice(..));
+    // Each run sets only what differs from the run before: wgpu records
+    // and checks every call, the same pipeline or buffer again too.
+    let mut bound = Bound::default();
+    for run in runs.iter() {
+        draw_run(&mut pass, gpu, run, &mut bound);
+    }
+    drop(pass);
+}

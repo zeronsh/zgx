@@ -128,7 +128,7 @@ pub(super) fn make_binding(
     let (layout, sampler) = (&gpu.texture_layout, &gpu.texture_sampler);
     let (placed_layout, wrapped) = (&mut gpu.placed_layout, &mut gpu.wrapped_samplers);
     let (layered_layout, glass_layout) = (&mut gpu.layered_layout, &mut gpu.glass_layout);
-    let behind = &gpu.behind;
+    let behind = &gpu.graph.behind;
     let view = |i: usize| {
         d.maps[i]
             .and_then(|t| views.get(&(t.id(), crate::Map::ALL[i].srgb())))

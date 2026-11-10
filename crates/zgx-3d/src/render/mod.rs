@@ -16,11 +16,13 @@ mod behind;
 mod draw;
 mod frame;
 mod gpu;
+mod graph;
 mod instances;
 mod materials;
 mod pipelines;
 mod shader;
 mod shadows;
+mod targets;
 mod variant;
 
 use crate::{
@@ -29,13 +31,14 @@ use crate::{
     world::Inner,
 };
 use behind::{Behind, draw_behind};
-use draw::{Bound, Run, draw_run};
+use draw::{Run, draw_main};
 use frame::frame_uniforms;
 use gpu::{Buffers, Gpu};
+use graph::Pass;
 use instances::{Instance, instance, morph_block};
 use materials::{make_binding, map_set, placed, upload};
 use pipelines::make_main_pipelines;
-use shadows::{CUT_OUT, Casting, PLACED, SHADOW_SIZE, make_shadow_pipeline, shadow_key, sun_view};
+use shadows::{Casting, SHADOW_SIZE, draw_shadows, make_shadow_pipeline, shadow_key, sun_view};
 use std::{cell::RefCell, rc::Weak};
 use variant::Variant;
 use zgx_gpu::{
@@ -105,31 +108,17 @@ impl Viewport for Renderer {
         let gpu = self.gpu.as_mut().unwrap();
         gpu.frame += 1;
         let size = frame.size;
-        if gpu.targets.as_ref().is_none_or(|(at, ..)| *at != size) {
-            let texture = |format, label| {
-                frame
-                    .device
-                    .create_texture(&wgpu::TextureDescriptor {
-                        label: Some(label),
-                        size: wgpu::Extent3d {
-                            width: size.0,
-                            height: size.1,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: samples,
-                        dimension: wgpu::TextureDimension::D2,
-                        format,
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        view_formats: &[],
-                    })
-                    .create_view(&Default::default())
-            };
-            gpu.targets = Some((
-                size,
-                (samples > 1).then(|| texture(format, "3D colour")),
-                texture(DEPTH, "3D depth"),
-            ));
+        // The frame's passes, compiled again only as what they follow
+        // changes.
+        let transmits = world.transmits();
+        let config = graph::Config {
+            size,
+            shadows: world.shadows,
+            transmits,
+        };
+        if gpu.graph.prepare(frame.device, config) {
+            // Bindings of what was behind before.
+            gpu.bindings.clear();
         }
 
         let camera = world.camera;
@@ -367,15 +356,6 @@ impl Viewport for Renderer {
                 }
             }
         }
-        // What is behind meshes light passes through, at the frame's size.
-        let transmits = world.transmits();
-        if transmits && gpu.behind.as_ref().is_none_or(|b| b.size != size) {
-            gpu.behind = Some(Behind::new(frame.device, gpu.format, size));
-            // Bindings of what was behind before.
-            gpu.bindings.clear();
-        } else if !transmits && gpu.behind.is_some() {
-            gpu.behind = None;
-        }
         // Each set of maps bound once, against stand-ins where a map is
         // missing. (Meshes sharing one are mostly neighbours by now.)
         let mut last = &[0; MAPS];
@@ -486,70 +466,6 @@ impl Viewport for Renderer {
                 make_shadow_pipeline(gpu, frame.device, run.variant);
             }
         }
-        if casting.is_some()
-            && casting != gpu.shadow_drawn
-            && let (Some(map), Some((instances_buffer, _))) = (&gpu.shadow_map, &gpu.instances)
-        {
-            let mut pass = frame
-                .encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("3D shadows"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: map,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.),
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    ..Default::default()
-                });
-            pass.set_bind_group(0, &gpu.shadow_bind, &[]);
-            pass.set_vertex_buffer(1, instances_buffer.slice(..));
-            // Translucent meshes cast none.
-            for run in runs.iter().filter(|run| !run.glass) {
-                let buffers = &gpu.geometries[&run.geometry];
-                let (skinned, morphing) = (run.variant.skinned(), run.variant.morphing());
-                let key = shadow_key(run.variant);
-                let (masked, placed) = (key & CUT_OUT != 0, key & PLACED != 0);
-                match gpu.shadow_variants.get(&key) {
-                    Some(pipeline) => {
-                        pass.set_pipeline(pipeline);
-                        let maps = gpu.bindings.get(&run.maps).filter(|_| masked);
-                        pass.set_bind_group(
-                            1,
-                            maps.map_or(&gpu.empty_bind, |(binding, _)| binding),
-                            &[],
-                        );
-                        if let Some((_, _, joints)) =
-                            gpu.palettes.as_ref().filter(|_| skinned || morphing)
-                        {
-                            pass.set_bind_group(2, joints, &[]);
-                        }
-                        if let Some(skin) = buffers.skin.as_ref().filter(|_| skinned) {
-                            pass.set_vertex_buffer(2, skin.slice(..));
-                        }
-                        if let Some(uvs) = buffers.second_uvs.as_ref().filter(|_| placed) {
-                            pass.set_vertex_buffer(2 + u32::from(skinned), uvs.slice(..));
-                        }
-                        if let Some(morphs) = buffers.morphs.as_ref().filter(|_| morphing) {
-                            pass.set_bind_group(3, morphs, &[]);
-                        }
-                    }
-                    None => pass.set_pipeline(&gpu.shadow),
-                }
-                pass.set_vertex_buffer(0, buffers.vertices.slice(..));
-                pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..buffers.count, 0, run.instances.clone());
-            }
-            drop(pass);
-            *spare = std::mem::replace(&mut gpu.shadow_drawn, casting.take());
-        }
-        if casting.is_some() {
-            *spare = casting;
-        }
-
         for run in runs.iter() {
             let variant = run.variant;
             if variant == Variant::default() || gpu.variants.contains_key(&variant) {
@@ -557,7 +473,6 @@ impl Viewport for Renderer {
             }
             make_main_pipelines(gpu, frame.device, variant);
         }
-        let (_, colour, depth_view) = gpu.targets.as_ref().unwrap();
         let frame_bind = match &gpu.environment_bind {
             Some(bind) if lit => bind,
             _ => &gpu.bind,
@@ -570,63 +485,41 @@ impl Viewport for Renderer {
                 b: f64::from(b),
                 a: f64::from(a),
             });
-        // What is behind meshes light passes through: the others drawn
-        // first into a picture of their own, made smaller and smaller for
-        // rough surfaces to read blurred.
-        if gpu.behind.is_some() && runs.iter().any(|run| run.variant.transmitting()) {
-            draw_behind(frame.encoder, gpu, runs, frame_bind, clear);
+        for pass in gpu.graph.passes().iter() {
+            match pass {
+                Pass::Shadows => {
+                    if casting.is_some()
+                        && casting != gpu.shadow_drawn
+                        && let (Some(map), Some((instances, _))) = (&gpu.shadow_map, &gpu.instances)
+                    {
+                        draw_shadows(frame.encoder, gpu, runs, map, instances);
+                        *spare = std::mem::replace(&mut gpu.shadow_drawn, casting.take());
+                    }
+                }
+                // What is behind meshes light passes through: the others
+                // drawn first into a picture of their own, made smaller and
+                // smaller for rough surfaces to read blurred.
+                Pass::Behind => {
+                    if runs.iter().any(|run| run.variant.transmitting()) {
+                        draw_behind(frame.encoder, gpu, runs, frame_bind, clear);
+                    }
+                }
+                Pass::Main => draw_main(frame.encoder, gpu, runs, target, frame_bind, clear),
+            }
         }
-        let mut pass = frame
-            .encoder
-            .begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("3D"),
-                // Multisampled, resolved into the target; else into it.
-                color_attachments: &[Some(match colour {
-                    Some(colour) => wgpu::RenderPassColorAttachment {
-                        view: colour,
-                        depth_slice: None,
-                        resolve_target: Some(target),
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear),
-                            store: wgpu::StoreOp::Discard,
-                        },
-                    },
-                    None => wgpu::RenderPassColorAttachment {
-                        view: target,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.),
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                }),
-                ..Default::default()
-            });
-        let Some((instances_buffer, _)) = &gpu.instances else {
-            return;
-        };
-        pass.set_bind_group(0, frame_bind, &[]);
-        pass.set_vertex_buffer(1, instances_buffer.slice(..));
-        // Each run sets only what differs from the run before: wgpu records
-        // and checks every call, the same pipeline or buffer again too.
-        let mut bound = Bound::default();
-        for run in runs.iter() {
-            draw_run(&mut pass, gpu, run, &mut bound);
+        if casting.is_some() {
+            *spare = casting;
         }
-        drop(pass);
         scratch.sorted = recycle(drawn);
         scratch.all = recycle(all);
     }
     fn device_changed(&mut self) {
         self.gpu = None;
+    }
+    fn rest(&mut self) {
+        // The frame's temporaries go; the next frame takes them again.
+        if let Some(gpu) = &mut self.gpu {
+            gpu.graph.rest();
+        }
     }
 }

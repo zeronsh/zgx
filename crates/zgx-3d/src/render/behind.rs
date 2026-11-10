@@ -4,6 +4,7 @@
 use super::{
     Gpu, Run,
     draw::{Bound, draw_run},
+    targets::{Desc, Temporary},
 };
 use zgx_gpu::wgpu;
 /// The frame's meshes but those light passes through (and translucent
@@ -18,11 +19,12 @@ pub(super) fn draw_behind(
     frame_bind: &wgpu::BindGroup,
     clear: wgpu::Color,
 ) {
-    let (Some(behind), Some((instances_buffer, _)), Some((_, colour, depth_view))) =
-        (&gpu.behind, &gpu.instances, &gpu.targets)
+    let (Some(behind), Some((instances_buffer, _)), Some(targets)) =
+        (&gpu.graph.behind, &gpu.instances, &gpu.graph.targets)
     else {
         return;
     };
+    let (colour, depth_view) = (&targets.colour, &targets.depth);
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("3D behind"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -75,29 +77,32 @@ pub(super) struct Behind {
     /// level's binding of the one before.
     pub(super) shrinking: wgpu::RenderPipeline,
     pub(super) sources: Vec<wgpu::BindGroup>,
+    /// Its texture, the pool's (`targets`).
+    pub(super) texture: Temporary,
 }
 impl Behind {
+    /// Its texture's, at a frame of `size` drawn in `format`: every level
+    /// down to one texel.
+    pub(super) fn desc(format: wgpu::TextureFormat, size: (u32, u32)) -> Desc {
+        let (width, height) = (size.0.max(1), size.1.max(1));
+        Desc {
+            size: (width, height),
+            format,
+            samples: 1,
+            levels: 32 - width.max(height).leading_zeros(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        }
+    }
+    /// What is behind at a frame of `size`, drawn into `made` (as `desc`
+    /// says).
     pub(super) fn new(
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         size: (u32, u32),
+        made: Temporary,
     ) -> Self {
-        let (width, height) = (size.0.max(1), size.1.max(1));
-        let levels = 32 - width.max(height).leading_zeros();
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("3D behind"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: levels,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+        let levels = made.desc.levels;
+        let texture = &made.texture;
         let level_views: Vec<wgpu::TextureView> = (0..levels)
             .map(|level| {
                 texture.create_view(&wgpu::TextureViewDescriptor {
@@ -194,6 +199,7 @@ impl Behind {
             sampler,
             shrinking,
             sources,
+            texture: made,
         }
     }
     /// Each level made from the one before.
