@@ -11008,8 +11008,12 @@ impl GpuRenderer {
             .collect();
         // Backdrop-reading layers that needn't see each other share a copy
         // and a pass: those later in the frame with nothing drawn since the
-        // first that touches what they read or paint.
-        let sharing = share_backdrops(&draws, &reads);
+        // first that touches what they read or paint. (Out of line, and not
+        // called without readers: a frame of none pays nothing for it.)
+        let sharing = match reads.is_empty() {
+            true => Vec::new(),
+            false => share_backdrops(&draws, &reads),
+        };
         if !sharing.is_empty() {
             cuts.retain(|(draw, batch)| {
                 batch.is_some() || !sharing.iter().any(|(_, shared)| shared.contains(draw))
@@ -16873,8 +16877,12 @@ fn zgx_backdrop(p:vec2<f32>)->vec4<f32> {
 }
 /// For each backdrop-reading layer drawn first in a pass, those after it that
 /// can share its copy of the target: no draw before them since then (the
-/// others sharing it included) paints anywhere they read or paint, so they
-/// read and draw as they would in order. Most frames have none.
+/// others sharing it included) paints anywhere they read or paint, and no
+/// reader between them left to copy later reads where they paint, so they
+/// read and draw as they would in order. Each shares one copy at most: drawn
+/// with a second, it would read itself. Most frames have none.
+#[cold]
+#[inline(never)]
 fn share_backdrops(draws: &[Draw], reads: &[(usize, Rect)]) -> Vec<(usize, Vec<usize>)> {
     /// How far apart readers share, in draws: a screenful, not a long scan.
     const WITHIN: usize = 512;
@@ -16885,19 +16893,22 @@ fn share_backdrops(draws: &[Draw], reads: &[(usize, Rect)]) -> Vec<(usize, Vec<u
             continue;
         }
         let mut shared = Vec::new();
-        for &(next, read) in &reads[index + 1..] {
+        for (later, &(next, read)) in reads[index + 1..].iter().enumerate() {
             if next > first + WITHIN {
                 break;
             }
             // (Those blurring too run their blur first: a copy of their own.)
-            if draws[first].blur.is_some() || draws[next].blur.is_some() {
+            if draws[first].blur.is_some() || draws[next].blur.is_some() || taken.contains(&next) {
                 continue;
             }
             let area = read.union(draws[next].bounds);
+            let painted = draws[next].bounds.intersection(draws[next].clip);
             let clear = draws[first..next].iter().all(|draw| {
                 draw.bounds
                     .intersection(draw.clip)
                     .is_none_or(|painted| !painted.intersects(area))
+            }) && reads[index + 1..][..later].iter().all(|(reader, theirs)| {
+                taken.contains(reader) || painted.is_none_or(|painted| !painted.intersects(*theirs))
             });
             if clear {
                 shared.push(next);
