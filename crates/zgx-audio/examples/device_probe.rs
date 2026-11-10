@@ -8,6 +8,8 @@
 //! - `idle <s>`: the same with an engine made and a sound loaded, nothing played
 //! - `after <s>`: one click played, its stream stopped after the hold, then `s` seconds
 //! - `latency <n> <pause|close>`: `n` cold starts and `3n` plays with the stream running, play to heard
+//! - `threads <n>`: after one click, `n` windows of 30 s: wakeups and each thread's CPU time
+//!   (`queried`: only the default output's format asked; `streamed`: a stream played to its end)
 //! - `load <s>`: 64 voices looping for `s` seconds: block times, underruns
 #[cfg(target_os = "macos")]
 mod probe {
@@ -39,6 +41,61 @@ mod probe {
             0
         );
         info.fields[2] + info.fields[3]
+    }
+
+    #[repr(C)]
+    struct ThreadExtendedInfo {
+        user_time: u64,
+        system_time: u64,
+        cpu_usage: i32,
+        policy: i32,
+        run_state: i32,
+        flags: i32,
+        sleep_time: i32,
+        curpri: i32,
+        priority: i32,
+        maxpriority: i32,
+        name: [u8; 64],
+    }
+
+    #[repr(C)]
+    struct ThreadIdentifierInfo {
+        thread_id: u64,
+        handle: u64,
+        dispatch_qaddr: u64,
+    }
+
+    unsafe extern "C" {
+        static mach_task_self_: u32;
+        fn task_threads(task: u32, threads: *mut *mut u32, count: *mut u32) -> i32;
+        fn thread_info(thread: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+    }
+
+    /// Each of this process's threads: its id, name, and CPU time so far
+    /// (user plus system, in nanoseconds).
+    fn thread_times() -> Vec<(u64, String, u64)> {
+        let mut list: *mut u32 = std::ptr::null_mut();
+        let mut count = 0u32;
+        // SAFETY: task_threads fills a list of this task's thread ports;
+        // THREAD_EXTENDED_INFO (5) and THREAD_IDENTIFIER_INFO (4) fill the
+        // structs above, whose sizes in integers are passed.
+        unsafe {
+            assert_eq!(task_threads(mach_task_self_, &mut list, &mut count), 0);
+            (0..count as usize)
+                .map(|i| {
+                    let thread = *list.add(i);
+                    let mut info: ThreadExtendedInfo = std::mem::zeroed();
+                    let mut size = (size_of::<ThreadExtendedInfo>() / 4) as u32;
+                    thread_info(thread, 5, &mut info as *mut _ as *mut i32, &mut size);
+                    let mut id: ThreadIdentifierInfo = std::mem::zeroed();
+                    let mut size = (size_of::<ThreadIdentifierInfo>() / 4) as u32;
+                    thread_info(thread, 4, &mut id as *mut _ as *mut i32, &mut size);
+                    let end = info.name.iter().position(|&b| b == 0).unwrap_or(64);
+                    let name = String::from_utf8_lossy(&info.name[..end]).into_owned();
+                    (id.thread_id, name, info.user_time + info.system_time)
+                })
+                .collect()
+        }
     }
 
     /// This process's threads.
@@ -219,6 +276,79 @@ mod probe {
                 );
                 assert!(stats.sounding > 0);
                 silent(&audio);
+            }
+            "threads" | "queried" | "streamed" => {
+                // After one click and its stream closed (or, `queried`, only
+                // the default output's format asked, no stream ever): every
+                // 30 s, the process's wakeups and each thread's CPU time.
+                let audio = engine(stopping);
+                if mode == "queried" {
+                    use zgx_audio::Device;
+                    println!("default output: {:?}", Cpal::new().format());
+                } else if mode == "streamed" {
+                    // A second of noise streamed to its end: the decode
+                    // thread fills it, then sleeps with nothing open.
+                    let noise: Vec<f32> = (0..48_000)
+                        .map(|i| ((i * 7919 % 1000) as f32 / 1000. - 0.5) * 0.1)
+                        .collect();
+                    let bytes =
+                        zgx_audio::wav::write(&noise, 1, 48_000, zgx_audio::wav::Encoding::Float32);
+                    let voice = audio
+                        .stream(zgx_audio::Source::bytes(bytes), Play::new())
+                        .unwrap();
+                    wait("the stream to start", Duration::from_secs(5), || {
+                        audio.stats().running
+                    });
+                    wait("the stream to end", Duration::from_secs(5), || {
+                        !voice.playing()
+                    });
+                    wait(
+                        "the decode thread to let it go",
+                        Duration::from_secs(5),
+                        || audio.stats().streams == 0,
+                    );
+                    wait("the device to stop", Duration::from_secs(5), || {
+                        audio.stats().stops == 1
+                    });
+                    assert_eq!(audio.stats().dry, 0, "{:?}", audio.stats());
+                } else {
+                    let sound = click();
+                    audio.play(&sound, Play::new()).unwrap();
+                    wait("the stream to start", Duration::from_secs(5), || {
+                        audio.stats().running
+                    });
+                    wait("the stream to stop", Duration::from_secs(5), || {
+                        audio.stats().stops == 1
+                    });
+                }
+                let windows = number(1, 10);
+                let mut before = thread_times();
+                for window in 0..windows {
+                    let wakes = wakeups();
+                    std::thread::sleep(Duration::from_secs(30));
+                    let wakes = wakeups() - wakes;
+                    let now = thread_times();
+                    let busy: Vec<String> = now
+                        .iter()
+                        .map(|(id, name, time)| {
+                            let was = before
+                                .iter()
+                                .find(|(b, ..)| b == id)
+                                .map_or(0, |(.., t)| *t);
+                            let name = if name.is_empty() { "?" } else { name };
+                            format!("{name}#{} +{}µs", id % 10_000, (time - was) / 1000)
+                        })
+                        .collect();
+                    println!(
+                        "{:>4} s: {wakes} wakeups; {}",
+                        (window + 1) * 30,
+                        busy.join(", ")
+                    );
+                    before = now;
+                }
+                if mode != "queried" {
+                    silent(&audio);
+                }
             }
             "load" => {
                 let audio = engine(stopping);

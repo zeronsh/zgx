@@ -7,6 +7,7 @@ use crate::limiter::Limiter;
 use crate::queue::{Consumer, Producer};
 use crate::ramp::{Curve, Ramp, Smoothed};
 use crate::resample::{Interpolation, ONE, Position, Region, Resampler, Step};
+use crate::ring::Reader;
 use crate::sound::SoundData;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
@@ -27,7 +28,7 @@ const RETRY: u64 = 64;
 pub(crate) enum Command {
     Play {
         id: u64,
-        sound: Arc<SoundData>,
+        sound: Feed,
         bus: u16,
         gain: f32,
         pan: f32,
@@ -79,7 +80,7 @@ pub(crate) enum VoiceParam {
 pub(crate) enum Return {
     /// A voice finished (or never started); its sound is the main thread's
     /// to drop.
-    Ended { id: u64, sound: Arc<SoundData> },
+    Ended { id: u64, sound: Feed },
 }
 
 /// Buckets of a microsecond for how long each block took to mix; the last
@@ -131,6 +132,8 @@ pub(crate) struct Meter {
     pub losses: AtomicU64,
     pub failures: AtomicU64,
     pub underruns: AtomicU64,
+    /// Times a stream ran dry.
+    pub dry: AtomicU64,
     pub running: AtomicBool,
     /// Why the device last failed. The host and the main thread take it;
     /// the audio thread never does.
@@ -165,6 +168,7 @@ impl Meter {
             losses: zero(),
             failures: zero(),
             underruns: zero(),
+            dry: zero(),
             running: AtomicBool::new(false),
             error: Mutex::new(None),
         }
@@ -218,7 +222,7 @@ impl Ord for Scheduled {
 struct Voice {
     /// 0: a free slot.
     id: u64,
-    sound: Option<Arc<SoundData>>,
+    sound: Option<Feed>,
     bus: u16,
     at: Position,
     /// The step at pitch 1: the sound's rate over the output's.
@@ -283,35 +287,66 @@ impl Voice {
         scratch: &mut Scratch,
         left: &mut [f32],
         right: &mut [f32],
+        click: u32,
+        underruns: &mut u64,
     ) -> bool {
         self.fresh = false;
-        let sound = self
-            .sound
-            .as_deref()
-            .expect("a playing voice has its sound");
-        let got = if self.pitch.settled() {
-            let step = Step::Fixed(self.step(self.pitch.value()));
-            self.resampler.render(
-                sound,
-                self.region,
-                &mut self.at,
-                step,
-                &mut scratch.left[..n],
-                &mut scratch.right[..n],
-            )
-        } else {
+        let fixed = self.pitch.settled();
+        let step = self.step(self.pitch.value());
+        if !fixed {
             let pitches = &mut scratch.values[..n];
             self.pitch.fill(pitches);
             let scale = self.base_step * ONE as f64;
             for (step, &pitch) in scratch.steps[..n].iter_mut().zip(pitches.iter()) {
                 *step = ((scale * f64::from(pitch)) as u64).max(1);
             }
-            let step = Step::PerFrame(&scratch.steps[..n]);
+        }
+        if let Some(Feed::Stream(stream)) = &mut self.sound {
+            let advance: u64 = if fixed {
+                step * n as u64
+            } else {
+                scratch.steps[..n].iter().sum()
+            };
+            let need = ((self.at + advance) >> 32) as usize + 4;
+            if !stream.ready(need, &mut self.envelope, click, underruns) {
+                // Waiting for its first frames, or run dry: time passes,
+                // nothing plays, the position holds.
+                self.gain.advance(n);
+                self.pan.advance(n);
+                self.envelope.advance(n);
+                stream.level.advance(n);
+                return !(self.stopping && self.envelope.settled() && self.envelope.value() == 0.);
+            }
+        }
+        let (sound, region, level) = match &mut self.sound {
+            Some(Feed::Sound(sound)) => (&**sound, self.region, None),
+            Some(Feed::Stream(stream)) => {
+                let region = Region {
+                    start: 0,
+                    end: stream.filled as u64,
+                    looping: false,
+                };
+                (&stream.window, region, Some(&mut stream.level))
+            }
+            None => unreachable!("a playing voice has its sound"),
+        };
+        // Two calls, each with its kind of step known, so each is made for
+        // it: one call taking either made the cubic 10% dearer.
+        let got = if fixed {
             self.resampler.render(
                 sound,
-                self.region,
+                region,
                 &mut self.at,
-                step,
+                Step::Fixed(step),
+                &mut scratch.left[..n],
+                &mut scratch.right[..n],
+            )
+        } else {
+            self.resampler.render(
+                sound,
+                region,
+                &mut self.at,
+                Step::PerFrame(&scratch.steps[..n]),
                 &mut scratch.left[..n],
                 &mut scratch.right[..n],
             )
@@ -322,8 +357,9 @@ impl Voice {
             &scratch.right
         };
         let source_left = &scratch.left;
-        if self.gain.settled() && self.envelope.settled() && self.pan.settled() {
-            let gain = self.gain.value() * self.envelope.value();
+        let level_settled = level.as_ref().is_none_or(|l| l.settled());
+        if self.gain.settled() && self.envelope.settled() && self.pan.settled() && level_settled {
+            let gain = self.gain.value() * self.envelope.value() * level.map_or(1., |l| l.value());
             if gain != 0. {
                 let (pl, pr) = pan_gains(self.pan.value());
                 let (gl, gr) = (gain * pl, gain * pr);
@@ -337,16 +373,16 @@ impl Voice {
             // its own, which the compiler turns into vector instructions.
             let gains = &mut scratch.gains[..n];
             self.gain.fill(gains);
-            if !self.envelope.settled() {
-                let envelope = &mut scratch.values[..n];
-                self.envelope.fill(envelope);
-                for (g, e) in gains.iter_mut().zip(envelope.iter()) {
-                    *g *= e;
-                }
-            } else {
-                let envelope = self.envelope.value();
-                if envelope != 1. {
-                    gains.iter_mut().for_each(|g| *g *= envelope);
+            for ramp in [Some(&mut self.envelope), level].into_iter().flatten() {
+                if !ramp.settled() {
+                    let values = &mut scratch.values[..n];
+                    ramp.fill(values);
+                    for (g, v) in gains.iter_mut().zip(values.iter()) {
+                        *g *= v;
+                    }
+                } else if ramp.value() != 1. {
+                    let value = ramp.value();
+                    gains.iter_mut().for_each(|g| *g *= value);
                 }
             }
             if self.pan.settled() {
@@ -365,8 +401,159 @@ impl Voice {
                 }
             }
         }
+        if let Some(Feed::Stream(stream)) = &mut self.sound {
+            stream.shift(&mut self.at);
+        }
         let faded = self.stopping && self.envelope.settled() && self.envelope.value() == 0.;
         got == n && !faded
+    }
+}
+
+/// What a voice plays: a sound in memory, or a stream decoded as it plays.
+pub(crate) enum Feed {
+    Sound(Arc<SoundData>),
+    Stream(Box<Streamed>),
+}
+
+impl Feed {
+    fn data(&self) -> &SoundData {
+        match self {
+            Feed::Sound(sound) => sound,
+            Feed::Stream(stream) => &stream.window,
+        }
+    }
+}
+
+/// Frames a stream's window holds: a block's worth at the highest pitch
+/// and rate, and some.
+const WINDOW: usize = 32_768;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flow {
+    /// Not started: waiting for its first frames.
+    Waiting,
+    Flowing,
+    /// Ran dry: silent until frames come again.
+    Dry,
+}
+
+/// A stream as a voice holds it: frames from the decode thread's ring,
+/// pulled into a window the resampler reads like a sound of its own.
+pub(crate) struct Streamed {
+    reader: Reader,
+    window: SoundData,
+    /// Frames in the window.
+    filled: usize,
+    flow: Flow,
+    /// Fades out as the ring runs low, and back in when it fills.
+    level: Smoothed,
+    /// Frames of that fade (5 ms), at the stream's rate.
+    reserve: usize,
+}
+
+impl Streamed {
+    /// Allocates: made on the main thread.
+    pub fn new(reader: Reader, channels: usize, rate: u32) -> Streamed {
+        Streamed {
+            reader,
+            window: SoundData {
+                samples: vec![0.; WINDOW * channels].into(),
+                channels,
+                rate,
+            },
+            filled: 0,
+            flow: Flow::Waiting,
+            level: Smoothed::new(1.),
+            reserve: (rate / 200).max(1) as usize,
+        }
+    }
+
+    /// Frames it holds: in the window and waiting in the ring.
+    fn held(&self) -> usize {
+        self.filled + self.reader.ready() / self.window.channels
+    }
+
+    /// Pulls frames until the window holds `need` (or is full), and says
+    /// whether to play this block: not while waiting for its first frames,
+    /// nor dry. Starts the fade out as frames run low, the fade in as they
+    /// come back, and counts each time it runs dry.
+    fn ready(
+        &mut self,
+        need: usize,
+        envelope: &mut Smoothed,
+        click: u32,
+        underruns: &mut u64,
+    ) -> bool {
+        let channels = self.window.channels;
+        let want = need.min(WINDOW).saturating_sub(self.filled) * channels;
+        if want > 0 {
+            let ready = self.reader.ready() / channels * channels;
+            let at = self.filled * channels;
+            let got = self
+                .reader
+                .read(&mut self.window.samples[at..at + want.min(ready)]);
+            self.filled += got / channels;
+        }
+        // Nothing more is coming: what's held plays out to the end, with no
+        // fade for running low.
+        let ended = self.reader.finished();
+        let (held, reserve) = (self.held(), self.reserve);
+        match self.flow {
+            Flow::Waiting if ended || held >= need + reserve => {
+                self.flow = Flow::Flowing;
+                // A stream starting away from zero fades in over its first
+                // millisecond, as a sound does.
+                let first = self.window.samples[..channels]
+                    .iter()
+                    .fold(0f32, |p, s| p.max(s.abs()));
+                if first > 1e-3 && envelope.settled() && envelope.value() == 1. {
+                    *envelope = Smoothed::new(0.);
+                    envelope.set(1., click, Curve::Linear);
+                }
+                true
+            }
+            Flow::Waiting => false,
+            Flow::Flowing if !ended && self.filled < need => {
+                // Out of frames before the fade could finish.
+                self.flow = Flow::Dry;
+                self.level = Smoothed::new(0.);
+                *underruns += 1;
+                false
+            }
+            Flow::Flowing => {
+                if !ended && held < need + reserve && self.level.target() == 1. {
+                    self.level.set(0., reserve as u32, Curve::Linear);
+                } else if (ended || held >= need + 4 * reserve) && self.level.target() == 0. {
+                    self.level.set(1., reserve as u32, Curve::Linear);
+                }
+                if self.level.settled() && self.level.value() == 0. {
+                    self.flow = Flow::Dry;
+                    *underruns += 1;
+                    return false;
+                }
+                true
+            }
+            Flow::Dry if ended || held >= need + 4 * reserve => {
+                self.flow = Flow::Flowing;
+                self.level.set(1., reserve as u32, Curve::Linear);
+                self.filled >= need || ended
+            }
+            Flow::Dry => false,
+        }
+    }
+
+    /// Drops the frames the position has passed, keeping a few before it
+    /// for the interpolator.
+    fn shift(&mut self, at: &mut Position) {
+        let passed = ((*at >> 32) as usize).saturating_sub(4).min(self.filled);
+        if passed > 0 {
+            let channels = self.window.channels;
+            self.window
+                .samples
+                .copy_within(passed * channels..self.filled * channels, 0);
+            self.filled -= passed;
+            *at -= (passed as u64) << 32;
+        }
     }
 }
 
@@ -461,6 +648,8 @@ pub(crate) struct Mixer {
     blocks: u64,
     collected: u64,
     sounding: u64,
+    /// Times a stream ran dry.
+    underruns: u64,
     /// The frame the last play was applied on, this block.
     started: Option<u64>,
     /// Frames of the shortest de-click fade (1 ms), and of a steal's or a
@@ -509,6 +698,7 @@ impl Mixer {
             blocks: 0,
             collected: 0,
             sounding: 0,
+            underruns: 0,
             started: None,
             click: (setup.rate / 1000).max(1),
             declick: (setup.rate / 200).max(1),
@@ -528,8 +718,8 @@ impl Mixer {
             self.limiter = Some(Limiter::new(rate, limiter.ceiling()));
         }
         for voice in self.voices.iter_mut() {
-            if let Some(sound) = &voice.sound {
-                voice.base_step = f64::from(sound.rate) / f64::from(rate);
+            if let Some(feed) = &voice.sound {
+                voice.base_step = f64::from(feed.data().rate) / f64::from(rate);
             }
         }
     }
@@ -626,6 +816,7 @@ impl Mixer {
         }
         meter.collected.store(self.collected, Ordering::SeqCst);
         meter.sounding.store(self.sounding, Ordering::Relaxed);
+        meter.dry.store(self.underruns, Ordering::Relaxed);
         meter.peak.fetch_max(peak, Ordering::Relaxed);
         meter.voices.store(live as u64, Ordering::Relaxed);
         meter.stolen.store(self.stolen, Ordering::Relaxed);
@@ -795,15 +986,20 @@ impl Mixer {
         let Some(voice) = self.voices.iter_mut().find(|v| v.id == 0) else {
             return Err(command);
         };
-        let start = sound.samples[..sound.channels.min(sound.samples.len())]
-            .iter()
-            .fold(0f32, |p, s| p.max(s.abs()));
+        // A stream's first frames aren't here yet: it looks when they are.
+        let start = match sound {
+            Feed::Sound(data) => data.samples[..data.channels.min(data.samples.len())]
+                .iter()
+                .fold(0f32, |p, s| p.max(s.abs())),
+            Feed::Stream(_) => 0.,
+        };
+        let source_rate = sound.data().rate;
         *voice = Voice {
             id,
             sound: None,
             bus,
             at: 0,
-            base_step: f64::from(sound.rate) / f64::from(rate),
+            base_step: f64::from(source_rate) / f64::from(rate),
             region,
             gain: Smoothed::new(gain.max(0.)),
             pan: Smoothed::new(pan.clamp(-1., 1.)),
@@ -892,6 +1088,8 @@ impl Mixer {
                     &mut self.scratch,
                     &mut bus.left[..n],
                     &mut bus.right[..n],
+                    self.click,
+                    &mut self.underruns,
                 ) {
                     voice.ended = true;
                 }

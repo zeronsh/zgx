@@ -2,11 +2,14 @@
 //! call becomes a command stamped with a frame and goes on a fixed queue;
 //! a full queue is an error, never a wait.
 use crate::device::{Device, Host, Message, Renderer};
-use crate::mixer::{Command, MAX_BUSES, Meter, Mixer, Return, Setup, VoiceParam};
+use crate::mixer::Streamed;
+use crate::mixer::{Command, Feed, MAX_BUSES, Meter, Mixer, Return, Setup, VoiceParam};
 use crate::queue::{Consumer, Producer, queue};
 use crate::ramp::{Curve, Ramp};
 use crate::resample::{Interpolation, Region};
+use crate::ring::ring;
 use crate::sound::{Sound, Source};
+use crate::stream::{Decoder, Feeding};
 use std::collections::HashSet;
 use std::ops::{Add, Range, Sub};
 use std::sync::atomic::Ordering;
@@ -145,6 +148,10 @@ pub struct Stats {
     pub failures: u64,
     /// Underruns the system reported.
     pub underruns: u64,
+    /// Times a stream ran dry: its decoding fell behind.
+    pub dry: u64,
+    /// Streams the decode thread is filling.
+    pub streams: u64,
     /// On the device's clock, in nanoseconds (0 until a device says): when
     /// the last block was asked for, when its first frame will be heard,
     /// and when the most recent play's first frame will be.
@@ -184,6 +191,8 @@ struct Inner {
     meter: Arc<Meter>,
     latency: usize,
     hosting: Mutex<Hosting>,
+    /// The decode thread, made with the first stream.
+    decoder: Mutex<Option<Decoder>>,
 }
 
 /// The engine, as the main thread holds it. Cloning it is cheap; every
@@ -205,11 +214,21 @@ impl std::fmt::Debug for Audio {
 pub struct Offline {
     renderer: Renderer,
     channels: usize,
+    audio: Audio,
 }
 
 impl Offline {
     /// Mixes the next `out.len() / channels` frames into `out`.
+    /// Streams are filled first, so what comes out doesn't depend on how
+    /// fast the decode thread ran.
     pub fn render(&mut self, out: &mut [f32]) {
+        self.audio.settle();
+        self.renderer.render(out, None);
+    }
+
+    /// Mixes without waiting for streams first, as a device does: a stream
+    /// the decode thread hasn't filled waits, or runs dry.
+    pub fn render_now(&mut self, out: &mut [f32]) {
         self.renderer.render(out, None);
     }
 
@@ -231,7 +250,14 @@ impl Audio {
         let (audio, mixer) = Audio::with_mixer(&config);
         let channels = config.channels.max(1);
         let renderer = Renderer::new(mixer, channels, audio.0.meter.clone());
-        (audio, Offline { renderer, channels })
+        (
+            audio.clone(),
+            Offline {
+                renderer,
+                channels,
+                audio,
+            },
+        )
     }
 
     /// An engine on the system's default output, through cpal. Nothing is
@@ -340,6 +366,7 @@ impl Audio {
             meter,
             latency,
             hosting: Mutex::new(Hosting::None),
+            decoder: Mutex::new(None),
         }));
         if config.gain != 1. {
             audio
@@ -447,7 +474,7 @@ impl Audio {
         let bus = play.bus.unwrap_or(0);
         let command = Command::Play {
             id,
-            sound: sound.0.clone(),
+            sound: Feed::Sound(sound.0.clone()),
             bus,
             gain: play.gain,
             pan: play.pan,
@@ -465,6 +492,68 @@ impl Audio {
             id,
             start: time,
         })
+    }
+
+    /// Plays `source` as it decodes, on the decode thread, about half a
+    /// second ahead: for music and anything long. `play` says how, as for a
+    /// sound; `looping` loops the whole stream, seamlessly. A stream that
+    /// runs dry (its decoding fell behind) fades out over 5 ms, counts in
+    /// [`Stats::dry`], and fades back in when frames come.
+    pub fn stream(&self, source: Source, play: Play) -> Result<Voice, Error> {
+        let decode = source.decoder()?;
+        let (channels, rate) = (decode.channels(), decode.rate());
+        let (writer, reader) = ring(rate as usize / 2 * channels);
+        let streamed = Box::new(Streamed::new(reader, channels, rate));
+        let mut control = self.control();
+        let id = control.next_id;
+        let command = Command::Play {
+            id,
+            sound: Feed::Stream(streamed),
+            bus: play.bus.unwrap_or(0),
+            gain: play.gain,
+            pan: play.pan,
+            pitch: play.pitch,
+            region: Region {
+                start: 0,
+                end: u64::MAX,
+                looping: false,
+            },
+            priority: play.priority,
+            fade_in: play.fade_in,
+        };
+        let time = play.at.map_or(0, |at| at.0);
+        // The decode thread starts filling before the mixer hears of it.
+        self.0
+            .decoder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get_or_insert_with(Decoder::new)
+            .open(Feeding {
+                decode,
+                writer,
+                looping: play.looping,
+            });
+        self.push(&mut control, time, command)?;
+        control.next_id += 1;
+        control.live.insert(id);
+        Ok(Voice {
+            audio: self.clone(),
+            id,
+            start: time,
+        })
+    }
+
+    /// Waits until the decode thread has filled every stream as far as it
+    /// can. [`Offline::render`] does it before each block.
+    pub fn settle(&self) {
+        if let Some(decoder) = &*self
+            .0
+            .decoder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            decoder.fill();
+        }
     }
 
     /// Drops the sounds the mixer has finished with. Every other call does
@@ -535,6 +624,14 @@ impl Audio {
             losses: meter.losses.load(Ordering::Relaxed),
             failures: meter.failures.load(Ordering::Relaxed),
             underruns: meter.underruns.load(Ordering::Relaxed),
+            dry: meter.dry.load(Ordering::Relaxed),
+            streams: self
+                .0
+                .decoder
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .map_or(0, |d| d.open.load(Ordering::Acquire) as u64),
             block_asked: meter.block_asked.load(Ordering::Relaxed),
             block_heard: meter.block_heard.load(Ordering::Relaxed),
             play_heard: meter.play_heard.load(Ordering::Acquire),

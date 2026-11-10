@@ -99,8 +99,60 @@ impl Source {
             let wav = crate::wav::read(&bytes).map_err(named)?;
             return Sound::from_samples(&wav.samples, wav.channels, wav.rate);
         }
-        Err(named(Error::Format(
-            "not a format zgx-audio reads (WAV)".into(),
-        )))
+        #[cfg(feature = "vorbis")]
+        if bytes.starts_with(b"OggS") {
+            let (samples, channels, rate) =
+                crate::decode::vorbis::decode_whole(self.vorbis_bytes(Some(bytes.into_owned())))
+                    .map_err(named)?;
+            return Sound::from_samples(&samples, channels, rate);
+        }
+        Err(named(Error::Format(Self::READS.into())))
+    }
+
+    const READS: &'static str = if cfg!(feature = "vorbis") {
+        "not a format zgx-audio reads (WAV, Ogg Vorbis)"
+    } else {
+        "not a format zgx-audio reads (WAV; Ogg Vorbis with the `vorbis` feature)"
+    };
+
+    /// Where a Vorbis decoder reads from: bytes already read, the bytes in
+    /// memory, or the file again.
+    #[cfg(feature = "vorbis")]
+    fn vorbis_bytes(&self, read: Option<Vec<u8>>) -> crate::decode::vorbis::Bytes {
+        use crate::decode::vorbis::Bytes;
+        match (self, read) {
+            (_, Some(read)) => Bytes::Memory(read.into()),
+            (Source::Bytes(Cow::Borrowed(bytes)), None) => Bytes::Static(bytes),
+            (Source::Bytes(Cow::Owned(bytes)), None) => Bytes::Memory(bytes.clone().into()),
+            (Source::File(path), None) => Bytes::File(path.clone()),
+        }
+    }
+
+    /// A decoder for this source, for a stream: the source's own for Ogg
+    /// Vorbis; WAV decoded whole and read out in pieces.
+    pub(crate) fn decoder(&self) -> Result<Box<dyn crate::decode::Decode>, Error> {
+        let head = match self {
+            Source::Bytes(bytes) => bytes.get(..4).map(|h| h.to_vec()).unwrap_or_default(),
+            Source::File(path) => {
+                use std::io::Read;
+                let mut head = [0u8; 4];
+                let mut file = std::fs::File::open(path)
+                    .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+                let got = file.read(&mut head).unwrap_or(0);
+                head[..got].to_vec()
+            }
+        };
+        #[cfg(feature = "vorbis")]
+        if head == b"OggS" {
+            let vorbis = crate::decode::vorbis::Vorbis::new(self.vorbis_bytes(None));
+            return match self {
+                Source::File(path) => vorbis.map_err(|e| e.within(&path.display().to_string())),
+                Source::Bytes(_) => vorbis,
+            }
+            .map(|v| Box::new(v) as Box<dyn crate::decode::Decode>);
+        }
+        let _ = head;
+        let sound = self.decode()?;
+        Ok(Box::new(crate::decode::Pcm::new(sound.0)))
     }
 }

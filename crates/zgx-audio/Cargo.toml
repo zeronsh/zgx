@@ -15,9 +15,12 @@ categories = ["multimedia::audio", "game-development"]
 # feature names what it gives, not how, so a platform's backend can change
 # without apps changing features.
 device = ["dep:cpal"]
+# Ogg Vorbis, loaded whole or streamed: lewton, pure Rust (MIT/Apache).
+vorbis = ["dep:lewton"]
 
 [dependencies]
 cpal = { version = "0.18.2", optional = true, default-features = false }
+lewton = { version = "0.10.2", optional = true }
 
 # The audio thread's rules: a counting allocator, so a process of its own,
 # and no test harness, so no other thread.

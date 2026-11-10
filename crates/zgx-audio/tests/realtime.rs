@@ -7,17 +7,22 @@
 //! interpolators, every ramp and curve, starts, stops, steals, drops, loops,
 //! the limiter, a return queue left full, outputs of 1, 2 and 6 channels.
 //!
-//! A binary of its own without the test harness: no other thread runs, so
-//! the kernel's counts for the task are this thread's. Commands are sent,
+//! A binary of its own without the test harness: no other thread runs but
+//! the decode thread, which sleeps through every armed stretch, so the
+//! kernel's counts for the task are this thread's. Commands are sent,
 //! timed for later frames, before each armed render: sending is the main
 //! thread's work and may allocate; applying them is the mixer's and mustn't.
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use zgx_audio::{Audio, Config, Curve, Interpolation, Offline, Play, Ramp, Sound, Time};
 
 struct Counting;
 
-static ARMED: AtomicBool = AtomicBool::new(false);
+thread_local! {
+    /// Set on the thread under test alone: the decode thread's own
+    /// allocations aren't the mixer's.
+    static ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
 static FREES: AtomicU64 = AtomicU64::new(0);
 
@@ -25,25 +30,25 @@ static FREES: AtomicU64 = AtomicU64::new(0);
 // are atomics, which allocate nothing.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.get() {
             ALLOCS.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.alloc(layout) }
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.get() {
             ALLOCS.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.alloc_zeroed(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.get() {
             FREES.fetch_add(1, Ordering::Relaxed);
         }
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-        if ARMED.load(Ordering::Relaxed) {
+        if ARMED.get() {
             ALLOCS.fetch_add(1, Ordering::Relaxed);
             FREES.fetch_add(1, Ordering::Relaxed);
         }
@@ -128,9 +133,9 @@ fn armed(work: impl FnOnce()) -> Broke {
         FREES.load(Ordering::Relaxed),
     );
     let (calls, switches) = kernel();
-    ARMED.store(true, Ordering::SeqCst);
+    ARMED.set(true);
     work();
-    ARMED.store(false, Ordering::SeqCst);
+    ARMED.set(false);
     let (calls_after, switches_after) = kernel();
     Broke {
         allocs: ALLOCS.load(Ordering::Relaxed) - allocs,
@@ -169,8 +174,11 @@ impl Run {
     /// Renders `blocks` blocks of 256 frames armed, one stretch each.
     fn render(&mut self, blocks: usize) {
         for _ in 0..blocks {
+            // Streams are filled on the main thread's side, then the mixer
+            // runs as a device runs it.
+            self.audio.settle();
             let (mixer, out) = (&mut self.mixer, &mut self.out);
-            let broke = armed(|| mixer.render(out));
+            let broke = armed(|| mixer.render_now(out));
             self.heard |= self.out.iter().any(|&s| s != 0.);
             let over = Broke {
                 allocs: broke.allocs,
@@ -390,6 +398,44 @@ fn main() {
     run.render(12);
     run.finish(&mut failures);
 
+    // Streams: the mixer pulls each from its ring, fades as it runs low,
+    // runs dry and comes back; the decode thread fills between blocks
+    // (its work, not the mixer's, so outside the armed stretch).
+    let mut run = Run::new("streams", Config::default(), floor);
+    for (i, (rate, channels)) in [(44_100, 2), (48_000, 1), (22_050, 2)]
+        .into_iter()
+        .enumerate()
+    {
+        let samples = noise(rate as usize, channels, i as u64 + 7);
+        let bytes =
+            zgx_audio::wav::write(&samples, channels, rate, zgx_audio::wav::Encoding::Float32);
+        let play = Play::new()
+            .gain(0.2)
+            .looping(i != 1)
+            .pitch(1. + i as f32 * 0.1);
+        run.audio
+            .stream(zgx_audio::Source::bytes(bytes), play)
+            .unwrap();
+    }
+    for block in 0..60 {
+        // Settled every other block: between, the rings run down, so
+        // streams also run low, fade and come back.
+        if block % 2 == 0 || block > 40 {
+            run.audio.settle();
+            // The decode thread, done, goes back to sleep: its calls are
+            // the task's too, so it has to be asleep before the stretch.
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        let (mixer, out) = (&mut run.mixer, &mut run.out);
+        let broke = armed(|| mixer.render_now(out));
+        run.heard |= out.iter().any(|&s| s != 0.);
+        run.worst.allocs = run.worst.allocs.max(broke.allocs);
+        run.worst.frees = run.worst.frees.max(broke.frees);
+        run.worst.calls = run.worst.calls.max(broke.calls - floor.calls);
+        run.worst.switches = run.worst.switches.max(broke.switches - floor.switches);
+    }
+    run.finish(&mut failures);
+
     // Too many voices: steals, and plays that lose and are dropped.
     let mut run = Run::new(
         "steals and drops",
@@ -462,7 +508,7 @@ fn main() {
     let mut last = 0;
     for block in 0..10 {
         let (mixer, out) = (&mut run.mixer, &mut run.out);
-        let broke = armed(|| mixer.render(out));
+        let broke = armed(|| mixer.render_now(out));
         if let Some(at) = out.iter().rposition(|&s| s != 0.) {
             last = block * 256 + at;
         }

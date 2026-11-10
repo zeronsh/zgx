@@ -22,6 +22,7 @@
 //! never waits for them. Sounds it has finished with are dropped by the
 //! next call on [`Audio`] (or [`Audio::update`]), never by the mixer.
 
+mod decode;
 mod device;
 mod engine;
 mod limiter;
@@ -29,7 +30,9 @@ mod mixer;
 mod queue;
 mod ramp;
 mod resample;
+mod ring;
 mod sound;
+mod stream;
 #[cfg(feature = "device")]
 mod via_cpal;
 pub mod wav;
