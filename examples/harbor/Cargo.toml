@@ -1,0 +1,68 @@
+[package]
+name = "zgx-harbor"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+description = "The reference demo of zgx-3d's primitives: a harbor at dawn, in rain, built on the public API alone."
+
+# A workspace of its own, outside zgx's (design-3d-aaa.md, decision 12). As
+# a member it would add itself to the workspace's lockfile, and `--workspace`
+# builds would unify the zgx-3d features it turns on into every other
+# crate's build. Its own lockfile was seeded from the root's, so it builds
+# against the same versions.
+[workspace]
+
+[dependencies]
+zgx = { path = "../../crates/zgx", default-features = false }
+zgx-3d = { path = "../../crates/zgx-3d" }
+zgx-desktop = { path = "../../crates/zgx-desktop", default-features = false }
+# `GpuRenderer`: the public offscreen renderer the bench draws through
+# (zgx-desktop doesn't re-export it).
+zgx-gpu = { path = "../../crates/zgx-gpu", default-features = false }
+# Writing a bench frame as a PNG (already in zgx's tree).
+png = "0.18"
+
+[features]
+# GPU busy time, read from the perf lane's patched wgpu-hal
+# (comparisons/3d/wgpu-hal-gpu-time.patch). Build it with that copy patched
+# in: `./gpu_time.sh` builds and runs it so (it compiles only against that
+# copy). Off, the bench reports no GPU time.
+gpu-time = []
+
+[[bin]]
+name = "harbor"
+path = "src/bin/harbor.rs"
+
+[[bin]]
+name = "harbor_bench"
+path = "src/bin/harbor_bench.rs"
+
+# As zgx's workspace builds it: the patches zgx ships with
+# (the root Cargo.toml says why each).
+[patch.crates-io]
+wgpu-hal = { path = "../../vendor/wgpu-hal" }
+accesskit_macos = { path = "../../vendor/accesskit_macos" }
+accesskit_consumer = { path = "../../vendor/accesskit_consumer" }
+accesskit_atspi_common = { path = "../../vendor/accesskit_atspi_common" }
+accesskit_unix = { path = "../../vendor/accesskit_unix" }
+accesskit_windows = { path = "../../vendor/accesskit_windows" }
+winit = { path = "../../vendor/winit" }
+
+# As zgx's workspace: dependencies optimized in dev builds too.
+[profile.dev.package."*"]
+opt-level = 3
+debug = "line-tables-only"
+
+[profile.dev.package.naga]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# What ships, and what the comparison tables measure.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
