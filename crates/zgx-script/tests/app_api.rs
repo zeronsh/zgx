@@ -144,7 +144,7 @@ fn capture_keys_needs_no_key_handler_of_its_own() {
 #[test]
 fn a_failed_load_keeps_the_published_commands() {
     let runtime = zgx::reactive::Runtime::new();
-    let dir = std::env::temp_dir().join(format!("zgx-commands-{}", std::process::id()));
+    let dir = common::temp_dir("commands");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("app.luau");
     std::fs::write(

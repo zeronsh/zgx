@@ -18,9 +18,7 @@ struct App {
 }
 impl App {
     fn new(name: &str, modules: &[&str]) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("zgx-reload-cache-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = common::temp_dir(&format!("reload-cache-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let app = Self {
             dir,

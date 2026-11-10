@@ -79,7 +79,7 @@ fn template_text_and_handlers_update_rust_state() {
 }
 
 fn temp_script(name: &str, code: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-script-{}-{name}", std::process::id()));
+    let dir = common::temp_dir(&format!("script-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("app.luau");
     std::fs::write(&path, code).unwrap();
@@ -615,7 +615,7 @@ fn on_press_runs_on_pointer_down_before_release() {
 
 #[test]
 fn scripts_require_modules_and_reload_when_they_change() {
-    let dir = std::env::temp_dir().join(format!("zgx-require-{}", std::process::id()));
+    let dir = common::temp_dir("require");
     std::fs::create_dir_all(dir.join("lib")).unwrap();
     std::fs::write(dir.join("lib/theme.luau"), r#"return { label = "first" }"#).unwrap();
     std::fs::write(
@@ -665,8 +665,7 @@ fn shader_compile_errors_are_script_errors() {
 
 #[test]
 fn modules_resolve_like_luau_and_keep_their_own_state() {
-    let dir = std::env::temp_dir().join(format!("zgx-modules-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir("modules");
     std::fs::create_dir_all(dir.join("ui/components")).unwrap();
     std::fs::create_dir_all(dir.join("ui/lib")).unwrap();
     let write = |path: &str, code: &str| std::fs::write(dir.join(path), code).unwrap();
@@ -723,8 +722,7 @@ fn modules_resolve_like_luau_and_keep_their_own_state() {
 
 #[test]
 fn text_templates_in_a_module_name_its_own_state() {
-    let dir = std::env::temp_dir().join(format!("zgx-module-templates-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir("module-templates");
     std::fs::create_dir_all(dir.join("ui")).unwrap();
     let write = |path: &str, code: &str| std::fs::write(dir.join(path), code).unwrap();
     // The module's `count` is its own (`ui/counter.luau::count`); its

@@ -4,23 +4,12 @@
 mod common;
 
 use common::Harness;
-use std::{
-    cell::RefCell,
-    path::PathBuf,
-    rc::Rc,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use std::{cell::RefCell, path::PathBuf, rc::Rc};
 use zgx_script::{Capability, GuardKind, Plugin, ScriptHost, Value};
 
 fn plugin_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
     // One of its own: tests run at once, some with plugins of one name.
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "zgx-plugin-rules-{}-{}-{name}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir(&format!("plugin-rules-{name}"));
     for (file, code) in files {
         std::fs::write(dir.join(file), code).unwrap();
     }

@@ -1,5 +1,7 @@
 //! `zgx test`: an app's own Luau tests (`*.test.luau`), each against the
 //! app mounted headless and driven by devtools' targets.
+mod common;
+
 use std::{path::PathBuf, process::Command};
 
 const APP: &str = r#"
@@ -24,8 +26,7 @@ fn zgx() -> Command {
 }
 /// An app with `APP` and the test files `tests`, in a directory of its own.
 fn app(name: &str, tests: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-test-cli-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir(&format!("test-cli-{name}"));
     std::fs::create_dir_all(dir.join("tests")).unwrap();
     std::fs::write(dir.join("app.luau"), APP).unwrap();
     for (file, code) in tests {

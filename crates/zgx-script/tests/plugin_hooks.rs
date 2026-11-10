@@ -14,7 +14,7 @@ fn plugin(name: &str, code: &str) -> PathBuf {
     // and two writing one name's file would load each other's code.
     static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("zgx-hooks-{}-{n}-{name}", std::process::id()));
+    let dir = common::temp_dir(&format!("hooks-{n}-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();

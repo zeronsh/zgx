@@ -86,7 +86,7 @@ return ui.column {
 "#;
 
 fn dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-io-{}-{name}", std::process::id()));
+    let dir = common::temp_dir(&format!("io-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -451,7 +451,7 @@ fn launch_arguments_and_files_the_system_opens_reach_the_script() {
 fn files_on_the_clipboard_reach_on_paste_and_can_be_read() {
     let file = std::env::temp_dir().join(format!("zgx-pasted-{}.txt", std::process::id()));
     std::fs::write(&file, "pasted file").unwrap();
-    let dir = std::env::temp_dir().join(format!("zgx-paste-plugin-{}", std::process::id()));
+    let dir = common::temp_dir("paste-plugin");
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("plugin.luau");
     std::fs::write(

@@ -38,7 +38,7 @@ return ui.column {
 
 #[test]
 fn an_unmounted_page_leaves_the_budget_and_comes_back_from_it() {
-    let dir = std::env::temp_dir().join(format!("zgx-image-cache-{}", std::process::id()));
+    let dir = common::temp_dir("image-cache");
     std::fs::create_dir_all(&dir).unwrap();
     for i in 1..=40 {
         std::fs::write(dir.join(format!("img{i}.png")), PNG).unwrap();
@@ -96,7 +96,7 @@ return ui.column {
     ui.button { id = "hide", w = 40, h = 20, on_click = function() shown:set(false) end, "Hide" },
 }
 "##;
-    let dir = std::env::temp_dir().join(format!("zgx-bg-cache-{}", std::process::id()));
+    let dir = common::temp_dir("bg-cache");
     std::fs::create_dir_all(&dir).unwrap();
     for i in 1..=40 {
         std::fs::write(dir.join(format!("img{i}.png")), PNG).unwrap();
@@ -120,7 +120,7 @@ return ui.column {
 
 #[test]
 fn going_idle_keeps_only_the_pictures_shown() {
-    let dir = std::env::temp_dir().join(format!("zgx-image-idle-{}", std::process::id()));
+    let dir = common::temp_dir("image-idle");
     std::fs::create_dir_all(&dir).unwrap();
     for i in 1..=40 {
         std::fs::write(dir.join(format!("img{i}.png")), PNG).unwrap();
@@ -146,7 +146,7 @@ fn going_idle_keeps_only_the_pictures_shown() {
 #[test]
 fn decode_says_when_a_picture_decodes() {
     use zgx::image::Decoding;
-    let dir = std::env::temp_dir().join(format!("zgx-image-decode-{}", std::process::id()));
+    let dir = common::temp_dir("image-decode");
     std::fs::create_dir_all(&dir).unwrap();
     for name in ["auto", "sync", "async"] {
         std::fs::write(dir.join(format!("{name}.png")), PNG).unwrap();

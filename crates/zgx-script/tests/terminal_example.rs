@@ -913,13 +913,7 @@ fn notes_plugin(status: &str) -> (Value, std::path::PathBuf) {
     // A directory of its own: tests run side by side, and one rewriting a
     // shared file (truncated, then written) as another loads it gave that
     // one an empty plugin, no panel.
-    static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let made = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "zterm-notes-{}-{made}-{status}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir(&format!("zterm-notes-{status}"));
     let entry = dir.join("init.luau");
     std::fs::write(
         &entry,
@@ -1274,7 +1268,7 @@ fn the_editor_plugin_opens_edits_and_saves_a_picked_file() {
             Box::pin(async move { Ok(Some(path)) })
         }
     }
-    let dir = std::env::temp_dir().join(format!("zterm-editor-{}", std::process::id()));
+    let dir = common::temp_dir("zterm-editor");
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("hello.rs");
     std::fs::write(&file, "fn main() {\n}\n").unwrap();

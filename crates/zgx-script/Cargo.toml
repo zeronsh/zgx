@@ -120,6 +120,11 @@ name = "memory_named"
 path = "tests/memory_named.rs"
 
 [[test]]
+# Its own process: it points `TMPDIR` at a directory of its own.
+name = "test_runner_temp"
+path = "tests/test_runner_temp.rs"
+
+[[test]]
 # Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
 name = "md_chunk_flat"
 path = "tests/md_chunk_flat.rs"

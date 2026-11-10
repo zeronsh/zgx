@@ -164,8 +164,7 @@ fn reference_examples_run_and_type_check() {
         "found {} examples",
         examples.len()
     );
-    let root = std::env::temp_dir().join(format!("zgx-reference-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = common::temp_dir("reference");
     let mut dirs = Vec::new();
     for example in &examples {
         eprintln!("{}: {} file(s)", example.at, example.files.len());

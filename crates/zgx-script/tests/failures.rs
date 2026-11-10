@@ -82,8 +82,7 @@ return ui.column {
 #[test]
 fn a_missing_image_names_the_line_that_asked_for_it() {
     let warning_of = |name: &str, files: &[(&str, &str)]| {
-        let dir =
-            std::env::temp_dir().join(format!("zgx-image-site-{}-{name}", std::process::id()));
+        let dir = common::temp_dir(&format!("image-site-{name}"));
         for (file, code) in files {
             let path = dir.join(file);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -184,8 +183,7 @@ const PNG: &[u8] = &[
 /// anything draws it.
 #[test]
 fn an_image_tells_what_became_of_its_file() {
-    let dir = std::env::temp_dir().join(format!("zgx-image-told-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir("image-told");
     std::fs::write(dir.join("shot.png"), PNG).unwrap();
     std::fs::write(dir.join("notes.png"), b"not a picture").unwrap();
     let app = dir.join("app.luau");
@@ -248,8 +246,7 @@ const GIF: &[u8] = &[
 /// sized as its frames are, no error, and plays.
 #[test]
 fn a_gif_shows() {
-    let dir = std::env::temp_dir().join(format!("zgx-image-gif-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir("image-gif");
     std::fs::write(dir.join("blink.gif"), GIF).unwrap();
     let app = dir.join("app.luau");
     std::fs::write(

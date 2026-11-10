@@ -2,6 +2,8 @@
 //! it promises, and its app loads, lints clean, passes its own tests and,
 //! with luau-lsp installed, type checks. (zgx-run's `tests/templates.rs`
 //! audits them.)
+mod common;
+
 use std::{path::PathBuf, process::Command};
 use zgx_script::scaffold::TEMPLATES;
 
@@ -9,8 +11,7 @@ fn zgx() -> Command {
     Command::new(env!("CARGO_BIN_EXE_zgx"))
 }
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-new-test-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir(&format!("new-test-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     dir
 }

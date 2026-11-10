@@ -5,19 +5,12 @@
 //! a plugin's popups stay in the window, under it, while one is up.
 mod common;
 use common::Harness;
-use std::{cell::Cell, path::PathBuf};
+use std::path::PathBuf;
 use zgx::input::{InputEvent, PointerButton};
 use zgx_script::{Capability, Plugin, ScriptHost};
 
-thread_local! { static DIRS: Cell<u32> = const { Cell::new(0) }; }
 fn plugin(name: &str, code: &str) -> PathBuf {
-    let at = DIRS.with(|dirs| dirs.replace(dirs.get() + 1));
-    let dir = std::env::temp_dir().join(format!(
-        "zgx-decision-{}-{:?}-{at}-{name}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir(&format!("decision-{name}"));
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();
     entry

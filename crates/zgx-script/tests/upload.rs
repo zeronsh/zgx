@@ -14,7 +14,7 @@ use zgx_script::{Request, Response, ScriptHost};
 
 /// `bytes` as `photo.png`, in a folder of the test's own (`test`).
 fn file(test: &str, bytes: &[u8]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-upload-{}-{test}", std::process::id()));
+    let dir = common::temp_dir(&format!("upload-{test}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("photo.png");
     std::fs::write(&path, bytes).unwrap();

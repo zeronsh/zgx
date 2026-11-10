@@ -21,7 +21,10 @@ use std::{
     cell::{OnceCell, RefCell},
     path::{Path, PathBuf},
     rc::Rc,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 use zgx::{reactive::Signal, scene::Rect};
@@ -99,8 +102,13 @@ pub fn run(
             report.outcomes.push(outcome);
         };
         let start = Instant::now();
+        // Declared before the VM, so it goes after it (and every app it
+        // held, whose last saves write their storage), a panic's unwinding
+        // included: what the file's tests made goes then.
+        let made = Made::default();
+        let _sweep = Sweep(made.clone());
         let lua = Lua::new();
-        let launches = Rc::new(Launches::default());
+        let launches = Rc::new(Launches::new(made));
         let tests = match load(&lua, dir, &file, launches.clone()) {
             Ok(tests) => tests,
             Err(error) => {
@@ -121,26 +129,103 @@ pub fn run(
                 .call::<()>(())
                 .err()
                 .map(|error| message(&error, &file));
-            // Its apps go with it, and what they kept: the next test mounts
-            // fresh ones.
+            // Its apps go with it, then what they kept: the next test mounts
+            // fresh ones. (An app saves as it goes, `Persist`'s drop: its
+            // storage goes after.)
+            launches.close();
+            let _ = lua.gc_collect();
+            let _ = lua.gc_collect();
             launches.end();
-            let _ = lua.gc_collect();
-            let _ = lua.gc_collect();
             record(name, failure, start.elapsed());
         }
     }
     Ok(report)
 }
 
+/// The directories a run's tests made (each test's storage, each mount's
+/// files), to remove: each as its test ends, after its apps; what is left
+/// (an app a file kept past its tests saves as it goes) once the file's VM
+/// has gone (`Sweep`); and on Ctrl-C under `zgx test`, all of them
+/// (`remove_made_on_interrupt`). Each run's own: tests running side by side
+/// never remove another's.
+#[derive(Clone, Default)]
+struct Made(Rc<RefCell<Vec<PathBuf>>>);
+/// Every run's directories not yet removed, for `remove_made_on_interrupt`.
+static MADE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+impl Made {
+    /// `dir`, to remove when it's done with.
+    fn add(&self, dir: PathBuf) -> PathBuf {
+        self.0.borrow_mut().push(dir.clone());
+        MADE.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(dir.clone());
+        dir
+    }
+    /// Remove everything listed: what an app held past its test may have
+    /// written again after its test removed it.
+    fn sweep(&self) {
+        let dirs = std::mem::take(&mut *self.0.borrow_mut());
+        for dir in &dirs {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        MADE.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|made| !dirs.contains(made));
+    }
+}
+/// Removes what its `Made` lists as it goes (`run`).
+struct Sweep(Made);
+impl Drop for Sweep {
+    fn drop(&mut self) {
+        self.0.sweep();
+    }
+}
+/// `zgx test`'s Ctrl-C (SIGINT) and SIGTERM: the directories its tests made
+/// go before the process ends (130, or 143). A thread of its own waits for
+/// the signal, blocked everywhere else (call it before any thread starts):
+/// removing a directory isn't something a signal handler may do.
+#[cfg(unix)]
+pub fn remove_made_on_interrupt() {
+    // SAFETY: `sigset_t` is plain data the sig* calls fill; the mask is the
+    // calling thread's, inherited by the threads it then starts.
+    let set = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        set
+    };
+    std::thread::spawn(move || {
+        let mut signal = 0;
+        // SAFETY: `set` lists blocked signals; `signal` takes the one that came.
+        if unsafe { libc::sigwait(&set, &mut signal) } != 0 {
+            return;
+        }
+        let dirs = std::mem::take(&mut *MADE.lock().unwrap_or_else(PoisonError::into_inner));
+        for dir in dirs {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        std::process::exit(128 + signal);
+    });
+}
+
 /// A test's launches: its apps share a storage directory of the test's own,
 /// so a second `mount` is the next launch, finding what the first kept
 /// (`ui.persist`, remembered folders), saved before it starts.
-#[derive(Default)]
 struct Launches {
     dir: RefCell<Option<PathBuf>>,
     hosts: RefCell<Vec<ScriptHost>>,
+    made: Made,
 }
 impl Launches {
+    fn new(made: Made) -> Self {
+        Self {
+            dir: RefCell::default(),
+            hosts: RefCell::default(),
+            made,
+        }
+    }
     /// The test's storage, its apps so far saved to it: where the next keeps
     /// its own.
     fn next(&self) -> PathBuf {
@@ -151,17 +236,21 @@ impl Launches {
             .borrow_mut()
             .get_or_insert_with(|| {
                 static TESTS: AtomicUsize = AtomicUsize::new(0);
-                std::env::temp_dir().join(format!(
+                self.made.add(std::env::temp_dir().join(format!(
                     "zgx-test-storage-{}-{}",
                     std::process::id(),
                     TESTS.fetch_add(1, Ordering::Relaxed)
-                ))
+                )))
             })
             .clone()
     }
-    /// The test ended: its storage goes.
-    fn end(&self) {
+    /// The test ended: its apps go (each saving as it does).
+    fn close(&self) {
         self.hosts.borrow_mut().clear();
+    }
+    /// Its apps gone: its storage goes (`Made` removes it again, should an
+    /// app the file kept write it after).
+    fn end(&self) {
         if let Some(dir) = self.dir.borrow_mut().take() {
             let _ = std::fs::remove_dir_all(dir);
         }
@@ -218,7 +307,7 @@ fn load(
                 dir: fixtures.clone(),
                 app: Rc::new(RefCell::new(app)),
                 viewport,
-                files: Files::default(),
+                files: Files(OnceCell::new(), launches.made.clone()),
                 window: None,
                 windows: RefCell::default(),
             })
@@ -303,9 +392,8 @@ struct Mounted {
 }
 
 /// The files a test's dialogs answer with: a directory of the mount's own,
-/// made when first used and gone with it.
-#[derive(Default)]
-struct Files(OnceCell<PathBuf>);
+/// made when first used and gone with it (and listed in the run's `Made`).
+struct Files(OnceCell<PathBuf>, Made);
 
 impl Files {
     /// Where `name` lies: inside the directory, or an error.
@@ -320,11 +408,11 @@ impl Files {
         }
         static MOUNTS: AtomicUsize = AtomicUsize::new(0);
         let dir = self.0.get_or_init(|| {
-            std::env::temp_dir().join(format!(
+            self.1.add(std::env::temp_dir().join(format!(
                 "zgx-test-{}-{}",
                 std::process::id(),
                 MOUNTS.fetch_add(1, Ordering::Relaxed)
-            ))
+            )))
         });
         let path = dir.join(name);
         if let Some(parent) = path.parent() {
@@ -692,7 +780,7 @@ impl UserData for Mounted {
                 dir: m.dir.clone(),
                 app: Rc::new(RefCell::new(window)),
                 viewport,
-                files: Files::default(),
+                files: Files(OnceCell::new(), m.files.1.clone()),
                 window: Some((id.clone(), open)),
                 windows: RefCell::default(),
             })?;
