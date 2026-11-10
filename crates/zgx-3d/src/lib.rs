@@ -49,6 +49,8 @@ mod math;
 mod memory;
 mod orbit;
 mod painter;
+#[cfg(feature = "particles")]
+mod particles;
 mod pick;
 mod render;
 mod texture;
@@ -71,6 +73,10 @@ pub use gltf::{Model, ModelError};
 pub use math::{Mat4, Quat, Transform, Vec3, vec3};
 pub use memory::Memory;
 pub use orbit::{Answer, Orbit, OrbitControls};
+#[cfg(feature = "particles")]
+pub use particles::{
+    Blend, CPU_PARTICLES, Collide, Emitter, EmitterId, Force, Response, Shape, Spawn,
+};
 pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};
 #[cfg(feature = "lighting")]

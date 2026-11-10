@@ -25,6 +25,9 @@ gltf = ["dep:serde_json", "zgx-gpu/png", "zgx-gpu/jpeg"]
 compute = []
 # The lighting milestone (design-3d-aaa.md, 6.3): clustered lights.
 lighting = []
+# Particle emitters (`World::add_emitter`): updated by compute where the
+# device runs it, on the CPU elsewhere.
+particles = ["compute"]
 
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop", default-features = false }
@@ -37,3 +40,7 @@ png = "0.18"
 [[example]]
 name = "model"
 required-features = ["gltf"]
+
+[[example]]
+name = "particles_bench"
+required-features = ["particles"]

@@ -2,8 +2,9 @@
 //! frame drawn with each device it reads the device's [`Caps`]; with the
 //! `compute` feature, it runs the app's compute passes marked before and
 //! after the frame, in the frame's encoder on either side of the renderer's,
-//! and moves the app's readbacks along. A world with no GPU data of its own
-//! costs one flag and one test a frame.
+//! and moves the app's readbacks along; with `particles`, it steps the
+//! world's emitters before the frame and draws them after. A world with
+//! none of these costs one flag and one test a frame.
 use crate::{Caps, world::Inner};
 use std::{cell::RefCell, rc::Weak};
 use zgx_gpu::{
@@ -19,6 +20,9 @@ pub(crate) struct Painter<V> {
     /// The app's GPU data on this device.
     #[cfg(feature = "compute")]
     data: crate::compute::Frames,
+    /// The world's particles on this device.
+    #[cfg(feature = "particles")]
+    particles: crate::particles::Device,
 }
 impl<V> Painter<V> {
     pub(crate) fn new(painter: V, world: Weak<RefCell<Inner>>) -> Self {
@@ -28,6 +32,8 @@ impl<V> Painter<V> {
             read: false,
             #[cfg(feature = "compute")]
             data: crate::compute::Frames::default(),
+            #[cfg(feature = "particles")]
+            particles: crate::particles::Device::default(),
         }
     }
     #[cold]
@@ -47,7 +53,13 @@ impl<V: Viewport> Viewport for Painter<V> {
         }
         #[cfg(feature = "compute")]
         let data = self.data.before(&self.world, frame);
+        #[cfg(feature = "particles")]
+        let particles = self.particles.before(&self.world, frame);
         self.painter.render(frame);
+        #[cfg(feature = "particles")]
+        if particles {
+            self.particles.after(&self.world, frame);
+        }
         #[cfg(feature = "compute")]
         if data {
             self.data.after(&self.world, frame);
@@ -57,6 +69,8 @@ impl<V: Viewport> Viewport for Painter<V> {
         self.read = false;
         #[cfg(feature = "compute")]
         self.data.device_changed();
+        #[cfg(feature = "particles")]
+        self.particles.device_changed();
         self.painter.device_changed();
     }
     fn rest(&mut self) {

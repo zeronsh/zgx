@@ -494,6 +494,9 @@ pub(crate) struct Inner {
     pub(crate) data: Option<Box<crate::compute::Data>>,
     #[cfg(feature = "lighting")]
     pub(crate) lighting: lighting::Lighting,
+    /// Its particle emitters, once it has any.
+    #[cfg(feature = "particles")]
+    pub(crate) particles: Option<Box<crate::particles::Particles>>,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -1117,6 +1120,8 @@ impl Skin {
 mod caps;
 #[cfg(feature = "compute")]
 mod compute;
+#[cfg(feature = "particles")]
+mod particles;
 
 /// A 3D scene shown by a GPU view (`view`): change it and the view draws a
 /// frame, before the window's next; leave it and it draws nothing. Clones
@@ -1181,6 +1186,8 @@ impl World {
             data: None,
             #[cfg(feature = "lighting")]
             lighting: Default::default(),
+            #[cfg(feature = "particles")]
+            particles: None,
         }));
         let view = zgx_gpu::viewport::view(crate::painter::Painter::new(
             crate::render::Renderer::new(Rc::downgrade(&inner)),

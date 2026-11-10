@@ -11,6 +11,8 @@ pub struct Memory {
     pub app_buffers: u64,
     /// The app's textures (`World::add_texture`), live handles only.
     pub app_textures: u64,
+    /// Particle emitters' pools (`World::add_emitter`).
+    pub particles: u64,
 }
 impl Memory {
     /// The app's buffers and textures: what counts against the world's cap
@@ -24,17 +26,25 @@ impl crate::World {
     /// Bytes it holds on the device, by kind. Handles the app dropped are let
     /// go here, as by the next frame.
     pub fn memory(&self) -> Memory {
+        #[allow(unused_mut)]
+        let mut memory = Memory::default();
         #[cfg(feature = "compute")]
         {
             let mut inner = self.inner_mut();
             if let Some(data) = inner.data.as_deref_mut() {
                 data.sweep();
-                return Memory {
-                    app_buffers: data.buffer_bytes,
-                    app_textures: data.texture_bytes,
-                };
+                memory.app_buffers = data.buffer_bytes;
+                memory.app_textures = data.texture_bytes;
             }
         }
-        Memory::default()
+        #[cfg(feature = "particles")]
+        {
+            let on_gpu = self.caps().is_none_or(|caps| caps.compute);
+            let inner = self.inner_mut();
+            if let Some(particles) = inner.particles.as_deref() {
+                memory.particles = particles.bytes(on_gpu);
+            }
+        }
+        memory
     }
 }
