@@ -331,9 +331,12 @@ impl TermDamageState {
     /// are damaged whole (`ordered`), and the old cursor moves up too. Whole
     /// damage, if they are all new. A count and an offset: no line is read.
     fn scroll_up(&mut self, lines: usize) {
+        // Past a third of the screen's lines since the last reset, the rest
+        // go too: a frame bringing that many builds most rows anyway, and
+        // one refilling the screen (output pouring in) then turns its
+        // damage for a third of its scrolls, not all of them.
         let count = self.lines.len();
-        // A screen's worth since the last reset: every line is new.
-        if self.scrolled + lines >= count {
+        if self.scrolled + lines > count / 3 {
             self.full = true;
             return;
         }
@@ -3677,6 +3680,26 @@ mod tests {
             ..Config::default()
         });
         assert!(turns(&mut term), "the scrollback shortened");
+    }
+
+    /// zgx: past a third of the screen's lines scrolled since the damage
+    /// was reset, all of it is damaged: the rows a frame brings are most of
+    /// what it would build anyway.
+    #[test]
+    fn turning_damage_stops_past_a_third_of_the_screen() {
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 9), VoidListener);
+        term.goto(8, 0);
+        term.reset_damage();
+        for scrolled in 1..=3 {
+            term.linefeed();
+            assert_eq!(term.scrolled(), scrolled);
+            assert!(
+                matches!(term.damage(), TermDamage::Partial(_)),
+                "{scrolled} lines"
+            );
+        }
+        term.linefeed();
+        assert!(matches!(term.damage(), TermDamage::Full), "a fourth line");
     }
 
     #[test]
