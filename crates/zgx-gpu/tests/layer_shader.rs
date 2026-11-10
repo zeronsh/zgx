@@ -856,3 +856,224 @@ fn a_layer_reads_its_own_far_pixels_exactly() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+/// Glass boxes over stripes (as d3d11_parity's cells: 96 by 72 each, six a
+/// row), those in `readers` reading what's behind them at an offset, the
+/// rest plain: the frame, as `direct` draws it.
+fn readers_frame(direct: bool, readers: &[usize]) -> (u32, Vec<u8>) {
+    let (width, height) = (576_u32, 216_u32);
+    let mut gpu = GpuRenderer::new(width, height).unwrap();
+    gpu.set_direct_metal(direct);
+    let mut scene = Scene::new(width as f32, height as f32);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    for i in 0..18 {
+        let stripe = scene.append(
+            root,
+            NodeKind::Rect(match i % 2 {
+                0 => Color(30, 60, 200, 255),
+                _ => Color(230, 130, 30, 255),
+            }),
+            fixed(width as f32, 12.),
+        );
+        scene.set_transform(
+            stripe,
+            Transform {
+                x: 0.,
+                y: i as f32 * 12.,
+            },
+        );
+    }
+    let mix = FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+    let behind = zgx_backdrop(input.p + vec2(6. * sin(input.time * 3.), 4.));
+    return vec4(mix(behind.rgb, input.color.rgb, 0.35), max(behind.a, input.color.a));
+}",
+        None,
+    );
+    let mut boxes = Vec::new();
+    for index in 0..18 {
+        let id = scene.append(
+            root,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: QuadStyle {
+                    radius: 6.,
+                    fill: Color(20, 24, 32, 200),
+                    ..Default::default()
+                },
+            },
+            fixed(48., 32.),
+        );
+        scene.set_transform(
+            id,
+            Transform {
+                x: (index % 6) as f32 * 96. + 24.,
+                y: (index / 6) as f32 * 72. + 20.,
+            },
+        );
+        let bar = scene.append(
+            id,
+            NodeKind::Rect(Color(250, 250, 250, 255)),
+            fixed(24., 8.),
+        );
+        scene.set_transform(bar, Transform { x: 12., y: 12. });
+        boxes.push(id);
+    }
+    let frame = scene.flush();
+    gpu.render(&scene, &frame.damage).unwrap();
+    for &index in readers {
+        scene.set_layer_shader(boxes[index], Some(mix.clone()));
+        scene.set_layer_uniforms(
+            boxes[index],
+            ShaderUniforms {
+                time: 0.1,
+                params: [[0.; 4]; 4],
+            },
+        );
+    }
+    let frame = scene.flush();
+    gpu.render(&scene, &frame.damage).unwrap();
+    (width, gpu.readback().unwrap())
+}
+
+/// Readers in one frame each read what's behind them as if drawn alone:
+/// some share one copy of the target (`share_backdrops`), drawn where the
+/// first is drawn.
+#[test]
+fn readers_in_one_frame_each_read_as_drawn_alone() {
+    let _gpu_fixture = gpu_fixture();
+    for direct in [true, false] {
+        for readers in [&[0, 2, 13][..], &[1, 3, 13], &[0, 1, 2, 3, 4, 5, 13]] {
+            let (width, together) = readers_frame(direct, readers);
+            for &index in readers {
+                let (_, alone) = readers_frame(direct, &[index]);
+                let (x0, y0) = ((index % 6) as u32 * 96, (index / 6) as u32 * 72);
+                for y in y0..y0 + 72 {
+                    for x in x0..x0 + 96 {
+                        let at = ((y * width + x) * 4) as usize;
+                        assert_eq!(
+                            together[at..at + 4],
+                            alone[at..at + 4],
+                            "direct={direct} readers={readers:?}: reader {index} at ({x}, {y}) \
+                             reads otherwise than alone"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Boxes reading the backdrop `offset` points across (their reach that far)
+/// at `at`, over stripes, on a frame that sets their shaders after a plain
+/// one: the frame, then the same frame repainted whole.
+fn readers_against_whole(direct: bool, at: &[(f32, f32)], offset: f32) -> (u32, Vec<u8>, Vec<u8>) {
+    let (width, height) = (576_u32, 216_u32);
+    let mut gpu = GpuRenderer::new(width, height).unwrap();
+    gpu.set_direct_metal(direct);
+    let mut scene = Scene::new(width as f32, height as f32);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    for i in 0..18 {
+        let stripe = scene.append(
+            root,
+            NodeKind::Rect(match i % 2 {
+                0 => Color(30, 60, 200, 255),
+                _ => Color(230, 130, 30, 255),
+            }),
+            fixed(width as f32, 12.),
+        );
+        scene.set_transform(
+            stripe,
+            Transform {
+                x: 0.,
+                y: i as f32 * 12.,
+            },
+        );
+    }
+    let reading = FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+    let behind = zgx_backdrop(input.p + vec2(input.params[0].x, 4.));
+    return vec4(mix(behind.rgb, input.color.rgb, 0.35), max(behind.a, input.color.a));
+}",
+        None,
+    );
+    let boxes: Vec<NodeId> = at
+        .iter()
+        .map(|&(x, y)| {
+            let id = scene.append(
+                root,
+                NodeKind::Panel {
+                    layout: Layout::Overlay,
+                    quad: QuadStyle {
+                        radius: 6.,
+                        fill: Color(20, 24, 32, 200),
+                        ..Default::default()
+                    },
+                },
+                fixed(48., 32.),
+            );
+            scene.set_transform(id, Transform { x, y });
+            id
+        })
+        .collect();
+    let frame = scene.flush();
+    gpu.render(&scene, &frame.damage).unwrap();
+    for &id in &boxes {
+        scene.set_layer_shader(id, Some(reading.clone()));
+        scene.set_layer_extent(id, 0., offset.abs() + 4.);
+        scene.set_layer_uniforms(
+            id,
+            ShaderUniforms {
+                time: 0.,
+                params: [[offset, 0., 0., 0.], [0.; 4], [0.; 4], [0.; 4]],
+            },
+        );
+    }
+    let frame = scene.flush();
+    gpu.render(&scene, &frame.damage).unwrap();
+    let drawn = gpu.readback().unwrap();
+    gpu.render(&scene, &[Rect::new(0., 0., width as f32, height as f32)])
+        .unwrap();
+    (width, drawn, gpu.readback().unwrap())
+}
+
+/// Readers that overlap, abut, or read past their neighbours, with others
+/// far off on the frame: each frame as a whole repaint draws it (a reader
+/// there reads its neighbours' composites, so not as drawn alone).
+#[test]
+fn readers_overlapping_abutting_or_reading_past_neighbours_draw_as_a_whole_repaint() {
+    let _gpu_fixture = gpu_fixture();
+    // Others across the top and one low on the frame: what the frame draws
+    // then reaches past what the walk of its damage alone would find.
+    let far = [(312., 20.), (408., 20.), (504., 20.), (120., 164.)];
+    // A case's name, its readers' places and how far across they read.
+    type Case = (&'static str, Vec<(f32, f32)>, f32);
+    let cases: [Case; 3] = [
+        ("overlapping", vec![(24., 20.), (52., 30.), (60., 40.)], 6.),
+        (
+            "abutting",
+            vec![(24., 20.), (72., 20.), (120., 20.), (72., 52.)],
+            6.,
+        ),
+        (
+            "reading past neighbours",
+            vec![(24., 20.), (120., 20.), (216., 20.)],
+            90.,
+        ),
+    ];
+    for direct in [true, false] {
+        for (name, mut at, offset) in cases.clone() {
+            at.extend(far);
+            let (width, drawn, whole) = readers_against_whole(direct, &at, offset);
+            let differs = (0..drawn.len() / 4).find(|i| drawn[i * 4..][..4] != whole[i * 4..][..4]);
+            assert!(
+                differs.is_none(),
+                "direct={direct} {name}: the frame differs from a whole repaint at {:?}: {:?} vs {:?}",
+                differs.map(|i| (i as u32 % width, i as u32 / width)),
+                differs.map(|i| &drawn[i * 4..][..4]),
+                differs.map(|i| &whole[i * 4..][..4]),
+            );
+        }
+    }
+}
