@@ -607,6 +607,13 @@ jobs:
       - run: "cargo test -p zgx --test lists --locked -- overlay_scrollbars::"
       # And its menus closing at once when an item is chosen, no flash.
       - run: "cargo test -p zgx --test overlays --locked -- composition_menu::a_chosen_item_flashes_first_where_menus_do"
+      # Scrolling with Windows' shapes: menu items spaced as WinUI's,
+      # scrollbars with arrow buttons, a right-to-left view's thumb.
+      - run: "cargo test -p zgx --test overlays --test lists --test layout --locked -- composition_menu_scroll:: composition_scrollbar:: rtl_scroll::"
+      # Paths as Windows writes them: a file a script uploads, a test's
+      # file and line the CLI names, and the reference's examples written
+      # out with their plugins (`-- file: … (granted …)`).
+      - run: "cargo test -p zgx-script --test state --test tooling --locked -- upload:: test_cli:: reference_docs::"
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The swap chain's alpha (opaque windows aren't blended by DWM, #513)

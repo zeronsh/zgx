@@ -22,9 +22,11 @@ fn file(test: &str, bytes: &[u8]) -> PathBuf {
 }
 
 fn app(photo: &std::path::Path, streaming: bool) -> (Harness, Rc<RefCell<Vec<Request>>>) {
+    // The path in a long string: in a quoted one, Windows' backslashes
+    // read as escapes.
     let script = format!(
         r#"
-local photo = {{ path = "{}", name = "photo.png" }}
+local photo = {{ path = [==[{}]==], name = "photo.png" }}
 local shown = ui.state("shown", "")
 local progress = ui.state("progress", "")
 local function report(sent, total)
