@@ -14003,6 +14003,54 @@ impl Scene {
         }
         Some(corners)
     }
+    /// A move with backdrop readers around it: split its clear parts and
+    /// repaint what they leave. Ordinary scroll moves push one clip directly.
+    #[cold]
+    #[inline(never)]
+    fn move_beside_blurs(
+        &mut self,
+        id: NodeId,
+        clip: Rect,
+        dx: f32,
+        dy: f32,
+        moves: &mut Vec<ScrollMove>,
+    ) -> bool {
+        let usable: smallvec::SmallVec<[Rect; 1]> = self
+            .clear_of_blurs(id, clip)
+            .into_iter()
+            .filter(|clear| dx.abs() < clear.width && dy.abs() < clear.height)
+            .collect();
+        if usable.is_empty() {
+            return false;
+        }
+        if usable[..] != [clip] {
+            let mut rest = vec![clip];
+            for part in &usable {
+                rest = rest
+                    .into_iter()
+                    .flat_map(|left| -> Vec<Rect> {
+                        match left.intersection(*part) {
+                            Some(inner) => rect_minus(left, inner).collect(),
+                            None => vec![left],
+                        }
+                    })
+                    .collect();
+            }
+            for rest in rest {
+                self.add_damage(rest);
+            }
+        }
+        for clip in usable {
+            moves.push(ScrollMove {
+                node: id,
+                clip,
+                dx,
+                dy,
+                serial: 0,
+            });
+        }
+        true
+    }
     /// Turn this frame's scroll translations into moves: damage what a copy
     /// cannot supply, or everything the content painted where a copy is
     /// unsafe (isolated ancestors, backdrop filters over the clip, nested or
@@ -14051,58 +14099,38 @@ impl Scene {
             }
             let clip = self.world_clip(id);
             let isolated = layered;
-            // Clear of what blurs what's behind it: a glass bar over the view takes
-            // only the view's band it reaches, and what's beside it still moves.
-            let usable: smallvec::SmallVec<[Rect; 1]> = match (clip, isolated) {
-                (Some(clip), false) => self
-                    .clear_of_blurs(id, clip)
-                    .into_iter()
-                    .filter(|clear| dx.abs() < clear.width && dy.abs() < clear.height)
-                    .collect(),
-                _ => smallvec::SmallVec::new(),
-            };
-            // What of the view the parts leave repaints.
-            if let Some(clip) = clip
-                && !usable.is_empty()
-                && usable[..] != [clip]
-            {
-                let mut rest = vec![clip];
-                for part in &usable {
-                    rest = rest
-                        .into_iter()
-                        .flat_map(|left| -> Vec<Rect> {
-                            match left.intersection(*part) {
-                                Some(inner) => rect_minus(left, inner).collect(),
-                                None => vec![left],
-                            }
-                        })
-                        .collect();
+            let usable =
+                clip.filter(|clip| !isolated && dx.abs() < clip.width && dy.abs() < clip.height);
+            if let Some(clip) = usable {
+                if self.blur_nodes.is_empty()
+                    && self
+                        .cold
+                        .as_deref()
+                        .is_none_or(|cold| cold.backdrop_readers.is_empty())
+                {
+                    moves.push(ScrollMove {
+                        node: id,
+                        clip,
+                        dx,
+                        dy,
+                        serial: 0,
+                    });
+                    continue;
                 }
-                for rest in rest {
-                    self.add_damage(rest);
+                if self.move_beside_blurs(id, clip, dx, dy, &mut moves) {
+                    continue;
                 }
             }
-            match usable.is_empty() {
-                false => moves.extend(usable.into_iter().map(|clip| ScrollMove {
-                    node: id,
-                    clip,
-                    dx,
-                    dy,
-                    serial: 0,
-                })),
-                true => {
-                    // What was damaged in it since it moved (a node gone, a
-                    // box laid out again) was taken where the content is
-                    // now, but painted where it was: there too.
-                    self.damage_before_move(id, clip, dx, dy);
-                    // Everything the content painted, at both positions.
-                    let now = self.node(id).transform;
-                    self.node_mut(id).transform = from;
-                    self.damage_subtree(id);
-                    self.node_mut(id).transform = now;
-                    self.damage_subtree(id);
-                }
-            }
+            // What was damaged in it since it moved (a node gone, a
+            // box laid out again) was taken where the content is
+            // now, but painted where it was: there too.
+            self.damage_before_move(id, clip, dx, dy);
+            // Everything the content painted, at both positions.
+            let now = self.node(id).transform;
+            self.node_mut(id).transform = from;
+            self.damage_subtree(id);
+            self.node_mut(id).transform = now;
+            self.damage_subtree(id);
         }
         // Nested or overlapping moves: repaint instead.
         let overlapping: Vec<usize> = (0..moves.len())
