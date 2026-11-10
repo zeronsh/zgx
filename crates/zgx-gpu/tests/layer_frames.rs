@@ -1298,6 +1298,23 @@ fn under_composer(offset: Signal<f32>) -> View {
                 })
                 .backdrop_blur(28.),
         )
+        // A "jump to latest" pill above it, off the pixel grid.
+        .child(
+            div()
+                .w(90.3)
+                .h(26.)
+                .left(145.1)
+                .top(SIZE.1 - 100.)
+                .rounded(13.)
+                .bg(Color(255, 255, 255, 60))
+                .shadow(zgx::scene::BoxShadow {
+                    color: Color(0, 0, 0, 80),
+                    offset: zgx::scene::Transform { x: 0., y: 2. },
+                    blur_radius: 6.,
+                    spread: 0.,
+                })
+                .backdrop_blur(16.),
+        )
 }
 #[cfg(target_os = "macos")]
 fn a_scroll_under_a_composers_glass_copies_up_to_its_shadow() {
@@ -1318,19 +1335,40 @@ fn a_scroll_under_a_composers_glass_copies_up_to_its_shadow() {
     ui.scene.borrow_mut().flush();
     let scene = ui.scene.borrow();
     let moves = scene.scroll_moves();
-    assert_eq!(moves.len(), 1, "one copy");
-    let clip = moves[0].clip;
-    let glass_top = SIZE.1 - 60.;
-    // The shadow: blur 10 (a reach of 3 x 10 / 2 past its box, or so), down 4.
+    // Above the glasses, and beside each.
+    assert!(moves.len() > 2, "{} parts copied: {moves:?}", moves.len());
+    let pill_top = SIZE.1 - 100.;
+    let top = moves
+        .iter()
+        .map(|scroll| scroll.clip)
+        .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
+        .unwrap();
+    // The pill's shadow: blur 6, down 2.
     assert!(
-        clip.y + clip.height > glass_top - 30.,
-        "the copy stops {} points above the glass, short of its shadow",
-        glass_top - clip.y - clip.height
+        top.y + top.height > pill_top - 20.,
+        "the copy stops {} points above the pill, short of its shadow",
+        pill_top - top.y - top.height
     );
+    // Every part on whole device pixels (a copy moves whole pixels), and
+    // clear of both glasses' boxes.
+    let pill = zgx::scene::Rect::new(145.1, pill_top, 90.3, 26.);
+    let composer = zgx::scene::Rect::new(60., SIZE.1 - 60., 260., 48.);
+    for scroll in moves {
+        let clip = scroll.clip;
+        for edge in [clip.x, clip.y, clip.x + clip.width, clip.y + clip.height] {
+            assert!((edge * 2.).fract().abs() < 1e-3, "{clip:?} off the pixels");
+        }
+        assert!(
+            !clip.intersects(pill) && !clip.intersects(composer),
+            "{clip:?} over a glass"
+        );
+    }
+    // Beside the composer, at its height, the content copies.
     assert!(
-        clip.y + clip.height <= glass_top,
-        "the copy runs into the glass: to {}",
-        clip.y + clip.height
+        moves.iter().any(|scroll| scroll.clip.x >= 320.
+            && scroll.clip.y < SIZE.1 - 60.
+            && scroll.clip.y + scroll.clip.height > SIZE.1 - 30.),
+        "nothing copied beside the composer: {moves:?}"
     );
 }
 /// A faded scroll copies its interior and repaints its bands and what it
