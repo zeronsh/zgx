@@ -3,6 +3,7 @@
 //! master through the limiter. It touches only memory made before it ran
 //! and never locks, allocates, frees or calls the system: sounds it's done
 //! with go back to the main thread to be dropped there.
+use crate::effect::Slot;
 use crate::limiter::Limiter;
 use crate::queue::{Consumer, Producer};
 use crate::ramp::{Curve, Ramp, Smoothed};
@@ -19,6 +20,16 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 pub(crate) const MAX_BLOCK: usize = 128;
 /// Buses at most, master included.
 pub(crate) const MAX_BUSES: usize = 32;
+/// Effects a bus can hold.
+pub(crate) const MAX_EFFECTS: usize = 8;
+/// The most a sample can be as it leaves a bus's effects, either way: 2^18.
+/// With every voice and every bus's effects bounded, the loudest sum
+/// through the deepest tree of buses is under 2^120: finite.
+const EFFECT_LIMIT: f32 = 262_144.;
+/// Frames of the clock between the points where a bus decides whether
+/// its effects run on silence: decided there, and only there, what an
+/// effect runs on doesn't depend on how the device splits its blocks.
+pub(crate) const CELL: u64 = MAX_BLOCK as u64;
 /// Slots past the voice limit, for voices fading out after being stolen.
 pub(crate) const FADING_SLOTS: usize = 16;
 /// Frames before a play that found no slot tries again.
@@ -73,6 +84,20 @@ pub(crate) enum Command {
         bus: u16,
         parent: u16,
     },
+    /// An effect, prepared, for the end of a bus's chain.
+    AddEffect {
+        bus: u16,
+        slot: Box<Slot>,
+    },
+    RemoveEffect {
+        id: u64,
+    },
+    EffectParam {
+        id: u64,
+        index: u16,
+        value: f32,
+        ramp: Ramp,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +112,12 @@ pub(crate) enum Return {
     /// A voice finished (or never started); its sound is the main thread's
     /// to drop.
     Ended { id: u64, sound: Feed },
+    /// An effect removed from its bus: the main thread's to drop.
+    Effect(Box<Slot>),
+    /// An effect prepared for a rate the mixer no longer runs at (it
+    /// changed while the effect was on its way): to prepare again and send
+    /// back.
+    Unprepared { bus: u16, slot: Box<Slot> },
 }
 
 /// A drive's bits when nothing drives it: a NaN.
@@ -632,6 +663,38 @@ struct Bus {
     touched: bool,
 }
 
+/// A bus's effects, and what deciding when they run keeps: apart from
+/// [`Bus`], which the voices' loop reads, so a mix without effects is the
+/// same code as before there were any.
+struct Chain {
+    /// In order; room for [`MAX_EFFECTS`] made up front. Boxed: each
+    /// arrives in a box and leaves in it, which unboxing here would free
+    /// on the audio thread.
+    #[allow(clippy::vec_box)]
+    effects: Vec<Box<Slot>>,
+    /// Their running on silence, decided every [`CELL`] frames of the
+    /// clock: the frame until which they may still sound with no input
+    /// (where the last cell fed ended, plus the longest tail); whether
+    /// they run in this cell; whether this cell was fed.
+    horizon: u64,
+    active: bool,
+    fed: bool,
+    /// Effects anywhere that take this bus's level as their side chain.
+    keyed: u32,
+}
+
+impl Chain {
+    fn new() -> Chain {
+        Chain {
+            effects: Vec::with_capacity(MAX_EFFECTS),
+            horizon: 0,
+            active: false,
+            fed: false,
+            keyed: 0,
+        }
+    }
+}
+
 impl Bus {
     fn new() -> Bus {
         Bus {
@@ -714,6 +777,19 @@ pub(crate) struct Mixer {
     /// mute's (5 ms).
     click: u32,
     declick: u32,
+    /// Each bus's level (after its gain) over the block being mixed, and
+    /// over the one before: what side chains read, so no bus waits on
+    /// another.
+    levels: [f32; MAX_BUSES],
+    heard: [f32; MAX_BUSES],
+    /// Effects with a side chain, anywhere.
+    keyed: u32,
+    /// Each bus's effects, by its index.
+    chains: Box<[Chain]>,
+    /// Effects on every bus.
+    effects: usize,
+    /// A bus's block interleaved, for its effects.
+    frames: Box<[f32; 2 * MAX_BLOCK]>,
 }
 
 impl Mixer {
@@ -747,6 +823,7 @@ impl Mixer {
                 values: [0.; MAX_BLOCK],
                 steps: [0; MAX_BLOCK],
             }),
+            frames: Box::new([0.; 2 * MAX_BLOCK]),
             limiter: setup
                 .limiter
                 .map(|ceiling| Limiter::new(setup.rate, ceiling)),
@@ -764,6 +841,11 @@ impl Mixer {
             taken: 0,
             click: (setup.rate / 1000).max(1),
             declick: (setup.rate / 200).max(1),
+            levels: [0.; MAX_BUSES],
+            heard: [0.; MAX_BUSES],
+            keyed: 0,
+            chains: (0..MAX_BUSES).map(|_| Chain::new()).collect(),
+            effects: 0,
         }
     }
 
@@ -818,6 +900,9 @@ impl Mixer {
                 voice.base_step = f64::from(feed.data().rate) / f64::from(rate);
             }
         }
+        for slot in self.chains.iter_mut().flat_map(|c| c.effects.iter_mut()) {
+            slot.prepare(rate);
+        }
     }
 
     pub fn rate(&self) -> u32 {
@@ -849,6 +934,10 @@ impl Mixer {
                     .saturating_sub(self.now)
                     .clamp(1, MAX_BLOCK as u64);
                 n = n.min(until as usize);
+            }
+            if self.effects > 0 {
+                // Effects decide on the clock's cells: no block spans two.
+                n = n.min((CELL - self.now % CELL) as usize);
             }
             self.mix(n);
             let master = &self.buses[0];
@@ -902,7 +991,11 @@ impl Mixer {
         // Anything playing, fading, in the limiter's tail or due to start
         // counts as heard: the device isn't stopped under it.
         let quiet = self.limiter.as_ref().is_none_or(Limiter::silent);
-        if self.voices.iter().any(|v| v.id != 0) || !quiet || !self.schedule.is_empty() {
+        let ringing = self.effects > 0
+            && self.chains[..self.bus_count]
+                .iter()
+                .any(|c| c.horizon > self.now);
+        if self.voices.iter().any(|v| v.id != 0) || !quiet || ringing || !self.schedule.is_empty() {
             meter.audible.store(self.now, Ordering::Relaxed);
         }
         if let Some(timing) = timing {
@@ -1056,7 +1149,81 @@ impl Mixer {
                 self.bus_count = self.bus_count.max(index + 1);
                 self.gate();
             }
+            Command::AddEffect { bus, slot } => return self.add_effect(bus, slot),
+            Command::RemoveEffect { id } => {
+                let found = self.chains.iter().enumerate().find_map(|(b, chain)| {
+                    let at = chain.effects.iter().position(|slot| slot.id == id)?;
+                    Some((b, at))
+                });
+                if let Some((b, at)) = found {
+                    let slot = self.chains[b].effects.remove(at);
+                    let side = slot.side;
+                    match self.returns.push(Return::Effect(slot)) {
+                        Ok(()) => {
+                            self.effects -= 1;
+                            if let Some(side) = side {
+                                self.chains[usize::from(side)].keyed -= 1;
+                                self.keyed -= 1;
+                            }
+                        }
+                        Err(Return::Effect(slot)) => {
+                            // No room to give it back: kept, and tried again.
+                            self.chains[b].effects.insert(at, slot);
+                            return Err(Command::RemoveEffect { id });
+                        }
+                        Err(_) => unreachable!("an effect is given back as one"),
+                    }
+                }
+            }
+            Command::EffectParam {
+                id,
+                index,
+                value,
+                ramp,
+            } => {
+                let (frames, curve) = (ramp.frames(self.rate), ramp.curve);
+                let param = self
+                    .chains
+                    .iter_mut()
+                    .flat_map(|chain| chain.effects.iter_mut())
+                    .find(|slot| slot.id == id)
+                    .and_then(|slot| slot.params.get_mut(usize::from(index)));
+                if let Some(param) = param {
+                    let value = if value.is_nan() { param.min } else { value };
+                    param
+                        .smoothed
+                        .set(value.clamp(param.min, param.max), frames, curve);
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// Puts `slot` at the end of `bus`'s chain, or gives it back to be
+    /// prepared again if the rate changed on its way.
+    fn add_effect(&mut self, bus: u16, slot: Box<Slot>) -> Result<(), Command> {
+        let unprepared = slot.rate != self.rate;
+        // The main thread keeps count: a full chain never gets another.
+        let full = self.chains[usize::from(bus)].effects.len() >= MAX_EFFECTS;
+        if unprepared || full {
+            let back = if unprepared {
+                Return::Unprepared { bus, slot }
+            } else {
+                Return::Effect(slot)
+            };
+            return self.returns.push(back).map_err(|back| match back {
+                Return::Unprepared { slot, .. } | Return::Effect(slot) => {
+                    Command::AddEffect { bus, slot }
+                }
+                Return::Ended { .. } => unreachable!("an effect is given back as one"),
+            });
+        }
+        if let Some(side) = slot.side {
+            self.chains[usize::from(side)].keyed += 1;
+            self.keyed += 1;
+        }
+        self.chains[usize::from(bus)].effects.push(slot);
+        self.effects += 1;
         Ok(())
     }
 
@@ -1107,6 +1274,7 @@ impl Mixer {
                         priority,
                         fade_in,
                     }),
+                    Err(_) => unreachable!("a dropped play is given back as one"),
                 };
             }
             victim.envelope.set(0., self.declick, Curve::Linear);
@@ -1243,29 +1411,36 @@ impl Mixer {
                         self.ended += 1;
                     }
                     Err(Return::Ended { sound, .. }) => voice.sound = Some(sound),
+                    Err(_) => unreachable!("an ended voice is given back as one"),
                 }
             }
         }
-        for b in (1..self.bus_count).rev() {
-            let (below, above) = self.buses.split_at_mut(b);
-            let bus = &mut above[0];
-            if !bus.used {
-                continue;
+        // With no effect anywhere, the buses' loop is the plain one: what
+        // effects need costs a mix without them nothing.
+        if self.effects > 0 {
+            self.sum_with_effects(n);
+        } else {
+            for b in (1..self.bus_count).rev() {
+                let (below, above) = self.buses.split_at_mut(b);
+                let bus = &mut above[0];
+                if !bus.used {
+                    continue;
+                }
+                if !bus.touched {
+                    bus.gain.advance(n);
+                    bus.gate.advance(n);
+                    continue;
+                }
+                let parent = &mut below[usize::from(bus.parent)];
+                parent.touch(n);
+                sum_into(
+                    bus,
+                    n,
+                    &mut self.scratch.gains,
+                    &mut parent.left[..n],
+                    &mut parent.right[..n],
+                );
             }
-            if !bus.touched {
-                bus.gain.advance(n);
-                bus.gate.advance(n);
-                continue;
-            }
-            let parent = &mut below[usize::from(bus.parent)];
-            parent.touch(n);
-            sum_into(
-                bus,
-                n,
-                &mut self.scratch.gains,
-                &mut parent.left[..n],
-                &mut parent.right[..n],
-            );
         }
         let master = &mut self.buses[0];
         if master.touched
@@ -1306,9 +1481,152 @@ impl Mixer {
             limiter.process(&mut master.left[..n], &mut master.right[..n]);
         }
     }
+
+    /// The buses' loop with effects somewhere: each bus through its own
+    /// before it sums into its parent, its level kept where a side chain
+    /// reads it, then master through its own.
+    #[inline(never)]
+    fn sum_with_effects(&mut self, n: usize) {
+        if self.keyed > 0 {
+            self.heard = self.levels;
+        }
+        for b in (1..self.bus_count).rev() {
+            let (below, above) = self.buses.split_at_mut(b);
+            let (bus, chain) = (&mut above[0], &mut self.chains[b]);
+            if !bus.used {
+                continue;
+            }
+            if !chain.effects.is_empty() {
+                run_effects(bus, chain, n, self.now, &mut self.frames, &self.heard);
+            }
+            if !bus.touched {
+                bus.gain.advance(n);
+                bus.gate.advance(n);
+                self.levels[b] = 0.;
+                continue;
+            }
+            let parent = &mut below[usize::from(bus.parent)];
+            parent.touch(n);
+            sum_into(
+                bus,
+                n,
+                &mut self.scratch.gains,
+                &mut parent.left[..n],
+                &mut parent.right[..n],
+            );
+            if chain.keyed > 0 {
+                self.levels[b] = level(bus, n);
+            }
+        }
+        let (master, chain) = (&mut self.buses[0], &mut self.chains[0]);
+        if !chain.effects.is_empty() {
+            run_effects(master, chain, n, self.now, &mut self.frames, &self.heard);
+        }
+        if chain.keyed > 0 {
+            self.levels[0] = if master.touched { level(master, n) } else { 0. };
+        }
+    }
+}
+
+/// Runs `bus`'s effects on its block, which lies within one of the
+/// clock's cells. At a cell's first frame the bus decides whether they run
+/// through it: yes if the cell before was fed, or a tail (read there) may
+/// still sound. A cell they don't run in starts them on the first frame
+/// that brings sound. Decided only on the clock, by what's heard, which
+/// frames an effect runs on doesn't depend on block sizes; otherwise their
+/// parameters move on and nothing runs: silence in, silence out. Not
+/// inlined: a mix with no effects doesn't carry it.
+#[inline(never)]
+fn run_effects(
+    bus: &mut Bus,
+    chain: &mut Chain,
+    n: usize,
+    now: u64,
+    frames: &mut [f32; 2 * MAX_BLOCK],
+    heard: &[f32; MAX_BUSES],
+) {
+    if now.is_multiple_of(CELL) {
+        if chain.fed {
+            let tail = chain.effects.iter().map(|slot| slot.tail()).max();
+            chain.horizon = now + tail.unwrap_or(0);
+        }
+        chain.active = now < chain.horizon;
+        chain.fed = false;
+    }
+    // Sound in this block: its first frame, if any.
+    let first = if bus.touched {
+        let quiet = |(l, r): (&f32, &f32)| *l == 0. && *r == 0.;
+        bus.left[..n]
+            .iter()
+            .zip(&bus.right[..n])
+            .position(|frame| !quiet(frame))
+    } else {
+        None
+    };
+    chain.fed |= first.is_some();
+    let from = if chain.active {
+        0
+    } else if let Some(first) = first {
+        chain.active = true;
+        first
+    } else {
+        for slot in chain.effects.iter_mut() {
+            slot.skip(n);
+        }
+        return;
+    };
+    bus.touch(n);
+    let pairs = &mut frames.as_chunks_mut::<2>().0[..n];
+    for (pair, (l, r)) in pairs.iter_mut().zip(bus.left.iter().zip(bus.right.iter())) {
+        *pair = [*l, *r];
+    }
+    for slot in chain.effects.iter_mut() {
+        let side = slot.side.map(|s| heard[usize::from(s)]);
+        slot.skip(from);
+        slot.process(&mut frames[from * 2..], n - from, now + from as u64, side);
+    }
+    // Back out finite and bounded, whatever an effect made: every source of
+    // sound (a voice, or a bus's effects) is then within its bound, and so
+    // is any sum of them through the tree. Checked as bits without their
+    // sign, an integer maximum, which vectorises (not a number and the
+    // infinities are above any finite value), and mended only in a block
+    // that needs it.
+    let block = &mut frames[..n * 2];
+    let loudest = block
+        .iter()
+        .fold(0u32, |m, s| m.max(s.to_bits() & 0x7fff_ffff));
+    if loudest > EFFECT_LIMIT.to_bits() {
+        for s in block.iter_mut() {
+            *s = if s.is_nan() {
+                0.
+            } else {
+                s.clamp(-EFFECT_LIMIT, EFFECT_LIMIT)
+            };
+        }
+    }
+    let pairs = &frames.as_chunks::<2>().0[..n];
+    for (pair, (l, r)) in pairs
+        .iter()
+        .zip(bus.left.iter_mut().zip(bus.right.iter_mut()))
+    {
+        [*l, *r] = *pair;
+    }
+}
+
+/// The root mean square of `bus`'s block, both sides, after its gain as
+/// it ends the block.
+#[inline(never)]
+fn level(bus: &Bus, n: usize) -> f32 {
+    let sum: f32 = bus.left[..n]
+        .iter()
+        .zip(&bus.right[..n])
+        .map(|(l, r)| l * l + r * r)
+        .sum();
+    (sum / (2 * n) as f32).sqrt() * bus.gain.value() * bus.gate.value()
 }
 
 /// The bus's gain times its gate for each of the next `n` frames.
+#[inline(always)]
 fn gain_of(bus: &mut Bus, n: usize, gains: &mut [f32; MAX_BLOCK]) {
     let gains = &mut gains[..n];
     bus.gain.fill(gains);
@@ -1323,6 +1641,7 @@ fn gain_of(bus: &mut Bus, n: usize, gains: &mut [f32; MAX_BLOCK]) {
 }
 
 /// Adds `bus`'s block, after its gain, into its parent's.
+#[inline(always)]
 fn sum_into(
     bus: &mut Bus,
     n: usize,
