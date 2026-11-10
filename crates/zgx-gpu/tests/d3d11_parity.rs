@@ -639,8 +639,148 @@ fn frames(scale: f32) -> Vec<Vec<u8>> {
     all.extend(blend_frames(scale));
     all.extend(glass_frames(scale));
     all.extend(cross_region_frames(scale));
+    all.extend(view_frames(scale));
     all
 }
+
+/// A GPU view (`zgx::gpu_view`) drawn by a painter with wgpu: under
+/// Direct3D 11, on the views' own Direct3D 12 device, its texture shared
+/// with Direct3D 11 (`view_host`). It clears to a colour and draws a
+/// triangle with a pipeline of its own, in a rounded box at 0.8 opacity over
+/// a bar, drawn again in a new colour each frame (`GpuView::invalidate`).
+/// Each frame must show the view's colour and its triangle: a view left out
+/// would show the bar.
+#[cfg(windows)]
+fn view_frames(scale: f32) -> Vec<Vec<u8>> {
+    use std::{cell::Cell, rc::Rc};
+    use zgx_gpu::viewport::{Viewport, ViewportFrame};
+    struct Painter {
+        colour: Rc<Cell<[f64; 3]>>,
+        pipeline: Option<wgpu::RenderPipeline>,
+    }
+    impl Viewport for Painter {
+        fn render(&mut self, frame: &mut ViewportFrame<'_>) {
+            let (device, format) = (frame.device, frame.format);
+            let pipeline = self.pipeline.get_or_insert_with(|| {
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("triangle"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = array(vec2(-0.6, -0.6), vec2(0.6, -0.6), vec2(0.0, 0.7));
+    return vec4(p[i], 0.0, 1.0);
+}
+@fragment fn fs() -> @location(0) vec4<f32> { return vec4(0.95, 0.9, 0.2, 1.0); }"
+                            .into(),
+                    ),
+                });
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("triangle"),
+                    layout: None,
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(format.into())],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            });
+            let [r, g, b] = self.colour.get();
+            let mut pass = frame
+                .encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("view"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: frame.target,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+            pass.set_pipeline(pipeline);
+            pass.draw(0..3, 0..1);
+        }
+        fn device_changed(&mut self) {
+            self.pipeline = None;
+        }
+    }
+    let size = VIEW_SIZE;
+    let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let colour = Rc::new(Cell::new([0.1, 0.3, 0.8]));
+    let view = zgx_gpu::viewport::view(Painter {
+        colour: colour.clone(),
+        pipeline: None,
+    });
+    let mut ui = Ui::new(size.0, size.1);
+    ui.mount(
+        div()
+            .size(size.0, size.1)
+            .bg(Color(20, 24, 32, 255))
+            .child(
+                div()
+                    .absolute()
+                    .ml(10.)
+                    .mt(60.)
+                    .size(220., 40.)
+                    .bg(Color(230, 130, 30, 255)),
+            )
+            .child(
+                gpu_view("view", &view)
+                    .absolute()
+                    .ml(40.)
+                    .mt(20.)
+                    .size(160., 120.)
+                    .rounded(12.)
+                    .opacity(0.8),
+            ),
+    );
+    [[0.1, 0.3, 0.8], [0.8, 0.2, 0.3], [0.2, 0.7, 0.4]]
+        .into_iter()
+        .map(|next| {
+            colour.set(next);
+            view.invalidate();
+            ui.prepare_frame();
+            let report = ui.scene.borrow_mut().flush();
+            gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+            let pixels = gpu.readback().unwrap();
+            // The view's middle shows its triangle, and its corner the
+            // colour it cleared to (over the bar, at 0.8): not the bar.
+            let width = (size.0 * scale) as usize;
+            let at = |x: f32, y: f32| ((y * scale) as usize * width + (x * scale) as usize) * 4;
+            let middle = &pixels[at(120., 80.)..][..4];
+            assert!(
+                middle[0] > 180 && middle[1] > 170 && middle[2] < 90,
+                "the view's triangle isn't drawn: {middle:?} at {scale}x"
+            );
+            let corner = &pixels[at(60., 70.)..][..4];
+            let strongest = |c: [f32; 3]| (0..3).max_by(|&a, &b| c[a].total_cmp(&c[b])).unwrap();
+            let drawn = [corner[0], corner[1], corner[2]].map(f32::from);
+            assert_eq!(
+                strongest(drawn),
+                strongest(next.map(|c| c as f32)),
+                "the view's clear colour {next:?} isn't drawn: {corner:?} at {scale}x"
+            );
+            pixels
+        })
+        .collect()
+}
+#[cfg(windows)]
+const VIEW_SIZE: (f32, f32) = (240., 160.);
 
 /// Glass on a frame whose damage the scene's grid cuts (`CROSS_NAMES`): a
 /// box reading a bar 140 points below it (`zgx_backdrop` at an offset, its
@@ -1267,6 +1407,8 @@ fn where_(frame: usize, scale: f32, pixel: usize) -> String {
             LAYER_COLUMNS,
             EFFECT_NAMES.map(String::from).to_vec(),
         )
+    } else if frame >= FRAMES + 3 + 5 + 4 + 2 + 2 + 5 + 2 {
+        (VIEW_SIZE.0, VIEW_SIZE, 1, vec!["GPU view".to_string()])
     } else if frame >= FRAMES + 3 + 5 + 4 + 2 + 2 + 5 {
         (
             CROSS_SIZE.0,
