@@ -5,6 +5,8 @@ use crate::{
     math::{Mat4, Transform, Vec3, vec3},
 };
 use std::{cell::RefCell, rc::Rc};
+#[cfg(feature = "gltf")]
+pub(crate) mod animation;
 #[cfg(feature = "lighting")]
 pub(crate) mod lighting;
 
@@ -497,6 +499,9 @@ pub(crate) struct Inner {
     /// Its particle emitters, once it has any.
     #[cfg(feature = "particles")]
     pub(crate) particles: Option<Box<crate::particles::Particles>>,
+    /// Its animators (`World::add_animator`).
+    #[cfg(feature = "gltf")]
+    animators: animation::Animators,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -511,6 +516,9 @@ pub(crate) struct Settle {
 }
 #[cfg_attr(not(test), allow(dead_code))]
 impl Settle {
+    /// An animator plays (`World::add_animator`).
+    #[cfg(feature = "gltf")]
+    pub(crate) const ANIMATION: u32 = 1;
     /// For the tests of this: a reason no feature uses.
     #[cfg(test)]
     pub(crate) const TEST: u32 = 1 << 31;
@@ -1188,6 +1196,8 @@ impl World {
             lighting: Default::default(),
             #[cfg(feature = "particles")]
             particles: None,
+            #[cfg(feature = "gltf")]
+            animators: Default::default(),
         }));
         let view = zgx_gpu::viewport::view(crate::painter::Painter::new(
             crate::render::Renderer::new(Rc::downgrade(&inner)),

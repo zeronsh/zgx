@@ -36,6 +36,8 @@ mod guide {}
 
 #[cfg(feature = "gltf")]
 mod animation;
+#[cfg(feature = "gltf")]
+mod animator;
 #[cfg(feature = "compute")]
 mod buffer;
 mod caps;
@@ -58,6 +60,8 @@ mod world;
 
 #[cfg(feature = "gltf")]
 pub use animation::{Clip, Placed};
+#[cfg(feature = "gltf")]
+pub use animator::{AnimatorId, AnimatorUpdate, Fired, Layer, Mask, Play};
 #[cfg(feature = "compute")]
 pub use buffer::{
     BufferDesc, DEFAULT_MEMORY_CAP, DEFAULT_READBACK_BUDGET, Format, GpuBuffer, GpuDataError,

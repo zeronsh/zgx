@@ -78,15 +78,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     clip.duration(),
                     model.clips().len()
                 );
-                let (world, frames, placed) = (world.clone(), cx.frames.clone(), placed.clone());
-                cx.tasks.spawn(async move {
-                    let start = std::time::Instant::now();
-                    loop {
-                        frames.next().await;
-                        let seconds = start.elapsed().as_secs_f32();
-                        placed.pose(&world, &clip, seconds % clip.duration().max(1e-3));
-                    }
-                });
+                // Played by the world's frames: drawn while it plays.
+                let animator = world.add_animator(&placed);
+                world.play(animator, &clip, Play::new());
             }
             world.set_transform(
                 id,

@@ -949,38 +949,30 @@ impl Reader<'_> {
                 // target, each sampled as any other.
                 let targets = flat.len() / keys;
                 for target in 0..targets {
-                    channels.push(Channel {
+                    let channel = Channel {
                         node,
                         path: Path::Weight(target),
                         interpolation,
-                        times: times.clone(),
+                        track: 0,
                         values: (0..keys)
                             .map(|key| [flat[key * targets + target], 0., 0., 0.])
                             .collect(),
-                    });
+                    };
+                    channels.push((times.clone(), channel));
                 }
                 continue;
             };
-            channels.push(Channel {
+            let channel = Channel {
                 node,
                 path,
                 interpolation,
-                times,
+                track: 0,
                 values,
-            });
+            };
+            channels.push((times, channel));
         }
-        let duration = channels
-            .iter()
-            .filter_map(|c| c.times.last().copied())
-            .fold(0., f32::max);
-        Ok(crate::Clip {
-            name: animation
-                .get("name")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            duration,
-            channels,
-        })
+        let name = animation.get("name").and_then(Value::as_str);
+        Ok(crate::Clip::new(name.map(str::to_owned), channels))
     }
     /// Image `index`'s encoded bytes: from a buffer view, a data URI or a
     /// file `resolve` gives.

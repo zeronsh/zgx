@@ -575,6 +575,8 @@ impl Viewport for Renderer {
         let Some(world) = self.world.upgrade() else {
             return;
         };
+        #[cfg(feature = "gltf")]
+        crate::world::animation::frame(&world, frame.time);
         let world = world.borrow();
         world.frames.set(world.frames.get() + 1);
         // Shade in linear light: written through the sRGB view where there is

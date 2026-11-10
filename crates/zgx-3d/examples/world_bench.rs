@@ -11,6 +11,11 @@
 //! `SCENE=lights` is `textured` under 256 point lights, the frame choosing
 //! which to shade (`lit`). `SCENE=anim` is `textured` with a quarter of its
 //! meshes skinned to one 64-joint chain posed every frame (`rig`, `posed`).
+//! With the `gltf` feature, `ANIMATOR` poses that chain by an animator
+//! playing the same motion as a clip instead (`animated`): `clip`, one
+//! layer; `layers`, a masked override and an additive layer over it;
+//! `crowd`, each skinned mesh a chain of its own playing the clip from its
+//! own time. Frames are then 1/60 s apart, whenever drawn.
 //! `MESHES` and `FRAMES` size it; `CULLING=0` draws what the camera can't
 //! see too. `SCENE=compute`, with the `compute` feature, adds the app's GPU
 //! data and compute passes to `textured` (`world_bench/compute.rs`), and
@@ -169,6 +174,9 @@ fn world(mixed: bool, meshes: usize) -> (World, ObjectId, ObjectId, Vec<ObjectId
 #[cfg(feature = "compute")]
 #[path = "world_bench/compute.rs"]
 mod compute;
+#[cfg(feature = "gltf")]
+#[path = "common/rig.rs"]
+mod models;
 #[cfg(feature = "particles")]
 #[path = "world_bench/particles.rs"]
 mod particles;
@@ -190,11 +198,19 @@ fn main() {
     if scene == "lights" {
         lit(&world);
     }
-    let joints = if scene == "anim" {
+    let arm = (scene == "anim")
+        .then(|| std::env::var("ANIMATOR").ok())
+        .flatten()
+        .filter(|arm| !arm.is_empty());
+    let joints = if let Some(arm) = &arm {
+        animated(&world, root, arm);
+        Vec::new()
+    } else if scene == "anim" {
         rig(&world, root)
     } else {
         Vec::new()
     };
+    let start = arm.as_ref().map(|_| std::time::Instant::now());
     let mut painter = world.viewport();
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("A frame"),
@@ -236,9 +252,16 @@ fn main() {
             1.,
         );
         drawing.target_srgb = Some(&srgb);
+        if let Some(start) = start {
+            drawing.time = start + std::time::Duration::from_secs_f64(frame as f64 / 60.);
+        }
         painter.render(&mut drawing);
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::Poll).expect("the no-op device");
+    }
+    if arm.is_some() {
+        // It did the work: its animators played through every frame.
+        assert!(world.view().animating() && world.frames_drawn() == frames as u64);
     }
 }
 
@@ -316,6 +339,75 @@ fn rig(world: &World, root: ObjectId) -> Vec<ObjectId> {
         world.set_skin(mesh, Some(skin.clone()));
     }
     joints
+}
+
+/// `SCENE=anim` with `ANIMATOR=arm`: `rig`'s chain and skinned meshes, the
+/// chain a model's (`rig::chain`) posed by an animator playing its clip.
+#[cfg(feature = "gltf")]
+fn animated(world: &World, root: ObjectId, arm: &str) {
+    const JOINTS: usize = 64;
+    let model = Model::from_bytes(&models::chain(JOINTS)).expect("the chain");
+    let clip = model.clip("Sway").expect("its clip").clone();
+    let shape = Geometry::cuboid(1., 1., 1.);
+    let count = shape.vertices().len();
+    let skinned = shape
+        .with_skin(
+            (0..count).map(|v| [(v % JOINTS) as u16, 0, 0, 0]).collect(),
+            vec![[1., 0., 0., 0.]; count],
+        )
+        .expect("an entry a vertex");
+    let chain = |from: f32| {
+        let placed = world.place_model(&model);
+        world.update(placed.root, |o| o.parent = Some(root));
+        let joints = (0..JOINTS)
+            .map(|i| placed.node(i).expect("a joint"))
+            .collect();
+        let skin = Skin::new(joints, vec![Mat4::IDENTITY; JOINTS]).expect("64 joints");
+        let animator = world.add_animator(&placed);
+        world.play(animator, &clip, Play::new().from(from));
+        (placed, animator, skin)
+    };
+    let meshes = setting("MESHES", 2000) / 4;
+    let side = (meshes as f32).sqrt().ceil() as usize;
+    let mesh = |i: usize, skin: &Skin| {
+        let at = [
+            (i % side) as f32 * 2. - side as f32,
+            4.,
+            (i / side) as f32 * 2. - side as f32,
+        ];
+        let mesh = world.add(
+            Object::mesh(skinned.clone(), Material::rgb(0xd0c0a0).with(0., 0.6))
+                .at(at)
+                .child_of(root),
+        );
+        world.set_skin(mesh, Some(skin.clone()));
+    };
+    match arm {
+        "clip" | "layers" => {
+            let (placed, animator, skin) = chain(0.);
+            if arm == "layers" {
+                let upper = Mask::new().below(placed.node(JOINTS / 2).expect("a joint"), 1.);
+                world.set_layer(animator, 1, Layer::new().weight(0.5).mask(upper));
+                world.play(animator, &clip, Play::new().layer(1).from(1.));
+                world.set_layer(animator, 2, Layer::additive().weight(0.3));
+                world.play(animator, &clip, Play::new().layer(2).from(0.5));
+            }
+            for i in 0..meshes {
+                mesh(i, &skin);
+            }
+        }
+        "crowd" => {
+            for i in 0..meshes {
+                let (_, _, skin) = chain(i as f32 * 0.37);
+                mesh(i, &skin);
+            }
+        }
+        _ => panic!("ANIMATOR is clip, layers or crowd"),
+    }
+}
+#[cfg(not(feature = "gltf"))]
+fn animated(_: &World, _: ObjectId, _: &str) {
+    panic!("ANIMATOR needs the gltf feature");
 }
 
 /// What a frame of `anim` moves: every joint of the chain, a little.

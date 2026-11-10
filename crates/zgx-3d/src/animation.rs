@@ -4,21 +4,78 @@
 use crate::{ObjectId, Quat, Transform, Vec3, World, vec3};
 
 /// One of a model's animations: its channels move nodes over `duration`
-/// seconds.
+/// seconds. Clones share it.
 #[derive(Clone, Debug)]
-pub struct Clip {
+pub struct Clip(pub(crate) std::sync::Arc<ClipData>);
+#[derive(Clone, Debug)]
+pub(crate) struct ClipData {
     pub(crate) name: Option<String>,
     pub(crate) duration: f32,
     pub(crate) channels: Vec<Channel>,
+    /// Its channels' key times, each list once (most clips share one
+    /// among all their channels): a time is found among each once a frame.
+    pub(crate) tracks: Vec<Vec<f32>>,
+    /// The nodes its channels move, each once, rising.
+    pub(crate) nodes: Vec<u32>,
+    /// Its events (`Clip::with_event`), by time.
+    pub(crate) events: Vec<(f32, std::sync::Arc<str>)>,
 }
 impl Clip {
+    /// `channels`, their times' lists shared where equal.
+    pub(crate) fn new(name: Option<String>, channels: Vec<(Vec<f32>, Channel)>) -> Self {
+        let mut tracks: Vec<Vec<f32>> = Vec::new();
+        let mut found = std::collections::HashMap::<Vec<u32>, usize>::new();
+        let channels: Vec<Channel> = channels
+            .into_iter()
+            .map(|(times, mut channel)| {
+                let bits = times.iter().map(|t| t.to_bits()).collect();
+                channel.track = *found.entry(bits).or_insert_with(|| {
+                    tracks.push(times);
+                    tracks.len() - 1
+                });
+                channel
+            })
+            .collect();
+        let duration = tracks
+            .iter()
+            .filter_map(|times| times.last().copied())
+            .fold(0., f32::max);
+        let mut nodes: Vec<u32> = channels.iter().map(|c| c.node as u32).collect();
+        nodes.sort_unstable();
+        nodes.dedup();
+        Self(std::sync::Arc::new(ClipData {
+            name,
+            duration,
+            channels,
+            tracks,
+            nodes,
+            events: Vec::new(),
+        }))
+    }
     /// Its name in the file, if it has one.
     pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
+        self.0.name.as_deref()
     }
     /// How long it runs, in seconds: its last key's time.
     pub fn duration(&self) -> f32 {
-        self.duration
+        self.0.duration
+    }
+    /// It with an event named `name` at `seconds` into it: an animator
+    /// playing it reports the event each time its time passes there
+    /// (`World::animator_update`). An event at its end is passed as it
+    /// ends or loops; one at 0 as it starts and at each loop.
+    pub fn with_event(mut self, seconds: f32, name: &str) -> Self {
+        if !seconds.is_finite() {
+            return self;
+        }
+        let events = &mut std::sync::Arc::make_mut(&mut self.0).events;
+        let at = events.partition_point(|(t, _)| *t <= seconds);
+        events.insert(at, (seconds, name.into()));
+        self
+    }
+    /// Whether `self` and `other` are the same clip (clones of one).
+    pub(crate) fn same(&self, other: &Clip) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
     }
 }
 
@@ -48,42 +105,92 @@ pub(crate) struct Channel {
     pub(crate) node: usize,
     pub(crate) path: Path,
     pub(crate) interpolation: Interpolation,
-    /// Keys' times, rising.
-    pub(crate) times: Vec<f32>,
+    /// Its keys' times: its clip's `tracks[track]`.
+    pub(crate) track: usize,
     /// Values, a key's (three for `Cubic`), xyz or xyzw.
     pub(crate) values: Vec<[f32; 4]>,
 }
-impl Channel {
-    /// Its value at `time` (seconds), held before its first key and after
-    /// its last.
-    pub(crate) fn sample(&self, time: f32) -> [f32; 4] {
-        let per = if self.interpolation == Interpolation::Cubic {
-            3
-        } else {
-            1
+/// Where a time falls among a track's keys: the key at or before it, the
+/// next (the same at either end, where the time is held), how far between
+/// them (0 to 1) and the seconds between them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Between {
+    pub(crate) key: u32,
+    pub(crate) next: u32,
+    pub(crate) s: f32,
+    pub(crate) span: f32,
+}
+impl Between {
+    /// Where `time` falls among `times` (rising, at least one).
+    pub(crate) fn find(times: &[f32], time: f32) -> Self {
+        Self::from(times, time, 0)
+    }
+    /// As `find`, looking on from `hint`'s key first: a time a little
+    /// after the last one asked (a clip playing) is a step or two on.
+    #[inline]
+    pub(crate) fn after(times: &[f32], time: f32, hint: Self) -> Self {
+        Self::from(times, time, hint.key as usize)
+    }
+    #[inline]
+    fn from(times: &[f32], time: f32, hint: usize) -> Self {
+        let last = times.len() - 1;
+        let held = |key: usize| Self {
+            key: key as u32,
+            next: key as u32,
+            s: 0.,
+            span: 0.,
         };
-        let value = |key: usize| self.values[key * per + per / 2];
-        let last = self.times.len() - 1;
         // Before its first key, or no time (NaN): its first value.
-        if time.partial_cmp(&self.times[0]) != Some(std::cmp::Ordering::Greater) {
-            return value(0);
+        if time.partial_cmp(&times[0]) != Some(std::cmp::Ordering::Greater) {
+            return held(0);
         }
-        if time >= self.times[last] {
-            return value(last);
+        if time >= times[last] {
+            return held(last);
         }
-        let next = self.times.partition_point(|&t| t <= time);
-        let key = next - 1;
-        let (t0, t1) = (self.times[key], self.times[next]);
+        // The last key at or before `time` (times[last] is after it).
+        let mut key = hint;
+        if key >= last || times[key] > time || times[(key + 4).min(last)] <= time {
+            key = times.partition_point(|&t| t <= time) - 1;
+        } else {
+            while times[key + 1] <= time {
+                key += 1;
+            }
+        }
+        let (t0, t1) = (times[key], times[key + 1]);
         let span = t1 - t0;
-        let s = if span > 0. { (time - t0) / span } else { 0. };
+        Self {
+            key: key as u32,
+            next: key as u32 + 1,
+            s: if span > 0. { (time - t0) / span } else { 0. },
+            span,
+        }
+    }
+}
+impl Channel {
+    /// Its value at `time` (seconds) among `times` (its track's), held
+    /// before its first key and after its last.
+    pub(crate) fn sample(&self, times: &[f32], time: f32) -> [f32; 4] {
+        self.at(Between::find(times, time))
+    }
+    /// Its value at `between`.
+    #[inline]
+    pub(crate) fn at(&self, between: Between) -> [f32; 4] {
+        let cubic = self.interpolation == Interpolation::Cubic;
+        let per = if cubic { 3 } else { 1 };
+        let value = |key: u32| self.values[key as usize * per + per / 2];
+        let (key, next, s) = (between.key, between.next, between.s);
+        if key == next {
+            return value(key);
+        }
         let rotation = self.path == Path::Rotation;
         match self.interpolation {
             Interpolation::Step => value(key),
             Interpolation::Linear if rotation => slerp(value(key), value(next), s),
             Interpolation::Linear => lerp(value(key), value(next), s),
             Interpolation::Cubic => {
-                let out_tangent = self.values[key * 3 + 2];
-                let in_tangent = self.values[next * 3];
+                let span = between.span;
+                let out_tangent = self.values[key as usize * 3 + 2];
+                let in_tangent = self.values[next as usize * 3];
                 let (s2, s3) = (s * s, s * s * s);
                 let (h00, h10) = (2. * s3 - 3. * s2 + 1., s3 - 2. * s2 + s);
                 let (h01, h11) = (-2. * s3 + 3. * s2, s3 - s2);
@@ -99,11 +206,21 @@ impl Channel {
             }
         }
     }
+    /// Its first key's value: where an additive layer measures it from.
+    #[inline]
+    pub(crate) fn first(&self) -> [f32; 4] {
+        let per = if self.interpolation == Interpolation::Cubic {
+            3
+        } else {
+            1
+        };
+        self.values[per / 2]
+    }
 }
-fn lerp(a: [f32; 4], b: [f32; 4], s: f32) -> [f32; 4] {
+pub(crate) fn lerp(a: [f32; 4], b: [f32; 4], s: f32) -> [f32; 4] {
     std::array::from_fn(|i| a[i] + (b[i] - a[i]) * s)
 }
-fn normalized(q: [f32; 4]) -> [f32; 4] {
+pub(crate) fn normalized(q: [f32; 4]) -> [f32; 4] {
     let length = q.iter().map(|v| v * v).sum::<f32>().sqrt();
     if length > 1e-12 {
         q.map(|v| v / length)
@@ -112,7 +229,7 @@ fn normalized(q: [f32; 4]) -> [f32; 4] {
     }
 }
 /// The rotation `s` of the way from `a` to `b`, along the shorter arc.
-fn slerp(a: [f32; 4], b: [f32; 4], s: f32) -> [f32; 4] {
+pub(crate) fn slerp(a: [f32; 4], b: [f32; 4], s: f32) -> [f32; 4] {
     let mut dot: f32 = (0..4).map(|i| a[i] * b[i]).sum();
     let b = if dot < 0. {
         dot = -dot;
@@ -152,6 +269,12 @@ impl Placed {
     pub fn lights(&self) -> &[crate::LightId] {
         &self.lights
     }
+    /// The object its node `index` (in its file's order) became: to mask
+    /// an animator's layer by (`Mask`), or move by hand. `None` for a node
+    /// its scene doesn't show.
+    pub fn node(&self, index: usize) -> Option<ObjectId> {
+        self.nodes.get(index).copied().flatten()
+    }
     /// Its cameras where its nodes are now, in its scene's order, for
     /// `World::set_camera` (one under a hidden node left out). A camera
     /// looks along its node's −z, without its roll.
@@ -165,11 +288,11 @@ impl Placed {
     /// the time modulo its `duration`): the nodes its channels move take
     /// their values then. A frame is drawn only if something moved.
     pub fn pose(&self, world: &World, clip: &Clip, seconds: f32) {
-        for channel in &clip.channels {
+        for channel in &clip.0.channels {
             let Some(Some(id)) = self.nodes.get(channel.node) else {
                 continue;
             };
-            let [x, y, z, w] = channel.sample(seconds);
+            let [x, y, z, w] = channel.sample(&clip.0.tracks[channel.track], seconds);
             if let Path::Weight(target) = channel.path {
                 // Its meshes share the node's weights.
                 for &mesh in self.meshes.get(channel.node).into_iter().flatten() {
@@ -194,14 +317,21 @@ impl Placed {
 mod tests {
     use super::*;
 
-    fn channel(interpolation: Interpolation, path: Path, values: Vec<[f32; 4]>) -> Channel {
-        Channel {
+    /// Keys at 1 and 3 s.
+    struct Keyed(Channel);
+    impl Keyed {
+        fn sample(&self, time: f32) -> [f32; 4] {
+            self.0.sample(&[1., 3.], time)
+        }
+    }
+    fn channel(interpolation: Interpolation, path: Path, values: Vec<[f32; 4]>) -> Keyed {
+        Keyed(Channel {
             node: 0,
             path,
             interpolation,
-            times: vec![1., 3.],
+            track: 0,
             values,
-        }
+        })
     }
 
     #[test]
