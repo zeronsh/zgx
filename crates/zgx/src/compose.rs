@@ -2331,28 +2331,35 @@ impl CanvasLabels {
                 color: text.color,
                 font_size: text.size,
             };
+            // Sized when its maker knows its size: never measured.
+            let style = |extent: Option<(f32, f32)>| crate::scene::Style {
+                absolute: true,
+                width: extent.map(|(width, _)| width),
+                height: extent.map(|(_, height)| height),
+                ..Default::default()
+            };
             let node = match self.nodes.get_mut(index) {
                 Some((node, shown)) => {
+                    if shown.extent != text.extent {
+                        scene.set_style(*node, style(text.extent));
+                    }
                     scene.set_kind(*node, kind);
                     *shown = text.clone();
                     *node
                 }
                 None => {
-                    let node = scene.append(
-                        group,
-                        kind,
-                        crate::scene::Style {
-                            absolute: true,
-                            ..Default::default()
-                        },
-                    );
+                    let node = scene.append(group, kind, style(text.extent));
                     self.nodes.push((node, text.clone()));
                     node
                 }
             };
             scene.set_font(node, text.font.clone());
-            let size = match (text.anchor, text.baseline) {
-                (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top) => (0., 0.),
+            if let Some(extent) = text.extent {
+                scene.set_text_measured(node, extent);
+            }
+            let size = match (text.anchor, text.baseline, text.extent) {
+                (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top, _) => (0., 0.),
+                (.., Some(extent)) => extent,
                 _ => scene.measure_text_with_font(&text.text, text.size, None, &text.font),
             };
             let (x, y) = text.origin(size);

@@ -14163,6 +14163,21 @@ impl Scene {
     }
     /// Paints a single compositor layer, replacing nested isolation boundaries with
     /// one item. A layer root excludes its own opacity/filter from its cached pixels.
+    /// A text node's size as its maker knows it, at whatever width it is
+    /// laid out at (a canvas text's `extent`, which its box is given):
+    /// layout and damage take it rather than measuring the text, until its
+    /// text, font or style next changes. Nothing else changes for a node it
+    /// isn't given.
+    pub fn set_text_measured(&mut self, id: NodeId, size: (f32, f32)) {
+        let revision = self.text_shaper_revision;
+        let node = self.node(id);
+        // As layout asks (unwrapped), as damage does at its box's width, and
+        // at no width, the box a new node had before it was laid out (what
+        // its first damage asks of where it was).
+        TextSizes::remember(&node.text_size, None, revision, size);
+        TextSizes::remember(&node.text_size, Some(size.0), revision, size);
+        TextSizes::remember(&node.text_size, Some(0.), revision, size);
+    }
     /// Changes whenever nodes are added, removed or change kind. Renderers can
     /// prune per-node caches only when it moves.
     pub fn content_revision(&self) -> u64 {

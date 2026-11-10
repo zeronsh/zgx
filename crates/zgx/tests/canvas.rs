@@ -1,5 +1,9 @@
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 use zgx::{
+    canvas::{CanvasText, TextAnchor, TextBaseline},
     compose::prelude::*,
     scene::{NodeKind, Rect},
     widgets::Ui,
@@ -53,4 +57,74 @@ fn canvas_callback_tracks_content_and_size_with_owned_disposal() {
 fn frame(ui: &mut Ui) -> zgx::scene::FrameReport {
     ui.prepare_frame();
     ui.scene.borrow_mut().flush()
+}
+
+/// A canvas's text whose maker gives its size (`CanvasText::extent`, a
+/// terminal's run) is laid out by it and never measured, however often it
+/// changes; one without is measured each time, as before, and sized by it.
+#[test]
+fn a_sized_canvas_text_is_never_measured() {
+    let mut ui = Ui::new(320., 200.);
+    let measured = Rc::new(RefCell::new(Vec::<String>::new()));
+    let seen = measured.clone();
+    ui.scene
+        .borrow_mut()
+        .set_font_text_measurer(move |text, size, _, _| {
+            seen.borrow_mut().push(text.to_string());
+            (text.chars().count() as f32 * size * 0.5, size)
+        });
+    let n = ui.signal(0);
+    let text = |text: String, y: f32, extent| CanvasText {
+        text: text.into(),
+        x: 0.,
+        y,
+        size: 10.,
+        color: rgb(0xffffff),
+        font: Default::default(),
+        anchor: TextAnchor::Start,
+        baseline: TextBaseline::Top,
+        extent,
+    };
+    let view = ui.mount(
+        canvas({
+            let n = n.clone();
+            move |_| {
+                let n = n.get();
+                let mut canvas = Canvas::new();
+                canvas.text(text(format!("sized {n}"), 0., Some((120., 14.))));
+                canvas.text(text(format!("plain {n}"), 20., None));
+                canvas
+            }
+        })
+        .id("canvas")
+        .w(300.)
+        .h(80.),
+    );
+    frame(&mut ui);
+    for step in 1..5 {
+        n.set(step);
+        frame(&mut ui);
+    }
+    let measured = measured.borrow();
+    assert!(
+        !measured.iter().any(|text| text.starts_with("sized")),
+        "{measured:?}"
+    );
+    for step in 0..5 {
+        assert!(measured.contains(&format!("plain {step}")), "{measured:?}");
+    }
+    // Laid out at the size given, and the other at the size measured.
+    let scene = ui.scene.borrow();
+    let label = |prefix: &str| {
+        scene
+            .paint_items()
+            .find(|item| matches!(scene.kind(item.id), NodeKind::Text { text, .. } if text.starts_with(prefix)))
+            .map(|item| scene.bounds(item.id))
+            .unwrap()
+    };
+    let (sized, plain) = (label("sized"), label("plain"));
+    assert_eq!((sized.width, sized.height), (120., 14.));
+    assert_eq!((plain.width, plain.height), (35., 10.));
+    drop(scene);
+    view.unmount();
 }

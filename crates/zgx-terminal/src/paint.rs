@@ -555,7 +555,7 @@ pub(crate) fn font() -> FontStyle {
 
 /// `paint` drawn on a row's canvas, in `font`: the grid's, on its cells
 /// (`LetterSpacing::cells`, set once with the cell, `view::row_view`).
-pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canvas {
+pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle, width: f32) -> Canvas {
     let mut canvas = Canvas::new();
     for fill in paint.fills.iter().chain(&paint.lines) {
         if fill.height < 0. {
@@ -590,6 +590,12 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
         } else {
             (x, TextAnchor::Start)
         };
+        // A run's size is known to be within the row (`width`), a cell
+        // high: never measured. The row's width serves every run, so a run
+        // changing its text changes no style. One drawn alone, centred by its
+        // glyph's width, is measured, as are all a row not yet laid out
+        // (no width to promise) has.
+        let extent = (!run.alone && width > 0.).then_some((width, metrics.cell_height));
         canvas.text(CanvasText {
             text: run.text.clone(),
             x,
@@ -599,6 +605,7 @@ pub(crate) fn draw(paint: &RowPaint, metrics: Metrics, font: &FontStyle) -> Canv
             font,
             anchor,
             baseline: TextBaseline::Top,
+            extent,
         });
     }
     canvas
