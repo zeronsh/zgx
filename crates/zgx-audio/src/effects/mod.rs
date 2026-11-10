@@ -14,6 +14,8 @@
 //! ```
 mod delay;
 mod filter;
+mod reverb;
 
 pub use delay::Delay;
 pub use filter::{FLAT, HighPass, LowPass, Peaking, Slope};
+pub use reverb::Reverb;

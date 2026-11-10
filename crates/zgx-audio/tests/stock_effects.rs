@@ -8,7 +8,7 @@
 //! the references anew; say why they changed.
 use std::f64::consts::PI;
 use std::path::PathBuf;
-use zgx_audio::effects::{Delay, FLAT, HighPass, LowPass, Peaking, Slope};
+use zgx_audio::effects::{Delay, FLAT, HighPass, LowPass, Peaking, Reverb, Slope};
 use zgx_audio::{Audio, Bus, Config, Effect, Play, Ramp, Sound, Time, wav};
 
 const RATE: u32 = 48_000;
@@ -319,4 +319,122 @@ fn a_delay_rings_on_until_its_echoes_are_quiet() {
     let left = channel(&mixer.frames(96_000), 0);
     assert!(left[1 + 4800 * 12].abs() > 0., "the 12th echo");
     assert!(left[78_000..].iter().all(|&s| s == 0.), "run past its tail");
+}
+
+/// The reverb's response to the impulse (on the left only), wet alone.
+fn reverb_impulse(reverb: Reverb, frames: usize) -> Vec<f32> {
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    audio.master().add_effect(reverb.mix(1., 0.)).unwrap();
+    let mut left = vec![0f32; 512 * 2];
+    left[2] = 0.5;
+    let click = Sound::from_samples(&left, 2, RATE).unwrap();
+    audio.play(&click, Play::new()).unwrap();
+    mixer.frames(frames)
+}
+
+/// Decibels of `samples`' energy over a window from `at`.
+fn level_db(samples: &[f32], at: usize, window: usize) -> f64 {
+    let e: f64 = samples[at..at + window]
+        .iter()
+        .map(|&s| f64::from(s).powi(2))
+        .sum();
+    10. * (e / window as f64).log10()
+}
+
+#[test]
+fn a_reverb_falls_60_db_in_its_decay_after_its_pre_delay() {
+    let out = reverb_impulse(Reverb::new(1., 1.).damping(0.).pre_delay(0.02), 96_000);
+    let (left, right) = (channel(&out, 0), channel(&out, 1));
+    // Nothing before the pre-delay (960 frames) and the shortest line
+    // (1427 frames) have passed, from the impulse on frame 1.
+    let first = left.iter().position(|&s| s != 0.).unwrap();
+    assert_eq!(first, 1 + 960 + 1427, "its first sound");
+    // The slope of its energy: from 0.2 s to 0.7 s it falls 30 dB at a
+    // decay of 1 s (60 dB a second), within 15%.
+    let both: Vec<f32> = left.iter().zip(&right).map(|(l, r)| l + r).collect();
+    let fall = level_db(&both, 9_600, 4_800) - level_db(&both, 33_600, 4_800);
+    assert!((fall - 30.).abs() < 4.5, "{fall:.1} dB over half a second");
+    // Left and right are two different echoes of one room.
+    let (mut lr, mut ll, mut rr) = (0f64, 0f64, 0f64);
+    for (l, r) in left.iter().zip(&right).skip(4_800).take(24_000) {
+        lr += f64::from(*l) * f64::from(*r);
+        ll += f64::from(*l).powi(2);
+        rr += f64::from(*r).powi(2);
+    }
+    let correlation = lr / (ll * rr).sqrt();
+    assert!(
+        correlation.abs() < 0.3,
+        "left and right correlate {correlation:.2}"
+    );
+}
+
+#[test]
+fn a_damped_reverb_loses_its_highs_before_its_lows() {
+    // The share of its energy above about 6 kHz (sample to sample
+    // differences against the samples), early and late.
+    let share = |samples: &[f32], at: usize| {
+        let window = &samples[at..at + 4_800];
+        let diff: f64 = window
+            .windows(2)
+            .map(|w| f64::from(w[1] - w[0]).powi(2))
+            .sum();
+        let all: f64 = window.iter().map(|&s| f64::from(s).powi(2)).sum();
+        diff / all
+    };
+    let damped = channel(&reverb_impulse(Reverb::new(1., 2.).damping(0.8), 48_000), 0);
+    let bright = channel(&reverb_impulse(Reverb::new(1., 2.).damping(0.), 48_000), 0);
+    let (early, late) = (share(&damped, 4_800), share(&damped, 33_600));
+    assert!(
+        late < early * 0.5,
+        "damped: highs {early:.3} early, {late:.3} late"
+    );
+    let (early, late) = (share(&bright, 4_800), share(&bright, 33_600));
+    assert!(
+        late > early * 0.7,
+        "undamped: highs {early:.3} early, {late:.3} late"
+    );
+}
+
+#[test]
+fn a_reverb_responds_as_its_references_its_size_and_decay_moving_on_their_frames() {
+    let out = respond(|_, master| {
+        master
+            .add_effect(Reverb::new(0.5, 0.3).pre_delay(0.005).mix(0.5, 1.))
+            .unwrap();
+    });
+    reference("reverb", &out);
+    let out = respond(|_, master| {
+        let room = master
+            .add_effect(Reverb::new(0.5, 0.3).pre_delay(0.005).mix(0.5, 1.))
+            .unwrap();
+        let sweep = Ramp::seconds(SWEEP as f64 / f64::from(RATE));
+        room.at(Time(IMPULSE as u64))
+            .set(Reverb::SIZE, 1.5, sweep)
+            .unwrap();
+        room.at(Time(IMPULSE as u64))
+            .set(Reverb::DECAY, 2., sweep)
+            .unwrap();
+        room.at(Time((IMPULSE + 100) as u64))
+            .set(Reverb::DAMPING, 0.9, Ramp::ms(30.))
+            .unwrap();
+    });
+    reference("reverb_moving", &out);
+    assert!(out.iter().all(|s| s.is_finite() && s.abs() < 1.));
+}
+
+#[test]
+fn a_reverb_rings_on_after_its_sound_and_rests_after_its_tail() {
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let world = audio.bus("world").unwrap();
+    // 0.4 s to fall 60 dB: 0.6 s to 90 dB, after 10 ms and its longest line.
+    world
+        .add_effect(Reverb::new(1., 0.4).pre_delay(0.01).mix(1., 0.))
+        .unwrap();
+    audio.play(&impulse(), Play::new().bus(&world)).unwrap();
+    let left = channel(&mixer.frames(96_000), 0);
+    assert!(
+        left[20_000..20_100].iter().any(|&s| s != 0.),
+        "silent too soon"
+    );
+    assert!(left[40_000..].iter().all(|&s| s == 0.), "run past its tail");
 }

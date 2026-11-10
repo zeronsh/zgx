@@ -619,7 +619,7 @@ fn main() {
         run.audio.bus("music").unwrap(),
         run.audio.bus("world").unwrap(),
     );
-    use zgx_audio::effects::{Delay, HighPass, LowPass, Peaking, Slope};
+    use zgx_audio::effects::{Delay, HighPass, LowPass, Peaking, Reverb, Slope};
     let low = music
         .add_effect(LowPass::new(4000.).slope(Slope::Db24).resonance(3.))
         .unwrap();
@@ -630,6 +630,11 @@ fn main() {
         .add_effect(Delay::new(0.01, 0.05).feedback(0.6))
         .unwrap();
     ui.add_effect(Delay::new(0.0004, 0.001)).unwrap();
+    let room = run
+        .audio
+        .master()
+        .add_effect(Reverb::new(0.6, 0.8).pre_delay(0.002))
+        .unwrap();
     for (i, bus) in [&ui, &music, &world].into_iter().enumerate() {
         run.audio
             .play(
@@ -657,6 +662,12 @@ fn main() {
         .unwrap();
     echo.at(run.at(0.002))
         .set(Delay::TIME, 0.04, Ramp::ms(30.))
+        .unwrap();
+    room.at(run.at(0.001))
+        .set(Reverb::SIZE, 1.8, Ramp::ms(40.))
+        .unwrap();
+    room.at(run.at(0.002))
+        .set(Reverb::DECAY, 3., Ramp::ms(20.))
         .unwrap();
     run.render(30);
     run.finish(&mut failures);

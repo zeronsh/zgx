@@ -60,6 +60,7 @@ Measured Nov 10 2026 on an Apple M1 Max (macOS 26.0.1, rustc 1.99.1, Apple clang
 | peaking band, +6 dB, Q 1 (`ma_peak2`) | 117.2 dB under | 32.04 | 46.52 |
 | low-pass, its cutoff moving every frame | — (miniaudio has no per-frame modulation) | 93.02 | — |
 | delay, 0.25 s, feedback 0.5 (`ma_delay`, its comb) | identical, bit for bit | 12.50 | 41.63 |
+| reverb, 8-line feedback delay network, size 1, decay 2 s | — (miniaudio has no reverb) | 103.83 | — |
 
 ## What isn't the same
 
