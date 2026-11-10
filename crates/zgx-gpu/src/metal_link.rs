@@ -100,6 +100,21 @@ impl MetalLink {
         let delegate: Retained<Delegate> = unsafe { msg_send![super(delegate), init] };
         let link = CAMetalDisplayLink::initWithMetalLayer(CAMetalDisplayLink::alloc(), layer);
         link.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
+        // How many frames ahead of its target it hands a drawable out
+        // (`ZGX_LINK_LATENCY`, 1 to 2): left at Metal's default, the M1
+        // suite saw frames shown ~2 refreshes later than deferred drawables'.
+        if let Some(latency) = zgx::env::var_os("ZGX_LINK_LATENCY")
+            .and_then(|v| v.to_str()?.parse::<f32>().ok())
+            .filter(|v| (1.0..=2.0).contains(v))
+        {
+            link.setPreferredFrameLatency(latency);
+        }
+        zgx::profile::note(|| {
+            format!(
+                "metal link: preferred frame latency {}",
+                link.preferredFrameLatency()
+            )
+        });
         link.setPaused(true);
         // SAFETY: on the main thread, with the main run loop, which outlives
         // the link (invalidated on drop).
