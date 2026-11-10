@@ -42,7 +42,7 @@
 //X     let shine = bitcast<vec4<f32>>(clusters[at + 1u]);
 //X     let aim = bitcast<vec4<f32>>(clusters[at + 2u]);
 //X     let to = place.xyz - world;
-//X     let distance = length(to);
+//X     let distance = max(length(to), 1e-4);
 //X     let l = to / distance;
 //X     let radius = shine.w;
 //X     // Falling as the square of the distance, from a sphere of its radius
@@ -53,7 +53,9 @@
 //X     let cone = clamp(dot(aim.xyz, -l) + aim.w, 0.0, 1.0);
 //X     // A sphere's highlight: as a rougher surface's, by the angle it spans
 //X     // (Karis 2013, sphere lights' roughness).
-//X     return Lamp(l, shine.rgb * (falloff * cone * cone), radius / (2.0 * max(distance, 1e-4)));
+//X     // Nothing where it doesn't reach, whatever it holds (never inf × 0).
+//X     let reach = falloff * cone * cone;
+//X     return Lamp(l, select(vec3(0.0), shine.rgb * reach, reach > 0.0), radius / (2.0 * distance));
 //X }
 //X // `roughness` widened for a light `widen` across (its square, α, grown).
 //X fn widened(roughness: f32, widen: f32) -> f32 {

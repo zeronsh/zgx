@@ -22,12 +22,21 @@ use crate::{
 };
 use zgx_gpu::wgpu;
 
-/// What the lights' lists on the device were binned for.
-#[derive(Clone, Copy, PartialEq)]
+/// What the lights' lists on the device were binned for, compared bit for
+/// bit (a view not a number is the same view as before, not another).
+#[derive(Clone, Copy)]
 struct Key {
     view: Mat4,
     projection: Mat4,
     size: (u32, u32),
+}
+impl PartialEq for Key {
+    fn eq(&self, other: &Self) -> bool {
+        let bits = |m: &Mat4| m.columns.map(|c| c.map(f32::to_bits));
+        bits(&self.view) == bits(&other.view)
+            && bits(&self.projection) == bits(&other.projection)
+            && self.size == other.size
+    }
 }
 
 /// What a renderer keeps for clustered lights.
@@ -41,8 +50,10 @@ pub(super) struct Lights {
     key: Option<Key>,
     words: Vec<[u32; 4]>,
     buffer: Option<(wgpu::Buffer, u64)>,
-    /// The sun's cascades, while its shadow is cut into them.
+    /// The sun's cascades, while its shadow is cut into them, and those the
+    /// device refused.
     pub(super) sun: Option<super::shadows::cascades::Sun>,
+    refused: Option<crate::Cascades>,
     /// The frame's layouts with the lists or the cascades, by `key`.
     layouts: [Option<wgpu::BindGroupLayout>; 8],
     /// Their bindings, the renderer's frame binding each was made beside
@@ -124,12 +135,16 @@ pub(super) fn prepare(
         .lighting
         .cascades
         .filter(|_| world.shadows && uniforms.sun_color != [0.; 4]);
+    // Cascades the device refused (`Sun::new`) aren't asked for again.
+    let cascades = cascades.filter(|c| gpu.lights.refused != Some(*c));
     if cascades != gpu.lights.sun.as_ref().map(|sun| sun.settings) {
-        gpu.lights.sun =
-            cascades.map(|c| super::shadows::cascades::Sun::new(device, &gpu.shadow_layout, c));
+        gpu.lights.sun = cascades
+            .and_then(|c| super::shadows::cascades::Sun::new(device, &gpu.shadow_layout, c));
+        gpu.lights.refused = cascades.filter(|_| gpu.lights.sun.is_none());
         gpu.lights.made += 1;
         gpu.kept = None;
     }
+    let cascades = cascades.filter(|_| gpu.lights.sun.is_some());
     if cascades.is_some() {
         uniforms.params[3] = 1.;
     }
@@ -185,6 +200,7 @@ fn clusters(
         far: camera.far.max(camera.near.max(1e-4) * 2.),
     };
     lights.binned.bin(&view, grid, &lights.gathered);
+    world.lighting.left_out.set(lights.binned.dropped);
     // The words, as the shader reads them.
     let binned = &lights.binned;
     let grid = binned.grid.unwrap_or(grid);
@@ -194,7 +210,7 @@ fn clusters(
     let words = &mut lights.words;
     words.clear();
     let base_lights = 4;
-    let base_clusters = base_lights + 3 * binned.lights.len() as u32;
+    let base_clusters = base_lights + 3 * binned.shown.len() as u32;
     let base_indices = base_clusters + CLUSTERS.div_ceil(2) as u32;
     words.push([
         f(TILES_X as f32 / size.0.max(1) as f32),
@@ -212,10 +228,10 @@ fn clusters(
         base_lights,
         base_clusters,
         base_indices,
-        binned.lights.len() as u32,
+        binned.shown.len() as u32,
     ]);
     words.push([TILES_X, TILES_Y, super::clusters::SLICES, 0]);
-    words.extend(binned.lights.iter().flat_map(|l| l.map(|v| v.map(f))));
+    words.extend(binned.shown.iter().flat_map(|l| l.map(|v| v.map(f))));
     words.extend(
         binned
             .clusters
@@ -315,14 +331,24 @@ pub(super) fn cascades(
         texel: 0.,
     }; c::MAX_CASCADES];
     for (i, fit) in fits.iter_mut().enumerate().take(count) {
-        *fit = c::fit(
-            &eye,
-            (splits[i], splits[i + 1]),
-            &frame,
-            scene,
-            settings.size,
-        );
-        if let Some(boxes) = boxes {
+        *fit = c::fit(&eye, (splits[i], splits[i + 1]), &frame, scene, sun.side);
+    }
+    // A camera that sees nothing (at its own target, say) fits no view:
+    // the maps hold what they did, moved by nothing, so the world rests.
+    if !fits[..count].iter().all(c::Fit::usable) {
+        let held: Option<Vec<c::Fit>> = sun.held[..count]
+            .iter()
+            .map(|held| held.as_ref().map(|held| held.fit))
+            .collect();
+        let Some(held) = held else {
+            sun.redraw = [false; c::MAX_CASCADES];
+            world.unsettle(crate::world::Settle::CASCADES, false);
+            return;
+        };
+        fits[..count].copy_from_slice(&held);
+    }
+    if let Some(boxes) = boxes {
+        for (i, fit) in fits.iter().enumerate().take(count) {
             let frustum = super::cull::Frustum::new(&fit.matrix);
             super::cull::visible(&frustum, boxes, &mut sun.masks[i]);
         }

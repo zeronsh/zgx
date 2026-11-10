@@ -135,3 +135,76 @@ fn nothing_past_the_cascades_reach_is_in_shadow() {
         pixels[lit]
     );
 }
+
+#[test]
+fn cascades_set_out_of_bounds_are_brought_within_them() {
+    let world = scene();
+    // Fields set by hand past what the builders allow: a map of no
+    // texels, a split past logarithmic, no distance, too many.
+    let mut cascades = Cascades::new(2);
+    cascades.size = 0;
+    cascades.split = 5.;
+    cascades.distance = f32::NAN;
+    cascades.count = 9;
+    world.set_cascades(Some(cascades));
+    let held = world.cascades().unwrap();
+    assert_eq!(held.count, 4);
+    assert!(held.size >= 64 && held.size <= 4096, "{}", held.size);
+    assert!((0. ..=1.).contains(&held.split), "{}", held.split);
+    assert!(held.distance.is_finite() && held.distance > 0.);
+    let mut huge = Cascades::new(1);
+    huge.size = 100_000;
+    world.set_cascades(Some(huge));
+    assert!(world.cascades().unwrap().size <= 4096);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    world.set_cascades(Some(cascades));
+    let pixels = window.draw();
+    let (shadow, lit) = (
+        seen_at(&world, vec3(-2., 0., 0.)),
+        seen_at(&world, vec3(2., 0., 0.)),
+    );
+    assert!(pixels[shadow] + 40 < pixels[lit], "still shadowed");
+}
+
+#[test]
+fn a_camera_at_its_own_target_lets_a_world_with_cascades_rest() {
+    let world = scene();
+    world.set_cascades(Some(Cascades::new(4)));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    for camera in [
+        Camera::looking_at([1., 2., 3.], [1., 2., 3.]),
+        Camera {
+            orthographic: true,
+            fov: f32::NAN,
+            ..Camera::looking_at([0., 6., 9.], [1., 0., 0.])
+        },
+        Camera {
+            orthographic: true,
+            fov: -3.,
+            ..Camera::looking_at([0., 6., 9.], [1., 0., 0.])
+        },
+    ] {
+        world.set_camera(camera);
+        // Settled within as many frames as there are cascades. (A
+        // headless window draws an animating view only when told: as a
+        // frame clock would, each frame here asks for the next.)
+        let mut drawn = 0;
+        for _ in 0..6 {
+            world.view().invalidate();
+            window.draw();
+            drawn += 1;
+            if !world.view().animating() {
+                break;
+            }
+        }
+        assert!(
+            !world.view().animating(),
+            "{camera:?}: still drawing after {drawn} frames"
+        );
+    }
+}

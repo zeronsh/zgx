@@ -20,6 +20,9 @@ pub(crate) struct Lighting {
     radii: ByIndex<(u32, f32)>,
     /// The sun's cascades (`World::set_cascades`), while it casts shadows.
     pub(crate) cascades: Option<Cascades>,
+    /// Lights and listings the last binning left out past its caps
+    /// (`World::lights_left_out`).
+    pub(crate) left_out: std::cell::Cell<u32>,
 }
 impl Lighting {
     /// Whether any light was given a radius (gone or not).
@@ -52,7 +55,11 @@ impl Inner {
 /// cut by depth into `count` slices up to `distance` in front of the
 /// camera, each shadowed by a map of its own `size` texels square, the
 /// nearer the sharper.
+///
+/// Made by `Cascades::new` and its setters; fields set by hand are brought
+/// within the setters' bounds by `World::set_cascades`.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Cascades {
     /// How many: 1 to 4.
     pub count: u32,
@@ -93,9 +100,30 @@ impl Cascades {
     /// Where they split, 0 (evenly) to 1 (logarithmically).
     pub fn split(self, split: f32) -> Self {
         Self {
-            split: split.clamp(0., 1.),
+            split: if split.is_finite() {
+                split.clamp(0., 1.)
+            } else {
+                0.75
+            },
             ..self
         }
+    }
+    /// It within its setters' bounds, whatever its fields were set to: 1 to
+    /// 4 cascades, maps of 64 to 4096 texels, a finite distance over 0, a
+    /// split of 0 to 1.
+    pub(crate) fn sanitized(self) -> Self {
+        let distance = if self.distance.is_finite() && self.distance > 0. {
+            self.distance
+        } else {
+            100.
+        };
+        Self {
+            count: self.count.clamp(1, 4),
+            ..self
+        }
+        .distance(distance)
+        .size(self.size)
+        .split(self.split)
     }
 }
 
@@ -108,7 +136,11 @@ impl Cascades {
 /// Given in lumens, a point light's is `lumens / 4π` candela, and a spot's
 /// the same whatever its cone (as Bevy and Filament take a spot's lumens):
 /// narrowing a spot's cone keeps how bright it is where it shines.
+///
+/// Made by `Light::point` or `Light::spot` and their setters; values set
+/// by hand are checked as `World::add_light` checks a light's.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct PointLight {
     /// Where it is.
     pub position: Vec3,
@@ -235,6 +267,13 @@ impl World {
             std::mem::replace(&mut inner.lighting.clustered, on) != on
         });
     }
+    /// How many lights the last frame shading through clusters left out
+    /// where they reach: past the 65,536 nearest the camera, and in each
+    /// cluster past its 255 nearest (a light counted once a cluster). 0
+    /// unless a world holds far more lights than a view can light.
+    pub fn lights_left_out(&self) -> u32 {
+        self.inner.borrow().lighting.left_out.get()
+    }
     /// Whether point and spot lights shade through clusters whatever their
     /// count (`set_clustered_lights`).
     pub fn clustered_lights(&self) -> bool {
@@ -252,6 +291,7 @@ impl World {
     /// They cost `count × size² × 2` bytes (32 MB for four of 2048).
     pub fn set_cascades(&self, cascades: Option<Cascades>) {
         self.change_view(|inner: &mut Inner| {
+            let cascades = cascades.map(Cascades::sanitized);
             std::mem::replace(&mut inner.lighting.cascades, cascades) != cascades
         });
     }
@@ -274,6 +314,13 @@ impl World {
                 return false;
             }
             let before = inner.lighting.radius(id.index as usize, id.generation);
+            // A radius not finite or under 0 is a point's.
+            let radius = if light.radius.is_finite() {
+                light.radius.max(0.)
+            } else {
+                0.
+            };
+            let light = PointLight { radius, ..light };
             if light.radius > 0. {
                 let entry = (id.generation, light.radius);
                 inner.lighting.radii.insert(id.index, entry);

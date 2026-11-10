@@ -11,6 +11,12 @@ pub(super) const TILES_X: u32 = 16;
 pub(super) const TILES_Y: u32 = 9;
 pub(super) const SLICES: u32 = 24;
 pub(super) const CLUSTERS: usize = (TILES_X * TILES_Y * SLICES) as usize;
+/// The most lights a cluster lists (its nearest), and the most a frame
+/// lists in all (the nearest the camera sees): past them, lights are left
+/// out and counted (`Binned::dropped`), so the lists' buffer stays within
+/// what a device binds whatever a world holds.
+pub(super) const MAX_PER_CLUSTER: usize = 255;
+pub(super) const MAX_LIGHTS: usize = 1 << 16;
 
 /// A light as the shader reads it, as the uniform path's slots are: where
 /// it is and how far it reaches, its colour and intensity, its cone.
@@ -65,10 +71,13 @@ impl Grid {
     }
 }
 
-/// The lists: each cluster's lights, as indices into `lights`.
+/// The lists: each cluster's lights, as indices into `shown`.
 #[derive(Default)]
 pub(super) struct Binned {
+    /// The lights binned, as given, and those the camera sees, nearest
+    /// first (`MAX_LIGHTS` at most), as the lists index them.
     pub(super) lights: Vec<Packed>,
+    pub(super) shown: Vec<Packed>,
     /// Each cluster's first index in `indices` and how many, cluster by
     /// cluster: x fastest, then y (top to bottom), then depth.
     pub(super) clusters: Vec<[u32; 2]>,
@@ -77,8 +86,14 @@ pub(super) struct Binned {
     /// Each light's runs of clusters as binning found them: a slice's rows
     /// of tiles (light, slice, x from and to, y from and to).
     spans: Vec<(u32, u32, [u32; 4])>,
-    /// The lights the camera may see: index, view-space centre, radius.
-    visible: Vec<(u32, Vec3, f32)>,
+    /// Lights and listings left out past `MAX_LIGHTS` and
+    /// `MAX_PER_CLUSTER`.
+    pub(super) dropped: u32,
+    /// The lights the camera may see: index, view-space centre, radius,
+    /// and how far from the camera, squared (their order).
+    visible: Vec<(u32, Vec3, f32, f32)>,
+    /// Each cluster's room in `indices`, while filling it.
+    room: Vec<u32>,
 }
 
 /// The tiles (x from, x to, y from, y to, inclusive) a light's sphere
@@ -125,11 +140,11 @@ impl Binned {
     pub(super) fn bin(&mut self, view: &Mat4, mut grid: Grid, lights: &[Packed]) {
         self.lights.clear();
         self.lights.extend_from_slice(lights);
-        // Each light the camera may see, its sphere in view space, and the
-        // depths they reach: the grid's slices span those alone.
+        self.dropped = 0;
+        // Each light the camera may see, its sphere in view space, nearest
+        // first, `MAX_LIGHTS` at most.
         let visible = &mut self.visible;
         visible.clear();
-        let (mut near, mut far) = (f32::MAX, f32::MIN);
         for (light, [at, ..]) in lights.iter().enumerate() {
             let centre = view.project(Vec3::from([at[0], at[1], at[2]]));
             let (radius, depth) = (at[3], -centre.z);
@@ -137,12 +152,30 @@ impl Binned {
                 (depth - radius).max(grid.near),
                 (depth + radius).min(grid.far),
             );
-            if reach.0 >= reach.1 || tiles(&grid, centre, radius, reach).is_none() {
+            // (Not a number reaches nowhere: compared, it isn't less.)
+            let reaches = reach.0 < reach.1;
+            if !reaches || tiles(&grid, centre, radius, reach).is_none() {
                 continue;
             }
-            near = near.min(reach.0);
-            far = far.max(reach.1);
-            visible.push((light as u32, centre, radius));
+            visible.push((light as u32, centre, radius, centre.dot(centre)));
+        }
+        // Nearest first, where a cap could leave some out: with no more
+        // than a cluster holds, none can be, and their order is no matter.
+        if visible.len() > MAX_PER_CLUSTER {
+            visible.sort_unstable_by(|a, b| a.3.total_cmp(&b.3));
+        }
+        if visible.len() > MAX_LIGHTS {
+            self.dropped += (visible.len() - MAX_LIGHTS) as u32;
+            visible.truncate(MAX_LIGHTS);
+        }
+        self.shown.clear();
+        self.shown
+            .extend(visible.iter().map(|&(light, ..)| lights[light as usize]));
+        // The depths they reach: the grid's slices span those alone.
+        let (mut near, mut far) = (f32::MAX, f32::MIN);
+        for &(_, centre, radius, _) in visible.iter() {
+            near = near.min(-centre.z - radius);
+            far = far.max(-centre.z + radius);
         }
         grid.near = near.max(grid.near);
         grid.far = far.min(grid.far);
@@ -164,7 +197,8 @@ impl Binned {
         for (z, depth) in depths.iter_mut().enumerate() {
             *depth = grid.depth_of(z as u32);
         }
-        for &(light, centre, radius) in visible.iter() {
+        for (light, &(_, centre, radius, _)) in visible.iter().enumerate() {
+            let light = light as u32;
             let depth = -centre.z;
             // The slices holding its nearest and farthest: found among the
             // slices' depths (no logarithm a light).
@@ -184,18 +218,42 @@ impl Binned {
                 self.spans.push((light, z, rect));
             }
         }
-        // Each cluster's first index, then its lights in the order given.
+        // Each cluster's first index and its room (its count, at most
+        // `MAX_PER_CLUSTER`), then its lights nearest first: the farthest
+        // past its room left out. (Checked a listing at a time only where
+        // some cluster is over: almost never.)
         let mut total = 0;
+        let mut over = false;
         for cluster in counts.iter_mut() {
+            let fits = cluster[1].min(MAX_PER_CLUSTER as u32);
+            over |= fits < cluster[1];
+            self.dropped += cluster[1] - fits;
             cluster[0] = total;
-            total += cluster[1];
+            cluster[1] = fits;
+            total += fits;
         }
         self.indices.resize(total as usize, 0);
-        // Where each cluster's next index goes: its count, counted back up.
-        for cluster in counts.iter_mut() {
-            cluster[1] = 0;
-        }
         let indices = &mut self.indices[..];
+        if over {
+            let room = &mut self.room;
+            room.clear();
+            room.extend(counts.iter().map(|cluster| cluster[1]));
+            counts.iter_mut().for_each(|cluster| cluster[1] = 0);
+            for &(light, z, [x0, x1, y0, y1]) in &self.spans {
+                for y in y0..=y1 {
+                    let row = at(x0, y, z)..=at(x1, y, z);
+                    for (cluster, &room) in counts[row.clone()].iter_mut().zip(&room[row]) {
+                        if cluster[1] < room {
+                            indices[(cluster[0] + cluster[1]) as usize] = light;
+                            cluster[1] += 1;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        // Where each cluster's next index goes: its count, counted back up.
+        counts.iter_mut().for_each(|cluster| cluster[1] = 0);
         for &(light, z, [x0, x1, y0, y1]) in &self.spans {
             for y in y0..=y1 {
                 for cluster in &mut counts[at(x0, y, z)..=at(x1, y, z)] {
@@ -295,8 +353,11 @@ mod tests {
                     for x in 0..TILES_X {
                         let cluster = ((z * TILES_Y + y) * TILES_X + x) as usize;
                         let [first, count] = binned.clusters[cluster];
-                        let list = &binned.indices[first as usize..(first + count) as usize];
-                        assert!(list.is_sorted(), "in the order given");
+                        let list: Vec<u32> = binned.indices
+                            [first as usize..(first + count) as usize]
+                            .iter()
+                            .map(|&at| binned.visible[at as usize].0)
+                            .collect();
                         listed += list.len();
                         for (i, l) in lights.iter().enumerate() {
                             let centre = view.project(vec3(l[0][0], l[0][1], l[0][2]));
@@ -316,6 +377,29 @@ mod tests {
                 "{listed}"
             );
         }
+    }
+
+    #[test]
+    fn a_cluster_lists_its_nearest_lights_up_to_its_cap_and_counts_the_rest() {
+        let camera = Camera::looking_at([0., 0., 0.], [0., 0., -1.]);
+        // More lights than a cluster holds, each reaching every cluster.
+        let count = MAX_PER_CLUSTER + 40;
+        let lights: Vec<Packed> = (0..count)
+            .map(|i| light(vec3(0., 0., -10. - i as f32 * 0.01), 1000.))
+            .collect();
+        let mut binned = Binned::default();
+        binned.bin(&camera.view(), grid(&camera, 1.), &lights);
+        for &[first, n] in &binned.clusters {
+            assert!(n as usize <= MAX_PER_CLUSTER);
+            // The nearest kept: the farthest (the last given) dropped.
+            let list = &binned.indices[first as usize..(first + n) as usize];
+            assert!(
+                list.iter().all(|&l| (l as usize) < MAX_PER_CLUSTER),
+                "{list:?}"
+            );
+        }
+        // The 40 farthest, left out of every cluster.
+        assert_eq!(binned.dropped as usize, 40 * CLUSTERS);
     }
 
     #[test]

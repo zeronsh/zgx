@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(before, 0x0a4b_2237_f883_7a85, "{before:#018x}");
         // And every variant of every bit there is now, as it is now.
         let all = variants_text(u32::from(Variant::ALL) + 1);
-        assert_eq!(all, 0x82d7_0223_946b_8ba5, "{all:#018x}");
+        assert_eq!(all, 0x3d4d_9104_4d81_6ec5, "{all:#018x}");
     }
 
     /// `bits` as a variant a mesh can have: a cut-out, placed, glass, coated

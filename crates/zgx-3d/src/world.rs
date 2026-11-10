@@ -62,7 +62,10 @@ pub fn srgb_to_linear(c: f32) -> f32 {
     }
 }
 
-/// A light.
+/// A light. A world takes its values finite and 0 or more: one it can't
+/// (an intensity or colour infinite or not a number, a position or
+/// direction that isn't one, a range not over 0) shines nothing, and
+/// intensities past 10^10 and colours past 10^4 are taken as those.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Light {
     /// Sunlight: parallel rays going `direction`, `intensity` in lux-like
@@ -96,6 +99,75 @@ pub enum Light {
         /// How strong.
         intensity: f32,
     },
+}
+impl Light {
+    /// The brightest a light's intensity is taken as, and a colour's
+    /// channel: past these a light's colour times its intensity, times its
+    /// fall-off, could pass what a float holds.
+    const MOST: (f32, f32) = (1e10, 1e4);
+    /// It as a world takes it (`World::add_light`, `set_light`): colours
+    /// and intensities finite, 0 or more and at most `MOST`; a light with
+    /// a value not a number or infinite, a position or direction that
+    /// isn't one, or a range not finite and over 0 shines nothing.
+    pub(crate) fn sanitized(self) -> Self {
+        let (most_intensity, most_channel) = Self::MOST;
+        let finite = |v: f32| v.is_finite();
+        let channel = |c: f32| c.clamp(0., most_channel);
+        let color = |c: [f32; 3]| c.map(channel);
+        let strength = |i: f32| i.clamp(0., most_intensity);
+        let none = [0.; 3];
+        match self {
+            Light::Directional {
+                direction,
+                color: c,
+                intensity,
+            } => {
+                let ok = direction.is_finite()
+                    && direction != Vec3::ZERO
+                    && c.iter().all(|v| finite(*v))
+                    && finite(intensity);
+                Light::Directional {
+                    direction: if ok { direction } else { vec3(0., -1., 0.) },
+                    color: if ok { color(c) } else { none },
+                    intensity: if ok { strength(intensity) } else { 0. },
+                }
+            }
+            Light::Point {
+                position,
+                color: c,
+                intensity,
+                range,
+            } => {
+                let ok = position.is_finite()
+                    && c.iter().all(|v| finite(*v))
+                    && finite(intensity)
+                    && finite(range)
+                    && range > 0.;
+                Light::Point {
+                    position: if position.is_finite() {
+                        position
+                    } else {
+                        Vec3::ZERO
+                    },
+                    color: if ok { color(c) } else { none },
+                    intensity: if ok { strength(intensity) } else { 0. },
+                    range: if ok { range } else { 1. },
+                }
+            }
+            Light::Hemisphere {
+                sky,
+                ground,
+                intensity,
+            } => {
+                let ok = sky.iter().chain(&ground).all(|v| finite(*v)) && finite(intensity);
+                Light::Hemisphere {
+                    sky: if ok { color(sky) } else { none },
+                    ground: if ok { color(ground) } else { none },
+                    intensity: if ok { strength(intensity) } else { 0. },
+                }
+            }
+        }
+    }
 }
 /// Point lights a frame shades with (the nearest the camera's target, past
 /// this many).
@@ -307,11 +379,23 @@ impl Spot {
     /// Shining along `direction`, fully within `inner` radians of it and
     /// fading to nothing at `outer` (glTF's `innerConeAngle` and
     /// `outerConeAngle`).
+    /// A direction that isn't one (zero, or not finite) shines down; angles
+    /// not numbers are the narrowest.
     pub fn new(direction: impl Into<Vec3>, inner: f32, outer: f32) -> Self {
-        let outer = outer.max(1e-3);
+        let direction = direction.into();
+        let direction = if direction.is_finite() && direction != Vec3::ZERO {
+            direction
+        } else {
+            vec3(0., -1., 0.)
+        };
+        let outer = outer.clamp(1e-3, std::f32::consts::PI);
         Self {
-            direction: direction.into(),
-            inner: inner.clamp(0., outer),
+            direction,
+            inner: if inner.is_finite() {
+                inner.clamp(0., outer)
+            } else {
+                0.
+            },
             outer,
         }
     }
@@ -1443,6 +1527,7 @@ impl World {
     }
     /// Add `light`.
     pub fn add_light(&self, light: Light) -> LightId {
+        let light = light.sanitized();
         let mut id = None;
         self.change_view(|inner| {
             let (index, generation) = claim(&mut inner.lights, &mut inner.free_light, light);
@@ -1453,6 +1538,7 @@ impl World {
     }
     /// Light `id` as `light`.
     pub fn set_light(&self, id: LightId, light: Light) {
+        let light = light.sanitized();
         self.change_view(|inner| match inner.lights.get_mut(id.index as usize) {
             Some(slot) if slot.generation == id.generation && slot.value.is_some() => {
                 let changed = slot.value != Some(light);

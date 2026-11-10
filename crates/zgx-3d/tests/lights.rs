@@ -371,3 +371,80 @@ fn look_of_a_lights_radius() {
             .unwrap();
     }
 }
+
+#[test]
+fn a_light_of_infinite_or_nan_values_shines_nothing() {
+    let bad = [
+        Light::Point {
+            position: vec3(0., 0.3, 0.),
+            color: [1.; 3],
+            intensity: f32::INFINITY,
+            range: 2.,
+        },
+        Light::Point {
+            position: vec3(0., 0.3, 0.),
+            color: [f32::NAN, 1., 1.],
+            intensity: 1.,
+            range: 2.,
+        },
+        Light::Point {
+            position: vec3(f32::NAN, 0.3, 0.),
+            color: [1.; 3],
+            intensity: 1.,
+            range: 2.,
+        },
+        Light::Point {
+            position: vec3(0., 0.3, 0.),
+            color: [1.; 3],
+            intensity: -4.,
+            range: 2.,
+        },
+        Light::Point {
+            position: vec3(0., 0.3, 0.),
+            color: [1.; 3],
+            intensity: 1.,
+            range: f32::INFINITY,
+        },
+        Light::Directional {
+            direction: vec3(f32::NAN, -1., 0.),
+            color: [1.; 3],
+            intensity: 1.,
+        },
+        Light::Hemisphere {
+            sky: [f32::INFINITY; 3],
+            ground: [0.; 3],
+            intensity: 1.,
+        },
+    ];
+    // One sane light beside it, through either path.
+    for clustered in [false, true] {
+        let draw = |with: Option<Light>| {
+            one_light_over_a_floor(|world| {
+                world.add_light(Light::Point {
+                    position: vec3(0.8, 0.3, 0.),
+                    color: [1.; 3],
+                    intensity: 0.3,
+                    range: 3.,
+                });
+                if let Some(light) = with {
+                    let id = world.add_light(light);
+                    // Set again too: the same either way.
+                    world.set_light(id, light);
+                }
+                world.set_clustered_lights(clustered);
+            })
+        };
+        let Some((expected, ..)) = draw(None) else {
+            return;
+        };
+        for light in bad {
+            let (actual, ..) = draw(Some(light)).unwrap();
+            let differing = actual
+                .iter()
+                .zip(&expected)
+                .filter(|(a, b)| a.abs_diff(**b) > 1)
+                .count();
+            assert_eq!(differing, 0, "clustered {clustered}: {light:?} shone");
+        }
+    }
+}

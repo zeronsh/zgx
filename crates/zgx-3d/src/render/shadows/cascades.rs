@@ -53,10 +53,17 @@ impl Eye {
         } else {
             1.
         };
-        let h = if camera.orthographic {
-            camera.fov * 0.5
+        // As `Camera::projection` takes it, a field of view not a number
+        // as its least.
+        let fov = if camera.fov.is_finite() {
+            camera.fov
         } else {
-            (camera.fov.clamp(1e-3, 3.1) * 0.5).tan()
+            1e-3
+        };
+        let h = if camera.orthographic {
+            fov.max(1e-3) * 0.5
+        } else {
+            (fov.clamp(1e-3, 3.1) * 0.5).tan()
         };
         Self {
             position: camera.position,
@@ -101,6 +108,15 @@ pub(crate) fn sun_frame(direction: Vec3) -> Mat4 {
 pub(crate) struct Fit {
     pub(crate) matrix: Mat4,
     pub(crate) texel: f32,
+}
+impl Fit {
+    /// Whether it's a view at all: a camera at its own target, or seeing
+    /// nothing, fits none (its texel 0, its matrix not a number).
+    pub(crate) fn usable(&self) -> bool {
+        self.texel.is_finite()
+            && self.texel > 0.
+            && self.matrix.columns.iter().flatten().all(|v| v.is_finite())
+    }
 }
 
 /// The cascade holding what `eye` sees between depths `near` and `far`, as
@@ -183,6 +199,8 @@ pub(crate) struct Held {
 /// What a renderer keeps for the sun's cascades, made when they turn on.
 pub(crate) struct Sun {
     pub(crate) settings: crate::Cascades,
+    /// Each map's side in texels: as set, within the device's limits.
+    pub(crate) side: u32,
     /// The maps, a layer each; each layer's view, and all as an array.
     _texture: wgpu::Texture,
     pub(crate) layers: Vec<wgpu::TextureView>,
@@ -218,13 +236,24 @@ impl Sun {
         device: &wgpu::Device,
         shadow_layout: &wgpu::BindGroupLayout,
         settings: crate::Cascades,
-    ) -> Self {
-        let count = settings.count.clamp(1, MAX_CASCADES as u32);
+    ) -> Option<Self> {
+        // Within the device's limits too, and made in an error scope: a
+        // map the device refuses turns the cascades off, reported, rather
+        // than losing the frame.
+        let limits = device.limits();
+        let count = settings
+            .count
+            .clamp(1, MAX_CASCADES as u32)
+            .min(limits.max_texture_array_layers.max(1));
+        let side = settings
+            .size
+            .clamp(1, limits.max_texture_dimension_2d.max(1));
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("3D sun cascades"),
             size: wgpu::Extent3d {
-                width: settings.size,
-                height: settings.size,
+                width: side,
+                height: side,
                 depth_or_array_layers: count,
             },
             mip_level_count: 1,
@@ -276,8 +305,15 @@ impl Sun {
                 (buffer, bind)
             })
             .collect();
-        Self {
+        if let Some(error) = now(scope.pop()) {
+            eprintln!(
+                "zgx-3d: the sun's cascades can't be made, so its shadow is one map: {error}"
+            );
+            return None;
+        }
+        Some(Self {
             settings,
+            side,
             _texture: texture,
             layers,
             array,
@@ -291,10 +327,22 @@ impl Sun {
             scene: None,
             pipelines: Default::default(),
             draws: 0,
-        }
+        })
     }
     pub(crate) fn count(&self) -> usize {
         self.layers.len()
+    }
+}
+
+/// `future`, which resolves at once (wgpu's error scopes on native).
+fn now<T>(future: impl std::future::Future<Output = T>) -> T {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+        std::thread::yield_now();
     }
 }
 
@@ -370,7 +418,7 @@ impl Sun {
         let mut out = CascadeUniforms {
             matrices: [Mat4::IDENTITY.columns; MAX_CASCADES],
             offsets: [[0.; 4]; MAX_CASCADES],
-            params: [self.count() as f32, 1. / self.settings.size as f32, 0., 0.],
+            params: [self.count() as f32, 1. / self.side as f32, 0., 0.],
         };
         for (c, held) in self.held.iter().enumerate().take(self.count()) {
             if let Some(held) = held {
