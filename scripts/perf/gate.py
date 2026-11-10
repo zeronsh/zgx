@@ -157,7 +157,10 @@ SCENES = [
     # Pictures in that terminal, drawn by wgpu's no-op backend: placed (RGBA
     # in chunks, a PNG), scrolled, replaced under their ids and deleted;
     # sixel images placed over one another. What `terminal` guards having no
-    # cost, this measures.
+    # cost, this measures. The output it makes beforehand (pixels, PNGs,
+    # base64) and its count of pictures drawn each frame are the bench's own
+    # and uncounted (`gate_marks`), since 0.1.11: before, they were a tenth
+    # of the cell (a re-baseline, not a saving).
     ('terminal-pictures', 'zgx-terminal', 'terminal_pictures_bench', {'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0',
                                                                       'ZGX_GPU_NOOP': '1'}),
     # 3D frames' CPU work, drawn by wgpu's no-op backend (no driver, no JIT):
