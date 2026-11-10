@@ -93,6 +93,14 @@ hardware-event latency. Sparse `slow` and `notches` cells also require at least
 80% of planned quantized updates, ten traced moving frames, and the same
 work/GPU/row/repaint and late-attribution checks. Idle intervals stay separate.
 
+The current interval-gap counter is conservative: a rounded coast curve can
+hold the same whole-point position for several refreshes without missing a due
+move. Such gaps are diagnostic until checked against independently expected
+curve positions on the display clock. Do not use the interval counter alone to
+claim AppKit-equivalent pacing or ship readiness. Keep latency, shown counts,
+headroom and invalid-condition checks alongside it; subtracting an estimated
+pipeline delay must not hide an added refresh of latency.
+
 The target is **zero late frames attributable to the app or GPU**. Every late
 or skipped presentation cites its frame record(s) in `late_attributions`:
 
