@@ -76,6 +76,12 @@ struct Look {
     // The vignette's, grain's and chromatic aberration's intensities, and
     // the frame's index (grain's seed).
     lens: vec4<f32>,
+    // Grading: white balance's L, M, S factors and the saturation; lift and
+    // the table's entries a side; 1 over gamma; gain.
+    balance: vec4<f32>,
+    lift: vec4<f32>,
+    gamma: vec4<f32>,
+    gain: vec4<f32>,
 }
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var bloom: texture_2d<f32>;
@@ -86,6 +92,37 @@ override BLOOM: bool = false;
 override VIGNETTE: bool = false;
 override GRAIN: bool = false;
 override ABERRATION: bool = false;
+override GRADE: bool = false;
+override TABLE: bool = false;
+@group(0) @binding(5) var table: texture_2d<f32>;
+
+// Linear sRGB to LMS and back (CAT02, as Unity's white balance).
+const TO_LMS = mat3x3(vec3(0.390405, 0.0708416, 0.0231082), vec3(0.549941, 0.963172, 0.128021), vec3(0.00892632, 0.00135775, 0.936245));
+const FROM_LMS = mat3x3(vec3(2.85847, -0.210182, -0.041812), vec3(-1.62879, 1.15820, -0.118169), vec3(-0.024891, 0.000324281, 1.06867));
+fn decode(c: vec3<f32>) -> vec3<f32> {
+    let low = c / 12.92;
+    let high = pow((c + 0.055) / 1.055, vec3(2.4));
+    return select(high, low, c <= vec3(0.04045));
+}
+// Lift, gamma, gain and saturation on what the display shows (encoded).
+fn graded(p: vec3<f32>) -> vec3<f32> {
+    var c = look.gain.rgb * (p + look.lift.rgb * (1.0 - p));
+    c = pow(max(c, vec3(0.0)), look.gamma.rgb);
+    let l = luma(c);
+    return clamp(l + (c - l) * look.balance.w, vec3(0.0), vec3(1.0));
+}
+// The table at `p` (encoded), between its entries trilinearly: two of its
+// strip's N by N tables (blue's two nearest), each read bilinearly.
+fn looked_up(p: vec3<f32>) -> vec3<f32> {
+    let n = look.lift.w;
+    let blue = p.b * (n - 1.0);
+    let slice = min(floor(blue), n - 2.0);
+    let x = (p.r * (n - 1.0) + 0.5 + slice * n) / (n * n);
+    let y = (p.g * (n - 1.0) + 0.5) / n;
+    let near = textureSampleLevel(table, bloom_sampler, vec2(x, y), 0.0).rgb;
+    let far = textureSampleLevel(table, bloom_sampler, vec2(x + 1.0 / n, y), 0.0).rgb;
+    return mix(near, far, blue - slice);
+}
 
 // The tone mappings, as the meshes' shader has them.
 fn neutral(color: vec3<f32>) -> vec3<f32> {
@@ -176,6 +213,10 @@ fn tent(uv: vec2<f32>) -> vec3<f32> {
     let alpha = drawn.a;
     let coverage = select(1.0, alpha, alpha > 1e-3);
     var exposed = light / coverage * look.params.x;
+    if GRADE {
+        // White balance: the eye adapted to another white, in LMS.
+        exposed = FROM_LMS * ((TO_LMS * exposed) * look.balance.xyz);
+    }
     if VIGNETTE {
         // Darker toward the corners, as cos⁴ of the angle off the axis
         // falls: at intensity 1, the corners a quarter.
@@ -183,6 +224,16 @@ fn tent(uv: vec2<f32>) -> vec3<f32> {
         exposed *= 1.0 / ((1.0 + r2) * (1.0 + r2));
     }
     var mapped = clamp(tone_map(exposed), vec3(0.0), vec3(1.0));
+    if GRADE || TABLE {
+        var shown = encode(mapped);
+        if GRADE {
+            shown = graded(shown);
+        }
+        if TABLE {
+            shown = looked_up(shown);
+        }
+        mapped = decode(shown);
+    }
     if GRAIN {
         // Noise of the frame's index, so a recorded frame repeats, most in
         // the middle tones, in a space near the eye's.

@@ -65,6 +65,12 @@ fn main() {
                 vignette: Some(Vignette::default()),
                 grain: Some(Grain::default()),
                 chromatic_aberration: Some(ChromaticAberration::default()),
+                grade: Some(Grade {
+                    temperature: 0.1,
+                    saturation: 1.1,
+                    lut: Some(Lut::identity(32)),
+                    ..Default::default()
+                }),
             },
         ),
     ];
@@ -73,7 +79,7 @@ fn main() {
     let mut step = 0u32;
     for round in 0..=rounds {
         for (arm, (_, post)) in arms.iter().enumerate() {
-            world.set_post(*post);
+            world.set_post(post.clone());
             let drawn = world.frames_drawn();
             for frame in 0..=frames {
                 step += 1;

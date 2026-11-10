@@ -15,7 +15,11 @@ pub(crate) mod gi;
 pub(crate) mod lighting;
 
 #[cfg(feature = "post")]
+mod grade;
+#[cfg(feature = "post")]
 mod post;
+#[cfg(feature = "post")]
+pub use grade::{Grade, Lut, LutError};
 #[cfg(feature = "post")]
 pub use post::{Bloom, ChromaticAberration, Grain, Post, Vignette};
 

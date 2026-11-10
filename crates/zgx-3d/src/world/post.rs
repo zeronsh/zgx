@@ -1,6 +1,6 @@
 //! What a world's frame goes through after its meshes are drawn: the post
 //! chain (design-3d-aaa.md, 5.2 and 6.1), with the `post` feature.
-use super::World;
+use super::{Grade, World};
 
 /// The passes a world's frame goes through after its meshes
 /// (`World::set_post`). Each is off by default; with any on, the meshes draw
@@ -8,7 +8,7 @@ use super::World;
 /// it, maps its tones (`World::set_exposure`, `World::set_tone_mapping`)
 /// and writes the view's target. Made with `..Default::default()` for what
 /// isn't set, so passes added later leave it as it is.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Post {
     /// Light spreading around what is bright, as a lens's glare does.
     pub bloom: Option<Bloom>,
@@ -20,6 +20,9 @@ pub struct Post {
     /// Colours parted toward the frame's edges, red outward and blue
     /// inward, as a simple lens refracts them.
     pub chromatic_aberration: Option<ChromaticAberration>,
+    /// Colour grading: white balance, lift, gamma, gain, saturation and a
+    /// look-up table.
+    pub grade: Option<Grade>,
 }
 impl Post {
     /// Whether any pass is on: if not, the meshes draw into the view's
@@ -29,6 +32,7 @@ impl Post {
             || self.vignette.is_some()
             || self.grain.is_some()
             || self.chromatic_aberration.is_some()
+            || self.grade.is_some()
     }
 }
 
@@ -117,7 +121,12 @@ impl World {
             chromatic_aberration: post.chromatic_aberration.map(|c| ChromaticAberration {
                 intensity: unit(c.intensity),
             }),
+            grade: post.grade.as_ref().map(Grade::sanitized),
         };
-        self.change_view(|inner| std::mem::replace(&mut inner.post, post) != post);
+        self.change_view(|inner| {
+            let changed = inner.post != post;
+            inner.post = post;
+            changed
+        });
     }
 }
