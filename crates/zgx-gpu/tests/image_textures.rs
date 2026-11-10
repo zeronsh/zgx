@@ -2,7 +2,7 @@
 //! frame go, least recently drawn first, and upload again when drawn. A long
 //! page of photos scrolled through drew until its 54th, then every frame
 //! failed.
-use std::sync::Arc;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use zgx::{image::ImageData, scene::*};
 use zgx_gpu::GpuRenderer;
 
@@ -45,8 +45,25 @@ fn scroll(scene: &mut Scene, column: NodeId, to: f32) -> Vec<Rect> {
     scene.flush().damage
 }
 
+/// Held by each test: `zgx::image::release_decoded` gives back every kept
+/// file's pixels in the process, so a test releasing them would take another's
+/// from under it (a decoded copy it reads, or one its frames wait on). One that
+/// releases runs alone; the rest together.
+static KEPT_COPIES: RwLock<()> = RwLock::new(());
+fn decoded_kept() -> RwLockReadGuard<'static, ()> {
+    KEPT_COPIES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+fn releases_decoded() -> RwLockWriteGuard<'static, ()> {
+    KEPT_COPIES
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn a_long_page_of_photos_scrolls_down_and_back() {
+    let _decoded = decoded_kept();
     let (mut scene, column) = page(600., 100);
     let mut gpu = GpuRenderer::new(800, 600).unwrap();
     let damage = scene.flush().damage;
@@ -74,6 +91,7 @@ fn a_long_page_of_photos_scrolls_down_and_back() {
 /// issue raised. (Stacked, half transparent: each one shows.)
 #[test]
 fn more_photos_than_the_budget_in_one_frame_draw_what_fits() {
+    let _decoded = decoded_kept();
     let mut scene = Scene::new(800., 600.);
     let stack = scene.append(
         scene.root(),
@@ -107,6 +125,7 @@ fn more_photos_than_the_budget_in_one_frame_draw_what_fits() {
 /// decoded copy ready to go.
 #[test]
 fn a_kept_file_draws_once_decoded_at_the_size_it_shows() {
+    let _decoded = decoded_kept();
     let mut png = Vec::new();
     image::RgbaImage::from_pixel(400, 300, image::Rgba([230, 20, 20, 255]))
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -159,6 +178,7 @@ fn a_kept_file_draws_once_decoded_at_the_size_it_shows() {
 /// window has gone idle it has gone, and memory with it.
 #[test]
 fn a_kept_file_returning_to_the_scene_draws_at_once() {
+    let _decoded = releases_decoded();
     let mut png = Vec::new();
     image::RgbaImage::from_pixel(400, 300, image::Rgba([230, 20, 20, 255]))
         .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
@@ -213,6 +233,7 @@ fn a_kept_file_returning_to_the_scene_draws_at_once() {
 /// recently drawn going first.
 #[test]
 fn textures_of_images_gone_are_bounded() {
+    let _decoded = decoded_kept();
     let whole = [Rect::new(0., 0., 800., 600.)];
     let mut scene = Scene::new(800., 600.);
     let mut gpu = GpuRenderer::new(800, 600).unwrap();
@@ -246,6 +267,7 @@ fn textures_of_images_gone_are_bounded() {
 /// background image alike.
 #[test]
 fn pixelated_images_take_the_nearest_pixel() {
+    let _decoded = decoded_kept();
     use zgx::decoration::{Background, Decoration};
     use zgx::image::ImageRendering;
     let checker = Arc::new(
@@ -315,6 +337,7 @@ fn pixelated_images_take_the_nearest_pixel() {
 /// inherited, as CSS's `image-rendering` is.
 #[test]
 fn a_kept_file_drawn_pixelated_takes_the_nearest_pixel() {
+    let _decoded = decoded_kept();
     use zgx::image::ImageRendering;
     let mut png = Vec::new();
     image::RgbaImage::from_fn(4, 4, |x, y| match (x + y) % 2 {
@@ -367,6 +390,7 @@ fn a_kept_file_drawn_pixelated_takes_the_nearest_pixel() {
 /// of its own either way, the pixelated ones with a sampler of their own.
 #[test]
 fn pixelated_images_draw_in_as_many_draws() {
+    let _decoded = decoded_kept();
     use zgx::image::ImageRendering;
     let images: Vec<_> = (0..20u8)
         .map(|i| Arc::new(ImageData::new(4, 4, [i * 12, 90, 200 - i * 9, 255].repeat(16)).unwrap()))

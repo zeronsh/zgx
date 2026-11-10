@@ -8,7 +8,7 @@ mod md_chunk;
 use zgx::profile::Phase;
 
 /// As `md_chunk_flat`'s, with the phases drawing adds.
-const STILL_GROWING: &[(Phase, &str)] = &[(Phase::Layout, "layout")];
+const STILL_GROWING: &[(Phase, &str)] = &[];
 
 #[test]
 fn a_drawn_chunk_costs_the_same_however_long_the_reply() {

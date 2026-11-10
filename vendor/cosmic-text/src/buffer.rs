@@ -1156,6 +1156,21 @@ impl Buffer {
         self.redraw = true;
     }
 
+    /// zgx: mark each line whose spans hold an inline box
+    /// (`Attrs::inline_box`, `BufferLine::set_inline_boxes`): after its text
+    /// is set, before it is shaped. Text without boxes needs no call.
+    #[cold]
+    #[inline(never)]
+    pub fn find_inline_boxes(&mut self) {
+        let mut reset = false;
+        for line in &mut self.lines {
+            let holds = line.attrs_list().holds_inline_boxes();
+            reset |= line.set_inline_boxes(holds);
+        }
+        // A line reset is shaped again as it is asked for.
+        self.redraw |= reset;
+    }
+
     /// True if a redraw is needed
     pub const fn redraw(&self) -> bool {
         self.redraw

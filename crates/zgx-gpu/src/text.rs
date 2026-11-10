@@ -552,7 +552,35 @@ impl ShapedText {
     }
 }
 
+/// Where the inline boxes of `runs` (of lines starting at `line_starts`)
+/// are: each one's character's offset, its left and its top, as its glyph
+/// says (`CacheKeyFlags::INLINE_BOX`: its `y_offset` is how far its top is
+/// above the baseline).
+pub(crate) fn inline_box_places<'a>(
+    runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
+    line_starts: &[usize],
+) -> Vec<(usize, f32, f32)> {
+    let mut boxes = Vec::new();
+    for run in runs {
+        for glyph in run.glyphs {
+            if glyph
+                .cache_key_flags
+                .contains(cosmic_text::CacheKeyFlags::INLINE_BOX)
+            {
+                boxes.push((
+                    line_starts.get(run.line_i).copied().unwrap_or(0) + glyph.start,
+                    glyph.x,
+                    run.line_y - glyph.y_offset * glyph.font_size,
+                ));
+            }
+        }
+    }
+    boxes
+}
 impl zgx::text_layout::TextLayout for ShapedText {
+    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
+        inline_box_places(self.buffer.layout_runs(), &self.line_offsets)
+    }
     fn cache_weight(&self) -> Option<usize> {
         // Charge capacities of all publicly inspectable owned shape/layout
         // vectors, including spare capacity. cosmic-text hides String capacity
@@ -1675,6 +1703,11 @@ pub(crate) fn truncated(
             run.background = None;
             run.underline = None;
             run.strikethrough = None;
+            // Taken from a box's run: it is text.
+            if run.font.features.is_inline_box() {
+                run.font.features = run.font.features.without_inline_box();
+                run.padding = [0.; 2];
+            }
             runs.push(run);
         }
         if content.is_empty()
@@ -1689,7 +1722,7 @@ pub(crate) fn truncated(
             buffer.shape_until_scroll(fonts, false);
             return buffer;
         }
-        let truncated = zgx::rich_text::RichText::new(content, runs).unwrap();
+        let truncated = rich.remade(content, runs).unwrap();
         rich_buffer_raw(fonts, &truncated, width, None, ellipsis)
     };
     if options.overflow == TextOverflow::Clip {
@@ -1934,6 +1967,9 @@ pub(crate) fn rich_buffer_unshaped(
     // (`run_at`). The ellipsis run stays apart, marked by `usize::MAX`.
     let runs = rich.runs();
     let ellipsis_run = ellipsis.then(|| runs.len().saturating_sub(1));
+    // Its inline boxes, found at the first: a box's run is a padded one,
+    // which most text has none of.
+    let mut boxes = None;
     let mut index = 0;
     while index < runs.len() {
         let run = &runs[index];
@@ -1944,7 +1980,7 @@ pub(crate) fn rich_buffer_unshaped(
             && runs[end].font == run.font
             && runs[end].font_size == run.font_size
             && runs[end].range.start == runs[end - 1].range.end
-            // A padded run's room goes around it alone.
+            // A padded run's room goes around it alone (an inline box is one).
             && run.padding[0] == 0.
             && runs[end].padding[0] == 0.
         {
@@ -1953,6 +1989,10 @@ pub(crate) fn rich_buffer_unshaped(
         let mut attributes = attrs(&run.font, run.font_size.max(1.));
         if run.padding[0] > 0. {
             attributes = attributes.padding(run.padding[0] / run.font_size.max(1.));
+            if run.font.features.is_inline_box() {
+                let boxes = boxes.get_or_insert_with(|| rich.inline_boxes());
+                attributes = attributes.inline_box(box_at(boxes, run.range.start));
+            }
         }
         let attributes = attributes
             .metrics(Metrics::new(
@@ -1978,7 +2018,37 @@ pub(crate) fn rich_buffer_unshaped(
         Shaping::Advanced,
         alignment(base.map_or(&default_font, |run| &run.font)),
     );
+    if boxes.is_some() {
+        buffer.find_inline_boxes();
+    }
     buffer
+}
+
+/// The box at byte `at` of `boxes` (`RichText::inline_boxes`, in order),
+/// as cosmic-text takes one.
+fn box_at(boxes: &[zgx::rich_text::InlineBox], at: usize) -> cosmic_text::InlineBox {
+    use zgx::rich_text::InlineAlign as A;
+    let b = boxes.binary_search_by_key(&at, |b| b.at).map_or_else(
+        |_| zgx::rich_text::InlineBox {
+            baseline: 0.,
+            ..zgx::rich_text::InlineBox::new(at)
+        },
+        |i| boxes[i],
+    );
+    cosmic_text::InlineBox {
+        width: b.width,
+        height: b.height,
+        baseline: b.baseline,
+        align: match b.align {
+            A::Middle => cosmic_text::InlineAlign::Middle,
+            A::TextTop => cosmic_text::InlineAlign::TextTop,
+            A::TextBottom => cosmic_text::InlineAlign::TextBottom,
+            A::Top => cosmic_text::InlineAlign::Top,
+            A::Bottom => cosmic_text::InlineAlign::Bottom,
+            A::Raise(by) => cosmic_text::InlineAlign::Raise(by),
+            _ => cosmic_text::InlineAlign::Baseline,
+        },
+    }
 }
 
 #[cfg(test)]

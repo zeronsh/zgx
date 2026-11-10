@@ -34,8 +34,17 @@ caches as they were.
    none, a box whose insets fix its width was laid out as one that has none
    (everything it holds measured again, its percentages of nothing) before
    zgx placed it at that width.
+4. In `src/compute/flexbox.rs`, an item's minimum main size is measured
+   at min-content only when it is automatic (`unwrap_or_else` where 0.9.0
+   had `unwrap_or`). An item naming its minimum (`min_w = 0` beside a
+   basis of 0, a chat row's text column) was laid out at zero width on
+   every pass and the result dropped: a paragraph a line a word, in Chinese
+   or Japanese a line a character, 83 ms for one on an iOS simulator.
+   Later taffy releases take a closure there too.
 
 Drop the fork when a taffy release keeps the gaps and keys children's
 results by their parent's layout mode and passes known sizes to a leaf's
-layout (the zgx tests are `crates/zgx/tests/layout_gaps.rs`,
-`layout_history.rs` and `viewports_within.rs`).
+layout and measures an automatic minimum only (the zgx tests are
+`crates/zgx/tests/layout_gaps.rs`, `layout_history.rs`,
+`viewports_within.rs` and `scene.rs`'s
+`a_flex_item_naming_its_minimum_is_not_laid_out_at_min_content`).

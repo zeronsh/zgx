@@ -355,11 +355,11 @@ impl UserData for WebUd {
 }
 /// JSON as script data (objects as maps, arrays as lists).
 pub(crate) fn json_value(json: &str) -> Value {
-    serde_json::from_str(json)
-        .map(from_json)
-        .unwrap_or_else(|_| Value::Str(json.into()))
+    crate::json::parse(json).unwrap_or_else(|_| Value::Str(json.into()))
 }
-/// Parsed JSON as a value.
+/// Parsed JSON as a value, through serde_json's tree: the old path, kept as
+/// the reader's test oracle.
+#[cfg(test)]
 pub(crate) fn from_json(v: serde_json::Value) -> Value {
     match v {
         serde_json::Value::Null => Value::Nil,
@@ -749,26 +749,28 @@ impl Node {
     /// Animations, scroll offsets, widget bindings and overlays need a
     /// component context.
     pub fn needs_context(&self) -> bool {
-        matches!(
-            self.kind,
+        (match self.kind {
             Kind::Scroll { .. }
-                | Kind::Checkbox { .. }
-                | Kind::Input { .. }
-                | Kind::Progress { .. }
-                | Kind::Slider { .. }
-                | Kind::Split { .. }
-                | Kind::List { .. }
-                | Kind::Modal { .. }
-                | Kind::Popover { .. }
-                | Kind::Menu { .. }
-                | Kind::Submenu { .. }
-                | Kind::Presence { .. }
-                | Kind::Each {
-                    motion: Some(_),
-                    ..
-                }
-        ) || self.kind.library_needs_context()
-            || self.kind.is_scene3d()
+            | Kind::Checkbox { .. }
+            | Kind::Input { .. }
+            | Kind::Progress { .. }
+            | Kind::Slider { .. }
+            | Kind::Split { .. }
+            | Kind::List { .. }
+            | Kind::Modal { .. }
+            | Kind::Popover { .. }
+            | Kind::Menu { .. }
+            | Kind::Submenu { .. }
+            | Kind::Presence { .. }
+            | Kind::Each {
+                motion: Some(_), ..
+            } => true,
+            // A 3D scene: its effects and bindings live in a component
+            // context. In this one test, no other for every node.
+            #[cfg(feature = "scene3d")]
+            Kind::Scene3d(_) => true,
+            _ => false,
+        }) || self.kind.library_needs_context()
             || self.props.iter().any(|(_, s)| matches!(s, Source::Anim(_)))
             // An icon's tint may be a theme token: it reads the scope.
             || matches!(self.kind, Kind::Svg { .. })
@@ -1025,6 +1027,8 @@ pub(crate) struct ListRare {
     /// start coming in reach calls. Taken as `fill` walks the table.
     pub(crate) start: Option<Function>,
     pub(crate) start_distance: Option<f32>,
+    /// `ahead`: viewports of rows built ahead (`View::list_ahead`).
+    pub(crate) ahead: Option<f32>,
     /// `estimate = { … }`, with `measured`: how a row's data makes its height.
     pub(crate) estimate: Option<Rc<crate::estimate::Rule>>,
     /// `at_end = state`: kept saying whether it rests at its end.
@@ -1095,6 +1099,8 @@ pub(crate) enum Kind {
         contain: bool,
         /// `wheel_across = true` (`ui.scroll_x`): a mouse wheel moves it.
         wheel_across: bool,
+        /// `paging = true`: it comes to rest on whole pages.
+        paging: bool,
         /// `scroll_padding`: kept clear as what it holds scrolls into view.
         padding: Option<Box<ScrollPadding>>,
     },
@@ -1125,9 +1131,6 @@ pub(crate) enum Kind {
     Canvas(Option<Function>, Option<Box<CanvasOptions>>),
     /// `ui.glass { ... }`: the system's glass where it has one.
     Glass(Box<GlassSpec>),
-    /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view.
-    #[cfg(feature = "scene3d")]
-    Scene3d(Rc<crate::scene3d::Scene3dSpec>),
     /// `ui.webview { ... }`: a native web view laid out like a div.
     WebView(Box<WebSpec>),
     /// `ui.terminal { term = ui.term(id) }`: a terminal session, shown
@@ -1312,6 +1315,12 @@ pub(crate) enum Kind {
         /// Only what this script (a plugin's name) contributes.
         from: Option<String>,
     },
+    /// `ui.scene3d { … }`: a 3D scene (zgx-3d) in a GPU view. Last: one in
+    /// the middle moves the others' discriminants, and what tests them for
+    /// every node (`styled`) takes more instructions with the feature on, a
+    /// scene on screen or not.
+    #[cfg(feature = "scene3d")]
+    Scene3d(Rc<crate::scene3d::Scene3dSpec>),
 }
 impl Kind {
     fn takes_children(&self) -> bool {
@@ -1352,14 +1361,6 @@ impl Kind {
         #[cfg(feature = "components")]
         if let Kind::Library(library) = self {
             return library.takes_children();
-        }
-        false
-    }
-    /// A 3D scene (its effects and bindings live in a component context).
-    fn is_scene3d(&self) -> bool {
-        #[cfg(feature = "scene3d")]
-        if let Kind::Scene3d(_) = self {
-            return true;
         }
         false
     }
@@ -3550,10 +3551,12 @@ const LATE_FIELDS: &[&str] = &[
     "at_caret",
     "on_start",
     "start_distance",
+    "ahead",
     "at_end",
     "on_paste",
     "overscroll",
     "wheel_across",
+    "paging",
     "capture_keys",
     "scroll_padding",
     "read_only",
@@ -3665,7 +3668,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 }
             }
         }
-        "on_start" | "start_distance" | "at_end" => {
+        "on_start" | "start_distance" | "ahead" | "at_end" => {
             if let Kind::List { rare, .. } = &mut node.kind {
                 let rare = rare.get_or_insert_default();
                 match name {
@@ -3674,6 +3677,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                         let distance: f32 = lua.unpack(value)?;
                         rare.start_distance = distance.is_finite().then_some(distance);
                     }
+                    "ahead" => rare.ahead = Some(lua.unpack(value)?),
                     _ => rare.at_end = Some(expect_state(&value, "`at_end`")?),
                 }
             }
@@ -3696,11 +3700,10 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
         }
         "capture_keys" => {
             if lua.unpack::<bool>(value)? {
-                node.events
-                    .get_or_insert_default()
-                    .rare
-                    .get_or_insert_default()
-                    .capture_keys = true;
+                let events = node.events.get_or_insert_default();
+                events.rare.get_or_insert_default().capture_keys = true;
+                // No handler sets it for this one (`any_input`).
+                events.input = true;
             }
         }
         "wheel_across" => {
@@ -3716,6 +3719,11 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                         "`wheel_across` is for a `ui.scroll_x`",
                     ));
                 }
+            }
+        }
+        "paging" => {
+            if let Kind::Scroll { paging, .. } = &mut node.kind {
+                *paging = lua.unpack::<Option<bool>>(value)?.unwrap_or(false);
             }
         }
         "overscroll" => {
@@ -5098,6 +5106,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             // Set as `fill` walks the table (`late_field`).
                             contain: false,
                             wheel_across: false,
+                            paging: false,
                             padding: None,
                         },
                     ),

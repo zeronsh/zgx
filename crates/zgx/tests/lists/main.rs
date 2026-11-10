@@ -18,6 +18,8 @@ mod composition_virtual_list;
 mod elastic_scrolling;
 #[path = "../keyboard_scrolling.rs"]
 mod keyboard_scrolling;
+#[path = "../list_build_ahead.rs"]
+mod list_build_ahead;
 #[path = "../list_wheel_lines.rs"]
 mod list_wheel_lines;
 #[path = "../navigation_swipes.rs"]
@@ -26,5 +28,7 @@ mod navigation_swipes;
 mod overlay_scrollbars;
 #[path = "../scroll_latching.rs"]
 mod scroll_latching;
+#[path = "../scroll_paging.rs"]
+mod scroll_paging;
 #[path = "../variable_virtual_list.rs"]
 mod variable_virtual_list;

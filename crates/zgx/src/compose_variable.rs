@@ -15,6 +15,11 @@ pub struct VariableHeights {
     index: Rc<RefCell<HeightIndex>>,
     revision: Signal<u64>,
     end: Rc<Cell<bool>>,
+    /// Bumped as rows may have become other rows (not as they resize): a
+    /// list's rows kept out of view find their places again.
+    structure: Rc<Cell<u64>>,
+    /// A list over it keeps rows (`crate::spare`).
+    keeps: Rc<Cell<bool>>,
 }
 impl VariableHeights {
     /// `count` rows, each `estimate` tall until measured. Panics if `estimate`
@@ -29,6 +34,8 @@ impl VariableHeights {
             index: Rc::new(RefCell::new(HeightIndex::try_new(count, estimate)?)),
             revision: runtime.signal(0),
             end: Default::default(),
+            structure: Default::default(),
+            keeps: Default::default(),
         })
     }
     /// Keep a viewport resting at the end there through height and count
@@ -70,6 +77,7 @@ impl VariableHeights {
     pub fn resize(&self, count: usize) -> Result<bool, HeightError> {
         let changed = self.index.borrow_mut().resize(count)?;
         if changed {
+            self.structure.set(self.structure.get().wrapping_add(1));
             self.changed();
         }
         Ok(changed)
@@ -78,6 +86,7 @@ impl VariableHeights {
     /// reordered wholesale.
     pub fn replace(&self, heights: impl IntoIterator<Item = f32>) -> Result<(), HeightError> {
         self.index.borrow_mut().replace(heights)?;
+        self.structure.set(self.structure.get().wrapping_add(1));
         self.changed();
         Ok(())
     }
@@ -316,6 +325,10 @@ fn rows_of<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 runtime.untracked(|| {
                     let default = heights.index.borrow().estimate();
                     let old = described.replace(current.clone());
+                    // The same rows (a keyed list's data written in place):
+                    // those kept out of view are where they were.
+                    let same =
+                        (heights.keeps.get() && old == current).then(|| heights.structure.get());
                     let known: HashMap<&K, f32> = {
                         let index = heights.index.borrow();
                         old.iter()
@@ -334,6 +347,9 @@ fn rows_of<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         })
                         .collect();
                     heights.replace(rows).expect("finite heights");
+                    if let Some(structure) = same {
+                        heights.structure.set(structure);
+                    }
                     {
                         let mut positions = positions.borrow_mut();
                         positions.clear();
@@ -422,6 +438,51 @@ struct PassInputs {
     request: Option<(u64, usize)>,
     reveal: u64,
 }
+/// `keys`, with what spare time adds (`crate::spare`).
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn merge_kept<K: Eq + std::hash::Hash + Clone>(
+    kept: &mut crate::spare::Kept<K>,
+    keys: &mut Vec<(K, usize, f32, f32)>,
+    weak: &crate::widgets::WeakUi,
+    heights: &VariableHeights,
+    entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
+    key: &mut dyn FnMut(usize) -> K,
+    view: crate::spare::KeptView,
+    measured: bool,
+    runtime: &Runtime,
+) {
+    let Some(ui) = weak.upgrade() else {
+        return;
+    };
+    kept.pass();
+    let shown = keys.iter().map(|(key, index, ..)| (key.clone(), *index));
+    let shown = shown.collect();
+    let index = &heights.index;
+    let rows = runtime.untracked(|| {
+        kept.merge(
+            &ui,
+            view,
+            shown,
+            key,
+            &|y| index.borrow().row_at(y),
+            &|row| {
+                measured
+                    || index
+                        .borrow()
+                        .row_height(row)
+                        .is_some_and(|height| height >= THINNEST_ROW)
+            },
+            &|key| entries.get(key).map(|entry| entry.node),
+        )
+    });
+    let model = index.borrow();
+    keys.clear();
+    keys.extend(rows.into_iter().map(|(key, row)| {
+        let height = model.row_height(row).unwrap_or(1.);
+        (key, row, model.row_offset(row), height)
+    }));
+}
 fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
     watch: W,
     offset: Signal<f32>,
@@ -439,6 +500,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
     let (mut key, mut build, mounted_in) = (rows.key(), rows.build(), rows.mounted_in.clone());
     View::new(Kind::VirtualList(Box::new(
         move |ui, root, environment, options: crate::compose::ListOptions| {
+            let ahead = options.ahead();
             let crate::compose::ListOptions {
                 scrollbar,
                 keyboard_navigation,
@@ -557,6 +619,13 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             let mut run = 0_u64;
             let mut order = Vec::new();
             let mounted_revision = ui.signal(0_u64);
+            // With spare time its overscan is spare time's too: the frame
+            // builds what shows alone. (Its turn wakes the pass by this.)
+            let mut kept = ui
+                .list_ahead(ahead, mounted_revision.clone())
+                .map(|ahead| crate::spare::Kept::new(ahead, overscan));
+            heights.keeps.set(kept.is_some());
+            let overscan = if kept.is_some() { 0 } else { overscan };
             let published = measured.then(|| ui.content_size_revision());
             let mut discovery: Option<(usize, usize, usize)> = None;
             let mut handled_request = 0;
@@ -872,6 +941,30 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     keys.retain(|(key, _, _, row_height)| {
                         *row_height >= THINNEST_ROW || dragged.contains(key)
                     });
+                }
+                if let Some(kept) = &mut kept {
+                    let settled = anchor
+                        .as_ref()
+                        .is_none_or(|anchor| anchor.revision != revision);
+                    merge_kept(
+                        kept,
+                        &mut keys,
+                        &weak,
+                        &heights,
+                        &entries,
+                        &mut key,
+                        crate::spare::KeptView {
+                            top: position,
+                            height,
+                            count: length,
+                            width,
+                            structure: heights.structure.get(),
+                            settled,
+                            focus_goes: keyboard_navigation,
+                        },
+                        measured,
+                        &runtime,
+                    );
                 }
                 // Rows kept are stamped with this run: one shown twice is a
                 // key repeated, and those left unstamped go below.

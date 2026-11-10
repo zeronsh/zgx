@@ -6189,6 +6189,10 @@ impl Scene {
         from: usize,
         children: &[NodeId],
     ) -> bool {
+        // A column that keeps its first children's places keeps none now.
+        if self.tree_node(parent).special == Special::Kept {
+            self.forget_column_end(parent);
+        }
         let current = &self.children_raw(self.tree_node(parent))[from..];
         let children = &children[from..];
         let place: NodeMap<usize> = current.iter().enumerate().map(|(i, id)| (*id, i)).collect();
@@ -7685,7 +7689,7 @@ impl Scene {
             })
             .collect();
         changed.then(|| {
-            crate::rich_text::RichText::new(rich.text(), runs)
+            rich.remade(rich.text_arc(), runs)
                 .expect("the same runs")
                 .with_options(rich.options())
         })
@@ -11931,11 +11935,13 @@ impl Scene {
         if ids.len() < stable {
             return None;
         }
+        // Its children changed: past the end alone, or it can't keep them.
+        // A list changes in place only by an append at its end, a removal, or
+        // a reorder (which forgets what it kept: `reorder_changed_children`).
+        // A removal before the end moves the child at its end's place.
         if node.dirty & CHILDREN != 0
-            && last.children[..stable]
-                .iter()
-                .zip(ids)
-                .any(|((child, ..), id)| child != id)
+            && stable > 0
+            && ids[stable - 1] != last.children[stable - 1].0
         {
             return None;
         }
@@ -11958,9 +11964,11 @@ impl Scene {
                 return None;
             }
         }
-        // (With none yet, `column_end` looks at each child it would keep.)
+        // (With none yet, `column_end` looks at each child it would keep. Not
+        // while phases are counted: a walk of every child, which would count
+        // as layout growing with the column.)
         #[cfg(debug_assertions)]
-        if memo.sums.is_some() {
+        if memo.sums.is_some() && !crate::profile::enabled() {
             let scanned = last
                 .children
                 .iter()
@@ -12053,7 +12061,7 @@ impl Scene {
                 | if own_w { OWN_PERCENT_WIDTH } else { 0 }
                 | if own_h { OWN_PERCENT_HEIGHT } else { 0 };
             #[cfg(debug_assertions)]
-            {
+            if !crate::profile::enabled() {
                 #[cfg(test)]
                 let calls = self.read_bits_calls.get();
                 assert_eq!(self.read_bits(*id), bits, "what a kept column reads");
@@ -12068,6 +12076,14 @@ impl Scene {
     /// anything that next reads it. One arranged somewhere else, its kept
     /// children's places move with it, is arranged again. One whose result was
     /// replaced since by a whole layout has nothing to take back.
+    /// Whether columns resumed at their end set children aside, and whether
+    /// any column is streamed into: what a layout pass looks at for them.
+    #[inline(always)]
+    fn column_work(&self) -> (bool, bool) {
+        self.cold.as_deref().map_or((false, false), |cold| {
+            (!cold.column_kept.is_empty(), !cold.column_memos.is_empty())
+        })
+    }
     #[cold]
     #[inline(never)]
     fn return_kept_children(&mut self, report: Option<&mut FrameReport>) {
@@ -12103,7 +12119,9 @@ impl Scene {
                 }
             } else {
                 #[cfg(debug_assertions)]
-                self.check_kept_in_place(kept.id, now);
+                if !crate::profile::enabled() {
+                    self.check_kept_in_place(kept.id, now);
+                }
             }
         }
     }
@@ -12125,6 +12143,19 @@ impl Scene {
                     || (child.bounds.x, child.bounds.y) == (at.x + rect.x, at.y + rect.y),
                 "a kept child stands where it is placed"
             );
+        }
+    }
+    /// Column `id`'s children moved: what it kept of its last layout serves no
+    /// more, and its next lays it out whole (`column_end`, which then goes on
+    /// resuming).
+    fn forget_column_end(&mut self, id: NodeId) {
+        if let Some(memo) = self
+            .cold
+            .as_deref_mut()
+            .and_then(|cold| cold.column_memos.get_mut(&id))
+        {
+            memo.pass = u64::MAX;
+            memo.sums = None;
         }
     }
     /// Column `id` no longer looks at its end (`keep_column_end`).
@@ -12234,7 +12265,9 @@ impl Scene {
         let mut children = std::mem::take(&mut last.children);
         children.truncate(keep);
         #[cfg(debug_assertions)]
-        self.check_kept_column(id, &children, natural, inner_w, padding, gap, &aligned);
+        if !crate::profile::enabled() {
+            self.check_kept_column(id, &children, natural, inner_w, padding, gap, &aligned);
+        }
         // Its sums where its end begins: kept for this result's end, or added
         // up from the places it keeps.
         let start = match memo.sums {
@@ -13306,8 +13339,13 @@ impl Scene {
             }
             false => full,
         };
-        if self.cold.is_some() {
+        // Columns streamed into (`column_end`): none in most scenes, which
+        // make no call.
+        let (kept, memos) = self.column_work();
+        if kept {
             self.return_kept_children(None);
+        }
+        if memos {
             self.restore_column_reads();
         }
         if full {
@@ -13361,7 +13399,7 @@ impl Scene {
         if !self.escaped.is_empty() {
             self.place_escaped(&mut report);
         }
-        if self.cold.is_some() {
+        if self.column_work().0 {
             self.return_kept_children(Some(&mut report));
         }
         // Probes this pass answered stay only as the next pass's few.
@@ -13546,6 +13584,21 @@ impl Scene {
             self.slots.truncate(keep);
         }
         self.slots.shrink_to_fit();
+        // Results held whole under other constraints, the places of their
+        // children and all: at rest, their sizes do for a probe, and what
+        // lays it out again is the next change's.
+        for slot in &mut self.slots {
+            let Some(node) = &mut slot.node else {
+                continue;
+            };
+            if !node.alternates.is_empty() {
+                let sizes = std::mem::take(&mut node.alternates)
+                    .iter()
+                    .map(ProbeSize::from)
+                    .collect();
+                keep_sizes(&mut node.sizes, sizes);
+            }
+        }
         // The lowest taken first from now on: what mounts next leaves the
         // slots above it free to go at the next rest.
         self.free.sort_unstable_by(|a, b| b.cmp(a));
@@ -15011,6 +15064,29 @@ impl<'a> Iterator for PaintIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// Taking a language again keeps a text's boxes.
+    #[test]
+    fn review_relayered_text_keeps_its_boxes() {
+        use crate::rich_text::{INLINE_BOX_TEXT, InlineBox, RichText, TextRun};
+        let mut scene = Scene::new(100., 100.);
+        let root = scene.root();
+        let id = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        scene.set_language(id, Some("zh-Hant".into()));
+        let rich = RichText::new(
+            INLINE_BOX_TEXT,
+            vec![TextRun {
+                range: 0..3,
+                font_size: 14.,
+                ..Default::default()
+            }],
+        )
+        .unwrap()
+        .with_inline_boxes(vec![InlineBox::new(0)])
+        .unwrap();
+        let relayered = scene.relayered(id, &rich).expect("its features changed");
+        assert_eq!(relayered.inline_boxes().len(), 1);
+        assert!(relayered.has_inline_boxes());
+    }
     use super::*;
     /// A long column's ink worked out from its kept union and the children
     /// that grew where they were (`grown_ink`) is, to the bit, the ink worked
@@ -16714,6 +16790,164 @@ mod tests {
             100
         );
     }
+    /// A column streamed into, its earlier children reordered or one removed
+    /// in the same flush as its end grows: what it kept can't stand, and it
+    /// lays out as a column built with what it holds.
+    #[test]
+    fn a_streamed_column_reordered_or_cut_lays_out_whole() {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        };
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let build = |words: &[String]| {
+            let mut scene = Scene::new(300.0, 4000.0);
+            scene.set_text_measurer(measurer);
+            let column = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(220.0),
+                    gap: 3.0,
+                    ..Style::default()
+                },
+            );
+            let ids: Vec<_> = words
+                .iter()
+                .map(|w| scene.append(column, text(w), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, column, ids)
+        };
+        // Words of different lengths, so a block moved changes heights.
+        let mut words: Vec<String> = (0..100)
+            .map(|i| "w ".repeat(1 + i % 7) + &i.to_string())
+            .collect();
+        let (mut scene, column, mut ids) = build(&words);
+        let grow = |scene: &mut Scene, words: &mut Vec<String>, ids: &[NodeId]| {
+            words.last_mut().unwrap().push_str(" more");
+            scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+        };
+        let same = |scene: &Scene, ids: &[NodeId], words: &[String]| {
+            let (fresh, fresh_column, fresh_ids) = build(words);
+            assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+            for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+                assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+            }
+        };
+        for _ in 0..2 {
+            grow(&mut scene, &mut words, &ids);
+            scene.flush();
+        }
+        // Two early blocks swap as its end grows.
+        ids.swap(3, 4);
+        words.swap(3, 4);
+        assert!(scene.reorder_children(column, &ids));
+        grow(&mut scene, &mut words, &ids);
+        scene.flush();
+        same(&scene, &ids, &words);
+        // It resumes from there.
+        grow(&mut scene, &mut words, &ids);
+        scene.flush();
+        same(&scene, &ids, &words);
+        // An early block goes as its end grows, and as a block arrives.
+        scene.remove(ids.remove(10));
+        words.remove(10);
+        grow(&mut scene, &mut words, &ids);
+        words.push("a block arriving".to_string());
+        ids.push(scene.append(column, text(words.last().unwrap()), wrap.clone()));
+        scene.flush();
+        same(&scene, &ids, &words);
+        grow(&mut scene, &mut words, &ids);
+        scene.flush();
+        same(&scene, &ids, &words);
+    }
+    /// A column streamed into at two widths, at rest after each chunk: rest
+    /// keeps only the sizes of the width it isn't showing, and the column
+    /// resumes at its end and stands where one built whole puts it, its
+    /// children all back in its result.
+    #[test]
+    fn a_column_streamed_into_resumes_the_same_after_rest() {
+        let measurer = |text: &str, _: f32, limit: Option<f32>| {
+            let width = text.len() as f32 * 7.0;
+            let room = limit.unwrap_or(width).max(7.0);
+            (width.min(room), (width / room).ceil().max(1.0) * 18.0)
+        };
+        let wrap = Style {
+            text_wrap: true,
+            ..Style::default()
+        };
+        let column_style = Style {
+            flex_grow: 1.0,
+            gap: 4.0,
+            ..Style::default()
+        };
+        // In a row, beside one that grows twice as much: probed and placed,
+        // it holds results under more than one width in a pass.
+        let build = |width: f32, words: &[String]| {
+            let mut scene = Scene::new(width, 4000.0);
+            scene.set_text_measurer(measurer);
+            let row = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Row),
+                Style::default(),
+            );
+            let column = scene.append(
+                row,
+                NodeKind::Container(Layout::Column),
+                column_style.clone(),
+            );
+            scene.append(
+                row,
+                text("a wrapping neighbour beside the column"),
+                Style {
+                    text_wrap: true,
+                    flex_grow: 2.0,
+                    ..Style::default()
+                },
+            );
+            let ids: Vec<_> = words
+                .iter()
+                .map(|w| scene.append(column, text(w), wrap.clone()))
+                .collect();
+            scene.flush();
+            (scene, column, ids)
+        };
+        let mut words: Vec<String> = (0..100).map(|i| format!("block {i}")).collect();
+        let (mut scene, column, ids) = build(300.0, &words);
+        let (mut resumed, mut held) = (false, false);
+        for width in [300.0, 220.0, 300.0, 220.0, 300.0] {
+            scene.resize(width, 4000.0);
+            for _ in 0..3 {
+                words.last_mut().unwrap().push_str(" more of it");
+                scene.set_text(*ids.last().unwrap(), words.last().unwrap().as_str());
+                scene.flush();
+                resumed |= scene
+                    .cold
+                    .as_deref()
+                    .is_some_and(|cold| cold.column_memos.contains_key(&column));
+                held |= !scene.node(column).alternates.is_empty();
+                scene.rest();
+                assert!(scene.node(column).alternates.is_empty());
+            }
+            let (fresh, fresh_column, fresh_ids) = build(width, &words);
+            assert_eq!(scene.bounds(column), fresh.bounds(fresh_column));
+            for (id, fresh_id) in ids.iter().zip(&fresh_ids) {
+                assert_eq!(scene.bounds(*id), fresh.bounds(*fresh_id));
+            }
+            let held = scene.node(column).measurement.as_ref().unwrap();
+            assert_eq!(held.children.len(), words.len());
+        }
+        assert!(resumed, "the column looked at its end");
+        assert!(
+            held,
+            "it held a result of the other width, for rest to let go of"
+        );
+    }
     /// A long column changed at its start, flush after flush: nothing is
     /// streaming into it, so it stops looking at its end, and lays out as any.
     #[test]
@@ -17716,6 +17950,92 @@ mod tests {
 mod measure_work_tests {
     use super::*;
     use crate::layout::{LayoutOptions, Length};
+    /// A chat row laid out once: an avatar and a text column taking the
+    /// rest (`grow`, a basis of 0) with the minimum width `min_width`,
+    /// holding paragraphs, a quote and a row of chips. The scene's measures.
+    fn row_measures(min_width: Option<Length>) -> u64 {
+        let mut scene = Scene::new(402., 2000.);
+        let row = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Row),
+            Style {
+                width: Some(402.),
+                gap: 12.,
+                ..Default::default()
+            },
+        );
+        scene.append(
+            row,
+            NodeKind::Rect(Color(1, 2, 3, 255)),
+            Style {
+                width: Some(40.),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        let content = scene.append(
+            row,
+            NodeKind::Container(Layout::Column),
+            Style {
+                flex_grow: 1.,
+                layout_options: Some(Arc::new(LayoutOptions {
+                    basis: Some(Length::Px(0.)),
+                    min_width,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        );
+        let wrap = Style {
+            text_wrap: true,
+            ..Default::default()
+        };
+        for n in 0..4 {
+            let text = format!("paragraph {n}: Maybe dinner could list launch layout good great.");
+            scene.append(
+                content,
+                NodeKind::Text {
+                    text: text.into(),
+                    color: Color(0, 0, 0, 255),
+                    font_size: 16.,
+                },
+                wrap.clone(),
+            );
+        }
+        let chips = scene.append(content, NodeKind::Container(Layout::Row), Style::default());
+        for _ in 0..4 {
+            scene.append(
+                chips,
+                NodeKind::Rect(Color(1, 2, 3, 255)),
+                Style {
+                    width: Some(48.),
+                    height: Some(28.),
+                    ..Default::default()
+                },
+            );
+        }
+        let before = scene.measure_calls;
+        scene.flush();
+        assert_eq!(scene.bounds(content).width, 350.);
+        scene.measure_calls - before
+    }
+    /// A flex item that names its minimum (`min_w`) isn't laid out at
+    /// min-content for an automatic minimum it doesn't use: a chat row's
+    /// text column was, on every pass, its paragraphs a line a word (in
+    /// Chinese or Japanese a line a character, 83 ms for one on an iOS
+    /// simulator). Only an automatic minimum asks for it.
+    #[test]
+    fn a_flex_item_naming_its_minimum_is_not_laid_out_at_min_content() {
+        let automatic = row_measures(None);
+        for named in [Some(Length::Px(0.)), Some(Length::Px(120.))] {
+            let measures = row_measures(named);
+            assert!(
+                measures < automatic,
+                "min_w {named:?}: {measures} measures, an automatic minimum {automatic}: \
+                 naming the minimum should spare the min-content layout"
+            );
+        }
+    }
     /// A stack `depth` deep of layout boxes, each holding wrapping text, a
     /// fixed-width row and the next box, laid out by taffy (their children
     /// set layout options). The boxes of a few levels animate a negative
@@ -17917,6 +18237,69 @@ mod measure_work_tests {
                 }
             }
         }
+    }
+    /// At rest a node keeps only the sizes of results it isn't showing, and
+    /// lays out to the same place from them whatever comes next.
+    #[test]
+    fn rest_keeps_the_sizes_of_results_and_lays_out_the_same() {
+        fn bounds_at(widths: &[f32], rest: bool) -> (Vec<Rect>, usize, usize) {
+            let mut scene = Scene::new(400., 300.);
+            let row = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Row),
+                Style::default(),
+            );
+            let cells: Vec<_> = (0..4)
+                .map(|at| {
+                    let cell = scene.append(
+                        row,
+                        NodeKind::Container(Layout::Column),
+                        Style {
+                            flex_grow: 1. + at as f32,
+                            ..Default::default()
+                        },
+                    );
+                    let leaf = scene.append(
+                        cell,
+                        NodeKind::Rect(Color(1, 2, 3, 255)),
+                        Style {
+                            height: Some(10. + at as f32),
+                            ..Default::default()
+                        },
+                    );
+                    (cell, leaf)
+                })
+                .collect();
+            let (mut held, mut kept) = (0, 0);
+            let mut seen = Vec::new();
+            for width in widths {
+                scene.resize(*width, 300.);
+                scene.flush();
+                held = held.max(scene.node(row).alternates.len());
+                if rest {
+                    scene.rest();
+                    for (cell, leaf) in &cells {
+                        for id in [row, *cell, *leaf] {
+                            assert!(scene.node(id).alternates.is_empty());
+                        }
+                    }
+                    kept = kept.max(scene.node(row).sizes.len());
+                }
+                seen.push(scene.bounds(row));
+                seen.extend(
+                    cells
+                        .iter()
+                        .flat_map(|(cell, leaf)| [scene.bounds(*cell), scene.bounds(*leaf)]),
+                );
+            }
+            (seen, held, kept)
+        }
+        let widths = [400., 300., 400., 250., 300., 400.];
+        let (plain, held, _) = bounds_at(&widths, false);
+        assert!(held > 0, "other results were held, for rest to let go of");
+        let (rested, _, kept) = bounds_at(&widths, true);
+        assert!(kept > 0, "their sizes stay");
+        assert_eq!(plain, rested);
     }
     #[test]
     fn a_hidden_subtree_is_measured_once_to_no_box() {

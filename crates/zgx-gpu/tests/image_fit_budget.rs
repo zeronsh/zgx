@@ -1,7 +1,7 @@
 //! Full-size pictures drawn small, however they come: a texture of the size
 //! drawn, no issue raised, none left out, and no frame failing for them.
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, Once};
+use std::sync::{Arc, Condvar, Mutex, Once, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use zgx::{image::ImageData, scene::*};
 use zgx_gpu::{GpuRenderer, GpuStats};
@@ -99,8 +99,25 @@ type Make = fn(u32, u32, [u8; 4]) -> Arc<ImageData>;
 const MAKERS: [(&str, Make); 2] = [("raw", raw), ("kept", kept)];
 
 /// One fading out as the next fades in, in a popup's window and a large one.
+/// Held by each test: `zgx::image::release_decoded` gives back every kept
+/// file's pixels in the process, so a test releasing them would take another's
+/// from under it (a decoded copy it reads, or one its frames wait on). One that
+/// releases runs alone; the rest together.
+static KEPT_COPIES: RwLock<()> = RwLock::new(());
+fn decoded_kept() -> RwLockReadGuard<'static, ()> {
+    KEPT_COPIES
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+fn releases_decoded() -> RwLockWriteGuard<'static, ()> {
+    KEPT_COPIES
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[test]
 fn two_snapshots_crossfading_take_the_size_they_are_drawn() {
+    let _decoded = decoded_kept();
     for window in WINDOWS {
         for (name, make) in MAKERS {
             let (a, b) = (
@@ -144,6 +161,7 @@ fn two_snapshots_crossfading_take_the_size_they_are_drawn() {
 /// unmasked while it does.
 #[test]
 fn a_mask_takes_the_size_it_is_drawn_and_fails_no_frame() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     for (name, make) in MAKERS {
         let mut scene = Scene::new(window.0 as f32, window.1 as f32);
@@ -200,6 +218,7 @@ fn a_mask_takes_the_size_it_is_drawn_and_fails_no_frame() {
 /// drawn larger: its texture is another then.
 #[test]
 fn a_fitted_mask_masks_in_the_right_place_and_follows_its_size() {
+    let _decoded = decoded_kept();
     // Its left half opaque.
     let (width, height) = (1000u32, 500u32);
     let mut pixels = vec![255u8; (width * height * 4) as usize];
@@ -248,6 +267,7 @@ fn a_fitted_mask_masks_in_the_right_place_and_follows_its_size() {
 /// uploaded once, not again on every frame.
 #[test]
 fn a_picture_past_the_budget_uploads_once() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (5000u32, 2500u32);
     for (name, make) in MAKERS {
@@ -308,6 +328,7 @@ fn a_picture_past_the_budget_uploads_once() {
 /// the rest looked as if they fit, and uploaded whole, to go again as they came.
 #[test]
 fn pictures_past_the_budget_take_their_shares_however_slowly_they_decode() {
+    let _decoded = decoded_kept();
     const SIDE: (u32, u32) = (5000, 2500);
     static DECODES: AtomicUsize = AtomicUsize::new(0);
     fn slowly(_: &[u8]) -> Result<Arc<[u8]>, String> {
@@ -349,6 +370,7 @@ fn pictures_past_the_budget_take_their_shares_however_slowly_they_decode() {
 /// meanwhile. The textures held for it go as it arrives.
 #[test]
 fn pictures_on_screen_stay_as_the_share_moves_until_their_replacements_are_ready() {
+    let _decoded = releases_decoded();
     const SIDE: u32 = 2500;
     const WINDOW: u32 = 2000;
     const CORNERS: [(usize, usize); 3] = [(100, 100), (700, 700), (1300, 1300)];
@@ -425,6 +447,7 @@ fn pictures_on_screen_stay_as_the_share_moves_until_their_replacements_are_ready
 /// ones came to nothing, an error raised, with the budget used up.)
 #[test]
 fn a_budget_used_up_leaves_no_picture_out() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (1400u32, 1400u32);
     let pixels: Arc<[u8]> = [20u8, 200, 20, 255]
@@ -464,6 +487,7 @@ fn a_budget_used_up_leaves_no_picture_out() {
 /// Kept files past the budget decode no larger than their textures will be.
 #[test]
 fn kept_files_past_the_budget_decode_no_more_than_they_show() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (4000u32, 2500u32);
     let mut scene = Scene::new(window.0 as f32, window.1 as f32);
@@ -495,6 +519,7 @@ fn kept_files_past_the_budget_decode_no_more_than_they_show() {
 /// is where a developer finds them.
 #[test]
 fn the_memory_report_names_what_went_softer() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (5000u32, 2500u32);
     let mut scene = Scene::new(window.0 as f32, window.1 as f32);
@@ -544,6 +569,7 @@ fn the_memory_report_names_what_went_softer() {
 /// their room back.
 #[test]
 fn pictures_past_the_budget_share_it_evenly() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[0];
     let (width, height) = (5000u32, 2500u32);
     let full = (width as f32, height as f32);
@@ -587,6 +613,7 @@ fn pictures_past_the_budget_share_it_evenly() {
 /// rasterizes at what shows, not at half of what it was laid out as.
 #[test]
 fn a_picture_scaled_down_by_its_parent_takes_what_it_shows() {
+    let _decoded = decoded_kept();
     let window = WINDOWS[1];
     let mut scene = Scene::new(window.0 as f32, window.1 as f32);
     let stack = stack(&mut scene);
@@ -671,6 +698,7 @@ impl Crowded {
 /// that).
 #[test]
 fn a_new_picture_past_the_budget_goes_softer_and_those_on_screen_stay() {
+    let _decoded = decoded_kept();
     for (own_box, first) in [(false, false), (true, false), (true, true)] {
         let Some(mut w) = Crowded::new() else {
             return;
@@ -707,6 +735,7 @@ fn a_new_picture_past_the_budget_goes_softer_and_those_on_screen_stay() {
 /// those showing are spared.
 #[test]
 fn a_picture_off_the_window_gives_way_to_a_new_one() {
+    let _decoded = decoded_kept();
     let Some(mut w) = Crowded::new() else {
         return;
     };

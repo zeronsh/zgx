@@ -406,3 +406,16 @@ again change nothing, yet xkbcommon worked out the effective modifiers and
 LEDs anew: about 400 instructions a move. `XkbState` keeps the masks it last
 gave and skips the call when they're the same
 (`platform_impl/linux/common/xkb/state.rs`).
+
+
+## Wayland: the loop doesn't sleep on an application's own queue
+
+An application with a queue of its own on winit's connection (zgx's popups:
+their `xdg_popup`, and a `wl_pointer` that hears their surfaces) depends on
+winit's loop: it reads the socket for all queues, and `poll_events_with_timeout`
+goes back to sleep, with no `AboutToWait`, if nothing came for winit's own
+windows. A pointer over a popup is on a surface winit doesn't know, so a click
+on a menu at rest stayed in zgx's queue until something else woke the loop.
+`platform::wayland::wake_for_own_queue` gives the loop a check, asked after a
+read when winit has heard nothing else, whose `true` runs a turn. No check, no
+cost. `scripts/wayland_popups_smoke.py` clicks a menu at rest.

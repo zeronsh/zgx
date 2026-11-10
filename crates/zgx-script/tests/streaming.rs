@@ -319,3 +319,59 @@ return ui.column {
     // The last block's row: its block, its runs and theirs.
     assert!(short <= 8, "a chunk converts {short} tables");
 }
+
+/// A memory report says what named states hold: the largest one by one, with
+/// its rows and its text, and a value two states share counted once.
+#[test]
+fn a_memory_report_names_what_states_hold() {
+    let h = Harness::new(|runtime| {
+        ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local messages = ui.state("messages", {})
+local again = ui.state("again", {})
+local small = ui.state("small", "hi")
+return ui.text { "{small}" }"#,
+        )
+    });
+    h.settle();
+    let words = "a message in a transcript, as a reply writes it. ".repeat(4);
+    let rows: Vec<Value> = (0..1000)
+        .map(|id| {
+            Value::Map(
+                [
+                    ("id".into(), Value::Num(id as f64)),
+                    ("text".into(), Value::from(format!("{id} {words}").as_str())),
+                ]
+                .into(),
+            )
+        })
+        .collect();
+    let list = Value::List(rows.into());
+    h.host.set_state("messages", list.clone()).unwrap();
+    h.host.set_state("again", list).unwrap();
+    h.settle();
+    let mut report = zgx::memory::Report::default();
+    h.host.memory(&mut report);
+    let line = |name: &str| {
+        (report.lines.iter())
+            .find(|line| line.area == "state" && line.name == name)
+            .cloned()
+    };
+    let text = 1000 * words.len();
+    let all = line("all named states").expect("listed");
+    let listed = line("messages")
+        .or_else(|| line("again"))
+        .expect("the largest listed");
+    assert_eq!(listed.entries, Some(1000), "its rows");
+    let bytes = listed.bytes.unwrap();
+    assert!(bytes > text, "{bytes} bytes for {text} of text");
+    assert!(
+        all.bytes.unwrap() < bytes + 4096,
+        "shared, counted once: {} of all, {bytes} of one",
+        all.bytes.unwrap()
+    );
+    let own_text = line(&format!("{}: text", listed.name)).unwrap();
+    assert!(own_text.bytes.unwrap() >= text);
+    assert!(line("small").is_none(), "small ones go in all alone");
+}
