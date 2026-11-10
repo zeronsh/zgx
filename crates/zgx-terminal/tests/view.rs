@@ -1151,6 +1151,58 @@ fn a_picture_keeps_its_node_as_it_scrolls_and_is_replaced() {
     term.close();
 }
 
+/// A row's text, for readers, is worked out only while one listens: none
+/// with no reader (a desktop's start), every row's as one starts, and new
+/// output's from then on.
+#[test]
+fn rows_carry_their_text_only_while_a_reader_listens() {
+    let ui = Ui::new(640., 360.);
+    ui.set_assistive_technology(false);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let labels = |app: &Harness| -> Vec<String> {
+        app.ui
+            .semantics
+            .borrow()
+            .iter()
+            .filter(|(_, node)| node.role == zgx::semantics::Role::Label)
+            .map(|(_, node)| node.label.clone())
+            .collect()
+    };
+    replay.feed(b"hello row\r\n");
+    app.ui.prepare_frame();
+    assert!(
+        !labels(&app).iter().any(|label| label.contains("hello")),
+        "{:?}",
+        labels(&app)
+    );
+    app.ui.set_assistive_technology(true);
+    app.ui.prepare_frame();
+    assert!(
+        labels(&app).iter().any(|label| label == "hello row"),
+        "{:?}",
+        labels(&app)
+    );
+    replay.feed(b"second row\r\n");
+    app.ui.prepare_frame();
+    assert!(
+        labels(&app).iter().any(|label| label == "second row"),
+        "{:?}",
+        labels(&app)
+    );
+    term.close();
+}
+
 /// Output read before the view's first layout (a terminal opened while its
 /// window runs, its program quick to write) makes the rows for the session's
 /// own size, from outside any reactive flush: the rows built then find the

@@ -8412,6 +8412,11 @@ impl NodeHandle {
             .contains(self.node)
             .then(|| ui.observe_size(self.node))
     }
+    /// Whether assistive technology reads the UI (`Ui::assistive_technology`),
+    /// as it changes: for what keeps an order only readers meet.
+    pub fn observe_assistive_technology(&self) -> Option<Signal<bool>> {
+        Some(self.ui.upgrade()?.assistive())
+    }
     /// Whether any of the node shows (inside every clip and viewport above
     /// it), republished after each frame's layout: for building what only
     /// matters on screen.
