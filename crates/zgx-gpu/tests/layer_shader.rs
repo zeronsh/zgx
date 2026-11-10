@@ -860,6 +860,11 @@ fn a_layer_reads_its_own_far_pixels_exactly() {
 /// row), those in `readers` reading what's behind them at an offset, the
 /// rest plain: the frame, as `direct` draws it.
 fn readers_frame(direct: bool, readers: &[usize]) -> (u32, Vec<u8>) {
+    readers_frame_across(direct, readers, None)
+}
+/// `readers_frame`, with box `across` (if any) showing what's behind the
+/// next box along (96 points across, its reach 100).
+fn readers_frame_across(direct: bool, readers: &[usize], across: Option<usize>) -> (u32, Vec<u8>) {
     let (width, height) = (576_u32, 216_u32);
     let mut gpu = GpuRenderer::new(width, height).unwrap();
     gpu.set_direct_metal(direct);
@@ -931,6 +936,16 @@ fn readers_frame(direct: bool, readers: &[usize]) -> (u32, Vec<u8>) {
             },
         );
     }
+    if let Some(index) = across {
+        let next = FillShader::new(
+            "fn layer(input: LayerInput) -> vec4<f32> {
+    return vec4(zgx_backdrop(input.p + vec2(96., 0.)).rgb, 1.);
+}",
+            None,
+        );
+        scene.set_layer_shader(boxes[index], Some(next));
+        scene.set_layer_extent(boxes[index], 0., 100.);
+    }
     let frame = scene.flush();
     gpu.render(&scene, &frame.damage).unwrap();
     (width, gpu.readback().unwrap())
@@ -961,6 +976,40 @@ fn readers_in_one_frame_each_read_as_drawn_alone() {
                 }
             }
         }
+    }
+}
+
+/// A reader that can't share an earlier reader's copy of the target (box 3,
+/// reading past box 2's plain paint, and box 4) takes its own: those after
+/// it still draw once, with one copy, and none that box 3 reads draws before
+/// it. Box 3 sees box 4's place as it is before box 4 draws: the stripe.
+#[test]
+fn a_reader_shares_one_copy_at_most_and_draws_after_those_reading_it() {
+    let _gpu_fixture = gpu_fixture();
+    for direct in [true, false] {
+        let readers = [0, 1, 4, 13];
+        let (width, together) = readers_frame_across(direct, &readers, Some(3));
+        for index in readers {
+            let (_, alone) = readers_frame(direct, &[index]);
+            let (x0, y0) = ((index % 6) as u32 * 96, (index / 6) as u32 * 72);
+            for y in y0..y0 + 72 {
+                for x in x0..x0 + 96 {
+                    let at = ((y * width + x) * 4) as usize;
+                    assert_eq!(
+                        together[at..at + 4],
+                        alone[at..at + 4],
+                        "direct={direct}: reader {index} at ({x}, {y}) reads otherwise than alone"
+                    );
+                }
+            }
+        }
+        // Box 3's (336, 30) shows (432, 30): box 4's place, a blue stripe.
+        let at = ((30 * width + 336) * 4) as usize;
+        assert_eq!(
+            together[at..at + 4],
+            [30, 60, 200, 255],
+            "direct={direct}: box 3 reads box 4 drawn before it"
+        );
     }
 }
 
