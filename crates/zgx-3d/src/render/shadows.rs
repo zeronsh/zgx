@@ -1,0 +1,261 @@
+//! The sun's shadow map: its view of the opaque meshes, its pipelines and
+//! its texture.
+use super::{
+    DEPTH, Gpu, Variant,
+    materials::{Extent, layout_of, make_layout},
+    pipelines::vertex_buffers,
+    shader::wgsl,
+};
+use crate::math::{Mat4, Vec3};
+use zgx_gpu::wgpu;
+/// The shadow map's side, in texels.
+pub(super) const SHADOW_SIZE: u32 = 2048;
+
+/// What the shadow map holds: the sun's view, each opaque mesh's geometry,
+/// place and alpha cutoff, skinned ones' joint matrices and morphing ones'
+/// weights.
+pub(super) type Casting = (Mat4, Vec<(u64, Mat4, u32)>, Vec<Mat4>, Vec<[f32; 2]>);
+
+/// A shadow pipeline's bits (`shadow_key`).
+pub(super) const CUT_OUT: u8 = 4;
+pub(super) const PLACED: u8 = 8;
+/// What sets `variant`'s shadow pipeline apart, as one number (looked up a
+/// run a frame): skinned, morphing, cut out (`CUT_OUT`) and, cut out,
+/// placed (`PLACED`) and layered (a coat or specular), its maps bound as its
+/// mesh's. A mesh light
+/// passes through casts its whole shadow (its binding isn't a cut-out
+/// shadow's).
+#[inline(always)]
+pub(super) fn shadow_key(variant: Variant) -> u8 {
+    let masked = variant.masked() && !variant.transmitting();
+    let bit = |on: bool, bit: u8| if on { bit } else { 0 };
+    bit(variant.skinned(), 1)
+        | bit(variant.morphing(), 2)
+        | bit(masked, CUT_OUT)
+        | bit(masked && variant.placed(), PLACED)
+        | bit(masked && (variant.coated() || variant.specular()), 16)
+}
+/// A skinned, morphing or cut-out shadow's pipeline for `variant`'s meshes.
+/// Made once, rarely: out of the frame's code.
+#[cold]
+#[inline(never)]
+pub(super) fn make_shadow_pipeline(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) {
+    let (skinned, morphing) = (variant.skinned(), variant.morphing());
+    let key = shadow_key(variant);
+    // A mesh light passes through casts its whole shadow.
+    let masked = variant.masked() && !variant.transmitting();
+    let placed = masked && variant.placed();
+    let layered = masked && (variant.coated() || variant.specular());
+    let variant = Variant::default()
+        .with(Variant::TEXTURED, masked)
+        .with(Variant::SKINNED, skinned)
+        .with(Variant::MORPHING, morphing)
+        .with(Variant::MASKED, masked)
+        .with(Variant::PLACED, placed);
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("3D skinned, morphing or cut-out shadows"),
+        source: wgpu::ShaderSource::Wgsl(wgsl(variant, 1).into()),
+    });
+    // A cut-out shadow binds its mesh's maps, as its mesh does.
+    let extent = if layered {
+        Some(Extent::Layered)
+    } else if placed {
+        Some(Extent::Placed)
+    } else {
+        masked.then_some(Extent::Maps)
+    };
+    make_layout(gpu, device, extent);
+    let group1 = layout_of(gpu, extent);
+    let layouts = [
+        Some(&gpu.shadow_layout),
+        Some(group1),
+        Some(&gpu.palette_layout),
+        Some(&gpu.morph_layout),
+    ];
+    let count = match (skinned, morphing) {
+        (_, true) => 4,
+        (true, false) => 3,
+        (false, false) => 2,
+    };
+    let pipeline = shadow_pipeline(device, &shader, &layouts[..count], variant);
+    gpu.shadow_variants.insert(key, pipeline);
+}
+
+/// The box holding the box `(low, high)` after `matrix`, which has no
+/// perspective: what its eight corners would give, each axis's least and
+/// greatest added up.
+pub(super) fn box_through(matrix: &Mat4, (low, high): (Vec3, Vec3)) -> (Vec3, Vec3) {
+    let c = &matrix.columns;
+    let (mut from, mut to) = ([c[3][0], c[3][1], c[3][2]], [c[3][0], c[3][1], c[3][2]]);
+    for (column, (l, h)) in c
+        .iter()
+        .zip([(low.x, high.x), (low.y, high.y), (low.z, high.z)])
+    {
+        for row in 0..3 {
+            let (a, b) = (column[row] * l, column[row] * h);
+            from[row] += a.min(b);
+            to[row] += a.max(b);
+        }
+    }
+    (Vec3::from(from), Vec3::from(to))
+}
+
+/// The sun going `direction` as it sees the opaque meshes of `all`: an
+/// orthographic view holding them all, onto the shadow map, and how wide a
+/// map texel is in the scene. `None` with nothing to cast a shadow.
+pub(super) fn sun_view(all: &[crate::world::Drawn], direction: Vec3) -> Option<(Mat4, f32)> {
+    // A mesh's box, and what places it. A skinned mesh's is placed by each
+    // of its joints: about where its pose can take it.
+    fn placed<'a>(d: &'a crate::world::Drawn) -> ((Vec3, Vec3), &'a [Mat4]) {
+        let bounds = match &d.morph {
+            Some(active) => d.geometry.morphed_bounds(active),
+            None => d.geometry.bounds(),
+        };
+        let matrices = d.palette;
+        (bounds, matrices.unwrap_or(std::slice::from_ref(&d.matrix)))
+    }
+    let opaque = || all.iter().filter(|d| d.material.color[3] >= 1.);
+    let (mut low, mut high) = (Vec3::from([f32::MAX; 3]), Vec3::from([f32::MIN; 3]));
+    for d in opaque() {
+        let (bounds, matrices) = placed(d);
+        for matrix in matrices {
+            let (from, to) = box_through(matrix, bounds);
+            low = low.min(from);
+            high = high.max(to);
+        }
+    }
+    let direction = direction.normalized();
+    if !(low.is_finite() && high.is_finite()) || direction == Vec3::ZERO {
+        return None;
+    }
+    let centre = (low + high) * 0.5;
+    let radius = ((high - low).length() * 0.5).max(1e-3);
+    let view = Mat4::look_at(centre - direction * (radius * 2.), centre, Vec3::Y);
+    let (mut near, mut far) = (Vec3::from([f32::MAX; 3]), Vec3::from([f32::MIN; 3]));
+    for d in opaque() {
+        let (bounds, matrices) = placed(d);
+        for matrix in matrices {
+            let (from, to) = box_through(&(view * *matrix), bounds);
+            near = near.min(from);
+            far = far.max(to);
+        }
+    }
+    // A texel's margin about them, so the filter's edge falls outside.
+    let margin = (far.x - near.x).max(far.y - near.y) / SHADOW_SIZE as f32 * 2.;
+    let (l, r) = (near.x - margin, far.x + margin);
+    let (b, t) = (near.y - margin, far.y + margin);
+    // View space looks down -z: the nearest is the greatest z.
+    let (n, f) = (-far.z - margin, -near.z + margin);
+    let projection = Mat4 {
+        columns: [
+            [2. / (r - l), 0., 0., 0.],
+            [0., 2. / (t - b), 0., 0.],
+            [0., 0., 1. / (n - f), 0.],
+            [-(r + l) / (r - l), -(t + b) / (t - b), n / (n - f), 1.],
+        ],
+    };
+    let texel = (r - l).max(t - b) / SHADOW_SIZE as f32;
+    Some((projection * view, texel))
+}
+
+/// Depth from the sun with `shader`, bound as `layouts` say; a cut-out
+/// `variant`'s by its alpha in a fragment shader (depth alone needs none
+/// otherwise).
+pub(super) fn shadow_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layouts: &[Option<&wgpu::BindGroupLayout>],
+    variant: Variant,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("3D shadows"),
+        layout: Some(
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("3D shadows"),
+                bind_group_layouts: layouts,
+                immediate_size: 0,
+            }),
+        ),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("shadow_vertex"),
+            compilation_options: Default::default(),
+            buffers: &vertex_buffers(variant),
+        },
+        fragment: variant.masked().then(|| wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("shadow_fragment"),
+            compilation_options: Default::default(),
+            targets: &[],
+        }),
+        // Both faces: a plane or an open mesh casts from either side.
+        primitive: Default::default(),
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: DEPTH,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: Default::default(),
+            // Kept off the surfaces they're cast on (acne), more where
+            // they slope from the sun.
+            bias: wgpu::DepthBiasState {
+                constant: 2,
+                slope_scale: 2.,
+                clamp: 0.,
+            },
+        }),
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+/// A depth texture `side` texels square, drawn to and sampled.
+pub(super) fn depth_map(device: &wgpu::Device, side: u32, label: &str) -> wgpu::TextureView {
+    device
+        .create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+        .create_view(&Default::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::math::Vec3;
+
+    #[test]
+    fn a_box_through_a_matrix_is_what_its_corners_give() {
+        let (low, high) = (crate::vec3(-1., 0.5, -2.), crate::vec3(3., 2., 0.25));
+        let turned = crate::Quat::from_euler(0.7, -1.2, 2.1);
+        let matrix =
+            Mat4::from_transform(crate::vec3(4., -3., 0.5), turned, crate::vec3(2., -1., 0.5));
+        let view = Mat4::look_at(crate::vec3(3., 9., -6.), Vec3::ZERO, Vec3::Y);
+        for matrix in [Mat4::IDENTITY, matrix, view * matrix] {
+            let (mut from, mut to) = (Vec3::from([f32::MAX; 3]), Vec3::from([f32::MIN; 3]));
+            for i in 0..8 {
+                let p = matrix.project(crate::vec3(
+                    if i & 1 == 0 { low.x } else { high.x },
+                    if i & 2 == 0 { low.y } else { high.y },
+                    if i & 4 == 0 { low.z } else { high.z },
+                ));
+                from = from.min(p);
+                to = to.max(p);
+            }
+            let (a, b) = box_through(&matrix, (low, high));
+            for (got, want) in [(a, from), (b, to)] {
+                assert!((got - want).length() < 1e-4, "{got:?} {want:?}");
+            }
+        }
+    }
+}
