@@ -15378,6 +15378,22 @@ impl GpuRenderer {
             over: self.over_frames(),
         })
     }
+    /// Diagnostics: split each frame drawn with Metal directly at its
+    /// backdrop blur's passes (reduce, across, down), each committed on its
+    /// own, for `debug_take_pass_times`. Off by default; it adds a command
+    /// buffer a pass while on. Process-wide.
+    #[cfg(target_os = "macos")]
+    pub fn debug_time_passes(&self, on: bool) {
+        metal_frame::TIME_PASSES.store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// What `debug_time_passes` split off since last asked, on this thread:
+    /// each part's GPU time in microseconds, in the order it ran ("frame
+    /// before the blur", "blur reduce", "blur across", "blur down", "frame
+    /// after"), waited for.
+    #[cfg(target_os = "macos")]
+    pub fn debug_take_pass_times(&self) -> Vec<(&'static str, f64)> {
+        metal_frame::take_pass_times()
+    }
     /// How long the GPU took to run the frame last presented, when it was
     /// encoded with Metal directly: the frame's own work, plus however long
     /// other work on the GPU (the window server's compositing, other apps)

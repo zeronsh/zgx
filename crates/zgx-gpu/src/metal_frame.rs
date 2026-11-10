@@ -34,6 +34,34 @@ unsafe impl Send for Threaded<Pipeline> {}
 unsafe impl Sync for Threaded<Pipeline> {}
 pub(crate) type Texture = Retained<ProtocolObject<dyn MTLTexture>>;
 pub(crate) type CommandBuffer = Retained<ProtocolObject<dyn MTLCommandBuffer>>;
+
+/// Diagnostics (`GpuRenderer::debug_time_passes`): a frame's backdrop blur
+/// passes each committed as a command buffer of their own, so the GPU's own
+/// start and end times split the frame's. Off, one load a blur batch.
+pub(crate) static TIME_PASSES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+    /// The command buffers `TIME_PASSES` split off, with what each ran.
+    static TIMED: std::cell::RefCell<Vec<(&'static str, CommandBuffer)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+/// What `TIMED` holds, waited for: each part's GPU time in microseconds, from
+/// the previous part's end (or its own start) to its own end, so parts that
+/// overlap are not counted twice.
+pub(crate) fn take_pass_times() -> Vec<(&'static str, f64)> {
+    let parts: Vec<_> = TIMED.with(|timed| timed.borrow_mut().drain(..).collect());
+    let mut last: Option<f64> = None;
+    parts
+        .into_iter()
+        .map(|(label, buffer)| {
+            buffer.waitUntilCompleted();
+            let (start, end) = (buffer.GPUStartTime(), buffer.GPUEndTime());
+            let from = last.map_or(start, |last| last.max(start));
+            last = Some(end);
+            (label, (end - from) * 1e6)
+        })
+        .collect()
+}
 type Encoder = Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>;
 
 /// The vertex buffer's slot; slot 0 holds the viewport.
@@ -682,8 +710,13 @@ impl Frame {
             (&blur.across, atlas[0], atlas[1]),
             (&blur.down, atlas[1], atlas[0]),
         ];
-        for (pipeline, source, into) in passes {
+        let timing = TIME_PASSES.load(std::sync::atomic::Ordering::Relaxed);
+        let ran = ["frame before the blur", "blur reduce", "blur across"];
+        for (step, (pipeline, source, into)) in passes.into_iter().enumerate() {
             self.encoder.endEncoding();
+            if timing {
+                self.split(frame, ran[step]);
+            }
             self.encoder = pass(&self.buffer, into, MTLLoadAction::Clear);
             self.encoder.setRenderPipelineState(pipeline);
             // SAFETY: Live textures for the blur's source slot.
@@ -700,7 +733,22 @@ impl Frame {
                 self.triangle(index as u32);
             }
         }
+        if timing {
+            self.encoder.endEncoding();
+            self.split(frame, "blur down");
+            // An empty pass for `resume` to end.
+            self.encoder = pass(&self.buffer, atlas[0], MTLLoadAction::Load);
+        }
         self.current = None;
+    }
+    /// `TIME_PASSES`: commit what the frame has encoded as `ran`, and go on
+    /// in a command buffer of its own.
+    #[cold]
+    fn split(&mut self, frame: &MetalFrame, ran: &'static str) {
+        let next = frame.command_buffer().expect("a command buffer");
+        let done = std::mem::replace(&mut self.buffer, next);
+        done.commit();
+        TIMED.with(|timed| timed.borrow_mut().push((ran, done)));
     }
     /// End this pass and open one into `target` (cleared if `clear`) at
     /// `viewport`: from a fade's bands (bands.rs) to the next, or to the
@@ -874,6 +922,13 @@ impl Frame {
             self.buffer.presentDrawable(drawable);
         }
         self.buffer.commit();
+        if TIME_PASSES.load(std::sync::atomic::Ordering::Relaxed) {
+            TIMED.with(|timed| {
+                timed
+                    .borrow_mut()
+                    .push(("frame after", self.buffer.clone()))
+            });
+        }
         self.buffer
     }
 }
