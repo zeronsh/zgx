@@ -32,6 +32,9 @@ pub(crate) struct SurfaceCache {
     submitted: std::cell::Cell<u64>,
     completed: Arc<AtomicU64>,
     conversion: Option<wgpu::ComputePipeline>,
+    /// When it last let go of a retired surface, while CoreVideo's cache may
+    /// still hold that surface (`collect`).
+    released: Option<std::time::Instant>,
 }
 impl SurfaceCache {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self, GpuError> {
@@ -69,6 +72,7 @@ impl SurfaceCache {
             submitted: std::cell::Cell::new(0),
             completed: Arc::new(AtomicU64::new(0)),
             conversion: None,
+            released: None,
         })
     }
     pub fn submitted(&self) {
@@ -97,7 +101,35 @@ impl SurfaceCache {
                 .push((self.submitted.get(), self.entries.remove(&id).unwrap()));
         }
         let completed = self.completed.load(Ordering::Acquire);
+        let before = self.retired.len();
         self.retired.retain(|(epoch, _)| *epoch > completed);
+        // Let go of here: flushed again as frames follow (`collect`).
+        if self.retired.len() < before {
+            self.released = Some(std::time::Instant::now());
+        }
+        self.cache.flush(0);
+    }
+    /// After a frame: lets go of retired surfaces the GPU is done with, and
+    /// has CoreVideo's cache let go of them too, which it does only a second
+    /// or so after a texture of one is gone. Nothing while none is retired
+    /// or just let go (a window showing the same surfaces, or none).
+    pub fn collect(&mut self) {
+        let now = std::time::Instant::now();
+        if self.retired.is_empty()
+            && self
+                .released
+                .is_none_or(|at| now.duration_since(at) > std::time::Duration::from_millis(1500))
+        {
+            self.released = None;
+            return;
+        }
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let completed = self.completed.load(Ordering::Acquire);
+        let before = self.retired.len();
+        self.retired.retain(|(epoch, _)| *epoch > completed);
+        if self.retired.len() < before {
+            self.released = Some(now);
+        }
         self.cache.flush(0);
     }
     /// Lets go of what's retired, as a window goes idle: no frame may come to
