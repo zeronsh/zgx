@@ -966,19 +966,77 @@ fn copy_blocker(
     fade: &mut Option<zgx::scene::FadeMask>,
 ) -> Option<CopyBlocker> {
     let clip = scroll.clip;
+    // What lies around the content alone, where its own items need no look
+    // (`Scene::layer_items_around`: they paint as plain items do, in the
+    // tree's order, and none of them blocks the copy): the content's ~300
+    // items of a transcript are left unwalked each frame it scrolls.
+    if let Some(items) = scene.layer_items_around(scroll.node, clip) {
+        let from = carried.len();
+        if let Some(blocker) =
+            copy_blocker_of::<true>(scene, scroll, damage, scale, carried, fade, &items)
+        {
+            #[cfg(debug_assertions)]
+            {
+                let (mut whole, mut whole_fade) = (Vec::new(), None);
+                let walked = scene.layer_items_within(None, Some(&[clip]));
+                let decided = copy_blocker_of::<false>(
+                    scene,
+                    scroll,
+                    damage,
+                    scale,
+                    &mut whole,
+                    &mut whole_fade,
+                    &walked,
+                );
+                assert_eq!(
+                    decided,
+                    Some(blocker),
+                    "the walk around the content decides as the whole"
+                );
+                assert_eq!(whole_fade, *fade);
+                // (Content covering the clip copies with less to carry.)
+                assert!(
+                    carried[from..].starts_with(&whole),
+                    "carried around {:?}, whole {whole:?}",
+                    &carried[from..]
+                );
+            }
+            return blocker;
+        }
+        carried.truncate(from);
+        *fade = None;
+    }
     let items = scene.layer_items_within(None, Some(&[clip]));
+    copy_blocker_of::<false>(scene, scroll, damage, scale, carried, fade, &items)
+        .expect("the whole walk decides")
+}
+/// `copy_blocker` from the window's paint `items` within the scroll's clip:
+/// all of them, or with `AROUND` those the content holds left out
+/// (its own items kept), when it can't say what lies under the content
+/// shows nowhere (`None`).
+#[allow(clippy::too_many_arguments)]
+fn copy_blocker_of<const AROUND: bool>(
+    scene: &Scene,
+    scroll: &zgx::scene::ScrollMove,
+    damage: &[Rect],
+    scale: f32,
+    carried: &mut Vec<Rect>,
+    fade: &mut Option<zgx::scene::FadeMask>,
+    items: &[zgx::scene::PaintItem<'_>],
+) -> Option<Option<CopyBlocker>> {
+    let clip = scroll.clip;
     let content = |item: &zgx::scene::PaintItem<'_>| scene.is_within(item.id, scroll.node);
     let Some(first) = items.iter().position(content) else {
-        return Some(CopyBlocker::NoContent);
+        return Some(Some(CopyBlocker::NoContent));
     };
     let last = items.iter().rposition(content).expect("found above");
     // What the content has from around it, which holds still as it moves:
     // the extras its own node was given. Any other an item has is its own.
     let Some(around) = items[first..=last].iter().find(|i| i.id == scroll.node) else {
-        return Some(CopyBlocker::NoContent);
+        return Some(Some(CopyBlocker::NoContent));
     };
     if around.outer_mask().is_some() {
-        return Some(CopyBlocker::TwoFades);
+        return Some(Some(CopyBlocker::TwoFades));
     }
     *fade = around.mask();
     let paints = |item: &zgx::scene::PaintItem<'_>| -> Option<Rect> {
@@ -1018,23 +1076,23 @@ fn copy_blocker(
     let mut within = Within::default();
     for item in &items[first..=last] {
         if !within.holds(scene, item.id, scroll.node) {
-            return Some(CopyBlocker::Between(item.id));
+            return Some(Some(CopyBlocker::Between(item.id)));
         }
         // What reads the pixels under it reads the view's, which hold still
         // where the content moves over them.
         if item.effects.blur_radius > 0. || (item.isolated && reads_under(scene, item.id)) {
-            return Some(CopyBlocker::Reads(item.id));
+            return Some(Some(CopyBlocker::Reads(item.id)));
         }
         // Dots on the screen's grid stay put as the picture slides under them.
         if let NodeKind::Image(image) = item.kind
             && image.effect() != zgx::image::ImageEffect::Plain
         {
-            return Some(CopyBlocker::Dots(item.id));
+            return Some(Some(CopyBlocker::Dots(item.id)));
         }
         // Under a fade, such a layer has its whole run fade item by item
         // where it paints whole, and a copy's bands are walked without it.
         if item.mask().is_some() && !bands::fades_apart(scene, item) {
-            return Some(CopyBlocker::FilteredUnderFade(item.id));
+            return Some(Some(CopyBlocker::FilteredUnderFade(item.id)));
         }
         // A loop a layer plays isn't in the frames, and its layer goes where
         // its node is whatever a frame walks (`sync_loops`): nothing of it
@@ -1087,7 +1145,7 @@ fn copy_blocker(
             // under it, and where the copy put it. Only a blur reads past
             // its own box, so a blurred one still repaints the whole view.
             if item.isolated || item.effects.blur_radius > 0. {
-                return Some(CopyBlocker::Over(item.id));
+                return Some(Some(CopyBlocker::Over(item.id)));
             }
             carried.push(ink);
         }
@@ -1110,7 +1168,7 @@ fn copy_blocker(
         items[first..=last].iter().filter(opaque).filter_map(paints),
         scale,
     ) {
-        return None;
+        return Some(None);
     }
     for item in items[..first].iter().rev() {
         let Some(rect) = paints(item) else {
@@ -1128,7 +1186,7 @@ fn copy_blocker(
             && !item.isolated
             && rect == clip
         {
-            return None;
+            return Some(None);
         }
         // One colour across the whole clip, however see-through (a card's
         // tint on the window's glass): the same under every pixel before
@@ -1141,11 +1199,13 @@ fn copy_blocker(
             continue;
         }
         if !repainted(rect) {
-            return Some(CopyBlocker::Under(item.id));
+            // Under it, beyond the view's own items, may be content that
+            // covers the clip (`spans_cover`): the whole walk decides.
+            return (!AROUND).then_some(Some(CopyBlocker::Under(item.id)));
         }
         carried.extend(carry(rect));
     }
-    None
+    Some(None)
 }
 /// Whether layer `id` draws from outside itself: a blend, or anywhere in it a
 /// backdrop filter or a shader reading the backdrop or the window, or whose
@@ -21348,6 +21408,14 @@ mod copy_refusal_tests {
         around: impl FnOnce(View) -> View,
         prepare: impl FnOnce(&mut Scene, NodeId),
     ) -> Option<(CopyBlocker, String)> {
+        refusal_around(around, prepare).0
+    }
+    /// `refusal`, and whether the walk around the content alone was taken
+    /// (`Scene::layer_items_around`).
+    fn refusal_around(
+        around: impl FnOnce(View) -> View,
+        prepare: impl FnOnce(&mut Scene, NodeId),
+    ) -> (Option<(CopyBlocker, String)>, bool) {
         let mut ui = Ui::new(240., 180.);
         let offset = ui.signal(0_f32);
         let page = column()
@@ -21369,19 +21437,27 @@ mod copy_refusal_tests {
         step(&mut ui);
         let content = ui.scene.borrow().scroll_moves()[0].node;
         prepare(&mut ui.scene.borrow_mut(), content);
+        // (A frame with what `prepare` made, then the move looked at.)
+        offset.set(12.);
+        step(&mut ui);
         offset.set(16.);
         let damage = step(&mut ui);
         let scene = ui.scene.borrow();
         let moved = scene.scroll_moves()[0].clone();
-        copy_blocker(&scene, &moved, &damage, 1., &mut Vec::new(), &mut None).map(|blocker| {
-            let note = blocker.describe(&scene);
-            (blocker, note)
-        })
+        let refused =
+            copy_blocker(&scene, &moved, &damage, 1., &mut Vec::new(), &mut None).map(|blocker| {
+                let note = blocker.describe(&scene);
+                (blocker, note)
+            });
+        let around = scene.layer_items_around(moved.node, moved.clip).is_some();
+        (refused, around)
     }
 
     #[test]
     fn a_plain_view_has_no_refusal() {
-        assert_eq!(refusal(|view| view, |_, _| {}), None);
+        let (refused, around) = refusal_around(|view| view, |_, _| {});
+        assert_eq!(refused, None);
+        assert!(around, "the walk around the content alone decides");
     }
 
     #[test]
@@ -21402,11 +21478,248 @@ mod copy_refusal_tests {
         assert!(note.contains("two fades"), "{note}");
     }
 
-    /// A loop in the content is no refusal (`baked_loops.rs` has it scrolling).
+    /// Every blocker `copy_blocker` names, and what makes it: one inside the
+    /// content (which the walk around the content can't see, so it hands the
+    /// verdict to the whole walk), or around it (which both walks see). A
+    /// blocker added to `CopyBlocker` doesn't compile here until it has a
+    /// case, nor a case until it has a scene making it.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Case {
+        Between,
+        Reads,
+        Dots,
+        FilteredUnderFade,
+        TwoFades,
+        Over,
+        Under,
+        NoContent,
+    }
+    fn case_of(blocker: CopyBlocker) -> Case {
+        match blocker {
+            CopyBlocker::Between(_) => Case::Between,
+            CopyBlocker::Reads(_) => Case::Reads,
+            CopyBlocker::Dots(_) => Case::Dots,
+            CopyBlocker::FilteredUnderFade(_) => Case::FilteredUnderFade,
+            CopyBlocker::TwoFades => Case::TwoFades,
+            CopyBlocker::Over(_) => Case::Over,
+            CopyBlocker::Under(_) => Case::Under,
+            CopyBlocker::NoContent => Case::NoContent,
+            CopyBlocker::Fade(..) => unreachable!("`scroll_copies` names it, not `copy_blocker`"),
+        }
+    }
+    /// The case's scene: what the copy makes of it, and whether the walk
+    /// around the content alone was taken.
+    fn made(case: Case) -> (Option<(CopyBlocker, String)>, bool) {
+        let first = |scene: &Scene, content: NodeId| scene.children(content)[0];
+        match case {
+            // A walk paints a subtree's items in one run (raised children are
+            // put in order among their siblings alone), so nothing paints
+            // between the content's: a raised row in it is what comes
+            // nearest, and the walk around it isn't taken (the walk that
+            // keeps paint order goes everywhere it reorders).
+            Case::Between => refusal_around(
+                |view| {
+                    column()
+                        .child(view)
+                        .child(div().w(240.).h(20.).bg(rgb(0x334455)))
+                },
+                |scene, content| {
+                    let row = first(scene, content);
+                    scene.set_z(row, 1);
+                },
+            ),
+            // (A backdrop blur in the content keeps it from moving at all:
+            // `Scene::clear_of_blurs`.)
+            Case::Reads => refusal_around(
+                |view| view,
+                |scene, content| {
+                    let row = first(scene, content);
+                    scene.set_blend(row, zgx::scene::BlendMode::Multiply);
+                },
+            ),
+            Case::Dots => refusal_around(
+                |view| view,
+                |scene, content| {
+                    let row = first(scene, content);
+                    let picture = zgx::image::ImageData::new(240, 400, vec![128; 240 * 400 * 4])
+                        .expect("an image");
+                    scene.set_kind(
+                        row,
+                        NodeKind::Image(std::sync::Arc::new(picture.dithered(2.))),
+                    );
+                },
+            ),
+            Case::FilteredUnderFade => refusal_around(
+                |view| view.fade_edges(20., 20.),
+                |scene, content| {
+                    let row = first(scene, content);
+                    scene.set_filter_blur(row, 4.);
+                },
+            ),
+            Case::TwoFades => refusal_around(
+                |view| {
+                    div()
+                        .w(240.)
+                        .h(180.)
+                        .overflow_hidden()
+                        .fade_edges(10., 10.)
+                        .child(view.fade_edges(20., 20.))
+                },
+                |_, _| {},
+            ),
+            Case::Over => refusal_around(
+                |view| {
+                    overlay().w(240.).h(180.).child(view).child(
+                        div()
+                            .absolute()
+                            .left(40.)
+                            .top(40.)
+                            .size(30., 30.)
+                            .bg(rgb(0xffffff))
+                            .filter_blur(2.),
+                    )
+                },
+                |_, _| {},
+            ),
+            Case::Under => refusal_around(
+                |view| {
+                    overlay()
+                        .w(240.)
+                        .h(180.)
+                        .child(
+                            div()
+                                .absolute()
+                                .left(0.)
+                                .top(0.)
+                                .size(240., 180.)
+                                .bg(rgb(0x101010))
+                                .child(div().size(60., 60.).bg(rgb(0xff0000))),
+                        )
+                        .child(view.bg(zgx::compose::prelude::rgba(0x00000000)))
+                },
+                |scene, content| {
+                    let page = scene.children(content)[0];
+                    let rows = scene.children(page).to_vec();
+                    for row in rows {
+                        scene.set_kind(row, NodeKind::Rect(zgx::scene::Color(0, 0, 0, 0)));
+                    }
+                },
+            ),
+            Case::NoContent => refusal_around(
+                |view| view,
+                |scene, content| {
+                    let effects = zgx::scene::Effects {
+                        opacity: 0.,
+                        ..scene.effects(content)
+                    };
+                    scene.set_effects(content, effects);
+                },
+            ),
+        }
+    }
+
+    fn assert_case(case: Case) {
+        let (refused, around) = made(case);
+        let found = refused.as_ref().map(|(blocker, _)| case_of(*blocker));
+        match case {
+            Case::Between => assert_eq!(found, None, "a raised row copies"),
+            case => assert_eq!(found, Some(case), "{refused:?}"),
+        }
+        if matches!(
+            case,
+            Case::Between | Case::Reads | Case::Dots | Case::FilteredUnderFade
+        ) {
+            assert!(
+                !around,
+                "{case:?} in the content: the walk around it was taken"
+            );
+        }
+    }
+
+    #[test]
+    fn raised_content_takes_the_whole_walk() {
+        assert_case(Case::Between);
+    }
+
+    #[test]
+    fn content_reading_the_backdrop_takes_the_whole_walk() {
+        assert_case(Case::Reads);
+    }
+
+    #[test]
+    fn dithered_content_takes_the_whole_walk() {
+        assert_case(Case::Dots);
+    }
+
+    #[test]
+    fn filtered_content_under_a_fade_takes_the_whole_walk() {
+        assert_case(Case::FilteredUnderFade);
+    }
+
+    #[test]
+    fn nested_fades_keep_their_refusal() {
+        assert_case(Case::TwoFades);
+    }
+
+    #[test]
+    fn nested_fades_in_the_content_take_the_whole_walk() {
+        let (refused, around) = refusal_around(
+            |view| view.fade_edges(20., 20.),
+            |scene, content| {
+                let page = scene.children(content)[0];
+                let row = scene.children(page)[0];
+                for id in [page, row] {
+                    let mut style = scene.style(id);
+                    style.fade_edges = [12., 12.];
+                    scene.set_style(id, style);
+                }
+            },
+        );
+        assert!(!around, "nested fades in content need the whole walk");
+        // The content's own fades are handled by scroll_copies after
+        // copy_blocker, as with a single content fade.
+        assert_eq!(refused, None);
+    }
+
+    #[test]
+    fn an_overlay_keeps_its_refusal() {
+        assert_case(Case::Over);
+    }
+
+    #[test]
+    fn a_visible_underlay_takes_the_whole_walk() {
+        assert_case(Case::Under);
+    }
+
+    #[test]
+    fn invisible_content_keeps_its_refusal() {
+        assert_case(Case::NoContent);
+    }
+
+    /// What the content holds that the copy carries rather than refuses (a
+    /// fade of its own, which `cut_fades` repaints): the walk around it
+    /// isn't taken, and the whole walk copies.
+    #[test]
+    fn a_fade_in_the_content_takes_the_whole_walk() {
+        let (refused, around) = refusal_around(
+            |view| view,
+            |scene, content| {
+                let row = scene.children(content)[0];
+                let mut style = scene.style(row);
+                style.fade_edges = [12., 12.];
+                scene.set_style(row, style);
+            },
+        );
+        assert!(!around, "the walk around the content was taken");
+        assert_eq!(refused, None);
+    }
+
+    /// A loop in the content is no refusal (`baked_loops.rs` has it
+    /// scrolling), and keeps the walk around the content from being taken.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_loop_in_the_content_is_no_refusal() {
-        let refused = refusal(
+        let (refused, around) = refusal_around(
             |view| view,
             |scene, content| {
                 let node = scene.children(content)[0];
@@ -21416,5 +21729,6 @@ mod copy_refusal_tests {
             },
         );
         assert_eq!(refused, None);
+        assert!(!around, "the walk around the content was taken");
     }
 }
