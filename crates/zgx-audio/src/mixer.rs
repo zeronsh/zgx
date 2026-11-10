@@ -548,7 +548,7 @@ impl Mixer {
         let frames = out.len() / channels;
         let first = self.now;
         let mut done = 0;
-        let mut peak = 0f32;
+        let mut peak = 0u32;
         self.started = None;
         self.collect();
         while done < frames {
@@ -559,11 +559,17 @@ impl Mixer {
             }
             self.mix(n);
             let master = &self.buses[0];
-            let loudest = master.left[..n]
-                .iter()
-                .chain(&master.right[..n])
-                .fold(0f32, |p, s| p.max(s.abs()));
-            peak = peak.max(loudest);
+            if master.touched {
+                // As bits without their sign: a float's size orders as its
+                // bits do, and an integer maximum vectorises.
+                let loudest = |side: &[f32]| {
+                    side.iter()
+                        .fold(0u32, |p, s| p.max(s.to_bits() & 0x7fff_ffff))
+                };
+                peak = peak
+                    .max(loudest(&master.left[..n]))
+                    .max(loudest(&master.right[..n]));
+            }
             let out = &mut out[done * channels..(done + n) * channels];
             match channels {
                 1 => {
@@ -620,7 +626,7 @@ impl Mixer {
         }
         meter.collected.store(self.collected, Ordering::SeqCst);
         meter.sounding.store(self.sounding, Ordering::Relaxed);
-        meter.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
+        meter.peak.fetch_max(peak, Ordering::Relaxed);
         meter.voices.store(live as u64, Ordering::Relaxed);
         meter.stolen.store(self.stolen, Ordering::Relaxed);
         meter.dropped.store(self.dropped, Ordering::Relaxed);

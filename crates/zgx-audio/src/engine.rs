@@ -539,7 +539,7 @@ impl Audio {
             block_heard: meter.block_heard.load(Ordering::Relaxed),
             play_heard: meter.play_heard.load(Ordering::Acquire),
             play_asked: meter.play_asked.load(Ordering::Relaxed),
-            play_mixed: meter.play_called.load(Ordering::Relaxed),
+            play_mixed: crate::device::clock::nanos(meter.play_called.load(Ordering::Relaxed)),
             peak: f32::from_bits(meter.peak.load(Ordering::Relaxed)),
         }
     }

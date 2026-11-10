@@ -27,7 +27,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub(crate) fn new(mixer: Mixer, channels: usize, meter: Arc<Meter>) -> Renderer {
-        host_clock();
+        clock::prime();
         Renderer {
             mixer,
             channels: channels.max(1),
@@ -58,41 +58,98 @@ impl Renderer {
     /// device's clock, which is how the time a sound is heard is known.
     /// Never locks, allocates, frees or calls the system.
     pub fn render(&mut self, out: &mut [f32], timing: Option<Timing>) {
-        let started = Instant::now();
         let plays = self.meter.play_heard.load(Ordering::Relaxed);
-        let called = host_clock();
+        let began = clock::now();
         self.mixer.render(out, self.channels, timing);
+        let ended = clock::now();
         if self.meter.play_heard.load(Ordering::Relaxed) != plays {
-            self.meter.play_called.store(called, Ordering::Relaxed);
+            self.meter
+                .play_called
+                .store(began.ticks(), Ordering::Relaxed);
         }
-        let micros = started.elapsed().as_micros() as usize;
+        let micros = ended.micros_since(began);
         self.meter.times[micros.min(self.meter.times.len() - 1)].fetch_add(1, Ordering::Relaxed);
     }
 }
 
-/// The host clock in nanoseconds where it costs no system call (macOS:
-/// `mach_absolute_time`, the clock CoreAudio's timestamps count), else 0.
-#[cfg(target_os = "macos")]
-pub(crate) fn host_clock() -> u64 {
-    unsafe extern "C" {
-        fn mach_absolute_time() -> u64;
-        fn mach_timebase_info(info: *mut [u32; 2]) -> i32;
+/// A clock read on the audio thread without a system call: on macOS
+/// `mach_absolute_time` (whose ticks CoreAudio's timestamps count), kept
+/// as ticks and made nanoseconds only when read out; elsewhere `Instant`.
+pub(crate) mod clock {
+    #[cfg(target_os = "macos")]
+    mod mach {
+        unsafe extern "C" {
+            pub fn mach_absolute_time() -> u64;
+            pub fn mach_timebase_info(info: *mut [u32; 2]) -> i32;
+        }
+        static TIMEBASE: std::sync::OnceLock<[u32; 2]> = std::sync::OnceLock::new();
+        /// Nanoseconds to a tick, as a fraction; read once, before any
+        /// stream runs.
+        pub fn timebase() -> [u32; 2] {
+            *TIMEBASE.get_or_init(|| {
+                let mut info = [1, 1];
+                // SAFETY: fills two u32s.
+                unsafe { mach_timebase_info(&mut info) };
+                [info[0], info[1].max(1)]
+            })
+        }
     }
-    static TIMEBASE: std::sync::OnceLock<[u32; 2]> = std::sync::OnceLock::new();
-    // SAFETY: both read the kernel's page shared with every process; the
-    // timebase fills two u32s, read once, before any stream runs.
-    let [numer, denom] = *TIMEBASE.get_or_init(|| {
-        let mut info = [1, 1];
-        unsafe { mach_timebase_info(&mut info) };
-        info
-    });
-    let ticks = unsafe { mach_absolute_time() };
-    (u128::from(ticks) * u128::from(numer) / u128::from(denom.max(1))) as u64
-}
 
-#[cfg(not(target_os = "macos"))]
-pub(crate) fn host_clock() -> u64 {
-    0
+    #[derive(Clone, Copy)]
+    pub struct Now(
+        #[cfg(target_os = "macos")] u64,
+        #[cfg(not(target_os = "macos"))] std::time::Instant,
+    );
+
+    pub fn now() -> Now {
+        // SAFETY: reads the page the kernel shares with every process.
+        #[cfg(target_os = "macos")]
+        return Now(unsafe { mach::mach_absolute_time() });
+        #[cfg(not(target_os = "macos"))]
+        return Now(std::time::Instant::now());
+    }
+
+    /// Ready to read before the first stream: the timebase is asked once.
+    pub fn prime() {
+        #[cfg(target_os = "macos")]
+        mach::timebase();
+    }
+
+    impl Now {
+        /// The raw ticks (macOS; 0 elsewhere), for [`nanos`].
+        pub fn ticks(self) -> u64 {
+            #[cfg(target_os = "macos")]
+            return self.0;
+            #[cfg(not(target_os = "macos"))]
+            return 0;
+        }
+
+        pub fn micros_since(self, earlier: Now) -> usize {
+            #[cfg(target_os = "macos")]
+            {
+                let [numer, denom] = mach::timebase();
+                (self.0.saturating_sub(earlier.0) * u64::from(numer) / u64::from(denom) / 1000)
+                    as usize
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                self.0.duration_since(earlier.0).as_micros() as usize
+            }
+        }
+    }
+
+    /// `ticks` as nanoseconds of the host's clock.
+    pub fn nanos(ticks: u64) -> u64 {
+        #[cfg(target_os = "macos")]
+        {
+            let [numer, denom] = mach::timebase();
+            (u128::from(ticks) * u128::from(numer) / u128::from(denom)) as u64
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            ticks
+        }
+    }
 }
 
 /// An output: the system's default device through some API. zgx-audio's
