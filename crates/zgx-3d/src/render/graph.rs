@@ -20,8 +20,9 @@ pub(super) enum Resource {
     ShadowMap,
     /// What is behind meshes light passes through, every level.
     Behind,
-    /// The multisampled colour meshes draw into, resolved into the target
-    /// (none drawing one sample a pixel: they draw into the target).
+    /// The multisampled colour meshes draw into, resolved into the scene
+    /// (none drawing one sample a pixel: they draw into it). With the post
+    /// chain, kept for a pass of its own to resolve.
     Colour,
     /// The depth meshes test against.
     Depth,
@@ -55,6 +56,10 @@ pub(super) enum Pass {
     Behind,
     /// The meshes, into the scene.
     Main,
+    /// The meshes' samples averaged into the scene, each weighted by how
+    /// bright it is so a bright edge is as smooth as a dim one.
+    #[cfg(feature = "post")]
+    Resolve,
     /// The scene's bloom, its steps made smaller then larger again.
     #[cfg(feature = "post")]
     Bloom,
@@ -64,12 +69,14 @@ pub(super) enum Pass {
 }
 impl Pass {
     /// How many there are: the most a list holds.
-    const COUNT: usize = if cfg!(feature = "post") { 5 } else { 3 };
+    const COUNT: usize = if cfg!(feature = "post") { 6 } else { 3 };
     pub(super) fn reads(self) -> &'static [Resource] {
         match self {
             Self::Shadows => &[],
             Self::Behind => &[Resource::ShadowMap],
             Self::Main => &[Resource::ShadowMap, Resource::Behind],
+            #[cfg(feature = "post")]
+            Self::Resolve => &[Resource::Colour],
             #[cfg(feature = "post")]
             Self::Bloom => &[Resource::Scene],
             #[cfg(feature = "post")]
@@ -81,6 +88,8 @@ impl Pass {
             Self::Shadows => &[Resource::ShadowMap],
             Self::Behind => &[Resource::Colour, Resource::Depth, Resource::Behind],
             Self::Main => &[Resource::Colour, Resource::Depth, Resource::Scene],
+            #[cfg(feature = "post")]
+            Self::Resolve => &[Resource::Scene],
             #[cfg(feature = "post")]
             Self::Bloom => &[Resource::Bloom],
             #[cfg(feature = "post")]
@@ -185,6 +194,9 @@ pub(super) struct Targets {
     /// the target).
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     pub(super) scene: Option<wgpu::TextureView>,
+    /// The samples are kept for the chain to resolve (`Pass::Resolve`), not
+    /// resolved as the meshes' pass ends.
+    pub(super) stored: bool,
     /// Each of bloom's steps, with it on.
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     pub(super) bloom: Vec<wgpu::TextureView>,
@@ -264,10 +276,14 @@ impl Graph {
     #[cold]
     #[inline(never)]
     fn compile(&mut self, device: &wgpu::Device, config: Config) -> bool {
+        // The chain resolves the samples itself (`Pass::Resolve`).
+        let resolves = config.post.on && self.samples > 1;
         let wanted = [
             config.shadows.then_some(Pass::Shadows),
             config.transmits.then_some(Pass::Behind),
             Some(Pass::Main),
+            #[cfg(feature = "post")]
+            resolves.then_some(Pass::Resolve),
             #[cfg(feature = "post")]
             config.post.bloom.then_some(Pass::Bloom),
             #[cfg(feature = "post")]
@@ -294,6 +310,10 @@ impl Graph {
         for (at, pass) in self.passes.iter().enumerate() {
             for &resource in pass.reads().iter().chain(pass.writes()) {
                 let desc = match resource {
+                    Resource::Colour if resolves => Desc {
+                        usage: read,
+                        ..target(config.size, self.format)
+                    },
                     Resource::Colour if self.samples > 1 => target(config.size, self.format),
                     Resource::Depth => target(config.size, DEPTH),
                     Resource::Scene if config.post.on => scene,
@@ -358,6 +378,7 @@ impl Graph {
             depth: depth.expect("the meshes' pass tests depth"),
             scene,
             bloom,
+            stored: resolves,
             textures: textures.into_iter().flatten().collect(),
         });
         // What is behind, at the frame's size, while light passes through.

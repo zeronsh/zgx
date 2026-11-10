@@ -124,6 +124,8 @@ pub(super) fn draw_main(
         return;
     };
     let (colour, depth_view) = (&targets.colour, &targets.depth);
+    // With the post chain, the samples are kept for it to resolve.
+    let stored = cfg!(feature = "post") && targets.stored;
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("3D"),
         // Multisampled, resolved into the target; else into it.
@@ -131,10 +133,14 @@ pub(super) fn draw_main(
             Some(colour) => wgpu::RenderPassColorAttachment {
                 view: colour,
                 depth_slice: None,
-                resolve_target: Some(target),
+                resolve_target: (!stored).then_some(target),
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(clear),
-                    store: wgpu::StoreOp::Discard,
+                    store: if stored {
+                        wgpu::StoreOp::Store
+                    } else {
+                        wgpu::StoreOp::Discard
+                    },
                 },
             },
             None => wgpu::RenderPassColorAttachment {

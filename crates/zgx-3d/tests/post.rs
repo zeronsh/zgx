@@ -125,7 +125,7 @@ fn with_the_chain_on_and_nothing_mixed_in_a_world_draws_as_without() {
         }
         let (most, _) = differ(&without, &with, 1);
         assert!(
-            most <= 64 && edges * 50 < side * side,
+            most <= 40 && edges * 50 < side * side,
             "{tone:?}, {stops}: by {most} at most, {edges} edge pixels by more than 1"
         );
         // Off again, exactly as before.
@@ -345,4 +345,164 @@ fn chromatic_aberration_parts_red_outward_and_blue_inward() {
     assert!(r > b + 20, "outer edge: {r} red, {b} blue");
     let [r, _, b, _] = at(&parted, left - 1, row);
     assert!(b > r + 20, "inner edge: {r} red, {b} blue");
+}
+
+/// `world` drawn at `side` pixels a side.
+fn drawn_at(world: &World, side: u32) -> Option<Vec<u8>> {
+    let mut gpu = match GpuRenderer::new(side, side) {
+        Ok(gpu) => gpu,
+        Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+            panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
+        }
+        Err(_) => return None,
+    };
+    let mut ui = Ui::new(side as f32, side as f32);
+    ui.mount(gpu_view("World", world.view()).size(side as f32, side as f32));
+    ui.prepare_frame();
+    let report = ui.scene.borrow_mut().flush();
+    gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+    Some(gpu.readback().unwrap())
+}
+
+fn decode(v: u8) -> f32 {
+    let c = f32::from(v) / 255.;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn encode(c: f32) -> u8 {
+    let c = c.clamp(0., 1.);
+    let v = if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1. / 2.4) - 0.055
+    };
+    (v * 255.).round() as u8
+}
+
+/// The pixels of `big` (`k` times `side` a side) averaged k by k in linear
+/// light: a supersampled frame at `side`.
+fn shrunk(big: &[u8], side: u32, k: u32) -> Vec<u8> {
+    let (side, k) = (side as usize, k as usize);
+    let mut out = vec![0; side * side * 4];
+    for y in 0..side {
+        for x in 0..side {
+            for c in 0..4 {
+                let mut sum = 0.;
+                for v in 0..k {
+                    for u in 0..k {
+                        let at = ((y * k + v) * side * k + x * k + u) * 4 + c;
+                        sum += if c == 3 {
+                            f32::from(big[at]) / 255.
+                        } else {
+                            decode(big[at])
+                        };
+                    }
+                }
+                let mean = sum / (k * k) as f32;
+                out[(y * side + x) * 4 + c] = if c == 3 {
+                    (mean * 255.).round() as u8
+                } else {
+                    encode(mean)
+                };
+            }
+        }
+    }
+    out
+}
+
+/// A crop of `pixels` (`side` a side) as a PPM image, where
+/// `ZGX_POST_CROPS` names a folder (for looking at edges by eye).
+fn crop(pixels: &[u8], side: u32, (x0, y0, w): (u32, u32, u32), name: &str) {
+    let Some(dir) = std::env::var_os("ZGX_POST_CROPS") else {
+        return;
+    };
+    let mut ppm = format!("P6 {w} {w} 255\n").into_bytes();
+    for y in y0..y0 + w {
+        for x in x0..x0 + w {
+            let at = ((y * side + x) * 4) as usize;
+            // The readback's channel order is the target's: blue first.
+            ppm.extend_from_slice(&[pixels[at + 2], pixels[at + 1], pixels[at]]);
+        }
+    }
+    std::fs::write(std::path::Path::new(&dir).join(format!("{name}.ppm")), ppm).unwrap();
+}
+
+#[test]
+fn a_bright_edge_is_as_smooth_with_the_chain_as_without() {
+    // A highlight's edge, slanted, over a dim wall: glowing 16 times
+    // brighter than white. Both lit, so both are mapped with the chain and
+    // without. (Against the background, coverage already keeps an edge
+    // smooth: the chain maps a pixel's colour, then its coverage.)
+    let edge = |samples| {
+        let world = World::new();
+        let bright = Material {
+            color: [0., 0., 0., 1.],
+            emissive: [16., 16., 16.],
+            ..Default::default()
+        };
+        let wall = Material::rgb(0x404040);
+        world.add(Object::mesh(Geometry::cuboid(8., 8., 0.1), wall).at([0., 0., -0.5]));
+        let turned = Quat::from_axis_angle(vec3(0., 0., 1.), 0.3);
+        let id = world.add(Object::mesh(Geometry::cuboid(1.5, 1.5, 0.1), bright));
+        world.update(id, |o| o.transform.rotation = turned);
+        world.add_light(Light::Directional {
+            direction: vec3(0., 0., -1.),
+            color: [1., 1., 1.],
+            intensity: 1.,
+        });
+        world.set_background_linear(Some([0.02, 0.02, 0.02, 1.]));
+        world.set_camera(Camera::looking_at([0., 0., 4.], [0., 0., 0.]));
+        world.set_samples(samples);
+        world
+    };
+    let side = SIZE;
+    let world = edge(4);
+    let Some(ldr) = drawn_at(&world, side) else {
+        return;
+    };
+    world.set_post(Post {
+        vignette: Some(Vignette { intensity: 0. }),
+        ..Default::default()
+    });
+    let chain = drawn_at(&world, side).unwrap();
+    let reference = shrunk(&drawn_at(&edge(1), side * 4).unwrap(), side, 4);
+    for (pixels, name) in [(&ldr, "ldr"), (&chain, "chain"), (&reference, "reference")] {
+        crop(pixels, side, (20, 20, 56), name);
+    }
+    // Edges: pixels of the reference unlike a neighbour.
+    let s = side as usize;
+    let red = |p: &[u8], x: usize, y: usize| i32::from(p[(y * s + x) * 4 + 1]);
+    let mut edges = Vec::new();
+    for y in 1..s - 1 {
+        for x in 1..s - 1 {
+            let here = red(&reference, x, y);
+            if [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]
+                .iter()
+                .any(|&(u, v)| (red(&reference, u, v) - here).abs() > 24)
+            {
+                edges.push((x, y));
+            }
+        }
+    }
+    assert!(edges.len() > 40, "{} edge pixels", edges.len());
+    // How far from the supersampled frame, over the edges: the chain as
+    // close as the path without it (measured on Metal, mean of 460 edge
+    // pixels: 7.10 with, 7.11 without; resolving the samples in linear
+    // light first, 23.43; weighting them by 1 / (1 + luma), 10.33).
+    let off = |p: &[u8]| {
+        let sum: i32 = edges
+            .iter()
+            .map(|&(x, y)| (red(p, x, y) - red(&reference, x, y)).abs())
+            .sum();
+        sum as f32 / edges.len() as f32
+    };
+    let (ldr_off, chain_off) = (off(&ldr), off(&chain));
+    assert!(
+        chain_off <= ldr_off + 0.5,
+        "on edges the chain is {chain_off:.2} off the reference, without it {ldr_off:.2}"
+    );
 }

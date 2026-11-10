@@ -179,3 +179,63 @@ fn hash(x: u32, y: u32, frame: u32) -> f32 {
     }
     return vec4(mapped * coverage, alpha) + look.background * (1.0 - alpha);
 }
+
+// The active tone curve on grey (a luma), and its inverse: what a sample
+// of that luma shows as, and what luma shows as that.
+fn curve(l: f32) -> f32 {
+    if look.params.y > 1.5 {
+        return min(l, 1.0);
+    }
+    if look.params.y > 0.5 {
+        let v = l / 0.6;
+        return clamp((v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.4329510) + 0.238081), 0.0, 1.0);
+    }
+    let c = select(l - 0.04, l - 6.25 * l * l, l < 0.08);
+    if c < 0.76 {
+        return c;
+    }
+    return 1.0 - 0.0576 / (c + 0.24 - 0.76);
+}
+fn uncurve(y: f32) -> f32 {
+    let t = min(y, 0.9999);
+    if look.params.y > 1.5 {
+        return t;
+    }
+    if look.params.y > 0.5 {
+        // v² + a v - b = t (c v² + d v + e), for v.
+        let qa = 1.0 - t * 0.983729;
+        let qb = 0.0245786 - t * 0.4329510;
+        let qc = -(0.000090537 + t * 0.238081);
+        return 0.6 * (-qb + sqrt(qb * qb - 4.0 * qa * qc)) / (2.0 * qa);
+    }
+    let c = select(t, 0.0576 / (1.0 - t) - 0.24 + 0.76, t >= 0.76);
+    return select((1.0 - sqrt(max(1.0 - 25.0 * c, 0.0))) / 12.5, c + 0.04, c >= 0.04);
+}
+
+// The meshes' samples averaged into the scene as the last pass will show
+// them: each sample scaled by what the tone curve makes of its luma
+// (exposed as the last pass will), averaged, and the curve undone. A grey
+// edge against a highlight then averages as the path without the chain
+// averages mapped samples, a coloured one closely (after Karis's
+// 1 / (1 + luma), with the curve itself).
+@group(0) @binding(0) var samples: texture_multisampled_2d<f32>;
+@fragment fn resolve(in: Out) -> @location(0) vec4<f32> {
+    let at = vec2<i32>(in.position.xy);
+    let n = textureNumSamples(samples);
+    let exposure = look.params.x;
+    var sum = vec4(0.0);
+    for (var i = 0u; i < n; i++) {
+        let c = textureLoad(samples, at, i32(i));
+        // A sample's own colour (its coverage divided out, as the last pass
+        // maps a pixel's), mapped, and its coverage again.
+        let a = max(c.a, 1e-4);
+        let x = c.rgb / a * exposure;
+        let l = max(luma(x), 1e-5);
+        sum += vec4(x * (curve(l) / l) * c.a, c.a);
+    }
+    let mean = sum / f32(n);
+    let a = max(mean.a, 1e-4);
+    let y = mean.rgb / a;
+    let l = max(luma(y), 1e-5);
+    return vec4(y * (uncurve(l) / l) / exposure * mean.a, mean.a);
+}
