@@ -120,6 +120,10 @@ impl PostPass {
     }
 }
 
+/// The most parameters a post pass declares (16 bytes each, in one
+/// uniform buffer).
+pub const MAX_POST_PARAMS: usize = 64;
+
 /// A post pass added to a world (`World::add_post`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PostPassId(u64);
@@ -134,7 +138,8 @@ pub enum PostError {
     /// own lines.
     Shader(String),
     /// A parameter's name isn't an identifier, is declared twice, isn't the
-    /// pass's, or is set with another type than declared.
+    /// pass's, or is set with another type than declared; or it declares
+    /// more than `MAX_POST_PARAMS`.
     Param(String),
     /// No such pass (removed, or another world's).
     Pass,
@@ -220,6 +225,12 @@ fn check(pass: &PostPass) -> Result<Arc<str>, PostError> {
         return Err(PostError::Version);
     }
     let body = lines.next().unwrap_or("");
+    if pass.params.len() > MAX_POST_PARAMS {
+        return Err(PostError::Param(format!(
+            "{} parameters, more than {MAX_POST_PARAMS}",
+            pass.params.len()
+        )));
+    }
     for (i, (name, _)) in pass.params.iter().enumerate() {
         let identifier = name
             .chars()
@@ -371,5 +382,12 @@ mod tests {
             check(&PostPass::new("#zgx post 1\n").param("2x", Param::Float)),
             Err(PostError::Param(_))
         ));
+        // At most MAX_POST_PARAMS (a uniform buffer's binding is bounded).
+        let mut many =
+            PostPass::new("#zgx post 1\nfn post(p: PostIn) -> vec4<f32> { return color(p.uv); }\n");
+        for i in 0..=MAX_POST_PARAMS {
+            many = many.param(&format!("p{i}"), Param::Vec4);
+        }
+        assert!(matches!(check(&many), Err(PostError::Param(_))));
     }
 }

@@ -2,6 +2,11 @@
 //! last pass, which mixes bloom in, exposes the scene, maps its tones and
 //! writes the view's target. Made with a world's first frame with one on.
 mod apps;
+/// For the tests: the HDR passes the frame's chain counted.
+#[cfg(test)]
+pub(super) fn counted(hdr: u8) {
+    apps::tests::COUNTED.with(|c| *c.borrow_mut() = Some(hdr));
+}
 mod exposure;
 
 use super::graph::{Graph, SCENE, bloom_format};
@@ -321,6 +326,14 @@ impl Chain {
             .exposure
             .get_or_insert_with(|| exposure::Exposure::new(device.0));
         exposure.run(device, encoder, graph, &self.state, settings, time)
+    }
+
+    /// Whether the device refused the app's pass `id` (its shader or
+    /// pipeline): it isn't run.
+    pub(super) fn refused(&self, id: crate::world::PostPassId) -> bool {
+        self.apps
+            .as_ref()
+            .is_some_and(|a| a.failed.contains_key(&id))
     }
 
     /// The app's passes of `stage` (`apps::Apps::run`).

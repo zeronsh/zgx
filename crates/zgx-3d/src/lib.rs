@@ -87,8 +87,8 @@ pub use texture::{Map, MapPlacement, Texture, Wrap};
 pub use world::lighting::{Cascades, PointLight};
 #[cfg(feature = "post")]
 pub use world::{
-    AutoExposure, Bloom, ChromaticAberration, Grade, Grain, Lut, LutError, Param, ParamValue, Post,
-    PostError, PostPass, PostPassId, PostStage, Vignette,
+    AutoExposure, Bloom, ChromaticAberration, Grade, Grain, Lut, LutError, MAX_POST_PARAMS, Param,
+    ParamValue, Post, PostError, PostPass, PostPassId, PostStage, Vignette,
 };
 pub use world::{
     Camera, Clearcoat, Light, LightId, MAX_JOINTS, Material, Object, ObjectId, POINT_LIGHTS, Skin,
