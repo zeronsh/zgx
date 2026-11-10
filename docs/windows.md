@@ -214,8 +214,9 @@ and canvases' polyline strokes and filled areas, and shader fills and
 layer shaders that don't read the backdrop (`radial` gradients, `hue_rotate`,
 `sepia` and `invert`, and zgx-fx's fills and layer effects among them), each
 one's pixel stage compiled by FXC off the frame as Direct3D 12's is, in a
-process of its own, and layer effects: content blurs, masks and drop
-shadows, their passes drawn into the effect atlas with effects.wgsl as on
+process of its own, images drawn dithered or as characters
+(image_effects.wgsl's pixel stage, made when one first draws), and layer
+effects: content blurs, masks and drop shadows, their passes drawn into the effect atlas with effects.wgsl as on
 Direct3D 12. What it doesn't draw yet, it leaves out where what's
 left can't show a picture a user would wrongly trust, naming each kind once
 on stderr: images a GPU view draws are left
@@ -223,9 +224,8 @@ empty; a backdrop blur, or a layer shader reading the backdrop (glass),
 draws its box opaque in its own colour, as the system's Reduce transparency
 draws glass, so what's over it stays legible. The rest fails the frame
 with an error naming it (and panics in a debug build), since there is no
-Direct3D 12 to fall back to: blend modes and image effects (an inverted
-icon or a blended text could read as something else), and a backdrop over
-a box with no colour of its own. What it draws (all but the opaque boxes) is Direct3D 12's
+Direct3D 12 to fall back to: blend modes (a blended text could read as
+something else), and a backdrop over a box with no colour of its own. What it draws (all but the opaque boxes) is Direct3D 12's
 frame byte for byte (`tests/d3d11_parity.rs`, at 1×, 1.5× and 2×). Both run
 the same HLSL compiled by FXC: Direct3D 11 ahead of time (`dxbc/`, written
 again by `python scripts/d3d11_shaders.py`, on Windows), and zgx

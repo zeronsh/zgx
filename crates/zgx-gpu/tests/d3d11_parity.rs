@@ -10,7 +10,8 @@
 //! filled with a gradient (source-in and behind blends), and every
 //! ready-made shader fill (`zgx_fx`'s, its fragment stage compiled for each
 //! as an app's), and layer effects (content blurs, narrow to wide, and
-//! masks, alone, sliding and under a blur, and drop shadows), at 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
+//! masks, alone, sliding and under a blur, and drop shadows), and images
+//! drawn dithered and as characters, at 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
 //! (Direct3D 12 pinned to it, docs/windows.md). `ZGX_D3D11` is read once a
 //! process, so the test runs itself again with it and compares that run's
 //! frames with its own.
@@ -570,8 +571,92 @@ fn frames(scale: f32) -> Vec<Vec<u8>> {
     all.extend(fill_frames(scale));
     all.extend(layer_frames(scale));
     all.extend(effect_frames(scale));
+    all.extend(image_effect_frames(scale));
     all
 }
+
+/// Images drawn with an effect (`IMAGE_EFFECT_NAMES`): a gradient image
+/// dithered and as characters, at two sizes, one under a transform; plain
+/// first. Each must change its cell.
+#[cfg(windows)]
+fn image_effect_frames(scale: f32) -> Vec<Vec<u8>> {
+    use std::sync::Arc;
+    use zgx::affine::Affine;
+    use zgx::image::ImageData;
+    use zgx::scene::*;
+    let (cell, columns) = (LAYER_CELL, LAYER_COLUMNS);
+    let size = (cell.0 * columns as f32, cell.1);
+    let pixels: Vec<u8> = (0..32u32 * 32)
+        .flat_map(|i| {
+            let (x, y) = (i % 32, i / 32);
+            [(x * 8) as u8, (y * 8) as u8, 160, 255]
+        })
+        .collect();
+    let image = ImageData::new(32, 32, pixels).unwrap();
+    let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let mut scene = Scene::new(size.0, size.1);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    let nodes: Vec<NodeId> = (0..IMAGE_EFFECT_NAMES.len())
+        .map(|index| {
+            let id = scene.append(
+                root,
+                // Plain (no dot size), its pixels shared.
+                NodeKind::Image(Arc::new(image.dithered(0.))),
+                Style {
+                    width: Some(48.),
+                    height: Some(48.),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(
+                id,
+                Transform {
+                    x: index as f32 * cell.0 + 16.,
+                    y: 12.,
+                },
+            );
+            id
+        })
+        .collect();
+    let mut draw = |scene: &mut Scene| {
+        let report = scene.flush();
+        gpu.render(scene, &report.damage).unwrap();
+        gpu.readback().unwrap()
+    };
+    let plain = draw(&mut scene);
+    for (index, &id) in nodes.iter().enumerate() {
+        let drawn = match IMAGE_EFFECT_NAMES[index] {
+            "dithered 2" => image.dithered(2.),
+            "dithered 3, scaled" => image.dithered(3.).transformed(Affine::scale(1.25, 1.25)),
+            "characters 2" => image.characters(2.),
+            "characters 3, scaled" => image.characters(3.).transformed(Affine::scale(1.25, 1.25)),
+            name => unreachable!("{name}"),
+        };
+        scene.set_kind(id, NodeKind::Image(Arc::new(drawn)));
+    }
+    let effected = draw(&mut scene);
+    let width = (size.0 * scale) as usize;
+    for (index, name) in IMAGE_EFFECT_NAMES.iter().enumerate() {
+        let x0 = (index as f32 * cell.0 * scale) as usize;
+        let (w, h) = ((cell.0 * scale) as usize, (cell.1 * scale) as usize);
+        let changed = (0..h).any(|y| {
+            (x0..x0 + w)
+                .any(|x| effected[(y * width + x) * 4..][..4] != plain[(y * width + x) * 4..][..4])
+        });
+        assert!(changed, "{name}: draws as the plain image");
+    }
+    vec![plain, effected]
+}
+/// The image effects' cells (`image_effect_frames`), in their order.
+#[cfg(windows)]
+const IMAGE_EFFECT_NAMES: [&str; 4] = [
+    "dithered 2",
+    "dithered 3, scaled",
+    "characters 2",
+    "characters 3, scaled",
+];
 
 /// Layer effects' cells (`EFFECT_NAMES`): a box holding a bar on striped
 /// content, blurred (narrow, wide enough to be averaged down, and changing
@@ -867,12 +952,19 @@ fn where_(frame: usize, scale: f32, pixel: usize) -> String {
             LAYER_COLUMNS,
             layer_names(),
         )
-    } else {
+    } else if frame < FRAMES + 3 + 5 + 4 {
         (
             LAYER_CELL.0 * LAYER_COLUMNS as f32,
             LAYER_CELL,
             LAYER_COLUMNS,
             EFFECT_NAMES.map(String::from).to_vec(),
+        )
+    } else {
+        (
+            LAYER_CELL.0 * LAYER_COLUMNS as f32,
+            LAYER_CELL,
+            LAYER_COLUMNS,
+            IMAGE_EFFECT_NAMES.map(String::from).to_vec(),
         )
     };
     let width = (width * scale) as usize;
