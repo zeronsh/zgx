@@ -184,6 +184,35 @@ fn history_keeps_the_last_hundred_places_behind() {
     assert_eq!(h.text("moved"), "100 /thread/50");
 }
 
+/// `history` sets how many places behind it keeps; `math.huge` keeps all,
+/// and what isn't a whole number from 1 is an error.
+#[test]
+fn history_keeps_as_many_as_asked() {
+    let app = |history: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"local router = ui.router {{ routes = {{ thread = "/thread/:id" }}, initial = "/thread/0", history = {history} }}
+            local function wrong(n)
+                local ok, err = pcall(ui.router, {{ routes = {{ home = "/" }}, history = n }})
+                return if ok then "ok" elseif string.find(tostring(err), "whole number from 1") then "error" else tostring(err)
+            end
+            local moved = ui.state("moved", "")
+            return ui.column {{
+                ui.text {{ id = "moved", "{{moved}}" }},
+                ui.button {{ id = "go", w = 40, h = 20, "go", on_click = function()
+                    for i = 1, 150 do router.navigate("thread", {{ id = i }}) end
+                    local steps = 0
+                    while router.can_back:peek() do router.back() steps += 1 end
+                    moved:set(`{{steps}} {{router.route:peek().path}}; {{wrong(0)}} {{wrong(2.5)}} {{wrong("9")}}`)
+                end }},
+            }}"##
+        ));
+        h.click("go");
+        h.text("moved")
+    };
+    assert_eq!(app("3"), "3 /thread/147; error error error");
+    assert_eq!(app("math.huge"), "150 /thread/0; error error error");
+}
+
 #[test]
 fn a_swipe_between_pages_over_the_view_goes_back_and_forward() {
     use zgx::input::{Navigation, ScrollGesture};

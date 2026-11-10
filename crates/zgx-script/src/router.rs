@@ -102,16 +102,24 @@ local function router(spec)
         return { name = to, path = path, params = match(r.pattern, path) }
     end
 
+    -- How many places behind it keeps (`history`): 100 unless asked, as a
+    -- browser keeps a tab's; `math.huge` for every one.
+    local most = spec.history
+    if most == nil then
+        most = 100
+    elseif type(most) ~= "number" or most < 1 or (most ~= math.huge and most % 1 ~= 0) then
+        error("ui.router: `history` is how many places behind it keeps, a whole number from 1", 2)
+    end
     local self = {}
     self.route = new_state(route_at(spec.initial or "/", 2))
     local behind, ahead = {}, {}
-    -- A place behind, the oldest let go past the last 100, as a browser
-    -- keeps a tab's. Each is a few small tables made as the app moves, among
-    -- what that move made and dropped: kept without end, they hold a page of
-    -- the heap each long after the rest of it is free.
+    -- A place behind, the oldest let go past the last `most`. Each is a few
+    -- small tables made as the app moves, among what that move made and
+    -- dropped: kept without end, they hold a page of the heap each long
+    -- after the rest of it is free.
     local function leave(route)
         table.insert(behind, route)
-        if #behind > 100 then
+        if #behind > most then
             table.remove(behind, 1)
         end
     end
