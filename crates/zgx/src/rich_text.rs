@@ -442,34 +442,31 @@ impl RichText {
                         == b.strikethrough.map(|d| (d.thickness(), d.line))
             })
     }
-    /// Whether `self` is `old` with its runs' text colours alone changed
-    /// (a fade's frame): laid out and painting where `old`
-    /// does. Every other field of each run is compared.
-    pub(crate) fn recolours(&self, old: &Self) -> bool {
-        self.options == old.options
-            && (Arc::ptr_eq(&self.text, &old.text) || self.text == old.text)
-            && self.runs.len() == old.runs.len()
-            && self.runs.iter().zip(old.runs.iter()).all(|(a, b)| {
-                let TextRun {
-                    range,
-                    font,
-                    font_size,
-                    color: _,
-                    background,
-                    underline,
-                    strikethrough,
-                    padding,
-                    radius,
-                } = a;
-                *range == b.range
-                    && *font == b.font
-                    && *font_size == b.font_size
-                    && *background == b.background
-                    && *underline == b.underline
-                    && *strikethrough == b.strikethrough
-                    && *padding == b.padding
-                    && *radius == b.radius
-            })
+    /// Whether `self`, `old` with `same_metrics` (its text, runs and
+    /// options laid out alike), paints where `old` does: its runs' washes,
+    /// lines and padding as they were, their text colours alone changed (a
+    /// fade's frame). Every run field `same_metrics` leaves is compared here.
+    /// Out of line: `Scene::set_kind` asks it only of such a text.
+    #[inline(never)]
+    pub(crate) fn paints_like(&self, old: &Self) -> bool {
+        self.runs.iter().zip(old.runs.iter()).all(|(a, b)| {
+            let TextRun {
+                range: _,
+                font: _,
+                font_size: _,
+                color: _,
+                background,
+                underline,
+                strikethrough,
+                padding,
+                radius,
+            } = a;
+            *background == b.background
+                && *underline == b.underline
+                && *strikethrough == b.strikethrough
+                && *padding == b.padding
+                && *radius == b.radius
+        })
     }
     pub(crate) fn same_metrics(&self, other: &Self) -> bool {
         self.overflow == other.overflow

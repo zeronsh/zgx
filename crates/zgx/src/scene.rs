@@ -7068,15 +7068,19 @@ impl Scene {
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
         let colour = paints_only(&self.node(id).kind, &kind);
-        // Rich text recoloured (a fade's frame): it paints where it did, so
-        // the inks and boxes cached for it and its ancestors stand; worked
+        // Recoloured (a colour changed alone; rich text laid out alike whose
+        // runs paint where they did: a fade's frame), it paints where it did,
+        // so the inks and boxes cached for it and its ancestors stand; worked
         // out again, each frame of a fade walked every ancestor's children.
-        let recoloured = matches!((&self.node(id).kind, &kind),
-            (NodeKind::RichText { text: old }, NodeKind::RichText { text: new }) if new.recolours(old));
+        let recoloured = colour
+            || (layout_unchanged
+                && matches!((&self.node(id).kind, &kind),
+                    (NodeKind::RichText { text: old }, NodeKind::RichText { text: new }) if new.paints_like(old)));
         self.node_mut(id).kind = kind;
+        let flags = if colour { PAINT | PAINT_ONLY } else { PAINT };
         match recoloured {
-            true => self.invalidate_with(id, PAINT, false, true, false),
-            false => self.invalidate(id, if colour { PAINT | PAINT_ONLY } else { PAINT }),
+            true => self.invalidate_with(id, flags, false, true, false),
+            false => self.invalidate(id, flags),
         }
         if !layout_unchanged {
             self.invalidate_layout(id);
