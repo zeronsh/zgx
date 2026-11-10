@@ -22,6 +22,8 @@ mod element_zoom;
 mod grid_areas;
 #[path = "../grid_tracks.rs"]
 mod grid_tracks;
+#[path = "../image_aspect.rs"]
+mod image_aspect;
 #[path = "../incremental_layout_equivalence.rs"]
 mod incremental_layout_equivalence;
 #[path = "../intrinsic_sizes.rs"]

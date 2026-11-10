@@ -41,10 +41,18 @@ caches as they were.
    every pass and the result dropped: a paragraph a line a word, in Chinese
    or Japanese a line a character, 83 ms for one on an iOS simulator.
    Later taffy releases take a closure there too.
+5. In `src/compute/flexbox.rs`, an item with an aspect ratio has its
+   hypothetical cross size from the main size flex gave it, through the
+   ratio: exactly that for a replaced element (`item_is_replaced`, which zgx
+   sets on an image with a ratio), no less than its content for any other
+   box. Upstream measured its content alone, so a flexed
+   `aspect_ratio(1.)` image came out its pixels' shape, and an empty box
+   with one as tall as nothing.
 
 Drop the fork when a taffy release keeps the gaps and keys children's
 results by their parent's layout mode and passes known sizes to a leaf's
-layout and measures an automatic minimum only (the zgx tests are
+layout and measures an automatic minimum only and sizes an item's cross
+side through its aspect ratio (the zgx tests are
 `crates/zgx/tests/layout_gaps.rs`, `layout_history.rs`,
-`viewports_within.rs` and `scene.rs`'s
+`viewports_within.rs`, `image_aspect.rs` and `scene.rs`'s
 `a_flex_item_naming_its_minimum_is_not_laid_out_at_min_content`).

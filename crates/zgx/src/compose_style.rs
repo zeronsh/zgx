@@ -1763,11 +1763,20 @@ fn apply_resolved(
         let padding = style
             .padding_edges
             .unwrap_or(crate::scene::Insets::all(style.padding));
+        // With an aspect ratio, as CSS's, the picture's own size is what it
+        // holds, not a size it is given: one flex, a size or a stretch decides
+        // sets the other through the ratio.
+        let holds = style
+            .layout_options
+            .as_deref()
+            .is_some_and(|options| options.aspect_ratio.is_some());
         if resolved.width.is_none() && resolved.width_percent.is_none() {
             style.width = Some(width + padding.left.max(0.) + padding.right.max(0.));
+            style.intrinsic_width |= holds;
         }
         if resolved.height.is_none() && resolved.height_percent.is_none() {
             style.height = Some(height + padding.top.max(0.) + padding.bottom.max(0.));
+            style.intrinsic_height |= holds;
         }
     }
 
