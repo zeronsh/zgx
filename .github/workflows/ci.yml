@@ -376,10 +376,13 @@ jobs:
         run: |
           python3 scripts/perf/gate.py "$BASE" --stage head
           if [ -f "$ZGX_GATE_BIN_CACHE/built-from" ]; then echo "binaries=yes" >> "$GITHUB_OUTPUT"; fi
-      # One chunk of a streamed Markdown reply should cost the same at 800
-      # sections as at 100 (scripts/perf/flat_chunks.py; by phase,
-      # crates/zgx-script/tests/md_chunk_flat.rs). Reported, not yet failing
-      # the job: it fails while layout and damage still walk every block.
+      # One chunk of a streamed Markdown reply costs the same at 800 sections
+      # as at 100, within 1.25x, in zgx's own instructions (malloc's and
+      # Luau's collector's move ±15% run to run: scripts/perf/flat_chunks.py; by phase,
+      # crates/zgx-script/tests/md_chunk_flat.rs): a pull request that makes
+      # it grow fails at the Gate step, as one the gate refuses does. The
+      # step itself carries on, so a slow or broken one leaves the gate's
+      # counts to run; one that never finished leaves no status, a failure.
       # Here, with the head's crates alone in the target: once the gate has
       # built the base there, cargo links the base's zgx with the head's
       # script crate, a compile error at best and at worst the base's engine
@@ -390,7 +393,11 @@ jobs:
         timeout-minutes: 15
         env:
           ZGX_GATE_TARGET: target/perf-gate
-        run: python3 scripts/perf/flat_chunks.py --report --markdown "$GITHUB_STEP_SUMMARY"
+        run: |
+          chunk=0
+          python3 scripts/perf/flat_chunks.py --markdown "$GITHUB_STEP_SUMMARY" || chunk=$?
+          if [ "${{ github.event_name }}" != pull_request ]; then chunk=0; fi
+          echo "chunk=$chunk" >> "$GITHUB_ENV"
       - uses: actions/cache/save@v4
         if: github.ref == 'refs/heads/main' && steps.head.outputs.binaries == 'yes'
         continue-on-error: true
@@ -431,7 +438,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh pr comment ${{ github.event.pull_request.number }} --edit-last --create-if-none --body-file perf.md
       - name: Gate
-        run: exit "$status"
+        run: |
+          if [ "${chunk:-1}" != 0 ]; then
+            echo "A streamed Markdown chunk grew with the reply past 1.25x, or wasn't counted (the 'Streamed Markdown per chunk' step)."
+            exit 1
+          fi
+          exit "$status"
   macos:
     runs-on: macos-latest
     timeout-minutes: 60
