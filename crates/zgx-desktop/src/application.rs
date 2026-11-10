@@ -132,21 +132,22 @@ fn host_ns(at: std::time::Instant) -> u64 {
 }
 /// When refresh `index`'s frame samples scroll input, the last sample's
 /// (`last`: its refresh and time) a refresh apart for each refresh since, but
-/// never after `now` nor over half a refresh before it. A first frame, a gap
-/// of more than 8 refreshes or an index going back samples at `now`.
+/// never after `now` nor over half a refresh before it. A draw of the same
+/// refresh again (input drawn between refreshes) keeps that sample's time,
+/// held to the same bounds. A first frame, a gap of more than 8 refreshes or
+/// an index going back samples at `now`.
 fn paced_sample(
     last: Option<(u64, std::time::Instant)>,
     index: u64,
     now: std::time::Instant,
     interval: std::time::Duration,
 ) -> std::time::Instant {
+    let earliest = now.checked_sub(interval / 2).unwrap_or(now);
     match last {
         Some((last, at)) if index > last && index - last <= 8 => {
-            let paced = at + interval * (index - last) as u32;
-            let earliest = now.checked_sub(interval / 2).unwrap_or(now);
-            paced.clamp(earliest, now)
+            (at + interval * (index - last) as u32).clamp(earliest, now)
         }
-        Some((last, at)) if index == last => at.min(now),
+        Some((last, at)) if index == last => at.clamp(earliest, now),
         _ => now,
     }
 }
@@ -9203,6 +9204,17 @@ mod tests {
         assert_eq!(
             super::paced_sample(Some((11, second)), 9, ms(400.), interval),
             ms(400.)
+        );
+        // The same refresh drawn again (input between refreshes): its
+        // sample's time, but never over half a refresh behind.
+        assert_eq!(
+            super::paced_sample(Some((12, third)), 12, third, interval),
+            third
+        );
+        let later = third + interval * 2;
+        assert_eq!(
+            super::paced_sample(Some((12, third)), 12, later, interval),
+            later - interval / 2
         );
     }
 
