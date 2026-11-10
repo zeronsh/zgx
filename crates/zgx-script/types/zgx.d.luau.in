@@ -2395,6 +2395,10 @@ export type NodeProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: number?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4

@@ -4262,6 +4262,49 @@ impl Scene {
         }
         bounds.intersection(clip.unwrap_or(self.viewport))
     }
+    /// Whether any of `id`'s box grown by `margin` on every side would show:
+    /// `visible_bounds`' test on a bigger box, inside the same clips and
+    /// viewport (a script's `visible_margin`, an IntersectionObserver's
+    /// `rootMargin`): what comes within `margin` of being seen. Out of
+    /// line: only nodes observed with a margin come here.
+    #[cold]
+    #[inline(never)]
+    pub fn shows_within(&self, id: NodeId, margin: f32) -> bool {
+        self.note_geometry_read(id);
+        let (bounds, effects, clip) = self.world(id);
+        if effects.opacity <= 0. {
+            return false;
+        }
+        let placed = |bounds: Rect, clip: Option<Rect>, placement: Option<Placement>| {
+            let Some(shown) = bounds
+                .expand(margin)
+                .intersection(clip.unwrap_or(UNCLIPPED))
+            else {
+                return false;
+            };
+            placement.is_none_or(|placement| {
+                placement
+                    .matrix
+                    .bounds(shown)
+                    .intersection(placement.clip)
+                    .is_some()
+            })
+        };
+        if !self.popups.is_empty()
+            && let Some(root) = self.popup_holding(id)
+        {
+            let (bounds, clip, placement) = self.placed_in_popup(id, root);
+            return placed(bounds, clip, placement);
+        }
+        if self.transformed > 0 {
+            let (bounds, clip, placement) = self.placed(id);
+            return placed(bounds, clip, placement);
+        }
+        bounds
+            .expand(margin)
+            .intersection(clip.unwrap_or(self.viewport))
+            .is_some()
+    }
     /// `visible_bounds` for `id` under a popup root, if it is under one.
     /// Out of line: windows without popups never come here.
     #[cold]
