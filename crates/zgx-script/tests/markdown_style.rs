@@ -670,7 +670,9 @@ fn a_code_block_or_table_the_hook_draws_grows_in_place_with_its_value_live() {
     app.host
         .set_state(
             "reply",
-            Value::from("```lua\nprint(1)\nprint(2)\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |"),
+            Value::from(
+                "```lua\nprint(1)\nprint(2)\n```\n\n| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |",
+            ),
         )
         .unwrap();
     app.frames(2);
@@ -770,5 +772,70 @@ fn a_text_held_in_runs_builds_those_near_and_holds_the_rest_at_their_height() {
     let shown = texts(&mut app);
     assert!(shown.contains(&"Paragraph 1.".to_string()));
     assert!(!shown.contains(&"Paragraph 20.".to_string()));
+    assert_eq!(app.error(), None);
+}
+
+#[test]
+fn a_chunk_written_to_the_last_run_asks_nothing_of_the_runs_before() {
+    // Forty paragraphs: three runs of sixteen, all near.
+    let mut text = String::new();
+    for i in 1..=40 {
+        text.push_str(&format!("Paragraph {i}.\n\n"));
+    }
+    let app = TestApp::inline(&format!(
+        r##"local reply = ui.state("reply", {text:?})
+        local asked = ui.state("asked", "")
+        return ui.column {{ w = 600,
+            ui.markdown_view {{ "{{reply}}", id = "md", w_full = true, style = {{}},
+                window = {{
+                    key = "asked",
+                    near = function(at, last)
+                        asked:set(asked:peek() .. at .. ";")
+                        return true
+                    end,
+                    mounted = function(at, el) end,
+                    resized = function(at, h, was) end,
+                }} }},
+        }}"##
+    ));
+    app.frames(3);
+    assert_eq!(app.error(), None);
+    let asked = |app: &TestApp| {
+        (app.host.states().into_iter())
+            .find(|(name, _)| name == "asked")
+            .map(|(_, v)| v.to_string())
+            .unwrap()
+    };
+    app.host.set_state("asked", Value::from("")).unwrap();
+    // More of the last paragraph, a chunk at a time: no run is judged
+    // again (none became the last, none stopped being it).
+    for more in ["Paragraph 40 goes", "Paragraph 40 goes on"] {
+        let now = text
+            .trim_end()
+            .trim_end_matches("Paragraph 40.")
+            .to_string()
+            + more;
+        app.host
+            .set_state("reply", Value::from(now.as_str()))
+            .unwrap();
+        app.frames(2);
+    }
+    assert_eq!(asked(&app), "", "no run judged again");
+    // A new run: the one that was last, and the new one, judged.
+    let longer = format!(
+        "{text}Paragraph 41.\n\nParagraph 42.\n\n{}",
+        (43..=50)
+            .map(|i| format!("Paragraph {i}.\n\n"))
+            .collect::<String>()
+    );
+    app.host
+        .set_state("reply", Value::from(longer.as_str()))
+        .unwrap();
+    app.frames(2);
+    let judged = asked(&app);
+    assert!(
+        judged.contains("3;") && judged.contains("4;") && !judged.contains("1;"),
+        "{judged}"
+    );
     assert_eq!(app.error(), None);
 }
