@@ -36,6 +36,7 @@ mod guide {}
 
 #[cfg(feature = "gltf")]
 mod animation;
+mod caps;
 mod environment;
 mod geometry;
 #[cfg(feature = "gltf")]
@@ -49,6 +50,7 @@ mod world;
 
 #[cfg(feature = "gltf")]
 pub use animation::{Clip, Placed};
+pub use caps::{Backend, Caps, Compressed, Tier};
 pub use environment::Environment;
 pub use geometry::{Geometry, MorphTarget, Vertex};
 #[cfg(feature = "gltf")]

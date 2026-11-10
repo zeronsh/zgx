@@ -484,6 +484,9 @@ pub(crate) struct Inner {
     /// and how many the last frame left out.
     pub(crate) culling: bool,
     pub(crate) culled: std::cell::Cell<u32>,
+    /// What its view's device can do, once a frame has been drawn
+    /// (`World::caps`).
+    pub(crate) caps: std::cell::Cell<Option<crate::Caps>>,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -1097,6 +1100,8 @@ impl Skin {
     }
 }
 
+mod caps;
+
 /// A 3D scene shown by a GPU view (`view`): change it and the view draws a
 /// frame, before the window's next; leave it and it draws nothing. Clones
 /// share it.
@@ -1155,8 +1160,12 @@ impl World {
             frames: std::cell::Cell::new(0),
             culling: true,
             culled: std::cell::Cell::new(0),
+            caps: std::cell::Cell::new(None),
         }));
-        let view = zgx_gpu::viewport::view(crate::render::Renderer::new(Rc::downgrade(&inner)));
+        let view = zgx_gpu::viewport::view(crate::caps::Reading::new(
+            crate::render::Renderer::new(Rc::downgrade(&inner)),
+            Rc::downgrade(&inner),
+        ));
         // Its painter holds it weakly: no cycle.
         inner.borrow_mut().view = Some(view.clone());
         Self { inner, view }
@@ -1164,7 +1173,10 @@ impl World {
     /// What draws it, for `world_bench` to draw it with no view.
     #[doc(hidden)]
     pub fn viewport(&self) -> impl zgx_gpu::viewport::Viewport + use<> {
-        crate::render::Renderer::new(Rc::downgrade(&self.inner))
+        crate::caps::Reading::new(
+            crate::render::Renderer::new(Rc::downgrade(&self.inner)),
+            Rc::downgrade(&self.inner),
+        )
     }
     /// A renderer of its own, for the renderer's tests to draw it with.
     #[cfg(test)]
