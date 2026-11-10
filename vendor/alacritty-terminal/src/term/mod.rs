@@ -245,6 +245,10 @@ struct TermDamageState {
     /// zgx: lines the whole screen scrolled up since the damage was reset,
     /// with the lines' damage moved up with them (`Term::scrolled`).
     scrolled: usize,
+
+    /// zgx: where line 0's damage is in `lines`, which scrolling rotates
+    /// rather than moves (`ordered` puts them back).
+    base: usize,
 }
 
 impl TermDamageState {
@@ -258,6 +262,7 @@ impl TermDamageState {
             lines,
             last_cursor: Default::default(),
             scrolled: 0,
+            base: 0,
         }
     }
 
@@ -266,6 +271,8 @@ impl TermDamageState {
         // Reset point, so old cursor won't end up outside of the viewport.
         self.last_cursor = Default::default();
         self.full = true;
+        self.scrolled = 0;
+        self.base = 0;
 
         self.lines.clear();
         self.lines.reserve(num_lines);
@@ -283,13 +290,29 @@ impl TermDamageState {
     /// Expand `line`'s damage to span at least `left` to `right` column.
     #[inline]
     fn damage_line(&mut self, line: usize, left: usize, right: usize) {
-        self.lines[line].expand(left, right);
+        let mut at = line + self.base;
+        if at >= self.lines.len() {
+            at -= self.lines.len();
+        }
+        self.lines[at].expand(left, right);
+    }
+
+    /// zgx: the lines' damage in order again, after scrolling rotated it.
+    fn ordered(&mut self) {
+        if self.base != 0 {
+            self.lines.rotate_left(self.base);
+            self.base = 0;
+            for (row, line) in self.lines.iter_mut().enumerate() {
+                line.line = row;
+            }
+        }
     }
 
     /// Reset information about terminal damage.
     fn reset(&mut self, num_cols: usize) {
         self.full = false;
         self.scrolled = 0;
+        self.ordered();
         self.lines.iter_mut().for_each(|line| line.reset(num_cols));
     }
 
@@ -303,12 +326,19 @@ impl TermDamageState {
             self.full = true;
             return;
         }
-        for row in 0..count - lines {
-            let moved = self.lines[row + lines];
-            self.lines[row] = LineDamageBounds::new(row, moved.left, moved.right);
-        }
-        for row in count - lines..count {
-            self.lines[row] = LineDamageBounds::new(row, 0, num_cols.saturating_sub(1));
+        // Rotated: the top lines' places take the new bottom lines.
+        for row in 0..lines {
+            self.base += 1;
+            if self.base == count {
+                self.base = 0;
+            }
+            let at = if self.base == 0 {
+                count - 1
+            } else {
+                self.base - 1
+            };
+            self.lines[at] =
+                LineDamageBounds::new(count - lines + row, 0, num_cols.saturating_sub(1));
         }
         // Off the top, it damages the first row (a needless redraw at most).
         self.last_cursor.line = cmp::max(self.last_cursor.line - lines as i32, Line(0));
@@ -552,6 +582,7 @@ impl<T> Term<T> {
 
         // NOTE: damage which changes all the content when the display offset is non-zero (e.g.
         // scrolling) is handled via full damage.
+        self.damage.ordered();
         let display_offset = self.grid().display_offset();
         TermDamage::Partial(TermDamageIterator::new(&self.damage.lines, display_offset))
     }
