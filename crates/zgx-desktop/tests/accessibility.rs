@@ -577,11 +577,13 @@ fn focus_reveal_updates_native_descendant_bounds_and_focus() {
         2.,
     );
     let focus = update.focus;
-    let native = update.nodes.iter().find(|(id, _)| *id == focus).unwrap();
-    let bounds = native.1.bounds().unwrap();
-    assert!(bounds.y0 >= 16. && bounds.y1 <= 144.);
     consumer.update_and_process_changes(update, &mut Changes::default());
-    assert_eq!(consumer.state().focus().unwrap().role(), NativeRole::Button);
+    let focused = consumer.state().focus().unwrap();
+    assert_eq!(focused.role(), NativeRole::Button);
+    // Where a client places it (the scroll's offset is its view's transform):
+    // inside the view.
+    let bounds = focused.bounding_box().unwrap();
+    assert!(bounds.y0 >= 16. && bounds.y1 <= 144., "{bounds:?}");
     assert_eq!(adapter.scene_node(focus), Some(target));
 }
 
