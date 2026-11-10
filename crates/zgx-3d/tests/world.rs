@@ -2511,3 +2511,128 @@ fn a_shadow_starts_at_the_base_of_what_casts_it_however_low_the_sun() {
         assert!(beside.iter().all(|&g| g < 20), "{sun:?}: {beside:?}");
     }
 }
+
+/// A cut-out square's shadow on a floor, set up by `state` (the map, its
+/// placement, light through it): the world built fresh, or the same world
+/// changed into each state in turn (`retained`).
+#[derive(Clone, Copy, Debug)]
+enum Card {
+    Clear,
+    Opaque,
+    NoMap,
+    HalfPlaced,
+    Glass,
+}
+fn card_world(cascaded: bool) -> (World, ObjectId) {
+    let vertex = |x: f32, z: f32, u: f32| Vertex {
+        position: [x, 0., z],
+        normal: [0., 1., 0.],
+        uv: [u, 0.5],
+    };
+    let flat = Geometry::new(
+        vec![
+            vertex(-1., 1., 0.),
+            vertex(1., 1., 1.),
+            vertex(1., -1., 1.),
+            vertex(-1., -1., 0.),
+        ],
+        vec![0, 1, 2, 0, 2, 3],
+    )
+    .unwrap();
+    let world = World::new();
+    world.set_shadows(true);
+    #[cfg(feature = "lighting")]
+    if cascaded {
+        world.set_cascades(Some(Cascades::new(2)));
+    }
+    #[cfg(not(feature = "lighting"))]
+    let _ = cascaded;
+    world.add_light(Light::Directional {
+        direction: vec3(0., -1., -0.0001),
+        color: [1., 1., 1.],
+        intensity: 3.,
+    });
+    let card = world.add(Object::mesh(flat, Material::rgb(0xffffff)));
+    world.set_transform(card, Transform::at([0., 1., 0.]));
+    world.set_alpha_cutoff(card, Some(0.5));
+    world.add(Object::mesh(
+        Geometry::plane(8., 8.),
+        Material::rgb(0xffffff).with(0., 1.),
+    ));
+    world.set_camera(Camera::looking_at([0., 0.6, 4.], [0., 0., 0.]));
+    (world, card)
+}
+fn set_card(world: &World, card: ObjectId, state: Card) {
+    let texture = |pixels: Vec<u8>| Some(Texture::from_rgba8(2, 1, pixels).unwrap());
+    let (clear, opaque, half) = (
+        vec![255, 255, 255, 0, 255, 255, 255, 0],
+        vec![255; 8],
+        vec![255, 255, 255, 0, 255, 255, 255, 255],
+    );
+    world.set_transmission(card, None);
+    world.set_map_placement(card, Map::BaseColour, None);
+    match state {
+        Card::Clear => world.set_map(card, Map::BaseColour, texture(clear)),
+        Card::Opaque => world.set_map(card, Map::BaseColour, texture(opaque)),
+        Card::NoMap => world.set_map(card, Map::BaseColour, None),
+        Card::HalfPlaced => {
+            world.set_map(card, Map::BaseColour, texture(half));
+            world.set_map_placement(
+                card,
+                Map::BaseColour,
+                Some(MapPlacement::new().offset(0.5, 0.)),
+            );
+        }
+        Card::Glass => {
+            world.set_map(card, Map::BaseColour, texture(clear));
+            world.set_transmission(card, Some(Transmission::new(1.)));
+        }
+    }
+}
+
+#[test]
+fn a_cut_out_casters_shadow_follows_its_map_placement_and_glass_as_a_fresh_world_draws_it() {
+    // Every input of the cut-out shadow (its map, the map going, its
+    // placement, light through it) changed on a retained world draws what
+    // a world built that way does.
+    retained_card_against_fresh(false);
+}
+
+#[cfg(feature = "lighting")]
+#[test]
+fn a_cut_out_casters_cascaded_shadow_follows_its_map_as_a_fresh_world_draws_it() {
+    retained_card_against_fresh(true);
+}
+
+fn retained_card_against_fresh(cascaded: bool) {
+    let (retained, card) = card_world(cascaded);
+    let Some(mut window) = Window::new(&retained) else {
+        return;
+    };
+    set_card(&retained, card, Card::Clear);
+    window.draw();
+    for state in [
+        Card::Opaque,
+        Card::NoMap,
+        Card::Clear,
+        Card::HalfPlaced,
+        Card::Clear,
+        Card::Glass,
+        Card::Clear,
+    ] {
+        set_card(&retained, card, state);
+        window.draw();
+        let (fresh, fresh_card) = card_world(cascaded);
+        set_card(&fresh, fresh_card, state);
+        let mut other = Window::new(&fresh).unwrap();
+        other.draw();
+        let (a, b) = (
+            window.gpu.readback().unwrap(),
+            other.gpu.readback().unwrap(),
+        );
+        assert!(
+            a == b,
+            "{state:?} (cascaded {cascaded}): the retained world's shadow differs"
+        );
+    }
+}

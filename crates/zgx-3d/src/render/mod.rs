@@ -543,13 +543,17 @@ fn casting_of(
     // What the map would hold now; drawn only if it holds something else.
     let spare = &mut scratch.casting;
     let casting = shadow.map(|(matrix, _)| {
-        let (_, mut meshes, mut joints, mut weights) = spare.take().unwrap_or_default();
+        let (_, mut meshes, mut joints, mut weights, mut cuts) = spare.take().unwrap_or_default();
         meshes.clear();
         joints.clear();
         weights.clear();
+        cuts.clear();
         let opaque = || drawn.iter().filter(|d| !translucent(d));
         meshes.extend(opaque().map(|d| {
             let cutoff = d.surface.alpha_cutoff.map_or(0, f32::to_bits);
+            if cutoff != 0 {
+                cuts.push(cut_key(d));
+            }
             (d.geometry.id(), d.matrix, cutoff)
         }));
         // Poses: an empty palette has none, so no mesh need be asked.
@@ -557,7 +561,7 @@ fn casting_of(
             joints.extend(opaque().flat_map(|d| d.palette.iter().copied().flatten().copied()));
             weights.extend(opaque().flat_map(|d| d.morph.iter().copied().flatten().copied()));
         }
-        (matrix, meshes, joints, weights)
+        (matrix, meshes, joints, weights, cuts)
     });
     if casting.is_some() {
         for run in runs.iter() {
@@ -569,6 +573,23 @@ fn casting_of(
         }
     }
     casting
+}
+
+/// What a cut-out shadow reads of `d` beside its place: its maps (the base
+/// colour's alpha cuts), their placement and what binds with them, as its
+/// run keys them (`map_set`); 0 where it casts whole (no base colour map,
+/// or light passes through it, as `shadow_key` says). Asked of casters with
+/// a cutoff alone. (Reading the set the frame's sort made instead cost every
+/// caster more than this costs masked ones: the loop compiled worse.)
+#[cold]
+#[inline(never)]
+fn cut_key(d: &crate::world::Drawn) -> u64 {
+    let glass = d.extras.is_some_and(|e| e.kinds & crate::world::GLASS != 0);
+    if d.maps[0].is_some() && !glass {
+        map_set(d)[0]
+    } else {
+        0
+    }
 }
 
 impl Viewport for Renderer {

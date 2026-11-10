@@ -1051,6 +1051,14 @@ impl Inner {
         self.extras(index, generation)?.placement()
     }
     /// Object `index`'s surface (no lookup in a world with none set).
+    /// Whether object `id` has an alpha cutoff: what a change of its maps,
+    /// their placement or light through it can change in its shadow (they
+    /// stamp it, `set_map`, only then).
+    fn cut_out(&self, id: ObjectId) -> bool {
+        self.surface(id.index as usize, id.generation)
+            .alpha_cutoff
+            .is_some()
+    }
     fn surface(&self, index: usize, generation: u32) -> Surface {
         if self.surfaces.is_empty() {
             return Surface::default();
@@ -1488,6 +1496,11 @@ impl World {
             if maps.iter().all(Option::is_none) {
                 inner.textures.remove(&id.index);
             }
+            // Its instance written again: what the sun's cascades redraw a
+            // cut-out caster for (`Sun::decide`).
+            if changed && inner.cut_out(id) {
+                inner.stamp(id.index as usize);
+            }
             changed
         });
     }
@@ -1710,6 +1723,11 @@ impl World {
             let placements = &mut inner.extras_mut(id.index, id.generation).placements;
             let before = std::mem::replace(&mut placements[map as usize], placement);
             inner.tidy_extras(id.index);
+            // Where a cut-out caster's map is moves its shadow: stamped as
+            // `set_map` stamps.
+            if before != placement && inner.cut_out(id) {
+                inner.stamp(id.index as usize);
+            }
             before != placement
         });
     }
@@ -1725,6 +1743,11 @@ impl World {
             let extras = inner.extras_mut(id.index, id.generation);
             let before = std::mem::replace(&mut extras.transmission, transmission);
             inner.tidy_extras(id.index);
+            // Light through a cut-out caster casts it whole: stamped as
+            // `set_map` stamps.
+            if before != transmission && inner.cut_out(id) {
+                inner.stamp(id.index as usize);
+            }
             before != transmission
         });
     }

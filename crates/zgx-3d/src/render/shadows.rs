@@ -14,9 +14,17 @@ pub(super) mod cascades;
 pub(super) const SHADOW_SIZE: u32 = 2048;
 
 /// What the shadow map holds: the sun's view, each opaque mesh's geometry,
-/// place and alpha cutoff, skinned ones' joint matrices and morphing ones'
-/// weights.
-pub(super) type Casting = (Mat4, Vec<(u64, Mat4, u32)>, Vec<Mat4>, Vec<[f32; 2]>);
+/// place and alpha cutoff, skinned ones' joint matrices, morphing ones'
+/// weights, and the maps' key of those casting cut out (`map_set`: the base
+/// colour map's alpha cuts, as placed), in turn (plain casters pay none). Every input the shadow pass reads
+/// of a mesh: what isn't here can't change what the map holds.
+pub(super) type Casting = (
+    Mat4,
+    Vec<(u64, Mat4, u32)>,
+    Vec<Mat4>,
+    Vec<[f32; 2]>,
+    Vec<u64>,
+);
 
 /// A shadow pipeline's bits (`shadow_key`).
 pub(super) const CUT_OUT: u8 = 4;
