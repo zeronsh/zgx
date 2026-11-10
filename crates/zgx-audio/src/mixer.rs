@@ -26,6 +26,10 @@ pub(crate) const MAX_EFFECTS: usize = 8;
 /// With every voice and every bus's effects bounded, the loudest sum
 /// through the deepest tree of buses is under 2^120: finite.
 const EFFECT_LIMIT: f32 = 262_144.;
+/// Frames of the clock between the points where a bus decides whether
+/// its effects run on silence: decided there, and only there, what an
+/// effect runs on doesn't depend on how the device splits its blocks.
+pub(crate) const CELL: u64 = MAX_BLOCK as u64;
 /// Slots past the voice limit, for voices fading out after being stolen.
 pub(crate) const FADING_SLOTS: usize = 16;
 /// Frames before a play that found no slot tries again.
@@ -657,16 +661,38 @@ struct Bus {
     right: Box<[f32; MAX_BLOCK]>,
     /// Holds this block's sound (else its buffers are stale).
     touched: bool,
-    /// Its effects, in order; room for [`MAX_EFFECTS`] made up front.
-    /// Boxed: each arrives in a box and leaves in it, which unboxing here
-    /// would free on the audio thread.
+}
+
+/// A bus's effects, and what deciding when they run keeps: apart from
+/// [`Bus`], which the voices' loop reads, so a mix without effects is the
+/// same code as before there were any.
+struct Chain {
+    /// In order; room for [`MAX_EFFECTS`] made up front. Boxed: each
+    /// arrives in a box and leaves in it, which unboxing here would free
+    /// on the audio thread.
     #[allow(clippy::vec_box)]
     effects: Vec<Box<Slot>>,
-    /// The frame until which its effects may still sound with no input:
-    /// the last frame fed, plus the longest tail.
-    ringing: u64,
-    /// Effects that take this bus's level as their side chain.
+    /// Their running on silence, decided every [`CELL`] frames of the
+    /// clock: the frame until which they may still sound with no input
+    /// (where the last cell fed ended, plus the longest tail); whether
+    /// they run in this cell; whether this cell was fed.
+    horizon: u64,
+    active: bool,
+    fed: bool,
+    /// Effects anywhere that take this bus's level as their side chain.
     keyed: u32,
+}
+
+impl Chain {
+    fn new() -> Chain {
+        Chain {
+            effects: Vec::with_capacity(MAX_EFFECTS),
+            horizon: 0,
+            active: false,
+            fed: false,
+            keyed: 0,
+        }
+    }
 }
 
 impl Bus {
@@ -683,9 +709,6 @@ impl Bus {
             left: Box::new([0.; MAX_BLOCK]),
             right: Box::new([0.; MAX_BLOCK]),
             touched: false,
-            effects: Vec::with_capacity(MAX_EFFECTS),
-            ringing: 0,
-            keyed: 0,
         }
     }
 
@@ -761,6 +784,8 @@ pub(crate) struct Mixer {
     heard: [f32; MAX_BUSES],
     /// Effects with a side chain, anywhere.
     keyed: u32,
+    /// Each bus's effects, by its index.
+    chains: Box<[Chain]>,
     /// Effects on every bus.
     effects: usize,
     /// A bus's block interleaved, for its effects.
@@ -819,6 +844,7 @@ impl Mixer {
             levels: [0.; MAX_BUSES],
             heard: [0.; MAX_BUSES],
             keyed: 0,
+            chains: (0..MAX_BUSES).map(|_| Chain::new()).collect(),
             effects: 0,
         }
     }
@@ -874,7 +900,7 @@ impl Mixer {
                 voice.base_step = f64::from(feed.data().rate) / f64::from(rate);
             }
         }
-        for slot in self.buses.iter_mut().flat_map(|b| b.effects.iter_mut()) {
+        for slot in self.chains.iter_mut().flat_map(|c| c.effects.iter_mut()) {
             slot.prepare(rate);
         }
     }
@@ -908,6 +934,10 @@ impl Mixer {
                     .saturating_sub(self.now)
                     .clamp(1, MAX_BLOCK as u64);
                 n = n.min(until as usize);
+            }
+            if self.effects > 0 {
+                // Effects decide on the clock's cells: no block spans two.
+                n = n.min((CELL - self.now % CELL) as usize);
             }
             self.mix(n);
             let master = &self.buses[0];
@@ -962,9 +992,9 @@ impl Mixer {
         // counts as heard: the device isn't stopped under it.
         let quiet = self.limiter.as_ref().is_none_or(Limiter::silent);
         let ringing = self.effects > 0
-            && self.buses[..self.bus_count]
+            && self.chains[..self.bus_count]
                 .iter()
-                .any(|b| b.ringing > self.now);
+                .any(|c| c.horizon > self.now);
         if self.voices.iter().any(|v| v.id != 0) || !quiet || ringing || !self.schedule.is_empty() {
             meter.audible.store(self.now, Ordering::Relaxed);
         }
@@ -1121,24 +1151,24 @@ impl Mixer {
             }
             Command::AddEffect { bus, slot } => return self.add_effect(bus, slot),
             Command::RemoveEffect { id } => {
-                let found = self.buses.iter().enumerate().find_map(|(b, bus)| {
-                    let at = bus.effects.iter().position(|slot| slot.id == id)?;
+                let found = self.chains.iter().enumerate().find_map(|(b, chain)| {
+                    let at = chain.effects.iter().position(|slot| slot.id == id)?;
                     Some((b, at))
                 });
                 if let Some((b, at)) = found {
-                    let slot = self.buses[b].effects.remove(at);
+                    let slot = self.chains[b].effects.remove(at);
                     let side = slot.side;
                     match self.returns.push(Return::Effect(slot)) {
                         Ok(()) => {
                             self.effects -= 1;
                             if let Some(side) = side {
-                                self.buses[usize::from(side)].keyed -= 1;
+                                self.chains[usize::from(side)].keyed -= 1;
                                 self.keyed -= 1;
                             }
                         }
                         Err(Return::Effect(slot)) => {
                             // No room to give it back: kept, and tried again.
-                            self.buses[b].effects.insert(at, slot);
+                            self.chains[b].effects.insert(at, slot);
                             return Err(Command::RemoveEffect { id });
                         }
                         Err(_) => unreachable!("an effect is given back as one"),
@@ -1153,9 +1183,9 @@ impl Mixer {
             } => {
                 let (frames, curve) = (ramp.frames(self.rate), ramp.curve);
                 let param = self
-                    .buses
+                    .chains
                     .iter_mut()
-                    .flat_map(|bus| bus.effects.iter_mut())
+                    .flat_map(|chain| chain.effects.iter_mut())
                     .find(|slot| slot.id == id)
                     .and_then(|slot| slot.params.get_mut(usize::from(index)));
                 if let Some(param) = param {
@@ -1174,7 +1204,7 @@ impl Mixer {
     fn add_effect(&mut self, bus: u16, slot: Box<Slot>) -> Result<(), Command> {
         let unprepared = slot.rate != self.rate;
         // The main thread keeps count: a full chain never gets another.
-        let full = self.buses[usize::from(bus)].effects.len() >= MAX_EFFECTS;
+        let full = self.chains[usize::from(bus)].effects.len() >= MAX_EFFECTS;
         if unprepared || full {
             let back = if unprepared {
                 Return::Unprepared { bus, slot }
@@ -1189,10 +1219,10 @@ impl Mixer {
             });
         }
         if let Some(side) = slot.side {
-            self.buses[usize::from(side)].keyed += 1;
+            self.chains[usize::from(side)].keyed += 1;
             self.keyed += 1;
         }
-        self.buses[usize::from(bus)].effects.push(slot);
+        self.chains[usize::from(bus)].effects.push(slot);
         self.effects += 1;
         Ok(())
     }
@@ -1462,12 +1492,12 @@ impl Mixer {
         }
         for b in (1..self.bus_count).rev() {
             let (below, above) = self.buses.split_at_mut(b);
-            let bus = &mut above[0];
+            let (bus, chain) = (&mut above[0], &mut self.chains[b]);
             if !bus.used {
                 continue;
             }
-            if !bus.effects.is_empty() {
-                run_effects(bus, n, self.now, &mut self.frames, &self.heard);
+            if !chain.effects.is_empty() {
+                run_effects(bus, chain, n, self.now, &mut self.frames, &self.heard);
             }
             if !bus.touched {
                 bus.gain.advance(n);
@@ -1484,57 +1514,83 @@ impl Mixer {
                 &mut parent.left[..n],
                 &mut parent.right[..n],
             );
-            if bus.keyed > 0 {
+            if chain.keyed > 0 {
                 self.levels[b] = level(bus, n);
             }
         }
-        let master = &mut self.buses[0];
-        if !master.effects.is_empty() {
-            run_effects(master, n, self.now, &mut self.frames, &self.heard);
+        let (master, chain) = (&mut self.buses[0], &mut self.chains[0]);
+        if !chain.effects.is_empty() {
+            run_effects(master, chain, n, self.now, &mut self.frames, &self.heard);
         }
-        if master.keyed > 0 {
+        if chain.keyed > 0 {
             self.levels[0] = if master.touched { level(master, n) } else { 0. };
         }
     }
 }
 
-/// Runs `bus`'s effects on its block: on what was summed into it, or on
-/// silence while a tail may still sound. Otherwise their parameters move
-/// on and nothing runs: silence in, silence out. Not inlined: a mix with
-/// no effects doesn't carry it.
+/// Runs `bus`'s effects on its block, which lies within one of the
+/// clock's cells. At a cell's first frame the bus decides whether they run
+/// through it: yes if the cell before was fed, or a tail (read there) may
+/// still sound. A cell they don't run in starts them on the first frame
+/// that brings sound. Decided only on the clock, by what's heard, which
+/// frames an effect runs on doesn't depend on block sizes; otherwise their
+/// parameters move on and nothing runs: silence in, silence out. Not
+/// inlined: a mix with no effects doesn't carry it.
 #[inline(never)]
 fn run_effects(
     bus: &mut Bus,
+    chain: &mut Chain,
     n: usize,
     now: u64,
     frames: &mut [f32; 2 * MAX_BLOCK],
     heard: &[f32; MAX_BUSES],
 ) {
-    let fed = bus.touched;
-    if !fed && bus.ringing <= now {
-        for slot in bus.effects.iter_mut() {
+    if now.is_multiple_of(CELL) {
+        if chain.fed {
+            let tail = chain.effects.iter().map(|slot| slot.tail()).max();
+            chain.horizon = now + tail.unwrap_or(0);
+        }
+        chain.active = now < chain.horizon;
+        chain.fed = false;
+    }
+    // Sound in this block: its first frame, if any.
+    let first = if bus.touched {
+        let quiet = |(l, r): (&f32, &f32)| *l == 0. && *r == 0.;
+        bus.left[..n]
+            .iter()
+            .zip(&bus.right[..n])
+            .position(|frame| !quiet(frame))
+    } else {
+        None
+    };
+    chain.fed |= first.is_some();
+    let from = if chain.active {
+        0
+    } else if let Some(first) = first {
+        chain.active = true;
+        first
+    } else {
+        for slot in chain.effects.iter_mut() {
             slot.skip(n);
         }
         return;
-    }
+    };
     bus.touch(n);
     let pairs = &mut frames.as_chunks_mut::<2>().0[..n];
     for (pair, (l, r)) in pairs.iter_mut().zip(bus.left.iter().zip(bus.right.iter())) {
         *pair = [*l, *r];
     }
-    let mut tail = 0;
-    for slot in bus.effects.iter_mut() {
+    for slot in chain.effects.iter_mut() {
         let side = slot.side.map(|s| heard[usize::from(s)]);
-        slot.process(frames, n, now, side);
-        tail = tail.max(slot.tail);
+        slot.skip(from);
+        slot.process(&mut frames[from * 2..], n - from, now + from as u64, side);
     }
     // Back out finite and bounded, whatever an effect made: every source of
     // sound (a voice, or a bus's effects) is then within its bound, and so
-    // is any sum of them through the tree. One pass, on buses with effects
-    // alone.
-    // Checked as bits without their sign, an integer maximum, which
-    // vectorises: not a number and the infinities are above any finite
-    // value. Mended only in a block that needs it.
+    // is any sum of them through the tree. Checked as bits without their
+    // sign, an integer maximum, which vectorises (not a number and the
+    // infinities are above any finite value), and mended only in a block
+    // that needs it.
     let block = &mut frames[..n * 2];
     let loudest = block
         .iter()
@@ -1554,9 +1610,6 @@ fn run_effects(
         .zip(bus.left.iter_mut().zip(bus.right.iter_mut()))
     {
         [*l, *r] = *pair;
-    }
-    if fed {
-        bus.ringing = bus.ringing.max(now + n as u64 + tail);
     }
 }
 

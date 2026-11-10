@@ -56,8 +56,10 @@ pub trait Effect: Send + 'static {
     fn prepare(&mut self, format: Format, max_block: usize);
 
     /// Called on the audio thread with the bus's frames, interleaved (two
-    /// channels: the mixer is stereo), to change in place: what it leaves
-    /// is made finite and kept within ±2^18 on the way out. No locks,
+    /// channels: the mixer is stereo), to change in place: while the bus
+    /// brings sound, and for the effect's [`tail`](Effect::tail) after. On
+    /// silence otherwise it isn't called: silence in, silence out. What it
+    /// leaves is made finite and kept within ±2^18 on the way out. No locks,
     /// allocation, freeing or system calls: a debug build of zgx-audio
     /// with [`Checked`] as the global allocator panics, naming the effect,
     /// when one allocates or frees here.
@@ -65,7 +67,11 @@ pub trait Effect: Send + 'static {
 
     /// How long sound continues after its input stops (a reverb's tail, a
     /// delay's echoes): the bus keeps running it on silence that long, and
-    /// the device isn't stopped under it.
+    /// the device isn't stopped under it. Asked on the audio thread (under
+    /// the same rules as `process`) every 128 frames of the clock after one
+    /// that brought sound, so it can follow the effect's parameters; how
+    /// long its sound outlasts the last sound in, to within those 128
+    /// frames.
     fn tail(&self) -> Duration {
         Duration::ZERO
     }
@@ -162,9 +168,8 @@ pub(crate) struct Slot {
     #[cfg(debug_assertions)]
     pub name: &'static str,
     pub params: Box<[Param]>,
-    /// The rate it was prepared for, and its tail in frames there.
+    /// The rate it was prepared for.
     pub rate: u32,
-    pub tail: u64,
     /// The bus whose level it's given, if any.
     pub side: Option<u16>,
 }
@@ -185,7 +190,6 @@ impl Slot {
             })
             .collect();
         effect.prepare(format(rate), MAX_BLOCK);
-        let tail = frames(effect.tail(), rate);
         Slot {
             id,
             effect: Box::new(effect),
@@ -193,7 +197,6 @@ impl Slot {
             name: std::any::type_name::<E>(),
             params,
             rate,
-            tail,
             side,
         }
     }
@@ -202,11 +205,16 @@ impl Slot {
     pub fn prepare(&mut self, rate: u32) {
         self.effect.prepare(format(rate), MAX_BLOCK);
         self.rate = rate;
-        self.tail = frames(self.effect.tail(), rate);
+    }
+
+    /// Its tail now, in frames.
+    pub fn tail(&self) -> u64 {
+        frames(self.effect.tail(), self.rate)
     }
 
     /// Runs the effect on `block` (`n` interleaved stereo frames from
-    /// frame `time`), its parameters moved on by `n` frames.
+    /// frame `time`, and maybe more after them), its parameters moved on
+    /// by `n` frames.
     pub fn process(&mut self, block: &mut [f32], n: usize, time: u64, side: Option<f32>) {
         for param in self.params.iter_mut() {
             param.first = param.smoothed.value();

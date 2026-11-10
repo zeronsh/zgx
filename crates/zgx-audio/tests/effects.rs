@@ -122,8 +122,9 @@ impl Effect for Show {
 fn parameters_move_by_index_on_their_frames_and_keep_to_their_ranges() {
     let out = render(1000, |audio| {
         let world = audio.bus("world").unwrap();
+        // Effects run on sound: a quiet one, which Show writes over.
         audio
-            .play(&flat(0.), Play::new().bus(&world).loop_frames(1..2))
+            .play(&flat(1e-3), Play::new().bus(&world).loop_frames(1..2))
             .unwrap();
         let show = world.add_effect(Show).unwrap();
         // 100 frames from 0.5 to 1, from frame 100.
@@ -137,11 +138,12 @@ fn parameters_move_by_index_on_their_frames_and_keep_to_their_ranges() {
         show.at(Time(700)).set(9, 3., Ramp::NONE).unwrap();
     });
     let (a, b) = (left(&out), right(&out));
-    assert_eq!(&a[..101], &[0.5; 101][..], "its default until frame 100");
+    // Frame 0 is the sound's first, a zero: nothing to run on yet.
+    assert_eq!(&a[1..101], &[0.5; 100][..], "its default until frame 100");
     assert_eq!(a[150], 0.75);
     assert_eq!(&a[200..600], &[1.; 400][..]);
     assert_eq!(&a[600..], &[0.; 400][..]);
-    assert_eq!(&b[..400], &[-1.; 400][..]);
+    assert_eq!(&b[1..400], &[-1.; 399][..]);
     assert_eq!(&b[400..], &[2.; 600][..]);
 }
 
@@ -194,6 +196,43 @@ fn a_tail_runs_on_silence_after_its_input_stops_then_rests() {
     assert!(ran * 128 < 2000, "ran on {ran} blocks of silence");
 }
 
+/// A one-pole smoother, whose state decays on silence and never quite
+/// reaches zero: where it stops shows in what comes after.
+struct Smooth([f32; 2]);
+impl Effect for Smooth {
+    fn prepare(&mut self, _: Format, _: usize) {}
+    fn process(&mut self, block: &mut [f32], _: &Context<'_>) {
+        for frame in block.as_chunks_mut::<2>().0 {
+            for (s, y) in frame.iter_mut().zip(self.0.iter_mut()) {
+                *y += 0.01 * (*s - *y);
+                *s = *y;
+            }
+        }
+    }
+    fn tail(&self) -> Duration {
+        Duration::from_secs_f64(500. / f64::from(RATE))
+    }
+}
+
+#[test]
+fn what_an_effect_runs_on_after_its_sound_stops_is_the_same_at_any_block_size() {
+    // A click that ends mid-block, the smoother's tail, and another click
+    // after it has rested: render() requires every block size to agree.
+    let click = Sound::from_samples(&[0., 0.5, -0.25, 0.1, 0.3], 1, RATE).unwrap();
+    let out = render(4000, |audio| {
+        let world = audio.bus("world").unwrap();
+        world.add_effect(Smooth([0.; 2])).unwrap();
+        audio
+            .play(&click, Play::new().bus(&world).at(Time(203)))
+            .unwrap();
+        audio
+            .play(&click, Play::new().bus(&world).at(Time(1777)))
+            .unwrap();
+    });
+    let left = left(&out);
+    assert!(left[204] > 0. && left[1778] > 0.);
+}
+
 /// Writes the level its side chain gives it.
 struct Key;
 impl Effect for Key {
@@ -213,7 +252,7 @@ fn a_side_chain_hears_its_bus_over_the_block_before() {
         .play(&flat(0.5), Play::new().bus(&ui).loop_frames(1..2))
         .unwrap();
     audio
-        .play(&flat(0.), Play::new().bus(&music).loop_frames(1..2))
+        .play(&flat(1e-3), Play::new().bus(&music).loop_frames(1..2))
         .unwrap();
     music.add_effect_keyed(Key, &ui).unwrap();
     let mut out = Vec::new();
@@ -235,7 +274,7 @@ fn a_side_chain_hears_its_bus_over_the_block_before() {
         .play(&flat(0.5), Play::new().bus(&world).loop_frames(1..2))
         .unwrap();
     audio
-        .play(&flat(0.), Play::new().bus(&ui).loop_frames(1..2))
+        .play(&flat(1e-3), Play::new().bus(&ui).loop_frames(1..2))
         .unwrap();
     ui.add_effect_keyed(Key, &world).unwrap();
     let out = left(&mixer.frames(64));
@@ -248,7 +287,7 @@ fn a_side_chain_hears_its_bus_over_the_block_before() {
         .play(&flat(0.5), Play::new().bus(&world).loop_frames(1..2))
         .unwrap();
     audio
-        .play(&flat(0.), Play::new().bus(&ui).loop_frames(1..2))
+        .play(&flat(1e-3), Play::new().bus(&ui).loop_frames(1..2))
         .unwrap();
     ui.set_gain(0.5, Ramp::NONE).unwrap();
     ui.add_effect_keyed(Key, &audio.master()).unwrap();
