@@ -1,0 +1,57 @@
+[
+  {
+    "kind": "coast",
+    "bucket": "a_stationary_shown_no_applied_note",
+    "count": 102
+  },
+  {
+    "kind": "coast",
+    "bucket": "a_stationary_shown_zero_target_axis_delta",
+    "count": 13
+  },
+  {
+    "kind": "coast",
+    "bucket": "b_handover_cadence_on_time_shown_cadence_late",
+    "count": 3
+  },
+  {
+    "kind": "coast",
+    "bucket": "c_render_start_cadence_already_late",
+    "count": 317
+  },
+  {
+    "kind": "coast",
+    "bucket": "other_render_start_on_time_handover_cadence_late",
+    "count": 8
+  },
+  {
+    "kind": "finger",
+    "bucket": "a_stationary_shown_no_applied_note",
+    "count": 600
+  },
+  {
+    "kind": "finger",
+    "bucket": "a_stationary_shown_nonzero_delta_rounding_or_cancellation_unresolved",
+    "count": 109
+  },
+  {
+    "kind": "finger",
+    "bucket": "a_stationary_shown_zero_target_axis_delta",
+    "count": 9
+  },
+  {
+    "kind": "finger",
+    "bucket": "b_handover_cadence_on_time_shown_cadence_late",
+    "count": 26
+  },
+  {
+    "kind": "finger",
+    "bucket": "c_render_start_cadence_already_late",
+    "count": 1155
+  },
+  {
+    "kind": "finger",
+    "bucket": "other_render_start_on_time_handover_cadence_late",
+    "count": 5
+  }
+]

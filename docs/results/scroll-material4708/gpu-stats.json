@@ -1,0 +1,74 @@
+[
+  {
+    "trial": 0,
+    "role": "base",
+    "mid_lines": 96,
+    "frames": 8133.0,
+    "passes_per_frame": 9.569777449895488,
+    "blur_passes_per_frame": 5.1589819254887495,
+    "draws_per_frame": 28.996803147669986,
+    "instances_per_frame": 1267.8550350424198,
+    "damaged_mpx_per_frame": 1.0357186769949593,
+    "layer_repaints_per_frame": 0.0
+  },
+  {
+    "trial": 0,
+    "role": "variant",
+    "mid_lines": 96,
+    "frames": 8218.0,
+    "passes_per_frame": 2.6984667802385007,
+    "blur_passes_per_frame": 0.0,
+    "draws_per_frame": 19.98296422487223,
+    "instances_per_frame": 1452.4830859089802,
+    "damaged_mpx_per_frame": 0.41446824044779734,
+    "layer_repaints_per_frame": 0.0
+  },
+  {
+    "trial": 1,
+    "role": "base",
+    "mid_lines": 96,
+    "frames": 8156.0,
+    "passes_per_frame": 9.711132908288377,
+    "blur_passes_per_frame": 5.24816086316822,
+    "draws_per_frame": 30.728666012751347,
+    "instances_per_frame": 1135.3115497793035,
+    "damaged_mpx_per_frame": 0.9910127513487007,
+    "layer_repaints_per_frame": 0.0
+  },
+  {
+    "trial": 1,
+    "role": "variant",
+    "mid_lines": 97,
+    "frames": 8343.0,
+    "passes_per_frame": 2.6687043030085102,
+    "blur_passes_per_frame": 0.0,
+    "draws_per_frame": 19.29246074553518,
+    "instances_per_frame": 1197.9870550161813,
+    "damaged_mpx_per_frame": 0.4053457988733069,
+    "layer_repaints_per_frame": 0.0
+  },
+  {
+    "trial": 2,
+    "role": "base",
+    "mid_lines": 96,
+    "frames": 8082.0,
+    "passes_per_frame": 9.475872308834447,
+    "blur_passes_per_frame": 5.144023756495917,
+    "draws_per_frame": 29.833704528582036,
+    "instances_per_frame": 1363.2452363276416,
+    "damaged_mpx_per_frame": 1.1614823063598128,
+    "layer_repaints_per_frame": 0.0
+  },
+  {
+    "trial": 2,
+    "role": "variant",
+    "mid_lines": 96,
+    "frames": 8213.0,
+    "passes_per_frame": 2.723608912699379,
+    "blur_passes_per_frame": 0.0,
+    "draws_per_frame": 19.990502861317424,
+    "instances_per_frame": 1256.6337513697797,
+    "damaged_mpx_per_frame": 0.40860830390843766,
+    "layer_repaints_per_frame": 0.0
+  }
+]
