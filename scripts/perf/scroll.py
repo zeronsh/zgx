@@ -942,6 +942,13 @@ return ui.overlay {""")
     return {k:v for k,v in result.items() if k not in ('frames', 'presents', 'latency_samples', 'polls', 'gpu_completion_micros')}
 
 
+def add_failure(result, message):
+    """A failed prerequisite must never promote invalid evidence to usable data."""
+    result['failures'].append(message)
+    if result['status'] != 'invalid':
+        result['status'] = 'fail'
+
+
 def report(results):
     lines = ['| Engine | Scene | Gesture | Size | Hz / scale / bg / present | Late % | Interval p99 ms | Main >4ms | App/GPU / system / unknown late | Result |',
              '|---|---|---|---|---|---:|---:|---:|---|---|']
@@ -1230,8 +1237,7 @@ def main():
                     ref['native_floor_before']=floor_before
                     ref['native_floor_after']=native_floor(args,size,hz,scale,present,f'native-after-{len(references)}')
                     if any(ref[k].get('status')=='invalid' for k in ('native_floor_before','native_floor_after')):
-                        ref['failures'].append('independent native reference invalid')
-                        ref['status']='fail'
+                        add_failure(ref, 'independent native reference invalid')
                 references[key] = ref
                 results.append(ref)
             if args.command=='reference':
@@ -1241,8 +1247,7 @@ def main():
             r = run_cell(args, scene, gesture, size, hz, scale, bg, repeat, present)
             r['reference'] = references[key].get('metrics')
             if references[key]['status'] != 'pass':
-                r['failures'].append('idle reference failed: system floor cannot be certified')
-                r['status'] = 'fail'
+                add_failure(r, 'idle reference failed: system floor cannot be certified')
             results.append(r)
             print(r['status'], '; '.join(r['failures']), flush=True)
             (args.output / 'summary.md').write_text(report(results))

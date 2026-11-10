@@ -11,6 +11,25 @@ import scroll
 import scroll_motion
 
 
+class InvalidEvidence(unittest.TestCase):
+    def test_failed_floor_keeps_invalid_sample_invalid(self):
+        result = dict(status='invalid', failures=['arm evidence missing'], metrics={'shown': 10})
+        scroll.add_failure(result, 'idle reference failed')
+        self.assertEqual(result['status'], 'invalid')
+        self.assertEqual(result['failures'], ['arm evidence missing', 'idle reference failed'])
+        self.assertEqual(result['metrics'], {'shown': 10})
+
+    def test_failed_prerequisite_fails_valid_sample(self):
+        result = dict(status='pass', failures=[])
+        scroll.add_failure(result, 'independent native reference invalid')
+        self.assertEqual(result['status'], 'fail')
+
+    def test_existing_failure_is_retained(self):
+        result = dict(status='fail', failures=['main over budget'])
+        scroll.add_failure(result, 'idle reference failed')
+        self.assertEqual(result, dict(status='fail', failures=['main over budget', 'idle reference failed']))
+
+
 class StagingCleanup(unittest.TestCase):
     def test_writers_stop_before_their_files_are_removed(self):
         events = []
