@@ -249,6 +249,43 @@ What it trades, measured with the Windows suite on an RTX 4090
 
 These are NVIDIA's numbers; AMD's and Intel's drivers have not been measured.
 
+#### Proposal: Direct3D 11 by default (not decided)
+
+This is a proposal, awaiting a decision. Windows would draw with Direct3D 11
+by default, and with Direct3D 12 only where Direct3D 11 can't draw an app's
+scenes. Startup shader and pipeline time on an RTX 4090 (main d0f38af05,
+medians of 5 launches, zgx's shader cache fresh → warm; a default launch
+today takes Direct3D 12 with FXC):
+
+| | Direct3D 11 | Direct3D 12, FXC | Direct3D 12, shipped DXC |
+| --- | ---: | ---: | ---: |
+| Shaders and pipelines | 1.7–2.2 → 1.7–2.1 ms | about 64 → 9.7–11.4 ms | about 54 → 3.8–4.5 ms |
+| Device to first frame | 42–45 → 11 ms | 104–107 → 18–19 ms | 93 → 11–12 ms |
+| Private memory at rest (lab scene) | 61 MiB | 124 MiB | |
+| CPU, animating scenes | 15 to 36% fewer cycles | | |
+| GPU a frame | about 10 µs more | | |
+
+What Direct3D 11 doesn't draw yet:
+- **Images a GPU view draws** (zgx-3d, `scene3d`, web views) are left empty:
+  wgpu runs on its no-op backend under Direct3D 11. An app that uses one
+  would be given Direct3D 12 at startup.
+- **Backdrop blurs** (`Styled::blur` backdrops, frosted glass) draw opaque in
+  their box's colour, and fail the frame over a box with no colour.
+- **Layer shaders reading the backdrop** (glass): byte-exact in #1885.
+
+`d3d11_parity` compares the rest with Direct3D 12 byte for byte, at 1×, 1.5×
+and 2×: on WARP in CI, and by hand on an RTX 4090 (exact except three bytes at
+±1, the driver's rounding of the same DXBC).
+
+Open risks before it's the default:
+- **No Intel or AMD parity run:** `d3d11_parity` has run on WARP and NVIDIA
+  only.
+- **Presentation, popups and acrylic aren't parity-tested.** Parity renders
+  offscreen. Both APIs present through the same DXGI composition swap chain,
+  but nothing compares windows, popups or system backdrops between them.
+- **The glyph atlas never shrinks under Direct3D 11**, so memory can stay
+  higher after a lot of text.
+
 ## Presentation
 
 wgpu runs on Direct3D 12 alone (`WGPU_BACKEND` still overrides, among the
