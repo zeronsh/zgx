@@ -262,6 +262,9 @@ impl Surface for NativeSurface {
             .map(|i| Arc::new(Mutex::new(SwapchainPresentSemaphores::new(i))))
             .collect::<Vec<_>>();
 
+        let presented = (0..images.len())
+            .map(|_| Arc::new(core::sync::atomic::AtomicBool::new(false)))
+            .collect();
         Ok(Box::new(NativeSwapchain {
             raw,
             functor,
@@ -273,6 +276,12 @@ impl Surface for NativeSurface {
             next_acquire_index: 0,
             present_semaphores,
             next_present_time: None,
+            presented,
+            next_present_regions: None,
+            incremental_present: device
+                .shared
+                .enabled_extensions
+                .contains(&khr::incremental_present::NAME),
         }))
     }
 
@@ -334,6 +343,13 @@ pub(crate) struct NativeSwapchain {
     /// This must only be set if [`wgt::Features::VULKAN_GOOGLE_DISPLAY_TIMING`] is enabled, and
     /// so the VK_GOOGLE_display_timing extension is present.
     next_present_time: Option<vk::PresentTimeGOOGLE>,
+
+    /// zgx patch: each image's "presented before" flag (`Texture::presented`).
+    presented: Vec<Arc<core::sync::atomic::AtomicBool>>,
+    /// zgx patch: the regions the next present names (`set_next_present_regions`).
+    next_present_regions: Option<Vec<vk::RectLayerKHR>>,
+    /// zgx patch: whether `VK_KHR_incremental_present` is enabled.
+    incremental_present: bool,
 }
 
 impl Swapchain for NativeSwapchain {
@@ -506,6 +522,7 @@ impl Swapchain for NativeSwapchain {
                     depth: 1,
                 },
                 identity,
+                presented: Some(Arc::clone(&self.presented[index as usize])),
             },
             metadata: Box::new(NativeSurfaceTextureMetadata {
                 acquire_semaphores: acquire_semaphore_arc,
@@ -576,6 +593,21 @@ impl Swapchain for NativeSwapchain {
             vk_info
         };
 
+        // zgx patch: what changed since the last present, when known.
+        let regions = self.next_present_regions.take();
+        let rectangles;
+        let mut present_regions;
+        let vk_info = match &regions {
+            Some(regions) if self.incremental_present && !regions.is_empty() => {
+                rectangles = [vk::PresentRegionKHR::default().rectangles(regions)];
+                present_regions = vk::PresentRegionsKHR::default().regions(&rectangles);
+                vk_info.push_next(&mut present_regions)
+            }
+            _ => vk_info,
+        };
+        // The image is in `PRESENT_SRC_KHR` from here, its contents kept.
+        self.presented[texture.index as usize].store(true, core::sync::atomic::Ordering::Relaxed);
+
         let suboptimal = {
             profiling::scope!("vkQueuePresentKHR");
             unsafe { self.functor.queue_present(queue.raw, &vk_info) }.map_err(|error| {
@@ -611,6 +643,13 @@ impl Swapchain for NativeSwapchain {
 impl NativeSwapchain {
     pub(crate) fn as_raw(&self) -> vk::SwapchainKHR {
         self.raw
+    }
+
+    /// zgx patch: see `Surface::set_next_present_regions`.
+    pub fn set_next_present_regions(&mut self, regions: Vec<vk::RectLayerKHR>) {
+        if self.incremental_present {
+            self.next_present_regions = Some(regions);
+        }
     }
 
     pub fn set_next_present_time(&mut self, present_timing: vk::PresentTimeGOOGLE) {

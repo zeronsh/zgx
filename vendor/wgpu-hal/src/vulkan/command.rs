@@ -247,7 +247,18 @@ impl crate::CommandEncoder for super::CommandEncoder {
                 &self.device.private_caps,
             );
             let (src_stage, src_access) = conv::map_texture_usage_to_barrier(bar.usage.from);
-            let src_layout = conv::derive_image_layout(bar.usage.from, bar.texture.format);
+            let mut src_layout = conv::derive_image_layout(bar.usage.from, bar.texture.format);
+            // zgx patch: a swapchain image presented before is in
+            // `PRESENT_SRC_KHR`, its contents kept (see `Texture::presented`).
+            if bar.usage.from == wgt::TextureUses::UNINITIALIZED
+                && bar
+                    .texture
+                    .presented
+                    .as_ref()
+                    .is_some_and(|presented| presented.load(core::sync::atomic::Ordering::Relaxed))
+            {
+                src_layout = vk::ImageLayout::PRESENT_SRC_KHR;
+            }
             src_stages |= src_stage;
             let (dst_stage, dst_access) = conv::map_texture_usage_to_barrier(bar.usage.to);
             let dst_layout = conv::derive_image_layout(bar.usage.to, bar.texture.format);

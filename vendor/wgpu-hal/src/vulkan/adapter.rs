@@ -1177,6 +1177,12 @@ impl PhysicalDeviceProperties {
         // Require `VK_KHR_swapchain`
         extensions.push(khr::swapchain::NAME);
 
+        // zgx patch: optional `VK_KHR_incremental_present`, a present's
+        // changed regions (`Surface::set_next_present_regions`).
+        if self.supports_extension(khr::incremental_present::NAME) {
+            extensions.push(khr::incremental_present::NAME);
+        }
+
         if self.device_api_version < vk::API_VERSION_1_1 {
             // Require `VK_KHR_maintenance1`
             extensions.push(khr::maintenance1::NAME);

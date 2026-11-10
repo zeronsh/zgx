@@ -65,6 +65,9 @@ gif = { version = "=0.14.2", default-features = false, features = ["std"], optio
 # systems that ship none. Never loaded where Vulkan is (`GpuContext::create`).
 [target.'cfg(target_os = "linux")'.dependencies]
 wgpu = { version = "29.0.4", default-features = false, features = ["gles"] }
+# Vulkan's types, for a present's partial copy and its regions (lib.rs,
+# `SwapHistory`): the version wgpu-hal's Vulkan backend uses.
+ash = { version = "0.38", default-features = false }
 
 [target.'cfg(not(any(windows, target_vendor = "apple")))'.dependencies]
 wgpu = { version = "29.0.4", default-features = false, features = ["vulkan"] }

@@ -4917,6 +4917,10 @@ impl Host {
             WindowEvent::Occluded(true) => self.occlude(),
             WindowEvent::Occluded(false) => {
                 self.native_occluded = false;
+                // Shown again: what its swap chain kept is not trusted.
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.forget_presented();
+                }
                 self.context
                     .ui
                     .set_presented(self.state.visible && !self.state.minimized);
@@ -4936,6 +4940,10 @@ impl Host {
                 // one is `held_damage`).
                 if !self.frame_paced {
                     self.force |= !cfg!(target_os = "macos");
+                    // An expose (X11, Windows): the swap chain's images too.
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.forget_presented();
+                    }
                 }
                 if std::mem::take(&mut self.frame_redraw_requested) {
                     // Wayland: the compositor granted this frame. Let animations

@@ -9,7 +9,12 @@ an owned Sway (`--wayland`) or on an owned X11 desktop:
   window every frame;
 - its GPU stats (`ZGX_GPU_STATS`) damage a small part of the window a frame;
 - `ZGX_DAMAGE_CHECK`, rendering each frame whole too and comparing, finds no
-  stale pixel.
+  stale pixel;
+- each present copies into its swap chain image only what the image lacks
+  (`swap copy rects=` in the present log, not `swap copy whole`), and
+  `ZGX_SWAP_CHECK`, reading every image back after its copy, finds none
+  differing from the frame, though the window is resized, then hidden and
+  shown again, mid-stream.
 
     cargo build --release -p zgx-desktop --example frame_clock
     python3 scripts/partial_repaint_smoke.py target/release/examples/frame_clock --wayland --output /tmp/zgx-partial
@@ -76,12 +81,46 @@ def desktop(private, processes, output, wayland):
     return client
 
 
-def run(binary, env, output, name, extra):
-    """The example for `SECONDS`, its stderr's lines."""
+def window_steps(env, wayland):
+    """Resize the window, then hide and show it again, mid-stream: what a
+    swap chain image holds is unknown after each, so the next presents copy
+    all of the frame (under `ZGX_SWAP_CHECK`, any image keeping less than it
+    was taken to holds says where)."""
+    def sway(command):
+        subprocess.run(["swaymsg", f'[title="{TITLE}"] {command}'], env=env, check=True,
+                       capture_output=True)
+
+    def x11(*command):
+        window = subprocess.check_output(["xdotool", "search", "--name", TITLE], env=env,
+                                         text=True).split()[0]
+        subprocess.run(["xdotool", command[0], window, *command[1:]], env=env, check=True)
+
+    time.sleep(1.2)
+    if wayland:
+        sway("resize set 600 300")
+    else:
+        x11("windowsize", "600", "300")
+    time.sleep(1)
+    if wayland:
+        sway("move scratchpad")
+        time.sleep(.4)
+        sway("scratchpad show")
+    else:
+        x11("windowunmap")
+        time.sleep(.4)
+        x11("windowmap")
+
+
+def run(binary, env, output, name, extra, during=None):
+    """The example for `SECONDS` (and what `during` does meanwhile), its
+    stderr's lines."""
     log = output / f"{name}.log"
     with log.open("w") as stderr:
         app = subprocess.Popen([str(binary)], env=dict(env, **extra), stdout=stderr, stderr=stderr)
         try:
+            if during:
+                time.sleep(.8)
+                during()
             app.wait(timeout=SECONDS)
             raise RuntimeError(f"{name}: the example exited early ({app.returncode}); see {log}")
         except subprocess.TimeoutExpired:
@@ -121,12 +160,28 @@ def main():
                 raise RuntimeError(f"{whole} of {len(later)} frames repainted the whole window")
             if per_frame and max(per_frame) > WINDOW_MP / 2:
                 raise RuntimeError(f"frames damaged up to {max(per_frame):.3f} MP of {WINDOW_MP:.3f}")
+            copies = [line for line in lines if "swap copy" in line]
+            partial = [line for line in copies if "swap copy rects=" in line]
+            pixels = [int(m.group(1)) for m in map(re.compile(r"swap copy rects=\d+ px=(\d+)").search, partial) if m]
+            print(f"{len(partial)} of {len(copies)} presents copied part of the frame "
+                  f"({sum(pixels) // max(len(pixels), 1)} px each on average)")
+            if len(partial) < len(copies) * 3 // 4:
+                raise RuntimeError(f"only {len(partial)} of {len(copies)} presents copied part of the frame")
             checked = run(binary, env, args.output, "check", {"ZGX_DAMAGE_CHECK": "1",
                                                               "ZGX_DAMAGE_DUMP": str(args.output)})
             stale = [line for line in checked if "ZGX_DAMAGE_CHECK frame" in line]
             if stale:
                 raise RuntimeError(f"{len(stale)} frames left stale pixels: {stale[:3]}")
-            print(f"PASS: partial frames{' on Wayland' if args.wayland else ' on X11'}, no stale pixel")
+            swapped = run(binary, env, args.output, "swap-check", {"ZGX_SWAP_CHECK": "1", "ZGX_PRESENT_LOG": "1"},
+                          during=lambda: window_steps(env, args.wayland))
+            differ = [line for line in swapped if "ZGX_SWAP_CHECK present" in line]
+            checked_copies = sum("swap copy rects=" in line for line in swapped)
+            if differ:
+                raise RuntimeError(f"{len(differ)} of {checked_copies} partly copied images differ from their frame: {differ[:3]}")
+            if checked_copies == 0:
+                raise RuntimeError("no present copied part of the frame under ZGX_SWAP_CHECK")
+            print(f"PASS: partial frames and copies{' on Wayland' if args.wayland else ' on X11'}, "
+                  f"no stale pixel, {checked_copies} copied images checked")
         finally:
             for process in reversed(processes):
                 stop(process)
