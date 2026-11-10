@@ -388,17 +388,33 @@ def failures(metrics, args):
     return errors
 
 
+def inspect_socket_paths(pid):
+    override = os.environ.get('ZGX_INSPECT_DIR')
+    if override:
+        directories = [Path(override)]
+    else:
+        name = f'zgx-inspect-{os.getuid()}'
+        directories = [Path(tempfile.gettempdir()) / name, Path('/tmp') / name]
+    return list(dict.fromkeys(directory / f'{pid}.sock' for directory in directories))
+
+
 def request(pid, cmd, timeout=10, **kw):
-    directory = Path(tempfile.gettempdir()) / f'zgx-inspect-{os.getuid()}'
-    with socket.socket(socket.AF_UNIX) as s:
-        s.settimeout(timeout)
-        s.connect(str(directory / f'{pid}.sock'))
-        s.sendall((json.dumps(dict(cmd=cmd, **kw)) + '\n').encode())
-        with s.makefile('r') as reader:
-            result = json.loads(reader.readline())
-    if not result.get('ok'):
-        raise RuntimeError(result.get('error', result))
-    return result
+    errors = []
+    for path in inspect_socket_paths(pid):
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(timeout)
+            try:
+                s.connect(str(path))
+            except OSError as error:
+                errors.append(error)
+                continue
+            s.sendall((json.dumps(dict(cmd=cmd, **kw)) + '\n').encode())
+            with s.makefile('r') as reader:
+                result = json.loads(reader.readline())
+            if not result.get('ok'):
+                raise RuntimeError(result.get('error', result))
+            return result
+    raise errors[-1]
 
 
 def rss(pid):
