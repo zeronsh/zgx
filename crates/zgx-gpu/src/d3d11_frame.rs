@@ -762,6 +762,8 @@ impl Device {
             context.VSSetConstantBuffers(0, Some(&[Some(state.viewport.clone())]));
             context.PSSetConstantBuffers(0, Some(&[Some(state.viewport.clone())]));
             context.PSSetShaderResources(REGIONS, Some(&[Some(regions.clone())]));
+            // (And for vertices: a fading run's alpha is read there.)
+            context.VSSetShaderResources(REGIONS, Some(&[Some(regions.clone())]));
             if let Some((_, points, _)) = &state.points {
                 context.PSSetShaderResources(POINTS, Some(&[Some(points.clone())]));
             }

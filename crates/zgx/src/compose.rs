@@ -5291,12 +5291,13 @@ fn paragraph_effect<const LOCATING: bool>(
 }
 
 /// A paragraph's runs fading in (`TextSpan::fade_in`): which, the paragraph as
-/// drawn without them, and the frame loop that recolours them. Each frame while
-/// they fade, the loop writes the paragraph again with its runs' colours as they
-/// are then: alike in shape, so nothing lays out and the renderer recolours
-/// glyphs. No script runs for it, and none of the paragraph's spans are made
-/// again. A paragraph no run of which has faded holds none of it, and starts
-/// nothing.
+/// drawn, and the frame loop that shows them. Each frame while they fade, the
+/// loop tells the scene the time they show at (`Scene::show_fades`): the
+/// paragraph's text and colours stay as they are, nothing lays out or
+/// repaints, and the renderer draws each run's alpha at that time (a frame
+/// of the fade alone drawn again, its time changed). No script runs for it,
+/// and none of the paragraph's spans are made again. A paragraph no run of
+/// which has faded holds none of it, and starts nothing.
 pub(crate) struct Fading {
     /// Where its frame loop's runner and frame clock are, if the host runs
     /// one (a copy of a scope is two counts).
@@ -5321,30 +5322,22 @@ struct ActiveFades {
 #[derive(Default)]
 struct FadingRuns {
     runs: RefCell<Vec<(usize, crate::compose_rich::TextFade)>>,
+    /// The paragraph's text they fade in, as drawn.
     base: RefCell<Option<std::sync::Arc<crate::rich_text::RichText>>>,
 }
 impl FadingRuns {
-    /// `rich`, the paragraph drawn without `fades`, as it shows at `now`.
-    fn faded(
+    /// `rich`, the paragraph as drawn, shown with `fades` at `now`
+    /// (`Scene::show_fades`): kept as the frame loop's, unless none fades.
+    fn show(
         &self,
+        scene: &mut crate::scene::Scene,
+        paragraph: NodeId,
         rich: &std::sync::Arc<crate::rich_text::RichText>,
         fades: &[(usize, crate::compose_rich::TextFade)],
         now: f64,
-    ) -> std::sync::Arc<crate::rich_text::RichText> {
-        if fades.is_empty() {
-            *self.base.borrow_mut() = None;
-            return rich.clone();
-        }
-        *self.base.borrow_mut() = Some(rich.clone());
-        std::sync::Arc::new(rich.recoloured(
-            |i, color| match fades.iter().find(|(at, _)| *at == i) {
-                Some((_, fade)) => {
-                    let alpha = (color.3 as f32 * fade.at(now)).round().clamp(0., 255.);
-                    crate::scene::Color(color.0, color.1, color.2, alpha as u8)
-                }
-                None => color,
-            },
-        ))
+    ) {
+        *self.base.borrow_mut() = (!fades.is_empty()).then(|| rich.clone());
+        scene.show_fades(paragraph, rich, fades, now);
     }
 }
 impl Fading {
@@ -5369,9 +5362,9 @@ impl Fading {
         fades.retain(|(_, fade)| fade.fading(now));
         self.set_runs(fades, weak, root, paragraph);
     }
-    /// The paragraph just drawn as it is, with `fades` among its runs: drawn
-    /// again as they show now, kept as the frame loop's base, and the loop
-    /// started. With none fading, what was kept for them is let go.
+    /// The paragraph just drawn as it is, with `fades` among its runs: shown
+    /// as they are now, kept as the frame loop's base, and the loop started.
+    /// With none fading, what was kept for them is let go.
     #[cold]
     #[inline(never)]
     fn drawn(&mut self, weak: &crate::widgets::WeakUi, root: NodeId, paragraph: NodeId) {
@@ -5390,10 +5383,7 @@ impl Fading {
                 NodeKind::RichText { text } => text.clone(),
                 _ => return,
             };
-            let faded = active.runs.faded(&shown, &fades, now);
-            if !std::sync::Arc::ptr_eq(&faded, &shown) {
-                scene.set_leaf_kind(paragraph, NodeKind::RichText { text: faded });
-            }
+            active.runs.show(&mut scene, paragraph, &shown, &fades, now);
         }
         drop(ui);
         self.set_runs(fades, weak, root, paragraph);
@@ -5453,8 +5443,9 @@ impl Fading {
 }
 
 /// The frame loop of a paragraph's fading runs (`Fading`): a frame at a time
-/// until none fades, then drawn as they end. Without a task runner or a frame
-/// clock (a host that draws no frames), fades show as they were when last built.
+/// until none fades, then drawn as they end. Each frame only tells the scene
+/// the time they show at. Without a task runner or a frame clock (a host that
+/// draws no frames), fades show as they were when last built.
 fn spawn_fades(
     services: &ServiceScope,
     fading: Rc<FadingRuns>,
@@ -5478,10 +5469,11 @@ fn spawn_fades(
             if !scene.contains(paragraph) {
                 return;
             }
-            let shown = fading.faded(&base, &fades, now);
-            scene.set_leaf_kind(paragraph, NodeKind::RichText { text: shown });
-            drop(scene);
+            // Those done show as the text is: what's left, at `now`; none
+            // left, the text as it is.
             let left: Vec<_> = fades.into_iter().filter(|(_, f)| f.fading(now)).collect();
+            fading.show(&mut scene, paragraph, &base, &left, now);
+            drop(scene);
             let done = left.is_empty();
             *fading.runs.borrow_mut() = left;
             if done {
@@ -5536,10 +5528,9 @@ mod fading_tests {
         fading.set_runs(Vec::new(), &weak, root, root);
         let active = fading.active().expect("kept");
         assert!(active.runs.runs.borrow().is_empty());
-        assert!(std::sync::Arc::ptr_eq(
-            &active.runs.faded(&rich, &[], 0.),
-            &rich
-        ));
+        let mut scene = ui.scene.borrow_mut();
+        active.runs.show(&mut scene, root, &rich, &[], 0.);
+        assert!(!scene.has_text_fades());
         assert!(active.runs.base.borrow().is_none());
     }
 }
