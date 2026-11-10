@@ -22002,8 +22002,10 @@ declare ui: {
 	paged: <T, C>(load: (cursor: C?) -> { items: { T }, next: C? }) -> Paged<T>,
 	-- `state` once it has stayed unchanged for `ms` (a search box's query):
 	-- read-only (as `ui.computed`'s: a write is an error), its timer begun
-	-- again on each change, gone with its owner.
-	debounced: <T>(state: State<T>, ms: number) -> State<T>,
+	-- again on each change, gone with its owner. `every`: what reads it is
+	-- told at each rest, even when the value is the one it already held (a
+	-- view's offset come back to where it last rested).
+	debounced: <T>(state: State<T>, ms: number, opts: { every: boolean? }?) -> State<T>,
 	-- A connection kept open to `url` (a WebSocket) through the host's
 	-- connector, as `useWebSocket`: messages to `on_message`, `send` queued
 	-- while it is not open and sent in order once it is, opened again after
