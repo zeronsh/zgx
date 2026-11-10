@@ -97,7 +97,8 @@ fn run(effect: Option<&str>, instances: usize, sounds: &[Sound]) -> (u64, u64) {
     let (audio, mut mixer) = Audio::offline(Config {
         limiter: None,
         ..Config::default()
-    });
+    })
+    .unwrap();
     let frames = Arc::new(AtomicU64::new(0));
     for i in 0..instances {
         let bus = audio.add_bus(&format!("bus {i}"), &audio.master()).unwrap();

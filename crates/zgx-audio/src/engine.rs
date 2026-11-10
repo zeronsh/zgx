@@ -5,7 +5,7 @@ use crate::device::{Device, Host, Message, Renderer};
 use crate::effect::{Effect, Slot};
 use crate::mixer::Streamed;
 use crate::mixer::{
-    Command, Feed, MAX_BUSES, MAX_EFFECTS, Meter, Mixer, Return, Setup, VoiceParam,
+    Command, FADING_SLOTS, Feed, MAX_BUSES, MAX_EFFECTS, Meter, Mixer, Return, Setup, VoiceParam,
 };
 use crate::queue::{Consumer, Producer, queue};
 use crate::ramp::{Curve, Ramp};
@@ -23,7 +23,9 @@ use std::time::Duration;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The command queue is full: the mixer hasn't run for a while, or
-    /// more was sent in one go than [`Config::commands`] holds.
+    /// more was sent in one go than [`Config::commands`] holds (of which a
+    /// quarter is kept for commands due now: ones for later get this
+    /// sooner).
     QueueFull,
     /// [`Audio::add_bus`] past the most buses there can be (32).
     TooManyBuses,
@@ -37,6 +39,10 @@ pub enum Error {
     Io(String),
     /// The output device couldn't be started, and why.
     Device(String),
+    /// A [`Config`] the engine can't be made with, and why.
+    Config(String),
+    /// A handle (a [`Bus`]) from another engine.
+    Foreign,
 }
 
 impl Error {
@@ -60,6 +66,8 @@ impl std::fmt::Display for Error {
             Error::BusExists(name) => write!(f, "a bus named {name:?} exists already"),
             Error::Format(why) | Error::Io(why) => f.write_str(why),
             Error::Device(why) => write!(f, "the audio device: {why}"),
+            Error::Config(why) => write!(f, "an audio engine can't be made with {why}"),
+            Error::Foreign => f.write_str("a bus from another audio engine"),
         }
     }
 }
@@ -108,6 +116,75 @@ pub struct Config {
     /// limiter's tail and sounds due count as sound): then it stops, and
     /// starts again with the next.
     pub hold: Duration,
+}
+
+/// Ended voices kept for [`Audio::take_ended`] at most.
+const MAX_ENDED: usize = 1 << 16;
+
+/// The most voices an engine can have.
+pub const MAX_VOICES: usize = 4096;
+
+/// The most a voice's or a bus's gain can be: +18 dB. With samples kept
+/// to ±[`MAX_SAMPLE`](crate::MAX_SAMPLE), the loudest a sum can get through
+/// the deepest tree of buses is about 2^115, so every sample the mixer
+/// sends is a finite number, with no check on the way.
+pub const MAX_GAIN: f32 = 8.;
+
+/// Values from the app, made what the mixer can rely on: here, on the main
+/// thread, so the audio thread checks nothing. A gain is kept from 0 to
+/// [`MAX_GAIN`] (not a number: 0), a pan from -1 to 1 (not a number: 0), a
+/// pitch from 1/64 to 16 (not a number: 1).
+fn gain(value: f32) -> f32 {
+    if value.is_nan() {
+        0.
+    } else {
+        value.clamp(0., MAX_GAIN)
+    }
+}
+fn pan(value: f32) -> f32 {
+    if value.is_nan() {
+        0.
+    } else {
+        value.clamp(-1., 1.)
+    }
+}
+fn pitch(value: f32) -> f32 {
+    if value.is_nan() {
+        1.
+    } else {
+        value.clamp(1. / 64., 16.)
+    }
+}
+
+impl Config {
+    /// Whether an engine can be made with it: a rate from 1 kHz to
+    /// 768 kHz, 1 to 64 channels, 1 to [`MAX_VOICES`] voices, 16 to 2^20
+    /// commands, a limiter's ceiling finite and above zero, and a gain from
+    /// 0 to [`MAX_GAIN`].
+    pub fn check(&self) -> Result<(), Error> {
+        let fail = |why: String| Err(Error::Config(why));
+        if !(1_000..=768_000).contains(&self.rate) {
+            return fail(format!("a rate of {} Hz (1 kHz to 768 kHz)", self.rate));
+        }
+        if !(1..=64).contains(&self.channels) {
+            return fail(format!("{} channels (1 to 64)", self.channels));
+        }
+        if !(1..=MAX_VOICES).contains(&self.voices) {
+            return fail(format!("{} voices (1 to {MAX_VOICES})", self.voices));
+        }
+        if !(16..=1 << 20).contains(&self.commands) {
+            return fail(format!("room for {} commands (16 to 2^20)", self.commands));
+        }
+        if let Some(ceiling) = self.limiter
+            && !(ceiling.is_finite() && ceiling > 0.)
+        {
+            return fail(format!("a limiter ceiling of {ceiling} (above 0, finite)"));
+        }
+        if !(0. ..=MAX_GAIN).contains(&self.gain) {
+            return fail(format!("a gain of {} (0 to {MAX_GAIN})", self.gain));
+        }
+        Ok(())
+    }
 }
 
 impl Default for Config {
@@ -173,10 +250,16 @@ pub struct Stats {
     pub play_mixed: u64,
     /// The loudest sample sent to the output since the engine was made.
     pub peak: f32,
+    /// Times a play found every slot taken (by voices fading out after a
+    /// steal) and waited a little to try again.
+    pub waited: u64,
 }
 
 struct Control {
     commands: Producer<(u64, Command)>,
+    /// The most commands that may wait for the mixer at once: its
+    /// schedule's room.
+    room: u64,
     returns: Consumer<Return>,
     next_id: u64,
     /// Voices given back since [`Audio::take_ended`] last took them.
@@ -200,7 +283,13 @@ enum Hosting {
     Running(Host),
 }
 
+/// Engines made so far: each takes the next as its identity, which its
+/// handles carry.
+static ENGINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 struct Inner {
+    /// Which engine this is: a handle from another is refused.
+    id: u64,
     control: Mutex<Control>,
     meter: Arc<Meter>,
     latency: usize,
@@ -260,36 +349,39 @@ impl Offline {
 
 impl Audio {
     /// An engine whose mixer the caller runs, with [`Offline::render`].
-    pub fn offline(config: Config) -> (Audio, Offline) {
-        let (audio, mixer) = Audio::with_mixer(&config);
-        let channels = config.channels.max(1);
+    /// Fails for a config [`Config::check`] refuses.
+    pub fn offline(config: Config) -> Result<(Audio, Offline), Error> {
+        let (audio, mixer) = Audio::with_mixer(&config)?;
+        let channels = config.channels;
         let renderer = Renderer::new(mixer, channels, audio.0.meter.clone());
-        (
+        Ok((
             audio.clone(),
             Offline {
                 renderer,
                 channels,
                 audio,
             },
-        )
+        ))
     }
 
     /// An engine on the system's default output, through cpal. Nothing is
     /// opened until the first sound: then a stream starts, and it stops
-    /// after [`Config::hold`] with nothing to hear.
+    /// after [`Config::hold`] with nothing to hear. Fails for a config
+    /// [`Config::check`] refuses.
     #[cfg(feature = "device")]
-    pub fn new(config: Config) -> Audio {
+    pub fn new(config: Config) -> Result<Audio, Error> {
         Audio::with_device(config, crate::Cpal::new())
     }
 
-    /// An engine on `device`, started with the first sound.
-    pub fn with_device(config: Config, device: impl Device) -> Audio {
+    /// An engine on `device`, started with the first sound. Fails for a
+    /// config [`Config::check`] refuses.
+    pub fn with_device(config: Config, device: impl Device) -> Result<Audio, Error> {
         let channels = config.channels;
         let hold = config.hold;
-        let (audio, mixer) = Audio::with_mixer(&config);
+        let (audio, mixer) = Audio::with_mixer(&config)?;
         let renderer = Box::new(Renderer::new(mixer, channels, audio.0.meter.clone()));
         *audio.hosting() = Hosting::Waiting(Box::new(device), renderer, hold);
-        audio
+        Ok(audio)
     }
 
     fn hosting(&self) -> MutexGuard<'_, Hosting> {
@@ -360,15 +452,22 @@ impl Audio {
             .collect()
     }
 
-    pub(crate) fn with_mixer(config: &Config) -> (Audio, Mixer) {
-        let voices = config.voices.max(1);
-        let (commands, from_main) = queue(config.commands.max(1));
-        let (to_main, returns) = queue(voices * 2 + 64);
-        let meter = Arc::new(Meter::new(config.rate.max(1)));
+    pub(crate) fn with_mixer(config: &Config) -> Result<(Audio, Mixer), Error> {
+        config.check()?;
+        let voices = config.voices;
+        let (commands, from_main) = queue(config.commands);
+        // Every sound the mixer's side holds is in one place: the command
+        // queue, the schedule (as much again), a voice's slot, or here.
+        // Each call on the engine empties this queue, so it never holds
+        // more than the rest can: it's never full, and the mixer gives
+        // back a voice the moment it ends, whether the app calls or not.
+        let held = commands.capacity() + config.commands + voices + FADING_SLOTS;
+        let (to_main, returns) = queue(held);
+        let meter = Arc::new(Meter::new(config.rate));
         let setup = Setup {
-            rate: config.rate.max(1),
+            rate: config.rate,
             voices,
-            commands: config.commands.max(1),
+            commands: config.commands,
             limiter: config.limiter,
             interpolation: config.interpolation,
         };
@@ -378,8 +477,10 @@ impl Audio {
             .map(|name| (name.to_string(), 0))
             .to_vec();
         let audio = Audio(Arc::new(Inner {
+            id: ENGINES.fetch_add(1, Ordering::Relaxed),
             control: Mutex::new(Control {
                 commands,
+                room: config.commands as u64,
                 returns,
                 next_id: 1,
                 ended: Vec::new(),
@@ -408,9 +509,9 @@ impl Audio {
         for bus in 1..4 {
             audio
                 .send(0, Command::AddBus { bus, parent: 0 })
-                .expect("a new queue has room");
+                .expect("a new queue has room for 16 commands");
         }
-        (audio, mixer)
+        Ok((audio, mixer))
     }
 
     fn control(&self) -> MutexGuard<'_, Control> {
@@ -426,6 +527,10 @@ impl Audio {
             match back {
                 Return::Ended { id, sound } => {
                     control.live.remove(&id);
+                    if control.ended.len() >= MAX_ENDED {
+                        // No one has asked for a long while: the oldest half go.
+                        control.ended.drain(..MAX_ENDED / 2);
+                    }
                     control.ended.push(id);
                     drop(sound);
                 }
@@ -448,10 +553,25 @@ impl Audio {
         self.push(&mut self.control(), time, command)
     }
 
-    /// Queues `command`, then wakes the device if it's stopped. The count
-    /// goes up before the device's state is read, and the host stops it
-    /// before reading the count: one of them sees the other.
+    /// Queues `command` for frame `time` if the mixer has room for it,
+    /// then wakes the device if it's stopped. What's sent and not yet done
+    /// with never passes the schedule's room, so the mixer takes every
+    /// command as it comes; a quarter of that is kept for commands due
+    /// now, which a crowd of later ones can't take. The count goes up
+    /// before the device's state is read, and the host stops it before
+    /// reading the count: one of them sees the other.
     fn push(&self, control: &mut Control, time: u64, command: Command) -> Result<(), Error> {
+        let meter = &self.0.meter;
+        let waiting = meter.sent.load(Ordering::SeqCst) - meter.taken.load(Ordering::Acquire);
+        let later = time > self.now().0;
+        let room = if later {
+            control.room - control.room / 4
+        } else {
+            control.room
+        };
+        if waiting >= room {
+            return Err(Error::QueueFull);
+        }
         control
             .commands
             .push((time, command))
@@ -487,13 +607,7 @@ impl Audio {
 
     /// Decodes a sound whole.
     pub fn load(&self, source: Source) -> Result<Sound, Error> {
-        let sound = source.decode()?;
-        if sound.frames() as u64 >= u64::from(u32::MAX) {
-            return Err(Error::Format(
-                "a sound of over 2^32 frames: stream it instead".into(),
-            ));
-        }
-        Ok(sound)
+        source.decode()
     }
 
     /// Plays `sound` as `play` says.
@@ -511,16 +625,20 @@ impl Audio {
                 looping,
             },
         };
+        let bus = match play.bus {
+            None => 0,
+            Some((engine, bus)) if engine == self.0.id => bus,
+            Some(_) => return Err(Error::Foreign),
+        };
         let mut control = self.control();
         let id = control.next_id;
-        let bus = play.bus.unwrap_or(0);
         let command = Command::Play {
             id,
             sound: Feed::Sound(sound.0.clone()),
             bus,
-            gain: play.gain,
-            pan: play.pan,
-            pitch: play.pitch,
+            gain: gain(play.gain),
+            pan: pan(play.pan),
+            pitch: pitch(play.pitch),
             region,
             priority: play.priority,
             fade_in: play.fade_in,
@@ -544,6 +662,11 @@ impl Audio {
     pub fn stream(&self, source: Source, play: Play) -> Result<Voice, Error> {
         let decode = source.decoder()?;
         let (channels, rate) = (decode.channels(), decode.rate());
+        let bus = match play.bus {
+            None => 0,
+            Some((engine, bus)) if engine == self.0.id => bus,
+            Some(_) => return Err(Error::Foreign),
+        };
         let (writer, reader) = ring(rate as usize / 2 * channels);
         let streamed = Box::new(Streamed::new(reader, channels, rate));
         let mut control = self.control();
@@ -551,10 +674,10 @@ impl Audio {
         let command = Command::Play {
             id,
             sound: Feed::Stream(streamed),
-            bus: play.bus.unwrap_or(0),
-            gain: play.gain,
-            pan: play.pan,
-            pitch: play.pitch,
+            bus,
+            gain: gain(play.gain),
+            pan: pan(play.pan),
+            pitch: pitch(play.pitch),
             region: Region {
                 start: 0,
                 end: u64::MAX,
@@ -586,7 +709,9 @@ impl Audio {
     }
 
     /// Voices that have ended (by their [`Voice::id`]) since this was last
-    /// asked: what turns a `playing` state false.
+    /// asked: what turns a `playing` state false. An app that never asks
+    /// doesn't keep them all: past 65 536, the oldest are let go
+    /// ([`Voice::playing`] still knows).
     pub fn take_ended(&self) -> Vec<u64> {
         std::mem::take(&mut self.control().ended)
     }
@@ -671,8 +796,11 @@ impl Audio {
         })
     }
 
-    /// A new bus feeding `parent`.
+    /// A new bus feeding `parent`, one of this engine's.
     pub fn add_bus(&self, name: &str, parent: &Bus) -> Result<Bus, Error> {
+        if parent.audio.0.id != self.0.id {
+            return Err(Error::Foreign);
+        }
         let mut control = self.control();
         if control.buses.iter().any(|(bus, _)| bus == name) {
             return Err(Error::BusExists(name.into()));
@@ -726,6 +854,7 @@ impl Audio {
             play_asked: meter.play_asked.load(Ordering::Relaxed),
             play_mixed: crate::device::clock::nanos(meter.play_called.load(Ordering::Relaxed)),
             peak: f32::from_bits(meter.peak.load(Ordering::Relaxed)),
+            waited: meter.waited.load(Ordering::Relaxed),
         }
     }
 }
@@ -734,7 +863,8 @@ impl Audio {
 /// its own pitch, now, once.
 #[derive(Clone, Debug)]
 pub struct Play {
-    bus: Option<u16>,
+    /// The bus's engine, and the bus.
+    bus: Option<(u64, u16)>,
     gain: f32,
     pan: f32,
     pitch: f32,
@@ -765,12 +895,13 @@ impl Play {
             fade_in: None,
         }
     }
-    /// The bus it plays into.
+    /// The bus it plays into: one of the engine's it's played on (another
+    /// engine's is an error).
     pub fn bus(mut self, bus: &Bus) -> Play {
-        self.bus = Some(bus.index);
+        self.bus = Some((bus.audio.0.id, bus.index));
         self
     }
-    /// Its gain, 1 as recorded.
+    /// Its gain, 1 as recorded, kept from 0 to [`MAX_GAIN`].
     pub fn gain(mut self, gain: f32) -> Play {
         self.gain = gain;
         self
@@ -781,6 +912,7 @@ impl Play {
         self
     }
     /// Speed and pitch together: 2 is an octave up and twice as fast.
+    /// Kept from 1/64 to 16.
     pub fn pitch(mut self, pitch: f32) -> Play {
         self.pitch = pitch;
         self
@@ -866,6 +998,11 @@ impl Voice {
 
     fn set(&self, param: VoiceParam, value: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         let ramp = ramp.into();
+        let value = match param {
+            VoiceParam::Gain => gain(value),
+            VoiceParam::Pan => pan(value),
+            VoiceParam::Pitch => pitch(value),
+        };
         self.send(Command::Voice {
             id: self.id,
             param,
@@ -874,7 +1011,7 @@ impl Voice {
         })
     }
 
-    /// Moves its gain to `gain`.
+    /// Moves its gain to `gain`, kept from 0 to [`MAX_GAIN`].
     pub fn set_gain(&self, gain: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         self.set(VoiceParam::Gain, gain, ramp)
     }
@@ -918,14 +1055,15 @@ impl Bus {
         }
     }
 
-    /// Moves its gain to `gain`: a fade, with a [`Ramp`]'s curve.
+    /// Moves its gain to `gain` (kept from 0 to [`MAX_GAIN`]): a fade, with
+    /// a [`Ramp`]'s curve.
     pub fn set_gain(&self, gain: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         let ramp = ramp.into();
         self.audio.send(
             self.time,
             Command::BusGain {
                 bus: self.index,
-                value: gain,
+                value: self::gain(gain),
                 ramp,
             },
         )
@@ -1081,7 +1219,8 @@ mod tests {
         let (audio, mut mixer) = Audio::offline(Config {
             gain: 0.,
             ..Config::default()
-        });
+        })
+        .unwrap();
         audio.play(&loud, Play::new().gain(4.)).unwrap();
         let out = mixer.frames(4800);
         assert!(out.iter().all(|&s| s == 0.));
@@ -1093,7 +1232,7 @@ mod tests {
     #[test]
     fn sounds_are_dropped_by_the_main_thread_once_played() {
         let click = Sound::from_samples(&[0., 1., 0.5], 1, 48_000).unwrap();
-        let (audio, mut mixer) = Audio::offline(Config::default());
+        let (audio, mut mixer) = Audio::offline(Config::default()).unwrap();
         let voice = audio.play(&click, Play::new()).unwrap();
         assert!(voice.playing());
         assert_eq!(Arc::strong_count(&click.0), 2, "the command holds it");
@@ -1124,7 +1263,8 @@ mod tests {
         let (audio, mut mixer) = Audio::offline(Config {
             limiter: None,
             ..Config::default()
-        });
+        })
+        .unwrap();
         audio.play(&flat, Play::new().loop_frames(1..2)).unwrap();
         // The rate the main thread reads moves under it, as a device's
         // starting at another rate would move it.
@@ -1141,6 +1281,84 @@ mod tests {
         audio.update();
         assert_eq!(mixer.frames(64)[2], 0.5);
         assert_eq!(*prepared.lock().unwrap(), [44_100, 48_000]);
+    }
+
+    #[test]
+    fn a_config_an_engine_can_t_be_made_with_is_an_error_not_a_panic() {
+        let bad = [
+            Config {
+                limiter: Some(-1.),
+                ..Config::default()
+            },
+            Config {
+                limiter: Some(f32::NAN),
+                ..Config::default()
+            },
+            Config {
+                limiter: Some(f32::INFINITY),
+                ..Config::default()
+            },
+            Config {
+                limiter: Some(0.),
+                ..Config::default()
+            },
+            Config {
+                commands: 1,
+                ..Config::default()
+            },
+            Config {
+                commands: 2,
+                ..Config::default()
+            },
+            Config {
+                voices: usize::MAX,
+                ..Config::default()
+            },
+            Config {
+                voices: 0,
+                ..Config::default()
+            },
+            Config {
+                rate: 0,
+                ..Config::default()
+            },
+            Config {
+                rate: u32::MAX,
+                ..Config::default()
+            },
+            Config {
+                channels: 0,
+                ..Config::default()
+            },
+            Config {
+                gain: f32::NAN,
+                ..Config::default()
+            },
+            Config {
+                gain: -1.,
+                ..Config::default()
+            },
+        ];
+        for config in bad {
+            let error = Audio::offline(config.clone()).err();
+            assert!(
+                matches!(error, Some(Error::Config(_))),
+                "{config:?}: {error:?}"
+            );
+        }
+        // At their limits, they make engines that mix.
+        let edge = Config {
+            rate: 1_000,
+            channels: 64,
+            voices: 1,
+            commands: 16,
+            limiter: Some(f32::MIN_POSITIVE),
+            ..Config::default()
+        };
+        let (audio, mut mixer) = Audio::offline(edge).unwrap();
+        let click = Sound::from_samples(&[0., 1., 0.5], 1, 1_000).unwrap();
+        audio.play(&click, Play::new()).unwrap();
+        assert_eq!(mixer.frames(64).len(), 64 * 64);
     }
 }
 
@@ -1161,9 +1379,10 @@ impl std::fmt::Debug for BusDrive {
 }
 
 impl BusDrive {
-    /// The gain the bus glides to.
+    /// The gain the bus glides to, kept from 0 to [`MAX_GAIN`] (not a
+    /// number: 0).
     pub fn set(&self, gain: f32) {
-        let gain = if gain.is_nan() { 0. } else { gain.max(0.) };
+        let gain = self::gain(gain);
         self.meter.drives[self.index].store(gain.to_bits(), Ordering::Relaxed);
     }
 }

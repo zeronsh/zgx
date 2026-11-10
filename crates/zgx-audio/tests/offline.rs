@@ -6,7 +6,7 @@
 //! `ZGX_AUDIO_BLESS=1 cargo test -p zgx-audio --test offline` writes the
 //! references anew; listen to them, and say why they changed.
 use std::path::PathBuf;
-use zgx_audio::{Audio, Config, Curve, Interpolation, Play, Ramp, Sound, Source, Time, wav};
+use zgx_audio::{Audio, Config, Curve, Error, Interpolation, Play, Ramp, Sound, Source, Time, wav};
 
 const RATE: u32 = 48_000;
 
@@ -34,7 +34,7 @@ fn blip() -> Sound {
 fn render(config: Config, frames: usize, build: impl Fn(&Audio)) -> Vec<f32> {
     let mut first: Option<Vec<f32>> = None;
     for block in [512, 1, 37, 128, 300] {
-        let (audio, mut mixer) = Audio::offline(config.clone());
+        let (audio, mut mixer) = Audio::offline(config.clone()).unwrap();
         build(&audio);
         let mut out = vec![0.; frames * mixer.channels()];
         for chunk in out.chunks_mut(block * mixer.channels()) {
@@ -67,7 +67,11 @@ fn reference(name: &str, samples: &[f32]) {
         .join("tests/references")
         .join(format!("{name}.wav"));
     if std::env::var_os("ZGX_AUDIO_BLESS").is_some() {
-        std::fs::write(&path, wav::write(samples, 2, RATE, wav::Encoding::Pcm24)).unwrap();
+        std::fs::write(
+            &path,
+            wav::write(samples, 2, RATE, wav::Encoding::Pcm24).unwrap(),
+        )
+        .unwrap();
         return;
     }
     let bytes = std::fs::read(&path)
@@ -241,6 +245,26 @@ fn the_limiter_keeps_master_under_its_ceiling() {
 }
 
 #[test]
+fn the_limiter_keeps_low_tones_under_its_ceiling_by_its_gain() {
+    // Below about 160 Hz the limiter keeps more gains than above: a tone
+    // at 40 Hz and its octaves, far over the ceiling.
+    let tones: Vec<Sound> = [40., 60., 80., 120.]
+        .map(|hz| sound(&tone(hz, 0.25, RATE), 1, RATE))
+        .to_vec();
+    let out = render(Config::default(), 12_000, |audio| {
+        for tone in &tones {
+            audio.play(tone, Play::new().gain(2.)).unwrap();
+        }
+    });
+    assert!(out.iter().all(|s| s.abs() <= 1.), "past the ceiling");
+    assert!(out.iter().any(|s| s.abs() > 0.99), "limited below it");
+    // Its final clamp keeps any limiter under the ceiling, broken or not:
+    // the reference is what shows the gain did the work (the unit tests
+    // count what the clamp had to correct).
+    reference("limiter_low", &out);
+}
+
+#[test]
 fn sounds_at_other_rates_play_at_their_own_speed() {
     let slow = sound(&tone(1000., 0.01, 24_000), 1, 24_000);
     let wide = sound(
@@ -346,7 +370,7 @@ fn past_the_voice_limit_the_quietest_of_the_lowest_priority_goes() {
         voices: 2,
         ..unlimited()
     };
-    let (audio, mut mixer) = Audio::offline(config);
+    let (audio, mut mixer) = Audio::offline(config).unwrap();
     let quiet = audio
         .play(&flat, Play::new().loop_frames(1..2).gain(0.1))
         .unwrap();
@@ -379,8 +403,8 @@ fn a_voice_stopped_before_it_starts_makes_no_sound() {
 
 #[test]
 fn wav_bytes_load_at_their_own_rate_and_channels() {
-    let bytes = wav::write(&[0.5, -0.5, 0.25, -0.25], 2, 22_050, wav::Encoding::Float32);
-    let audio = Audio::offline(Config::default()).0;
+    let bytes = wav::write(&[0.5, -0.5, 0.25, -0.25], 2, 22_050, wav::Encoding::Float32).unwrap();
+    let audio = Audio::offline(Config::default()).unwrap().0;
     let sound = audio.load(Source::bytes(bytes)).unwrap();
     assert_eq!(
         (sound.frames(), sound.channels(), sound.rate()),
@@ -400,14 +424,15 @@ fn wav_bytes_load_at_their_own_rate_and_channels() {
 fn a_full_queue_is_an_error_not_a_wait() {
     let click = blip();
     let (audio, mut mixer) = Audio::offline(Config {
-        commands: 8,
+        commands: 16,
         ..unlimited()
-    });
-    let sent = (0..20)
+    })
+    .unwrap();
+    let sent = (0..40)
         .filter(|_| audio.play(&click, Play::new()).is_ok())
         .count();
-    // 3 of the 8 hold the default buses.
-    assert_eq!(sent, 5);
+    // 3 of the 16 hold the default buses.
+    assert_eq!(sent, 13);
     mixer.frames(1);
     assert!(audio.play(&click, Play::new()).is_ok());
 }
@@ -415,7 +440,7 @@ fn a_full_queue_is_an_error_not_a_wait() {
 #[test]
 fn a_driven_bus_glides_to_each_value_without_a_command() {
     let flat = sound(&[0., 1.], 1, RATE);
-    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
     let music = audio.bus("music").unwrap();
     audio
         .play(&flat, Play::new().bus(&music).loop_frames(1..2))
@@ -439,7 +464,7 @@ fn a_driven_bus_glides_to_each_value_without_a_command() {
 #[test]
 fn with_interface_sounds_off_the_ui_bus_is_silent_and_the_rest_play_on() {
     let flat = sound(&[0., 0.5], 1, RATE);
-    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
     let (ui, music) = (audio.bus("ui").unwrap(), audio.bus("music").unwrap());
     audio
         .play(&flat, Play::new().bus(&ui).loop_frames(1..2))
@@ -464,7 +489,7 @@ fn with_interface_sounds_off_the_ui_bus_is_silent_and_the_rest_play_on() {
 #[test]
 fn ended_voices_are_reported_once() {
     let click = blip();
-    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
     let a = audio.play(&click, Play::new()).unwrap();
     let b = audio.play(&click, Play::new().at(Time(1000))).unwrap();
     mixer.frames(500);
@@ -472,4 +497,250 @@ fn ended_voices_are_reported_once() {
     mixer.frames(1000);
     assert_eq!(audio.take_ended(), [b.id()]);
     assert!(audio.take_ended().is_empty());
+}
+
+#[test]
+fn a_bus_from_another_engine_is_an_error() {
+    let click = blip();
+    let (a, _) = Audio::offline(unlimited()).unwrap();
+    let (b, mut mixer) = Audio::offline(unlimited()).unwrap();
+    // A's buses past any B has: as a parent, it was read out of bounds.
+    let mut deep = a.master();
+    for i in 0..20 {
+        deep = a.add_bus(&format!("a{i}"), &deep).unwrap();
+    }
+    assert!(matches!(b.add_bus("x", &deep), Err(Error::Foreign)));
+    // Indices B has too: made B's buses a cycle, and a solo hung the mixer.
+    let (a4, a5) = (
+        a.add_bus("four", &a.master()).unwrap(),
+        a.add_bus("five", &a.master()).unwrap(),
+    );
+    let b4 = b.add_bus("four", &b.master()).unwrap();
+    assert!(matches!(b.add_bus("five", &a5), Err(Error::Foreign)));
+    let _ = a4;
+    assert!(matches!(
+        b.play(&click, Play::new().bus(&deep)),
+        Err(Error::Foreign)
+    ));
+    // B's own still work.
+    b.play(&click, Play::new().bus(&b4)).unwrap();
+    b4.solo(true).unwrap();
+    assert_eq!(left(&mixer.frames(8))[1], 1.);
+}
+
+#[test]
+fn nothing_but_finite_samples_leave_the_mixer_whatever_comes_in() {
+    let wild = [
+        0.,
+        f32::NAN,
+        f32::INFINITY,
+        -f32::INFINITY,
+        1e30,
+        -1e30,
+        0.5,
+    ];
+    let wild = sound(&wild, 1, RATE);
+    let tone = sound(&tone(440., 0.1, RATE), 1, RATE);
+    for limiter in [None, Some(1.)] {
+        let (audio, mut mixer) = Audio::offline(Config {
+            limiter,
+            ..Config::default()
+        })
+        .unwrap();
+        // A tree as deep as there can be, every bus as loud as it goes.
+        let mut deep = audio.master();
+        for i in 0..28 {
+            deep = audio.add_bus(&format!("deep {i}"), &deep).unwrap();
+            deep.set_gain(f32::INFINITY, Ramp::NONE).unwrap();
+        }
+        for bad in [f32::NAN, f32::INFINITY, -f32::INFINITY, 1e30] {
+            audio
+                .play(
+                    &wild,
+                    Play::new().bus(&deep).gain(bad).pan(bad).looping(true),
+                )
+                .unwrap();
+            let voice = audio
+                .play(&tone, Play::new().gain(bad).pitch(bad).pan(bad))
+                .unwrap();
+            voice.set_gain(bad, Ramp::ms(1.)).unwrap();
+            voice.set_pitch(bad, Ramp::ms(1.)).unwrap();
+            voice.set_pan(bad, Ramp::ms(1.)).unwrap();
+        }
+        audio.master().set_gain(f32::NAN, Ramp::ms(2.)).unwrap();
+        audio.master().set_gain(1., Ramp::ms(2.)).unwrap();
+        let out = mixer.frames(48_000);
+        let bad = out.iter().position(|s| !s.is_finite());
+        assert_eq!(
+            bad, None,
+            "limiter {limiter:?}: not finite at sample {bad:?}"
+        );
+        // A pitch that wasn't a number plays at 1, and its tone ends: left
+        // are the four loops and the tone at -inf, kept to 1/64 (6.4 s).
+        assert_eq!(audio.stats().voices, 5);
+    }
+}
+
+#[test]
+fn a_sound_of_no_frames_plays_and_ends_at_once() {
+    let empty = sound(&[], 2, RATE);
+    assert_eq!(empty.frames(), 0);
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let voices = [
+        audio.play(&empty, Play::new()).unwrap(),
+        audio.play(&empty, Play::new().looping(true)).unwrap(),
+        audio
+            .play(&empty, Play::new().loop_frames(0..10).pitch(3.))
+            .unwrap(),
+    ];
+    assert!(mixer.frames(64).iter().all(|&s| s == 0.));
+    audio.update();
+    assert!(voices.iter().all(|v| !v.playing()));
+}
+
+#[test]
+fn voices_end_and_free_their_slots_while_the_app_makes_no_call() {
+    // 400 blips scheduled up front, then not a call on the engine while
+    // they play: every one is heard on its frame, none left waiting.
+    let click = blip();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    for i in 0..400u64 {
+        audio
+            .play(&click, Play::new().at(Time(100 + i * 50)))
+            .unwrap();
+    }
+    let out = left(&mixer.frames(100 + 400 * 50 + 100));
+    let missing: Vec<u64> = (0..400u64)
+        .filter(|i| out[(100 + i * 50 + 1) as usize] != 1.)
+        .collect();
+    assert_eq!(missing, Vec::<u64>::new(), "blips never heard");
+    assert_eq!(audio.stats().voices, 0);
+}
+
+#[test]
+fn a_stop_for_a_play_still_waiting_for_a_slot_waits_with_it() {
+    // One voice: each play of higher priority steals the one before,
+    // which fades out in a slot of its own; 17 at once leave the 18th
+    // with none until a fade ends. Its stop, sent with it, must still
+    // stop it.
+    let flat = sound(&[0., 0.5], 1, RATE);
+    let (audio, mut mixer) = Audio::offline(Config {
+        voices: 1,
+        ..unlimited()
+    })
+    .unwrap();
+    let mut last = None;
+    for priority in 0..18 {
+        last = Some(
+            audio
+                .play(&flat, Play::new().loop_frames(1..2).priority(priority))
+                .unwrap(),
+        );
+    }
+    let last = last.unwrap();
+    last.stop().unwrap();
+    mixer.frames(4800);
+    assert!(
+        audio.stats().waited > 0,
+        "nothing waited: {:?}",
+        audio.stats()
+    );
+    assert_eq!(audio.stats().voices, 0, "{:?}", audio.stats());
+    audio.update();
+    assert!(!last.playing());
+}
+
+#[test]
+fn commands_far_in_the_future_never_hold_back_one_due_now() {
+    let flat = sound(&[0., 0.5], 1, RATE);
+    let click = blip();
+    let (audio, mut mixer) = Audio::offline(Config {
+        commands: 64,
+        ..unlimited()
+    })
+    .unwrap();
+    let voice = audio.play(&flat, Play::new().loop_frames(1..2)).unwrap();
+    mixer.frames(64);
+    // Far more than there's room for, an hour away: past some point
+    // they're refused, but none blocks what's due now.
+    let hour = Time(RATE as u64 * 3600);
+    let mut refused = 0;
+    for round in 0..4 {
+        for _ in 0..40 {
+            if audio.play(&click, Play::new().at(hour)).is_err() {
+                refused += 1;
+            }
+        }
+        mixer.frames(64 + round);
+    }
+    assert!(refused > 0, "all taken: no room was ever kept");
+    voice.stop().unwrap();
+    let out = left(&mixer.frames(1000));
+    assert_eq!(out[999], 0., "the stop never came");
+    audio.update();
+    assert!(!voice.playing());
+}
+
+#[test]
+fn a_play_four_billion_frames_away_waits_without_hanging_the_mixer() {
+    let click = blip();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    for far in [1u64 << 32, (1 << 32) + 1, u64::MAX] {
+        audio.play(&click, Play::new().at(Time(far))).unwrap();
+    }
+    let out = mixer.frames(4096);
+    assert!(out.iter().all(|&s| s == 0.));
+    assert_eq!(audio.stats().frames, 4096);
+}
+
+#[test]
+fn a_sound_at_a_rate_the_mixer_can_t_play_is_an_error() {
+    for rate in [0, 999, 768_001, u32::MAX] {
+        assert!(
+            Sound::from_samples(&[0., 0.5], 1, rate).is_err(),
+            "{rate} Hz"
+        );
+    }
+    for rate in [1_000, 768_000] {
+        assert!(
+            Sound::from_samples(&[0., 0.5], 1, rate).is_ok(),
+            "{rate} Hz"
+        );
+    }
+}
+
+#[test]
+fn a_bus_driven_to_infinity_or_nothing_sends_finite_sound() {
+    let flat = sound(&[0., 0.5], 1, RATE);
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let music = audio.bus("music").unwrap();
+    audio
+        .play(&flat, Play::new().bus(&music).loop_frames(1..2))
+        .unwrap();
+    // The bus is made with the first block: a drive is followed after.
+    mixer.frames(64);
+    for bad in [f32::INFINITY, f32::NAN, -f32::INFINITY, 1e30] {
+        music.drive().set(bad);
+        let out = mixer.frames(1000);
+        assert!(out.iter().all(|s| s.is_finite()), "driven to {bad}");
+    }
+}
+
+#[test]
+fn ended_voices_no_one_asks_about_are_not_kept_forever() {
+    let click = blip();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let mut played = 0;
+    while played < 100_000 {
+        for _ in 0..500 {
+            if audio.play(&click, Play::new()).is_ok() {
+                played += 1;
+            }
+        }
+        mixer.frames(64);
+    }
+    audio.update();
+    let kept = audio.take_ended().len();
+    assert!(kept <= 65_536, "{kept} ids kept for no one");
+    assert!(kept > 0);
 }

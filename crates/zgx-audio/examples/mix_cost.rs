@@ -1,5 +1,7 @@
-//! What a voice costs the mixer, in instructions retired on this thread
-//! (macOS; elsewhere, nanoseconds) for each second of sound it mixes.
+//! What a voice costs the mixer, in instructions retired by this process
+//! (macOS, which counts them for a process with `proc_pid_rusage`, a
+//! public call; the example runs no thread but this one) or, elsewhere,
+//! nanoseconds, for each second of sound it mixes.
 //!
 //! `cargo run --release -p zgx-audio --example mix_cost -- [voices] [source rate] [channels] [block]`
 //!
@@ -14,14 +16,24 @@ const SECONDS: usize = 10;
 
 #[cfg(target_os = "macos")]
 fn count() -> u64 {
-    unsafe extern "C" {
-        fn thread_selfcounts(kind: i32, buffer: *mut u64, size: usize) -> i32;
+    /// `struct rusage_info_v4` (`<sys/resource.h>`): a UUID, then 35
+    /// counters, of which instructions are the 30th.
+    #[repr(C)]
+    struct RusageInfoV4 {
+        uuid: [u8; 16],
+        counters: [u64; 35],
     }
-    let mut counts = [0u64; 2];
-    // SAFETY: kind 1 (THSC_CPI) fills two u64s: instructions, then cycles.
-    let ok = unsafe { thread_selfcounts(1, counts.as_mut_ptr(), 16) } == 0;
-    assert!(ok, "this kernel doesn't count a thread's instructions");
-    counts[0]
+    unsafe extern "C" {
+        fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut RusageInfoV4) -> i32;
+    }
+    let mut info = RusageInfoV4 {
+        uuid: [0; 16],
+        counters: [0; 35],
+    };
+    // SAFETY: flavor 4 (RUSAGE_INFO_V4) fills a struct rusage_info_v4.
+    let ok = unsafe { proc_pid_rusage(std::process::id() as i32, 4, &mut info) } == 0;
+    assert!(ok, "this system doesn't count a process's instructions");
+    info.counters[29]
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -40,7 +52,8 @@ fn run(voices: usize, sound: &Sound, block: usize) -> (u64, f64) {
     let (audio, mut mixer) = Audio::offline(Config {
         voices: voices.max(1),
         ..Config::default()
-    });
+    })
+    .unwrap();
     let buses = ["ui", "music", "world"].map(|name| audio.bus(name).unwrap());
     for i in 0..voices {
         let play = Play::new()

@@ -126,7 +126,8 @@ fn engine(hold: Duration) -> (Audio, Controls) {
                 ..Config::default()
             },
             fake,
-        ),
+        )
+        .unwrap(),
         controls,
     )
 }
@@ -267,7 +268,8 @@ fn an_app_that_never_plays_a_sound_never_touches_the_device() {
             ..Config::default()
         },
         fake,
-    );
+    )
+    .unwrap();
     // Everything an app does at startup, short of a sound.
     let flat = Sound::from_samples(&[1.; 4800], 1, 48_000).unwrap();
     let ui = audio.bus("ui").unwrap();
@@ -279,12 +281,9 @@ fn an_app_that_never_plays_a_sound_never_touches_the_device() {
     audio.set_ui_sounds(true).unwrap();
     assert!(audio.ui_sounds_enabled());
     let _wav = audio
-        .load(Source::bytes(zgx_audio::wav::write(
-            &[0.; 8],
-            1,
-            48_000,
-            zgx_audio::wav::Encoding::Pcm24,
-        )))
+        .load(Source::bytes(
+            zgx_audio::wav::write(&[0.; 8], 1, 48_000, zgx_audio::wav::Encoding::Pcm24).unwrap(),
+        ))
         .unwrap();
     std::thread::sleep(Duration::from_millis(100));
     assert_eq!(
@@ -363,4 +362,21 @@ fn an_effect_s_tail_keeps_the_device_running_until_it_has_rung() {
     let took = began.elapsed();
     assert!(took >= Duration::from_millis(700), "stopped after {took:?}");
     assert_eq!(controls.log(), ["format", "start 48000", "stop"]);
+}
+
+#[test]
+fn a_device_that_reports_a_format_the_mixer_can_t_run_at_is_a_failure_not_a_panic() {
+    for rate in [0, 10, 10_000_000] {
+        let (audio, controls) = engine(Duration::from_millis(50));
+        controls.rate.store(rate, Ordering::Relaxed);
+        audio.play(&blip(), Play::new()).unwrap();
+        until("a failure", || audio.stats().failures >= 1);
+        assert_eq!(controls.count("start"), 0, "started at {rate} Hz");
+        let why = audio.device_error().unwrap_or_default();
+        assert!(why.contains(&rate.to_string()), "{rate} Hz: {why}");
+        // A device that comes back right is used.
+        controls.rate.store(48_000, Ordering::Relaxed);
+        audio.play(&blip(), Play::new()).unwrap();
+        until("a start", || audio.stats().running);
+    }
 }

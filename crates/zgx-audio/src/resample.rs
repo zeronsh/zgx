@@ -399,7 +399,9 @@ fn run<const C: usize, K: Kernel>(
         } else if frame as u64 >= low && *at < limit {
             match step {
                 Step::Fixed(step) => {
-                    let count = ((limit - *at).div_ceil(step) as usize).min(wanted - i);
+                    // The least in u64, then a usize: on a 32-bit target the
+                    // frames to the limit may not fit one.
+                    let count = (limit - *at).div_ceil(step).min((wanted - i) as u64) as usize;
                     *at = K::span::<C>(
                         samples,
                         *at,

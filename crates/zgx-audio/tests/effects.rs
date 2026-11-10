@@ -40,7 +40,7 @@ fn right(samples: &[f32]) -> Vec<f32> {
 fn render(frames: usize, build: impl Fn(&Audio)) -> Vec<f32> {
     let mut first: Option<Vec<f32>> = None;
     for block in [512, 1, 37, 128, 300] {
-        let (audio, mut mixer) = Audio::offline(unlimited());
+        let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
         build(&audio);
         let mut out = vec![0.; frames * 2];
         for chunk in out.chunks_mut(block * 2) {
@@ -171,7 +171,7 @@ impl Effect for Echo {
 #[test]
 fn a_tail_runs_on_silence_after_its_input_stops_then_rests() {
     let calls = Arc::new(AtomicUsize::new(0));
-    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
     let world = audio.bus("world").unwrap();
     world
         .add_effect(Echo {
@@ -206,7 +206,7 @@ impl Effect for Key {
 
 #[test]
 fn a_side_chain_hears_its_bus_over_the_block_before() {
-    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
     let (ui, music) = (audio.bus("ui").unwrap(), audio.bus("music").unwrap());
     ui.set_gain(0.5, Ramp::NONE).unwrap();
     audio
@@ -229,7 +229,7 @@ fn a_side_chain_hears_its_bus_over_the_block_before() {
 
     // The other way round: a bus mixed before the one keyed on it is
     // still heard a block late, not as it is now.
-    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
     let (ui, world) = (audio.bus("ui").unwrap(), audio.bus("world").unwrap());
     audio
         .play(&flat(0.5), Play::new().bus(&world).loop_frames(1..2))
@@ -242,7 +242,7 @@ fn a_side_chain_hears_its_bus_over_the_block_before() {
     assert_eq!(out[10], 0.5, "heard before its block was over: {}", out[10]);
 
     // Master too, though it's mixed after every other bus.
-    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
     let (ui, world) = (audio.bus("ui").unwrap(), audio.bus("world").unwrap());
     audio
         .play(&flat(0.5), Play::new().bus(&world).loop_frames(1..2))
@@ -274,7 +274,7 @@ impl Drop for Dropped {
 #[test]
 fn a_removed_effect_stops_on_its_frame_and_is_dropped_by_the_main_thread() {
     let dropped = Arc::new(AtomicBool::new(false));
-    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
     let ui = audio.bus("ui").unwrap();
     audio
         .play(&flat(0.25), Play::new().bus(&ui).loop_frames(1..2))
@@ -290,7 +290,7 @@ fn a_removed_effect_stops_on_its_frame_and_is_dropped_by_the_main_thread() {
 
 #[test]
 fn a_bus_holds_eight_effects() {
-    let audio = Audio::offline(unlimited()).0;
+    let audio = Audio::offline(unlimited()).unwrap().0;
     let ui = audio.bus("ui").unwrap();
     let held: Vec<_> = (0..8).map(|_| ui.add_effect(Scale(1.)).unwrap()).collect();
     assert_eq!(ui.add_effect(Scale(1.)).unwrap_err(), Error::TooManyEffects);
@@ -312,7 +312,7 @@ impl Effect for Leaky {
 #[test]
 #[cfg(debug_assertions)]
 fn an_effect_that_allocates_on_the_audio_thread_is_named_in_a_panic() {
-    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
     let ui = audio.bus("ui").unwrap();
     audio
         .play(&flat(0.25), Play::new().bus(&ui).loop_frames(1..2))
