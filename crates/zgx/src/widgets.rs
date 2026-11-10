@@ -1624,6 +1624,9 @@ pub(crate) struct UiStorage {
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
     observed_bounds: RefCell<crate::scene::NodeMap<Signal<Rect>>>,
     observed_visibility: RefCell<crate::scene::NodeMap<Signal<bool>>>,
+    /// Of those, the ones that count as shown within a margin of the view
+    /// (`observe_visibility_within`): only nodes asked so are here.
+    visibility_margins: RefCell<crate::scene::NodeMap<f32>>,
     /// Scroll views' insets kept clear scrolling into view
     /// (`set_scroll_padding`).
     scroll_padding: RefCell<crate::scene::NodeMap<crate::scene::Insets>>,
@@ -1906,6 +1909,10 @@ impl Ui {
                 .try_borrow()
                 .map_or(0, |m| map_bytes(&m))
             + storage
+                .visibility_margins
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage
                 .scroll_padding
                 .try_borrow()
                 .map_or(0, |m| map_bytes(&m))
@@ -1994,6 +2001,7 @@ impl Ui {
             observed_sizes: RefCell::default(),
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
+            visibility_margins: RefCell::default(),
             scroll_padding: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
             layout_listeners: RefCell::default(),
@@ -3461,6 +3469,23 @@ impl Ui {
             }
         }
     }
+    /// As `observe_visibility`, but shown when any of the node's box grown
+    /// by `margin` on every side would show (`Scene::shows_within`): true
+    /// as it comes within `margin` of the view, before it shows.
+    pub(crate) fn observe_visibility_within(&self, node: NodeId, margin: f32) -> Signal<bool> {
+        let margin = margin.max(0.);
+        let changed = self
+            .storage
+            .visibility_margins
+            .borrow_mut()
+            .insert(node, margin)
+            .is_none_or(|was| was != margin);
+        if changed {
+            // Judged again at the next frame, with this margin.
+            self.storage.bounds_geometry_revision.set(None);
+        }
+        self.observe_visibility(node)
+    }
     pub(crate) fn observe_visibility(&self, node: NodeId) -> Signal<bool> {
         if let Some(signal) = self.storage.observed_visibility.borrow().get(&node) {
             return signal.clone();
@@ -4161,9 +4186,16 @@ impl Ui {
             let mut visibility = Vec::new();
             if geometry_changed {
                 let scene = self.scene.borrow();
+                let margins = self.storage.visibility_margins.borrow();
                 for (node, signal) in self.storage.observed_visibility.borrow().iter() {
                     if scene.contains(*node) {
-                        let now = scene.visible_bounds(*node).is_some();
+                        let now = match margins.is_empty() {
+                            true => scene.visible_bounds(*node).is_some(),
+                            false => match margins.get(node) {
+                                Some(margin) => scene.shows_within(*node, *margin),
+                                None => scene.visible_bounds(*node).is_some(),
+                            },
+                        };
                         if signal.with_untracked(|told| *told != now) {
                             visibility.push((*node, signal.clone(), now));
                         }
@@ -4750,6 +4782,9 @@ impl Ui {
             }
             if !self.storage.observed_visibility.borrow().is_empty() {
                 self.storage.observed_visibility.borrow_mut().remove(id);
+                if !self.storage.visibility_margins.borrow().is_empty() {
+                    self.storage.visibility_margins.borrow_mut().remove(id);
+                }
             }
             if !self.storage.layout_listeners.borrow().is_empty() {
                 listeners.extend(self.storage.layout_listeners.borrow_mut().remove(id));
@@ -4901,6 +4936,7 @@ impl Ui {
             self.storage.observed_sizes.borrow_mut().remove(&id);
             self.storage.observed_bounds.borrow_mut().remove(&id);
             self.storage.observed_visibility.borrow_mut().remove(&id);
+            self.storage.visibility_margins.borrow_mut().remove(&id);
             if !self.storage.layout_listeners.borrow().is_empty() {
                 // Dropped outside the borrow: a listener's captures may reenter.
                 let listeners = self.storage.layout_listeners.borrow_mut().remove(&id);
