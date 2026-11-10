@@ -606,6 +606,9 @@ jobs:
       # one at a time: run together on the runner's three cores, five busy
       # tests kept the watchdog's thread off a core 130 ms (a runaway
       # stopped at 157 ms of CPU), as an app's few threads never do.
+      # `zgx test` leaves nothing in the temp directory, and Ctrl-Break (a
+      # console interrupt) mid-run removes what it made first.
+      - run: cargo test -p zgx-script --test test_runner_temp --locked
       - run: cargo test -p zgx-script --test state --locked -- --test-threads=1 script::runaway script::a_script_short_of_its_budget script::garbage_from_builtins script::copies_of_state script::a_script_keeping_nodes
       # The vendored accesskit_windows' tests of zgx's patches (UIA's
       # HeadingLevel, and a grid cell named by its text for Narrator;

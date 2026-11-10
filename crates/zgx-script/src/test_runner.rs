@@ -209,6 +209,27 @@ pub fn remove_made_on_interrupt() {
         std::process::exit(128 + signal);
     });
 }
+/// `zgx test`'s Ctrl-C and Ctrl-Break (Windows): the directories its tests
+/// made go before the process ends, as a console interrupt ends it
+/// (`STATUS_CONTROL_C_EXIT`). The console runs the handler on a thread of
+/// its own, which may remove them itself.
+#[cfg(windows)]
+pub fn remove_made_on_interrupt() {
+    use windows::Win32::System::Console::{CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler};
+    unsafe extern "system" fn interrupted(kind: u32) -> windows::core::BOOL {
+        if kind != CTRL_C_EVENT && kind != CTRL_BREAK_EVENT {
+            return false.into();
+        }
+        let dirs = std::mem::take(&mut *MADE.lock().unwrap_or_else(PoisonError::into_inner));
+        for dir in dirs {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        // STATUS_CONTROL_C_EXIT, the code a console interrupt ends with.
+        std::process::exit(0xC000_013A_u32 as i32);
+    }
+    // SAFETY: a handler of the signature the console calls, added once.
+    let _ = unsafe { SetConsoleCtrlHandler(Some(interrupted), true) };
+}
 
 /// A test's launches: its apps share a storage directory of the test's own,
 /// so a second `mount` is the next launch, finding what the first kept
