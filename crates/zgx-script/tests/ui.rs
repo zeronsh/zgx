@@ -3443,6 +3443,35 @@ fn visible_margin_jumps_tell_each_row_once() {
 }
 
 #[test]
+fn on_visible_tells_a_node_mounted_in_a_frame_within_that_frame() {
+    // A row that mounts as the view jumps (a list's new rows): its first
+    // report comes in the frame that shows it, so what it builds lays out
+    // before that frame is drawn, not a frame later.
+    let mut h = common::Harness::inline(
+        r##"local shown = ui.state("shown", false)
+        local seen = ui.state("seen", "")
+        return ui.column { w = 200,
+            ui.show(shown,
+                ui.div { h = 20, visible_margin = 100,
+                    on_visible = function(on) seen:set(seen:get() .. "row:" .. tostring(on) .. " ") end }),
+            ui.text { "{seen}", id = "seen" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    assert!(margin_calls(&mut h).is_empty());
+    h.host
+        .set_state("shown", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.frame();
+    assert_eq!(
+        margin_calls(&mut h),
+        ["row:true"],
+        "told in its first frame"
+    );
+}
+
+#[test]
 fn visible_margin_is_judged_inside_nested_scroll_views() {
     // A row across a view 200 wide that scrolls sideways, inside a view
     // that scrolls down: the chip 350 to the right is within its margin of
