@@ -725,7 +725,7 @@ impl<const OSC_RAW_BUF_SIZE: usize> Parser<OSC_RAW_BUF_SIZE> {
         let bytes = text.as_bytes();
         let mut at = 0;
         while at < bytes.len() {
-            let run = bytes[at..].iter().position(|byte| !matches!(byte, 0x20..=0x7e));
+            let run = bytes[at..].iter().position(|byte| !matches!(byte, 0x20..=0x7E));
             let end = run.map_or(bytes.len(), |run| at + run);
             if end > at {
                 // SAFETY: ASCII, so on character boundaries.
@@ -1606,7 +1606,7 @@ mod tests {
         }
 
         fn print_str(&mut self, text: &str) {
-            assert!(!text.is_empty() && text.bytes().all(|byte| (0x20..=0x7e).contains(&byte)));
+            assert!(!text.is_empty() && text.bytes().all(|byte| (0x20..=0x7E).contains(&byte)));
             self.runs.push(text.into());
             for c in text.chars() {
                 self.dispatched.print(c);
@@ -1656,7 +1656,7 @@ mod tests {
             b"\xff",
             b"\xe2\x82",
         ];
-        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
         let mut next = move |below: usize| {
             state ^= state << 13;
             state ^= state >> 7;
