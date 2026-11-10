@@ -2036,6 +2036,10 @@ impl Host {
             zgx::image::set_decoded_wake(move || {
                 let _ = wake.send_event(Event::ImagesDecoded);
             });
+            // The decoding thread's heap collected once the copies it made
+            // are given back at rest: freed by this thread, their pages
+            // wait for that one.
+            zgx::image::set_decoder_rest(crate::release_thread_heap);
         }
         let popups = crate::popup_window::PopupHost::new({
             let proxy = proxy.clone();
