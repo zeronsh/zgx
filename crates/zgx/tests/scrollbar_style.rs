@@ -317,3 +317,18 @@ fn a_rail_left_out_of_assistive_technology_has_no_node_there() {
         "no scrollbar for a reader"
     );
 }
+
+#[test]
+fn fading_in_it_is_there_from_the_frame_the_user_scrolls() {
+    let mut ui = Ui::new(300., 200.);
+    mount(&mut ui, rail());
+    wheel(&mut ui, 0.001);
+    // Before any step of its fade: laid out, and the pointer reaches it.
+    assert_eq!(thumb(&ui).0.height, 24.);
+    assert_eq!(ui.scene.borrow().bounds(bar(&ui)).width, 10.);
+    assert!(
+        ui.next_interaction_deadline()
+            .is_some_and(|at| at <= Instant::now()),
+        "its first step is due at once"
+    );
+}

@@ -4631,7 +4631,7 @@ impl Ui {
     }
     /// Advance due captured-editor interactions using an explicit monotonic time.
     /// Returns whether a tick ran; stalls contribute at most 50 ms of motion.
-    pub fn advance_interactions(&mut self, now: Instant) -> Result<bool, LayoutFeedbackError> {
+    pub fn advance_interactions(&self, now: Instant) -> Result<bool, LayoutFeedbackError> {
         if self.storage.advancing_interaction.get() {
             return Ok(false);
         }

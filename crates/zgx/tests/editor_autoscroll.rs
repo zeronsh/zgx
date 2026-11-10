@@ -348,7 +348,7 @@ fn held_boundary_rearms_after_resize_without_another_pointer_move() {
 
 #[test]
 fn idle_advance_does_not_prepare_unrelated_dirty_layout() {
-    let (mut ui, editor, calls) = fixture(false, false);
+    let (ui, editor, calls) = fixture(false, false);
     assert!(ui.next_interaction_deadline().is_none());
     let mut style = ui.scene.borrow().style(editor.node);
     style.width = Some(70.);

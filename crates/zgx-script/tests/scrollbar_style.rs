@@ -110,3 +110,35 @@ fn a_scrollbar_table_says_what_it_has_no_place_for() {
     .expect("an error");
     assert!(error.contains("`scrollbar` has no `thikness`"), "{error}");
 }
+
+#[test]
+fn a_test_apps_frames_fade_it_in_on_its_clock() {
+    // A test's own time, moved a frame at a time: the frames step the fade
+    // as a window's do.
+    let clock = zgx::clock::VirtualClock::new();
+    let mut h = Harness::inline(&format!(
+        r#"return ui.list {{ id = "l", w = 200, h = 100, count = 100, height = 20, scrollbar = {RAIL} }},
+            row = function(i) return ui.text {{ "row " .. i, h = 20 }} end }}"#
+    ));
+    h.frame();
+    let l = h.find("l").unwrap();
+    zgx_script::driver::scroll(&mut h.ui, l, 8.);
+    let alpha = |h: &Harness| {
+        let bar = bar(h);
+        let scene = h.ui.scene.borrow();
+        let thumb = *scene.children(bar).last().unwrap();
+        match scene.kind(thumb) {
+            NodeKind::Quad(quad) => quad.fill.3,
+            _ => 0,
+        }
+    };
+    let mut seen = Vec::new();
+    for _ in 0..20 {
+        clock.advance(clock.elapsed() + Duration::from_millis(16), || {});
+        h.frame();
+        seen.push(alpha(&h));
+    }
+    assert!(seen[0] > 0 && seen[0] < seen[19], "rising: {seen:?}");
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
+    assert_eq!(thumb(&h).height, 24.);
+}
