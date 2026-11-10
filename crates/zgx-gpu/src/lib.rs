@@ -210,6 +210,10 @@ pub struct DebugCacheStats {
     /// Pipelines of an app's own shaders (fills, layer shaders and their
     /// blends) held.
     pub shader_pipelines: usize,
+    /// Frames after which the native surface cache polled and flushed, to
+    /// let go of surfaces no longer shown (`SurfaceCache::collect`): only in
+    /// the second and a half after one was let go (macOS).
+    pub surface_collections: u64,
 }
 const SHAPE_BUDGET: usize = 8 * 1024 * 1024;
 /// Shaping frames a cached word survives without being used.
@@ -5712,6 +5716,13 @@ impl GpuRenderer {
                     .keys()
                     .filter(|id| **id != BLEND_PLAIN)
                     .count(),
+            #[cfg(target_os = "macos")]
+            surface_collections: self
+                .native_surfaces
+                .as_ref()
+                .map_or(0, |cache| cache.collections()),
+            #[cfg(not(target_os = "macos"))]
+            surface_collections: 0,
         }
     }
     /// At the first frame, a swap chain made opaque under a background that
@@ -6134,6 +6145,10 @@ impl GpuRenderer {
         self.frame_scene = Some(std::ptr::NonNull::from(scene));
         let result = self.render_frame(scene, damage);
         self.frame_scene = None;
+        #[cfg(target_os = "macos")]
+        if let Some(cache) = &mut self.native_surfaces {
+            cache.collect();
+        }
         result
     }
     fn render_frame(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
@@ -6517,6 +6532,21 @@ impl GpuRenderer {
             }
         }
         self.svgs.retain(scene);
+        // Surfaces with no picture beside them (a video player alone): let
+        // go of those no longer shown as frames are drawn, as below does with
+        // pictures. Else a playing window kept each frame's until it rested.
+        #[cfg(target_os = "macos")]
+        if self.images.is_empty()
+            && let Some(cache) = &mut self.native_surfaces
+        {
+            let live = (scene.paint_items())
+                .filter_map(|item| match item.kind {
+                    NodeKind::NativeSurface(frame) => Some(frame.id()),
+                    _ => None,
+                })
+                .collect();
+            cache.retain(&live);
+        }
         if !self.images.is_empty() {
             let mut live_images: std::collections::HashSet<u64> = scene
                 .paint_items()
