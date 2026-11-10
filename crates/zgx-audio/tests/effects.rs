@@ -327,3 +327,72 @@ fn an_effect_that_allocates_on_the_audio_thread_is_named_in_a_panic() {
         "{message}"
     );
 }
+
+/// Writes what it was made with over every sample.
+struct Writes(f32);
+impl Effect for Writes {
+    fn prepare(&mut self, _: Format, _: usize) {}
+    fn process(&mut self, block: &mut [f32], _: &Context<'_>) {
+        block.iter_mut().for_each(|s| *s = self.0);
+    }
+}
+
+#[test]
+fn an_effect_s_non_finite_output_never_leaves_the_mixer() {
+    for bad in [f32::NAN, f32::INFINITY, -f32::INFINITY, 1e38] {
+        for limiter in [None, Some(1.)] {
+            let (audio, mut mixer) = Audio::offline(Config {
+                limiter,
+                ..Config::default()
+            })
+            .unwrap();
+            let ui = audio.bus("ui").unwrap();
+            ui.set_gain(8., Ramp::NONE).unwrap();
+            audio
+                .play(&flat(0.25), Play::new().bus(&ui).loop_frames(1..2))
+                .unwrap();
+            ui.add_effect(Writes(bad)).unwrap();
+            audio.master().add_effect(Scale(8.)).unwrap();
+            let out = mixer.frames(1000);
+            assert!(
+                out.iter().all(|s| s.is_finite()),
+                "{bad}, limiter {limiter:?}"
+            );
+        }
+    }
+}
+
+/// An effect whose parameters an engine can't keep to.
+struct Odd(Parameter);
+impl Effect for Odd {
+    fn parameters(&self) -> &[Parameter] {
+        std::slice::from_ref(&self.0)
+    }
+    fn prepare(&mut self, _: Format, _: usize) {}
+    fn process(&mut self, _: &mut [f32], _: &Context<'_>) {}
+}
+
+#[test]
+fn an_effect_with_parameters_that_can_t_be_kept_or_a_foreign_side_chain_is_an_error() {
+    let audio = Audio::offline(unlimited()).unwrap().0;
+    let other = Audio::offline(unlimited()).unwrap().0;
+    let ui = audio.bus("ui").unwrap();
+    for odd in [
+        Parameter::new("upside down", 0.5, 1., 0.),
+        Parameter::new("no default", f32::NAN, 0., 1.),
+        Parameter::new("no floor", 0., f32::NAN, 1.),
+        Parameter::new("endless", 0., 0., f32::INFINITY),
+    ] {
+        assert!(
+            matches!(ui.add_effect(Odd(odd)), Err(Error::Effect(_))),
+            "{odd:?}"
+        );
+    }
+    assert!(matches!(
+        ui.add_effect_keyed(Scale(1.), &other.bus("music").unwrap()),
+        Err(Error::Foreign)
+    ));
+    // One kept to its range is fine.
+    ui.add_effect(Odd(Parameter::new("fine", 2., 0., 1.)))
+        .unwrap();
+}

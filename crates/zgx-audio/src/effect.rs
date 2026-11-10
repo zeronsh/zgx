@@ -56,7 +56,8 @@ pub trait Effect: Send + 'static {
     fn prepare(&mut self, format: Format, max_block: usize);
 
     /// Called on the audio thread with the bus's frames, interleaved (two
-    /// channels: the mixer is stereo), to change in place. No locks,
+    /// channels: the mixer is stereo), to change in place: what it leaves
+    /// is made finite and kept within ±2^18 on the way out. No locks,
     /// allocation, freeing or system calls: a debug build of zgx-audio
     /// with [`Checked`] as the global allocator panics, naming the effect,
     /// when one allocates or frees here.

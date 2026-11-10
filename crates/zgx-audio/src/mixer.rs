@@ -22,6 +22,10 @@ pub(crate) const MAX_BLOCK: usize = 128;
 pub(crate) const MAX_BUSES: usize = 32;
 /// Effects a bus can hold.
 pub(crate) const MAX_EFFECTS: usize = 8;
+/// The most a sample can be as it leaves a bus's effects, either way: 2^18.
+/// With every voice and every bus's effects bounded, the loudest sum
+/// through the deepest tree of buses is under 2^120: finite.
+const EFFECT_LIMIT: f32 = 262_144.;
 /// Slots past the voice limit, for voices fading out after being stolen.
 pub(crate) const FADING_SLOTS: usize = 16;
 /// Frames before a play that found no slot tries again.
@@ -1523,6 +1527,26 @@ fn run_effects(
         let side = slot.side.map(|s| heard[usize::from(s)]);
         slot.process(frames, n, now, side);
         tail = tail.max(slot.tail);
+    }
+    // Back out finite and bounded, whatever an effect made: every source of
+    // sound (a voice, or a bus's effects) is then within its bound, and so
+    // is any sum of them through the tree. One pass, on buses with effects
+    // alone.
+    // Checked as bits without their sign, an integer maximum, which
+    // vectorises: not a number and the infinities are above any finite
+    // value. Mended only in a block that needs it.
+    let block = &mut frames[..n * 2];
+    let loudest = block
+        .iter()
+        .fold(0u32, |m, s| m.max(s.to_bits() & 0x7fff_ffff));
+    if loudest > EFFECT_LIMIT.to_bits() {
+        for s in block.iter_mut() {
+            *s = if s.is_nan() {
+                0.
+            } else {
+                s.clamp(-EFFECT_LIMIT, EFFECT_LIMIT)
+            };
+        }
     }
     let pairs = &frames.as_chunks::<2>().0[..n];
     for (pair, (l, r)) in pairs

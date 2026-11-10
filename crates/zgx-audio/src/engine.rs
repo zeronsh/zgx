@@ -43,6 +43,9 @@ pub enum Error {
     Config(String),
     /// A handle (a [`Bus`]) from another engine.
     Foreign,
+    /// An effect whose parameters can't be kept to (a range upside down, or
+    /// not a number), and why.
+    Effect(String),
 }
 
 impl Error {
@@ -68,6 +71,7 @@ impl std::fmt::Display for Error {
             Error::Device(why) => write!(f, "the audio device: {why}"),
             Error::Config(why) => write!(f, "an audio engine can't be made with {why}"),
             Error::Foreign => f.write_str("a bus from another audio engine"),
+            Error::Effect(why) => write!(f, "an effect with {why}"),
         }
     }
 }
@@ -456,12 +460,14 @@ impl Audio {
         config.check()?;
         let voices = config.voices;
         let (commands, from_main) = queue(config.commands);
-        // Every sound the mixer's side holds is in one place: the command
-        // queue, the schedule (as much again), a voice's slot, or here.
+        // Every sound (and effect) the mixer's side holds is in one place:
+        // the command queue, the schedule (as much again), a voice's slot
+        // (a bus's chain), or here.
         // Each call on the engine empties this queue, so it never holds
         // more than the rest can: it's never full, and the mixer gives
         // back a voice the moment it ends, whether the app calls or not.
-        let held = commands.capacity() + config.commands + voices + FADING_SLOTS;
+        let held =
+            commands.capacity() + config.commands + voices + FADING_SLOTS + MAX_BUSES * MAX_EFFECTS;
         let (to_main, returns) = queue(held);
         let meter = Arc::new(Meter::new(config.rate));
         let setup = Setup {
@@ -1125,16 +1131,29 @@ impl Bus {
     /// As [`add_effect`](Bus::add_effect), with `side`'s level given to the
     /// effect each block ([`Context::side_chain`](crate::Context::side_chain)):
     /// that bus's level over the block before, so neither bus waits on the
-    /// other.
+    /// other. `side` must be this engine's.
     pub fn add_effect_keyed<E: Effect>(
         &self,
         effect: E,
         side: &Bus,
     ) -> Result<EffectHandle, Error> {
+        if side.audio.0.id != self.audio.0.id {
+            return Err(Error::Foreign);
+        }
         self.add(effect, Some(side.index))
     }
 
     fn add<E: Effect>(&self, effect: E, side: Option<u16>) -> Result<EffectHandle, Error> {
+        // Its parameters as the mixer will keep to them: a range the right
+        // way up, all of it numbers. Checked here: the mixer can't refuse.
+        for p in effect.parameters() {
+            if !(p.min.is_finite() && p.max.is_finite() && p.min <= p.max && !p.default.is_nan()) {
+                return Err(Error::Effect(format!(
+                    "a parameter {:?} from {} to {}, starting at {}",
+                    p.name, p.min, p.max, p.default
+                )));
+            }
+        }
         let mut control = self.audio.control();
         let held = control
             .effects
