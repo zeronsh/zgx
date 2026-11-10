@@ -3390,6 +3390,9 @@ pub struct Scene {
     /// hit (`hit_test_all`): a pointer move's dispatch and its cursor ask the
     /// same, and most moves between frames ask where nothing changed.
     hit_memo: std::cell::RefCell<Option<HitMemo>>,
+    /// Nodes the hit walk visited (`hit_nodes_walked`), debug builds alone.
+    #[cfg(debug_assertions)]
+    hit_walked: std::cell::Cell<u64>,
     cursor_styles: usize,
     /// Scroll content translated since the last flush: its transform before
     /// the first move, and whether it moved again (see `resolve_moves`).
@@ -3626,6 +3629,8 @@ impl Scene {
             #[cfg(test)]
             inks_asked: Default::default(),
             hit_memo: Default::default(),
+            #[cfg(debug_assertions)]
+            hit_walked: Default::default(),
             cursor_styles: 0,
             contents_styles: Default::default(),
             hidden_when_empty: Default::default(),
@@ -5726,6 +5731,15 @@ impl Scene {
             None => self.children_raw(node),
         }
     }
+    /// How many nodes hit tests have visited so far: a test's measure of
+    /// their work. Debug builds count; a release build says 0.
+    #[doc(hidden)]
+    pub fn hit_nodes_walked(&self) -> u64 {
+        #[cfg(debug_assertions)]
+        return self.hit_walked.get();
+        #[cfg(not(debug_assertions))]
+        0
+    }
     /// Front-to-back hit targets, including containers; call after flushing layout.
     /// The point maps through each transformed ancestor's inverse, so nodes
     /// are hit where they are drawn; a singular transform hits nothing.
@@ -5791,6 +5805,36 @@ impl Scene {
         } else {
             false
         }
+    }
+    /// `hit_outside` for a node the walk placed at `transform`, its
+    /// ancestors' translations summed from the root. Its proof sums its
+    /// subtree's boxes in its own frame, where a child ends where it does;
+    /// the walk adds the translation to each box, and those sums round
+    /// apart, putting the child up to an ulp past it for each one. So, moved,
+    /// the point is past the box only by more than that: 32 ulps of the
+    /// edge's distance from 0 and the translation's, enough for as many
+    /// translated levels under it (one a layout put in place adds none).
+    /// At rest the walk sums what the proof does: exact.
+    #[inline(always)]
+    fn hit_outside_at(
+        &self,
+        node: &Node,
+        b: Rect,
+        point: (f32, f32),
+        transform: Transform,
+    ) -> bool {
+        if transform == Transform::default() {
+            return self.hit_outside(node, b, point);
+        }
+        let slack = |low: f32, size: f32, by: f32| {
+            (low.abs().max((low + size).abs()) + by.abs()) * (32. * f32::EPSILON)
+        };
+        let (x, y) = (
+            slack(b.x, b.width, transform.x),
+            slack(b.y, b.height, transform.y),
+        );
+        let grown = Rect::new(b.x - x, b.y - y, b.width + 2. * x, b.height + 2. * y);
+        self.hit_outside(node, grown, point)
     }
     #[inline(never)]
     fn hit_proved<const D: usize>(&self, node: &Node) -> bool {
@@ -5933,6 +5977,8 @@ impl Scene {
             };
             let point = parent_point;
             let node = self.node(id);
+            #[cfg(debug_assertions)]
+            self.hit_walked.set(self.hit_walked.get() + 1);
             // Held, it isn't there to take the pointer.
             if POPUPS && self.popups_held && self.popup_held(id) {
                 continue;
@@ -5991,11 +6037,17 @@ impl Scene {
             if self.children_raw(node).is_empty() {
                 continue;
             }
-            if !hit
-                && !POPUPS
-                && transform == Transform::default()
-                && self.hit_outside(node, bounds, point)
-            {
+            // The proof is of directions alone (nothing under it reaches past
+            // that side of its box), so it holds wherever its box was moved
+            // to (a scroll's content and its rows are skipped as the content
+            // scrolls under a pointer: only the moved node's proof, and its
+            // ancestors', was cleared) and whatever order its children paint
+            // in: a scene with raised or sticky children, or popups (which
+            // are in the tree, and in their ancestors' proofs), is skipped
+            // as a plain one is; moved, past its box by more than the walk's
+            // rounding (`hit_outside_at`). (Not a node hit where it's going,
+            // `hit_test_targets`, which its box doesn't bound.)
+            if !hit && self.hit_outside_at(node, bounds, point, transform) {
                 continue;
             }
             if !siblings.as_slice().is_empty() {
@@ -6060,6 +6112,8 @@ impl Scene {
             };
             let point = parent_point;
             let node = self.node(id);
+            #[cfg(debug_assertions)]
+            self.hit_walked.set(self.hit_walked.get() + 1);
             // Held, it isn't there to take the pointer.
             if POPUPS && self.popups_held && self.popup_held(id) {
                 continue;
@@ -6135,11 +6189,13 @@ impl Scene {
             if self.children_raw(node).is_empty() {
                 continue;
             }
-            if !hit
-                && !POPUPS
-                && transform == Transform::default()
-                && self.hit_outside(node, bounds, point)
-            {
+            // The proof is of directions alone (nothing under it reaches past
+            // that side of its box), so it holds wherever its box was moved
+            // to: a scroll's content and its rows are skipped as the content
+            // scrolls under a pointer, where only the moved node's proof (and
+            // its ancestors') was cleared; past its box by more than the
+            // walk's rounding (`hit_outside_at`).
+            if !hit && !POPUPS && self.hit_outside_at(node, bounds, point, transform) {
                 continue;
             }
             if !siblings.as_slice().is_empty() {
