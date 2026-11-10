@@ -75,6 +75,8 @@ pub(super) struct Words {
     pub words: Vec<(usize, Arc<Shape>)>,
     pub font_size: f32,
     align: Option<Align>,
+    /// Its words' glyphs, all told (`bytes`).
+    glyphs: usize,
     /// Laid out at this wrap width (`lay_out`), into `lines`.
     laid: Option<Option<f32>>,
     pub lines: Vec<LayoutLine>,
@@ -96,18 +98,49 @@ struct Stream {
     /// lines laid out at this width, its words before this one the same
     /// (`WordCache::words`). `lay_out` keeps the lines those words decide.
     grown: Option<(Option<f32>, usize)>,
-    /// Its last measure (`measure`), and the words before which it holds
-    /// where they grew (as `grown`): `measure` keeps the lines they decide.
-    measured: Option<Measured>,
-    measured_grown: Option<usize>,
+    /// Its last measures (`measure`), one a width (a layout asks a text at
+    /// more than one: its own, and its least or most): `MEASURED` at most.
+    measured: Vec<Measured>,
 }
+
+/// Widths a long paragraph keeps its measure at (`Stream::measured`).
+const MEASURED: usize = 4;
 
 /// A paragraph's size and reach at a width (`Words::measure`), with each
 /// visual line's start and what the lines before it came to.
 struct Measured {
     width: Option<f32>,
-    lines: Vec<(At, Sums)>,
+    /// Where it stood before every `CHECKPOINT`th word (`Measuring`).
+    checkpoints: Vec<(usize, Measuring)>,
     size: ((f32, f32), f32),
+    /// Grown since (a stream's chunks): the words before this one the
+    /// same, the lines they decide kept (`Words::measure`).
+    grown: Option<usize>,
+}
+
+/// Words between a measure's checkpoints (`Measured`): a chunk measures
+/// from the last before its words, at most this many again. A few in
+/// tests, so that one falls among the words a chunk changes.
+const CHECKPOINT: usize = if cfg!(test) { 3 } else { 32 };
+
+/// Where measuring a paragraph's words stands before one of them (all
+/// `Words::measure` carries from word to word, which only the words before
+/// decide): the line being filled, what the lines done came to, and where
+/// the words not yet added to it start.
+#[derive(Clone, Copy, Default)]
+struct Measuring {
+    line: Line,
+    sums: Sums,
+    any: bool,
+    fitting: At,
+    range_width: f32,
+    before_last_blank: f32,
+    /// The height the words not yet added set (`fitting` to the word
+    /// being read), and those before the last blank among them: kept as
+    /// they are read, not read again when added (one line of a paragraph
+    /// with no wrap width holds all of it).
+    range_height: Option<f32>,
+    before_blank_height: Option<f32>,
 }
 
 /// What lines measured so far came to (`Compact::size_reach`'s running
@@ -272,14 +305,24 @@ impl WordCache {
                     words: Vec::new(),
                     font_size: size,
                     align: None,
+                    glyphs: 0,
                     laid: None,
                     lines: Vec::new(),
                     stream: None,
                 })
             })
         });
-        let words = &mut kept.words;
         // Its words before `taken` kept, where it grew from them.
+        if resumed {
+            let gone: usize = kept.words[taken..]
+                .iter()
+                .map(|(_, word)| word.glyphs.len())
+                .sum();
+            kept.glyphs -= gone;
+        } else {
+            kept.glyphs = 0;
+        }
+        let words = &mut kept.words;
         words.truncate(taken);
         words.reserve(ranges.len());
         let mut run = 0;
@@ -326,20 +369,31 @@ impl WordCache {
                     shape
                 }
             };
-            words.push((start, shape));
+            kept.glyphs += shape.glyphs.len();
+            kept.words.push((start, shape));
         }
         let align = crate::text::alignment(base);
         if let Some(stream) = &mut kept.stream {
             let same = resumed && kept.font_size == size;
             // Its lines kept only where laid out as it would lay them out,
-            // and its measure where it was in this size.
-            stream.grown = match kept.laid {
-                Some(width) if same && kept.align == align => Some((width, taken)),
+            // and its measures where they were in this size: from the
+            // fewer of the words they still hold, a chunk since not laid out
+            // or measured at a width holding fewer.
+            let fewer = |grown: Option<usize>| Some(grown.map_or(taken, |at| at.min(taken)));
+            stream.grown = match (kept.laid, stream.grown) {
+                (Some(width), _) if same && kept.align == align => Some((width, taken)),
+                (None, Some((width, at))) if same && kept.align == align => {
+                    Some((width, at.min(taken)))
+                }
                 _ => None,
             };
-            stream.measured_grown = same.then_some(taken);
-            if !same {
-                stream.measured = None;
+            match same {
+                true => {
+                    for measured in &mut stream.measured {
+                        measured.grown = fewer(measured.grown);
+                    }
+                }
+                false => stream.measured.clear(),
             }
         }
         kept.font_size = size;
@@ -363,43 +417,45 @@ type At = (usize, usize);
 
 /// A visual line being measured (`Words::measure`), as `Compact`'s
 /// `Visual`: its width, the height its words set, and whether it holds any.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Line {
     w: f32,
     height: Option<f32>,
     nonempty: bool,
 }
+/// The taller of two line heights a word may set (`Visual::add`'s).
+fn taller(a: Option<f32>, b: Option<f32>) -> Option<f32> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+/// A word's line height, as `Compact` packs it (its first glyph's).
+fn height_of(word: &Shape) -> Option<f32> {
+    word.glyphs
+        .first()
+        .and_then(|glyph| glyph.metrics_opt)
+        .map(|metrics| metrics.line_height)
+}
 impl Line {
-    /// Add `words` from `start` to `end`, `width` wide, as `Visual::add`.
-    fn add(&mut self, words: &[(usize, Arc<Shape>)], start: At, end: At, width: f32) {
+    /// Add the words from `start` to `end`, `width` wide and setting
+    /// `height` (theirs, kept as they were read: `Words::measure`), as
+    /// `Visual::add` does.
+    fn add(&mut self, start: At, end: At, width: f32, height: Option<f32>) {
         if start == end {
             return;
         }
         self.nonempty = true;
         self.w += width;
-        for (_, word) in &words[start.0..end.0 + usize::from(end.1 != 0)] {
-            // A word's line height, as `Compact` packs it (its first glyph's).
-            let first = word.glyphs.first().and_then(|glyph| glyph.metrics_opt);
-            if let Some(height) = first.map(|metrics| metrics.line_height) {
-                self.height = Some(self.height.map_or(height, |line| line.max(height)));
-            }
-        }
+        self.height = taller(self.height, height);
     }
-    /// Done: counted into `sums` (where it holds any), the next line's
-    /// start noted at `next` with what the lines so far came to.
-    fn push(
-        &mut self,
-        sums: &mut Sums,
-        any: &mut bool,
-        memo: &mut Vec<(At, Sums)>,
-        next: At,
-        line_height: f32,
-    ) {
+    /// Done: counted into `sums`, where it holds any.
+    fn push(&mut self, sums: &mut Sums, any: &mut bool, line_height: f32) {
         if self.nonempty {
             sums.widest = sums.widest.max(self.w);
             sums.height += self.height.unwrap_or(line_height);
             *any = true;
-            memo.push((next, *sums));
         }
         *self = Self::default();
     }
@@ -528,9 +584,11 @@ impl Words {
     /// Its size wrapped at `width` (an empty paragraph `line_height` high)
     /// and the width up to which its lines break as they do there, as
     /// `Compact::size_reach` measures a compact of these words, step by
-    /// step. Grown from a paragraph measured at `width` (`measured_grown`),
-    /// from the first line its new words can change, what the lines before
-    /// came to kept (`Measured`): a chunk measures its own lines.
+    /// step. Grown from a paragraph measured at `width` (`Measured::grown`),
+    /// from the last checkpoint before its new words: where measuring stood
+    /// there depends on the words before it alone, which are the same. A
+    /// chunk measures its own words and a checkpoint's at most, in a line
+    /// or across lines.
     pub fn measure(&mut self, width: Option<f32>, line_height: f32) -> ((f32, f32), f32) {
         let Words {
             words,
@@ -539,48 +597,64 @@ impl Words {
             ..
         } = self;
         let stream = stream.get_or_insert_with(Default::default);
-        let grown = stream.measured_grown.take();
-        if let Some(measured) = &stream.measured
-            && measured.width == width
-            && grown.is_none()
-        {
-            return measured.size;
-        }
-        let mut memo = stream
+        let at = stream
             .measured
-            .take()
-            .filter(|measured| measured.width == width)
-            .map(|measured| measured.lines)
-            .unwrap_or_default();
-        // The line to measure from, as `resume_line` finds it.
-        let mut kept = 0;
-        if let Some(at) = grown {
-            let first = memo
-                .iter()
-                .position(|(start, _)| start.0 >= at)
-                .unwrap_or(memo.len());
-            kept = first.saturating_sub(1);
-            while kept > 0 && memo[kept].0.1 != 0 {
-                kept -= 1;
-            }
+            .iter()
+            .position(|measured| measured.width == width);
+        if let Some(at) = at
+            && stream.measured[at].grown.is_none()
+        {
+            return stream.measured[at].size;
         }
-        let (from, mut sums) = match memo.get(kept) {
-            Some(&(start, sums)) if kept > 0 && start.0 < words.len() => (start.0, sums),
-            _ => (0, Sums::default()),
+        let (mut checkpoints, grown) = match at {
+            Some(at) => {
+                let measured = stream.measured.remove(at);
+                (measured.checkpoints, measured.grown)
+            }
+            None => (Vec::new(), None),
         };
-        memo.truncate(if from == 0 { 0 } else { kept });
-        memo.push(((from, 0), sums));
+        // The last checkpoint its kept words decide (a measure of the same
+        // words, not grown, keeps none: measured afresh).
+        let kept = grown.map_or(0, |at| checkpoints.partition_point(|(word, _)| *word <= at));
+        checkpoints.truncate(kept);
+        let (from, state) = checkpoints.last().copied().unwrap_or((
+            0,
+            Measuring {
+                sums: Sums::default(),
+                ..Measuring::default()
+            },
+        ));
         let limit = crate::text::wrap_width(width).unwrap_or(f32::INFINITY);
         let size = *font_size;
         #[cfg(test)]
         worked(|w| w.measured += words.len() - from);
-        // The line being filled (`Visual`).
-        let mut line = Line::default();
-        let mut any = from > 0;
-        let mut fitting = (from, 0);
-        let mut range_width = 0_f32;
-        let mut before_last_blank = 0_f32;
+        let Measuring {
+            mut line,
+            mut sums,
+            mut any,
+            mut fitting,
+            mut range_width,
+            mut before_last_blank,
+            mut range_height,
+            mut before_blank_height,
+        } = state;
         for (i, (_, word)) in words.iter().enumerate().skip(from) {
+            if i % CHECKPOINT == 0 && i > from {
+                checkpoints.push((
+                    i,
+                    Measuring {
+                        line,
+                        sums,
+                        any,
+                        fitting,
+                        range_width,
+                        before_last_blank,
+                        range_height,
+                        before_blank_height,
+                    },
+                ));
+            }
+            let own = height_of(word);
             let asks = match word.blank {
                 true => line.w + range_width,
                 false => line.w + (range_width + word.width),
@@ -591,15 +665,18 @@ impl Words {
                 sums.fit = sums.fit.max(asks);
                 if word.blank {
                     before_last_blank = range_width;
+                    before_blank_height = range_height;
                 }
                 range_width += word.width;
+                range_height = taller(range_height, own);
             } else if word.width > limit {
                 sums.beyond = sums.beyond.min(asks).min(word.width);
                 if range_width > 0. {
-                    line.add(words, fitting, (i, 0), range_width);
-                    line.push(&mut sums, &mut any, &mut memo, (i, 0), line_height);
+                    line.add(fitting, (i, 0), range_width, range_height);
+                    line.push(&mut sums, &mut any, line_height);
                     range_width = 0.;
                     fitting = (i, 0);
+                    range_height = None;
                 }
                 for (glyph, shaped) in word.glyphs.iter().enumerate() {
                     let advance = shaped.width(size);
@@ -609,42 +686,44 @@ impl Words {
                         range_width += advance;
                     } else {
                         sums.beyond = sums.beyond.min(asks);
-                        line.add(words, fitting, (i, glyph), range_width);
-                        line.push(&mut sums, &mut any, &mut memo, (i, glyph), line_height);
+                        // To glyph `glyph` of this word: it too, if any.
+                        let height = match glyph {
+                            0 => range_height,
+                            _ => taller(range_height, own),
+                        };
+                        line.add(fitting, (i, glyph), range_width, height);
+                        line.push(&mut sums, &mut any, line_height);
                         range_width = advance;
                         fitting = (i, glyph);
+                        range_height = None;
                     }
                 }
+                range_height = taller(range_height, own);
             } else {
                 sums.beyond = sums.beyond.min(asks);
                 sums.fit = sums.fit.max(word.width);
                 if range_width > 0. {
                     // A blank before the break is left out.
                     if i > 0 && words[i - 1].1.blank {
-                        line.add(words, fitting, (i - 1, 0), before_last_blank);
+                        line.add(fitting, (i - 1, 0), before_last_blank, before_blank_height);
                     } else {
-                        line.add(words, fitting, (i, 0), range_width);
+                        line.add(fitting, (i, 0), range_width, range_height);
                     }
                 }
-                let next = if word.blank { (i + 1, 0) } else { (i, 0) };
-                line.push(&mut sums, &mut any, &mut memo, next, line_height);
+                line.push(&mut sums, &mut any, line_height);
                 if word.blank {
                     range_width = 0.;
                     fitting = (i + 1, 0);
+                    range_height = None;
                 } else {
                     range_width = word.width;
                     fitting = (i, 0);
+                    range_height = own;
                 }
             }
         }
-        line.add(words, fitting, (words.len(), 0), range_width);
-        line.push(
-            &mut sums,
-            &mut any,
-            &mut memo,
-            (words.len(), 0),
-            line_height,
-        );
+        line.add(fitting, (words.len(), 0), range_width, range_height);
+        line.push(&mut sums, &mut any, line_height);
         let height = sums.height + if any { 0. } else { line_height };
         let reach = match width {
             Some(_) if sums.fit <= sums.widest && sums.beyond.is_finite() => {
@@ -655,10 +734,14 @@ impl Words {
             _ => 0.,
         };
         let size = ((sums.widest, height), reach);
-        stream.measured = Some(Measured {
+        if stream.measured.len() == MEASURED {
+            stream.measured.remove(0);
+        }
+        stream.measured.push(Measured {
             width,
-            lines: memo,
+            checkpoints,
             size,
+            grown: None,
         });
         size
     }
@@ -835,11 +918,11 @@ impl Words {
     /// go, its lines' glyph lists only if short.
     pub fn recycle(mut self: Box<Self>) -> Option<Box<Self>> {
         self.words.clear();
+        self.glyphs = 0;
         if let Some(stream) = &mut self.stream {
             stream.bounds.clear();
             stream.grown = None;
-            stream.measured = None;
-            stream.measured_grown = None;
+            stream.measured.clear();
         }
         self.lines.truncate(4);
 
@@ -853,8 +936,7 @@ impl Words {
     /// Estimated bytes it holds laid out: the same all its life, so the
     /// cache's count of them holds (a layout glyph for each of its glyphs).
     pub fn bytes(&self) -> usize {
-        let glyphs: usize = self.words.iter().map(|(_, word)| word.glyphs.len()).sum();
-        256 + self.words.len() * 16 + glyphs * size_of::<cosmic_text::LayoutGlyph>()
+        256 + self.words.len() * 16 + self.glyphs * size_of::<cosmic_text::LayoutGlyph>()
     }
 }
 
