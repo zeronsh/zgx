@@ -92,6 +92,9 @@ pub(crate) struct Meter {
     pub late: AtomicU64,
     pub blocks: AtomicU64,
     pub waited: AtomicU64,
+    /// Commands the mixer is done with: applied, or found nothing to
+    /// apply to. The main thread counts those it sent against it.
+    pub taken: AtomicU64,
 }
 
 /// A command and the frame it's for (0: as soon as it can be).
@@ -367,6 +370,8 @@ pub(crate) struct Mixer {
     blocks: u64,
     /// Times a play found no free slot and waited.
     waited: u64,
+    /// Commands done with.
+    taken: u64,
     /// Frames of the shortest de-click fade (1 ms), and of a steal's or a
     /// mute's (5 ms).
     click: u32,
@@ -413,6 +418,7 @@ impl Mixer {
             late: 0,
             blocks: 0,
             waited: 0,
+            taken: 0,
             click: (setup.rate / 1000).max(1),
             declick: (setup.rate / 200).max(1),
         }
@@ -478,6 +484,7 @@ impl Mixer {
         meter.late.store(self.late, Ordering::Relaxed);
         meter.blocks.store(self.blocks, Ordering::Relaxed);
         meter.waited.store(self.waited, Ordering::Relaxed);
+        meter.taken.store(self.taken, Ordering::Release);
         meter.now.store(self.now, Ordering::Release);
     }
 
@@ -507,7 +514,11 @@ impl Mixer {
             if time != 0 && time < self.now && matches!(command, Command::Play { .. }) {
                 self.late += 1;
             }
-            if let Err(command) = self.apply(command) {
+            let result = self.apply(command);
+            if result.is_ok() {
+                self.taken += 1;
+            }
+            if let Err(command) = result {
                 // No slot yet (or, for a stop or a change, its play has
                 // none yet): tried again a little later, in the order sent.
                 // The heap has room: this one just left it.

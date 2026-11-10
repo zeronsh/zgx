@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The command queue is full: the mixer hasn't run for a while, or
-    /// more was sent in one go than [`Config::commands`] holds.
+    /// more was sent in one go than [`Config::commands`] holds (of which a
+    /// quarter is kept for commands due now: ones for later get this
+    /// sooner).
     QueueFull,
     /// [`Audio::add_bus`] past the most buses there can be (32).
     TooManyBuses,
@@ -191,6 +193,10 @@ pub struct Stats {
 
 struct Control {
     commands: Producer<(u64, Command)>,
+    /// Commands sent, and the most that may wait for the mixer at once
+    /// (its schedule's room).
+    sent: u64,
+    room: u64,
     returns: Consumer<Return>,
     next_id: u64,
     /// Name and parent of each bus, by index.
@@ -293,6 +299,8 @@ impl Audio {
             id: ENGINES.fetch_add(1, Ordering::Relaxed),
             control: Mutex::new(Control {
                 commands,
+                sent: 0,
+                room: config.commands as u64,
                 returns,
                 next_id: 1,
                 buses,
@@ -325,10 +333,31 @@ impl Audio {
     }
 
     fn send(&self, time: u64, command: Command) -> Result<(), Error> {
-        self.control()
+        self.push(&mut self.control(), time, command)
+    }
+
+    /// Queues `command` for frame `time`, if the mixer has room for it:
+    /// what's sent and not yet done with never passes its schedule's room,
+    /// so it takes every command as soon as it comes. A quarter of that is
+    /// kept for commands due now, which a crowd of later ones can't take.
+    fn push(&self, control: &mut Control, time: u64, command: Command) -> Result<(), Error> {
+        let taken = self.0.meter.taken.load(Ordering::Acquire);
+        let waiting = control.sent - taken;
+        let later = time > self.now().0;
+        let room = if later {
+            control.room - control.room / 4
+        } else {
+            control.room
+        };
+        if waiting >= room {
+            return Err(Error::QueueFull);
+        }
+        control
             .commands
             .push((time, command))
-            .map_err(|_| Error::QueueFull)
+            .map_err(|_| Error::QueueFull)?;
+        control.sent += 1;
+        Ok(())
     }
 
     /// Frames a second.
@@ -399,10 +428,7 @@ impl Audio {
                 .map(|ramp| (ramp.frames(self.0.rate), ramp.curve)),
         };
         let time = play.at.map_or(0, |at| at.0);
-        control
-            .commands
-            .push((time, command))
-            .map_err(|_| Error::QueueFull)?;
+        self.push(&mut control, time, command)?;
         control.next_id += 1;
         control.live.insert(id);
         Ok(Voice {
@@ -452,16 +478,11 @@ impl Audio {
             return Err(Error::TooManyBuses);
         }
         let index = control.buses.len() as u16;
-        control
-            .commands
-            .push((
-                0,
-                Command::AddBus {
-                    bus: index,
-                    parent: parent.index,
-                },
-            ))
-            .map_err(|_| Error::QueueFull)?;
+        let command = Command::AddBus {
+            bus: index,
+            parent: parent.index,
+        };
+        self.push(&mut control, 0, command)?;
         control.buses.push((name.into(), parent.index));
         Ok(Bus {
             audio: self.clone(),

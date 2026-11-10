@@ -587,3 +587,34 @@ fn a_stop_for_a_play_still_waiting_for_a_slot_waits_with_it() {
     audio.update();
     assert!(!last.playing());
 }
+
+#[test]
+fn commands_far_in_the_future_never_hold_back_one_due_now() {
+    let flat = sound(&[0., 0.5], 1, RATE);
+    let click = blip();
+    let (audio, mut mixer) = Audio::offline(Config {
+        commands: 64,
+        ..unlimited()
+    })
+    .unwrap();
+    let voice = audio.play(&flat, Play::new().loop_frames(1..2)).unwrap();
+    mixer.frames(64);
+    // Far more than there's room for, an hour away: past some point
+    // they're refused, but none blocks what's due now.
+    let hour = Time(RATE as u64 * 3600);
+    let mut refused = 0;
+    for round in 0..4 {
+        for _ in 0..40 {
+            if audio.play(&click, Play::new().at(hour)).is_err() {
+                refused += 1;
+            }
+        }
+        mixer.frames(64 + round);
+    }
+    assert!(refused > 0, "all taken: no room was ever kept");
+    voice.stop().unwrap();
+    let out = left(&mixer.frames(1000));
+    assert_eq!(out[999], 0., "the stop never came");
+    audio.update();
+    assert!(!voice.playing());
+}
