@@ -3290,6 +3290,10 @@ pub struct Scene {
     /// A walk stopped at a child of a row or column (`stops_alone`), to
     /// lay out alone if its parent sees no change (`layout_alone`).
     alone_pending: bool,
+    /// A walk stopped above an absolute node since the last layout
+    /// (`absolute_stop`): such a stop may hold another inside it, so
+    /// `layout_alone` takes the deepest first.
+    absolute_alone: bool,
     /// The nodes `set_style_within` stopped walks at, for `relayout_alone`.
     held_alone: Vec<NodeId>,
     /// How deep the contents syncs running now nest (`sync_contents`).
@@ -3575,6 +3579,7 @@ impl Scene {
             walk_hints: Default::default(),
             layout_roots: Vec::new(),
             alone_pending: false,
+            absolute_alone: false,
             held_alone: Vec::new(),
             syncing: 0,
             overfull: Vec::new(),
@@ -6972,7 +6977,10 @@ impl Scene {
         self.node_mut(id).kind = kind;
         self.invalidate(id, if colour { PAINT | PAINT_ONLY } else { PAINT });
         if !layout_unchanged {
-            self.invalidate_layout(id);
+            match self.node(id).style.absolute && self.absolute_may_stop(id) {
+                true => self.invalidate_absolute_layout(id),
+                false => self.invalidate_layout(id),
+            }
         }
     }
     /// Show `image`, a GPU view's next frame (`crate::gpu_view`), where `id`
@@ -7027,7 +7035,10 @@ impl Scene {
         self.relative_count += usize::from(style.relative);
         let overflow_fade = style.fade_overflow;
         // It runs as its parent does until it says otherwise.
-        let rtl = self.node(parent).rtl;
+        let (rtl, parent_absolute) = {
+            let parent = self.node(parent);
+            (parent.rtl, parent.style.absolute)
+        };
         let way = Way {
             own: rtl,
             parent: rtl,
@@ -7118,7 +7129,10 @@ impl Scene {
             self.overflow_fades.push((id, [0.; 4]));
         }
         self.dirty.push(id);
-        self.invalidate_layout(parent);
+        match parent_absolute && self.absolute_may_stop(parent) {
+            true => self.invalidate_absolute_layout(parent),
+            false => self.invalidate_layout(parent),
+        }
         self.children_changed(parent);
         id
     }
@@ -7198,7 +7212,10 @@ impl Scene {
             inert.retain(|n| self.contains(*n));
             self.inert = inert;
         }
-        self.invalidate_layout(parent);
+        match self.node(parent).style.absolute && self.absolute_may_stop(parent) {
+            true => self.invalidate_absolute_layout(parent),
+            false => self.invalidate_layout(parent),
+        }
         // Children removed or moved: its kept ink union goes unless only
         // its tail changed (`KeptInk`).
         if self.kept_any.get() {
@@ -8626,6 +8643,7 @@ impl Scene {
         self.move_context = None;
         let node = self.node_mut(id);
         node.style = style;
+        let absolute = node.style.absolute;
         node.style_writes = node.style_writes.wrapping_add(1);
         if paints {
             self.damage_subtree(id);
@@ -8636,6 +8654,7 @@ impl Scene {
         }
         match HELD {
             true => self.invalidate_layout_with::<true>(id, false, true, owner),
+            false if absolute && self.absolute_may_stop(id) => self.invalidate_absolute_layout(id),
             false => self.invalidate_layout(id),
         }
         if containing {
@@ -9007,6 +9026,42 @@ impl Scene {
     fn invalidate_layout(&mut self, id: NodeId) {
         self.invalidate_layout_with::<false>(id, false, true, id);
     }
+    /// Whether absolute node `id`'s parent may be where its change's walk
+    /// stops (`absolute_stop`), by its own fields alone: laid out once, under
+    /// one question, and what it reads known or kept. Or, with a relative
+    /// block somewhere, an absolute box of a fixed size, which one may place
+    /// (`escaped_fixed`). Most absolute nodes' parents are refused here,
+    /// without the calls that walk.
+    #[inline(always)]
+    fn absolute_may_stop(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        node.measurement.is_some()
+            && node.parent.is_some_and(|parent| {
+                let parent = self.tree_node(parent);
+                parent.alternates.is_empty()
+                    && parent.sizes.is_empty()
+                    && parent.measurement.is_some()
+                    && !parent.special.any()
+                    && (parent.reads.get() & (READS_KNOWN | READS_KEPT) != 0
+                        || (self.relative_count != 0
+                            && parent.style.absolute
+                            && parent.style.width.is_some()
+                            && parent.style.height.is_some()))
+            })
+    }
+    /// `invalidate_layout` for absolute node `id`: one placed by its parent (a
+    /// thumb, a badge, a run of a row's text) changes nothing of its parent's
+    /// answer, so the walk stops there, to lay it out alone
+    /// (`absolute_stop`). Its callers ask only for absolute nodes, which
+    /// keeps every other change's walk as it was.
+    #[cold]
+    #[inline(never)]
+    fn invalidate_absolute_layout(&mut self, id: NodeId) {
+        match self.absolute_stop(id) {
+            Some(stop) => self.invalidate_layout_with::<true>(id, false, true, stop),
+            None => self.invalidate_layout(id),
+        }
+    }
     /// `invalidate_layout` for a change of a leaf's content (a text's): its
     /// ancestors may answer as they did, so the walk may stop at a child of
     /// a plain row or column (`alone_stop`) and lay that out alone.
@@ -9073,16 +9128,11 @@ impl Scene {
         let mut current = id;
         let mut first = true;
         let mut marked = 0u64;
-        // The node the walk just left, if it is absolute: nothing of its
-        // size reaches past `current`, its parent (`holds_absolute`).
-        let mut below_absolute = None;
         let (mut parent, mut ink) = loop {
             // Above `id`, a child of a plain row or column whose answers to
             // it may not have changed: laid out alone if they haven't
-            // (`relayout_alone`), its siblings left where they are. Or the
-            // parent of an absolute node the walk came up through.
-            let alone = (ALONE && current == stop)
-                || below_absolute.is_some_and(|child| self.holds_absolute(current, child));
+            // (`relayout_alone`), its siblings left where they are.
+            let alone = ALONE && current == stop;
             // Past `id`, a parent the tree led to (`tree_node_mut`).
             let node = if first {
                 self.node_mut(current)
@@ -9093,7 +9143,6 @@ impl Scene {
             // A boundary is laid out as one (`layout_roots`).
             let alone = alone && !boundary;
             let parent = node.parent;
-            below_absolute = node.style.absolute.then_some(current);
             let ink = node.bounds_valid.replace(0);
             node.dirty |= LAYOUT;
             if first && own {
@@ -9182,24 +9231,22 @@ impl Scene {
         {
             return false;
         }
-        // Absolute, placed by a relative block above (`place_escaped`): its
-        // parent leaves it out of its layout, and a size its style gives on
-        // both axes moves nothing of the block's. What it reads matters to
-        // no parent: laid out again under what it was asked, it stands.
-        if node.style.absolute && self.escaped_fixed(id) {
-            return true;
-        }
         // What it reads known, or kept by a walk that stopped here this pass
-        // already (several changes in one box, one frame).
+        // already (several changes in one box, one frame). Or neither, for an
+        // absolute box a relative block above places (`place_escaped`): its
+        // parent leaves it out of its layout, and a size its style gives on
+        // both axes moves nothing of the block's, so what it reads matters to
+        // no parent: laid out again under what it was asked, it stands.
         if node.reads.get() & (READS_KNOWN | READS_KEPT) == 0 {
-            return false;
+            return node.style.absolute && self.escaped_fixed(id);
         }
         // Absolute, placed by its parent: out of its flow, whatever its
         // layout, it stands where its size does (its place comes from its
         // size and its own insets, against its parent's box).
+        // Or placed by a relative block above, of a fixed size, its reads
+        // kept by a walk that stopped here this pass (as above).
         if node.style.absolute {
-            return self.containing_block(id).is_none()
-                && self.tree_node(parent).measurement.is_some();
+            return self.absolute_stops(id, parent);
         }
         let parent = self.tree_node(parent);
         matches!(
@@ -9215,6 +9262,18 @@ impl Scene {
             && parent.alternates.is_empty()
             && parent.sizes.is_empty()
     }
+    /// `stops_alone` for absolute node `id` under `parent`, out of its way:
+    /// placed by `parent`, laid out once, or placed by a relative block above
+    /// with a size its style gives on both axes.
+    #[cold]
+    #[inline(never)]
+    fn absolute_stops(&self, id: NodeId, parent: NodeId) -> bool {
+        let style = &self.tree_node(id).style;
+        match self.containing_block(id) {
+            None => self.tree_node(parent).measurement.is_some(),
+            Some(_) => style.width.is_some() && style.height.is_some(),
+        }
+    }
     /// Whether absolute node `id` is placed by a relative block above its
     /// parent (`containing_block`) and its style gives its width and height.
     #[cold]
@@ -9223,15 +9282,22 @@ impl Scene {
         let style = &self.tree_node(id).style;
         style.width.is_some() && style.height.is_some() && self.containing_block(id).is_some()
     }
-    /// Whether a walk up through absolute node `child` stops at `parent`, to
-    /// lay it out alone (`relayout_alone`): `child` is out of the flow, so its
-    /// size and place change nothing of `parent`'s own answer, which stands if
-    /// `parent` gives what it did. Not one its containing block above places
-    /// (`containing_block`): `parent` leaves it out of its layout.
+    /// Where the walk up from absolute node `id`'s change stops: its parent,
+    /// laid out alone (`relayout_alone`), as `id` is out of its flow and its
+    /// size and place change nothing of the parent's own answer, which
+    /// stands if it gives what it did. Not one its containing block above
+    /// places (`containing_block`): its parent leaves it out of its layout.
     #[cold]
     #[inline(never)]
-    fn holds_absolute(&self, parent: NodeId, child: NodeId) -> bool {
-        self.containing_block(child).is_none() && self.stops_alone(parent)
+    fn absolute_stop(&mut self, id: NodeId) -> Option<NodeId> {
+        let node = self.node(id);
+        node.measurement.as_ref()?;
+        let parent = node.parent?;
+        let stops = self.stops_alone(parent) && self.containing_block(id).is_none();
+        if stops {
+            self.absolute_alone = true;
+        }
+        stops.then_some(parent)
     }
     /// `id`, where a walk stopped (`stops_alone`), laid out again under the
     /// one constraint its parent asked it: if it gives what it did, and it
@@ -9255,7 +9321,14 @@ impl Scene {
             (false, true) => read,
             // A rail a block above places, of a fixed size: what it reads
             // decides nothing of its parent's (`stops_alone`).
-            (false, false) if node.style.absolute && self.escaped_fixed(id) => self.reads_bits(id),
+            (false, false)
+                if node.style.absolute
+                    && node.style.width.is_some()
+                    && node.style.height.is_some()
+                    && self.escaped_fixed(id) =>
+            {
+                self.reads_bits(id)
+            }
             (false, false) => return false,
         };
         // Sized along by its parent (grown or shrunk: flexed): how far it
@@ -9297,65 +9370,72 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn layout_alone(&mut self, report: &mut FrameReport) {
-        // A node marked under a parent that isn't: a stop, unless an earlier
-        // one found not to stand has marked its parent since.
-        let stops_here = |scene: &Self, id: NodeId| {
-            if !scene.contains(id) {
-                return None;
-            }
-            let node = scene.tree_node(id);
-            let parent = node.parent?;
-            (node.dirty & LAYOUT != 0
-                && scene.tree_node(parent).dirty & LAYOUT == 0
-                && !Self::is_layout_boundary(node))
-            .then_some(parent)
-        };
-        // The deepest first: one inside another (a text's row inside an
-        // absolute box laid out alone above) is laid out before the one
-        // around it measures it, and its arrange then leaves nothing marked.
-        let mut stops: Vec<(usize, NodeId)> = self
-            .dirty
-            .iter()
-            .filter(|id| stops_here(self, **id).is_some())
-            .map(|id| (self.depth(*id), *id))
-            .collect();
-        stops.sort_by_key(|(depth, id)| (std::cmp::Reverse(*depth), id.index, id.generation));
-        stops.dedup_by_key(|(_, id)| *id);
-        // Then, as found: what laying those out marked (each node once, as
-        // the queue holds it once).
-        let mut at = self.dirty.len();
-        let mut next = stops.into_iter().map(|(_, id)| id);
-        loop {
-            let id = match next.next() {
-                Some(id) => id,
-                None => match self.dirty.get(at) {
-                    Some(&id) => {
-                        at += 1;
-                        id
-                    }
-                    None => break,
-                },
-            };
-            let Some(parent) = stops_here(self, id) else {
-                continue;
-            };
-            if self.relayout_alone(id) {
-                let bounds = self.node(id).bounds;
-                self.arrange_from(id, bounds.x, bounds.y, report);
-            } else {
-                // Its ancestors, for a layout that takes what this pass
-                // measured of it (and what it read): it changed no more
-                // than the walk marked.
-                let mut above = Some(parent);
-                while let Some(ancestor) = above {
-                    self.invalidate_with(ancestor, LAYOUT, false, false);
-                    self.expire_this_pass(ancestor);
-                    above = self.node(ancestor).parent;
-                }
+        // Above an absolute node, one stop may be inside another (a text's
+        // row inside the box laid out alone): the deepest first, so that the
+        // one around it measures it as it now is, and its arrange then
+        // leaves nothing marked. Otherwise, as the queue holds them.
+        if std::mem::take(&mut self.absolute_alone) {
+            self.lay_out_deepest_stops(report);
+        }
+        let mut at = 0;
+        while let Some(&id) = self.dirty.get(at) {
+            at += 1;
+            if let Some(parent) = self.stop_marked(id) {
+                self.lay_out_stop(id, parent, report);
             }
         }
         self.alone_pending = false;
         self.held_alone.clear();
+    }
+    /// `layout_alone`'s stops, deepest first (`absolute_alone`).
+    #[cold]
+    #[inline(never)]
+    fn lay_out_deepest_stops(&mut self, report: &mut FrameReport) {
+        let mut stops: Vec<(usize, NodeId)> = self
+            .dirty
+            .iter()
+            .filter(|id| self.stop_marked(**id).is_some())
+            .map(|id| (self.depth(*id), *id))
+            .collect();
+        stops.sort_by_key(|(depth, id)| (std::cmp::Reverse(*depth), id.index, id.generation));
+        stops.dedup_by_key(|(_, id)| *id);
+        for (_, id) in stops {
+            if let Some(parent) = self.stop_marked(id) {
+                self.lay_out_stop(id, parent, report);
+            }
+        }
+    }
+    /// `id`'s parent, if `id` is a stop `layout_alone` lays out: marked
+    /// under a parent that isn't, neither the root nor a boundary.
+    #[inline]
+    fn stop_marked(&self, id: NodeId) -> Option<NodeId> {
+        if !self.contains(id) {
+            return None;
+        }
+        let node = self.tree_node(id);
+        let parent = node.parent?;
+        (node.dirty & LAYOUT != 0
+            && self.tree_node(parent).dirty & LAYOUT == 0
+            && !Self::is_layout_boundary(node))
+        .then_some(parent)
+    }
+    /// Stop `id` laid out alone and placed where it is, if it stands;
+    /// otherwise its ancestors marked, for a layout that takes what this
+    /// pass measured of it (and what it read): it changed no more than the
+    /// walk marked.
+    #[inline]
+    fn lay_out_stop(&mut self, id: NodeId, parent: NodeId, report: &mut FrameReport) {
+        if self.relayout_alone(id) {
+            let bounds = self.node(id).bounds;
+            self.arrange_from(id, bounds.x, bounds.y, report);
+        } else {
+            let mut above = Some(parent);
+            while let Some(ancestor) = above {
+                self.invalidate_with(ancestor, LAYOUT, false, false);
+                self.expire_this_pass(ancestor);
+                above = self.node(ancestor).parent;
+            }
+        }
     }
     /// `id`, around a child just found not to stand: what it answered this
     /// pass, if it was laid out alone too (a stop this one is inside, which
