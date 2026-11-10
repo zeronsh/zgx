@@ -153,9 +153,11 @@ fn main() {
         .expect("a frame with a layer shader reading the backdrop draws");
     opaque_box(&read, "a layer shader reading the backdrop");
 
-    // A content blur and a blend mode: the frame fails, naming it.
-    let blur = draw(|scene, id| scene.set_filter_blur(id, 4.)).unwrap_err();
-    assert!(blur.contains("content blur"), "{blur}");
+    // A content blur draws (d3d11_parity compares it with Direct3D 12's);
+    // a blend mode fails the frame, naming it.
+    let blurred =
+        draw(|scene, id| scene.set_filter_blur(id, 4.)).expect("a frame with a content blur draws");
+    assert_ne!(blurred, plain, "the content blur drew nothing");
     let blend = draw(|scene, id| scene.set_blend(id, BlendMode::Multiply)).unwrap_err();
     assert!(blend.contains("blend mode"), "{blend}");
 

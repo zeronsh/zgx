@@ -9,7 +9,8 @@
 //! a truncated text's blurred shadow reaching past its box, and a counter
 //! filled with a gradient (source-in and behind blends), and every
 //! ready-made shader fill (`zgx_fx`'s, its fragment stage compiled for each
-//! as an app's), at 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
+//! as an app's), and layer effects (content blurs, narrow to wide, and
+//! masks, alone, sliding and under a blur), at 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
 //! (Direct3D 12 pinned to it, docs/windows.md). `ZGX_D3D11` is read once a
 //! process, so the test runs itself again with it and compares that run's
 //! frames with its own.
@@ -561,14 +562,162 @@ fn layer_frames(scale: f32) -> Vec<Vec<u8>> {
 }
 
 /// Each frame's pixels, RGBA, as this process draws them at `scale`: the
-/// suite's view's, then the fills', then the layer shaders'.
+/// suite's view's, then the fills', the layer shaders' and the layer
+/// effects'.
 #[cfg(windows)]
 fn frames(scale: f32) -> Vec<Vec<u8>> {
     let mut all = suite_frames(scale);
     all.extend(fill_frames(scale));
     all.extend(layer_frames(scale));
+    all.extend(effect_frames(scale));
     all
 }
+
+/// Layer effects' cells (`EFFECT_NAMES`): a box holding a bar on striped
+/// content, blurred (narrow, wide enough to be averaged down, and changing
+/// sigma), masked by a ramp (still and sliding), and both, with nothing
+/// first and at a few moments after, as this process draws them at
+/// `scale`. Each must change its cell: drawn as painted in both processes,
+/// they would match.
+#[cfg(windows)]
+fn effect_frames(scale: f32) -> Vec<Vec<u8>> {
+    use std::sync::Arc;
+    use zgx::scene::*;
+    let (cell, columns) = (LAYER_CELL, LAYER_COLUMNS);
+    let size = (
+        cell.0 * columns as f32,
+        cell.1 * EFFECT_NAMES.len().div_ceil(columns) as f32,
+    );
+    // A ramp of 16 texels, clear to opaque, then a hard edge.
+    let ramp: Vec<u8> = (0..16u32)
+        .flat_map(|i| [255, 255, 255, (i * 17).min(255) as u8])
+        .chain([255, 255, 255, 0])
+        .collect();
+    let ramp = Arc::new(zgx::image::ImageData::new(17, 1, ramp).unwrap());
+    let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let mut scene = Scene::new(size.0, size.1);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    for i in 0..(size.1 / 12.).ceil() as usize {
+        let stripe = scene.append(
+            root,
+            NodeKind::Rect(if i % 2 == 0 {
+                Color(30, 60, 200, 255)
+            } else {
+                Color(230, 130, 30, 255)
+            }),
+            Style {
+                width: Some(size.0),
+                height: Some(12.),
+                ..Default::default()
+            },
+        );
+        scene.set_transform(
+            stripe,
+            Transform {
+                x: 0.,
+                y: i as f32 * 12.,
+            },
+        );
+    }
+    let boxes: Vec<NodeId> = (0..EFFECT_NAMES.len())
+        .map(|index| {
+            let id = scene.append(
+                root,
+                NodeKind::Panel {
+                    layout: Layout::Overlay,
+                    quad: QuadStyle {
+                        radius: 6.,
+                        fill: Color(20, 24, 32, 220),
+                        ..Default::default()
+                    },
+                },
+                Style {
+                    width: Some(56.),
+                    height: Some(40.),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(
+                id,
+                Transform {
+                    x: (index % columns) as f32 * cell.0 + 20.,
+                    y: (index / columns) as f32 * cell.1 + 16.,
+                },
+            );
+            let bar = scene.append(
+                id,
+                NodeKind::Rect(Color(250, 250, 250, 255)),
+                Style {
+                    width: Some(28.),
+                    height: Some(10.),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(bar, Transform { x: 14., y: 15. });
+            id
+        })
+        .collect();
+    let mut draw = |scene: &mut Scene| {
+        let report = scene.flush();
+        gpu.render(scene, &report.damage).unwrap();
+        gpu.readback().unwrap()
+    };
+    let plain = draw(&mut scene);
+    let mut all = vec![plain.clone()];
+    let mask = |offset: (f32, f32)| ImageMask {
+        image: ramp.clone(),
+        offset,
+        size: (34., 40.),
+    };
+    for moment in 0..3 {
+        let m = moment as f32;
+        for (index, &id) in boxes.iter().enumerate() {
+            match EFFECT_NAMES[index] {
+                "blur 1.5" => scene.set_filter_blur(id, 1.5),
+                "blur 6" => scene.set_filter_blur(id, 6.),
+                "blur 24" => scene.set_filter_blur(id, 24.),
+                "blur changing" => scene.set_filter_blur(id, 2. + 5. * m),
+                "mask" => scene.set_mask(id, Some(mask((4., 0.)))),
+                "mask sliding" => scene.set_mask(id, Some(mask((-6. + 9. * m, 0.)))),
+                "mask under blur" => {
+                    scene.set_filter_blur(id, 3. + m);
+                    scene.set_mask(id, Some(mask((2. * m, 0.))));
+                }
+                name => unreachable!("{name}"),
+            }
+        }
+        all.push(draw(&mut scene));
+    }
+    let width = (size.0 * scale) as usize;
+    for (index, name) in EFFECT_NAMES.iter().enumerate() {
+        let (x0, y0) = (
+            ((index % columns) as f32 * cell.0 * scale) as usize,
+            ((index / columns) as f32 * cell.1 * scale) as usize,
+        );
+        let (w, h) = ((cell.0 * scale) as usize, (cell.1 * scale) as usize);
+        let changed = all[1..].iter().all(|frame| {
+            (y0..y0 + h).any(|y| {
+                (x0..x0 + w)
+                    .any(|x| frame[(y * width + x) * 4..][..4] != plain[(y * width + x) * 4..][..4])
+            })
+        });
+        assert!(changed, "{name}: draws as painted at a moment");
+    }
+    all
+}
+/// The layer effects' cells (`effect_frames`), in their order.
+#[cfg(windows)]
+const EFFECT_NAMES: [&str; 7] = [
+    "blur 1.5",
+    "blur 6",
+    "blur 24",
+    "blur changing",
+    "mask",
+    "mask sliding",
+    "mask under blur",
+];
 
 /// The suite's view's frames at `scale`.
 #[cfg(windows)]
@@ -680,12 +829,19 @@ fn where_(frame: usize, scale: f32, pixel: usize) -> String {
             FILL_COLUMNS,
             fill_names(),
         )
-    } else {
+    } else if frame < FRAMES + 3 + 5 {
         (
             LAYER_CELL.0 * LAYER_COLUMNS as f32,
             LAYER_CELL,
             LAYER_COLUMNS,
             layer_names(),
+        )
+    } else {
+        (
+            LAYER_CELL.0 * LAYER_COLUMNS as f32,
+            LAYER_CELL,
+            LAYER_COLUMNS,
+            EFFECT_NAMES.map(String::from).to_vec(),
         )
     };
     let width = (width * scale) as usize;
