@@ -277,6 +277,7 @@ impl Device {
             }
         };
         particles.feed();
+        particles.pools.clear();
         let mut pass: Option<wgpu::ComputePass<'static>> = None;
         let mut events: Vec<(u32, [f32; 3], u32)> = Vec::new();
         // Sub-emitters before their parents: a parent's births land in
@@ -299,6 +300,11 @@ impl Device {
                 .pools
                 .entry(live.id)
                 .or_insert_with(|| make_pool(device, (update_layout, draw_layout), slots, on_gpu));
+            // Made for the other way of updating: made again, from this frame.
+            if pool.cpu.is_some() == on_gpu || pool.slots != slots {
+                *pool = make_pool(device, (update_layout, draw_layout), slots, on_gpu);
+            }
+            particles.pools.push((pool.slots, pool.cpu.is_some()));
             pool.used = index;
             pool.blend = live.emitter.blend;
             if pool.failed {

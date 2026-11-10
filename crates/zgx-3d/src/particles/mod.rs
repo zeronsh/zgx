@@ -424,6 +424,9 @@ pub(crate) struct Particles {
     /// Frames stepped: what particles' random numbers are drawn from, so a
     /// run of frames repeats whatever came before them.
     pub(crate) steps: u32,
+    /// The last frame's pools, each emitter's in order: its slots and
+    /// whether the CPU updated it (`World::particle_pools`, for tests).
+    pub(crate) pools: Vec<(u32, bool)>,
 }
 impl Particles {
     pub(crate) fn add(&mut self, mut emitter: Emitter) -> EmitterId {

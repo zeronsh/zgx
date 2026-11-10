@@ -428,3 +428,25 @@ fn a_pool_is_refused_past_the_devices_limits_and_counts_against_the_cap() {
     assert!(world.add_buffer(BufferDesc::bytes(200_000)).is_ok());
     drop(buffer);
 }
+
+#[test]
+fn a_pool_follows_the_way_its_particles_are_updated_from_the_next_frame() {
+    let world = world();
+    world
+        .add_emitter(Emitter::new(20_000).rate(10_000.))
+        .unwrap();
+    let Some(mut frames) = Frames::new(&world) else {
+        return;
+    };
+    frames.ready(&world, 0.);
+    frames.draw(1. / 60.);
+    assert_eq!(world.particle_pools(), [(20_000, false)]);
+    // On the CPU: its pool is the CPU's, at most CPU_PARTICLES, in the very
+    // next frame.
+    world.set_particles_on_cpu(true);
+    frames.draw(2. / 60.);
+    assert_eq!(world.particle_pools(), [(CPU_PARTICLES, true)]);
+    world.set_particles_on_cpu(false);
+    frames.draw(3. / 60.);
+    assert_eq!(world.particle_pools(), [(20_000, false)]);
+}

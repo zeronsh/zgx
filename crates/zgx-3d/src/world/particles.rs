@@ -122,6 +122,17 @@ impl World {
             .is_some_and(|p| p.ready)
     }
 
+    /// The last frame's pools, each emitter's in the order they're updated:
+    /// its slots and whether the CPU updated it. For tests.
+    #[doc(hidden)]
+    pub fn particle_pools(&self) -> Vec<(u32, bool)> {
+        self.inner
+            .borrow()
+            .particles
+            .as_ref()
+            .map_or_else(Vec::new, |p| p.pools.clone())
+    }
+
     /// Update particles on the CPU even where the device computes, as tier
     /// B does: for tests comparing the two.
     #[doc(hidden)]
