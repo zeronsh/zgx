@@ -10054,7 +10054,16 @@ impl GpuRenderer {
             }
             let catch_up = catch_up.map(|(_, instances)| instances);
             let stats = self.render_d3d11(
-                quads, draws, &regions, &copies, catch_up, shown, &clips, &points, stats,
+                quads,
+                draws,
+                &regions,
+                &copies,
+                catch_up,
+                shown,
+                &clips,
+                &points,
+                (&effect_jobs, effect_first),
+                stats,
             )?;
             self.frame_points = points;
             return Ok(stats);
@@ -10859,9 +10868,9 @@ impl GpuRenderer {
     ///   so what's over it stays legible. A box with no colour of its own
     ///   keeps the frame's error.
     ///
-    /// Content blurs, masks, blend modes and image effects keep the error:
-    /// without them content meant hidden would show, or an inverted icon
-    /// or a blended text could read as something else.
+    /// Blend modes and image effects keep the error: without them an
+    /// inverted icon or a blended text could read as something else.
+    /// Content blurs and masks draw (`d3d11_effects`).
     #[cfg(d3d11)]
     fn d3d11_leave_out(
         &self,
@@ -10914,14 +10923,18 @@ impl GpuRenderer {
         if !batches.is_empty() {
             return Some("backdrop blur over a box with no colour of its own");
         }
-        if !effect_jobs.is_empty() {
-            return Some("content blur or mask");
-        }
+        // Content blurs and masks draw (`d3d11_effects`); drop shadows' jobs
+        // are left out (`d3d11_leave_out`).
+        debug_assert!(
+            effect_jobs
+                .iter()
+                .all(|job| job.purpose == effects::Purpose::Content)
+        );
         draws
             .iter()
             .filter(|draw| draw.end > draw.start)
             .find_map(|draw| match (draw.source, draw.shading) {
-                (TextureSource::Image(effects::EFFECT_ATLAS), _) => Some("content blur or mask"),
+                (TextureSource::Image(effects::EFFECT_ATLAS), _) => None,
                 (TextureSource::Image(_) | TextureSource::Pixelated(_), _)
                     if self.d3d11_texture(draw.source).is_none() =>
                 {
@@ -10963,6 +10976,98 @@ impl GpuRenderer {
         };
         surface?.srv.as_ref()
     }
+    /// Layer effects' passes with Direct3D 11 (`d3d11_frame::Device::effects`):
+    /// `jobs`' quads at instance `first` on, as `effect_quads` lays them out,
+    /// across into the scratch atlas, then down into the effect atlas, which
+    /// composites as an image does. The atlas and its scratch twin are made
+    /// at the shell's size, again when it is made anew.
+    #[cfg(d3d11)]
+    fn d3d11_effects(
+        &mut self,
+        jobs: &[effects::Job],
+        first: u32,
+        vertices: &windows::Win32::Graphics::Direct3D11::ID3D11Buffer,
+        stats: &mut GpuStats,
+    ) -> Result<(), GpuError> {
+        let missing = || GpuError("Direct3D 11 has no texels for a layer an effect reads".into());
+        let atlas = self.effects.as_ref().expect("planned with its jobs");
+        let state = self.d3d11.as_mut().expect("checked by the caller");
+        let device = state.device.clone();
+        let (width, height) = (atlas.output.width(), atlas.output.height());
+        if !state.textures.contains_key(&atlas.output) {
+            state
+                .textures
+                .insert(atlas.output.clone(), device.surface(width, height, true)?);
+        }
+        if state
+            .effects
+            .as_ref()
+            .is_none_or(|(scratch, ..)| *scratch != atlas.scratch)
+        {
+            state.effects = Some((
+                atlas.scratch.clone(),
+                device.surface(width, height, true)?,
+                device.surface(1, 1, false)?,
+            ));
+        }
+        let state = self.d3d11.as_ref().expect("checked by the caller");
+        let (_, scratch, blank) = state.effects.as_ref().expect("made above");
+        let output = &state.textures[&atlas.output];
+        let srv = |surface: &'_ d3d11_frame::Surface| surface.srv.clone();
+        let blank = srv(blank).expect("sampled");
+        let scratch_srv = srv(scratch).expect("sampled");
+        let mut views = Vec::new();
+        for down in [false, true] {
+            for job in jobs.iter().filter(|job| down || job.across.is_some()) {
+                let source = match down && job.across.is_some() {
+                    true => Some(scratch_srv.clone()),
+                    false => state
+                        .layers
+                        .get(&self.layers.get(&job.node).ok_or_else(missing)?.texture)
+                        .and_then(srv),
+                };
+                // A mask without texels masks with the blank one, as wgpu's.
+                let mask = match (down, job.mask) {
+                    (true, Some(id)) => self
+                        .images
+                        .get(&id)
+                        .and_then(|entry| entry.2.as_ref())
+                        .and_then(|texture| state.textures.get(texture))
+                        .and_then(srv),
+                    _ => None,
+                };
+                views.push((
+                    down,
+                    source.ok_or_else(missing)?,
+                    mask.unwrap_or(blank.clone()),
+                ));
+            }
+        }
+        let mut passes: Vec<d3d11_frame::EffectPass<'_>> = Vec::new();
+        for (index, (down, source, mask)) in views.iter().enumerate() {
+            let target = if *down { output } else { scratch };
+            if passes.last().is_none_or(|pass| pass.down != *down) {
+                passes.push(d3d11_frame::EffectPass {
+                    target,
+                    down: *down,
+                    draws: Vec::new(),
+                });
+            }
+            let pass = passes.last_mut().expect("pushed above");
+            pass.draws.push(d3d11_frame::EffectDraw {
+                source,
+                mask,
+                instance: first + index as u32,
+            });
+        }
+        for pass in &passes {
+            stats.render_passes += 1;
+            stats.effect_passes += 1;
+            stats.draw_calls += pass.draws.len();
+        }
+        device.effects(&passes, vertices);
+        Ok(())
+    }
     /// Record this frame with Direct3D 11 (`d3d11_frame`): the pass the
     /// wgpu path records for a frame of plain draws, as `render_direct`
     /// records it with Metal.
@@ -10978,6 +11083,7 @@ impl GpuRenderer {
         shown: Option<usize>,
         clips: &[Region],
         points: &[[f32; 2]],
+        (effect_jobs, effect_first): (&[effects::Job], u32),
         mut stats: GpuStats,
     ) -> Result<GpuStats, GpuError> {
         let _span = zgx::profile::span(zgx::profile::Phase::Encode);
@@ -10997,6 +11103,11 @@ impl GpuRenderer {
         self.vertex_capacity = state.ring.bytes();
         state.set_frame(self.viewport_values, bytemuck::cast_slice(clips))?;
         state.set_points(bytemuck::cast_slice(points))?;
+        // Effect slots drawn first, each pass of them into its atlas.
+        if !effect_jobs.is_empty() {
+            self.d3d11_effects(effect_jobs, effect_first, &vertices, &mut stats)?;
+        }
+        let state = self.d3d11.as_mut().expect("checked by the caller");
         // Offscreen, the retained target is the renderer's own (and its
         // spare, for scroll copies), made at its size.
         let presenting = self.layer_present.is_some();
