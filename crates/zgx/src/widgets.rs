@@ -4330,6 +4330,20 @@ impl Ui {
         self.try_dispatch_with_modifiers(event, modifiers)
             .unwrap_or_else(|error| panic!("{error}"))
     }
+    /// The pointer passed `x, y` on its way to its next move, which a host
+    /// heard in one turn with it and handles alone (a platform's moves,
+    /// folded): hover goes there, so what it enters and leaves hears it, as
+    /// it would from a move of its own; nothing else does (no move is
+    /// dispatched there). A cell crossed between two moves of a turn is
+    /// entered and left.
+    pub fn try_pointer_passed(&mut self, x: f32, y: f32) -> Result<(), LayoutFeedbackError> {
+        self.try_prepare_frame()?;
+        let _span = crate::profile::span(crate::profile::Phase::Input);
+        self.storage.dispatching.set(true);
+        self.input.pointer_passed(&self.scene, x, y);
+        self.storage.dispatching.set(false);
+        Ok(())
+    }
     /// Fallible counterpart of `dispatch_with_modifiers`; failed geometry
     /// preparation leaves the event and click sequence unprocessed.
     pub fn try_dispatch_with_modifiers(
