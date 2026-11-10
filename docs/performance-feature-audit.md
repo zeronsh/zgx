@@ -178,6 +178,20 @@ an M5 Max, tiles cost less at full rate (the window server's CPU 1.3 points
 and the app's 0.8 lower, for 4–7 mW more GPU). At 60 Hz they cost more of
 both (above), and frames below the display's rate stay on tiles.
 
+**What each path costs the main thread, per frame (M5, Nov 10).** The
+`frame_clock` window, a box moving every frame at 520 × 240, measured by
+`thread_selfcounts` around the present's steps:
+
+- **Tiles:** about 296K instructions a frame: paint 15.5K, encode 70K, submit 18K, present 175–200K. `show_plain`'s Core Animation transaction is about 142K of the present, the host's `pre_present_notify` about 15K.
+- **Drawables (`ZGX_PRESENT_DRAWABLE=1`):** about 200K. Paint rises to 74.5K, because `nextDrawable` moves into it, about 58K and 2–2.7 ms of wall time spent waiting. Encode is 77K, submit 29K, present 19–27K.
+- **The platform's floor:** a minimal CAMetalLayer app that clears and presents a drawable each frame (`nextDrawable`, one pass, `presentDrawable`, commit) takes 147K.
+
+These count one thread's instructions, not the process's or the window
+server's CPU, nor the GPU's energy, which the comparisons above weigh.
+That is why tiles stay the default. Core Animation's commit floor is its
+own: a transaction swapping one layer's `contents` costs about 78 µs, any
+small non-empty one about 48 µs, an empty one 12.5 µs.
+
 Drawables are paced by the view's own display link and kept in phase
 (skipping a tick when frames start to wait a refresh for a drawable), from
 a pool of two. Their frame shows 16 ms after it starts, against 27–32 before
