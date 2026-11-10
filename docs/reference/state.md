@@ -14,6 +14,8 @@ ui.sort<T>(list: { T }, by: string | (item: T) -> any, descending: boolean?) -> 
 ui.number(n: number, opts: NumberOptions?) -> string
 ui.json.encode(value: any, opts: { pretty: boolean? }?) -> string
 ui.json.decode(text: string) -> any
+ui.json.data(text: string) -> JsonData
+ui.json.load(path: string) -> JsonData
 ui.ref() -> Ref
 ui.component<P>(build: (props: P) -> Node) -> (props: P) -> Node
 ui.on_mount(f: () -> ...unknown) -> ()
@@ -491,6 +493,8 @@ return ui.list {
 - `ui.number(n, opts)` formats numbers as `Intl.NumberFormat` does: `ui.number(1234.5)` is "1,234.50"; `decimals`, `style = "percent"` (`n` a fraction: 0.05 is "5%"), `notation = "compact"` ("1.2K", "3.4M", "5.6B", "7.8T"), `sign` (`"auto"`, `"always"`, `"except_zero"`, `"never"`), `grouping` (thousands separators, on) and `currency` (`"$"`, before the number).
 
 - `ui.json.encode(value, { pretty })` writes what state could hold as JSON (lists as arrays, tables as objects, `ui.null` as null), and `ui.json.decode(text)` gives back tables the script may change, failing with where the JSON is wrong: a document saved and opened with `ui.write_file` and `ui.read_file`.
+- `ui.json.data(text)` reads the same JSON read-only, made as the script reads it: a list or object is a `JsonData`, whose parts are made the first time they're read, so data handed whole to `ui.state`, `ui.list { data = … }` or `ui.json.encode` is its value again without ever becoming tables, and a list makes tables for the rows it shows alone. Read it as `decode`'s tables: index it (`data.messages[1].author`), take `#`, and loop **`for k, v in data do`**, not `pairs` or `ipairs`; a part read twice is the same (`==`). A part of up to 512 values (a row, a paragraph's runs), or one holding plain values alone (a series of numbers, however long), is a read-only table, made whole the first time it's read, so a loop reading every row or point costs what `decode` would and no more; lists and objects of larger lists and objects are `JsonData` again (each read of one is a call, some 60 ns where a table's is 3). `JsonData` isn't a table: `pairs`, `ipairs`, `next`, `rawget` and the `table` library fail on it with a type error (`table expected, got JsonData`), never as an empty loop, and the lint's `json-data-raw` points at them; take `decode`'s tables for those. A write fails, naming `decode` as the way to tables a script changes. Nulls among a list's items stay in its value (in `decode`'s tables they are holes, which state can't hold).
+- `ui.json.load(path)` is `ui.json.data` of a file, found as `require` finds a module: `"./feed.json"` beside the script loading it, `"@alias/…"`, a bare path from the app's directory, `.json` when it has no extension, and only inside the app's directory or a package (a bundle carries its `.json` files). It is read once per load, and watched with the scripts. Prefer it to a module returning a long string (`return [==[…]==]`), which Luau compiles and copies before it is read.
 
 ## Refs
 

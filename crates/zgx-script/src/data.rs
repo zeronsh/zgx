@@ -347,6 +347,17 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     let json = lua.create_table()?;
     json.set("encode", lua.create_function(encode)?)?;
     json.set("decode", lua.create_function(decode)?)?;
+    json.set(
+        "data",
+        lua.create_function(|lua, text: mlua::LuaString| {
+            let value = crate::json::parse_bytes(&text.as_bytes())
+                .map_err(|e| mlua::Error::runtime(format!("ui.json.data: {e}")))?;
+            crate::json::data(lua, &value)
+        })?,
+    )?;
+    if let Some(load) = lua.app_data_ref::<crate::json::Load>() {
+        json.set("load", load.0.clone())?;
+    }
     json.set_readonly(true);
     ui.set("json", json)?;
     let sort_by_keys =

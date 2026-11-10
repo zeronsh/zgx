@@ -35,6 +35,8 @@
 //! - `computed-markdown-rewrite`: `ui.markdown` given a computed's text, or a
 //!   rewrite of a state's text in a computed: each chunk rewrites the whole
 //!   reply and the parser can't follow its appends.
+//! - `json-data-raw`: `ui.json.data`'s (or `load`'s) lists and objects,
+//!   which aren't tables, given to `pairs`, `ipairs`, `next` or `table.*`.
 //! - `list-key`: a positional `ui.list` over a list the file removes from or
 //!   inserts into: every row after the change is written again.
 //! - `list-measured`: a `ui.list` of fixed heights whose rows wrap text: a
@@ -158,6 +160,10 @@ pub const RULES: &[(&str, &str)] = &[
     (
         "computed-markdown-rewrite",
         "ui.markdown given text a computed rewrites whole each chunk",
+    ),
+    (
+        "json-data-raw",
+        "ui.json.data's lists and objects given to pairs, ipairs, next or the table library",
     ),
     (
         "list-key",
@@ -631,6 +637,7 @@ fn lint_tokens(file: &Path, tokens: &[Token], comments: &[(u32, String)]) -> Vec
     linter.run();
     linter.list_key();
     linter.markdown_computed_text();
+    linter.json_data_raw();
     linter.component_id();
     linter.list_measured();
     linter.reserved_system_key();
@@ -2104,6 +2111,58 @@ impl Linter<'_> {
             }
         }
     }
+    /// `ui.json.data`'s (or `load`'s) list or object, or a part of one, given
+    /// to what takes a table: `pairs`, `ipairs`, `next`, `rawget`, `rawlen`,
+    /// the `table` library. It isn't one, and fails there.
+    fn json_data_raw(&mut self) {
+        let made = |j: usize| {
+            self.is(j, "ui")
+                && self.is(j + 1, ".")
+                && self.is(j + 2, "json")
+                && self.is(j + 3, ".")
+                && (self.is(j + 4, "data") || self.is(j + 4, "load"))
+                && self.is(j + 5, "(")
+        };
+        let handles: Vec<String> = (0..self.tokens.len())
+            .filter(|&j| self.is(j + 1, "=") && (made(j + 2) || self.is(j + 2, "(") && made(j + 3)))
+            .filter_map(|j| self.name(j).map(str::to_owned))
+            .collect();
+        if handles.is_empty() {
+            return;
+        }
+        for at in 0..self.tokens.len() {
+            let arg = if self.is(at, "table")
+                && self.is(at + 1, ".")
+                && self.name(at + 2).is_some()
+                && self.is(at + 3, "(")
+            {
+                at + 4
+            } else if ["pairs", "ipairs", "next", "rawget", "rawlen"]
+                .iter()
+                .any(|f| self.is(at, f))
+                && self.is(at + 1, "(")
+                && !self.is(at.wrapping_sub(1), ".")
+                && !self.is(at.wrapping_sub(1), ":")
+            {
+                at + 2
+            } else {
+                continue;
+            };
+            if self
+                .name(arg)
+                .is_some_and(|name| handles.iter().any(|h| h == name))
+            {
+                self.report(
+                    at,
+                    "json-data-raw",
+                    "`ui.json.data`'s lists and objects aren't tables, so this fails on one: loop \
+                     `for k, v in data do` (and index it, or take `#`), or take \
+                     `ui.json.decode`'s tables for `pairs`, `ipairs` and the `table` library."
+                        .into(),
+                );
+            }
+        }
+    }
     /// Whether the call opening at `open` has a first argument that calls
     /// something on a state's read, rather than being that read alone.
     fn rewrites_a_read(&self, open: usize) -> bool {
@@ -2605,6 +2664,34 @@ return ui.column {
 }
 "##;
         assert_eq!(rules(source), vec![]);
+    }
+
+    #[test]
+    fn json_data_read_raw_is_reported() {
+        let source = r##"
+local data = ui.json.data(text)
+local feed = (ui.json.load("./feed.json") :: any)
+local tags = table.concat(data.tags, ", ")
+local first = next(feed)
+local copy = table.clone(feed.items)
+local n = #data.items -- fine
+for _, item in feed.items do end -- fine
+for _, item in ipairs(feed.items) do end
+for k in pairs(data) do end
+local decoded = ui.json.decode(text)
+local joined = table.concat(decoded.tags) -- fine: decode's tables
+local mine = {} table.insert(mine, data.n) -- fine: into a table of its own
+"##;
+        assert_eq!(
+            rules(source),
+            vec![
+                (4, "json-data-raw".into()),
+                (5, "json-data-raw".into()),
+                (6, "json-data-raw".into()),
+                (9, "json-data-raw".into()),
+                (10, "json-data-raw".into())
+            ]
+        );
     }
 
     #[test]

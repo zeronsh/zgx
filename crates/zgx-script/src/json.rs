@@ -3,6 +3,7 @@
 //! (10,000 messages' `id` share one).
 
 use crate::value::Value;
+use mlua::{AnyUserData, Lua, MetaMethod, Table};
 use rustc_hash::FxHashMap;
 use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::rc::Rc;
@@ -123,6 +124,211 @@ impl<'de> Visitor<'de> for Key<'_> {
     fn visit_str<E>(self, key: &str) -> Result<Rc<str>, E> {
         Ok(self.0.get(key))
     }
+}
+
+/// What a write to `ui.json.data`'s lists and objects says.
+const READ_ONLY: &str = "ui.json.data's lists and objects are read-only: \
+                         ui.json.decode(text) gives tables a script can change";
+
+/// `ui.json.data`'s lists and objects (`JsonData` to scripts): a userdata
+/// over the value, read through `__index`, `__len`, `__iter` (`for k, v in
+/// data do`) and `__eq`, so data handed on whole (to `ui.state`, a list's
+/// `data`) is never made into tables at all, and is its value again without
+/// a walk (`value::convert`). Its parts are made as they are read and kept
+/// in its user value by key, so a part read twice is the same. Not a table,
+/// it fails `pairs`, `ipairs`, `next`, `rawget` and the `table` library
+/// with a type error, rather than reading as empty.
+pub(crate) struct Data(pub(crate) Value);
+
+/// `ui.json.load` of a VM, resolving as its `require` does.
+pub(crate) struct Load(pub mlua::Function);
+
+/// `__iter`'s step, one per VM.
+struct Step(mlua::Function);
+
+impl mlua::UserData for Data {
+    fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+        fields.add_meta_field(MetaMethod::Type, "JsonData");
+    }
+    fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+        methods.add_meta_function(
+            MetaMethod::Index,
+            |lua, (data, key): (AnyUserData, mlua::Value)| index(lua, &data, key),
+        );
+        methods.add_meta_method(MetaMethod::Len, |_, data, ()| {
+            Ok(match &data.0 {
+                Value::List(items) => items.len(),
+                _ => 0,
+            })
+        });
+        methods.add_meta_function(MetaMethod::Iter, |lua, data: AnyUserData| {
+            Ok((step(lua)?, data, mlua::Value::Nil))
+        });
+        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (AnyUserData, AnyUserData)| {
+            let (a, b) = (a.borrow::<Data>()?, b.borrow::<Data>()?);
+            let id = crate::value::identity(&a.0);
+            Ok(id != 0 && id == crate::value::identity(&b.0))
+        });
+        methods.add_meta_function(MetaMethod::NewIndex, |_, ()| {
+            Err::<(), _>(mlua::Error::runtime(READ_ONLY))
+        });
+    }
+}
+
+/// `value` for a script to read: a list or object as `Data`, else as
+/// itself.
+pub(crate) fn data(lua: &Lua, value: &Value) -> mlua::Result<mlua::Value> {
+    match value {
+        Value::List(_) | Value::Map(_) => lua
+            .create_userdata(Data(value.clone()))
+            .map(mlua::Value::UserData),
+        _ => crate::value::to_lua(value, lua, true),
+    }
+}
+
+/// `data[key]`: an item (by its position) or a field, a list or object
+/// made the first time it is read and kept.
+fn index(lua: &Lua, data: &AnyUserData, key: mlua::Value) -> mlua::Result<mlua::Value> {
+    let part = {
+        let this = data.borrow::<Data>()?;
+        let part = match (&this.0, &key) {
+            (Value::List(items), mlua::Value::Integer(i)) => usize::try_from(*i)
+                .ok()
+                .and_then(|i| items.get(i.checked_sub(1)?)),
+            (Value::List(items), mlua::Value::Number(n)) if n.fract() == 0. && *n >= 1. => {
+                items.get(*n as usize - 1)
+            }
+            (Value::Map(_), mlua::Value::String(name)) => match name.to_str() {
+                Ok(name) => this.0.field(&name),
+                Err(_) => None,
+            },
+            _ => None,
+        };
+        match part {
+            None => return Ok(mlua::Value::Nil),
+            Some(part @ (Value::List(_) | Value::Map(_))) => part.clone(),
+            Some(part) => return crate::value::to_lua(part, lua, true),
+        }
+    };
+    let kept: Option<Table> = data.user_value()?;
+    if let Some(kept) = &kept
+        && let found @ (mlua::Value::UserData(_) | mlua::Value::Table(_)) =
+            kept.raw_get::<mlua::Value>(&key)?
+    {
+        return Ok(found);
+    }
+    let made = data_part(lua, &part)?;
+    let kept = match kept {
+        Some(kept) => kept,
+        None => {
+            let kept = lua.create_table()?;
+            data.set_user_value(&kept)?;
+            kept
+        }
+    };
+    kept.raw_set(key, &made)?;
+    Ok(made)
+}
+/// A part as a script reads it: as a read-only table, made whole at once,
+/// when it is small (a row, a paragraph's runs) or holds plain values alone
+/// (a series of numbers, of any length): its items then read at a table's
+/// speed, where each `Data` read is a call (60-75 ns in a release build,
+/// against a table's 2-4). Lists and objects of lists and objects stay
+/// `Data`, their parts made as they are read.
+fn data_part(lua: &Lua, part: &Value) -> mlua::Result<mlua::Value> {
+    if small(part) || plain(part) {
+        return crate::value::to_lua(part, lua, true);
+    }
+    lua.create_userdata(Data(part.clone()))
+        .map(mlua::Value::UserData)
+}
+/// Whether `value` holds no list or object: plain values alone.
+fn plain(value: &Value) -> bool {
+    match value {
+        Value::List(items) => items
+            .iter()
+            .all(|v| !matches!(v, Value::List(_) | Value::Map(_))),
+        Value::Map(fields) => fields
+            .iter()
+            .all(|(_, v)| !matches!(v, Value::List(_) | Value::Map(_))),
+        _ => true,
+    }
+}
+/// The most values a part made a table holds.
+const TABLE_UP_TO: usize = 512;
+/// Whether `value` holds `TABLE_UP_TO` values or fewer, all the way down.
+fn small(value: &Value) -> bool {
+    fn count(value: &Value, left: &mut usize) -> bool {
+        let children: &mut dyn Iterator<Item = &Value> = match value {
+            Value::List(items) => &mut items.iter(),
+            Value::Map(fields) => &mut fields.iter().map(|(_, v)| v),
+            _ => return true,
+        };
+        for child in children {
+            if *left == 0 {
+                return false;
+            }
+            *left -= 1;
+            if !count(child, left) {
+                return false;
+            }
+        }
+        true
+    }
+    count(value, &mut TABLE_UP_TO.clone())
+}
+
+/// The VM's `__iter` step: `(data, key)` to the next key and its value,
+/// past nulls (as a table holds none).
+fn step(lua: &Lua) -> mlua::Result<mlua::Function> {
+    if let Some(step) = lua.app_data_ref::<Step>() {
+        return Ok(step.0.clone());
+    }
+    let step = lua.create_function(|lua, (data, key): (AnyUserData, mlua::Value)| {
+        let next = {
+            let this = data.borrow::<Data>()?;
+            let mut at = match (&this.0, &key) {
+                (_, mlua::Value::Nil) => 0,
+                (Value::List(_), mlua::Value::Integer(i)) => *i as usize,
+                (Value::List(_), mlua::Value::Number(n)) => *n as usize,
+                (Value::Map(fields), mlua::Value::String(name)) => {
+                    let name = name.to_str()?;
+                    match fields.binary_search_by(|(k, _)| (**k).cmp(&*name)) {
+                        Ok(i) => i + 1,
+                        Err(_) => return Err(mlua::Error::runtime("invalid key to iterate")),
+                    }
+                }
+                _ => return Err(mlua::Error::runtime("invalid key to iterate")),
+            };
+            match &this.0 {
+                Value::List(items) => {
+                    while items.get(at).is_some_and(|v| matches!(v, Value::Nil)) {
+                        at += 1;
+                    }
+                    (at < items.len()).then(|| mlua::Value::Integer(at as i64 + 1))
+                }
+                Value::Map(fields) => {
+                    while fields.get(at).is_some_and(|(_, v)| matches!(v, Value::Nil)) {
+                        at += 1;
+                    }
+                    match fields.get(at) {
+                        Some((name, _)) => Some(mlua::Value::String(lua.create_string(&**name)?)),
+                        None => None,
+                    }
+                }
+                _ => None,
+            }
+        };
+        match next {
+            Some(key) => {
+                let value = index(lua, &data, key.clone())?;
+                Ok((key, value))
+            }
+            None => Ok((mlua::Value::Nil, mlua::Value::Nil)),
+        }
+    })?;
+    lua.set_app_data(Step(step.clone()));
+    Ok(step)
 }
 
 #[cfg(test)]

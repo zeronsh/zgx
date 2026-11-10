@@ -980,6 +980,10 @@ fn convert_in(value: mlua::Value, old: Option<&Value>, depth: u32) -> mlua::Resu
         },
         mlua::Value::UserData(ud) if ud.is::<State>() => ud.borrow::<State>()?.0.get(),
         mlua::Value::UserData(ud) if ud.is::<ReadState>() => ud.borrow::<ReadState>()?.0.0.get(),
+        // `ui.json.data`'s list or object: its value, never walked.
+        mlua::Value::UserData(ud) if ud.is::<crate::json::Data>() => {
+            ud.borrow::<crate::json::Data>()?.0.clone()
+        }
         // `ui.raw(value, reason)` is its value; only the design lint looks.
         mlua::Value::UserData(ud) if ud.is::<crate::design::RawUd>() => {
             ud.borrow::<crate::design::RawUd>()?.0.clone()

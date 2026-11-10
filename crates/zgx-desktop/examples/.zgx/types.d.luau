@@ -990,6 +990,17 @@ declare extern type Bitmap with
 	w: number
 	h: number
 end
+-- `ui.json.data`'s (and `load`'s) list or object, read-only, its parts made
+-- as they are read (one of up to 512 values, or of plain values alone, a
+-- read-only table): index it, take `#`, and loop `for k, v in data do`. Not
+-- a table, it fails `pairs`, `ipairs`, `next` and the `table` library
+-- (`ui.json.decode` gives tables). Handed to state or a list, it's never
+-- made into tables.
+declare extern type JsonData with
+	[string | number]: any
+	function __iter(self): ((JsonData, any) -> (any, any), JsonData)
+	function __len(self): number
+end
 declare extern type Shader with
 end
 export type ShaderPass = {
@@ -22044,6 +22055,12 @@ declare ui: {
 	json: {
 		encode: (value: any, opts: { pretty: boolean? }?) -> string,
 		decode: (text: string) -> any,
+		-- The JSON `text` read-only (`JsonData`), its parts made as they are
+		-- read: a document handed to `ui.state` or a list whole is never
+		-- made into tables. `load` reads a file, found as `require` finds a
+		-- module ("./feed.json"; `.json` when it has no extension).
+		data: (text: string) -> JsonData,
+		load: (path: string) -> JsonData,
 	},
 	-- `n` formatted, as `Intl.NumberFormat` would: `ui.number(1234.5)` is
 	-- "1,234.50", `{ style = "percent" }` takes a fraction (0.05 is "5%"),
