@@ -4774,13 +4774,77 @@ pub struct GpuRenderer {
     backdrop_walk: Option<Box<BackdropWalk>>,
 }
 /// What a window frame's walk grows its damage through (kept for the next),
-/// and that damage grown, for its `render_flat` (readers alone, no blur).
+/// and that damage grown, for its `render_flat` (readers alone, no blur), with
+/// the frame it is for (`GpuRenderer::frame`): taken in that frame alone.
 #[derive(Default)]
 struct BackdropWalk {
     filters: Vec<(Rect, f32)>,
     grown: Option<Vec<Rect>>,
+    frame: u64,
 }
 impl GpuRenderer {
+    #[inline(never)]
+    fn filter_damage(
+        &mut self,
+        scene: &Scene,
+        items: &[zgx::scene::PaintItem<'_>],
+        damage: &[Rect],
+        viewport: Rect,
+        readers: bool,
+    ) -> Vec<Rect> {
+        // (Patching draws nothing: its damage is the window's.) Readers
+        // alone: grown by the walk already, over all they can read.
+        if readers
+            && !self.in_layer
+            && let Some(grown) = self
+                .backdrop_walk
+                .as_mut()
+                .filter(|walk| walk.frame == self.frame)
+                .and_then(|walk| walk.grown.take())
+        {
+            grown
+        } else {
+            let dependencies: Vec<_> = items
+                .iter()
+                .filter_map(|item| {
+                    if readers
+                        && item.isolated
+                        && item.effects.opacity > 0.
+                        && let Some((area, _)) = self.backdrop_read(scene, item, viewport)
+                    {
+                        return Some((area, 0.));
+                    }
+                    if item.effects.opacity <= 0. || item.effects.blur_radius <= 0. {
+                        return None;
+                    }
+                    let output = item
+                        .bounds
+                        .intersection(item.clip.unwrap_or(viewport))?
+                        .intersection(viewport)?;
+                    Some((output, item.effects.blur_radius))
+                })
+                .collect();
+            blur_damage(damage, &dependencies, viewport, self.scale)
+        }
+    }
+    /// A window frame's bounded walk, with damage grown through every
+    /// backdrop filter or reader first. Keep that setup out of
+    /// `render_once`, including when no filter grows the damage.
+    #[inline(never)]
+    fn walk_through_filters<'s>(
+        &mut self,
+        scene: &'s Scene,
+        damage: &[Rect],
+        viewport: Rect,
+    ) -> Vec<zgx::scene::PaintItem<'s>> {
+        match scene.has_backdrop_readers() {
+            false => {
+                let reach = blur_damage(damage, &scene.backdrop_filters(), viewport, self.scale);
+                scene.layer_items_within(None, Some(&reach))
+            }
+            true => self.walk_over_readers(scene, damage, viewport),
+        }
+    }
     /// A window frame's items with backdrop readers in it, out of
     /// `render_once`'s line: the damage grown first through all each reader
     /// could read (`backdrop_read`, a pixel past it) as well as the blurs,
@@ -4806,9 +4870,10 @@ impl GpuRenderer {
         }
         let reach = blur_damage(damage, filters, viewport, self.scale);
         let items = scene.layer_items_within(None, Some(&reach));
-        if blurs == 0 {
-            walk.grown = Some(reach);
-        }
+        // Damage left, `render_flat` takes it this frame (with none, it
+        // returns before it would).
+        walk.grown = (blurs == 0 && !damage.is_empty()).then_some(reach);
+        walk.frame = self.frame;
         items
     }
 }
@@ -6344,10 +6409,6 @@ impl GpuRenderer {
         }
         let mut inherited = Vec::new();
         scene.take_painted_fades();
-        // (A frame that returned before drawing left none behind.)
-        if let Some(walk) = &mut self.backdrop_walk {
-            walk.grown = None;
-        }
         let (items, merged) = match &merged {
             _ if keep => (
                 scene.layer_items_recorded(&mut inherited),
@@ -6372,14 +6433,7 @@ impl GpuRenderer {
             // With readers alone (no blur), what the frame draws is that
             // reach: `render_flat` takes it rather than work it out again.
             None if !self.fresh && start.is_none() && self.plane.is_none() && !self.in_layer => {
-                match scene.has_backdrop_readers() {
-                    false => {
-                        let reach =
-                            blur_damage(damage, &scene.backdrop_filters(), viewport, self.scale);
-                        (scene.layer_items_within(None, Some(&reach)), merged)
-                    }
-                    true => (self.walk_over_readers(scene, damage, viewport), merged),
-                }
+                (self.walk_through_filters(scene, damage, viewport), merged)
             }
             None => (scene.layer_items(start), merged),
         };
@@ -8809,39 +8863,7 @@ impl GpuRenderer {
         let damage = if self.fresh {
             vec![viewport]
         } else if MODE != PATCH && (has_blur || readers) {
-            // (Patching draws nothing: its damage is the window's.) Readers
-            // alone: grown by the walk already, over all they can read.
-            if readers
-                && !self.in_layer
-                && let Some(grown) = self
-                    .backdrop_walk
-                    .as_mut()
-                    .and_then(|walk| walk.grown.take())
-            {
-                grown
-            } else {
-                let dependencies: Vec<_> = items
-                    .iter()
-                    .filter_map(|item| {
-                        if readers
-                            && item.isolated
-                            && item.effects.opacity > 0.
-                            && let Some((area, _)) = self.backdrop_read(scene, item, viewport)
-                        {
-                            return Some((area, 0.));
-                        }
-                        if item.effects.opacity <= 0. || item.effects.blur_radius <= 0. {
-                            return None;
-                        }
-                        let output = item
-                            .bounds
-                            .intersection(item.clip.unwrap_or(viewport))?
-                            .intersection(viewport)?;
-                        Some((output, item.effects.blur_radius))
-                    })
-                    .collect();
-                blur_damage(damage, &dependencies, viewport, self.scale)
-            }
+            self.filter_damage(scene, &items, damage, viewport, readers)
         } else {
             merged.unwrap_or_else(|| merge_damage(damage, viewport, self.scale))
         };
