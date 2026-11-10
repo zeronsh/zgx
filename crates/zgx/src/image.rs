@@ -709,8 +709,13 @@ pub fn release_decoded() -> usize {
         }
         None => false,
     });
+    drop(list);
     // Every copy given back: dropped images' too.
     HELD.store(0, Ordering::Relaxed);
+    // What the decoding thread made is free now: it rests, if it ever ran.
+    if freed > 0 && WORKER.get().is_some() {
+        send_work(Work::Rest);
+    }
     freed
 }
 /// What kept files' decoded copies hold together, pinned ones aside, or
@@ -840,26 +845,69 @@ fn registry() -> std::sync::MutexGuard<'static, Vec<std::sync::Weak<Pixels>>> {
 type Job = (Arc<Pixels>, (u32, u32), (u32, u32));
 /// Queue a decode for the one thread decoding kept files, a file at a time:
 /// a page of photos holds one whole decode at once, not one each.
+/// What the decoding thread is sent: a decode, or word that the copies it
+/// made were given back (`release_decoded`).
+enum Work {
+    Decode(Job),
+    Rest,
+}
+/// The one thread decoding kept files, once one has been queued.
+static WORKER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Work>>> =
+    std::sync::OnceLock::new();
+/// What the decoding thread runs once the copies it made are given back:
+/// the host's allocator collects that thread's heap (`set_decoder_rest`).
+static DECODER_REST: std::sync::RwLock<Option<fn()>> = std::sync::RwLock::new(None);
+/// Rests the decoding thread has had (`decoder_rests`).
+static RESTS: AtomicU64 = AtomicU64::new(0);
+/// What the thread decoding kept files runs after `release_decoded` gives
+/// back what it decoded: a host whose allocator keeps a thread's freed pages
+/// until that thread collects them (mimalloc: a block freed by another
+/// thread waits for its own) collects that thread's heap here. Decoded
+/// copies are made on that thread and given back by the main one, so
+/// without it the pages of every copy a long scroll made stayed in memory
+/// at rest. Nothing runs as pictures decode or draw.
+pub fn set_decoder_rest(rest: fn()) {
+    *DECODER_REST.write().unwrap_or_else(|p| p.into_inner()) = Some(rest);
+}
+/// How many times the decoding thread has rested (`set_decoder_rest`). For
+/// tests.
+#[doc(hidden)]
+pub fn decoder_rests() -> u64 {
+    RESTS.load(Ordering::Relaxed)
+}
 fn send(job: Job) {
-    static WORKER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Job>>> =
-        std::sync::OnceLock::new();
+    send_work(Work::Decode(job));
+}
+fn send_work(work: Work) {
     let sender = WORKER.get_or_init(|| {
-        let (send, receive) = std::sync::mpsc::channel::<Job>();
+        let (send, receive) = std::sync::mpsc::channel::<Work>();
         std::thread::Builder::new()
             .name("zgx image decode".into())
             .spawn(move || {
-                for (pixels, full, size) in receive {
-                    // Asked for larger since: that decode is queued behind
-                    // this one, and what this would make goes unused.
-                    if !superseded(&pixels, size) {
-                        decode_at(&pixels, full, size, true);
+                for work in receive {
+                    match work {
+                        // Asked for larger since: that decode is queued
+                        // behind this one, and what this would make goes
+                        // unused.
+                        Work::Decode((pixels, full, size)) => {
+                            if !superseded(&pixels, size) {
+                                decode_at(&pixels, full, size, true);
+                            }
+                        }
+                        Work::Rest => {
+                            let rest = *DECODER_REST.read().unwrap_or_else(|p| p.into_inner());
+                            if let Some(rest) = rest {
+                                rest();
+                            }
+                            RESTS.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 }
             })
             .expect("a decoding thread");
         std::sync::Mutex::new(send)
     });
-    let _ = sender.lock().unwrap_or_else(|p| p.into_inner()).send(job);
+    let _ = sender.lock().unwrap_or_else(|p| p.into_inner()).send(work);
 }
 /// A larger decode of `pixels` than `size` has been queued since.
 fn superseded(pixels: &Pixels, size: (u32, u32)) -> bool {
@@ -1097,6 +1145,47 @@ mod kept_tests {
         // Borrowed: whole, straight, and kept.
         assert_eq!(image.pixels().len(), 8 * 4 * 4);
         assert_eq!(image.pixels_arc().len(), 8 * 4 * 4);
+    }
+
+    /// The decoding thread rests once what it decoded is given back, and
+    /// only then: not as it decodes, nor as a release gives nothing back.
+    #[test]
+    fn the_decoding_thread_rests_after_its_copies_are_given_back() {
+        let _alone = alone();
+        static RUN: AtomicU64 = AtomicU64::new(0);
+        fn rest() {
+            RUN.fetch_add(1, Ordering::Relaxed);
+        }
+        set_decoder_rest(rest);
+        release_decoded();
+        let wait = |count: u64| {
+            for _ in 0..500 {
+                if RUN.load(Ordering::Relaxed) >= count {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            panic!("never rested");
+        };
+        // Whatever an earlier release asked for has run.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let before = RUN.load(Ordering::Relaxed);
+        let image = ImageData::kept(300, 300, Arc::from(&b"large"[..]), decode_large).unwrap();
+        image.set_decoding(Decoding::Async);
+        assert!(image.pixels_at((300, 300)).is_none(), "decoding");
+        wait_for(&image, (300, 300));
+        let other = ImageData::kept(300, 300, Arc::from(&b"large"[..]), decode_large).unwrap();
+        other.set_decoding(Decoding::Async);
+        wait_for(&other, (150, 150));
+        assert_eq!(RUN.load(Ordering::Relaxed), before, "none while it decodes");
+        assert!(release_decoded() > 0);
+        wait(before + 1);
+        let rests = decoder_rests();
+        // Nothing held: nothing to collect.
+        assert_eq!(release_decoded(), 0);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(RUN.load(Ordering::Relaxed), before + 1);
+        assert_eq!(decoder_rests(), rests);
     }
 
     /// Past the budget, a decode landing gives back the copies used least
