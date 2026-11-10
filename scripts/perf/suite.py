@@ -56,6 +56,10 @@ SCENES = [
     ('anime', 'zgx-script', 'anime_bench', {}),
     ('script-layout', 'zgx-script', 'script_layout_bench', {}),
     ('list-state', 'zgx-script', 'list_state_bench', {}),
+    ('scroll-transcript', 'zgx-script', 'scroll_bench', {'SCENE': 'transcript'}),
+    ('scroll-plain', 'zgx-script', 'scroll_bench', {'SCENE': 'plain'}),
+    ('scroll-grid', 'zgx-script', 'scroll_bench', {'SCENE': 'grid'}),
+    ('scroll-nested', 'zgx-script', 'scroll_bench', {'SCENE': 'nested'}),
     ('state', 'zgx-script', 'state_bench', {}, 'slow'),
     ('layout', 'zgx-gpu', 'layout_bench', {}),
     ('frame', 'zgx-gpu', 'frame_bench', {}),
@@ -122,13 +126,18 @@ def build(checkout, target, scenes):
     claim(checkout, target)
     scenes = [s for s in scenes if has_example(checkout, s[1], s[2])]
     command = ['cargo', 'build', '--release', '--locked', '--quiet']
-    for package in dict.fromkeys(scene[1] for scene in scenes):
+    regular = [s for s in scenes if s[2] != 'scroll_bench']
+    for package in dict.fromkeys(scene[1] for scene in regular):
         command += ['-p', package_in(checkout, package)]
-        for example in dict.fromkeys(s[2] for s in scenes if s[1] == package):
+        for example in dict.fromkeys(s[2] for s in regular if s[1] == package):
             command += ['--example', example]
     env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_INCREMENTAL='0')
     started = time.monotonic()
-    result = subprocess.run(command, cwd=checkout, env=env)
+    result = subprocess.run(command, cwd=checkout, env=env) if regular else subprocess.CompletedProcess(command, 0)
+    if result.returncode == 0 and any(s[2] == 'scroll_bench' for s in scenes):
+        result = subprocess.run(['cargo', 'build', '--release', '--locked', '--quiet',
+                                 '-p', 'zgx-script', '--example', 'scroll_bench',
+                                 '--features', 'zgx-script/inspect'], cwd=checkout, env=env)
     if result.returncode:
         sys.exit(f'build failed in {checkout}')
     print(f'built {checkout} in {time.monotonic() - started:.0f} s', file=sys.stderr)

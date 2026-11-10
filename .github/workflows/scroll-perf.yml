@@ -1,0 +1,56 @@
+name: Scroll performance
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit to measure
+        required: true
+      hz:
+        description: Actual display refresh (unsupported conditions fail)
+        default: '120'
+      sizes:
+        default: M,L
+      scales:
+        default: '1,2'
+jobs:
+  replay:
+    # A real, visible Mac desktop. Hosted macOS VMs cannot certify 120 Hz.
+    runs-on: [self-hosted, macOS, zgx-perf-gpu]
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --profile dist --locked -p zgx-run --no-default-features --features inspect,mimalloc
+      - run: cargo build --profile dist --locked -p zgx-script --features inspect --example scroll_reference
+      - uses: actions/checkout@v4
+        with:
+          repository: zeronsh/zeron
+          ref: zeron/laurent-chips
+          path: target/zeron-source
+          token: ${{ secrets.ZERON_READ_TOKEN || github.token }}
+      - name: Build isolated actual Zeron host
+        run: python3 scripts/perf/prepare_zeron.py --source target/zeron-source --output target/zeron-native/current
+      - name: Real Zeron headline gate
+        id: real
+        env:
+          SCROLL_HZ: ${{ inputs.hz }}
+          SCROLL_SCALES: ${{ inputs.scales }}
+        run: python3 scripts/perf/scroll.py run --native-floor --set-refresh --scenes zeron --gestures wing,flick,stream --hz "$SCROLL_HZ" --sizes W --scale "$SCROLL_SCALES" --backgrounds translucent --output target/scroll-real-ci
+      - name: Real-window replay gate
+        if: success() || (failure() && steps.real.outcome == 'failure')
+        env:
+          SCROLL_HZ: ${{ inputs.hz }}
+          SCROLL_SIZES: ${{ inputs.sizes }}
+          SCROLL_SCALES: ${{ inputs.scales }}
+        run: python3 scripts/perf/scroll.py run --native-floor --set-refresh --scenes transcript,tables --gestures wing,flick,reversals,stream --hz "$SCROLL_HZ" --sizes "$SCROLL_SIZES" --scale "$SCROLL_SCALES" --output target/scroll-ci
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: scroll-evidence
+          path: |
+            target/scroll-ci
+            target/scroll-real-ci
+            target/zeron-native/current/build.json
+            target/zeron-native/current/Cargo.lock

@@ -1,0 +1,2443 @@
+{
+  "clock_note": "Trace times are estimates from the inspect mark host/trace anchor, rounded by ended_ms. Exact link tick, handover and GPU completion absolute times were not recorded; null means unavailable. Presentation record tuple is callback_host_s, shown_host_s, frame_id, render_started_host_s.",
+  "late_intervals": [
+    {
+      "replay_ms": 30.423958986997604,
+      "presentations_around": [
+        [
+          206451.870797208,
+          206451.870498375,
+          560.0,
+          0.0
+        ],
+        [
+          206451.887501125,
+          206451.887165042,
+          561.0,
+          0.0
+        ],
+        [
+          206451.8958355,
+          206451.895498458,
+          562.0,
+          0.0
+        ],
+        [
+          206451.9041545,
+          206451.903831792,
+          563.0,
+          0.0
+        ],
+        [
+          206451.912463416,
+          206451.912165167,
+          564.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 560,
+          "trace_end_host_ms_estimate": 206451852.66129097,
+          "trace_start_host_ms_estimate": 206451851.45929098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.047125,
+          "phases": [
+            {
+              "instructions": 276473,
+              "micros": 971,
+              "phase": "present"
+            },
+            {
+              "instructions": 59427,
+              "micros": 92,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21512,
+              "micros": 34,
+              "phase": "paint"
+            },
+            {
+              "instructions": 11426,
+              "micros": 34,
+              "phase": "script"
+            },
+            {
+              "instructions": 9294,
+              "micros": 34,
+              "phase": "update"
+            },
+            {
+              "instructions": 27841,
+              "micros": 21,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 15,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 561,
+          "trace_end_host_ms_estimate": 206451863.861291,
+          "trace_start_host_ms_estimate": 206451862.747291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.089708,
+          "phases": [
+            {
+              "instructions": 259364,
+              "micros": 948,
+              "phase": "present"
+            },
+            {
+              "instructions": 68609,
+              "micros": 71,
+              "phase": "encode"
+            },
+            {
+              "instructions": 67758,
+              "micros": 36,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9225,
+              "micros": 18,
+              "phase": "update"
+            },
+            {
+              "instructions": 7691,
+              "micros": 17,
+              "phase": "script"
+            },
+            {
+              "instructions": 27504,
+              "micros": 16,
+              "phase": "submit"
+            },
+            {
+              "instructions": 11141,
+              "micros": 7,
+              "phase": "damage"
+            },
+            {
+              "instructions": 562,
+              "micros": 2,
+              "phase": "input"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    },
+    {
+      "replay_ms": 1297.0930420160294,
+      "presentations_around": [
+        [
+          206453.129323916,
+          206453.128834083,
+          710.0,
+          0.0
+        ],
+        [
+          206453.13752075,
+          206453.137167417,
+          711.0,
+          0.0
+        ],
+        [
+          206453.154634375,
+          206453.153834125,
+          713.0,
+          0.0
+        ],
+        [
+          206453.162674375,
+          206453.1621675,
+          714.0,
+          0.0
+        ],
+        [
+          206453.170981958,
+          206453.170500792,
+          715.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 711,
+          "trace_end_host_ms_estimate": 206453119.821291,
+          "trace_start_host_ms_estimate": 206453117.098291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.1035,
+          "phases": [
+            {
+              "instructions": 298070,
+              "micros": 2392,
+              "phase": "present"
+            },
+            {
+              "instructions": 59443,
+              "micros": 130,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21534,
+              "micros": 56,
+              "phase": "paint"
+            },
+            {
+              "instructions": 13862,
+              "micros": 50,
+              "phase": "script"
+            },
+            {
+              "instructions": 9279,
+              "micros": 46,
+              "phase": "update"
+            },
+            {
+              "instructions": 25600,
+              "micros": 26,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 23,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        },
+        {
+          "frame": 712,
+          "trace_end_host_ms_estimate": 206453129.18129098,
+          "trace_start_host_ms_estimate": 206453126.884291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.09875,
+          "phases": [
+            {
+              "instructions": 302633,
+              "micros": 1800,
+              "phase": "present"
+            },
+            {
+              "instructions": 77757,
+              "micros": 191,
+              "phase": "encode"
+            },
+            {
+              "instructions": 93563,
+              "micros": 114,
+              "phase": "paint"
+            },
+            {
+              "instructions": 7788,
+              "micros": 70,
+              "phase": "script"
+            },
+            {
+              "instructions": 9234,
+              "micros": 61,
+              "phase": "update"
+            },
+            {
+              "instructions": 26017,
+              "micros": 32,
+              "phase": "submit"
+            },
+            {
+              "instructions": 13105,
+              "micros": 28,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 713,
+          "trace_end_host_ms_estimate": 206453136.231291,
+          "trace_start_host_ms_estimate": 206453134.509291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.049792,
+          "phases": [
+            {
+              "instructions": 268334,
+              "micros": 1497,
+              "phase": "present"
+            },
+            {
+              "instructions": 63394,
+              "micros": 105,
+              "phase": "encode"
+            },
+            {
+              "instructions": 22177,
+              "micros": 35,
+              "phase": "paint"
+            },
+            {
+              "instructions": 23773,
+              "micros": 27,
+              "phase": "submit"
+            },
+            {
+              "instructions": 9279,
+              "micros": 24,
+              "phase": "update"
+            },
+            {
+              "instructions": 7789,
+              "micros": 22,
+              "phase": "script"
+            },
+            {
+              "instructions": 7605,
+              "micros": 12,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    },
+    {
+      "replay_ms": 2263.7615420222282,
+      "presentations_around": [
+        [
+          206454.096108208,
+          206454.095502625,
+          826.0,
+          0.0
+        ],
+        [
+          206454.104162833,
+          206454.103835917,
+          827.0,
+          0.0
+        ],
+        [
+          206454.120985083,
+          206454.120502625,
+          829.0,
+          0.0
+        ],
+        [
+          206454.129196666,
+          206454.128835958,
+          830.0,
+          0.0
+        ],
+        [
+          206454.137515666,
+          206454.137169292,
+          831.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 827,
+          "trace_end_host_ms_estimate": 206454086.78129098,
+          "trace_start_host_ms_estimate": 206454084.84829098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.05,
+          "phases": [
+            {
+              "instructions": 282405,
+              "micros": 1432,
+              "phase": "present"
+            },
+            {
+              "instructions": 103534,
+              "micros": 286,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21679,
+              "micros": 64,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9279,
+              "micros": 47,
+              "phase": "update"
+            },
+            {
+              "instructions": 7691,
+              "micros": 43,
+              "phase": "script"
+            },
+            {
+              "instructions": 28108,
+              "micros": 40,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 20,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 828,
+          "trace_end_host_ms_estimate": 206454096.00129098,
+          "trace_start_host_ms_estimate": 206454093.28829098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.093875,
+          "phases": [
+            {
+              "instructions": 284364,
+              "micros": 1832,
+              "phase": "present"
+            },
+            {
+              "instructions": 103434,
+              "micros": 445,
+              "phase": "paint"
+            },
+            {
+              "instructions": 89842,
+              "micros": 232,
+              "phase": "encode"
+            },
+            {
+              "instructions": 19587,
+              "micros": 68,
+              "phase": "update"
+            },
+            {
+              "instructions": 7690,
+              "micros": 48,
+              "phase": "script"
+            },
+            {
+              "instructions": 17356,
+              "micros": 48,
+              "phase": "damage"
+            },
+            {
+              "instructions": 33613,
+              "micros": 41,
+              "phase": "submit"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 829,
+          "trace_end_host_ms_estimate": 206454102.581291,
+          "trace_start_host_ms_estimate": 206454101.42729098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.051458,
+          "phases": [
+            {
+              "instructions": 267141,
+              "micros": 1021,
+              "phase": "present"
+            },
+            {
+              "instructions": 63332,
+              "micros": 61,
+              "phase": "encode"
+            },
+            {
+              "instructions": 22079,
+              "micros": 19,
+              "phase": "paint"
+            },
+            {
+              "instructions": 27713,
+              "micros": 18,
+              "phase": "submit"
+            },
+            {
+              "instructions": 11381,
+              "micros": 16,
+              "phase": "script"
+            },
+            {
+              "instructions": 9282,
+              "micros": 14,
+              "phase": "update"
+            },
+            {
+              "instructions": 7605,
+              "micros": 6,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    },
+    {
+      "replay_ms": 5122.100250005722,
+      "presentations_around": [
+        [
+          206456.962484458,
+          206456.962174583,
+          1170.0,
+          0.0
+        ],
+        [
+          206456.979327375,
+          206456.978841333,
+          1172.0,
+          0.0
+        ],
+        [
+          206456.987575666,
+          206456.987174625,
+          1173.0,
+          0.0
+        ],
+        [
+          206456.995883875,
+          206456.995508,
+          1174.0,
+          0.0
+        ],
+        [
+          206457.004290375,
+          206457.003841375,
+          1175.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1170,
+          "trace_end_host_ms_estimate": 206456945.051291,
+          "trace_start_host_ms_estimate": 206456943.196291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.097833,
+          "phases": [
+            {
+              "instructions": 301682,
+              "micros": 1479,
+              "phase": "present"
+            },
+            {
+              "instructions": 63984,
+              "micros": 144,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21727,
+              "micros": 64,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9397,
+              "micros": 59,
+              "phase": "update"
+            },
+            {
+              "instructions": 7672,
+              "micros": 51,
+              "phase": "script"
+            },
+            {
+              "instructions": 23563,
+              "micros": 29,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7711,
+              "micros": 29,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1171,
+          "trace_end_host_ms_estimate": 206456957.97129098,
+          "trace_start_host_ms_estimate": 206456956.62429097,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.055125,
+          "phases": [
+            {
+              "instructions": 279447,
+              "micros": 1213,
+              "phase": "present"
+            },
+            {
+              "instructions": 59391,
+              "micros": 64,
+              "phase": "encode"
+            },
+            {
+              "instructions": 26020,
+              "micros": 20,
+              "phase": "submit"
+            },
+            {
+              "instructions": 21527,
+              "micros": 16,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9282,
+              "micros": 14,
+              "phase": "update"
+            },
+            {
+              "instructions": 7678,
+              "micros": 13,
+              "phase": "script"
+            },
+            {
+              "instructions": 7605,
+              "micros": 7,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1172,
+          "trace_end_host_ms_estimate": 206456961.03129098,
+          "trace_start_host_ms_estimate": 206456959.743291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.0415,
+          "phases": [
+            {
+              "instructions": 278640,
+              "micros": 1195,
+              "phase": "present"
+            },
+            {
+              "instructions": 58912,
+              "micros": 40,
+              "phase": "encode"
+            },
+            {
+              "instructions": 11073,
+              "micros": 16,
+              "phase": "script"
+            },
+            {
+              "instructions": 27711,
+              "micros": 12,
+              "phase": "submit"
+            },
+            {
+              "instructions": 21515,
+              "micros": 11,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9294,
+              "micros": 9,
+              "phase": "update"
+            },
+            {
+              "instructions": 7605,
+              "micros": 5,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        }
+      ]
+    },
+    {
+      "replay_ms": 7163.770749986172,
+      "presentations_around": [
+        [
+          206458.9959645,
+          206458.995511792,
+          1414.0,
+          0.0
+        ],
+        [
+          206459.004194583,
+          206459.003845167,
+          1415.0,
+          0.0
+        ],
+        [
+          206459.021088916,
+          206459.020511833,
+          1417.0,
+          0.0
+        ],
+        [
+          206459.029259375,
+          206459.028845208,
+          1418.0,
+          0.0
+        ],
+        [
+          206459.03759775,
+          206459.0371785,
+          1419.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1415,
+          "trace_end_host_ms_estimate": 206458986.541291,
+          "trace_start_host_ms_estimate": 206458983.481291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.186125,
+          "phases": [
+            {
+              "instructions": 285714,
+              "micros": 2726,
+              "phase": "present"
+            },
+            {
+              "instructions": 59383,
+              "micros": 139,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21527,
+              "micros": 55,
+              "phase": "paint"
+            },
+            {
+              "instructions": 7776,
+              "micros": 48,
+              "phase": "script"
+            },
+            {
+              "instructions": 9279,
+              "micros": 43,
+              "phase": "update"
+            },
+            {
+              "instructions": 23810,
+              "micros": 29,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 20,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        },
+        {
+          "frame": 1416,
+          "trace_end_host_ms_estimate": 206458999.421291,
+          "trace_start_host_ms_estimate": 206458998.085291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.100375,
+          "phases": [
+            {
+              "instructions": 277143,
+              "micros": 1188,
+              "phase": "present"
+            },
+            {
+              "instructions": 77884,
+              "micros": 67,
+              "phase": "encode"
+            },
+            {
+              "instructions": 93750,
+              "micros": 35,
+              "phase": "paint"
+            },
+            {
+              "instructions": 23729,
+              "micros": 17,
+              "phase": "submit"
+            },
+            {
+              "instructions": 9888,
+              "micros": 12,
+              "phase": "script"
+            },
+            {
+              "instructions": 9237,
+              "micros": 9,
+              "phase": "update"
+            },
+            {
+              "instructions": 13007,
+              "micros": 8,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1417,
+          "trace_end_host_ms_estimate": 206459002.831291,
+          "trace_start_host_ms_estimate": 206459000.870291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.042625,
+          "phases": [
+            {
+              "instructions": 278575,
+              "micros": 1882,
+              "phase": "present"
+            },
+            {
+              "instructions": 62863,
+              "micros": 35,
+              "phase": "encode"
+            },
+            {
+              "instructions": 22079,
+              "micros": 13,
+              "phase": "paint"
+            },
+            {
+              "instructions": 27723,
+              "micros": 12,
+              "phase": "submit"
+            },
+            {
+              "instructions": 9282,
+              "micros": 9,
+              "phase": "update"
+            },
+            {
+              "instructions": 7616,
+              "micros": 7,
+              "phase": "script"
+            },
+            {
+              "instructions": 7605,
+              "micros": 4,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        }
+      ]
+    },
+    {
+      "replay_ms": 7663.771667003632,
+      "presentations_around": [
+        [
+          206459.4959605,
+          206459.495512708,
+          1474.0,
+          0.0
+        ],
+        [
+          206459.504172875,
+          206459.503846125,
+          1475.0,
+          0.0
+        ],
+        [
+          206459.520996625,
+          206459.52051275,
+          1477.0,
+          0.0
+        ],
+        [
+          206459.529228416,
+          206459.528846125,
+          1478.0,
+          0.0
+        ],
+        [
+          206459.537560583,
+          206459.537179458,
+          1479.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1475,
+          "trace_end_host_ms_estimate": 206459486.671291,
+          "trace_start_host_ms_estimate": 206459484.951291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.051875,
+          "phases": [
+            {
+              "instructions": 285886,
+              "micros": 1300,
+              "phase": "present"
+            },
+            {
+              "instructions": 59373,
+              "micros": 162,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21527,
+              "micros": 72,
+              "phase": "paint"
+            },
+            {
+              "instructions": 13131,
+              "micros": 71,
+              "phase": "update"
+            },
+            {
+              "instructions": 7771,
+              "micros": 60,
+              "phase": "script"
+            },
+            {
+              "instructions": 23573,
+              "micros": 31,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 24,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1476,
+          "trace_end_host_ms_estimate": 206459495.50129098,
+          "trace_start_host_ms_estimate": 206459493.47129098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.093917,
+          "phases": [
+            {
+              "instructions": 289209,
+              "micros": 1476,
+              "phase": "present"
+            },
+            {
+              "instructions": 77751,
+              "micros": 223,
+              "phase": "encode"
+            },
+            {
+              "instructions": 102806,
+              "micros": 130,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9234,
+              "micros": 63,
+              "phase": "update"
+            },
+            {
+              "instructions": 7770,
+              "micros": 58,
+              "phase": "script"
+            },
+            {
+              "instructions": 26005,
+              "micros": 44,
+              "phase": "submit"
+            },
+            {
+              "instructions": 16392,
+              "micros": 35,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1477,
+          "trace_end_host_ms_estimate": 206459502.631291,
+          "trace_start_host_ms_estimate": 206459501.370291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.049667,
+          "phases": [
+            {
+              "instructions": 272331,
+              "micros": 1117,
+              "phase": "present"
+            },
+            {
+              "instructions": 63332,
+              "micros": 69,
+              "phase": "encode"
+            },
+            {
+              "instructions": 27713,
+              "micros": 19,
+              "phase": "submit"
+            },
+            {
+              "instructions": 22180,
+              "micros": 18,
+              "phase": "paint"
+            },
+            {
+              "instructions": 11162,
+              "micros": 18,
+              "phase": "script"
+            },
+            {
+              "instructions": 9282,
+              "micros": 13,
+              "phase": "update"
+            },
+            {
+              "instructions": 7605,
+              "micros": 7,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    },
+    {
+      "replay_ms": 7830.43866699934,
+      "presentations_around": [
+        [
+          206459.67088525,
+          206459.670513083,
+          1495.0,
+          0.0
+        ],
+        [
+          206459.687858666,
+          206459.68717975,
+          1497.0,
+          0.0
+        ],
+        [
+          206459.695919208,
+          206459.695513083,
+          1498.0,
+          0.0
+        ],
+        [
+          206459.704313125,
+          206459.703846417,
+          1499.0,
+          0.0
+        ],
+        [
+          206459.712627916,
+          206459.712179792,
+          1500.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1495,
+          "trace_end_host_ms_estimate": 206459653.361291,
+          "trace_start_host_ms_estimate": 206459651.574291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.052292,
+          "phases": [
+            {
+              "instructions": 291284,
+              "micros": 1365,
+              "phase": "present"
+            },
+            {
+              "instructions": 59376,
+              "micros": 175,
+              "phase": "encode"
+            },
+            {
+              "instructions": 34641,
+              "micros": 88,
+              "phase": "paint"
+            },
+            {
+              "instructions": 13804,
+              "micros": 53,
+              "phase": "update"
+            },
+            {
+              "instructions": 7771,
+              "micros": 45,
+              "phase": "script"
+            },
+            {
+              "instructions": 23566,
+              "micros": 32,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 30,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1496,
+          "trace_end_host_ms_estimate": 206459662.65129098,
+          "trace_start_host_ms_estimate": 206459660.40229097,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.0955,
+          "phases": [
+            {
+              "instructions": 283338,
+              "micros": 1682,
+              "phase": "present"
+            },
+            {
+              "instructions": 77768,
+              "micros": 211,
+              "phase": "encode"
+            },
+            {
+              "instructions": 93556,
+              "micros": 146,
+              "phase": "paint"
+            },
+            {
+              "instructions": 16707,
+              "micros": 80,
+              "phase": "script"
+            },
+            {
+              "instructions": 9236,
+              "micros": 59,
+              "phase": "update"
+            },
+            {
+              "instructions": 28136,
+              "micros": 40,
+              "phase": "submit"
+            },
+            {
+              "instructions": 13105,
+              "micros": 31,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1497,
+          "trace_end_host_ms_estimate": 206459669.771291,
+          "trace_start_host_ms_estimate": 206459666.761291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.051875,
+          "phases": [
+            {
+              "instructions": 278191,
+              "micros": 2770,
+              "phase": "present"
+            },
+            {
+              "instructions": 63294,
+              "micros": 88,
+              "phase": "encode"
+            },
+            {
+              "instructions": 9921,
+              "micros": 41,
+              "phase": "script"
+            },
+            {
+              "instructions": 9282,
+              "micros": 34,
+              "phase": "update"
+            },
+            {
+              "instructions": 22177,
+              "micros": 33,
+              "phase": "paint"
+            },
+            {
+              "instructions": 27930,
+              "micros": 28,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 16,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        }
+      ]
+    },
+    {
+      "replay_ms": 7997.1056669950485,
+      "presentations_around": [
+        [
+          206459.837518375,
+          206459.837180042,
+          1515.0,
+          0.0
+        ],
+        [
+          206459.854373375,
+          206459.85384675,
+          1517.0,
+          0.0
+        ],
+        [
+          206459.862596333,
+          206459.862180042,
+          1518.0,
+          0.0
+        ],
+        [
+          206459.870874583,
+          206459.870513375,
+          1519.0,
+          0.0
+        ],
+        [
+          206459.879199833,
+          206459.878846792,
+          1520.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1515,
+          "trace_end_host_ms_estimate": 206459820.201291,
+          "trace_start_host_ms_estimate": 206459818.307291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.054583,
+          "phases": [
+            {
+              "instructions": 281136,
+              "micros": 1416,
+              "phase": "present"
+            },
+            {
+              "instructions": 59376,
+              "micros": 186,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21524,
+              "micros": 82,
+              "phase": "paint"
+            },
+            {
+              "instructions": 20883,
+              "micros": 78,
+              "phase": "script"
+            },
+            {
+              "instructions": 9385,
+              "micros": 65,
+              "phase": "update"
+            },
+            {
+              "instructions": 23758,
+              "micros": 38,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 28,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1516,
+          "trace_end_host_ms_estimate": 206459828.991291,
+          "trace_start_host_ms_estimate": 206459826.764291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.096875,
+          "phases": [
+            {
+              "instructions": 301461,
+              "micros": 1616,
+              "phase": "present"
+            },
+            {
+              "instructions": 77966,
+              "micros": 206,
+              "phase": "encode"
+            },
+            {
+              "instructions": 93659,
+              "micros": 152,
+              "phase": "paint"
+            },
+            {
+              "instructions": 24960,
+              "micros": 97,
+              "phase": "script"
+            },
+            {
+              "instructions": 9340,
+              "micros": 64,
+              "phase": "update"
+            },
+            {
+              "instructions": 35281,
+              "micros": 62,
+              "phase": "submit"
+            },
+            {
+              "instructions": 13105,
+              "micros": 30,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1517,
+          "trace_end_host_ms_estimate": 206459835.91129097,
+          "trace_start_host_ms_estimate": 206459834.741291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.048375,
+          "phases": [
+            {
+              "instructions": 267370,
+              "micros": 1047,
+              "phase": "present"
+            },
+            {
+              "instructions": 63324,
+              "micros": 58,
+              "phase": "encode"
+            },
+            {
+              "instructions": 27713,
+              "micros": 19,
+              "phase": "submit"
+            },
+            {
+              "instructions": 11162,
+              "micros": 15,
+              "phase": "script"
+            },
+            {
+              "instructions": 22184,
+              "micros": 14,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9388,
+              "micros": 11,
+              "phase": "update"
+            },
+            {
+              "instructions": 7605,
+              "micros": 5,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    },
+    {
+      "replay_ms": 8188.772708982229,
+      "presentations_around": [
+        [
+          206460.029142083,
+          206460.028847083,
+          1538.0,
+          0.0
+        ],
+        [
+          206460.046059416,
+          206460.045513792,
+          1540.0,
+          0.0
+        ],
+        [
+          206460.05431225,
+          206460.053847083,
+          1541.0,
+          0.0
+        ],
+        [
+          206460.062595208,
+          206460.062180458,
+          1542.0,
+          0.0
+        ],
+        [
+          206460.070895041,
+          206460.070513792,
+          1543.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1538,
+          "trace_end_host_ms_estimate": 206460011.961291,
+          "trace_start_host_ms_estimate": 206460009.930291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.049625,
+          "phases": [
+            {
+              "instructions": 271400,
+              "micros": 1364,
+              "phase": "present"
+            },
+            {
+              "instructions": 172785,
+              "micros": 303,
+              "phase": "script"
+            },
+            {
+              "instructions": 59346,
+              "micros": 159,
+              "phase": "encode"
+            },
+            {
+              "instructions": 14453,
+              "micros": 80,
+              "phase": "update"
+            },
+            {
+              "instructions": 21515,
+              "micros": 71,
+              "phase": "paint"
+            },
+            {
+              "instructions": 23566,
+              "micros": 30,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 25,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1539,
+          "trace_end_host_ms_estimate": 206460022.211291,
+          "trace_start_host_ms_estimate": 206460020.97329098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.055625,
+          "phases": [
+            {
+              "instructions": 271923,
+              "micros": 1121,
+              "phase": "present"
+            },
+            {
+              "instructions": 59050,
+              "micros": 57,
+              "phase": "encode"
+            },
+            {
+              "instructions": 28200,
+              "micros": 16,
+              "phase": "submit"
+            },
+            {
+              "instructions": 21527,
+              "micros": 15,
+              "phase": "paint"
+            },
+            {
+              "instructions": 7673,
+              "micros": 11,
+              "phase": "script"
+            },
+            {
+              "instructions": 9282,
+              "micros": 11,
+              "phase": "update"
+            },
+            {
+              "instructions": 7605,
+              "micros": 7,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1540,
+          "trace_end_host_ms_estimate": 206460027.671291,
+          "trace_start_host_ms_estimate": 206460026.43829098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.0935,
+          "phases": [
+            {
+              "instructions": 271875,
+              "micros": 1054,
+              "phase": "present"
+            },
+            {
+              "instructions": 77440,
+              "micros": 64,
+              "phase": "encode"
+            },
+            {
+              "instructions": 93637,
+              "micros": 45,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9237,
+              "micros": 21,
+              "phase": "update"
+            },
+            {
+              "instructions": 7672,
+              "micros": 21,
+              "phase": "script"
+            },
+            {
+              "instructions": 27711,
+              "micros": 15,
+              "phase": "submit"
+            },
+            {
+              "instructions": 13007,
+              "micros": 13,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    },
+    {
+      "replay_ms": 8463.773124992847,
+      "presentations_around": [
+        [
+          206460.29592725,
+          206460.29551425,
+          1570.0,
+          0.0
+        ],
+        [
+          206460.304134833,
+          206460.303847542,
+          1571.0,
+          0.0
+        ],
+        [
+          206460.320950208,
+          206460.320514208,
+          1573.0,
+          0.0
+        ],
+        [
+          206460.329240583,
+          206460.328847625,
+          1574.0,
+          0.0
+        ],
+        [
+          206460.337513041,
+          206460.337180958,
+          1575.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1571,
+          "trace_end_host_ms_estimate": 206460286.581291,
+          "trace_start_host_ms_estimate": 206460284.82729098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.048917,
+          "phases": [
+            {
+              "instructions": 281476,
+              "micros": 1287,
+              "phase": "present"
+            },
+            {
+              "instructions": 59373,
+              "micros": 157,
+              "phase": "encode"
+            },
+            {
+              "instructions": 28776,
+              "micros": 117,
+              "phase": "script"
+            },
+            {
+              "instructions": 22472,
+              "micros": 77,
+              "phase": "update"
+            },
+            {
+              "instructions": 21527,
+              "micros": 58,
+              "phase": "paint"
+            },
+            {
+              "instructions": 23732,
+              "micros": 30,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 28,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1572,
+          "trace_end_host_ms_estimate": 206460295.571291,
+          "trace_start_host_ms_estimate": 206460293.484291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.09575,
+          "phases": [
+            {
+              "instructions": 292141,
+              "micros": 1523,
+              "phase": "present"
+            },
+            {
+              "instructions": 77777,
+              "micros": 216,
+              "phase": "encode"
+            },
+            {
+              "instructions": 93563,
+              "micros": 149,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9340,
+              "micros": 65,
+              "phase": "update"
+            },
+            {
+              "instructions": 7770,
+              "micros": 63,
+              "phase": "script"
+            },
+            {
+              "instructions": 28022,
+              "micros": 41,
+              "phase": "submit"
+            },
+            {
+              "instructions": 13105,
+              "micros": 30,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1573,
+          "trace_end_host_ms_estimate": 206460302.421291,
+          "trace_start_host_ms_estimate": 206460301.35729098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.05025,
+          "phases": [
+            {
+              "instructions": 261864,
+              "micros": 964,
+              "phase": "present"
+            },
+            {
+              "instructions": 63332,
+              "micros": 45,
+              "phase": "encode"
+            },
+            {
+              "instructions": 27723,
+              "micros": 16,
+              "phase": "submit"
+            },
+            {
+              "instructions": 22187,
+              "micros": 13,
+              "phase": "paint"
+            },
+            {
+              "instructions": 11162,
+              "micros": 13,
+              "phase": "script"
+            },
+            {
+              "instructions": 9388,
+              "micros": 8,
+              "phase": "update"
+            },
+            {
+              "instructions": 7605,
+              "micros": 5,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    },
+    {
+      "replay_ms": 9030.440959006548,
+      "presentations_around": [
+        [
+          206460.8708635,
+          206460.870515292,
+          1639.0,
+          0.0
+        ],
+        [
+          206460.887810166,
+          206460.887182042,
+          1641.0,
+          0.0
+        ],
+        [
+          206460.896010291,
+          206460.895515375,
+          1642.0,
+          0.0
+        ],
+        [
+          206460.90431525,
+          206460.903848708,
+          1643.0,
+          0.0
+        ],
+        [
+          206460.912591833,
+          206460.912182042,
+          1644.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1639,
+          "trace_end_host_ms_estimate": 206460853.19129097,
+          "trace_start_host_ms_estimate": 206460850.11429098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.30325,
+          "phases": [
+            {
+              "instructions": 292647,
+              "micros": 2760,
+              "phase": "present"
+            },
+            {
+              "instructions": 59373,
+              "micros": 134,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21527,
+              "micros": 52,
+              "phase": "paint"
+            },
+            {
+              "instructions": 7673,
+              "micros": 42,
+              "phase": "script"
+            },
+            {
+              "instructions": 9279,
+              "micros": 40,
+              "phase": "update"
+            },
+            {
+              "instructions": 23573,
+              "micros": 29,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 20,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        },
+        {
+          "frame": 1640,
+          "trace_end_host_ms_estimate": 206460862.271291,
+          "trace_start_host_ms_estimate": 206460860.37429097,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.095625,
+          "phases": [
+            {
+              "instructions": 279965,
+              "micros": 1378,
+              "phase": "present"
+            },
+            {
+              "instructions": 80395,
+              "micros": 201,
+              "phase": "encode"
+            },
+            {
+              "instructions": 67742,
+              "micros": 134,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9234,
+              "micros": 70,
+              "phase": "update"
+            },
+            {
+              "instructions": 7672,
+              "micros": 55,
+              "phase": "script"
+            },
+            {
+              "instructions": 23674,
+              "micros": 33,
+              "phase": "submit"
+            },
+            {
+              "instructions": 11141,
+              "micros": 26,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1641,
+          "trace_end_host_ms_estimate": 206460869.44129097,
+          "trace_start_host_ms_estimate": 206460868.00329098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.049875,
+          "phases": [
+            {
+              "instructions": 268880,
+              "micros": 1232,
+              "phase": "present"
+            },
+            {
+              "instructions": 63273,
+              "micros": 87,
+              "phase": "encode"
+            },
+            {
+              "instructions": 11064,
+              "micros": 31,
+              "phase": "script"
+            },
+            {
+              "instructions": 23745,
+              "micros": 28,
+              "phase": "submit"
+            },
+            {
+              "instructions": 21956,
+              "micros": 28,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9282,
+              "micros": 22,
+              "phase": "update"
+            },
+            {
+              "instructions": 7605,
+              "micros": 11,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    },
+    {
+      "replay_ms": 9213.774583995342,
+      "presentations_around": [
+        [
+          206461.054156291,
+          206461.053849,
+          1661.0,
+          0.0
+        ],
+        [
+          206461.070938625,
+          206461.070515667,
+          1662.0,
+          0.0
+        ],
+        [
+          206461.079207583,
+          206461.078849,
+          1663.0,
+          0.0
+        ],
+        [
+          206461.07927175,
+          206461.078849,
+          1664.0,
+          0.0
+        ],
+        [
+          206461.087555,
+          206461.087182333,
+          1665.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1661,
+          "trace_end_host_ms_estimate": 206461036.451291,
+          "trace_start_host_ms_estimate": 206461033.73229098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.287875,
+          "phases": [
+            {
+              "instructions": 305332,
+              "micros": 2371,
+              "phase": "present"
+            },
+            {
+              "instructions": 63300,
+              "micros": 142,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21956,
+              "micros": 63,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9826,
+              "micros": 53,
+              "phase": "script"
+            },
+            {
+              "instructions": 9282,
+              "micros": 41,
+              "phase": "update"
+            },
+            {
+              "instructions": 23734,
+              "micros": 25,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 24,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        },
+        {
+          "frame": 1662,
+          "trace_end_host_ms_estimate": 206461053.461291,
+          "trace_start_host_ms_estimate": 206461048.51929098,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.05575,
+          "phases": [
+            {
+              "instructions": 291384,
+              "micros": 4799,
+              "phase": "present"
+            },
+            {
+              "instructions": 59419,
+              "micros": 69,
+              "phase": "encode"
+            },
+            {
+              "instructions": 27703,
+              "micros": 20,
+              "phase": "submit"
+            },
+            {
+              "instructions": 21512,
+              "micros": 17,
+              "phase": "paint"
+            },
+            {
+              "instructions": 11766,
+              "micros": 17,
+              "phase": "update"
+            },
+            {
+              "instructions": 11362,
+              "micros": 14,
+              "phase": "script"
+            },
+            {
+              "instructions": 7605,
+              "micros": 7,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        }
+      ]
+    },
+    {
+      "replay_ms": 9797.108999997377,
+      "presentations_around": [
+        [
+          206461.629381666,
+          206461.628850083,
+          1730.0,
+          0.0
+        ],
+        [
+          206461.637595708,
+          206461.637183417,
+          1731.0,
+          0.0
+        ],
+        [
+          206461.654433166,
+          206461.653850083,
+          1733.0,
+          0.0
+        ],
+        [
+          206461.662640333,
+          206461.662183458,
+          1734.0,
+          0.0
+        ],
+        [
+          206461.670978916,
+          206461.670516792,
+          1735.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1731,
+          "trace_end_host_ms_estimate": 206461619.851291,
+          "trace_start_host_ms_estimate": 206461616.883291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.172625,
+          "phases": [
+            {
+              "instructions": 295587,
+              "micros": 2644,
+              "phase": "present"
+            },
+            {
+              "instructions": 59414,
+              "micros": 131,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21739,
+              "micros": 60,
+              "phase": "paint"
+            },
+            {
+              "instructions": 11339,
+              "micros": 46,
+              "phase": "script"
+            },
+            {
+              "instructions": 9385,
+              "micros": 39,
+              "phase": "update"
+            },
+            {
+              "instructions": 23566,
+              "micros": 28,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7711,
+              "micros": 20,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        },
+        {
+          "frame": 1732,
+          "trace_end_host_ms_estimate": 206461629.041291,
+          "trace_start_host_ms_estimate": 206461627.022291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.049292,
+          "phases": [
+            {
+              "instructions": 284563,
+              "micros": 1530,
+              "phase": "present"
+            },
+            {
+              "instructions": 59441,
+              "micros": 199,
+              "phase": "encode"
+            },
+            {
+              "instructions": 20937,
+              "micros": 92,
+              "phase": "update"
+            },
+            {
+              "instructions": 21727,
+              "micros": 66,
+              "phase": "paint"
+            },
+            {
+              "instructions": 7672,
+              "micros": 58,
+              "phase": "script"
+            },
+            {
+              "instructions": 23681,
+              "micros": 38,
+              "phase": "submit"
+            },
+            {
+              "instructions": 15749,
+              "micros": 37,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1733,
+          "trace_end_host_ms_estimate": 206461636.321291,
+          "trace_start_host_ms_estimate": 206461634.661291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.052167000000000005,
+          "phases": [
+            {
+              "instructions": 270101,
+              "micros": 1416,
+              "phase": "present"
+            },
+            {
+              "instructions": 59431,
+              "micros": 105,
+              "phase": "encode"
+            },
+            {
+              "instructions": 11061,
+              "micros": 35,
+              "phase": "script"
+            },
+            {
+              "instructions": 21739,
+              "micros": 33,
+              "phase": "paint"
+            },
+            {
+              "instructions": 23732,
+              "micros": 31,
+              "phase": "submit"
+            },
+            {
+              "instructions": 9388,
+              "micros": 26,
+              "phase": "update"
+            },
+            {
+              "instructions": 7711,
+              "micros": 15,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    },
+    {
+      "replay_ms": 9897.109209001064,
+      "presentations_around": [
+        [
+          206461.737512291,
+          206461.737183583,
+          1743.0,
+          0.0
+        ],
+        [
+          206461.754514625,
+          206461.753850292,
+          1745.0,
+          0.0
+        ],
+        [
+          206461.7626035,
+          206461.762183708,
+          1746.0,
+          0.0
+        ],
+        [
+          206461.770951125,
+          206461.770516958,
+          1747.0,
+          0.0
+        ],
+        [
+          206461.779282708,
+          206461.778850333,
+          1748.0,
+          0.0
+        ]
+      ],
+      "frames": [
+        {
+          "frame": 1743,
+          "trace_end_host_ms_estimate": 206461719.791291,
+          "trace_start_host_ms_estimate": 206461717.359291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.066458,
+          "phases": [
+            {
+              "instructions": 297944,
+              "micros": 2107,
+              "phase": "present"
+            },
+            {
+              "instructions": 59411,
+              "micros": 124,
+              "phase": "encode"
+            },
+            {
+              "instructions": 21524,
+              "micros": 55,
+              "phase": "paint"
+            },
+            {
+              "instructions": 13729,
+              "micros": 48,
+              "phase": "script"
+            },
+            {
+              "instructions": 9385,
+              "micros": 43,
+              "phase": "update"
+            },
+            {
+              "instructions": 26349,
+              "micros": 31,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 24,
+              "phase": "damage"
+            }
+          ],
+          "notes": [
+            "ready early: waited to hand over with the display link's other frames, so two don't land on one refresh"
+          ]
+        },
+        {
+          "frame": 1744,
+          "trace_end_host_ms_estimate": 206461728.94129097,
+          "trace_start_host_ms_estimate": 206461726.86829096,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.089792,
+          "phases": [
+            {
+              "instructions": 275777,
+              "micros": 1563,
+              "phase": "present"
+            },
+            {
+              "instructions": 68540,
+              "micros": 204,
+              "phase": "encode"
+            },
+            {
+              "instructions": 48557,
+              "micros": 104,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9340,
+              "micros": 72,
+              "phase": "update"
+            },
+            {
+              "instructions": 7672,
+              "micros": 63,
+              "phase": "script"
+            },
+            {
+              "instructions": 26089,
+              "micros": 38,
+              "phase": "submit"
+            },
+            {
+              "instructions": 9462,
+              "micros": 28,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        },
+        {
+          "frame": 1745,
+          "trace_end_host_ms_estimate": 206461735.90129098,
+          "trace_start_host_ms_estimate": 206461734.488291,
+          "link_tick_host_ms": null,
+          "handover_host_ms": null,
+          "gpu_complete_host_ms": null,
+          "gpu_duration_ms": 0.054708,
+          "phases": [
+            {
+              "instructions": 278523,
+              "micros": 1185,
+              "phase": "present"
+            },
+            {
+              "instructions": 63368,
+              "micros": 82,
+              "phase": "encode"
+            },
+            {
+              "instructions": 56525,
+              "micros": 50,
+              "phase": "script"
+            },
+            {
+              "instructions": 21963,
+              "micros": 35,
+              "phase": "paint"
+            },
+            {
+              "instructions": 9388,
+              "micros": 26,
+              "phase": "update"
+            },
+            {
+              "instructions": 25509,
+              "micros": 24,
+              "phase": "submit"
+            },
+            {
+              "instructions": 7605,
+              "micros": 13,
+              "phase": "damage"
+            }
+          ],
+          "notes": []
+        }
+      ]
+    }
+  ],
+  "inter_late_gap_ms": [
+    1266.6690830290318,
+    966.6685000061989,
+    2858.338707983494,
+    2041.6704999804497,
+    500.00091701745987,
+    166.66699999570847,
+    166.66699999570847,
+    191.6670419871807,
+    275.0004160106182,
+    566.6678340137005,
+    183.33362498879433,
+    583.3344160020351,
+    100.0002090036869
+  ]
+}

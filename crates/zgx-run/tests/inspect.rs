@@ -172,6 +172,7 @@ fn a_session_answers_the_tree_states_and_actions() {
 
 #[test]
 fn an_app_serves_its_session_on_a_socket_only_its_user_reaches() {
+    let _guard = FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner());
     let (app, session) = app();
     let executor = app.executor.clone();
     let server = zgx_script::inspect::serve(session, "test app", move |task| {
@@ -1028,4 +1029,57 @@ return ui.column { ui.text { id = "seen", "{seen}" } }
     // And a name that is neither is still an error.
     let wrong = ask(&app, &session, r#"{"cmd":"key","keys":"altt"}"#);
     assert!(!wrong.field("ok").is_some_and(Value::truthy));
+}
+
+#[test]
+fn a_wait_does_not_block_reading_the_frame_ring() {
+    let _guard = FRAME_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    let (app, session) = app();
+    let executor = app.executor.clone();
+    let _server = zgx_script::inspect::serve(session, "concurrent frame reader", move |task| {
+        executor.borrow_mut().spawn(task);
+    })
+    .unwrap();
+    let pid = std::process::id();
+    let (sent, received) = std::sync::mpsc::channel();
+    let waiting = std::thread::spawn(move || {
+        sent.send(()).unwrap();
+        zgx_script::inspect_client::request(
+            pid,
+            &Value::from_json(r#"{"cmd":"sleep","ms":1500}"#).unwrap(),
+        )
+        .unwrap()
+    });
+    received.recv().unwrap();
+    // Let the first request enter its pending future before reading frames.
+    for _ in 0..20 {
+        app.settle();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let reader = std::thread::spawn(move || {
+        zgx_script::inspect_client::request(
+            pid,
+            &Value::from_json(r#"{"cmd":"frames","n":400}"#).unwrap(),
+        )
+        .unwrap()
+    });
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !reader.is_finished() {
+        assert!(
+            Instant::now() < deadline,
+            "frame reader blocked behind the wait"
+        );
+        app.frame();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !waiting.is_finished(),
+        "frame reader waited for the sleep to finish"
+    );
+    assert!(reader.join().unwrap().contains(r#""ok":true"#));
+    while !waiting.is_finished() {
+        app.frame();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(waiting.join().unwrap().contains(r#""ok":true"#));
 }
