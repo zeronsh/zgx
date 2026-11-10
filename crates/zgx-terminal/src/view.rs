@@ -471,6 +471,7 @@ impl Engine {
         let caret;
         let output;
         let screen_rows;
+        let scrolled;
         {
             let mut term = session.term();
             let rows = term.screen_lines();
@@ -496,6 +497,11 @@ impl Engine {
             output = !all;
             *self.last_selection.borrow_mut() = selection;
             let mut damaged = vec![false; rows];
+            // Lines the screen scrolled up, their damage moved with them:
+            // what the slots drew moves up as many rows, and only the rows
+            // damaged since are built (the lines new at the bottom, and any
+            // written to). Unless everything is drawn again anyway.
+            let lines_scrolled = term.scrolled();
             match term.damage() {
                 alacritty_terminal::term::TermDamage::Full => all = true,
                 alacritty_terminal::term::TermDamage::Partial(lines) => {
@@ -506,7 +512,12 @@ impl Engine {
                     }
                 }
             }
-            let was = self.last_cursor.replace(cursor_row);
+            scrolled = if all { 0 } else { lines_scrolled };
+            // The row the cursor was drawn on, moved up with its line.
+            let was = self
+                .last_cursor
+                .replace(cursor_row)
+                .and_then(|row| row.checked_sub(scrolled));
             for row in [was, cursor_row].into_iter().flatten() {
                 if let Some(row) = damaged.get_mut(row) {
                     *row = true;
@@ -552,15 +563,18 @@ impl Engine {
             Vec::new()
         };
         let news = if output && listening {
-            self.news_of(&shown, &changed)
+            self.news_of(&shown, &changed, scrolled)
         } else {
             String::new()
         };
         self.runtime.batch(|| {
-            // Every row worked out again (output scrolled, most often): the
-            // slots of lines still on screen move up with them.
-            if every_row {
-                self.scroll_slots(shift(&shown, &changed));
+            // Output scrolled the screen: the slots of lines still on it
+            // move up with them, as many as it says, or, every row worked
+            // out again, as many as their rows show.
+            match scrolled {
+                0 if every_row => self.scroll_slots(shift(&shown, &changed)),
+                0 => {}
+                lines => self.scroll_slots(lines),
             }
             let rows = self.rows.borrow();
             let slots = self.slots.borrow();
@@ -640,20 +654,27 @@ impl Engine {
     /// What a reader hears of rows `changed` from what the rows show: new
     /// lines and what lines gained, less the shell's echo of what was typed.
     /// `shown`, every row's paint, when every row changed (output may have
-    /// scrolled them); otherwise empty, and only the changed rows are read.
-    /// Out of line: worked out only while a reader listens, it leaves the
-    /// paint of every other frame as it was.
+    /// scrolled them); otherwise empty. `scrolled`: the lines shown moved up
+    /// that many rows first, the changed rows built after. Rows that neither
+    /// all changed nor scrolled are compared alone; otherwise every row,
+    /// read here if not given. Out of line: worked out only while a reader
+    /// listens, it leaves the paint of every other frame as it was.
     #[cold]
     #[inline(never)]
-    fn news_of(&self, shown: &[Rc<RowPaint>], changed: &[(usize, RowPaint)]) -> String {
+    fn news_of(
+        &self,
+        shown: &[Rc<RowPaint>],
+        changed: &[(usize, RowPaint)],
+        scrolled: usize,
+    ) -> String {
         if changed.is_empty() {
             return String::new();
         }
-        let news = if shown.is_empty() {
+        let rows = self.rows.borrow();
+        let slots = self.slots.borrow();
+        let news = if shown.is_empty() && scrolled == 0 {
             // Rows that didn't all change didn't scroll: what each changed
             // row showed is all there is to compare.
-            let rows = self.rows.borrow();
-            let slots = self.slots.borrow();
             // Top first, as a reader hears the screen.
             let mut was: Vec<(usize, Rc<RowPaint>, &RowPaint)> = changed
                 .iter()
@@ -668,8 +689,21 @@ impl Engine {
                     .map(|(_, was, now)| (was.text.as_str(), now.text.as_str())),
             )
         } else {
-            let mut after: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
-            let before: Vec<&str> = after.clone();
+            // A scroll building only the lines it brings in: every row's
+            // paint, from the slots.
+            let all: Vec<Rc<RowPaint>>;
+            let shown = match shown.is_empty() {
+                true => {
+                    all = (slots.iter())
+                        .map(|slot| rows[*slot].with_untracked(Rc::clone))
+                        .collect();
+                    &all[..]
+                }
+                false => shown,
+            };
+            let before: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
+            let mut after: Vec<&str> = before.iter().skip(scrolled).copied().collect();
+            after.resize(before.len(), "");
             for (row, paint) in changed {
                 if let Some(text) = after.get_mut(*row) {
                     *text = &paint.text;
