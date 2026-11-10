@@ -1,8 +1,8 @@
 //! Contains [TaffyTree](crate::tree::TaffyTree): the default implementation of [LayoutTree](crate::tree::LayoutTree), and the error type for Taffy.
-#[cfg(not(feature = "std"))]
+// zgx: a node's context in a dense map by slot, with `std` too
+// (`ZGX_PATCH.md`): measured by its context, a leaf looks it up each time
+// it is laid out, and upstream's sparse map hashes the slot with SipHash.
 use slotmap::SecondaryMap;
-#[cfg(feature = "std")]
-use slotmap::SparseSecondaryMap as SecondaryMap;
 use slotmap::{DefaultKey, SlotMap};
 
 use crate::geometry::Size;
