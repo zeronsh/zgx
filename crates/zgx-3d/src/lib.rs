@@ -36,13 +36,19 @@ mod guide {}
 
 #[cfg(feature = "gltf")]
 mod animation;
+#[cfg(feature = "compute")]
+mod buffer;
 mod caps;
+#[cfg(feature = "compute")]
+mod compute;
 mod environment;
 mod geometry;
 #[cfg(feature = "gltf")]
 mod gltf;
 mod math;
+mod memory;
 mod orbit;
+mod painter;
 mod pick;
 mod render;
 mod texture;
@@ -50,12 +56,20 @@ mod world;
 
 #[cfg(feature = "gltf")]
 pub use animation::{Clip, Placed};
+#[cfg(feature = "compute")]
+pub use buffer::{
+    BufferDesc, DEFAULT_MEMORY_CAP, DEFAULT_READBACK_BUDGET, Format, GpuBuffer, GpuDataError,
+    GpuTexture, ReadError, Readback, TextureDesc, WriteError,
+};
 pub use caps::{Backend, Caps, Compressed, Tier};
+#[cfg(feature = "compute")]
+pub use compute::{Access, Compute, ComputeError, ComputeId, ComputeStatus, Point};
 pub use environment::Environment;
 pub use geometry::{Geometry, MorphTarget, Vertex};
 #[cfg(feature = "gltf")]
 pub use gltf::{Model, ModelError};
 pub use math::{Mat4, Quat, Transform, Vec3, vec3};
+pub use memory::Memory;
 pub use orbit::{Answer, Orbit, OrbitControls};
 pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};

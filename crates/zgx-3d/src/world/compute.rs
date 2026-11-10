@@ -1,0 +1,133 @@
+//! A world's GPU data and compute passes (design-3d-aaa.md, 5.3): the
+//! `World` calls of `crate::buffer` and `crate::compute`.
+use super::World;
+use crate::{
+    BufferDesc, Compute, ComputeError, ComputeId, ComputeStatus, GpuBuffer, GpuDataError,
+    GpuTexture, TextureDesc,
+    buffer::{BufferShared, TextureShared},
+    compute::{Data, UNSETTLED},
+};
+use std::{cell::RefCell, rc::Rc};
+
+impl World {
+    /// Its GPU data, made with the first call needing it.
+    fn data<T>(&self, f: impl FnOnce(&mut Data) -> T) -> T {
+        let mut inner = self.inner.borrow_mut();
+        let view = self.view.clone();
+        let data = inner.data.get_or_insert_with(|| Box::new(Data::new(view)));
+        let out = f(data);
+        let wants = data.wants_frames();
+        inner.unsettle(UNSETTLED, wants);
+        out
+    }
+
+    /// A buffer on the device for compute passes to bind, and to read back:
+    /// its bytes count against the world's cap (`set_memory_cap`) while the
+    /// handle (or a pass binding it) lives.
+    pub fn add_buffer(&self, desc: BufferDesc) -> Result<GpuBuffer, GpuDataError> {
+        let most = wgpu_limits().max_buffer_size;
+        if desc.size == 0 || desc.size > most {
+            return Err(GpuDataError::Size(desc.size));
+        }
+        self.data(|data| {
+            data.room(desc.size)?;
+            let shared = Rc::new(BufferShared {
+                id: data.link.id(),
+                size: desc.size,
+                contents: RefCell::new(desc.contents),
+                writes: RefCell::default(),
+                gpu: RefCell::default(),
+                link: data.link.clone(),
+            });
+            data.add_buffer(&shared);
+            Ok(GpuBuffer(shared))
+        })
+    }
+
+    /// A texture on the device for compute passes to write and read and
+    /// materials to sample, zeroed: counted as `add_buffer`'s are.
+    pub fn add_texture(&self, desc: TextureDesc) -> Result<GpuTexture, GpuDataError> {
+        let most = wgpu_limits().max_texture_dimension_2d;
+        let (width, height) = desc.size;
+        if width == 0 || height == 0 || width > most || height > most {
+            return Err(GpuDataError::Size(desc.bytes()));
+        }
+        self.data(|data| {
+            data.room(desc.bytes())?;
+            let shared = Rc::new(TextureShared {
+                id: data.link.id(),
+                desc,
+                gpu: RefCell::default(),
+                link: data.link.clone(),
+            });
+            data.add_texture(&shared);
+            Ok(GpuTexture(shared))
+        })
+    }
+
+    /// The most the app's buffers and textures may hold, in bytes (256 MiB
+    /// to begin with): `add_buffer` and `add_texture` refuse more. Lowering
+    /// it lets go of nothing.
+    pub fn set_memory_cap(&self, bytes: u64) {
+        self.data(|data| data.cap = bytes);
+    }
+
+    /// The most readbacks copy a frame, in bytes (64 KiB to begin with):
+    /// larger reads take more frames, smaller ones share one.
+    pub fn set_readback_budget(&self, bytes: u64) {
+        self.data(|data| data.budget = bytes.max(4));
+    }
+
+    /// Add a compute pass, checked now: its WGSL parsed and validated (errors
+    /// at the shader's own lines), its bindings against the shader's, its
+    /// workgroups against the limits every tier A device has, and its order
+    /// against the passes at its point. `Unsupported` where the view's
+    /// device (once a frame has been drawn) runs no compute; on a device
+    /// found to run none later, its status says so. It's compiled off the
+    /// frame and runs from the first frame after.
+    pub fn add_compute(&self, compute: Compute) -> Result<ComputeId, ComputeError> {
+        if self.caps().is_some_and(|caps| !caps.compute) {
+            return Err(ComputeError::Unsupported);
+        }
+        let id = self.data(|data| data.add_compute(compute))?;
+        self.view.invalidate();
+        Ok(id)
+    }
+
+    /// Take a compute pass out: what it bound is let go with it, unless the
+    /// app holds it too.
+    pub fn remove_compute(&self, id: ComputeId) {
+        self.data(|data| data.remove_compute(id));
+    }
+
+    /// Enable or disable a compute pass: disabled, it doesn't run and keeps
+    /// no frames coming.
+    pub fn set_compute_enabled(&self, id: ComputeId, on: bool) {
+        if self.data(|data| data.set_enabled(id, on)) && on {
+            self.view.invalidate();
+        }
+    }
+
+    /// Run an on-demand compute pass once more, in the next frame (which this
+    /// asks for).
+    pub fn run_compute(&self, id: ComputeId) {
+        if self.data(|data| data.demand(id)) {
+            self.view.invalidate();
+        }
+    }
+
+    /// Where a compute pass is on the device; `None` if it was removed.
+    pub fn compute_status(&self, id: ComputeId) -> Option<ComputeStatus> {
+        self.inner
+            .borrow()
+            .data
+            .as_ref()
+            .and_then(|data| data.status(id))
+    }
+}
+
+/// The limits GPU data is made within: WebGPU's defaults, which every tier
+/// A device meets.
+fn wgpu_limits() -> zgx_gpu::wgpu::Limits {
+    zgx_gpu::wgpu::Limits::default()
+}

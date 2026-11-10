@@ -20,6 +20,9 @@ serde_json = { version = "1", optional = true }
 # glTF 2.0 models (`Model`, `World::add_model`): `.glb` and `.gltf` files,
 # their textures PNG or JPEG.
 gltf = ["dep:serde_json", "zgx-gpu/png", "zgx-gpu/jpeg"]
+# The app's GPU data and compute passes (`World::add_buffer`,
+# `add_texture`, `add_compute`): WGSL checked by the naga wgpu brings.
+compute = []
 
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop", default-features = false }

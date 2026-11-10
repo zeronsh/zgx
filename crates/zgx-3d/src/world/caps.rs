@@ -10,3 +10,12 @@ impl World {
         self.inner.borrow().caps.get()
     }
 }
+
+impl World {
+    /// Its state, to change: for the modules of features kept apart from
+    /// world.rs (compute, particles).
+    #[cfg_attr(not(feature = "compute"), allow(dead_code))]
+    pub(crate) fn inner_mut(&self) -> std::cell::RefMut<'_, super::Inner> {
+        self.inner.borrow_mut()
+    }
+}

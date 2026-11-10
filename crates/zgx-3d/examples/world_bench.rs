@@ -9,7 +9,9 @@
 //! placed ones. `SCENE=still` is `textured`'s meshes standing still, the
 //! camera going round them: a frame where only the view changed.
 //! `MESHES` and `FRAMES` size it; `CULLING=0` draws what the camera can't
-//! see too. None has an environment:
+//! see too. `SCENE=compute`, with the `compute` feature, adds the app's GPU
+//! data and compute passes to `textured` (`world_bench/compute.rs`). None has
+//! an environment:
 //! prefiltering one takes two thirds of a cell, and its threads move the count.
 //! Run: cargo run --release -p zgx-3d --example world_bench
 use std::{
@@ -160,7 +162,15 @@ fn world(mixed: bool, meshes: usize) -> (World, ObjectId, ObjectId, Vec<ObjectId
     (world, root, joint, morphs)
 }
 
+#[cfg(feature = "compute")]
+#[path = "world_bench/compute.rs"]
+mod compute;
+
 fn main() {
+    #[cfg(feature = "compute")]
+    if std::env::var("SCENE").is_ok_and(|scene| scene == "compute") {
+        return compute::main();
+    }
     let mixed = std::env::var("SCENE").is_ok_and(|scene| scene == "mixed");
     let (meshes, frames) = (setting("MESHES", 2000), setting("FRAMES", 30));
     let (device, queue) = device();

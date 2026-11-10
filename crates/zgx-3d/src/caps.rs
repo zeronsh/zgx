@@ -3,12 +3,7 @@
 //! again after the device changes, and sorted into the design's tiers. A
 //! feature that needs more than the device has says so through it, once,
 //! rather than failing silently.
-use crate::world::Inner;
-use std::{cell::RefCell, rc::Weak};
-use zgx_gpu::{
-    viewport::{Viewport, ViewportFrame},
-    wgpu,
-};
+use zgx_gpu::wgpu;
 
 /// Which of the design's tiers a device is (design-3d-aaa.md, section 3).
 #[non_exhaustive]
@@ -205,53 +200,11 @@ impl Caps {
     }
 }
 
-/// A world's painter, reading its device's [`Caps`] into the world before
-/// the first frame drawn with each device: one flag tested a frame.
-pub(crate) struct Reading<V> {
-    painter: V,
-    world: Weak<RefCell<Inner>>,
-    read: bool,
-}
-impl<V> Reading<V> {
-    pub(crate) fn new(painter: V, world: Weak<RefCell<Inner>>) -> Self {
-        Self {
-            painter,
-            world,
-            read: false,
-        }
-    }
-}
-impl<V: Viewport> Viewport for Reading<V> {
-    #[inline]
-    fn render(&mut self, frame: &mut ViewportFrame<'_>) {
-        if !self.read {
-            self.read(frame.device);
-        }
-        self.painter.render(frame);
-    }
-    fn device_changed(&mut self) {
-        self.read = false;
-        self.painter.device_changed();
-    }
-    fn rest(&mut self) {
-        self.painter.rest();
-    }
-}
-impl<V> Reading<V> {
-    #[cold]
-    #[inline(never)]
-    fn read(&mut self, device: &wgpu::Device) {
-        self.read = true;
-        if let Some(world) = self.world.upgrade() {
-            world.borrow().caps.set(Some(Caps::of(device)));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::World;
+    use zgx_gpu::viewport::{Viewport, ViewportFrame};
 
     fn noop() -> (wgpu::Device, wgpu::Queue) {
         wgpu::Device::noop(&Default::default())
