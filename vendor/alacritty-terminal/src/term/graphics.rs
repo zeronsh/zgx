@@ -38,6 +38,24 @@ pub struct Placement {
     pub size: [u32; 2],
 }
 
+/// A picture shown where the text puts it (the kitty graphics protocol's
+/// virtual placements, `U=1`): fitted into `columns` by `lines` cells, of
+/// which each Unicode placeholder cell (U+10EEEE) the text holds names one.
+/// It sits on no lines: the placeholders move with the text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtualPlacement {
+    /// The embedder's picture.
+    pub image: u32,
+    /// Its number among the picture's virtual placements, which the
+    /// placeholders' underline colour names (zero: any).
+    pub id: u32,
+    /// The rectangle of cells the picture is fitted into.
+    pub columns: usize,
+    pub lines: usize,
+    /// Under the text when negative, over it otherwise.
+    pub z: i32,
+}
+
 impl Placement {
     /// The lines it covers.
     pub fn line_range(&self) -> Range<Line> {

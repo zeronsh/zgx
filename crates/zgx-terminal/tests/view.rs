@@ -1221,6 +1221,162 @@ fn cells_are_whole_device_pixels_at_any_scale() {
     term.close();
 }
 
+/// Placeholder text shows a picture (the kitty graphics protocol's
+/// Unicode placeholders): a virtual placement fits it into 4 by 2 cells,
+/// and two rows of placeholders in its colour, the first naming its row and
+/// column, the rest left to follow on, each show their row of it, drawn
+/// once, fitted (2 by 1 pixels: as wide as the 4 cells, centred down the
+/// 2 rows) and not as glyphs. Scrolled, the rows keep their nodes.
+#[test]
+fn placeholder_text_shows_a_picture() {
+    use zgx::scene::NodeId;
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let feed = |app: &Harness, bytes: &[u8]| {
+        replay.feed(bytes);
+        app.ui.prepare_frame();
+    };
+    let drawn = |app: &Harness| -> Vec<(NodeId, zgx::scene::Rect)> {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .filter_map(|item| match item.kind {
+                NodeKind::Image(_) => Some((item.id, scene.transformed_bounds(item.id))),
+                _ => None,
+            })
+            .collect()
+    };
+    let text = |app: &Harness, text: &str| {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .find_map(|item| match scene.kind(item.id) {
+                NodeKind::Text { text: shown, .. } if &**shown == text => {
+                    Some(scene.transformed_bounds(item.id))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{text} isn't shown"))
+    };
+    feed(&app, b"mark\r\n");
+    feed(
+        &app,
+        b"\x1b_Ga=T,U=1,f=24,s=2,v=1,c=4,r=2,i=42,q=2;/wAAAAD/\x1b\\",
+    );
+    // Row 0 column 0 named, then three to follow; row 1 named alone.
+    let (p, row0, row1) = ("\u{10EEEE}", "\u{0305}", "\u{030D}");
+    let placeholders = format!(
+        "\x1b[38;5;42m{p}{row0}{row0}{p}{p}{p}\x1b[39m\r\n\x1b[38;5;42m{p}{row1}{p}{p}{p}\x1b[39m\r\nend\r\n"
+    );
+    feed(&app, placeholders.as_bytes());
+    let (mark, end) = (text(&app, "mark"), text(&app, "end"));
+    let (cell, line) = (mark.width / 4., (end.y - mark.y) / 3.);
+    let near = |a: f32, b: f32| (a - b).abs() < 0.01;
+    let check = |app: &Harness| {
+        let shown = drawn(app);
+        let [(first, a), (second, b)] = shown[..] else {
+            panic!("{shown:?}");
+        };
+        // Each row's node draws the whole picture where it is, clipped to
+        // its row: both in one place.
+        assert!(
+            near(a.x, b.x) && near(a.y, b.y) && near(a.width, b.width),
+            "{a:?} {b:?}"
+        );
+        let top = text(app, "end").y - 2. * line;
+        assert!(
+            near(a.x, text(app, "end").x)
+                && near(a.width, 4. * cell)
+                && near(a.height, 2. * cell)
+                && near(a.y, top + line - cell),
+            "{a:?} in 4 by 2 cells of {cell} by {line} from {top}"
+        );
+        (first, second)
+    };
+    let nodes = check(&app);
+    // No placeholder is drawn as a glyph.
+    let scene = app.ui.scene.borrow();
+    let glyphs = scene.paint_items().filter(|item| {
+        matches!(scene.kind(item.id), NodeKind::Text { text, .. } if text.contains('\u{10EEEE}'))
+    });
+    assert_eq!(glyphs.count(), 0);
+    drop(scene);
+    // Scrolled up a line at a time, the rows keep their nodes.
+    for n in 0..20 {
+        feed(&app, format!("after {n}\r\n").as_bytes());
+        if drawn(&app).len() == 2 {
+            assert_eq!(check(&app), nodes, "made again");
+        }
+    }
+    // Deleted with its picture, nothing shows.
+    feed(&app, b"\x1b[H\x1b_Ga=d,d=I,i=42,q=2\x1b\\");
+    feed(&app, b"\x1b[2J\x1b[3J\x1b[H");
+    for n in 0..3 {
+        feed(&app, format!("more {n}\r\n").as_bytes());
+    }
+    assert!(drawn(&app).is_empty(), "{:?}", drawn(&app));
+    term.close();
+}
+
+/// Before any picture is placed for them, placeholder cells are text like
+/// any other (a row is built as it was before placeholders); the first
+/// virtual placement builds every row again, and the same cells show it,
+/// drawing no glyph.
+#[test]
+fn placeholders_show_pictures_once_one_is_placed() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let feed = |app: &Harness, bytes: &[u8]| {
+        replay.feed(bytes);
+        app.ui.prepare_frame();
+    };
+    let shown = |app: &Harness| {
+        let scene = app.ui.scene.borrow();
+        let glyphs = scene.paint_items().filter(|item| {
+            matches!(scene.kind(item.id), NodeKind::Text { text, .. } if text.contains('\u{10EEEE}'))
+        });
+        let glyphs = glyphs.count();
+        let pictures = scene
+            .paint_items()
+            .filter(|item| matches!(item.kind, NodeKind::Image(_)))
+            .count();
+        (glyphs, pictures)
+    };
+    // A picture sent, not placed; then placeholder text naming it.
+    feed(&app, b"\x1b_Ga=t,f=24,s=2,v=1,i=42,q=2;/wAAAAD/\x1b\\");
+    let (p, row0) = ("\u{10EEEE}", "\u{0305}");
+    let line = format!("\x1b[38;5;42m{p}{row0}{row0}{p}{p}{p}\x1b[39m\r\nend\r\n");
+    feed(&app, line.as_bytes());
+    // Each drawn alone, as a character of its range is.
+    assert_eq!(shown(&app), (4, 0), "text, until a picture is placed");
+    // Placed for them: the row is built again.
+    feed(&app, b"\x1b_Ga=p,U=1,i=42,c=4,r=1,q=2\x1b\\");
+    assert_eq!(shown(&app), (0, 1), "the picture, and no glyph");
+    term.close();
+}
+
 /// Output read before the view's first layout (a terminal opened while its
 /// window runs, its program quick to write) makes the rows for the session's
 /// own size, from outside any reactive flush: the rows built then find the

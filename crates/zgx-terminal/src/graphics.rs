@@ -4,10 +4,12 @@
 //! Pictures come in the escape codes themselves (`t=d`), whole or in
 //! chunks, as RGB, RGBA or PNG, zlib-compressed or not. Reading files or
 //! shared memory the program names (`t=f`, `t=t`, `t=s`) is refused, as are
-//! animation and relative or Unicode-placeholder placements: a program
-//! asking (`a=q`) is told, and sends the pixels in the codes instead. The
-//! screen model keeps where each placement is (`Term::place`) and moves it
-//! with its lines; the pictures' pixels are here, shared with the view.
+//! animation and relative placements: a program asking (`a=q`) is told, and
+//! sends the pixels in the codes instead. The screen model keeps where each
+//! placement is (`Term::place`) and moves it with its lines; a virtual
+//! placement (`U=1`) it keeps beside them, shown where placeholder text puts
+//! it (`crate::placeholder`). The pictures' pixels are here, shared with the
+//! view.
 //! Sixel images (`crate::sixel`) are kept and placed here too.
 
 use alacritty_terminal::{
@@ -15,7 +17,7 @@ use alacritty_terminal::{
     event::EventListener,
     grid::Dimensions,
     index::{Column, Line},
-    term::graphics::Placement,
+    term::graphics::{Placement, VirtualPlacement},
     vte::ansi::Handler,
 };
 use std::{
@@ -59,8 +61,9 @@ struct Keys {
     z: i32,
     stay: bool,
     delete: u8,
-    /// Keys asking for what this doesn't do: relative or Unicode
-    /// placeholder placement.
+    /// Placed where placeholder text puts it (`U=1`).
+    virtual_placement: bool,
+    /// Keys asking for what this doesn't do: relative placement.
     unsupported: bool,
 }
 
@@ -107,7 +110,7 @@ fn keys(control: &[u8]) -> Option<Keys> {
             b'z' => keys.z = std::str::from_utf8(value).ok()?.parse().ok()?,
             b'C' => keys.stay = number()? == 1,
             b'd' => keys.delete = letter()?,
-            b'U' => keys.unsupported |= number()? != 0,
+            b'U' => keys.virtual_placement = number()? == 1,
             b'P' | b'Q' | b'H' | b'V' => keys.unsupported = true,
             // Sizes and offsets of files, and animation's keys.
             _ => {}
@@ -388,7 +391,10 @@ impl Graphics {
         }
         // Over the quota, the oldest go: first those not on the screen.
         while self.bytes > QUOTA {
-            let placed = |id: &u32| term.placements().iter().any(|p| p.image == *id);
+            let placed = |id: &u32| {
+                term.placements().iter().any(|p| p.image == *id)
+                    || term.virtual_placements().iter().any(|p| p.image == *id)
+            };
             let Some(oldest) = self
                 .held
                 .iter()
@@ -400,6 +406,7 @@ impl Graphics {
             };
             self.forget(oldest, images);
             term.retain_placements(|p| p.image != oldest);
+            term.retain_virtual_placements(|p| p.image != oldest);
         }
     }
 
@@ -453,6 +460,24 @@ impl Graphics {
             }
             !go
         });
+        // Virtual placements go only when their picture is named (by id,
+        // number or range): the others pick cells, and they have none.
+        if !term.virtual_placements().is_empty() {
+            let picked = |p: &VirtualPlacement| match keys.delete.to_ascii_lowercase() {
+                b'i' | b'n' => {
+                    Some(p.image) == id && (keys.placement == 0 || p.id == keys.placement)
+                }
+                b'r' => (x..=y).contains(&p.image),
+                _ => false,
+            };
+            term.retain_virtual_placements(|p| {
+                let go = picked(p);
+                if go {
+                    shown.push(p.image);
+                }
+                !go
+            });
+        }
         if keys.delete.is_ascii_uppercase() {
             // Named pictures go even when nothing showed them.
             if matches!(keys.delete, b'I' | b'N') {
@@ -462,7 +487,9 @@ impl Graphics {
                 shown.extend(self.held.keys().copied().filter(|id| (x..=y).contains(id)));
             }
             for id in shown {
-                if !term.placements().iter().any(|p| p.image == id) {
+                let placed = term.placements().iter().any(|p| p.image == id)
+                    || term.virtual_placements().iter().any(|p| p.image == id);
+                if !placed {
                     self.forget(id, images);
                 }
             }
@@ -595,6 +622,42 @@ fn png(data: &[u8]) -> Result<(u32, u32, Vec<u8>), &'static str> {
 /// Place `image` at the cursor, as `keys` say, and move the cursor past it
 /// unless asked not to (`C=1`): down its lines but the last, scrolling as a
 /// line feed does, and across its columns.
+/// Place `image` (picture `id`) where placeholder text puts it, fitted into
+/// the columns and rows asked for: given one, the other its shape needs;
+/// given neither, the cells its pixels need. The cursor stays.
+fn place_virtual<T: EventListener>(
+    keys: &Keys,
+    id: u32,
+    image: &ImageData,
+    term: &mut Term<T>,
+    cell: (u16, u16),
+) {
+    let (width, height) = (u64::from(image.width()), u64::from(image.height()));
+    let (cell_width, cell_height) = (u64::from(cell.0.max(1)), u64::from(cell.1.max(1)));
+    let (columns, rows) = (u64::from(keys.columns), u64::from(keys.rows));
+    let (columns, rows) = match (columns, rows) {
+        (0, 0) => (width.div_ceil(cell_width), height.div_ceil(cell_height)),
+        (0, rows) => (
+            (rows * cell_height * width).div_ceil(height * cell_width),
+            rows,
+        ),
+        (columns, 0) => (
+            columns,
+            (columns * cell_width * height).div_ceil(width * cell_height),
+        ),
+        both => both,
+    };
+    // As many as the diacritics number.
+    let most = |n: u64| n.clamp(1, 297) as usize;
+    term.place_virtual(VirtualPlacement {
+        image: id,
+        id: keys.placement,
+        columns: most(columns),
+        lines: most(rows),
+        z: keys.z,
+    });
+}
+
 fn place<T: EventListener>(
     keys: &Keys,
     id: u32,
@@ -602,6 +665,9 @@ fn place<T: EventListener>(
     term: &mut Term<T>,
     cell: (u16, u16),
 ) {
+    if keys.virtual_placement {
+        return place_virtual(keys, id, image, term, cell);
+    }
     let [x, y, w, h] = keys.source;
     let (x, y) = (x.min(image.width()), y.min(image.height()));
     let width = if w == 0 {
@@ -988,6 +1054,45 @@ mod tests {
         assert_eq!(fx.graphics.held.capacity(), 0);
         assert!(fx.graphics.loading.is_none());
         assert!(fx.term.placements().is_empty());
+    }
+
+    /// A virtual placement (`U=1`) is kept beside the screen's, on no
+    /// cells, and the cursor stays: placeholder text will show it. Asked
+    /// for no cells, it takes those its pixels need, or with one side given
+    /// what its shape needs. Deleting by cells passes it by; by its picture
+    /// it goes.
+    #[test]
+    fn virtual_placements_wait_for_placeholder_text() {
+        let mut fx = Fixture::new();
+        let cursor = fx.term.grid().cursor.point;
+        let red_blue = [255, 0, 0, 0, 0, 255];
+        assert_eq!(
+            fx.run("a=T,U=1,f=24,s=2,v=1,c=4,r=2,i=1", &red_blue),
+            "\x1b_Gi=1;OK\x1b\\"
+        );
+        assert!(fx.term.placements().is_empty());
+        assert_eq!(fx.term.grid().cursor.point, cursor, "the cursor stays");
+        let virtuals = |fx: &Fixture| {
+            let all = fx.term.virtual_placements().iter();
+            all.map(|p| (p.image, p.id, p.columns, p.lines))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(virtuals(&fx), [(1, 0, 4, 2)]);
+        // 40 by 10 pixels, in cells 10 by 20.
+        fx.run("a=t,f=24,s=40,v=10,i=2,q=2", &[0; 40 * 10 * 3]);
+        fx.run("a=p,U=1,i=2,p=5,q=2", &[]);
+        fx.run("a=p,U=1,i=2,p=6,c=8,q=2", &[]);
+        assert_eq!(virtuals(&fx), [(1, 0, 4, 2), (2, 5, 4, 1), (2, 6, 8, 1)]);
+        fx.run("a=d,d=a,q=2", &[]);
+        assert_eq!(virtuals(&fx).len(), 3, "by cells");
+        fx.run("a=d,d=i,i=2,p=5,q=2", &[]);
+        assert_eq!(virtuals(&fx), [(1, 0, 4, 2), (2, 6, 8, 1)]);
+        fx.run("a=d,d=I,i=2,q=2", &[]);
+        assert_eq!(virtuals(&fx), [(1, 0, 4, 2)]);
+        assert!(
+            !fx.images.lock().unwrap().contains_key(&2),
+            "and its picture"
+        );
     }
 
     /// Over the quota, the oldest pictures go, those not on the screen

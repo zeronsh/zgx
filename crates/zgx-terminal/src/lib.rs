@@ -25,6 +25,7 @@ mod news;
 mod osc;
 mod paint;
 mod palette;
+mod placeholder;
 mod process;
 mod session;
 mod sixel;

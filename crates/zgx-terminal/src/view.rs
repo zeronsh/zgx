@@ -101,6 +101,9 @@ struct Engine {
     /// Whether `pictured` holds, read as each paint begins; and the
     /// pictures a paint worked out, for its batch to show.
     any_pictures: Cell<bool>,
+    /// Whether a picture was ever placed for Unicode placeholders: from
+    /// then on, rows show their cells as pictures (`paint::row`).
+    placeholders: Cell<bool>,
     pictures_due: Cell<Option<Vec<(i32, Picture)>>>,
     /// An input method's composition, drawn at the cursor.
     preedit: Signal<String>,
@@ -217,6 +220,7 @@ impl EngineTerminal {
             pictures: runtime.signal(Rc::from([])),
             pictured: runtime.signal(false),
             any_pictures: Cell::new(false),
+            placeholders: Cell::new(false),
             pictures_due: Cell::new(None),
             preedit: runtime.signal(String::new()),
             news: runtime.signal(String::new()),
@@ -496,6 +500,12 @@ impl Engine {
             output = !all;
             *self.last_selection.borrow_mut() = selection;
             let mut damaged = vec![false; rows];
+            // Placing the first one damages the whole screen: every row is
+            // built again with it.
+            if !term.virtual_placements().is_empty() {
+                self.placeholders.set(true);
+            }
+            let placeholders = self.placeholders.get();
             match term.damage() {
                 alacritty_terminal::term::TermDamage::Full => all = true,
                 alacritty_terminal::term::TermDamage::Partial(lines) => {
@@ -524,11 +534,22 @@ impl Engine {
                     });
                     changed.push((
                         row,
-                        paint::row(&term, row, look, metrics, cursor, selection.as_ref()),
+                        paint::row(
+                            &term,
+                            row,
+                            look,
+                            metrics,
+                            cursor,
+                            selection.as_ref(),
+                            placeholders,
+                        ),
                     ));
                 }
             });
-            if !term.placements().is_empty() || self.any_pictures.get() {
+            if !term.placements().is_empty()
+                || !term.virtual_placements().is_empty()
+                || self.any_pictures.get()
+            {
                 self.work_out_pictures(&term, session, metrics);
             }
             term.reset_damage();
@@ -1988,6 +2009,9 @@ fn shown_pictures(term: &crate::Term, session: &Session, metrics: Metrics) -> Ve
             .filter(|(_, p)| p.key.0 == key.0 && p.key.1 == key.1);
         shown[at].1.key.2 = same.count() as u32;
     }
+    if !term.virtual_placements().is_empty() {
+        shown.extend(placeholder_pictures(term, session, metrics));
+    }
     // Placed later over placed earlier, at one z.
     shown.sort_by_key(|(_, p)| p.z);
     shown
@@ -2013,6 +2037,99 @@ fn pictures_view(engine: &Rc<Engine>, below: bool) -> View {
 /// A picture's nodes: made once, as a row's are, and moved by offset. What
 /// it shows or where it stands follows `pictures`, which a scroll leaves as
 /// it is: the rows' container carries it.
+/// The pictures placeholder text shows (`crate::placeholder`): a run of
+/// placeholder cells in a row, naming one picture's cells left to right,
+/// shows those cells of the picture fitted into its virtual placement
+/// (keeping its shape, centred). Keyed by the picture, the placement and the
+/// picture's cell the run starts at, so a run keeps its node as it scrolls.
+#[cold]
+#[inline(never)]
+fn placeholder_pictures(
+    term: &crate::Term,
+    session: &Session,
+    metrics: Metrics,
+) -> Vec<(i32, Picture)> {
+    use crate::placeholder::{self, PLACEHOLDER, Read, Shows};
+    let offset = term.grid().display_offset() as i32;
+    let (cw, ch) = (metrics.cell_width, metrics.cell_height);
+    let mut shown: Vec<(i32, Picture)> = Vec::new();
+    let mut show = |row: i32, first: usize, start: Shows, cells: usize| {
+        let virtuals = term.virtual_placements().iter();
+        let mut virtuals = virtuals.filter(|v| v.image == start.image);
+        let Some(placed) = (match start.placement {
+            0 => virtuals.next(),
+            id => virtuals.find(|v| v.id == id),
+        }) else {
+            return;
+        };
+        let Some(image) = session.image(start.image) else {
+            return;
+        };
+        // Fitted into the placement's cells, keeping its shape, centred.
+        let (width, height) = (placed.columns as f32 * cw, placed.lines as f32 * ch);
+        let (iw, ih) = (image.width().max(1) as f32, image.height().max(1) as f32);
+        let scale = (width / iw).min(height / ih);
+        let (fw, fh) = (iw * scale, ih * scale);
+        let whole = [
+            (width - fw) / 2. - start.column as f32 * cw,
+            (height - fh) / 2. - start.row as f32 * ch,
+            fw,
+            fh,
+        ];
+        let at = (start.row << 12 | start.column) & 0xff_ffff;
+        let key = (start.image, start.placement, 1 << 31 | at);
+        let again = shown
+            .iter()
+            .filter(|(_, p)| p.key.0 == key.0 && p.key.1 == key.1 && p.key.2 & 0xff_ffff == at);
+        let key = (key.0, key.1, key.2 | (again.count() as u32 & 0x7f) << 24);
+        let rect = [PAD_X + first as f32 * cw, 0., cells as f32 * cw, ch];
+        shown.push((
+            row,
+            Picture {
+                key,
+                image,
+                rect,
+                whole,
+                z: placed.z,
+            },
+        ));
+    };
+    for row in 0..term.screen_lines() as i32 {
+        let line = &term.grid()[Line(row - offset)];
+        // The run open: its screen column, what it starts at, its length.
+        let mut run: Option<(usize, Shows, usize)> = None;
+        let mut left: Option<Read> = None;
+        for column in 0..term.columns() {
+            let cell = &line[Column(column)];
+            let read = (cell.c == PLACEHOLDER)
+                .then(|| placeholder::read(cell, left.as_ref()))
+                .flatten();
+            let joins = match (&run, &read) {
+                (Some((_, start, cells)), Some(read)) => {
+                    let s = read.shows;
+                    (s.image, s.placement, s.row) == (start.image, start.placement, start.row)
+                        && s.column == start.column + *cells as u32
+                }
+                _ => false,
+            };
+            match (joins, &mut run) {
+                (true, Some((_, _, cells))) => *cells += 1,
+                _ => {
+                    if let Some((first, start, cells)) = run.take() {
+                        show(row, first, start, cells);
+                    }
+                    run = read.map(|read| (column, read.shows, 1));
+                }
+            }
+            left = read;
+        }
+        if let Some((first, start, cells)) = run {
+            show(row, first, start, cells);
+        }
+    }
+    shown
+}
+
 fn picture_view(pictures: &Signal<Rc<[Picture]>>, key: PictureKey) -> View {
     let of = |pictures: Signal<Rc<[Picture]>>, key| {
         move |read: &dyn Fn(&Picture) -> [f32; 4]| {
