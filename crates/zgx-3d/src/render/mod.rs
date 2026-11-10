@@ -33,7 +33,7 @@ use draw::{Bound, Run, draw_run};
 use frame::frame_uniforms;
 use gpu::{Buffers, Gpu};
 use instances::{Instance, instance, morph_block};
-use materials::{make_binding, map_set, placed, upload};
+use materials::{make_binding, map_set, placed, upload_missing};
 use pipelines::make_main_pipelines;
 use shadows::{CUT_OUT, Casting, PLACED, SHADOW_SIZE, make_shadow_pipeline, shadow_key, sun_view};
 use std::{cell::RefCell, rc::Weak};
@@ -356,10 +356,9 @@ impl Viewport for Renderer {
                 if let Some(texture) = texture {
                     // A texture that can't be read draws as if it had none.
                     let key = (texture.id(), map.srgb());
-                    if !gpu.views.contains_key(&key)
-                        && let Some(view) = upload(frame.device, frame.queue, texture, map.srgb())
-                    {
-                        gpu.views.insert(key, (view, 0));
+                    // The first not uploaded: all of the frame's, together.
+                    if !gpu.views.contains_key(&key) && !texture.failed() {
+                        upload_missing(gpu, (frame.device, frame.queue), &drawn);
                     }
                     if let Some(entry) = gpu.views.get_mut(&key) {
                         entry.1 = gpu.frame;
