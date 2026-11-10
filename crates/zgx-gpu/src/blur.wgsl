@@ -109,6 +109,10 @@ fn along(s:Slot, l:vec2<i32>, step:vec2<i32>)->vec4<f32>{
  return sum/total;
 }
 @fragment fn fs_reduce(v:Vertex)->@location(0) vec4<f32>{return reduced(slots[v.index],v.p.xy);}
+// The blurs as passes of their own, where compute stages can't run
+// (`blur_compute`): the same texels, the same values.
+@fragment fn fs_across(v:Vertex)->@location(0) vec4<f32>{let s=slots[v.index];return along(s,vec2<i32>(v.p.xy)-vec2<i32>(s.atlas.xy),vec2(1,0));}
+@fragment fn fs_down(v:Vertex)->@location(0) vec4<f32>{let s=slots[v.index];return along(s,vec2<i32>(v.p.xy)-vec2<i32>(s.atlas.xy),vec2(0,1));}
 // The stages as dispatches of one compute pass, each over every slot of the
 // batch: `z` the slot, `x` and `y` its texel. A texel past its slot, or a
 // slot the stage passes over (`owner.y`: 0 for an area's copy, which is
