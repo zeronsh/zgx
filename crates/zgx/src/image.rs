@@ -85,13 +85,6 @@ impl Drop for Pixels {
     }
 }
 extern "C" fn drop_kept(kept: &mut std::mem::ManuallyDrop<Option<Kept>>) {
-    if let Some(kept) = &**kept {
-        let held = kept.held.lock().unwrap_or_else(|p| p.into_inner());
-        HELD.fetch_sub(
-            held.as_ref().map_or(0, |h| h.pixels.len()),
-            Ordering::Relaxed,
-        );
-    }
     // SAFETY: once, from `Pixels::drop`; nothing reads it after.
     unsafe { std::mem::ManuallyDrop::drop(kept) }
 }
@@ -729,9 +722,14 @@ pub fn release_decoded() -> usize {
         }
         None => false,
     });
+    // Every copy given back: dropped images' too.
+    HELD.store(0, Ordering::Relaxed);
     freed
 }
-/// What kept files' decoded copies hold together, pinned ones aside.
+/// What kept files' decoded copies hold together, pinned ones aside, or
+/// more: a dropped image's copy stays counted until `shed` or
+/// `release_decoded` counts again, so an image's drop stays as it was (a
+/// style holding one drops it inline, and every style's drop would pay).
 static HELD: AtomicUsize = AtomicUsize::new(0);
 /// What they may hold before those used least recently go (`set_decoded_budget`).
 static BUDGET: AtomicUsize = AtomicUsize::new(usize::MAX);
@@ -772,25 +770,29 @@ fn hold(kept: &Kept, held: Option<Held>) -> usize {
     HELD.fetch_sub(old, Ordering::Relaxed);
     old
 }
-/// Past the budget: give back copies until it is under, those a renderer
-/// holds as textures first (each a duplicate), then those used least
-/// recently; never `keep`'s (just decoded) nor one whose decode is under way.
+/// Past the budget: count what the copies hold again (`HELD` may count
+/// dropped images'), then give back copies until it is under, those a
+/// renderer holds as textures first (each a duplicate), then those used
+/// least recently; never `keep`'s (just decoded) nor one whose decode is
+/// under way.
 #[cold]
 #[inline(never)]
 fn shed(keep: &Pixels) {
+    let mut total = 0;
     let mut held: Vec<(bool, u64, Arc<Pixels>)> = {
         let mut list = registry();
         list.retain(|weak| weak.strong_count() > 0);
         list.iter()
             .filter_map(std::sync::Weak::upgrade)
-            .filter(|pixels| !std::ptr::eq(&**pixels, keep))
             .filter_map(|pixels| {
                 let kept = pixels.kept.as_ref()?;
-                let has = kept
+                let bytes = kept
                     .held
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .is_some();
+                    .as_ref()
+                    .map(|held| held.pixels.len());
+                total += bytes.unwrap_or(0);
                 let decoding = kept
                     .pending
                     .lock()
@@ -798,10 +800,12 @@ fn shed(keep: &Pixels) {
                     .is_some();
                 let used = kept.used.load(Ordering::Relaxed);
                 let shown = kept.resident.load(Ordering::Relaxed) > 0;
-                (has && !decoding).then_some((!shown, used, pixels))
+                let spare = bytes.is_some() && !decoding && !std::ptr::eq(&*pixels, keep);
+                spare.then_some((!shown, used, pixels))
             })
             .collect()
     };
+    HELD.store(total, Ordering::Relaxed);
     held.sort_unstable_by_key(|(evicted, used, _)| (*evicted, *used));
     let budget = BUDGET.load(Ordering::Relaxed);
     for (.., pixels) in held {
@@ -1128,8 +1132,9 @@ mod kept_tests {
     }
 
     /// Past the budget, a decode landing gives back the copies used least
-    /// recently, never its own; under it, nothing goes. And a copy goes from
-    /// the count with its image.
+    /// recently, never its own; under it, nothing goes. A dropped image's
+    /// copy, counted until then, is counted again then, and takes no live
+    /// one's place.
     #[test]
     fn decoded_copies_past_the_budget_go_least_recently_used_first() {
         let _alone = alone();
@@ -1155,8 +1160,13 @@ mod kept_tests {
             held(&a) && !held(&b) && held(&c),
             "the least recently used went"
         );
+        // `a` dropped: its copy still counted, until `d`'s decode lands past
+        // the budget and they are counted again; `c` and `d` fit.
         drop(a);
-        assert_eq!(HELD.load(Ordering::Relaxed), 128, "gone with its image");
+        let d = file();
+        assert!(d.pixels_at((8, 4)).is_some());
+        assert!(held(&c) && held(&d), "a dropped copy took no place");
+        assert_eq!(HELD.load(Ordering::Relaxed), 2 * 128);
         set_decoded_budget(before.0);
         release_decoded();
         assert_eq!(HELD.load(Ordering::Relaxed), 0);
