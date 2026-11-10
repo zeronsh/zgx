@@ -460,7 +460,7 @@ fn read_png(path: &Path) -> ((u32, u32), Vec<u8>) {
 fn differ(a: &[u8], b: &[u8], level: u8) -> (usize, u8) {
     let mut count = 0;
     let mut largest = 0;
-    for (p, q) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+    for (p, q) in a.as_chunks::<4>().0.iter().zip(b.as_chunks::<4>().0) {
         let d = p.iter().zip(q).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
         largest = largest.max(d);
         count += (d > level) as usize;
@@ -473,8 +473,10 @@ fn differ(a: &[u8], b: &[u8], level: u8) -> (usize, u8) {
 fn keep_failure(name: &str, size: (u32, u32), actual: &[u8], expected: &[u8]) -> String {
     let dir = std::env::temp_dir().join("zgx-3d-reference");
     let diff: Vec<u8> = actual
-        .chunks_exact(4)
-        .zip(expected.chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(expected.as_chunks::<4>().0)
         .flat_map(|(p, q)| {
             let d = |i: usize| p[i].abs_diff(q[i]).saturating_mul(8);
             [d(0), d(1), d(2), 255]
@@ -613,7 +615,9 @@ fn a_retained_window_draws_what_a_fresh_one_does() {
         // The control: the changes showed (green, however exposed).
         let changed = window.pixels();
         let greens = changed
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[1] > p[0].saturating_add(30) && p[1] > p[2].saturating_add(30))
             .count();
         assert!(
