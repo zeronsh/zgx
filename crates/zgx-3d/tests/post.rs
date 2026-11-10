@@ -705,3 +705,43 @@ fn post(p: PostIn) -> vec4<f32> {
     world.remove_post(pulse);
     assert!(!world.view().animating());
 }
+
+#[test]
+fn automatic_exposure_brings_a_dim_and_a_bright_scene_to_middle_grey_and_settles() {
+    let shown = |level: f32, auto: bool| {
+        let world = flat([level, level, level, 1.]);
+        world.set_post(Post {
+            auto_exposure: auto.then(AutoExposure::default),
+            vignette: Some(Vignette { intensity: 0. }),
+            ..Default::default()
+        });
+        let mut window = Window::new(&world)?;
+        // Frames until its exposure reads back settled (the first frame
+        // adapts at once; the readback comes two frames later).
+        let mut frames = 0;
+        loop {
+            frames += 1;
+            world.set_camera(Camera::looking_at(
+                [0., 0., 4. + frames as f32 * 1e-4],
+                [0., 0., 0.],
+            ));
+            let pixels = window.draw();
+            if !world.view().animating() || frames == 12 {
+                return Some((at(&pixels, SIZE / 2, SIZE / 2)[0], frames));
+            }
+        }
+    };
+    let Some((dim, settled)) = shown(0.01, true) else {
+        return;
+    };
+    let (bright, _) = shown(4., true).unwrap();
+    assert!(settled < 12, "settled after {settled} frames");
+    // Middle grey (0.18), mapped linearly and encoded: 118. (The bright
+    // scene's light past 1 survives the resolve to be measured.)
+    for v in [dim, bright] {
+        assert!(v.abs_diff(118) <= 3, "{dim} and {bright}");
+    }
+    let (dim, _) = shown(0.01, false).unwrap();
+    let (bright, _) = shown(4., false).unwrap();
+    assert!(dim < 40 && bright > 240, "without: {dim} and {bright}");
+}

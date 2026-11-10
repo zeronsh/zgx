@@ -19,7 +19,7 @@ mod post_pass;
 #[cfg(feature = "post")]
 pub use grade::{Grade, Lut, LutError};
 #[cfg(feature = "post")]
-pub use post::{Bloom, ChromaticAberration, Grain, Post, Vignette};
+pub use post::{AutoExposure, Bloom, ChromaticAberration, Grain, Post, Vignette};
 #[cfg(feature = "post")]
 pub(crate) use post_pass::AppPass;
 #[cfg(feature = "post")]

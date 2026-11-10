@@ -23,6 +23,9 @@ pub struct Post {
     /// Colour grading: white balance, lift, gamma, gain, saturation and a
     /// look-up table.
     pub grade: Option<Grade>,
+    /// Exposure that follows the scene's light, as an eye or camera
+    /// adapts, instead of `World::set_exposure`'s stops alone.
+    pub auto_exposure: Option<AutoExposure>,
 }
 impl Post {
     /// Whether any pass is on: if not, the meshes draw into the view's
@@ -33,6 +36,70 @@ impl Post {
             || self.grain.is_some()
             || self.chromatic_aberration.is_some()
             || self.grade.is_some()
+            || self.auto_exposure.is_some()
+    }
+}
+
+impl super::Settle {
+    /// Automatic exposure is still adapting (`Post::auto_exposure`).
+    pub(crate) const EXPOSURE: u32 = 1 << 9;
+}
+
+/// Exposure following the scene's light (`Post::auto_exposure`): a
+/// histogram of the scene's brightness each frame, the mean of its middle
+/// (between `low` and `high`, so a few very bright or dark pixels don't
+/// swing it) brought to middle grey, eased toward at `up` and `down` stops
+/// a second. `World::set_exposure`'s stops still apply, as compensation
+/// on top. Where the device runs no compute shaders (`World::caps`), the
+/// stops alone apply.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AutoExposure {
+    /// The dimmest scene it adapts to, as log2 of its mean luminance in the
+    /// scene's units (a scene whose mean is 1 is 0, and is exposed by
+    /// log2 0.18, to middle grey); dimmer, it's exposed as that one. −8 by
+    /// default.
+    pub min: f32,
+    /// The brightest, likewise. 8 by default.
+    pub max: f32,
+    /// The share of the histogram's pixels, from the darkest, left out
+    /// below the mean: 0.5 by default (the mean of the brighter half).
+    pub low: f32,
+    /// The share, from the darkest, above which pixels are left out too:
+    /// 0.9 by default (the brightest tenth left out).
+    pub high: f32,
+    /// How fast it adapts to a brighter scene, in stops a second: 3 by
+    /// default (eyes adapt to light faster than to the dark).
+    pub up: f32,
+    /// How fast it adapts to a darker scene: 1 by default.
+    pub down: f32,
+}
+impl Default for AutoExposure {
+    fn default() -> Self {
+        Self {
+            min: -8.,
+            max: 8.,
+            low: 0.5,
+            high: 0.9,
+            up: 3.,
+            down: 1.,
+        }
+    }
+}
+impl AutoExposure {
+    /// The same, every number finite and in order.
+    fn sanitized(self) -> Self {
+        let finite = |v: f32, default: f32| if v.is_finite() { v } else { default };
+        let d = Self::default();
+        let min = finite(self.min, d.min).clamp(-30., 30.);
+        let low = finite(self.low, d.low).clamp(0., 0.99);
+        Self {
+            min,
+            max: finite(self.max, d.max).clamp(min, 30.),
+            low,
+            high: finite(self.high, d.high).clamp(low + 0.01, 1.),
+            up: finite(self.up, d.up).clamp(0.01, 100.),
+            down: finite(self.down, d.down).clamp(0.01, 100.),
+        }
     }
 }
 
@@ -122,11 +189,18 @@ impl World {
                 intensity: unit(c.intensity),
             }),
             grade: post.grade.as_ref().map(Grade::sanitized),
+            auto_exposure: post.auto_exposure.map(AutoExposure::sanitized),
         };
+        let adapts = post.auto_exposure.is_some();
         self.change_view(|inner| {
             let changed = inner.post != post;
             inner.post = post;
             changed
         });
+        // Unsettled until its exposure is where it's going (the renderer
+        // reads that back).
+        self.inner
+            .borrow()
+            .unsettle(super::Settle::EXPOSURE, adapts);
     }
 }
