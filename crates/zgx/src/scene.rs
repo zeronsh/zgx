@@ -2143,6 +2143,9 @@ impl HitTarget {
 /// second user of `NodeMap<()>`'s insert stops it inlining into the label
 /// queue's, on every mount.
 struct Flat;
+/// A contents node out of layout while it holds nothing
+/// (`Scene::set_hidden_when_empty`). Its own type, not `()`, as `Flat`.
+struct HiddenWhenEmpty;
 /// A box whose width its content doesn't size (`Scene::set_contained`).
 struct Contained;
 /// A node holding at `top` below its scroll view's top (`Scene::set_sticky`).
@@ -2784,6 +2787,13 @@ fn laid_out_style(mut style: Style, way: Way) -> Style {
     style.layout_options = (!options.is_empty()).then(|| Arc::new(options));
     style
 }
+/// `own`, out of layout (`display: none`).
+fn hidden_style(mut own: Style) -> Style {
+    let mut options = own.layout_options.as_deref().copied().unwrap_or_default();
+    options.display = Some(crate::layout::Display::None);
+    own.layout_options = Some(Arc::new(options));
+    own
+}
 /// What a contents node lays out as (`Scene::set_contents`): `own` with
 /// `lead`'s place in the parent. Its margins add to the node's own. The
 /// node's visibility and clip stay its own (the lead's would also cut the
@@ -3407,6 +3417,9 @@ pub struct Scene {
     /// default: their own paint, clip and margins; the rest of what lays
     /// them out is their last child's.
     contents_styles: NodeMap<Style>,
+    /// Contents nodes out of layout while they hold nothing
+    /// (`set_hidden_when_empty`): a region showing nothing.
+    hidden_when_empty: NodeMap<HiddenWhenEmpty>,
     /// The style a node was given, where it lays out by another
     /// (`laid_out_style`: it runs right to left, or sets a line's start or
     /// end): `Scene::style` returns it.
@@ -3618,6 +3631,7 @@ impl Scene {
             hit_memo: Default::default(),
             cursor_styles: 0,
             contents_styles: Default::default(),
+            hidden_when_empty: Default::default(),
             given_styles: Default::default(),
             cold: None,
             directions: Default::default(),
@@ -5431,6 +5445,20 @@ impl Scene {
             _ => {}
         }
     }
+    /// Keep contents node `id` out of layout (`display: none`) while it has
+    /// no children, whatever its own style says: a region showing nothing
+    /// (`compose::switch_or_none`) takes no place, no flex item nor gap, as
+    /// an empty hidden box in it did, with no such box.
+    pub fn set_hidden_when_empty(&mut self, id: NodeId, on: bool) {
+        let was = if on {
+            self.hidden_when_empty.insert(id, HiddenWhenEmpty).is_some()
+        } else {
+            self.hidden_when_empty.remove(&id).is_some()
+        };
+        if was != on && self.node(id).contents() {
+            self.sync_contents(id);
+        }
+    }
     /// Whether `id` is a contents node (CSS `display: contents`): its
     /// children lay out in its place.
     pub fn is_contents(&self, id: NodeId) -> bool {
@@ -5532,6 +5560,7 @@ impl Scene {
         let zoomed = node.special.has(ZOOMED);
         let mut style = match self.children_of(node).last() {
             Some(lead) => contents_style(own, &self.node(*lead).style),
+            None if self.hidden_when_empty.contains_key(&id) => hidden_style(own),
             None => own,
         };
         style.snap |= zoomed;
@@ -7313,6 +7342,7 @@ impl Scene {
         if node.special.any() {
             if node.contents() {
                 self.contents_styles.remove(&id);
+                self.hidden_when_empty.remove(&id);
             }
             if node.special.has(COLD) {
                 self.forget_cold(id);

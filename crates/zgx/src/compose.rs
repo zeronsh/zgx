@@ -3006,9 +3006,8 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
         let runtime = ui.runtime.clone();
         let mut selected: Option<K> = None;
         let mut mounted = None;
-        // Its own style while it shows nothing and is hidden for it (out of
-        // layout: no flex item, no gap), to show again with.
-        let mut hid: Option<crate::scene::Style> = None;
+        // Showing nothing, out of layout: no flex item, no gap.
+        ui.scene.borrow_mut().set_hidden_when_empty(root, true);
         ui.bind(root, move || {
             let key = select();
             if selected.as_ref() == Some(&key) {
@@ -3023,29 +3022,13 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
             runtime.untracked(|| {
                 let mut cx = Context::new(runtime.clone(), environment.clone());
                 let Some(view) = build(key.clone(), &mut cx) else {
-                    // Nothing shows: no child at all, and the region out of
-                    // layout (as an empty hidden box was).
+                    // Nothing shows: no child at all (the region, hidden
+                    // while empty, takes no place: `set_hidden_when_empty`).
                     if let Some(old) = mounted.take() {
                         ui.remove(old);
                     }
-                    if hid.is_none() {
-                        let mut scene = ui.scene.borrow_mut();
-                        let own = scene.style(root);
-                        let mut options =
-                            own.layout_options.as_deref().cloned().unwrap_or_default();
-                        options.display = Some(crate::layout::Display::None);
-                        let hidden = crate::scene::Style {
-                            layout_options: Some(std::sync::Arc::new(options)),
-                            ..own.clone()
-                        };
-                        scene.set_style(root, hidden);
-                        hid = Some(own);
-                    }
                     return;
                 };
-                if let Some(own) = hid.take() {
-                    ui.scene.borrow_mut().set_style(root, own);
-                }
                 let mut transaction = MountTransaction::new(&ui, root);
                 let node = mount(&mut ui, root, view, environment.clone());
                 cx.finish(&mut ui, node);

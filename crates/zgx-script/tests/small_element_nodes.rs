@@ -159,3 +159,39 @@ fn a_show_in_a_presence_enters_and_leaves_with_it() {
     h.settle();
     assert!(h.find("entered").is_none());
 }
+
+/// A row whose hover restyles it (as a sidebar section's header does), two
+/// shows in it trading places as the pointer comes and goes: the one closed
+/// again still takes no place (its region's own style, applied again as the
+/// row restyles, doesn't bring it back into layout).
+#[test]
+fn a_show_closed_again_in_a_restyled_row_takes_no_gap() {
+    let mut h = Harness::inline(
+        r##"
+local hovered = ui.state("hovered", false)
+local editing = ui.state("editing", false)
+local menu_open = ui.state("menu_open", false)
+local menu = ui.popover { open = menu_open, anchor = ui.button { id = "dots", "…" }, build = function() return ui.text { "menu" } end }
+return ui.column {
+    ui.row { id = "away", w = 200, h = 30, ui.text { "away" } },
+    ui.row {
+        id = "hdr", w = 240, h = 24, gap = 4, pl = 8, pr = 4, items = "center",
+        color = "#888888", hover = { color = "#aaaaaa" }, cursor = "pointer",
+        on_hover = function(inside: boolean) hovered:set(inside) end,
+        on_click = function() end,
+        ui.show(function() return editing:get() end, ui.text { "editing" }, ui.text { id = "name", grow = 1, "Later" }),
+        ui.show(function() return not hovered:get() and not menu_open:get() end, ui.row { shrink = 0, pr = 4, ui.text { id = "count", "1" } }),
+        ui.show(function() return hovered:get() or menu_open:get() end, menu),
+    },
+}
+"##,
+    );
+    h.settle();
+    let before = h.bounds("count");
+    h.hover("hdr");
+    h.settle();
+    h.hover("away");
+    h.settle();
+    let after = h.bounds("count");
+    assert_eq!(before, after, "the count where it was");
+}
