@@ -122,7 +122,6 @@ fn fixed_size(options: &WindowOptions) -> bool {
 }
 /// `at` on the host clock (CLOCK_UPTIME_RAW, the present log's), in
 /// nanoseconds, for devtools notes.
-#[cfg(target_os = "macos")]
 fn host_ns(at: std::time::Instant) -> u64 {
     let now = std::time::Instant::now();
     let now_ns = zgx_gpu::present_log::now_ns();
@@ -6435,6 +6434,13 @@ impl Host {
         };
         let at = paced_sample(self.sampled_at, index, now, self.frame_interval);
         self.sampled_at = Some((index, at));
+        zgx::profile::note(|| {
+            format!(
+                "scroll sampled cadence index={index} at_ns={} now_ns={}",
+                host_ns(at),
+                host_ns(now)
+            )
+        });
         at
     }
     /// The plane waker came: a tick deferred for its drawable is drawn now.

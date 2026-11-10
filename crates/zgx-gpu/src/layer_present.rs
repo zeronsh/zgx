@@ -1457,6 +1457,13 @@ impl Layer {
         let asked = std::time::Instant::now();
         // Waited for already, off the main thread, while the last frame ran
         // its course; else (the first, after a resize) waited for here.
+        zgx::profile::note(|| {
+            format!(
+                "drawables count={} link={}",
+                drawables.layer.maximumDrawableCount(),
+                drawables.metal_link.is_some()
+            )
+        });
         // The link's, handed to this frame's update; running from the first
         // frame on, paused as the layer hides.
         let linked = drawables.metal_link.as_ref().and_then(|link| {
