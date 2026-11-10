@@ -2166,9 +2166,13 @@ const COLD: u8 = 4;
 /// `ColdMaps::column_memos`: `measure_special` looks there before it lays
 /// out whole (`Scene::column_end`).
 const KEPT_COLUMN: u8 = 8;
+/// `Node::special`: a paragraph whose children are its inline boxes
+/// (`Scene::set_inline_children`), laid out in its lines (`measure_inline`).
+const INLINE: u8 = 16;
 /// `Scene::contents_count`'s unit for a node with any `special` bit.
 const SPECIAL_UNIT: u64 = 1 << 32;
-/// `Node::special`'s bits (`CONTENTS`, `ZOOMED`, `COLD`), as an enum rather than a
+/// `Node::special`'s bits (`CONTENTS`, `ZOOMED`, `COLD`, `KEPT_COLUMN`,
+/// `INLINE`), as an enum rather than a
 /// `u8`: its unused values are a niche, as a `bool`'s are, so `Node` lays
 /// its byte fields out as it did with `contents: bool` (a field moved puts
 /// `invalidate_layout`'s two-byte store off its alignment).
@@ -2191,6 +2195,22 @@ enum Special {
     KeptColdContents = 13,
     KeptColdZoomed = 14,
     KeptColdBoth = 15,
+    Inline = 16,
+    InlineContents = 17,
+    InlineZoomed = 18,
+    InlineBoth = 19,
+    InlineCold = 20,
+    InlineColdContents = 21,
+    InlineColdZoomed = 22,
+    InlineColdBoth = 23,
+    InlineKept = 24,
+    InlineKeptContents = 25,
+    InlineKeptZoomed = 26,
+    InlineKeptBoth = 27,
+    InlineKeptCold = 28,
+    InlineKeptColdContents = 29,
+    InlineKeptColdZoomed = 30,
+    InlineKeptColdBoth = 31,
 }
 impl Special {
     /// Whether it has any bit: the one test a node without any pays.
@@ -2237,7 +2257,23 @@ impl Special {
             12 => Special::KeptCold,
             13 => Special::KeptColdContents,
             14 => Special::KeptColdZoomed,
-            _ => Special::KeptColdBoth,
+            15 => Special::KeptColdBoth,
+            16 => Special::Inline,
+            17 => Special::InlineContents,
+            18 => Special::InlineZoomed,
+            19 => Special::InlineBoth,
+            20 => Special::InlineCold,
+            21 => Special::InlineColdContents,
+            22 => Special::InlineColdZoomed,
+            23 => Special::InlineColdBoth,
+            24 => Special::InlineKept,
+            25 => Special::InlineKeptContents,
+            26 => Special::InlineKeptZoomed,
+            27 => Special::InlineKeptBoth,
+            28 => Special::InlineKeptCold,
+            29 => Special::InlineKeptColdContents,
+            30 => Special::InlineKeptColdZoomed,
+            _ => Special::InlineKeptColdBoth,
         }
     }
 }
@@ -3251,6 +3287,12 @@ pub struct Scene {
     /// A paint walk since the last `take_painted_fades` passed a node that
     /// fades its edges (set where the walk works its mask out anyway).
     painted_fades: std::cell::Cell<bool>,
+    /// Paragraphs whose inline boxes changed size in layout, for what follows
+    /// where their text lies (`take_inline_moved`).
+    inline_moved: Vec<NodeId>,
+    /// What the inline boxes of the paragraphs that say read and copy as
+    /// (`set_inline_alts`), rather than the text they hold.
+    inline_alts: NodeMap<Arc<[Option<Arc<str>>]>>,
     /// Nodes with a local transform: none keeps every geometry query on
     /// the translation-only paths.
     transformed: usize,
@@ -3563,6 +3605,8 @@ impl Scene {
             font_reach: None,
             font_min_content: None,
             rich_min_content: None,
+            inline_moved: Vec::new(),
+            inline_alts: Default::default(),
             rich_measurer: Default::default(),
             rich_shaper: None,
             text_shaper_revision: 0,
@@ -6577,6 +6621,35 @@ impl Scene {
             self.invalidate_layout(id);
         }
     }
+    /// Install where the host lays out a paragraph's inline boxes (each
+    /// one's offset, left and top at a width) and how far below its top a
+    /// paragraph's first baseline is: what inline boxes are placed by and
+    /// aligned with (`set_inline_children`). Without them, the headless
+    /// fallback's.
+    pub fn set_rich_inline_layout(
+        &mut self,
+        place: impl Fn(&crate::rich_text::RichText, Option<f32>) -> Vec<(usize, f32, f32)> + 'static,
+        baseline: impl Fn(&crate::rich_text::RichText, Option<f32>) -> f32 + 'static,
+    ) {
+        self.rich_measurer
+            .install_inline(Box::new(place), Box::new(baseline));
+        self.text_shaper_revision = self.text_shaper_revision.wrapping_add(1);
+    }
+    /// Lay `id`'s children out as its inline boxes, if `inline`: `id` is a
+    /// paragraph (`NodeKind::RichText`) whose text holds a box for each
+    /// (`RichText::with_inline_boxes`), in order. Each is measured as an
+    /// atomic inline (CSS's inline-block: shrink-to-fit against the
+    /// paragraph's width, its margins in its box), aligned by its first
+    /// text's baseline (else its bottom), its size written into the
+    /// paragraph's text, and placed where its box is laid out, in the same
+    /// pass. Otherwise a paragraph's children aren't laid out.
+    pub fn set_inline_children(&mut self, id: NodeId, inline: bool) {
+        if self.node(id).special.has(INLINE) == inline {
+            return;
+        }
+        self.set_special(id, INLINE, inline);
+        self.invalidate_layout(id);
+    }
     /// Install measurement for rich text that is not mounted (`TextMeasure`),
     /// sized exactly as `set_rich_text_measurer` sizes it but without keeping
     /// what drawing it would need.
@@ -7407,6 +7480,9 @@ impl Scene {
                 && let Some(maps) = &mut self.cold
             {
                 maps.column_memos.remove(&id);
+            }
+            if node.special.has(INLINE) {
+                self.inline_alts.remove(&id);
             }
             if node.special.laid_out() {
                 self.contents_count -= 1;
@@ -12821,6 +12897,9 @@ impl Scene {
         if self.has_flat_children(id) {
             return self.measure_flat(id, constraints);
         }
+        if self.tree_node(id).special.has(INLINE) {
+            return Some(self.measure_inline(id, constraints));
+        }
         if !self.tree_node(id).special.laid_out() {
             return None;
         }
@@ -12876,6 +12955,273 @@ impl Scene {
             measurement.size = outer;
         }
         Some(outer)
+    }
+    /// A paragraph laid out with its inline boxes (`set_inline_children`):
+    /// each child measured as an atomic inline against the paragraph's
+    /// width, its size and baseline written into the paragraph's text, the
+    /// text measured, and each child placed where its box is laid out at the
+    /// width its lines wrap at, as `arrange` places any node's children.
+    /// Apart and out of line: no other node comes here.
+    #[cold]
+    #[inline(never)]
+    fn measure_inline(&mut self, id: NodeId, constraints: Constraints) -> (f32, f32) {
+        let style = self.resolved_leaf_style(id, constraints);
+        let padding = style.padding_edges.unwrap_or(Insets::all(style.padding));
+        let padding = Insets {
+            top: padding.top.max(0.0),
+            right: padding.right.max(0.0),
+            bottom: padding.bottom.max(0.0),
+            left: padding.left.max(0.0),
+        };
+        let (horizontal, vertical) = (padding.left + padding.right, padding.top + padding.bottom);
+        let explicit_w = constraints
+            .force_width
+            .or(style.width)
+            .or_else(|| percentage(style.width_percent, constraints.percent_width))
+            .map(|w| dimension(w, style.min_width, style.max_width));
+        let explicit_h = constraints
+            .force_height
+            .or(style.height)
+            .or_else(|| percentage(style.height_percent, constraints.percent_height))
+            .map(|h| dimension(h, style.min_height, style.max_height));
+        let available_w = explicit_w
+            .or_else(|| {
+                constraints
+                    .width
+                    .map(|w| w.min(style.max_width.unwrap_or(f32::INFINITY)))
+            })
+            .or(style.max_width)
+            .map(|w| (w - horizontal).max(0.0));
+        let NodeKind::RichText { text } = &self.node(id).kind else {
+            // Not a paragraph: its children aren't laid out.
+            let (w, h) = self.leaf_size(id, &style, available_w);
+            let size = (
+                dimension(
+                    explicit_w.unwrap_or(w + horizontal),
+                    style.min_width,
+                    style.max_width,
+                ),
+                dimension(
+                    explicit_h.unwrap_or(h + vertical),
+                    style.min_height,
+                    style.max_height,
+                ),
+            );
+            self.store_measurement(id, constraints, size, Vec::new());
+            return size;
+        };
+        let text = text.clone();
+        // Each box, shrink-to-fit in the paragraph's width (percentages of
+        // it), its margins round it.
+        let asked = Constraints {
+            width: available_w,
+            percent_width: available_w,
+            ..Constraints::default()
+        };
+        let children = self.children_raw(self.node(id)).clone();
+        let mut placed = Vec::with_capacity(children.len());
+        let mut sized = Vec::with_capacity(children.len());
+        for &child in &children {
+            let ((w, h), kept) = self.measure_kept(child, asked);
+            let margin = self.node(child).style.margin;
+            let baseline = self.inline_baseline(child, 0).unwrap_or(h);
+            let height = (h + margin.top + margin.bottom).max(0.0);
+            sized.push((
+                (w + margin.left + margin.right).max(0.0),
+                height,
+                (baseline + margin.top).clamp(0.0, height),
+            ));
+            placed.push((child, w, h, margin, kept));
+        }
+        // Its text with its boxes at those sizes: what layout measures and
+        // the renderer draws. Unchanged, as it is.
+        let boxes = text.inline_boxes();
+        if boxes
+            .iter()
+            .zip(&sized)
+            .any(|(b, &(w, h, base))| (b.width, b.height, b.baseline) != (w, h, base))
+        {
+            let now = Arc::new(text.with_box_sizes(sized.iter().copied()));
+            self.damage_subtree(id);
+            let node = self.node_mut(id);
+            node.kind = NodeKind::RichText { text: now };
+            node.text_size.set(TextSizes::default());
+            self.invalidate(id, PAINT);
+            if !self.inline_moved.contains(&id) {
+                self.inline_moved.push(id);
+            }
+        }
+        let (w, h) = self.leaf_size(id, &style, available_w);
+        let width = dimension(
+            explicit_w.unwrap_or(w + horizontal),
+            style.min_width,
+            style.max_width,
+        );
+        let height = dimension(
+            explicit_h.unwrap_or(h + vertical),
+            style.min_height,
+            style.max_height,
+        );
+        // Each box where it is laid out, at the width its lines wrap at
+        // where they show (as the renderer lays them out).
+        let NodeKind::RichText { text } = &self.node(id).kind else {
+            unreachable!("a paragraph");
+        };
+        let text = text.clone();
+        let content = (width - horizontal).max(0.0);
+        let (wrap, inset) = self.text_wrap(id, content);
+        let limit = (style.text_wrap || text.options() != Default::default()).then_some(wrap);
+        let places = self.rich_measurer.inline_places(&text, limit);
+        let boxes = text.inline_boxes();
+        let mut out = Vec::with_capacity(placed.len());
+        for (i, (child, w, h, margin, kept)) in placed.into_iter().enumerate() {
+            let (x, top) = boxes
+                .get(i)
+                .and_then(|b| places.iter().find(|place| place.0 == b.at))
+                // Cut off (past a line clamp): nowhere it paints or takes a hit.
+                .map_or((-1e6, -1e6), |place| (place.1 + inset, place.2));
+            out.push((
+                child,
+                Rect::new(
+                    padding.left + x + margin.left,
+                    padding.top + top + margin.top,
+                    w,
+                    h,
+                ),
+                kept,
+            ));
+        }
+        self.store_measurement(id, constraints, (width, height), out);
+        (width, height)
+    }
+    /// What paragraph `id`'s inline boxes read and copy as, in order, rather
+    /// than the text they hold (`None` for those that read as it).
+    pub(crate) fn set_inline_alts(&mut self, id: NodeId, alts: Vec<Option<Arc<str>>>) {
+        if alts.iter().any(Option::is_some) {
+            self.inline_alts.insert(id, alts.into());
+        } else if !self.inline_alts.is_empty() {
+            self.inline_alts.remove(&id);
+        }
+    }
+    /// The paragraphs whose inline boxes changed size since this was last
+    /// asked.
+    pub(crate) fn take_inline_moved(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.inline_moved)
+    }
+    /// What inline box `index` of paragraph `id` reads and copies as: what
+    /// it says (`set_inline_alts`), else the text it holds.
+    pub(crate) fn inline_box_text(&self, id: NodeId, index: usize) -> String {
+        if let Some(alts) = self.inline_alts.get(&id)
+            && let Some(Some(alt)) = alts.get(index)
+        {
+            return alt.to_string();
+        }
+        let mut out = String::new();
+        if let Some(&child) = self.children_raw(self.node(id)).get(index) {
+            self.held_text(child, &mut out);
+        }
+        out
+    }
+    /// The text `id` and what it holds show, in order, joined by spaces.
+    fn held_text(&self, id: NodeId, out: &mut String) {
+        let mut add = |text: &str| {
+            if !text.is_empty() {
+                if !out.is_empty() {
+                    out.push(' ');
+                }
+                out.push_str(text);
+            }
+        };
+        match self.kind(id) {
+            NodeKind::Text { text, .. } if !self.font(id).masked => add(text),
+            NodeKind::RichText { text } if text.has_inline_boxes() => {
+                add(&self.inline_plain_text(id));
+                return;
+            }
+            NodeKind::RichText { text } => add(text.text()),
+            _ => {}
+        }
+        for &child in self.children_raw(self.node(id)) {
+            self.held_text(child, out);
+        }
+    }
+    /// Paragraph `id`'s text as it reads: each inline box as what it reads
+    /// as (`inline_box_text`) where its character is, icons' places left out.
+    pub(crate) fn inline_plain_text(&self, id: NodeId) -> String {
+        let NodeKind::RichText { text } = self.kind(id) else {
+            return String::new();
+        };
+        self.inline_text_range(id, 0..text.text().len())
+    }
+    /// `inline_plain_text` of the bytes `range` of paragraph `id`'s text.
+    pub(crate) fn inline_text_range(&self, id: NodeId, range: std::ops::Range<usize>) -> String {
+        let NodeKind::RichText { text } = self.kind(id) else {
+            return String::new();
+        };
+        let mut out = String::with_capacity(range.len());
+        let mut at = range.start;
+        for (index, b) in text.inline_boxes().iter().enumerate() {
+            if b.at < range.start {
+                continue;
+            }
+            if b.at >= range.end {
+                break;
+            }
+            out.push_str(&text.text()[at..b.at].replace('\u{2060}', ""));
+            out.push_str(&self.inline_box_text(id, index));
+            at = b.at + crate::rich_text::INLINE_BOX_TEXT.len();
+        }
+        if at < range.end {
+            out.push_str(&text.text()[at..range.end].replace('\u{2060}', ""));
+        }
+        out
+    }
+    /// How far below its top `id`'s baseline is, as an inline box aligns it
+    /// (CSS's inline-block): its first text's first baseline, a row's (or
+    /// an overlay's) from its first child that has one, a column's from its
+    /// last; `None` without text, aligned by its bottom. From its layout
+    /// just measured.
+    fn inline_baseline(&self, id: NodeId, depth: u8) -> Option<f32> {
+        let node = self.node(id);
+        let top = node
+            .style
+            .padding_edges
+            .map_or(node.style.padding, |p| p.top)
+            .max(0.0);
+        let width = |node: &Node| node.measurement.as_ref().map(|m| m.size.0);
+        match &node.kind {
+            NodeKind::Text {
+                text, font_size, ..
+            } if !text.is_empty() => {
+                let rich = crate::rich_text::RichText::new(
+                    text.clone(),
+                    vec![crate::rich_text::TextRun {
+                        range: 0..text.len(),
+                        font: node.font.clone(),
+                        font_size: *font_size,
+                        ..Default::default()
+                    }],
+                )
+                .ok()?;
+                let limit = node.style.text_wrap.then(|| width(node)).flatten();
+                Some(top + self.rich_measurer.first_baseline(&rich, limit))
+            }
+            NodeKind::RichText { text } if !text.text().is_empty() => {
+                let limit = node.style.text_wrap.then(|| width(node)).flatten();
+                Some(top + self.rich_measurer.first_baseline(text, limit))
+            }
+            NodeKind::Container(layout) | NodeKind::Panel { layout, .. } if depth < 8 => {
+                let placed = &node.measurement.as_ref()?.children;
+                let find = |&(child, rect, _): &ChildPlacement| {
+                    Some(rect.y + self.inline_baseline(child, depth + 1)?)
+                };
+                match layout {
+                    Layout::Column => placed.iter().rev().find_map(find),
+                    Layout::Row | Layout::Overlay => placed.iter().find_map(find),
+                }
+            }
+            _ => None,
+        }
     }
     /// Make a new result current, keeping earlier ones that are still valid.
     fn store_measurement(
@@ -18814,6 +19160,9 @@ mod absolute_layout_tests {
     #[cfg(target_pointer_width = "64")]
     fn style_stays_its_size() {
         assert_eq!(std::mem::size_of::<Style>(), 176);
+        // A byte, its niche left for what holds it, with `INLINE` too.
+        assert_eq!(std::mem::size_of::<Special>(), 1);
+        assert_eq!(std::mem::size_of::<Option<Special>>(), 1);
     }
     #[test]
     fn layout_borders_relayout_when_their_width_changes_not_their_colour() {

@@ -552,6 +552,15 @@ impl ShapedText {
     }
 }
 
+impl ShapedText {
+    /// How far below its top its first line's baseline is.
+    pub(crate) fn first_baseline(&self) -> f32 {
+        self.buffer
+            .layout_runs()
+            .next()
+            .map_or(0., |run| run.line_y)
+    }
+}
 /// Where the inline boxes of `runs` (of lines starting at `line_starts`)
 /// are: each one's character's offset, its left and its top, as its glyph
 /// says (`CacheKeyFlags::INLINE_BOX`: its `y_offset` is how far its top is

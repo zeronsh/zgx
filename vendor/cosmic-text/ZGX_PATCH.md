@@ -474,7 +474,8 @@ become glyphs of their own (`box_glyphs`), as wide as the box, drawing nothing
 (their font's space, or no font at all where it has none: an icon font's
 `.notdef` shows), flagged `CacheKeyFlags::INLINE_BOX` (and
 `INLINE_LINE_TOP` or `INLINE_LINE_BOTTOM`), never in the shape-run cache. A box
-takes its own character alone, so marks after it are text. Its
+takes its own character alone, so marks after it are text. Its span needs
+metrics of its own: the buffer's only come at layout. Its
 `ascent` and `descent` are how far the box reaches above and below the
 baseline, from the run font's ascent, descent and x-height (half an em where
 its OS/2 table has none, as CSS takes it), and its `x_offset` the run font's

@@ -18878,6 +18878,39 @@ fn install_text(
             .borrow_mut()
             .measure(&mut fonts.borrow_mut(), rich, width)
     });
+    // Where a paragraph's inline boxes are and where its first baseline is,
+    // from the lines drawn. A clamped or truncated text has a path of its own.
+    let (place_fonts, place_cache) = (shared_fonts.clone(), shared_cache.clone());
+    let (base_fonts, base_cache) = (shared_fonts.clone(), shared_cache.clone());
+    scene.set_rich_inline_layout(
+        move |rich, width| {
+            let _span = zgx::profile::nested(zgx::profile::Phase::Text);
+            if crate::prepared::TextCache::handles(rich) {
+                return place_cache.borrow_mut().inline_boxes(
+                    &mut place_fonts.borrow_mut(),
+                    rich,
+                    width,
+                );
+            }
+            use zgx::text_layout::TextLayout;
+            crate::text::ShapedText::with_runs(&mut place_fonts.borrow_mut(), rich, width)
+                .inline_boxes()
+        },
+        move |rich, width| {
+            let _span = zgx::profile::nested(zgx::profile::Phase::Text);
+            if crate::prepared::TextCache::handles(rich) {
+                return base_cache
+                    .borrow_mut()
+                    .layout(&mut base_fonts.borrow_mut(), rich, width)
+                    .runs(None)
+                    .next()
+                    .map_or(0., |run| run.line_y);
+            }
+            let shaped =
+                crate::text::ShapedText::with_runs(&mut base_fonts.borrow_mut(), rich, width);
+            shaped.first_baseline()
+        },
+    );
     // Plain text nodes, from the same prepared text.
     let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
     scene.set_font_text_measurer(move |text, size, width, font| {

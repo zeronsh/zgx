@@ -1656,11 +1656,17 @@ impl Ui {
                 out.push_str(separator(&scene, before, part.node, before_size.min(size)));
             }
             let range = part.range.start.min(text.len())..part.range.end.min(text.len());
-            out.extend(
-                text[range]
-                    .chars()
-                    .filter(|c| *c != '\u{2060}' && *c != '\u{fffc}'),
-            );
+            match scene.kind(part.node) {
+                // Each inline box as what it reads as.
+                NodeKind::RichText { text } if text.has_inline_boxes() => {
+                    out.push_str(&scene.inline_text_range(part.node, range));
+                }
+                _ => out.extend(
+                    text[range]
+                        .chars()
+                        .filter(|c| *c != '\u{2060}' && *c != '\u{fffc}'),
+                ),
+            }
             previous = Some((part.node, size));
         }
         for (_, row) in provided {
@@ -2024,9 +2030,13 @@ impl Ui {
                                     .find(|(range, _)| range.start <= start && end <= range.end)
                                     .map(|(_, href)| &**href)
                             });
+                            // An inline box as what it reads as.
+                            let boxed = text
+                                .has_inline_boxes()
+                                .then(|| scene.inline_text_range(part.node, start..end));
                             html_run(
                                 &mut out,
-                                &text.text()[start..end],
+                                boxed.as_deref().unwrap_or(&text.text()[start..end]),
                                 &run.font,
                                 href,
                                 // A link's colour is the link's.
@@ -2591,6 +2601,10 @@ fn font_size(scene: &Scene, id: NodeId) -> f32 {
 /// leaves inline icons' placeholders out.
 fn semantic_offset(scene: &Scene, id: NodeId, offset: usize) -> usize {
     match scene.kind(id) {
+        // Its inline boxes read as what they hold.
+        NodeKind::RichText { text } if text.has_inline_boxes() => scene
+            .inline_text_range(id, 0..offset.min(text.text().len()))
+            .len(),
         NodeKind::RichText { text } => {
             let icon = crate::compose_rich::ICON_PLACEHOLDER;
             offset
@@ -2608,6 +2622,9 @@ fn scene_offset(scene: &Scene, id: NodeId, semantic: usize) -> usize {
     let NodeKind::RichText { text } = scene.kind(id) else {
         return semantic;
     };
+    if text.has_inline_boxes() {
+        return inline_scene_offset(scene, id, semantic);
+    }
     let icon = crate::compose_rich::ICON_PLACEHOLDER;
     let (mut seen, mut offset) = (0, 0);
     let text = text.text();
@@ -2622,6 +2639,35 @@ fn scene_offset(scene: &Scene, id: NodeId, semantic: usize) -> usize {
         let step = text[offset..].chars().next().map_or(1, char::len_utf8);
         seen += step;
         offset += step;
+    }
+    offset
+}
+
+/// `scene_offset` in a paragraph with inline boxes: a place inside what a
+/// box reads as is the box's start, as it is one character.
+fn inline_scene_offset(scene: &Scene, id: NodeId, semantic: usize) -> usize {
+    let NodeKind::RichText { text } = scene.kind(id) else {
+        return semantic;
+    };
+    let source = text.text();
+    let (mut seen, mut offset, mut index) = (0, 0, 0);
+    while offset < source.len() && seen < semantic {
+        let c = source[offset..].chars().next().unwrap_or('\0');
+        if text
+            .inline_boxes()
+            .get(index)
+            .is_some_and(|b| b.at == offset)
+        {
+            let read = scene.inline_box_text(id, index).len();
+            if seen + read > semantic {
+                break;
+            }
+            seen += read;
+            index += 1;
+        } else if c != '\u{2060}' {
+            seen += c.len_utf8();
+        }
+        offset += c.len_utf8();
     }
     offset
 }

@@ -4,6 +4,11 @@ use std::{ops::Range, sync::Arc};
 pub(crate) type RichShaper =
     dyn Fn(&RichText, Option<f32>) -> Box<dyn crate::text_layout::TextLayout>;
 pub(crate) type RichMeasurer = dyn Fn(&RichText, Option<f32>) -> (f32, f32);
+/// Where a paragraph's inline boxes are laid out at a width
+/// (`TextLayout::inline_boxes`).
+pub(crate) type RichPlacer = dyn Fn(&RichText, Option<f32>) -> Vec<(usize, f32, f32)>;
+/// How far below its top a paragraph's first baseline is, at a width.
+pub(crate) type RichBaseline = dyn Fn(&RichText, Option<f32>) -> f32;
 
 /// Measures rich text exactly as layout does: with the host's installed
 /// measurers (prepared text on desktop, where a size at a new width costs line
@@ -17,6 +22,10 @@ pub struct TextMeasure(std::rc::Rc<std::cell::RefCell<Measurers>>);
 struct Measurers {
     layout: Option<Box<RichMeasurer>>,
     detached: Option<Box<RichMeasurer>>,
+    /// Where inline boxes go, and where a first baseline is, as the host
+    /// lays text out (`Scene::set_rich_inline_layout`).
+    placer: Option<Box<RichPlacer>>,
+    baseline: Option<Box<RichBaseline>>,
 }
 impl TextMeasure {
     /// `rich`'s (width, height) wrapped at `width`, or unwrapped for `None`.
@@ -43,6 +52,36 @@ impl TextMeasure {
     }
     pub(crate) fn install_detached(&self, measure: Box<RichMeasurer>) {
         self.0.borrow_mut().detached = Some(measure);
+    }
+    pub(crate) fn install_inline(&self, placer: Box<RichPlacer>, baseline: Box<RichBaseline>) {
+        let mut measurers = self.0.borrow_mut();
+        measurers.placer = Some(placer);
+        measurers.baseline = Some(baseline);
+    }
+    /// Where `rich`'s inline boxes are laid out at `width`: each one's
+    /// character's offset, left and top (the headless fallback's until a
+    /// host installs its own).
+    pub(crate) fn inline_places(
+        &self,
+        rich: &RichText,
+        width: Option<f32>,
+    ) -> Vec<(usize, f32, f32)> {
+        match &self.0.borrow().placer {
+            Some(place) => place(rich, width),
+            None => crate::text_layout::FallbackTextLayout::inline_places(rich, width),
+        }
+    }
+    /// How far below its top `rich`'s first baseline is, laid out at `width`.
+    pub(crate) fn first_baseline(&self, rich: &RichText, width: Option<f32>) -> f32 {
+        match &self.0.borrow().baseline {
+            Some(baseline) => baseline(rich, width),
+            // The fallback's: its first run's ascent (0.8 em) below half
+            // its leading (`FallbackLine`).
+            None => rich.runs().first().map_or(0., |run| {
+                let size = run.font_size;
+                (run.font.line_height.resolve(size) - size) / 2. + 0.8 * size
+            }),
+        }
     }
 }
 

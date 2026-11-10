@@ -1540,9 +1540,10 @@ fn box_glyphs(
     start: usize,
     end: usize,
 ) {
-    // A span without metrics of its own has none here to scale by (the
-    // buffer's come at layout): its glyph is sized in pixels, at a size of 1,
-    // and alignment by the text's metrics reads them at that size.
+    // A span without metrics of its own (`Attrs::inline_box` asks for them)
+    // has none here to scale by (the buffer's come at layout): its glyph is
+    // sized in pixels, at a size of 1, and its line and alignment by the
+    // text's metrics read them at that size.
     let metrics: Metrics = attrs
         .metrics_opt
         .map_or_else(|| Metrics::new(1.0, inline.height.max(1.0)), Into::into);

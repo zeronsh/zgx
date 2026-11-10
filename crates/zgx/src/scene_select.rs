@@ -1093,6 +1093,11 @@ impl Scene {
                     bounds,
                     visible: clip.and_then(|clip| bounds.intersection(clip)),
                 });
+                // Inline boxes are characters of its text: atomic, what
+                // they hold not selected apart.
+                if !self.children_raw(node).is_empty() {
+                    continue;
+                }
             }
             let inner = clipped_bounds(clip, bounds, &node.style);
             stack.extend(

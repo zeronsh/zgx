@@ -68,6 +68,14 @@ pub(crate) struct Content {
     pub links: Vec<Link>,
     pub icons: Vec<InlineIcon>,
 }
+/// A span that is an inline box (`inline_span`): the paragraph's next
+/// child in its line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct InlineSpan {
+    pub align: crate::rich_text::InlineAlign,
+    /// What it reads and copies as, rather than the text it holds.
+    pub alt: Option<Arc<str>>,
+}
 /// An icon in the text (`TextSpan::icon`): drawn over the room its
 /// placeholder run (`range`) keeps in the line.
 #[derive(Clone, Debug, PartialEq)]
@@ -145,6 +153,8 @@ pub(crate) struct SpanExtras {
     /// Room after the text, where it isn't `padding`'s across
     /// (`TextSpan::padding_end`).
     pub padding_end: Option<f32>,
+    /// It is an inline box (`inline_span`).
+    pub inline: Option<InlineSpan>,
 }
 /// How a link span looks under the pointer (`TextSpan::hover`): CSS's
 /// `a:hover { text-decoration: underline }`.
@@ -171,7 +181,69 @@ pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {
         extras: None,
     }
 }
+/// A span that is an inline box: the paragraph's next child (a view given
+/// to `rich_text_signal`'s view with `child`, or by [`RichTextView::inline`])
+/// in its line, atomic as CSS's inline-block. Its paragraph has one such span
+/// for each child, in order. The child is an ordinary view, with its own
+/// events, hover, focus and accessibility; it is measured by layout, aligned
+/// by its baseline (`inline_align`), and never breaks across lines.
+pub fn inline_span() -> TextSpan {
+    let mut span = text_span(crate::rich_text::INLINE_BOX_TEXT);
+    span.extras.get_or_insert_default().inline = Some(InlineSpan::default());
+    span
+}
+/// A view with how it sits in its paragraph's line (see
+/// [`RichTextView::inline`]).
+pub struct InlineBoxView {
+    view: View,
+    span: TextSpan,
+}
+/// `view` as an inline box, for [`RichTextView::inline`].
+pub fn inline_box(view: impl Into<View>) -> InlineBoxView {
+    InlineBoxView {
+        view: view.into(),
+        span: inline_span(),
+    }
+}
+impl InlineBoxView {
+    /// How it sits in its line (CSS's `vertical-align`).
+    pub fn align(mut self, align: crate::rich_text::InlineAlign) -> Self {
+        self.span = self.span.inline_align(align);
+        self
+    }
+    /// What it reads and copies as, rather than the text it holds.
+    pub fn alt(mut self, alt: impl Into<Arc<str>>) -> Self {
+        self.span = self.span.alt(alt);
+        self
+    }
+}
+impl From<View> for InlineBoxView {
+    fn from(view: View) -> Self {
+        inline_box(view)
+    }
+}
 impl TextSpan {
+    /// If it is an inline box (`inline_span`), what it says it reads as.
+    pub(crate) fn inline_alt(&self) -> Option<Option<&Arc<str>>> {
+        let inline = self.extras.as_ref()?.inline.as_ref()?;
+        Some(inline.alt.as_ref())
+    }
+    /// How an inline box (`inline_span`) sits in its line (CSS's
+    /// `vertical-align`). Nothing for other spans.
+    pub fn inline_align(mut self, align: crate::rich_text::InlineAlign) -> Self {
+        if let Some(inline) = self.extras.as_mut().and_then(|e| e.inline.as_mut()) {
+            inline.align = align;
+        }
+        self
+    }
+    /// What an inline box (`inline_span`) reads and copies as, rather than
+    /// the text it holds. Nothing for other spans.
+    pub fn alt(mut self, alt: impl Into<Arc<str>>) -> Self {
+        if let Some(inline) = self.extras.as_mut().and_then(|e| e.inline.as_mut()) {
+            inline.alt = Some(alt.into());
+        }
+        self
+    }
     /// An icon before the text, in the line (a file chip's file type):
     /// `size` square, centred on the line, `gap` from the text. An icon
     /// that follows the text colour takes the span's.
@@ -402,6 +474,15 @@ impl RichTextView {
         self.spans.extend(spans);
         self
     }
+    /// Add a view after the existing spans as an inline box: atomic in its
+    /// line, as CSS's inline-block (see [`inline_span`]). A view alone sits
+    /// on the baseline; [`inline_box`] says otherwise, or what it copies as.
+    pub fn inline(mut self, inline: impl Into<InlineBoxView>) -> Self {
+        let InlineBoxView { view, span } = inline.into();
+        self.view = self.view.child(view);
+        self.spans.push(span);
+        self
+    }
     /// Name the paragraph's view (see `View::id`).
     pub fn id(mut self, id: impl Into<String>) -> Self {
         self.view = self.view.id(id);
@@ -615,10 +696,9 @@ impl SpanLocator {
         let (local_x, local_y) = scene.local_point(self.paragraph, x, y);
         let bounds = scene.bounds(self.paragraph);
         let (wrap, inset) = scene.text_wrap(self.paragraph, bounds.width);
-        let layout = crate::text_layout::Inset::around(
-            scene.shape_rich_text(&content.rich, Some(wrap)),
-            inset,
-        );
+        let laid = laid_text(&scene, self.paragraph, &content.rich);
+        let layout =
+            crate::text_layout::Inset::around(scene.shape_rich_text(&laid, Some(wrap)), inset);
         let at = layout.hit_test(local_x, local_y);
         // At a run's end the offset is the next one's start too: the one
         // whose text the point is on.
@@ -636,6 +716,20 @@ impl SpanLocator {
     }
 }
 
+/// `rich` as it is laid out in `paragraph`: with its inline boxes' sizes,
+/// which only layout knows (`measure_inline`). Text without boxes is as given.
+fn laid_text(
+    scene: &crate::scene::Scene,
+    paragraph: crate::scene::NodeId,
+    rich: &Arc<crate::rich_text::RichText>,
+) -> Arc<crate::rich_text::RichText> {
+    match scene.kind(paragraph) {
+        crate::scene::NodeKind::RichText { text } if !scene.children(paragraph).is_empty() => {
+            text.clone()
+        }
+        _ => rich.clone(),
+    }
+}
 /// Whether a link opens through the system's handler: web and mail links
 /// only (see `TextSpan::href`).
 fn opens(url: &str) -> bool {
@@ -645,6 +739,7 @@ fn opens(url: &str) -> bool {
             .any(|allowed| scheme.eq_ignore_ascii_case(allowed))
     })
 }
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mount_links(
     ui: &mut crate::widgets::Ui,
     owner: crate::scene::NodeId,
@@ -655,6 +750,9 @@ pub(crate) fn mount_links(
     // Each link's box, kept for a paragraph whose menu takes its links
     // (`SpanLocator`).
     boxes: Option<Rc<RefCell<Vec<crate::scene::NodeId>>>>,
+    // A paragraph with inline boxes: told when a box changes size, moving
+    // the text after it in a box that may not move.
+    moved: Option<crate::reactive::Signal<u64>>,
 ) {
     let deferred = boxes.is_some();
     use crate::{
@@ -724,7 +822,9 @@ pub(crate) fn mount_links(
             .clone();
         let bounds = bounds.get();
         let owner_bounds = owner_bounds.get();
-        let engine = engine.get();
+        let engine = engine
+            .get()
+            .wrapping_add(moved.as_ref().map_or(0, |moved| moved.get()));
         let key = (
             data.rich.clone(),
             bounds.width.to_bits(),
@@ -743,8 +843,9 @@ pub(crate) fn mount_links(
                 // (balanced). A change of balance moves `engine`.
                 let scene = ui.scene.borrow();
                 let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
+                let laid = laid_text(&scene, paragraph, &data.rich);
                 let layout = crate::text_layout::Inset::around(
-                    scene.shape_rich_text(&data.rich, Some(wrap)),
+                    scene.shape_rich_text(&laid, Some(wrap)),
                     inset,
                 );
                 drop(scene);
@@ -1185,4 +1286,67 @@ pub(crate) fn mount_icons(
             }
         }
     });
+}
+
+/// A paragraph's inline boxes are its children (`inline_span`): laid out
+/// with it by layout, its accessible text following what they hold as they
+/// change size.
+pub(crate) fn mount_inline_boxes(
+    ui: &mut crate::widgets::Ui,
+    owner: crate::scene::NodeId,
+    paragraph: crate::scene::NodeId,
+    moved: crate::reactive::Signal<u64>,
+) {
+    ui.scene.borrow_mut().set_inline_children(paragraph, true);
+    let weak = ui.downgrade();
+    ui.bind(owner, move || {
+        moved.get();
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        let text = {
+            let scene = ui.scene.borrow();
+            if !scene.contains(paragraph) {
+                return;
+            }
+            scene.inline_plain_text(paragraph)
+        };
+        ui.semantics.borrow_mut().update(paragraph, |node| {
+            node.label = text.clone();
+            node.value = Some(text);
+        });
+    });
+}
+
+#[cfg(test)]
+mod inline_box_tests {
+    use crate::{compose::prelude::*, widgets::Ui};
+    /// A paragraph gone leaves nothing of its inline boxes behind, whichever
+    /// way it goes: a subtree removed node by node, or a large one whose
+    /// nodes are freed over the next frames. (Rows scrolled away held their
+    /// signals for good: about a kilobyte a paragraph.)
+    #[test]
+    fn a_paragraph_gone_lets_its_inline_boxes_signal_go() {
+        let paragraph = || {
+            let mut text = rich_text().w(200.).text_size(10.).text_wrap(true);
+            for _ in 0..3 {
+                text = text.child(text_span("a ")).inline(row().w(8.).h(8.));
+            }
+            text
+        };
+        let mut ui = Ui::new(400., 400.);
+        for _ in 0..3 {
+            let small = ui.mount(paragraph().into());
+            ui.prepare_frame();
+            assert_eq!(ui.inline_boxes_watched(), 1);
+            ui.remove(small.node());
+            assert_eq!(ui.inline_boxes_watched(), 0, "removed node by node");
+        }
+        let large = ui.mount(column().children((0..600).map(|_| paragraph().into())));
+        ui.prepare_frame();
+        assert_eq!(ui.inline_boxes_watched(), 600);
+        ui.remove(large.node());
+        while ui.reclaim(std::time::Duration::from_secs(1)) {}
+        assert_eq!(ui.inline_boxes_watched(), 0, "removed all at once");
+    }
 }

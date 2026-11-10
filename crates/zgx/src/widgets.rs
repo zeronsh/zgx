@@ -1535,6 +1535,9 @@ pub(crate) struct UiStorage {
     /// The theme scope of the element being mounted (`Ui::enter_theme`).
     mount_theme: RefCell<Option<Rc<ThemeScope>>>,
     text_geometry_revision: Signal<u64>,
+    /// Paragraphs with inline boxes, each told when a box changes size
+    /// (`inline_boxes_moved`).
+    inline_moved: RefCell<crate::scene::NodeMap<Signal<u64>>>,
     presented: Signal<bool>,
     /// Whether the window is the active one, as a signal, made the first
     /// time something observes it (`Ui::observe_window_active`): an app
@@ -1941,6 +1944,7 @@ impl Ui {
             themes: Themes::of(&runtime),
             mount_theme: RefCell::new(None),
             text_geometry_revision: runtime.signal(0),
+            inline_moved: RefCell::default(),
             presented: runtime.signal(true),
             window_active: RefCell::default(),
             overlay_scrollbars: runtime.signal(false),
@@ -4212,6 +4216,7 @@ impl Ui {
                 for editor in editors {
                     refreshed |= editor.refresh_if_resized(refreshed);
                 }
+                self.publish_inline_moved();
                 self.run_layout_listeners();
             }
             self.run_after_layout();
@@ -4306,6 +4311,39 @@ impl Ui {
     /// Recompute editor geometry after changing the font backend or display scale.
     pub(crate) fn observe_text_geometry_revision(&self) -> Signal<u64> {
         self.storage.text_geometry_revision.clone()
+    }
+    /// A signal told when `paragraph`'s inline boxes change size, moving the
+    /// text after them in a box that may not move.
+    pub(crate) fn inline_boxes_moved(&self, paragraph: NodeId) -> Signal<u64> {
+        let signal = self.signal(0);
+        self.storage
+            .inline_moved
+            .borrow_mut()
+            .insert(paragraph, signal.clone());
+        signal
+    }
+    /// How many paragraphs are told when their inline boxes change size:
+    /// those mounted, each signal held only as long as its paragraph.
+    #[cfg(test)]
+    pub(crate) fn inline_boxes_watched(&self) -> usize {
+        self.storage.inline_moved.borrow().len()
+    }
+    /// Tell those whose inline boxes changed size in the layout just done.
+    fn publish_inline_moved(&self) {
+        let moved = self.scene.borrow_mut().take_inline_moved();
+        if moved.is_empty() {
+            return;
+        }
+        let told: Vec<_> = {
+            let signals = self.storage.inline_moved.borrow();
+            moved
+                .iter()
+                .filter_map(|node| signals.get(node).cloned())
+                .collect()
+        };
+        for signal in told {
+            signal.update(|revision| *revision = revision.wrapping_add(1));
+        }
     }
     /// Text's lines moved in a box that did not (`Scene::set_text_balance`):
     /// what follows text geometry (`observe_text_geometry_revision`) looks
@@ -4745,6 +4783,9 @@ impl Ui {
                     sizes.borrow_mut().remove(id);
                 }
             }
+            if !self.storage.inline_moved.borrow().is_empty() {
+                self.storage.inline_moved.borrow_mut().remove(id);
+            }
             if !self.storage.observed_bounds.borrow().is_empty() {
                 self.storage.observed_bounds.borrow_mut().remove(id);
             }
@@ -4778,6 +4819,7 @@ impl Ui {
         crate::shrink_sparse(&mut self.storage.editors.borrow_mut());
         crate::shrink_sparse(&mut self.storage.content_sizes.borrow_mut());
         crate::shrink_sparse(&mut self.storage.observed_sizes.borrow_mut());
+        crate::shrink_sparse(&mut self.storage.inline_moved.borrow_mut());
         crate::shrink_sparse(&mut self.storage.observed_bounds.borrow_mut());
     }
     /// What removing `node` ends before its subtree goes: an interaction
@@ -4897,6 +4939,9 @@ impl Ui {
             self.scene.borrow_mut().remove(node);
         }
         for id in ids {
+            if !self.storage.inline_moved.borrow().is_empty() {
+                self.storage.inline_moved.borrow_mut().remove(&id);
+            }
             self.storage.content_sizes.borrow_mut().remove(&id);
             self.storage.observed_sizes.borrow_mut().remove(&id);
             self.storage.observed_bounds.borrow_mut().remove(&id);

@@ -2445,7 +2445,10 @@ pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
 pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
-pub use crate::compose_rich::{RichTextView, SpanHover, SpanIcon, TextSpan, rich_text, text_span};
+pub use crate::compose_rich::{
+    InlineBoxView, RichTextView, SpanHover, SpanIcon, TextSpan, inline_box, inline_span, rich_text,
+    text_span,
+};
 pub use crate::compose_tooltip::{Tooltip, TooltipTiming, set_tooltip_timing};
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
@@ -3387,7 +3390,22 @@ pub(crate) fn view_text(view: &mut View) -> String {
     match &mut view.kind {
         Kind::Text(text) => return text.clone(),
         Kind::BoundText(text) => return text(),
-        Kind::RichText(spans) => return spans().iter().map(|span| &*span.text).collect(),
+        Kind::RichText(spans) => {
+            // Each inline box as what it reads as, as a copy takes it.
+            let (spans, mut boxes) = (spans(), view.children.iter_mut());
+            let mut out = String::new();
+            for span in &spans {
+                match span.inline_alt() {
+                    Some(alt) => match (alt, boxes.next()) {
+                        (Some(alt), _) => out.push_str(alt),
+                        (None, Some(child)) => out.push_str(&view_text(child)),
+                        (None, None) => {}
+                    },
+                    None => out.push_str(&span.text),
+                }
+            }
+            return out;
+        }
         _ => {}
     }
     let separator = if matches!(view.kind, Kind::Container(Layout::Row)) {
@@ -4904,6 +4922,9 @@ fn paragraph_effect<const LOCATING: bool>(
         let mut links = Vec::new();
         let mut icons = Vec::new();
         let mut spanned = Vec::new();
+        // Its inline boxes and what each reads as: most paragraphs have none.
+        let mut boxes = Vec::new();
+        let mut alts = Vec::new();
         for (index, mut span) in spans.into_iter().enumerate() {
             if span.text.is_empty() {
                 continue;
@@ -4917,6 +4938,13 @@ fn paragraph_effect<const LOCATING: bool>(
                 None => (None, None, None, false, -1.),
                 Some(extras) => {
                     let extras = *extras;
+                    if let Some(inline) = extras.inline {
+                        boxes.push(crate::rich_text::InlineBox {
+                            align: inline.align,
+                            ..crate::rich_text::InlineBox::new(content.len())
+                        });
+                        alts.push(inline.alt);
+                    }
                     let end = extras.padding_end.unwrap_or(span.padding[0]);
                     let apart = extras.icon.is_some() || end != span.padding[0];
                     (
@@ -5136,9 +5164,15 @@ fn paragraph_effect<const LOCATING: bool>(
         if LOCATING && let Some(kept) = &locating {
             *kept.borrow_mut() = spanned;
         }
-        let rich = crate::rich_text::RichText::new(content.as_str(), runs)
+        let mut rich = crate::rich_text::RichText::new(content.as_str(), runs)
             .expect("normalized inline spans")
             .with_options(base.display);
+        let boxed = !boxes.is_empty();
+        if boxed {
+            rich = rich
+                .with_inline_boxes(boxes)
+                .expect("an inline box is a run of its own");
+        }
         // Recomputed but unchanged (its inputs animate for a sibling):
         // nothing to lay out, paint, describe or relabel.
         if content_state.with_untracked(|current| {
@@ -5159,11 +5193,25 @@ fn paragraph_effect<const LOCATING: bool>(
             style.text_wrap = base.wrap;
             scene.set_style(paragraph, style);
             // The language each run's text is in, where any node says.
-            let shown = scene.rich_with_languages(paragraph, rich.clone());
+            let mut shown = scene.rich_with_languages(paragraph, rich.clone());
+            // Its boxes at the sizes layout gave them, until it looks again.
+            if boxed && let NodeKind::RichText { text } = scene.kind(paragraph) {
+                let sized = text.inline_boxes();
+                if sized.len() == alts.len() {
+                    let sized = sized.iter().map(|b| (b.width, b.height, b.baseline));
+                    shown = std::sync::Arc::new(shown.with_box_sizes(sized));
+                }
+            }
+            if boxed {
+                scene.set_inline_alts(paragraph, alts);
+            }
             scene.set_leaf_kind(paragraph, NodeKind::RichText { text: shown });
         }
-        // Icons' placeholders aren't text to read out.
-        let content = if icons.is_empty() {
+        // Icons' placeholders aren't text to read out, and an inline box
+        // reads as what it holds.
+        let content = if boxed {
+            ui.scene.borrow().inline_plain_text(paragraph)
+        } else if icons.is_empty() {
             content
         } else {
             content.replace(crate::compose_rich::ICON_PLACEHOLDER, "")
@@ -5196,7 +5244,10 @@ fn mount_rich(
     compute: Box<dyn FnMut() -> Vec<crate::compose_rich::TextSpan>>,
     environment: &Environment,
     spans: bool,
+    inline: bool,
 ) {
+    // Told when its inline boxes change size, if it has any.
+    let moved = inline.then(|| ui.inline_boxes_moved(paragraph));
     // A paragraph whose menu is told the run (`context_menu_with_span`):
     // what finds it, by the node the menu is on, and every run kept.
     let span_locator = spans.then(|| {
@@ -5234,8 +5285,12 @@ fn mount_rich(
         hovered.clone(),
         environment,
         boxes,
+        moved.clone(),
     );
     crate::compose_rich::mount_icons(ui, root, paragraph, content_state.clone());
+    if let Some(moved) = moved {
+        crate::compose_rich::mount_inline_boxes(ui, root, paragraph, moved);
+    }
     let weak = ui.downgrade();
     let typography = environment.typography.clone();
     let theme = environment.theme.clone();
@@ -5562,10 +5617,6 @@ fn open_element(
             root
         }
         Kind::RichText(binding) => {
-            assert!(
-                view.children.is_empty(),
-                "rich text uses inline TextSpan children"
-            );
             rich_compute = Some(binding);
             let root = ui.container(parent, Layout::Overlay, Default::default());
             let paragraph = ui.label(root, "", Default::default());
@@ -6062,6 +6113,7 @@ fn open_element(
             compute,
             &environment,
             rare.as_deref().is_some_and(|r| r.context_menu_spans),
+            !view.children.is_empty(),
         );
     }
     if let Some(mut source) = svg_compute {
@@ -6333,7 +6385,11 @@ fn open_element(
         scroll_layout_target.as_ref().unwrap().set(Some(content));
         (viewport, content)
     });
-    let child_parent = scroll_nodes.map_or(root, |(_, content)| content);
+    // A paragraph's children are its inline boxes, in it.
+    let child_parent = match rich_paragraph {
+        Some(paragraph) if !view.children.is_empty() => paragraph,
+        _ => scroll_nodes.map_or(root, |(_, content)| content),
+    };
     Opened {
         children: view.children,
         conditional: rare
@@ -8267,7 +8323,7 @@ fn name_from_content(ui: &Ui, scene: &crate::scene::Scene, id: NodeId) {
 }
 /// `id`'s label from its text, its content naming it.
 fn name_content(ui: &Ui, scene: &crate::scene::Scene, id: NodeId) {
-    let mut parts = Vec::new();
+    let mut parts: Vec<std::borrow::Cow<'_, str>> = Vec::new();
     let mut pending = vec![id];
     let semantics = ui.semantics.borrow();
     while let Some(child) = pending.pop() {
@@ -8276,8 +8332,15 @@ fn name_content(ui: &Ui, scene: &crate::scene::Scene, id: NodeId) {
             continue;
         }
         match scene.kind(child) {
-            NodeKind::Text { text, .. } if !text.is_empty() => parts.push(text.as_ref()),
-            NodeKind::RichText { text } if !text.text().is_empty() => parts.push(text.text()),
+            NodeKind::Text { text, .. } if !text.is_empty() => parts.push(text.as_ref().into()),
+            // Its inline boxes read in their places, not after it.
+            NodeKind::RichText { .. } if !scene.children(child).is_empty() => {
+                parts.push(scene.inline_plain_text(child).into());
+                continue;
+            }
+            NodeKind::RichText { text } if !text.text().is_empty() => {
+                parts.push(text.text().into());
+            }
             _ => {}
         }
         pending.extend(scene.children(child).iter().rev().copied());
@@ -8793,7 +8856,9 @@ pub mod prelude {
         scrollbar, slider, submenu, switch, text, text_area, text_area_value, text_input,
         text_input_value, text_message, text_signal, variable_virtual_list, virtual_list,
     };
-    pub use super::{RichTextView, TextSpan, rich_text, rich_text_signal, text_span};
+    pub use super::{
+        RichTextView, TextSpan, inline_box, inline_span, rich_text, rich_text_signal, text_span,
+    };
     pub use super::{SplitOptions, split};
     pub use super::{animated_image, animated_image_controlled, async_image, canvas, gpu_view};
     #[cfg(target_os = "macos")]
