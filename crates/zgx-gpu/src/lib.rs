@@ -11437,8 +11437,16 @@ impl GpuRenderer {
     }
     /// Submit commands recorded by the last render, if any.
     fn flush_pending(&self) {
+        // With `ZGX_RING_HANDLER` a direct frame still running isn't waited
+        // for: its ring slots free themselves, wgpu's buffers are its own
+        // (the staging belt), and its commands go on the same queue, after.
         #[cfg(target_os = "macos")]
-        self.finish_direct();
+        match *RING_HANDLER {
+            true => self.finish_direct_if_done(),
+            false => {
+                self.finish_direct();
+            }
+        }
         let Some(mut pending) = self.pending.borrow_mut().take() else {
             return;
         };
