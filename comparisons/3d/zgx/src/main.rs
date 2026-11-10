@@ -133,6 +133,31 @@ fn main() {
         intensity: 3.,
     };
     let sun_id = world.add_light(sun(0.));
+    // `--point-lights=N`: the light scene, N shadowless point lights placed
+    // as Bevy's and Filament's (`report::light_at`): 150 lm each, so
+    // 150 / 4π cd, reaching 8 m. Clustered with the `lighting` feature;
+    // without it zgx shades the eight nearest its camera's target.
+    let point_lights: usize = std::env::args()
+        .find_map(|a| a.strip_prefix("--point-lights=").map(|v| v.parse().unwrap()))
+        .unwrap_or(0);
+    // `--light-range=R`: their reach (8 m as the others'), to attribute
+    // the cost to the lights a pixel shades.
+    let range: f32 = std::env::args()
+        .find_map(|a| a.strip_prefix("--light-range=").map(|v| v.parse().unwrap()))
+        .unwrap_or(8.);
+    for i in 0..point_lights {
+        let (position, color) = report::light_at(i);
+        world.add_light(Light::Point {
+            position: position.into(),
+            color,
+            intensity: 150. / (4. * std::f32::consts::PI),
+            range,
+        });
+    }
+    // `--clustered=1`: shaded through clusters whatever the lights (with
+    // none, what the clustered shader costs by itself).
+    #[cfg(feature = "lighting")]
+    world.set_clustered_lights(std::env::args().any(|a| a == "--clustered=1"));
     // zgx redraws its shadow map only when the sun or a caster moves; the
     // other engines redraw theirs every frame. `--shadow-every-frame=1`
     // nudges the sun each frame so zgx does the same work.

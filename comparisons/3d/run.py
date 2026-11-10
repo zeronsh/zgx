@@ -96,6 +96,16 @@ ARMS = {
                      "args": ["--culling=0"]},
     # Load time split by phase (adds a timed re-decode, kept out of load ms).
     "zgx-load-phases": {"dir": "zgx", "bin": "zgx-compare-3d", "target": "zgx", "args": ["--load-phases=1"]},
+    # 256 point lights over Bistro as bevy-lights' and filament-lights',
+    # clustered (zgx-3d's `lighting` feature).
+    "zgx-lights": {"dir": "zgx", "bin": "zgx-compare-3d", "target": "zgx-lights",
+                   "features": ["lighting"], "args": ["--point-lights=256"]},
+    # Attribution for zgx-lights: the clustered shader with no lights, and
+    # the lights reaching 1 m instead of 8.
+    "zgx-clustered": {"dir": "zgx", "bin": "zgx-compare-3d", "target": "zgx-lights",
+                      "args": ["--clustered=1"]},
+    "zgx-lights-near": {"dir": "zgx", "bin": "zgx-compare-3d", "target": "zgx-lights",
+                        "args": ["--point-lights=256", "--light-range=1"]},
     "zgx-noshadow": {"dir": "zgx", "bin": "zgx-compare-3d", "target": "zgx", "args": ["--shadows=0"]},
     "bevy-noshadow": {"dir": "bevy", "bin": "bevy-compare-3d", "target": "bevy", "args": ["--shadows=0"]},
     # Bevy's environment refiltered every frame (its realtime mode), as the
@@ -181,7 +191,8 @@ def build(arm):
     env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_PROFILE_DEV_DEBUG="0")
     # The plain copy's lock differs from the arm's by wgpu-hal's source alone.
     locked = [] if arm in ("zgx-plain", "zgx-cull") else ["--locked"]
-    subprocess.run(["cargo", "build", "--release", "--bin", ARMS[arm]["bin"], *locked],
+    features = ["--features", ",".join(ARMS[arm]["features"])] if "features" in ARMS[arm] else []
+    subprocess.run(["cargo", "build", "--release", "--bin", ARMS[arm]["bin"], *locked, *features],
                    cwd=HERE / ARMS[arm]["dir"], env=env, check=True)
     return target / "release" / ARMS[arm]["bin"]
 

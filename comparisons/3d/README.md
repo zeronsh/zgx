@@ -17,7 +17,7 @@ python3 comparisons/3d/run.py --rounds 3 --scene boxes-100k-still --arms zgx,zgx
 python3 comparisons/3d/run.py --rounds 3 --scene boxes-10k-moving --arms zgx,bevy,filament
 python3 comparisons/3d/run.py --rounds 3 --scene bistro --arms zgx,zgx-plain,zgx-shadows,zgx-noshadow,bevy,bevy-mips,bevy-noshadow,bevy-noindirect,bevy-env-realtime,filament
 python3 comparisons/3d/run.py --rounds 3 --scene bistro --msaa 1 --arms zgx,bevy,filament
-python3 comparisons/3d/run.py --rounds 3 --scene bistro --arms bevy-lights,filament-lights
+python3 comparisons/3d/run.py --rounds 3 --scene bistro --arms zgx,zgx-lights,zgx-clustered,bevy,bevy-lights,filament,filament-lights
 ```
 
 A zgx branch joins as the `zgx-cull` and `zgx-cull-off` arms with `ZGX_3D_CULL_TREE=<its checkout>`; the arm reads `World::set_culling` and `World::culled` there.
@@ -104,7 +104,7 @@ Each renderer is free to skip what it can prove invisible (culling) or unchanged
 **Bistro:**
 - **Mipmaps:** Bevy's glTF loader makes no mipmaps for PNGs, so it samples level 0 everywhere; zgx and Filament build chains. `bevy-mips` gives Bevy the same chains.
 - **Meshes and culling:** both zgx and Bevy draw a primitive as a mesh: 1,591 of them. On this path Bevy's frustum keeps a median 1,471, and so does zgx-cull's. Bevy culls by frustum on the CPU and again on the GPU. zgx on main culls nothing and draws all 1,591; `zgx-cull` culls by frustum on the CPU.
-- **Point lights:** the 256 point lights run in Bevy and Filament only. zgx shades the 8 nearest and can't take part yet.
+- **Point lights:** the 256 point lights are 150 lm each, reaching 8 m, in every arm: zgx's `zgx-lights` shades them through clusters (zgx-3d's `lighting` feature; its arm `zgx` without the lights is the base). zgx's are given in candela, 150 / 4π.
 
 **Boxes:**
 - **Batching:** one mesh and one material for every cube in every arm. Bevy and zgx batch them into instanced draws. Filament draws a renderable per cube (gltfio's nodes): its natural API without instancing, so its CPU numbers carry that.
@@ -155,7 +155,9 @@ The union of command-buffer intervals counts each moment the GPU worked once, wh
 | `bevy-env-realtime` | Bevy's environment refiltered every frame |
 | `zgx-plain` | zgx's own wgpu-hal, unpatched: the GPU-time instrument's cost |
 | `zgx-cull`, `zgx-cull-off` | another zgx tree (`ZGX_3D_CULL_TREE`), culling on and off |
-| `bevy-lights`, `filament-lights` | 256 point lights over the scene |
+| `bevy-lights`, `filament-lights`, `zgx-lights` | 256 point lights over the scene (zgx: clustered, the `lighting` feature) |
+| `zgx-clustered` | the clustered shader with no point lights: what clusters cost by themselves |
+| `zgx-lights-near` | `zgx-lights` with each light reaching 1 m: what the lights a pixel shades cost |
 
 `--msaa=1` runs any of them without multisampling.
 
