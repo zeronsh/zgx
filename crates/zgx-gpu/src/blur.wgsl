@@ -48,6 +48,10 @@ fn sigma(b:Blur, p:vec2<f32>)->f32{
 // Each texel: the mean of the area pixels in its factor-wide square, every
 // area pixel read once; bilinear samples between pixels average four at a
 // time. At factor 1, a copy.
+// A reduce's bilinear sample of the 2x2 texels at `start` + (x, y).
+fn tap(start:vec2<i32>, x:i32, y:i32, size:vec2<f32>)->vec4<f32>{
+ return textureSampleLevel(source,linear,(vec2<f32>(start+vec2(x,y))+1.)/size,0.);
+}
 @fragment fn fs_reduce(v:Vertex)->@location(0) vec4<f32>{
  let s=slots[v.index];let b=blurs[s.owner.x];let f=i32(s.region.z);
  let start=vec2<i32>(s.region.xy)+(vec2<i32>(v.p.xy)-vec2<i32>(s.atlas.xy))*f;
@@ -55,9 +59,15 @@ fn sigma(b:Blur, p:vec2<f32>)->f32{
  var sum=vec4(0.);
  if f>1&&all(end-start==vec2(f)){
   let size=vec2<f32>(textureDimensions(source));
-  for(var y=0;y<f;y+=2){for(var x=0;x<f;x+=2){
-   sum+=textureSampleLevel(source,linear,(vec2<f32>(start+vec2(x,y))+1.)/size,0.);
-  }}
+  // Each factor's taps written out (a loop of a count known only at run
+  // time kept each waiting on the last): the same samples, summed in the
+  // same order.
+  switch f {
+   case 2 { sum+=tap(start,0,0,size); }
+   case 4 { sum+=tap(start,0,0,size);sum+=tap(start,2,0,size);sum+=tap(start,0,2,size);sum+=tap(start,2,2,size); }
+   case 8 { sum+=tap(start,0,0,size);sum+=tap(start,2,0,size);sum+=tap(start,4,0,size);sum+=tap(start,6,0,size);sum+=tap(start,0,2,size);sum+=tap(start,2,2,size);sum+=tap(start,4,2,size);sum+=tap(start,6,2,size);sum+=tap(start,0,4,size);sum+=tap(start,2,4,size);sum+=tap(start,4,4,size);sum+=tap(start,6,4,size);sum+=tap(start,0,6,size);sum+=tap(start,2,6,size);sum+=tap(start,4,6,size);sum+=tap(start,6,6,size); }
+   default { for(var y=0;y<f;y+=2){for(var x=0;x<f;x+=2){sum+=tap(start,x,y,size);}} }
+  }
   return sum*4./f32(f*f);
  }
  for(var y=start.y;y<end.y;y++){for(var x=start.x;x<end.x;x++){sum+=textureLoad(source,vec2(x,y),0);}}
