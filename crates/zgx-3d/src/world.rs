@@ -413,6 +413,9 @@ fn release<T>(slots: &mut [Slot<T>], first_free: &mut usize, index: usize) {
 pub(crate) struct Inner {
     objects: Vec<Slot<Object>>,
     lights: Vec<Slot<Light>>,
+    /// Each object's matrix in its parent's frame, `None` hidden: kept as
+    /// its transform changes, by index (a frame reads every object's).
+    locals: Vec<Option<Mat4>>,
     /// No slot before these is free (`claim`).
     free_object: usize,
     free_light: usize,
@@ -679,6 +682,14 @@ impl Inner {
             });
             f(light, spot);
         }
+    }
+    /// Object `index`'s matrix in its parent's frame is `local` (`None`:
+    /// hidden).
+    fn place(&mut self, index: usize, local: Option<Mat4>) {
+        if self.locals.len() <= index {
+            self.locals.resize(index + 1, None);
+        }
+        self.locals[index] = local;
     }
     /// Every visible mesh with its world matrix, its ancestors' applied.
     fn world_of(&self, index: usize) -> Option<Mat4> {
@@ -955,7 +966,7 @@ fn world_matrix(
         return known;
     }
     let object = inner.objects[index].value.as_ref()?;
-    let local = object.visible.then(|| object.transform.matrix());
+    let local = inner.locals[index];
     let found = match (local, object.parent) {
         (None, _) => None,
         (Some(local), None) => Some(local),
@@ -1026,6 +1037,7 @@ impl World {
         let inner = Rc::new(RefCell::new(Inner {
             objects: Vec::new(),
             lights: Vec::new(),
+            locals: Vec::new(),
             free_object: 0,
             free_light: 0,
             camera: Camera::default(),
@@ -1074,7 +1086,9 @@ impl World {
         object.geometry = object.geometry.filter(|geometry| !geometry.is_empty());
         let mut id = None;
         self.change(|inner| {
+            let local = object.visible.then(|| object.transform.matrix());
             let (index, generation) = claim(&mut inner.objects, &mut inner.free_object, object);
+            inner.place(index as usize, local);
             id = Some(ObjectId { index, generation });
             true
         });
@@ -1173,7 +1187,13 @@ impl World {
             let before = object.clone();
             f(object);
             object.transform = object.transform.sanitized();
-            *object != before
+            let placed = (object.transform, object.visible) != (before.transform, before.visible);
+            let changed = *object != before;
+            if placed {
+                let local = object.visible.then(|| object.transform.matrix());
+                inner.place(index, local);
+            }
+            changed
         });
     }
     /// Place object `id`.
