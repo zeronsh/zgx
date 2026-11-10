@@ -3,6 +3,8 @@
 //! to filter; a plugin is allowed them; `zgx test` mounts it as `zgx run`
 //! would. A grant beyond what is exposed, or one that doesn't exist, is an
 //! error as it loads, naming the plugin and the grant.
+mod common;
+
 use std::{path::PathBuf, process::Command};
 
 const APP: &str = r##"
@@ -76,8 +78,7 @@ const CONFIG: &str = r##"{
 }"##;
 
 fn app(name: &str, config: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-app-plugins-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir(&format!("app-plugins-{name}"));
     std::fs::create_dir_all(dir.join("plugins/focus")).unwrap();
     std::fs::create_dir_all(dir.join("tests")).unwrap();
     std::fs::write(dir.join("app.luau"), APP).unwrap();

@@ -319,9 +319,7 @@ fn elements_can_be_kept_in_state() {
 }
 
 fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-persist-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    dir
+    common::temp_dir(&format!("persist-{name}"))
 }
 const COUNTER: &str = r#"local n = ui.persist("n", 0)
 ui.command { id = "inc", run = function() n:add(1) end }
@@ -792,7 +790,7 @@ fn a_wait_fires_timers_after_frames_ran_ahead_of_the_wall_clock() {
 /// a window, where `ui.after(0)` runs before the next frame is drawn.
 #[test]
 fn an_after_0_from_on_resize_settles_before_the_frame_is_drawn() {
-    let dir = std::env::temp_dir().join(format!("zgx-after-0-{}", std::process::id()));
+    let dir = common::temp_dir("after-0");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("app.luau");
     std::fs::write(

@@ -2,6 +2,8 @@
 //! loads, used only for the very bytes `require` reads, and let go as the
 //! load ends. A process of its own: what was compiled ahead is the
 //! process's, one session at a time.
+mod common;
+
 use std::{path::Path, time::Duration};
 use zgx_script::{
     ScriptHost, compile_ahead, compile_ahead_counts, compile_ahead_pause, testing::TestApp,
@@ -44,8 +46,7 @@ fn requires_find_their_modules_compiled_ahead_only_for_the_same_bytes() {
     let _one = ONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir = std::env::temp_dir().join(format!("zgx-compile-ahead-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir("compile-ahead");
     write(&dir, 10, "one");
     let app = dir.join("app.luau");
     let (_, _, open, hits, _) = compile_ahead_counts();
@@ -129,7 +130,7 @@ fn only_what_the_script_requires_is_compiled_ahead() {
     let _one = ONE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let dir = std::env::temp_dir().join(format!("zgx-compile-ahead-graph-{}", std::process::id()));
+    let dir = common::temp_dir("compile-ahead-graph");
     let lent = dir.with_extension("lent");
     for d in [&dir, &lent] {
         let _ = std::fs::remove_dir_all(d);

@@ -24,8 +24,7 @@ const AR: &str = r#"{ "greeting": "مرحبا، {name}" }"#;
 
 /// A script directory: `app.luau` with `code`, and `locales/` with these.
 fn app(name: &str, code: &str, locales: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-i18n-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir(&format!("i18n-{name}"));
     std::fs::create_dir_all(dir.join("locales")).unwrap();
     for (locale, text) in locales {
         std::fs::write(dir.join("locales").join(format!("{locale}.json")), text).unwrap();

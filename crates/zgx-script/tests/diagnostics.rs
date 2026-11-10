@@ -20,8 +20,7 @@ return ui.column {
 "#;
 
 fn temp_script(name: &str, code: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-diag-{}-{name}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir(&format!("diag-{name}"));
     let path = dir.join("app.luau");
     std::fs::write(&path, code).unwrap();
     path
@@ -290,8 +289,7 @@ fn a_watching_host_reloads_when_a_file_is_saved() {
 
 #[test]
 fn a_debug_build_lints_its_scripts_after_each_load() {
-    let dir = std::env::temp_dir().join(format!("zgx-lint-on-load-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir("lint-on-load");
     let app = dir.join("app.luau");
     std::fs::write(
         &app,

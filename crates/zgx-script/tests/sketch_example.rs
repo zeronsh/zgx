@@ -273,7 +273,7 @@ fn the_wheel_pans_and_zooms_about_the_pointer() {
 
 #[test]
 fn a_drawing_saves_and_opens_through_the_dialogs() {
-    let dir = std::env::temp_dir().join(format!("zgx-sketch-{}", std::process::id()));
+    let dir = common::temp_dir("sketch");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("drawing.json");
     let mut h = sketch();
@@ -320,7 +320,7 @@ fn a_drawing_saves_and_opens_through_the_dialogs() {
 #[test]
 #[ignore = "a timing probe: cargo test --release -- --ignored --nocapture"]
 fn how_long_a_busy_drawing_takes() {
-    let dir = std::env::temp_dir().join(format!("zgx-sketch-probe-{}", std::process::id()));
+    let dir = common::temp_dir("sketch-probe");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("busy.json");
     let shapes: Vec<String> = (0..500)

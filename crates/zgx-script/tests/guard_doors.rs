@@ -343,7 +343,7 @@ fn a_guard_set_after_a_web_view_was_made_asks_of_it_too() {
 /// A plugin's web view goes by its grants: the guard is the app VM's.
 #[test]
 fn a_plugins_web_view_is_not_asked_of() {
-    let dir = std::env::temp_dir().join(format!("zgx-guard-web-{}", std::process::id()));
+    let dir = common::temp_dir("guard-web");
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
     std::fs::write(
@@ -521,9 +521,7 @@ struct Kept {
 }
 impl Kept {
     fn new(name: &str) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("zgx-guard-persist-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = common::temp_dir(&format!("guard-persist-{name}"));
         std::fs::create_dir_all(dir.join("app")).unwrap();
         let file = dir.join("app").join("token.json");
         std::fs::write(&file, "\"the app's own\"").unwrap();

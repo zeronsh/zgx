@@ -5,19 +5,12 @@
 mod common;
 
 use common::Harness;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use zgx::reactive::Runtime;
 use zgx_script::ScriptHost;
 
 /// `code` as a script file of its own (`anime` is there only for files).
 fn script(code: &str) -> std::path::PathBuf {
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "zgx-crash-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir("crash");
     let path = dir.join("app.luau");
     std::fs::write(&path, code).unwrap();
     path

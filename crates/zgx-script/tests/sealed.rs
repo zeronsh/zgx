@@ -8,12 +8,7 @@ use std::path::PathBuf;
 use zgx_script::{Capability, Plugin, ScriptHost};
 
 fn entry(name: &str, code: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "zgx-sealed-{}-{:?}-{name}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir(&format!("sealed-{name}"));
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();
     entry

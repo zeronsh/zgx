@@ -18,9 +18,7 @@ struct App {
 }
 impl App {
     fn new(name: &str, files: &[(&str, &str)]) -> Self {
-        let dir =
-            std::env::temp_dir().join(format!("zgx-reload-shadow-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = common::temp_dir(&format!("reload-shadow-{name}"));
         std::fs::create_dir_all(&dir).unwrap();
         let app = Self {
             dir,

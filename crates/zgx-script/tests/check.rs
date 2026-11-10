@@ -1,14 +1,15 @@
 //! `zgx check`: type checks scripts with luau-lsp before they run. These
 //! tests run the binary when luau-lsp is installed (on the PATH or at
 //! `LUAU_LSP`) and skip otherwise.
+mod common;
+
 use std::{path::PathBuf, process::Command};
 
 fn zgx() -> Command {
     Command::new(env!("CARGO_BIN_EXE_zgx"))
 }
 fn scripts(name: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-check-test-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir(&format!("check-test-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     for (file, code) in files {
         std::fs::write(dir.join(file), code).unwrap();

@@ -11,7 +11,7 @@ fn plugin(name: &str, code: &str) -> PathBuf {
     // and two writing one name's file would load each other's code.
     static MADE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("zgx-plugins-{}-{n}-{name}", std::process::id()));
+    let dir = common::temp_dir(&format!("plugins-{n}-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();
@@ -402,7 +402,7 @@ fn a_plugin_shows_remote_images_only_with_the_fetch_grant() {
 fn a_plugin_shows_a_picked_file_and_no_other_outside_its_directory() {
     // A file its host's grant let it pick is its to show; one it only names
     // is not.
-    let outside = std::env::temp_dir().join(format!("zgx-picked-{}", std::process::id()));
+    let outside = common::temp_dir("picked");
     std::fs::create_dir_all(&outside).unwrap();
     // A red pixel.
     let png: &[u8] = &[
@@ -476,7 +476,7 @@ ui.contribute("bar", ui.column {{
 fn a_plugin_requires_nothing_outside_its_directory_through_a_link() {
     // A module that is a link to a file outside (a secret the plugin would
     // read back in a parse error) is outside, whatever its name says.
-    let outside = std::env::temp_dir().join(format!("zgx-outside-{}.luau", std::process::id()));
+    let outside = common::temp_dir("outside").join("outside.luau");
     std::fs::write(&outside, r#"return "outside""#).unwrap();
     let entry = plugin(
         "linked",
@@ -502,7 +502,7 @@ ui.contribute("bar", ui.text { tostring(ok) .. " " .. tostring(got), id = "got" 
 
 #[test]
 fn a_plugins_images_come_from_its_directory() {
-    let outside = std::env::temp_dir().join(format!("zgx-outside-{}.png", std::process::id()));
+    let outside = common::temp_dir("outside").join("outside.png");
     std::fs::write(&outside, b"not really a png").unwrap();
     let entry = plugin(
         "pictures",

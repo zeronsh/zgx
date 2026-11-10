@@ -1,5 +1,7 @@
 //! `zgx inspect mcp`: devtools as MCP tools, the handshake and the tools
 //! an agent sees (asking an app is `zgx-run`'s tests).
+mod common;
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -67,8 +69,7 @@ fn the_mcp_server_says_what_it_offers() {
 /// something else, before any app is asked.
 #[test]
 fn key_value_words_are_the_commands_fields() {
-    let empty = std::env::temp_dir().join(format!("zgx-no-apps-{}", std::process::id()));
-    std::fs::create_dir_all(&empty).unwrap();
+    let empty = common::temp_dir("no-apps");
     let run = |args: &[&str]| {
         let out = Command::new(env!("CARGO_BIN_EXE_zgx"))
             .arg("inspect")

@@ -2,13 +2,14 @@
 //! else the one on PATH, with the arguments as given and its exit status
 //! as theirs. A stand-in zgx-run (a shell script) says what it was given.
 #![cfg(unix)]
+mod common;
+
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
 /// A copy of zgx in a directory of its own, with a stand-in zgx-run beside
 /// it if `with_run`.
 fn tools(name: &str, with_run: bool) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-run-cli-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir(&format!("run-cli-{name}"));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::copy(env!("CARGO_BIN_EXE_zgx"), dir.join("zgx")).unwrap();
     if with_run {

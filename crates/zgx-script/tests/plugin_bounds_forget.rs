@@ -4,21 +4,11 @@
 mod common;
 
 use common::Harness;
-use std::{
-    path::PathBuf,
-    sync::atomic::{AtomicU32, Ordering},
-};
+use std::path::PathBuf;
 use zgx_script::{Capability, Plugin, ScriptHost};
 
 fn temp(name: &str) -> PathBuf {
-    static NEXT: AtomicU32 = AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!(
-        "zgx-plugin-bf-{}-{}-{name}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    common::temp_dir(&format!("plugin-bf-{name}"))
 }
 fn plugin(name: &str, code: &str, grants: Vec<Capability>) -> Plugin {
     let entry = temp(name).join("init.luau");

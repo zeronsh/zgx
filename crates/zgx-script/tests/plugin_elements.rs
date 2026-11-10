@@ -6,7 +6,7 @@ use common::Harness;
 use zgx_script::{ListedElement, Plugin, ScriptHost};
 
 fn with(test: &str, app: &'static str, code: &str) -> Harness {
-    let dir = std::env::temp_dir().join(format!("zgx-elements-{}-{test}", std::process::id()));
+    let dir = common::temp_dir(&format!("elements-{test}"));
     std::fs::create_dir_all(&dir).unwrap();
     let entry = dir.join("init.luau");
     std::fs::write(&entry, code).unwrap();

@@ -3,6 +3,8 @@
 //! the bytecode. No host holds it: the table keeps it until a host goes
 //! idle (`zgx::idle::trim`), which releases it all. A hot-reloading host
 //! keeps its own. Its own process: what is kept is the process's.
+mod common;
+
 use std::path::PathBuf;
 use zgx::reactive::Runtime;
 use zgx_script::ScriptHost;
@@ -10,8 +12,7 @@ use zgx_script::ScriptHost;
 /// A package of two modules, and an app requiring one of them (which
 /// requires the other).
 fn files() -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("zgx-package-bytecode-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir("package-bytecode");
     for (path, code) in [
         (
             "kit/button.luau",

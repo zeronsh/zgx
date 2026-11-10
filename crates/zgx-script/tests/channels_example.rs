@@ -194,7 +194,7 @@ fn a_dropped_file_uploads_and_goes_with_the_message() {
     let server = ChannelsServer::new();
     let mut h = channels(&server);
     assert!(h.wait_until(|h| h.find("channel-general").is_some()));
-    let dir = std::env::temp_dir().join(format!("zgx-channels-{}", std::process::id()));
+    let dir = common::temp_dir("channels");
     std::fs::create_dir_all(&dir).unwrap();
     let file = dir.join("notes.txt");
     std::fs::write(&file, "the notes").unwrap();

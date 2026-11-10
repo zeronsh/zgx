@@ -32,8 +32,7 @@ return ui.column {
 /// Two files to drop, in a directory of `test`'s own: tests run at once,
 /// and one writing the files another is reading showed it a size of 0.
 fn files(test: &str) -> Vec<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("zgx-file-drop-{}-{test}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir(&format!("file-drop-{test}"));
     let photo = dir.join("photo.PNG");
     std::fs::write(&photo, [0u8; 12]).unwrap();
     let notes = dir.join("notes.unknown");

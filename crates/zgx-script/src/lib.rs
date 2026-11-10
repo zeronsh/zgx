@@ -4629,6 +4629,37 @@ fn trim_idle(inner: &Inner) {
     sources::release_packages();
 }
 
+/// A unit test's directory in the temp directory, `name` exactly: made
+/// fresh, and removed as the test binary ends (a failing test's too).
+/// Only what the tests made goes, never a sweep of the temp directory.
+#[cfg(test)]
+pub(crate) fn test_dir(name: &str) -> PathBuf {
+    use std::sync::{Mutex, Once, PoisonError};
+    static MADE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    static HOOK: Once = Once::new();
+    unsafe extern "C" {
+        fn atexit(hook: extern "C" fn()) -> std::ffi::c_int;
+    }
+    extern "C" fn remove_made() {
+        let made = std::mem::take(&mut *MADE.lock().unwrap_or_else(PoisonError::into_inner));
+        for dir in made {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    // SAFETY: the C runtime's `atexit`, given a function that takes no
+    // arguments and returns, registered once.
+    HOOK.call_once(|| unsafe {
+        atexit(remove_made);
+    });
+    let dir = std::env::temp_dir().join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    MADE.lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(dir.clone());
+    dir
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

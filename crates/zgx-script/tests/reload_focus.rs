@@ -51,8 +51,7 @@ return ui.column {
 /// Focus `target` with a click, reload, and say what had focus before and
 /// after (its line in the tree).
 fn across_a_reload(test: &str, target: &str) -> (String, String) {
-    let dir = std::env::temp_dir().join(format!("zgx-reload-focus-{}-{test}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir(&format!("reload-focus-{test}"));
     let path = dir.join("app.luau");
     std::fs::write(&path, APP).unwrap();
     let mut h = Harness::new(move |runtime| ScriptHost::new(runtime, path.clone()));
@@ -96,8 +95,7 @@ fn a_reload_keeps_focus_on_a_keyed_list_row() {
 /// Focus the `nth` (from 1) of the nodes `target` names alike, reload, press it
 /// (Enter): which row it was, by what it picks.
 fn alike_across_a_reload(test: &str, target: &str, nth: usize) -> String {
-    let dir = std::env::temp_dir().join(format!("zgx-reload-focus-{}-{test}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir(&format!("reload-focus-{test}"));
     let path = dir.join("app.luau");
     std::fs::write(&path, APP).unwrap();
     let mut h = Harness::new(move |runtime| ScriptHost::new(runtime, path.clone()));
@@ -132,8 +130,7 @@ fn a_reload_scrolls_a_list_back_to_its_focused_row() {
     // Row r30, scrolled to and focused; the reload builds the list from
     // its top, where r30 isn't built: the list is scrolled to it, and it
     // has focus again.
-    let dir = std::env::temp_dir().join(format!("zgx-reload-focus-{}-far", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir("reload-focus-far");
     let path = dir.join("app.luau");
     std::fs::write(&path, APP).unwrap();
     let mut h = Harness::new(move |runtime| ScriptHost::new(runtime, path.clone()));
@@ -167,8 +164,7 @@ return ui.column { w = 400, h = 300,
 
 /// The palette, from a file so it reloads.
 fn palette(test: &str) -> Harness {
-    let dir = std::env::temp_dir().join(format!("zgx-reload-focus-{}-{test}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = common::temp_dir(&format!("reload-focus-{test}"));
     let path = dir.join("app.luau");
     std::fs::write(&path, PALETTE).unwrap();
     let h = Harness::new(move |runtime| ScriptHost::new(runtime, path.clone()));

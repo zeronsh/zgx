@@ -450,9 +450,7 @@ mod tests {
 
     /// An app lending `@ds` (not `@kit`) to its plugin `p`.
     fn lending_app(name: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("zgx-lent-types-{}-{name}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::test_dir(&format!("zgx-lent-types-{}-{name}", std::process::id()));
         for dir in ["app/plugins/p", "shared/ds", "shared/kit"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
@@ -521,7 +519,7 @@ mod tests {
 
     #[test]
     fn an_apps_message_keys_are_its_source_locales() {
-        let dir = std::env::temp_dir().join(format!("zgx-message-keys-{}", std::process::id()));
+        let dir = crate::test_dir(&format!("zgx-message-keys-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("lang")).unwrap();
         std::fs::write(
             dir.join("lang/de.json"),

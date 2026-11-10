@@ -607,8 +607,7 @@ mod tests {
     use super::*;
 
     fn folder(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zgx-folder-{}-{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
+        let dir = crate::test_dir(&format!("zgx-folder-{}-{name}", std::process::id()));
         fs::create_dir_all(dir.join("inside/deep")).unwrap();
         fs::write(dir.join("inside/note.md"), "hello").unwrap();
         fs::canonicalize(dir).unwrap()

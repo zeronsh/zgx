@@ -8,8 +8,7 @@ use zgx_script::{Plugin, ScriptHost};
 
 /// A directory of files, made fresh for one test.
 fn files(name: &str, files: &[(&str, &str)]) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("zgx-packages-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = common::temp_dir_named(&format!("zgx-packages-{}-{name}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for (path, code) in files {
         let path = dir.join(path);

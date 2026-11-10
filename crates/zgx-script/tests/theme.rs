@@ -192,7 +192,7 @@ fn spans_take_tokens() {
 
 #[test]
 fn theme_files_reload_without_reloading_scripts() {
-    let dir = std::env::temp_dir().join(format!("zgx-script-theme-{}", std::process::id()));
+    let dir = common::temp_dir("script-theme");
     std::fs::create_dir_all(&dir).unwrap();
     let theme = dir.join("brand.json");
     let write = |accent: &str, offset: u64| {
