@@ -2,6 +2,7 @@
 """Permanent scroll gate. See docs/scroll-benchmark.md for the measurement contract."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from collections import Counter
 import hashlib
 import itertools
@@ -578,6 +579,32 @@ def settle_warm_coast(pid):
         time.sleep(.1)
 
 
+@contextmanager
+def staging_directory(close_process, cleanup_error):
+    """Stop writers before removing their files; preserve the primary failure."""
+    directory = tempfile.mkdtemp(prefix='zgx-scroll-')
+    primary = None
+    try:
+        yield directory
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            close_process()
+        except Exception as error:
+            cleanup_error(f'process cleanup failed; stage retained at {directory}: {error}')
+            if primary is None:
+                raise
+        else:
+            try:
+                shutil.rmtree(directory)
+            except Exception as error:
+                cleanup_error(str(error))
+                if primary is None:
+                    raise
+
+
 def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present, unavailable=None, real_reference=False):
     label = f'{scene}-{gesture}-{size}-{hz}hz-{scale}x-{background}-p{present}-{repeat}'
     out = args.output / label
@@ -586,10 +613,19 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                   background=background, repeat=repeat, present=present, status='invalid', failures=[],
                   engine_pin=args.engine_pin,engine_commit=args.engine_commit)
     process = None
+    def close_process():
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
     try:
         if unavailable:
             raise RuntimeError(unavailable)
-        with tempfile.TemporaryDirectory(prefix='zgx-scroll-') as tmp:
+        with staging_directory(close_process, lambda error: result.setdefault('cleanup_errors', []).append(error)) as tmp:
             stage = Path(tmp)
             real_app = scene == 'zeron' or real_reference
             source = ROOT / 'crates/zgx-script/examples' / ('transcript_scroll' if scene in ('transcript', 'tables') else 'scroll_scenes')
@@ -803,8 +839,10 @@ return ui.overlay {""")
                     try:
                         frames, polls = collect(process.pid, future, begin, out, tracked_target)
                     except Exception:
-                        process.terminate()
-                        process.wait(timeout=5)
+                        try:
+                            close_process()
+                        except Exception as error:
+                            result.setdefault('cleanup_errors', []).append(str(error))
                         raise
                     result['replay'] = future.result()
                 if real_app:
@@ -891,15 +929,14 @@ return ui.overlay {""")
                 process.terminate()
                 process.wait(timeout=5)
     except Exception as error:
+        result['status'] = 'invalid'
         result['failures'].append(str(error))
     finally:
-        if process is not None and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+        try:
+            close_process()
+        except Exception as error:
+            result['status'] = 'invalid'
+            result['failures'].append(f'host did not stop: {error}')
         (out / 'run.json').write_text(json.dumps(result, indent=2) + '\n')
     result['evidence'] = str(out)
     return {k:v for k,v in result.items() if k not in ('frames', 'presents', 'latency_samples', 'polls', 'gpu_completion_micros')}

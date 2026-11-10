@@ -11,6 +11,58 @@ import scroll
 import scroll_motion
 
 
+class StagingCleanup(unittest.TestCase):
+    def test_writers_stop_before_their_files_are_removed(self):
+        events = []
+        remove = scroll.shutil.rmtree
+        def cleanup(directory):
+            self.assertEqual(events, ['stopped'])
+            events.append('removed')
+            remove(directory)
+        with patch.object(scroll.shutil, 'rmtree', side_effect=cleanup):
+            with scroll.staging_directory(lambda: events.append('stopped'), self.fail) as directory:
+                Path(directory, 'fixture.luau').write_text('fixture')
+        self.assertEqual(events, ['stopped', 'removed'])
+        self.assertFalse(Path(directory).exists())
+
+    def test_cleanup_cannot_mask_a_failed_condition(self):
+        errors = []
+        try:
+            with patch.object(scroll.shutil, 'rmtree', side_effect=OSError('cleanup failed')):
+                with self.assertRaisesRegex(RuntimeError, 'unsupported refresh'):
+                    with scroll.staging_directory(lambda: None, errors.append) as directory:
+                        raise RuntimeError('unsupported refresh')
+            self.assertEqual(errors, ['cleanup failed'])
+        finally:
+            scroll.shutil.rmtree(directory)
+
+    def test_cleanup_failure_without_a_primary_error_is_reported(self):
+        errors = []
+        try:
+            with patch.object(scroll.shutil, 'rmtree', side_effect=OSError('cleanup failed')):
+                with self.assertRaisesRegex(OSError, 'cleanup failed'):
+                    with scroll.staging_directory(lambda: None, errors.append) as directory:
+                        pass
+            self.assertEqual(errors, ['cleanup failed'])
+        finally:
+            scroll.shutil.rmtree(directory)
+
+    def test_stage_is_retained_if_its_writer_cannot_stop(self):
+        errors = []
+        def cannot_stop():
+            raise OSError('cannot stop')
+        try:
+            with patch.object(scroll.shutil, 'rmtree') as remove:
+                with self.assertRaisesRegex(OSError, 'cannot stop'):
+                    with scroll.staging_directory(cannot_stop, errors.append) as directory:
+                        pass
+                remove.assert_not_called()
+            self.assertTrue(Path(directory).is_dir())
+            self.assertIn('stage retained', errors[0])
+        finally:
+            scroll.shutil.rmtree(directory)
+
+
 class InspectSocketPaths(unittest.TestCase):
     def test_explicit_directory_does_not_fall_back_to_another_server(self):
         with patch.dict(scroll.os.environ, {'ZGX_INSPECT_DIR':'/owned/inspect'}):
