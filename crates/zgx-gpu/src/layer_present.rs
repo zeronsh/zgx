@@ -1416,17 +1416,22 @@ impl Layer {
             transaction(|| self.host.addSublayer(&layer));
             crate::present_log::log(|| "drawables-start".into());
             // Paced by its own link, three drawables, as Zed's GPUI has
-            // (`ZGX_DRAWABLE_COUNT` to choose).
+            // (`ZGX_DRAWABLE_COUNT` to choose). Set before the link is made:
+            // a link-driven layer's count can't change (Metal raises).
             let metal_link = (*crate::metal_link::METAL_LINK)
-                .then(|| crate::metal_link::MetalLink::new(&layer, wake.cloned()))
+                .then(|| {
+                    let count = zgx::env::var_os("ZGX_DRAWABLE_COUNT")
+                        .and_then(|v| v.to_str()?.parse::<usize>().ok())
+                        .filter(|count| (2..=3).contains(count))
+                        .unwrap_or(3);
+                    layer.setMaximumDrawableCount(count);
+                    let link = crate::metal_link::MetalLink::new(&layer, wake.cloned());
+                    if link.is_none() {
+                        layer.setMaximumDrawableCount(2);
+                    }
+                    link
+                })
                 .flatten();
-            if metal_link.is_some() {
-                let count = zgx::env::var_os("ZGX_DRAWABLE_COUNT")
-                    .and_then(|v| v.to_str()?.parse::<usize>().ok())
-                    .filter(|count| (2..=3).contains(count))
-                    .unwrap_or(3);
-                layer.setMaximumDrawableCount(count);
-            }
             let prefetch = (*DRAWABLE_PREFETCH && metal_link.is_none()).then(|| {
                 let wake = wake.filter(|_| *DRAWABLE_DEFER).cloned();
                 crate::plane_drawables::Drawables::new(layer.clone(), wake)
@@ -1582,6 +1587,10 @@ impl Layer {
         let Some(drawables) = &mut self.drawables else {
             return;
         };
+        // A link-driven layer's presentation isn't changed while the link
+        // runs (as its drawable count can't be): Metal presents its frames,
+        // a plane moving with one a frame apart from it.
+        let transactional = transactional && drawables.metal_link.is_none();
         if drawables.layer.presentsWithTransaction() != transactional {
             drawables.layer.setPresentsWithTransaction(transactional);
         }
