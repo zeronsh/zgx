@@ -195,6 +195,59 @@ pub struct AnimatorId {
 pub struct AnimatorUpdate {
     /// Its clips' events passed, in the order they were.
     pub events: Vec<Fired>,
+    /// How far its root motion's node went (`World::set_root_motion`), in
+    /// the model's frame: taken out of its pose, for the app to move the
+    /// model by. The sum of each frame's since last asked.
+    pub moved: Vec3,
+    /// How far it turned about the model's up (y), in radians, counter-
+    /// clockwise looking down: taken out of its pose as `moved` is.
+    pub turned: f32,
+}
+
+/// Motion an animator takes out of a node's pose and gives the app
+/// (`World::set_root_motion`): a walk's steps moving the character, not its
+/// hips away from it. Its ground plane (x and z of the model) by default.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RootMotion {
+    pub(crate) node: ObjectId,
+    pub(crate) vertical: bool,
+    pub(crate) turn: bool,
+    pub(crate) apply: Option<ObjectId>,
+}
+impl RootMotion {
+    /// `node`'s motion along the model's x and z (its up is y).
+    pub fn new(node: ObjectId) -> Self {
+        Self {
+            node,
+            vertical: false,
+            turn: false,
+            apply: None,
+        }
+    }
+    /// Its up and down too (a jump's rise moving the character).
+    pub fn vertical(mut self) -> Self {
+        self.vertical = true;
+        self
+    }
+    /// Its turn about the model's up too.
+    pub fn turn(mut self) -> Self {
+        self.turn = true;
+        self
+    }
+    /// Moved and turned by the animator itself, the frame it's taken:
+    /// `object` (the placed model's root, as a rule) goes as far along its
+    /// own facing and at its own scale.
+    pub fn apply_to(mut self, object: ObjectId) -> Self {
+        self.apply = Some(object);
+        self
+    }
+}
+/// A root motion's node by index, and its parent's turn from the model's
+/// frame (to measure it in the model's frame, where up is y).
+pub(crate) struct Root {
+    pub(crate) motion: RootMotion,
+    pub(crate) node: usize,
+    pub(crate) parent: Quat,
 }
 /// A clip's event passed (`Clip::with_event`).
 #[derive(Clone, Debug, PartialEq)]
@@ -226,6 +279,13 @@ struct State {
     between: Vec<Between>,
     /// Not yet stepped: its first step takes no time, posing its start.
     fresh: bool,
+    /// Its time before its last step, and whether that step went round
+    /// (1 forward, -1 backward): its root motion's span.
+    before: f32,
+    wrapped: i8,
+    /// Its clip's channels moving the root motion's node (translation,
+    /// rotation), found for that node.
+    root: Option<(usize, [Option<usize>; 2])>,
 }
 impl State {
     fn weight(&self) -> f32 {
@@ -253,6 +313,8 @@ impl State {
         self.elapsed = (self.elapsed + dt).min(self.length.max(0.));
         let duration = self.clip.duration();
         let before = self.time;
+        self.before = before;
+        self.wrapped = 0;
         let delta = dt * self.speed * speed;
         let mut after = before + delta;
         let events = &self.clip.0.events;
@@ -299,10 +361,12 @@ impl State {
                     fire(before, duration, first);
                     after = after.rem_euclid(duration);
                     fire(0., after, true);
+                    self.wrapped = 1;
                 } else {
                     fire(before, 0., first);
                     after = after.rem_euclid(duration);
                     fire(duration, after, true);
+                    self.wrapped = -1;
                 }
             } else {
                 fire(before, after, first);
@@ -315,6 +379,59 @@ impl State {
         }
         self.time = after;
     }
+    /// How far `root`'s node went in its last step, in the model's frame,
+    /// and how far it turned about y.
+    fn root_motion(&mut self, root: &Root) -> (Vec3, f32) {
+        let clip = &self.clip.0;
+        let found = match self.root {
+            Some((node, found)) if node == root.node => found,
+            _ => {
+                let of = |path: Path| {
+                    clip.channels
+                        .iter()
+                        .position(|c| c.node == root.node && c.path == path)
+                };
+                let found = [of(Path::Translation), of(Path::Rotation)];
+                self.root = Some((root.node, found));
+                found
+            }
+        };
+        let (before, after, duration) = (self.before, self.time, clip.duration);
+        let at = |channel: usize, time: f32| {
+            let channel = &clip.channels[channel];
+            channel.sample(&clip.tracks[channel.track], time)
+        };
+        // From `before` to `after`, round the end once if it went round.
+        let span = |channel: usize, f: &dyn Fn([f32; 4], [f32; 4]) -> Vec3| match self.wrapped {
+            1 => {
+                f(at(channel, before), at(channel, duration))
+                    + f(at(channel, 0.), at(channel, after))
+            }
+            -1 => {
+                f(at(channel, before), at(channel, 0.))
+                    + f(at(channel, duration), at(channel, after))
+            }
+            _ => f(at(channel, before), at(channel, after)),
+        };
+        let moved = found[0].map_or(Vec3::ZERO, |channel| {
+            span(channel, &|a, b| root.parent.rotate(v3(b) - v3(a)))
+        });
+        let turned = found[1].filter(|_| root.motion.turn).map_or(0., |channel| {
+            let yaw = |q: [f32; 4]| twist(root.parent * quat(q));
+            span(channel, &|a, b| vec3(wrap(yaw(b) - yaw(a)), 0., 0.)).x
+        });
+        (moved, turned)
+    }
+}
+/// `q`'s turn about y, in radians (its twist, by swing-twist).
+pub(crate) fn twist(q: Quat) -> f32 {
+    2. * q.y.atan2(q.w)
+}
+/// `angle` in (-π, π].
+fn wrap(angle: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let a = (angle + PI).rem_euclid(TAU) - PI;
+    if a == -PI { PI } else { a }
 }
 
 /// A layer as it plays.
@@ -343,6 +460,12 @@ pub(crate) struct Animator {
     pub(crate) update: AnimatorUpdate,
     /// Changed by a call since its last frame: posed again by the next.
     pub(crate) dirty: bool,
+    /// Its root motion, if it takes one (`World::set_root_motion`).
+    pub(crate) root: Option<Root>,
+    /// The root motion its last pose took out: moved, turned.
+    pub(crate) motion: (Vec3, f32),
+    /// The placed model's root.
+    pub(crate) model: Option<ObjectId>,
 }
 impl Animator {
     pub(crate) fn new(nodes: Vec<Option<ObjectId>>, rest: Vec<Transform>) -> Self {
@@ -355,6 +478,9 @@ impl Animator {
             speed: 1.,
             update: AnimatorUpdate::default(),
             dirty: false,
+            root: None,
+            motion: (Vec3::ZERO, 0.),
+            model: None,
         }
     }
     /// Layer `index`, made (as `Layer::new`) with those under it if it's
@@ -432,6 +558,9 @@ impl Animator {
             length,
             between: vec![Between::default(); clip.0.tracks.len()],
             fresh: true,
+            before: time,
+            wrapped: 0,
+            root: None,
         });
         self.dirty = true;
     }
@@ -485,6 +614,7 @@ impl Animator {
         for &node in &self.posed {
             pose[node as usize] = self.rest[node as usize];
         }
+
         for layer in &mut self.layers {
             let weight = layer.layer.weight;
             let total: f32 = layer.states.iter().map(State::weight).sum();
@@ -550,6 +680,85 @@ impl Animator {
             }
         }
         self.dirty = false;
+    }
+    /// Its root motion's node's motion this step, blended as its pose is
+    /// (`evaluate`'s shares), taken out of its pose and noted.
+    #[inline(never)]
+    pub(crate) fn take_root_motion(&mut self) {
+        let pose = &mut self.pose;
+        let Some(root) = self.root.as_ref().filter(|root| root.node < pose.len()) else {
+            return;
+        };
+        let (mut moved, mut turned) = (Vec3::ZERO, 0.);
+        for layer in &mut self.layers {
+            let weight = layer.layer.weight;
+            let total: f32 = layer.states.iter().map(State::weight).sum();
+            if weight <= 0. || total <= 0. {
+                continue;
+            }
+            let masked = layer.mask.as_deref().map_or(1., |m| m[root.node]);
+            match layer.layer.blend {
+                Blend::Override => {
+                    let a = (weight * total.min(1.)).min(1.) * masked;
+                    let mut sum = 0.;
+                    for state in &mut layer.states {
+                        let share = state.weight() / total;
+                        sum += share;
+                        if a > 0. {
+                            let t = a * share / (1. - a + a * sum);
+                            let (by, turn) = state.root_motion(root);
+                            moved = moved + (by - moved) * t;
+                            turned += (turn - turned) * t;
+                        }
+                    }
+                }
+                Blend::Additive => {
+                    for state in &mut layer.states {
+                        let a = weight * state.weight() * masked;
+                        if a > 0. {
+                            let (by, turn) = state.root_motion(root);
+                            moved = moved + by * a;
+                            turned += turn * a;
+                        }
+                    }
+                }
+            }
+        }
+        {
+            // Taken out of its pose: it stays where it rests, along what's
+            // taken.
+            let motion = root.motion;
+            let local = &mut pose[root.node];
+            let rest = self.rest[root.node];
+            let (to_model, from_model) = (root.parent, conjugate(root.parent));
+            let (now, rested) = (
+                to_model.rotate(local.position),
+                to_model.rotate(rest.position),
+            );
+            let y = if motion.vertical { rested.y } else { now.y };
+            local.position = from_model.rotate(vec3(rested.x, y, rested.z));
+            if motion.turn {
+                let turned_now = to_model * local.rotation;
+                let back = twist(to_model * rest.rotation) - twist(turned_now);
+                let back = Quat::from_axis_angle(Vec3::Y, back);
+                local.rotation = (from_model * (back * turned_now)).normalized();
+            }
+            if !motion.vertical {
+                moved.y = 0.;
+            }
+            self.motion = (moved, turned);
+            self.update.moved = self.update.moved + moved;
+            self.update.turned += turned;
+        }
+    }
+}
+/// `q`'s inverse, it being at length 1.
+fn conjugate(q: Quat) -> Quat {
+    Quat {
+        x: -q.x,
+        y: -q.y,
+        z: -q.z,
+        w: q.w,
     }
 }
 

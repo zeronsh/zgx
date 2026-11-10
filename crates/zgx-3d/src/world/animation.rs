@@ -1,8 +1,8 @@
 //! A world's animators (`World::add_animator`): played by its frames' time.
 use super::{Inner, Settle, Slot, World, claim, release};
 use crate::{
-    Clip, Mat4, Placed, Quat, Transform,
-    animator::{Animator, AnimatorId, AnimatorUpdate, Layer, MAX_STEP, Play},
+    Clip, Mat4, Placed, Quat, Transform, Vec3,
+    animator::{Animator, AnimatorId, AnimatorUpdate, Layer, MAX_STEP, Play, Root, RootMotion},
 };
 use std::time::Instant;
 
@@ -47,7 +47,15 @@ pub(crate) fn advance(inner: &mut Inner, time: Instant) -> bool {
         if animator.due() {
             animator.step(dt);
             animator.evaluate();
+            // Root motion apart: an animator without it runs none of it.
+            let root = animator.root.is_some();
+            if root {
+                animator.take_root_motion();
+            }
             changed |= write(inner, animator);
+            if root {
+                changed |= carry(inner, animator);
+            }
         }
         playing |= animator.playing();
     }
@@ -85,6 +93,34 @@ fn write(inner: &mut Inner, animator: &Animator) -> bool {
         changed = true;
     }
     changed
+}
+
+/// `animator`'s root motion this frame applied to the object it says
+/// (`RootMotion::apply_to`), along its facing at its scale: whether it moved.
+#[inline(never)]
+fn carry(inner: &mut Inner, animator: &Animator) -> bool {
+    let Some(id) = animator.root.as_ref().and_then(|root| root.motion.apply) else {
+        return false;
+    };
+    let (moved, turned) = animator.motion;
+    let Some(index) = inner.live(id.index, id.generation) else {
+        return false;
+    };
+    if moved == Vec3::ZERO && turned == 0. {
+        return false;
+    }
+    let object = inner.objects[index].value.as_mut().unwrap();
+    let t = object.transform;
+    let transform = sanitized(Transform {
+        position: t.position + t.rotation.rotate(moved.scaled(t.scale)),
+        rotation: t.rotation * Quat::from_axis_angle(Vec3::Y, turned),
+        ..t
+    });
+    object.transform = transform;
+    let local = object.visible.then(|| matrix(&transform));
+    inner.place(index, local);
+    inner.stamp(index);
+    true
 }
 
 /// `t` as `Transform::sanitized` makes it, in fewer steps where it's all
@@ -140,7 +176,8 @@ impl World {
                     .map_or_else(Default::default, |object| object.transform)
             })
             .collect();
-        let animator = Animator::new(placed.nodes.clone(), rest);
+        let mut animator = Animator::new(placed.nodes.clone(), rest);
+        animator.model = Some(placed.root);
         let animators = &mut inner.animators;
         let (index, generation) = claim(&mut animators.slots, &mut animators.free, animator);
         AnimatorId { index, generation }
@@ -199,6 +236,54 @@ impl World {
             })
         };
         self.change_animator(id, |animator| animator.set_layer(index, layer, mask));
+    }
+    /// Animator `id`'s root motion (`None`: none, its default): the motion
+    /// of a node (a character's hips or root bone) taken out of its pose
+    /// and given in `animator_update`'s `moved` and `turned`, or applied
+    /// to an object (`RootMotion::apply_to`), so a walk moves the character
+    /// rather than its hips away from it. Blended as the pose is: a
+    /// crossfade from a walk to a run speeds up as it goes. Measured in the
+    /// model's frame (its up y) from the node's parent, as that is turned
+    /// now.
+    pub fn set_root_motion(&self, id: AnimatorId, root: Option<RootMotion>) {
+        let root = {
+            let inner = self.inner.borrow();
+            let Some(animator) = Self::animator_ref(&inner, id) else {
+                return;
+            };
+            root.and_then(|motion| {
+                let node = animator
+                    .nodes
+                    .iter()
+                    .position(|n| *n == Some(motion.node))?;
+                // Its parent's turn from the model's root.
+                let mut parent = Quat::IDENTITY;
+                let mut at = inner
+                    .live(motion.node.index, motion.node.generation)
+                    .and_then(|i| inner.objects[i].value.as_ref()?.parent);
+                let mut depth = 0;
+                while let Some(id) = at
+                    && Some(id) != animator.model
+                    && depth < 64
+                {
+                    let Some(object) = inner
+                        .live(id.index, id.generation)
+                        .and_then(|i| inner.objects[i].value.as_ref())
+                    else {
+                        break;
+                    };
+                    parent = object.transform.rotation * parent;
+                    at = object.parent;
+                    depth += 1;
+                }
+                Some(Root {
+                    motion,
+                    node,
+                    parent: parent.normalized(),
+                })
+            })
+        };
+        self.change_animator(id, |animator| animator.root = root);
     }
     /// Animator `id`'s speed, on its clips' own: 1 by default, 0 pauses it
     /// (and the world settles), negative plays them backwards.
@@ -265,7 +350,8 @@ impl World {
 #[cfg(test)]
 mod tests {
     use crate::{
-        Clip, Layer, Mask, Object, ObjectId, Placed, Play, Quat, Transform, Vec3, World,
+        Clip, Layer, Mask, Object, ObjectId, Placed, Play, Quat, RootMotion, Transform, Vec3,
+        World,
         animation::{Channel, Interpolation, Path},
         animator::Blend,
         vec3,
@@ -597,6 +683,141 @@ mod tests {
         };
         assert_eq!(super::sanitized(nan), nan.sanitized());
         assert_eq!(super::sanitized(t), t.sanitized());
+    }
+
+    /// Frames every quarter second from `from` to `to`.
+    fn frames(clock: &Clock, world: &World, from: f32, to: f32) {
+        let mut t = from;
+        while t <= to + 1e-4 {
+            clock.frame(world, t);
+            t += 0.25;
+        }
+    }
+
+    #[test]
+    fn root_motion_moves_the_model_not_its_hips() {
+        let world = World::new();
+        let (placed, a, _) = rig(&world);
+        let animator = world.add_animator(&placed);
+        world.set_root_motion(animator, Some(RootMotion::new(a)));
+        // 2 m a loop of a second, the hips also bobbing 0.5 up.
+        let walk = clip(vec![(
+            0,
+            Path::Translation,
+            vec![0., 0.5, 1.],
+            vec![[0., 0., 0., 0.], [1., 0.5, 0., 0.], [2., 0., 0., 0.]],
+        )]);
+        world.play(animator, &walk, Play::new());
+        let clock = Clock(Instant::now());
+        frames(&clock, &world, 0., 2.5);
+        let update = world.animator_update(animator);
+        assert!(
+            close(update.moved.x, 5.),
+            "2.5 s round the loop: {update:?}"
+        );
+        assert_eq!(
+            (update.moved.y, update.moved.z, update.turned),
+            (0., 0., 0.)
+        );
+        let hips = at(&world, a).position;
+        assert_eq!((hips.x, hips.z), (0., 0.), "where they rest");
+        assert_eq!(hips.y, 0.5, "the bob stays in the pose (2.5 s is halfway)");
+        clock.frame(&world, 2.75);
+        assert!(
+            close(world.animator_update(animator).moved.x, 0.5),
+            "asked again: since"
+        );
+    }
+
+    #[test]
+    fn root_motion_blends_as_the_pose_does() {
+        let world = World::new();
+        let (placed, a, _) = rig(&world);
+        let animator = world.add_animator(&placed);
+        world.set_root_motion(animator, Some(RootMotion::new(a)));
+        world.play(animator, &slide(0., 1.), Play::new());
+        let clock = Clock(Instant::now());
+        clock.frame(&world, 0.);
+        world.animator_update(animator);
+        world.play(animator, &slide(0., 3.), Play::new().fade(1.));
+        // Its first frame takes no time; then four quarter seconds at
+        // weights 0.25 to 1 of the run: speeds 1.5, 2, 2.5 and 3.
+        frames(&clock, &world, 0.25, 1.25);
+        let moved = world.animator_update(animator).moved.x;
+        assert!(close(moved, 0.25 * (1.5 + 2. + 2.5 + 3.)), "{moved}");
+    }
+
+    #[test]
+    fn root_motion_turns_and_moves_an_object_along_its_facing() {
+        let world = World::new();
+        let (placed, a, _) = rig(&world);
+        let quarter = std::f32::consts::FRAC_PI_2;
+        world.update(placed.root, |o| {
+            o.transform.rotation = Quat::from_axis_angle(Vec3::Y, quarter);
+            o.transform.scale = Vec3::ONE * 2.;
+        });
+        let animator = world.add_animator(&placed);
+        let motion = RootMotion::new(a).turn().apply_to(placed.root);
+        world.set_root_motion(animator, Some(motion));
+        let walk = clip(vec![
+            (0, Path::Translation, vec![0., 1.], vec![x(0.), x(1.)]),
+            (
+                0,
+                Path::Rotation,
+                vec![0., 1.],
+                vec![turn(0.), turn(quarter)],
+            ),
+        ]);
+        world.play(animator, &walk, Play::new().once());
+        let clock = Clock(Instant::now());
+        frames(&clock, &world, 0., 0.25);
+        let update = world.animator_update(animator);
+        assert!(
+            close(update.moved.x, 0.25) && close(update.turned, quarter / 4.),
+            "{update:?}"
+        );
+        let root = at(&world, placed.root);
+        // A quarter turn left: its x is the world's -z; twice the size.
+        assert!(
+            close(root.position.z, -0.5) && close(root.position.x, 0.),
+            "{root:?}"
+        );
+        assert!(close(angle(root.rotation), quarter * 1.25));
+        let hips = at(&world, a);
+        assert!(
+            close(angle(hips.rotation), 0.) && hips.position.x == 0.,
+            "{hips:?}"
+        );
+    }
+
+    #[test]
+    fn root_motion_is_measured_in_the_models_frame() {
+        let world = World::new();
+        let (placed, a, b) = rig(&world);
+        // A z-up file's armature: turned a quarter about x, so its y is the
+        // model's -z.
+        let quarter = std::f32::consts::FRAC_PI_2;
+        world.update(a, |o| {
+            o.transform.rotation = Quat::from_axis_angle(vec3(1., 0., 0.), -quarter)
+        });
+        let animator = world.add_animator(&placed);
+        world.set_root_motion(animator, Some(RootMotion::new(b)));
+        let forward = clip(vec![(
+            1,
+            Path::Translation,
+            vec![0., 1.],
+            vec![[0., 1., 0., 0.], [0., 2., 0., 0.]],
+        )]);
+        world.play(animator, &forward, Play::new().once());
+        let clock = Clock(Instant::now());
+        frames(&clock, &world, 0., 0.5);
+        let moved = world.animator_update(animator).moved;
+        assert!(
+            close(moved.z, -0.5) && close(moved.x, 0.) && moved.y == 0.,
+            "{moved:?}"
+        );
+        let hips = at(&world, b).position;
+        assert!(close(hips.y, 1.) && close(hips.z, 0.), "at rest: {hips:?}");
     }
 
     #[test]
