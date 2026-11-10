@@ -75,6 +75,8 @@ mod list_reindex;
 mod list_tab_rows;
 #[path = "../list_thin_rows.rs"]
 mod list_thin_rows;
+#[path = "../mapped_insets.rs"]
+mod mapped_insets;
 #[path = "../markdown_lazy.rs"]
 mod markdown_lazy;
 #[path = "../mentions.rs"]

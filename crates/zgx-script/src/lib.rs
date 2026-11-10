@@ -67,6 +67,7 @@ mod lazy;
 mod library;
 pub mod lint;
 mod lower;
+mod mapped;
 pub mod markdown;
 mod meter;
 mod modifiers;
@@ -4400,6 +4401,7 @@ impl ScriptHost {
             opens::install(lua, ui, opens, plugin)
         });
         lazy.global(&["anime"], |lua, _| anime::api::install(lua));
+        lazy.ui(&["map"], mapped::install);
         self.install_require(
             &lua,
             script.dir(),

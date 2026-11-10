@@ -8,6 +8,7 @@ ui.shared<T>(key: string, initial: T) -> State<T>
 ui.persist<T>(key: string, initial: T) -> State<T>
 ui.use_state<T>(initial: T) -> State<T>
 ui.computed<T>(f: () -> T) -> State<T>
+ui.map(source: State<number>, { from = {a, b}, to = {c, d}, clamp = false }) -> MappedInset
 ui.effect(f: () -> ...unknown) -> ()
 ui.batch<R...>(f: () -> R...) -> R...
 ui.sort<T>(list: { T }, by: string | (item: T) -> any, descending: boolean?) -> { T }
@@ -753,3 +754,18 @@ end
 - A plugin's `ui.state` is its own; the application's is not visible to plugins.
 - `ui.persist` reads its file only the first time a run asks for the key; a hot reload keeps the live value. A file that is not JSON starts the key from `initial`, with a warning.
 - An effect reads with `get` what it should follow and with `peek` what it only uses: one that writes a state it also follows runs again after each write.
+
+## Native mapped insets
+
+`ui.map` binds `top` or `left` to an affine mapping of a numeric state:
+
+```luau
+ui.div {
+    absolute = true, w = 4, h = 24,
+    top = ui.map(offset, { from = {0, limit}, to = {4, finish}, clamp = true }),
+}
+```
+
+Each endpoint is a number, a numeric state (including a computed), or a function. Endpoint functions rerun only when their own dependencies change; a changed endpoint remaps the current source even when it has not moved. Source changes map and apply the inset in Rust, without running Luau or a frame timer. Other reactive styles keep the current mapped inset. Interaction styles retain their normal precedence; a competing inset uses the ordinary Rust style path with Lua property functions cached by their own dependencies.
+
+`clamp = true` holds the source within the two input endpoints. Reversed ranges work. A zero-width input range maps to the first output endpoint. Nonfinite inputs or endpoints use that first output when finite, otherwise zero; output always stays finite. The mapping lives as long as its creating scope, and each mounted inset binding ends with its node. Fixed absolute rail boxes may lay out alone; changes of ancestor geometry keep their normal invalidation and layout.

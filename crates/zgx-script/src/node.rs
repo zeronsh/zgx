@@ -1601,6 +1601,7 @@ pub(crate) enum Source {
     Anim(Rc<Anim>),
     /// Set by `variants = …` chosen by state: what the choice sets now.
     Variant(Rc<crate::variants::Selection>, Prop),
+    Mapped(Signal<Value>),
 }
 
 /// What `radial` is told when it can't draw what it was given.
@@ -2829,6 +2830,14 @@ fn source_linted(
             let message = ud.borrow::<crate::i18n::MessageUd>()?.0.clone();
             Ok(Source::Computed(
                 lua.create_function(move |_, ()| Ok(message.get()))?,
+            ))
+        }
+        mlua::Value::UserData(ud) if ud.is::<crate::mapped::MappedUd>() => {
+            if !matches!(name, "top" | "left") {
+                return Err(mlua::Error::runtime("ui.map currently binds top or left"));
+            }
+            Ok(Source::Mapped(
+                ud.borrow::<crate::mapped::MappedUd>()?.0.clone(),
             ))
         }
         mlua::Value::UserData(ud) if ud.is::<AnimUd>() => {

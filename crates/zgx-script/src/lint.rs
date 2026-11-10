@@ -242,6 +242,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "persist",
     "use_state",
     "computed",
+    "map",
     "sorted",
     "resource",
     "paged",

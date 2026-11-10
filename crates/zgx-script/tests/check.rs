@@ -409,3 +409,55 @@ fn plugin_targets_by_class_and_chain_type_check() {
     assert_eq!(stdout.trim(), "", "no findings");
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+/// Native maps accept computed/function endpoints, but are inset bindings,
+/// not numeric values or bindings for unrelated style properties.
+#[test]
+fn mapped_insets_have_numeric_sources_and_only_top_left_targets() {
+    if !installed() {
+        return;
+    }
+    let dir = scripts(
+        "mapped-insets",
+        &[
+            (
+                "app.luau",
+                r#"--!strict
+local offset = ui.state("offset", 0)
+local limit = ui.computed(function() return 100 end)
+local mapped = ui.map(offset, {from={0,limit},to={4,function() return 80 end},clamp=true})
+return ui.div {absolute=true,w=4,h=24,top=mapped,left=mapped}
+"#,
+            ),
+            (
+                "wrong-target.luau",
+                r#"--!strict
+local offset = ui.state("offset", 0)
+return ui.div {h=ui.map(offset,{from={0,100},to={4,80}})}
+"#,
+            ),
+        ],
+    );
+    let out = zgx()
+        .arg("check")
+        .arg(dir.join("app.luau"))
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let out = zgx()
+        .arg("check")
+        .arg(dir.join("wrong-target.luau"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

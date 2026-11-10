@@ -7573,12 +7573,53 @@ impl Scene {
     pub fn set_style(&mut self, id: NodeId, style: Style) {
         self.restyle(id, style, true);
     }
+    /// Patch left/top pixel insets from an explicit native numeric binding.
+    /// The ordinary style path has no mapping selector. A currently fixed
+    /// absolute parent may stand alone; pending ancestor layout is retained.
+    pub fn set_mapped_position(&mut self, id: NodeId, left: Option<f32>, top: Option<f32>) {
+        use crate::layout::Length;
+        let left = left.filter(|v| v.is_finite()).map(Length::Px);
+        let top = top.filter(|v| v.is_finite()).map(Length::Px);
+        if left.is_none() && top.is_none() {
+            return;
+        }
+        // Use the authored style: contents and logical layouts keep it
+        // separately from the effective style stored on the node.
+        let mut style = self.style(id);
+        let inset = style
+            .layout_options
+            .as_ref()
+            .map(|o| o.inset)
+            .unwrap_or_default();
+        let node = self.node(id);
+        if left.is_none_or(|v| inset.left == Some(v)) && top.is_none_or(|v| inset.top == Some(v)) {
+            return;
+        }
+        let stopping = node.style.absolute
+            && node.parent.is_some_and(|parent| {
+                let parent = self.tree_node(parent);
+                parent.style.absolute
+                    && parent.style.width.is_some()
+                    && parent.style.height.is_some()
+            });
+        let options = Arc::make_mut(style.layout_options.get_or_insert_default());
+        if let Some(left) = left {
+            options.inset.left = Some(left);
+        }
+        if let Some(top) = top {
+            options.inset.top = Some(top);
+        }
+        if stopping {
+            self.set_style_stopping(id, style);
+        } else {
+            self.set_style(id, style);
+        }
+    }
     /// `set_style` for a node that may be laid out above alone: an absolute
     /// one placed by its parent (a scrollbar's thumb in its rail) stops its
     /// walk at that parent (`invalidate_absolute_layout`). For callers that
     /// style such nodes (a script's or a composed view's style); `set_style`
     /// asks nothing, and lays out as it always has.
-    #[cfg(test)]
     #[cold]
     #[inline(never)]
     pub(crate) fn set_style_stopping(&mut self, id: NodeId, style: Style) {

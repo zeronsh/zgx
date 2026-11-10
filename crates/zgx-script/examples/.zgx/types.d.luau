@@ -850,6 +850,12 @@ end
 -- `ui.tween`, `ui.spring`, `ui.loop`: a property eased in Rust.
 declare extern type Binding with
 end
+-- A numeric affine binding accepted by top and left.
+declare extern type MappedInset with
+end
+export type MapEndpoint = number | Readable<number> | (() -> number)
+export type MapOptions = { from: { MapEndpoint }, to: { MapEndpoint }, clamp: boolean? }
+
 -- Variants chosen from a `ui.variants` recipe: give it to an element as
 -- `variants = …`.
 declare extern type Variants with
@@ -2075,8 +2081,8 @@ export type StyleProps = {
 	aspect: Reactive<number>?,
 	absolute: Reactive<boolean>?,
 	relative: Reactive<boolean>?,
-	top: Reactive<Length>?,
-	left: Reactive<Length>?,
+	top: (Reactive<Length> | MappedInset)?,
+	left: (Reactive<Length> | MappedInset)?,
 	inset_start: Reactive<Length>?,
 	inset_end: Reactive<Length>?,
 	right: Reactive<Length>?,
@@ -2953,8 +2959,8 @@ export type Props_h_full = Reactive<boolean>?
 export type Props_aspect = Reactive<number>?
 export type Props_absolute = Reactive<boolean>?
 export type Props_relative = Reactive<boolean>?
-export type Props_top = Reactive<Length>?
-export type Props_left = Reactive<Length>?
+export type Props_top = (Reactive<Length> | MappedInset)?
+export type Props_left = (Reactive<Length> | MappedInset)?
 export type Props_inset_start = Reactive<Length>?
 export type Props_inset_end = Reactive<Length>?
 export type Props_right = Reactive<Length>?
@@ -21871,6 +21877,8 @@ declare ui: {
 	set: <T>(state: { read set: (self: any, value: T) -> () }, value: T) -> Action,
 	toggle: (state: State<boolean>) -> Action,
 	add: (state: State<number>, by: number?) -> Action,
+	-- Native affine top/left mapping; endpoint functions follow only their own inputs.
+	map: (source: Readable<number>, opts: MapOptions) -> MappedInset,
 	-- The state's truthiness (or number) drives a 0-to-1 scalar, or
 	-- `from` to `to`. Durations are milliseconds, as in `anime`.
 	tween: (state: State<any>, opts: TweenOptions?) -> Binding,

@@ -23,6 +23,7 @@ const TERM: &str = include_str!("../src/term.rs");
 const COMMAND: &str = include_str!("../src/command.rs");
 const CANVAS: &str = include_str!("../src/canvas.rs");
 const MOTION: &str = include_str!("../src/motion.rs");
+const MAPPED: &str = include_str!("../src/mapped.rs");
 const TARGET: &str = include_str!("../src/anime/target.rs");
 const API: &str = include_str!("../src/anime/api.rs");
 const DRAGGABLE: &str = include_str!("../src/anime/draggable.rs");
@@ -710,7 +711,7 @@ fn fn_body<'a>(source: &'a str, start: &str) -> &'a str {
 #[test]
 fn ui_functions_are_typed() {
     let mut names = Vec::new();
-    for source in [NODE, LIBRARY, TERM, COMMAND, CANVAS] {
+    for source in [NODE, LIBRARY, TERM, COMMAND, CANVAS, MAPPED] {
         for chunk in source.split("ui.set(").skip(1) {
             if let Some(name) = chunk
                 .trim_start()

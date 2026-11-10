@@ -3876,9 +3876,17 @@ fn styled(
     // animated values, share one reactive style.
     let mut statics: smallvec::SmallVec<[(Prop, Lit); 8]> = smallvec::SmallVec::new();
     let mut dynamic = Vec::new();
+    let mut apartness = Apartness::FirstRun;
     for (prop, source) in &node.props {
         match source {
             Source::Lit(lit) => statics.push((*prop, lit.clone())),
+            Source::Mapped(value) => {
+                apartness = Apartness::Apart;
+                let (value, vm, mapped_prop) = (value.clone(), vm.clone(), *prop);
+                let output = value.clone();
+                view = crate::mapped::install_binding(view, node, mapped_prop, value, vm);
+                dynamic.push((*prop, Owned::State(output), None));
+            }
             Source::Anim(spec) => {
                 let scalar = anim::drive(need(&mut cx), spec);
                 dynamic.push((*prop, resolve_owned(source), Some(scalar)));
@@ -4014,7 +4022,8 @@ fn styled(
         let vm = vm.clone();
         let element = element.clone();
         let mut apart: Option<Box<StylesApart>> = None;
-        let mut apartness = Apartness::FirstRun;
+        // Only explicit mapped sources selected Apart above; other bindings
+        // keep their existing first-run classification without a new scan.
         view = view.reactive_style(move || {
             let styles = match &element {
                 _ if apartness != Apartness::Never
@@ -6181,6 +6190,7 @@ fn resolve_owned(source: &Source) -> Owned {
         Source::Lit(l) => Owned::Lit(l.clone()),
         Source::State(s) => Owned::State(s.clone()),
         Source::Computed(f) => Owned::Computed(f.clone(), std::cell::Cell::default()),
+        Source::Mapped(value) => Owned::State(value.clone()),
         Source::Anim(a) => Owned::Anim(a.from.clone(), a.to.clone()),
         Source::Variant(selection, prop) => Owned::Variant(selection.clone(), *prop),
     }
