@@ -270,7 +270,8 @@ impl Emitter {
     /// Each of its particles gives birth to `count` of `child`'s as it
     /// dies. `child` is an emitter already in the world: a sub-emitter is
     /// born into by its parents alone (its rate and bursts don't spawn), and
-    /// an emitter has one.
+    /// an emitter has one. An event, and a frame's events all told, give it
+    /// at most its pool's count, whatever `count` asks.
     pub fn on_death(mut self, child: EmitterId, count: u32) -> Self {
         let hit = self.sub.filter(|s| s.0 == child).map_or(0, |s| s.2);
         self.sub = Some((child, count, hit));
@@ -374,6 +375,9 @@ pub(crate) struct Live {
     /// `on_hit`), and the last time one's particles might have.
     pub(crate) fed: bool,
     fed_until: Option<f64>,
+    /// Its pool couldn't be made on the device: it draws nothing and keeps
+    /// nothing drawing.
+    pub(crate) failed: bool,
 }
 impl Live {
     /// Particles to spawn in a frame of `step` seconds at `time`: what it
@@ -400,7 +404,19 @@ impl Live {
     }
     /// Whether it keeps its world drawing at `time`: it emits, a burst is
     /// waiting, or a particle may live.
+    /// This frame's spawns: where in the ring they start (within `slots`,
+    /// however many the pool had before) and how many; the head moved past
+    /// them.
+    pub(crate) fn window(&mut self, time: f64, step: f32, slots: u32) -> (u32, u32) {
+        let base = self.head % slots;
+        let count = self.step(time, step, slots);
+        self.head = (base + count) % slots;
+        (base, count)
+    }
     fn unsettled(&self, time: f64) -> bool {
+        if self.failed {
+            return false;
+        }
         let lives = |at: f64| time - at <= f64::from(self.emitter.longest()) + f64::from(MAX_STEP);
         (!self.fed && (self.emitting && self.emitter.spawn.rate > 0. || self.bursts > 0))
             || self.last_spawn.is_some_and(lives)
@@ -431,10 +447,15 @@ pub(crate) struct Particles {
 impl Particles {
     pub(crate) fn add(&mut self, mut emitter: Emitter) -> EmitterId {
         self.next_id += 1;
-        // A sub-emitter is one already here.
-        if let Some((child, ..)) = emitter.sub {
+        // A sub-emitter is one already here, and an event gives birth to at
+        // most its pool.
+        if let Some((child, death, hit)) = emitter.sub {
             match self.get_mut(child) {
-                Some(child) => child.fed = true,
+                Some(child) => {
+                    child.fed = true;
+                    let most = child.emitter.max;
+                    emitter.sub = Some((emitter.sub.unwrap().0, death.min(most), hit.min(most)));
+                }
                 None => {
                     eprintln!("zgx-3d: an emitter's sub-emitter isn't in the world: none");
                     emitter.sub = None;
@@ -452,6 +473,7 @@ impl Particles {
             id: self.next_id,
             fed: false,
             fed_until: None,
+            failed: false,
         };
         let index = match self.emitters.iter().position(|(_, e)| e.is_none()) {
             Some(index) => index,
@@ -590,6 +612,18 @@ mod tests {
         // At most a pool's worth.
         live.bursts = 1000;
         assert_eq!(live.step(0.1, 1. / 60., 100), 100);
+    }
+
+    #[test]
+    fn the_spawn_window_starts_within_the_pools_slots() {
+        let mut particles = Particles::default();
+        let id = particles.add(Emitter::new(20_000).rate(600.));
+        let live = particles.get_mut(id).unwrap();
+        // The head as a larger pool left it, read in a smaller one.
+        live.head = 18_000;
+        let (base, count) = live.window(0., 1. / 60., 16_384);
+        assert_eq!((base, count), (18_000 % 16_384, 10));
+        assert_eq!(live.head, 18_000 % 16_384 + 10);
     }
 
     #[test]

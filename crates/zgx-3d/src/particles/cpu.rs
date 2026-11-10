@@ -120,7 +120,14 @@ pub(crate) fn give_birth(
     events: &[(u32, [f32; 3], u32)],
 ) {
     let slots = children.len() as u32;
+    // A frame gives it at most its pool, an event too.
+    let mut left = slots;
     for &(parent, at, births) in events {
+        let births = births.min(left);
+        if births == 0 {
+            break;
+        }
+        left -= births;
         let seed = child.life[3].to_bits() ^ pcg(parent);
         for k in 0..births {
             let slot = born.wrapping_add(k) % slots;
@@ -221,8 +228,18 @@ pub(crate) fn step(
         if p.age >= p.life {
             happened |= DIED;
         }
-        let births = (if happened & DIED != 0 { u.events[1] } else { 0 })
-            + (if happened & HIT != 0 { u.events[2] } else { 0 });
+        let most = u.events[0];
+        let births = (if happened & DIED != 0 {
+            u.events[1].min(most)
+        } else {
+            0
+        })
+        .saturating_add(if happened & HIT != 0 {
+            u.events[2].min(most)
+        } else {
+            0
+        })
+        .min(most);
         if births > 0 && u.events[0] > 0 {
             events.push((slot, p.position, births));
         }

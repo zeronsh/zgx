@@ -308,12 +308,11 @@ impl Device {
             pool.used = index;
             pool.blend = live.emitter.blend;
             if pool.failed {
+                live.failed = true;
                 pool.shown = false;
                 continue;
             }
-            let count = live.step(time, step, slots);
-            let base = live.head;
-            live.head = (live.head + count) % slots;
+            let (base, count) = live.window(time, step, slots);
             pool.shown = live.unsettled(time) || count > 0;
             if !pool.shown {
                 continue;
@@ -338,9 +337,17 @@ impl Device {
                             .write_buffer(&pool.particles, 0, bytemuck::cast_slice(cpu));
                     }
                 }
-                None => frame
-                    .queue
-                    .write_buffer(&pool.update, 0, bytemuck::bytes_of(&u)),
+                None => {
+                    frame
+                        .queue
+                        .write_buffer(&pool.update, 0, bytemuck::bytes_of(&u));
+                    // A frame's births into it start again from none.
+                    if live.fed
+                        && let Some(born) = &pool.born
+                    {
+                        frame.queue.write_buffer(born, 4, &[0; 4]);
+                    }
+                }
             }
             let e = &live.emitter;
             let draw = DrawUniforms {
@@ -730,7 +737,7 @@ fn make_pool_in_scope(
         born: on_gpu.then(|| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("3D particles born"),
-                size: 4,
+                size: 8,
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             })

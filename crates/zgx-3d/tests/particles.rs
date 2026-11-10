@@ -13,14 +13,20 @@ use zgx_gpu::{
 const SIDE: u32 = 64;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
-fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+fn device(limits: wgpu::Limits) -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let found = pollster(instance.request_adapter(&Default::default()))
         .ok()
-        .and_then(|adapter| pollster(adapter.request_device(&Default::default())).ok());
+        .and_then(|adapter| {
+            pollster(adapter.request_device(&wgpu::DeviceDescriptor {
+                required_limits: limits,
+                ..Default::default()
+            }))
+            .ok()
+        });
     if found.is_none() && std::env::var_os("ZGX_REQUIRE_GPU").is_some() {
         panic!("ZGX_REQUIRE_GPU, but no device");
     }
@@ -49,7 +55,11 @@ struct Frames {
 }
 impl Frames {
     fn new(world: &World) -> Option<Self> {
-        let (device, queue) = device()?;
+        Self::with_limits(world, wgpu::Limits::default())
+    }
+    /// On a device asked for `limits`.
+    fn with_limits(world: &World, limits: wgpu::Limits) -> Option<Self> {
+        let (device, queue) = device(limits)?;
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -449,4 +459,73 @@ fn a_pool_follows_the_way_its_particles_are_updated_from_the_next_frame() {
     world.set_particles_on_cpu(false);
     frames.draw(3. / 60.);
     assert_eq!(world.particle_pools(), [(20_000, false)]);
+}
+
+#[test]
+fn a_sub_emitters_births_are_bounded_by_its_pool_whatever_count_is_asked() {
+    // A thousand-particle child asked for a billion births each death
+    // (and u32::MAX each hit): each event and each frame give it at most
+    // its slots, on the CPU and the GPU, and frames end promptly.
+    for on_cpu in [true, false] {
+        let world = world();
+        let Some(mut frames) = Frames::new(&world) else {
+            return;
+        };
+        world.set_particles_on_cpu(on_cpu);
+        let child = world
+            .add_emitter(Emitter::new(1000).lifetime(0.2..0.2))
+            .unwrap();
+        world
+            .add_emitter(
+                Emitter::new(100)
+                    .burst(100)
+                    .lifetime(0.05..0.05)
+                    .force(Force::Gravity)
+                    .collide(Collide::Plane {
+                        height: -0.01,
+                        then: Response::Bounce {
+                            keep: 0.5,
+                            friction: 0.,
+                        },
+                    })
+                    .on_death(child, 1 << 30)
+                    .on_hit(child, u32::MAX),
+            )
+            .unwrap();
+        frames.ready(&world, 0.);
+        let started = std::time::Instant::now();
+        frames.run(0., 0.5);
+        frames.pixels();
+        let took = started.elapsed();
+        assert!(
+            took < std::time::Duration::from_secs(5),
+            "{} frames took {took:?}",
+            if on_cpu { "the CPU's" } else { "the GPU's" }
+        );
+    }
+}
+
+#[test]
+fn an_emitter_whose_pool_the_device_refused_lets_its_world_settle() {
+    let world = world();
+    // Within WebGPU's default binding (80 MB of 128), so it's added; the
+    // device it's drawn on binds 16 MiB at most, so its pool is refused.
+    world
+        .add_emitter(Emitter::new(1_000_000).rate(1000.).lifetime(0.1..0.1))
+        .unwrap();
+    let Some(mut frames) = Frames::with_limits(
+        &world,
+        wgpu::Limits {
+            max_storage_buffer_binding_size: 16 << 20,
+            ..Default::default()
+        },
+    ) else {
+        return;
+    };
+    frames.ready(&world, 0.);
+    frames.run(0., 0.1);
+    assert!(
+        !world.view().animating(),
+        "a pool that can't be made draws nothing and keeps nothing drawing"
+    );
 }

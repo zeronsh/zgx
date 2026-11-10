@@ -50,7 +50,9 @@ struct Emitter {
 // `update_events`: its parents write its births as their events happen.
 @group(0) @binding(2) var<uniform> child: Emitter;
 @group(0) @binding(3) var<storage, read_write> children: array<Particle>;
-@group(0) @binding(4) var<storage, read_write> born: atomic<u32>;
+// Its births: in all (where the next goes in its ring), and this frame
+// (none past its slots).
+@group(0) @binding(4) var<storage, read_write> born: array<atomic<u32>, 2>;
 
 fn pcg(v: u32) -> u32 {
     let s = v * 747796405u + 2891336453u;
@@ -193,18 +195,25 @@ fn update_events(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let happened = step(id.x);
+    // At most its pool an event and a frame, whatever was asked.
+    let most = emitter.events.x;
     var births = 0u;
     if (happened & DIED) != 0u {
-        births += emitter.events.y;
+        births = min(emitter.events.y, most);
     }
     if (happened & HIT) != 0u {
-        births += emitter.events.z;
+        births = min(births + min(emitter.events.z, most), most);
     }
     if births == 0u {
         return;
     }
+    let granted = atomicAdd(&born[1], births);
+    if granted >= most {
+        return;
+    }
+    births = min(births, most - granted);
     let p = particles[id.x];
-    let first = atomicAdd(&born, births);
+    let first = atomicAdd(&born[0], births);
     let seed = bitcast<u32>(child.life.w) ^ pcg(id.x);
     for (var k = 0u; k < births; k++) {
         let slot = (first + k) % emitter.events.x;
