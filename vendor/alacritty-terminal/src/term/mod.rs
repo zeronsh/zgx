@@ -318,7 +318,9 @@ impl TermDamageState {
 
     /// Reset information about terminal damage.
     fn reset(&mut self, num_cols: usize) {
-        self.ordered(num_cols);
+        // Every line is reset: turned back is only for damage read. (A
+        // scroll changes no line's number, so they stay where they are.)
+        self.base = 0;
         self.full = false;
         self.scrolled = 0;
         self.lines.iter_mut().for_each(|line| line.reset(num_cols));
