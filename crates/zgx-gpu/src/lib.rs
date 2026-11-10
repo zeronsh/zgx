@@ -4785,6 +4785,38 @@ struct BackdropWalk {
     grown: Option<Vec<Rect>>,
 }
 impl GpuRenderer {
+    /// A window frame's items with backdrop readers in it, out of
+    /// `render_once`'s line: the damage grown first through all each reader
+    /// could read (`backdrop_read`, a pixel past it) as well as the blurs,
+    /// and with readers alone (no blur) that reach kept for `render_flat`,
+    /// which draws it rather than work it out again.
+    #[cold]
+    #[inline(never)]
+    fn walk_over_readers<'s>(
+        &mut self,
+        scene: &'s Scene,
+        damage: &[Rect],
+        viewport: Rect,
+    ) -> Vec<zgx::scene::PaintItem<'s>> {
+        let walk = self.backdrop_walk.get_or_insert_default();
+        let filters = &mut walk.filters;
+        filters.clear();
+        filters.extend(scene.backdrop_filters());
+        let blurs = filters.len();
+        scene.backdrop_reads(filters);
+        let margin = 1. / self.scale;
+        for (read, _) in &mut filters[blurs..] {
+            *read = read.expand(margin);
+        }
+        let reach = blur_damage(damage, filters, viewport, self.scale);
+        let items = scene.layer_items_within(None, Some(&reach));
+        if blurs == 0 {
+            walk.grown = Some(reach);
+        }
+        items
+    }
+}
+impl GpuRenderer {
     /// An offscreen renderer `width` by `height` physical pixels, on a context
     /// of its own.
     pub fn new(width: u32, height: u32) -> Result<Self, GpuError> {
@@ -6266,7 +6298,7 @@ impl GpuRenderer {
             self.width as f32 / self.scale,
             self.height as f32 / self.scale,
         );
-        let merged = (!self.fresh && !scene.has_backdrop_blur() && !scene.has_backdrop_readers())
+        let merged = (!self.fresh && !scene.has_backdrop_blur())
             .then(|| merge_damage(damage, viewport, self.scale));
         // A popup window's renderer walks its root's subtree alone.
         let start = self.plane_popup();
@@ -6379,22 +6411,14 @@ impl GpuRenderer {
             // With readers alone (no blur), what the frame draws is that
             // reach: `render_flat` takes it rather than work it out again.
             None if !self.fresh && start.is_none() && self.plane.is_none() && !self.in_layer => {
-                let walk = self.backdrop_walk.get_or_insert_default();
-                let filters = &mut walk.filters;
-                filters.clear();
-                filters.extend(scene.backdrop_filters());
-                let blurs = filters.len();
-                scene.backdrop_reads(filters);
-                let margin = 1. / self.scale;
-                for (read, _) in &mut filters[blurs..] {
-                    *read = read.expand(margin);
+                match scene.has_backdrop_readers() {
+                    false => {
+                        let reach =
+                            blur_damage(damage, &scene.backdrop_filters(), viewport, self.scale);
+                        (scene.layer_items_within(None, Some(&reach)), merged)
+                    }
+                    true => (self.walk_over_readers(scene, damage, viewport), merged),
                 }
-                let reach = blur_damage(damage, filters, viewport, self.scale);
-                let items = scene.layer_items_within(None, Some(&reach));
-                if blurs == 0 {
-                    walk.grown = Some(reach);
-                }
-                (items, merged)
             }
             None => (scene.layer_items(start), merged),
         };
