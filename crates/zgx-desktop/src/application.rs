@@ -1173,9 +1173,48 @@ impl Default for Application {
 static RENDER_WHEN_COVERED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
     zgx::env::var_os("ZGX_RENDER_WHEN_COVERED").is_some_and(|v| !v.is_empty() && v != "0")
 });
+/// What a window's next trim is for (`Host::trim_at`): the trim of what
+/// animation alone used, or what goes later at rest (`Rest`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TrimStage {
+    Trim,
+    Rest,
+}
+/// What a window at rest still gives back, each at its own delay past the
+/// trim (`at`): the glyph atlas it grew, and Metal's queue.
+#[derive(Clone, Copy, Debug)]
+struct Rest {
+    at: std::time::Instant,
+    atlas: bool,
+    queue: bool,
+}
+impl Rest {
+    fn none() -> Self {
+        Self {
+            at: std::time::Instant::now(),
+            atlas: false,
+            queue: false,
+        }
+    }
+    /// When the next of what's owed is due, if anything is.
+    fn next(&self) -> Option<std::time::Instant> {
+        [
+            self.atlas.then_some(ATLAS_TRIM_DELAY),
+            self.queue.then_some(QUEUE_REST_DELAY),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .map(|delay| self.at + delay)
+    }
+}
 /// A window that has presented nothing for this long releases animation-only
 /// renderer memory.
 const TRIM_DELAY: std::time::Duration = std::time::Duration::from_millis(1500);
+/// A window idle this long past that gives back its GPU queue
+/// (`GpuRenderer::rest_queue`): idle that long, a queue starts as slowly as a
+/// new one, so the next frame pays no more for it than it would anyway.
+const QUEUE_REST_DELAY: std::time::Duration = std::time::Duration::from_secs(10);
 /// A window idle this long past that gives back a glyph atlas it grew: what
 /// it costs is a slow first frame, for someone who has been away a while.
 const ATLAS_TRIM_DELAY: std::time::Duration = std::time::Duration::from_secs(30);
@@ -1818,8 +1857,11 @@ struct Host {
     /// When lists let go of rows kept out of view, `KEPT_REST` past the
     /// last frame presented.
     release_rows_at: Option<std::time::Instant>,
-    /// `trim_at` is for the glyph atlas (`ATLAS_TRIM_DELAY`).
-    trim_atlas: bool,
+    /// What `trim_at` is for: renderer memory, then the GPU queue
+    /// (`QUEUE_REST_DELAY`), then the glyph atlas (`ATLAS_TRIM_DELAY`).
+    trim_stage: TrimStage,
+    /// What's owed at rest after the trim (`TrimStage::Rest`).
+    rest: Rest,
     /// When to save the window's frame (`frame_autosave`, Linux): once its
     /// moves and resizes settle.
     frame_save_at: Option<std::time::Instant>,
@@ -2240,9 +2282,10 @@ impl Host {
             #[cfg(target_os = "macos")]
             refresh_frame: false,
             trim_at: None,
+            trim_stage: TrimStage::Trim,
+            rest: Rest::none(),
             release_images_at: None,
             release_rows_at: None,
-            trim_atlas: false,
             frame_save_at: None,
             startup_trim: StartupTrim::Pending,
             frame_timer: crate::frame_source::FrameTimer::new(std::time::Instant::now()),
@@ -3182,7 +3225,8 @@ impl Host {
                     if renderer.take_images_uploaded() {
                         self.release_images_at = Some(now + TRIM_DELAY);
                     }
-                    self.trim_atlas = false;
+                    self.trim_stage = TrimStage::Trim;
+                    self.rest = Rest::none();
                     // Startup's garbage (shader compilation, first layout)
                     // is freed once, even if the window never goes idle.
                     if self.startup_trim == StartupTrim::Pending {
@@ -6245,19 +6289,17 @@ impl Host {
         {
             self.release_rows_at = None;
             self.context.ui.release_kept_rows()?;
-            // And what that freed goes back to the system.
+            // And what that freed goes back to the system: a whole trim, which
+            // owes what goes later at rest again.
             self.trim_at = Some(std::time::Instant::now());
+            self.trim_stage = TrimStage::Trim;
         }
         if self
             .trim_at
             .is_some_and(|at| std::time::Instant::now() >= at)
         {
             self.trim_at = None;
-            if std::mem::take(&mut self.trim_atlas) {
-                if let Some(renderer) = &mut self.renderer {
-                    renderer.trim_atlas();
-                }
-            } else {
+            if self.trim_stage == TrimStage::Trim {
                 // What a large removal left where no frame came to free it,
                 // and garbage scripts made (`zgx::idle`), first: what they
                 // free, the trims below give back.
@@ -6265,19 +6307,39 @@ impl Host {
                 zgx::idle::trim(&self.context.ui.runtime);
                 if let Some(renderer) = &mut self.renderer {
                     renderer.trim();
-                    // Only a window with an atlas to give back wakes again.
-                    if renderer.atlas_grown() {
-                        self.trim_at = Some(std::time::Instant::now() + ATLAS_TRIM_DELAY);
-                        self.trim_atlas = true;
-                    }
                 }
+                // What goes later, each at its own delay past this trim: the
+                // glyph atlas (a window that grew one), and Metal's queue once
+                // a frame would find it cold anyway.
+                self.rest = Rest {
+                    at: std::time::Instant::now(),
+                    atlas: self.renderer.as_ref().is_some_and(|r| r.atlas_grown()),
+                    queue: self.renderer.is_some() && cfg!(target_os = "macos"),
+                };
+                self.trim_stage = TrimStage::Rest;
                 self.native.trim();
                 self.context.ui.scene.borrow_mut().rest();
                 self.context.ui.semantics.borrow_mut().rest();
                 zgx::theme::Themes::of(&self.context.ui.runtime).rest();
                 self.tree.rest();
                 release_freed_heap();
+            } else {
+                let now = std::time::Instant::now();
+                if self.rest.atlas && now >= self.rest.at + ATLAS_TRIM_DELAY {
+                    self.rest.atlas = false;
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.trim_atlas();
+                    }
+                }
+                if self.rest.queue && now >= self.rest.at + QUEUE_REST_DELAY {
+                    self.rest.queue = false;
+                    if let Some(renderer) = &mut self.renderer {
+                        renderer.rest_queue();
+                    }
+                }
             }
+            // The next of what's still owed.
+            self.trim_at = self.rest.next();
         }
         loop {
             let task = self.pending.borrow_mut().pop_front();
@@ -6502,10 +6564,11 @@ impl Host {
         let ui = &self.context.ui;
         let asked = zgx::idle::take_request(&ui.runtime);
         if (asked || (ui.reclaiming() && !self.frames_presented()))
-            && (self.trim_at.is_none() || self.trim_atlas)
+            && (self.trim_at.is_none() || self.trim_stage == TrimStage::Rest)
         {
             self.trim_at = Some(std::time::Instant::now() + TRIM_DELAY);
-            self.trim_atlas = false;
+            self.trim_stage = TrimStage::Trim;
+            self.rest = Rest::none();
         }
     }
     /// Start, stop or schedule this window's frame source to match demand.
@@ -8981,6 +9044,35 @@ impl WindowCursor {
 
 #[cfg(test)]
 mod tests {
+    /// A window at rest gives back Metal's queue, then its glyph atlas, each
+    /// at its own delay past the trim, and nothing once both have gone.
+    #[test]
+    fn rest_gives_back_the_atlas_then_the_queue() {
+        use super::{ATLAS_TRIM_DELAY, QUEUE_REST_DELAY, Rest};
+        let at = std::time::Instant::now();
+        let both = Rest {
+            at,
+            atlas: true,
+            queue: true,
+        };
+        // The queue goes first: the atlas waits longer.
+        assert!(QUEUE_REST_DELAY < ATLAS_TRIM_DELAY);
+        assert_eq!(both.next(), Some(at + QUEUE_REST_DELAY));
+        let atlas = Rest {
+            queue: false,
+            ..both
+        };
+        assert_eq!(atlas.next(), Some(at + ATLAS_TRIM_DELAY));
+        assert_eq!(
+            Rest {
+                atlas: false,
+                ..atlas
+            }
+            .next(),
+            None
+        );
+        assert_eq!(Rest::none().next(), None);
+    }
     #[test]
     fn stale_pixels_say_where_and_by_how_much() {
         let fresh = vec![10_u8; 3 * 2 * 4];
