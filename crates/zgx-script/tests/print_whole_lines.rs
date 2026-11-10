@@ -57,10 +57,25 @@ fn child() {
     let noise = {
         let stop = stop.clone();
         std::thread::spawn(move || {
+            #[cfg(windows)]
+            let mut stderr = {
+                use std::os::windows::io::AsHandle;
+                std::fs::File::from(std::io::stderr().as_handle().try_clone_to_owned().unwrap())
+            };
             while !stop.load(std::sync::atomic::Ordering::Relaxed) {
                 let text = b"[1.000] wl_pointer@45.frame()\n";
+                #[cfg(unix)]
                 // SAFETY: a write of a buffer it holds to stderr's descriptor.
-                unsafe { libc::write(2, text.as_ptr().cast(), text.len()) };
+                unsafe {
+                    libc::write(2, text.as_ptr().cast(), text.len())
+                };
+                #[cfg(windows)]
+                {
+                    use std::io::Write;
+                    // A cloned OS handle bypasses Rust's stderr lock, as
+                    // another library's writes do on Unix.
+                    stderr.write_all(text).unwrap();
+                }
             }
         })
     };
