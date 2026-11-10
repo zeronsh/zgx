@@ -8345,15 +8345,6 @@ fn context_menu_items(
     }
 }
 
-/// `lower_rich`'s span fading in, out of its per-span closure: few spans fade.
-#[cold]
-#[inline(never)]
-fn span_fade_in(
-    span: zgx::compose::TextSpan,
-    fade: zgx::compose::TextFade,
-) -> zgx::compose::TextSpan {
-    span.fade_in(fade)
-}
 fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     /// A span with its text and handler owned by the closure.
     struct OwnedSpan {
@@ -8426,8 +8417,30 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         })
         .collect();
     let (vm, actions, low) = (vm.clone(), low.actions.clone(), low.clone());
+    // Whether any span fades in: known here, so a paragraph none of whose
+    // spans does builds them as before, and only one that has one fades them
+    // after (`fade_spans`, out of line).
+    let fades = owned
+        .iter()
+        .any(|span| span.rare.as_ref().is_some_and(|rare| rare.fade.is_some()));
+    /// `spans`, made from `owned` one for one, with those whose spans fade in
+    /// fading.
+    #[cold]
+    #[inline(never)]
+    fn fade_spans(spans: Vec<TextSpan>, owned: &[OwnedSpan]) -> Vec<TextSpan> {
+        spans
+            .into_iter()
+            .zip(owned)
+            .map(
+                |(out, span)| match span.rare.as_ref().and_then(|rare| rare.fade) {
+                    Some(fade) => out.fade_in(fade),
+                    None => out,
+                },
+            )
+            .collect()
+    }
     rich_text_signal(move || {
-        owned
+        let spans: Vec<TextSpan> = owned
             .iter()
             .map(|span| {
                 // Copied only for the few that follow: a span's own is read
@@ -8558,9 +8571,6 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         out = out
                             .context_menu(move |e| context_menu_items(&vm, &low, &build, e, None));
                     }
-                    if let Some(fade) = rare.fade {
-                        out = span_fade_in(out, fade);
-                    }
                 }
                 if let Some(href) = &span.href {
                     out = out.href(href.clone());
@@ -8591,7 +8601,12 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 }
                 out
             })
-            .collect()
+            .collect();
+        if fades {
+            fade_spans(spans, &owned)
+        } else {
+            spans
+        }
     })
 }
 
