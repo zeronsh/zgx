@@ -745,3 +745,55 @@ fn automatic_exposure_brings_a_dim_and_a_bright_scene_to_middle_grey_and_settles
     let (bright, _) = shown(4., false).unwrap();
     assert!(dim < 40 && bright > 240, "without: {dim} and {bright}");
 }
+
+#[test]
+fn a_pixel_not_finite_spreads_through_neither_bloom_nor_the_exposure() {
+    // One pixel of the scene made NaN by an HDR pass (as an infinite light
+    // would), against the same pixel made black: the frames alike.
+    let frame = |value: &str| {
+        let world = scene();
+        world.set_post(Post {
+            bloom: Some(Bloom { intensity: 0.2 }),
+            auto_exposure: Some(AutoExposure::default()),
+            ..Default::default()
+        });
+        world
+            .add_post(PostPass::new(format!(
+                "#zgx post 1
+fn post(p: PostIn) -> vec4<f32> {{
+    if all(floor(p.position) == vec2(48.0, 40.0)) {{
+        return {value};
+    }}
+    return color(p.uv);
+}}
+"
+            )))
+            .unwrap();
+        let mut window = Window::new(&world)?;
+        Some(window.draw())
+    };
+    let Some(nan) = frame("vec4(bitcast<f32>(0x7fc00000u))") else {
+        return;
+    };
+    let black = frame("vec4(0.0)").unwrap();
+    let side = SIZE as usize;
+    let mut most = 0;
+    let mut far = 0;
+    for (i, (a, b)) in nan.chunks(4).zip(black.chunks(4)).enumerate() {
+        let (x, y) = (i % side, i / side);
+        let by = a.iter().zip(b).map(|(p, q)| p.abs_diff(*q)).max().unwrap();
+        most = most.max(by);
+        if x.abs_diff(48) > 3 || y.abs_diff(40) > 3 {
+            far = far.max(by);
+        }
+    }
+    // Bloom's filtered taps touching it read as nothing whole, a little
+    // more than the pixel alone: a level at most beyond its neighbours.
+    // (Unguarded, the NaN takes bloom and the exposure, and the frame, with
+    // it.)
+    assert!(
+        far <= 1,
+        "beyond its neighbours, the frame as with black: by {far}"
+    );
+    assert!(most <= 4, "and near it, by {most}");
+}
