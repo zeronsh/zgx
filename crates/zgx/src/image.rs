@@ -1,7 +1,7 @@
 //! Immutable decoded straight-alpha RGBA8 images shared between scene nodes.
 use std::sync::{
     Arc,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicU64, AtomicUsize, Ordering},
 };
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) fn next_identity() -> Result<u64, &'static str> {
@@ -187,6 +187,9 @@ struct Kept {
     held: std::sync::Mutex<Option<Held>>,
     /// The size a decode under way makes, if one is.
     pending: std::sync::Mutex<Option<(u32, u32)>>,
+    /// When `held` was last asked for (`USES`), for which goes first past the
+    /// budget (`set_decoded_budget`).
+    used: AtomicU64,
     /// When it decodes (`Decoding`, as a `u8`).
     decoding: std::sync::atomic::AtomicU8,
     /// Its file didn't decode: not tried again (each try would draw again).
@@ -572,6 +575,7 @@ impl ImageData {
                 scaled,
                 held: std::sync::Mutex::new(None),
                 pending: std::sync::Mutex::new(None),
+                used: AtomicU64::new(0),
                 decoding: std::sync::atomic::AtomicU8::new(Decoding::Auto as u8),
                 failed: std::sync::atomic::AtomicBool::new(false),
                 pinned: std::sync::OnceLock::new(),
@@ -665,6 +669,8 @@ impl ImageData {
             && held.width >= size.0
             && held.height >= size.1
         {
+            kept.used
+                .store(USES.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
             return Some(held.clone());
         }
         if kept.failed.load(Ordering::Relaxed) {
@@ -697,14 +703,104 @@ pub fn release_decoded() -> usize {
     list.retain(|weak| match weak.upgrade() {
         Some(pixels) => {
             if let Some(kept) = &*pixels.kept {
-                let mut held = kept.held.lock().unwrap_or_else(|p| p.into_inner());
-                freed += held.take().map_or(0, |held| held.pixels.len());
+                freed += hold(kept, None);
             }
             true
         }
         None => false,
     });
+    // Every copy given back: dropped images' too.
+    HELD.store(0, Ordering::Relaxed);
     freed
+}
+/// What kept files' decoded copies hold together, pinned ones aside, or
+/// more: a dropped image's copy stays counted until `shed` or
+/// `release_decoded` counts again, so an image's drop stays as it was (a
+/// style holding one drops it inline, and every style's drop would pay).
+static HELD: AtomicUsize = AtomicUsize::new(0);
+/// What they may hold before those used least recently go (`set_decoded_budget`).
+static BUDGET: AtomicUsize = AtomicUsize::new(usize::MAX);
+/// A count of uses of decoded copies, for which was used least recently.
+static USES: AtomicU64 = AtomicU64::new(1);
+/// Decodes of kept files so far (`decodes`).
+static DECODES: AtomicU64 = AtomicU64::new(0);
+/// What kept files' decoded copies may hold together, pinned ones aside:
+/// past it, as a decode lands, those used least recently go. A renderer holds
+/// what it uploaded as textures, so a copy serves only to upload again (a
+/// texture given back, then drawn again, decodes again). Below it, nothing
+/// changes: an app showing few pictures never decodes twice. Unbounded until a
+/// host sets it for its windows (zgx-desktop: sixteen frames of its largest, 64
+/// to 192 MiB); a window at rest gives every copy back as well
+/// (`release_decoded`).
+pub fn set_decoded_budget(bytes: usize) {
+    BUDGET.store(bytes, Ordering::Relaxed);
+}
+/// The budget `set_decoded_budget` set.
+pub fn decoded_budget() -> usize {
+    BUDGET.load(Ordering::Relaxed)
+}
+/// How many decodes of kept files there have been in this process: with a
+/// count of pictures shown, how many decoded again. For tests and benches.
+pub fn decodes() -> u64 {
+    DECODES.load(Ordering::Relaxed)
+}
+/// Put `held` in place of `kept`'s copy, counting it: the bytes the copy it
+/// replaces held.
+fn hold(kept: &Kept, held: Option<Held>) -> usize {
+    let new = held.as_ref().map_or(0, |h| h.pixels.len());
+    let old = std::mem::replace(
+        &mut *kept.held.lock().unwrap_or_else(|p| p.into_inner()),
+        held,
+    )
+    .map_or(0, |h| h.pixels.len());
+    HELD.fetch_add(new, Ordering::Relaxed);
+    HELD.fetch_sub(old, Ordering::Relaxed);
+    old
+}
+/// Past the budget: count what the copies hold again (`HELD` may count
+/// dropped images'), then give back copies until it is under, those used
+/// least recently first; never `keep`'s (just decoded) nor one whose decode
+/// is under way.
+#[cold]
+#[inline(never)]
+fn shed(keep: &Pixels) {
+    let mut total = 0;
+    let mut held: Vec<(u64, Arc<Pixels>)> = {
+        let mut list = registry();
+        list.retain(|weak| weak.strong_count() > 0);
+        list.iter()
+            .filter_map(std::sync::Weak::upgrade)
+            .filter_map(|pixels| {
+                let kept = pixels.kept.as_ref()?;
+                let bytes = kept
+                    .held
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .as_ref()
+                    .map(|held| held.pixels.len());
+                total += bytes.unwrap_or(0);
+                let decoding = kept
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .is_some();
+                let used = kept.used.load(Ordering::Relaxed);
+                let spare = bytes.is_some() && !decoding && !std::ptr::eq(&*pixels, keep);
+                spare.then_some((used, pixels))
+            })
+            .collect()
+    };
+    HELD.store(total, Ordering::Relaxed);
+    held.sort_unstable_by_key(|(used, _)| *used);
+    let budget = BUDGET.load(Ordering::Relaxed);
+    for (.., pixels) in held {
+        if HELD.load(Ordering::Relaxed) <= budget {
+            break;
+        }
+        if let Some(kept) = &*pixels.kept {
+            hold(kept, None);
+        }
+    }
 }
 /// What kept files' decoded pixels hold now (pinned ones too).
 pub fn decoded_bytes() -> usize {
@@ -830,7 +926,13 @@ fn decode_at(
         kept.failed.store(true, Ordering::Relaxed);
         return None;
     };
-    *kept.held.lock().unwrap_or_else(|p| p.into_inner()) = Some(done.clone());
+    hold(kept, Some(done.clone()));
+    kept.used
+        .store(USES.fetch_add(1, Ordering::Relaxed), Ordering::Relaxed);
+    DECODES.fetch_add(1, Ordering::Relaxed);
+    if HELD.load(Ordering::Relaxed) > BUDGET.load(Ordering::Relaxed) {
+        shed(pixels);
+    }
     // Off the main thread: whoever waited draws again.
     let wake = wake
         .then(|| WAKE.lock().unwrap_or_else(|p| p.into_inner()).clone())
@@ -995,6 +1097,47 @@ mod kept_tests {
         // Borrowed: whole, straight, and kept.
         assert_eq!(image.pixels().len(), 8 * 4 * 4);
         assert_eq!(image.pixels_arc().len(), 8 * 4 * 4);
+    }
+
+    /// Past the budget, a decode landing gives back the copies used least
+    /// recently, never its own; under it, nothing goes. A dropped image's
+    /// copy, counted until then, is counted again then, and takes no live
+    /// one's place.
+    #[test]
+    fn decoded_copies_past_the_budget_go_least_recently_used_first() {
+        let _alone = alone();
+        release_decoded();
+        let before = (decoded_budget(), decodes());
+        let file = || ImageData::kept(8, 4, Arc::from(&b"file"[..]), decode).unwrap();
+        let (a, b, c) = (file(), file(), file());
+        // Two copies fit (each 8 by 4, 128 bytes): small, they decode here.
+        set_decoded_budget(2 * 128 + 64);
+        assert!(a.pixels_at((8, 4)).is_some());
+        assert!(b.pixels_at((8, 4)).is_some());
+        assert_eq!(decoded_bytes(), 2 * 128, "under it: both kept");
+        // `a` used again: `b` is now the least recent.
+        assert!(a.pixels_at((8, 4)).is_some());
+        assert_eq!(decodes(), before.1 + 2, "used again, not decoded");
+        assert!(c.pixels_at((8, 4)).is_some());
+        assert_eq!(decoded_bytes(), 2 * 128, "past it: one went");
+        let held = |image: &ImageData| {
+            let kept = image.pixels.kept.as_ref().unwrap();
+            kept.held.lock().unwrap().is_some()
+        };
+        assert!(
+            held(&a) && !held(&b) && held(&c),
+            "the least recently used went"
+        );
+        // `a` dropped: its copy still counted, until `d`'s decode lands past
+        // the budget and they are counted again; `c` and `d` fit.
+        drop(a);
+        let d = file();
+        assert!(d.pixels_at((8, 4)).is_some());
+        assert!(held(&c) && held(&d), "a dropped copy took no place");
+        assert_eq!(HELD.load(Ordering::Relaxed), 2 * 128);
+        set_decoded_budget(before.0);
+        release_decoded();
+        assert_eq!(HELD.load(Ordering::Relaxed), 0);
     }
 
     /// Read whole for a moment (a copy to the clipboard), a kept file holds

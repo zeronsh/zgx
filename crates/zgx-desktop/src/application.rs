@@ -8630,6 +8630,21 @@ fn map_key(key: &WKey) -> Option<Key> {
 fn zoomed(scale: f64, zoom: f64) -> f64 {
     if zoom == 1. { scale } else { scale * zoom }
 }
+/// Kept pictures' decoded copies may hold sixteen of the largest window's
+/// frames, 64 to 192 MiB (`zgx::image::set_decoded_budget`): what a long
+/// scroll through a few hundred photos draws again without decoding again,
+/// where without a bound every picture ever shown stayed until the window
+/// rested.
+fn decoded_budget_for(size: PhysicalSize<u32>) {
+    static LARGEST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let frame = size.width as usize * size.height as usize * 4;
+    let largest = LARGEST
+        .fetch_max(frame, std::sync::atomic::Ordering::Relaxed)
+        .max(frame);
+    zgx::image::set_decoded_budget((16 * largest).clamp(DECODED_LEAST, DECODED_MOST));
+}
+const DECODED_LEAST: usize = 64 << 20;
+const DECODED_MOST: usize = 192 << 20;
 fn apply_viewport(
     options: &mut WindowOptions,
     ui: &Ui,
@@ -8640,6 +8655,7 @@ fn apply_viewport(
     if size.width == 0 || size.height == 0 || !scale.is_finite() || scale <= 0. {
         return false;
     }
+    decoded_budget_for(size);
     let width = size.width as f64 / scale;
     let height = size.height as f64 / scale;
     if !width.is_finite()
