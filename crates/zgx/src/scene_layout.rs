@@ -955,6 +955,10 @@ impl Scene {
                     }
                     // A `contents` child clips as the child it lays out as.
                     mapped.overflow = overflow(super::clips(&scene.node(laid).style));
+                    // An image with an aspect ratio is sized by it as CSS's
+                    // replaced elements are (the vendored taffy's flexbox).
+                    mapped.item_is_replaced =
+                        mapped.aspect_ratio.is_some() && scene.node(laid).replaced;
                     if stacked {
                         mapped = stacked_style(mapped);
                     }

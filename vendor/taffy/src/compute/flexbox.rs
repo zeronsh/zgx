@@ -235,7 +235,9 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
 
     // 1. Generate anonymous flex items as described in §4 Flex Items.
     debug_log!("generate_anonymous_flex_items");
-    let mut flex_items = generate_anonymous_flex_items(tree, node, &constants);
+    // zgx: whether any item has an aspect ratio (`cross_through_ratio`).
+    let mut any_aspect_ratio = false;
+    let mut flex_items = generate_anonymous_flex_items(tree, node, &constants, &mut any_aspect_ratio);
 
     // 9.2. Line Length Determination
 
@@ -304,6 +306,9 @@ fn compute_preliminary(tree: &mut impl LayoutFlexboxContainer, node: NodeId, inp
     debug_log!("determine_hypothetical_cross_size");
     for line in &mut flex_lines {
         determine_hypothetical_cross_size(tree, line, &constants, available_space);
+        if any_aspect_ratio {
+            cross_through_ratio(tree, line, &constants);
+        }
     }
 
     // Calculate child baselines. This function is internally smart and only computes child baselines
@@ -498,6 +503,7 @@ fn generate_anonymous_flex_items(
     tree: &impl LayoutFlexboxContainer,
     node: NodeId,
     constants: &AlgoConstants,
+    any_aspect_ratio: &mut bool,
 ) -> Vec<FlexItem> {
     tree.child_ids(node)
         .enumerate()
@@ -506,6 +512,7 @@ fn generate_anonymous_flex_items(
         .filter(|(_, _, style)| style.box_generation_mode() != BoxGenerationMode::None)
         .map(|(index, child, child_style)| {
             let aspect_ratio = child_style.aspect_ratio();
+            *any_aspect_ratio |= aspect_ratio.is_some();
             let padding = child_style
                 .padding()
                 .resolve_or_zero(constants.node_inner_size.width, |val, basis| tree.calc(val, basis));
@@ -1350,6 +1357,37 @@ fn resolve_flexible_lengths(line: &mut FlexLine, constants: &AlgoConstants) {
         }
 
         // f. Return to the start of this loop.
+    }
+}
+
+/// zgx: for a line some item of which has an aspect ratio, those items'
+/// hypothetical cross sizes through it from the main size flex gave them, as
+/// CSS: exactly that for a replaced element (an image: its pixels are what it
+/// holds), no less than its content (the size measured before) for any other
+/// box. Upstream measured content alone. Out of line, and reached only for a
+/// container holding such an item: the per-item pass stays as it was.
+#[cold]
+#[inline(never)]
+fn cross_through_ratio(tree: &mut impl LayoutFlexboxContainer, line: &mut FlexLine, constants: &AlgoConstants) {
+    for child in line.items.iter_mut() {
+        if child.size.cross(constants.dir).is_some() {
+            continue;
+        }
+        let style = tree.get_flexbox_child_style(child.node);
+        let Some(ratio) = style.aspect_ratio() else {
+            continue;
+        };
+        let replaced = style.is_compressible_replaced();
+        let main = child.target_size.main(constants.dir);
+        let through = if constants.is_row { main / ratio } else { main * ratio };
+        let measured = child.hypothetical_inner_size.cross(constants.dir);
+        let padding_border_sum = (child.padding + child.border).cross_axis_sum(constants.dir);
+        let inner = if replaced { through } else { through.max(measured) }
+            .maybe_clamp(child.min_size.cross(constants.dir), child.max_size.cross(constants.dir))
+            .max(padding_border_sum);
+        let outer = inner + child.margin.cross_axis_sum(constants.dir);
+        child.hypothetical_inner_size.set_cross(constants.dir, inner);
+        child.hypothetical_outer_size.set_cross(constants.dir, outer);
     }
 }
 
