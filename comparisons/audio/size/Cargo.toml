@@ -1,0 +1,21 @@
+[package]
+name = "audio-size"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "What zgx-audio adds to a release binary: std alone, the core, the device, Vorbis"
+
+# Outside zgx's workspace, with a lockfile of its own.
+[workspace]
+
+[features]
+device = ["zgx-audio/device"]
+vorbis = ["zgx-audio/vorbis"]
+
+[dependencies]
+zgx-audio = { path = "../../../crates/zgx-audio", optional = true }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

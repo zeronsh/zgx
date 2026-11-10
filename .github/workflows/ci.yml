@@ -176,6 +176,8 @@ jobs:
       - run: cargo test -p zgx-terminal --locked
       # The optional effects package: every effect drawn, on each job's backend.
       - run: cargo test -p zgx-fx --locked
+      # The mixer offline, against its references, sample for sample.
+      - run: cargo test -p zgx-audio --locked
       # zgx-script's tests with all its features, as an app built by zgx-run
       # has them (scene3d, i18n, gltf, inspect): ICU's plural rules change
       # what the i18n lint finds, and each feature may add lazy `ui`
@@ -507,6 +509,7 @@ jobs:
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
       - run: cargo test -p zgx-fx --locked
+      - run: cargo test -p zgx-audio --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
       # The soak (an app used for a while holds what it did), on Metal.
@@ -598,6 +601,7 @@ jobs:
       # Text in every script, shaped in the system's own fonts.
       - run: cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
       - run: cargo test -p zgx-fx --locked
+      - run: cargo test -p zgx-audio --locked
       # Menus, popovers and tooltips in Windows' shapes there (WinUI's).
       - run: "cargo test -p zgx --test overlays --locked -- composition_menu::a_menu_takes_its_platforms_shape"
       # Focus drawn as Windows' focus visual there (outside the control,
