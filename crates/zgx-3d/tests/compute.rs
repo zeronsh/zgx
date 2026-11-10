@@ -572,3 +572,82 @@ fn writes_waiting_for_a_frame_hold_at_most_the_buffers_bytes() {
     assert_eq!(words[16], last(16));
     assert_eq!(words[1023], last(1023));
 }
+
+/// A frame of `world` drawn on a no-op device of `limits`: its caps read.
+fn drawn_on(world: &World, limits: zgx_gpu::wgpu::Limits) {
+    use zgx_gpu::{
+        viewport::{Viewport, ViewportFrame},
+        wgpu,
+    };
+    let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor {
+        required_limits: limits,
+        ..Default::default()
+    });
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let mut frame = ViewportFrame::new(&device, &queue, &mut encoder, &view, format, (8, 8), 1.);
+    world.viewport().render(&mut frame);
+    queue.submit([encoder.finish()]);
+}
+
+#[test]
+fn gpu_data_is_held_to_the_devices_own_limits_once_known() {
+    let world = World::new();
+    drawn_on(
+        &world,
+        zgx_gpu::wgpu::Limits {
+            max_texture_dimension_2d: 256,
+            max_buffer_size: 1 << 20,
+            ..Default::default()
+        },
+    );
+    assert_eq!(world.caps().unwrap().max_texture, 256);
+    assert!(matches!(
+        world.add_texture(TextureDesc::storage(512, 16, Format::Rgba8Unorm)),
+        Err(GpuDataError::Size(_))
+    ));
+    assert!(
+        world
+            .add_texture(TextureDesc::storage(256, 16, Format::Rgba8Unorm))
+            .is_ok()
+    );
+    assert!(matches!(
+        world.add_buffer(BufferDesc::bytes(2 << 20)),
+        Err(GpuDataError::Size(_))
+    ));
+    // No compute (tier B): textures only passes write are refused, as the
+    // passes are.
+    let world = World::new();
+    drawn_on(
+        &world,
+        zgx_gpu::wgpu::Limits {
+            max_compute_workgroups_per_dimension: 0,
+            max_compute_invocations_per_workgroup: 0,
+            ..zgx_gpu::wgpu::Limits::downlevel_defaults()
+        },
+    );
+    assert!(!world.caps().unwrap().compute);
+    assert_eq!(
+        world.add_texture(TextureDesc::storage(16, 16, Format::Rgba8Unorm)),
+        Err(GpuDataError::Unsupported)
+    );
+    assert_eq!(
+        world.add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}")),
+        Err(ComputeError::Unsupported)
+    );
+}

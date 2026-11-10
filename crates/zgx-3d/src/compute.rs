@@ -913,7 +913,7 @@ impl Frames {
                 .borrow()
                 .as_ref()
                 .is_some_and(|(g, _)| *g == generation);
-            if made {
+            if made || buffer.refused.get() == generation {
                 continue;
             }
             let usage = wgpu::BufferUsages::STORAGE
@@ -923,12 +923,23 @@ impl Frames {
                 | wgpu::BufferUsages::VERTEX
                 | wgpu::BufferUsages::INDIRECT;
             let contents = buffer.contents.borrow_mut().take();
+            // Checked against the device's limits when added; a refusal
+            // all the same is the resource's, not the device's handler's.
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             let made = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("3D app buffer"),
                 size: buffer.size,
                 usage,
                 mapped_at_creation: contents.is_some(),
             });
+            if let Some(error) = now(scope.pop()) {
+                eprintln!(
+                    "zgx-3d: a buffer of {} bytes couldn't be made: {error}",
+                    buffer.size
+                );
+                buffer.refused.set(generation);
+                continue;
+            }
             if let Some(contents) = contents {
                 made.slice(..)
                     .get_mapped_range_mut()
@@ -943,10 +954,11 @@ impl Frames {
                 .borrow()
                 .as_ref()
                 .is_some_and(|(g, ..)| *g == generation);
-            if made {
+            if made || texture.refused.get() == generation {
                 continue;
             }
             let (width, height) = texture.desc.size;
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
             // Renderable, so wgpu clears it by a render pass, not a blit.
             let made = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("3D app texture"),
@@ -966,6 +978,11 @@ impl Frames {
                 view_formats: &[],
             });
             let view = made.create_view(&Default::default());
+            if let Some(error) = now(scope.pop()) {
+                eprintln!("zgx-3d: a texture of {width} by {height} couldn't be made: {error}");
+                texture.refused.set(generation);
+                continue;
+            }
             *texture.gpu.borrow_mut() = Some((generation, made, view));
         }
         // Writes since the last frame, ahead of this frame's commands.

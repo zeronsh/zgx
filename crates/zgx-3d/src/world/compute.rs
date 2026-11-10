@@ -25,7 +25,9 @@ impl World {
     /// its bytes count against the world's cap (`set_memory_cap`) while the
     /// handle (or a pass binding it) lives.
     pub fn add_buffer(&self, desc: BufferDesc) -> Result<GpuBuffer, GpuDataError> {
-        let most = wgpu_limits().max_buffer_size;
+        let most = self
+            .caps()
+            .map_or(wgpu_limits().max_buffer_size, |caps| caps.max_buffer);
         if desc.size == 0 || desc.size > most {
             return Err(GpuDataError::Size(desc.size));
         }
@@ -37,6 +39,7 @@ impl World {
                 contents: RefCell::new(desc.contents),
                 writes: RefCell::default(),
                 gpu: RefCell::default(),
+                refused: Default::default(),
                 link: data.link.clone(),
             });
             data.add_buffer(&shared);
@@ -47,7 +50,13 @@ impl World {
     /// A texture on the device for compute passes to write and read and
     /// materials to sample, zeroed: counted as `add_buffer`'s are.
     pub fn add_texture(&self, desc: TextureDesc) -> Result<GpuTexture, GpuDataError> {
-        let most = wgpu_limits().max_texture_dimension_2d;
+        let caps = self.caps();
+        if caps.is_some_and(|caps| !caps.compute || caps.storage_textures == 0) {
+            return Err(GpuDataError::Unsupported);
+        }
+        let most = caps.map_or(wgpu_limits().max_texture_dimension_2d, |caps| {
+            caps.max_texture
+        });
         let (width, height) = desc.size;
         if width == 0 || height == 0 || width > most || height > most {
             return Err(GpuDataError::Size(desc.bytes()));
@@ -58,6 +67,7 @@ impl World {
                 id: data.link.id(),
                 desc,
                 gpu: RefCell::default(),
+                refused: Default::default(),
                 link: data.link.clone(),
             });
             data.add_texture(&shared);

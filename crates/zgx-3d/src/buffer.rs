@@ -154,8 +154,12 @@ pub enum GpuDataError {
         /// The cap.
         cap: u64,
     },
-    /// No bytes, or more than a device of tier A is sure to hold.
+    /// No bytes, or more than the view's device holds (once a frame has
+    /// said which device; until then, what every tier A device holds).
     Size(u64),
+    /// The device runs no compute (`caps().compute` false), so nothing would
+    /// write it.
+    Unsupported,
 }
 impl std::fmt::Display for GpuDataError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -165,6 +169,7 @@ impl std::fmt::Display for GpuDataError {
                 "{asked} bytes more would take the app's GPU data past its cap ({used} of {cap} used)"
             ),
             Self::Size(size) => write!(f, "a buffer or texture of {size} bytes can't be made"),
+            Self::Unsupported => f.write_str("the device runs no compute shaders to write it"),
         }
     }
 }
@@ -263,6 +268,8 @@ pub(crate) struct BufferShared {
     pub(crate) writes: RefCell<Vec<(u64, Vec<u8>)>>,
     /// Its device copy, and the device generation it was made on.
     pub(crate) gpu: RefCell<Option<(u64, wgpu::Buffer)>>,
+    /// The device generation that refused to make it, if one did.
+    pub(crate) refused: Cell<u64>,
     pub(crate) link: Rc<Link>,
 }
 
@@ -362,6 +369,8 @@ pub(crate) struct TextureShared {
     pub(crate) id: u64,
     pub(crate) desc: TextureDesc,
     pub(crate) gpu: RefCell<Option<(u64, wgpu::Texture, wgpu::TextureView)>>,
+    /// The device generation that refused to make it, if one did.
+    pub(crate) refused: Cell<u64>,
     pub(crate) link: Rc<Link>,
 }
 
