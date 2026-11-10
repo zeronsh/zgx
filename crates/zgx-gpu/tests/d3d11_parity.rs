@@ -504,6 +504,30 @@ fn shader_frames(scale: f32, glass: bool) -> Vec<Vec<u8>> {
                 },
             );
         }
+        // Glass reads the backdrop at offsets across as well as down
+        // (chroma_split's split is across): columns over the stripes, so
+        // what's behind changes both ways.
+        for j in (1..(size.0 / 12.).ceil() as usize)
+            .step_by(2)
+            .filter(|_| glass)
+        {
+            let column = scene.append(
+                root,
+                NodeKind::Rect(Color(40, 200, 90, 140)),
+                Style {
+                    width: Some(12.),
+                    height: Some(size.1),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(
+                column,
+                Transform {
+                    x: j as f32 * 12.,
+                    y: 0.,
+                },
+            );
+        }
         for (index, (_, fx)) in layers.iter().enumerate() {
             let id = scene.append(
                 root,
