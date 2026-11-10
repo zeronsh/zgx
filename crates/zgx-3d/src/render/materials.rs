@@ -353,8 +353,30 @@ pub(super) fn upload(
     texture: &crate::Texture,
     srgb: bool,
 ) -> Option<wgpu::TextureView> {
+    let decoded = decoded(texture)?;
+    Some(upload_decoded(device, queue, texture, srgb, decoded))
+}
+/// A texture's pixels and their smaller levels, ready to upload: decoding
+/// them is most of an upload's time, and needs no device.
+type Decoded = (
+    std::sync::Arc<zgx::image::ImageData>,
+    Vec<(u32, u32, Vec<u8>)>,
+);
+/// `texture`'s pixels (decoded from its file if it keeps one) and their
+/// smaller levels; `None` if they don't decode.
+fn decoded(texture: &crate::Texture) -> Option<Decoded> {
     let image = texture.pixels()?;
     let smaller = crate::texture::mipmaps(texture.width(), texture.height(), image.pixels());
+    Some((image, smaller))
+}
+/// `texture`, `decoded`, on the GPU (`upload`).
+fn upload_decoded(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &crate::Texture,
+    srgb: bool,
+    (image, smaller): Decoded,
+) -> wgpu::TextureView {
     let levels: Vec<&[u8]> = std::iter::once(image.pixels())
         .chain(smaller.iter().map(|(_, _, pixels)| pixels.as_slice()))
         .collect();
@@ -371,7 +393,77 @@ pub(super) fn upload(
         "3D map",
     );
     texture.uploaded();
-    Some(made.create_view(&Default::default()))
+    made.create_view(&Default::default())
+}
+/// Threads decoding a frame's textures (`upload_missing`), the machine's
+/// cores up to 4. Each holds one decoded texture and the channel as many
+/// again, so about twice this many are decoded at once. Measured loading 64
+/// textures of 1024² (M5 Max, file to first frame): 1 thread 427 ms, 2
+/// 214, 4 141, 8 99; each kept about 11 MB more in the footprint at rest.
+fn decoders() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(4))
+}
+/// `missing`, maps a frame draws that `gpu` hasn't uploaded (each read as
+/// sRGB or not; one may come twice), uploaded and marked used this frame:
+/// those whose files decode, more than `SMALL` pixels, decoded with their
+/// smaller levels on `decoders()` threads and each put on the GPU here as
+/// it's ready; the rest here, in turn. A map that doesn't decode draws as if
+/// it had none (`Texture::pixels`). Once a frame with any new map: out of
+/// the frame's code.
+#[cold]
+#[inline(never)]
+pub(super) fn upload_missing(
+    gpu: &mut Gpu,
+    (device, queue): (&wgpu::Device, &wgpu::Queue),
+    mut missing: Vec<(&crate::Texture, bool)>,
+) {
+    let mut seen = std::collections::HashSet::new();
+    missing.retain(|(texture, srgb)| seen.insert((texture.id(), *srgb)));
+    let wanted = missing;
+    let now = gpu.frame;
+    // Pixels in hand, or few of them: here, in turn. A thread costs more
+    // than they do.
+    let (wanted, here): (Vec<_>, Vec<_>) = wanted.into_iter().partition(|(texture, _)| {
+        !texture.holds_pixels() && texture.width() * texture.height() > crate::texture::SMALL
+    });
+    let workers = decoders().min(wanted.len());
+    for (texture, srgb) in here
+        .into_iter()
+        .chain(wanted.iter().copied().filter(|_| workers <= 1))
+    {
+        if let Some(view) = upload(device, queue, texture, srgb) {
+            gpu.views.insert((texture.id(), srgb), (view, now));
+        }
+    }
+    if workers <= 1 {
+        return;
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let (sent, received) = std::sync::mpsc::sync_channel(workers);
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let (sent, next, wanted) = (sent.clone(), &next, &wanted);
+            scope.spawn(move || {
+                loop {
+                    let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&(texture, _)) = wanted.get(at) else {
+                        break;
+                    };
+                    if sent.send((at, decoded(texture))).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(sent);
+        for (at, decoded) in received {
+            let (texture, srgb) = wanted[at];
+            if let Some(decoded) = decoded {
+                let view = upload_decoded(device, queue, texture, srgb, decoded);
+                gpu.views.insert((texture.id(), srgb), (view, now));
+            }
+        }
+    });
 }
 /// A mesh's maps (`Map::ALL`'s order) bound for sampling.
 pub(super) fn map_binding(

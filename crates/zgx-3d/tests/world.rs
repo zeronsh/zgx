@@ -522,6 +522,107 @@ fn a_mesh_light_passes_through_shows_what_is_behind_it() {
     assert_eq!(window.pixel(50, 50), solid);
 }
 
+/// An uncompressed PNG of `pixels` (`side` square, RGBA): zlib's stored
+/// blocks, so it needs no encoder.
+#[cfg(feature = "gltf")]
+fn stored_png(side: u32, pixels: &[u8]) -> Vec<u8> {
+    let crc = |bytes: &[u8]| {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    0xedb8_8320 ^ (crc >> 1)
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    };
+    let raw: Vec<u8> = pixels
+        .chunks(side as usize * 4)
+        .flat_map(|row| std::iter::once(0).chain(row.iter().copied()))
+        .collect();
+    let mut zlib = vec![0x78, 0x01];
+    for (i, block) in raw.chunks(65_535).enumerate() {
+        zlib.push(u8::from((i + 1) * 65_535 >= raw.len()));
+        let len = block.len() as u16;
+        zlib.extend(len.to_le_bytes());
+        zlib.extend((!len).to_le_bytes());
+        zlib.extend(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in &raw {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    zlib.extend((b << 16 | a).to_be_bytes());
+    let mut file = vec![137, 80, 78, 71, 13, 10, 26, 10];
+    let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+        file.extend((data.len() as u32).to_be_bytes());
+        let body: Vec<u8> = kind.iter().chain(data).copied().collect();
+        file.extend(&body);
+        file.extend(crc(&body).to_be_bytes());
+    };
+    let header: Vec<u8> = [side.to_be_bytes(), side.to_be_bytes()].concat();
+    chunk(b"IHDR", &[header, vec![8, 6, 0, 0, 0]].concat());
+    chunk(b"IDAT", &zlib);
+    chunk(b"IEND", &[]);
+    file
+}
+
+#[cfg(feature = "gltf")]
+#[test]
+fn textures_read_from_files_draw_as_textures_given_their_pixels() {
+    // Nine meshes, nine textures: read from files, they decode together as
+    // the first frame uploads them, on threads of their own (each more than
+    // 128², so worth a thread). Given their pixels, the meshes come one a
+    // frame: each frame uploads one, here.
+    let world = World::new();
+    world.set_camera(Camera::looking_at([0., 0., 5.], [0., 0., 0.]));
+    let (read, given) = (world, World::new());
+    given.set_camera(Camera::looking_at([0., 0., 5.], [0., 0., 0.]));
+    let (Some(mut a), Some(mut b)) = (Window::new(&read), Window::new(&given)) else {
+        return;
+    };
+    for i in 0..9u8 {
+        const SIDE: u32 = 160;
+        let pixels: Vec<u8> = (0..SIDE * SIDE)
+            .flat_map(|t| {
+                [
+                    i * 28,
+                    (t / SIDE * 8 + t % SIDE * 8) as u8,
+                    255 - i * 28,
+                    255,
+                ]
+            })
+            .collect();
+        for (world, texture) in [
+            (&read, Texture::decode(&stored_png(SIDE, &pixels)).unwrap()),
+            (&given, Texture::from_rgba8(SIDE, SIDE, pixels).unwrap()),
+        ] {
+            let mut material = Material::rgb(0xffffff);
+            material.unlit = true;
+            let mesh = world.add(Object::mesh(Geometry::plane(0.9, 0.9), material));
+            let (x, y) = (f32::from(i % 3) - 1., f32::from(i / 3) - 1.);
+            world.set_transform(
+                mesh,
+                Transform {
+                    position: vec3(x, y, 0.),
+                    rotation: Quat::from_axis_angle(vec3(1., 0., 0.), PI / 2.),
+                    ..Transform::default()
+                },
+            );
+            world.set_texture(mesh, Some(texture));
+        }
+        b.draw();
+    }
+    a.draw();
+    assert_ne!(a.pixel(50, 50), [0, 128, 0, 255], "it drew");
+    assert!(a.gpu.readback().unwrap() == b.gpu.readback().unwrap());
+}
+
 #[test]
 fn a_world_that_rested_draws_its_frames_as_one_that_never_did() {
     // Glass: what is behind it is a temporary too, and its binding reads it.

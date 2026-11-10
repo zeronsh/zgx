@@ -37,7 +37,7 @@ use frame::frame_uniforms;
 use gpu::{Buffers, Gpu, Kept};
 use graph::Pass;
 use instances::{Instance, instance, morph_block, note, write_changed};
-use materials::{make_binding, map_set, placed, upload};
+use materials::{make_binding, map_set, placed, upload_missing};
 use pipelines::make_main_pipelines;
 use shadows::{
     Casting, SHADOW_SIZE, draw_shadows, make_shadow_pipeline, shadow_key, sun_bounds, sun_view,
@@ -311,7 +311,9 @@ fn prepare<'a>(
         };
     }
     // What they draw with, kept and marked used. (Meshes sharing it are
-    // mostly neighbours by now.)
+    // mostly neighbours by now.) Maps not yet uploaded are noted, and
+    // uploaded together after.
+    let mut missing = Vec::new();
     let mut last = None;
     for (d, ((_, set), _)) in drawn.iter().zip(order.iter()) {
         if last == Some((d.geometry.id(), set)) {
@@ -388,16 +390,16 @@ fn prepare<'a>(
             if let Some(texture) = texture {
                 // A texture that can't be read draws as if it had none.
                 let key = (texture.id(), map.srgb());
-                if !gpu.views.contains_key(&key)
-                    && let Some(view) = upload(device, queue, texture, map.srgb())
-                {
-                    gpu.views.insert(key, (view, 0));
-                }
-                if let Some(entry) = gpu.views.get_mut(&key) {
-                    entry.1 = gpu.frame;
+                match gpu.views.get_mut(&key) {
+                    Some(entry) => entry.1 = gpu.frame,
+                    None if !texture.failed() => missing.push((texture, map.srgb())),
+                    None => {}
                 }
             }
         }
+    }
+    if !missing.is_empty() {
+        upload_missing(gpu, (device, queue), missing);
     }
     // Each set of maps bound once, against stand-ins where a map is
     // missing. (Meshes sharing one are mostly neighbours by now.)

@@ -9,9 +9,9 @@ use std::sync::{
 /// its texture coordinates, repeating past 0 to 1. Shared by clones (the
 /// same texture), immutable, uploaded once per renderer with its mipmaps.
 ///
-/// One decoded from a PNG or JPEG (`decode`) keeps that file's bytes, not
-/// its pixels: those go once a renderer has uploaded it, and are decoded
-/// again only if another upload needs them (a lost device, another
+/// One read from a PNG or JPEG (`decode`) keeps that file's bytes, not its
+/// pixels: they're decoded as a renderer uploads it, and go once it has,
+/// decoded again only if another upload needs them (a lost device, another
 /// renderer's). One made from pixels (`from_rgba8`) keeps them.
 #[derive(Clone)]
 pub struct Texture(Arc<Data>);
@@ -22,8 +22,11 @@ struct Data {
     /// Its pixels, while held (see `Texture`): the decoder's own, shared,
     /// not a copy.
     pixels: Mutex<Option<Arc<zgx::image::ImageData>>>,
-    /// The PNG or JPEG it was decoded from, if it was.
+    /// The PNG or JPEG it was read from, if it was.
     encoded: Option<Arc<[u8]>>,
+    /// Its file failed to decode at an upload: it draws as if it had none,
+    /// and isn't tried again.
+    failed: std::sync::atomic::AtomicBool,
 }
 impl std::fmt::Debug for Texture {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -103,6 +106,9 @@ impl Map {
     }
 }
 
+/// Of this many pixels or fewer, a texture's file is decoded on the thread
+/// that uploads it: under a millisecond, less than a thread's start.
+pub(crate) const SMALL: u32 = 128 * 128;
 /// The longest side a texture may have.
 pub(crate) const MAX_SIDE: u32 = 8192;
 impl Texture {
@@ -117,25 +123,40 @@ impl Texture {
             return Err("a texture's pixels are 4 bytes each, width by height");
         }
         let image = zgx::image::ImageData::new(width, height, pixels)?;
-        Ok(Self::made(Arc::new(image), None))
+        Ok(Self::made((width, height), Some(Arc::new(image)), None))
     }
-    /// A PNG's or JPEG's bytes, decoded (as zgx-gpu's `png` and `jpeg`
-    /// features allow). It keeps `bytes` and drops its pixels once uploaded.
+    /// A PNG's or JPEG's bytes (as zgx-gpu's `png` and `jpeg` features
+    /// allow), their header read: its pixels are decoded as a renderer
+    /// uploads it, one texture at a time, and go once it has, so a model of
+    /// many textures never holds them all decoded at once. Fails on a file
+    /// whose header isn't an image's, or too large; a file whose pixels then
+    /// fail to decode draws as if it had none. (Another format, a GIF,
+    /// decodes here.)
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let image = zgx_gpu::assets::decode_image(bytes).map_err(|e| e.to_string())?;
-        if image.width() > MAX_SIDE || image.height() > MAX_SIDE {
+        let bytes: Arc<[u8]> = bytes.into();
+        let header =
+            zgx_gpu::assets::decode_image_kept(bytes.clone()).map_err(|e| e.to_string())?;
+        if header.width() > MAX_SIDE || header.height() > MAX_SIDE {
             return Err("a texture is 1 to 8192 pixels on a side".into());
         }
-        Ok(Self::made(image, Some(bytes.into())))
+        let (width, height) = (header.width(), header.height());
+        // Decoded now (a format it doesn't keep), its pixels are held.
+        let pixels = (!header.keeps_file()).then_some(header);
+        Ok(Self::made((width, height), pixels, Some(bytes)))
     }
-    fn made(image: Arc<zgx::image::ImageData>, encoded: Option<Arc<[u8]>>) -> Self {
+    fn made(
+        (width, height): (u32, u32),
+        pixels: Option<Arc<zgx::image::ImageData>>,
+        encoded: Option<Arc<[u8]>>,
+    ) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(Arc::new(Data {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
-            width: image.width(),
-            height: image.height(),
-            pixels: Mutex::new(Some(image)),
+            width,
+            height,
+            pixels: Mutex::new(pixels),
             encoded,
+            failed: Default::default(),
         }))
     }
     /// Its width in pixels.
@@ -150,14 +171,25 @@ impl Texture {
     pub fn id(&self) -> u64 {
         self.0.id
     }
-    /// Its pixels: held, or decoded again from its file. `None` only if
-    /// that file no longer decodes to this size (it did when made).
+    /// Its pixels: held, or decoded from its file. `None` if that file
+    /// doesn't decode to its header's size (remembered: not tried again).
     pub(crate) fn pixels(&self) -> Option<Arc<zgx::image::ImageData>> {
         if let Some(pixels) = self.held().clone() {
             return Some(pixels);
         }
-        let image = zgx_gpu::assets::decode_image(self.0.encoded.as_ref()?).ok()?;
-        ((image.width(), image.height()) == (self.0.width, self.0.height)).then_some(image)
+        if self.0.failed.load(Ordering::Relaxed) {
+            return None;
+        }
+        let image = zgx_gpu::assets::decode_image(self.0.encoded.as_ref()?).ok();
+        let image = image.filter(|i| (i.width(), i.height()) == (self.0.width, self.0.height));
+        if image.is_none() {
+            self.0.failed.store(true, Ordering::Relaxed);
+        }
+        image
+    }
+    /// Whether its file failed to decode (`pixels`): it draws none.
+    pub(crate) fn failed(&self) -> bool {
+        self.0.failed.load(Ordering::Relaxed)
     }
     /// A renderer has it: its pixels go if its file can bring them back.
     pub(crate) fn uploaded(&self) {
@@ -165,8 +197,8 @@ impl Texture {
             *self.held() = None;
         }
     }
-    /// Whether it holds its pixels now.
-    #[cfg(test)]
+    /// Whether it holds its pixels now: given them, or a format decoded as
+    /// it's read and not yet uploaded.
     pub(crate) fn holds_pixels(&self) -> bool {
         self.held().is_some()
     }
@@ -228,16 +260,30 @@ mod tests {
 
     #[cfg(feature = "gltf")]
     #[test]
-    fn a_decoded_texture_keeps_its_file_not_its_pixels() {
+    fn a_texture_read_from_a_file_decodes_its_pixels_only_as_they_are_uploaded() {
         let texture = Texture::decode(RED_BLUE).unwrap();
-        assert!(texture.holds_pixels(), "until a renderer has it");
-        texture.uploaded();
-        assert!(!texture.holds_pixels());
-        // Decoded again, the same, as often as an upload asks.
+        assert_eq!((texture.width(), texture.height()), (2, 1), "its header's");
+        assert!(!texture.holds_pixels(), "nothing decoded yet");
+        // Decoded as an upload asks, the same each time, never kept.
         let pixels = [255, 0, 0, 255, 0, 0, 255, 255];
         assert_eq!(texture.pixels().unwrap().pixels(), pixels);
         assert_eq!(texture.pixels().unwrap().pixels(), pixels);
+        texture.uploaded();
         assert!(!texture.holds_pixels(), "and not kept");
+    }
+
+    #[cfg(feature = "gltf")]
+    #[test]
+    fn a_file_whose_pixels_dont_decode_draws_none_and_isnt_tried_again() {
+        // Its header whole, its image data cut short.
+        let cut = &RED_BLUE[..RED_BLUE.len() - 20];
+        let texture = Texture::decode(cut).unwrap();
+        assert_eq!((texture.width(), texture.height()), (2, 1));
+        assert!(texture.pixels().is_none());
+        assert!(texture.0.failed.load(Ordering::Relaxed), "remembered");
+        assert!(texture.pixels().is_none());
+        // A file that isn't an image fails as it's read.
+        assert!(Texture::decode(b"not an image").is_err());
     }
 
     #[test]
