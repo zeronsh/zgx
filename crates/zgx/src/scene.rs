@@ -7085,8 +7085,10 @@ impl Scene {
             colour || (layout_unchanged && rich_recoloured(&self.node(id).kind, &kind));
         self.node_mut(id).kind = kind;
         let flags = if colour { PAINT | PAINT_ONLY } else { PAINT };
-        // (One call: `invalidate_with` is inlined where it's called.)
-        self.invalidate_with(id, flags, false, true, !recoloured);
+        match recoloured {
+            true => self.invalidate_recoloured(id, flags),
+            false => self.invalidate(id, flags),
+        }
         if !layout_unchanged {
             self.invalidate_layout(id);
         }
@@ -9040,6 +9042,13 @@ impl Scene {
     }
     // Inlined: each caller's `flags` is a constant, so the bits that demote a
     // repaint (`PAINT_MIXED`, `CHANGED`) are worked out as it compiles.
+    /// `invalidate` for a node recoloured (`Scene::set_kind`): where it and
+    /// its ancestors paint stands, so their cached inks and boxes are kept.
+    /// Out of line, so `set_kind` inlines `invalidate` alone, as it did.
+    #[inline(never)]
+    fn invalidate_recoloured(&mut self, id: NodeId, flags: u8) {
+        self.invalidate_with(id, flags, false, true, false);
+    }
     #[inline(always)]
     fn invalidate(&mut self, id: NodeId, flags: u8) {
         self.invalidate_with(id, flags, false, true, true);
