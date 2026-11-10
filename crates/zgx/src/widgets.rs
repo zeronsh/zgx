@@ -1687,6 +1687,10 @@ pub(crate) struct UiStorage {
     listening: Cell<bool>,
     /// Overlay scrollbars shown, to fade once their view stops scrolling.
     scrollbar_fades: RefCell<Vec<std::rc::Weak<crate::compose_scrollbar::Fade>>>,
+    /// Scroll views' and lists' own scrollbar styles, by the node their bar
+    /// mounts on, until it does (`View::scrollbar_style`).
+    scrollbar_styles:
+        RefCell<rustc_hash::FxHashMap<NodeId, Rc<crate::compose_scrollbar::ScrollbarStyle>>>,
     /// Input is being dispatched: what scrolls now, the user scrolled.
     dispatching: Cell<bool>,
     /// A platform's wheel is being dispatched (`Ui::wheel_in_window`).
@@ -2016,6 +2020,7 @@ impl Ui {
             elastic: Default::default(),
             paging: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
+            scrollbar_styles: Default::default(),
             dispatching: Cell::new(false),
             wheel_in_window: Cell::new(false),
             document_listeners: RefCell::new(Vec::new()),
@@ -3010,6 +3015,28 @@ impl Ui {
     /// Whether input is being dispatched, so a scroll now is the user's.
     pub(crate) fn is_dispatching(&self) -> bool {
         self.storage.dispatching.get()
+    }
+    /// Keep `style` for the scrollbar that mounts on `node`.
+    pub(crate) fn keep_scrollbar_style(
+        &self,
+        node: NodeId,
+        style: Rc<crate::compose_scrollbar::ScrollbarStyle>,
+    ) {
+        self.storage
+            .scrollbar_styles
+            .borrow_mut()
+            .insert(node, style);
+    }
+    /// The style kept for the scrollbar mounting on `node`, if any.
+    pub(crate) fn take_scrollbar_style(
+        &self,
+        node: NodeId,
+    ) -> Option<Rc<crate::compose_scrollbar::ScrollbarStyle>> {
+        let mut styles = self.storage.scrollbar_styles.borrow_mut();
+        if styles.is_empty() {
+            return None;
+        }
+        styles.remove(&node)
     }
     pub(crate) fn scrollbar_fades(
         &self,

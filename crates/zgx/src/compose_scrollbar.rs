@@ -649,8 +649,10 @@ pub(crate) fn mount(
     size: Signal<(f32, f32)>,
     extent: Signal<f32>,
     horizontal: bool,
-    style: Option<&ScrollbarStyle>,
 ) {
+    // Its view's own style, if it has one (`View::scrollbar_style`).
+    let style = ui.take_scrollbar_style(owner);
+    let style = style.as_deref();
     let look = style.map_or(LOOK, |style| style.over(LOOK));
     let overlay = ui.container(owner, Layout::Overlay, Style::default());
     // The view's own fade (`fade`) fades its rows, not its scrollbar.
