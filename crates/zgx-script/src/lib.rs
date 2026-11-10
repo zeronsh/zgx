@@ -1754,6 +1754,9 @@ struct Inner {
     theme_error: RefCell<Option<String>>,
     /// Collects the VMs' garbage as the host goes idle (`zgx::idle`).
     idle: RefCell<Option<zgx::idle::IdleTrim>>,
+    /// A cache's next expiry, after the window may already have stopped
+    /// trimming: one CPU-only wake, with no frames in between.
+    idle_later: RefCell<Option<(std::time::Instant, timers::Stop)>>,
 }
 
 /// A wake-up for one waiting task: `notify` before or during the wait ends it.
@@ -1927,6 +1930,7 @@ impl ScriptHost {
             lint: runtime.signal(None),
             theme_error: RefCell::default(),
             idle: RefCell::default(),
+            idle_later: RefCell::default(),
         }));
         host.0.assets.connect(
             host.0.timers.clone(),
@@ -4583,17 +4587,51 @@ const STATE_LISTED_FROM: usize = 64 * 1024;
 /// What the host gives back as it goes idle: its scripts' garbage, then the
 /// pictures no node shows (the image cache keeps up to its budget of them
 /// while the app is in use, so a page shown again is instant).
-fn trim_idle(inner: &Inner) {
+fn trim_idle(inner: &Rc<Inner>) {
     value::forget_streamed_edits();
     let loaded = inner.current.borrow().clone();
-    for vm in loaded.iter().flat_map(|loaded| loaded._vms.iter()) {
-        markdown::rest(&vm.lua);
-    }
+    let next = loaded
+        .iter()
+        .flat_map(|loaded| loaded._vms.iter())
+        .filter_map(|vm| {
+            markdown::rest(&vm.lua);
+            markdown::rest_due(&vm.lua)
+        })
+        .min();
     collect_garbage(inner);
     mlua::release_free_pages();
     inner.assets.trim();
     // Packages' compiled modules, every host's: the next host compiles them.
     sources::release_packages();
+    trim_later(inner, next);
+}
+
+/// A cache still within its quiet interval must get another trim at expiry,
+/// without relying on an interaction or a presented frame to bring one.
+fn trim_later(inner: &Rc<Inner>, next: Option<std::time::Instant>) {
+    let mut later = inner.idle_later.borrow_mut();
+    if next.is_some_and(|next| {
+        later
+            .as_ref()
+            .is_some_and(|(at, stop)| !stop.done() && *at <= next)
+    }) {
+        return;
+    }
+    *later = next.map(|at| {
+        let weak = Rc::downgrade(inner);
+        let stop = inner.timers.start(
+            at.saturating_duration_since(std::time::Instant::now()),
+            false,
+            move || {
+                if let Some(inner) = weak.upgrade() {
+                    inner.idle_later.borrow_mut().take();
+                    zgx::idle::request(&inner.runtime);
+                }
+                false
+            },
+        );
+        (at, stop)
+    });
 }
 
 #[cfg(test)]

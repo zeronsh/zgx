@@ -132,6 +132,8 @@ SMOKES = [
     ("luau-views", "python3 scripts/luau_views_smoke.py {bin}/luau_probe --output {out}", False),
     ("covered-window", "python3 scripts/covered_window_smoke.py {bin}/../zgx-run --output {out}", False),
     ("inspect-memory", "python3 scripts/inspect_memory_smoke.py {bin}/../zgx-run --output {out}", False),
+    ("renderer-rest", "python3 scripts/renderer_rest_smoke.py {bin}/rest_memory --output {out}", False),
+    ("markdown-quiet", "python3 scripts/markdown_quiet_smoke.py {bin}/../zgx-run --output {out}", False),
     ("window-state", "python3 scripts/window_state_smoke.py {bin}/../zgx-run --output {out}", False),
     ("editor-autoscroll", "python3 scripts/editor_autoscroll_smoke.py {bin}/editor_autoscroll --output {out}", False),
     ("transparency", "python3 scripts/transparency_smoke.py {bin}/transparency --output {out}", False),
