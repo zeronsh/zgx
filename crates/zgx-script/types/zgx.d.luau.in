@@ -1276,6 +1276,55 @@ export type LineOptions = { cap: LineCap?, join: LineJoin?, dash: { number }?, d
 -- What a scroll view keeps clear (`scroll_padding`): points on every side,
 -- or by side.
 export type ScrollPadding = number | { top: number?, bottom: number?, left: number?, right: number? }
+-- A scrollbar drawn and timed as the app's own, over the platform's (each
+-- field set replaces the platform's), in points and milliseconds: an app's
+-- floating rail, thin, clear of a card's corners, gone with no track.
+export type Scrollbar = {
+	-- `false`: over zgx's own look on every platform (no arrow buttons, no
+	-- widening delay), the same bar wherever the app runs.
+	platform: boolean?,
+	-- The thumb across, and under the pointer or dragged.
+	thickness: number?,
+	active_thickness: number?,
+	-- The strip that takes the pointer, and the thumb from the view's edge
+	-- (otherwise centred in the strip).
+	strip: number?,
+	side: number?,
+	-- How far its track stops short of each end, the thumb whole within it;
+	-- how far the thumb's drawing is inset from its place; the shortest.
+	ends: number?,
+	inset: number?,
+	min: number?,
+	-- How long it stays once the view stops scrolling, how long it fades,
+	-- whether it fades in too, and on which curve.
+	linger: number?,
+	fade: number?,
+	fade_in: boolean?,
+	ease: ("linear" | "outQuad" | "outCubic")?,
+	-- How long its track is, from the view's start (a transcript's, stopping
+	-- above a composer over its foot); read as it changes.
+	track: (State<number> | () -> number)?,
+	-- Shown while this holds (what can't be seen to scroll until tried).
+	hint: (State<boolean> | () -> boolean)?,
+	-- Under the pointer or dragged, the theme's `scrollbar.thumb.active`;
+	-- whether its track is drawn.
+	active_color: boolean?,
+	track_fill: boolean?,
+	-- A press beside the thumb: a page, or the thumb's middle to the pointer,
+	-- dragged from there.
+	press: ("page" | "jump")?,
+	-- Let go (the pointer leaves, a hint ends): it lingers from then, or
+	-- from the last scroll.
+	linger_from: ("release" | "scroll")?,
+	-- Whether a press focuses it, for its keys.
+	focusable: boolean?,
+	-- An overlay (shown as it scrolls) even where scrollbars always show.
+	always_overlay: boolean?,
+	-- Whether assistive technology has it, a scrollbar whose value is the
+	-- offset (`false`: left out, as an app's rail may be; the view scrolls
+	-- for it as before).
+	accessible: boolean?,
+}
 export type MarkdownOptions = {
 	-- Names a text that grows (a streaming reply): parsed incrementally.
 	key: string?,
@@ -2492,8 +2541,9 @@ export type ScrollProps = Merge<ContainerProps, {
 	-- The scroll position in points, both ways.
 	offset: State<number>?,
 	-- Stays at the end while the content grows, until scrolled away.
-	-- An interactive scrollbar over the trailing edge (none by default).
-	scrollbar: boolean?,
+	-- An interactive scrollbar over the trailing edge (none by default):
+	-- the platform's (`true`), or drawn and timed as `Scrollbar` says.
+	scrollbar: (boolean | Scrollbar)?,
 	follow: boolean?,
 	-- "contain": a wheel or trackpad gesture over it stays with it at its
 	-- edges (CSS's overscroll-behavior), the scroll views around it never
@@ -3275,8 +3325,9 @@ export type ListProps = Merge<Props, {
 	label: Label?,
 	-- The row count (with `heights`, their length).
 	count: Reactive<number>?,
-	-- An interactive scrollbar over the trailing edge (none by default).
-	scrollbar: boolean?,
+	-- An interactive scrollbar over the trailing edge (none by default):
+	-- the platform's (`true`), or drawn and timed as `Scrollbar` says.
+	scrollbar: (boolean | Scrollbar)?,
 	-- Its rows are one Tab stop, and the arrows, Page Up and Down, Home and
 	-- End move focus through every row (mounting it), as a list box's do.
 	keyboard: boolean?,

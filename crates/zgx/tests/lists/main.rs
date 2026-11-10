@@ -30,5 +30,7 @@ mod overlay_scrollbars;
 mod scroll_latching;
 #[path = "../scroll_paging.rs"]
 mod scroll_paging;
+#[path = "../scrollbar_style.rs"]
+mod scrollbar_style;
 #[path = "../variable_virtual_list.rs"]
 mod variable_virtual_list;

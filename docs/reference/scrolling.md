@@ -19,7 +19,7 @@ ui.list(props: ListProps) -> Node
 | `row_text` | `(index: number) -> string` | the row's own texts | the plain text of row `index`: in a selectable region, copying a selection that spans rows the list has not mounted (select-all over a long transcript) takes theirs from it. Without it, the list builds the row's description (not mounted) and takes its texts, a `row`'s children joined by tabs and others by line breaks, as a copy of the row on screen does; give it for rows drawn or built in ways that don't say their text |
 | `paging` | `boolean` | `false` | it comes to rest only on whole pages, a page its own length along the way it scrolls, as `UIScrollView.pagingEnabled`: lifting a gesture goes on to the next page if quick (300 points a second or more), else to the nearest, and never more than one page from where it began, on UIKit's own spring; a mouse wheel goes a page a notch, and at the last page goes on to what's around it, as a touchpad does on X11 and Windows, which don't say when fingers lift; anything else that moves it (a key, a reveal, setting `offset`) settles on the nearest page once it stops; resized, it stays on its page |
 | `follow` | `boolean` | `false` | stays at the end while the content grows, until scrolled away from it (a transcript, a log) |
-| `scrollbar` | `boolean` | `false` | an interactive scrollbar over the trailing edge: drag it, click its track to page; overlay style (hidden until scrolling) where the system has overlay scrollbars |
+| `scrollbar` | `boolean` \| [`Scrollbar`](#a-scrollbar-of-your-own) | `false` | an interactive scrollbar over the trailing edge: drag it, click its track to page; overlay style (hidden until scrolling) where the system has overlay scrollbars. A table draws and times it as the app's own |
 | `overscroll` | `"auto"` \| `"contain"` | `"auto"` | `"contain"`: a wheel or trackpad gesture that starts over it stays with it at its edges, momentum included, as CSS's `overscroll-behavior: contain`: the scroll views around it neither move nor stretch (a transcript inside a page). `"auto"` hands what it can't scroll on to them |
 | `scroll_padding` | `number` \| `{ top, bottom, left, right }` | `0` | points kept clear inside its edges as a focused control scrolls into view, as CSS's `scroll-padding`: what floats over them (a composer over the bottom, a title bar over the top) doesn't cover it. One number for every side; a side not given is 0. A state or a function saying it is followed: what floats over the edge growing (a composer to more lines) takes its room as it does |
 | `w`, `h` | `Length` | `320` by `240` when nothing else sizes it | a stretching parent, `grow`, `w`/`h` or `w_full` size it instead |
@@ -49,7 +49,7 @@ A child with `sticky_top` holds at the top as the view scrolls past it, inside i
 | `overscan` | `number` | `2` | rows built beyond each edge of the view, at the least: at once where a host has no time to spare, as `ahead`'s otherwise ([building ahead](#building-ahead)) |
 | `ahead` | `number` | `1` | viewports of rows built beyond each edge of the view in time frames leave over, and kept as it scrolls away ([building ahead](#building-ahead)); `0`, it builds the rows in view and its `overscan` alone, and drops the rest |
 | `offset` | `State<number>` | its own | the scroll position in points, as `scroll`'s |
-| `scrollbar` | `boolean` | `false` | an interactive scrollbar, as `scroll`'s |
+| `scrollbar` | `boolean` \| [`Scrollbar`](#a-scrollbar-of-your-own) | `false` | an interactive scrollbar, as `scroll`'s |
 | `overscroll` | `"auto"` \| `"contain"` | `"auto"` | as `scroll`'s: `"contain"` keeps a gesture over the list with it at its ends |
 | `scroll_padding` | `number` \| `{ top, bottom, left, right }` | `0` | as `scroll`'s: focus moving to a control in a row (Tab past the rows in view, onto one built beyond them) scrolls the list to it, the offset following, this much kept clear |
 | `keyboard` | `boolean` | `false` | its rows are one Tab stop, landing on the row last focused, and the arrows, Page Up/Down, Home and End move focus through every row (mounting it), as a list box's do; typing jumps to the next row whose text starts with what was typed (letters within 750 ms build a prefix, the same letter again cycles), rows not mounted read by `row_text`. A row with `role = "option"` (or `"listitem"`) takes the focus itself, so its `on_focus` can open it (selection following focus); other controls in a row keep their own keys |
@@ -206,6 +206,48 @@ A text has:
 | `markdown` | none | it's Markdown: `{ paragraph, heading, item, code, table }`, what each kind of source line adds. A paragraph's or an item's source lines flow as one, however they were wrapped; code and table lines stay one each |
 
 It's an estimate: fit it to a few rows by eye or by measuring. A row's real height replaces it as the row mounts, without moving what's in view. A row's height can't come from anything but its data here: state, pictures not sized in the data and the like are only known once it's built.
+
+## A scrollbar of your own
+
+`scrollbar = { … }` draws and times the bar as the app's own: an app's floating rail, say, thin and clear of a card's corners. It's still zgx's bar, drawn and timed in Rust: a scroll runs no script for it, its edge `fade` doesn't fade it, and it lights up only for a scroll the user makes (an app placing its view, a kept place put back as rows are measured, or a reload leave it dark). Each field it sets replaces the platform's, in points and milliseconds:
+
+| Field | Type | Platform's (zgx's own) | |
+| --- | --- | --- | --- |
+| `platform` | `boolean` | `true` | `false`: over zgx's own look on every platform, with no Windows arrow buttons and no widening delay |
+| `thickness`, `active_thickness` | `number` | `6`, `8` | the thumb across, and under the pointer or dragged (`thickness` alone sets both) |
+| `strip` | `number` | `8` | the strip at the edge that takes the pointer |
+| `side` | `number` | centred | the thumb from the view's edge |
+| `ends` | `number` | `0` | how far its track stops short of each end, the thumb whole within it (at least `min` drawn) |
+| `inset` | `number` | `2` | how far the thumb's drawing is inset from its place at each end (so it's drawn `2 × inset` shorter) |
+| `min` | `number` | `24` | the shortest thumb |
+| `linger`, `fade` | `number` | `1000`, `200` | how long it stays once the view stops scrolling, and how long it fades |
+| `fade_in` | `boolean` | `false` | it fades in over `fade` too, not at once |
+| `ease` | `"linear"` \| `"outQuad"` \| `"outCubic"` | `"linear"` | its fade's curve |
+| `track` | `State<number>` \| `() -> number` | the view's length | its track's length from the view's start (a transcript's rail stopping above a composer over its foot), read as it changes |
+| `hint` | `State<boolean>` \| `() -> boolean` | none | shown while it holds (a table a pointer rests on), read as it changes |
+| `active_color` | `boolean` | `false` | under the pointer or dragged, the thumb is `$scrollbar.thumb.active` (not its own colour, brighter) |
+| `track_fill` | `boolean` | `true` | whether its track (`$scrollbar.track`) is drawn |
+| `press` | `"page"` \| `"jump"` | `"page"` | a press beside the thumb pages, or brings the thumb's middle under the pointer and drags from there |
+| `linger_from` | `"release"` \| `"scroll"` | `"release"` | let go (the pointer leaves, a hint ends), it lingers from then, or from the last scroll |
+| `focusable` | `boolean` | `true` | whether a press focuses it for its keys; `false` leaves focus where it was (a composer keeps it) |
+| `always_overlay` | `boolean` | `false` | shown as it scrolls even where the system always shows scrollbars |
+| `accessible` | `boolean` | `true` | whether assistive technology has it, a scrollbar whose value is the offset; `false` leaves it out (the view itself still scrolls for a reader), as an app's rail may |
+
+```luau
+-- A floating rail: 3 across (5 under the pointer) 2 from the edge, its
+-- ends 4 short of the view's, in and out over 260 ms 1.4 s after a scroll.
+ui.list {
+	count = #rows, height = 20, offset = at,
+	scrollbar = {
+		platform = false, thickness = 3, active_thickness = 5, strip = 10, side = 2,
+		ends = 4, inset = 0, linger = 1400, fade = 260, fade_in = true, ease = "outQuad",
+		active_color = true, track_fill = false, press = "jump", linger_from = "scroll",
+		focusable = false, always_overlay = true, accessible = false,
+		track = function() return seen:get() - composer:get() end,
+	},
+	row = function(i) return Row(rows[i]) end,
+}
+```
 
 ## Example
 
