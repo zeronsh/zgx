@@ -419,3 +419,53 @@ fn let_go_off_the_bar_it_is_no_longer_lit() {
     ui.prepare_frame();
     assert_eq!(thumb(&ui).0.width, 3.);
 }
+
+#[test]
+fn a_bar_that_takes_no_focus_is_not_in_the_tab_order() {
+    use zgx::input::{Key, Modifiers};
+    let tab = |ui: &mut Ui, shift: bool| {
+        ui.dispatch(InputEvent::KeyDown {
+            key: Key::Tab,
+            modifiers: Modifiers {
+                shift,
+                ..Default::default()
+            },
+            repeat: false,
+        });
+        ui.prepare_frame();
+    };
+    let mut ui = Ui::new(300., 200.);
+    let view = ui.mount(
+        column()
+            .child(
+                scroll(ui.signal(0.))
+                    .w(200.)
+                    .h(100.)
+                    .scrollbar_style(rail())
+                    .child(button().id("row").h(400.).child(text("row"))),
+            )
+            .child(button().id("composer").size(50., 20.).child(text("Send"))),
+    );
+    ui.prepare_frame();
+    let (row, composer) = (view.find("row").unwrap(), view.find("composer").unwrap());
+    wheel(&mut ui, 0.001);
+    // Shown and lit or not, the keys go from the row to the composer and
+    // back, never to the bar.
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        tab(&mut ui, false);
+        seen.push(ui.input.focused());
+    }
+    assert!(
+        seen.iter().all(|f| *f == Some(row) || *f == Some(composer)),
+        "{seen:?}"
+    );
+    for _ in 0..4 {
+        tab(&mut ui, true);
+        let focused = ui.input.focused();
+        assert!(
+            focused == Some(row) || focused == Some(composer),
+            "{focused:?}"
+        );
+    }
+}
