@@ -120,6 +120,17 @@ pub struct WindowOptions {
 fn fixed_size(options: &WindowOptions) -> bool {
     options.min_size.is_some() && options.min_size == options.max_size
 }
+/// `at` on the host clock (CLOCK_UPTIME_RAW, the present log's), in
+/// nanoseconds, for devtools notes.
+#[cfg(target_os = "macos")]
+fn host_ns(at: std::time::Instant) -> u64 {
+    let now = std::time::Instant::now();
+    let now_ns = zgx_gpu::present_log::now_ns();
+    match at.checked_duration_since(now) {
+        Some(ahead) => now_ns + ahead.as_nanos() as u64,
+        None => now_ns.saturating_sub(now.duration_since(at).as_nanos() as u64),
+    }
+}
 /// A scroll delta the host applies (`scroll-applied source=… dx dy`): on
 /// stderr with `ZGX_PRESENT_LOG`, and as a devtools note with its time on the
 /// host clock (CLOCK_UPTIME_RAW, the present log's), while recording.
@@ -6384,7 +6395,13 @@ impl Host {
     #[cfg(target_os = "macos")]
     fn drawable_woken(&mut self) {
         if let Some(frame) = self.drawable_deferred.take() {
-            zgx::profile::note(|| "frame drawn as its drawable came".into());
+            zgx::profile::note(|| {
+                format!(
+                    "frame drawn as its drawable came at_ns={} tick_ns={}",
+                    zgx_gpu::present_log::now_ns(),
+                    host_ns(frame.time)
+                )
+            });
             self.deliver_frame(frame);
         }
     }
@@ -6417,7 +6434,13 @@ impl Host {
             .as_ref()
             .is_some_and(GpuRenderer::drawable_pending)
         {
-            zgx::profile::note(|| "frame deferred: its drawable has not come".into());
+            zgx::profile::note(|| {
+                format!(
+                    "frame deferred: its drawable has not come at_ns={} tick_ns={}",
+                    zgx_gpu::present_log::now_ns(),
+                    host_ns(frame.time)
+                )
+            });
             self.drawable_deferred = Some(frame);
             return;
         }
