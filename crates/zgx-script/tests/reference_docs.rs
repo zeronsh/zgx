@@ -117,15 +117,19 @@ fn examples() -> Vec<Example> {
             }
             match code.strip_prefix("-- file: ") {
                 Some(rest) => {
-                    let (line, body) = rest.split_once('\n').unwrap();
-                    let (path, grant) = file_line(line);
                     let example = project.get_or_insert_with(|| Example {
                         at: at.clone(),
                         files: Vec::new(),
                         grants: Vec::new(),
                     });
-                    example.files.push((path, body.to_owned()));
-                    example.grants.extend(grant);
+                    // A block may hold several files, each from its own
+                    // `-- file:` line.
+                    for file in rest.split("\n-- file: ") {
+                        let (line, body) = file.split_once('\n').unwrap_or((file, ""));
+                        let (path, grant) = file_line(line);
+                        example.files.push((path, body.to_owned()));
+                        example.grants.extend(grant);
+                    }
                 }
                 None => out.push(Example {
                     at,

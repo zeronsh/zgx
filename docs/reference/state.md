@@ -735,6 +735,11 @@ A plugin targeting an `id` that is not a declared `hook` reaches the app's inter
 - A plugin requires none of the app's modules; a `.luaurc` defining an `app` or `app-original` alias is an error.
 
 ```lua
+-- file: components/card.luau
+return function(props: { title: string })
+    return ui.column { p = 8, ui.text { props.title, literal = true } }
+end
+
 -- file: plugins/badges/init.luau (granted Capability::OverrideModule("@app/components/card"))
 ui.override { module = "@app/components/card", with = "./card" }
 
