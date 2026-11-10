@@ -3020,8 +3020,6 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
         let runtime = ui.runtime.clone();
         let mut selected: Option<K> = None;
         let mut mounted = None;
-        // Showing nothing, out of layout: no flex item, no gap.
-        ui.scene.borrow_mut().set_hidden_when_empty(root, true);
         ui.bind(root, move || {
             let key = select();
             if selected.as_ref() == Some(&key) {
@@ -3036,8 +3034,13 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
             runtime.untracked(|| {
                 let mut cx = Context::new(runtime.clone(), environment.clone());
                 let Some(view) = build(key.clone(), &mut cx) else {
-                    // Nothing shows: no child at all (the region, hidden
-                    // while empty, takes no place: `set_hidden_when_empty`).
+                    // Nothing shows: no child at all, and the region, hidden
+                    // while empty, takes no place (no flex item, no gap).
+                    // Marked only now, so that a region that always shows
+                    // something (a `switch`, an open `ui.show`) is restyled
+                    // no more than it was; its old view's removal lays it
+                    // out hidden.
+                    ui.scene.borrow_mut().set_hidden_when_empty(root, true);
                     if let Some(old) = mounted.take() {
                         ui.remove(old);
                     }

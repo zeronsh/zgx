@@ -5450,14 +5450,17 @@ impl Scene {
     /// Keep contents node `id` out of layout (`display: none`) while it has
     /// no children, whatever its own style says: a region showing nothing
     /// (`compose::switch_or_none`) takes no place, no flex item nor gap, as
-    /// an empty hidden box in it did, with no such box.
+    /// an empty hidden box in it did, with no such box. Laid out again only
+    /// while it is empty: with a child, it lays out as its child, and losing
+    /// its last one lays it out again anyway.
     pub fn set_hidden_when_empty(&mut self, id: NodeId, on: bool) {
         let was = if on {
             self.hidden_when_empty.insert(id, HiddenWhenEmpty).is_some()
         } else {
             self.hidden_when_empty.remove(&id).is_some()
         };
-        if was != on && self.node(id).contents() {
+        let node = self.node(id);
+        if was != on && node.contents() && self.children_of(node).is_empty() {
             self.sync_contents(id);
         }
     }
@@ -7336,7 +7339,10 @@ impl Scene {
         if node.special.any() {
             if node.contents() {
                 self.contents_styles.remove(&id);
-                self.hidden_when_empty.remove(&id);
+                // (Asked first: most contents nodes never show nothing.)
+                if !self.hidden_when_empty.is_empty() {
+                    self.hidden_when_empty.remove(&id);
+                }
             }
             if node.special.has(COLD) {
                 self.forget_cold(id);
