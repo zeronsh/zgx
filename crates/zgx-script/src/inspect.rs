@@ -1362,7 +1362,7 @@ impl Session {
                     let Some(ui) = session.0.ui.upgrade() else {
                         return failed("the window has closed");
                     };
-                    ui.scene.borrow().memory(&mut report);
+                    ui.memory(&mut report);
                     zgx::trace::memory(&mut report);
                     session.0.host.memory(&mut report);
                     // Each layer by its node's `id` too, beside its `@n`.

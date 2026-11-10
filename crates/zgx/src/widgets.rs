@@ -1837,6 +1837,95 @@ impl Drop for UiStorage {
     }
 }
 impl Ui {
+    /// The interface's lines of a memory report: its scene's, its reactive
+    /// runtime's, its semantics', and what it keeps per node beside them
+    /// (effects, input bindings and resources each node owns; editors,
+    /// observers and listeners). Worked out only as a report asks.
+    #[cold]
+    pub fn memory(&self, report: &mut crate::memory::Report) {
+        use crate::memory::{map_bytes, vec_bytes};
+        self.scene.borrow().memory(report);
+        self.runtime.memory(report);
+        self.input.memory(report);
+        if let Ok(semantics) = self.semantics.try_borrow() {
+            semantics.memory(report);
+        }
+        let storage = &self.storage;
+        let Ok(owned) = storage.owned.try_borrow() else {
+            return;
+        };
+        let held: usize = owned
+            .values()
+            .map(|owned| {
+                let effects = if owned.effects.spilled() {
+                    owned.effects.capacity() * size_of::<Effect>()
+                } else {
+                    0
+                };
+                effects
+                    + vec_bytes(&owned.bindings)
+                    + vec_bytes(&owned.resources)
+                    + owned
+                        .resources
+                        .iter()
+                        .map(|resource| size_of_val(&**resource))
+                        .sum::<usize>()
+            })
+            .sum();
+        report.add(
+            "interface",
+            "what nodes own",
+            Some(owned.len()),
+            Some(map_bytes(&owned) + held),
+        );
+        let listeners = storage
+            .layout_listeners
+            .try_borrow()
+            .map_or(0, |listeners| {
+                map_bytes(&listeners) + listeners.values().map(vec_bytes).sum::<usize>()
+            });
+        let tables = storage.editors.try_borrow().map_or(0, |m| map_bytes(&m))
+            + storage
+                .paste_hooks
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage
+                .content_sizes
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage
+                .observed_sizes
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage
+                .observed_bounds
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage
+                .observed_visibility
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage
+                .scroll_padding
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage.containers.try_borrow().map_or(0, |m| map_bytes(&m))
+            + storage
+                .list_reveals
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage.list_rows.try_borrow().map_or(0, |m| map_bytes(&m))
+            + storage
+                .wheel_lines
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage
+                .pending_labels
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + listeners;
+        report.add("interface", "tables", None, Some(tables));
+    }
     /// A `width` by `height` document on a runtime of its own.
     pub fn new(width: f32, height: f32) -> Self {
         Self::with_runtime(Runtime::new(), width, height)

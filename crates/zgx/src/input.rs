@@ -998,6 +998,35 @@ pub struct DispatchResult {
     pub focus_changed: bool,
 }
 impl InputDispatcher {
+    /// Its line of a memory report: the nodes' listeners (each callback's
+    /// captures) and options, and its tables. Worked out only as a report
+    /// asks; none while input is being dispatched.
+    #[cold]
+    pub fn memory(&self, report: &mut crate::memory::Report) {
+        use crate::memory::{map_bytes, vec_bytes};
+        let Ok(state) = self.state.try_borrow() else {
+            return;
+        };
+        let mut callbacks = rustc_hash::FxHashSet::default();
+        let mut listeners = 0;
+        let mut bytes = map_bytes(&state.entries)
+            + map_bytes(&state.options)
+            + map_bytes(&state.disabled_observers)
+            + map_bytes(&state.groups)
+            + vec_bytes(&state.scopes)
+            + vec_bytes(&state.triggers);
+        for entries in state.entries.values() {
+            bytes += vec_bytes(entries);
+            for entry in entries {
+                listeners += 1;
+                // A callback shared by listeners counts once.
+                if callbacks.insert(Rc::as_ptr(&entry.callback) as *const () as usize) {
+                    bytes += 2 * size_of::<usize>() + size_of_val(&*entry.callback);
+                }
+            }
+        }
+        report.add("input", "listeners", Some(listeners), Some(bytes));
+    }
     /// Keys go to `node` while nothing is focused (and no modal is open),
     /// as a page's go to its body: an app's shortcuts reach its root's
     /// listeners. The last such node still in the scene takes them.

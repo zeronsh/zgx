@@ -48,6 +48,33 @@ impl Report {
     }
 }
 
+/// What a `Vec`'s buffer takes: its capacity, not its length.
+pub fn vec_bytes<T>(vec: &Vec<T>) -> usize {
+    vec.capacity() * size_of::<T>()
+}
+/// What a hash map's table takes: the buckets its capacity needs (a power
+/// of two, at most seven in eight full), each an entry and a control byte.
+/// The entries' own heap is the holder's to add.
+pub fn map_bytes<K, V, S>(map: &std::collections::HashMap<K, V, S>) -> usize {
+    table_bytes(map.capacity(), size_of::<(K, V)>())
+}
+/// `map_bytes` for a set.
+pub fn set_bytes<T, S>(set: &std::collections::HashSet<T, S>) -> usize {
+    table_bytes(set.capacity(), size_of::<T>())
+}
+/// A table of `capacity` entries of `entry` bytes, as `map_bytes`.
+pub fn table_bytes(capacity: usize, entry: usize) -> usize {
+    if capacity == 0 {
+        return 0;
+    }
+    let buckets = if capacity < 8 {
+        (capacity + 1).next_power_of_two()
+    } else {
+        (capacity * 8).div_ceil(7).next_power_of_two()
+    };
+    buckets * (entry + 1) + 16
+}
+
 thread_local! {
     static HOSTED: Cell<bool> = const { Cell::new(false) };
     static ASKED: Cell<bool> = const { Cell::new(false) };
