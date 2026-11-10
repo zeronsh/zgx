@@ -2774,9 +2774,9 @@ fn drive_of(
     } else {
         props.layer_clock
     };
-    let literal = match fill {
-        true => shaders.params,
-        false => shaders.layer_params,
+    let (literal, tokens) = match fill {
+        true => (shaders.params, shaders.tokens),
+        false => (shaders.layer_params, shaders.layer_tokens),
     };
     let params_of = props.layer_params_of.clone();
     let on = props.layer_on.as_ref().map(resolve_owned);
@@ -2803,6 +2803,7 @@ fn drive_of(
             shader: shows.then(|| shader.clone()),
             fill,
             params: last,
+            tokens,
             bleed,
             reach,
             frost: 0.,
@@ -4152,10 +4153,14 @@ fn styled(
                         params: *params,
                     });
                     // Theme colours bind to their slots: resolved where the
-                    // node is styled, and again when the theme changes.
+                    // node is styled, and again when the theme changes. A
+                    // driven fill's are the drive's (`ShaderDrive::tokens`):
+                    // in the style they'd put its time back.
                     let mut styles = styles;
                     for (slot, token) in tokens.iter().enumerate() {
-                        if let Some(token) = token {
+                        if let Some(token) = token
+                            && !driven
+                        {
                             styles =
                                 styles.token(zgx::theme::Field::ShaderParam(slot as u8), *token);
                         }

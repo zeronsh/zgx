@@ -33,6 +33,9 @@ pub struct ShaderDrive {
     pub fill: bool,
     /// Its sixteen values.
     pub params: [[f32; 4]; 4],
+    /// Rows of `params` that are a theme's colours instead: each resolved
+    /// where the node is, and again when the theme changes.
+    pub tokens: [Option<crate::theme::TokenId>; 4],
     /// How far past the box it paints (`Scene::set_layer_extent`).
     pub bleed: f32,
     /// How far past that `zgx_backdrop` reads.
@@ -43,6 +46,17 @@ pub struct ShaderDrive {
     pub running: bool,
 }
 impl ShaderDrive {
+    /// Its theme colours (`tokens`) written into their rows, as `scope` has
+    /// them: read inside an effect, it follows them.
+    fn themed(&mut self, scope: &crate::theme::ThemeScope) {
+        for (row, token) in self.tokens.iter().enumerate() {
+            if let Some(token) = token
+                && let Some(c) = scope.get(*token).color()
+            {
+                self.params[row] = [c.0, c.1, c.2, c.3].map(|v| f32::from(v) / 255.);
+            }
+        }
+    }
     /// Put it on `node` in `scene`, its time `time`.
     pub fn apply(&self, scene: &mut Scene, node: NodeId, time: f32) {
         let uniforms = ShaderUniforms {
@@ -97,6 +111,7 @@ pub fn attach(
 ) -> View {
     let runner = cx.try_service::<TaskRunner>();
     let frames = cx.try_service::<FrameClock>();
+    let scope = cx.theme();
     let first = make();
     let view = match (&first.shader, first.fill) {
         // Its uniforms come from the scene (`ShaderDrive::apply`): none in the
@@ -109,7 +124,7 @@ pub fn attach(
     view.on_mount(move |handle| {
         let weak = handle.ui_handle().clone();
         if let Some(mut ui) = weak.upgrade() {
-            mount(&mut ui, weak, handle.node(), make, runner, frames);
+            mount(&mut ui, weak, handle.node(), make, scope, runner, frames);
         }
     })
 }
@@ -119,6 +134,7 @@ fn mount(
     weak: WeakUi,
     node: NodeId,
     mut make: impl FnMut() -> ShaderDrive + 'static,
+    scope: Rc<crate::theme::ThemeScope>,
     runner: Option<Rc<TaskRunner>>,
     frames: Option<Rc<FrameClock>>,
 ) {
@@ -128,7 +144,10 @@ fn mount(
     let clock: Rc<RefCell<Clock>> = Default::default();
     ui.retain(node, clock.clone());
     ui.bind(node, move || {
-        let drive = make();
+        let mut drive = make();
+        if drive.tokens.iter().any(Option::is_some) {
+            drive.themed(&scope);
+        }
         let reduced = themes.system_preferences().reduced_motion;
         let shows = presented.get() && visible.get();
         let now = crate::clock::now();
