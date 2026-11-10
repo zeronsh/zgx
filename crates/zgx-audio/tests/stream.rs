@@ -15,7 +15,7 @@ fn noise(frames: usize, channels: usize, rate: u32) -> Vec<u8> {
         })
         .collect();
     samples[..channels].fill(0.);
-    wav::write(&samples, channels, rate, wav::Encoding::Float32)
+    wav::write(&samples, channels, rate, wav::Encoding::Float32).unwrap()
 }
 
 fn engine() -> (Audio, zgx_audio::Offline) {
@@ -23,6 +23,7 @@ fn engine() -> (Audio, zgx_audio::Offline) {
         limiter: None,
         ..Config::default()
     })
+    .unwrap()
 }
 
 /// `frames` frames in blocks of 512, as a device asks for them: a ring
