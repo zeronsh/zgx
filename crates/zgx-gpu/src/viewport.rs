@@ -96,14 +96,20 @@ struct Painter {
     device: Option<std::rc::Weak<crate::GpuContextInner>>,
 }
 
-/// View `view`'s painter rests, if it lives and isn't drawing.
-fn rest(view: u64) {
-    if let Some(painter) = zgx::gpu_view::painter(view)
-        && let Some(painter) = painter.downcast_ref::<RefCell<Painter>>()
-        && let Ok(mut painter) = painter.try_borrow_mut()
-    {
-        painter.viewport.rest();
-    }
+/// View `view`'s painter rests, if it lives and isn't drawing: whether it's
+/// done with (rested, or gone), not busy.
+fn rest(view: u64) -> bool {
+    let Some(painter) = zgx::gpu_view::painter(view) else {
+        return true;
+    };
+    let Some(painter) = painter.downcast_ref::<RefCell<Painter>>() else {
+        return true;
+    };
+    let Ok(mut painter) = painter.try_borrow_mut() else {
+        return false;
+    };
+    painter.viewport.rest();
+    true
 }
 
 /// A GPU view drawn by `painter`: show it with `zgx::compose::gpu_view`.
@@ -612,9 +618,8 @@ impl GpuRenderer {
         let Some(views) = self.views.as_mut() else {
             return;
         };
-        for view in views.painted.drain() {
-            rest(view);
-        }
+        // One whose painter was busy is kept, to rest with the next trim.
+        views.painted.retain(|&view| !rest(view));
     }
     /// The painted views no box shows any more rest (their last box went).
     /// Called only as boxes or planes go.
@@ -631,8 +636,9 @@ impl GpuRenderer {
             .filter(|&v| !views.boxed(v))
             .collect();
         for view in boxless {
-            views.painted.remove(&view);
-            rest(view);
+            if rest(view) {
+                views.painted.remove(&view);
+            }
         }
     }
     /// The device and queue views draw with: the renderer's own, as it
@@ -1235,5 +1241,30 @@ mod tests {
         gpu.trim();
         assert_eq!(counts.get().1, 1, "once: it hasn't drawn since");
         assert!(zgx::gpu_view::painter(view.id()).is_some(), "it lives on");
+    }
+
+    #[test]
+    fn a_view_whose_painter_is_busy_as_it_trims_rests_with_the_next_trim() {
+        let Ok(mut gpu) = GpuRenderer::new(64, 64) else {
+            return;
+        };
+        let mut ui = Ui::new(64., 64.);
+        let counts = std::rc::Rc::new(std::cell::Cell::new((0, 0)));
+        let view = view(Counted(counts.clone()));
+        let _shown = ui.mount(gpu_view("Model", &view).size(32., 32.));
+        draw(&ui, &mut gpu);
+        {
+            let painter = zgx::gpu_view::painter(view.id()).unwrap();
+            let painter = painter.downcast_ref::<RefCell<Painter>>().unwrap();
+            let _busy = painter.borrow_mut();
+            gpu.trim();
+            assert_eq!(counts.get().1, 0, "busy: not rested");
+        }
+        gpu.trim();
+        assert_eq!(
+            counts.get().1,
+            1,
+            "rested with the next trim, undrawn since"
+        );
     }
 }
