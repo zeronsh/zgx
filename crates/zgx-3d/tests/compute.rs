@@ -477,3 +477,98 @@ fn a_buffer_too_large_to_count_is_refused_not_a_panic() {
         Err(GpuDataError::Size(_))
     ));
 }
+
+#[test]
+fn reads_nobody_holds_are_dropped_and_the_queue_is_bounded() {
+    let world = World::new();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let buffer = world.add_buffer(BufferDesc::bytes(1 << 20)).unwrap();
+    window.draw();
+    // A 1 MiB read a frame at 64 KiB a frame, each dropped for the next:
+    // the queue holds the newest, not one more a frame.
+    let mut last = None;
+    for _ in 0..60 {
+        last = Some(buffer.read(0..1 << 20));
+        window.draw();
+    }
+    let (count, bytes) = world.readbacks_queued();
+    assert!(
+        count <= 2 && bytes <= 2 << 20,
+        "{count} reads, {bytes} bytes queued"
+    );
+    let read = last.unwrap();
+    window.until(&read, 100);
+    assert_eq!(read.try_take().unwrap().unwrap().len(), 1 << 20);
+    // Held, reads past the cap (64 frames' budget: 4 MiB) are refused at
+    // once; the queue stays within it.
+    let held: Vec<Readback> = (0..10).map(|_| buffer.read(0..1 << 20)).collect();
+    let refused = held
+        .iter()
+        .filter(|r| r.try_take() == Some(Err(ReadError::Busy)))
+        .count();
+    assert_eq!(refused, 6, "four fit in 4 MiB");
+    assert!(world.readbacks_queued().1 <= 4 << 20);
+    // A read larger than the cap still goes when nothing is queued.
+    drop(held);
+    window.draw();
+    world.set_readback_budget(1 << 10);
+    assert_eq!(world.readbacks_queued().0, 0, "dropped reads are let go");
+    let read = buffer.read(0..1 << 20);
+    assert!(!read.is_ready());
+}
+
+#[test]
+fn a_large_texture_reads_back_whole_a_band_a_frame() {
+    let world = World::new();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    world.set_readback_budget(256 << 10);
+    let texture = world
+        .add_texture(TextureDesc::storage(1024, 1024, Format::R32Uint))
+        .unwrap();
+    let pass = world
+        .add_compute(
+            Compute::new(FILL)
+                .texture("out", &texture, Access::Write)
+                .threads([1024, 1024, 1]),
+        )
+        .unwrap();
+    window.compiled(&world, pass);
+    let read = texture.read();
+    let frames = window.until(&read, 200);
+    assert!(frames >= 16, "4 MiB at 256 KiB a frame: {frames} frames");
+    let texels = words(&read.try_take().unwrap().unwrap());
+    assert_eq!(texels.len(), 1024 * 1024);
+    for (at, &texel) in texels.iter().enumerate() {
+        let (x, y) = ((at % 1024) as u32, (at / 1024) as u32);
+        assert_eq!(texel, x + y * 1000, "at {x}, {y}");
+    }
+}
+
+#[test]
+fn writes_waiting_for_a_frame_hold_at_most_the_buffers_bytes() {
+    let world = World::new();
+    let buffer = world.add_buffer(BufferDesc::bytes(4096)).unwrap();
+    // No frame comes (no window): 10,000 writes over one another and
+    // beside one another hold no more than the buffer.
+    for i in 0..10_000u32 {
+        buffer.write(u64::from(i % 1024) * 4, &[i]).unwrap();
+        buffer.write(0, &[i; 16]).unwrap();
+    }
+    assert!(world.writes_queued() <= 4096, "{}", world.writes_queued());
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    // The last write to each place is what the buffer holds.
+    let read = buffer.read(0..4096);
+    window.until(&read, 100);
+    let words = words(&read.try_take().unwrap().unwrap());
+    assert_eq!(words[..16], [9999; 16]);
+    let last = |place: u32| (0..10_000u32).filter(|i| i % 1024 == place).max().unwrap();
+    assert_eq!(words[16], last(16));
+    assert_eq!(words[1023], last(1023));
+}

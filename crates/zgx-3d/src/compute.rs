@@ -17,8 +17,8 @@
 //! unsettled); one with on-demand passes draws when one is asked to run.
 use crate::{
     buffer::{
-        BufferShared, DEFAULT_MEMORY_CAP, DEFAULT_READBACK_BUDGET, Format, GpuBuffer, GpuTexture,
-        Link, ReadError, ReadJob, Source, Stage, TextureShared,
+        BufferShared, Chunk, DEFAULT_MEMORY_CAP, DEFAULT_READBACK_BUDGET, Format, GpuBuffer,
+        GpuTexture, Link, ReadError, Source, Stage, TextureShared,
     },
     world::Inner,
 };
@@ -1220,7 +1220,8 @@ impl Frames {
         }
     }
 
-    /// Reads copied whole in an earlier frame mapped, and those mapped
+    /// Reads nobody holds let go; chunks copied in an earlier frame mapped,
+    /// those mapped taken out, and reads whose chunks are all back
     /// resolved.
     fn finish_reads(&mut self, data: &mut Data, device: &wgpu::Device) {
         let mut reads = data.link.reads.borrow_mut();
@@ -1228,61 +1229,95 @@ impl Frames {
             return;
         }
         let (generation, index) = (self.generation, self.index);
-        let mut mapping = false;
-        for job in reads.iter_mut() {
-            if !matches!(job.stage, Stage::Queued) && job.generation != generation {
-                job.state.resolve(Err(ReadError::DeviceChanged));
-                continue;
+        reads.retain(|job| {
+            if job.abandoned() {
+                return false;
             }
-            if let Stage::Copied(at) = job.stage
+            if !job.chunks.is_empty() && job.generation != generation {
+                job.state.resolve(Err(ReadError::DeviceChanged));
+                return false;
+            }
+            true
+        });
+        let mut mapping = false;
+        for chunk in reads.iter_mut().flat_map(|job| job.chunks.iter_mut()) {
+            if let Stage::Copied(at) = chunk.stage
                 && at < index
             {
                 let flag = Arc::new(AtomicU8::new(0));
                 let set = flag.clone();
-                job.staging
-                    .as_ref()
-                    .unwrap()
+                chunk
+                    .staging
                     .map_async(wgpu::MapMode::Read, .., move |result| {
                         set.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release)
                     });
-                job.stage = Stage::Mapping(flag);
+                chunk.stage = Stage::Mapping(flag);
             }
-            mapping |= matches!(job.stage, Stage::Mapping(_));
+            mapping |= matches!(chunk.stage, Stage::Mapping(_));
         }
         if mapping {
             let _ = device.poll(wgpu::PollType::Poll);
         }
         let spare = &mut self.spare;
         reads.retain_mut(|job| {
-            if job.state.done() {
+            let rows = match &job.source {
+                Source::Buffer(_) => None,
+                Source::Texture(weak) => weak.upgrade().map(|t| {
+                    let row = u64::from(t.desc.size.0) * u64::from(t.desc.format.texel());
+                    (
+                        row as usize,
+                        padded_row(t.desc.size.0, t.desc.format) as usize,
+                    )
+                }),
+            };
+            let (chunks, out) = (&mut job.chunks, &mut job.out);
+            let mut failed = false;
+            chunks.retain(|chunk| {
+                let Stage::Mapping(flag) = &chunk.stage else {
+                    return true;
+                };
+                match flag.load(Ordering::Acquire) {
+                    0 => return true,
+                    1 => {
+                        {
+                            let mapped = chunk.staging.slice(..).get_mapped_range();
+                            let (at, len) = (chunk.at as usize, chunk.len as usize);
+                            match rows {
+                                None => out[at..at + len].copy_from_slice(&mapped[..len]),
+                                Some((row, padded)) => {
+                                    for r in 0..len {
+                                        out[(at + r) * row..(at + r + 1) * row]
+                                            .copy_from_slice(&mapped[r * padded..r * padded + row]);
+                                    }
+                                }
+                            }
+                        }
+                        chunk.staging.unmap();
+                        if spare.len() < SPARE && chunk.staging.size() <= SPARE_SIZE {
+                            spare.push(chunk.staging.clone());
+                        }
+                    }
+                    _ => failed = true,
+                }
+                false
+            });
+            if failed {
+                job.state.resolve(Err(ReadError::DeviceChanged));
                 return false;
             }
-            let Stage::Mapping(flag) = &job.stage else {
-                return true;
-            };
-            match flag.load(Ordering::Acquire) {
-                0 => true,
-                1 => {
-                    let staging = job.staging.take().unwrap();
-                    let bytes = extract(job, &staging.slice(..).get_mapped_range());
-                    staging.unmap();
-                    if spare.len() < SPARE && staging.size() <= SPARE_SIZE {
-                        spare.push(staging);
-                    }
-                    job.state.resolve(Ok(bytes));
-                    false
-                }
-                _ => {
-                    job.state.resolve(Err(ReadError::DeviceChanged));
-                    false
-                }
+            if job.issued == job.total && job.chunks.is_empty() {
+                let bytes = job.out[job.trim.clone()].to_vec();
+                job.state.resolve(Ok(bytes));
+                return false;
             }
+            true
         });
     }
 
-    /// Reads waiting their turn copied into their staging buffers, in the
-    /// order asked, up to the budget's bytes this frame (at least a texture's
-    /// row, if the budget is narrower).
+    /// Chunks of the reads waiting copied into staging buffers, in the order
+    /// asked, up to the budget's bytes this frame (at least 4 bytes or a
+    /// texture's row, if the budget is narrower), none larger than
+    /// `MAX_CHUNK`.
     fn copy_reads(&mut self, data: &mut Data, frame: &mut ViewportFrame<'_>) {
         let mut reads = data.link.reads.borrow_mut();
         let (generation, index) = (self.generation, self.index);
@@ -1290,15 +1325,15 @@ impl Frames {
         let mut copied = false;
         let spare = &mut self.spare;
         reads.retain_mut(|job| {
-            if !matches!(job.stage, Stage::Queued) {
+            if job.abandoned() {
+                return false;
+            }
+            if job.issued == job.total || (left == 0 && copied) {
                 return true;
             }
-            if left == 0 && copied {
-                return true;
-            }
-            if job.copied > 0 && job.generation != generation {
-                job.copied = 0;
-                job.staging = None;
+            if job.issued > 0 && job.generation != generation {
+                job.state.resolve(Err(ReadError::DeviceChanged));
+                return false;
             }
             match &job.source {
                 Source::Buffer(weak) => {
@@ -1307,29 +1342,42 @@ impl Frames {
                         return false;
                     };
                     let gpu = buffer.gpu.borrow();
-                    let Some((g, gpu)) = gpu.as_ref().filter(|(g, _)| *g == generation) else {
+                    let Some((_, gpu)) = gpu.as_ref().filter(|(g, _)| *g == generation) else {
                         return true;
                     };
-                    let staging = job
-                        .staging
-                        .get_or_insert_with(|| staging(spare, frame.device, job.total));
-                    job.generation = *g;
-                    let mut chunk = (job.total - job.copied).min(left & !3);
-                    if chunk == 0 && !copied {
-                        chunk = (job.total - job.copied).min(4);
+                    job.generation = generation;
+                    if job.out.is_empty() {
+                        job.out = vec![0; job.total as usize];
                     }
-                    if chunk > 0 {
+                    while job.issued < job.total {
+                        let mut len = (job.total - job.issued).min(left & !3).min(MAX_CHUNK);
+                        if len == 0 {
+                            if copied {
+                                break;
+                            }
+                            len = (job.total - job.issued).min(4);
+                        }
+                        let staging = staging(spare, frame.device, len);
                         frame.encoder.copy_buffer_to_buffer(
                             gpu,
-                            job.from + job.copied,
-                            staging,
-                            job.copied,
-                            chunk,
+                            job.from + job.issued,
+                            &staging,
+                            0,
+                            len,
                         );
+                        job.chunks.push(Chunk {
+                            at: job.issued,
+                            len,
+                            staging,
+                            stage: Stage::Copied(index),
+                        });
+                        job.issued += len;
+                        left = left.saturating_sub(len);
+                        copied = true;
+                        if left == 0 {
+                            break;
+                        }
                     }
-                    job.copied += chunk;
-                    left = left.saturating_sub(chunk);
-                    copied |= chunk > 0;
                 }
                 Source::Texture(weak) => {
                     let Some(texture) = weak.upgrade() else {
@@ -1337,35 +1385,40 @@ impl Frames {
                         return false;
                     };
                     let gpu = texture.gpu.borrow();
-                    let Some((g, gpu, _)) = gpu.as_ref().filter(|(g, ..)| *g == generation) else {
+                    let Some((_, gpu, _)) = gpu.as_ref().filter(|(g, ..)| *g == generation) else {
                         return true;
                     };
+                    job.generation = generation;
+                    if job.out.is_empty() {
+                        job.out = vec![0; job.trim.end];
+                    }
                     let (width, _) = texture.desc.size;
                     let padded = padded_row(width, texture.desc.format);
-                    let staging = job
-                        .staging
-                        .get_or_insert_with(|| staging(spare, frame.device, padded * job.total));
-                    job.generation = *g;
-                    let mut rows = (job.total - job.copied).min(left / padded);
-                    if rows == 0 && !copied {
-                        rows = 1;
-                    }
-                    if rows > 0 {
+                    while job.issued < job.total {
+                        let fit = (left / padded).min(MAX_CHUNK / padded);
+                        let mut rows = (job.total - job.issued).min(fit);
+                        if rows == 0 {
+                            if copied {
+                                break;
+                            }
+                            rows = 1;
+                        }
+                        let staging = staging(spare, frame.device, rows * padded);
                         frame.encoder.copy_texture_to_buffer(
                             wgpu::TexelCopyTextureInfo {
                                 texture: gpu,
                                 mip_level: 0,
                                 origin: wgpu::Origin3d {
                                     x: 0,
-                                    y: job.copied as u32,
+                                    y: job.issued as u32,
                                     z: 0,
                                 },
                                 aspect: wgpu::TextureAspect::All,
                             },
                             wgpu::TexelCopyBufferInfo {
-                                buffer: staging,
+                                buffer: &staging,
                                 layout: wgpu::TexelCopyBufferLayout {
-                                    offset: job.copied * padded,
+                                    offset: 0,
                                     bytes_per_row: Some(padded as u32),
                                     rows_per_image: None,
                                 },
@@ -1376,19 +1429,29 @@ impl Frames {
                                 depth_or_array_layers: 1,
                             },
                         );
+                        job.chunks.push(Chunk {
+                            at: job.issued,
+                            len: rows,
+                            staging,
+                            stage: Stage::Copied(index),
+                        });
+                        job.issued += rows;
+                        left = left.saturating_sub(rows * padded);
+                        copied = true;
+                        if left == 0 {
+                            break;
+                        }
                     }
-                    job.copied += rows;
-                    left = left.saturating_sub(rows * padded);
-                    copied |= rows > 0;
                 }
-            }
-            if job.copied == job.total {
-                job.stage = Stage::Copied(index);
             }
             true
         });
     }
 }
+
+/// The most a chunk of a read stages: so a large read never makes a large
+/// staging buffer, whatever the budget.
+const MAX_CHUNK: u64 = 4 << 20;
 
 /// Staging buffers kept for reads to come, and the largest kept.
 const SPARE: usize = 4;
@@ -1414,26 +1477,6 @@ fn staging(spare: &mut Vec<wgpu::Buffer>, device: &wgpu::Device, size: u64) -> w
 /// A texture row's bytes as copied: padded to 256.
 fn padded_row(width: u32, format: Format) -> u64 {
     (u64::from(width) * u64::from(format.texel())).next_multiple_of(256)
-}
-
-/// The bytes `job` asked for, from its staging buffer's `mapped`.
-fn extract(job: &ReadJob, mapped: &[u8]) -> Vec<u8> {
-    match &job.source {
-        Source::Buffer(_) => mapped[job.trim.clone()].to_vec(),
-        Source::Texture(weak) => {
-            let rows = job.total as usize;
-            let row = job.trim.len() / rows.max(1);
-            let padded = match weak.upgrade() {
-                Some(t) => padded_row(t.desc.size.0, t.desc.format) as usize,
-                None => row.next_multiple_of(256),
-            };
-            let mut out = Vec::with_capacity(row * rows);
-            for y in 0..rows {
-                out.extend_from_slice(&mapped[y * padded..y * padded + row]);
-            }
-            out
-        }
-    }
 }
 
 /// `pass` can't run: why, reported once.

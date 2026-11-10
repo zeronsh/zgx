@@ -199,6 +199,9 @@ pub enum ReadError {
     Dropped,
     /// The view moved to another device before it was read.
     DeviceChanged,
+    /// Reads already queued hold the world's cap (64 frames of its budget):
+    /// ask again once they've come.
+    Busy,
 }
 impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -206,6 +209,7 @@ impl std::fmt::Display for ReadError {
             Self::OutOfRange => "the read runs past the buffer's end",
             Self::Dropped => "the world was dropped before the read",
             Self::DeviceChanged => "the view moved to another device before the read",
+            Self::Busy => "reads already queued hold the world's cap",
         })
     }
 }
@@ -217,6 +221,8 @@ pub(crate) struct Link {
     pub(crate) view: zgx::gpu_view::GpuView,
     pub(crate) writes: RefCell<Vec<Weak<BufferShared>>>,
     pub(crate) reads: RefCell<VecDeque<ReadJob>>,
+    /// The most bytes reads may queue: 64 frames of the budget.
+    pub(crate) queue_cap: Cell<u64>,
     next_id: Cell<u64>,
 }
 impl Link {
@@ -225,8 +231,21 @@ impl Link {
             view,
             writes: RefCell::default(),
             reads: RefCell::default(),
+            queue_cap: Cell::new(64 * DEFAULT_READBACK_BUDGET),
             next_id: Cell::new(1),
         }
+    }
+    /// `job` queued, or refused (`Busy`) where it would take the queue past
+    /// its cap; one larger than the cap goes when nothing else is queued.
+    fn enqueue(&self, job: ReadJob, readback: Readback) -> Readback {
+        let mut reads = self.reads.borrow_mut();
+        let queued: u64 = reads.iter().map(|job| job.bytes).sum();
+        if !reads.is_empty() && queued.saturating_add(job.bytes) > self.queue_cap.get() {
+            return Readback::failed(ReadError::Busy);
+        }
+        reads.push_back(job);
+        self.view.invalidate();
+        readback
     }
     pub(crate) fn id(&self) -> u64 {
         let id = self.next_id.get();
@@ -288,7 +307,27 @@ impl GpuBuffer {
         if writes.is_empty() {
             self.0.link.writes.borrow_mut().push(Rc::downgrade(&self.0));
         }
-        writes.push((offset, bytes.to_vec()));
+        // Merged with those it meets or touches: what waits for a frame is
+        // disjoint ranges, at most the buffer's bytes however many writes
+        // come before it.
+        let (mut start, mut end) = (offset, offset + len);
+        let mut met = Vec::new();
+        writes.retain_mut(|(at, held)| {
+            let held_end = *at + held.len() as u64;
+            if held_end < start || *at > end {
+                return true;
+            }
+            start = start.min(*at);
+            end = end.max(held_end);
+            met.push((*at, std::mem::take(held)));
+            false
+        });
+        let mut merged = vec![0; (end - start) as usize];
+        for (at, held) in met.into_iter().chain([(offset, bytes.to_vec())]) {
+            let from = (at - start) as usize;
+            merged[from..from + held.len()].copy_from_slice(&held);
+        }
+        writes.push((start, merged));
         self.0.link.view.invalidate();
         Ok(())
     }
@@ -309,14 +348,13 @@ impl GpuBuffer {
             trim: (range.start - start) as usize..(range.end - start) as usize,
             total: end - start,
             from: start,
-            stage: Stage::Queued,
-            copied: 0,
-            staging: None,
+            bytes: end - start,
+            issued: 0,
+            out: Vec::new(),
+            chunks: Vec::new(),
             generation: 0,
         };
-        self.0.link.reads.borrow_mut().push_back(job);
-        self.0.link.view.invalidate();
-        readback
+        self.0.link.enqueue(job, readback)
     }
 }
 
@@ -368,14 +406,13 @@ impl GpuTexture {
             trim: 0..(row * u64::from(height)) as usize,
             total: u64::from(height),
             from: 0,
-            stage: Stage::Queued,
-            copied: 0,
-            staging: None,
+            bytes: row * u64::from(height),
+            issued: 0,
+            out: Vec::new(),
+            chunks: Vec::new(),
             generation: 0,
         };
-        self.0.link.reads.borrow_mut().push_back(job);
-        self.0.link.view.invalidate();
-        readback
+        self.0.link.enqueue(job, readback)
     }
 }
 
@@ -387,15 +424,9 @@ pub struct Readback(Rc<ReadState>);
 pub(crate) struct ReadState {
     result: RefCell<Option<Result<Vec<u8>, ReadError>>>,
     waker: RefCell<Option<std::task::Waker>>,
-    done: Cell<bool>,
 }
 impl ReadState {
-    /// Whether it was resolved (its result may have been taken since).
-    pub(crate) fn done(&self) -> bool {
-        self.done.get()
-    }
     pub(crate) fn resolve(&self, result: Result<Vec<u8>, ReadError>) {
-        self.done.set(true);
         *self.result.borrow_mut() = Some(result);
         if let Some(waker) = self.waker.borrow_mut().take() {
             waker.wake();
@@ -449,21 +480,31 @@ pub(crate) enum Source {
     Texture(Weak<TextureShared>),
 }
 
-/// Where a read is.
+/// Where a chunk of a read is.
 #[derive(Clone, Debug)]
 pub(crate) enum Stage {
-    /// Waiting its turn in the budget.
-    Queued,
-    /// Copied whole into its staging buffer in the frame of this index:
-    /// mapped at the start of a later one.
+    /// Copied into its staging buffer in the frame of this index: mapped at
+    /// the start of a later one.
     Copied(u64),
     /// Being mapped: the device sets it to 1 when mapped, 2 when that
     /// failed.
     Mapping(Arc<AtomicU8>),
 }
 
-/// A read on its way: copied a part a frame into a staging buffer, then
-/// mapped and resolved.
+/// A part of a read copied a frame, at most the budget's bytes (and a
+/// staging buffer's most): its own staging buffer, mapped and taken out on
+/// its own.
+pub(crate) struct Chunk {
+    /// Where in the read, and how much: bytes of a buffer, rows of a
+    /// texture.
+    pub(crate) at: u64,
+    pub(crate) len: u64,
+    pub(crate) staging: wgpu::Buffer,
+    pub(crate) stage: Stage,
+}
+
+/// A read on its way, copied a chunk at a time within each frame's budget,
+/// each chunk mapped and taken out as it comes back.
 pub(crate) struct ReadJob {
     pub(crate) state: Rc<ReadState>,
     pub(crate) source: Source,
@@ -473,9 +514,18 @@ pub(crate) struct ReadJob {
     /// rows of a texture.
     pub(crate) from: u64,
     pub(crate) total: u64,
-    pub(crate) copied: u64,
-    pub(crate) stage: Stage,
-    pub(crate) staging: Option<wgpu::Buffer>,
-    /// The device generation it was copied on.
+    /// Its bytes, for the queue's cap.
+    pub(crate) bytes: u64,
+    /// How much chunks have been copied of, and what's come back.
+    pub(crate) issued: u64,
+    pub(crate) out: Vec<u8>,
+    pub(crate) chunks: Vec<Chunk>,
+    /// The device generation its chunks were copied on.
     pub(crate) generation: u64,
+}
+impl ReadJob {
+    /// Whether nobody holds its `Readback` any more.
+    pub(crate) fn abandoned(&self) -> bool {
+        Rc::strong_count(&self.state) == 1
+    }
 }

@@ -74,8 +74,44 @@ impl World {
 
     /// The most readbacks copy a frame, in bytes (64 KiB to begin with):
     /// larger reads take more frames, smaller ones share one.
+    ///
+    /// Reads queue up to 64 frames of it (4 MiB to begin with): one asked
+    /// for past that is refused (`ReadError::Busy`), unless nothing else is
+    /// queued. A read whose `Readback` is dropped is let go.
     pub fn set_readback_budget(&self, bytes: u64) {
-        self.data(|data| data.budget = bytes.max(4));
+        self.data(|data| {
+            data.budget = bytes.max(4);
+            data.link.queue_cap.set(data.budget.saturating_mul(64));
+        });
+    }
+
+    /// Bytes written to its buffers waiting for a frame. For tests.
+    #[doc(hidden)]
+    pub fn writes_queued(&self) -> u64 {
+        self.inner.borrow().data.as_ref().map_or(0, |data| {
+            data.link
+                .writes
+                .borrow()
+                .iter()
+                .filter_map(std::rc::Weak::upgrade)
+                .map(|b| {
+                    b.writes
+                        .borrow()
+                        .iter()
+                        .map(|(_, w)| w.len() as u64)
+                        .sum::<u64>()
+                })
+                .sum()
+        })
+    }
+
+    /// Reads queued and their bytes. For tests.
+    #[doc(hidden)]
+    pub fn readbacks_queued(&self) -> (usize, u64) {
+        self.inner.borrow().data.as_ref().map_or((0, 0), |data| {
+            let reads = data.link.reads.borrow();
+            (reads.len(), reads.iter().map(|job| job.bytes).sum())
+        })
     }
 
     /// Add a compute pass, checked now: its WGSL parsed and validated (errors
