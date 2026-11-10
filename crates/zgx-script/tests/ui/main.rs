@@ -103,6 +103,8 @@ mod sealed;
 mod selection;
 #[path = "../size_calc.rs"]
 mod size_calc;
+#[path = "../small_element_nodes.rs"]
+mod small_element_nodes;
 #[path = "../stack.rs"]
 mod stack;
 #[path = "../sticky.rs"]

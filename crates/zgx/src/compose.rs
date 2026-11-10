@@ -2988,7 +2988,15 @@ pub fn scrollbar(offset: Signal<f32>, mut extent: impl FnMut() -> f32 + 'static)
 /// (`switch(..).w_full()`), it is a box of its own that holds the view.
 pub fn switch<K: PartialEq + Clone + 'static>(
     select: impl FnMut() -> K + 'static,
-    build: impl FnMut(K, &mut Context) -> View + 'static,
+    mut build: impl FnMut(K, &mut Context) -> View + 'static,
+) -> View {
+    switch_with::<K, false>(select, move |key, cx| Some(build(key, cx)))
+}
+/// A [`switch`] whose cases may show nothing (`None`): the region holds no
+/// child then, not an empty one (a closed `ui.show`: one node, not two).
+pub fn switch_or_none<K: PartialEq + Clone + 'static>(
+    select: impl FnMut() -> K + 'static,
+    build: impl FnMut(K, &mut Context) -> Option<View> + 'static,
 ) -> View {
     switch_with::<K, false>(select, build)
 }
@@ -2999,13 +3007,13 @@ pub fn switch<K: PartialEq + Clone + 'static>(
 /// what had the keyboard should keep it.
 pub fn switch_keeping_focus<K: PartialEq + Clone + 'static>(
     select: impl FnMut() -> K + 'static,
-    build: impl FnMut(K, &mut Context) -> View + 'static,
+    mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
-    switch_with::<K, true>(select, build)
+    switch_with::<K, true>(select, move |key, cx| Some(build(key, cx)))
 }
 fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
     mut select: impl FnMut() -> K + 'static,
-    mut build: impl FnMut(K, &mut Context) -> View + 'static,
+    mut build: impl FnMut(K, &mut Context) -> Option<View> + 'static,
 ) -> View {
     let mut region = View::new(Kind::Region(Box::new(move |ui, root, environment| {
         let weak = ui.downgrade();
@@ -3025,7 +3033,19 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
             }
             runtime.untracked(|| {
                 let mut cx = Context::new(runtime.clone(), environment.clone());
-                let view = build(key.clone(), &mut cx);
+                let Some(view) = build(key.clone(), &mut cx) else {
+                    // Nothing shows: no child at all, and the region, hidden
+                    // while empty, takes no place (no flex item, no gap).
+                    // Marked only now, so that a region that always shows
+                    // something (a `switch`, an open `ui.show`) is restyled
+                    // no more than it was; its old view's removal lays it
+                    // out hidden.
+                    ui.scene.borrow_mut().set_hidden_when_empty(root, true);
+                    if let Some(old) = mounted.take() {
+                        ui.remove(old);
+                    }
+                    return;
+                };
                 let mut transaction = MountTransaction::new(&ui, root);
                 let node = mount(&mut ui, root, view, environment.clone());
                 cx.finish(&mut ui, node);
@@ -8790,8 +8810,9 @@ pub mod prelude {
         Context, Slot, VariableHeights, View, button, checkbox, column, component, div, image,
         image_signal, keyed, measured_rows, measured_virtual_list, menu, menu_item, modal, overlay,
         popover, progress, provide, provide_with, radio, radio_group, row, scroll, scroll_x,
-        scrollbar, slider, submenu, switch, text, text_area, text_area_value, text_input,
-        text_input_value, text_message, text_signal, variable_virtual_list, virtual_list,
+        scrollbar, slider, submenu, switch, switch_or_none, text, text_area, text_area_value,
+        text_input, text_input_value, text_message, text_signal, variable_virtual_list,
+        virtual_list,
     };
     pub use super::{RichTextView, TextSpan, rich_text, rich_text_signal, text_span};
     pub use super::{SplitOptions, split};

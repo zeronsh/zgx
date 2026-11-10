@@ -33,7 +33,7 @@ zgx-gpu	478	4789	effects::<impl in crates/zgx-gpu/src/effects.rs>::prepare_effec
 zgx-gpu	159	1785	effects::<impl in crates/zgx-gpu/src/effects.rs>::encode_effects
 zgx-gpu	177	1271	upload::<impl in crates/zgx-gpu/src/upload.rs>::encode
 zgx-gpu	151	1165	passes::<impl in crates/zgx-gpu/src/passes.rs>::prepare_inputs
-zgx-script	1567	13142	kind_view
+zgx-script	1567	13146	kind_view
 zgx-script	325	2333	kind_view::{closure#27}::{closure#0}
 zgx-script	553	8910	lower::apply
 zgx-script	361	3265	lower_list
