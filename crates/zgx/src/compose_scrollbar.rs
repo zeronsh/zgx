@@ -507,7 +507,12 @@ pub(crate) fn advance_fades(ui: &Ui, now: Instant) -> bool {
         if let Some((_, _, duration)) = look.widen {
             stepped |= step_widening(&fade, now, duration, ui.refresh_interval());
         }
-        if fade.next.get().is_none_or(|next| next > now) {
+        // A step due within half a refresh of now is this frame's: a frame
+        // a refresh on from the last comes a hair before its step as often
+        // as after it, and would take every other step. (Each step works
+        // its value out from the time, so early is no harm.)
+        let slack = ui.refresh_interval() / 2;
+        if fade.next.get().is_none_or(|next| next > now + slack) {
             continue;
         }
         // Fading in (`Look::fade_in`): a step a refresh, then on to its
@@ -767,7 +772,18 @@ pub(crate) fn mount(
             InputEvent::PointerLeave if grab.is_none() => {
                 write_active.set(false);
             }
-            InputEvent::PointerUp { .. } | InputEvent::PointerCancel | InputEvent::Blur => {
+            // Let go over it, it stays lit while the pointer rests there
+            // (no move follows to say so); let go off it, it goes.
+            InputEvent::PointerUp { x, y, .. } => {
+                let over = scene.borrow().bounds(track);
+                write_active.set(
+                    x >= over.x
+                        && x < over.x + over.width
+                        && y >= over.y
+                        && y < over.y + over.height,
+                );
+            }
+            InputEvent::PointerCancel | InputEvent::Blur => {
                 write_active.set(false);
             }
             _ => {}
