@@ -904,6 +904,55 @@ impl CopyBlocker {
         }
     }
 }
+/// Which paint items are a node's subtree's, asked in paint order, without a
+/// walk up the tree for each: an item's parent is the item before it or one
+/// of that one's ancestors (a walk paints a node before what it holds, and
+/// its border pass after), so the nodes from the subtree's root down to the
+/// item before are kept, and an item whose parent is among them is within.
+/// Any other is walked up, as `Scene::is_within` does. (A transcript's rows
+/// lie 16 nodes under its scroll view: a walk for each of 300 items, every
+/// frame it scrolls.)
+#[derive(Default)]
+struct Within(Vec<NodeId>, #[cfg(test)] usize);
+impl Within {
+    /// Whether `id` is `root` or within it (`Scene::is_within`).
+    fn holds(&mut self, scene: &Scene, id: NodeId, root: NodeId) -> bool {
+        if id == root {
+            self.0.clear();
+            self.0.push(id);
+            return true;
+        }
+        if let Some(parent) = scene.parent(id) {
+            while let Some(&last) = self.0.last() {
+                if last == parent {
+                    self.0.push(id);
+                    return true;
+                }
+                self.0.pop();
+            }
+        }
+        // Walked up: the nodes on the way, root first, are kept if within.
+        #[cfg(test)]
+        {
+            self.1 += 1;
+        }
+        let mut at = id;
+        loop {
+            self.0.push(at);
+            if at == root {
+                self.0.reverse();
+                return true;
+            }
+            match scene.parent(at) {
+                Some(parent) => at = parent,
+                None => {
+                    self.0.clear();
+                    return false;
+                }
+            }
+        }
+    }
+}
 /// Whether moving `scroll`'s pixels reproduces the frame (`None`), and what
 /// keeps it from it otherwise: its content is one contiguous run of paint
 /// items none of which reads what lies under it; beneath it the clip shows a
@@ -973,8 +1022,9 @@ fn copy_blocker(
         })
     };
     let mut looked: Option<*const zgx::scene::PaintExtras> = None;
+    let mut within = Within::default();
     for item in &items[first..=last] {
-        if !content(item) {
+        if !within.holds(scene, item.id, scroll.node) {
             return Some(CopyBlocker::Between(item.id));
         }
         // What reads the pixels under it reads the view's, which hold still
@@ -19721,6 +19771,87 @@ mod copy_blocker_tests {
         compose::prelude::{rgba, *},
         widgets::Ui,
     };
+
+    /// Which paint items lie within a node, asked in paint order as the copy
+    /// asks of its content's, say what `Scene::is_within` says, for every
+    /// item and whatever node, with raised rows and border passes among them;
+    /// and within a scroll view's content none is walked up the tree.
+    #[test]
+    fn items_within_a_node_in_paint_order_without_a_walk_each() {
+        let mut ui = Ui::new(200., 300.);
+        let offset = ui.signal(0_f32);
+        let view = ui.mount(
+            column()
+                .w(200.)
+                .h(300.)
+                .child(div().id("header").w(200.).h(20.).bg(rgb(0x111111)))
+                .child(
+                    scroll(offset.clone())
+                        .id("list")
+                        .w(200.)
+                        .h(260.)
+                        .bg(rgb(0x202020))
+                        .children((0..12).map(|i| {
+                            let mut row = row()
+                                .id(format!("row-{i}"))
+                                .w(200.)
+                                .h(24.)
+                                .bg(rgb(0x303030))
+                                .child(div().w(20.).h(20.).bg(rgb(0x404040)))
+                                .child(
+                                    column()
+                                        .id(format!("parts-{i}"))
+                                        .child(div().w(100.).h(10.).bg(rgb(0x505050)))
+                                        .child(div().w(100.).h(10.).bg(rgb(0x606060))),
+                                );
+                            if i % 4 == 1 {
+                                // A border pass: its outline after what it holds.
+                                row = row.outline(2., rgb(0xffffff));
+                            }
+                            row
+                        })),
+                )
+                .child(div().id("footer").w(200.).h(20.).bg(rgb(0x111111))),
+        );
+        ui.prepare_frame();
+        let raised = view.find("row-6").unwrap();
+        ui.scene.borrow_mut().set_z(raised, 1);
+        ui.prepare_frame();
+        let scene = ui.scene.borrow();
+        let items = scene.layer_items(None);
+        assert!(items.iter().any(|item| item.border_pass), "a border pass");
+        let list = view.find("list").unwrap();
+        let roots = [
+            list,
+            view.find("row-1").unwrap(),
+            view.find("parts-6").unwrap(),
+            view.find("header").unwrap(),
+            scene.root(),
+        ];
+        for root in roots {
+            let mut within = Within::default();
+            for item in &items {
+                assert_eq!(
+                    within.holds(&scene, item.id, root),
+                    scene.is_within(item.id, root),
+                    "@{} within @{}",
+                    item.id.number(),
+                    root.number()
+                );
+            }
+        }
+        // The content's run, as the copy asks: not one walked up.
+        let first = items.iter().position(|item| item.id == list).unwrap();
+        let last = items
+            .iter()
+            .rposition(|item| scene.is_within(item.id, list))
+            .unwrap();
+        let mut within = Within::default();
+        for item in &items[first..=last] {
+            assert!(within.holds(&scene, item.id, list));
+        }
+        assert_eq!(within.1, 0, "items of the content walked up the tree");
+    }
 
     /// Whether `carried` repaints the point `(x, y)`.
     fn repaints(carried: &[Rect], x: f32, y: f32) -> bool {
