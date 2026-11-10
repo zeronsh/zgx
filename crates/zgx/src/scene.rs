@@ -13666,8 +13666,10 @@ impl Scene {
     }
     /// The largest band of `clip` a move can copy: clear of every backdrop blur
     /// that shows, and of what such a bar paints around itself (a shadow, which
-    /// a copy would carry and `copy_blocker` refuses): three times its blur's sigma.
-    /// All of `clip` if none touches it; none if little's left.
+    /// a copy would carry and `copy_blocker` refuses): its ink, the box and its
+    /// shadows and what it holds, and a device pixel more. What lies past that
+    /// within its blur's reach is only read: a copy has moved it already when
+    /// the bar blurs it. All of `clip` if none touches it; none if little's left.
     fn clear_of_blurs(&self, clip: Rect) -> Option<Rect> {
         let mut clear = clip;
         let mut touched = false;
@@ -13676,13 +13678,7 @@ impl Scene {
             if effects.opacity <= 0. {
                 continue;
             }
-            let reach = (effects.blur_radius * 3.).ceil();
-            let wide = Rect::new(
-                bounds.x - reach,
-                bounds.y - reach,
-                bounds.width + reach * 2.,
-                bounds.height + reach * 2.,
-            );
+            let wide = self.blur_ink(*blur, bounds);
             if !wide.intersects(clear) {
                 continue;
             }
@@ -13718,6 +13714,33 @@ impl Scene {
             return None;
         }
         Some(clear)
+    }
+    /// What backdrop blur `id`, its box `bounds` in the window, paints there:
+    /// its ink's reach past its own box, on each side, added to `bounds`, and
+    /// a device pixel more. Scaled or turned, three times its blur's sigma
+    /// around it, as before its ink was asked.
+    fn blur_ink(&self, id: NodeId, bounds: Rect) -> Rect {
+        let node = self.node(id);
+        if node.transformed() {
+            return bounds.expand((node.effects.blur_radius * 3.).ceil());
+        }
+        // (Ink is in the parent's space, the node's translation in it.)
+        let local = node.bounds.translated(node.transform);
+        let ink = self.ink(id).map_or(local, |ink| ink.union(local));
+        let pixel = match self.pixel_scale > 0. {
+            true => 1. / self.pixel_scale,
+            false => 1.,
+        };
+        let left = (local.x - ink.x).max(0.) + pixel;
+        let top = (local.y - ink.y).max(0.) + pixel;
+        let right = (ink.x + ink.width - local.x - local.width).max(0.) + pixel;
+        let bottom = (ink.y + ink.height - local.y - local.height).max(0.) + pixel;
+        Rect::new(
+            bounds.x - left,
+            bounds.y - top,
+            bounds.width + left + right,
+            bounds.height + top + bottom,
+        )
     }
     /// `clear_of_blurs` for nodes reading the backdrop: the largest band of
     /// `clear` none of them reads (`touched` if any reached it).
