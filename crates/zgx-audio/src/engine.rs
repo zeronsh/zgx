@@ -383,13 +383,7 @@ impl Audio {
 
     /// Decodes a sound whole.
     pub fn load(&self, source: Source) -> Result<Sound, Error> {
-        let sound = source.decode()?;
-        if sound.frames() as u64 >= u64::from(u32::MAX) {
-            return Err(Error::Format(
-                "a sound of over 2^32 frames: stream it instead".into(),
-            ));
-        }
-        Ok(sound)
+        source.decode()
     }
 
     /// Plays `sound` as `play` says.
