@@ -6185,6 +6185,8 @@ enum Owned {
     Computed(mlua::Function, std::cell::Cell<Option<CachedHex>>),
     Anim(Option<Value>, Option<Value>),
     Variant(Rc<crate::variants::Selection>, Prop),
+    /// `ui.map`: computed in Rust from the states it reads, no script run.
+    Map(Rc<crate::node::MapSpec>),
 }
 fn resolve_owned(source: &Source) -> Owned {
     match source {
@@ -6193,6 +6195,7 @@ fn resolve_owned(source: &Source) -> Owned {
         Source::Computed(f) => Owned::Computed(f.clone(), std::cell::Cell::default()),
         Source::Anim(a) => Owned::Anim(a.from.clone(), a.to.clone()),
         Source::Variant(selection, prop) => Owned::Variant(selection.clone(), *prop),
+        Source::Map(spec) => Owned::Map(spec.clone()),
     }
 }
 /// A style's value now. What a function returns is checked by the design
@@ -6761,6 +6764,8 @@ fn resolve(source: &Owned, ty: Ty, scalar: Option<&Signal<f32>>, vm: &Vm) -> Opt
             .iter()
             .find_map(|(p, l)| (p == prop).then(|| l.clone())),
         Owned::State(s) => s.with(|v| lit(v, ty).or_else(|| refused(v, ty, vm))),
+        // Mapped in Rust from the states it reads: no script runs.
+        Owned::Map(spec) => lit(&Value::Num(spec.value() as f64), ty),
         // A colour or a number (most computed styles): read from what the
         // function returned as it is, without making a `Value` of it first.
         Owned::Computed(f, cache) if matches!(ty, Ty::Color | Ty::Num) => {

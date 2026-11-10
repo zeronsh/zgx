@@ -1609,6 +1609,8 @@ pub(crate) enum Source {
     State(Signal<Value>),
     Computed(Function),
     Anim(Rc<Anim>),
+    /// `ui.map`: a number mapped from a state in Rust.
+    Map(Rc<MapSpec>),
     /// Set by `variants = …` chosen by state: what the choice sets now.
     Variant(Rc<crate::variants::Selection>, Prop),
 }
@@ -2106,6 +2108,65 @@ pub(crate) struct Provided(pub std::collections::HashMap<Rc<str>, (Weak<Vm>, mlu
 pub(crate) struct NodeUd(pub Rc<Node>);
 impl UserData for NodeUd {}
 pub(crate) struct AnimUd(pub Rc<Anim>);
+/// `ui.map`'s value: a number a state holds, mapped from one range to
+/// another (`from` to `to`) in Rust, so a style that follows it runs no
+/// script as the state changes (a scrollbar thumb's `top` following an
+/// offset). Each end is a number, a state or a function, kept current as
+/// what it reads changes (`computed`).
+pub(crate) struct MapSpec {
+    pub source: Signal<Value>,
+    pub from: [MapEnd; 2],
+    pub to: [MapEnd; 2],
+    pub clamp: bool,
+}
+/// One end of a `ui.map` range.
+pub(crate) enum MapEnd {
+    Num(f64),
+    State(Signal<Value>),
+}
+impl MapEnd {
+    /// Its value now, followed by the reading effect; `None` if it isn't a
+    /// finite number.
+    fn get(&self) -> Option<f64> {
+        let value = match self {
+            MapEnd::Num(v) => *v,
+            MapEnd::State(state) => state.with(|v| v.as_f64())?,
+        };
+        value.is_finite().then_some(value)
+    }
+}
+impl MapSpec {
+    /// The mapped value now: `to`'s start where the source sits at `from`'s
+    /// start, its end at `from`'s end, in a line between, held within `to`
+    /// with `clamp`. A range of no width (or any end not a finite number)
+    /// gives `to`'s start, or 0: a finite value, never NaN.
+    pub(crate) fn value(&self) -> f32 {
+        let at = self.source.with(|v| v.as_f64()).filter(|v| v.is_finite());
+        let [a, b] = [self.from[0].get(), self.from[1].get()];
+        let [c, d] = [self.to[0].get(), self.to[1].get()];
+        let Some(start) = c else {
+            return 0.;
+        };
+        let (Some(at), Some(a), Some(b), Some(d)) = (at, a, b, d) else {
+            return start as f32;
+        };
+        let width = b - a;
+        if width == 0. || !width.is_finite() {
+            return start as f32;
+        }
+        let mut t = (at - a) / width;
+        if self.clamp {
+            t = t.clamp(0., 1.);
+        }
+        let value = start + t * (d - start);
+        match value.is_finite() {
+            true => value as f32,
+            false => start as f32,
+        }
+    }
+}
+pub(crate) struct MapUd(pub Rc<MapSpec>);
+impl UserData for MapUd {}
 impl UserData for AnimUd {}
 pub(crate) struct ActionUd(pub Action);
 impl UserData for ActionUd {}
@@ -2844,6 +2905,12 @@ fn source_linted(
         mlua::Value::UserData(ud) if ud.is::<AnimUd>() => {
             Ok(Source::Anim(ud.borrow::<AnimUd>()?.0.clone()))
         }
+        mlua::Value::UserData(ud) if ud.is::<MapUd>() => match ty {
+            Ty::Num | Ty::Len => Ok(Source::Map(ud.borrow::<MapUd>()?.0.clone())),
+            _ => Err(mlua::Error::runtime(format!(
+                "`{name}` doesn't take a number: ui.map gives one"
+            ))),
+        },
         other => {
             let raw = crate::design::is_raw(&other);
             // A colour written out, the commonest string a style takes, is
@@ -6658,6 +6725,42 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })))
     };
     use crate::anime::ease::{Base, Ease, Mode};
+    ui.set(
+        "map",
+        lua.create_function(|lua, (state, opts): (mlua::Value, Table)| {
+            let source = expect_readable(&state, "ui.map's source")?;
+            let env = env(lua)?;
+            let end = |value: mlua::Value, what: &str| -> mlua::Result<MapEnd> {
+                if let Some(state) = state_of(&value) {
+                    return Ok(MapEnd::State(state));
+                }
+                match value {
+                    mlua::Value::Integer(n) => Ok(MapEnd::Num(n as f64)),
+                    mlua::Value::Number(n) => Ok(MapEnd::Num(n)),
+                    mlua::Value::Function(f) => Ok(MapEnd::State(computed(lua, &env, f))),
+                    other => Err(mlua::Error::runtime(format!(
+                        "ui.map's {what} ends are numbers, states or functions, not {}",
+                        other.type_name()
+                    ))),
+                }
+            };
+            let range = |what: &str| -> mlua::Result<[MapEnd; 2]> {
+                let Some(range) = opts.get::<Option<Table>>(what)? else {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.map needs `{what} = {{ start, end }}`"
+                    )));
+                };
+                Ok([end(range.get(1)?, what)?, end(range.get(2)?, what)?])
+            };
+            let spec = MapSpec {
+                source,
+                from: range("from")?,
+                to: range("to")?,
+                clamp: opts.get::<Option<bool>>("clamp")?.unwrap_or(false),
+            };
+            lua.create_userdata(MapUd(Rc::new(spec)))
+        })?,
+    )?;
     ui.set(
         "tween",
         lua.create_function(move |lua, (state, opts): (mlua::Value, Option<Table>)| {
