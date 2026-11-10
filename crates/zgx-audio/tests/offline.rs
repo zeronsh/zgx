@@ -241,6 +241,26 @@ fn the_limiter_keeps_master_under_its_ceiling() {
 }
 
 #[test]
+fn the_limiter_keeps_low_tones_under_its_ceiling_by_its_gain() {
+    // Below about 160 Hz the limiter keeps more gains than above: a tone
+    // at 40 Hz and its octaves, far over the ceiling.
+    let tones: Vec<Sound> = [40., 60., 80., 120.]
+        .map(|hz| sound(&tone(hz, 0.25, RATE), 1, RATE))
+        .to_vec();
+    let out = render(Config::default(), 12_000, |audio| {
+        for tone in &tones {
+            audio.play(tone, Play::new().gain(2.)).unwrap();
+        }
+    });
+    assert!(out.iter().all(|s| s.abs() <= 1.), "past the ceiling");
+    assert!(out.iter().any(|s| s.abs() > 0.99), "limited below it");
+    // Its final clamp keeps any limiter under the ceiling, broken or not:
+    // the reference is what shows the gain did the work (the unit tests
+    // count what the clamp had to correct).
+    reference("limiter_low", &out);
+}
+
+#[test]
 fn sounds_at_other_rates_play_at_their_own_speed() {
     let slow = sound(&tone(1000., 0.01, 24_000), 1, 24_000);
     let wide = sound(
