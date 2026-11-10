@@ -9072,7 +9072,16 @@ impl Scene {
         // The node the walk just left, if it is absolute: nothing of its
         // size reaches past `current`, its parent (`holds_absolute`).
         let mut below_absolute = None;
+        // ZGX_LAYOUT_WHY: why each ancestor wasn't a stop, for a walk that
+        // reaches the root (measuring only).
+        let mut why = layout_why().then(Vec::new);
         let (mut parent, mut ink) = loop {
+            let came_absolute = below_absolute;
+            // As the node stood before this walk marks it.
+            let before = match why.is_some() && !first {
+                true => Some(self.why_not_stop(current, came_absolute)),
+                false => None,
+            };
             // Above `id`, a child of a plain row or column whose answers to
             // it may not have changed: laid out alone if they haven't
             // (`relayout_alone`), its siblings left where they are. Or the
@@ -9126,9 +9135,17 @@ impl Scene {
                 self.alone_pending = true;
                 break (parent, ink);
             }
+            if let (Some(trail), Some(before)) = (why.as_mut(), before) {
+                trail.push(before);
+            }
             match parent {
                 Some(parent) => current = parent,
-                None => return,
+                None => {
+                    if let Some(trail) = why {
+                        self.report_root_walk(id, ALONE, stop, &trail);
+                    }
+                    return;
+                }
             }
             first = false;
         };
@@ -9202,6 +9219,151 @@ impl Scene {
             && parent.alternates.is_empty()
             && parent.sizes.is_empty()
     }
+    /// A node in a `ZGX_LAYOUT_WHY` line: index, kind, box, what its style fixes.
+    #[cold]
+    fn why_describe(&self, id: NodeId) -> String {
+        let node = self.node(id);
+        let kind = match &node.kind {
+            NodeKind::Container(layout) => format!("Container({layout:?})"),
+            NodeKind::Panel { layout, .. } => format!("Panel({layout:?})"),
+            NodeKind::Text { .. } => "Text".into(),
+            NodeKind::RichText { .. } => "RichText".into(),
+            NodeKind::Rect(_) => "Rect".into(),
+            NodeKind::Quad(_) => "Quad".into(),
+            NodeKind::Canvas(_) => "Canvas".into(),
+            NodeKind::Image(_) => "Image".into(),
+            NodeKind::Svg(_) => "Svg".into(),
+            other => format!("{:?}", std::mem::discriminant(other)),
+        };
+        let b = node.bounds;
+        let st = &node.style;
+        format!(
+            "#{} {kind} {}x{} at {},{}{}{}{}{}{}{}",
+            id.index,
+            b.width,
+            b.height,
+            b.x,
+            b.y,
+            if st.absolute { " absolute" } else { "" },
+            if st.relative { " relative" } else { "" },
+            st.width.map_or(String::new(), |w| format!(" w={w}")),
+            st.width_percent
+                .map_or(String::new(), |w| format!(" w%={w}")),
+            st.height.map_or(String::new(), |h| format!(" h={h}")),
+            st.height_percent
+                .map_or(String::new(), |h| format!(" h%={h}")),
+        )
+    }
+    /// Why the walk didn't stop at `id` (`ZGX_LAYOUT_WHY`): each check of
+    /// `stops_alone` it fails, and whether a walk came up through an
+    /// absolute child (`holds_absolute`).
+    #[cold]
+    #[inline(never)]
+    fn why_not_stop(&self, id: NodeId, came_absolute: Option<NodeId>) -> String {
+        let node = self.tree_node(id);
+        let mut why = Vec::new();
+        match came_absolute {
+            Some(child) if self.containing_block(child).is_some() => {
+                why.push("absolute child placed by a relative block above".to_string())
+            }
+            Some(_) => why.push("(absolute child: tried as a stop)".to_string()),
+            None => why.push("(no absolute child, not a content stop: walks on)".to_string()),
+        }
+        if Self::is_layout_boundary(node) {
+            why.push("boundary".into());
+        }
+        if !node.alternates.is_empty() {
+            why.push(format!("alternates {}", node.alternates.len()));
+        }
+        if !node.sizes.is_empty() {
+            why.push(format!("kept sizes {}", node.sizes.len()));
+        }
+        if node.measurement.is_none() {
+            why.push("no measurement".into());
+        }
+        if node.special.any() {
+            why.push("special (contents or zoomed)".into());
+        }
+        let reads = node.reads.get();
+        if reads & (READS_KNOWN | READS_KEPT) == 0 {
+            why.push(format!("reads not known ({reads:#x})"));
+        }
+        match node.parent {
+            None => why.push("root".into()),
+            Some(parent) => {
+                let p = self.tree_node(parent);
+                if node.style.absolute {
+                    if self.containing_block(id).is_some() {
+                        why.push("itself absolute, placed by a relative block above".into());
+                    }
+                } else {
+                    let plain = matches!(
+                        p.kind,
+                        NodeKind::Container(Layout::Row | Layout::Column)
+                            | NodeKind::Panel {
+                                layout: Layout::Row | Layout::Column,
+                                ..
+                            }
+                    );
+                    if !plain {
+                        why.push("parent not a row or column".into());
+                    }
+                    if p.advanced_layout.is_some() {
+                        why.push("parent advanced layout".into());
+                    }
+                    if p.special.any() && p.special != Special::Kept {
+                        why.push("parent special (contents or zoomed)".into());
+                    }
+                    if !p.alternates.is_empty() {
+                        why.push(format!("parent alternates {}", p.alternates.len()));
+                    }
+                    if !p.sizes.is_empty() {
+                        why.push(format!("parent kept sizes {}", p.sizes.len()));
+                    }
+                }
+                if p.measurement.is_none() {
+                    why.push("parent no measurement".into());
+                }
+            }
+        }
+        format!("{} [{}]", self.why_describe(id), why.join(", "))
+    }
+    /// A walk that reached the root (`ZGX_LAYOUT_WHY`): what started it, and
+    /// why each ancestor wasn't a stop; with `ZGX_LAYOUT_WHY=2`, its caller.
+    /// Walks from nodes never laid out (mounts) only with `=all`.
+    #[cold]
+    #[inline(never)]
+    fn report_root_walk(&self, id: NodeId, alone: bool, stop: NodeId, trail: &[String]) {
+        // A node just mounted (never laid out) walks to the root by design:
+        // left out unless asked for (`ZGX_LAYOUT_WHY=all`).
+        let level = std::env::var("ZGX_LAYOUT_WHY").unwrap_or_default();
+        if self.node(id).measurement.is_none() && level != "all" {
+            return;
+        }
+        let mut line = format!(
+            "ZGX_LAYOUT_WHY root walk from {} (content stop {})",
+            self.why_describe(id),
+            match alone {
+                true => format!("#{}", stop.index),
+                false => "none".into(),
+            }
+        );
+        for step in trail {
+            line.push_str("\n    up: ");
+            line.push_str(step);
+        }
+        if level == "2" {
+            let trace = std::backtrace::Backtrace::force_capture().to_string();
+            let frames: Vec<&str> = trace
+                .lines()
+                .filter(|l| l.contains(": ") && !l.contains("std::") && !l.contains("core::"))
+                .take(14)
+                .collect();
+            line.push_str("\n    caller: ");
+            line.push_str(&frames.join("\n            "));
+        }
+        eprintln!("{line}");
+    }
     /// Whether a walk up through absolute node `child` stops at `parent`, to
     /// lay it out alone (`relayout_alone`): `child` is out of the flow, so its
     /// size and place change nothing of `parent`'s own answer, which stands if
@@ -9251,9 +9413,19 @@ impl Scene {
         // Held (`set_style_within`): its parent chose its size, and it answers
         // that as it did or isn't let stand.
         let held = !self.held_alone.is_empty() && self.held_alone.contains(&id);
+        let now_reads = self.reads_bits(id);
         let stands = (held || flexed.is_none())
-            && self.reads_bits(id) == kept_reads
+            && now_reads == kept_reads
             && self.measure_full(id, asked) == was;
+        if !stands && layout_why() {
+            let size = self.tree_node(id).measurement.as_ref().map(|m| m.size);
+            eprintln!(
+                "ZGX_LAYOUT_WHY alone didn't stand: {} flexed {:?} held {held} reads {now_reads:#x} kept {kept_reads:#x} size {:?} was {was:?}",
+                self.why_describe(id),
+                flexed,
+                size
+            );
+        }
         if stands && held {
             // What it answered to other questions read what just changed.
             let node = self.tree_node_mut(id);
@@ -21311,4 +21483,11 @@ fn rect_minus(outer: Rect, inner: Rect) -> impl Iterator<Item = Rect> {
     ]
     .into_iter()
     .filter(|rect| rect.width > 0. && rect.height > 0.)
+}
+
+/// Whether `ZGX_LAYOUT_WHY` is set (read once): layout walks that reach the
+/// root say why each ancestor wasn't a stop, on stderr. For measuring.
+fn layout_why() -> bool {
+    static WHY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WHY.get_or_init(|| std::env::var_os("ZGX_LAYOUT_WHY").is_some_and(|v| v != "0"))
 }
