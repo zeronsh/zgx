@@ -1,7 +1,7 @@
 //! The post chain's passes (design-3d-aaa.md, 6.1): bloom's steps, and the
 //! last pass, which mixes bloom in, exposes the scene, maps its tones and
 //! writes the view's target. Made with a world's first frame with one on.
-use super::graph::{Graph, SCENE};
+use super::graph::{Graph, SCENE, bloom_format};
 use zgx_gpu::wgpu;
 
 /// The last pass's numbers (the shader's `Look`).
@@ -136,7 +136,7 @@ impl Chain {
                 (&shader, entry, &[]),
                 &step_pipeline_layout,
                 wgpu::ColorTargetState {
-                    format: SCENE,
+                    format: bloom_format(device),
                     blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 },

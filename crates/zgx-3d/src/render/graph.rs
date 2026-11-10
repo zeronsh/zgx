@@ -148,15 +148,28 @@ pub(super) struct Chain {
 /// The scene's format where the post chain follows: linear light, past 1.
 pub(super) const SCENE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// Bloom's steps for a frame of `size`: the first half its size, each half
-/// the last, at most 6, the smallest at least 2 pixels a side where the
-/// frame allows.
-pub(super) fn bloom_desc(size: (u32, u32)) -> Desc {
+/// What bloom's steps are drawn in on `device`: three floats in 4 bytes
+/// where it can draw into them, else the scene's format.
+pub(super) fn bloom_format(device: &wgpu::Device) -> wgpu::TextureFormat {
+    if device
+        .features()
+        .contains(wgpu::Features::RG11B10UFLOAT_RENDERABLE)
+    {
+        wgpu::TextureFormat::Rg11b10Ufloat
+    } else {
+        SCENE
+    }
+}
+
+/// Bloom's steps for a frame of `size`, in `format`: the first half its
+/// size, each half the last, at most 6, the smallest at least 2 pixels a
+/// side where the frame allows.
+pub(super) fn bloom_desc(size: (u32, u32), format: wgpu::TextureFormat) -> Desc {
     let half = ((size.0 / 2).max(1), (size.1 / 2).max(1));
     let levels = half.0.min(half.1).ilog2().clamp(1, 6);
     Desc {
         size: half,
-        format: SCENE,
+        format,
         samples: 1,
         levels,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
@@ -284,7 +297,9 @@ impl Graph {
                     Resource::Colour if self.samples > 1 => target(config.size, self.format),
                     Resource::Depth => target(config.size, DEPTH),
                     Resource::Scene if config.post.on => scene,
-                    Resource::Bloom if config.post.bloom => bloom_desc(config.size),
+                    Resource::Bloom if config.post.bloom => {
+                        bloom_desc(config.size, bloom_format(device))
+                    }
                     _ => continue,
                 };
                 debug_assert!(resource.temporary());
@@ -470,7 +485,8 @@ mod tests {
         assert!(targets.scene.is_some() && targets.colour.is_none());
         // Bloom from 32 by 16 down to 2 by 1 (16 is 2 to the 4th: 4 steps).
         assert_eq!(targets.bloom.len(), 4);
-        let steps: u64 = (0..4).map(|l| (32u64 >> l) * (16u64 >> l) * 8).sum();
+        let texel = u64::from(bloom_format(&device).block_copy_size(None).unwrap());
+        let steps: u64 = (0..4).map(|l| (32u64 >> l) * (16u64 >> l) * texel).sum();
         assert_eq!(graph.bytes(), 64 * 32 * (8 + 4) + steps);
         graph.prepare(&device, config(false));
         assert_eq!(

@@ -46,3 +46,7 @@ required-features = ["gltf"]
 [[example]]
 name = "particles_bench"
 required-features = ["particles"]
+
+[[example]]
+name = "post_bench"
+required-features = ["post"]

@@ -207,12 +207,17 @@ fn the_chains_targets_go_as_the_world_rests() {
     let held = window.draw();
     // Without: four samples of colour and of depth, 4 bytes each. With, the
     // samples' colour in 8 bytes, the scene one sample of 8, and bloom's
-    // steps from half its size.
+    // steps from half its size: 4 bytes a texel where the device draws
+    // into three floats packed so, else 8.
     let pixels = u64::from(SIZE * SIZE);
     assert_eq!(plain, pixels * 4 * (4 + 4));
-    let steps: u64 = (0..5).map(|l| u64::from((SIZE / 2) >> l).pow(2) * 8).sum();
-    let chain = pixels * (4 * (8 + 4) + 8) + steps;
-    assert_eq!(world.temporary_bytes(), chain);
+    let steps: u64 = (0..5).map(|l| u64::from((SIZE / 2) >> l).pow(2)).sum();
+    let chain = world.temporary_bytes();
+    assert!(
+        [4, 8].contains(&((chain - pixels * (4 * (8 + 4) + 8)) / steps)),
+        "{chain}"
+    );
+    assert_eq!((chain - pixels * (4 * (8 + 4) + 8)) % steps, 0);
     window.gpu.trim();
     assert_eq!(world.temporary_bytes(), 0);
     // A change and its undoing: a frame, of the world as it was.

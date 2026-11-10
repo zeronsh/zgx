@@ -4130,6 +4130,9 @@ impl GpuContext {
             } else {
                 wgpu::Features::empty()
             } | (adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING)
+                // Half the bytes of a float target where alpha isn't needed
+                // (3D bloom's steps), where the GPU draws into it.
+                | (adapter.features() & wgpu::Features::RG11B10UFLOAT_RENDERABLE)
                 // An app's shaders' bytecode, compiled by FXC elsewhere
                 // (`app_fragment`).
                 | if info.backend == wgpu::Backend::Dx12 {
