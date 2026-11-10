@@ -91,11 +91,17 @@ fn a_show_showing_nothing_takes_no_gap() {
     let mut h = Harness::inline(SHOWS);
     h.settle();
     let (left, right) = (h.bounds("left"), h.bounds("right"));
-    assert!((right.x - (left.x + left.width) - 10.).abs() < 0.01, "one gap: {left:?} {right:?}");
+    assert!(
+        (right.x - (left.x + left.width) - 10.).abs() < 0.01,
+        "one gap: {left:?} {right:?}"
+    );
     h.click("toggle");
     h.settle();
     let (left, right) = (h.bounds("left"), h.bounds("right"));
-    assert!(right.x - (left.x + left.width) > 20., "M and two gaps between: {left:?} {right:?}");
+    assert!(
+        right.x - (left.x + left.width) > 20.,
+        "M and two gaps between: {left:?} {right:?}"
+    );
 }
 
 #[test]
@@ -107,7 +113,10 @@ fn what_a_show_shows_is_named_hit_measured_and_told_its_size() {
     for _ in 0..2 {
         h.click("toggle");
         h.settle();
-        assert!(h.find("role:button \"Inside\"").is_some(), "named for assistive technology");
+        assert!(
+            h.find("role:button \"Inside\"").is_some(),
+            "named for assistive technology"
+        );
         assert_eq!(h.text("measured"), "w=true n=true", "its ref and on_resize");
         // Hit where it is: its click closes it.
         h.click("inside");
@@ -130,7 +139,12 @@ fn a_show_shows_its_otherwise() {
 fn keyed_rows_with_shows_keep_their_state_as_they_move() {
     let mut h = Harness::inline(SHOWS);
     h.settle();
-    let rows = |h: &mut Harness| h.texts().into_iter().filter(|t| t.starts_with("kept")).collect::<Vec<_>>();
+    let rows = |h: &mut Harness| {
+        h.texts()
+            .into_iter()
+            .filter(|t| t.starts_with("kept"))
+            .collect::<Vec<_>>()
+    };
     assert_eq!(rows(&mut h), ["kept a", "kept b", "kept c"]);
     h.click("reverse");
     h.settle();
