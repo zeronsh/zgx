@@ -196,6 +196,13 @@ SCENES = [
     ('list-estimate', 'zgx-script', 'estimate_bench', {}),
     # New text mounting, cold: a word's first shape.
     ('mount-text', 'zgx-script', 'mount_text_bench', {}),
+    # An app's cold start: a chat feed decoded from the script's source into
+    # a state, a keyed list of measured rows built and the first frame laid
+    # out and shaped (Expo Exact's heavy-list shape, made by the bench, not
+    # kept). A change that slows startup shows here. 1,000 messages, a few
+    # percent of the gate's run: the bench's own 10,000 counted 2.8 G, 12%,
+    # and decoding and state cost the same by the message at either size.
+    ('startup', 'zgx-script', 'startup_bench', {'N': '1000'}),
     # A reply's token streamed in, a composer keystroke, a switch.
     ('app-chat', 'zgx-script', 'list_state_bench', {'APP': 'chat', 'REPS': '4'}),
     # A sort with no order kept (the honest whole sort) on its own, as the
