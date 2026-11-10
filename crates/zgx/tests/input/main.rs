@@ -26,6 +26,8 @@ mod focus_groups;
 mod focus_removal;
 #[path = "../focus_visible.rs"]
 mod focus_visible;
+#[path = "../hit_shared_edge.rs"]
+mod hit_shared_edge;
 #[path = "../hit_targets.rs"]
 mod hit_targets;
 #[path = "../hover_nested.rs"]
