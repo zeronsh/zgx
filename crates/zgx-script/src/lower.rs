@@ -8420,9 +8420,17 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
     // Whether any span fades in: known here, so a paragraph none of whose
     // spans does builds them as before, and only one that has one fades them
     // after (`fade_spans`, out of line).
-    let fades = owned
-        .iter()
-        .any(|span| span.rare.as_ref().is_some_and(|rare| rare.fade.is_some()));
+    // (A loop, not a closure: the closures here keep their numbers, which
+    // `scripts/perf/inline_scopes.txt` names the span builder by.)
+    let mut fades = false;
+    for span in &owned {
+        if let Some(rare) = &span.rare
+            && rare.fade.is_some()
+        {
+            fades = true;
+            break;
+        }
+    }
     /// `spans`, made from `owned` one for one, with those whose spans fade in
     /// fading.
     #[cold]
