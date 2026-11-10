@@ -4,6 +4,12 @@ use std::{ops::Range, sync::Arc};
 pub(crate) type RichShaper =
     dyn Fn(&RichText, Option<f32>) -> Box<dyn crate::text_layout::TextLayout>;
 pub(crate) type RichMeasurer = dyn Fn(&RichText, Option<f32>) -> (f32, f32);
+/// Where the glyphs of byte ranges of a rich text lie, laid out `width`
+/// wide and cut below `height` as drawn: each line's from the first such
+/// glyph to the last, its line's height tall, in the layout's coordinates
+/// (`Scene::set_rich_text_inks`). False where the host can't tell.
+pub(crate) type RichInks =
+    dyn Fn(&RichText, f32, f32, &[Range<usize>], &mut Vec<crate::scene::Rect>) -> bool;
 
 /// Measures rich text exactly as layout does: with the host's installed
 /// measurers (prepared text on desktop, where a size at a new width costs line
@@ -467,6 +473,20 @@ impl RichText {
                 && *padding == b.padding
                 && *radius == b.radius
         })
+    }
+    /// The bytes of `self`'s runs whose colour differs from `old`'s, which
+    /// `paints_like` (laid out and painting alike): adjacent ones joined,
+    /// in order, into `ranges`.
+    pub(crate) fn recoloured_ranges(&self, old: &Self, ranges: &mut Vec<Range<usize>>) {
+        for (a, b) in self.runs.iter().zip(old.runs.iter()) {
+            if a.color == b.color {
+                continue;
+            }
+            match ranges.last_mut() {
+                Some(last) if last.end == a.range.start => last.end = a.range.end,
+                _ => ranges.push(a.range.clone()),
+            }
+        }
     }
     pub(crate) fn same_metrics(&self, other: &Self) -> bool {
         self.overflow == other.overflow

@@ -1235,6 +1235,61 @@ impl TextCache {
         let hash = self.entry(fonts, Source::Rich(rich), false, Need::Layout);
         self.laid_out(fonts, hash, width)
     }
+    /// Where the glyphs of `ranges` (bytes of `rich`) lie laid out at
+    /// `width`, cut below `height`, as the renderer places them from these
+    /// lines: for each line holding one, its box from the first such glyph
+    /// to the last (`zgx::scene::Scene::set_rich_text_inks`). False for a
+    /// text `handles` refuses.
+    pub fn inks(
+        &mut self,
+        fonts: &mut FontSystem,
+        rich: &RichText,
+        (width, height): (f32, f32),
+        ranges: &[Range<usize>],
+        out: &mut Vec<zgx::scene::Rect>,
+    ) -> bool {
+        if !Self::handles(rich) {
+            return false;
+        }
+        let laid = self.layout(fonts, rich, Some(width));
+        let starts = laid.line_starts();
+        let (first, last) = (
+            ranges.iter().map(|r| r.start).min().unwrap_or(0),
+            ranges.iter().map(|r| r.end).max().unwrap_or(0),
+        );
+        for run in laid.runs(Some(height)) {
+            let base = starts.get(run.line_i).copied().unwrap_or(0);
+            // (A line wholly before or after them holds none.)
+            match (run.glyphs.first(), run.glyphs.last()) {
+                (Some(a), Some(b))
+                    if base + a.start.min(b.start) < last && first < base + a.end.max(b.end) => {}
+                _ => continue,
+            }
+            let mut span: Option<(f32, f32, f32, f32)> = None;
+            for glyph in run.glyphs {
+                let (start, end) = (base + glyph.start, base + glyph.end.max(glyph.start + 1));
+                if !ranges.iter().any(|r| r.start < end && start < r.end) {
+                    continue;
+                }
+                let x = glyph.x + glyph.font_size * glyph.x_offset;
+                let y = glyph.y - glyph.font_size * glyph.y_offset;
+                let (left, right) = (x.min(x + glyph.w), x.max(x + glyph.w));
+                span = Some(match span {
+                    None => (left, right, y.min(0.), y.max(0.)),
+                    Some((l, r, up, down)) => (l.min(left), r.max(right), up.min(y), down.max(y)),
+                });
+            }
+            if let Some((left, right, up, down)) = span {
+                out.push(zgx::scene::Rect::new(
+                    left,
+                    run.line_top + up,
+                    right - left,
+                    run.line_height + down - up,
+                ));
+            }
+        }
+        true
+    }
     /// Where `rich`'s inline boxes are laid out at `width`: each one's
     /// character's offset, its left and its top (`TextLayout::inline_boxes`),
     /// from the lines drawn. Clamped or ellipsized text, laid out by its own

@@ -18845,6 +18845,15 @@ fn install_text(
             width,
         ))
     });
+    // Where a recoloured run's glyphs lie, from the lines drawn: a fade's
+    // frame damages those, not the paragraph's lines.
+    let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());
+    scene.set_rich_text_inks(move |rich, width, height, ranges, out| {
+        let _span = zgx::profile::nested(zgx::profile::Phase::Text);
+        cache
+            .borrow_mut()
+            .inks(&mut fonts.borrow_mut(), rich, (width, height), ranges, out)
+    });
     // Prepared text: shaped once, then measured at any width by line
     // breaking alone; the renderer draws from the same lines.
     let (fonts, cache) = (shared_fonts.clone(), shared_cache.clone());

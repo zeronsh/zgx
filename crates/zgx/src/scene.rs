@@ -1801,6 +1801,24 @@ fn repaint_flags(dirty: u8) -> u8 {
 /// Whether `new` differs from `old` in colour alone (`PAINT_ONLY`): a rect's
 /// colour, a text's colour, a box's fill or border colour (with no
 /// decoration, whose rasters are kept apart).
+/// Whether `text` holds right-to-left characters, its node's `flags`
+/// remembering when it doesn't (`NON_RTL`). ASCII holds none: a reply
+/// streaming in is checked a word at a time, not a character at a time.
+#[inline(always)]
+fn text_rtl(text: &str, flags: &std::cell::Cell<u8>) -> bool {
+    let validity = flags.get();
+    if validity & NON_RTL != 0 {
+        return false;
+    }
+    let rtl = !text.is_ascii()
+        && text.chars().any(|c| {
+            matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
+        });
+    if !rtl {
+        flags.set(validity | NON_RTL);
+    }
+    rtl
+}
 /// Whether `new`, rich text laid out as `old` is, paints where it does: its
 /// runs' colours alone changed (`RichText::paints_like`). Out of line, as
 /// `Scene::set_kind` asks it of rich text alone.
@@ -3282,6 +3300,13 @@ pub struct Scene {
     rich_min_content: Option<Box<RichMinContent>>,
     rich_measurer: crate::rich_text::TextMeasure,
     rich_shaper: Option<std::rc::Rc<crate::rich_text::RichShaper>>,
+    /// Where a rich text's runs' glyphs lie (`set_rich_text_inks`): a
+    /// recolour damages those alone.
+    rich_inks: Option<Box<crate::rich_text::RichInks>>,
+    /// Rich texts recoloured since the last flush, with the bytes whose
+    /// colour changed (`recolour_rich`): damaged there alone
+    /// (`damage_recoloured`), unless their paint changed otherwise too.
+    recolours: Vec<(NodeId, Vec<std::ops::Range<usize>>)>,
     text_shaper_revision: u32,
     pending_layout_nodes: usize,
     layout_revision: u64,
@@ -3574,6 +3599,8 @@ impl Scene {
             rich_min_content: None,
             rich_measurer: Default::default(),
             rich_shaper: None,
+            rich_inks: None,
+            recolours: Vec::new(),
             text_shaper_revision: 0,
             pending_layout_nodes: 0,
             layout_revision: 0,
@@ -6496,6 +6523,24 @@ impl Scene {
             |shaper| shaper(rich, width),
         )
     }
+    /// Install where a rich text's glyphs lie, from the lines the renderer
+    /// draws (`RichInks`): `inks(text, width, height, ranges, out)` pushes
+    /// onto `out`, for each line holding a glyph of `ranges`, the line's box
+    /// from the first such glyph to the last. A text whose runs change
+    /// colour alone (a fade's frame) is damaged there, not over its lines.
+    pub fn set_rich_text_inks(
+        &mut self,
+        inks: impl Fn(
+            &crate::rich_text::RichText,
+            f32,
+            f32,
+            &[std::ops::Range<usize>],
+            &mut Vec<Rect>,
+        ) -> bool
+        + 'static,
+    ) {
+        self.rich_inks = Some(Box::new(inks));
+    }
     /// Install wrapping plain text's measurement with the widths it holds
     /// for: its size at a limit, and the width up to which (from its widest
     /// line's) its lines break the same. Layout serves a width between from
@@ -7066,6 +7111,12 @@ impl Scene {
         #[cfg(target_os = "macos")]
         let layout_unchanged = layout_unchanged
             || matches!((&self.node(id).kind,&kind),(NodeKind::NativeSurface(old),NodeKind::NativeSurface(new)) if (old.width(),old.height())==(new.width(),new.height()) || (self.node(id).style.width.is_some() && self.node(id).style.height.is_some()));
+        // Rich text laid out alike whose runs paint where they did, their
+        // colours alone changed (a fade's frame): damaged where those runs'
+        // glyphs are, as it flushes (`recolour_rich`).
+        if layout_unchanged && rich_recoloured(&self.node(id).kind, &kind) {
+            return self.recolour_rich(id, kind);
+        }
         self.damage_subtree(id);
         if matches!((&self.node(id).kind, &kind), (NodeKind::Image(old), NodeKind::Image(new))
             if old.transform() != new.transform())
@@ -7077,17 +7128,13 @@ impl Scene {
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
         let colour = paints_only(&self.node(id).kind, &kind);
-        // Recoloured (a colour changed alone; rich text laid out alike whose
-        // runs paint where they did: a fade's frame), it paints where it did,
-        // so the inks and boxes cached for it and its ancestors stand; worked
+        // Recoloured (a colour changed alone), it paints where it did, so
+        // the inks and boxes cached for it and its ancestors stand; worked
         // out again, each frame of a fade walked every ancestor's children.
-        let recoloured =
-            colour || (layout_unchanged && rich_recoloured(&self.node(id).kind, &kind));
         self.node_mut(id).kind = kind;
-        let flags = if colour { PAINT | PAINT_ONLY } else { PAINT };
-        match recoloured {
-            true => self.invalidate_recoloured(id, flags),
-            false => self.invalidate(id, flags),
+        match colour {
+            true => self.invalidate_recoloured(id, PAINT | PAINT_ONLY),
+            false => self.invalidate(id, PAINT),
         }
         if !layout_unchanged {
             self.invalidate_layout(id);
@@ -9042,6 +9089,160 @@ impl Scene {
     }
     // Inlined: each caller's `flags` is a constant, so the bits that demote a
     // repaint (`PAINT_MIXED`, `CHANGED`) are worked out as it compiles.
+    /// `set_kind` for rich text recoloured (`rich_recoloured`): it paints
+    /// where it did, so nothing is damaged now; its runs whose colour
+    /// changed are, as it flushes (`damage_recoloured`), where their glyphs
+    /// are then. Out of line: `set_kind` inlines as it did.
+    #[inline(never)]
+    fn recolour_rich(&mut self, id: NodeId, kind: NodeKind) {
+        if self.rich_inks.is_some()
+            && let (NodeKind::RichText { text: old }, NodeKind::RichText { text: new }) =
+                (&self.node(id).kind, &kind)
+        {
+            let old = old.clone();
+            let at = match self.recolours.iter().position(|(node, _)| *node == id) {
+                Some(at) => at,
+                None => {
+                    self.recolours.push((id, Vec::new()));
+                    self.recolours.len() - 1
+                }
+            };
+            new.recoloured_ranges(&old, &mut self.recolours[at].1);
+        }
+        self.node_mut(id).kind = kind;
+        // Its colours alone changed: `PAINT_ONLY`, which any other change to
+        // its paint before it flushes undoes (`PAINT_MIXED`).
+        self.invalidate_recoloured(id, PAINT | PAINT_ONLY);
+    }
+    /// `damage_node` for a node repainted in colour alone, some recoloured
+    /// rich text among them (`recolours`): that text where the glyphs of its
+    /// recoloured runs are (`damage_inks`), anything else as usual.
+    #[cold]
+    #[inline(never)]
+    fn damage_recoloured(&mut self, id: NodeId) {
+        let ranges = match self.recolours.iter_mut().find(|(node, _)| *node == id) {
+            Some((_, ranges)) => std::mem::take(ranges),
+            None => return self.damage_node(id),
+        };
+        if !self.damage_inks(id, &ranges) {
+            self.damage_node(id);
+        }
+    }
+    /// Whether `ranges` cover all `len` bytes of a text.
+    fn covers(ranges: &[std::ops::Range<usize>], len: usize) -> bool {
+        let mut sorted = ranges.to_vec();
+        sorted.sort_unstable_by_key(|range| range.start);
+        let mut covered = 0;
+        for range in sorted {
+            if range.start > covered {
+                return false;
+            }
+            covered = covered.max(range.end);
+        }
+        covered >= len
+    }
+    /// Damage what rich text `id` paints of the bytes `ranges`: each line's
+    /// glyphs of them (`rich_inks`), padded for what reaches past their
+    /// line (accents, descenders, underlines, italic overhang) as
+    /// `text_ink` pads its lines, within those. False, with nothing
+    /// damaged, where those aren't known: then its whole text is.
+    fn damage_inks(&mut self, id: NodeId, ranges: &[std::ops::Range<usize>]) -> bool {
+        if self.damage_is_full() || !self.shown(id) {
+            return true;
+        }
+        let node = self.node(id);
+        let NodeKind::RichText { text } = &node.kind else {
+            return false;
+        };
+        let style = &node.style;
+        let padded = style.padding != 0.
+            || style
+                .padding_edges
+                .is_some_and(|edges| edges != Insets::default());
+        // Laid out otherwise than `text_ink` knows, blurred, shadowed or
+        // filled with a gradient (each reaching past its glyphs): as usual.
+        // Recoloured whole (a cell or line that came in at once, fading as
+        // one): its whole text, as usual, without asking where its glyphs are.
+        if ranges.is_empty()
+            || Self::covers(ranges, text.text().len())
+            || style.text_options != Default::default()
+            || padded
+            || text.options() != Default::default()
+            || !self.rich_measurer.is_native()
+            || text_rtl(text.text(), &node.bounds_valid)
+            || self.has_text_gradients()
+            || (self.has_text_shadows() && !self.text_shadows(id).is_empty())
+        {
+            return false;
+        }
+        let text = text.clone();
+        // Where it is and what cuts it, as `damage_node` works them out.
+        let past_clip = self.paints_past_clip(id);
+        let (bounds, blur_radius, clip, placement) = if self.transformed + self.filtered.get() > 0 {
+            if self.filtered.get() & POPUPS_BIT != 0 && self.in_popup_cold(id) {
+                return true;
+            }
+            let (bounds, clip, placement) = self.placed(id);
+            let node = self.node(id);
+            let clip = match (past_clip, node.parent) {
+                (false, _) => clip,
+                _ if node.transformed() || node.filtered() => None,
+                (true, Some(parent)) => self.context(parent).1,
+                (true, None) => Some(self.viewport),
+            };
+            (bounds, node.effects.blur_radius, clip, placement)
+        } else {
+            let (bounds, effects, clip) = self.world(id);
+            let clip = match (past_clip, self.node(id).parent) {
+                (false, _) => clip,
+                (true, Some(parent)) => self.world_clip(parent),
+                (true, None) => Some(self.viewport),
+            };
+            (bounds, effects.blur_radius, clip, None)
+        };
+        if blur_radius > 0. {
+            return false;
+        }
+        // Its lines where it's drawn: at its wrap width, `inset` across.
+        let (wrap, inset) = self.text_wrap(id, bounds.width);
+        let mut parts = Vec::new();
+        let Some(inks) = &self.rich_inks else {
+            return false;
+        };
+        if !inks(&text, wrap, bounds.height, ranges, &mut parts) {
+            return false;
+        }
+        let whole = self.text_ink(id, bounds);
+        let font_size = text
+            .runs()
+            .iter()
+            .map(|run| run.font_size)
+            .fold(0., f32::max);
+        let pad = (font_size * 0.3).max(2.);
+        // An underline sits below its baseline by its offset, a double or
+        // wavy one a few of its thicknesses further: the line below may
+        // hold it, which this text's other lines don't damage now. (Within
+        // its whole text's ink still, as damaged before.)
+        let below = text
+            .runs()
+            .iter()
+            .filter_map(|run| {
+                let line = run.underline?;
+                let offset = line.offset_px().unwrap_or(run.font_size * 0.1).abs();
+                Some(offset + 4. * line.thickness())
+            })
+            .fold(0., f32::max);
+        for part in parts {
+            let rect = Rect::new(
+                bounds.x + inset + part.x - pad,
+                bounds.y + part.y - pad,
+                part.width + 2. * pad,
+                part.height + 2. * pad + below,
+            );
+            self.damage_within_placed(rect.intersection(whole), clip, placement);
+        }
+        true
+    }
     /// `invalidate` for a node recoloured (`Scene::set_kind`): where it and
     /// its ancestors paint stands, so their cached inks and boxes are kept.
     /// Out of line, so `set_kind` inlines `invalidate` alone, as it did.
@@ -10650,23 +10851,7 @@ impl Scene {
             }
             size
         };
-        // ASCII holds none: a reply streaming in is checked a word at a
-        // time, not a character at a time.
-        #[inline(always)]
-        fn rtl(text: &str, flags: &std::cell::Cell<u8>) -> bool {
-            let validity = flags.get();
-            if validity & NON_RTL != 0 {
-                return false;
-            }
-            let rtl = !text.is_ascii()
-                && text.chars().any(|c| {
-                matches!(c as u32, 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
-            });
-            if !rtl {
-                flags.set(validity | NON_RTL);
-            }
-            rtl
-        }
+        let rtl = text_rtl;
         let (size, font_size, line, align) = match &node.kind {
             NodeKind::Text {
                 text, font_size, ..
@@ -13609,7 +13794,13 @@ impl Scene {
                 self.repaints.push((*id, repaint_flags(flags)));
             }
             if flags & PAINT != 0 {
-                self.damage_node(*id);
+                // (Recoloured rich text: damaged where its recoloured runs
+                // are, unless its paint changed otherwise too.)
+                match flags & (PAINT_ONLY | PAINT_MIXED) == PAINT_ONLY && !self.recolours.is_empty()
+                {
+                    true => self.damage_recoloured(*id),
+                    false => self.damage_node(*id),
+                }
             }
             if flags & COMPOSITE != 0 {
                 report.composite_nodes += 1;
@@ -13620,6 +13811,7 @@ impl Scene {
         }
         self.dirty = dirty;
         self.dirty.clear();
+        self.recolours.clear();
         self.measure_overflow_fades();
         // Backdrop-filter output depends on pixels behind it, even when its own node is clean.
         // Text shadows reach past their text's ink: where they were and are.
