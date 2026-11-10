@@ -3894,6 +3894,177 @@ mod vocabulary_tests {
         );
     }
 
+    /// A cold projection rebuilds text geometry as well as properties. Only
+    /// its ID assignments are seeded from the live tree, so comparing its
+    /// delta cannot accidentally inherit stale geometry from either cache.
+    #[test]
+    fn scroll_and_same_tick_invalidations_match_a_cold_projection() {
+        let mut ui = Ui::new(500., 500.);
+        ui.set_assistive_technology(true);
+        let offset = ui.signal(0_f32);
+        let words = ui.signal(String::from("First text for a fixed box"));
+        let size = ui.signal(12_f32);
+        let (read_words, read_size) = (words.clone(), size.clone());
+        let view = ui.mount(
+            column()
+                .child(
+                    scroll(offset.clone()).h(180.).child(
+                        column()
+                            .w(350.)
+                            .role(Role::Group)
+                            .accessible_label("Inherited")
+                            .id("parent")
+                            .selectable(true)
+                            .child(
+                                text_signal(move || read_words.get())
+                                    .id("label")
+                                    .w(300.)
+                                    .h(36.)
+                                    .reactive_style(move || {
+                                        Styles::new().text_size(read_size.get())
+                                    }),
+                            )
+                            .child(div().h(600.)),
+                    ),
+                )
+                .child(button().id("button").child("Focus")),
+        );
+        let label = view.find("label").unwrap();
+        let parent = view.find("parent").unwrap();
+        let button = view.find("button").unwrap();
+        let mut live = AccessibilityTree::new();
+        frame(&mut ui, &mut live, None);
+        for step in 0..18 {
+            let old_id = live.ids.get(&label).copied();
+            let old_runs = live.text_runs.get(&label).cloned();
+            let own_revision = ui.semantics.borrow().node_revision(label);
+            offset.set((step % 6) as f32 * 3.);
+            match step {
+                2 => {
+                    ui.semantics
+                        .borrow_mut()
+                        .update(parent, |n| n.disabled = true);
+                }
+                3 => {
+                    ui.semantics
+                        .borrow_mut()
+                        .update(parent, |n| n.disabled = false);
+                }
+                4 => ui.scene.borrow_mut().set_effects(
+                    parent,
+                    zgx::scene::Effects {
+                        opacity: 0.,
+                        ..Default::default()
+                    },
+                ),
+                5 => ui
+                    .scene
+                    .borrow_mut()
+                    .set_effects(parent, zgx::scene::Effects::default()),
+                6 => {
+                    ui.semantics
+                        .borrow_mut()
+                        .update(parent, |n| n.hidden = true);
+                }
+                7 => {
+                    ui.semantics
+                        .borrow_mut()
+                        .update(parent, |n| n.hidden = false);
+                }
+                8 => ui
+                    .scene
+                    .borrow_mut()
+                    .set_clip_inset(parent, Some(zgx::scene::ClipInset::px(3., 2., 4., 1.))),
+                9 => {
+                    words.set("Other text for a fixed box".into());
+                }
+                10 => {
+                    ui.semantics.borrow_mut().update(label, |n| {
+                        n.role = Role::Heading;
+                        n.level = Some(2);
+                    });
+                }
+                11 => {
+                    ui.semantics.borrow_mut().update(label, |n| {
+                        n.role = Role::Label;
+                        n.level = None;
+                    });
+                }
+                12 => {
+                    size.set(20.);
+                }
+                13 => {
+                    size.set(14.);
+                }
+                14 => {
+                    assert!(ui.select_text(
+                        TextPoint {
+                            node: label,
+                            offset: 1
+                        },
+                        TextPoint {
+                            node: label,
+                            offset: 5
+                        }
+                    ));
+                }
+                15 => {
+                    words.set("Third text for a fixed box".into());
+                    size.set(18.);
+                }
+                _ => {}
+            }
+            let focus = (step % 2 == 0).then_some(button);
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+            live.note_flush(&ui.scene.borrow());
+            if matches!(step, 2..=8 | 12 | 13) {
+                assert_eq!(
+                    ui.semantics.borrow().node_revision(label),
+                    own_revision,
+                    "inherited/style changes must be detected without an own semantic revision"
+                );
+            }
+            let before = live.cache.clone();
+            let mut cold = AccessibilityTree::new();
+            cold.ids = live.ids.clone();
+            cold.next = live.next;
+            cold.text_runs = live.text_runs.clone();
+            let scale = 1.;
+            let mut expected = cold.update(
+                &ui.scene.borrow(),
+                &ui.semantics.borrow(),
+                focus,
+                "Test",
+                scale,
+            );
+            expected
+                .nodes
+                .retain(|(id, node)| before.get(id) != Some(node));
+            let update = live.update(
+                &ui.scene.borrow(),
+                &ui.semantics.borrow(),
+                focus,
+                "Test",
+                scale,
+            );
+            assert_eq!(
+                live.cache, cold.cache,
+                "cold cache at same-tick invalidation {step}"
+            );
+            live.assert_same_as(&cold, &update, &expected);
+            assert_eq!(update.nodes, expected.nodes, "delivery order at {step}");
+            if let (Some(was), Some(now)) = (old_id, live.ids.get(&label).copied()) {
+                assert_eq!(was, now, "a retained label keeps its native ID");
+                if let (Some(was), Some(now)) = (old_runs, live.text_runs.get(&label))
+                    && was.len() == now.len()
+                {
+                    assert_eq!(was, *now, "retained runs keep their IDs");
+                }
+            }
+        }
+    }
+
     fn frame_names(ui: &mut Ui, tree: &mut AccessibilityTree, focused: Option<NodeId>) {
         ui.prepare_frame();
         ui.scene.borrow_mut().flush();
