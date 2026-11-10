@@ -11478,8 +11478,8 @@ impl GpuRenderer {
     ///   so what's over it stays legible. A box with no colour of its own
     ///   keeps the frame's error.
     ///
-    /// Blend modes and image effects keep the error: without them an
-    /// inverted icon or a blended text could read as something else.
+    /// Blend modes keep the error: without them a blended text could read
+    /// as something else.
     /// Content blurs, masks and drop shadows draw (`d3d11_effects`).
     #[cfg(d3d11)]
     fn d3d11_leave_out(
@@ -11551,8 +11551,9 @@ impl GpuRenderer {
                 (_, Shading::FilterBlend(_)) => {
                     Some("layer shader reading the backdrop over a box with no colour of its own")
                 }
+                // Its pixel stage made when first drawn (`d3d11_frame::Frame::quads`).
+                (_, Shading::ImageEffect) => None,
                 (_, Shading::Blend) => Some("blend mode"),
-                _ => Some("image effect"),
             })
     }
     /// What a batch of `source` samples with Direct3D 11: the glyph atlas,

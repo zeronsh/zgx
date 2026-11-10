@@ -82,6 +82,9 @@ const POLYLINE_FS: &[u8] = include_bytes!("dxbc/polyline_fs_polyline.dxbc");
 const EFFECTS_VS: &[u8] = include_bytes!("dxbc/effects_vs.dxbc");
 const EFFECTS_ACROSS: &[u8] = include_bytes!("dxbc/effects_fs_across.dxbc");
 const EFFECTS_DOWN: &[u8] = include_bytes!("dxbc/effects_fs_down.dxbc");
+/// Image effects' pixel stage (image_effects.wgsl after draw.wgsl,
+/// `crate::image_effect_source`).
+const IMAGE_EFFECT_FS: &[u8] = include_bytes!("dxbc/image_effects_zgx_image_effect.dxbc");
 
 /// Registers the HLSL is written with (`translate`): the sampled texture
 /// (the atlas, or the shown buffer for copies) in t0, the clip regions in
@@ -226,6 +229,9 @@ pub(crate) struct Device {
     pipelines: [Pipeline; 8],
     /// Layer effects' passes (`Device::effects`): across, then down.
     effect_pipelines: [Pipeline; 2],
+    /// Image effects' pixel stage (`Shading::ImageEffect`), made when an
+    /// image first draws with one (`None`: Direct3D made none).
+    image_effect: std::cell::OnceCell<Option<ID3D11PixelShader>>,
     rasterizer: ID3D11RasterizerState,
     sampler: ID3D11SamplerState,
     /// Pixelated images' sampler, the nearest texel's, made with the first
@@ -413,6 +419,7 @@ impl Device {
             context,
             pipelines,
             effect_pipelines,
+            image_effect: std::cell::OnceCell::new(),
             rasterizer,
             sampler,
             nearest: std::cell::OnceCell::new(),
@@ -1400,6 +1407,31 @@ impl Frame<'_> {
         // own pixel stage, the full pipeline's vertex stage, layout and
         // blending (as wgpu's `fill_pipeline` builds both). Compiled, or its
         // draw would be `Full` (`GpuRenderer::d3d11_app_shaders`).
+        // An image drawn with an effect: image_effects.wgsl's pixel stage,
+        // the rest as a shader fill's.
+        if let (Shading::ImageEffect, false) = (shading, clear) {
+            let device = self.device;
+            let pixel = device.image_effect.get_or_init(|| {
+                let mut shader = None;
+                // SAFETY: DXBC compiled by FXC (`translated_hlsl_matches`).
+                unsafe {
+                    device
+                        .device
+                        .CreatePixelShader(IMAGE_EFFECT_FS, None, Some(&mut shader))
+                }
+                .ok()?;
+                shader
+            });
+            if let Some(pixel) = pixel {
+                self.bind(Bound::Full);
+                self.current = None;
+                // SAFETY: A pixel stage reading what the full vertex stage
+                // writes (draw.wgsl's `Out`), in the registers it binds.
+                unsafe { device.context.PSSetShader(pixel, None) };
+                self.draw(instances);
+                return;
+            }
+        }
         let app = match (shading, clear) {
             (Shading::Fill(id), false) => Some((id, AppShader::Fill)),
             (Shading::Filter(id), false) => Some((id, AppShader::Filter)),
@@ -1692,6 +1724,12 @@ mod tests {
                 Module::Copy,
                 "copy_offset",
                 &[("vs", "vs_5_0", COPY_VS), ("fs", "ps_5_0", COPY_FS)][..],
+            ),
+            (
+                crate::image_effect_source().as_str(),
+                Module::Draw,
+                "image_effects",
+                &[("zgx_image_effect", "ps_5_0", IMAGE_EFFECT_FS)][..],
             ),
             (
                 include_str!("effects.wgsl"),
