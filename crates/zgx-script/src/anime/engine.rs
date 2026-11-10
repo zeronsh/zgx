@@ -478,7 +478,11 @@ impl Clip {
         if self.baking.get() == Baking::Unknown {
             self.baking.set(match self.can_bake() {
                 true => Baking::From(std::time::Instant::now()),
-                false => Baking::Never,
+                false => {
+                    let why = self.why_not_baked();
+                    zgx::profile::note(|| format!("anime loop plays each tick: {why}"));
+                    Baking::Never
+                }
             });
         }
         let Baking::From(from) = self.baking.get() else {
@@ -526,6 +530,36 @@ impl Clip {
                     && matches!(t.key, Key::Opacity | Key::Shader(0))
             })
     }
+    /// The first reason `can_bake` says no, for devtools.
+    #[cfg(target_os = "macos")]
+    fn why_not_baked(&self) -> &'static str {
+        let timing = self.timing.borrow();
+        if !timing.loops.is_infinite() {
+            return "it doesn't loop forever";
+        }
+        if !(timing.iteration.is_finite() && timing.iteration > 0.) {
+            return "its iteration has no length";
+        }
+        if timing.delay != 0. {
+            return "it has a delay";
+        }
+        if timing.speed != 1. || timing.reversed || timing.playback_ease.is_some() {
+            return "its speed, direction or playback ease is changed";
+        }
+        if !timing.frame_rate.is_some_and(|fps| fps > 0.) {
+            return "it has no frameRate";
+        }
+        let callbacks = self.callbacks.borrow();
+        if callbacks.before_update.is_some()
+            || callbacks.update.is_some()
+            || callbacks.render.is_some()
+            || callbacks.loop_.is_some()
+            || !self.marks.borrow().is_empty()
+        {
+            return "a script watches it (a callback or mark)";
+        }
+        "it animates more than one element's opacity and shader time"
+    }
     /// One period of the loop, sampled as `render` would: (opacity, shader
     /// time) at each frame. `None` past `MOST_BAKED`, or if it ever hides
     /// (an item at opacity 0 isn't drawn, so nothing would place its layer).
@@ -570,6 +604,9 @@ impl Clip {
     #[cfg(target_os = "macos")]
     fn bake(self: &Rc<Self>, element: &Rc<Element>) {
         let Some(frames) = self.sampled(element) else {
+            zgx::profile::note(|| {
+                "anime loop plays each tick: a period of over 300 frames, or one that hides".into()
+            });
             self.baking.set(Baking::Never);
             return;
         };

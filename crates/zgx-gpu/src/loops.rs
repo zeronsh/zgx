@@ -22,6 +22,10 @@ use crate::{GpuRenderer, Region};
 use std::rc::Rc;
 use zgx::scene::{BakedLoop, NodeId, NodeKind, PaintItem, Rect, Scene};
 
+/// A declared loop the renderer won't play from a sheet, and why (devtools).
+fn refused(node: NodeId, why: &str) {
+    zgx::profile::note(|| format!("loop @{} drawn each tick: {why}", node.number()));
+}
 /// The most bytes a loop's sheet takes: past it, it stays on Metal rather
 /// than trade driver memory for a large sheet.
 const MOST_BYTES: u64 = 4 << 20;
@@ -360,6 +364,7 @@ impl GpuRenderer {
         // itself, and would draw under the layer.)
         for (node, loop_) in baked {
             if !scene.children(*node).is_empty() {
+                refused(*node, "it has children, which would draw under its layer");
                 loop_.refuse();
             }
         }
@@ -373,6 +378,16 @@ impl GpuRenderer {
                 placed.push((item.clone(), loop_.clone()));
                 return false;
             }
+            refused(
+                item.id,
+                match plays {
+                    false => "this window's frames aren't its own surfaces' (no layer to play it)",
+                    true => {
+                        "a layer over the frames wouldn't show what it does (cut by its clip or \
+                             region, or something painted over it)"
+                    }
+                },
+            );
             loop_.refuse();
             true
         });
@@ -403,9 +418,13 @@ impl GpuRenderer {
             if at.is_none() || stale {
                 self.loop_sheets.retain(|sheet| sheet.node != item.id);
                 let Some(sheet) = self.bake_loop(scene, &item, &loop_, fraction) else {
+                    refused(item.id, "its sheet would pass the bytes loops may take");
                     loop_.refuse();
                     continue;
                 };
+                zgx::profile::note(|| {
+                    format!("loop @{} baked: a layer plays it", item.id.number())
+                });
                 self.loop_sheets.push(sheet);
             }
             let Some(sheet) = self.loop_sheets.iter_mut().find(|s| s.node == item.id) else {
@@ -644,6 +663,10 @@ impl GpuRenderer {
         }
         for item in items {
             if let Some((_, loop_)) = baked.iter().find(|(node, _)| *node == item.id) {
+                refused(
+                    item.id,
+                    "it's in a layer, whose frames would show it frozen",
+                );
                 loop_.refuse();
             }
         }
