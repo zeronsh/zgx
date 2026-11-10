@@ -55,6 +55,11 @@ pub(crate) fn queue<T>(capacity: usize) -> (Producer<T>, Consumer<T>) {
 }
 
 impl<T> Producer<T> {
+    /// Items it holds at most.
+    pub fn capacity(&self) -> usize {
+        self.0.slots.len()
+    }
+
     /// Adds `item`, or gives it back when the queue is full.
     pub fn push(&mut self, item: T) -> Result<(), T> {
         let ring = &*self.0;

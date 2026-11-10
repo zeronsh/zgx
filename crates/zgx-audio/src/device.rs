@@ -18,6 +18,23 @@ pub struct Format {
     pub channels: usize,
 }
 
+impl Format {
+    /// It, if the mixer can run at it: what [`Config::check`] allows of a
+    /// rate (1 kHz to 768 kHz) and of channels (1 to 64).
+    ///
+    /// [`Config::check`]: crate::Config::check
+    fn check(self) -> Result<Format, String> {
+        if (1_000..=768_000).contains(&self.rate) && (1..=64).contains(&self.channels) {
+            Ok(self)
+        } else {
+            Err(format!(
+                "the output asks for {} channels at {} Hz, which the mixer can't run at",
+                self.channels, self.rate
+            ))
+        }
+    }
+}
+
 /// The mixer as a device runs it, block by block on its own thread.
 pub struct Renderer {
     mixer: Mixer,
@@ -52,7 +69,7 @@ impl Renderer {
 
     /// Mixes in `format` from now on. Allocates: call it off the audio
     /// thread, between streams.
-    pub fn set_format(&mut self, format: Format) {
+    pub(crate) fn set_format(&mut self, format: Format) {
         self.mixer.set_rate(format.rate);
         self.channels = format.channels.max(1);
         self.meter
@@ -247,7 +264,10 @@ pub(crate) fn host(
                     Some(held) => held,
                     None => break 'start,
                 };
-                let format = match device.format() {
+                // A format the mixer can't run at (a rate or a channel count
+                // a config couldn't have) is the device failing, not a
+                // stream started at it.
+                let format = match device.format().and_then(|format| format.check()) {
                     Ok(format) => format,
                     Err(why) => {
                         meter.failures.fetch_add(1, Ordering::Relaxed);

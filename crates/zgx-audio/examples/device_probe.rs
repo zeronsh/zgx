@@ -121,7 +121,7 @@ mod probe {
             ..Config::default()
         };
         assert_eq!(config.gain, 0., "every automated run is silent");
-        Audio::with_device(config, Cpal::new().stopping(stopping))
+        Audio::with_device(config, Cpal::new().stopping(stopping)).expect("a config it runs with")
     }
 
     fn click() -> Sound {
@@ -292,7 +292,8 @@ mod probe {
                         .map(|i| ((i * 7919 % 1000) as f32 / 1000. - 0.5) * 0.1)
                         .collect();
                     let bytes =
-                        zgx_audio::wav::write(&noise, 1, 48_000, zgx_audio::wav::Encoding::Float32);
+                        zgx_audio::wav::write(&noise, 1, 48_000, zgx_audio::wav::Encoding::Float32)
+                            .expect("a WAV of noise");
                     let voice = audio
                         .stream(zgx_audio::Source::bytes(bytes), Play::new())
                         .unwrap();
