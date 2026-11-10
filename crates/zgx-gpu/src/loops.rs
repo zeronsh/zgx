@@ -378,16 +378,18 @@ impl GpuRenderer {
                 placed.push((item.clone(), loop_.clone()));
                 return false;
             }
-            refused(
-                item.id,
-                match plays {
-                    false => "this window's frames aren't its own surfaces' (no layer to play it)",
-                    true => {
-                        "a layer over the frames wouldn't show what it does (cut by its clip or \
-                             region, or something painted over it)"
-                    }
-                },
-            );
+            match plays {
+                false => refused(
+                    item.id,
+                    "this window's frames aren't its own surfaces' (no layer to play it)",
+                ),
+                true => {
+                    let why = why_not_shown(scene, item, scale);
+                    zgx::profile::note(|| {
+                        format!("loop @{} drawn each tick: {why}", item.id.number())
+                    });
+                }
+            }
             loop_.refuse();
             true
         });
@@ -793,6 +795,46 @@ impl GpuRenderer {
 
 /// Whether a layer over the frames shows what `item` would there: a lone
 /// box with nothing cutting or covering it, by anything the walk knows of.
+/// Which of `loop_shows`'s conditions fails, for devtools.
+#[cold]
+#[inline(never)]
+fn why_not_shown(scene: &Scene, item: &PaintItem<'_>, scale: f32) -> String {
+    let bounds = item.bounds;
+    let within = |clip: Rect| {
+        clip.x <= bounds.x
+            && clip.y <= bounds.y
+            && clip.x + clip.width >= bounds.x + bounds.width
+            && clip.y + clip.height >= bounds.y + bounds.height
+    };
+    let node = |id: NodeId| format!("@{} ({})", id.number(), zgx::inspect::kind_name(scene, id));
+    if item.isolated {
+        return "it's isolated (a layer of its own)".into();
+    }
+    if item.border_pass {
+        return "it's a border's pass".into();
+    }
+    if item.matrix().is_some() {
+        return "it's scaled or turned".into();
+    }
+    if item.effects.blur_radius > 0. {
+        return "it's blurred".into();
+    }
+    if let Some(clip) = item.clip
+        && !within(clip)
+    {
+        return format!("its clip {clip:?} cuts its box {bounds:?}");
+    }
+    if Region::of(item).is_some_and(|region| !region.covers(bounds, scale)) {
+        return "a rounded clip or fade around it changes its pixels".into();
+    }
+    if !scene.children(item.id).is_empty() {
+        return "it has children".into();
+    }
+    match scene.painted_over_by(item.id, bounds) {
+        Some(over) => format!("{} is painted after it, over its box", node(over)),
+        None => "a layer over the frames wouldn't show what it does".into(),
+    }
+}
 fn loop_shows(scene: &Scene, item: &PaintItem<'_>, scale: f32) -> bool {
     let bounds = item.bounds;
     let within = |clip: Rect| {

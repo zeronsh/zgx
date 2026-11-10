@@ -4117,6 +4117,44 @@ impl Scene {
         }
         false
     }
+    /// `painted_over`'s first node that does, for devtools: what keeps a
+    /// loop on a layer from showing.
+    #[cold]
+    #[inline(never)]
+    #[doc(hidden)]
+    pub fn painted_over_by(&self, id: NodeId, rect: Rect) -> Option<NodeId> {
+        self.settle_children();
+        let mut node = id;
+        while let Some(parent) = self.node(node).parent {
+            let mut offset = Transform::default();
+            let mut up = Some(parent);
+            while let Some(at) = up {
+                let ancestor = self.tree_node(at);
+                offset.x += ancestor.transform.x;
+                offset.y += ancestor.transform.y;
+                up = ancestor.parent;
+            }
+            let children = match self.cold.is_none() {
+                true => self.children_raw(self.tree_node(parent)).as_slice(),
+                false => self.paint_order(parent, self.tree_node(parent)),
+            };
+            let after = children
+                .iter()
+                .position(|child| *child == node)
+                .map_or(0, |at| at + 1);
+            for later in &children[after..] {
+                if self
+                    .ink_alone(*later)
+                    .is_some_and(|ink| ink.translated(offset).intersects(rect))
+                    && self.paints(*later)
+                {
+                    return Some(*later);
+                }
+            }
+            node = parent;
+        }
+        None
+    }
     /// Whether `id` or anything it holds paints: its ink counts a box's bounds
     /// whatever it fills them with, and a box empty but for its layout or clip
     /// (a track waiting for what it unrolls) covers nothing. A layer shader
