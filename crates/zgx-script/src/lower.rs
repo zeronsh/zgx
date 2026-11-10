@@ -8577,6 +8577,13 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                         pad: icon.pad,
                     });
                 }
+                // An inline box: the paragraph's next child in the line.
+                if let Some(inline) = rare.and_then(|rare| rare.inline.as_ref()) {
+                    out = zgx::compose::inline_span().inline_align(inline.align);
+                    if let Some(alt) = &inline.alt {
+                        out = out.alt(alt.clone());
+                    }
+                }
                 out
             })
             .collect()

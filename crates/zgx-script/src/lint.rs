@@ -2232,6 +2232,7 @@ mod tests {
     /// while the interface is built: a window's options, a contribution, a
     /// document parsed into blocks, a 3D scene's objects.
     const BUILDS: &[&str] = &[
+        "inline_box",
         "window",
         "contribute",
         "filter",
