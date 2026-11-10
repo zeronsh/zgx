@@ -438,7 +438,13 @@ impl Mixer {
             self.apply_due();
             let mut n = (frames - done).min(MAX_BLOCK);
             if let Some(next) = self.schedule.peek() {
-                n = n.min(next.time.saturating_sub(self.now).max(1) as usize);
+                // Kept to a block in u64 before it's a usize: a command
+                // 2^32 frames away is no block of 0 on a 32-bit target.
+                let until = next
+                    .time
+                    .saturating_sub(self.now)
+                    .clamp(1, MAX_BLOCK as u64);
+                n = n.min(until as usize);
             }
             self.mix(n);
             let master = &self.buses[0];

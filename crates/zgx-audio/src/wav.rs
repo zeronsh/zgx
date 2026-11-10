@@ -16,9 +16,11 @@ pub fn read(bytes: &[u8]) -> Result<Wav, Error> {
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(bad("not a WAV file"));
     }
-    let mut at = 12;
+    let mut at: usize = 12;
     let mut format: Option<(u16, usize, u32, u16)> = None;
-    while at + 8 <= bytes.len() {
+    // Positions in u64 (a usize is 32 bits on some targets, where a chunk
+    // of 4 GiB would wrap one), made a usize only once within the bytes.
+    while at.checked_add(8).is_some_and(|end| end <= bytes.len()) {
         let id = &bytes[at..at + 4];
         let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
         // A size past the end (a file still being written says 0xFFFFFFFF)
@@ -85,7 +87,8 @@ pub fn read(bytes: &[u8]) -> Result<Wav, Error> {
                 rate,
             });
         }
-        at = at.saturating_add(8 + size + size % 2);
+        let next = at as u64 + 8 + size as u64 + size as u64 % 2;
+        at = usize::try_from(next).unwrap_or(usize::MAX);
     }
     Err(bad("a WAV without data"))
 }
@@ -283,5 +286,42 @@ mod tests {
                 "{channels} channels at {rate} Hz"
             );
         }
+    }
+
+    #[test]
+    fn no_header_however_broken_panics_the_reader() {
+        // Every byte of a good file's first 64 set to values a header's
+        // fields break on, one at a time and in pairs, and every length
+        // cut short: an error or samples, never a panic or a hang.
+        let good = write(&[0.25, -0.5, 0.75, -1.], 2, 48_000, Encoding::Pcm24).unwrap();
+        let values = [0u8, 1, 2, 3, 8, 0x7f, 0x80, 0xf8, 0xfe, 0xff];
+        let mut tried = 0;
+        for at in 0..good.len().min(64) {
+            for &value in &values {
+                let mut bytes = good.clone();
+                bytes[at] = value;
+                let _ = read(&bytes);
+                for other in (at + 1..good.len().min(64)).step_by(3) {
+                    let mut both = bytes.clone();
+                    both[other] = value ^ 0xff;
+                    let _ = read(&both);
+                    tried += 1;
+                }
+            }
+        }
+        for cut in 0..good.len() {
+            let _ = read(&good[..cut]);
+        }
+        // Chunk sizes at the edges of a u32: the next chunk would be at
+        // 8 + size, past the end (or, in a usize of 32 bits, wrapped).
+        for size in [u32::MAX, u32::MAX - 7, u32::MAX - 8, 0x8000_0000] {
+            let mut bytes = good.clone();
+            bytes[16..20].copy_from_slice(&size.to_le_bytes());
+            assert!(read(&bytes).is_err());
+            let mut bytes = good.clone();
+            bytes[40..44].copy_from_slice(&size.to_le_bytes());
+            let _ = read(&bytes);
+        }
+        assert!(tried > 1000);
     }
 }

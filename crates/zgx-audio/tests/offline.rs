@@ -618,3 +618,15 @@ fn commands_far_in_the_future_never_hold_back_one_due_now() {
     audio.update();
     assert!(!voice.playing());
 }
+
+#[test]
+fn a_play_four_billion_frames_away_waits_without_hanging_the_mixer() {
+    let click = blip();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    for far in [1u64 << 32, (1 << 32) + 1, u64::MAX] {
+        audio.play(&click, Play::new().at(Time(far))).unwrap();
+    }
+    let out = mixer.frames(4096);
+    assert!(out.iter().all(|&s| s == 0.));
+    assert_eq!(audio.stats().frames, 4096);
+}
