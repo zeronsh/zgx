@@ -148,3 +148,10 @@ default went through `try_stack_value`, which read the type again
 (`Option<Table>` had already read it) and made a `Value` to unwrap. A code
 editor's highlighter returns its spans this way for each line (zgx #1276).
 Anything but a table converts as before, its error the same.
+
+## Pooled pages in use, for a memory report (zgx-mlua 0.12.8)
+
+`pooled_page_bytes` (`src/memory.rs`) says what pooled Luau pages in use
+take, every VM's together: memory outside the program's heap, which a VM's
+`used_memory` counts with the rest. The pool counts the slots it maps as it
+maps a chunk, so taking and giving a page do as they did (zgx #1841).
