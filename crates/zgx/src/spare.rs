@@ -216,6 +216,12 @@ pub(crate) struct Kept<K> {
     rows: Vec<(K, usize)>,
     /// What each row mounted with, counted once it is kept.
     nodes: crate::scene::NodeMap<usize>,
+    /// The decodes each row out of view asked for its pictures in spare
+    /// time (`ImageData::decode_ahead`), let go as it goes.
+    pictures: crate::scene::NodeMap<Vec<crate::image::Ahead>>,
+    /// Rows out of view haven't all asked for theirs: another turn is wanted
+    /// while there's room for their decodes.
+    unasked: bool,
 }
 /// A list's view as a pass sees it, for [`Kept::merge`].
 pub(crate) struct KeptView {
@@ -243,6 +249,8 @@ impl<K: Eq + Hash + Clone> Kept<K> {
             up: false,
             rows: Vec::new(),
             nodes: Default::default(),
+            pictures: Default::default(),
+            unasked: false,
         })
     }
     /// A pass begins, subscribed to its turn of spare time.
@@ -342,6 +350,9 @@ impl<K: Eq + Hash + Clone> Kept<K> {
             if self.nodes.len() > shown.len() + kept.len() {
                 self.nodes.retain(|node, _| scene.contains(*node));
             }
+            if self.pictures.len() > shown.len() + kept.len() {
+                self.pictures.retain(|node, _| scene.contains(*node));
+            }
         }
         let nodes = |row: &K| {
             node_of(row)
@@ -359,9 +370,13 @@ impl<K: Eq + Hash + Clone> Kept<K> {
         let mut built: Vec<usize> = shown.iter().chain(&kept).map(|(_, index)| *index).collect();
         built.sort_unstable();
         let mut next = rings.next(&range, !self.up, &built, can);
-        if self.ahead.take_may_build()
-            && let Some(index) = next
-        {
+        let turn = self.ahead.take_may_build();
+        // Spare time's turn: the rows out of view ask for their pictures
+        // (laid out, all: a row built this turn is only after).
+        if turn {
+            self.unasked = self.decode_pictures(ui, &kept, &range, node_of);
+        }
+        if turn && let Some(index) = next {
             let row = key(index);
             // Rows moved where nothing said so: the next pass that moves
             // looks again.
@@ -372,14 +387,85 @@ impl<K: Eq + Hash + Clone> Kept<K> {
                 let at = built.partition_point(|row| *row < index);
                 built.insert(at, index);
                 next = rings.next(&range, !self.up, &built, can);
+                // It asks for its pictures next turn, laid out.
+                self.unasked = true;
             }
         }
-        ui.list_wants(&self.ahead, next.is_some());
+        let pictures = self.unasked && crate::image::ahead_room();
+        ui.list_wants(&self.ahead, next.is_some() || pictures);
         drop(in_view);
         kept.extend(shown);
         kept.sort_unstable_by_key(|(_, index)| *index);
         self.rows = kept.clone();
         kept
+    }
+}
+impl<K: Eq + Hash + Clone> Kept<K> {
+    /// Rows out of view not yet asked ask for their pictures' pixels at the
+    /// size they'll be drawn: those the way the view goes first, nearest
+    /// first, while the decodes waiting are few enough (`AHEAD_MOST`). Each
+    /// row's go as it does. Whether rows are left to ask (the room ran out).
+    #[inline(never)]
+    fn decode_pictures(
+        &mut self,
+        ui: &crate::widgets::Ui,
+        kept: &[(K, usize)],
+        shown: &Range<usize>,
+        node_of: &dyn Fn(&K) -> Option<NodeId>,
+    ) -> bool {
+        let up = self.up;
+        let mut rows: Vec<(bool, usize, NodeId)> = kept
+            .iter()
+            .filter_map(|(row, index)| {
+                let node = node_of(row)?;
+                (!self.pictures.contains_key(&node)).then(|| {
+                    let behind = if up {
+                        *index >= shown.end
+                    } else {
+                        *index < shown.start
+                    };
+                    (behind, distance(shown, *index), node)
+                })
+            })
+            .collect();
+        rows.sort_unstable_by_key(|(behind, distance, _)| (*behind, *distance));
+        let scene = ui.scene.borrow();
+        let scale = match scene.pixel_scale() {
+            scale if scale > 0. => scale,
+            _ => 1.,
+        };
+        for (_, _, node) in rows {
+            if !crate::image::ahead_room() {
+                return true;
+            }
+            let mut asked = Vec::new();
+            let mut stack = vec![node];
+            while let Some(at) = stack.pop() {
+                if let crate::scene::NodeKind::Image(image) = scene.kind(at)
+                    && let bounds = scene.bounds(at)
+                    // (Drawing nothing, as a renderer passes it by.)
+                    && image.paint_bounds(bounds).width > 0.
+                    && image.paint_bounds(bounds).height > 0.
+                {
+                    // At the size a renderer draws it: its box, through its
+                    // own transform, in device pixels.
+                    let m = image.transform();
+                    let stretch = (m.a.hypot(m.b)).max(m.c.hypot(m.d));
+                    let drawn = (
+                        bounds.width * scale * stretch,
+                        bounds.height * scale * stretch,
+                    );
+                    let size =
+                        crate::image::fitted_size(image.width(), image.height(), Some(drawn));
+                    if let Some(ahead) = image.decode_ahead(size) {
+                        asked.push(ahead);
+                    }
+                }
+                stack.extend_from_slice(scene.children(at));
+            }
+            self.pictures.insert(node, asked);
+        }
+        false
     }
 }
 fn nodes_under(scene: &crate::scene::Scene, row: NodeId) -> usize {
