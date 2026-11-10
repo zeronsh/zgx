@@ -10746,11 +10746,11 @@ impl GpuRenderer {
             present.changed.extend(regions.iter().map(|(_, s)| *s));
             present.changed.extend(copies.iter().map(|(s, _)| *s));
         }
-        // And for the swap chain's images, which take it at the present.
+        // And for the swap chain's images, which take it at the present
+        // (a window's alone: offscreen, nothing presents).
         #[cfg(target_os = "linux")]
-        {
-            self.swap.changed.extend(regions.iter().map(|(_, s)| *s));
-            self.swap.changed.extend(copies.iter().map(|(s, _)| *s));
+        if self.surface.is_some() {
+            self.swap_changes(&regions, &copies);
         }
         // What the surface lacks: changes since it was last shown that this
         // frame doesn't repaint, and scrolled content; both drawn from the
@@ -15971,6 +15971,17 @@ impl GpuRenderer {
                 );
             }
         }
+    }
+    /// What a frame drawn changes in the retained target, for the swap
+    /// chain's images to take at the present (`SwapHistory`). Out of line:
+    /// every frame's walk (`render_flat_taking`) compiles as it did without
+    /// it.
+    #[cfg(target_os = "linux")]
+    #[cold]
+    #[inline(never)]
+    fn swap_changes(&mut self, regions: &[(Rect, Scissor)], copies: &[ScrollCopy]) {
+        self.swap.changed.extend(regions.iter().map(|(_, s)| *s));
+        self.swap.changed.extend(copies.iter().map(|(s, _)| *s));
     }
     /// `frame`'s image now holds the frame drawn; what it changed since the
     /// last present is the next present's regions.
