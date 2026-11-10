@@ -248,3 +248,20 @@ fn dropping_the_engine_closes_the_device() {
     // The host joined, closing the device on its way out.
     assert_eq!(controls.log(), ["start 48000", "close"]);
 }
+
+#[test]
+fn a_device_that_reports_a_format_the_mixer_can_t_run_at_is_a_failure_not_a_panic() {
+    for rate in [0, 10, 10_000_000] {
+        let (audio, controls) = engine(Duration::from_millis(50));
+        controls.rate.store(rate, Ordering::Relaxed);
+        audio.play(&blip(), Play::new()).unwrap();
+        until("a failure", || audio.stats().failures >= 1);
+        assert_eq!(controls.count("start"), 0, "started at {rate} Hz");
+        let why = audio.device_error().unwrap_or_default();
+        assert!(why.contains(&rate.to_string()), "{rate} Hz: {why}");
+        // A device that comes back right is used.
+        controls.rate.store(48_000, Ordering::Relaxed);
+        audio.play(&blip(), Play::new()).unwrap();
+        until("a start", || audio.stats().running);
+    }
+}
