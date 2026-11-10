@@ -1,5 +1,9 @@
 use zgx::scene::*;
 use zgx_gpu::GpuRenderer;
+
+/// A backdrop blur's passes: one compute pass where Metal is drawn directly
+/// (macOS), else reduce, across and down as render passes.
+const BLUR_PASSES: usize = if cfg!(target_os = "macos") { 1 } else { 3 };
 // These tests create independent devices on the same adapter. Keep their resource
 // lifetimes separate rather than multiplying driver threads/caches by the test
 // runner's CPU count. Tests that exercise shared devices still create multiple
@@ -3547,7 +3551,7 @@ fn bounded_blur_damage_distant_and_backdrop_halo_updates() {
         "small blur halo should remain local: {stats:?}"
     );
     assert_blur_matches_fresh(&gpu, &scene, 240, 160, 1.);
-    assert_eq!(stats.blur_passes, 1);
+    assert_eq!(stats.blur_passes, BLUR_PASSES);
     assert!(stats.render_passes > stats.blur_passes);
     let after = gpu.readback().unwrap();
     let sample = (53 * 240 + 37) * 4;
@@ -4391,7 +4395,9 @@ fn clean_blur_streaming_uses_one_pass_including_isolated_layer_accounting() {
         scene.set_transform(text, Transform { x: 130., y: 120. });
         let damage = scene.flush().damage;
         let initial = gpu.render(&scene, &damage).unwrap();
-        assert_eq!(initial.blur_passes, 1);
+        // One compute pass where Metal draws it directly, three render
+        // passes through wgpu (an isolated layer's, on macOS too).
+        assert!(matches!(initial.blur_passes, 1 | 3), "{initial:?}");
         assert!(initial.render_passes > initial.blur_passes);
         for n in 1..5 {
             scene.set_kind(text, text_kind(n));
@@ -4743,10 +4749,10 @@ fn damaged_blur_batches_surrounding_draws_instead_of_one_pass_each() {
         );
         let d = s.flush().damage;
         let stats = gpu.render(&s, &d).unwrap();
-        assert_eq!(stats.blur_passes, 1);
-        // Clear+draws, the blur's compute pass, then the blur drawn back and the rest.
+        assert_eq!(stats.blur_passes, BLUR_PASSES);
+        // Clear+draws, the blur's passes, then the blur drawn back and the rest.
         assert!(
-            stats.render_passes <= 3,
+            stats.render_passes <= 2 + BLUR_PASSES,
             "{} render passes for one filter",
             stats.render_passes
         );

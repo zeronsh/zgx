@@ -1,7 +1,8 @@
-//! A backdrop blur's stages as one compute pass (blur.wgsl's `cs_*`) draw
-//! the same bytes as the render passes they replace, which remain where an
-//! adapter can't run them (`blur_compute`): frosted panels at 1×, 2× and
-//! 3×, narrow, wide and fading blurs, drawn through wgpu.
+//! macOS: a backdrop blur's stages as one compute pass, where Metal is
+//! drawn directly (blur.wgsl's `cs_*`, metal_frame.rs), draw the same bytes
+//! as the render passes wgpu draws them with: frosted panels at 1×, 2× and
+//! 3×, narrow, wide and fading blurs.
+#![cfg(target_os = "macos")]
 use zgx::scene::*;
 use zgx_gpu::GpuRenderer;
 
@@ -61,35 +62,28 @@ fn scene(sigma: f32, fade: f32) -> Scene {
     s
 }
 
-/// A frame through wgpu, its stages as passes or not, and its blur passes.
-fn frame(passes: bool, scale: f32, sigma: f32, fade: f32) -> (Vec<u8>, usize, bool) {
-    zgx_gpu::debug_blur_passes(passes);
+/// A frame drawn directly with Metal or through wgpu, and its blur passes.
+fn frame(direct: bool, scale: f32, sigma: f32, fade: f32) -> (Vec<u8>, usize) {
     let mut gpu = GpuRenderer::new((160. * scale) as u32, (100. * scale) as u32).unwrap();
-    gpu.set_direct_metal(false);
+    gpu.set_direct_metal(direct);
     gpu.set_scale_factor(scale);
-    let compute = gpu.debug_blur_compute();
     let mut s = scene(sigma, fade);
     let damage = s.flush().damage;
     let stats = gpu.render(&s, &damage).unwrap();
-    assert_eq!(gpu.debug_direct_frames(), 0, "drawn through wgpu");
-    (gpu.readback().unwrap(), stats.blur_passes, compute)
+    (gpu.readback().unwrap(), stats.blur_passes)
 }
 
 #[test]
 fn compute_stages_draw_the_render_passes_bytes() {
     for scale in [1., 2., 3.] {
         for (sigma, fade) in [(2., 0.), (9., 0.), (24., 0.), (10., 24.)] {
-            let (stages, stage_passes, compute) = frame(false, scale, sigma, fade);
-            let (passes, render_passes, fallback) = frame(true, scale, sigma, fade);
-            assert!(!fallback, "the switch takes the render passes");
-            // Metal has them: what's compared there is both paths.
-            assert!(
-                compute || !cfg!(target_os = "macos"),
-                "compute stages on Metal"
+            let (stages, stage_passes) = frame(true, scale, sigma, fade);
+            let (passes, render_passes) = frame(false, scale, sigma, fade);
+            assert_eq!(
+                (stage_passes, render_passes),
+                (1, 3),
+                "one compute pass, three render passes"
             );
-            assert_eq!(render_passes, 3, "reduce, across and down");
-            // Where the adapter has no compute stages, both are passes.
-            assert_eq!(stage_passes, if compute { 1 } else { 3 });
             assert!(
                 stages == passes,
                 "{scale}x, sigma {sigma}, fade {fade}: {} bytes differ",
@@ -97,5 +91,4 @@ fn compute_stages_draw_the_render_passes_bytes() {
             );
         }
     }
-    zgx_gpu::debug_blur_passes(false);
 }
