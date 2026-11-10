@@ -478,6 +478,41 @@ struct PassInputs {
     /// move or a clip changing within them changes nothing it builds.
     shown: (usize, usize),
 }
+/// The ancestor's visible rows, kept out of the pass for a list that
+/// scrolls itself.
+#[inline(never)]
+fn ancestor_shown(
+    window: &crate::compose::AncestorWindow,
+    weak: &crate::widgets::WeakUi,
+    heights: &VariableHeights,
+    overscan: usize,
+) -> (usize, usize) {
+    let model = heights.index.borrow();
+    let Some((top, height)) = window.shown(weak, model.content_height()) else {
+        return (0, 0);
+    };
+    let (range, _) = model.visible_range_and_row(top, height, overscan);
+    (range.start, range.end)
+}
+
+/// Only a list keeping rows needs to distinguish a scroll from heights
+/// settling. Keep that check beside its spare work, out of the ordinary pass.
+#[inline(never)]
+fn kept_settled(
+    anchor: Option<&Anchor>,
+    ancestor: bool,
+    revision: u64,
+    kept_revision: &mut Option<u64>,
+) -> bool {
+    let settled = match anchor {
+        Some(anchor) => anchor.revision != revision,
+        None if ancestor => kept_revision.is_none_or(|was| was != revision),
+        None => true,
+    };
+    *kept_revision = Some(revision);
+    settled
+}
+
 /// `keys`, with what spare time adds (`crate::spare`).
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
@@ -757,15 +792,10 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                 let revision = heights.revision.get();
                 // A list scrolled by the view around it: the part that view
                 // shows. (Read before any return: the pass follows it.)
-                let shown = window
-                    .as_ref()
-                    .and_then(|window| {
-                        let model = heights.index.borrow();
-                        let (top, height) = window.shown(&weak, model.content_height())?;
-                        let (range, _) = model.visible_range_and_row(top, height, overscan);
-                        Some((range.start, range.end))
-                    })
-                    .unwrap_or((0, 0));
+                let shown = match &window {
+                    Some(window) => ancestor_shown(window, &weak, &heights, overscan),
+                    None => (0, 0),
+                };
                 let inputs = PassInputs {
                     revision,
                     mounted,
@@ -1009,12 +1039,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     // Rows' heights changing under the view, not a scroll.
                     // One scrolled by the view around it keeps no anchor (that
                     // view keeps its place): its own last pass says.
-                    let settled = match &anchor {
-                        Some(anchor) => anchor.revision != revision,
-                        None if ancestor => kept_revision.is_none_or(|was| was != revision),
-                        None => true,
-                    };
-                    kept_revision = Some(revision);
+                    let settled =
+                        kept_settled(anchor.as_ref(), ancestor, revision, &mut kept_revision);
                     merge_kept(
                         kept,
                         &mut keys,
