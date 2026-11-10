@@ -11124,6 +11124,19 @@ impl GpuRenderer {
         };
         buffer.waitUntilCompleted();
         let ran = buffer.GPUEndTime() - buffer.GPUStartTime();
+        // When, on the host clock (CLOCK_UPTIME_RAW's, which Metal's GPU
+        // times are in, and the present log's), for devtools. A frame not
+        // waited for at once (drawables) notes it in the frame that waits.
+        let (start, end) = (buffer.GPUStartTime(), buffer.GPUEndTime());
+        if end > 0. {
+            zgx::profile::note(|| {
+                format!(
+                    "GPU ran start_ns={} end_ns={}",
+                    (start * 1e9) as u64,
+                    (end * 1e9) as u64
+                )
+            });
+        }
         self.gpu_time
             .set((ran > 0.).then(|| std::time::Duration::from_secs_f64(ran)));
         if let Some(mapped) = &self.mapped {
