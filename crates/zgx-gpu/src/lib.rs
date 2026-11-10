@@ -11478,8 +11478,6 @@ impl GpuRenderer {
     ///   so what's over it stays legible. A box with no colour of its own
     ///   keeps the frame's error.
     ///
-    /// Blend modes keep the error: without them a blended text could read
-    /// as something else.
     /// Content blurs, masks and drop shadows draw (`d3d11_effects`).
     #[cfg(d3d11)]
     fn d3d11_leave_out(
@@ -11553,7 +11551,8 @@ impl GpuRenderer {
                 }
                 // Its pixel stage made when first drawn (`d3d11_frame::Frame::quads`).
                 (_, Shading::ImageEffect) => None,
-                (_, Shading::Blend) => Some("blend mode"),
+                // Over a copy of the target under it (`d3d11_frame::Frame::blended`).
+                (_, Shading::Blend) => None,
             })
     }
     /// What a batch of `source` samples with Direct3D 11: the glyph atlas,
@@ -11572,6 +11571,34 @@ impl GpuRenderer {
             }
         };
         surface?.srv.as_ref()
+    }
+    /// One batch of a frame drawn with Direct3D 11 (`render_d3d11`): its
+    /// texture bound if another, its scissor, its quads.
+    #[cfg(d3d11)]
+    fn d3d11_batch(
+        &self,
+        frame: &mut d3d11_frame::Frame<'_>,
+        sampled: &mut TextureSource,
+        unpainted: &mut bool,
+        stats: &mut GpuStats,
+        batch: Batch,
+    ) {
+        let Some(rect) = scissor(batch.rect, self.scale, self.width, self.height) else {
+            return;
+        };
+        if batch.source != *sampled {
+            let Some(view) = self.d3d11_texture(batch.source) else {
+                *unpainted = true;
+                return;
+            };
+            frame.texture(view);
+            frame.nearest(matches!(batch.source, TextureSource::Pixelated(_)));
+            *sampled = batch.source;
+        }
+        frame.scissor(rect);
+        frame.quads(batch.shading, false, batch.start..batch.end);
+        stats.draw_calls += 1;
+        stats.instances += (batch.end - batch.start) as usize;
     }
     /// Layer effects' passes with Direct3D 11 (`d3d11_frame::Device::effects`):
     /// `jobs`' quads at instance `first` on, as `effect_quads` lays them out,
@@ -11739,6 +11766,21 @@ impl GpuRenderer {
         if state.atlas.is_none() {
             state.atlas = Some(device.surface(1, 1, false)?);
         }
+        // Blended layers read a copy of the target under them, of its size.
+        let blended: Vec<usize> = draws
+            .iter()
+            .enumerate()
+            .filter(|(_, draw)| draw.shading == Shading::Blend && draw.end > draw.start)
+            .map(|(index, _)| index)
+            .collect();
+        if !blended.is_empty()
+            && state
+                .backdrop
+                .as_ref()
+                .is_none_or(|b| (b.width, b.height) != (width, height))
+        {
+            state.backdrop = Some(device.surface(width, height, false)?);
+        }
         self.whole_frames = 0;
         let first = occluded_from(&quads, &draws, regions, self.scale);
         let state = self.d3d11.as_ref().expect("checked by the caller");
@@ -11784,24 +11826,41 @@ impl GpuRenderer {
                 frame.quads(clear, true, 0..1);
                 stats.draw_calls += 1;
             }
-            self.batches(*region, &draws, first[index], kept, |batch| {
-                let Some(rect) = scissor(batch.rect, self.scale, self.width, self.height) else {
-                    return;
+            // The draws up to each blended one, then it, over what they drew.
+            let mut from = 0;
+            for &at in blended.iter().chain(std::iter::once(&draws.len())) {
+                self.batches(*region, &draws[from..at], first[index], kept, |batch| {
+                    self.d3d11_batch(&mut frame, &mut sampled, &mut unpainted, &mut stats, batch)
+                });
+                from = at + 1;
+                let Some(draw) = draws.get(at) else {
+                    continue;
                 };
-                if batch.source != sampled {
-                    let Some(view) = self.d3d11_texture(batch.source) else {
+                let Some(rect) = region
+                    .intersection(draw.clip)
+                    .and_then(|rect| rect.intersection(draw.bounds))
+                    .and_then(|rect| scissor(rect, self.scale, self.width, self.height))
+                    .filter(|_| draw.end > first[index])
+                else {
+                    continue;
+                };
+                if draw.source != sampled {
+                    let Some(view) = self.d3d11_texture(draw.source) else {
                         unpainted = true;
-                        return;
+                        continue;
                     };
                     frame.texture(view);
-                    frame.nearest(matches!(batch.source, TextureSource::Pixelated(_)));
-                    sampled = batch.source;
+                    frame.nearest(matches!(draw.source, TextureSource::Pixelated(_)));
+                    sampled = draw.source;
                 }
-                frame.scissor(rect);
-                frame.quads(batch.shading, false, batch.start..batch.end);
-                stats.draw_calls += 1;
-                stats.instances += (batch.end - batch.start) as usize;
-            });
+                let backdrop = state.backdrop.as_ref().expect("made above");
+                if frame.blended(target, backdrop, rect, draw.start..draw.end) {
+                    stats.draw_calls += 1;
+                    stats.instances += (draw.end - draw.start) as usize;
+                } else {
+                    unpainted = true;
+                }
+            }
         }
         {
             let _span = zgx::profile::span(zgx::profile::Phase::Submit);
