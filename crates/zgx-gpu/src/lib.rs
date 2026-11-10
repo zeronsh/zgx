@@ -258,7 +258,10 @@ fn scaled_size(size: (u32, u32), image: &zgx::image::ImageData, scale: f32) -> (
     let side = |v: u32, full: u32| ((v as f32 * scale).ceil() as u32).clamp(1, full.max(1));
     (side(size.0, image.width()), side(size.1, image.height()))
 }
-use zgx::image::resample::{halve, shrink};
+use zgx::image::{
+    premultiply,
+    resample::{halve, shrink},
+};
 /// Why an image can have no texture: a frame goes on without it.
 const IMAGE_MISSES: [&str; 2] = [
     "visible images exceed the budget of 16,384",
@@ -16324,39 +16327,6 @@ impl GpuRenderer {
 #[inline]
 pub(crate) fn bgra_to_rgba(word: u32) -> u32 {
     (word & 0xFF00_FF00) | ((word >> 16) & 0xFF) | ((word & 0xFF) << 16)
-}
-
-/// Straight RGBA pixels made premultiplied, in place, sixteen at a time: a
-/// block all opaque (a photo's, a video's) is as it was, one all
-/// transparent (around a canvas's marks) is zeros, and in the rest each
-/// colour is times its alpha, `(c · a + 127) / 255`, exactly, as a multiply
-/// and two shifts in 16 bits. No branch a pixel, so each part is
-/// vectorized: one per pixel (an early return for opaque pixels) made a
-/// canvas's a pixel at a time.
-fn premultiply(pixels: &mut [u8]) {
-    for block in pixels.chunks_mut(64) {
-        let (mut all, mut any) = (255u8, 0u8);
-        for pixel in block.as_chunks::<4>().0 {
-            all &= pixel[3];
-            any |= pixel[3];
-        }
-        if all == 255 {
-            continue;
-        }
-        if any == 0 {
-            block.fill(0);
-            continue;
-        }
-        for pixel in block.as_chunks_mut::<4>().0 {
-            let alpha = u16::from(pixel[3]);
-            for channel in &mut pixel[..3] {
-                // ⌊x / 255⌋ is (x + 1 + (x >> 8)) >> 8 for every x c · a + 127
-                // reaches (at most 65,152, where the sum is 65,407: 16 bits).
-                let x = u16::from(*channel) * alpha + 127;
-                *channel = ((x + 1 + (x >> 8)) >> 8) as u8;
-            }
-        }
-    }
 }
 
 /// What [`GpuRenderer::readback_into`] reads through, kept by whoever reads

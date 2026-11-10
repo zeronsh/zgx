@@ -990,11 +990,35 @@ fn decode_at(
     }
     Some(done)
 }
-fn premultiply(rgba: &mut [u8]) {
-    for pixel in rgba.as_chunks_mut::<4>().0 {
-        let alpha = u16::from(pixel[3]);
-        for channel in &mut pixel[..3] {
-            *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+/// Straight RGBA pixels made premultiplied, in place, sixteen at a time: a
+/// block all opaque (a photo's, a video's) is as it was, one all
+/// transparent (around a canvas's marks) is zeros, and in the rest each
+/// colour is times its alpha, `(c · a + 127) / 255`, exactly, as a multiply
+/// and two shifts in 16 bits. No branch a pixel, so each part is
+/// vectorized: one per pixel (an early return for opaque pixels) made a
+/// canvas's a pixel at a time.
+pub fn premultiply(pixels: &mut [u8]) {
+    for block in pixels.chunks_mut(64) {
+        let (mut all, mut any) = (255u8, 0u8);
+        for pixel in block.as_chunks::<4>().0 {
+            all &= pixel[3];
+            any |= pixel[3];
+        }
+        if all == 255 {
+            continue;
+        }
+        if any == 0 {
+            block.fill(0);
+            continue;
+        }
+        for pixel in block.as_chunks_mut::<4>().0 {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel[..3] {
+                // ⌊x / 255⌋ is (x + 1 + (x >> 8)) >> 8 for every x c · a + 127
+                // reaches (at most 65,152, where the sum is 65,407: 16 bits).
+                let x = u16::from(*channel) * alpha + 127;
+                *channel = ((x + 1 + (x >> 8)) >> 8) as u8;
+            }
         }
     }
 }
@@ -1034,9 +1058,104 @@ pub mod resample {
     /// Premultiplied RGBA `width` by `height` at `to` (no larger), each texel
     /// the area-weighted mean of what it covers: from a halving at most twice
     /// its size, as sharp as a mip level, at any size.
+    ///
+    /// The weights are a product of one along each axis, so the mean is
+    /// taken down each target row's few source rows, then across: a few taps
+    /// each way, not every one of the area, each axis's weights summing to
+    /// one, with no division a texel.
     pub fn shrink(pixels: &[u8], width: u32, height: u32, to: (u32, u32)) -> Vec<u8> {
+        let (tw, th) = (to.0 as usize, to.1 as usize);
+        let (xs, ys) = (Taps::new(width, tw), Taps::new(height, th));
+        let row = width as usize * 4;
+        let mut out = vec![0u8; tw * th * 4];
+        // A target row's source rows, each texel's channels summed down.
+        let mut down = vec![0f32; row];
+        for (ty, target) in out.chunks_exact_mut(tw * 4).enumerate() {
+            down.fill(0.);
+            let (y0, wy) = ys.of(ty);
+            for (dy, &ky) in wy.iter().enumerate() {
+                // (A tap past a row's own span: nothing to add.)
+                if ky == 0. {
+                    continue;
+                }
+                let source = &pixels[(y0 + dy) * row..][..row];
+                for (sum, texel) in down.iter_mut().zip(source) {
+                    *sum += f32::from(*texel) * ky;
+                }
+            }
+            let texels = down.as_chunks::<4>().0;
+            for (tx, out) in target.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let (x0, wx) = xs.of(tx);
+                let mut sum = [0f32; 4];
+                for (texel, kx) in texels[x0..x0 + wx.len()].iter().zip(wx) {
+                    for c in 0..4 {
+                        sum[c] += texel[c] * kx;
+                    }
+                }
+                for c in 0..4 {
+                    out[c] = sum[c].round() as u8;
+                }
+            }
+        }
+        out
+    }
+    /// Each target texel's span along an axis, as as many taps as the widest
+    /// covers (at most three from a halving twice the size): its first
+    /// source texel (moved back from the far edge so that its taps stay in
+    /// it) and the share each takes, summing to one, zero past its own.
+    struct Taps {
+        first: Vec<usize>,
+        weights: Vec<f32>,
+        taps: usize,
+    }
+    impl Taps {
+        fn new(from: u32, to: usize) -> Self {
+            let step = from as f32 / to as f32;
+            let spans: Vec<(u32, Vec<f32>)> = (0..to)
+                .map(|t| {
+                    let (start, end) = (t as f32 * step, (t + 1) as f32 * step);
+                    let first = start.floor() as u32;
+                    let last = (end.ceil() as u32).min(from);
+                    let weights: Vec<f32> = (first..last)
+                        .map(|s| ((s + 1) as f32).min(end) - (s as f32).max(start))
+                        .collect();
+                    let total: f32 = weights.iter().sum();
+                    (first, weights.iter().map(|w| w / total).collect())
+                })
+                .collect();
+            let taps = spans.iter().map(|(_, w)| w.len()).max().unwrap_or(1);
+            let (mut first, mut weights) = (Vec::with_capacity(to), vec![0.; to * taps]);
+            for (t, (own, shares)) in spans.into_iter().enumerate() {
+                // Near the far edge, its taps start earlier; its own shares
+                // then come later among them.
+                let start = (own as usize).min(from as usize - taps);
+                let at = t * taps + own as usize - start;
+                weights[at..at + shares.len()].copy_from_slice(&shares);
+                first.push(start);
+            }
+            Self {
+                first,
+                weights,
+                taps,
+            }
+        }
+        fn of(&self, t: usize) -> (usize, &[f32]) {
+            (self.first[t], &self.weights[t * self.taps..][..self.taps])
+        }
+    }
+}
+
+#[cfg(test)]
+mod resample_tests {
+    use super::resample::shrink;
+
+    /// A texel of a test image, by where it is.
+    type Texel = dyn Fn(u32, u32) -> [u8; 4];
+
+    /// The shrink as it was: each target texel the mean of its whole area,
+    /// divided by its weights' sum.
+    fn by_area(pixels: &[u8], width: u32, height: u32, to: (u32, u32)) -> Vec<u8> {
         let (tw, th) = to;
-        // Each target texel's span along an axis: (first source texel, weights).
         let spans = |from: u32, to: u32| -> Vec<(u32, Vec<f32>)> {
             let step = from as f32 / to as f32;
             (0..to)
@@ -1075,6 +1194,89 @@ pub mod resample {
             }
         }
         out
+    }
+
+    /// Premultiplied RGBA `width` by `height`, each texel from `texel(x, y)`
+    /// (its colour times its alpha).
+    fn image(width: u32, height: u32, texel: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
+        (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let [r, g, b, a] = texel(x, y);
+                let times = |c: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
+                [times(r), times(g), times(b), a]
+            })
+            .collect()
+    }
+
+    /// Shrunk across then down, a texel is what the whole area's mean made
+    /// of it, to the rounding (one 255th), in noise, fine lines, a
+    /// checkerboard and at an edge left over, from just under the size
+    /// drawn to half of it; and a flat colour stays that colour exactly.
+    #[test]
+    fn a_shrink_is_the_mean_of_the_area_each_texel_covers() {
+        let noise = |x: u32, y: u32| {
+            let h = (x.wrapping_mul(73_856_093) ^ y.wrapping_mul(19_349_663))
+                .wrapping_mul(2_654_435_761);
+            [
+                (h >> 24) as u8,
+                (h >> 16) as u8,
+                (h >> 8) as u8,
+                (h as u8) | 1,
+            ]
+        };
+        let lines = |x: u32, _: u32| {
+            if x.is_multiple_of(3) {
+                [255, 255, 255, 255]
+            } else {
+                [0, 0, 0, 255]
+            }
+        };
+        let checks = |x: u32, y: u32| {
+            if (x + y).is_multiple_of(2) {
+                [250, 10, 30, 255]
+            } else {
+                [5, 240, 200, 128]
+            }
+        };
+        let sources: [(&str, &Texel); 3] =
+            [("noise", &noise), ("lines", &lines), ("checks", &checks)];
+        for (name, texel) in sources {
+            for (width, height) in [(161, 97), (64, 64)] {
+                let pixels = image(width, height, texel);
+                for to in [
+                    (width - 1, height - 1),
+                    (width * 2 / 3, height * 3 / 4),
+                    (width.div_ceil(2), height.div_ceil(2)),
+                    (1, 1),
+                ] {
+                    let (now, before) = (
+                        shrink(&pixels, width, height, to),
+                        by_area(&pixels, width, height, to),
+                    );
+                    assert_eq!(now.len(), before.len());
+                    let most = now
+                        .iter()
+                        .zip(&before)
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap();
+                    assert!(
+                        most <= 1,
+                        "{name} {width}x{height} to {to:?}: off by {most}"
+                    );
+                }
+            }
+        }
+        let flat = image(161, 97, |_, _| [37, 180, 90, 255]);
+        let shrunk = shrink(&flat, 161, 97, (100, 61));
+        assert!(
+            shrunk
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|t| *t == [37, 180, 90, 255])
+        );
     }
 }
 
