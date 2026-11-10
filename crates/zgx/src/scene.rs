@@ -14396,6 +14396,30 @@ impl Scene {
             })
             .collect()
     }
+    /// Everything the layer shaders reading the backdrop (and showing) can
+    /// read, in the window, onto `reads` (with no blur radius, as
+    /// `backdrop_filters` pairs them): each one's box grown by its bleed and
+    /// reach. As
+    /// a frame draws what that touches (the renderer's backdrop damage), a
+    /// walk for it must reach that far first, as for `backdrop_filters`.
+    pub fn backdrop_reads(&self, reads: &mut Vec<(Rect, f32)>) {
+        for &id in self.backdrop_readers() {
+            // (One look up the tree a reader: `backdrop_region`'s.)
+            let (bounds, effects, _) = self.world(id);
+            if effects.opacity <= 0.0 {
+                continue;
+            }
+            let bounds = match self.transformed {
+                0 => bounds,
+                _ => self.transformed_world_bounds(id),
+            };
+            let grown = match self.layer_shader(id).filter(|layer| layer.reads_backdrop()) {
+                Some(layer) => bounds.expand(layer.bleed + layer.reach),
+                None => bounds,
+            };
+            reads.push((grown, 0.));
+        }
+    }
     /// The paint items in paint order: the window's with `None` (popups left
     /// out), or popup `root`'s alone.
     pub fn layer_items(&self, root: Option<NodeId>) -> Vec<PaintItem<'_>> {
