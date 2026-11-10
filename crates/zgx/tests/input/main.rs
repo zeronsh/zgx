@@ -36,6 +36,8 @@ mod hover_passed;
 mod hover_refresh;
 #[path = "../hover_removal.rs"]
 mod hover_removal;
+#[path = "../hover_scroll.rs"]
+mod hover_scroll;
 #[path = "../hover_subtree.rs"]
 mod hover_subtree;
 #[path = "../key_activation_target.rs"]
