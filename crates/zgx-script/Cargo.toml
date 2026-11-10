@@ -110,6 +110,11 @@ name = "luau_pages"
 path = "tests/luau_pages.rs"
 
 [[test]]
+# Its own process: it runs itself again as a child, reading its stderr.
+name = "print_whole_lines"
+path = "tests/print_whole_lines.rs"
+
+[[test]]
 # Its own process: it counts with `ZGX_PROFILE` (`zgx::profile::take`).
 name = "md_chunk_flat"
 path = "tests/md_chunk_flat.rs"
