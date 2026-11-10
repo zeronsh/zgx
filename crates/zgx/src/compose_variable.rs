@@ -3,6 +3,13 @@ use super::*;
 use crate::virtual_list::{HeightError, HeightIndex, THINNEST_ROW};
 use std::cell::Cell;
 
+/// Measuring only: whether `ZGX_SNAP_FOLLOW=1` asks a list following its
+/// end to rest on whole device pixels (read once).
+fn snap_follow() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("ZGX_SNAP_FOLLOW").is_ok_and(|v| v == "1"))
+}
+
 /// Cloneable indexed heights with logarithmic point updates and no whole-index clones.
 ///
 /// Heights belong to positions; callers must reorder them with their data. A point
@@ -820,6 +827,17 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         && heights.end.get()
                     {
                         position = limit;
+                        // Measuring only (`ZGX_SNAP_FOLLOW=1`): the end
+                        // followed on whole device pixels, at or above it.
+                        if snap_follow() {
+                            let scale = weak
+                                .upgrade()
+                                .and_then(|ui| ui.scene.try_borrow().ok().map(|s| s.pixel_scale()))
+                                .unwrap_or(0.);
+                            if scale > 0. {
+                                position = ((limit * scale).floor() / scale).max(0.);
+                            }
+                        }
                     } else if let Some(previous) = &anchor
                         && previous.revision != revision
                         && requested == previous.position
