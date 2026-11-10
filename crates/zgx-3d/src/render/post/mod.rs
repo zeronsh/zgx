@@ -51,6 +51,8 @@ struct Binds {
     steps: Vec<wgpu::BindGroup>,
     /// The scene and bloom's first step, read by the last pass.
     last: wgpu::BindGroup,
+    /// The meshes' samples, where the chain resolves them.
+    samples: Option<wgpu::BindGroup>,
 }
 
 /// The chain's pipelines, layouts and the bindings of the graph's targets.
@@ -58,6 +60,9 @@ pub(super) struct Chain {
     shader: wgpu::ShaderModule,
     step_layout: wgpu::BindGroupLayout,
     last_layout: wgpu::BindGroupLayout,
+    samples_layout: wgpu::BindGroupLayout,
+    /// The meshes' samples resolved into the scene.
+    resolve: wgpu::RenderPipeline,
     last_pipeline_layout: wgpu::PipelineLayout,
     sampler: wgpu::Sampler,
     /// Bloom's first step down, the others, and each step up.
@@ -117,6 +122,42 @@ impl Chain {
                 },
             ],
         });
+        let uniform = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let samples_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("3D post, samples"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: true,
+                    },
+                    count: None,
+                },
+                uniform(3),
+            ],
+        });
+        let resolve = pipeline(
+            device,
+            (&shader, "resolve", &[]),
+            &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("3D post, samples"),
+                bind_group_layouts: &[Some(&samples_layout)],
+                immediate_size: 0,
+            }),
+            SCENE.into(),
+        );
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("3D post"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -186,6 +227,8 @@ impl Chain {
             shader,
             step_layout,
             last_layout,
+            samples_layout,
+            resolve,
             last_pipeline_layout,
             sampler,
             first,
@@ -257,8 +300,26 @@ impl Chain {
                     },
                 ],
             });
+            let samples = targets.colour.as_ref().filter(|_| targets.stored);
+            let samples = samples.map(|colour| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("3D post, samples"),
+                    layout: &self.samples_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(colour),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: self.look.as_entire_binding(),
+                        },
+                    ],
+                })
+            });
             self.binds = Some(Binds {
                 compiled: graph.compiled,
+                samples,
                 bytes: graph.bytes(),
                 scene: step(scene),
                 steps: targets.bloom.iter().map(step).collect(),
@@ -266,6 +327,43 @@ impl Chain {
             });
         }
         Some(())
+    }
+
+    /// The meshes' samples resolved into the scene (`Pass::Resolve`).
+    pub(super) fn resolve(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        graph: &Graph,
+    ) {
+        if self.made(device, graph).is_none() {
+            return;
+        }
+        let (Some(binds), Some(scene)) = (
+            &self.binds,
+            graph.targets.as_ref().and_then(|t| t.scene.as_ref()),
+        ) else {
+            return;
+        };
+        let Some(samples) = &binds.samples else {
+            return;
+        };
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("3D post, resolve"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: scene,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.resolve);
+        pass.set_bind_group(0, samples, &[]);
+        pass.draw(0..3, 0..1);
     }
 
     /// Bloom's steps: each made from the one before (the scene for the

@@ -953,6 +953,13 @@ impl Viewport for Renderer {
                     )
                 }
                 #[cfg(feature = "post")]
+                Pass::Resolve => {
+                    let chain = gpu
+                        .post
+                        .get_or_insert_with(|| post::Chain::new(frame.device));
+                    chain.resolve(frame.device, frame.encoder, &gpu.graph);
+                }
+                #[cfg(feature = "post")]
                 Pass::Bloom => {
                     let chain = gpu
                         .post
