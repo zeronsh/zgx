@@ -2,6 +2,7 @@
 /out/
 /miniaudio/miniaudio.h
 /miniaudio/bench
+/miniaudio/effects
 # The kira arm: kept out of the repository until a licence decision on one
 # of its dependencies (triple_buffer, MPL-2.0).
 /kira/

@@ -9,10 +9,12 @@
 //! with a control of the same scene without the effects, which is
 //! subtracted. Every arm checks that each instance ran on every block.
 //! Effects: `none` (an effect that does nothing: what running one costs),
-//! `gain`.
+//! `gain`, `lowpass`, `lowpass24`, `highpass`, `peaking`, and `sweep` (a
+//! low-pass whose cutoff moves the whole time).
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use zgx_audio::{Audio, Bus, Config, Context, Effect, Format, Play, Sound};
+use zgx_audio::effects::{HighPass, LowPass, Peaking, Slope};
+use zgx_audio::{Audio, Bus, Config, Context, Effect, EffectHandle, Format, Play, Ramp, Sound};
 
 const SECONDS: usize = 10;
 const BLOCK: usize = 512;
@@ -76,19 +78,19 @@ impl Effect for Gain {
     }
 }
 
-fn add(name: &str, bus: &Bus, frames: Arc<AtomicU64>) {
+fn add(name: &str, bus: &Bus, frames: Arc<AtomicU64>) -> EffectHandle {
+    fn counted<E: Effect>(bus: &Bus, effect: E, frames: Arc<AtomicU64>) -> EffectHandle {
+        bus.add_effect(Counted { effect, frames }).unwrap()
+    }
     match name {
-        "none" => bus.add_effect(Counted {
-            effect: Nothing,
-            frames,
-        }),
-        "gain" => bus.add_effect(Counted {
-            effect: Gain(0.5),
-            frames,
-        }),
+        "none" => counted(bus, Nothing, frames),
+        "gain" => counted(bus, Gain(0.5), frames),
+        "lowpass" | "sweep" => counted(bus, LowPass::new(2000.), frames),
+        "lowpass24" => counted(bus, LowPass::new(2000.).slope(Slope::Db24), frames),
+        "highpass" => counted(bus, HighPass::new(200.), frames),
+        "peaking" => counted(bus, Peaking::new(1000., 6., 1.), frames),
         other => panic!("no effect named {other:?}"),
     }
-    .unwrap();
 }
 
 /// Instructions for the scene's blocks after the first, and the frames the
@@ -103,7 +105,12 @@ fn run(effect: Option<&str>, instances: usize, sounds: &[Sound]) -> (u64, u64) {
     for i in 0..instances {
         let bus = audio.add_bus(&format!("bus {i}"), &audio.master()).unwrap();
         if let Some(name) = effect {
-            add(name, &bus, frames.clone());
+            let handle = add(name, &bus, frames.clone());
+            if name == "sweep" {
+                handle
+                    .set(LowPass::CUTOFF, 200., Ramp::seconds(SECONDS as f64 + 1.))
+                    .unwrap();
+            }
         }
         let play = Play::new()
             .bus(&bus)

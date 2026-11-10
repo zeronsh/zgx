@@ -46,6 +46,20 @@ Spread, the pan laws differ (kira's near side rises to +3 dB, miniaudio's far si
 
 zgx-audio's 6.84 by stage, from arms that remove one at a time: 3.03 reading the sound (voices at gain 0, read but not mixed), 3.63 gain and pan into the bus (`master` minus `silent`), 0.17 the three buses into master (`buses` minus `master`), and 0.24 the limiter.
 
+## Effects against miniaudio's
+
+`python3 comparisons/audio/run.py --effects` runs each stock effect against miniaudio's that does the same, on the same noise. One instance of each runs on its own looping second for the outputs; past the first 0.1 s (a zgx-audio voice fades in over 1 ms) they must agree to 90 dB under the signal. The cost arms run 16 instances, each on its own bus and looping noise, least of 5 runs, a control without the effects subtracted. zgx-audio's figures include its effect plumbing, about 6 instructions a frame: interleaving the bus's block in and out, its parameters, and keeping its output finite.
+
+Measured Nov 10 2026 on an Apple M1 Max (macOS 26.0.1, rustc 1.99.1, Apple clang 17.0.0).
+
+| effect | output against miniaudio's | zgx-audio | miniaudio |
+| --- | --- | --- | --- |
+| low-pass, 12 dB (`ma_lpf2`, Q 0.707) | 117.4 dB under | 27.70 | 46.61 |
+| low-pass, 24 dB (`ma_lpf`, order 4: Butterworth sections) | 121.3 dB under | 42.76 | 133.62 |
+| high-pass, 12 dB (`ma_hpf2`) | 101.3 dB under | 34.74 | 46.54 |
+| peaking band, +6 dB, Q 1 (`ma_peak2`) | 117.2 dB under | 32.04 | 46.52 |
+| low-pass, its cutoff moving every frame | — (miniaudio has no per-frame modulation) | 93.02 | — |
+
 ## What isn't the same
 
 - kira evaluates every parameter per frame in decibels (two `powf` a frame) and its position in f64, whether or not anything moves. That is most of its flat ~205.

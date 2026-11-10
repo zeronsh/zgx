@@ -8,6 +8,7 @@ each cost arm and prints instructions a voice a frame.
 
     python3 comparisons/audio/run.py            # everything (about 4 minutes)
     python3 comparisons/audio/run.py --sound    # only the same-work check
+    python3 comparisons/audio/run.py --effects  # the stock effects against miniaudio's
 """
 import hashlib
 import os
@@ -21,6 +22,8 @@ MINIAUDIO_TAG = "0.11.25"
 MINIAUDIO_SHA256 = "ac7af4de748b7e26b777f37e01cee313a308a7296a3eb080e2906b320cc55c89"
 HEADER = HERE / "miniaudio" / "miniaudio.h"
 BENCH = HERE / "miniaudio" / "bench"
+EFFECTS = HERE / "miniaudio" / "effects"
+ROOT = HERE.parent.parent
 OUT = HERE / "out"
 
 # (voices, rate, block, pan, ramps, limiter, interpolation, layout)
@@ -53,6 +56,39 @@ MINIAUDIO_ARMS = [
 ]
 
 
+# miniaudio's effect, and zgx-audio's that does the same: one instance of
+# each on its own looping noise for the outputs, 16 for the cost.
+EFFECT_ARMS = [
+    ("lpf2", "lowpass"),
+    ("lpf4", "lowpass24"),
+    ("hpf2", "highpass"),
+    ("peak2", "peaking"),
+]
+
+
+def effects(target):
+    """Each stock effect's output against miniaudio's, then their costs."""
+    subprocess.run(["clang", "-O3", "-std=c11", "-o", str(EFFECTS), str(HERE / "miniaudio" / "effects.c")], check=True)
+    for theirs, ours in EFFECT_ARMS:
+        out = OUT / f"effect-{theirs}.f32"
+        subprocess.run([str(EFFECTS), theirs, "1", str(out)], check=True, stdout=subprocess.DEVNULL)
+        subprocess.run([str(target / "release" / "effects"), ours, str(out)], check=True)
+    for theirs, ours in EFFECT_ARMS:
+        subprocess.run([str(EFFECTS), theirs, "16"], check=True)
+        subprocess.run(
+            ["cargo", "run", "-q", "--release", "-p", "zgx-audio", "--example", "effect_cost", "--", ours, "16"],
+            cwd=ROOT,
+            check=True,
+        )
+    # zgx-audio's cutoff moving the whole time: miniaudio's filters have no
+    # per-frame modulation to compare.
+    subprocess.run(
+        ["cargo", "run", "-q", "--release", "-p", "zgx-audio", "--example", "effect_cost", "--", "sweep", "16"],
+        cwd=ROOT,
+        check=True,
+    )
+
+
 def fetch_header():
     if HEADER.exists() and hashlib.sha256(HEADER.read_bytes()).hexdigest() == MINIAUDIO_SHA256:
         return
@@ -67,16 +103,19 @@ def fetch_header():
 def build():
     subprocess.run(["cargo", "build", "--release", "--locked"], cwd=HERE, check=True)
     subprocess.run(["clang", "-O3", "-std=c11", "-o", str(BENCH), str(HERE / "miniaudio" / "bench.c")], check=True)
-    target = Path(os.environ.get("CARGO_TARGET_DIR", HERE / "target"))
-    return target / "release" / "audio-compare"
+    return Path(os.environ.get("CARGO_TARGET_DIR", HERE / "target"))
 
 
 def main():
     if sys.platform != "darwin":
         sys.exit("macOS only: instructions are read with thread_selfcounts")
     fetch_header()
-    compare = build()
+    target = build()
+    compare = target / "release" / "audio-compare"
     OUT.mkdir(exist_ok=True)
+    if "--effects" in sys.argv:
+        effects(target)
+        return
     for rate in ("48000", "44100"):
         for pan in ("center", "spread"):
             subprocess.run([str(BENCH), "64", rate, "512", pan, "none", str(OUT / f"out-{rate}-{pan}.f32")], check=True)

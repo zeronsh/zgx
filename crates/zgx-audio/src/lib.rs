@@ -30,6 +30,7 @@
 mod decode;
 mod device;
 mod effect;
+pub mod effects;
 mod engine;
 mod limiter;
 mod mixer;

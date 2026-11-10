@@ -1,0 +1,260 @@
+//! The stock effects through the whole engine: each one's response to an
+//! impulse and to a sweep, rendered offline in blocks of several sizes
+//! (which must give the same samples) and compared with a checked-in
+//! reference (tests/references, 24-bit WAV) to within -90 dB; then what
+//! each must do, measured.
+//!
+//! `ZGX_AUDIO_BLESS=1 cargo test -p zgx-audio --test stock_effects` writes
+//! the references anew; say why they changed.
+use std::f64::consts::PI;
+use std::path::PathBuf;
+use zgx_audio::effects::{FLAT, HighPass, LowPass, Peaking, Slope};
+use zgx_audio::{Audio, Bus, Config, Effect, Play, Ramp, Sound, Time, wav};
+
+const RATE: u32 = 48_000;
+/// -90 dB, as a difference of samples.
+const TOLERANCE: f32 = 3.162e-5;
+/// Frames of impulse response, then of sweep.
+const IMPULSE: usize = 2048;
+const SWEEP: usize = 4096;
+
+fn unlimited() -> Config {
+    Config {
+        limiter: None,
+        ..Config::default()
+    }
+}
+
+/// An impulse of half scale (room for a peak's gain under the references'
+/// full scale) on the left at frame 1 and on the right at frame 101 (a
+/// sound's first frame is zero, so it gets no fade in).
+fn impulse() -> Sound {
+    let mut samples = vec![0f32; 512 * 2];
+    samples[2] = 0.5;
+    samples[101 * 2 + 1] = 0.5;
+    Sound::from_samples(&samples, 2, RATE).unwrap()
+}
+
+/// A logarithmic sweep from 20 Hz to 20 kHz, a fifth of full scale (room
+/// for a resonance or a peak's gain under the references' full scale), on
+/// the left; the same, inverted, on the right.
+fn sweep() -> Sound {
+    let (low, high) = (20f64, 20_000f64);
+    let n = SWEEP as f64;
+    let k = (high / low).ln();
+    let samples: Vec<f32> = (0..SWEEP)
+        .flat_map(|i| {
+            let t = i as f64 / f64::from(RATE);
+            let duration = n / f64::from(RATE);
+            let phase = 2. * PI * low * duration / k * ((t / duration * k).exp() - 1.);
+            let s = (phase.sin() * 0.2) as f32;
+            [s, -s]
+        })
+        .collect();
+    Sound::from_samples(&samples, 2, RATE).unwrap()
+}
+
+/// The impulse, then the sweep, through what `add` puts on master, in
+/// blocks of several sizes, which must agree.
+fn respond(add: impl Fn(&Audio, &Bus)) -> Vec<f32> {
+    let (impulse, sweep) = (impulse(), sweep());
+    let mut first: Option<Vec<f32>> = None;
+    for block in [512, 1, 37, 128, 300] {
+        let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+        let master = audio.master();
+        add(&audio, &master);
+        audio.play(&impulse, Play::new()).unwrap();
+        audio
+            .play(&sweep, Play::new().at(Time(IMPULSE as u64)))
+            .unwrap();
+        let mut out = vec![0.; (IMPULSE + SWEEP) * 2];
+        for chunk in out.chunks_mut(block * 2) {
+            mixer.render(chunk);
+        }
+        match &first {
+            None => first = Some(out),
+            Some(first) => {
+                let at = first.iter().zip(&out).position(|(a, b)| a != b);
+                assert_eq!(at, None, "blocks of {block} differ from 512's at {at:?}");
+            }
+        }
+    }
+    first.unwrap()
+}
+
+/// Compares stereo `samples` with the reference `name`.
+fn reference(name: &str, samples: &[f32]) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/references")
+        .join(format!("{name}.wav"));
+    if std::env::var_os("ZGX_AUDIO_BLESS").is_some() {
+        std::fs::write(
+            &path,
+            wav::write(samples, 2, RATE, wav::Encoding::Pcm24).unwrap(),
+        )
+        .unwrap();
+        return;
+    }
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|_| panic!("{} is missing: ZGX_AUDIO_BLESS=1 writes it", path.display()));
+    let expected = wav::read(&bytes).unwrap();
+    assert_eq!((expected.channels, expected.rate), (2, RATE));
+    assert_eq!(
+        expected.samples.len(),
+        samples.len(),
+        "{name}: a different length"
+    );
+    let (at, worst) = expected
+        .samples
+        .iter()
+        .zip(samples)
+        .map(|(a, b)| (a - b).abs())
+        .enumerate()
+        .fold(
+            (0, 0f32),
+            |(at, worst), (i, d)| {
+                if d > worst { (i, d) } else { (at, worst) }
+            },
+        );
+    assert!(
+        worst <= TOLERANCE,
+        "{name}: frame {} differs by {:.1} dB from its reference",
+        at / 2,
+        20. * worst.log10()
+    );
+}
+
+fn channel(samples: &[f32], c: usize) -> Vec<f32> {
+    samples.as_chunks::<2>().0.iter().map(|f| f[c]).collect()
+}
+
+/// The gain of `effect` at `hz`, in decibels: a long sine through it on
+/// master, measured once it has settled.
+fn gain_at(effect: impl Effect + Clone, hz: f64) -> f64 {
+    let frames = 48_000;
+    let tone: Vec<f32> = (0..frames)
+        .map(|i| (2. * PI * hz * i as f64 / f64::from(RATE)).sin() as f32 * 0.25)
+        .collect();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    audio.master().add_effect(effect).unwrap();
+    let tone = Sound::from_samples(&tone, 1, RATE).unwrap();
+    audio.play(&tone, Play::new()).unwrap();
+    let left = channel(&mixer.frames(frames), 0);
+    // A whole number of cycles over the last half second.
+    let (mut re, mut im) = (0f64, 0f64);
+    for (i, &s) in left.iter().enumerate().skip(frames / 2) {
+        let phase = 2. * PI * hz * i as f64 / f64::from(RATE);
+        re += f64::from(s) * phase.sin();
+        im += f64::from(s) * phase.cos();
+    }
+    let amplitude = 2. * (re * re + im * im).sqrt() / (frames / 2) as f64;
+    20. * (amplitude / 0.25).log10()
+}
+
+#[test]
+fn low_pass_filters_respond_as_references_and_fall_12_or_24_db_an_octave() {
+    let out = respond(|_, master| {
+        master.add_effect(LowPass::new(1000.)).unwrap();
+    });
+    reference("lowpass_12", &out);
+    // The impulse response sums to the gain at 0 Hz (1) times the
+    // impulse's (0.5).
+    let sum: f32 = channel(&out, 0)[..IMPULSE].iter().sum();
+    assert!((sum - 0.5).abs() < 1e-3, "{sum}");
+    let out = respond(|_, master| {
+        master
+            .add_effect(LowPass::new(1000.).slope(Slope::Db24))
+            .unwrap();
+    });
+    reference("lowpass_24", &out);
+    // -3 dB at the cutoff for both (Butterworth); then 12 or 24 dB an
+    // octave, two octaves on.
+    for (slope, per_octave) in [(Slope::Db12, 12.), (Slope::Db24, 24.)] {
+        let at = gain_at(LowPass::new(1000.).slope(slope), 1000.);
+        assert!(
+            (at + 3.01).abs() < 0.05,
+            "{slope:?} at its cutoff: {at:.2} dB"
+        );
+        // Two to four times the cutoff: past the knee, short of where the
+        // bilinear transform's warping near half the rate steepens it.
+        let fall = gain_at(LowPass::new(1000.).slope(slope), 2000.)
+            - gain_at(LowPass::new(1000.).slope(slope), 4000.);
+        assert!(
+            (fall - per_octave).abs() < 1.,
+            "{slope:?}: {fall:.1} dB from 2 to 4 kHz"
+        );
+    }
+}
+
+#[test]
+fn a_high_pass_responds_as_its_reference_and_passes_nothing_steady() {
+    let out = respond(|_, master| {
+        master
+            .add_effect(HighPass::new(200.).resonance(2.))
+            .unwrap();
+    });
+    reference("highpass_12", &out);
+    let sum: f32 = channel(&out, 0)[..IMPULSE].iter().sum();
+    assert!(sum.abs() < 1e-3, "{sum}");
+    // Resonance 2: +6 dB at its cutoff (20 log Q).
+    let at = gain_at(HighPass::new(200.).resonance(2.), 200.);
+    assert!((at - 6.02).abs() < 0.05, "{at:.2} dB");
+    let below = gain_at(HighPass::new(200.), 25.);
+    assert!(below < -35., "{below:.1} dB three octaves down");
+}
+
+#[test]
+fn a_peaking_band_lifts_its_centre_by_its_gain_and_leaves_the_rest() {
+    let out = respond(|_, master| {
+        master.add_effect(Peaking::new(1000., 9., 1.4)).unwrap();
+    });
+    reference("peaking", &out);
+    let centre = gain_at(Peaking::new(1000., 9., 1.4), 1000.);
+    assert!((centre - 9.).abs() < 0.02, "{centre:.3} dB");
+    let cut = gain_at(Peaking::new(1000., -12., 0.7), 1000.);
+    assert!((cut + 12.).abs() < 0.02, "{cut:.3} dB");
+    for hz in [30., 15_000.] {
+        let away = gain_at(Peaking::new(1000., 9., 1.4), hz);
+        assert!(away.abs() < 0.2, "{away:.2} dB at {hz} Hz");
+    }
+}
+
+#[test]
+fn a_cutoff_moving_a_frame_at_a_time_lands_on_its_frames_at_any_block_size() {
+    let out = respond(|_, master| {
+        let filter = master.add_effect(LowPass::new(200.).resonance(4.)).unwrap();
+        filter
+            .at(Time(IMPULSE as u64))
+            .set(
+                LowPass::CUTOFF,
+                8000.,
+                Ramp::seconds(SWEEP as f64 / f64::from(RATE)),
+            )
+            .unwrap();
+        filter
+            .at(Time((IMPULSE + SWEEP / 2) as u64))
+            .set(LowPass::RESONANCE, FLAT, Ramp::ms(20.))
+            .unwrap();
+    });
+    reference("lowpass_moving", &out);
+    assert!(out.iter().all(|s| s.is_finite() && s.abs() < 4.));
+}
+
+#[test]
+fn a_ringing_filter_runs_on_after_its_sound_until_its_tail_is_quiet() {
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let world = audio.bus("world").unwrap();
+    // Q 10 at 100 Hz rings for 10.36 * 10 / (pi * 100) = 0.33 s to -90 dB.
+    world.add_effect(LowPass::new(100.).resonance(10.)).unwrap();
+    audio.play(&impulse(), Play::new().bus(&world)).unwrap();
+    let left = channel(&mixer.frames(48_000), 0);
+    // The impulse's sound is 512 frames; the filter rings on, till its
+    // tail has passed (15 840 frames after the sound), and no further.
+    let late = left[15_000..15_100]
+        .iter()
+        .fold(0f32, |m, s| m.max(s.abs()));
+    assert!(late > 0., "silent before its tail was over");
+    let peak = left.iter().fold(0f32, |m, s| m.max(s.abs()));
+    assert!(late < peak * 3.2e-4, "{late} still loud, against {peak}");
+    assert!(left[17_000..].iter().all(|&s| s == 0.), "run past its tail");
+}

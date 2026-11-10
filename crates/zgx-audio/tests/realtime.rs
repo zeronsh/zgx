@@ -611,6 +611,49 @@ fn main() {
     run.render(30);
     run.finish(&mut failures);
 
+    // The stock effects: every filter and slope, their cutoffs, resonances
+    // and gains moving a frame at a time, tails ringing out on silence.
+    let mut run = Run::new("stock effects", Config::default(), floor);
+    let (ui, music, world) = (
+        run.audio.bus("ui").unwrap(),
+        run.audio.bus("music").unwrap(),
+        run.audio.bus("world").unwrap(),
+    );
+    use zgx_audio::effects::{HighPass, LowPass, Peaking, Slope};
+    let low = music
+        .add_effect(LowPass::new(4000.).slope(Slope::Db24).resonance(3.))
+        .unwrap();
+    let high = world.add_effect(HighPass::new(80.)).unwrap();
+    let peak = ui.add_effect(Peaking::new(1000., 9., 2.)).unwrap();
+    music.add_effect(Peaking::new(300., -12., 0.7)).unwrap();
+    for (i, bus) in [&ui, &music, &world].into_iter().enumerate() {
+        run.audio
+            .play(
+                &sounds[i],
+                Play::new().bus(bus).gain(0.3).at(run.at(0.001 * i as f64)),
+            )
+            .unwrap();
+    }
+    run.render(4);
+    low.at(run.at(0.001))
+        .set(LowPass::CUTOFF, 300., Ramp::ms(40.))
+        .unwrap();
+    low.at(run.at(0.002))
+        .set(
+            LowPass::RESONANCE,
+            12.,
+            Ramp::ms(30.).curve(Curve::Exponential),
+        )
+        .unwrap();
+    high.at(run.at(0.001))
+        .set(HighPass::CUTOFF, 2000., Ramp::ms(20.))
+        .unwrap();
+    peak.at(run.at(0.003))
+        .set(Peaking::GAIN, -24., Ramp::ms(25.))
+        .unwrap();
+    run.render(30);
+    run.finish(&mut failures);
+
     if failures.is_empty() {
         println!("the mixer kept the rules");
     } else {
