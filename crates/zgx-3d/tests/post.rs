@@ -424,8 +424,7 @@ fn crop(pixels: &[u8], side: u32, (x0, y0, w): (u32, u32, u32), name: &str) {
     for y in y0..y0 + w {
         for x in x0..x0 + w {
             let at = ((y * side + x) * 4) as usize;
-            // The readback's channel order is the target's: blue first.
-            ppm.extend_from_slice(&[pixels[at + 2], pixels[at + 1], pixels[at]]);
+            ppm.extend_from_slice(&pixels[at..at + 3]);
         }
     }
     std::fs::write(std::path::Path::new(&dir).join(format!("{name}.ppm")), ppm).unwrap();
@@ -505,4 +504,106 @@ fn a_bright_edge_is_as_smooth_with_the_chain_as_without() {
         chain_off <= ldr_off + 0.5,
         "on edges the chain is {chain_off:.2} off the reference, without it {ldr_off:.2}"
     );
+}
+
+#[test]
+fn grading_with_nothing_changed_leaves_the_frame_and_each_part_does_its_own() {
+    let color = [0.2, 0.05, 0.4, 1.];
+    let world = flat(color);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let graded = |window: &mut Window, grade: Grade| {
+        world.set_post(Post {
+            grade: Some(grade),
+            ..Default::default()
+        });
+        at(&window.draw(), SIZE / 2, SIZE / 2)
+    };
+    // The chain on, nothing graded: the colour as without it.
+    world.set_post(Post {
+        vignette: Some(Vignette { intensity: 0. }),
+        ..Default::default()
+    });
+    let plain = at(&window.draw(), SIZE / 2, SIZE / 2);
+    let near = |a: [u8; 4], b: [u8; 4], by: u8| a.iter().zip(&b).all(|(x, y)| x.abs_diff(*y) <= by);
+    let identity = graded(
+        &mut window,
+        Grade {
+            lut: Some(Lut::identity(17)),
+            ..Default::default()
+        },
+    );
+    assert!(near(identity, plain, 1), "{identity:?} against {plain:?}");
+    let [r, g, b, _] = plain;
+    // A table turning each channel over, from a .cube file.
+    let mut cube = String::from("LUT_3D_SIZE 2\n");
+    for i in 0..8 {
+        cube += &format!("{} {} {}\n", 1 - (i & 1), 1 - ((i >> 1) & 1), 1 - (i >> 2));
+    }
+    let inverted = graded(
+        &mut window,
+        Grade {
+            lut: Some(Lut::from_cube(&cube).unwrap()),
+            ..Default::default()
+        },
+    );
+    assert!(
+        near(inverted, [255 - r, 255 - g, 255 - b, 255], 2),
+        "{inverted:?} against {plain:?}"
+    );
+    let grey = graded(
+        &mut window,
+        Grade {
+            saturation: 0.,
+            ..Default::default()
+        },
+    );
+    assert!(
+        grey[0].abs_diff(grey[1]) <= 1 && grey[1].abs_diff(grey[2]) <= 1,
+        "{grey:?}"
+    );
+    let halved = graded(
+        &mut window,
+        Grade {
+            gain: [0.5; 3],
+            ..Default::default()
+        },
+    );
+    assert!(near(halved, [r / 2, g / 2, b / 2, 255], 1), "{halved:?}");
+    let lifted = graded(
+        &mut window,
+        Grade {
+            lift: [0.5; 3],
+            ..Default::default()
+        },
+    );
+    let up = |v: u8| v / 2 + 128;
+    assert!(near(lifted, [up(r), up(g), up(b), 255], 1), "{lifted:?}");
+    let brighter = graded(
+        &mut window,
+        Grade {
+            gamma: [2.; 3],
+            ..Default::default()
+        },
+    );
+    let root = |v: u8| ((f32::from(v) / 255.).sqrt() * 255.).round() as u8;
+    assert!(
+        near(brighter, [root(r), root(g), root(b), 255], 1),
+        "{brighter:?}"
+    );
+    // Warmer: red up, blue down, of a grey.
+    let world = flat([0.2, 0.2, 0.2, 1.]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    world.set_post(Post {
+        grade: Some(Grade {
+            temperature: 0.6,
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let [r, g, b, _] = at(&window.draw(), SIZE / 2, SIZE / 2);
+    assert!(r > g + 4 && g > b + 4, "warm: {r} {g} {b}");
 }

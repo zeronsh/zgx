@@ -876,7 +876,8 @@ impl Viewport for Renderer {
                         .get_or_insert_with(|| post::Chain::new(frame.device));
                     let device = (frame.device, frame.queue);
                     let into = (target, format);
-                    chain.last(device, frame.encoder, &gpu.graph, into, look);
+                    let table = world.post.grade.as_ref().and_then(|g| g.lut.as_ref());
+                    chain.last(device, frame.encoder, &gpu.graph, into, look, table);
                 }
             }
         }
@@ -968,8 +969,13 @@ fn post_look(
     let vignette = post.vignette.map_or(0., |v| v.intensity);
     let grain = post.grain.map_or(0., |g| g.intensity);
     let aberration = post.chromatic_aberration.map_or(0., |c| c.intensity);
+    let grade = post.grade.as_ref();
+    let balance = grade.map_or([1.; 3], |g| g.white_balance());
+    let table = grade.and_then(|g| g.lut.as_ref());
     let mut parts = 0;
     for (on, bit) in [
+        (grade.is_some(), post::Parts::GRADE),
+        (table.is_some(), post::Parts::TABLE),
         (steps > 0, post::Parts::BLOOM),
         (post.vignette.is_some(), post::Parts::VIGNETTE),
         (post.grain.is_some(), post::Parts::GRAIN),
@@ -989,6 +995,24 @@ fn post_look(
             0.,
         ],
         lens: [vignette, grain, aberration, index],
+        balance: [
+            balance[0],
+            balance[1],
+            balance[2],
+            grade.map_or(1., |g| g.saturation),
+        ],
+        lift: {
+            let [r, g, b] = grade.map_or([0.; 3], |g| g.lift);
+            [r, g, b, table.map_or(2., |t| t.size() as f32)]
+        },
+        gamma: {
+            let [r, g, b] = grade.map_or([1.; 3], |g| g.gamma.map(|v| 1. / v));
+            [r, g, b, 0.]
+        },
+        gain: {
+            let [r, g, b] = grade.map_or([1.; 3], |g| g.gain);
+            [r, g, b, 0.]
+        },
     };
     (look, post::Parts(parts))
 }

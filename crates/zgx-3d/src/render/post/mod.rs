@@ -19,6 +19,12 @@ pub(super) struct Look {
     /// The vignette's, grain's and chromatic aberration's intensities, and
     /// the frame's index.
     pub(super) lens: [f32; 4],
+    /// Grading: white balance's factors and saturation, lift and the
+    /// table's size, 1 over gamma, gain.
+    pub(super) balance: [f32; 4],
+    pub(super) lift: [f32; 4],
+    pub(super) gamma: [f32; 4],
+    pub(super) gain: [f32; 4],
 }
 
 /// What the last pass has compiled in: bloom, vignette, grain, chromatic
@@ -30,13 +36,17 @@ impl Parts {
     pub(super) const VIGNETTE: u8 = 2;
     pub(super) const GRAIN: u8 = 4;
     pub(super) const ABERRATION: u8 = 8;
-    fn constants(self) -> [(&'static str, f64); 4] {
+    pub(super) const GRADE: u8 = 16;
+    pub(super) const TABLE: u8 = 32;
+    fn constants(self) -> [(&'static str, f64); 6] {
         let on = |bit: u8| f64::from(u8::from(self.0 & bit != 0));
         [
             ("BLOOM", on(Self::BLOOM)),
             ("VIGNETTE", on(Self::VIGNETTE)),
             ("GRAIN", on(Self::GRAIN)),
             ("ABERRATION", on(Self::ABERRATION)),
+            ("GRADE", on(Self::GRADE)),
+            ("TABLE", on(Self::TABLE)),
         ]
     }
 }
@@ -75,6 +85,8 @@ pub(super) struct Chain {
     look: wgpu::Buffer,
     /// What the last pass reads for bloom without it.
     stand_in: wgpu::TextureView,
+    /// The grading table on the device, by its id.
+    table: Option<(u64, wgpu::TextureView)>,
     binds: Option<Binds>,
 }
 
@@ -111,6 +123,7 @@ impl Chain {
                 texture(0),
                 texture(1),
                 texture(4),
+                texture(5),
                 sampler_entry(2),
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
@@ -239,6 +252,7 @@ impl Chain {
             lasts: Vec::new(),
             look,
             stand_in,
+            table: None,
             binds: None,
         }
     }
@@ -306,6 +320,12 @@ impl Chain {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(wider),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(
+                            self.table.as_ref().map_or(&self.stand_in, |(_, view)| view),
+                        ),
                     },
                 ],
             });
@@ -438,7 +458,24 @@ impl Chain {
         graph: &Graph,
         (target, format): (&wgpu::TextureView, wgpu::TextureFormat),
         (look, parts): (Look, Parts),
+        table: Option<&crate::Lut>,
     ) {
+        // The grading table uploaded as it changes (its binding with it).
+        if let Some(lut) = table
+            && self.table.as_ref().is_none_or(|(id, _)| *id != lut.id())
+        {
+            let n = lut.size();
+            let texture = zgx_gpu::viewport::texture_with_levels(
+                device,
+                queue,
+                (n * n, n),
+                wgpu::TextureFormat::Rgba8Unorm,
+                &[lut.strip()],
+                "3D grading table",
+            );
+            self.table = Some((lut.id(), texture.create_view(&Default::default())));
+            self.binds = None;
+        }
         let key = (format, parts);
         if !self.lasts.iter().any(|(k, _)| *k == key) {
             let made = pipeline(
