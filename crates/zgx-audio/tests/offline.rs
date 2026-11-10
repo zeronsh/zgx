@@ -630,3 +630,19 @@ fn a_play_four_billion_frames_away_waits_without_hanging_the_mixer() {
     assert!(out.iter().all(|&s| s == 0.));
     assert_eq!(audio.stats().frames, 4096);
 }
+
+#[test]
+fn a_sound_at_a_rate_the_mixer_can_t_play_is_an_error() {
+    for rate in [0, 999, 768_001, u32::MAX] {
+        assert!(
+            Sound::from_samples(&[0., 0.5], 1, rate).is_err(),
+            "{rate} Hz"
+        );
+    }
+    for rate in [1_000, 768_000] {
+        assert!(
+            Sound::from_samples(&[0., 0.5], 1, rate).is_ok(),
+            "{rate} Hz"
+        );
+    }
+}
