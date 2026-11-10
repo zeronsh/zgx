@@ -424,6 +424,21 @@ fn fill_frames(scale: f32) -> Vec<Vec<u8>> {
 /// they would match.
 #[cfg(windows)]
 fn layer_frames(scale: f32) -> Vec<Vec<u8>> {
+    shader_frames(scale, false)
+}
+
+/// As `layer_frames`, of every ready-made layer shader reading the backdrop
+/// but not blurring it (glass, `zgx_fx`'s), and a glass of zgx's own mixing
+/// the backdrop with the box. Each cell is damaged at each moment: a frame
+/// of several regions, whose backdrop reads may reach past their own.
+#[cfg(windows)]
+fn glass_frames(scale: f32) -> Vec<Vec<u8>> {
+    shader_frames(scale, true)
+}
+
+/// The frames `layer_frames` or (`glass`) `glass_frames` draw.
+#[cfg(windows)]
+fn shader_frames(scale: f32, glass: bool) -> Vec<Vec<u8>> {
     use std::time::{Duration, Instant};
     use zgx::decoration::{ShaderUniforms, color_filter_shader};
     use zgx::scene::*;
@@ -431,7 +446,9 @@ fn layer_frames(scale: f32) -> Vec<Vec<u8>> {
     let mut layers: Vec<(String, Option<zgx_fx::Fx>)> = zgx_fx::catalog()
         .into_iter()
         .filter(|(_, fx)| {
-            fx.kind() == zgx_fx::FxKind::Layer && fx.frost() == 0. && !fx.shader().reads_backdrop()
+            fx.kind() == zgx_fx::FxKind::Layer
+                && fx.frost() == 0.
+                && fx.shader().reads_backdrop() == glass
         })
         .map(|(name, fx)| {
             // A one-shot alive since `start`, seen a moment on.
@@ -439,8 +456,20 @@ fn layer_frames(scale: f32) -> Vec<Vec<u8>> {
             (name, Some(fx))
         })
         .collect();
-    assert!(layers.len() >= 10, "{} layer shaders", layers.len());
-    layers.push(("hue_rotate".into(), None));
+    match glass {
+        false => {
+            assert!(layers.len() >= 10, "{} layer shaders", layers.len());
+            layers.push(("hue_rotate".into(), None));
+        }
+        true => layers.push(("glass mix".into(), None)),
+    }
+    let mix = zgx::decoration::FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+    let behind = zgx_backdrop(input.p + vec2(6. * sin(input.time * 3.), 4.));
+    return vec4(mix(behind.rgb, input.color.rgb, 0.35), max(behind.a, input.color.a));
+}",
+        None,
+    );
     let (cell, columns) = (LAYER_CELL, LAYER_COLUMNS);
     let size = (
         cell.0 * columns as f32,
@@ -488,7 +517,7 @@ fn layer_frames(scale: f32) -> Vec<Vec<u8>> {
                         // 11 compiles from two modules. As a fill it doesn't
                         // validate (no `fill`) and the box draws its colour;
                         // as the layer's shader it must still draw.
-                        decoration: fx.is_none().then(|| {
+                        decoration: (fx.is_none() && !glass).then(|| {
                             std::sync::Arc::new(zgx::decoration::Decoration {
                                 background: Some(zgx::decoration::Background::Shader(
                                     color_filter_shader(),
@@ -525,6 +554,16 @@ fn layer_frames(scale: f32) -> Vec<Vec<u8>> {
             match (time, fx) {
                 (None, _) => {}
                 (Some(time), Some(fx)) => fx.apply(&mut scene, id, time, false, later),
+                (Some(time), None) if glass => {
+                    scene.set_layer_shader(id, Some(mix.clone()));
+                    scene.set_layer_uniforms(
+                        id,
+                        ShaderUniforms {
+                            time,
+                            params: [[0.; 4]; 4],
+                        },
+                    );
+                }
                 (Some(_), None) => {
                     let matrix = hue_rotate_matrix(120.);
                     scene.set_layer_shader(id, Some(color_filter_shader()));
@@ -574,8 +613,125 @@ fn frames(scale: f32) -> Vec<Vec<u8>> {
     all.extend(effect_frames(scale));
     all.extend(image_effect_frames(scale));
     all.extend(blend_frames(scale));
+    all.extend(glass_frames(scale));
+    all.extend(cross_region_frames(scale));
     all
 }
+
+/// Glass on a frame whose damage the scene's grid cuts (`CROSS_NAMES`): a
+/// box reading a bar 140 points below it (`zgx_backdrop` at an offset, its
+/// reach past it), a box beside the read from the bar's rows down, and 80
+/// dots far off, all changing in the second frame: past `DAMAGE_RECTS`, the
+/// damage goes on the grid, whose runs cut the read where the side box
+/// starts. (The renderer draws the read as one region again,
+/// `layer_shader.rs`'s `a_backdrop_read_is_never_split_between_regions`.)
+/// The glass must show the bar's new colour.
+#[cfg(windows)]
+fn cross_region_frames(scale: f32) -> Vec<Vec<u8>> {
+    use zgx::decoration::{FillShader, ShaderUniforms};
+    use zgx::scene::*;
+    let size = CROSS_SIZE;
+    let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let mut scene = Scene::new(size.0, size.1);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    let fixed = |width: f32, height: f32| Style {
+        width: Some(width),
+        height: Some(height),
+        ..Default::default()
+    };
+    let reading = FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+    let behind = zgx_backdrop(input.p + vec2(0., input.params[0].x));
+    return vec4(mix(behind.rgb, input.color.rgb, 0.2), 1.);
+}",
+        None,
+    );
+    let bar = scene.append(
+        root,
+        NodeKind::Rect(Color(200, 40, 40, 255)),
+        fixed(200., 20.),
+    );
+    scene.set_transform(bar, Transform { x: 40., y: 180. });
+    let side = scene.append(
+        root,
+        NodeKind::Rect(Color(30, 60, 200, 255)),
+        fixed(410., 300.),
+    );
+    scene.set_transform(side, Transform { x: 390., y: 176. });
+    let glass = scene.append(
+        root,
+        NodeKind::Panel {
+            layout: Layout::Overlay,
+            quad: QuadStyle {
+                fill: Color(20, 24, 32, 255),
+                ..Default::default()
+            },
+        },
+        fixed(200., 20.),
+    );
+    scene.set_transform(glass, Transform { x: 40., y: 40. });
+    scene.set_layer_shader(glass, Some(reading));
+    scene.set_layer_extent(glass, 0., 150.);
+    let uniforms = |changed: f32| ShaderUniforms {
+        time: 0.,
+        params: [[140., changed, 0., 0.], [0.; 4], [0.; 4], [0.; 4]],
+    };
+    scene.set_layer_uniforms(glass, uniforms(0.));
+    let dots: Vec<NodeId> = (0..80)
+        .map(|i| {
+            let dot = scene.append(
+                root,
+                NodeKind::Rect(Color(250, 250, 250, 255)),
+                fixed(2., 2.),
+            );
+            scene.set_transform(
+                dot,
+                Transform {
+                    x: 1000. + (i % 10) as f32 * 8.,
+                    y: 700. + (i / 10) as f32 * 8.,
+                },
+            );
+            dot
+        })
+        .collect();
+    let mut draw = |scene: &mut Scene| {
+        let report = scene.flush();
+        gpu.render(scene, &report.damage).unwrap();
+        (report.damage, gpu.readback().unwrap())
+    };
+    let (_, before) = draw(&mut scene);
+    scene.set_kind(bar, NodeKind::Rect(Color(40, 200, 90, 255)));
+    scene.set_kind(side, NodeKind::Rect(Color(200, 60, 30, 255)));
+    for &dot in &dots {
+        scene.set_kind(dot, NodeKind::Rect(Color(250, 200, 40, 255)));
+    }
+    scene.set_layer_uniforms(glass, uniforms(1.));
+    let (damage, after) = draw(&mut scene);
+    assert!(
+        damage.iter().any(|d| d.y + d.height == 176.) && damage.iter().any(|d| d.y == 176.),
+        "the damage isn't cut at the side box: {damage:?}"
+    );
+    let width = (size.0 * scale) as usize;
+    let at = ((50. * scale) as usize * width + (140. * scale) as usize) * 4;
+    // Mostly the bar it reads (a fifth the box): red, then green.
+    let (was, now) = (&before[at..at + 4], &after[at..at + 4]);
+    assert!(
+        was[0] > 120 && was[1] < 80,
+        "the glass doesn't show the bar: {was:?}"
+    );
+    assert!(
+        now[1] > 120 && now[0] < 80,
+        "the glass doesn't show the bar's new colour: {now:?}"
+    );
+    vec![before, after]
+}
+#[cfg(windows)]
+const CROSS_SIZE: (f32, f32) = (1200., 900.);
+/// The cross-region frames' parts (`cross_region_frames`), for `where_`.
+#[cfg(windows)]
+const CROSS_NAMES: [&str; 1] = ["glass on cut damage"];
 
 /// A layer in each blend mode but `Normal` (`BLEND_NAMES`): a translucent
 /// box holding a bar, over striped content, drawn first normally. Each must
@@ -1087,6 +1243,20 @@ fn where_(frame: usize, scale: f32, pixel: usize) -> String {
             LAYER_COLUMNS,
             EFFECT_NAMES.map(String::from).to_vec(),
         )
+    } else if frame >= FRAMES + 3 + 5 + 4 + 2 + 2 + 5 {
+        (
+            CROSS_SIZE.0,
+            CROSS_SIZE,
+            1,
+            CROSS_NAMES.map(String::from).to_vec(),
+        )
+    } else if frame >= FRAMES + 3 + 5 + 4 + 2 + 2 {
+        (
+            LAYER_CELL.0 * LAYER_COLUMNS as f32,
+            LAYER_CELL,
+            LAYER_COLUMNS,
+            glass_names(),
+        )
     } else if frame >= FRAMES + 3 + 5 + 4 + 2 {
         (
             LAYER_CELL.0 * LAYER_COLUMNS as f32,
@@ -1132,6 +1302,18 @@ fn fill_names() -> Vec<String> {
         .map(|(name, _)| name)
         .collect();
     names.push("radial".into());
+    names
+}
+#[cfg(windows)]
+fn glass_names() -> Vec<String> {
+    let mut names: Vec<String> = zgx_fx::catalog()
+        .into_iter()
+        .filter(|(_, fx)| {
+            fx.kind() == zgx_fx::FxKind::Layer && fx.frost() == 0. && fx.shader().reads_backdrop()
+        })
+        .map(|(name, _)| name)
+        .collect();
+    names.push("glass mix".into());
     names
 }
 #[cfg(windows)]
