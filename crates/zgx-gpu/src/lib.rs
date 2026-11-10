@@ -18695,6 +18695,7 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
     };
     let close = |a: Rect, b: Rect| area(a.union(b)) <= close(a, b);
     let mut regions: Vec<Rect> = Vec::new();
+    let mut overlap = false;
     let rounded: Vec<Rect>;
     let damage = if damage.len() > MAX_REGIONS {
         rounded = cluster_damage(damage, viewport);
@@ -18712,14 +18713,15 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
                 r = r.union(regions.swap_remove(i));
                 i = 0;
             } else {
+                overlap = overlap || regions[i].intersects(r);
                 i += 1;
             }
         }
         regions.push(r);
     }
-    // What's left overlapping goes (`apart`), so none is drawn twice: rare.
-    let overlap = (0..regions.len())
-        .any(|i| (i + 1..regions.len()).any(|j| regions[i].intersection(regions[j]).is_some()));
+    // A pair left apart may overlap: remember it in the merge walk, rather
+    // than walking all the pairs again. A later merge may have consumed it;
+    // `apart` checks that before splitting.
     match overlap {
         true => apart(regions, scale),
         false => regions,
@@ -18730,6 +18732,11 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
 #[cold]
 #[inline(never)]
 fn apart(regions: Vec<Rect>, scale: f32) -> Vec<Rect> {
+    if !(0..regions.len())
+        .any(|i| (i + 1..regions.len()).any(|j| regions[i].intersection(regions[j]).is_some()))
+    {
+        return regions;
+    }
     let mut apart: Vec<PixelBox> = Vec::with_capacity(regions.len() + 4);
     for region in regions {
         let mut parts = vec![PixelBox::of(region, scale)];
@@ -19221,6 +19228,81 @@ mod shadow_blur_tests {
             }
         }
     }
+    #[test]
+    fn damage_overlap_flag_matches_the_final_pair_scan() {
+        use crate::{NEAR_PIXELS, Rect, apart, merge_damage, rounded_damage};
+
+        // The previous merge walk, with its unconditional final pair scan:
+        // an oracle for moving that scan off the usual path. These fixtures
+        // are below the clustering limit.
+        fn reference(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
+            let area = |r: Rect| r.width * r.height * scale * scale;
+            let mut regions: Vec<Rect> = Vec::new();
+            for r in damage {
+                let Some(mut r) = rounded_damage(*r, viewport, scale) else {
+                    continue;
+                };
+                let mut i = 0;
+                while i < regions.len() {
+                    let a = area(regions[i]);
+                    let b = area(r);
+                    if area(regions[i].union(r)) <= a + b + a.min(b) * 0.5 + NEAR_PIXELS {
+                        r = r.union(regions.swap_remove(i));
+                        i = 0;
+                    } else {
+                        i += 1;
+                    }
+                }
+                regions.push(r);
+            }
+            if (0..regions.len()).any(|i| {
+                (i + 1..regions.len()).any(|j| regions[i].intersection(regions[j]).is_some())
+            }) {
+                apart(regions, scale)
+            } else {
+                regions
+            }
+        }
+        fn permutations(damage: &mut [Rect], at: usize, viewport: Rect, scale: f32) {
+            if at == damage.len() {
+                assert_eq!(
+                    merge_damage(damage, viewport, scale),
+                    reference(damage, viewport, scale),
+                    "scale {scale}, damage {damage:?}"
+                );
+                return;
+            }
+            for i in at..damage.len() {
+                damage.swap(at, i);
+                permutations(damage, at + 1, viewport, scale);
+                damage.swap(at, i);
+            }
+        }
+        let viewport = Rect::new(0., 0., 1000., 1000.);
+        for scale in [1., 1.25, 1.5, 2.] {
+            // The first pair is rejected while overlapping; the last rect
+            // later consumes both. No split or pixel conversion is needed.
+            let mut consumed = [
+                Rect::new(0., 0., 600., 20.),
+                Rect::new(0., 0., 20., 600.),
+                Rect::new(0., 0., 600., 600.),
+            ];
+            assert_eq!(reference(&consumed, viewport, scale).len(), 1);
+            permutations(&mut consumed, 0, viewport, scale);
+            // Retained overlaps, disjoint and touching regions, fractional
+            // edges, clipping, and unions that restart the merge walk.
+            let mut retained = [
+                Rect::new(-10., 0., 610., 20.),
+                Rect::new(0., 0., 20., 600.),
+                Rect::new(200.1, 300.2, 400.3, 20.4),
+                Rect::new(300.2, 200.1, 20.4, 400.3),
+                Rect::new(600., 0., 20., 20.),
+                Rect::new(800., 800., 10., 10.),
+            ];
+            permutations(&mut retained, 0, viewport, scale);
+        }
+    }
+
     /// Sigma is keyed in eighths of a device pixel, at most 128 pixels; none,
     /// negative or not a number is sharp.
     #[test]
