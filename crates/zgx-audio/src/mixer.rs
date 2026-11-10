@@ -5,12 +5,13 @@
 //! with go back to the main thread to be dropped there.
 use crate::limiter::Limiter;
 use crate::queue::{Consumer, Producer};
-use crate::ramp::{Curve, Smoothed};
+use crate::ramp::{Curve, Ramp, Smoothed};
 use crate::resample::{Interpolation, ONE, Position, Region, Resampler, Step};
 use crate::sound::SoundData;
 use std::collections::BinaryHeap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// The most frames mixed at once; a device's longer blocks are mixed in
 /// pieces of this.
@@ -33,26 +34,25 @@ pub(crate) enum Command {
         pitch: f32,
         region: Region,
         priority: i8,
-        /// Frames of fade in and their curve; `None`, a click-free start.
-        fade_in: Option<(u32, Curve)>,
+        /// A fade in; `None`, a click-free start.
+        fade_in: Option<Ramp>,
     },
+    // Ramps are in seconds, made frames by the mixer at its rate: a device
+    // may set the rate after a command was sent.
     Stop {
         id: u64,
-        frames: u32,
-        curve: Curve,
+        ramp: Ramp,
     },
     Voice {
         id: u64,
         param: VoiceParam,
         value: f32,
-        frames: u32,
-        curve: Curve,
+        ramp: Ramp,
     },
     BusGain {
         bus: u16,
         value: f32,
-        frames: u32,
-        curve: Curve,
+        ramp: Ramp,
     },
     Mute {
         bus: u16,
@@ -82,8 +82,11 @@ pub(crate) enum Return {
     Ended { id: u64, sound: Arc<SoundData> },
 }
 
+/// Buckets of a microsecond for how long each block took to mix; the last
+/// holds everything longer.
+pub(crate) const TIME_BUCKETS: usize = 2048;
+
 /// Counters the mixer publishes after each block and anyone reads.
-#[derive(Default)]
 pub(crate) struct Meter {
     pub now: AtomicU64,
     pub voices: AtomicU64,
@@ -91,6 +94,101 @@ pub(crate) struct Meter {
     pub dropped: AtomicU64,
     pub late: AtomicU64,
     pub blocks: AtomicU64,
+    /// Frames a second, as the device last set them.
+    pub rate: AtomicU64,
+    /// Commands sent by the main thread, and taken off the queue by the
+    /// mixer: a device isn't stopped while they differ.
+    pub sent: AtomicU64,
+    pub collected: AtomicU64,
+    /// The last frame anything could be heard: a voice, a fade, the
+    /// limiter's tail.
+    pub audible: AtomicU64,
+    /// Frames mixed with sound reaching master, before master's gain:
+    /// proof a run at zero gain mixed something.
+    pub sounding: AtomicU64,
+    /// On the device's clock, in nanoseconds: when the last block was asked
+    /// for, when its first frame will be heard, and when the most recent
+    /// play's first frame will be.
+    pub block_asked: AtomicU64,
+    pub block_heard: AtomicU64,
+    pub play_heard: AtomicU64,
+    /// The device's clock when the block that started the most recent play
+    /// was asked for.
+    pub play_asked: AtomicU64,
+    /// The host clock (macOS) when that block was rendered.
+    pub play_called: AtomicU64,
+    /// The loudest sample sent to the output since the engine was made (an
+    /// f32's bits: a positive float's order is its bits').
+    pub peak: AtomicU32,
+    /// How long blocks took to mix, a bucket a microsecond.
+    pub times: [AtomicU32; TIME_BUCKETS],
+    /// The host's doings: streams started and stopped, how long the last
+    /// start took, streams lost and rebuilt, failures to start, underruns
+    /// the system reported, whether a stream runs now.
+    pub starts: AtomicU64,
+    pub stops: AtomicU64,
+    pub start_micros: AtomicU64,
+    pub losses: AtomicU64,
+    pub failures: AtomicU64,
+    pub underruns: AtomicU64,
+    pub running: AtomicBool,
+    /// Why the device last failed. The host and the main thread take it;
+    /// the audio thread never does.
+    pub error: Mutex<Option<String>>,
+}
+
+impl Meter {
+    pub fn new(rate: u32) -> Meter {
+        let zero = || AtomicU64::new(0);
+        Meter {
+            now: zero(),
+            voices: zero(),
+            stolen: zero(),
+            dropped: zero(),
+            late: zero(),
+            blocks: zero(),
+            rate: AtomicU64::new(u64::from(rate)),
+            sent: zero(),
+            collected: zero(),
+            audible: zero(),
+            sounding: zero(),
+            block_asked: zero(),
+            block_heard: zero(),
+            play_heard: zero(),
+            play_asked: zero(),
+            play_called: zero(),
+            peak: AtomicU32::new(0),
+            times: std::array::from_fn(|_| AtomicU32::new(0)),
+            starts: zero(),
+            stops: zero(),
+            start_micros: zero(),
+            losses: zero(),
+            failures: zero(),
+            underruns: zero(),
+            running: AtomicBool::new(false),
+            error: Mutex::new(None),
+        }
+    }
+
+    /// Whether commands were sent that the mixer hasn't taken yet.
+    pub fn pending(&self) -> bool {
+        self.sent.load(Ordering::SeqCst) != self.collected.load(Ordering::SeqCst)
+    }
+
+    pub fn set_error(&self, why: String) {
+        *self
+            .error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(why);
+    }
+}
+
+/// When a device asks for a block, and when its first frame will be heard,
+/// in nanoseconds of the device's own clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Timing {
+    pub asked: u64,
+    pub heard: u64,
 }
 
 /// A command and the frame it's for (0: as soon as it can be).
@@ -361,6 +459,10 @@ pub(crate) struct Mixer {
     dropped: u64,
     late: u64,
     blocks: u64,
+    collected: u64,
+    sounding: u64,
+    /// The frame the last play was applied on, this block.
+    started: Option<u64>,
     /// Frames of the shortest de-click fade (1 ms), and of a steal's or a
     /// mute's (5 ms).
     click: u32,
@@ -405,9 +507,35 @@ impl Mixer {
             dropped: 0,
             late: 0,
             blocks: 0,
+            collected: 0,
+            sounding: 0,
+            started: None,
             click: (setup.rate / 1000).max(1),
             declick: (setup.rate / 200).max(1),
         }
+    }
+
+    /// Mixes at `rate` from now on: a device whose rate isn't the one the
+    /// mixer was made with. Off the audio thread: it allocates.
+    pub fn set_rate(&mut self, rate: u32) {
+        if rate == self.rate || rate == 0 {
+            return;
+        }
+        self.rate = rate;
+        self.click = (rate / 1000).max(1);
+        self.declick = (rate / 200).max(1);
+        if let Some(limiter) = &self.limiter {
+            self.limiter = Some(Limiter::new(rate, limiter.ceiling()));
+        }
+        for voice in self.voices.iter_mut() {
+            if let Some(sound) = &voice.sound {
+                voice.base_step = f64::from(sound.rate) / f64::from(rate);
+            }
+        }
+    }
+
+    pub fn rate(&self) -> u32 {
+        self.rate
     }
 
     /// Frames the output lags a command's time: the limiter's look-ahead.
@@ -416,9 +544,12 @@ impl Mixer {
     }
 
     /// Mixes the next `out.len() / channels` frames into `out`, interleaved.
-    pub fn render(&mut self, out: &mut [f32], channels: usize) {
+    pub fn render(&mut self, out: &mut [f32], channels: usize, timing: Option<Timing>) {
         let frames = out.len() / channels;
+        let first = self.now;
         let mut done = 0;
+        let mut peak = 0f32;
+        self.started = None;
         self.collect();
         while done < frames {
             self.apply_due();
@@ -428,6 +559,11 @@ impl Mixer {
             }
             self.mix(n);
             let master = &self.buses[0];
+            let loudest = master.left[..n]
+                .iter()
+                .chain(&master.right[..n])
+                .fold(0f32, |p, s| p.max(s.abs()));
+            peak = peak.max(loudest);
             let out = &mut out[done * channels..(done + n) * channels];
             match channels {
                 1 => {
@@ -464,6 +600,27 @@ impl Mixer {
         self.blocks += 1;
         let live = self.voices.iter().filter(|v| v.id != 0 && !v.ended).count();
         let meter = &self.meter;
+        // Anything playing, fading, in the limiter's tail or due to start
+        // counts as heard: the device isn't stopped under it.
+        let quiet = self.limiter.as_ref().is_none_or(Limiter::silent);
+        if self.voices.iter().any(|v| v.id != 0) || !quiet || !self.schedule.is_empty() {
+            meter.audible.store(self.now, Ordering::Relaxed);
+        }
+        if let Some(timing) = timing {
+            let after = |frames: u64| timing.heard + frames * 1_000_000_000 / u64::from(self.rate);
+            meter.block_asked.store(timing.asked, Ordering::Relaxed);
+            meter.block_heard.store(timing.heard, Ordering::Relaxed);
+            if let Some(started) = self.started {
+                let latency = self.limiter.as_ref().map_or(0, Limiter::latency) as u64;
+                meter.play_asked.store(timing.asked, Ordering::Relaxed);
+                meter
+                    .play_heard
+                    .store(after(started - first + latency), Ordering::Release);
+            }
+        }
+        meter.collected.store(self.collected, Ordering::SeqCst);
+        meter.sounding.store(self.sounding, Ordering::Relaxed);
+        meter.peak.fetch_max(peak.to_bits(), Ordering::Relaxed);
         meter.voices.store(live as u64, Ordering::Relaxed);
         meter.stolen.store(self.stolen, Ordering::Relaxed);
         meter.dropped.store(self.dropped, Ordering::Relaxed);
@@ -479,6 +636,7 @@ impl Mixer {
                 break;
             };
             self.seq += 1;
+            self.collected += 1;
             self.schedule.push(Scheduled {
                 time,
                 seq: self.seq,
@@ -517,8 +675,8 @@ impl Mixer {
     fn apply(&mut self, command: Command) -> Result<(), Command> {
         match command {
             Command::Play { .. } => return self.play(command),
-            Command::Stop { id, frames, curve } => {
-                let click = self.click;
+            Command::Stop { id, ramp } => {
+                let (click, frames, curve) = (self.click, ramp.frames(self.rate), ramp.curve);
                 if let Some(voice) = self.voice(id) {
                     if voice.fresh {
                         // Stopped before a frame was heard: no fade to make.
@@ -533,9 +691,9 @@ impl Mixer {
                 id,
                 param,
                 value,
-                frames,
-                curve,
+                ramp,
             } => {
+                let (frames, curve) = (ramp.frames(self.rate), ramp.curve);
                 if let Some(voice) = self.voice(id) {
                     match param {
                         VoiceParam::Gain => voice.gain.set(value.max(0.), frames, curve),
@@ -548,15 +706,11 @@ impl Mixer {
                     }
                 }
             }
-            Command::BusGain {
-                bus,
-                value,
-                frames,
-                curve,
-            } => {
+            Command::BusGain { bus, value, ramp } => {
+                let frames = ramp.frames(self.rate);
                 self.buses[usize::from(bus)]
                     .gain
-                    .set(value.max(0.), frames, curve);
+                    .set(value.max(0.), frames, ramp.curve);
             }
             Command::Mute { bus, on } => {
                 self.buses[usize::from(bus)].muted = on;
@@ -656,9 +810,9 @@ impl Mixer {
             resampler: Resampler::new(interpolation),
         };
         match fade_in {
-            Some((frames, curve)) => {
+            Some(ramp) => {
                 voice.envelope = Smoothed::new(0.);
-                voice.envelope.set(1., frames, curve);
+                voice.envelope.set(1., ramp.frames(rate), ramp.curve);
             }
             // A sound that starts away from zero gets a millisecond's fade.
             None if start > 1e-3 => {
@@ -671,6 +825,7 @@ impl Mixer {
             unreachable!()
         };
         voice.sound = Some(sound);
+        self.started = Some(self.now);
         Ok(())
     }
 
@@ -771,6 +926,14 @@ impl Mixer {
             );
         }
         let master = &mut self.buses[0];
+        if master.touched
+            && master.left[..n]
+                .iter()
+                .chain(&master.right[..n])
+                .any(|&s| s != 0.)
+        {
+            self.sounding += n as u64;
+        }
         if master.touched {
             if master.gain.settled() && master.gate.settled() {
                 let gain = master.gain.value() * master.gate.value();

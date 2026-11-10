@@ -10,10 +10,21 @@ description = "Sound for zgx apps: a sample-accurate mixer with buses, fades and
 keywords = ["audio", "mixer", "sound", "gamedev", "gui"]
 categories = ["multimedia::audio", "game-development"]
 
+[features]
+# The system's default output: through cpal today on every platform. The
+# feature names what it gives, not how, so a platform's backend can change
+# without apps changing features.
+device = ["dep:cpal"]
+
 [dependencies]
+cpal = { version = "0.18.2", optional = true, default-features = false }
 
 # The audio thread's rules: a counting allocator, so a process of its own,
 # and no test harness, so no other thread.
 [[test]]
 name = "realtime"
 harness = false
+
+[[example]]
+name = "device_probe"
+required-features = ["device"]

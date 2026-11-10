@@ -58,6 +58,15 @@ impl Limiter {
         }
     }
 
+    pub fn ceiling(&self) -> f32 {
+        self.ceiling
+    }
+
+    /// Whether it holds nothing but silence and isn't limiting.
+    pub fn silent(&self) -> bool {
+        self.quiet >= self.look && self.at_rest()
+    }
+
     /// The frames its output lags its input.
     pub fn latency(&self) -> usize {
         self.look

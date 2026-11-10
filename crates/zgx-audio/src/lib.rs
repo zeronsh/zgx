@@ -22,6 +22,7 @@
 //! never waits for them. Sounds it has finished with are dropped by the
 //! next call on [`Audio`] (or [`Audio::update`]), never by the mixer.
 
+mod device;
 mod engine;
 mod limiter;
 mod mixer;
@@ -29,9 +30,15 @@ mod queue;
 mod ramp;
 mod resample;
 mod sound;
+#[cfg(feature = "device")]
+mod via_cpal;
 pub mod wav;
 
+pub use device::{Device, Format, Renderer};
 pub use engine::{Audio, Bus, Config, Error, Offline, Play, Stats, Time, Voice};
+pub use mixer::Timing;
 pub use ramp::{Curve, Ramp};
 pub use resample::Interpolation;
 pub use sound::{Sound, Source};
+#[cfg(feature = "device")]
+pub use via_cpal::{Cpal, Stopping};

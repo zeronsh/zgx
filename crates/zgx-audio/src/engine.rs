@@ -1,6 +1,7 @@
 //! The main thread's side: [`Audio`] and the handles it gives out. Each
 //! call becomes a command stamped with a frame and goes on a fixed queue;
 //! a full queue is an error, never a wait.
+use crate::device::{Device, Host, Message, Renderer};
 use crate::mixer::{Command, MAX_BUSES, Meter, Mixer, Return, Setup, VoiceParam};
 use crate::queue::{Consumer, Producer, queue};
 use crate::ramp::{Curve, Ramp};
@@ -10,6 +11,7 @@ use std::collections::HashSet;
 use std::ops::{Add, Range, Sub};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 /// Why a call failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +27,8 @@ pub enum Error {
     Format(String),
     /// A file that couldn't be read.
     Io(String),
+    /// The output device couldn't be started, and why.
+    Device(String),
 }
 
 impl Error {
@@ -44,6 +48,7 @@ impl std::fmt::Display for Error {
             Error::TooManyBuses => write!(f, "there can be at most {MAX_BUSES} buses"),
             Error::BusExists(name) => write!(f, "a bus named {name:?} exists already"),
             Error::Format(why) | Error::Io(why) => f.write_str(why),
+            Error::Device(why) => write!(f, "the audio device: {why}"),
         }
     }
 }
@@ -86,6 +91,12 @@ pub struct Config {
     /// How voices read between frames when a sound's rate or pitch isn't
     /// the output's.
     pub interpolation: Interpolation,
+    /// Master's gain at the start, before any command.
+    pub gain: f32,
+    /// How long a device keeps running after the last sound (fades, the
+    /// limiter's tail and sounds due count as sound): then it stops, and
+    /// starts again with the next.
+    pub hold: Duration,
 }
 
 impl Default for Config {
@@ -97,12 +108,14 @@ impl Default for Config {
             commands: 1024,
             limiter: Some(1.),
             interpolation: Interpolation::Cubic,
+            gain: 1.,
+            hold: Duration::from_secs(1),
         }
     }
 }
 
 /// What the mixer has done, as of its last block.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stats {
     /// Frames mixed.
     pub frames: u64,
@@ -116,6 +129,35 @@ pub struct Stats {
     pub dropped: u64,
     /// Commands applied after the frame they asked for.
     pub late: u64,
+    /// Frames mixed with sound reaching master, before its gain: what a run
+    /// at zero gain mixed.
+    pub sounding: u64,
+    /// Whether a device stream runs now.
+    pub running: bool,
+    /// Device streams started (or resumed) and stopped.
+    pub starts: u64,
+    pub stops: u64,
+    /// How long the last start took the device, in microseconds.
+    pub start_micros: u64,
+    /// Streams lost (a device gone, a format changed) and started again.
+    pub losses: u64,
+    /// Starts that failed: see [`Audio::device_error`].
+    pub failures: u64,
+    /// Underruns the system reported.
+    pub underruns: u64,
+    /// On the device's clock, in nanoseconds (0 until a device says): when
+    /// the last block was asked for, when its first frame will be heard,
+    /// and when the most recent play's first frame will be.
+    pub block_asked: u64,
+    pub block_heard: u64,
+    pub play_heard: u64,
+    /// The device's clock when the block that started the most recent play
+    /// was asked for.
+    pub play_asked: u64,
+    /// The host's clock (macOS; else 0) when that block was mixed.
+    pub play_mixed: u64,
+    /// The loudest sample sent to the output since the engine was made.
+    pub peak: f32,
 }
 
 struct Control {
@@ -128,11 +170,20 @@ struct Control {
     live: HashSet<u64>,
 }
 
+/// The device and its host thread, made when first needed.
+enum Hosting {
+    /// No device: an offline engine.
+    None,
+    /// A device not started yet, and the renderer it will run.
+    Waiting(Box<dyn Device>, Box<Renderer>, Duration),
+    Running(Host),
+}
+
 struct Inner {
     control: Mutex<Control>,
     meter: Arc<Meter>,
-    rate: u32,
     latency: usize,
+    hosting: Mutex<Hosting>,
 }
 
 /// The engine, as the main thread holds it. Cloning it is cheap; every
@@ -143,7 +194,7 @@ pub struct Audio(Arc<Inner>);
 impl std::fmt::Debug for Audio {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Audio")
-            .field("rate", &self.0.rate)
+            .field("rate", &self.rate())
             .field("now", &self.now())
             .finish()
     }
@@ -152,14 +203,14 @@ impl std::fmt::Debug for Audio {
 /// The mixer run by hand, on a clock of its own: tests compare what it
 /// makes sample for sample, and a video renders its soundtrack with it.
 pub struct Offline {
-    mixer: Mixer,
+    renderer: Renderer,
     channels: usize,
 }
 
 impl Offline {
     /// Mixes the next `out.len() / channels` frames into `out`.
     pub fn render(&mut self, out: &mut [f32]) {
-        self.mixer.render(out, self.channels);
+        self.renderer.render(out, None);
     }
 
     /// The next `frames` frames, interleaved.
@@ -178,20 +229,94 @@ impl Audio {
     /// An engine whose mixer the caller runs, with [`Offline::render`].
     pub fn offline(config: Config) -> (Audio, Offline) {
         let (audio, mixer) = Audio::with_mixer(&config);
-        (
-            audio,
-            Offline {
-                mixer,
-                channels: config.channels.max(1),
-            },
-        )
+        let channels = config.channels.max(1);
+        let renderer = Renderer::new(mixer, channels, audio.0.meter.clone());
+        (audio, Offline { renderer, channels })
+    }
+
+    /// An engine on the system's default output, through cpal. Nothing is
+    /// opened until the first sound: then a stream starts, and it stops
+    /// after [`Config::hold`] with nothing to hear.
+    #[cfg(feature = "device")]
+    pub fn new(config: Config) -> Audio {
+        Audio::with_device(config, crate::Cpal::new())
+    }
+
+    /// An engine on `device`, started with the first sound.
+    pub fn with_device(config: Config, device: impl Device) -> Audio {
+        let channels = config.channels;
+        let hold = config.hold;
+        let (audio, mixer) = Audio::with_mixer(&config);
+        let renderer = Box::new(Renderer::new(mixer, channels, audio.0.meter.clone()));
+        *audio.hosting() = Hosting::Waiting(Box::new(device), renderer, hold);
+        audio
+    }
+
+    fn hosting(&self) -> MutexGuard<'_, Hosting> {
+        self.0
+            .hosting
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Tells the host a command waits, starting it the first time.
+    fn wake(&self, message: Message) {
+        let mut hosting = self.hosting();
+        if let Hosting::Waiting(..) = &*hosting {
+            let Hosting::Waiting(device, renderer, hold) =
+                std::mem::replace(&mut *hosting, Hosting::None)
+            else {
+                unreachable!()
+            };
+            let (messages, inbox) = std::sync::mpsc::channel();
+            let meter = self.0.meter.clone();
+            let thread = std::thread::Builder::new()
+                .name("zgx-audio".into())
+                .spawn(move || crate::device::host(device, renderer, inbox, meter, hold))
+                .expect("a thread for the audio device");
+            *hosting = Hosting::Running(Host {
+                messages,
+                thread: Some(thread),
+            });
+        }
+        if let Hosting::Running(host) = &*hosting {
+            let _ = host.messages.send(message);
+        }
+    }
+
+    /// Starts the device now, before a sound needs it, and holds it for
+    /// [`Config::hold`]: for an app that knows a sound is coming and would
+    /// rather not wait for a stream to start.
+    pub fn prewarm(&self) {
+        self.wake(Message::Prewarm);
+    }
+
+    /// Why the device last failed to start, if it did.
+    pub fn device_error(&self) -> Option<String> {
+        self.0
+            .meter
+            .error
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// How many blocks took each number of microseconds to mix (the last
+    /// entry: that long or longer), since the engine was made.
+    pub fn block_times(&self) -> Vec<u32> {
+        self.0
+            .meter
+            .times
+            .iter()
+            .map(|t| t.load(Ordering::Relaxed))
+            .collect()
     }
 
     pub(crate) fn with_mixer(config: &Config) -> (Audio, Mixer) {
         let voices = config.voices.max(1);
         let (commands, from_main) = queue(config.commands.max(1));
         let (to_main, returns) = queue(voices * 2 + 64);
-        let meter = Arc::new(Meter::default());
+        let meter = Arc::new(Meter::new(config.rate.max(1)));
         let setup = Setup {
             rate: config.rate.max(1),
             voices,
@@ -213,9 +338,21 @@ impl Audio {
                 live: HashSet::new(),
             }),
             meter,
-            rate: setup.rate,
             latency,
+            hosting: Mutex::new(Hosting::None),
         }));
+        if config.gain != 1. {
+            audio
+                .send(
+                    0,
+                    Command::BusGain {
+                        bus: 0,
+                        value: config.gain,
+                        ramp: Ramp::NONE,
+                    },
+                )
+                .expect("a new queue has room");
+        }
         for bus in 1..4 {
             audio
                 .send(0, Command::AddBus { bus, parent: 0 })
@@ -239,15 +376,28 @@ impl Audio {
     }
 
     fn send(&self, time: u64, command: Command) -> Result<(), Error> {
-        self.control()
+        self.push(&mut self.control(), time, command)
+    }
+
+    /// Queues `command`, then wakes the device if it's stopped. The count
+    /// goes up before the device's state is read, and the host stops it
+    /// before reading the count: one of them sees the other.
+    fn push(&self, control: &mut Control, time: u64, command: Command) -> Result<(), Error> {
+        control
             .commands
             .push((time, command))
-            .map_err(|_| Error::QueueFull)
+            .map_err(|_| Error::QueueFull)?;
+        let meter = &self.0.meter;
+        meter.sent.fetch_add(1, Ordering::SeqCst);
+        if !meter.running.load(Ordering::SeqCst) {
+            self.wake(Message::Wake);
+        }
+        Ok(())
     }
 
     /// Frames a second.
     pub fn rate(&self) -> u32 {
-        self.0.rate
+        self.0.meter.rate.load(Ordering::Acquire) as u32
     }
 
     /// The frame the mixer will mix next.
@@ -257,7 +407,7 @@ impl Audio {
 
     /// `seconds` as frames, to add to a [`Time`].
     pub fn seconds(&self, seconds: f64) -> u64 {
-        (seconds.max(0.) * f64::from(self.0.rate)).round() as u64
+        (seconds.max(0.) * f64::from(self.rate())).round() as u64
     }
 
     /// Frames between a command's time and its sound leaving the mixer
@@ -304,15 +454,10 @@ impl Audio {
             pitch: play.pitch,
             region,
             priority: play.priority,
-            fade_in: play
-                .fade_in
-                .map(|ramp| (ramp.frames(self.0.rate), ramp.curve)),
+            fade_in: play.fade_in,
         };
         let time = play.at.map_or(0, |at| at.0);
-        control
-            .commands
-            .push((time, command))
-            .map_err(|_| Error::QueueFull)?;
+        self.push(&mut control, time, command)?;
         control.next_id += 1;
         control.live.insert(id);
         Ok(Voice {
@@ -359,16 +504,11 @@ impl Audio {
             return Err(Error::TooManyBuses);
         }
         let index = control.buses.len() as u16;
-        control
-            .commands
-            .push((
-                0,
-                Command::AddBus {
-                    bus: index,
-                    parent: parent.index,
-                },
-            ))
-            .map_err(|_| Error::QueueFull)?;
+        let command = Command::AddBus {
+            bus: index,
+            parent: parent.index,
+        };
+        self.push(&mut control, 0, command)?;
         control.buses.push((name.into(), parent.index));
         Ok(Bus {
             audio: self.clone(),
@@ -387,6 +527,20 @@ impl Audio {
             stolen: meter.stolen.load(Ordering::Relaxed),
             dropped: meter.dropped.load(Ordering::Relaxed),
             late: meter.late.load(Ordering::Relaxed),
+            sounding: meter.sounding.load(Ordering::Relaxed),
+            running: meter.running.load(Ordering::SeqCst),
+            starts: meter.starts.load(Ordering::Relaxed),
+            stops: meter.stops.load(Ordering::Relaxed),
+            start_micros: meter.start_micros.load(Ordering::Relaxed),
+            losses: meter.losses.load(Ordering::Relaxed),
+            failures: meter.failures.load(Ordering::Relaxed),
+            underruns: meter.underruns.load(Ordering::Relaxed),
+            block_asked: meter.block_asked.load(Ordering::Relaxed),
+            block_heard: meter.block_heard.load(Ordering::Relaxed),
+            play_heard: meter.play_heard.load(Ordering::Acquire),
+            play_asked: meter.play_asked.load(Ordering::Relaxed),
+            play_mixed: meter.play_called.load(Ordering::Relaxed),
+            peak: f32::from_bits(meter.peak.load(Ordering::Relaxed)),
         }
     }
 }
@@ -518,8 +672,7 @@ impl Voice {
         let fade = fade.into();
         self.send(Command::Stop {
             id: self.id,
-            frames: fade.frames(self.audio.rate()),
-            curve: fade.curve,
+            ramp: fade,
         })
     }
 
@@ -529,8 +682,7 @@ impl Voice {
             id: self.id,
             param,
             value,
-            frames: ramp.frames(self.audio.rate()),
-            curve: ramp.curve,
+            ramp,
         })
     }
 
@@ -581,8 +733,7 @@ impl Bus {
             Command::BusGain {
                 bus: self.index,
                 value: gain,
-                frames: ramp.frames(self.audio.rate()),
-                curve: ramp.curve,
+                ramp,
             },
         )
     }
@@ -626,6 +777,21 @@ impl Bus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_zero_gain_engine_mixes_but_sends_silence_from_its_first_frame() {
+        let loud = Sound::from_samples(&[0.9; 4800], 1, 48_000).unwrap();
+        let (audio, mut mixer) = Audio::offline(Config {
+            gain: 0.,
+            ..Config::default()
+        });
+        audio.play(&loud, Play::new().gain(4.)).unwrap();
+        let out = mixer.frames(4800);
+        assert!(out.iter().all(|&s| s == 0.));
+        let stats = audio.stats();
+        assert_eq!(stats.peak, 0.);
+        assert!(stats.sounding >= 4700, "it mixed: {stats:?}");
+    }
 
     #[test]
     fn sounds_are_dropped_by_the_main_thread_once_played() {
