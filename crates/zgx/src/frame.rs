@@ -56,7 +56,7 @@ struct Inner {
     max_rate: Cell<Option<f64>>,
     /// Last refresh index delivered to each refresh divisor. Requests with the
     /// same divisor tick together and stay evenly spaced.
-    cadence: RefCell<HashMap<u64, u64>>,
+    cadence: RefCell<HashMap<u64, u64, rustc_hash::FxBuildHasher>>,
 }
 struct Waiter {
     max_rate: Option<f64>,
@@ -118,17 +118,25 @@ impl FrameClock {
         {
             let mut waiters = self.0.waiters.borrow_mut();
             let mut cadence = self.0.cadence.borrow_mut();
-            let mut due: HashMap<u64, bool> = HashMap::new();
+            // Each divisor's answer this refresh. Waiters share a handful of
+            // rates (most none), so a short list on the stack serves where a
+            // map would hash and allocate every frame.
+            let mut due: smallvec::SmallVec<[(u64, bool); 4]> = smallvec::SmallVec::new();
             for waiter in waiters.values_mut().filter(|waiter| waiter.frame.is_none()) {
                 let divisor = self.divisor(waiter.max_rate, refresh);
-                let ready = *due.entry(divisor).or_insert_with(|| {
-                    cadence
-                        .get(&divisor)
-                        // A restarted source counts from a lower index again.
-                        .is_none_or(|&last| {
-                            frame.index >= last.saturating_add(divisor) || frame.index < last
-                        })
-                });
+                let ready = match due.iter().find(|(d, _)| *d == divisor) {
+                    Some(&(_, ready)) => ready,
+                    None => {
+                        let ready = cadence
+                            .get(&divisor)
+                            // A restarted source counts from a lower index again.
+                            .is_none_or(|&last| {
+                                frame.index >= last.saturating_add(divisor) || frame.index < last
+                            });
+                        due.push((divisor, ready));
+                        ready
+                    }
+                };
                 if ready {
                     waiter.frame = Some(frame);
                     wakers.extend(waiter.waker.take());
