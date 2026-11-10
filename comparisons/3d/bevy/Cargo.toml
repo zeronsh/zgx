@@ -1,0 +1,31 @@
+[package]
+name = "bevy-compare-3d"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: nothing here is a dependency of any zgx crate.
+[workspace]
+
+[dependencies]
+# 0.19: the release on wgpu 29, as zgx (0.20 is on wgpu 30).
+# Bevy's 3D renderer and loaders without a window, audio or gamepads.
+bevy = { version = "0.19.1", default-features = false, features = [
+    "3d_bevy_render", "default_app", "std", "multi_threaded",
+    "jpeg", "png", "hdr", "tonemapping_luts", "bevy_world_serialization",
+] }
+half = "2"
+image = { version = "0.25", default-features = false, features = ["hdr"] }
+png = "0.18"
+# Bevy's own (29.0.4), to name what bevy_render doesn't re-export.
+wgpu = { version = "29.0.4", default-features = false }
+
+# As zgx's workspace builds it: the same wgpu-hal (Metal backend patch).
+[patch.crates-io]
+# zgx's vendored copy with comparisons/3d/wgpu-hal-gpu-time.patch applied
+# (run.py makes it): each submission's GPU span, as Metal reports it.
+wgpu-hal = { path = "../.wgpu-hal-timed" }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,44 @@
+[package]
+name = "zgx-compare-3d"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Its own workspace: nothing here is a dependency of any zgx crate.
+[workspace]
+
+[dependencies]
+zgx = { path = "../../../crates/zgx" }
+zgx-3d = { path = "../../../crates/zgx-3d", features = ["gltf"] }
+zgx-gpu = { path = "../../../crates/zgx-gpu" }
+bytemuck = "1.25"
+pollster = "0.4"
+png = "0.18"
+# As zgx-run ships: `--features mimalloc` puts load_memory's counting
+# allocator over mimalloc instead of the system's.
+mimalloc = { version = "0.1", default-features = false, optional = true }
+
+[features]
+default = ["gpu-time"]
+# Read submissions' GPU spans from the patched wgpu-hal (see run.py).
+gpu-time = []
+# Built against a zgx tree that has `World::set_culling` (run.py's zgx-cull).
+cull-tree = []
+mimalloc = ["dep:mimalloc"]
+
+# The Metal device's allocated bytes, beside the footprint (as zgx-gpu reads it).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-metal = "0.3.2"
+objc2-foundation = "0.3"
+objc2 = "0.6"
+
+# As zgx's workspace builds it: the Metal backend patch zgx ships with.
+[patch.crates-io]
+# zgx's vendored copy with comparisons/3d/wgpu-hal-gpu-time.patch applied
+# (run.py makes it): each submission's GPU span, as Metal reports it.
+wgpu-hal = { path = "../.wgpu-hal-timed" }
+
+# As zgx's dist: what ships, and what the comparison tables measure.
+[profile.release]
+lto = "fat"
+codegen-units = 1

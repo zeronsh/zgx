@@ -1,0 +1,108 @@
+diff -ruN -x . wgpu-hal/Cargo.toml ../comparisons/3d/.wgpu-hal-timed/Cargo.toml
+--- a/Cargo.toml	2026-11-10 10:34:02
++++ b/Cargo.toml	2026-11-10 11:58:24
+@@ -413,6 +413,8 @@
+ features = [
+     "std",
+     "block2",
++    # zgx comparison patch: command buffers' GPU times (CFTimeInterval).
++    "objc2-core-foundation",
+     "MTLAllocation",
+     "MTLBlitCommandEncoder",
+     "MTLBlitPass",
+diff -ruN -x . wgpu-hal/src/metal/gpu_time.rs ../comparisons/3d/.wgpu-hal-timed/src/metal/gpu_time.rs
+--- a/src/metal/gpu_time.rs	1969-12-31 16:00:00
++++ b/src/metal/gpu_time.rs	2026-11-10 12:22:53
+@@ -0,0 +1,53 @@
++//! zgx comparison patch (comparisons/3d, never shipped): each submission's
++//! GPU span, from the first of its command buffers to start on the GPU to
++//! the last to end (`GPUStartTime`, `GPUEndTime`), the time Metal itself
++//! reports and Filament's `gpuFrameDuration` reads.
++use alloc::{sync::Arc, vec::Vec};
++use core::sync::atomic::{AtomicUsize, Ordering};
++use parking_lot::Mutex;
++
++static SPANS: Mutex<Vec<f64>> = Mutex::new(Vec::new());
++static INTERVALS: Mutex<Vec<(f64, f64)>> = Mutex::new(Vec::new());
++
++/// Each completed submission's span, in seconds, in completion order; taken.
++pub fn take_spans() -> Vec<f64> {
++    core::mem::take(&mut *SPANS.lock())
++}
++
++/// Each completed command buffer's (start, end) on the GPU, in seconds of
++/// host time; taken. Their union is the time the GPU was busy, whether or
++/// not work from one frame overlapped the next.
++pub fn take_intervals() -> Vec<(f64, f64)> {
++    core::mem::take(&mut *INTERVALS.lock())
++}
++
++pub(super) struct Span {
++    remaining: AtomicUsize,
++    bounds: Mutex<(f64, f64)>,
++}
++impl Span {
++    pub(super) fn new(buffers: usize) -> Arc<Self> {
++        Arc::new(Self {
++            remaining: AtomicUsize::new(buffers),
++            bounds: Mutex::new((f64::MAX, f64::MIN)),
++        })
++    }
++    pub(super) fn add(&self, start: f64, end: f64) {
++        if start > 0. && end > start {
++            INTERVALS.lock().push((start, end));
++        }
++        {
++            let mut bounds = self.bounds.lock();
++            if start > 0. {
++                bounds.0 = bounds.0.min(start);
++            }
++            bounds.1 = bounds.1.max(end);
++        }
++        if self.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
++            let (start, end) = *self.bounds.lock();
++            if end > start {
++                SPANS.lock().push(end - start);
++            }
++        }
++    }
++}
+diff -ruN -x . wgpu-hal/src/metal/mod.rs ../comparisons/3d/.wgpu-hal-timed/src/metal/mod.rs
+--- a/src/metal/mod.rs	2026-11-10 10:34:02
++++ b/src/metal/mod.rs	2026-11-10 11:58:24
+@@ -23,6 +23,8 @@
+ mod command;
+ mod conv;
+ mod device;
++/// zgx comparison patch: submissions' GPU spans.
++pub mod gpu_time;
+ mod library_from_metallib;
+ mod surface;
+ mod time;
+@@ -719,6 +721,26 @@
+                     // block, so it outlives `block`; it runs once, on Metal's
+                     // thread, touching only the `Send + Sync` handoff.
+                     unsafe { last.addScheduledHandler(block2::RcBlock::as_ptr(&block)) };
++                }
++            }
++            // zgx comparison patch: the submission's GPU span.
++            {
++                let raws: Vec<_> = command_buffers
++                    .iter()
++                    .filter_map(|b| b.raw.clone())
++                    .chain(extra_command_buffer.clone())
++                    .collect();
++                let span = gpu_time::Span::new(raws.len());
++                for raw in &raws {
++                    let span = Arc::clone(&span);
++                    let block = block2::RcBlock::new(
++                        move |buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
++                            // SAFETY: Metal passes the completed buffer.
++                            let buffer = unsafe { buffer.as_ref() };
++                            span.add(buffer.GPUStartTime(), buffer.GPUEndTime());
++                        },
++                    );
++                    unsafe { raw.addCompletedHandler(block2::RcBlock::as_ptr(&block)) };
+                 }
+             }
+             for cmd_buffer in command_buffers {
