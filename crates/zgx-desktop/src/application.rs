@@ -6236,6 +6236,21 @@ impl Host {
         // with no refreshes coming, to its end at once.
         #[cfg(target_os = "macos")]
         if self.coast.active() && (self.frame_arrived || !self.frames_presented()) {
+            // The delivered frame's own target, whether it's taken, for
+            // devtools: told apart from what the coast samples at.
+            if *COAST_AT_TARGET && self.frames_presented() {
+                let now = std::time::Instant::now();
+                let target = self.delivered_target;
+                let eligible = target
+                    .is_some_and(|target| target >= now && target <= now + self.frame_interval * 3);
+                zgx::profile::note(|| {
+                    format!(
+                        "coast target frame_ns={} now_ns={} eligible={eligible}",
+                        target.map_or_else(|| "none".to_string(), |t| host_ns(t).to_string()),
+                        host_ns(now)
+                    )
+                });
+            }
             let shows = match self.frames_presented() {
                 // The refresh this frame was delivered for, when that's this
                 // one's (`ZGX_COAST_AT_TARGET`): the coast's samples then a
