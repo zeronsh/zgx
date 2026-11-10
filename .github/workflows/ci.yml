@@ -113,6 +113,8 @@ jobs:
         run: python3 scripts/test_xvfb_retry.py -v
       - name: The instruction gate counts each binary warm, with a cache of its own
         run: python3 scripts/perf/test_gate.py -v
+      - name: The size check reads symbols as llvm-nm prints them and fails on any move
+        run: python3 scripts/perf/test_sizes.py -v
       - name: The inlining check reads MIR and fails on #1740's and #1824's changes
         run: python3 scripts/perf/test_inline_scopes.py -v
       - run: cargo fmt --all -- --check
