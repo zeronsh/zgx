@@ -118,5 +118,26 @@ class ExplainTests(unittest.TestCase):
         self.assertTrue(any('(out of time)' in line and 'c' in line for line in table), table)
 
 
+class SelectTests(unittest.TestCase):
+    SCENES = [('heavy-both', 'zgx-desktop', 'heavy_headless', {}), ('mount', 'zgx-script', 'mount_bench', {}),
+              ('3d-textured', 'zgx-3d', 'world_bench', {}), ('fx-none', 'zgx-3d', 'fx_bench', {}),
+              ('video', 'zgx-video', 'bench', {})]
+
+    def names(self, **kw):
+        return [s[0] for s in gate.select(self.SCENES, **kw)]
+
+    def test_no_patterns_keep_every_scene(self):
+        self.assertEqual(self.names(), [s[0] for s in self.SCENES])
+
+    def test_only_keeps_the_scenes_matched(self):
+        self.assertEqual(self.names(only='3d-*,video'), ['3d-textured', 'video'])
+
+    def test_except_leaves_out_the_scenes_matched(self):
+        self.assertEqual(self.names(except_='3d-*, fx-*, video'), ['heavy-both', 'mount'])
+
+    def test_both_apply(self):
+        self.assertEqual(self.names(only='*', except_='heavy-*'), ['mount', '3d-textured', 'fx-none', 'video'])
+
+
 if __name__ == '__main__':
     unittest.main()

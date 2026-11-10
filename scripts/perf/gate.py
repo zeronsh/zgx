@@ -49,6 +49,7 @@ pull request looks for its base's once its own are, minutes after a merge
 to main rather than at once.
 """
 import argparse
+import fnmatch
 import hashlib
 import os
 import pathlib
@@ -560,6 +561,15 @@ def same_run():
     return built
 
 
+def select(scenes, only=None, except_=None):
+    """`scenes` whose names match `only`'s patterns (all, without it) and
+    none of `except_`'s; each a comma-separated list of fnmatch patterns."""
+    def patterns(text):
+        return [p.strip() for p in (text or '').split(',') if p.strip()]
+    kept = [s for s in scenes if not only or any(fnmatch.fnmatchcase(s[0], p) for p in patterns(only))]
+    return [s for s in kept if not any(fnmatch.fnmatchcase(s[0], p) for p in patterns(except_))]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('base')
@@ -567,7 +577,15 @@ def main():
     parser.add_argument('--markdown', type=pathlib.Path)
     parser.add_argument('--stage', choices=['head', 'run'],
                         help="build the head's binaries alone, or the rest with them built")
+    parser.add_argument('--only', help='scenes to build and count, by name: comma-separated fnmatch patterns')
+    parser.add_argument('--except', dest='except_', help='scenes to leave out, as --only names them')
     args = parser.parse_args()
+    # A part of the table first, when the whole takes hours (the UI cells
+    # alone: --except '3d-*,fx-*,video'): what's built and counted both.
+    global SCENES
+    SCENES = select(SCENES, args.only, args.except_)
+    if not SCENES:
+        sys.exit('--only and --except leave no scene')
     # Both sides build into one target directory: CI's (ZGX_GATE_TARGET)
     # sits in the workspace's, where its cache keeps the dependencies.
     target = pathlib.Path(os.environ.get('ZGX_GATE_TARGET', WORK / 'gate-target')).resolve()
