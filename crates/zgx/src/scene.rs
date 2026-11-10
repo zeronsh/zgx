@@ -4197,17 +4197,69 @@ impl Scene {
                 .position(|child| *child == node)
                 .map_or(0, |at| at + 1);
             for later in &children[after..] {
-                if self
-                    .ink_alone(*later)
-                    .is_some_and(|ink| ink.translated(offset).intersects(rect))
-                    && self.paints(*later)
-                {
+                if self.paints_within(*later, offset, rect) {
                     return true;
                 }
             }
             node = parent;
         }
         false
+    }
+    /// Whether `id` or anything it holds paints on `rect` (window points),
+    /// `offset` its parent's translation in the window: its ink's union can
+    /// span far more than what paints (a panel the window's width holding a
+    /// shadow at one edge), so where it meets `rect` what it holds is asked
+    /// in turn, each inside its clip. What moves its paint about (a scale or
+    /// turn, a blur, a layer shader, a native view) counts its whole ink.
+    fn paints_within(&self, id: NodeId, offset: Transform, rect: Rect) -> bool {
+        let node = self.node(id);
+        if node.effects.opacity <= 0.0 || !own_visible(&node.style) {
+            return false;
+        }
+        if !self
+            .ink_alone(id)
+            .is_some_and(|ink| ink.translated(offset).intersects(rect))
+        {
+            return false;
+        }
+        if node.transformed()
+            || node.effect_layer()
+            || node.effects.blur_radius > 0.0
+            || self.platform_nodes.contains(&id)
+            || self
+                .layer_shader(id)
+                .is_some_and(|layer| layer.shader.is_some())
+        {
+            return self.paints(id);
+        }
+        // Its own paint is in its untranslated layout space.
+        let inner = Transform {
+            x: offset.x + node.transform.x,
+            y: offset.y + node.transform.y,
+        };
+        let own = match &node.kind {
+            NodeKind::Container(_) => false,
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => !quad.paints_nothing(),
+            _ => true,
+        };
+        if own
+            && self
+                .own_ink(id)
+                .is_some_and(|ink| ink.translated(inner).intersects(rect))
+        {
+            return true;
+        }
+        // What it holds paints only inside its clip.
+        let local = Rect::new(rect.x - inner.x, rect.y - inner.y, rect.width, rect.height);
+        let Some(within) = clipped_bounds(Some(local), node.bounds, &node.style)
+            .filter(|r| r.width > 0. && r.height > 0.)
+            .map(|r| r.translated(inner))
+        else {
+            return false;
+        };
+        self.children_raw(node)
+            .iter()
+            .any(|child| crate::deep(0, || self.paints_within(*child, inner, within)))
     }
     /// Whether `id` or anything it holds paints: its ink counts a box's bounds
     /// whatever it fills them with, and a box empty but for its layout or clip
@@ -17632,6 +17684,82 @@ mod tests {
             scene.flush();
             assert!(scene.plain_box(caret).is_none(), "{changed:?}");
         }
+    }
+
+    /// A later box whose ink spans a rect only as the union of what it holds
+    /// (a panel with a dot at each corner) doesn't paint over it; one of its
+    /// boxes on the rect does, and only inside its clip.
+    #[test]
+    fn what_paints_over_a_rect_is_what_lands_on_it() {
+        let mut scene = Scene::new(200.0, 200.0);
+        let at = |x: f32, y: f32, w: f32, h: f32| Style {
+            layout_options: Some(Arc::new(crate::layout::LayoutOptions {
+                inset: crate::layout::EdgeLengths {
+                    left: Some(crate::layout::Length::Px(x)),
+                    top: Some(crate::layout::Length::Px(y)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })),
+            width: Some(w),
+            height: Some(h),
+            absolute: true,
+            ..Style::default()
+        };
+        let root = scene.root();
+        let ring = scene.append(
+            root,
+            NodeKind::Rect(Color(0, 0, 0, 255)),
+            at(90., 90., 14., 14.),
+        );
+        let panel = scene.append(
+            root,
+            NodeKind::Container(Layout::Column),
+            at(0., 0., 200., 200.),
+        );
+        let dot = || NodeKind::Rect(Color(9, 9, 9, 255));
+        scene.append(panel, dot(), at(0., 0., 10., 10.));
+        let far = scene.append(panel, dot(), at(190., 190., 10., 10.));
+        scene.flush();
+        let rect = Rect::new(90., 90., 14., 14.);
+        assert!(!scene.painted_over(ring, rect), "only the union reaches it");
+        // A child on the rect does.
+        let near = scene.append(panel, dot(), at(95., 95., 4., 4.));
+        scene.flush();
+        assert!(scene.painted_over(ring, rect));
+        scene.remove(near);
+        // A translated child does, too.
+        scene.set_transform(far, Transform { x: -95., y: -95. });
+        scene.flush();
+        assert!(scene.painted_over(ring, rect), "translated onto it");
+        scene.set_transform(far, Transform::default());
+        // Clipped away by a box between, it doesn't.
+        let clip = scene.append(
+            panel,
+            NodeKind::Container(Layout::Column),
+            Style {
+                clip: true,
+                ..at(0., 0., 50., 50.)
+            },
+        );
+        scene.append(clip, dot(), at(90., 90., 14., 14.));
+        scene.flush();
+        assert!(!scene.painted_over(ring, rect), "clipped out of it");
+        // Effects and non-translation transforms keep the conservative union.
+        scene.set_zoom(panel, 0.9);
+        scene.flush();
+        assert!(scene.painted_over(ring, rect), "transformed union");
+        scene.set_zoom(panel, 1.);
+        scene.set_filter_blur(panel, 2.);
+        scene.flush();
+        assert!(scene.painted_over(ring, rect), "filtered union");
+        scene.set_filter_blur(panel, 0.);
+        scene.flush();
+        assert!(!scene.painted_over(ring, rect));
+        // Zero-height wrappers can still hold widely separated paint.
+        scene.set_style(panel, at(0., 0., 200., 0.));
+        scene.flush();
+        assert!(!scene.painted_over(ring, rect), "zero-height wrapper");
     }
 
     #[test]
