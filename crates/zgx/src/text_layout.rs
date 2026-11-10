@@ -410,13 +410,28 @@ impl FontFeatures {
             A::Raise(by) => (6, by),
             _ => (0, 0.),
         };
-        Self::settled(self.without_inline_box().settings().iter().copied().chain([
-            (Self::BOX_WIDTH, b.width.to_bits()),
-            (Self::BOX_HEIGHT, b.height.to_bits()),
-            (Self::BOX_BASELINE, b.baseline.to_bits()),
+        // Merged into the settings, which are sorted, in their order (each
+        // list mounted makes its boxes' features again): no map, one list.
+        let tags = [
             (Self::BOX_ALIGN, align),
+            (Self::BOX_BASELINE, b.baseline.to_bits()),
+            (Self::BOX_HEIGHT, b.height.to_bits()),
             (Self::BOX_RAISE, f32::to_bits(raise)),
-        ]))
+            (Self::BOX_WIDTH, b.width.to_bits()),
+        ];
+        let mut merged = Vec::with_capacity(self.settings().len() + tags.len());
+        let mut tags = tags.into_iter().peekable();
+        for &(tag, value) in self.settings() {
+            if Self::BOX_TAGS.contains(&tag) {
+                continue;
+            }
+            while let Some(own) = tags.next_if(|own| own.0 < tag) {
+                merged.push(own);
+            }
+            merged.push((tag, value));
+        }
+        merged.extend(tags);
+        Self(Some(merged.into()))
     }
     /// These saying no inline box (an ellipsis cloned from a box's run).
     pub fn without_inline_box(&self) -> Self {
@@ -1363,6 +1378,44 @@ impl TextLayout for FallbackTextLayout {
 }
 #[cfg(test)]
 mod tests {
+    /// A box's tags merged into a run's features read as rebuilding them
+    /// all would: sorted, each tag once, an earlier box's replaced.
+    #[test]
+    fn a_boxs_tags_merge_as_settled() {
+        use crate::rich_text::{InlineAlign, InlineBox};
+        let b = InlineBox {
+            width: 12.,
+            height: 9.,
+            baseline: 7.,
+            align: InlineAlign::Raise(1.5),
+            ..InlineBox::new(0)
+        };
+        let other = InlineBox { width: 3., ..b };
+        for features in [
+            FontFeatures::default(),
+            FontFeatures::new([(*b"liga", 0), (*b"ABCD", 1), (*b"zzzz", 2)]),
+            FontFeatures::new([(*b"_hyp", 1), (*b"_iaa", 4), (*b"_ibx", 5)]),
+            FontFeatures::new([(*b"kern", 1)]).with_inline_box(&other),
+        ] {
+            let merged = features.with_inline_box(&b);
+            let settled = FontFeatures::settled(
+                features
+                    .without_inline_box()
+                    .settings()
+                    .iter()
+                    .copied()
+                    .chain([
+                        (FontFeatures::BOX_WIDTH, b.width.to_bits()),
+                        (FontFeatures::BOX_HEIGHT, b.height.to_bits()),
+                        (FontFeatures::BOX_BASELINE, b.baseline.to_bits()),
+                        (FontFeatures::BOX_ALIGN, 6),
+                        (FontFeatures::BOX_RAISE, 1.5_f32.to_bits()),
+                    ]),
+            );
+            assert_eq!(merged.settings(), settled.settings(), "{features:?}");
+            assert_eq!(merged.inline_box(0), Some(b), "{features:?}");
+        }
+    }
     /// `grapheme_ranges` is `grapheme_indices`' ranges, ASCII or not.
     #[test]
     fn grapheme_ranges_are_grapheme_indices() {
