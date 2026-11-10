@@ -6,7 +6,10 @@
 //! `SCENE=textured` is meshes with a base colour map and nothing else, a sun
 //! casting shadows: a feature here costs what it costs meshes not using it.
 //! `SCENE=mixed` is those among skinned, morphing, double-sided cut-out and
-//! placed ones. `MESHES` and `FRAMES` size it. Neither has an environment:
+//! placed ones. `SCENE=still` is `textured`'s meshes standing still, the
+//! camera going round them: a frame where only the view changed.
+//! `MESHES` and `FRAMES` size it; `CULLING=0` draws what the camera can't
+//! see too. None has an environment:
 //! prefiltering one takes two thirds of a cell, and its threads move the count.
 //! Run: cargo run --release -p zgx-3d --example world_bench
 use std::{
@@ -182,24 +185,14 @@ fn main() {
         format: Some(FORMAT.add_srgb_suffix()),
         ..Default::default()
     });
+    let still = std::env::var("SCENE").is_ok_and(|scene| scene == "still");
+    // `CULLING=0`: every mesh drawn, to compare.
+    world.set_culling(std::env::var("CULLING").map_or(true, |on| on != "0"));
     for frame in 0..frames {
-        let turned = frame as f32 * 0.01;
-        world.set_transform(
-            root,
-            Transform {
-                rotation: Quat::from_axis_angle(Vec3::Y, turned),
-                ..Transform::default()
-            },
-        );
-        world.set_transform(
-            joint,
-            Transform {
-                rotation: Quat::from_axis_angle(vec3(1., 0., 0.), turned),
-                ..Transform::default()
-            },
-        );
-        for &mesh in &morphs {
-            world.set_morph_weights(mesh, &[0.5 + turned.sin() * 0.5]);
+        if still {
+            orbit(&world, frame);
+        } else {
+            moved(&world, (root, joint, &morphs), frame);
         }
         let mut encoder = device.create_command_encoder(&Default::default());
         let mut drawing = ViewportFrame::new(
@@ -216,4 +209,37 @@ fn main() {
         queue.submit([encoder.finish()]);
         device.poll(wgpu::PollType::Poll).expect("the no-op device");
     }
+}
+
+/// What a frame of `textured` or `mixed` moves: the whole world turns, the
+/// skinned meshes' joint with it, and the morphing meshes' weights.
+fn moved(world: &World, (root, joint, morphs): (ObjectId, ObjectId, &[ObjectId]), frame: usize) {
+    let turned = frame as f32 * 0.01;
+    world.set_transform(
+        root,
+        Transform {
+            rotation: Quat::from_axis_angle(Vec3::Y, turned),
+            ..Transform::default()
+        },
+    );
+    world.set_transform(
+        joint,
+        Transform {
+            rotation: Quat::from_axis_angle(vec3(1., 0., 0.), turned),
+            ..Transform::default()
+        },
+    );
+    for &mesh in morphs {
+        world.set_morph_weights(mesh, &[0.5 + turned.sin() * 0.5]);
+    }
+}
+
+/// What a frame of `still` moves: the camera, a step round the meshes.
+fn orbit(world: &World, frame: usize) {
+    let turned = frame as f32 * 0.01;
+    let (sin, cos) = turned.sin_cos();
+    world.set_camera(Camera::looking_at(
+        [80. * sin, 40., 80. * cos],
+        [0., 0., 0.],
+    ));
 }

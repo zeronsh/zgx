@@ -15658,6 +15658,8 @@ impl GpuRenderer {
             cache.rest();
         }
         self.retain_views();
+        // Views let go of what only their frames need.
+        self.rest_views();
         // Idle: only the shown surface is needed; the next frame makes another.
         #[cfg(target_os = "macos")]
         if let Some(present) = &mut self.layer_present

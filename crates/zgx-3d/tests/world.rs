@@ -523,6 +523,403 @@ fn a_mesh_light_passes_through_shows_what_is_behind_it() {
 }
 
 #[test]
+fn a_world_that_rested_draws_its_frames_as_one_that_never_did() {
+    // Glass: what is behind it is a temporary too, and its binding reads it.
+    let unlit = |rgb| {
+        let mut material = Material::rgb(rgb);
+        material.unlit = true;
+        material
+    };
+    let (world, behind) = one(facing_square(), unlit(0xff0000));
+    world.set_transform(behind, Transform::at([0., 0., -1.]));
+    let pane = world.add(Object::mesh(
+        facing_square(),
+        Material::rgb(0xffffff).with(0., 0.),
+    ));
+    world.set_transmission(pane, Some(Transmission::new(1.)));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    assert!(window.pixel(50, 50)[0] > 200, "red through it");
+    // The window goes idle: the world lets go of its temporaries. What is
+    // behind then changes: the glass shows it, not what was behind before.
+    window.gpu.trim();
+    world.set_material(behind, unlit(0x0000ff));
+    window.draw();
+    let rested = window.gpu.readback().unwrap();
+    let through = window.pixel(50, 50);
+    assert!(
+        through[2] > 200 && through[0] < 40,
+        "blue through it: {through:?}"
+    );
+    let mut fresh = Window::new(&world).unwrap();
+    fresh.draw();
+    assert!(
+        fresh.gpu.readback().unwrap() == rested,
+        "as a world never rested"
+    );
+}
+
+#[test]
+fn translucent_meshes_crossing_in_depth_draw_back_to_front_again() {
+    let half = |rgb| {
+        let mut material = Material::rgb(rgb);
+        material.unlit = true;
+        material.color[3] = 0.5;
+        material
+    };
+    let (world, red) = one(facing_square(), half(0xff0000));
+    world.set_transform(red, Transform::at([0., 0., -1.]));
+    world.add(Object::mesh(facing_square(), half(0x0000ff)));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    // What a window drawing the world for the first time shows.
+    let fresh = |world: &World| {
+        let mut fresh = Window::new(world).unwrap();
+        fresh.draw();
+        fresh.gpu.readback().unwrap()
+    };
+    window.draw();
+    let blue_over_red = window.pixel(50, 50);
+    assert!(blue_over_red[2] > blue_over_red[0], "{blue_over_red:?}");
+    // The red one comes in front: drawn after the blue one now.
+    world.set_transform(red, Transform::at([0., 0., 1.]));
+    window.draw();
+    let red_over_blue = window.pixel(50, 50);
+    assert!(red_over_blue[0] > red_over_blue[2], "{red_over_blue:?}");
+    assert!(window.gpu.readback().unwrap() == fresh(&world));
+    // Back, and the camera goes round: only the camera moved.
+    world.set_transform(red, Transform::at([0., 0., -1.]));
+    window.draw();
+    assert_eq!(window.pixel(50, 50), blue_over_red);
+    world.set_camera(Camera::looking_at([0., 0., -3.], [0., 0., 0.]));
+    window.draw();
+    let from_behind = window.pixel(50, 50);
+    assert!(from_behind[0] > from_behind[2], "{from_behind:?}");
+    assert!(window.gpu.readback().unwrap() == fresh(&world));
+}
+
+/// What `lit_scene`'s changes name: its sun, its lamp and its ball.
+type LitScene = (LightId, LightId, ObjectId);
+/// A world of opaque meshes, a sun casting shadows and a point light, as
+/// `changes` (applied in order, `change_lit_scene`) leave it.
+fn lit_scene(changes: &[&str]) -> (World, LitScene) {
+    let world = World::new();
+    world.set_shadows(true);
+    let sun = world.add_light(Light::Directional {
+        direction: vec3(-0.4, -1., -0.3),
+        color: [1.; 3],
+        intensity: 2.,
+    });
+    let lamp = world.add_light(Light::Point {
+        position: vec3(1., 1., 1.),
+        color: [1., 0.5, 0.2],
+        intensity: 4.,
+        range: 6.,
+    });
+    let floor = world.add(Object::mesh(
+        Geometry::plane(6., 6.),
+        Material::rgb(0x808080),
+    ));
+    world.set_transform(floor, Transform::at([0., -0.5, 0.]));
+    let ball = world.add(Object::mesh(
+        Geometry::sphere(0.5, 16),
+        Material::rgb(0x3366cc),
+    ));
+    let cube = world.add(Object::mesh(
+        Geometry::cuboid(0.5, 0.5, 0.5),
+        Material::rgb(0xcc6633),
+    ));
+    world.set_transform(cube, Transform::at([1., 0., -0.5]));
+    world.set_camera(Camera::looking_at([0., 2., 4.], [0., 0., 0.]));
+    for change in changes {
+        change_lit_scene(&world, (sun, lamp, ball), change);
+    }
+    (world, (sun, lamp, ball))
+}
+/// `change` made to `lit_scene`'s world: the camera turned to step `"1"`,
+/// `"2"`…, the lamp moved, a background, the sun turned, the ball moved.
+fn change_lit_scene(world: &World, (sun, lamp, ball): LitScene, change: &str) {
+    match change {
+        "lamp" => world.set_light(
+            lamp,
+            Light::Point {
+                position: vec3(-1., 1., 1.),
+                color: [0.2, 0.5, 1.],
+                intensity: 4.,
+                range: 6.,
+            },
+        ),
+        "background" => world.set_background(Some(0x141e28)),
+        "sun" => world.set_light(
+            sun,
+            Light::Directional {
+                direction: vec3(0.5, -1., 0.2),
+                color: [1.; 3],
+                intensity: 2.,
+            },
+        ),
+        "ball" => world.set_transform(ball, Transform::at([-1., 0., 0.5])),
+        step => {
+            let turned = step.parse::<f32>().unwrap() * 0.6;
+            world.set_camera(Camera::looking_at(
+                [4. * turned.sin(), 2., 4. * turned.cos()],
+                [0., 0., 0.],
+            ));
+        }
+    }
+}
+
+#[test]
+fn frames_where_only_the_view_changed_draw_as_a_fresh_window_does() {
+    // A frame where only the camera or a light but the sun moved draws the
+    // meshes as the last frame did; each must be what a world made as it is
+    // now draws in a window of its own.
+    let (world, ids) = lit_scene(&[]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let first = window.gpu.readback().unwrap();
+    let mut changes: Vec<&str> = Vec::new();
+    for change in ["1", "2", "3", "lamp", "background", "sun", "ball", "1"] {
+        changes.push(change);
+        change_lit_scene(&world, ids, change);
+        window.draw();
+        let drawn = window.gpu.readback().unwrap();
+        assert!(drawn != first, "{change} changed the frame");
+        // (Kept alive: its view's painter holds it weakly.)
+        let (made, _) = lit_scene(&changes);
+        let mut fresh = Window::new(&made).unwrap();
+        fresh.draw();
+        assert!(fresh.pixel(50, 50) != [0, 128, 0, 255], "it drew");
+        assert!(drawn == fresh.gpu.readback().unwrap(), "after {changes:?}");
+    }
+}
+
+#[test]
+fn a_still_world_with_nothing_unsettled_draws_no_frames() {
+    // What every feature keeping a world drawing (design 4.4) must leave
+    // true once it settles: ticks of the window draw the world no more, and
+    // its view doesn't animate. (This window has no frame clock: a view
+    // animating draws no more frames here, so the second is what fails.)
+    let (world, ids) = lit_scene(&[]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let drawn = world.frames_drawn();
+    assert!(drawn > 0, "it drew");
+    for _ in 0..30 {
+        window.draw();
+    }
+    assert_eq!(world.frames_drawn(), drawn, "frames over 30 ticks at rest");
+    assert!(!world.view().animating());
+    // A change draws one.
+    change_lit_scene(&world, ids, "1");
+    window.draw();
+    window.draw();
+    assert_eq!(world.frames_drawn(), drawn + 1);
+}
+
+/// A world with the camera inside a grid of meshes, some translucent, some
+/// morphing, and a sun casting shadows; culling as `culling` says.
+fn inside_a_grid(culling: bool) -> World {
+    let world = World::new();
+    world.set_culling(culling);
+    world.set_shadows(true);
+    world.add_light(Light::Directional {
+        direction: vec3(-0.3, -1., -0.2),
+        color: [1.; 3],
+        intensity: 2.,
+    });
+    let shapes = [
+        Geometry::cuboid(0.6, 0.6, 0.6),
+        Geometry::sphere(0.4, 12),
+        Geometry::cone(0.3, 0.7, 12),
+    ];
+    for i in 0..9 * 9 * 3 {
+        let (x, z, y) = (i % 9, i / 9 % 9, i / 81);
+        let mut material = Material::rgb([0xcc4422, 0x2266cc, 0x44aa55][i % 3]);
+        if i % 7 == 0 {
+            material.color[3] = 0.5;
+        }
+        // Every fifth morphs: its box follows its weights.
+        let geometry = if i % 5 == 0 {
+            let up = vec![[0., 0.6, 0.]; shapes[i % 3].vertices().len()];
+            let targets = vec![MorphTarget::new(up)];
+            shapes[i % 3].clone().with_morph_targets(targets).unwrap()
+        } else {
+            shapes[i % 3].clone()
+        };
+        let mesh = world.add(Object::mesh(geometry, material));
+        let at = |n: usize| (n as f32 - 4.) * 1.5;
+        world.set_transform(mesh, Transform::at([at(x), y as f32 * 1.5 - 1.5, at(z)]));
+        if i % 5 == 0 {
+            world.set_morph_weights(mesh, &[1.]);
+        }
+    }
+    world
+}
+
+#[test]
+fn culling_leaves_out_what_the_camera_cant_see_and_changes_no_pixel() {
+    let (culled, whole) = (inside_a_grid(true), inside_a_grid(false));
+    let (Some(mut a), Some(mut b)) = (Window::new(&culled), Window::new(&whole)) else {
+        return;
+    };
+    for step in 0..4 {
+        let turned = step as f32 * 1.4;
+        let camera = Camera::looking_at([0.3, 0.2, 0.4], [turned.sin(), 0., turned.cos()]);
+        culled.set_camera(camera);
+        whole.set_camera(camera);
+        a.draw();
+        b.draw();
+        assert!(
+            culled.culled() > 100,
+            "most meshes are out of view: {}",
+            culled.culled()
+        );
+        assert_eq!(whole.culled(), 0);
+        assert!(
+            a.gpu.readback().unwrap() == b.gpu.readback().unwrap(),
+            "the same frame at step {step}"
+        );
+    }
+}
+
+/// A row of 50 cubes the camera sees whole and one wandering in from far
+/// off it, culling as `culling` says: the world and the wanderer.
+fn wandering(culling: bool) -> (World, ObjectId) {
+    let world = World::new();
+    world.set_culling(culling);
+    world.add_light(Light::Directional {
+        direction: vec3(-0.3, -1., -0.5),
+        color: [1.; 3],
+        intensity: 3.,
+    });
+    for i in 0..50 {
+        let cube = world.add(Object::mesh(
+            Geometry::cuboid(0.3, 0.3, 0.3),
+            Material::rgb(0x808080),
+        ));
+        world.set_transform(cube, Transform::at([(i as f32 - 25.) * 0.3, -1., 0.]));
+    }
+    let wanderer = world.add(Object::mesh(
+        Geometry::sphere(0.5, 16),
+        Material::rgb(0xcc3311),
+    ));
+    world.set_transform(wanderer, Transform::at([100., 0., 0.]));
+    world.set_camera(Camera::looking_at([0., 0., 30.], [0., 0., 0.]));
+    (world, wanderer)
+}
+
+#[test]
+fn a_mesh_moving_while_culling_rests_is_drawn_when_it_looks_again() {
+    // Culling leaves out 1 of 51 (under 2%) and rests; the wanderer comes
+    // into view meanwhile and stops there. Looking again, culling must test
+    // where it is now, not where it was when it last looked.
+    let ((culled, a_id), (whole, b_id)) = (wandering(true), wandering(false));
+    let (Some(mut a), Some(mut b)) = (Window::new(&culled), Window::new(&whole)) else {
+        return;
+    };
+    for step in 0..24 {
+        let at = Transform::at([(100. - step as f32 * 12.).max(0.), 0., 0.]);
+        culled.set_transform(a_id, at);
+        whole.set_transform(b_id, at);
+        // A camera's nudge: a frame each step, after it stops too.
+        let camera = Camera::looking_at([0., 0., 30. + step as f32 * 0.01], [0., 0., 0.]);
+        culled.set_camera(camera);
+        whole.set_camera(camera);
+        a.draw();
+        b.draw();
+        assert!(
+            a.gpu.readback().unwrap() == b.gpu.readback().unwrap(),
+            "the same frame at step {step}"
+        );
+    }
+    assert!(culled.frames_drawn() >= 24, "a frame each step");
+    assert_eq!(whole.culled(), 0);
+}
+
+/// A group holding two meshes, a mesh apart, and a sun, as `changes` leave
+/// it (`change_grouped`): the world, and its group, a mesh in it and the
+/// mesh apart.
+fn grouped(changes: &[&str]) -> (World, [ObjectId; 3]) {
+    let world = World::new();
+    world.add_light(Light::Directional {
+        direction: vec3(-0.3, -1., -0.6),
+        color: [1.; 3],
+        intensity: 3.,
+    });
+    let group = world.add(Object::group());
+    let mesh = |geometry, rgb| Object::mesh(geometry, Material::rgb(rgb)).child_of(group);
+    let a = world.add(mesh(Geometry::cuboid(0.6, 0.6, 0.6), 0xcc4422));
+    world.set_transform(a, Transform::at([-0.8, 0., 0.]));
+    let b = world.add(mesh(Geometry::sphere(0.4, 12), 0x2266cc));
+    world.set_transform(b, Transform::at([0.8, 0., 0.]));
+    let apart = world.add(Object::mesh(
+        Geometry::cuboid(0.5, 0.5, 0.5),
+        Material::rgb(0x44aa55),
+    ));
+    world.set_transform(apart, Transform::at([0., -1., 0.]));
+    world.set_camera(Camera::looking_at([0., 0.5, 4.], [0., 0., 0.]));
+    let ids = [group, b, apart];
+    for change in changes {
+        change_grouped(&world, ids, change);
+    }
+    (world, ids)
+}
+/// `change` made to `grouped`'s world: `"group"` moves the group,
+/// `"colour"` recolours a mesh in it, `"apart"` moves the other,
+/// `"texture"` gives the first a texture, `"metal"` turns the other to metal.
+fn change_grouped(world: &World, [group, b, apart]: [ObjectId; 3], change: &str) {
+    match change {
+        "group" => world.set_transform(group, Transform::at([0.3, 0.6, 0.])),
+        "colour" => world.set_material(b, Material::rgb(0xeeee22)),
+        "apart" => world.set_transform(apart, Transform::at([0.5, -1., 0.5])),
+        "texture" => {
+            let pixels = [
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [255; 4],
+            ];
+            let texture = Texture::from_rgba8(2, 2, pixels.concat()).unwrap();
+            world.set_texture(b, Some(texture));
+        }
+        _ => world.set_material(apart, Material::rgb(0xcccccc).with(1., 0.3)),
+    }
+}
+
+#[test]
+fn a_change_reaches_the_instances_of_the_meshes_it_moves_or_colours() {
+    // A frame makes again only the instances of meshes stamped since the
+    // last: a group's move must reach the meshes under it.
+    let (world, ids) = grouped(&[]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let mut changes = Vec::new();
+    for change in ["group", "colour", "apart", "texture", "group", "metal"] {
+        changes.push(change);
+        change_grouped(&world, ids, change);
+        window.draw();
+        // (Kept alive: its view's painter holds it weakly.)
+        let (made, _) = grouped(&changes);
+        let mut fresh = Window::new(&made).unwrap();
+        fresh.draw();
+        assert!(
+            window.gpu.readback().unwrap() == fresh.gpu.readback().unwrap(),
+            "after {changes:?}"
+        );
+    }
+}
+
+#[test]
 fn a_volume_takes_out_light_by_how_far_it_goes() {
     let (world, pane) = red_behind_glass(Material::rgb(0xffffff).with(0., 0.));
     let Some(mut window) = Window::new(&world) else {
