@@ -1,0 +1,13 @@
+[package]
+name = "zgx-audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+rust-version.workspace = true
+description = "Sound for zgx apps: a sample-accurate mixer with buses, fades and a limiter, WAV files, and an offline renderer. Optional: an app that doesn't depend on it pays nothing."
+keywords = ["audio", "mixer", "sound", "gamedev", "gui"]
+categories = ["multimedia::audio", "game-development"]
+
+[dependencies]

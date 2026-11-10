@@ -5095,6 +5095,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "zgx-audio"
+version = "0.1.10"
+
+[[package]]
 name = "zgx-components"
 version = "0.1.10"
 dependencies = [
