@@ -16,7 +16,8 @@ use std::{
 #[derive(Default)]
 struct Ready {
     queue: VecDeque<u64>,
-    queued: HashSet<u64>,
+    // (Fx: task ids are small integers, hashed at every wake.)
+    queued: HashSet<u64, rustc_hash::FxBuildHasher>,
 }
 struct Scheduler {
     ready: Mutex<Ready>,
@@ -93,7 +94,7 @@ impl Drop for TaskHandle {
 /// Single-threaded future storage, with a thread-safe wake queue.
 /// Call `tick` from the UI event loop after its wake event; no idle polling needed.
 pub struct LocalExecutor {
-    tasks: HashMap<u64, Task>,
+    tasks: HashMap<u64, Task, rustc_hash::FxBuildHasher>,
     next: Rc<Cell<u64>>,
     pending: Rc<RefCell<Vec<Task>>>,
     scheduler: Arc<Scheduler>,
@@ -111,7 +112,7 @@ impl LocalExecutor {
     /// The callback should post an event, rather than synchronously run `tick`.
     pub fn with_wake(wake_event_loop: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
-            tasks: HashMap::new(),
+            tasks: HashMap::default(),
             next: Rc::new(Cell::new(0)),
             pending: Rc::new(RefCell::new(Vec::new())),
             scheduler: Arc::new(Scheduler {
