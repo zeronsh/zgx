@@ -409,7 +409,12 @@ where
         available_space: Size<AvailableSpace>,
         run_mode: RunMode,
     ) -> Option<LayoutOutput> {
-        self.taffy.nodes[node_id.into()].cache.get(known_dimensions, available_space, run_mode)
+        // zgx: a node with a context is measured by it, sized by what it
+        // holds unless its style gives its width (`Cache::get_with`).
+        let node = &self.taffy.nodes[node_id.into()];
+        node.cache.get_with(known_dimensions, available_space, run_mode, || {
+            node.has_context && node.style.size.width.is_auto()
+        })
     }
 
     fn cache_store(

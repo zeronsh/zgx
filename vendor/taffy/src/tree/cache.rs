@@ -114,13 +114,33 @@ impl Cache {
         available_space: Size<AvailableSpace>,
         run_mode: RunMode,
     ) -> Option<LayoutOutput> {
+        self.get_with(known_dimensions, available_space, run_mode, || false)
+    }
+
+    /// zgx: `get`, for a node that may be measured by its content (`leaf`,
+    /// asked only where it matters: `ZGX_PATCH.md`): a width such a node
+    /// answered at its least (no room) isn't taken for its answer at that
+    /// width. A zgx box gives its min-content width with the height it has
+    /// at no room, not the one it has at that width, as a box taffy lays
+    /// out does.
+    #[inline]
+    pub(crate) fn get_with(
+        &self,
+        known_dimensions: Size<Option<f32>>,
+        available_space: Size<AvailableSpace>,
+        run_mode: RunMode,
+        leaf: impl Fn() -> bool,
+    ) -> Option<LayoutOutput> {
+        // Along its width alone: its width at a height is the one it answered.
+        let least = |space: AvailableSpace| matches!(space, AvailableSpace::MinContent) && leaf();
         match run_mode {
             RunMode::PerformLayout => self
                 .final_layout_entry
                 .filter(|entry| {
                     let cached_size = entry.content.size;
                     (known_dimensions.width == entry.known_dimensions.width
-                        || known_dimensions.width == Some(cached_size.width))
+                        || (known_dimensions.width == Some(cached_size.width)
+                            && !least(entry.available_space.width)))
                         && (known_dimensions.height == entry.known_dimensions.height
                             || known_dimensions.height == Some(cached_size.height))
                         && (known_dimensions.width.is_some()
@@ -134,7 +154,8 @@ impl Cache {
                     let cached_size = entry.content;
 
                     if (known_dimensions.width == entry.known_dimensions.width
-                        || known_dimensions.width == Some(cached_size.width))
+                        || (known_dimensions.width == Some(cached_size.width)
+                            && !least(entry.available_space.width)))
                         && (known_dimensions.height == entry.known_dimensions.height
                             || known_dimensions.height == Some(cached_size.height))
                         && (known_dimensions.width.is_some()

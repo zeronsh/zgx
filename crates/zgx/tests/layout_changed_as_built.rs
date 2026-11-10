@@ -412,10 +412,7 @@ fn a_tree_with_a_long_column_changed_lays_out_as_one_built_whole() {
 
 #[test]
 fn a_tree_with_absolute_boxes_changed_lays_out_as_one_built_whole() {
-    // Seed 127 lays a row out stale, as main did before this test (nested
-    // absolute boxes, a reorder and a text in one flush): left out until
-    // that is fixed.
-    for seed in (1..=300).filter(|seed| *seed != 127) {
+    for seed in 1..=300 {
         run(seed, seed % 3 == 0, true);
     }
 }
