@@ -1,6 +1,6 @@
 # zgx-audio: playback, mixing and spatial sound (design, Nov 10 2026)
 
-Read on origin/main `e89ada127`. Nothing here is built. It needs the maintainer's approval before a lane starts; the decisions it asks for are in [section 12](#12-decisions-for-the-maintainer). The rendering side is [design-3d-aaa.md](design-3d-aaa.md).
+Read on origin/main `e89ada127`. Nothing here is built yet. The questions it raised are settled in [section 12](#12-decisions). The rendering side is [design-3d-aaa.md](design-3d-aaa.md).
 
 ## 1. Where zgx is today
 
@@ -47,7 +47,7 @@ A separate crate, not a zgx-desktop feature: Rust apps that draw nothing (a tool
 - **Audio callback:** owned by the platform. Each block it applies the commands due, at their exact frame within the block, mixes, and writes. It touches only memory made before it started: a fixed pool of voices (64 real by default), buses and effect state. Buffers it's done with go back on the return queue to be freed on the main thread, since `free` isn't allowed here.
 - **Decode thread:** one thread, asleep on a condition variable unless a stream needs filling or a load was asked for. A stream that runs dry fades out over 5 ms, counts an underrun, and fades back when data arrives.
 - **Voices past the limit:** each voice has a priority; when the pool is full the quietest of the lowest priority is stolen with a 5 ms fade. Looping voices that are stolen or inaudible become *virtual* (their position advances, nothing mixes) and return when there's room.
-- **Starting and stopping the device:** the stream starts with the first sound and stops after a hold with nothing audible (1 s by default: reverb tails and fades count as audible). `Audio::prewarm()` starts it early for an app that knows a sound is coming. See [decision 4](#12-decisions-for-the-maintainer): a cold start may be slower than the platform's own click.
+- **Starting and stopping the device:** the stream starts with the first sound and stops after a hold with nothing audible (1 s by default: reverb tails and fades count as audible). `Audio::prewarm()` starts it early for an app that knows a sound is coming. See [decision 4](#12-decisions): a cold start may be slower than the platform's own click.
 - **Device changes:** the engine listens for the system's default-device and format notifications and rebuilds its stream on the new one, keeping voices and their positions. Sounds are held at their file's rate and resampled per voice, so a rate change needs no reload.
 
 ## 5. Playback
@@ -109,7 +109,7 @@ world.add_reverb_zone(ReverbZone::box_(min, max).preset(Reverb::WAREHOUSE).fade(
 - **Emitters** follow their object's world transform; the **listener** follows the camera unless set. Positions are read when the world changes, sent as commands, and interpolated over the audio block, so a fast pass-by doesn't step. A still world sends nothing.
 - **Distance:** inverse, linear or exponential roll-off with reference and maximum distances, or the app's own curve; air absorption as a distance-driven low-pass.
 - **Doppler** from the emitter's and listener's velocities along the line between them, as a pitch change in the voice's resampler, smoothed and clamped.
-- **Panning:** equal-power for stereo speakers; vector-based amplitude panning for surround layouts; **HRTF** for headphones (a built-in set of impulse responses, convolved per emitter, behind the `hrtf` feature). The platform's own spatialisers aren't used: they differ per OS and can't be rendered offline or compared in tests. [Decision 6](#12-decisions-for-the-maintainer).
+- **Panning:** equal-power for stereo speakers; vector-based amplitude panning for surround layouts; **HRTF** for headphones (a built-in set of impulse responses, convolved per emitter, behind the `hrtf` feature). The platform's own spatialisers aren't used: they differ per OS and can't be rendered offline or compared in tests. [Decision 6](#12-decisions).
 - **Occlusion and obstruction:** rays from the listener to each audible emitter against the world's meshes (the same triangles picking uses), on the main thread, a budget of rays per frame spread round-robin, only when either end moved. The result is a gain and a low-pass cutoff, smoothed. Apps can mark meshes as not blocking sound, give a mesh a transmission value, or supply the query themselves. Diffraction and propagation paths aren't modelled.
 - **Reverb zones** are volumes the app places, each with reverb settings. The listener's position picks the zones it's in, weighted by a fade distance, and emitters send to that reverb; an emitter in a different zone from the listener sends less. One reverb instance per active zone, two at most by default.
 - **Budget rule:** emitters past the voice limit or below an audibility threshold are virtual and cost a distance check each.
@@ -124,12 +124,12 @@ world.add_reverb_zone(ReverbZone::box_(min, max).preset(Reverb::WAREHOUSE).fade(
 | MP3 | A Rust decoder; its patents have expired | `mp3` |
 | AAC | The platform's decoder only: AudioToolbox on Apple systems, Media Foundation on Windows. Nothing on Linux. | `aac` |
 
-All decoding is off the main thread. Each decoder's binary size is measured before its feature becomes anyone's default, and each dependency's licence is listed for the maintainer first ([decision 3](#12-decisions-for-the-maintainer)).
+All decoding is off the main thread. Each decoder's binary size is measured before its feature becomes anyone's default, and each dependency's licence is listed for the maintainer first ([decision 3](#12-decisions)).
 
 ## 9. The system
 
 - **Platforms:** CoreAudio on macOS (an output unit on the default device) and iOS (with an audio session); WASAPI shared mode on Windows; PipeWire on Linux, PulseAudio where PipeWire isn't there, ALSA last. Shared mode everywhere: zgx never takes a device exclusively.
-- **Backends:** proposal: start on `cpal` behind zgx-audio's own small `Device` trait, and measure it against each requirement (wakeups when stopped, start latency, buffer sizes, device-change handling, native PipeWire, size). Where it fails one, write that platform's backend directly behind the same trait, as the project already maintains its own forks where upstream doesn't fit. [Decision 2](#12-decisions-for-the-maintainer).
+- **Backends:** proposal: start on `cpal` behind zgx-audio's own small `Device` trait, and measure it against each requirement (wakeups when stopped, start latency, buffer sizes, device-change handling, native PipeWire, size). Where it fails one, write that platform's backend directly behind the same trait, as the project already maintains its own forks where upstream doesn't fit. [Decision 2](#12-decisions).
 - **Device and volume:** the system's default output and its changes are followed; the system volume applies to zgx's output as to any app's. zgx-audio has no API to change either.
 - **Interruptions (iOS):** the session's interruption notifications pause the engine and resume it when the system says to. The session category defaults to *ambient* (mixes with other apps, obeys the silent switch); an app that is a player asks for *playback*. Built and verified only once an iOS host is on main.
 - **Suspend and hidden windows:** the engine pauses when the app is suspended. A hidden or minimised window keeps playing unless the app asks otherwise (music players exist).
@@ -176,7 +176,7 @@ ui.scene3d {
 | Wakeups with nothing playing | The same as the app without the `audio` feature, over 60 s |
 | Memory at rest, engine made, nothing loaded | Under 1 MB, and no device stream open |
 | Click to sound, stream running | One device buffer plus the output latency the device reports (typically under 15 ms) |
-| Click to sound, stream stopped | Measured against the platform's own click (NSSound, `PlaySound`); if slower, [decision 4](#12-decisions-for-the-maintainer) |
+| Click to sound, stream stopped | Measured against the platform's own click (NSSound, `PlaySound`); if slower, [decision 4](#12-decisions) |
 | Callback time, 64 voices, 3 buses with effects, limiter | Under 10% of the block period at the 99.9th percentile, M5 and a mid-range x86 |
 | The same with 16 HRTF emitters and 2 reverbs | Under 25% |
 | Underruns in a 10-minute soak under UI load (heavy scroll, a 3D scene animating) | 0 |
@@ -213,14 +213,18 @@ ui.scene3d {
 
 All of the demo's sounds are synthesised or recorded for it.
 
-## 12. Decisions for the maintainer
+## 12. Decisions
 
-1. **A crate of its own, `zgx-audio`,** with `audio` features in zgx-desktop, zgx-3d and zgx-script, all off by default. *Recommended over a zgx-desktop feature.*
-2. **Device backends:** start on `cpal` behind our own trait and replace per platform where it fails a measured requirement, or write the three backends directly from the start. Starting on cpal is weeks faster; direct backends give control of idle behaviour and PipeWire. I recommend cpal first, with the measurements deciding.
-3. **Decoder dependencies and licences.** The candidates and their licences come to you as a list before any is added. One to flag now: the broadest Rust decoding library is MPL-2.0, not MIT or Apache; the plan above avoids needing it by using one small decoder per format.
-4. **Silent-when-idle against instant clicks.** Stopping the stream when nothing plays is what makes idle free, and it means the first click after a silence pays the device's start time. Options: (a) the 1 s hold plus `prewarm()` (proposed); (b) UI sounds go through the platform's own click services where they exist, and the engine handles everything else; (c) keep the stream running while a window is focused, which costs wakeups all the time. The measurement in A1 says how big the problem is.
+Settled Nov 10 2026 by the coordinator, the maintainer having said designs need no approval. Each can be reopened by a measurement.
+
+1. **A crate of its own, `zgx-audio`,** with `audio` features in zgx-desktop, zgx-3d and zgx-script, all off by default.
+2. **Device backends start on `cpal` behind our own `Device` trait.** A1 measures it per platform against section 9's requirements; a platform where it fails one gets a direct backend behind the same trait.
+3. **One small decoder per format.** Dependencies under MIT, Apache-2.0, BSD or zlib are added on a size measurement; anything else (MPL-2.0 included) goes to the maintainer first.
+4. **Idle wins:** the stream stops after a 1 s hold, with `prewarm()`. A1 measures the cold start against the platform's own click; if it loses audibly, UI sounds on that platform go through the platform's click service.
 5. **The `ui` bus obeys the user's interface-sound setting; other buses don't.**
-6. **HRTF:** our own convolution with a built-in response set (which set, and its licence, comes to you), not the platforms' spatialisers.
+6. **HRTF is our own convolution** with a built-in response set under a permissive licence, named in A2's PR.
 7. **No DSP in Luau.**
-8. **Audible tests on your machines:** zero-gain by default, anything audible asked for first.
-9. **iOS** waits for a host on main, as in the 3D plan.
+8. **Automated runs on the maintainer's Macs are at zero gain;** anything audible is asked for first.
+9. **iOS** waits for the host in draft to land.
+
+**The bar,** as for rendering: the mixer is measured against established engines' published figures and an open one run on the same machine (callback time per voice, latency, idle wakeups), and merges when it ties or beats them or says why not.

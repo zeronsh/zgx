@@ -1,6 +1,6 @@
 # zgx-3d: rendering primitives for games (design, Nov 10 2026)
 
-Read on origin/main `e89ada127`. Nothing here is built. It needs the maintainer's approval before any lane starts; the decisions it asks for are in [section 14](#14-decisions-for-the-maintainer).
+Read on origin/main `e89ada127`. Nothing here is built yet. The design questions it raised are settled in [section 14](#14-decisions); the bar for merging anything is [section 2a](#2a-the-bar-among-the-fastest-renderers).
 
 The goal is general primitives a AAA-quality scene can be built from, proven by a reference demo (a harbor at dawn, in rain) written only against the public API. Water, weather, terrain, foliage and the like stay in the demo. Audio is in [design-audio.md](design-audio.md).
 
@@ -35,6 +35,25 @@ Already done, so not listed again below: clearcoat, transmission, volume, IOR an
 6. **Primitives only.** The test for each addition: could two unrelated games use it unchanged? Water is not a primitive; "a material that can read the scene behind it and displace its vertices" is.
 7. **All of it lives in zgx-3d.** zgx, zgx-gpu and zgx-desktop change only where the view seam must (capabilities, the D3D11 view host, an HDR-capable target if approved), each as a new cold function with the UI gate read cell by cell.
 
+## 2a. The bar: among the fastest renderers
+
+zgx-3d is built to match or beat the most performant renderers, and a primitive merges only when it's shown to be among the best. Concretely:
+
+- **Same scene, same machine, same output.** Each primitive is measured against established renderers drawing the same scene at the same resolution and comparable image quality: Bevy (it's on wgpu too, so the comparison isolates the renderer from the backend), Filament and Godot's Forward+ renderer, and a published engine figure where one exists for the hardware. The scenes are public benchmark scenes (fetched by the harness, never committed) plus the harbor.
+- **What's compared:** GPU time per frame by pass, CPU time and instructions per frame, memory, and frames drawn when nothing changes (where zgx should win outright: the others draw every frame).
+- **The merge bar:** at equal image quality, the primitive's GPU and CPU cost ties or beats the best of the others on the M5 Max and the 4090, or its PR says by how much it loses, why, and what closes the gap. A primitive that loses without a reason stays on its branch.
+- **Each arm proves it drew:** frames counted, pixels checked, as for every probe.
+
+What that bar changes in this design, against a simpler plan:
+
+1. **GPU-driven from the start.** Kept instance data with dirty-range uploads, GPU culling and indirect draws move from the last milestone into R0 and R3: rebuilding every instance on the CPU each frame is today's largest gap to the fast renderers.
+2. **A depth prepass with reversed Z and equal-depth shading,** so the forward pass shades each pixel once.
+3. **Fewer, fatter passes.** The whole display chain is one fragment pass; screen-space effects run at half resolution with one shared depth pyramid; passes that can share a render pass do (it also keeps tile memory on Apple GPUs).
+4. **Pipelines compiled ahead:** wgpu's pipeline cache is turned on and persisted, and variants a scene will need are compiled off the frame, so the first frame with a new material doesn't hitch.
+5. **Bindless textures where the device has them** (texture binding arrays), so draws batch across materials; the per-material bind groups stay as the fallback.
+6. **Meshlets and a visibility buffer are measured, not assumed:** they're built if the comparison scenes show clustered forward losing to them at high triangle counts.
+7. **Hardware ray tracing is an optional path** (Metal and Direct3D 12, when wgpu exposes it) for probe updates and reflections; the rasterised paths stay the default everywhere.
+
 ## 3. Backends and tiers
 
 | Tier | Backends | What it has |
@@ -58,7 +77,7 @@ On tier B, proposed:
 
 Parity is checked as it is today: tier A backends against each other on software adapters where CI has them (WARP for D3D12, lavapipe for Vulkan), Metal on the macOS job, hardware on WING-PC, the M5 and M1, and personal-metal. `d3d11_parity` gains view-host cases. No check is loosened without a minimal repro showing the driver differs.
 
-**iOS** can't be verified until an iOS host is on main ([decision 14](#14-decisions-for-the-maintainer)). Until then the parity lane keeps zgx-3d building for `aarch64-apple-ios` and designs for it; no primitive is called done on iOS. When it's there, iOS is tier A (Metal) with tighter memory budgets ([section 11](#11-budgets)) and tile-based GPU rules: no pass reads a target it also writes, and passes that can share a render pass do, so tile memory isn't stored and reloaded between them.
+**iOS** can't be verified until an iOS host is on main ([decision 14](#14-decisions)). Until then the parity lane keeps zgx-3d building for `aarch64-apple-ios` and designs for it; no primitive is called done on iOS. When it's there, iOS is tier A (Metal) with tighter memory budgets ([section 11](#11-budgets)) and tile-based GPU rules: no pass reads a target it also writes, and passes that can share a render pass do, so tile memory isn't stored and reloaded between them.
 
 ## 4. The frame
 
@@ -95,7 +114,7 @@ With features on, the full list is:
 - **Scene colour** is `Rgba16Float` when the world has a background or a sky, and when it's transparent over its box (alpha has to survive). `Rg11b10Ufloat` is used for half-resolution intermediates that carry no alpha.
 - **Depth** moves to reversed Z (1 near, 0 far) `Depth32Float` when any feature needing the prepass is on: distant precision matters for fog, SSR and large scenes. A world with nothing on keeps today's depth, so its cost and pixels don't move.
 - **MSAA and TAA** exclude each other per world: `Antialiasing::Msaa(4)` (today's default), `Taa`, or `None`. Under MSAA the screen-space passes read resolved depth.
-- **Output** stays the view's `Bgra8Unorm` target, premultiplied, composited by zgx as an image. Display HDR (EDR on macOS, scRGB on Windows) needs a float view target in zgx-gpu and is left out of this plan ([decision 7](#14-decisions-for-the-maintainer)).
+- **Output** stays the view's `Bgra8Unorm` target, premultiplied, composited by zgx as an image. Display HDR (EDR on macOS, scRGB on Windows) needs a float view target in zgx-gpu and is left out of this plan ([decision 7](#14-decisions)).
 
 ### 4.3 Resource lifetimes
 
@@ -259,7 +278,7 @@ let rain = world.add_emitter(Emitter::new(200_000)
 
 - **Stock modules:** spawn shapes (point, box, sphere, cone, mesh surface, another emitter's events), rate and bursts, lifetime, velocity, colour and size over life, forces (gravity, drag, wind, curl noise, attractors, a vector-field texture), collision against the depth buffer (bounce, stick, die, emit an event), and sub-emitters on events.
 - **Drawing:** billboards, velocity streaks, meshes, ribbons later. Soft against depth. Lit from the clusters per vertex (cheap) or per pixel, receiving cascade shadows and fog.
-- **Transparency:** weighted blended order-independent transparency by default (no sort, one extra target), with a per-emitter GPU sort for the cases it handles badly (dense, opaque-looking smoke). [Decision 6](#14-decisions-for-the-maintainer).
+- **Transparency:** weighted blended order-independent transparency by default (no sort, one extra target), with a per-emitter GPU sort for the cases it handles badly (dense, opaque-looking smoke). [Decision 6](#14-decisions).
 - **Temporal:** particles write the reactive mask, so TAA doesn't smear them.
 - **Custom:** `.update(wgsl)` replaces or follows the stock update (`fn update(p: ptr<function, Particle>, e: EmitterIn)`), and `.material(shader)` draws through 5.1.
 - **Settled** when no particle lives and nothing emits; a burst that ends lets the world go idle.
@@ -299,7 +318,7 @@ Each is off by default and set on the world (or on a light, a mesh, a volume). T
 
 ### 6.4 Global illumination and reflections
 
-- **Irradiance volumes:** the app places `ProbeVolume`s (a box and a spacing). Each probe stores irradiance as octahedral maps plus depth moments for visibility, the layout DDGI uses. **Updates are rasterised:** zgx has no ray tracing on its backends, so a probe is refreshed by drawing six small faces, a budget of probes a frame, on demand (`volume.bake()`) or continuously. Baked results can be saved and loaded as an asset. This is a real difference from ray-traced DDGI: updates are slower to spread and cost draw calls. [Decision 5](#14-decisions-for-the-maintainer).
+- **Irradiance volumes:** the app places `ProbeVolume`s (a box and a spacing). Each probe stores irradiance as octahedral maps plus depth moments for visibility, the layout DDGI uses. **Updates are rasterised:** zgx has no ray tracing on its backends, so a probe is refreshed by drawing six small faces, a budget of probes a frame, on demand (`volume.bake()`) or continuously. Baked results can be saved and loaded as an asset. This is a real difference from ray-traced DDGI: updates are slower to spread and cost draw calls. [Decision 5](#14-decisions).
 - **Reflection probes:** placed boxes, captured and prefiltered on the GPU into a cube array, box-projected for parallax, blended by influence. The environment is the last fallback.
 - **Screen-space reflections:** a hierarchical-depth trace at half resolution on the previous frame's colour, resolved with roughness, falling back per pixel to probes and then the environment where the ray leaves the screen.
 - **Ambient occlusion:** GTAO at half resolution, depth-aware upsample, temporally filtered under TAA. It multiplies indirect light only, and bent normals are kept for specular occlusion.
@@ -399,7 +418,7 @@ ui.scene3d {
 
 ## 10. The demo
 
-`examples/harbor` (location: [decision 12](#14-decisions-for-the-maintainer)), Rust and Luau, public API only. Its geometry is procedural or modelled for it, its textures generated, its sounds synthesised or recorded for it; nothing is copied from a game. When it needs something the API can't express, it files an issue for the owning lane and waits; it doesn't work around it.
+`examples/harbor` (location: [decision 12](#14-decisions)), Rust and Luau, public API only. Its geometry is procedural or modelled for it, its textures generated, its sounds synthesised or recorded for it; nothing is copied from a game. When it needs something the API can't express, it files an issue for the owning lane and waits; it doesn't work around it.
 
 | In the scene | Built in the demo from | Engine primitives used |
 | --- | --- | --- |
@@ -421,7 +440,7 @@ Targets: 60 fps at 1080p on a mid-range GPU and 120 fps on an M-series Mac. The 
 
 ## 11. Budgets
 
-These are targets to be measured against, set before measuring; where a measurement shows one is wrong it's changed in this table with the number that showed it. GPU time is per frame with the feature at its default quality, read from timestamp queries where the backend has them and from A/B frame times (interleaved, repeated, with a control arm) where it doesn't. "M" is an M5 Max; the M1 Max must hold 60 fps on the demo. "RTX" is the 4090 in WING-PC. **There's no mid-range GPU in the fleet** ([decision 8](#14-decisions-for-the-maintainer)).
+These are targets to be measured against, set before measuring; where a measurement shows one is wrong it's changed in this table with the number that showed it. GPU time is per frame with the feature at its default quality, read from timestamp queries where the backend has them and from A/B frame times (interleaved, repeated, with a control arm) where it doesn't. "M" is an M5 Max; the M1 Max must hold 60 fps on the demo. "RTX" is the 4090 in WING-PC. **There's no mid-range GPU in the fleet** ([decision 8](#14-decisions)).
 
 | Primitive | 1080p M | 1080p RTX | 4K M | 4K RTX |
 | --- | --- | --- | --- | --- |
@@ -470,7 +489,7 @@ Each ends with a report to the maintainer: what landed with numbers, what was co
 
 | | Milestone | Exit criteria |
 | --- | --- | --- |
-| R0 | **Foundations.** `render.rs` split into modules with no change in behaviour; the pass list with today's three passes; `caps()`; the reference-image harness; the first new gate cells; zgx-3d's GPU tests in CI; the D3D11 view host. | Today's 57 pixel tests pass unchanged; `3d-textured` and `3d-mixed` at or below main on arm64 and x86; UI cells flat; a view draws on D3D11 with `d3d11_parity` cases. |
+| R0 | **Foundations.** `render.rs` split into modules with no change in behaviour; the pass list with today's three passes; kept instance data and CPU frustum culling; the comparison harness of section 2a; `caps()`; the reference-image harness; the first new gate cells; zgx-3d's GPU tests in CI; the D3D11 view host. | Today's 57 pixel tests pass unchanged; `3d-textured` and `3d-mixed` at or below main on arm64 and x86; UI cells flat; a view draws on D3D11 with `d3d11_parity` cases. |
 | R1 | **HDR and the post chain:** HDR targets, bloom, exposure (manual and automatic), grading and LUTs, vignette, grain, chromatic aberration, the `PostPass` interface, then depth of field and motion blur (which need R2's velocity; they land with it). | Goldens on every backend; Filament and Cycles comparisons; budgets met; idle after settling; a world with nothing on unchanged; Luau props, docs, example. |
 | R2 | **TAA and upscaling:** prepass (depth, normal, velocity), TAA, reactive mask, upscaling. | The three no-ghosting scenes against supersampled references; UI over a view bit-identical with TAA on and off; settles in 8 frames. |
 | A1 | Audio core, UI sounds first (design-audio.md). | |
@@ -485,22 +504,24 @@ Each ends with a report to the maintainer: what landed with numbers, what was co
 | R10 | **Animation:** animator, layers, additive, root motion, IK hook. | Poses against Blender's for the same clips and weights. |
 | D | **The demo**, a slice per milestone, finished after R10. | 60 fps at 1080p mid-range, 120 fps on the M5 Max, public API only, every gap filed and closed. |
 
-## 14. Decisions for the maintainer
+## 14. Decisions
 
-1. **Today's path is kept as "the pass list with nothing on",** not as a second renderer. Bar: `3d-textured` and `3d-mixed` at or below main, today's pixels unchanged. *Recommended.* The alternative (always HDR, always a tone-map pass) is simpler but costs every existing 3D app a pass and 16 MB.
-2. **Binary size where 3D is already on.** `zgx-run` and `zgx-video` build `scene3d` by default, so new shaders and code grow them. Proposal: new work sits behind zgx-3d Cargo features (`post`, `lighting`, `shaders`, `compute`, `particles`, `media`, `gi`, `scale`, `ktx2`), each measured in KiB on `zgx-run`'s `dist` build, and you choose which `zgx-run` turns on by default. Until you do, none.
-3. **Direct3D 11 shows no GPU views today,** and #1905 proposes D3D11 as Windows' default. I recommend the view host (shared texture and fence, as agreed in October) be built in R0, before any primitive, and that #1905 doesn't land ahead of it.
-4. **GL's reduced tier** as tabled in section 3: no compute, CPU particles capped, no froxel fog. The alternative is to require GLES 3.1 compute and drop older GL for these features entirely.
-5. **Probe GI is rasterised,** not ray traced: slower to react, no hardware requirement. Ray-traced updates could be added later behind a capability, on Metal and D3D12 only.
-6. **Particle transparency defaults to weighted blended OIT,** with a per-emitter sort as the exception. It's a look decision: WBOIT is order-free and cheap but washes out dense, dark smoke. I'll bring side-by-side frames before R7 starts.
-7. **No display HDR in this plan.** The world renders in HDR and tone maps to the 8-bit view target. EDR/scRGB output needs zgx-gpu's view target and compositing to carry float, which touches UI paths.
-8. **A mid-range GPU to measure on.** The fleet has an M5 Max, an M1 Max and a 4090. The 60 fps target names a mid-range card; without one, I'd hold the demo to 4 ms GPU at 1080p on the 4090 as a stand-in, which is a guess. A cloud or borrowed 4060-class machine would settle it.
-9. **Reference renderers and tolerances:** Khronos viewer for materials, Cycles for light transport, Filament for post, FLIP as the metric, your eye as the judge per primitive.
-10. **Dependencies:** a BasisU transcoder (C++ `basis_universal` through a sys crate, or a Rust port if it's complete and smaller). Anything with a licence beyond MIT/Apache/BSD/zlib comes to you first.
-11. **Stability promises** as written in section 5: versioned WGSL contracts (`#zgx material 1`), additions only within a version.
-12. **Where the demo lives:** `examples/harbor` in this repository if its assets stay under about 20 MB (procedural and generated), otherwise a repository of its own that depends on published zgx crates, which is also the stricter proof of "public API only". I lean to its own repository.
-13. **Surface layers** (5.1) are in the engine as the general form of wetness. If that reads as a game system by another name, the demo instead sets the same shader on every mesh.
-14. **iOS.** The brief lists iOS, and main has no iOS host. A host is in draft (#1591, #1592 and the PRs stacked with them), held for review. Either it lands first and iOS joins each primitive's definition of done from then on, built on that host and no other, or iOS is dropped from "every backend" for this plan. Until you say, primitives are done on macOS, Windows and Linux, with iOS builds kept compiling.
+Settled Nov 10 2026 by the coordinator, the maintainer having said designs need no approval and that the bar is the result. Each can be reopened by a measurement.
+
+1. **Today's path is the pass list with nothing on,** not a second renderer. `3d-textured` and `3d-mixed` stay at or below main; today's pixels don't change.
+2. **Each primitive sits behind a zgx-3d Cargo feature** (`post`, `lighting`, `shaders`, `compute`, `particles`, `media`, `gi`, `scale`, `ktx2`), measured in KiB on `zgx-run`'s `dist` build. None is a default of `zgx-run` or `zgx-video` until the maintainer chooses.
+3. **The Direct3D 11 view host is built in R0,** by the lane that owns D3D11 parity. It's needed whatever is decided about Windows' default renderer.
+4. **GL is the reduced tier** tabled in section 3.
+5. **Probe GI is rasterised by default,** with ray-traced updates as an optional path later (2a.7).
+6. **Particle transparency defaults to weighted blended OIT,** with a per-emitter sort. Side-by-side frames go to the maintainer before R7 merges; work doesn't wait on them.
+7. **No display HDR in this plan.**
+8. **The 4090 stands in for a mid-range GPU** at a 4 ms budget for the demo at 1080p until a 4060-class machine can be measured.
+9. **Reference renderers:** the Khronos viewer for materials, Cycles for light transport, Filament for post; FLIP as the metric; every visible difference stated in the PR. Looks are shown to the maintainer.
+10. **Dependencies** under MIT, Apache-2.0, BSD or zlib are added on a size measurement; anything else goes to the maintainer first.
+11. **Stability promises** are section 5's: versioned WGSL contracts, additions only within a version.
+12. **The demo lives in this repository,** `examples/harbor`, as a crate outside the workspace's default members that depends on the zgx crates by their public API only. Its assets are generated by code or scripts in it.
+13. **Surface layers** (5.1) are in the engine.
+14. **iOS** work goes on the iOS host in draft (#1591, #1592 and the PRs stacked with them) once it lands; until then zgx-3d is kept compiling for `aarch64-apple-ios` and no primitive is called done on iOS.
 
 ## 15. Lanes and who owns what
 
