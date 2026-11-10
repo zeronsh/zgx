@@ -334,7 +334,8 @@ impl Voice {
             self.pitch.fill(pitches);
             let scale = self.base_step * ONE as f64;
             for (step, &pitch) in scratch.steps[..n].iter_mut().zip(pitches.iter()) {
-                *step = ((scale * f64::from(pitch)) as u64).max(1);
+                // Kept from zero as a float: the loop vectorises.
+                *step = (scale * f64::from(pitch)).max(1.) as u64;
             }
         }
         if let Some(Feed::Stream(stream)) = &mut self.sound {

@@ -97,7 +97,11 @@ trait Kernel {
     /// Frames from `position` on at a fixed `step`, every one of whose taps
     /// is in `samples`, one per slot of `left` (and `right`). Returns the
     /// position after.
-    #[inline(always)]
+    ///
+    /// The spans aren't inlined: in [`run`] they made the copy at a sound's
+    /// own rate dearer (its registers spilled), and a call is nothing next
+    /// to a span's work.
+    #[inline(never)]
     fn span<const C: usize>(
         samples: &[f32],
         mut position: Position,
@@ -119,6 +123,41 @@ trait Kernel {
             position += step;
         }
         position
+    }
+
+    /// Frames from `position` on, moving by `steps[i]` after frame `i`, for
+    /// as long as the position is under `limit` (below which every tap is
+    /// in `samples`), one per slot of `left` (and `right`). Returns the
+    /// position after and how many were written: at least one, as
+    /// `position` starts under `limit`.
+    #[inline(never)]
+    fn span_varying<const C: usize>(
+        samples: &[f32],
+        mut position: Position,
+        limit: Position,
+        steps: &[u64],
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> (Position, usize) {
+        let taps = Self::BEHIND + 1 + Self::AHEAD;
+        let mut written = 0;
+        for ((l, r), step) in left.iter_mut().zip(right.iter_mut()).zip(steps) {
+            if position >= limit {
+                break;
+            }
+            let first = ((position >> 32) as usize - Self::BEHIND) * C;
+            let t = fraction(position);
+            if C == 2 {
+                let mut window = [0f32; 8];
+                window[..taps * 2].copy_from_slice(&samples[first..first + taps * 2]);
+                [*l, *r] = Self::stereo(&window, t);
+            } else {
+                *l = Self::at::<1>(&samples[first..first + taps], t);
+            }
+            position += step;
+            written += 1;
+        }
+        (position, written)
     }
 }
 
@@ -154,8 +193,10 @@ impl Kernel for Cubic {
     }
 
     /// In runs of 64 frames: first each frame's taps are gathered into a
-    /// row per tap, then the cubic runs down the rows, where it vectorises
-    /// (the same operations in the same order: the same results).
+    /// row per tap (a frame's channels side by side), then the cubic runs
+    /// down the rows, where it vectorises (the same operations in the same
+    /// order: the same results).
+    #[inline(never)]
     fn span<const C: usize>(
         samples: &[f32],
         mut position: Position,
@@ -163,30 +204,105 @@ impl Kernel for Cubic {
         left: &mut [f32],
         right: &mut [f32],
     ) -> Position {
-        const RUN: usize = 64;
+        let mut rows = Rows::<C>::new();
         for (left, right) in left.chunks_mut(RUN).zip(right.chunks_mut(RUN)) {
-            let n = left.len();
-            let mut rows = [[[0f32; RUN]; 4]; C];
-            let mut ts = [0f32; RUN];
-            for (j, t) in ts[..n].iter_mut().enumerate() {
-                let first = ((position >> 32) as usize - 1) * C;
-                let window = &samples[first..first + 4 * C];
-                for (channel, rows) in rows.iter_mut().enumerate() {
-                    for (k, row) in rows.iter_mut().enumerate() {
-                        row[j] = window[k * C + channel];
-                    }
-                }
-                *t = fraction(position);
+            // At most a run: said so the compiler drops the rows' checks.
+            let n = left.len().min(RUN);
+            for j in 0..n {
+                rows.gather(samples, position, j);
                 position += step;
             }
-            for (channel, out) in [&mut *left, &mut *right].into_iter().take(C).enumerate() {
-                let [before, now, next, after] = &rows[channel];
-                for j in 0..n {
-                    out[j] = cubic(before[j], now[j], next[j], after[j], ts[j]);
-                }
-            }
+            rows.cubic(n, left, right);
         }
         position
+    }
+
+    /// As the fixed span, with each frame's own step.
+    #[inline(never)]
+    fn span_varying<const C: usize>(
+        samples: &[f32],
+        mut position: Position,
+        limit: Position,
+        steps: &[u64],
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> (Position, usize) {
+        let (mut rows, mut written) = (Rows::<C>::new(), 0);
+        for ((left, right), steps) in left
+            .chunks_mut(RUN)
+            .zip(right.chunks_mut(RUN))
+            .zip(steps.chunks(RUN))
+        {
+            let (mut n, most) = (0, left.len().min(RUN));
+            while n < most && position < limit {
+                rows.gather(samples, position, n);
+                position += steps[n];
+                n += 1;
+            }
+            rows.cubic(n, left, right);
+            written += n;
+            if n < most {
+                break;
+            }
+        }
+        (position, written)
+    }
+}
+
+/// Frames a cubic span gathers at once.
+const RUN: usize = 64;
+
+/// A run's taps, a row per tap holding each frame's channels side by
+/// side (so a tap is one load and one store), each frame's fraction as
+/// many times, and the cubic's frames before they're parted by channel.
+struct Rows<const C: usize> {
+    taps: [[[f32; C]; RUN]; 4],
+    ts: [[f32; C]; RUN],
+    out: [[f32; C]; RUN],
+}
+
+impl<const C: usize> Rows<C> {
+    #[inline(always)]
+    fn new() -> Self {
+        Rows {
+            taps: [[[0.; C]; RUN]; 4],
+            ts: [[0.; C]; RUN],
+            out: [[0.; C]; RUN],
+        }
+    }
+
+    /// The taps around `position` into column `j`.
+    #[inline(always)]
+    fn gather(&mut self, samples: &[f32], position: Position, j: usize) {
+        let first = ((position >> 32) as usize - 1) * C;
+        let window: &[[f32; C]] = samples[first..first + 4 * C].as_chunks::<C>().0;
+        for (row, &tap) in self.taps.iter_mut().zip(window) {
+            row[j] = tap;
+        }
+        self.ts[j] = [fraction(position); C];
+    }
+
+    /// The cubic down the first `n` columns, into `left` (and `right`).
+    #[inline(always)]
+    fn cubic(&mut self, n: usize, left: &mut [f32], right: &mut [f32]) {
+        let n = n.min(RUN);
+        let lanes = n * C;
+        let [before, now, next, after] =
+            self.taps.each_ref().map(|row| &row.as_flattened()[..lanes]);
+        let ts = &self.ts.as_flattened()[..lanes];
+        for (i, out) in self.out.as_flattened_mut()[..lanes].iter_mut().enumerate() {
+            *out = cubic(before[i], now[i], next[i], after[i], ts[i]);
+        }
+        let frames = &self.out[..n];
+        if C == 2 {
+            for ((l, r), frame) in left.iter_mut().zip(right.iter_mut()).zip(frames) {
+                [*l, *r] = [frame[0], frame[1]];
+            }
+        } else {
+            for (l, frame) in left.iter_mut().zip(frames) {
+                *l = frame[0];
+            }
+        }
     }
 }
 
@@ -294,17 +410,16 @@ fn run<const C: usize, K: Kernel>(
                     i += count;
                 }
                 Step::PerFrame(steps) => {
-                    while i < wanted && *at < limit {
-                        let first = ((*at >> 32) as usize - K::BEHIND) * C;
-                        let window = &samples[first..first + taps * C];
-                        let t = fraction(*at);
-                        left[i] = K::at::<C>(window, t);
-                        if C == 2 {
-                            right[i] = K::at::<C>(&window[1..], t);
-                        }
-                        *at += steps[i];
-                        i += 1;
-                    }
+                    let (after, count) = K::span_varying::<C>(
+                        samples,
+                        *at,
+                        limit,
+                        &steps[i..wanted],
+                        &mut left[i..wanted],
+                        &mut right[i..wanted],
+                    );
+                    *at = after;
+                    i += count;
                 }
             }
         } else {
@@ -511,6 +626,46 @@ mod tests {
                 &mut r,
             );
             assert_eq!((fixed, a), (varied, b));
+        }
+    }
+
+    #[test]
+    fn steps_that_move_read_as_each_frame_read_alone_at_its_step() {
+        // A pitch sweeping from 0.3 to 2.9 over 300 frames, round a loop
+        // several times: read in one call it must be what reading each
+        // frame on its own, at that frame's step, gives.
+        let steps: Vec<u64> = (0..300)
+            .map(|i| (ONE as f64 * (0.3 + 2.6 * i as f64 / 300.)) as u64)
+            .collect();
+        for kind in [Interpolation::Linear, Interpolation::Cubic] {
+            for channels in [1, 2] {
+                let samples: Vec<f32> = (0..120 * channels)
+                    .map(|i| (i as f32 * 0.61).sin())
+                    .collect();
+                let data = sound(&samples, channels);
+                let looped = region(15, 110, true);
+                let start = ONE * 3 + ONE / 3;
+                let (mut at, mut l, mut r) = (start, vec![0.; 300], vec![0.; 300]);
+                let got = Resampler::new(kind).render(
+                    &data,
+                    looped,
+                    &mut at,
+                    Step::PerFrame(&steps),
+                    &mut l,
+                    &mut r,
+                );
+                assert_eq!(got, 300);
+                let (mut alone, mut one) = (start, Resampler::new(kind));
+                for (i, &step) in steps.iter().enumerate() {
+                    let (frame_l, frame_r, _) = read(&mut one, &data, looped, &mut alone, step, 1);
+                    assert_eq!(
+                        (l[i], r[i]),
+                        (frame_l[0], frame_r[0]),
+                        "{kind:?}, {channels} channels: frame {i}"
+                    );
+                }
+                assert_eq!(at, alone);
+            }
         }
     }
 }
