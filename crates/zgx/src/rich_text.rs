@@ -507,11 +507,10 @@ impl RichText {
                 ..run.clone()
             })
             .collect();
-        Self {
-            options: self.options,
-            text: self.text.clone(),
-            runs: runs.into(),
-        }
+        // All else as it is: its options, and whether a run holds a box.
+        let mut recoloured = self.clone();
+        recoloured.runs = runs.into();
+        recoloured
     }
 }
 
