@@ -836,3 +836,38 @@ fn a_frame_asked_for_survives_a_reload_asked_with_it() {
         drawn_at(&mut stage, &player, 40);
     }
 }
+
+/// A player whose device is lost (a driver reset, a GPU removed) draws on a
+/// new one and goes on, rather than stopping with an error.
+#[test]
+fn a_player_whose_device_is_lost_draws_on_a_new_one() {
+    let dir = temp_dir("player-lost-device");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let path = dir.to_path_buf();
+    let mut held = None;
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            player.open("Bar", json!({ "color": "#00ff00" }), 40);
+            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    drawn_at(&mut stage, &player, 40);
+    player.debug_lose_device();
+    player.seek(41);
+    drawn_at(&mut stage, &player, 41);
+    let error = player.error.with_untracked(Clone::clone);
+    assert!(error.is_none(), "it stopped: {error:?}");
+}

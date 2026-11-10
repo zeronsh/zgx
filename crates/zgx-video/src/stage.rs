@@ -147,6 +147,12 @@ impl Stage {
         stage.deliver()?;
         Ok(stage)
     }
+    /// Lose its renderer's device, as a driver reset would: for tests of
+    /// recovery.
+    #[doc(hidden)]
+    pub fn debug_lose_device(&self) {
+        self.gpu.context().debug_lose_device();
+    }
     /// The frame it stands at.
     pub fn frame(&self) -> u64 {
         self.frame
