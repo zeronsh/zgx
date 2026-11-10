@@ -43,8 +43,10 @@ use graph::Pass;
 use instances::{Instance, instance, morph_block, note, write_changed};
 use materials::{make_binding, map_set, placed, upload_missing};
 use pipelines::make_main_pipelines;
+#[cfg(feature = "lighting")]
+use shadows::sun_bounds;
 use shadows::{
-    Casting, SHADOW_SIZE, draw_shadows, make_shadow_pipeline, shadow_key, sun_bounds, sun_view,
+    Casting, SHADOW_SIZE, draw_shadows, make_shadow_pipeline, shadow_key, sun_view, sun_view_within,
 };
 use std::{cell::RefCell, rc::Weak};
 use variant::Variant;
@@ -115,7 +117,7 @@ fn recycle<T, U>(mut list: Vec<T>) -> Vec<U> {
 }
 
 /// A frame's meshes when what they draw changed (`Inner::meshes`): sorted
-/// (the list returned), their instances, boxes and poses uploaded, their
+/// (the list returned), their instances and poses uploaded, their
 /// buffers and bindings made and marked used, in runs (`Scratch::runs`).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
@@ -127,7 +129,6 @@ fn prepare<'a>(
     world: &Inner,
     view: Mat4,
     (lit, transmits, lighting): (bool, bool, u16),
-    culls: bool,
 ) -> Vec<&'a crate::world::Drawn<'a>> {
     // Meshes by geometry, translucent ones after, back to front: by a
     // key of one integer (a sort of integers, not of meshes).
@@ -207,20 +208,17 @@ fn prepare<'a>(
         }
         base
     };
-    // Posed in the world, a mesh's box follows its joints, which may be no
-    // ancestors of it.
-    let moving = |d: &crate::world::Drawn| d.palette.is_some() || d.morph.is_some();
-    let stale = |d: &crate::world::Drawn| d.stamp > since || moving(d);
-    let sparse = kept_order
+    let stale = |d: &crate::world::Drawn| d.stamp > since || skinned(d) || morphing(d);
+    if kept_order
         && instances.len() == drawn.len()
-        && drawn.iter().filter(|d| stale(d)).count() * 2 <= drawn.len();
-    if sparse {
+        && drawn.iter().filter(|d| stale(d)).count() * 2 <= drawn.len()
+    {
         // Few changed: those made again and written.
         for (at, d) in drawn.iter().enumerate() {
-            if !stale(d) {
+            let posed = skinned(d) || morphing(d);
+            if !posed && d.stamp <= since {
                 continue;
             }
-            let posed = skinned(d) || morphing(d);
             let base = if posed { pose(d) } else { 0 };
             instances[at] = instance(d, base);
             note(changed, at);
@@ -238,25 +236,6 @@ fn prepare<'a>(
             let posed = skinned(d) || morphing(d);
             instance(d, if posed { pose(d) } else { 0 })
         });
-    }
-    // The meshes' boxes, for a frame that culls (`culls`): those that
-    // changed where the rest are as the last frame left them, else all. A
-    // frame that doesn't leaves them stale. On a device drawing posed meshes
-    // in their bind pose, their boxes aren't what draws: not sure, not
-    // culled.
-    let boxes = &mut scratch.boxes;
-    if culls {
-        let sure = |d: &crate::world::Drawn| skinned(d) || morphing(d) || !moving(d);
-        let current = sparse && scratch.boxed == Some(since) && boxes.len() == drawn.len();
-        boxes.resize(drawn.len());
-        for (at, d) in drawn.iter().enumerate() {
-            if !current || stale(d) {
-                boxes.set(at, cull::world_box(d), sure(d));
-            }
-        }
-        scratch.boxed = Some(world.meshes);
-    } else {
-        scratch.boxed = None;
     }
     scratch.prepared = world.meshes;
     if !palette.is_empty() {
@@ -484,7 +463,6 @@ fn prepare<'a>(
             maps,
             variant,
             instances: start as u32..end as u32,
-            indices: first.geometry.indices().len() as u32,
         });
         start = end;
     }
@@ -656,6 +634,11 @@ impl Viewport for Renderer {
             Some(kept) => (kept.shadow, None),
             None => {
                 world.drawn_into(&mut self.poses, &mut all);
+                // What culling's boxes follow (`cull::update`): as the last
+                // frame made instances, and whether the order is unmoved.
+                let since = scratch.prepared;
+                let unmoved =
+                    scratch.ordered == Some(world.ordering) && scratch.order.len() == all.len();
                 let drawn = prepare(
                     gpu,
                     scratch,
@@ -664,21 +647,25 @@ impl Viewport for Renderer {
                     &world,
                     view,
                     (lit, transmits, lighting),
-                    // Cascades cull their casters by the boxes, resting or not.
-                    culls || cascaded,
                 );
+                // Cascades cull their casters by the boxes, resting or not.
+                if culls || cascaded {
+                    let skinning = gpu.skinning && world.posing();
+                    cull::update(scratch, &drawn, (since, unmoved), world.meshes, skinning);
+                } else {
+                    scratch.boxed = None;
+                }
                 // The sun's view, fit to the opaque meshes' boxes where this
                 // frame made them.
                 let opaque = scratch.runs.iter().filter(|run| !run.glass);
                 let ranges =
                     opaque.map(|run| run.instances.start as usize..run.instances.end as usize);
                 let shadow = sun.and_then(|sun| {
-                    let bounds = if scratch.boxed == Some(world.meshes) {
-                        scratch.boxes.union(ranges)
+                    if scratch.boxed == Some(world.meshes) {
+                        sun_view_within(&all, scratch.boxes.union(ranges), sun)
                     } else {
-                        sun_bounds(&all)
-                    };
-                    sun_view(&all, bounds, sun)
+                        sun_view(&all, sun)
+                    }
                 });
                 let casting = casting_of(gpu, scratch, &drawn, shadow, frame.device);
                 // The cascades' casters' box, where it may have changed.
@@ -736,7 +723,9 @@ impl Viewport for Renderer {
             cull::visible(&frustum, &scratch.boxes, &mut scratch.mask);
             &scratch.mask[..]
         });
-        let culled = cull::shown(runs, mask, &mut scratch.shown);
+        let geometries = &gpu.geometries;
+        let indices = |run: &Run| geometries[&run.geometry].count;
+        let culled = cull::shown(runs, mask, &mut scratch.shown, indices);
         if culling && cull::hardly(culled, scratch.instances.len()) {
             scratch.unculled = cull::RESTING;
         }

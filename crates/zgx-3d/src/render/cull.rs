@@ -6,7 +6,7 @@
 //! sun's volume comes with cascades). The meshes left draw in the order
 //! they had, each run's in spans of its instances, so a frame shows what it
 //! would with nothing culled.
-use super::{Run, shadows::box_through};
+use super::{Run, Scratch, shadows::box_through};
 use crate::math::{Mat4, Vec3};
 
 /// Each instance's mesh's box in the world, by axis (lows' x, y, z, then
@@ -28,8 +28,9 @@ impl Boxes {
         self.axes.iter_mut().for_each(|axis| axis.resize(len, 0.));
         self.sure.resize(len, false);
     }
-    /// Instance `at`'s box (`at < len()`).
-    #[inline(always)]
+    /// Instance `at`'s box (`at < len()`; the frame writes them in step,
+    /// `update`).
+    #[cfg(test)]
     pub(super) fn set(&mut self, at: usize, (low, high): (Vec3, Vec3), sure: bool) {
         let values = [low.x, low.y, low.z, high.x, high.y, high.z];
         for (axis, value) in self.axes.iter_mut().zip(values) {
@@ -78,6 +79,42 @@ pub(super) fn world_box(d: &crate::world::Drawn) -> (Vec3, Vec3) {
             (low, high)
         }
     }
+}
+
+/// The meshes' boxes for a frame that culls, `drawn` being its sorted list:
+/// where the order is unmoved and the boxes are as of `since` (the last
+/// frame making instances), those of meshes stamped since and posed ones;
+/// else all. Then as of `meshes`. A posed mesh not drawn posed (`posing`
+/// false: a device drawing it in its bind pose) isn't sure: not culled.
+// Apart from the frame's code: inlined, it compiled the rest worse.
+#[inline(never)]
+pub(super) fn update(
+    scratch: &mut Scratch,
+    drawn: &[&crate::world::Drawn],
+    (since, unmoved): (u64, bool),
+    meshes: u64,
+    posing: bool,
+) {
+    let boxes = &mut scratch.boxes;
+    let current = unmoved && scratch.boxed == Some(since) && boxes.len() == drawn.len();
+    boxes.resize(drawn.len());
+    // Each axis's list beside the meshes, written in step: no index checked.
+    let [lx, ly, lz, hx, hy, hz] = &mut boxes.axes;
+    let axes = lx.iter_mut().zip(ly.iter_mut()).zip(lz.iter_mut());
+    let axes = axes.zip(hx.iter_mut().zip(hy.iter_mut()).zip(hz.iter_mut()));
+    for ((d, (((lx, ly), lz), ((hx, hy), hz))), sure) in
+        drawn.iter().zip(axes).zip(boxes.sure.iter_mut())
+    {
+        // Posed in the world, its box follows its joints, which may be no
+        // ancestors of it.
+        let moving = d.palette.is_some() || d.morph.is_some();
+        if !current || moving || d.stamp > since {
+            let (low, high) = world_box(d);
+            (*lx, *ly, *lz, *hx, *hy, *hz) = (low.x, low.y, low.z, high.x, high.y, high.z);
+            *sure = posing || !moving;
+        }
+    }
+    scratch.boxed = Some(meshes);
 }
 
 /// Which instances the camera may see, into `mask`: those whose boxes no
@@ -130,6 +167,7 @@ pub(super) fn shown(
     runs: &[Run],
     mask: Option<&[bool]>,
     out: &mut Vec<(u32, std::ops::Range<u32>)>,
+    indices: impl Fn(&Run) -> u32,
 ) -> u32 {
     out.clear();
     let Some(mask) = mask else {
@@ -138,21 +176,24 @@ pub(super) fn shown(
     };
     let mut drawn = 0;
     for (r, run) in runs.iter().enumerate() {
-        // The longest gap a span spans.
-        let gap = DRAW_INDICES / run.indices.max(1);
+        // The longest gap a span spans, asked for at the run's first gap
+        // alone: its geometry is found by id.
+        let mut gap = None;
         let mut span: Option<std::ops::Range<u32>> = None;
         for i in run.instances.clone() {
             if !mask[i as usize] {
                 continue;
             }
-            match &mut span {
-                Some(open) if i - open.end <= gap => open.end = i + 1,
-                _ => {
-                    if let Some(done) = span.replace(i..i + 1) {
-                        drawn += done.len() as u32;
-                        out.push((r as u32, done));
-                    }
+            if let Some(open) = &mut span {
+                let longest = || DRAW_INDICES / indices(run).max(1);
+                if i == open.end || i - open.end <= *gap.get_or_insert_with(longest) {
+                    open.end = i + 1;
+                    continue;
                 }
+            }
+            if let Some(done) = span.replace(i..i + 1) {
+                drawn += done.len() as u32;
+                out.push((r as u32, done));
             }
         }
         if let Some(done) = span {
@@ -256,5 +297,33 @@ mod tests {
         let mut mask = Vec::new();
         visible(&frustum, &boxes, &mut mask);
         assert_eq!(mask, [true, false, false, true, false, true]);
+    }
+
+    #[test]
+    fn spans_keep_short_gaps_and_ask_a_runs_indices_only_at_one() {
+        let run = |geometry, instances| Run {
+            geometry,
+            glass: false,
+            maps: [0; crate::texture::MAPS],
+            variant: Default::default(),
+            instances,
+        };
+        // Run 0 all shown; run 1 a gap of 1 then of 3; run 2 none shown.
+        let runs = [run(0, 0..4), run(1, 4..12), run(2, 12..14)];
+        let mut mask = vec![true; 14];
+        mask[5] = false;
+        mask[8..11].fill(false);
+        mask[12..14].fill(false);
+        let asked = std::cell::RefCell::new(Vec::new());
+        // Run 1's geometry has DRAW_INDICES / 2 indices: gaps of 2 kept.
+        let indices = |r: &Run| {
+            asked.borrow_mut().push(r.geometry);
+            DRAW_INDICES / 2
+        };
+        let mut out = Vec::new();
+        let culled = shown(&runs, Some(&mask), &mut out, indices);
+        assert_eq!(out, [(0, 0..4), (1, 4..8), (1, 11..12)]);
+        assert_eq!(culled, 3 + 2);
+        assert_eq!(*asked.borrow(), [1], "once, at run 1's first gap");
     }
 }

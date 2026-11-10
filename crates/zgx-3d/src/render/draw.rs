@@ -10,8 +10,6 @@ pub(super) struct Run {
     pub(super) maps: [u64; MAPS],
     pub(super) variant: Variant,
     pub(super) instances: std::ops::Range<u32>,
-    /// Its geometry's indices: what each instance costs to draw.
-    pub(super) indices: u32,
 }
 
 /// What a pass has bound, by address, so a run sets only what differs from

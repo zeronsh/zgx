@@ -342,7 +342,9 @@ pub(super) fn cascades(
         }
         drawn += 1;
         let mask = boxes.map(|_| &sun.masks[i][..]);
-        super::cull::shown(runs, mask, &mut sun.spans[i]);
+        let geometries = &gpu.geometries;
+        let indices = |run: &super::Run| geometries[&run.geometry].count;
+        super::cull::shown(runs, mask, &mut sun.spans[i], indices);
         // Its caster pass's frame: today's map's, its view the cascade's.
         let mut frame: super::frame::FrameUniforms = bytemuck::Zeroable::zeroed();
         frame.shadow = fit.matrix.columns;
