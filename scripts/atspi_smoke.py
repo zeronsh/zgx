@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--scroll-projection", action="store_true", help="check nested scroll geometry, text queries and focus")
     parser.add_argument("--session", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     args.binary = args.binary.resolve()
@@ -29,7 +30,7 @@ def main():
         env = dict(os.environ, ZGX_PRIVATE_ATSPI="1")
         for name in ("AT_SPI_BUS_ADDRESS", "DBUS_SESSION_BUS_ADDRESS", "DISPLAY", "WAYLAND_DISPLAY", "SWAYSOCK", "I3SOCK"):
             env.pop(name, None)
-        result = subprocess.run(["dbus-run-session", "--", sys.executable, str(pathlib.Path(__file__).resolve()), str(args.binary), "--output", str(args.output), "--session"], env=env)
+        result = subprocess.run(["dbus-run-session", "--", sys.executable, str(pathlib.Path(__file__).resolve()), str(args.binary), "--output", str(args.output), "--session"] + (["--scroll-projection"] if args.scroll_projection else []), env=env)
         raise SystemExit(result.returncode)
     if os.environ.get("ZGX_PRIVATE_ATSPI") != "1":
         raise RuntimeError("the private session must be created by this runner")
@@ -96,7 +97,7 @@ def main():
                 except GLib.Error:
                     pass
             listener = Atspi.EventListener.new(record)
-            for event_type in ("object:state-changed", "object:property-change", "object:text-changed", "object:text-caret-moved"):
+            for event_type in ("object:state-changed", "object:property-change", "object:bounds-changed", "object:text-changed", "object:text-caret-moved"):
                 assert listener.register(event_type)
             with (args.output / "application.log").open("w") as log:
                 app = subprocess.Popen([str(args.binary), "--smoke-test"], stdout=log, stderr=log)
@@ -115,6 +116,10 @@ def main():
                 def find(name):
                     return next((node for node, _ in tree() if node.get_name() == name), None)
                 wait_for(lambda: any(node.get_process_id() == app.pid for node, _ in tree()), "zgx application on private AT-SPI desktop")
+                if args.scroll_projection:
+                    from ax_scroll_projection_probe import run
+                    run(Atspi, find, wait_for, events, args.output)
+                    return
                 entry = wait_for(lambda: find("AT-SPI name"), "named text input")
                 count = wait_for(lambda: find("AT-SPI count"), "count button")
                 slider = wait_for(lambda: find("AT-SPI amount"), "numeric slider")
