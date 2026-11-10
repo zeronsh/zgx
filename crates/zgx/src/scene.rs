@@ -4218,17 +4218,79 @@ impl Scene {
                 .position(|child| *child == node)
                 .map_or(0, |at| at + 1);
             for later in &children[after..] {
-                if self
-                    .ink_alone(*later)
-                    .is_some_and(|ink| ink.translated(offset).intersects(rect))
-                    && self.paints(*later)
-                {
+                if self.paints_within(*later, offset, rect) {
                     return true;
                 }
             }
             node = parent;
         }
         false
+    }
+    /// Whether `id` or anything it holds paints on `rect` (window points),
+    /// `offset` its parent's translation in the window: its ink's union can
+    /// span far more than what paints (a panel the window's width holding a
+    /// shadow at one edge), so where it meets `rect` what it holds is asked
+    /// in turn, each inside its clip. What moves its paint about (a scale or
+    /// turn, a blur, a layer shader, a native view) counts its whole ink.
+    fn paints_within(&self, id: NodeId, offset: Transform, rect: Rect) -> bool {
+        let node = self.node(id);
+        if node.effects.opacity <= 0.0 || !own_visible(&node.style) {
+            return false;
+        }
+        if !self
+            .ink_alone(id)
+            .is_some_and(|ink| ink.translated(offset).intersects(rect))
+        {
+            return false;
+        }
+        if node.transformed()
+            || node.filtered()
+            || node.layer_shaded()
+            || node.effects.blur_radius > 0.0
+            || self.platform_nodes.contains(&id)
+            || self
+                .layer_shader(id)
+                .is_some_and(|layer| layer.shader.is_some())
+        {
+            return self.paints(id);
+        }
+        // In its own space: its box, its own paint and what it holds.
+        let inner = Transform {
+            x: offset.x + node.transform.x,
+            y: offset.y + node.transform.y,
+        };
+        // Its own paint, from what is kept: a leaf's ink is its own (met
+        // above), a box's its quad's; anything else holding children counts
+        // its whole ink, as before.
+        let children = self.children_raw(node);
+        match &node.kind {
+            NodeKind::Container(_) => {}
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } if quad.paints_nothing() => {}
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } if !children.is_empty() => {
+                if quad
+                    .paint_bounds(node.bounds)
+                    .translated(inner)
+                    .intersects(rect)
+                {
+                    return true;
+                }
+            }
+            _ => return true,
+        }
+        if children.is_empty() {
+            return false;
+        }
+        // What it holds paints only inside its clip.
+        let local = Rect::new(rect.x - inner.x, rect.y - inner.y, rect.width, rect.height);
+        let Some(within) = clipped_bounds(Some(local), node.bounds, &node.style)
+            .filter(|r| r.width > 0. && r.height > 0.)
+            .map(|r| r.translated(inner))
+        else {
+            return false;
+        };
+        children
+            .iter()
+            .any(|child| crate::deep(0, || self.paints_within(*child, inner, within)))
     }
     /// Whether `id` or anything it holds paints: its ink counts a box's bounds
     /// whatever it fills them with, and a box empty but for its layout or clip
@@ -17728,6 +17790,71 @@ mod tests {
             scene.flush();
             assert!(scene.plain_box(caret).is_none(), "{changed:?}");
         }
+    }
+
+    /// A later box whose ink spans a rect only as the union of what it holds
+    /// (a panel with a dot at each corner) doesn't paint over it; one of its
+    /// boxes on the rect does, and only inside its clip.
+    #[test]
+    fn what_paints_over_a_rect_is_what_lands_on_it() {
+        let mut scene = Scene::new(200.0, 200.0);
+        let sized = |w: f32, h: f32, clip: bool| Style {
+            width: Some(w),
+            height: Some(h),
+            absolute: true,
+            clip,
+            ..Style::default()
+        };
+        // Each box at the origin of what holds it, moved by its translation.
+        let at = |scene: &mut Scene, id: NodeId, x: f32, y: f32| {
+            scene.set_transform(id, Transform { x, y });
+        };
+        let root = scene.root();
+        let ring = scene.append(
+            root,
+            NodeKind::Rect(Color(0, 0, 0, 255)),
+            sized(14., 14., false),
+        );
+        at(&mut scene, ring, 90., 90.);
+        let panel = scene.append(
+            root,
+            NodeKind::Container(Layout::Column),
+            sized(200., 200., false),
+        );
+        let dot = || NodeKind::Rect(Color(9, 9, 9, 255));
+        scene.append(panel, dot(), sized(10., 10., false));
+        let far = scene.append(panel, dot(), sized(10., 10., false));
+        at(&mut scene, far, 190., 190.);
+        scene.flush();
+        let rect = Rect::new(90., 90., 14., 14.);
+        assert!(!scene.painted_over(ring, rect), "only the union reaches it");
+        // A dot of its on the rect does.
+        let near = scene.append(panel, dot(), sized(4., 4., false));
+        at(&mut scene, near, 95., 95.);
+        scene.flush();
+        assert!(scene.painted_over(ring, rect));
+        scene.remove(near);
+        scene.flush();
+        assert!(!scene.painted_over(ring, rect));
+        // Moved onto it, as the panel holds it, too.
+        at(&mut scene, far, 92., 92.);
+        scene.flush();
+        assert!(scene.painted_over(ring, rect), "translated onto it");
+        at(&mut scene, far, 190., 190.);
+        // Clipped out of it by a box between, it doesn't.
+        let clip = scene.append(
+            panel,
+            NodeKind::Container(Layout::Column),
+            sized(50., 50., true),
+        );
+        let inside = scene.append(clip, dot(), sized(14., 14., false));
+        at(&mut scene, inside, 90., 90.);
+        scene.flush();
+        assert!(!scene.painted_over(ring, rect), "clipped out of it");
+        // Unclipped, it does.
+        scene.set_style(clip, sized(50., 50., false));
+        scene.flush();
+        assert!(scene.painted_over(ring, rect), "unclipped");
     }
 
     #[test]
