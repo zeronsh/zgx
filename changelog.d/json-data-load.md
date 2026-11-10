@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **`ui.json.data(text)` and `ui.json.load(path)`** (zgx-script): JSON read-only, made as the script reads it: a list or object is a `JsonData` userdata whose parts are made the first time they're read (one of up to 512 values, or of plain values alone, a read-only table), so data handed whole to `ui.state` or `ui.list { data = … }` is its value again without becoming tables. Index it, take `#` and loop `for k, v in data do`; `pairs`, `ipairs` and the `table` library fail on it with a type error, and the lint's `json-data-raw` points at them. A write fails, naming `ui.json.decode`. `load` finds its file as `require` finds a module, with the same sandbox, and watches it. A 6.8 MB feed of 10,000 messages in a list starts with 289M instructions of script loaded, where decoding a module's string took 1,842M (118 ms → 17 ms headless on an M5); a loop reading every row costs no more than over `decode`'s tables.
