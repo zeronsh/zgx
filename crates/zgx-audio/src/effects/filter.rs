@@ -57,7 +57,7 @@ impl Coefficients {
                 (k, [1., -k, -1.])
             }
             Shape::Peak => {
-                let a = 10f32.powf(db / 40.);
+                let a = crate::math::exp10f(db / 40.);
                 let k = 1. / (q * a);
                 (k, [1., k * (a * a - 1.), 0.])
             }
@@ -277,7 +277,7 @@ impl Svf {
             return Duration::ZERO;
         }
         let q = match self.shape {
-            Shape::Peak => q * 10f64.powf(db / 40.),
+            Shape::Peak => q * crate::math::exp(db / 40. * std::f64::consts::LN_10),
             _ if self.sections == 2 => q * f64::from(BUTTERWORTH_4[1]),
             _ => q,
         };

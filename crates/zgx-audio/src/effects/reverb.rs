@@ -201,7 +201,7 @@ impl Reverb {
             *length = frames;
             // -60 dB over `decay` seconds: -3 decades a decay, this line's
             // share of it each time round.
-            *gain = 10f32.powf(-3. * frames / (self.rate * decay));
+            *gain = crate::math::exp10f(-3. * frames / (self.rate * decay));
         }
         // The loop's low-pass: 1 passes all; less, the highs die first.
         self.damping = 1. - 0.9 * damping;

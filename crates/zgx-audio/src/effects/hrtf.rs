@@ -100,8 +100,9 @@ impl HrtfSet {
 /// A direction from azimuth (degrees, 0 ahead, positive to the right) and
 /// elevation (degrees up).
 fn toward(azimuth: f32, elevation: f32) -> Vec3 {
-    let (a, e) = (azimuth.to_radians(), elevation.to_radians());
-    [e.cos() * a.sin(), e.sin(), -e.cos() * a.cos()]
+    let (sin_a, cos_a) = crate::math::sin_cosf(azimuth.to_radians());
+    let (sin_e, cos_e) = crate::math::sin_cosf(elevation.to_radians());
+    [cos_e * sin_a, sin_e, -cos_e * cos_a]
 }
 
 /// One direction's filter: each partition's spectrum of the left ear's

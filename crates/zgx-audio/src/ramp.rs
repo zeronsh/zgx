@@ -155,8 +155,15 @@ impl Smoothed {
                 }
             }
             Curve::Exponential => {
+                // The logarithms once; each sample as `at` makes it.
+                let (la, lb) = logarithms(a, b);
                 for (i, slot) in ramp.iter_mut().enumerate() {
-                    *slot = self.at(done + i as u32);
+                    let done = done + i as u32;
+                    *slot = if done == 0 {
+                        a
+                    } else {
+                        exponential(la, lb, done as f32 * step)
+                    };
                 }
             }
         }
@@ -180,11 +187,27 @@ impl Smoothed {
             Curve::Linear => a + (b - a) * t,
             Curve::EqualPower => (a * a * (1. - t) + b * b * t).sqrt(),
             Curve::Exponential => {
-                let (la, lb) = (a.max(FLOOR).ln(), b.max(FLOOR).ln());
-                (la + (lb - la) * t).exp()
+                let (la, lb) = logarithms(a, b);
+                exponential(la, lb, t)
             }
         }
     }
+}
+
+/// The logarithms an exponential curve moves between: none below
+/// [`FLOOR`], so a fade to silence has somewhere to go.
+#[inline(always)]
+fn logarithms(a: f32, b: f32) -> (f32, f32) {
+    (
+        crate::math::lnf(a.max(FLOOR)),
+        crate::math::lnf(b.max(FLOOR)),
+    )
+}
+
+/// An exponential curve's value `t` of the way.
+#[inline(always)]
+fn exponential(la: f32, lb: f32, t: f32) -> f32 {
+    crate::math::expf(la + (lb - la) * t)
 }
 
 #[cfg(test)]

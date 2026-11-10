@@ -27,7 +27,8 @@ impl Fft {
         while half < size {
             for k in 0..half {
                 let angle = -std::f64::consts::PI * k as f64 / half as f64;
-                forward.push([angle.cos() as f32, angle.sin() as f32]);
+                let (sin, cos) = crate::math::sin_cos(angle);
+                forward.push([cos as f32, sin as f32]);
             }
             half *= 2;
         }

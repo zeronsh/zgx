@@ -57,7 +57,7 @@ impl Limiter {
             least_len: 0,
             reduction: 0.,
             // 80 ms to come back to 1/e of the reduction.
-            decay: (-1. / (0.08 * rate as f32)).exp(),
+            decay: crate::math::expf(-1. / (0.08 * rate as f32)),
             sample: 0,
             quiet: look,
             #[cfg(test)]

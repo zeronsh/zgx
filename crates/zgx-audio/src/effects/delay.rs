@@ -138,7 +138,7 @@ impl Effect for Delay {
     fn tail(&self) -> Duration {
         let [time, feedback] = self.now;
         let echoes = if feedback > 0. {
-            4.5 / -feedback.log10()
+            4.5 / -crate::math::log10f(feedback)
         } else {
             0.
         };

@@ -39,7 +39,7 @@ fn exp2(y: f32) -> f32 {
 
 /// A one-pole's coefficient for a time constant of `seconds` at `rate`.
 fn coefficient(seconds: f32, rate: f32) -> f32 {
-    (-1. / (seconds.max(1e-5) * rate)).exp()
+    crate::math::expf(-1. / (seconds.max(1e-5) * rate))
 }
 
 /// A compressor: above its threshold, every `ratio` decibels in become one
@@ -224,11 +224,28 @@ impl Effect for Duck {
         };
         let level = DB_PER_OCTAVE * log2(level.max(1e-9));
         let frames = block.as_chunks_mut::<2>().0;
+        // The coefficients once, unless a parameter moves in the block.
+        let steady = (0..4).all(|p| context.values(p).is_none());
+        let mut values = [0, 1, 2, 3].map(|p| context.value(p));
+        let mut coefficients = [
+            coefficient(values[2], self.rate),
+            coefficient(values[3], self.rate),
+        ];
         for (i, frame) in frames.iter_mut().enumerate() {
-            let [depth, threshold, attack, release] = [0, 1, 2, 3].map(|p| context.value_at(p, i));
+            if !steady {
+                values = [0, 1, 2, 3].map(|p| context.value_at(p, i));
+                coefficients = [
+                    coefficient(values[2], self.rate),
+                    coefficient(values[3], self.rate),
+                ];
+            }
+            let [depth, threshold, _, _] = values;
             let target = if level > threshold { depth } else { 0. };
-            let time = if target < self.gain { attack } else { release };
-            let c = coefficient(time, self.rate);
+            let c = if target < self.gain {
+                coefficients[0]
+            } else {
+                coefficients[1]
+            };
             self.gain = target + c * (self.gain - target);
             let gain = exp2(self.gain / DB_PER_OCTAVE);
             *frame = [frame[0] * gain, frame[1] * gain];

@@ -166,7 +166,7 @@ impl Falloff {
                 rolloff,
             } => {
                 let (r, _, d) = clamp(reference, max);
-                (d / r).powf(-rolloff.max(0.))
+                crate::math::powf(d / r, -rolloff.max(0.))
             }
             Falloff::Custom(ref curve) => curve(distance),
         };
@@ -203,7 +203,7 @@ impl Cone {
         let (Some(facing), Some(to)) = (unit(facing), unit(to_listener)) else {
             return 1.;
         };
-        let angle = dot(facing, to).clamp(-1., 1.).acos().to_degrees();
+        let angle = crate::math::acosf(dot(facing, to).clamp(-1., 1.)).to_degrees();
         let (inner, outer) = (
             self.inner.clamp(0., 360.) / 2.,
             self.outer.clamp(0., 360.) / 2.,
@@ -226,7 +226,7 @@ impl Cone {
 pub fn air_cutoff(distance: f32) -> f32 {
     let lost = 0.1 * distance.max(0.);
     // A 12 dB Butterworth falls 10 log10(1 + (f / cutoff)^4) dB at f.
-    let ratio = 10f32.powf(lost / 10.) - 1.;
+    let ratio = crate::math::exp10f(lost / 10.) - 1.;
     if ratio <= 0. {
         return 20_000.;
     }
@@ -274,7 +274,8 @@ pub fn doppler(
 pub fn equal_power(pan: f32) -> [f32; 2] {
     let pan = if pan.is_nan() { 0. } else { pan.clamp(-1., 1.) };
     let angle = (pan + 1.) * std::f32::consts::FRAC_PI_4;
-    [angle.cos(), angle.sin()]
+    let (sin, cos) = crate::math::sin_cosf(angle);
+    [cos, sin]
 }
 
 /// The gain each speaker of a horizontal layout plays a sound from
@@ -315,8 +316,8 @@ pub fn vbap(speakers: &[f32], azimuth: f32, gains: &mut [f32]) {
     }
     // Solve source = g1 l1 + g2 l2 for the two speakers' unit vectors.
     let direction = |degrees: f32| {
-        let r = degrees.to_radians();
-        [r.sin(), r.cos()]
+        let (sin, cos) = crate::math::sin_cosf(degrees.to_radians());
+        [sin, cos]
     };
     let (p, l1, l2) = (
         direction(source),

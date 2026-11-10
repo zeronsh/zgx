@@ -33,6 +33,7 @@ mod effect;
 pub mod effects;
 mod engine;
 mod limiter;
+mod math;
 mod mixer;
 mod queue;
 mod ramp;
