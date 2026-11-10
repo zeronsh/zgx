@@ -8,6 +8,7 @@ import tempfile
 from unittest.mock import patch
 import unittest
 import scroll
+import scroll_motion
 
 
 class InspectSocketPaths(unittest.TestCase):
@@ -31,6 +32,110 @@ class InspectSocketPaths(unittest.TestCase):
 
 
 class ScrollMetrics(unittest.TestCase):
+    def test_capture_drains_observed_coast_after_replay_reply(self):
+        from concurrent.futures import Future
+        future=Future();future.set_result({})
+        batches=iter([[dict(frame=1,notes=['frame source: view link (coasting true)'])],
+                      [dict(frame=2,notes=['frame source: view link (coasting false)'])]])
+        def reply(pid,command,**kwargs):
+            if command=='frames':return {'data':next(batches)}
+            return {'data':{'frame':0}}
+        with tempfile.TemporaryDirectory() as directory, patch.object(scroll,'request',side_effect=reply), patch.object(scroll.time,'sleep'):
+            frames,polls=scroll.collect(1,future,{'frame':0},Path(directory),'#transcript')
+        self.assertEqual([f['frame'] for f in frames],[1,2])
+        self.assertEqual(len(polls),2)
+
+    def test_warm_reset_waits_for_the_apps_coast(self):
+        batches=iter([[dict(frame=1,notes=['frame source: view link (coasting true)'])],
+                      [dict(frame=2,notes=['frame source: view link (coasting false)'])]])
+        with patch.object(scroll,'request',side_effect=lambda *a,**k:{'data':next(batches)}), patch.object(scroll.time,'sleep') as sleep:
+            scroll.settle_warm_coast(1)
+        sleep.assert_called_once_with(.1)
+
+    def test_disabled_deferral_arm_rejects_observed_deferrals(self):
+        good=scroll.behavior_checks({'deferred_drawable_frames':0,'drawn_on_drawable_arrival_frames':0},['ZGX_DRAWABLE_DEFER=0'],[],'0',False)
+        bad=scroll.behavior_checks({'deferred_drawable_frames':1},['ZGX_DRAWABLE_DEFER=0'],[],'0',False)
+        self.assertTrue(good['drawable_deferral_disabled'])
+        self.assertFalse(bad['drawable_deferral_disabled'])
+
+    def test_normal_gate_records_a_new_default_without_assuming_an_old_mode(self):
+        metrics={'frame_source_counts':{'view link':100},'render_frames':100}
+        self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',True),{})
+        self.assertEqual(scroll.behavior_checks(metrics,[],[],'0',False),{})
+
+    def test_frame_source_context_does_not_change_the_mode(self):
+        frame=dict(frame=1,notes=['scroll @1 copied its pixels',
+                   'frame source: view link (wanted true, rate Some(30), scroll live true, coasting false, input true)'],
+                   phases=[dict(phase='paint',micros=100,instructions=1000)],gpu_micros=500)
+        result=scroll.summarize([frame],[(.01,.01,1,0)],[(0,'pixel',0,-10,'moved')],120,2,0,{})
+        self.assertEqual(result['frame_source_counts'],{'view link':1})
+
+    def test_catalog_settlement_must_be_observed_and_missing_is_not_loading(self):
+        self.assertTrue(scroll.catalog_matches({'bench_catalog_complete':True},'settled'))
+        self.assertTrue(scroll.catalog_matches({'bench_catalog_complete':False},'loading'))
+        self.assertFalse(scroll.catalog_matches({},'loading'))
+        self.assertFalse(scroll.catalog_matches({'bench_catalog_complete':False},'settled'))
+        self.assertFalse(scroll.catalog_matches({'bench_catalog_complete':1},'settled'))
+
+    def test_loading_control_requires_the_known_fixture_marker(self):
+        source='local settle_model_catalog = true\nreturn real_shell'
+        self.assertIn('= false',scroll.fixture_model_source(source,'loading'))
+        self.assertEqual(scroll.fixture_model_source(source,'settled'),source)
+        with self.assertRaises(RuntimeError):scroll.fixture_model_source('outdated fixture','loading')
+
+    def test_changed_default_is_verified_without_forcing_an_environment_flag(self):
+        metrics={'frame_source_counts':{'view link':100},'render_frames':100}
+        proof=scroll.behavior_checks(metrics,[],[],'0',True,True,'view link')
+        self.assertTrue(proof['frame_source_is_view link'])
+        wrong=scroll.behavior_checks(metrics,[],[],'0',True,True,'display link')
+        self.assertFalse(wrong['frame_source_is_display link'])
+
+    def timing_frame(self, notes, end=16, micros=15000):
+        return dict(frame=1,notes=notes,ended_ms=end,frame_micros=micros)
+
+    def test_acquisition_is_separate_and_direct_submit_is_preferred(self):
+        frame=self.timing_frame(['next drawable waited 5000 us','waited 1000 us for the GPU',
+                                 'handed over at 15000000 ns in 100 us',
+                                 'submitted drawable at 12000000 ns in 500 us'])
+        result=scroll.presentation_timings([frame],[(.0175,.017,1,.001)],0,0)
+        self.assertEqual(result['acquisition_ms']['p99'],5)
+        self.assertEqual(result['gpu_wait_ms']['p99'],1)
+        self.assertEqual(result['present_to_display_ms']['p99'],5.5)
+        self.assertEqual(result['samples'][0]['handover']['kind'],'drawable')
+        self.assertTrue(result['samples'][0]['clock_aligned'])
+
+    def test_missing_or_wrong_clock_handover_is_not_a_zero_latency(self):
+        empty=scroll.presentation_timings([self.timing_frame([])],[(.0175,.017,1,.001)],0,0)
+        self.assertIsNone(empty['present_to_display_ms']['p99'])
+        self.assertEqual(empty['coverage']['missing_handover'],1)
+        wrong=scroll.presentation_timings([self.timing_frame(['handed over at 1000000000000 ns in 10 us'])],
+                                         [(.0175,.017,1,0)],0,0)
+        self.assertEqual(wrong['coverage']['clock_mismatch'],1)
+        self.assertIsNone(wrong['present_to_display_ms']['p99'])
+
+    def test_handover_can_return_after_the_frame_has_already_shown(self):
+        frame=self.timing_frame(['submitted drawable at 18000000 ns in 10000 us'],20,19000)
+        result=scroll.presentation_timings([frame],[(.0175,.017,1,.001)],0,0)
+        self.assertTrue(result['samples'][0]['clock_aligned'])
+        self.assertEqual(result['present_to_display_ms']['p99'],9)
+        self.assertEqual(result['handover_end_to_display_ms']['p99'],-1)
+
+    def test_native_handover_has_the_same_latency_and_late_split(self):
+        wakes={1:[1,1,1.008],2:[1.01,1.01,1.018]}
+        presents=[[1,1.009,1.008,1],[2,1.026,1.025,1.01]]
+        m=scroll.native_presentation_timings(presents,wakes,{1:[1.002,1.003],2:[1.012,1.013]},
+                                            {1:.1,2:.2},1000/120)
+        self.assertEqual(m['coverage']['clock_mismatch'],0)
+        self.assertEqual(m['coverage']['missing_handover'],0)
+        self.assertAlmostEqual(m['present_to_display_ms']['p50'],6)
+        self.assertEqual(m['groups']['late']['count'],1)
+        self.assertAlmostEqual(m['groups']['late']['present_to_display_ms']['max'],13)
+
+    def test_native_missing_handover_does_not_become_zero(self):
+        m=scroll.native_presentation_timings([[1,1.009,1.008,1]],{1:[1,1,1.008]}, {},{},1000/120)
+        self.assertEqual(m['coverage']['missing_handover'],1)
+        self.assertIsNone(m['present_to_display_ms']['p99'])
+
     def metrics(self, step, gesture='fling', skipped=0):
         events = scroll.parse_tape(scroll.tape(gesture, 120))
         presents = [(t / 1000, t / 1000) for t in range(step, 3990, step)]
@@ -117,6 +222,16 @@ class ScrollMetrics(unittest.TestCase):
         args = argparse.Namespace(min_intervals=30,max_late=0,max_rows=0,max_main_ms=4,
                                   max_instructions=50_000_000,max_gpu_ms=4)
         self.assertTrue(any('main-thread work max' in e for e in scroll.failures(m,args)))
+
+    def test_flick_lifts_at_speed_and_does_not_fabricate_system_momentum(self):
+        for gesture in ('flick','fling'):
+            for hz in (60,120):
+                events=scroll.parse_tape(scroll.tape(gesture,hz))
+                self.assertEqual(sum(e[4]=='started' for e in events),1)
+                self.assertEqual(events[-1][4],'ended')
+                self.assertGreater(abs(events[-2][3]),20)
+                self.assertLess(events[-1][0],650)
+                self.assertFalse(scroll_motion.accepted_events(events)[1])
 
     def test_stream_motion_stays_near_its_visible_tail(self):
         offset=low=high=0

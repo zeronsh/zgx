@@ -1432,6 +1432,7 @@ impl Layer {
         let asked = std::time::Instant::now();
         let drawable = drawables.layer.nextDrawable()?;
         let waited = asked.elapsed();
+        zgx::profile::note(|| format!("next drawable waited {} us", waited.as_micros()));
         if drawables.watch.observe(waited) {
             drawables.rephase = Some(waited);
         }

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import scroll_motion
 
 ROOT = Path(__file__).resolve().parents[2]
 SIZES = {'S': (640, 480), 'M': (960, 720), 'L': (1440, 960), 'W': (1114, 685)}
@@ -41,7 +42,8 @@ def tape(gesture, hz):
         return '# zgx wheel tape 1\n0 pixel 0 0 moved\n10000 pixel 0 0 moved\n'
     events = [(0., 'pixel', 0., 0., 'started')]
     period = 1000 / hz
-    for i in range(1, hz * 4 + 1):
+    finger_frames = round(hz * .6) if gesture in ('flick', 'fling') else hz * 4
+    for i in range(1, finger_frames + 1):
         t = i * period
         dx = 0
         phase = 'moved'
@@ -49,7 +51,9 @@ def tape(gesture, hz):
         if gesture == 'slow':
             dy = -.2  # also tests quantized, intentionally unchanged pixels
         elif gesture in ('flick', 'fling'):
-            dy = -(64 if gesture == 'fling' else 32) * math.exp(-i / (hz * 1.4))
+            # macOS supplies the coast itself; OS momentum events are ignored.
+            # Keep speed high at lift instead of sending a fabricated OS tail.
+            dy = -(64 if gesture == 'fling' else 32) * (.5 + .5*i/finger_frames)
         elif gesture == 'reversals':
             dy = -12 if (i // (hz // 4)) % 2 == 0 else 12
         elif gesture == 'notches':
@@ -60,7 +64,7 @@ def tape(gesture, hz):
             # Orbit near the streaming tail instead of pushing into its edge.
             dy = 2 if (i // (hz//2)) % 2 == 0 else -2
         events.append((t, unit, dx, dy, phase))
-    events.append((4010., 'pixel', 0., 0., 'ended'))
+    events.append(((finger_frames+1)*period, 'pixel', 0., 0., 'ended'))
     return '# zgx wheel tape 1\n' + ''.join(f'{t:.3f} {u} {x:.6f} {y:.6f} {p}\n' for t, u, x, y, p in events)
 
 
@@ -146,16 +150,84 @@ def workload(frames):
                 worst_main_frame=max(frames,key=app_work_ms,default=None))
 
 
+def fixture_model_source(text, model_catalog):
+    marker = 'local settle_model_catalog = true'
+    if text.count(marker) != 1:
+        raise RuntimeError('unrecognized fixture catalog control')
+    return text.replace(marker, 'local settle_model_catalog = false') if model_catalog == 'loading' else text
+
+
+def catalog_matches(state, model_catalog):
+    return state.get('bench_catalog_complete') is (model_catalog == 'settled')
+
+
 def material_matches(state, background):
     return state.get('bench_effective_frost') is (background=='translucent')
+
+
+def frame_timing_notes(frame):
+    acquisition=[]; gpu_wait=[]; handovers=[]
+    for note in frame.get('notes',[]):
+        match=re.fullmatch(r'next drawable waited ([0-9.]+) us',note)
+        if match:acquisition.append(float(match[1]))
+        match=re.fullmatch(r'waited ([0-9.]+) us for the GPU',note)
+        if match:gpu_wait.append(float(match[1]))
+        match=re.fullmatch(r'(handed over|submitted drawable) at (\d+) ns in ([0-9.]+) us',note)
+        if match:
+            handovers.append(dict(kind='drawable' if match[1]=='submitted drawable' else 'layer',
+                                  end_ns=int(match[2]),micros=float(match[3])))
+    return dict(acquisition_micros=sum(acquisition) if acquisition else None,
+                gpu_wait_micros=sum(gpu_wait) if gpu_wait else None,handovers=handovers)
+
+
+def presentation_timings(frames, records, anchor, trace_to_host_ms):
+    """Join same-frame timing notes; never substitute paint time for acquisition."""
+    by_id={frame['frame']:frame for frame in frames}
+    notes={index:frame_timing_notes(frame) for index,frame in by_id.items()}
+    samples=[]
+    for callback,shown,index,started in records:
+        if shown<=0 or shown*1000<anchor or index not in by_id:continue
+        timing=notes[index]; preferred='drawable' if started>0 else 'layer'
+        candidates=[value for value in timing['handovers'] if value['kind']==preferred]
+        if not candidates and preferred=='drawable':candidates=timing['handovers']
+        value=candidates[0] if len(candidates)==1 else None
+        sample=dict(frame=index,shown_s=shown,acquisition_micros=timing['acquisition_micros'],
+                    gpu_wait_micros=timing['gpu_wait_micros'],handover=value,
+                    clock_aligned=None,present_to_display_ms=None,handover_end_to_display_ms=None)
+        if value is not None:
+            # N is the API return; its measured duration reconstructs the
+            # start to within the note's one-microsecond quantization.
+            begin=value['end_ns']-value['micros']*1000
+            frame=by_id[index]
+            aligned=begin<=callback*1e9+2e6 and shown*1e9>=begin-1e4 and shown<=callback+.002
+            if started>0:aligned=aligned and begin>=started*1e9-2e6
+            if trace_to_host_ms is not None and 'ended_ms' in frame:
+                end=(trace_to_host_ms+frame['ended_ms'])*1e6
+                start=end-frame.get('frame_micros',0)*1000
+                aligned=aligned and start-2e6<=begin<=value['end_ns']<=end+2e6
+            sample['clock_aligned']=aligned
+            if aligned:
+                sample['present_to_display_ms']=(shown*1e9-begin)/1e6
+                sample['handover_end_to_display_ms']=(shown*1e9-value['end_ns'])/1e6
+        samples.append(sample)
+    return dict(samples=samples,
+                acquisition_ms=spread([v['acquisition_micros']/1000 for v in notes.values() if v['acquisition_micros'] is not None]),
+                gpu_wait_ms=spread([v['gpu_wait_micros']/1000 for v in notes.values() if v['gpu_wait_micros'] is not None]),
+                present_to_display_ms=spread([s['present_to_display_ms'] for s in samples if s['present_to_display_ms'] is not None]),
+                handover_end_to_display_ms=spread([s['handover_end_to_display_ms'] for s in samples if s['handover_end_to_display_ms'] is not None]),
+                coverage=dict(shown_records=len(samples),handover_records=sum(s['handover'] is not None for s in samples),
+                              missing_handover=sum(s['handover'] is None for s in samples),
+                              clock_mismatch=sum(s['clock_aligned'] is False for s in samples)))
 
 
 def verify_environment_text(text, overrides):
     return {item:bool(re.search(r'(?:^|\s)'+re.escape(item)+r'(?=\s|$)',text)) for item in overrides}
 
 
-def behavior_checks(metrics, overrides, presents, present, reference, require_source=False):
+def behavior_checks(metrics, overrides, presents, present, reference, require_source=False, expected_source=None):
     checks={}
+    if 'ZGX_DRAWABLE_DEFER=0' in overrides:
+        checks['drawable_deferral_disabled']=metrics.get('deferred_drawable_frames',0)==0 and metrics.get('drawn_on_drawable_arrival_frames',0)==0
     if 'ZGX_HANDOVER_ASAP=1' in overrides:
         checks['asap_no_hold']=metrics['wait_ms']['p99'] is not None and metrics['wait_ms']['p99']<=.5
     if 'ZGX_VIEW_CLOCK=1' in overrides and present=='0' and (reference or 'ZGX_SCROLL_LINK=1' in overrides):
@@ -166,11 +238,12 @@ def behavior_checks(metrics, overrides, presents, present, reference, require_so
     flags=dict(value.split('=',1) for value in overrides)
     pacing=any(flags.get(key)=='1' for key in ('ZGX_HANDOVER_ASAP','ZGX_VIEW_CLOCK','ZGX_SCROLL_LINK')) or 'ZGX_LEAD_US' in flags
     counts=metrics.get('frame_source_counts',{})
-    if pacing or require_source or counts:
+    if pacing or require_source or expected_source:
         timer=flags.get('ZGX_HANDOVER_ASAP')=='1' or 'ZGX_LEAD_US' in flags or (not reference and flags.get('ZGX_SCROLL_LINK')!='1')
         expected='timer on the grid' if timer else 'view link' if flags.get('ZGX_VIEW_CLOCK')=='1' else 'display link'
         if not timer and (present=='1' or (present=='auto' and any(len(r)>3 and r[3]>0 for r in presents)) or (flags.get('ZGX_SCROLL_DRAWABLES')=='1' and not reference)):
             expected='view link'
+        if expected_source is not None:expected=expected_source
         total=sum(counts.values())
         checks['frame_source_is_'+expected]=total>=10 and total>=.8*metrics.get('render_frames',metrics.get('scroll_frames',0)) and counts.get(expected,0)>=.95*total
     return checks
@@ -217,9 +290,11 @@ def coalesce_presentations(records, period):
 
 
 def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=False,
-              main_budget=4., gpu_budget=4., sparse=False, trace_to_host_ms=None):
+              main_budget=4., gpu_budget=4., sparse=False, trace_to_host_ms=None, motion_view=None, initial_motion_frames=(), motion_axis=1, allow_app_animation=False):
     period = 1000 / hz
-    windows = [(0, events[-1][0])] if reference and events else motion_windows(events, period, scale)
+    accepted, ignored = scroll_motion.accepted_events(events)
+    windows = [(0, events[-1][0])] if reference and events else motion_windows(accepted, period, scale)
+    movement = scroll_motion.Motion(frames, motion_view, initial_motion_frames, axis=motion_axis, scale=scale)
     # Feedback carries the exact trace index captured before presenting. An
     # older runner's two-field record remains readable but cannot certify
     # attribution: missing frame identity is an explicit gate failure.
@@ -255,13 +330,26 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
                     gpu_max_ms=max(gpu, default=None), notes=notes)
 
     double_then_skip=0
-    for group_index,(prev, current) in enumerate(zip(shown, shown[1:])):
+    if not reference and movement.have_applied:
+        intervals = movement.presented_intervals(shown, period)
+    else:
+        def legacy_intervals():
+            for index, (previous, current) in enumerate(zip(shown, shown[1:])):
+                a, b = previous[1]*1000-anchor, current[1]*1000-anchor
+                finger = active_gap(a, b, windows, period)
+                if reference:
+                    demand, late = finger, finger and b-a > 1.5*period
+                else:
+                    demand, late = movement.interval(previous, current, finger, period)
+                yield index, previous, current, demand, late
+        intervals = legacy_intervals()
+    for group_index, prev, current, demanded, late in intervals:
         a, b = prev[1]*1000-anchor, current[1]*1000-anchor
-        if not active_gap(a, b, windows, period):
+        if not demanded:
             idle.append(b-a)
             continue
         gaps.append(b-a)
-        if b-a > 1.5*period:
+        if late:
             double_then_skip += len({int(r[2]) for r in display_groups[group_index]})>1
             ids = range(prev[2], current[2]+1) if prev[2] and current[2] >= prev[2] else []
             record=attribute('late', b, ids)
@@ -277,13 +365,16 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     motion_frames=[];noted_frames=0;frame_sources=Counter()
     for f in frames:
         notes = f.get('notes', [])
-        moving = any('copied its pixels' in n or 'repainted its view:' in n or
+        coasting = movement.states.get(f['frame'], (None, None))[1] is True
+        dispatched = any((dx,dy)[motion_axis] != 0 for _,dx,dy,_ in movement.applied.get(f['frame'], ()))
+        noted_move = f['frame'] in movement.moved_frames or any('copied its pixels' in n or 'repainted its view:' in n or
                      'composited its picture' in n for n in notes)
+        moving = coasting or dispatched or noted_move or movement.live.get(f['frame']) is True
         in_motion=in_motion_window(f,windows,trace_to_host_ms,anchor)
-        if f.get('spare', False) or (not moving and not reference and not in_motion):
+        if f.get('spare', False) or (not moving and not reference and (movement.have_applied or not in_motion)):
             continue
-        frame_sources.update(n.removeprefix('frame source: ') for n in notes if n.startswith('frame source: '))
-        noted_frames+=moving or reference
+        frame_sources.update(n.removeprefix('frame source: ').split(' (',1)[0] for n in notes if n.startswith('frame source: '))
+        noted_frames+=noted_move or reference
         if in_motion:motion_frames.append(f)
         scroll_frames.append(f)
         work.append(app_work_ms(f))
@@ -321,10 +412,17 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
     total = len(gaps)
     duration=events[-1][0] if events else 0
     shown_in_tape=[r for r in shown if 0<=r[1]*1000-anchor<=duration]
-    return dict(frames=len(frames), sparse=sparse,
+    scoring = movement.summary() if not reference else dict(cadence_model='continuous-reference',cadence_scoring_complete=True)
+    scoring['unexpected_app_animation_intervals'] = 0 if reference or allow_app_animation else movement.app_animated
+    if scoring['unexpected_app_animation_intervals']:
+        scoring['cadence_scoring_complete'] = False
+    return dict(**scoring, ignored_os_momentum_events=len(ignored),frames=len(frames), sparse=sparse,
+                presentation_timings=presentation_timings(scroll_frames,records,anchor,trace_to_host_ms),
                 picture_costs=picture_costs(frames),
+                deferred_drawable_frames=sum('frame deferred: its drawable has not come' in f.get('notes',[]) for f in frames),
+                drawn_on_drawable_arrival_frames=sum('frame drawn as its drawable came' in f.get('notes',[]) for f in frames),
                 motion_window_work=workload(motion_frames),
-                work_selection="motion-window frame intervals plus noted scroll frames; spare excluded",
+                work_selection="applied-input frames, observed app coast and noted scroll frames; spare excluded",
                 noted_scroll_frames=noted_frames,frame_source_counts=dict(frame_sources),
                 render_frames=sum(f.get('gpu_micros') is not None for f in scroll_frames),
                 worst_main_frame=max(scroll_frames,key=app_work_ms,default=None),
@@ -359,6 +457,8 @@ def summarize(frames, presents, events, hz, scale, anchor, rss, *, reference=Fal
 
 def failures(metrics, args):
     errors = []
+    if metrics.get('cadence_scoring_complete') is False:
+        errors.append('incomplete accepted-input/coast movement evidence; cadence cannot certify')
     if metrics['active_intervals'] < args.min_intervals and not metrics['sparse']:
         errors.append('insufficient actual presentation feedback during motion')
     if metrics['sparse'] and metrics['displayed_motion_frames'] < .8*metrics['expected_pixel_updates']:
@@ -428,6 +528,7 @@ def sha(path):
 def collect(pid, future, begin, out, target):
     cursor = begin['frame']
     frames, polls = {}, []
+    coasting, drain_deadline = None, None
     while True:
         queried = time.monotonic()
         batch = request(pid, 'frames', n=400, since=cursor, runs=0)['data']
@@ -439,6 +540,10 @@ def collect(pid, future, begin, out, target):
             frames[f['frame']] = f
         if batch:
             cursor = max(f['frame'] for f in batch)
+            for f in sorted(batch, key=lambda f: f['frame']):
+                state = scroll_motion.coast_state(f)
+                if state is not None:
+                    coasting = state
         # Numeric cursor is the last frame actually read, so a frame drawn
         # between this read and the next mark is never lost.
         mark = request(pid, 'mark', name='drain')['data']
@@ -446,9 +551,31 @@ def collect(pid, future, begin, out, target):
         polls.append(mark)
         if future.done():
             future.result()
-            break
+            if coasting is not True:
+                break
+            if drain_deadline is None:
+                drain_deadline = time.monotonic()+10
+            elif time.monotonic() >= drain_deadline:
+                raise RuntimeError('app coast did not settle within the capture drain budget')
         time.sleep(1)
     return sorted(frames.values(), key=lambda f: f['frame']), polls
+
+
+def settle_warm_coast(pid):
+    """A warm replay can reply before its generated coast has ended."""
+    deadline = time.monotonic()+10
+    coasting = None
+    while True:
+        frames = request(pid, 'frames', n=40, runs=0)['data']
+        for frame in sorted(frames, key=lambda f: f['frame']):
+            state = scroll_motion.coast_state(frame)
+            if state is not None:
+                coasting = state
+        if coasting is not True:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError('warm coast did not settle before resetting the measured view')
+        time.sleep(.1)
 
 
 def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present, unavailable=None, real_reference=False):
@@ -471,7 +598,9 @@ def run_cell(args, scene, gesture, size, hz, scale, background, repeat, present,
                 if not source.is_dir():
                     source = args.zeron_source / 'ui'
                 shutil.copytree(source, stage/'app')
-                shutil.copy2(ROOT/'scripts/perf/zeron_fixture.luau',stage/'app/scroll_fixture.luau')
+                result['model_catalog'] = args.model_catalog
+                fixture_text = fixture_model_source((ROOT/'scripts/perf/zeron_fixture.luau').read_text(), args.model_catalog)
+                (stage/'app/scroll_fixture.luau').write_text(fixture_text)
                 if getattr(args,'reset_row',0)>0:
                     transcript=stage/'app/ds/transcript.luau'
                     source_text=transcript.read_text()
@@ -611,6 +740,8 @@ return ui.overlay {""")
                     (out/'fixture_state.json').write_text(json.dumps(state,indent=2)+'\n')
                     result['fixture_state'] = {k:v for k,v in state.items() if 'bench_' in k}
                     if not material_matches(result['fixture_state'],background):raise RuntimeError('actual shell material differs from requested background')
+                    if not catalog_matches(result['fixture_state'],args.model_catalog):raise RuntimeError('actual shell catalog differs from requested settlement')
+                    result['catalog_complete'] = result['fixture_state']['bench_catalog_complete']
                 if scene in ('idle','zeron-idle'):
                     # Never seed a reference with wheel state, even in warmup:
                     # gesture/coast grace periods can change the tick source.
@@ -619,6 +750,7 @@ return ui.overlay {""")
                 else:
                     # Visit a long fling's range before measuring the warmed path.
                     request(process.pid, 'replay', target='#transcript', tape=tape('fling',hz), timeout=15)
+                    settle_warm_coast(process.pid)
                     if real_app:
                         request(process.pid,'command',id='bench.reset')
                         if getattr(args,'reset_row',0)>0 and gesture!='stream':
@@ -641,6 +773,14 @@ return ui.overlay {""")
                     if getattr(args,'reset_row',0)>0 and gesture!='stream':
                         ok=request(process.pid,'state',name='bench.goto_ok')['data'].get('bench.goto_ok')
                         if ok is not True:raise RuntimeError('deterministic transcript row reset failed')
+                initial_motion_frames = []
+                motion_view = None
+                if scene not in ('idle','zeron-idle'):
+                    before_node = request(process.pid,'node',target=tracked_target)['data']
+                    initial_motion_frames = request(process.pid,'frames',n=40,runs=0)['data']
+                    motion_view = scroll_motion.select_view(before_node,initial_motion_frames,scale,scene=='nested')
+                    result['initial_motion_frames'] = initial_motion_frames
+                    result['motion_view'] = motion_view
                 begin = request(process.pid, 'mark', name='sample')['data']
                 result['conditions'] = begin
                 if not {'refresh_ms', 'pixel_scale', 'host_ns'} <= begin.keys():
@@ -667,10 +807,24 @@ return ui.overlay {""")
                         process.wait(timeout=5)
                         raise
                     result['replay'] = future.result()
+                if real_app:
+                    final_catalog = request(process.pid,'state',name='bench_catalog_complete')['data']
+                    result['catalog_complete_after'] = final_catalog.get('bench_catalog_complete')
+                    if not catalog_matches(final_catalog,args.model_catalog):raise RuntimeError('shell catalog settlement changed during replay')
                 errors = request(process.pid,'errors')['text']
                 if 'error:' in errors or 'types:' in errors:
                     raise RuntimeError(errors)
                 after = rss(process.pid)
+                memory = dict(before=before, after=after, delta=after-before)
+                if args.rest_seconds > 0 and scene not in ('idle', 'zeron-idle'):
+                    # No inspector request or synthetic input during settling.
+                    # A vanished process makes the cell invalid, never zero RSS.
+                    time.sleep(args.rest_seconds)
+                    if process.poll() is not None:
+                        raise RuntimeError('host exited during the rest-memory sample')
+                    memory['rest_after'] = rss(process.pid)
+                    memory['rest_seconds'] = args.rest_seconds
+                    memory['rest_delta_from_before'] = memory['rest_after'] - before
                 result['polls'] = polls
                 result['frames'] = frames
                 # Give asynchronous presentation callbacks time to arrive.
@@ -710,14 +864,17 @@ return ui.overlay {""")
                     raise RuntimeError('missing replay clock anchor')
                 result['replay_start_host_ms'] = replay_starts[-1]
                 metrics = summarize(frames, presents, events, hz, scale, replay_starts[-1],
-                                    dict(before=before, after=after, delta=after-before),
+                                    memory,
                                     reference=scene in ('idle','zeron-idle'), main_budget=args.max_main_ms, gpu_budget=args.max_gpu_ms,
                                     sparse=gesture in ('slow','notches'),
-                                    trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'])
+                                    trace_to_host_ms=begin['host_ns']/1e6-begin['trace_ms'], motion_view=motion_view, initial_motion_frames=initial_motion_frames, motion_axis=0 if scene=='nested' else 1, allow_app_animation=gesture=='stream')
+                if not metrics.get('cadence_scoring_complete',False):
+                    metrics['late_pct'] = None
+                    metrics['app_late_pct'] = None
                 metrics['start_to_present_ms'] = spread([(p-s)*1000 for s,p in latency if s*1000 >= replay_starts[-1]])
                 result['latency_samples'] = latency
                 result['metrics'] = metrics
-                result['behavior_checks']=behavior_checks(metrics,args.host_env,presents,present,scene in ('idle','zeron-idle'),getattr(args,'require_frame_source',False))
+                result['behavior_checks']=behavior_checks(metrics,args.host_env,presents,present,scene in ('idle','zeron-idle'),getattr(args,'require_frame_source',False),getattr(args,'reference_source' if scene in ('idle','zeron-idle') else 'scroll_source',None))
                 if not all(result['behavior_checks'].values()):raise RuntimeError('diagnostic arm failed observed behaviour check: '+str(result['behavior_checks']))
                 result['failures'] = failures(metrics, args)
                 latency_p99 = metrics['start_to_present_ms']['p99']
@@ -800,6 +957,40 @@ class RefreshModes:
                 dict(original=self.original, actions=self.actions), indent=2)+'\n')
 
 
+def native_presentation_timings(presents, wakes, handovers, acquisition, period):
+    samples=[]; previous=None
+    for n,callback,shown,started in sorted(presents,key=lambda value:value[2]):
+        n=int(n)
+        if n not in wakes or shown<=0:continue
+        handover=handovers.get(n)
+        aligned=None; latency=None; end_latency=None; phase=None
+        if handover is not None:
+            begin,end=handover
+            aligned=(wakes[n][0]-.002<=begin<=end and begin<=callback+.002
+                     and shown>=begin-.00001 and shown<=callback+.002)
+            if aligned:
+                latency=(shown-begin)*1000;end_latency=(shown-end)*1000
+                phase=((begin-shown)*1000)%period
+        samples.append(dict(frame=n,shown_s=shown,handover=handover,clock_aligned=aligned,
+                            acquisition_ms=acquisition.get(n),present_to_display_ms=latency,
+                            handover_end_to_display_ms=end_latency,observed_refresh_phase_ms=phase,
+                            late=None if previous is None else (shown-previous)*1000>1.5*period))
+        previous=shown
+    groups={}
+    for name,late in (('late',True),('on_time',False)):
+        selected=[s for s in samples if s['late'] is late and s['clock_aligned']]
+        groups[name]=dict(count=len(selected),present_to_display_ms=spread([s['present_to_display_ms'] for s in selected]),
+                          observed_refresh_phase_ms=spread([s['observed_refresh_phase_ms'] for s in selected]))
+    return dict(samples=samples,
+                acquisition_ms=spread([v for n,v in acquisition.items() if n in wakes]),
+                present_to_display_ms=spread([s['present_to_display_ms'] for s in samples if s['clock_aligned']]),
+                handover_end_to_display_ms=spread([s['handover_end_to_display_ms'] for s in samples if s['clock_aligned']]),
+                coverage=dict(shown_records=len(samples),handover_records=sum(s['handover'] is not None for s in samples),
+                              missing_handover=sum(s['handover'] is None for s in samples),
+                              clock_mismatch=sum(s['clock_aligned'] is False for s in samples)),
+                phase_definition='handover start modulo the observed shown refresh grid, not an absolute link tick',groups=groups)
+
+
 def native_floor(args, size, hz, scale, present, label):
     """Independent CADisplayLink/Metal window; no zgx pacing in this process."""
     out=args.output/label
@@ -822,7 +1013,7 @@ def native_floor(args, size, hz, scale, present, label):
     except (subprocess.TimeoutExpired,subprocess.CalledProcessError) as error:
         return invalid(str(error))
     begin=end=None
-    wakes={}; gpu=[]; work=[]; presents=[]; unavailable=0
+    wakes={}; gpu=[]; work=[]; presents=[]; unavailable=0; handovers={}; acquisition={}
     for line in (out/'native.log').read_text().splitlines():
         parts=line.split()
         if not parts: continue
@@ -832,6 +1023,8 @@ def native_floor(args, size, hz, scale, present, label):
         elif parts[0]=='NATIVE_PRESENT': presents.append(list(map(float,parts[1:])))
         elif parts[0]=='NATIVE_GPU': gpu.append((int(parts[1]),float(parts[2])))
         elif parts[0]=='NATIVE_WORK': work.append((int(parts[1]),float(parts[2])))
+        elif parts[0]=='NATIVE_HANDOVER': handovers[int(parts[1])]=list(map(float,parts[2:]))
+        elif parts[0]=='NATIVE_ACQUIRE': acquisition[int(parts[1])]=float(parts[2])
         elif parts[0]=='NATIVE_UNAVAILABLE': unavailable+=1
     if begin is None or end is None: return invalid('native floor missing sample anchors')
     sample={n:v for n,v in wakes.items() if begin<=v[0]<=end}
@@ -840,6 +1033,7 @@ def native_floor(args, size, hz, scale, present, label):
     skipped=sum(p[2]<=0 for p in presents if int(p[0]) in sample)
     late=sum(gap>1.5*1000/hz for gap in gaps)
     m=dict(mode=mode,native_points=native_size,requested_scale=scale,hz=hz,
+           presentation_timings=native_presentation_timings(presents,sample,handovers,acquisition,1000/hz),
            late_frames=late,skipped_drawables=skipped,late_pct=100*late/max(1,len(gaps)),
            interval_ms=spread(gaps),main_work_ms=spread([v for n,v in work if n in sample]),
            gpu_p99_ms=percentile([v for n,v in gpu if n in sample],.99),
@@ -873,16 +1067,20 @@ def main():
     p.add_argument('--hz', default='120')
     p.add_argument('--host-env',action='append',default=[],help='diagnostic ZGX_VIEW_CLOCK=0|1 or ZGX_SCROLL_LINK=0|1; repeat for both')
     p.add_argument('--require-frame-source',action='store_true',help='invalidate a pacing arm without its observed source-mode note')
+    for name in ('reference-source','scroll-source'):
+        p.add_argument('--'+name,choices=['view link','display link','timer on the grid'],help='expected mode for an engine with a changed default; verified from frame notes')
     p.add_argument('--reference-refresh-grid',choices=['off','on'],default='off',help='on exercises latch holds in explicit pacing probes')
     p.add_argument('--native-floor',action='store_true',help='bracket each zgx idle reference with independent Swift/Metal references')
     p.add_argument('--set-refresh', action='store_true', help='select matching native display modes and restore the original')
     p.add_argument('--scale', default='2')
+    p.add_argument('--model-catalog',choices=['settled','loading'],default='settled',help='real-shell catalog condition; verified before and after replay')
     p.add_argument('--reset-row',type=int,default=160,help='real-app message row to align before each run;0 retains legacy fractional reset')
     p.add_argument('--native-scale', type=float, default=2, help='display backing scale; requested render scales use app zoom')
     p.add_argument('--backgrounds', default='opaque,translucent')
     p.add_argument('--present', default='0,1', help='comma-separated 0 (tiles), 1 (drawables), auto')
     p.add_argument('--repeats', type=int, default=3)
     p.add_argument('--warmup', type=float, default=3)
+    p.add_argument('--rest-seconds', type=float, default=0, help='sample RSS after an input-free settling period; no inspector polling during the wait')
     p.add_argument('--max-late', type=float, default=0.)
     p.add_argument('--max-rows', type=int, default=0)
     p.add_argument('--max-instructions', type=int, default=50_000_000)
@@ -893,8 +1091,10 @@ def main():
     p.add_argument('--damage-check', action='store_true', help='correctness run; timings include full repaint verification')
     p.add_argument('--strict', action='store_true', help='headless: require zero row builds and copies on the shared scene')
     args = p.parse_args()
+    if not math.isfinite(args.rest_seconds) or not 0 <= args.rest_seconds <= 60:
+        p.error('--rest-seconds must be finite and between 0 and 60')
     for item in args.host_env:
-        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1'):
+        if item not in ('ZGX_VIEW_CLOCK=0','ZGX_VIEW_CLOCK=1','ZGX_SCROLL_LINK=0','ZGX_SCROLL_LINK=1','ZGX_SCROLL_DRAWABLES=0','ZGX_SCROLL_DRAWABLES=1','ZGX_HANDOVER_ASAP=0','ZGX_HANDOVER_ASAP=1','ZGX_LEAD_US=4000','ZGX_LEAD_US=5500','ZGX_GPU_STATS=1','ZGX_SHADOW_WHOLE=1','ZGX_DRAWABLE_PREFETCH=0','ZGX_DRAWABLE_PREFETCH=1','ZGX_DRAWABLE_DEFER=0','ZGX_DRAWABLE_DEFER=1'):
             p.error('unsupported diagnostic host environment override')
     if args.command=='reference' and any(item.startswith('ZGX_LEAD_US=') for item in args.host_env) and args.reference_refresh_grid!='on':
         p.error('LEAD_US marker probes require --reference-refresh-grid on to exercise the hold')
@@ -947,6 +1147,7 @@ def main():
     for name in ('transcript_scroll', 'scroll_scenes'):
         shutil.copytree(ROOT / 'crates/zgx-script/examples' / name, sources / name)
     shutil.copy2(Path(__file__), sources / 'scroll.py')
+    shutil.copy2(ROOT/'scripts/perf/scroll_motion.py',sources/'scroll_motion.py')
     shutil.copy2(ROOT/'scripts/perf/zeron_fixture.luau',sources/'zeron_fixture.luau')
     if args.zeron_runner.is_file():
         audit['zeron_binary_sha256']=sha(args.zeron_runner)

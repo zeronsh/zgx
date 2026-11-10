@@ -6,7 +6,8 @@
 //! them), to line a screen recording's frames up with what happened.
 use std::sync::OnceLock;
 
-pub(crate) fn enabled() -> bool {
+/// Whether `ZGX_PRESENT_LOG` is set.
+pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| zgx::env::var_os("ZGX_PRESENT_LOG").is_some_and(|v| v != "0"))
 }

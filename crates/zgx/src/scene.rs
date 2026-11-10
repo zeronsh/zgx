@@ -14185,6 +14185,24 @@ impl Scene {
     pub fn layer_revision(&self, id: NodeId) -> u64 {
         self.node(id).layer_revision
     }
+    /// Scroll content (`set_scroll_copy`) and its translation, for devtools.
+    #[doc(hidden)]
+    pub fn scroll_contents(&self) -> impl Iterator<Item = (NodeId, Transform)> + '_ {
+        self.slots.iter().enumerate().filter_map(|(index, slot)| {
+            slot.node
+                .as_ref()
+                .filter(|node| node.scroll_copy && !slot.dead)
+                .map(|node| {
+                    (
+                        NodeId {
+                            index: index as u32,
+                            generation: slot.generation,
+                        },
+                        node.transform,
+                    )
+                })
+        })
+    }
     /// The isolated nodes.
     pub fn isolated_nodes(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.slots.iter().enumerate().filter_map(|(index, slot)| {
