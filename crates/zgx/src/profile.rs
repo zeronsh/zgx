@@ -191,6 +191,47 @@ pub fn frame() {
     }
 }
 
+/// A host's draw begins (`trace::draw_begins`): where the frame it ends
+/// starts, for devtools.
+#[inline]
+pub fn draw_begins() {
+    #[cfg(feature = "trace")]
+    if enabled() && crate::trace::enabled() {
+        crate::trace::draw_begins();
+    }
+}
+/// Frames ended so far (`frame`), while measured: a host tells by it
+/// whether its draw presented one (`frame_unpresented`).
+#[inline]
+pub fn frames_ended() -> u64 {
+    match enabled() {
+        true => PROFILE.with(|profile| profile.borrow().frames_total),
+        false => 0,
+    }
+}
+/// A host's draw is done and presented nothing: what it did is an entry of
+/// its own in a trace, marked so (`trace::Frame::no_present`), not counted
+/// as a frame.
+pub fn frame_unpresented() {
+    if !enabled() {
+        return;
+    }
+    PROFILE.with(|profile| {
+        let frame = std::mem::take(&mut profile.borrow_mut().frame);
+        #[cfg(feature = "trace")]
+        if crate::trace::enabled() {
+            let phases = PHASES
+                .iter()
+                .zip(frame)
+                .filter(|(_, t)| !t.time.is_zero())
+                .map(|(phase, t)| (phase.name(), t.instructions, t.time.as_secs_f32() * 1e6))
+                .collect();
+            crate::trace::end_unpresented(phases);
+        }
+        #[cfg(not(feature = "trace"))]
+        let _ = frame;
+    });
+}
 /// What runs in `work` is spare time's (`crate::spare`), no frame's: a trace
 /// keeps it apart, for no frame waited for it.
 pub fn spare_time<R>(work: impl FnOnce() -> R) -> R {
@@ -355,6 +396,8 @@ struct Profile {
     /// This frame's, for devtools' traces.
     frame: [Totals; PHASES.len()],
     frames: u64,
+    /// Frames ended ever (`frames` resets with each report).
+    frames_total: u64,
 }
 
 thread_local! {
@@ -378,6 +421,7 @@ impl Profile {
             totals: Default::default(),
             frame: Default::default(),
             frames: 0,
+            frames_total: 0,
         }
     }
     /// The count now, or the last open counted span's when `phase` is nested
@@ -478,6 +522,7 @@ fn end_frame() {
     PROFILE.with(|profile| {
         let mut profile = profile.borrow_mut();
         profile.frames += 1;
+        profile.frames_total += 1;
         // This frame's split, for devtools' trace of it.
         let frame = std::mem::take(&mut profile.frame);
         #[cfg(feature = "trace")]

@@ -2786,7 +2786,15 @@ impl Host {
             self.recover_renderer();
         }
         self.spend_spare_time()?;
-        match self.draw_frame() {
+        // Each draw its own trace entry: one that presents nothing ends one
+        // marked so, not folded into the next frame's (devtools).
+        zgx::profile::draw_begins();
+        let ended = zgx::profile::frames_ended();
+        let drawn = self.draw_frame();
+        if zgx::profile::enabled() && zgx::profile::frames_ended() == ended {
+            zgx::profile::frame_unpresented();
+        }
+        match drawn {
             Err(error)
                 if error
                     .downcast_ref::<zgx_gpu::GpuError>()

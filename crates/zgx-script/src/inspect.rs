@@ -145,7 +145,7 @@ const NOT_PRESENTING: &str = "the window isn't presenting (hidden, minimized or 
 fn pacing(from: f64, named: &dyn Fn(&str) -> String) -> (String, Value) {
     let frames: Vec<_> = zgx::trace::frames(usize::MAX)
         .into_iter()
-        .filter(|f| f.ended_ms >= from && !f.spare)
+        .filter(|f| f.ended_ms >= from && !f.spare && !f.no_present)
         .collect();
     interaction(&frames, named)
 }
@@ -1088,7 +1088,7 @@ impl Session {
                 if field("summary").is_some_and(|v| v.truthy()) {
                     let frames: Vec<_> = zgx::trace::frames(usize::MAX)
                         .into_iter()
-                        .filter(|f| !f.spare)
+                        .filter(|f| !f.spare && !f.no_present)
                         .filter(|f| since.is_none_or(|s| f.index > s))
                         .filter(|f| until.is_none_or(|u| f.index <= u))
                         .collect();
@@ -1731,6 +1731,11 @@ impl Session {
             data.push(Value::record([
                 ("frame", Value::Num(frame.index as f64)),
                 ("spare", Value::Bool(frame.spare)),
+                ("no_present", Value::Bool(frame.no_present)),
+                (
+                    "started_ms",
+                    Value::Num((frame.started_ms * 100.).round() / 100.),
+                ),
                 (
                     "ended_ms",
                     Value::Num((frame.ended_ms * 100.).round() / 100.),

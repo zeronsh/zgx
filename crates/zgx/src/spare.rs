@@ -591,4 +591,45 @@ mod tests {
         assert_eq!(frames[1].events, 1, "the input stays the frame's");
         assert!(frames[1].phases.iter().all(|p| p.0 != "update"));
     }
+
+    /// A draw that presents nothing is an entry of its own, marked so and
+    /// not counted as a frame; the next draw's frame starts where it began.
+    #[cfg(feature = "trace")]
+    #[test]
+    fn a_draw_that_presents_nothing_is_an_entry_of_its_own() {
+        let frame = crate::trace::frame_index();
+        crate::trace::set_enabled(true);
+        crate::profile::set_recording(true);
+        let ended = crate::profile::frames_ended();
+        crate::profile::draw_begins();
+        crate::trace::input();
+        {
+            let _update = crate::profile::span(crate::profile::Phase::Update);
+        }
+        crate::profile::frame_unpresented();
+        assert_eq!(crate::profile::frames_ended(), ended, "not a frame");
+        crate::profile::draw_begins();
+        crate::trace::input();
+        crate::profile::frame();
+        assert_eq!(crate::profile::frames_ended(), ended + 1);
+        let frames = crate::trace::frames(usize::MAX);
+        crate::profile::set_recording(false);
+        crate::trace::set_enabled(false);
+        let frames: Vec<_> = frames.iter().filter(|f| f.index > frame).collect();
+        assert_eq!(frames.len(), 2, "{}", frames.len());
+        assert!(frames[0].no_present && !frames[1].no_present);
+        assert!(frames[0].phases.iter().any(|p| p.0 == "update"));
+        assert_eq!(frames[0].events, 1);
+        assert_eq!(frames[1].events, 1, "the next draw's own");
+        assert!(frames[1].index > frames[0].index, "indices apart");
+        for f in &frames {
+            assert!(
+                f.started_ms <= f.ended_ms,
+                "{} {}",
+                f.started_ms,
+                f.ended_ms
+            );
+        }
+        assert!(frames[1].started_ms >= frames[0].ended_ms);
+    }
 }

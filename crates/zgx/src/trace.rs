@@ -86,6 +86,12 @@ pub struct Frame {
     /// When it ended (was shown), in milliseconds since tracing began
     /// ([`now_ms`]'s clock): the time between frames is their pacing.
     pub ended_ms: f64,
+    /// When the draw it ended began ([`draw_begins`]), on the same clock;
+    /// its `ended_ms` if none was marked.
+    pub started_ms: f64,
+    /// A draw that showed nothing (`zgx::profile::frame_unpresented`): its
+    /// work, but no frame of the window's pacing, nor one shown.
+    pub no_present: bool,
     /// Why it did what it did, where the engine said ([`note`]): a scroll
     /// repainted rather than copied, a wait for a later refresh, input that
     /// waited for the window to present again.
@@ -140,6 +146,8 @@ struct Log {
     began: Option<Instant>,
     index: u64,
     current: Frame,
+    /// When the draw under way began (`draw_begins`).
+    draw_started: Option<f64>,
     /// The frame under way while spare time runs (`spare_begins`).
     held: Option<Frame>,
     frames: VecDeque<Frame>,
@@ -292,13 +300,35 @@ pub fn measure_end(node: u32) {
         }
     });
 }
-/// The frame being traced is done (`zgx::profile::frame`, as a renderer
-/// presents it), its phases' split given: kept if anything happened in it.
-pub fn end_frame(phases: Vec<(&'static str, u64, f32)>) {
+/// A host's draw begins: the frame it ends starts here
+/// (`Frame::started_ms`), the first draw since the last frame ended.
+pub fn draw_begins() {
     if !enabled() {
         return;
     }
     LOG.with_borrow_mut(|log| {
+        if log.draw_started.is_none() {
+            let began = *log.began.get_or_insert_with(Instant::now);
+            log.draw_started = Some(began.elapsed().as_secs_f64() * 1e3);
+        }
+    });
+}
+/// The frame being traced is done (`zgx::profile::frame`, as a renderer
+/// presents it), its phases' split given: kept if anything happened in it.
+pub fn end_frame(phases: Vec<(&'static str, u64, f32)>) {
+    end_traced(phases, false);
+}
+/// A draw that presented nothing is done (`zgx::profile::frame_unpresented`):
+/// an entry of its own, marked `no_present`.
+pub fn end_unpresented(phases: Vec<(&'static str, u64, f32)>) {
+    end_traced(phases, true);
+}
+fn end_traced(phases: Vec<(&'static str, u64, f32)>, no_present: bool) {
+    if !enabled() {
+        return;
+    }
+    LOG.with_borrow_mut(|log| {
+        let started = log.draw_started.take();
         log.index += 1;
         if log.current.writes.is_empty()
             && log.current.runs.is_empty()
@@ -314,6 +344,8 @@ pub fn end_frame(phases: Vec<(&'static str, u64, f32)>) {
         frame.index = log.index;
         let began = *log.began.get_or_insert_with(Instant::now);
         frame.ended_ms = began.elapsed().as_secs_f64() * 1e3;
+        frame.started_ms = started.unwrap_or(frame.ended_ms);
+        frame.no_present = no_present;
         log.frames.push_back(frame);
         while log.frames.len() > kept() {
             log.frames.pop_front();
