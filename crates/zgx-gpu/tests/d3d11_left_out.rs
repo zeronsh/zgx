@@ -1,9 +1,9 @@
 //! What Direct3D 11 (`ZGX_D3D11=1`, the `d3d11` feature) leaves out of a
 //! frame rather than fail it, and what still fails it
 //! (`GpuRenderer::d3d11_leave_out`): a drop shadow draws; a backdrop
-//! blur and a layer shader reading the backdrop (glass) draw their box
-//! opaque in its own colour, as the system's Reduce transparency draws
-//! glass; a content blur and a blend mode draw. Each
+//! blur draws its box opaque in its own colour, as the system's Reduce
+//! transparency draws glass; a layer shader reading the backdrop, a content
+//! blur and a blend mode draw. Each
 //! kind left out is named once. `ZGX_D3D11` is read once a process, so this
 //! test is one of its own, setting it first.
 #[cfg(windows)]
@@ -139,7 +139,8 @@ fn main() {
     // Outside it, the stripes as they were.
     assert_eq!(at(&blurred, 20, 30), at(&plain, 20, 30));
 
-    // A layer shader reading the backdrop (glass): the same.
+    // A layer shader reading the backdrop (glass): drawn over a copy of it
+    // (d3d11_parity compares it with Direct3D 12's), so not the opaque box.
     let glass = zgx::decoration::FillShader::new(
         "fn layer(input: LayerInput) -> vec4<f32> {
     return mix(zgx_backdrop(input.p), input.color, 0.5);
@@ -148,7 +149,33 @@ fn main() {
     );
     let read = draw(|scene, id| scene.set_layer_shader(id, Some(glass)))
         .expect("a frame with a layer shader reading the backdrop draws");
-    opaque_box(&read, "a layer shader reading the backdrop");
+    assert_ne!(read, plain, "the glass drew nothing");
+    let opaque = (90..150).all(|y| {
+        (70..170).all(|x| {
+            let [r, g, b, a] = at(&read, x, y);
+            [r, g, b] == [FILL.0, FILL.1, FILL.2] && a == 255
+        })
+    });
+    assert!(!opaque, "the glass drew as the opaque box");
+    // Glass reading at an offset, its reach past the box (as zgx-fx's
+    // glass reads): a stripe away, so neither the box as painted (its layer
+    // without the shader, `layered`) nor the glass reading straight under it.
+    let offset = zgx::decoration::FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+    return mix(zgx_backdrop(input.p + vec2(0., 10.)), input.color, 0.5);
+}",
+        None,
+    );
+    let shifted = draw(|scene, id| {
+        scene.set_layer_shader(id, Some(offset));
+        scene.set_layer_extent(id, 0., 12.);
+    })
+    .expect("a frame with glass reading at an offset draws");
+    assert_ne!(
+        shifted, layered,
+        "the offset glass drew as the box as painted"
+    );
+    assert_ne!(shifted, read, "the offset glass read straight under it");
 
     // A content blur and a blend mode draw (d3d11_parity compares them
     // with Direct3D 12's).
@@ -160,12 +187,13 @@ fn main() {
     assert_ne!(blended, plain, "the blend mode drew nothing");
 
     let left_out = GpuRenderer::debug_d3d11_left_out();
-    for kind in [
-        "backdrop blurs (drawn opaque)",
-        "backdrop reads (glass drawn opaque)",
-    ] {
-        assert!(left_out.contains(&kind), "{kind} not named: {left_out:?}");
-    }
+    let kind = "backdrop blurs (drawn opaque)";
+    assert!(left_out.contains(&kind), "{kind} not named: {left_out:?}");
+    assert_eq!(
+        left_out.len(),
+        1,
+        "only backdrop blurs are left out: {left_out:?}"
+    );
     println!("d3d11_left_out: {left_out:?}");
 }
 

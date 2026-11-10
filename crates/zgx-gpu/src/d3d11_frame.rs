@@ -142,12 +142,17 @@ enum Bound {
 pub(crate) enum AppShader {
     Fill,
     Filter,
+    /// A layer's composite through a layer shader reading the backdrop
+    /// (glass, `Shading::FilterBlend`): drawn over a copy of the target under
+    /// it (`Frame::blended`).
+    FilterBlend,
 }
 impl AppShader {
     fn what(self) -> &'static str {
         match self {
             Self::Fill => "shader fill",
             Self::Filter => "layer shader",
+            Self::FilterBlend => "layer shader reading the backdrop",
         }
     }
 }
@@ -181,6 +186,7 @@ fn start_app_shader(
     let (source, entry) = match kind {
         AppShader::Fill => (crate::fill_source(shader.source()), "zgx_fill"),
         AppShader::Filter => (crate::filter_source(shader.source()), "zgx_filter"),
+        AppShader::FilterBlend => (crate::filter_source(shader.source()), "zgx_filter_blended"),
     };
     let id = shader.id();
     crate::compile::Compiled::Pending(crate::compile::spawn(move || {
@@ -1354,33 +1360,9 @@ pub(crate) struct Frame<'a> {
 }
 
 impl Frame<'_> {
-    /// A blended layer's composite (`Shading::Blend`), `instances` within
-    /// `rect` of `target`: the target under it copied to `backdrop` (of the
-    /// target's size), then drawn with blend.wgsl's pixel stage reading it,
-    /// replacing the target's pixels, as Direct3D 12's blend pipeline does.
-    /// Its layer's texture is the one bound (`texture`). Whether it drew.
-    pub(crate) fn blended(
-        &mut self,
-        target: &Surface,
-        backdrop: &Surface,
-        rect: Scissor,
-        instances: std::ops::Range<u32>,
-    ) -> bool {
-        let device = self.device;
-        let pixel = device.blend.get_or_init(|| {
-            let mut shader = None;
-            // SAFETY: DXBC compiled by FXC (`translated_hlsl_matches`).
-            unsafe {
-                device
-                    .device
-                    .CreatePixelShader(BLEND_FS, None, Some(&mut shader))
-            }
-            .ok()?;
-            shader
-        });
-        let Some(pixel) = pixel else {
-            return false;
-        };
+    /// What the target holds within `rect` copied to `backdrop` (of the
+    /// target's size), for the blended draws after it (`blended`) to read.
+    pub(crate) fn copy_backdrop(&mut self, target: &Surface, backdrop: &Surface, rect: Scissor) {
         let (x, y, width, height) = rect;
         let region = D3D11_BOX {
             left: x,
@@ -1393,8 +1375,10 @@ impl Frame<'_> {
         // SAFETY: Two textures of one size and format, the box within both;
         // the backdrop is bound to no stage while it is written.
         unsafe {
-            device.context.PSSetShaderResources(POINTS, Some(&[None]));
-            device.context.CopySubresourceRegion(
+            self.device
+                .context
+                .PSSetShaderResources(POINTS, Some(&[None]));
+            self.device.context.CopySubresourceRegion(
                 &backdrop.texture,
                 0,
                 x,
@@ -1405,6 +1389,45 @@ impl Frame<'_> {
                 Some(&region),
             );
         }
+    }
+    /// A blended layer's composite, `instances` within `rect`, over the
+    /// copy of the target under it in `backdrop` (`copy_backdrop`): with
+    /// blend.wgsl's pixel stage (`Shading::Blend`), or the layer shader
+    /// `glass` reading it (`Shading::FilterBlend`, compiled), replacing the
+    /// target's pixels as Direct3D 12's blend pipelines do. Its layer's
+    /// texture is the one bound (`texture`). Whether it drew.
+    pub(crate) fn blended(
+        &mut self,
+        glass: Option<u64>,
+        backdrop: &Surface,
+        rect: Scissor,
+        instances: std::ops::Range<u32>,
+    ) -> bool {
+        let device = self.device;
+        let pixel = match glass {
+            None => device
+                .blend
+                .get_or_init(|| {
+                    let mut shader = None;
+                    // SAFETY: DXBC compiled by FXC (`translated_hlsl_matches`).
+                    unsafe {
+                        device
+                            .device
+                            .CreatePixelShader(BLEND_FS, None, Some(&mut shader))
+                    }
+                    .ok()?;
+                    shader
+                })
+                .clone(),
+            Some(id) => device
+                .app_shaders
+                .borrow()
+                .get(&(id, AppShader::FilterBlend))
+                .and_then(|entry| entry.pixel.clone()?),
+        };
+        let Some(pixel) = pixel else {
+            return false;
+        };
         // Replacing (no blending), with the full pipeline's vertex stage
         // and layout.
         self.bind(Bound::FullClear);
@@ -1413,7 +1436,7 @@ impl Frame<'_> {
         // SAFETY: A pixel stage reading what the full vertex stage writes
         // (draw.wgsl's `Out`), and its backdrop, in the registers it binds.
         unsafe {
-            device.context.PSSetShader(pixel, None);
+            device.context.PSSetShader(&pixel, None);
             device
                 .context
                 .PSSetShaderResources(POINTS, Some(std::slice::from_ref(&backdrop.srv)));

@@ -211,18 +211,18 @@ and fades, kept frames, scroll copies, and isolated layers (translucent,
 nested, transformed), each drawn into a texture of its own and composited,
 images the CPU writes (pictures, gradients, canvases' and SVGs' images),
 and canvases' polyline strokes and filled areas, and shader fills and
-layer shaders that don't read the backdrop (`radial` gradients, `hue_rotate`,
-`sepia` and `invert`, and zgx-fx's fills and layer effects among them), each
-one's pixel stage compiled by FXC off the frame as Direct3D 12's is, in a
-process of its own, images drawn dithered or as characters
+layer shaders (`radial` gradients, `hue_rotate`, `sepia` and `invert`, and
+zgx-fx's fills and layer effects among them; those reading the backdrop,
+glass, over a copy of the target under them), each one's pixel stage
+compiled by FXC off the frame as Direct3D 12's is, in a process of its own, images drawn dithered or as characters
 (image_effects.wgsl's pixel stage, made when one first draws), and layer
-effects: blend modes (over a copy of the target under the layer, as on
-Direct3D 12), content blurs, masks and drop shadows, their passes drawn into the effect atlas with effects.wgsl as on
+effects: blend modes (over that copy too), content blurs, masks and drop
+shadows, their passes drawn into the effect atlas with effects.wgsl as on
 Direct3D 12. What it doesn't draw yet, it leaves out where what's
 left can't show a picture a user would wrongly trust, naming each kind once
 on stderr: images a GPU view draws are left
-empty; a backdrop blur, or a layer shader reading the backdrop (glass),
-draws its box opaque in its own colour, as the system's Reduce transparency
+empty; a backdrop blur (frosted glass among them) draws its box opaque in
+its own colour, as the system's Reduce transparency
 draws glass, so what's over it stays legible. The rest fails the frame
 with an error naming it (and panics in a debug build), since there is no
 Direct3D 12 to fall back to: a backdrop over a box with no colour of its
