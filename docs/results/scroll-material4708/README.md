@@ -1,5 +1,7 @@
 # Deferred hybrid: frosted versus opaque material
 
+> Cadence qualification: the “late” columns in these captures use the prior interval-gap classifier. Correct whole-point rounding can hold a coast position across several refreshes, so those counts are provisional and do not establish missed due moves or ship readiness. Main-thread, GPU, row-build, memory and raw interval measurements remain useful. Native motion and an independent expected-position classifier are being validated; thresholds have not been relaxed retroactively.
+
 Three interleaved pairs on M1, real shell, Wing tape, 1114×685 pt, 120 Hz, 2×, settled catalog, reset row 160. Same binary at engine `4708c942`, `ZGX_SCROLL_DRAWABLES=1 ZGX_GPU_STATS=1`, both verified in the actual child. Harness `d3f15c37`. Six valid captures; every cell has a zgx view-clock marker and independent native Metal brackets.
 
 Opaque sets `material.frosted=false`, making `material.see_through()` false; the app covers native glass with solid color. Native window glass configuration itself is unchanged. This is a diagnostic material contrast.

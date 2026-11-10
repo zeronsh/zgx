@@ -1,5 +1,7 @@
 # e875c5e0 generic scroll baseline
 
+> Cadence qualification: the “late” columns in these captures use the prior interval-gap classifier. Correct whole-point rounding can hold a coast position across several refreshes, so those counts are provisional and do not establish missed due moves or ship readiness. Main-thread, GPU, row-build, memory and raw interval measurements remain useful. Native motion and an independent expected-position classifier are being validated; thresholds have not been relaxed retroactively.
+
 **Cadence-scoring qualification (2026-11-09):** historical Wing percentages here used raw wheel-demand windows. On macOS, the recorder runs before the host drops system momentum events; nominal replay classification finds 69 such groups in Wing’s tape. Those ignored deltas must not demand new frames after the app’s own coast stops. Treat these percentages as unfiltered-input statistics, not certified app missed-refresh rates, pending coast-aware scoring. Per-frame measurements and recorded stalls remain evidence; aggregates whose population used raw demand also need qualification. No outliers are removed. Independent continuous native/idle references are unaffected by this input-filtering issue.
 
 These 16 single-trial cells are the original-engine baseline, with opt-in

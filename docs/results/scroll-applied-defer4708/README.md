@@ -1,5 +1,7 @@
 # Applied-input three-arm scroll comparison, 4708c942
 
+> Cadence qualification: the “late” columns in these captures use the prior interval-gap classifier. Correct whole-point rounding can hold a coast position across several refreshes, so those counts are provisional and do not establish missed due moves or ship readiness. Main-thread, GPU, row-build, memory and raw interval measurements remain useful. Native motion and an independent expected-position classifier are being validated; thresholds have not been relaxed retroactively.
+
 All 12 captures are valid; every arm fails the ship gates. The deferred hybrid
 removes most main-thread drawable waiting, but has no proven no-loss result:
 its shown-frame difference against the waiting hybrid is +84,−105,−12
