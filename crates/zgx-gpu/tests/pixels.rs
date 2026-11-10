@@ -4199,6 +4199,13 @@ fn variable_virtual_rows_height_anchor_focus_and_resize_match_full_repaint() {
     );
 }
 
+/// Measured rows streaming and reflowing repaint as a full frame does, the
+/// focused row's anchor held. On WARP alone a one-pixel scroll's copied text
+/// differs from it drawn fresh one pixel higher by 1 in blue at two pixels:
+/// inside the copy, outside the repainted strip, so no damage is missing;
+/// WARP's linear sample lands a hair off a glyph's texel centre, by where it
+/// sits on screen. Metal and an RTX 4090 are exact. (CI's WARP run leaves
+/// `pixels` out for this; see ci.yml.)
 #[test]
 fn naturally_measured_streaming_rows_reflow_with_damage_and_stable_anchor() {
     let _gpu_fixture = gpu_fixture();
@@ -6115,6 +6122,13 @@ fn text_lands_on_whole_device_pixels() {
 /// reach the clip alone: the same pixels as making every line's, with far
 /// fewer quads, and a document of 100,000 lines draws within the frame's
 /// geometry budget.
+///
+/// On WARP alone (Direct3D 12's software rasterizer) culled and whole differ
+/// by 1 in a channel at 45 glyph-edge pixels: culling shapes fewer lines, so
+/// the same glyph sits in another atlas cell, and WARP's linear sample lands
+/// a hair off its texel centre, by where. The cells' bytes are the same, and
+/// equal settings give equal pixels. Metal and an RTX 4090 are exact. (CI's
+/// WARP run leaves `pixels` out for this; see ci.yml.)
 #[test]
 fn a_long_text_draws_only_the_lines_in_its_clip() {
     let _gpu_fixture = gpu_fixture();

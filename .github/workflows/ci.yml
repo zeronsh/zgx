@@ -641,6 +641,19 @@ jobs:
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold
           ZGX_EXPECT_COLD_CACHE: "1"
+      # Tests that once failed on a real Windows GPU alone, which this job
+      # never ran: a scaled layer reading its own texels (`layer_shader`),
+      # and colour emoji drawn opaque (`color_glyphs`, `colour_layers`: Segoe
+      # UI Emoji is COLR).
+      - run: cargo test -p zgx-gpu --test layer_shader --test color_glyphs --test colour_layers --locked
+      # Not `pixels`: on WARP two of its tests read text a level apart where a
+      # real GPU reads it exact (`a_long_text_draws_only_the_lines_in_its_clip`,
+      # `naturally_measured_streaming_rows_reflow_with_damage_and_stable_anchor`).
+      # WARP's linear sampling lands a hair off a glyph's texel centres, so a
+      # glyph copied by a scroll, or read from another atlas cell, differs by 1
+      # in a channel. Metal and an RTX 4090 are exact, measured; reading texels
+      # exactly instead cost 1-8% GPU on Metal or 0.6-1.2% CPU on fx cells, so
+      # zgx doesn't pay it for a software rasterizer.
       # The app-shader HLSL generator's register map and the FXC child's
       # job and cache key (dx12_fill, fxc_child: Windows-only modules).
       - run: cargo test -p zgx-gpu --lib --locked -- dx12_fill fxc_child
