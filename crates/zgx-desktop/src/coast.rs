@@ -57,6 +57,9 @@ struct Running {
 impl Coast {
     /// Fingers touched down: what was coasting stops.
     pub(crate) fn touched(&mut self, now: Instant) {
+        if let Some(running) = &self.running {
+            note_end("cancel (fingers down)", running);
+        }
         *self = Self {
             at: Some(now),
             ..Self::default()
@@ -138,6 +141,16 @@ impl Coast {
             distance,
             shown: (0., 0.),
         });
+        // Exactly, for devtools: what reproduces the curve (`sample`).
+        zgx::profile::note(|| {
+            format!(
+                "coast start start_ns={} k={k:?} length_secs={length:?} distance_pt={:?},{:?} \
+                 speed_pt_s={x:?},{y:?}",
+                ns(now),
+                distance.0,
+                distance.1
+            )
+        });
         self.running.is_some()
     }
 
@@ -148,6 +161,9 @@ impl Coast {
 
     /// Stop a coast where it is (scrolled into an edge, or replaced).
     pub(crate) fn stop(&mut self) {
+        if let Some(running) = &self.running {
+            note_end("stop (an edge, or replaced)", running);
+        }
         self.running = None;
     }
 
@@ -166,6 +182,14 @@ impl Coast {
         let delta = (at.0 - running.shown.0, at.1 - running.shown.1);
         running.shown = at;
         let done = left == 0.;
+        zgx::profile::note(|| {
+            format!(
+                "coast sample shows_ns={} shown_pt={:?},{:?} done={done}",
+                ns(shows),
+                at.0,
+                at.1
+            )
+        });
         if done {
             self.running = None;
         }
@@ -239,6 +263,26 @@ pub(crate) fn event_time() -> Instant {
 /// A distance in whole points, as AppKit rounds its scroll views': within an
 /// eighth of a whole point, that point; otherwise the nearest, halves toward
 /// zero.
+/// A coast's end other than its curve's (`sample` notes that), for devtools.
+fn note_end(how: &str, running: &Running) {
+    zgx::profile::note(|| {
+        format!(
+            "coast end {how} at_ns={} shown_pt={:?},{:?}",
+            ns(Instant::now()),
+            running.shown.0,
+            running.shown.1
+        )
+    });
+}
+/// `at` on the host clock (CLOCK_UPTIME_RAW, the present log's), in ns.
+fn ns(at: Instant) -> u64 {
+    let now = Instant::now();
+    let now_ns = zgx_gpu::present_log::now_ns();
+    match at.checked_duration_since(now) {
+        Some(ahead) => now_ns + ahead.as_nanos() as u64,
+        None => now_ns.saturating_sub(now.duration_since(at).as_nanos() as u64),
+    }
+}
 fn whole(distance: f32) -> f32 {
     let near = distance.round();
     if (distance - near).abs() <= 0.125 {
