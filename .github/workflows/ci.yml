@@ -455,6 +455,9 @@ jobs:
         env:
           BASE: ${{ steps.base.outputs.sha }}
         run: |
+          # The default shell (`bash -e`) has no pipefail: the check's status,
+          # not tee's.
+          set -o pipefail
           inline=0
           sources='^crates/zgx(-gpu|-script|-fx|-components|-3d)?/.*\.rs$|^vendor/.*\.rs$|^Cargo\.(lock|toml)$|^scripts/perf/inline_scopes\.'
           if ! git diff --name-only "$BASE" HEAD | grep -qE "$sources"; then
