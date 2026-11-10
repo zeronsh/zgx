@@ -191,7 +191,10 @@ fn alone(c: char) -> bool {
     c >= 0x2190 && matches!(c, ..0x2500 | 0x25a0..0x2800 | 0x2e80..)
 }
 
-/// The row at viewport `row` (0 at the top of what shows).
+/// The row at viewport `row` (0 at the top of what shows). `placeholders`:
+/// once a picture is placed for Unicode placeholders, their cells show it
+/// rather than a glyph (`crate::placeholder`); until then a row is built as
+/// it was before them, asking nothing of its cells.
 pub(crate) fn row(
     term: &Term,
     row: usize,
@@ -199,10 +202,33 @@ pub(crate) fn row(
     metrics: Metrics,
     cursor: Option<CursorAt>,
     selection: Option<&SelectionRange>,
+    placeholders: bool,
 ) -> RowPaint {
-    let (paint, styled) = row_built::<false>(term, row, look, metrics, cursor, selection);
+    if placeholders {
+        return row_with_placeholders(term, row, look, metrics, cursor, selection);
+    }
+    let (paint, styled) = row_built::<false, false>(term, row, look, metrics, cursor, selection);
     if styled {
         return row_styled(term, row, look, metrics, cursor, selection);
+    }
+    paint
+}
+
+/// `row` once placeholders show pictures: out of its line, so a terminal
+/// that never placed one builds its rows as before.
+#[cold]
+#[inline(never)]
+fn row_with_placeholders(
+    term: &Term,
+    row: usize,
+    look: &Look,
+    metrics: Metrics,
+    cursor: Option<CursorAt>,
+    selection: Option<&SelectionRange>,
+) -> RowPaint {
+    let (paint, styled) = row_built::<false, true>(term, row, look, metrics, cursor, selection);
+    if styled {
+        return row_built::<true, true>(term, row, look, metrics, cursor, selection).0;
     }
     paint
 }
@@ -220,14 +246,15 @@ fn row_styled(
     cursor: Option<CursorAt>,
     selection: Option<&SelectionRange>,
 ) -> RowPaint {
-    row_built::<true>(term, row, look, metrics, cursor, selection).0
+    row_built::<true, false>(term, row, look, metrics, cursor, selection).0
 }
 
 /// The row at viewport `row`, and whether it has an underline in a style or
 /// colour of its own. Without `STYLED` those are left to the text (the row
 /// is built again with it, `row_styled`), so a plain row carries nothing of
-/// them.
-fn row_built<const STYLED: bool>(
+/// them. With `PLACEHOLDERS`, a placeholder cell reads as a blank and draws
+/// no glyph (`row`).
+fn row_built<const STYLED: bool, const PLACEHOLDERS: bool>(
     term: &Term,
     row: usize,
     look: &Look,
@@ -445,7 +472,7 @@ fn row_built<const STYLED: bool>(
             finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
             // A Unicode placeholder shows a picture's cell, not a glyph
             // (`crate::placeholder`), and reads as a blank.
-            if c == crate::placeholder::PLACEHOLDER {
+            if PLACEHOLDERS && c == crate::placeholder::PLACEHOLDER {
                 paint.text.pop();
                 paint.text.push(' ');
                 continue;

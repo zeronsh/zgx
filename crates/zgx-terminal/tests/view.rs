@@ -1329,6 +1329,54 @@ fn placeholder_text_shows_a_picture() {
     term.close();
 }
 
+/// Before any picture is placed for them, placeholder cells are text like
+/// any other (a row is built as it was before placeholders); the first
+/// virtual placement builds every row again, and the same cells show it,
+/// drawing no glyph.
+#[test]
+fn placeholders_show_pictures_once_one_is_placed() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let feed = |app: &Harness, bytes: &[u8]| {
+        replay.feed(bytes);
+        app.ui.prepare_frame();
+    };
+    let shown = |app: &Harness| {
+        let scene = app.ui.scene.borrow();
+        let glyphs = scene.paint_items().filter(|item| {
+            matches!(scene.kind(item.id), NodeKind::Text { text, .. } if text.contains('\u{10EEEE}'))
+        });
+        let glyphs = glyphs.count();
+        let pictures = scene
+            .paint_items()
+            .filter(|item| matches!(item.kind, NodeKind::Image(_)))
+            .count();
+        (glyphs, pictures)
+    };
+    // A picture sent, not placed; then placeholder text naming it.
+    feed(&app, b"\x1b_Ga=t,f=24,s=2,v=1,i=42,q=2;/wAAAAD/\x1b\\");
+    let (p, row0) = ("\u{10EEEE}", "\u{0305}");
+    let line = format!("\x1b[38;5;42m{p}{row0}{row0}{p}{p}{p}\x1b[39m\r\nend\r\n");
+    feed(&app, line.as_bytes());
+    // Each drawn alone, as a character of its range is.
+    assert_eq!(shown(&app), (4, 0), "text, until a picture is placed");
+    // Placed for them: the row is built again.
+    feed(&app, b"\x1b_Ga=p,U=1,i=42,c=4,r=1,q=2\x1b\\");
+    assert_eq!(shown(&app), (0, 1), "the picture, and no glyph");
+    term.close();
+}
+
 /// Output read before the view's first layout (a terminal opened while its
 /// window runs, its program quick to write) makes the rows for the session's
 /// own size, from outside any reactive flush: the rows built then find the

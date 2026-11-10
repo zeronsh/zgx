@@ -101,6 +101,9 @@ struct Engine {
     /// Whether `pictured` holds, read as each paint begins; and the
     /// pictures a paint worked out, for its batch to show.
     any_pictures: Cell<bool>,
+    /// Whether a picture was ever placed for Unicode placeholders: from
+    /// then on, rows show their cells as pictures (`paint::row`).
+    placeholders: Cell<bool>,
     pictures_due: Cell<Option<Vec<(i32, Picture)>>>,
     /// An input method's composition, drawn at the cursor.
     preedit: Signal<String>,
@@ -217,6 +220,7 @@ impl EngineTerminal {
             pictures: runtime.signal(Rc::from([])),
             pictured: runtime.signal(false),
             any_pictures: Cell::new(false),
+            placeholders: Cell::new(false),
             pictures_due: Cell::new(None),
             preedit: runtime.signal(String::new()),
             news: runtime.signal(String::new()),
@@ -496,6 +500,12 @@ impl Engine {
             output = !all;
             *self.last_selection.borrow_mut() = selection;
             let mut damaged = vec![false; rows];
+            // Placing the first one damages the whole screen: every row is
+            // built again with it.
+            if !term.virtual_placements().is_empty() {
+                self.placeholders.set(true);
+            }
+            let placeholders = self.placeholders.get();
             match term.damage() {
                 alacritty_terminal::term::TermDamage::Full => all = true,
                 alacritty_terminal::term::TermDamage::Partial(lines) => {
@@ -524,7 +534,15 @@ impl Engine {
                     });
                     changed.push((
                         row,
-                        paint::row(&term, row, look, metrics, cursor, selection.as_ref()),
+                        paint::row(
+                            &term,
+                            row,
+                            look,
+                            metrics,
+                            cursor,
+                            selection.as_ref(),
+                            placeholders,
+                        ),
                     ));
                 }
             });
