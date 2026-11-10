@@ -112,6 +112,9 @@ pub struct Config {
     pub hold: Duration,
 }
 
+/// Ended voices kept for [`Audio::take_ended`] at most.
+const MAX_ENDED: usize = 1 << 16;
+
 /// The most voices an engine can have.
 pub const MAX_VOICES: usize = 4096;
 
@@ -511,6 +514,10 @@ impl Audio {
         // Sounds the mixer is done with are dropped here, on this thread.
         while let Some(Return::Ended { id, sound }) = control.returns.pop() {
             control.live.remove(&id);
+            if control.ended.len() >= MAX_ENDED {
+                // No one has asked for a long while: the oldest half go.
+                control.ended.drain(..MAX_ENDED / 2);
+            }
             control.ended.push(id);
             drop(sound);
         }
@@ -677,7 +684,9 @@ impl Audio {
     }
 
     /// Voices that have ended (by their [`Voice::id`]) since this was last
-    /// asked: what turns a `playing` state false.
+    /// asked: what turns a `playing` state false. An app that never asks
+    /// doesn't keep them all: past 65 536, the oldest are let go
+    /// ([`Voice::playing`] still knows).
     pub fn take_ended(&self) -> Vec<u64> {
         std::mem::take(&mut self.control().ended)
     }
@@ -1217,9 +1226,10 @@ impl std::fmt::Debug for BusDrive {
 }
 
 impl BusDrive {
-    /// The gain the bus glides to.
+    /// The gain the bus glides to, kept from 0 to [`MAX_GAIN`] (not a
+    /// number: 0).
     pub fn set(&self, gain: f32) {
-        let gain = if gain.is_nan() { 0. } else { gain.max(0.) };
+        let gain = self::gain(gain);
         self.meter.drives[self.index].store(gain.to_bits(), Ordering::Relaxed);
     }
 }

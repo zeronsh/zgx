@@ -708,3 +708,39 @@ fn a_sound_at_a_rate_the_mixer_can_t_play_is_an_error() {
         );
     }
 }
+
+#[test]
+fn a_bus_driven_to_infinity_or_nothing_sends_finite_sound() {
+    let flat = sound(&[0., 0.5], 1, RATE);
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let music = audio.bus("music").unwrap();
+    audio
+        .play(&flat, Play::new().bus(&music).loop_frames(1..2))
+        .unwrap();
+    // The bus is made with the first block: a drive is followed after.
+    mixer.frames(64);
+    for bad in [f32::INFINITY, f32::NAN, -f32::INFINITY, 1e30] {
+        music.drive().set(bad);
+        let out = mixer.frames(1000);
+        assert!(out.iter().all(|s| s.is_finite()), "driven to {bad}");
+    }
+}
+
+#[test]
+fn ended_voices_no_one_asks_about_are_not_kept_forever() {
+    let click = blip();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let mut played = 0;
+    while played < 100_000 {
+        for _ in 0..500 {
+            if audio.play(&click, Play::new()).is_ok() {
+                played += 1;
+            }
+        }
+        mixer.frames(64);
+    }
+    audio.update();
+    let kept = audio.take_ended().len();
+    assert!(kept <= 65_536, "{kept} ids kept for no one");
+    assert!(kept > 0);
+}
