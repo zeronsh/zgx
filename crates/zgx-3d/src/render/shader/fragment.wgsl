@@ -53,10 +53,32 @@
 //A let turning_x = dpdx(facing);
 //A let turning_y = dpdy(facing);
 //A widening = min(0.3 * (dot(turning_x, turning_x) + dot(turning_y, turning_y)), 0.18);
+    // A custom material's surface (`zgx_surface`): what its shaders make
+    // of what the mesh's material and maps give.
+//V     var zs: SurfaceIn;
+//V     zs.world_position = in.world;
+//V     zs.geometric_normal = normalize(in.normal) * select(-1.0, 1.0, front);
+//V     zs.normal = zs.geometric_normal;
+//V //T     zs.normal = bumped(zs.geometric_normal, dpx, dpy, duvx, duvy, bump);
+//V     zs.uv = in.uv;
+//V     zs.uv1 = in.uv;
+//V //U     zs.uv1 = in.second_uv;
+//V     zs.color = in.color;
+//V     zs.view = normalize(frame.camera.xyz - in.world);
+//V     zs.depth = -(frame.view * vec4(in.world, 1.0)).z;
+//V     zs.screen_uv = in.position.xy / frame.size;
+//V     zs.front_facing = front;
+//D     if zgx_opacity(zs) < zgx_cutoff(in.material.z) {
+//D         discard;
+//D     }
+//V     zgx_so_far = Surface(in.color.rgb * texel.rgb, in.material.x * surface.b, clamp(in.material.y * surface.g, 0.02, 1.0), zs.normal, in.emissive * glow, occlusion, clamp(select(1.0, in.color.a * texel.a, in.color.a < 1.0), 0.0, 1.0));
+//V     let zm = zgx_surface(zs, in.material.z <= 0.5);
+//V     occlusion = zm.occlusion;
 //K     if texel.a < cutoff_of(in.material.z) {
 //K         discard;
 //K     }
-    var base = in.color.rgb * texel.rgb;
+//O     var base = in.color.rgb * texel.rgb;
+//V     var base = zm.base_color;
     var lit: vec3<f32>;
     if in.material.z > 0.5 {
         lit = base;
@@ -69,9 +91,12 @@
         // under it does.
 //L         let coat_n = bumped(n, dpx, dpy, coat_duvx, coat_duvy, coat_bump);
 //T         n = bumped(n, dpx, dpy, duvx, duvy, bump);
+//V         n = zm.normal;
         let v = normalize(frame.camera.xyz - in.world);
-        let metallic = in.material.x * surface.b;
-        let given = clamp(in.material.y * surface.g, 0.02, 1.0);
+//O         let metallic = in.material.x * surface.b;
+//O         let given = clamp(in.material.y * surface.g, 0.02, 1.0);
+//V         let metallic = zm.metallic;
+//V         let given = clamp(zm.roughness, 0.02, 1.0);
         let a = given * given;
         let roughness = sqrt(sqrt(clamp(a * a + widening, 0.0, 1.0)));
 //L         let coat_a = coat_given * coat_given;
@@ -129,7 +154,8 @@
 //E     surround = irradiance(turned(n)) * base * (1.0 - metallic) * (1.0 - fresnel);
 //E     surround = (surround + along * reflectance(f0, roughness, n_v)) * frame.environment.x;
         lit += surround * occlusion;
-        lit += in.emissive * glow;
+//O         lit += in.emissive * glow;
+//V         lit += zm.emissive;
         // A coat reflects its surroundings as glass, and what is under it
         // (its light included) shows the less the more it reflects.
 //L         let coat_r = reflect(-v, coat_n);
@@ -152,6 +178,7 @@
     }
     // A translucent mesh's texture adds its own alpha; an opaque one's
     // is ignored (glTF's OPAQUE).
-    let alpha = clamp(select(1.0, in.color.a * texel.a, in.color.a < 1.0), 0.0, 1.0);
+//O     let alpha = clamp(select(1.0, in.color.a * texel.a, in.color.a < 1.0), 0.0, 1.0);
+//V     let alpha = clamp(zm.opacity, 0.0, 1.0);
     return vec4(lit * alpha, alpha);
 }

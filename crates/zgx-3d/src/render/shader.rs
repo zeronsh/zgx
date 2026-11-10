@@ -22,6 +22,14 @@ use super::Variant;
 #[cold]
 #[inline(never)]
 pub(super) fn wgsl(variant: Variant, samples: u32) -> String {
+    wgsl_with(variant, samples, None)
+}
+/// `wgsl`'s shader with `custom` code (a mesh's shader, the world's surface
+/// layers): its lines marked `//V ` are a custom one's alone, `//O ` any
+/// other's, and `//D ` one whose mesh's shader cuts it out (`opacity`).
+#[cold]
+#[inline(never)]
+pub(super) fn wgsl_with(variant: Variant, samples: u32, custom: Option<&Custom>) -> String {
     let on = |tag: u8| match tag {
         b'T' => variant.textured(),
         b'S' => variant.skinned(),
@@ -42,6 +50,9 @@ pub(super) fn wgsl(variant: Variant, samples: u32) -> String {
         b'Y' => !variant.clustered(),
         b'H' => variant.cascaded(),
         b'I' => !variant.cascaded(),
+        b'V' => custom.is_some(),
+        b'O' => custom.is_none(),
+        b'D' => custom.is_some_and(cuts),
         _ => false,
     };
     // The kept chunks, copied whole.
@@ -51,6 +62,9 @@ pub(super) fn wgsl(variant: Variant, samples: u32) -> String {
         if tags.iter().all(|&tag| tag == 0 || on(tag)) {
             source.push_str(&text[range.clone()]);
         }
+    }
+    if let Some(custom) = custom {
+        source.push_str(code_of(custom));
     }
     source
 }
@@ -89,18 +103,50 @@ pub(super) fn shader_chunks() -> &'static Chunks {
     })
 }
 
-/// The shader's parts (`shader/*.wgsl`), in order, as one text.
+#[cfg(feature = "shaders")]
+use crate::material::Custom;
+/// Custom code: none without the `shaders` feature.
+#[cfg(not(feature = "shaders"))]
+pub(super) enum Custom {}
+#[cfg(feature = "shaders")]
+fn cuts(custom: &Custom) -> bool {
+    custom.opacity
+}
+#[cfg(feature = "shaders")]
+fn code_of(custom: &Custom) -> &str {
+    &custom.code
+}
+#[cfg(not(feature = "shaders"))]
+fn cuts(custom: &Custom) -> bool {
+    match *custom {}
+}
+#[cfg(not(feature = "shaders"))]
+fn code_of(custom: &Custom) -> &str {
+    match *custom {}
+}
+/// The shader's parts (`shader/*.wgsl`), in order, as one text; with the
+/// `shaders` feature, custom materials' inputs (`material`) after them (a
+/// build without it doesn't read their lines).
 macro_rules! parts {
     ($($name:literal),* $(,)?) => {
         /// Metallic-roughness shading (GGX, Smith, Schlick) under a sun, up
         /// to eight point or spot lights and a hemisphere's or an
         /// environment's ambient, mapped to display range, premultiplied:
         /// its parts joined, read as one text with tagged lines.
+        #[cfg(not(feature = "shaders"))]
         pub(super) const SHADER: &str = concat!($(include_str!(concat!("shader/", $name, ".wgsl"))),*);
+        #[cfg(feature = "shaders")]
+        pub(super) const SHADER: &str = concat!(
+            $(include_str!(concat!("shader/", $name, ".wgsl")),)*
+            include_str!("shader/material.wgsl")
+        );
         /// Each part's name and text.
         #[cfg(test)]
-        const PARTS: &[(&str, &str)] =
-            &[$(($name, include_str!(concat!("shader/", $name, ".wgsl")))),*];
+        const PARTS: &[(&str, &str)] = &[
+            $(($name, include_str!(concat!("shader/", $name, ".wgsl"))),)*
+            #[cfg(feature = "shaders")]
+            ("material", include_str!("shader/material.wgsl")),
+        ];
     };
 }
 // A feature's WGSL is a part of its own, listed here. Its lines carry its
@@ -236,9 +282,13 @@ mod tests {
         // change to today's shading.
         let before = variants_text(1 << 11);
         assert_eq!(before, 0x0a4b_2237_f883_7a85, "{before:#018x}");
+        // Those of bits 0 to 12 (clustered lights', cascades') as they were
+        // before custom materials (bit 13), whose code they don't parse.
+        let lit = variants_text(1 << 13);
+        assert_eq!(lit, 0x3d4d_9104_4d81_6ec5, "{lit:#018x}");
         // And every variant of every bit there is now, as it is now.
         let all = variants_text(u32::from(Variant::ALL) + 1);
-        assert_eq!(all, 0x3d4d_9104_4d81_6ec5, "{all:#018x}");
+        assert_eq!(all, 0xbc9a_c07f_4884_1b65, "{all:#018x}");
     }
 
     /// `bits` as a variant a mesh can have: a cut-out, placed, glass, coated

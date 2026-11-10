@@ -77,7 +77,18 @@ pub(super) fn draw_run(
         .palettes
         .as_ref()
         .filter(|_| run.variant.skinned() || run.variant.morphing());
-    match gpu.variants.get(&run.variant) {
+    // A custom material's variant is never a stock one: asked of its own
+    // only where the stock ones have none (a run of others pays nothing).
+    #[cfg(feature = "shaders")]
+    let pipelines = gpu.variants.get(&run.variant).or_else(|| {
+        run.variant
+            .custom()
+            .then(|| super::custom::pipelines(gpu, run))
+            .flatten()
+    });
+    #[cfg(not(feature = "shaders"))]
+    let pipelines = gpu.variants.get(&run.variant);
+    match pipelines {
         Some(pipelines) => {
             bound.pipeline(pass, &pipelines[usize::from(run.glass)]);
             bound.group(pass, 1, maps.unwrap_or(&gpu.empty_bind));

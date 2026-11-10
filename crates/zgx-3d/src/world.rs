@@ -169,6 +169,11 @@ impl Light {
         }
     }
 }
+#[cfg(feature = "shaders")]
+mod materials;
+#[cfg(feature = "shaders")]
+pub(crate) use materials::ShaderRef;
+
 /// Point lights a frame shades with (the nearest the camera's target, past
 /// this many).
 pub const POINT_LIGHTS: usize = 8;
@@ -588,6 +593,9 @@ pub(crate) struct Inner {
     animators: animation::Animators,
     /// The bytes its renderer's frame temporaries hold (`World::temporary_bytes`).
     pub(crate) temporaries: std::cell::Cell<u64>,
+    /// Its custom materials and surface layers (`World::add_shader`).
+    #[cfg(feature = "shaders")]
+    pub(crate) shaders: crate::material::Shaders,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -702,11 +710,17 @@ pub(crate) struct Extras {
     /// specular (`SPECULAR`) it has, kept as they change: a frame asks of
     /// every mesh, and one byte is cheaper to ask than the three.
     pub(crate) kinds: u8,
+    /// Its custom material (`World::set_shader`, `SHADER`).
+    #[cfg(feature = "shaders")]
+    pub(crate) shader: Option<ShaderRef>,
 }
 /// `Extras::kinds`' bits.
 pub(crate) const GLASS: u8 = 1;
 pub(crate) const COAT: u8 = 2;
 pub(crate) const SPECULAR: u8 = 4;
+/// A custom material (`World::set_shader`).
+#[cfg_attr(not(feature = "shaders"), allow(dead_code))]
+pub(crate) const SHADER: u8 = 32;
 /// A mesh's rarer layers (`Extras::layers`).
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Layers {
@@ -744,6 +758,10 @@ impl Extras {
         self.kinds = bit(self.transmission.is_some(), GLASS)
             | bit(layers.is_some_and(|l| l.clearcoat.is_some()), COAT)
             | bit(layers.is_some_and(|l| l.specular.is_some()), SPECULAR);
+        #[cfg(feature = "shaders")]
+        if self.shader.is_some() {
+            self.kinds |= SHADER;
+        }
     }
     /// `f` applied to its layers, made if it has none and dropped if
     /// nothing is left in them.
@@ -954,7 +972,19 @@ impl Inner {
     }
     /// Whether any mesh lets light through.
     pub(crate) fn transmits(&self) -> bool {
-        self.extras.values().any(|(_, e)| e.transmission.is_some())
+        self.extras.values().any(|(_, e)| e.transmission.is_some()) || self.reads_scene()
+    }
+    /// Whether any mesh's custom material reads what is behind it (asked of
+    /// its meshes only if one of its shaders does).
+    fn reads_scene(&self) -> bool {
+        #[cfg(feature = "shaders")]
+        return self.shaders.list.iter().any(|s| s.reads_scene)
+            && self
+                .extras
+                .values()
+                .any(|(_, e)| e.shader.as_ref().is_some_and(|s| s.0.reads_scene));
+        #[cfg(not(feature = "shaders"))]
+        false
     }
     /// Object `index`'s extras, if it has any (no lookup in a world with
     /// none).
@@ -1285,6 +1315,8 @@ impl World {
             #[cfg(feature = "gltf")]
             animators: Default::default(),
             temporaries: std::cell::Cell::new(0),
+            #[cfg(feature = "shaders")]
+            shaders: Default::default(),
         }));
         let view = zgx_gpu::viewport::view(crate::painter::Painter::new(
             crate::render::Renderer::new(Rc::downgrade(&inner)),

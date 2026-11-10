@@ -90,6 +90,13 @@ pub(super) fn layers_key(extras: &crate::world::Extras) -> u64 {
         mix(0x5bec);
         specular.numbers().into_iter().for_each(|n| mix(n.into()));
     }
+    // A custom material's shader and the textures it has now: its binding's.
+    #[cfg(feature = "shaders")]
+    if let Some(shader) = &extras.shader {
+        mix(0x5ade);
+        mix(shader.0.id.into());
+        mix(shader.0.values.borrow().pictures);
+    }
     key
 }
 /// A number for what `placement` says, never 0.
@@ -129,6 +136,14 @@ pub(super) fn make_binding(
     let (placed_layout, wrapped) = (&mut gpu.placed_layout, &mut gpu.wrapped_samplers);
     let (layered_layout, glass_layout) = (&mut gpu.layered_layout, &mut gpu.glass_layout);
     let behind = &gpu.graph.behind;
+    #[cfg(feature = "shaders")]
+    let custom_state = &mut gpu.custom;
+    #[cfg(feature = "shaders")]
+    let own = super::custom::Own {
+        sampler: &gpu.texture_sampler,
+        white: [&stand_ins[0], &stand_ins[1]],
+        behind: behind.as_ref().map(|b| (&b.whole, &b.sampler)),
+    };
     let view = |i: usize| {
         d.maps[i]
             .and_then(|t| views.get(&(t.id(), crate::Map::ALL[i].srgb())))
@@ -199,15 +214,35 @@ pub(super) fn make_binding(
         gpu.behind_held = behind.texture.desc.bytes();
     }
     let glass = glass.map(|(_, behind)| (&behind.whole, &behind.sampler));
-    let layout = if glass.is_some() {
-        glass_layout.get_or_insert_with(|| map_layout(device, Extent::Glass))
+    let extent = if glass.is_some() {
+        Extent::Glass
     } else if layered {
-        layered_layout.get_or_insert_with(|| map_layout(device, Extent::Layered))
+        Extent::Layered
     } else if rows.is_some() {
-        placed_layout.get_or_insert_with(|| map_layout(device, Extent::Placed))
+        Extent::Placed
     } else {
-        layout
+        Extent::Maps
     };
+    let layout = match extent {
+        Extent::Glass => glass_layout.get_or_insert_with(|| map_layout(device, Extent::Glass)),
+        Extent::Layered => {
+            layered_layout.get_or_insert_with(|| map_layout(device, Extent::Layered))
+        }
+        Extent::Placed => placed_layout.get_or_insert_with(|| map_layout(device, Extent::Placed)),
+        Extent::Maps => layout,
+    };
+    // A custom material binds its shader's numbers, textures and what is
+    // behind besides, by a layout of its own.
+    // (Its uploads and binding are the device's to refuse: then its mesh
+    // binds as without it, and its shader says why.)
+    #[cfg(feature = "shaders")]
+    let shader = d.extras.and_then(|e| e.shader.as_ref());
+    #[cfg(feature = "shaders")]
+    let custom = shader.map(|shader| {
+        super::custom::scoped(device, || {
+            super::custom::binding_of(custom_state, device, queue, shader, extent, own, map_set(d))
+        })
+    });
     // White where it has none (all passing, as thick as its transmission
     // says, as much coat and as rough as it says), a coat's normal flat.
     let layer_view = |i: usize| {
@@ -218,14 +253,39 @@ pub(super) fn make_binding(
         .as_ref()
         .map(|words| (words, [2, 3, 4].map(layer_view)));
     let glass = glass.map(|(view, sampler)| (view, sampler, [0, 1].map(layer_view)));
+    let maps = std::array::from_fn(view);
+    #[cfg(feature = "shaders")]
+    if let (Some(shader), Some(custom)) = (shader, custom) {
+        let made = custom.and_then(|custom| {
+            let entries = custom.entries();
+            super::custom::scoped(device, || {
+                let rows = rows.as_ref();
+                map_binding(
+                    device,
+                    &custom.layout,
+                    sampler,
+                    maps,
+                    rows,
+                    layers,
+                    glass,
+                    &entries,
+                )
+            })
+        });
+        match made {
+            Ok(binding) => return binding,
+            Err(error) => super::custom::refused_binding(custom_state, shader, map_set(d), error),
+        }
+    }
     map_binding(
         device,
         layout,
         sampler,
-        std::array::from_fn(view),
+        maps,
         rows.as_ref(),
         layers,
         glass,
+        &[],
     )
 }
 /// Group 1's layout as far as `extent`, made if no pipeline has it yet.
@@ -255,7 +315,7 @@ pub(super) fn layout_of(gpu: &Gpu, extent: Option<Extent>) -> &wgpu::BindGroupLa
     }
 }
 /// How much group 1 binds: each extent all of the one before and more.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(super) enum Extent {
     /// The maps and their sampler.
     Maps,
@@ -268,6 +328,13 @@ pub(super) enum Extent {
 }
 /// Group 1's layout, as far as `extent`.
 pub(super) fn map_layout(device: &wgpu::Device, extent: Extent) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("3D maps"),
+        entries: &map_layout_entries(extent),
+    })
+}
+/// Group 1's entries, as far as `extent`.
+pub(super) fn map_layout_entries(extent: Extent) -> Vec<wgpu::BindGroupLayoutEntry> {
     let fragment = wgpu::ShaderStages::FRAGMENT;
     let texture = |binding| wgpu::BindGroupLayoutEntry {
         binding,
@@ -323,10 +390,7 @@ pub(super) fn map_layout(device: &wgpu::Device, extent: Extent) -> wgpu::BindGro
             texture(MAPS as u32 + 6),
         ]);
     }
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("3D maps"),
-        entries: &entries,
-    })
+    entries
 }
 /// A mipmapped, anisotropic sampler wrapping as `wrap` says along u and v.
 pub(super) fn texture_sampler(device: &wgpu::Device, wrap: [crate::Wrap; 2]) -> wgpu::Sampler {
@@ -468,7 +532,8 @@ pub(super) fn upload_missing(
         }
     });
 }
-/// A mesh's maps (`Map::ALL`'s order) bound for sampling.
+/// A mesh's maps (`Map::ALL`'s order) bound for sampling, and `extra`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn map_binding(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -481,6 +546,7 @@ pub(super) fn map_binding(
         &wgpu::Sampler,
         [&wgpu::TextureView; GLASS_MAPS],
     )>,
+    extra: &[wgpu::BindGroupEntry],
 ) -> wgpu::BindGroup {
     let entries: Vec<wgpu::BindGroupEntry> = maps
         .iter()
@@ -545,6 +611,7 @@ pub(super) fn map_binding(
                     ]
                 }),
         )
+        .chain(extra.iter().cloned())
         .collect();
     device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("3D maps"),

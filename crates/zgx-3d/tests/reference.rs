@@ -379,6 +379,8 @@ fn scenes() -> Vec<Scene> {
     scenes.push(clustered_lights());
     #[cfg(feature = "lighting")]
     scenes.push(cascaded_shadow());
+    #[cfg(feature = "shaders")]
+    scenes.push(materials());
     scenes
 }
 
@@ -467,6 +469,109 @@ fn clustered_lights() -> Scene {
         tone: ToneMapping::Neutral,
         environment: || None,
         camera: camera([0., 2.6, 3.6], [0., 0.2, -0.3]),
+    }
+}
+
+/// Custom materials (`shaders`): a sphere its shader tints and roughens by
+/// noise, a plane its shader waves, a cut-out casting its holes' shadow,
+/// and a surface layer darkening every lit mesh's lower half.
+#[cfg(feature = "shaders")]
+fn materials() -> Scene {
+    Scene {
+        name: "material",
+        tolerance: EDGES,
+        build: |world| {
+            let shader = |source: &str| MaterialShader::new(format!("#zgx material 1\n{source}"));
+            let noisy = world
+                .add_shader(
+                    shader(
+                        "fn surface(s: SurfaceIn) -> Surface {
+                             var m = surface_default(s);
+                             m.base_color *= params.tint.rgb;
+                             m.roughness = 0.15 + 0.7 * noise3(s.world_position * 6.0);
+                             return m;
+                         }",
+                    )
+                    .param("tint", Param::Color),
+                )
+                .unwrap();
+            world.set_param(noisy, "tint", [0.4, 0.7, 1., 1.]).unwrap();
+            let wave = world
+                .add_shader(
+                    shader(
+                        "fn displace(v: VertexIn) -> Displaced {
+                             var d: Displaced;
+                             let h = params.height * sin(v.world.x * 8.0);
+                             let slope = params.height * 8.0 * cos(v.world.x * 8.0);
+                             d.position = v.position + v.normal * h;
+                             d.normal = normalize(v.normal - vec3(slope, 0.0, 0.0));
+                             return d;
+                         }",
+                    )
+                    .param("height", Param::Float),
+                )
+                .unwrap();
+            world.set_param(wave, "height", 0.08).unwrap();
+            let holes = world
+                .add_shader(shader(
+                    "fn opacity(s: SurfaceIn) -> f32 {
+                         let cell = fract(s.uv * 4.0) - 0.5;
+                         return select(1.0, 0.0, dot(cell, cell) < 0.1);
+                     }",
+                ))
+                .unwrap();
+            let wet = world
+                .add_surface_layer(shader(
+                    "fn surface(s: SurfaceIn) -> Surface {
+                         var m = surface_default(s);
+                         let low = 1.0 - smoothstep(0.0, 0.3, s.world_position.y);
+                         m.base_color *= 1.0 - 0.5 * low;
+                         m.roughness = mix(m.roughness, 0.1, low);
+                         return m;
+                     }",
+                ))
+                .unwrap();
+            let _ = wet;
+            let ball = world.add(
+                Object::mesh(
+                    Geometry::sphere(0.5, 48),
+                    Material::rgb(0xffffff).with(0., 0.5),
+                )
+                .at([-0.9, 0.55, 0.]),
+            );
+            world.set_shader(ball, Some(noisy));
+            let sheet = world.add(
+                Object::mesh(
+                    Geometry::plane(1.2, 1.2),
+                    Material::rgb(0xd0a060).with(0., 0.6),
+                )
+                .transformed(Transform {
+                    position: vec3(0.6, 0.7, -0.3),
+                    rotation: Quat::from_euler(PI / 2., 0., 0.),
+                    ..Transform::default()
+                }),
+            );
+            world.set_shader(sheet, Some(wave));
+            let card = world.add(
+                Object::mesh(
+                    Geometry::cuboid(0.8, 0.8, 0.04),
+                    Material::rgb(0x40a060).with(0., 0.5),
+                )
+                .at([0.2, 1.3, 0.6]),
+            );
+            world.set_shader(card, Some(holes));
+            sun(world, [-0.3, -1., -0.4], 3.);
+            world.add_light(Light::Hemisphere {
+                sky: [0.3, 0.35, 0.45],
+                ground: [0.1, 0.08, 0.06],
+                intensity: 1.,
+            });
+            vec![ball, sheet, card, floor(world)]
+        },
+        shadows: true,
+        tone: ToneMapping::Neutral,
+        environment: || None,
+        camera: camera([0., 1.6, 3.6], [0., 0.6, 0.]),
     }
 }
 
@@ -723,6 +828,19 @@ fn a_retained_window_draws_what_a_fresh_one_does() {
             world.set_material(id, material);
             world.set_transmission(id, transmission);
             world.set_clearcoat(id, clearcoat);
+        }
+        // Each object's custom material taken off and put back.
+        #[cfg(feature = "shaders")]
+        {
+            let shaders: Vec<_> = objects.iter().map(|&id| world.shader(id)).collect();
+            for &id in &objects {
+                world.set_shader(id, None);
+            }
+            window.draw();
+            for (&id, shader) in objects.iter().zip(shaders) {
+                world.set_shader(id, shader);
+            }
+            window.draw();
         }
         // An object come and gone.
         let extra = world.add(Object::mesh(

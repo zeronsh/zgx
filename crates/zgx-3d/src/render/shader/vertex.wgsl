@@ -33,6 +33,18 @@ struct Out {
 //M     joints_from = morphed.joints;
 //S     model = skinned(joints_from, joints, weights);
 //S     normals = mat3x3(model[0].xyz, model[1].xyz, model[2].xyz);
+//V     var zv: VertexIn;
+//V     zv.position = at;
+//V     zv.normal = facing;
+//V     zv.uv = uv;
+//V     zv.uv1 = uv;
+//V //U     zv.uv1 = second_uv;
+//V     zv.color = vec4(1.0);
+//V //C     zv.color = vertex_color;
+//V     zv.world = (model * vec4(at, 1.0)).xyz;
+//V     let zd = zgx_displace(zv);
+//V     at = zd.position;
+//V     facing = zd.normal;
     let world = model * vec4(at, 1.0);
     let n = normals * facing;
     var tint = color;

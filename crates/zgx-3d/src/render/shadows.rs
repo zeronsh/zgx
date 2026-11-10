@@ -29,19 +29,37 @@ pub(super) const PLACED: u8 = 8;
 /// shadow's).
 #[inline(always)]
 pub(super) fn shadow_key(variant: Variant) -> u8 {
+    #[cfg(not(feature = "shaders"))]
     let masked = variant.masked() && !variant.transmitting();
+    // A custom material's mesh never casts by a stock cut-out pipeline: its
+    // binding is its shader's (`custom::draw_shadow`).
+    #[cfg(feature = "shaders")]
+    let masked =
+        variant.0 & (Variant::MASKED | Variant::TRANSMITTING | Variant::CUSTOM) == Variant::MASKED;
     let bit = |on: bool, bit: u8| if on { bit } else { 0 };
-    bit(variant.skinned(), 1)
+    let key = bit(variant.skinned(), 1)
         | bit(variant.morphing(), 2)
         | bit(masked, CUT_OUT)
         | bit(masked && variant.placed(), PLACED)
-        | bit(masked && (variant.coated() || variant.specular()), 16)
+        | bit(masked && (variant.coated() || variant.specular()), 16);
+    // A custom material's: none of these (`custom::draw_shadow`).
+    #[cfg(feature = "shaders")]
+    let key = key | bit(variant.custom(), CUSTOM);
+    key
 }
+/// A custom material's shadow key's bit: no stock pipeline has it.
+#[cfg(feature = "shaders")]
+pub(super) const CUSTOM: u8 = 32;
 /// A skinned, morphing or cut-out shadow's pipeline for `variant`'s meshes.
 /// Made once, rarely: out of the frame's code.
 #[cold]
 #[inline(never)]
 pub(super) fn make_shadow_pipeline(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) {
+    // (A custom material's are its shader's: `custom::prepare`.)
+    #[cfg(feature = "shaders")]
+    if variant.custom() {
+        return;
+    }
     let key = shadow_key(variant);
     let pipeline = caster_pipeline(gpu, device, variant, DEPTH);
     gpu.shadow_variants.insert(key, pipeline);
@@ -57,8 +75,11 @@ pub(super) fn caster_pipeline(
     format: wgpu::TextureFormat,
 ) -> wgpu::RenderPipeline {
     let (skinned, morphing) = (variant.skinned(), variant.morphing());
-    // A mesh light passes through casts its whole shadow.
+    // A mesh light passes through casts its whole shadow (as, here, does
+    // a custom material's: `shadow_key`).
     let masked = variant.masked() && !variant.transmitting();
+    #[cfg(feature = "shaders")]
+    let masked = masked && !variant.custom();
     let placed = masked && variant.placed();
     let layered = masked && (variant.coated() || variant.specular());
     let variant = Variant::default()
@@ -339,7 +360,14 @@ pub(super) fn draw_shadows(
                     pass.set_bind_group(3, morphs, &[]);
                 }
             }
-            None => pass.set_pipeline(&gpu.shadow),
+            None => {
+                // A custom material's (whose key no stock pipeline has).
+                #[cfg(feature = "shaders")]
+                if run.variant.custom() && super::custom::draw_shadow(&mut pass, gpu, run) {
+                    continue;
+                }
+                pass.set_pipeline(&gpu.shadow)
+            }
         }
         pass.set_vertex_buffer(0, buffers.vertices.slice(..));
         pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);

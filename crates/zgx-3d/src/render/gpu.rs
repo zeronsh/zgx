@@ -10,11 +10,15 @@ use super::{
     shadows::{Casting, SHADOW_SIZE, depth_map, shadow_pipeline},
     variant::ByVariant,
 };
+#[cfg(feature = "shaders")]
+use crate::material::FRAME_TAIL;
 use crate::{
     math::{Mat4, Vec3},
     texture::MAPS,
 };
 use std::collections::HashMap;
+#[cfg(not(feature = "shaders"))]
+const FRAME_TAIL: u64 = 0;
 use zgx_gpu::wgpu;
 pub(super) struct Buffers {
     pub(super) vertices: wgpu::Buffer,
@@ -127,6 +131,9 @@ pub(super) struct Gpu {
     /// Clustered lights' lists and bindings (`lights`).
     #[cfg(feature = "lighting")]
     pub(super) lights: super::lights::Lights,
+    /// Custom materials' pipelines, bindings and numbers (`custom`).
+    #[cfg(feature = "shaders")]
+    pub(super) custom: super::custom::State,
 }
 
 impl Gpu {
@@ -215,7 +222,13 @@ impl Gpu {
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("3D frame"),
-            size: std::mem::size_of::<FrameUniforms>() as u64,
+            // With custom materials, their tail after (`material::FRAME_TAIL`).
+            size: std::mem::size_of::<FrameUniforms>() as u64
+                + if cfg!(feature = "shaders") {
+                    FRAME_TAIL
+                } else {
+                    0
+                },
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -360,6 +373,8 @@ impl Gpu {
             frame: 0,
             #[cfg(feature = "lighting")]
             lights: Default::default(),
+            #[cfg(feature = "shaders")]
+            custom: Default::default(),
         }
     }
 }

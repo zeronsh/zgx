@@ -31,16 +31,20 @@ impl Variant {
     pub(super) const CLUSTERED: u16 = 1 << 11;
     /// Its world's sun casts its shadow through cascades.
     pub(super) const CASCADED: u16 = 1 << 12;
+    /// A custom material draws it (`World::set_shader`): which one, its
+    /// binding says (`custom`).
+    pub(super) const CUSTOM: u16 = 1 << 13;
     // `Extras::kinds`' bits, shifted, are these (see `variant_of`).
     pub(super) const _KINDS: () = assert!(
         Self::TRANSMITTING == crate::world::GLASS as u16 * Self::TRANSMITTING
             && Self::COATED == crate::world::COAT as u16 * Self::TRANSMITTING
             && Self::SPECULAR == crate::world::SPECULAR as u16 * Self::TRANSMITTING
+            && Self::CUSTOM == crate::world::SHADER as u16 * Self::TRANSMITTING
     );
     /// Every bit there is (`shader`'s tests cover each, and fail on one
     /// left out of this).
     #[cfg(test)]
-    pub(super) const ALL: u16 = (Self::CASCADED << 1) - 1;
+    pub(super) const ALL: u16 = (Self::CUSTOM << 1) - 1;
     /// It with `bit` on or off.
     pub(super) fn with(self, bit: u16, on: bool) -> Self {
         Self(if on { self.0 | bit } else { self.0 & !bit })
@@ -83,6 +87,9 @@ impl Variant {
     }
     pub(super) fn cascaded(self) -> bool {
         self.0 & Self::CASCADED != 0
+    }
+    pub(super) fn custom(self) -> bool {
+        self.0 & Self::CUSTOM != 0
     }
 }
 /// Hashes a `Variant` by its own bits: they're few and its, and the

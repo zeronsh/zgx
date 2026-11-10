@@ -1,21 +1,35 @@
 //! The meshes' pipelines: their vertex buffers and states, made once a
 //! variant.
+#[cfg(not(feature = "shaders"))]
+use super::shader::wgsl;
+#[cfg(feature = "shaders")]
+use super::shader::wgsl_with;
 use super::{
     DEPTH, Gpu, Instance, Variant,
     materials::{Extent, layout_of, make_layout},
-    shader::wgsl,
 };
 use zgx_gpu::wgpu;
 /// `variant`'s pipelines, opaque and translucent. Made once, rarely: out
-/// of the frame's code.
+/// of the frame's code. (A custom material's are made by its binding's
+/// shader: `custom::make_pipelines`.)
 #[cold]
 #[inline(never)]
 pub(super) fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) {
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("3D mesh variant"),
-        source: wgpu::ShaderSource::Wgsl(wgsl(variant, gpu.samples).into()),
-    });
-    let extent = if variant.transmitting() {
+    if variant.custom() {
+        return;
+    }
+    let extent = extent_of(variant);
+    make_layouts(gpu, device, variant, extent);
+    #[cfg(feature = "shaders")]
+    let source = wgsl_with(variant, gpu.samples, gpu.custom.layers());
+    #[cfg(not(feature = "shaders"))]
+    let source = wgsl(variant, gpu.samples);
+    let pipelines = pipelines_of(gpu, device, variant, source, layout_of(gpu, extent));
+    gpu.variants.insert(variant, pipelines);
+}
+/// How much of group 1 `variant` binds.
+pub(super) fn extent_of(variant: Variant) -> Option<Extent> {
+    if variant.transmitting() {
         Some(Extent::Glass)
     } else if variant.coated() || variant.specular() {
         Some(Extent::Layered)
@@ -23,7 +37,16 @@ pub(super) fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant:
         Some(Extent::Placed)
     } else {
         variant.textured().then_some(Extent::Maps)
-    };
+    }
+}
+/// The layouts `variant`'s pipelines bind (group 1 as far as `extent`, a
+/// clustered world's lights), made if none has them yet.
+pub(super) fn make_layouts(
+    gpu: &mut Gpu,
+    device: &wgpu::Device,
+    variant: Variant,
+    extent: Option<Extent>,
+) {
     make_layout(gpu, device, extent);
     #[cfg(feature = "lighting")]
     let key = super::lights::key_of(variant) & !super::lights::LIT;
@@ -31,13 +54,30 @@ pub(super) fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant:
     if key != 0 {
         super::lights::make_layouts(gpu, device, super::lights::key_of(variant));
     }
+    #[cfg(not(feature = "lighting"))]
+    let _ = variant;
+}
+/// `variant`'s pipelines with `source`, group 1 bound as `group1` says (its
+/// other layouts made: `make_layouts`).
+pub(super) fn pipelines_of(
+    gpu: &Gpu,
+    device: &wgpu::Device,
+    variant: Variant,
+    source: String,
+    group1: &wgpu::BindGroupLayout,
+) -> [wgpu::RenderPipeline; 2] {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("3D mesh variant"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    #[cfg(feature = "lighting")]
+    let key = super::lights::key_of(variant) & !super::lights::LIT;
     let group0 = match &gpu.environment_layout {
         #[cfg(feature = "lighting")]
         _ if key != 0 => super::lights::layout_of(gpu, super::lights::key_of(variant)),
         Some((layout, _)) if variant.lit() => layout,
         _ => &gpu.layout,
     };
-    let group1 = layout_of(gpu, extent);
     let layouts = [
         Some(group0),
         Some(group1),
@@ -49,14 +89,13 @@ pub(super) fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant:
         (true, false) => 3,
         (false, false) => 2,
     };
-    let pipelines = main_pipelines(
+    main_pipelines(
         device,
         (gpu.format, gpu.samples),
         &shader,
         &layouts[..count],
         variant,
-    );
-    gpu.variants.insert(variant, pipelines);
+    )
 }
 
 pub(super) const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] =

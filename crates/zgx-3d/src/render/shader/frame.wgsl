@@ -14,6 +14,13 @@ struct Frame {
     environment: vec4<f32>,
     irradiance: array<vec4<f32>, 9>,
     look: vec4<f32>,
+//V     view: mat4x4<f32>,
+//V     projection: mat4x4<f32>,
+//V     size: vec2<f32>,
+//V     time: f32,
+//V     delta: f32,
+//V     index: u32,
+//V     layers: ZgxLayers,
 }
 @group(0) @binding(0) var<uniform> frame: Frame;
 @group(0) @binding(1) var shadow_map: texture_depth_2d;

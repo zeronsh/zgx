@@ -33,6 +33,11 @@ lighting = []
 # device runs it, on the CPU elsewhere.
 particles = ["compute"]
 
+# Custom materials (`MaterialShader`, `World::add_shader`, surface layers):
+# WGSL functions plugged into the lit pipeline. Off, a world draws as
+# without them, and none of their code is built.
+shaders = []
+
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop", default-features = false }
 # `world_bench` draws by the no-op backend. The gate builds this crate alone
@@ -48,3 +53,7 @@ required-features = ["gltf"]
 [[example]]
 name = "particles_bench"
 required-features = ["particles"]
+
+[[test]]
+name = "shaders"
+required-features = ["shaders"]

@@ -8,6 +8,8 @@
 //M     @builtin(vertex_index) index: u32,
 //U     @location(14) second_uv: vec2<f32>,
 //K     @location(2) uv: vec2<f32>, @location(9) n2: vec4<f32>,
+//V     @location(1) normal: vec3<f32>,
+//V //N     @location(2) uv: vec2<f32>,
 //N ) -> @builtin(position) vec4<f32> {
 //K ) -> ShadowOut {
     var model = mat4x4(m0, m1, m2, m3);
@@ -17,15 +19,28 @@
 //M     at = morphed.position;
 //M     joints_from = morphed.joints;
 //S     model = skinned(joints_from, joints, weights);
+    // A custom material moves its shadow as it moves its mesh.
+//V     var zv: VertexIn;
+//V     zv.position = at;
+//V     zv.normal = normal;
+//V     zv.uv = uv;
+//V     zv.uv1 = uv;
+//V     zv.color = vec4(1.0);
+//V     zv.world = (model * vec4(at, 1.0)).xyz;
+//V     at = zgx_displace(zv).position;
 //N     return frame.shadow * model * vec4(at, 1.0);
 //K     var cut_uv = uv;
 //K //U     cut_uv = placed(0u, uv, second_uv);
-//K     return ShadowOut(frame.shadow * model * vec4(at, 1.0), cut_uv, n2.w);
+//K //O     return ShadowOut(frame.shadow * model * vec4(at, 1.0), cut_uv, n2.w);
+//K //V     let zn = normalize(mat3x3(model[0].xyz, model[1].xyz, model[2].xyz) * normal);
+//K //V     return ShadowOut(frame.shadow * model * vec4(at, 1.0), cut_uv, n2.w, (model * vec4(at, 1.0)).xyz, zn);
 }
 //K struct ShadowOut {
 //K     @builtin(position) position: vec4<f32>,
 //K     @location(0) uv: vec2<f32>,
 //K     @location(1) word: f32,
+//K //V     @location(2) world: vec3<f32>,
+//K //V     @location(3) normal: vec3<f32>,
 //K }
 //K // A surface's alpha cutoff from its third material word (`surface_word`).
 //K fn cutoff_of(word: f32) -> f32 {
@@ -35,4 +50,16 @@
 //K     if textureSample(base_texture, map_sampler, in.uv).a < cutoff_of(in.word) {
 //K         discard;
 //K     }
+//K //D     var zs: SurfaceIn;
+//K //D     zs.world_position = in.world;
+//K //D     zs.normal = in.normal;
+//K //D     zs.geometric_normal = in.normal;
+//K //D     zs.uv = in.uv;
+//K //D     zs.uv1 = in.uv;
+//K //D     zs.color = vec4(1.0);
+//K //D     zs.view = -frame.sun_direction.xyz;
+//K //D     zs.front_facing = true;
+//K //D     if zgx_opacity(zs) < zgx_cutoff(in.word) {
+//K //D         discard;
+//K //D     }
 //K }

@@ -16,6 +16,9 @@
 //! layer; `layers`, a masked override and an additive layer over it;
 //! `crowd`, each skinned mesh a chain of its own playing the clip from its
 //! own time. Frames are then 1/60 s apart, whenever drawn.
+//! `SCENE=shader` (with the `shaders` feature) is `textured`'s meshes, a
+//! tenth drawn by one of four custom materials (two shading, one moving its
+//! vertices, one cutting out), one shader's parameter set each frame.
 //! `MESHES` and `FRAMES` size it; `CULLING=0` draws what the camera can't
 //! see too; `CASCADES=n`, with the `lighting` feature, casts the sun's
 //! shadow through n cascades (`still`: they follow the camera; `textured`:
@@ -97,7 +100,7 @@ const MIXED: [Kind; 5] = [
 ];
 
 /// The world, and what its frames move: its root, the joint its skinned
-/// meshes share, and its morphing meshes.
+/// meshes share, its morphing meshes, and its custom materials.
 fn world(mixed: bool, meshes: usize) -> (World, ObjectId, ObjectId, Vec<ObjectId>) {
     let world = World::new();
     world.set_shadows(true);
@@ -133,6 +136,8 @@ fn world(mixed: bool, meshes: usize) -> (World, ObjectId, ObjectId, Vec<ObjectId
         })
         .collect();
     let textures: Vec<Texture> = (0..TEXTURES).map(texture).collect();
+    #[cfg(feature = "shaders")]
+    let mut all = Vec::with_capacity(meshes);
     let side = (meshes as f32).sqrt().ceil() as usize;
     let mut morphs = Vec::new();
     for i in 0..meshes {
@@ -153,6 +158,8 @@ fn world(mixed: bool, meshes: usize) -> (World, ObjectId, ObjectId, Vec<ObjectId
         let half = side as f32 / 2.;
         world.set_transform(mesh, Transform::at([(x - half) * 2., 0., (z - half) * 2.]));
         world.set_texture(mesh, Some(textures[i % TEXTURES].clone()));
+        #[cfg(feature = "shaders")]
+        all.push(mesh);
         match kind {
             Kind::Textured => {}
             Kind::Skinned => {
@@ -170,6 +177,8 @@ fn world(mixed: bool, meshes: usize) -> (World, ObjectId, ObjectId, Vec<ObjectId
             }
         }
     }
+    #[cfg(feature = "shaders")]
+    custom_shaders(&world, &all);
     (world, root, joint, morphs)
 }
 
@@ -249,6 +258,8 @@ fn main() {
             moved(&world, (root, joint, &morphs), frame);
         }
         posed(&world, &joints, frame);
+        #[cfg(feature = "shaders")]
+        shader_frame(&world, frame);
         let mut encoder = device.create_command_encoder(&Default::default());
         let mut drawing = ViewportFrame::new(
             &device,
@@ -270,6 +281,49 @@ fn main() {
     if arm.is_some() {
         // It did the work: its animators played through every frame.
         assert!(world.view().animating() && world.frames_drawn() == frames as u64);
+    }
+}
+
+thread_local! {
+    /// `SCENE=shader`'s shader whose parameter each frame sets.
+    #[cfg(feature = "shaders")]
+    static TINTED: std::cell::Cell<Option<ShaderId>> = const { std::cell::Cell::new(None) };
+}
+/// `SCENE=shader`'s four shaders (none in another scene), given to every
+/// tenth of `meshes`.
+#[cfg(feature = "shaders")]
+fn custom_shaders(world: &World, meshes: &[ObjectId]) {
+    if !std::env::var("SCENE").is_ok_and(|scene| scene == "shader") {
+        return;
+    }
+    let shaders: Vec<ShaderId> = [
+        "fn surface(s: SurfaceIn) -> Surface { var m = surface_default(s); m.base_color *= params.tint.rgb; return m; }",
+        "fn surface(s: SurfaceIn) -> Surface { var m = surface_default(s); m.roughness = 0.2 + 0.6 * noise3(s.world_position); return m; }",
+        "fn displace(v: VertexIn) -> Displaced { var d: Displaced; d.position = v.position * (1.0 + 0.1 * params.tint.x); d.normal = v.normal; return d; }",
+        "fn opacity(s: SurfaceIn) -> f32 { return step(0.2, fract(s.uv.x * 4.0)); }",
+    ]
+    .into_iter()
+    .map(|body| {
+        let shader =
+            MaterialShader::new(format!("#zgx material 1\n{body}")).param("tint", Param::Color);
+        let id = world.add_shader(shader).expect("it compiles");
+        world.set_param(id, "tint", [1., 0.8, 0.6, 1.]).expect("its parameter");
+        id
+    })
+    .collect();
+    for (i, &mesh) in meshes.iter().enumerate().step_by(10) {
+        world.set_shader(mesh, Some(shaders[i / 10 % shaders.len()]));
+    }
+    TINTED.set(Some(shaders[0]));
+}
+/// What a frame of `SCENE=shader` changes: one shader's parameter.
+#[cfg(feature = "shaders")]
+fn shader_frame(world: &World, frame: usize) {
+    if let Some(shader) = TINTED.get() {
+        let tint = 0.5 + 0.5 * (frame as f32 * 0.1).sin();
+        world
+            .set_param(shader, "tint", [tint, 0.8, 0.6, 1.])
+            .expect("its parameter");
     }
 }
 

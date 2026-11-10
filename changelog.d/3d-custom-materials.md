@@ -1,0 +1,4 @@
+---
+section: added
+---
+- **Custom materials** (zgx-3d, `shaders` feature): `World::add_shader(MaterialShader::new(wgsl))` plugs an app's WGSL `displace`, `surface` and `opacity` functions into the lit pipeline against the stable inputs of `#zgx material 1` (frame time and camera, `VertexIn`, `SurfaceIn`, `Surface`, `scene_color`, `params.<name>`, `surface_default` and noise helpers), with `World::set_shader`, typed parameters by `World::set_param` (numbers, colours, textures), `.reads_scene()` and `.animated()` (a world keeps drawing only while a mesh reading time is in view). `World::add_surface_layer` runs a shader's `surface` over every lit mesh. Shaders are compiled when added, their errors reported at the app's own lines; shadows run `displace` and `opacity`. A mesh without a shader draws as before, and without the feature none of it is built. See docs/3d.md, "Custom materials", for the inputs and what is promised of them.

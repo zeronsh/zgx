@@ -56,6 +56,11 @@ pub(super) fn draw_behind(
     let mut bound = Bound::default();
     for spans in shown.chunk_by(|a, b| a.0 == b.0) {
         let run = &runs[spans[0].0 as usize];
+        // (Nor custom ones reading what is behind.)
+        #[cfg(feature = "shaders")]
+        if run.variant.custom() && super::custom::reads_scene(gpu, run) {
+            continue;
+        }
         if !run.glass && !run.variant.transmitting() {
             draw_run(&mut pass, gpu, (run, spans), &mut bound);
         }

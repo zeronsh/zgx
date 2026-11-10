@@ -16,6 +16,8 @@ mod behind;
 #[cfg(feature = "lighting")]
 mod clusters;
 mod cull;
+#[cfg(feature = "shaders")]
+mod custom;
 mod draw;
 mod frame;
 mod gpu;
@@ -36,6 +38,16 @@ use crate::{
     world::Inner,
 };
 use behind::{Behind, draw_behind};
+#[cfg(feature = "shaders")]
+pub(crate) use custom::engine_text;
+/// Custom materials: none without the `shaders` feature.
+#[cfg(not(feature = "shaders"))]
+mod custom {
+    /// Whether a run's custom material reads what is behind: none does.
+    pub(super) fn reads(_: &super::Gpu) -> bool {
+        false
+    }
+}
 use draw::{Run, draw_main};
 use frame::frame_uniforms;
 use gpu::{Buffers, Gpu, Kept};
@@ -757,6 +769,10 @@ impl Viewport for Renderer {
             }
             make_main_pipelines(gpu, frame.device, variant);
         }
+        // Custom materials' pipelines, numbers and time (none in a world
+        // without them).
+        #[cfg(feature = "shaders")]
+        custom::prepare(gpu, &world, frame, (runs, shown));
         let frame_bind = match &gpu.environment_bind {
             Some(bind) if lit => bind,
             _ => &gpu.bind,
@@ -790,7 +806,7 @@ impl Viewport for Renderer {
                 // drawn first into a picture of their own, made smaller and
                 // smaller for rough surfaces to read blurred.
                 Pass::Behind => {
-                    if runs.iter().any(|run| run.variant.transmitting()) {
+                    if runs.iter().any(|run| run.variant.transmitting()) || custom::reads(gpu) {
                         draw_behind(frame.encoder, gpu, (runs, shown), frame_bind, clear);
                     }
                 }

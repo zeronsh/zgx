@@ -47,6 +47,8 @@ mod environment;
 mod geometry;
 #[cfg(feature = "gltf")]
 mod gltf;
+#[cfg(feature = "shaders")]
+mod material;
 mod math;
 mod memory;
 mod orbit;
@@ -81,6 +83,8 @@ pub use environment::Environment;
 pub use geometry::{Geometry, MorphTarget, Vertex};
 #[cfg(feature = "gltf")]
 pub use gltf::{Model, ModelError};
+#[cfg(feature = "shaders")]
+pub use material::{MATERIAL_VERSION, MaterialShader, Param, ParamValue, ShaderError, ShaderId};
 pub use math::{Mat4, Quat, Transform, Vec3, vec3};
 pub use memory::Memory;
 pub use orbit::{Answer, Orbit, OrbitControls};
