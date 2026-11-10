@@ -7,9 +7,12 @@
 //! replays on this thread (`zgx_terminal::replay_terminal`), so the count
 //! moves with the code alone. CI's instruction gate counts it, so what
 //! showing a picture costs is guarded, beside `terminal`, what showing none
-//! does.
+//! does. Making the output (pixels, PNGs, base64) and counting the pictures
+//! drawn are the bench's own work and left uncounted (`gate_marks`).
 //! Run: ZGX_GPU_NOOP=1 cargo run -p zgx-terminal --release --example terminal_pictures_bench
 //! (`ROUNDS` sets the rounds, 60 by default.)
+#[path = "support/gate_marks.rs"]
+mod gate_marks;
 use base64::Engine;
 use std::{fmt::Write, sync::Arc};
 use zgx::{
@@ -164,7 +167,7 @@ fn main() {
     let report = ui.scene.borrow_mut().flush();
     gpu.render(&ui.scene.borrow(), &report.damage)
         .expect("a frame");
-    let steps = steps(rounds);
+    let steps = gate_marks::outside(|| steps(rounds));
     let started = std::time::Instant::now();
     let mut drawn = 0;
     for step in &steps {
@@ -175,10 +178,12 @@ fn main() {
         let report = ui.scene.borrow_mut().flush();
         let scene = ui.scene.borrow();
         gpu.render(&scene, &report.damage).expect("a frame");
-        drawn += scene
-            .paint_items()
-            .filter(|item| matches!(item.kind, NodeKind::Image(_)))
-            .count();
+        drawn += gate_marks::outside(|| {
+            scene
+                .paint_items()
+                .filter(|item| matches!(item.kind, NodeKind::Image(_)))
+                .count()
+        });
     }
     // A cell measuring nothing would read as flat: every frame but a few
     // shows a picture.
