@@ -121,6 +121,9 @@ pub(super) struct Gpu {
     /// The bytes of what is behind glass a binding holds (`bindings`' glass
     /// ones keep it alive past the graph's): at most what it was.
     pub(super) behind_held: u64,
+    /// The scene's targets the world's scene draws were prepared for, and
+    /// which (by address).
+    pub(super) draws_prepared: (Option<super::SceneTarget>, Vec<usize>),
     /// Samples a pixel (`World::set_samples`).
     pub(super) samples: u32,
     pub(super) frame: u64,
@@ -356,6 +359,7 @@ impl Gpu {
             kept: None,
             written: 0,
             behind_held: 0,
+            draws_prepared: (None, Vec::new()),
             samples,
             frame: 0,
             #[cfg(feature = "lighting")]
