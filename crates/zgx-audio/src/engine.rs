@@ -25,6 +25,8 @@ pub enum Error {
     Format(String),
     /// A file that couldn't be read.
     Io(String),
+    /// A [`Config`] the engine can't be made with, and why.
+    Config(String),
 }
 
 impl Error {
@@ -44,6 +46,7 @@ impl std::fmt::Display for Error {
             Error::TooManyBuses => write!(f, "there can be at most {MAX_BUSES} buses"),
             Error::BusExists(name) => write!(f, "a bus named {name:?} exists already"),
             Error::Format(why) | Error::Io(why) => f.write_str(why),
+            Error::Config(why) => write!(f, "an audio engine can't be made with {why}"),
         }
     }
 }
@@ -86,6 +89,36 @@ pub struct Config {
     /// How voices read between frames when a sound's rate or pitch isn't
     /// the output's.
     pub interpolation: Interpolation,
+}
+
+/// The most voices an engine can have.
+pub const MAX_VOICES: usize = 4096;
+
+impl Config {
+    /// Whether an engine can be made with it: a rate from 1 kHz to
+    /// 768 kHz, 1 to 64 channels, 1 to [`MAX_VOICES`] voices, 16 to 2^20
+    /// commands, and a limiter's ceiling finite and above zero.
+    pub fn check(&self) -> Result<(), Error> {
+        let fail = |why: String| Err(Error::Config(why));
+        if !(1_000..=768_000).contains(&self.rate) {
+            return fail(format!("a rate of {} Hz (1 kHz to 768 kHz)", self.rate));
+        }
+        if !(1..=64).contains(&self.channels) {
+            return fail(format!("{} channels (1 to 64)", self.channels));
+        }
+        if !(1..=MAX_VOICES).contains(&self.voices) {
+            return fail(format!("{} voices (1 to {MAX_VOICES})", self.voices));
+        }
+        if !(16..=1 << 20).contains(&self.commands) {
+            return fail(format!("room for {} commands (16 to 2^20)", self.commands));
+        }
+        if let Some(ceiling) = self.limiter
+            && !(ceiling.is_finite() && ceiling > 0.)
+        {
+            return fail(format!("a limiter ceiling of {ceiling} (above 0, finite)"));
+        }
+        Ok(())
+    }
 }
 
 impl Default for Config {
@@ -176,26 +209,28 @@ impl Offline {
 
 impl Audio {
     /// An engine whose mixer the caller runs, with [`Offline::render`].
-    pub fn offline(config: Config) -> (Audio, Offline) {
-        let (audio, mixer) = Audio::with_mixer(&config);
-        (
+    /// Fails for a config [`Config::check`] refuses.
+    pub fn offline(config: Config) -> Result<(Audio, Offline), Error> {
+        let (audio, mixer) = Audio::with_mixer(&config)?;
+        Ok((
             audio,
             Offline {
                 mixer,
-                channels: config.channels.max(1),
+                channels: config.channels,
             },
-        )
+        ))
     }
 
-    pub(crate) fn with_mixer(config: &Config) -> (Audio, Mixer) {
-        let voices = config.voices.max(1);
-        let (commands, from_main) = queue(config.commands.max(1));
+    pub(crate) fn with_mixer(config: &Config) -> Result<(Audio, Mixer), Error> {
+        config.check()?;
+        let voices = config.voices;
+        let (commands, from_main) = queue(config.commands);
         let (to_main, returns) = queue(voices * 2 + 64);
         let meter = Arc::new(Meter::default());
         let setup = Setup {
-            rate: config.rate.max(1),
+            rate: config.rate,
             voices,
-            commands: config.commands.max(1),
+            commands: config.commands,
             limiter: config.limiter,
             interpolation: config.interpolation,
         };
@@ -219,9 +254,9 @@ impl Audio {
         for bus in 1..4 {
             audio
                 .send(0, Command::AddBus { bus, parent: 0 })
-                .expect("a new queue has room");
+                .expect("a new queue has room for 16 commands");
         }
-        (audio, mixer)
+        Ok((audio, mixer))
     }
 
     fn control(&self) -> MutexGuard<'_, Control> {
@@ -630,7 +665,7 @@ mod tests {
     #[test]
     fn sounds_are_dropped_by_the_main_thread_once_played() {
         let click = Sound::from_samples(&[0., 1., 0.5], 1, 48_000).unwrap();
-        let (audio, mut mixer) = Audio::offline(Config::default());
+        let (audio, mut mixer) = Audio::offline(Config::default()).unwrap();
         let voice = audio.play(&click, Play::new()).unwrap();
         assert!(voice.playing());
         assert_eq!(Arc::strong_count(&click.0), 2, "the command holds it");
@@ -644,5 +679,75 @@ mod tests {
         audio.update();
         assert!(!voice.playing());
         assert_eq!(Arc::strong_count(&click.0), 1);
+    }
+
+    #[test]
+    fn a_config_an_engine_can_t_be_made_with_is_an_error_not_a_panic() {
+        let bad = [
+            Config {
+                limiter: Some(-1.),
+                ..Config::default()
+            },
+            Config {
+                limiter: Some(f32::NAN),
+                ..Config::default()
+            },
+            Config {
+                limiter: Some(f32::INFINITY),
+                ..Config::default()
+            },
+            Config {
+                limiter: Some(0.),
+                ..Config::default()
+            },
+            Config {
+                commands: 1,
+                ..Config::default()
+            },
+            Config {
+                commands: 2,
+                ..Config::default()
+            },
+            Config {
+                voices: usize::MAX,
+                ..Config::default()
+            },
+            Config {
+                voices: 0,
+                ..Config::default()
+            },
+            Config {
+                rate: 0,
+                ..Config::default()
+            },
+            Config {
+                rate: u32::MAX,
+                ..Config::default()
+            },
+            Config {
+                channels: 0,
+                ..Config::default()
+            },
+        ];
+        for config in bad {
+            let error = Audio::offline(config.clone()).err();
+            assert!(
+                matches!(error, Some(Error::Config(_))),
+                "{config:?}: {error:?}"
+            );
+        }
+        // At their limits, they make engines that mix.
+        let edge = Config {
+            rate: 1_000,
+            channels: 64,
+            voices: 1,
+            commands: 16,
+            limiter: Some(f32::MIN_POSITIVE),
+            ..Config::default()
+        };
+        let (audio, mut mixer) = Audio::offline(edge).unwrap();
+        let click = Sound::from_samples(&[0., 1., 0.5], 1, 1_000).unwrap();
+        audio.play(&click, Play::new()).unwrap();
+        assert_eq!(mixer.frames(64).len(), 64 * 64);
     }
 }

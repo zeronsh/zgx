@@ -99,13 +99,36 @@ pub enum Encoding {
     Float32,
 }
 
-/// The bytes of a WAV file holding `samples`.
-pub fn write(samples: &[f32], channels: usize, rate: u32, encoding: Encoding) -> Vec<u8> {
+/// The bytes of a WAV file holding `samples`: an error for what a WAV
+/// can't hold (no channels, a frame or a second too many bytes for its
+/// header's fields, over 4 GiB of samples, or a frame cut short).
+pub fn write(
+    samples: &[f32],
+    channels: usize,
+    rate: u32,
+    encoding: Encoding,
+) -> Result<Vec<u8>, Error> {
     let (tag, width) = match encoding {
         Encoding::Pcm24 => (1u16, 3usize),
         Encoding::Float32 => (3, 4),
     };
-    let size = (samples.len() * width) as u32;
+    let too_big = |what: &str| Error::Format(format!("a WAV can't hold {what}"));
+    if channels == 0 || !samples.len().is_multiple_of(channels) {
+        return Err(too_big(&format!(
+            "{} samples as frames of {channels} channels",
+            samples.len()
+        )));
+    }
+    let frame = u16::try_from(channels * width).map_err(|_| too_big("frames that wide"))?;
+    let second = rate
+        .checked_mul(u32::from(frame))
+        .ok_or_else(|| too_big("that many bytes a second"))?;
+    let size = samples
+        .len()
+        .checked_mul(width)
+        .and_then(|size| u32::try_from(size).ok())
+        .filter(|size| *size <= u32::MAX - 37)
+        .ok_or_else(|| too_big("over 4 GiB of samples"))?;
     let mut bytes = Vec::with_capacity(44 + size as usize);
     bytes.extend_from_slice(b"RIFF");
     bytes.extend_from_slice(&(36 + size + size % 2).to_le_bytes());
@@ -114,8 +137,8 @@ pub fn write(samples: &[f32], channels: usize, rate: u32, encoding: Encoding) ->
     bytes.extend_from_slice(&tag.to_le_bytes());
     bytes.extend_from_slice(&(channels as u16).to_le_bytes());
     bytes.extend_from_slice(&rate.to_le_bytes());
-    bytes.extend_from_slice(&(rate * (channels * width) as u32).to_le_bytes());
-    bytes.extend_from_slice(&((channels * width) as u16).to_le_bytes());
+    bytes.extend_from_slice(&second.to_le_bytes());
+    bytes.extend_from_slice(&frame.to_le_bytes());
     bytes.extend_from_slice(&((width * 8) as u16).to_le_bytes());
     bytes.extend_from_slice(b"data");
     bytes.extend_from_slice(&size.to_le_bytes());
@@ -131,7 +154,7 @@ pub fn write(samples: &[f32], channels: usize, rate: u32, encoding: Encoding) ->
     if size % 2 == 1 {
         bytes.push(0);
     }
-    bytes
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -217,7 +240,7 @@ mod tests {
     #[test]
     fn written_files_read_back() {
         let samples = [0.25, -0.5, 1.0, -1.0, 0.0, 0.125];
-        let float = read(&write(&samples, 2, 48_000, Encoding::Float32)).unwrap();
+        let float = read(&write(&samples, 2, 48_000, Encoding::Float32).unwrap()).unwrap();
         assert_eq!(
             float,
             Wav {
@@ -226,7 +249,7 @@ mod tests {
                 rate: 48_000
             }
         );
-        let pcm = read(&write(&samples, 2, 48_000, Encoding::Pcm24)).unwrap();
+        let pcm = read(&write(&samples, 2, 48_000, Encoding::Pcm24).unwrap()).unwrap();
         for (a, b) in pcm.samples.iter().zip(samples) {
             assert!((a - b).abs() < 2e-7, "{a} {b}");
         }
@@ -249,5 +272,16 @@ mod tests {
         );
         cut.truncate(20);
         assert!(read(&cut).is_err());
+    }
+
+    #[test]
+    fn what_a_wav_can_t_hold_is_an_error_not_a_panic() {
+        let samples = [0f32; 8];
+        for (channels, rate) in [(0, 48_000), (3, 48_000), (8, u32::MAX), (40_000, 48_000)] {
+            assert!(
+                write(&samples, channels, rate, Encoding::Float32).is_err(),
+                "{channels} channels at {rate} Hz"
+            );
+        }
     }
 }

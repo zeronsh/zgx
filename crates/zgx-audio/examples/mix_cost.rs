@@ -40,7 +40,8 @@ fn run(voices: usize, sound: &Sound, block: usize) -> (u64, f64) {
     let (audio, mut mixer) = Audio::offline(Config {
         voices: voices.max(1),
         ..Config::default()
-    });
+    })
+    .unwrap();
     let buses = ["ui", "music", "world"].map(|name| audio.bus(name).unwrap());
     for i in 0..voices {
         let play = Play::new()

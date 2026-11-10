@@ -34,7 +34,7 @@ fn blip() -> Sound {
 fn render(config: Config, frames: usize, build: impl Fn(&Audio)) -> Vec<f32> {
     let mut first: Option<Vec<f32>> = None;
     for block in [512, 1, 37, 128, 300] {
-        let (audio, mut mixer) = Audio::offline(config.clone());
+        let (audio, mut mixer) = Audio::offline(config.clone()).unwrap();
         build(&audio);
         let mut out = vec![0.; frames * mixer.channels()];
         for chunk in out.chunks_mut(block * mixer.channels()) {
@@ -67,7 +67,11 @@ fn reference(name: &str, samples: &[f32]) {
         .join("tests/references")
         .join(format!("{name}.wav"));
     if std::env::var_os("ZGX_AUDIO_BLESS").is_some() {
-        std::fs::write(&path, wav::write(samples, 2, RATE, wav::Encoding::Pcm24)).unwrap();
+        std::fs::write(
+            &path,
+            wav::write(samples, 2, RATE, wav::Encoding::Pcm24).unwrap(),
+        )
+        .unwrap();
         return;
     }
     let bytes = std::fs::read(&path)
@@ -366,7 +370,7 @@ fn past_the_voice_limit_the_quietest_of_the_lowest_priority_goes() {
         voices: 2,
         ..unlimited()
     };
-    let (audio, mut mixer) = Audio::offline(config);
+    let (audio, mut mixer) = Audio::offline(config).unwrap();
     let quiet = audio
         .play(&flat, Play::new().loop_frames(1..2).gain(0.1))
         .unwrap();
@@ -399,8 +403,8 @@ fn a_voice_stopped_before_it_starts_makes_no_sound() {
 
 #[test]
 fn wav_bytes_load_at_their_own_rate_and_channels() {
-    let bytes = wav::write(&[0.5, -0.5, 0.25, -0.25], 2, 22_050, wav::Encoding::Float32);
-    let audio = Audio::offline(Config::default()).0;
+    let bytes = wav::write(&[0.5, -0.5, 0.25, -0.25], 2, 22_050, wav::Encoding::Float32).unwrap();
+    let audio = Audio::offline(Config::default()).unwrap().0;
     let sound = audio.load(Source::bytes(bytes)).unwrap();
     assert_eq!(
         (sound.frames(), sound.channels(), sound.rate()),
@@ -420,14 +424,15 @@ fn wav_bytes_load_at_their_own_rate_and_channels() {
 fn a_full_queue_is_an_error_not_a_wait() {
     let click = blip();
     let (audio, mut mixer) = Audio::offline(Config {
-        commands: 8,
+        commands: 16,
         ..unlimited()
-    });
-    let sent = (0..20)
+    })
+    .unwrap();
+    let sent = (0..40)
         .filter(|_| audio.play(&click, Play::new()).is_ok())
         .count();
-    // 3 of the 8 hold the default buses.
-    assert_eq!(sent, 5);
+    // 3 of the 16 hold the default buses.
+    assert_eq!(sent, 13);
     mixer.frames(1);
     assert!(audio.play(&click, Play::new()).is_ok());
 }

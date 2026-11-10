@@ -6,7 +6,7 @@
 //! ```
 //! use zgx_audio::{Audio, Config, Play, Ramp, Sound};
 //!
-//! let (audio, mut mixer) = Audio::offline(Config::default());
+//! let (audio, mut mixer) = Audio::offline(Config::default())?;
 //! let tone: Vec<f32> = (0..4800).map(|i| (i as f32 * 0.06).sin() * 0.5).collect();
 //! let tone = Sound::from_samples(&tone, 1, 48_000)?;
 //! let ui = audio.bus("ui").unwrap();
@@ -31,7 +31,7 @@ mod resample;
 mod sound;
 pub mod wav;
 
-pub use engine::{Audio, Bus, Config, Error, Offline, Play, Stats, Time, Voice};
+pub use engine::{Audio, Bus, Config, Error, MAX_VOICES, Offline, Play, Stats, Time, Voice};
 pub use ramp::{Curve, Ramp};
 pub use resample::Interpolation;
 pub use sound::{Sound, Source};
