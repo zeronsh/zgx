@@ -411,3 +411,65 @@ fn a_full_queue_is_an_error_not_a_wait() {
     mixer.frames(1);
     assert!(audio.play(&click, Play::new()).is_ok());
 }
+
+#[test]
+fn a_driven_bus_glides_to_each_value_without_a_command() {
+    let flat = sound(&[0., 1.], 1, RATE);
+    let (audio, mut mixer) = Audio::offline(unlimited());
+    let music = audio.bus("music").unwrap();
+    audio
+        .play(&flat, Play::new().bus(&music).loop_frames(1..2))
+        .unwrap();
+    let drive = music.drive();
+    mixer.frames(100);
+    drive.set(0.25);
+    let out = left(&mixer.frames(1000));
+    // 10 ms: 480 frames from 1 to 0.25, in straight steps.
+    assert_eq!(out[0], 1.);
+    assert!((out[240] - 0.625).abs() < 1e-3, "{}", out[240]);
+    assert_eq!(out[480], 0.25);
+    assert_eq!(out[999], 0.25);
+    // Unchanged, nothing moves; a command takes over until it's set again.
+    music.set_gain(1., Ramp::NONE).unwrap();
+    assert_eq!(left(&mixer.frames(10))[9], 1.);
+    drive.set(0.5);
+    assert_eq!(left(&mixer.frames(600))[599], 0.5);
+}
+
+#[test]
+fn with_interface_sounds_off_the_ui_bus_is_silent_and_the_rest_play_on() {
+    let flat = sound(&[0., 0.5], 1, RATE);
+    let (audio, mut mixer) = Audio::offline(unlimited());
+    let (ui, music) = (audio.bus("ui").unwrap(), audio.bus("music").unwrap());
+    audio
+        .play(&flat, Play::new().bus(&ui).loop_frames(1..2))
+        .unwrap();
+    audio
+        .play(&flat, Play::new().bus(&music).loop_frames(1..2).gain(0.5))
+        .unwrap();
+    mixer.frames(100);
+    audio.set_ui_sounds(false).unwrap();
+    assert!(!audio.ui_sounds_enabled());
+    let out = left(&mixer.frames(1000));
+    // After the 5 ms gate, only music's 0.25.
+    assert_eq!(out[999], 0.25);
+    // The app's own mute and the system's don't undo each other.
+    ui.mute(true).unwrap();
+    audio.set_ui_sounds(true).unwrap();
+    assert_eq!(left(&mixer.frames(1000))[999], 0.25);
+    ui.mute(false).unwrap();
+    assert_eq!(left(&mixer.frames(1000))[999], 0.75);
+}
+
+#[test]
+fn ended_voices_are_reported_once() {
+    let click = blip();
+    let (audio, mut mixer) = Audio::offline(unlimited());
+    let a = audio.play(&click, Play::new()).unwrap();
+    let b = audio.play(&click, Play::new().at(Time(1000))).unwrap();
+    mixer.frames(500);
+    assert_eq!(audio.take_ended(), [a.id()]);
+    mixer.frames(1000);
+    assert_eq!(audio.take_ended(), [b.id()]);
+    assert!(audio.take_ended().is_empty());
+}

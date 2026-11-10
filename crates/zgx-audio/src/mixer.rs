@@ -63,6 +63,12 @@ pub(crate) enum Command {
         bus: u16,
         on: bool,
     },
+    /// Silenced by the system (the user's interface-sound setting), apart
+    /// from the app's own mute.
+    Quiet {
+        bus: u16,
+        on: bool,
+    },
     AddBus {
         bus: u16,
         parent: u16,
@@ -82,6 +88,12 @@ pub(crate) enum Return {
     /// to drop.
     Ended { id: u64, sound: Feed },
 }
+
+/// A drive's bits when nothing drives it: a NaN.
+pub(crate) const UNDRIVEN: u32 = 0x7fc0_0000;
+
+/// How long a bus takes to reach a value its drive was set to.
+const GLIDE_SECONDS: f64 = 0.01;
 
 /// Buckets of a microsecond for how long each block took to mix; the last
 /// holds everything longer.
@@ -135,6 +147,14 @@ pub(crate) struct Meter {
     /// Times a stream ran dry.
     pub dry: AtomicU64,
     pub running: AtomicBool,
+    /// Each bus's gain as the main thread drives it, an f32's bits
+    /// ([`UNDRIVEN`] until driven): read by the mixer each block, so a
+    /// slider or an animation moves it with no command at all.
+    pub drives: [AtomicU32; MAX_BUSES],
+    /// Voices given back, so far: the host tells the app when it moves.
+    pub ended: AtomicU64,
+    /// Called by the host when voices end: the app's waker.
+    pub notify: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Why the device last failed. The host and the main thread take it;
     /// the audio thread never does.
     pub error: Mutex<Option<String>>,
@@ -170,6 +190,9 @@ impl Meter {
             underruns: zero(),
             dry: zero(),
             running: AtomicBool::new(false),
+            drives: std::array::from_fn(|_| AtomicU32::new(UNDRIVEN)),
+            ended: zero(),
+            notify: Mutex::new(None),
             error: Mutex::new(None),
         }
     }
@@ -177,6 +200,19 @@ impl Meter {
     /// Whether commands were sent that the mixer hasn't taken yet.
     pub fn pending(&self) -> bool {
         self.sent.load(Ordering::SeqCst) != self.collected.load(Ordering::SeqCst)
+    }
+
+    /// Tells the app, if it asked to be told, that voices were given back
+    /// (so a `playing` state can change). Called by the host, never the
+    /// audio thread.
+    pub fn notify(&self) {
+        if let Some(notify) = &*self
+            .notify
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        {
+            notify();
+        }
     }
 
     pub fn set_error(&self, why: String) {
@@ -579,6 +615,10 @@ struct Bus {
     gate: Smoothed,
     muted: bool,
     soloed: bool,
+    /// Silenced by the system's setting.
+    quiet: bool,
+    /// The drive's bits last applied (NaN's: not driven).
+    driven: u32,
     left: Box<[f32; MAX_BLOCK]>,
     right: Box<[f32; MAX_BLOCK]>,
     /// Holds this block's sound (else its buffers are stale).
@@ -594,6 +634,8 @@ impl Bus {
             gate: Smoothed::new(1.),
             muted: false,
             soloed: false,
+            quiet: false,
+            driven: UNDRIVEN,
             left: Box::new([0.; MAX_BLOCK]),
             right: Box::new([0.; MAX_BLOCK]),
             touched: false,
@@ -648,6 +690,8 @@ pub(crate) struct Mixer {
     blocks: u64,
     collected: u64,
     sounding: u64,
+    /// Voices given back.
+    ended: u64,
     /// Times a stream ran dry.
     underruns: u64,
     /// The frame the last play was applied on, this block.
@@ -698,11 +742,46 @@ impl Mixer {
             blocks: 0,
             collected: 0,
             sounding: 0,
+            ended: 0,
             underruns: 0,
             started: None,
             click: (setup.rate / 1000).max(1),
             declick: (setup.rate / 200).max(1),
         }
+    }
+
+    fn frames(&self, seconds: f64) -> u32 {
+        (seconds * f64::from(self.rate)).round() as u32
+    }
+
+    /// Moves each bus whose drive changed toward its new value over
+    /// `frames` (at once while nothing plays).
+    fn follow_drives(&mut self, frames: u32) {
+        for (bus, drive) in self.buses[..self.bus_count]
+            .iter_mut()
+            .zip(&self.meter.drives)
+        {
+            let bits = drive.load(Ordering::Relaxed);
+            if bits != bus.driven {
+                bus.driven = bits;
+                let value = f32::from_bits(bits);
+                if !value.is_nan() {
+                    bus.gain.set(value.max(0.), frames, Curve::Linear);
+                }
+            }
+        }
+    }
+
+    /// Applies what's been sent while no device runs (off the audio
+    /// thread): gains, mutes and solos take effect, plays find their
+    /// voices, and the clock stands still. Returns whether anything would
+    /// sound: a voice, or a command due later.
+    pub fn idle(&mut self) -> bool {
+        self.collect();
+        self.follow_drives(0);
+        self.apply_due();
+        self.meter.collected.store(self.collected, Ordering::SeqCst);
+        self.voices.iter().any(|v| v.id != 0) || !self.schedule.is_empty()
     }
 
     /// Mixes at `rate` from now on: a device whose rate isn't the one the
@@ -741,6 +820,7 @@ impl Mixer {
         let mut peak = 0u32;
         self.started = None;
         self.collect();
+        self.follow_drives(self.frames(GLIDE_SECONDS));
         while done < frames {
             self.apply_due();
             let mut n = (frames - done).min(MAX_BLOCK);
@@ -815,6 +895,7 @@ impl Mixer {
             }
         }
         meter.collected.store(self.collected, Ordering::SeqCst);
+        meter.ended.store(self.ended, Ordering::Release);
         meter.sounding.store(self.sounding, Ordering::Relaxed);
         meter.dry.store(self.underruns, Ordering::Relaxed);
         meter.peak.fetch_max(peak, Ordering::Relaxed);
@@ -915,6 +996,10 @@ impl Mixer {
             }
             Command::Solo { bus, on } => {
                 self.buses[usize::from(bus)].soloed = on;
+                self.gate();
+            }
+            Command::Quiet { bus, on } => {
+                self.buses[usize::from(bus)].quiet = on;
                 self.gate();
             }
             Command::AddBus { bus, parent } => {
@@ -1065,7 +1150,11 @@ impl Mixer {
                 }
             }
             let bus = &mut self.buses[b];
-            let target = if bus.muted || !audible { 0. } else { 1. };
+            let target = if bus.muted || bus.quiet || !audible {
+                0.
+            } else {
+                1.
+            };
             if bus.gate.target() != target {
                 bus.gate.set(target, declick, Curve::Linear);
             }
@@ -1103,7 +1192,10 @@ impl Mixer {
                     id: voice.id,
                     sound,
                 }) {
-                    Ok(()) => voice.id = 0,
+                    Ok(()) => {
+                        voice.id = 0;
+                        self.ended += 1;
+                    }
                     Err(Return::Ended { sound, .. }) => voice.sound = Some(sound),
                 }
             }

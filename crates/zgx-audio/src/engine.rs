@@ -171,6 +171,10 @@ struct Control {
     commands: Producer<(u64, Command)>,
     returns: Consumer<Return>,
     next_id: u64,
+    /// Voices given back since [`Audio::take_ended`] last took them.
+    ended: Vec<u64>,
+    /// Whether the `ui` bus plays: the user's interface-sound setting.
+    ui_sounds: bool,
     /// Name and parent of each bus, by index.
     buses: Vec<(String, u16)>,
     /// Voices sent and not yet given back.
@@ -288,6 +292,14 @@ impl Audio {
     /// Tells the host a command waits, starting it the first time.
     fn wake(&self, message: Message) {
         let mut hosting = self.hosting();
+        // Before any sound, a command that makes none (a gain, a mute, a
+        // bus) is applied here: no device, no thread, nothing of the
+        // system's audio touched.
+        if let (Hosting::Waiting(_, renderer, _), Message::Wake) = (&mut *hosting, &message)
+            && !renderer.idle()
+        {
+            return;
+        }
         if let Hosting::Waiting(..) = &*hosting {
             let Hosting::Waiting(device, renderer, hold) =
                 std::mem::replace(&mut *hosting, Hosting::None)
@@ -360,6 +372,8 @@ impl Audio {
                 commands,
                 returns,
                 next_id: 1,
+                ended: Vec::new(),
+                ui_sounds: true,
                 buses,
                 live: HashSet::new(),
             }),
@@ -397,6 +411,7 @@ impl Audio {
         // Sounds the mixer is done with are dropped here, on this thread.
         while let Some(Return::Ended { id, sound }) = control.returns.pop() {
             control.live.remove(&id);
+            control.ended.push(id);
             drop(sound);
         }
         control
@@ -541,6 +556,52 @@ impl Audio {
             id,
             start: time,
         })
+    }
+
+    /// Voices that have ended (by their [`Voice::id`]) since this was last
+    /// asked: what turns a `playing` state false.
+    pub fn take_ended(&self) -> Vec<u64> {
+        std::mem::take(&mut self.control().ended)
+    }
+
+    /// Voices playing or due, as of the mixer's last block.
+    pub fn voices_playing(&self) -> usize {
+        self.control().live.len()
+    }
+
+    /// Calls `notify` (from the engine's own thread, never the audio
+    /// thread) when voices end while a device runs, so an app asleep in its
+    /// event loop wakes to call [`take_ended`](Audio::take_ended). An
+    /// offline engine has no device: its caller asks after rendering.
+    pub fn on_voices_ended(&self, notify: impl Fn() + Send + 'static) {
+        *self
+            .0
+            .meter
+            .notify
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Box::new(notify));
+    }
+
+    /// Follows the user's interface-sound setting: with it off, the `ui`
+    /// bus is silent (over 5 ms) and every other bus plays on. Apart from
+    /// the app's own mute: neither undoes the other.
+    pub fn set_ui_sounds(&self, enabled: bool) -> Result<(), Error> {
+        let mut control = self.control();
+        control.ui_sounds = enabled;
+        self.push(
+            &mut control,
+            0,
+            Command::Quiet {
+                bus: UI_BUS,
+                on: !enabled,
+            },
+        )
+    }
+
+    /// Whether interface sounds play, as last set by
+    /// [`set_ui_sounds`](Audio::set_ui_sounds) (true until then).
+    pub fn ui_sounds_enabled(&self) -> bool {
+        self.control().ui_sounds
     }
 
     /// Waits until the decode thread has filled every stream as far as it
@@ -734,6 +795,9 @@ impl From<f64> for Ramp {
     }
 }
 
+/// The `ui` bus's index: made second, after master.
+const UI_BUS: u16 = 1;
+
 /// A sound playing, or due to.
 #[derive(Clone, Debug)]
 pub struct Voice {
@@ -798,6 +862,11 @@ impl Voice {
         self.set(VoiceParam::Pitch, pitch, ramp)
     }
 
+    /// The id [`Audio::take_ended`] gives back when it ends.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Whether it's playing or due to, as of the mixer's last block.
     pub fn playing(&self) -> bool {
         self.audio.control().live.contains(&self.id)
@@ -838,6 +907,17 @@ impl Bus {
     /// Fades it to `gain` over `seconds` along `curve`.
     pub fn fade_to(&self, gain: f32, seconds: f64, curve: Curve) -> Result<(), Error> {
         self.set_gain(gain, Ramp::seconds(seconds).curve(curve))
+    }
+
+    /// A handle that sets this bus's gain with no command: the mixer reads
+    /// it each block and glides to it over 10 ms. For a slider or an
+    /// animation that changes every frame; a later [`set_gain`](Bus::set_gain)
+    /// takes over until the drive is set again.
+    pub fn drive(&self) -> BusDrive {
+        BusDrive {
+            meter: self.audio.0.meter.clone(),
+            index: usize::from(self.index),
+        }
     }
 
     /// Silences it, over 5 ms.
@@ -907,5 +987,29 @@ mod tests {
         audio.update();
         assert!(!voice.playing());
         assert_eq!(Arc::strong_count(&click.0), 1);
+    }
+}
+
+/// A bus's gain, set from any thread at any rate without a command: see
+/// [`Bus::drive`].
+#[derive(Clone)]
+pub struct BusDrive {
+    meter: Arc<Meter>,
+    index: usize,
+}
+
+impl std::fmt::Debug for BusDrive {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BusDrive")
+            .field("bus", &self.index)
+            .finish()
+    }
+}
+
+impl BusDrive {
+    /// The gain the bus glides to.
+    pub fn set(&self, gain: f32) {
+        let gain = if gain.is_nan() { 0. } else { gain.max(0.) };
+        self.meter.drives[self.index].store(gain.to_bits(), Ordering::Relaxed);
     }
 }

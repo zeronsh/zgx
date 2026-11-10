@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use zgx_audio::{Audio, Config, Device, Format, Play, Renderer, Sound, Time, Timing};
+use zgx_audio::{Audio, Config, Device, Format, Play, Ramp, Renderer, Sound, Source, Time, Timing};
 
 #[derive(Clone, Default)]
 struct Controls {
@@ -54,6 +54,7 @@ impl Fake {
 
 impl Device for Fake {
     fn format(&mut self) -> Result<Format, String> {
+        self.controls.log.lock().unwrap().push("format".into());
         Ok(Format {
             rate: self.controls.rate.load(Ordering::Relaxed),
             channels: 2,
@@ -162,7 +163,7 @@ fn the_device_starts_with_the_first_sound_and_stops_after_its_hold() {
         "{:?}",
         began.elapsed()
     );
-    assert_eq!(controls.log(), ["start 48000", "stop"]);
+    assert_eq!(controls.log(), ["format", "start 48000", "stop"]);
     assert!(audio.stats().sounding > 0);
     // And the next sound starts it again.
     audio.play(&blip(), Play::new()).unwrap();
@@ -197,7 +198,7 @@ fn prewarming_starts_the_device_without_a_sound_and_holds_it() {
     until("a start", || audio.stats().running);
     until("a stop", || audio.stats().stops == 1);
     assert!(began.elapsed() >= Duration::from_millis(80));
-    assert_eq!(controls.log(), ["start 48000", "stop"]);
+    assert_eq!(controls.log(), ["format", "start 48000", "stop"]);
 }
 
 #[test]
@@ -216,7 +217,10 @@ fn a_lost_stream_starts_again_keeping_its_voices_and_the_new_rate() {
     assert_eq!(audio.rate(), 44_100);
     until("the clock to move on", || audio.now() > before + 4410);
     assert!(voice.playing(), "the voice kept playing across the change");
-    assert_eq!(controls.log(), ["start 48000", "close", "start 44100"]);
+    assert_eq!(
+        controls.log(),
+        ["format", "start 48000", "close", "format", "start 44100"]
+    );
     voice.stop().unwrap();
     until("a stop", || audio.stats().stops == 1);
 }
@@ -235,7 +239,10 @@ fn a_device_that_fails_to_start_says_why_and_is_tried_again_with_the_next_sound(
     audio.play(&blip(), Play::new().at(Time(0))).unwrap();
     until("a start", || audio.stats().starts == 1);
     until("a stop", || audio.stats().stops == 1);
-    assert_eq!(controls.log(), ["failed", "start 48000", "stop"]);
+    assert_eq!(
+        controls.log(),
+        ["format", "failed", "format", "start 48000", "stop"]
+    );
 }
 
 #[test]
@@ -245,5 +252,84 @@ fn dropping_the_engine_closes_the_device() {
     until("a start", || audio.stats().running);
     drop(audio);
     // The host joined, closing the device on its way out.
-    assert_eq!(controls.log(), ["start 48000", "close"]);
+    assert_eq!(controls.log(), ["format", "start 48000", "close"]);
+}
+
+#[test]
+fn an_app_that_never_plays_a_sound_never_touches_the_device() {
+    let (fake, controls) = Fake::new();
+    let audio = Audio::with_device(
+        Config {
+            hold: Duration::from_millis(50),
+            ..Config::default()
+        },
+        fake,
+    );
+    // Everything an app does at startup, short of a sound.
+    let flat = Sound::from_samples(&[1.; 4800], 1, 48_000).unwrap();
+    let ui = audio.bus("ui").unwrap();
+    let effects = audio.add_bus("effects", &ui).unwrap();
+    ui.set_gain(0.25, Ramp::NONE).unwrap();
+    effects.mute(true).unwrap();
+    effects.solo(false).unwrap();
+    audio.bus("music").unwrap().drive().set(0.5);
+    audio.set_ui_sounds(true).unwrap();
+    assert!(audio.ui_sounds_enabled());
+    let _wav = audio
+        .load(Source::bytes(zgx_audio::wav::write(
+            &[0.; 8],
+            1,
+            48_000,
+            zgx_audio::wav::Encoding::Pcm24,
+        )))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        controls.log(),
+        Vec::<String>::new(),
+        "not even the format asked"
+    );
+    assert_eq!(audio.stats().starts, 0);
+    // The first sound starts it, with what was set before already in place.
+    audio.play(&flat, Play::new().bus(&ui)).unwrap();
+    until("a start", || audio.stats().running);
+    until("the sound", || audio.stats().peak > 0.);
+    assert!(
+        (audio.stats().peak - 0.25).abs() < 1e-6,
+        "the gain set before: {}",
+        audio.stats().peak
+    );
+    assert_eq!(controls.log()[..2], ["format", "start 48000"]);
+}
+
+#[test]
+fn a_gain_set_while_the_device_is_stopped_does_not_start_it() {
+    let (audio, controls) = engine(Duration::from_millis(40));
+    audio.play(&blip(), Play::new()).unwrap();
+    until("a stop", || audio.stats().stops == 1);
+    audio
+        .bus("music")
+        .unwrap()
+        .set_gain(0.3, Ramp::ms(10.))
+        .unwrap();
+    audio.master().mute(false).unwrap();
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(controls.log(), ["format", "start 48000", "stop"]);
+    assert_eq!(audio.stats().starts, 1);
+}
+
+#[test]
+fn the_app_is_told_when_voices_end() {
+    let (audio, _controls) = engine(Duration::from_millis(500));
+    let told = Arc::new(AtomicU32::new(0));
+    let count = told.clone();
+    audio.on_voices_ended(move || {
+        count.fetch_add(1, Ordering::Relaxed);
+    });
+    let voice = audio.play(&blip(), Play::new()).unwrap();
+    assert_eq!(audio.voices_playing(), 1);
+    until("a notice", || told.load(Ordering::Relaxed) >= 1);
+    assert_eq!(audio.take_ended(), [voice.id()]);
+    assert_eq!(audio.voices_playing(), 0);
+    assert_eq!(audio.take_ended(), Vec::<u64>::new());
 }

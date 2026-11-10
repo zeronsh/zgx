@@ -249,3 +249,16 @@ impl Device for Cpal {
         self.underruns.load(Ordering::Relaxed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn making_it_touches_nothing_of_the_system() {
+        // No host, no device, no stream until the engine first starts it:
+        // an app that never plays a sound never loads the system's audio.
+        let cpal = Cpal::new();
+        assert!(cpal.host.is_none() && cpal.device.is_none() && cpal.stream.is_none());
+    }
+}

@@ -38,7 +38,7 @@ mod via_cpal;
 pub mod wav;
 
 pub use device::{Device, Format, Renderer};
-pub use engine::{Audio, Bus, Config, Error, Offline, Play, Stats, Time, Voice};
+pub use engine::{Audio, Bus, BusDrive, Config, Error, Offline, Play, Stats, Time, Voice};
 pub use mixer::Timing;
 pub use ramp::{Curve, Ramp};
 pub use resample::Interpolation;

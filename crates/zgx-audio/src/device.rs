@@ -43,6 +43,13 @@ impl Renderer {
         }
     }
 
+    /// Applies what's been sent while no stream runs: gains and mutes take
+    /// effect, plays find their voices. Returns whether anything would
+    /// sound, so a device need start. Off the audio thread.
+    pub fn idle(&mut self) -> bool {
+        self.mixer.idle()
+    }
+
     /// Mixes in `format` from now on. Allocates: call it off the audio
     /// thread, between streams.
     pub fn set_format(&mut self, format: Format) {
@@ -219,9 +226,17 @@ pub(crate) fn host(
     let mut renderer = Some(renderer);
     let mut quit = false;
     while !quit {
-        // Stopped: asleep until a command comes.
+        // Stopped: asleep until a command comes. One that makes no sound
+        // (a gain, a mute) is applied here, without the device.
         match messages.recv() {
-            Ok(Message::Wake | Message::Prewarm) => {}
+            Ok(Message::Wake) => {
+                if let Some(held) = renderer.as_mut()
+                    && !held.idle()
+                {
+                    continue;
+                }
+            }
+            Ok(Message::Prewarm) => {}
             Ok(Message::Quit) | Err(_) => break,
         }
         'start: loop {
@@ -256,6 +271,7 @@ pub(crate) fn host(
             meter.running.store(true, Ordering::SeqCst);
             // Held from here as if something had just been heard.
             let mut floor = meter.now.load(Ordering::Acquire);
+            let mut told = meter.ended.load(Ordering::Acquire);
             loop {
                 match messages.recv_timeout(CHECK) {
                     Ok(Message::Quit) | Err(RecvTimeoutError::Disconnected) => {
@@ -266,6 +282,11 @@ pub(crate) fn host(
                     Ok(Message::Wake) | Err(RecvTimeoutError::Timeout) => {}
                 }
                 meter.underruns.store(device.underruns(), Ordering::Relaxed);
+                let ended = meter.ended.load(Ordering::Acquire);
+                if ended != told {
+                    told = ended;
+                    meter.notify();
+                }
                 if device.lost() {
                     meter.losses.fetch_add(1, Ordering::Relaxed);
                     renderer = device.close();
@@ -283,9 +304,13 @@ pub(crate) fn host(
                     }
                     meter.running.store(false, Ordering::SeqCst);
                     meter.stops.fetch_add(1, Ordering::Relaxed);
+                    // Voices that ended in its last blocks.
+                    if meter.ended.load(Ordering::Acquire) != told {
+                        meter.notify();
+                    }
                     // A command sent as it stopped, which saw it running and
-                    // sent no wake: start again for it.
-                    if meter.pending() {
+                    // sent no wake: applied, and started again if it sounds.
+                    if meter.pending() && renderer.as_mut().is_none_or(|held| held.idle()) {
                         continue 'start;
                     }
                     break;
