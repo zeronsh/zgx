@@ -1,0 +1,16 @@
+[package]
+name = "audio-compare"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "zgx-audio's mixer against miniaudio on one scene, in instructions a voice a frame"
+
+# Outside zgx's workspace, with a lockfile of its own.
+[workspace]
+
+[dependencies]
+zgx-audio = { path = "../../crates/zgx-audio" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
