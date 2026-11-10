@@ -37,6 +37,8 @@ pub(crate) enum Ask {
     Surfaces(bool),
     /// Bytes wanted too (a script's player): no pixel buffers then.
     Pixels(bool),
+    /// Lose its renderer's device, as a driver reset would (tests).
+    LoseDevice,
     Quit,
 }
 
@@ -383,6 +385,11 @@ pub(crate) fn run(
         for ask in asked {
             match ask {
                 Ask::Quit => return,
+                Ask::LoseDevice => {
+                    if let Some(stage) = &preview.stage {
+                        stage.film.stage.debug_lose_device();
+                    }
+                }
                 Ask::Open(id, props, frame) => {
                     if preview
                         .composition
@@ -498,6 +505,17 @@ pub(crate) fn run(
                 );
                 if watched {
                     result = preview.show(at, playing.is_none());
+                    // Its device lost (a driver reset, a GPU removed): built
+                    // again on a new one, and the frame drawn again, rather
+                    // than stopping with an error the app can't undo.
+                    if result
+                        .as_ref()
+                        .is_err_and(|error| error.starts_with("GPU device lost"))
+                    {
+                        result = preview
+                            .build()
+                            .and_then(|()| preview.show(at, playing.is_none()));
+                    }
                     stale = false;
                     // At rest, only the buffer shown is held.
                     #[cfg(target_os = "macos")]
@@ -624,6 +642,12 @@ impl Player {
     /// `"<name>.watch"`.
     pub fn watch(&self, seen: bool) {
         let _ = self.asks.send(Ask::Watch(seen));
+    }
+    /// Lose the device its frames are drawn on, as a driver reset would:
+    /// for tests of recovery.
+    #[doc(hidden)]
+    pub fn debug_lose_device(&self) {
+        let _ = self.asks.send(Ask::LoseDevice);
     }
     /// Play again from its start at its end (true by default), or stop there.
     pub fn looping(&self, on: bool) {

@@ -198,6 +198,8 @@ player.play(true);
 cx.render(div().size(640., 360.).child(player.view().size(640., 360.)));
 ```
 
+What a playing player costs in memory is mostly the GPU driver's. On an M5 with macOS 26.4, a 1080p clip playing in a 960×540 window reads about 427 MB in Activity Monitor, about 312 MB of it the Metal driver's memory for the drawing under way. zgx's own caches account for about 40 MB: the frames a player keeps are only those shown while paused or scrubbing. It drains once drawing stops: about 160 to 320 MB 5 s after, 100 MB from 15 s with the player still held, and about 38 MB once the player is gone. If its device is lost (a driver reset, a GPU removed), a player draws again on a new one rather than stopping with an error.
+
 `open(id, props, frame)`, `seek`, `play`, `looping`, `watch` and `reload` drive it. `frame`, `playing`, `composition`, `tracks`, `error` and `image` are its state, as signals. For a Luau app, `player.expose(&host, "clip")` gives the script `ui.image { src = "host:clip" }` to show it, `ui.call("clip.listen")` to follow it, `ui.invoke("clip.open" | "clip.seek" | "clip.play" | "clip.loop" | "clip.watch", …)` to drive it, and `ui.shared("clip")` for its frame, whether it plays, its composition and its error.
 
 ```lua
