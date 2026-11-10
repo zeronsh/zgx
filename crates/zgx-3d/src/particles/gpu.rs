@@ -33,6 +33,8 @@ pub(crate) struct Uniforms {
     pub(crate) swirl: [f32; 4],
     pub(crate) collide: [f32; 4],
     pub(crate) color: [f32; 4],
+    /// Its sub-emitter's slots, and births a death and a hit give it.
+    pub(crate) events: [u32; 4],
 }
 
 /// What the draw shader reads (`Draw` in `draw.wgsl`).
@@ -121,6 +123,7 @@ fn uniforms(
         swirl,
         collide,
         color: e.color,
+        events: [0; 4],
     }
 }
 
@@ -134,6 +137,12 @@ struct Pool {
     draw_bind: wgpu::BindGroup,
     /// Its particles, where the CPU updates them.
     cpu: Option<Vec<Particle>>,
+    /// Particles its parents gave birth to (the next goes in this, modulo
+    /// its slots): on the device, or the CPU's count.
+    born: Option<wgpu::Buffer>,
+    born_cpu: u32,
+    /// This frame's numbers, for parents giving birth into it.
+    last: Uniforms,
     /// Whether any may live this frame (else neither updated nor drawn).
     shown: bool,
     blend: Blend,
@@ -144,6 +153,8 @@ struct Pool {
 /// Pipelines made on a thread of their own with the first frame.
 struct Pipelines {
     update: Option<wgpu::ComputePipeline>,
+    /// `update` giving birth into a sub-emitter's pool.
+    update_events: Option<wgpu::ComputePipeline>,
     /// Alpha's and additive's, for the frame's format.
     draw: [wgpu::RenderPipeline; 2],
 }
@@ -154,6 +165,7 @@ pub(crate) struct Device {
     made: bool,
     compute: bool,
     update_layout: Option<wgpu::BindGroupLayout>,
+    events_layout: Option<wgpu::BindGroupLayout>,
     draw_layout: Option<wgpu::BindGroupLayout>,
     format: Option<wgpu::TextureFormat>,
     compiling: Option<Compiling>,
@@ -255,14 +267,32 @@ impl Device {
         let (view, projection) = (inner.camera.view(), inner.camera.projection(aspect));
         let index = self.index;
         let seed_base = particles.steps.wrapping_mul(0x9e37_79b9);
-        let mut pass: Option<wgpu::ComputePass<'static>> = None;
-        for (_, live) in particles.emitters.iter_mut() {
-            let Some(live) = live else { continue };
-            let slots = if on_gpu {
+        let slots_of = |live: &Live| {
+            if on_gpu {
                 live.emitter.max
             } else {
                 live.emitter.max.min(CPU_PARTICLES)
+            }
+        };
+        particles.feed();
+        let mut pass: Option<wgpu::ComputePass<'static>> = None;
+        let mut events: Vec<(u32, [f32; 3], u32)> = Vec::new();
+        // Sub-emitters before their parents: a parent's births land in
+        // their pools after their own step.
+        for at in particles.order() {
+            let child = particles.emitters[at]
+                .1
+                .as_ref()
+                .and_then(|live| live.emitter.sub)
+                .and_then(|(child, death, hit)| {
+                    let live = particles.child(child)?;
+                    Some((live.id, slots_of(live), death, hit))
+                })
+                .filter(|&(id, ..)| self.pools.contains_key(&id));
+            let Some(live) = particles.emitters[at].1.as_mut() else {
+                continue;
             };
+            let slots = slots_of(live);
             let pool = self
                 .pools
                 .entry(live.id)
@@ -276,38 +306,29 @@ impl Device {
             if !pool.shown {
                 continue;
             }
-            let u = uniforms(
+            let mut u = uniforms(
                 live,
                 (base, count, slots),
                 time,
                 step,
                 seed_base ^ live.id as u32,
             );
+            if let Some((_, child_slots, death, hit)) = child {
+                u.events = [child_slots, death, hit, 0];
+            }
+            pool.last = u;
+            events.clear();
             match &mut pool.cpu {
                 Some(cpu) => {
-                    if cpu::step(cpu, &u) {
+                    if cpu::step(cpu, &u, &mut events) {
                         frame
                             .queue
                             .write_buffer(&pool.particles, 0, bytemuck::cast_slice(cpu));
                     }
                 }
-                None => {
-                    frame
-                        .queue
-                        .write_buffer(&pool.update, 0, bytemuck::bytes_of(&u));
-                    let compute = pass.get_or_insert_with(|| {
-                        frame
-                            .encoder
-                            .begin_compute_pass(&wgpu::ComputePassDescriptor {
-                                label: Some("3D particles"),
-                                timestamp_writes: None,
-                            })
-                            .forget_lifetime()
-                    });
-                    compute.set_pipeline(pipelines.update.as_ref().unwrap());
-                    compute.set_bind_group(0, pool.update_bind.as_ref().unwrap(), &[]);
-                    compute.dispatch_workgroups(slots.div_ceil(256), 1, 1);
-                }
+                None => frame
+                    .queue
+                    .write_buffer(&pool.update, 0, bytemuck::bytes_of(&u)),
             }
             let e = &live.emitter;
             let draw = DrawUniforms {
@@ -324,6 +345,54 @@ impl Device {
             frame
                 .queue
                 .write_buffer(&pool.draw, 0, bytemuck::bytes_of(&draw));
+            let id = live.id;
+            let pool = &self.pools[&id];
+            if pool.cpu.is_none() {
+                let compute = pass.get_or_insert_with(|| {
+                    frame
+                        .encoder
+                        .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("3D particles"),
+                            timestamp_writes: None,
+                        })
+                        .forget_lifetime()
+                });
+                let feeding = child
+                    .zip(pipelines.update_events.as_ref())
+                    .zip(self.events_layout.as_ref());
+                match feeding {
+                    Some(((child, pipeline), layout)) => {
+                        let into = &self.pools[&child.0];
+                        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("3D particles giving birth"),
+                            layout,
+                            entries: &[
+                                entry(0, &pool.update),
+                                entry(1, &pool.particles),
+                                entry(2, &into.update),
+                                entry(3, &into.particles),
+                                entry(4, into.born.as_ref().unwrap()),
+                            ],
+                        });
+                        compute.set_pipeline(pipeline);
+                        compute.set_bind_group(0, &bind, &[]);
+                    }
+                    None => {
+                        compute.set_pipeline(pipelines.update.as_ref().unwrap());
+                        compute.set_bind_group(0, pool.update_bind.as_ref().unwrap(), &[]);
+                    }
+                }
+                compute.dispatch_workgroups(slots.div_ceil(256), 1, 1);
+            } else if let Some((child, ..)) = child
+                && !events.is_empty()
+                && let Some(into) = self.pools.get_mut(&child)
+                && let Some(children) = &mut into.cpu
+            {
+                cpu::give_birth(children, &mut into.born_cpu, &into.last, &events);
+                frame
+                    .queue
+                    .write_buffer(&into.particles, 0, bytemuck::cast_slice(children));
+            }
         }
         drop(pass);
         // Pools of emitters removed, or made for another way of updating.
@@ -396,6 +465,23 @@ impl Device {
                 })
             })
             .clone();
+        let events_layout = self
+            .events_layout
+            .get_or_insert_with(|| {
+                let storage = wgpu::BufferBindingType::Storage { read_only: false };
+                let uniform = wgpu::BufferBindingType::Uniform;
+                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("3D particles giving birth"),
+                    entries: &[
+                        layout_entry(0, wgpu::ShaderStages::COMPUTE, uniform),
+                        layout_entry(1, wgpu::ShaderStages::COMPUTE, storage),
+                        layout_entry(2, wgpu::ShaderStages::COMPUTE, uniform),
+                        layout_entry(3, wgpu::ShaderStages::COMPUTE, storage),
+                        layout_entry(4, wgpu::ShaderStages::COMPUTE, storage),
+                    ],
+                })
+            })
+            .clone();
         let draw_layout = self
             .draw_layout
             .get_or_insert_with(|| {
@@ -413,25 +499,32 @@ impl Device {
         let done = slot.clone();
         let (device, compute) = (device.clone(), self.compute);
         let make = move || {
-            let update = compute.then(|| {
-                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            let module = compute.then(|| {
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("3D particles update"),
                     source: wgpu::ShaderSource::Wgsl(include_str!("update.wgsl").into()),
-                });
-                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("3D particles update"),
-                    bind_group_layouts: &[Some(&update_layout)],
-                    immediate_size: 0,
-                });
-                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("3D particles update"),
-                    layout: Some(&layout),
-                    module: &module,
-                    entry_point: Some("update"),
-                    compilation_options: Default::default(),
-                    cache: None,
                 })
             });
+            let update_pipeline = |layout: &wgpu::BindGroupLayout, entry: &str| {
+                let module = module.as_ref()?;
+                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("3D particles update"),
+                    bind_group_layouts: &[Some(layout)],
+                    immediate_size: 0,
+                });
+                Some(
+                    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("3D particles update"),
+                        layout: Some(&layout),
+                        module,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        cache: None,
+                    }),
+                )
+            };
+            let update = update_pipeline(&update_layout, "update");
+            let update_events = update_pipeline(&events_layout, "update_events");
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("3D particles draw"),
                 source: wgpu::ShaderSource::Wgsl(include_str!("draw.wgsl").into()),
@@ -443,7 +536,11 @@ impl Device {
             });
             let draw = [Blend::Alpha, Blend::Additive]
                 .map(|blend| draw_pipeline(&device, &layout, &module, format, blend));
-            *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(Pipelines { update, draw });
+            *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(Pipelines {
+                update,
+                update_events,
+                draw,
+            });
         };
         if std::thread::Builder::new()
             .name("zgx-3d particles".into())
@@ -453,6 +550,13 @@ impl Device {
             eprintln!("zgx-3d: no thread to compile particles' pipelines on: none drawn");
         }
         slot
+    }
+}
+
+fn entry(binding: u32, buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+    wgpu::BindGroupEntry {
+        binding,
+        resource: buffer.as_entire_binding(),
     }
 }
 
@@ -598,6 +702,16 @@ fn make_pool(
         update_bind,
         draw_bind,
         cpu: (!on_gpu).then(|| vec![Particle::default(); slots as usize]),
+        born: on_gpu.then(|| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("3D particles born"),
+                size: 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        }),
+        born_cpu: 0,
+        last: Uniforms::default(),
         shown: false,
         blend: Blend::Alpha,
         used: 0,

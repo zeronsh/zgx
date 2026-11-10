@@ -308,3 +308,70 @@ fn the_cpu_holds_at_most_its_cap() {
     world.set_particles_on_cpu(true);
     assert_eq!(world.memory().particles, u64::from(CPU_PARTICLES) * 80);
 }
+
+#[test]
+fn drops_hitting_a_plane_give_birth_to_splashes_there() {
+    // Red where the drops hit, on the GPU and the CPU; none without the
+    // sub-emitter.
+    let reds: Vec<usize> = [(false, true), (true, true), (false, false)]
+        .into_iter()
+        .filter_map(|(on_cpu, splashing)| {
+            let world = world();
+            let mut frames = Frames::new(&world)?;
+            world.set_particles_on_cpu(on_cpu);
+            let splashes = world.add_emitter(
+                Emitter::new(4000)
+                    .spawn(Spawn::sphere([0., 0.02, 0.], 0.02))
+                    .lifetime(0.3..0.3)
+                    .velocity([0., 1., 0.], 0.5)
+                    .size(0.06..0.06)
+                    .color([1., 0.05, 0.05, 1.]),
+            );
+            let mut drops = Emitter::new(2000)
+                .spawn(Spawn::box_([-1., 1., -0.1], [1., 1.1, 0.1]).rate(600.))
+                .lifetime(2.0..2.0)
+                .force(Force::Gravity)
+                .collide(Collide::Plane {
+                    height: -0.5,
+                    then: Response::Die,
+                })
+                .size(0.03..0.03)
+                .color([0.2, 0.6, 1.0, 1.0]);
+            if splashing {
+                drops = drops.on_hit(splashes, 3);
+            }
+            let rain = world.add_emitter(drops);
+            world.set_emitting(rain, false);
+            frames.ready(&world, 0.);
+            world.set_emitting(rain, true);
+            let at = frames.run(0., 50. / 60.);
+            let image = frames.pixels();
+            let red = (30..46)
+                .flat_map(|y| (0..SIDE as usize).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let [r, g, b, _] = pixel(&image, x, y);
+                    r > 150 && g < 100 && b < 100
+                })
+                .count();
+            // Stopped, it settles once the drops have fallen and the last
+            // splashes are gone: 2 s and 0.3 s at most, and a step.
+            world.set_emitting(rain, false);
+            let mut until = at;
+            while world.view().animating() {
+                until = frames.run(until, until + 1. / 60.);
+                assert!(until - at < 3., "never settled");
+            }
+            Some(red)
+        })
+        .collect();
+    let [gpu, cpu, none] = reds[..] else {
+        return;
+    };
+    assert!(
+        gpu > 100 && cpu > 100,
+        "splashes: {gpu} red on the GPU, {cpu} on the CPU"
+    );
+    assert_eq!(none, 0, "no sub-emitter, no splashes");
+    let ratio = gpu as f32 / cpu as f32;
+    assert!((0.6..1.6).contains(&ratio), "{gpu} against {cpu}");
+}

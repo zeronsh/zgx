@@ -48,8 +48,10 @@ fn xyz(v: [f32; 4]) -> [f32; 3] {
     [v[0], v[1], v[2]]
 }
 
-fn spawn(slot: u32, u: &Uniforms) -> Particle {
-    let mut state = pcg(slot ^ u.life[3].to_bits());
+/// A particle of `u`'s born at `slot`, its spawn shape placed at `origin`
+/// (`spawn` in `update.wgsl`).
+pub(crate) fn spawn(u: &Uniforms, slot: u32, seed: u32, origin: [f32; 3]) -> Particle {
+    let mut state = pcg(slot ^ seed);
     let mut p = Particle {
         seed: state,
         ..Default::default()
@@ -81,6 +83,7 @@ fn spawn(slot: u32, u: &Uniforms) -> Particle {
         }
         _ => p.position = xyz(u.a),
     }
+    p.position = add(p.position, origin);
     p.velocity = if u.spawn[0] == 3 {
         scale(direction, length(xyz(u.velocity)))
     } else {
@@ -90,9 +93,41 @@ fn spawn(slot: u32, u: &Uniforms) -> Particle {
     p.life = u.life[0] + (u.life[1] - u.life[0]) * random(&mut state);
     p.size = u.collide[2] + (u.collide[3] - u.collide[2]) * random(&mut state);
     p.color = u.color;
+    p
+}
+
+/// Born in this frame's slice of the ring, at a random moment in the frame
+/// (`spawn_here` in `update.wgsl`).
+fn spawn_here(slot: u32, u: &Uniforms) -> Particle {
+    let mut p = spawn(u, slot, u.life[3].to_bits(), [0.; 3]);
+    let mut state = pcg(p.seed ^ 0x5bd1_e995);
     p.age = random(&mut state) * u.life[2];
     p.position = add(p.position, scale(p.velocity, p.age));
     p
+}
+
+/// What happened to a particle this frame, for its sub-emitter.
+pub(crate) const DIED: u32 = 1;
+pub(crate) const HIT: u32 = 2;
+
+/// A sub-emitter's particles born in `children` (`born` so far), each
+/// `(position, how many)` of `events`, by `child`'s numbers, from parents'
+/// slots (`update_events` in `update.wgsl`).
+pub(crate) fn give_birth(
+    children: &mut [Particle],
+    born: &mut u32,
+    child: &Uniforms,
+    events: &[(u32, [f32; 3], u32)],
+) {
+    let slots = children.len() as u32;
+    for &(parent, at, births) in events {
+        let seed = child.life[3].to_bits() ^ pcg(parent);
+        for k in 0..births {
+            let slot = born.wrapping_add(k) % slots;
+            children[slot as usize] = spawn(child, slot, seed ^ k.wrapping_mul(0x9e37_79b9), at);
+        }
+        *born = born.wrapping_add(births);
+    }
 }
 
 fn length(a: [f32; 3]) -> f32 {
@@ -115,15 +150,21 @@ fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 /// `particles` a frame on by `u`, as `update.wgsl` steps them: whether any
-/// changed (a pool all dead and spawning none is left as it was).
-pub(crate) fn step(particles: &mut [Particle], u: &Uniforms) -> bool {
+/// changed (a pool all dead and spawning none is left as it was). Births its
+/// deaths and hits give a sub-emitter (`u.events`) go into `events`: the
+/// slot, where, and how many.
+pub(crate) fn step(
+    particles: &mut [Particle],
+    u: &Uniforms,
+    events: &mut Vec<(u32, [f32; 3], u32)>,
+) -> bool {
     let slots = particles.len() as u32;
     let dt = u.life[2];
     let mut changed = false;
     for (slot, p) in (0..slots).zip(particles.iter_mut()) {
         let ring = (slot + slots - u.spawn[1] % slots) % slots;
         if ring < u.spawn[2] {
-            *p = spawn(slot, u);
+            *p = spawn_here(slot, u);
             changed = true;
             continue;
         }
@@ -131,6 +172,7 @@ pub(crate) fn step(particles: &mut [Particle], u: &Uniforms) -> bool {
             continue;
         }
         changed = true;
+        let mut happened = 0;
         if p.flags == 0 {
             let mut a = add(
                 xyz(u.accel),
@@ -155,6 +197,7 @@ pub(crate) fn step(particles: &mut [Particle], u: &Uniforms) -> bool {
             p.position = add(p.position, scale(p.velocity, dt));
             let action = u.collide[0] as u32;
             if action != 0 && p.position[1] < u.swirl[2] && p.velocity[1] < 0. {
+                happened = HIT;
                 match action {
                     1 => {
                         p.position[1] = u.swirl[2];
@@ -175,6 +218,14 @@ pub(crate) fn step(particles: &mut [Particle], u: &Uniforms) -> bool {
             }
         }
         p.age += dt;
+        if p.age >= p.life {
+            happened |= DIED;
+        }
+        let births = (if happened & DIED != 0 { u.events[1] } else { 0 })
+            + (if happened & HIT != 0 { u.events[2] } else { 0 });
+        if births > 0 && u.events[0] > 0 {
+            events.push((slot, p.position, births));
+        }
     }
     changed
 }
