@@ -22,6 +22,9 @@ use zgx::{compose::prelude::*, reactive::Signal, scene::Color, widgets::Ui};
 use zgx_gpu::{GpuRenderer, text::FontData};
 
 #[cfg(windows)]
+#[path = "support/view_painters.rs"]
+mod view_painters;
+#[cfg(windows)]
 const GEIST: &[u8] = include_bytes!("fonts/GeistVariable-subset.ttf");
 #[cfg(windows)]
 const SIZE: (f32, f32) = (400., 300.);
@@ -640,7 +643,24 @@ fn frames(scale: f32) -> Vec<Vec<u8>> {
     all.extend(glass_frames(scale));
     all.extend(cross_region_frames(scale));
     all.extend(view_frames(scale));
+    all.extend(view_scene_frames(scale));
     all
+}
+
+/// The seven GPU-view scenes of `support/view_painters.rs`
+/// (`VIEW_SCENE_NAMES`): a lit textured cube with depth, MSAA resolved into
+/// the target, a transparent view over UI, a view resized between frames,
+/// one animated, two views in a window, and one clipped, rounded, turned,
+/// scaled and translucent. Each scene asserts its view drew.
+#[cfg(windows)]
+fn view_scene_frames(scale: f32) -> Vec<Vec<u8>> {
+    let frames = view_painters::view_scene_frames(scale);
+    assert_eq!(
+        frames.len(),
+        view_painters::VIEW_SCENE_NAMES.len(),
+        "a GPU is required here"
+    );
+    frames
 }
 
 /// A GPU view (`zgx::gpu_view`) drawn by a painter with wgpu: under
@@ -1406,6 +1426,17 @@ fn where_(frame: usize, scale: f32, pixel: usize) -> String {
             LAYER_CELL,
             LAYER_COLUMNS,
             EFFECT_NAMES.map(String::from).to_vec(),
+        )
+    } else if frame >= FRAMES + 3 + 5 + 4 + 2 + 2 + 5 + 2 + 3 {
+        let name = view_painters::VIEW_SCENE_NAMES[(frame
+            - (FRAMES + 3 + 5 + 4 + 2 + 2 + 5 + 2 + 3))
+            as usize
+            % view_painters::VIEW_SCENE_NAMES.len()];
+        (
+            view_painters::VIEW_SCENE_SIZE.0,
+            view_painters::VIEW_SCENE_SIZE,
+            1,
+            vec![name.to_string()],
         )
     } else if frame >= FRAMES + 3 + 5 + 4 + 2 + 2 + 5 + 2 {
         (VIEW_SIZE.0, VIEW_SIZE, 1, vec!["GPU view".to_string()])
