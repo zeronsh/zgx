@@ -616,7 +616,10 @@ fn clips_fading_at_their_head_as_the_view_comes_back() {
     let _gpu = gpu_fixture();
     for scale in SCALES {
         let (w, h) = ((W * scale) as u32, (H * scale) as u32);
-        let gpu = GpuRenderer::new(w, h).unwrap();
+        let mut gpu = GpuRenderer::new(w, h).unwrap();
+        // (Off macOS, a see-through window's frames don't draw in a single
+        // pass, so none goes straight to the screen, below.)
+        gpu.set_background(zgx::scene::Color(0, 0, 0, 255));
         let mut ui = Ui::new(W, H);
         let offset = ui.signal(0_f32);
         let mut page = column().w(W).gap(12.);
