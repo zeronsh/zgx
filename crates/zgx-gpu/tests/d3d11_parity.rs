@@ -16,6 +16,16 @@
 //! (Direct3D 12 pinned to it, docs/windows.md). `ZGX_D3D11` is read once a
 //! process, so the test runs itself again with it and compares that run's
 //! frames with its own.
+//!
+//! One allowance, on a hardware adapter alone (`HARDWARE_ONE_OFF`): an app's
+//! shaders reach the two APIs as different DXBC (Direct3D 12's through its
+//! sampler heap, `dx12_fill`, as ps_5_1; Direct3D 11's with its sampler
+//! bound, as ps_5_0), which FXC lays out apart. WARP draws both alike to the
+//! byte, but a driver's own compilers may round a value on a half-step
+//! apart: on an RTX 4090, the very DXBC Direct3D 12 draws (its dump byte for
+//! byte WARP's) gives fire's green 112 where WARP gives 113, as Direct3D 11
+//! does there. So in a frame of app shaders a hardware adapter may differ by
+//! one level in a few bytes, each printed; WARP stays exact.
 #[cfg(windows)]
 use zgx::{compose::prelude::*, reactive::Signal, scene::Color, widgets::Ui};
 #[cfg(windows)]
@@ -1033,12 +1043,16 @@ fn main() {
     );
     let mut rest = &theirs[..];
     let mut failures = Vec::new();
+    // Both processes draw on this adapter: WARP is a CPU device.
+    let hardware = GpuRenderer::new(1, 1).unwrap().adapter_info().device_type
+        != zgx_gpu::wgpu::DeviceType::Cpu;
     for (scale, frames) in &ours {
         for (frame, ours) in frames.iter().enumerate() {
             let (theirs, after) = rest.split_at(ours.len());
             rest = after;
             let (mut differ, mut most) = (0, 0);
             let mut first = Vec::new();
+            let mut each = Vec::new();
             for (i, (a, b)) in ours.iter().zip(theirs).enumerate() {
                 if a != b {
                     differ += 1;
@@ -1046,9 +1060,21 @@ fn main() {
                     if first.len() < 6 {
                         first.push(where_(frame, *scale, i / 4));
                     }
+                    if each.len() < HARDWARE_ONE_OFF {
+                        each.push((i, *a, *b));
+                    }
                 }
             }
-            if differ > 0 {
+            let allowed = hardware && app_shaders(frame) && most <= 1 && differ <= HARDWARE_ONE_OFF;
+            if differ > 0 && allowed {
+                for (i, a, b) in each {
+                    println!(
+                        "d3d11_parity {scale}×, frame {frame}: byte {} of {} is {a} on Direct3D 12, {b} on 11 (a hardware driver's rounding, allowed)",
+                        i % 4,
+                        where_(frame, *scale, i / 4)
+                    );
+                }
+            } else if differ > 0 {
                 failures.push(format!(
                     "{scale}×, frame {frame}: {differ} bytes differ between Direct3D 12 and 11, by up to {most}, at {first:?}"
                 ));
@@ -1057,6 +1083,19 @@ fn main() {
         println!("d3d11_parity {scale}×: {} frames compared", frames.len());
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// How many bytes of a frame of app shaders a hardware adapter may draw one
+/// level apart (the module's doc): its drivers' rounding, never WARP's.
+#[cfg(windows)]
+const HARDWARE_ONE_OFF: usize = 4;
+
+/// Whether frame `frame` is of app shaders, compiled for each API apart:
+/// the fills' and the layer shaders'.
+#[cfg(windows)]
+fn app_shaders(frame: usize) -> bool {
+    let frame = frame as u32;
+    (FRAMES..FRAMES + 3 + 5).contains(&frame)
 }
 
 /// What pixel `pixel` of frame `frame` at `scale` shows: the suite's point,
