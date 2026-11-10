@@ -616,7 +616,10 @@ fn clips_fading_at_their_head_as_the_view_comes_back() {
     let _gpu = gpu_fixture();
     for scale in SCALES {
         let (w, h) = ((W * scale) as u32, (H * scale) as u32);
-        let gpu = GpuRenderer::new(w, h).unwrap();
+        let mut gpu = GpuRenderer::new(w, h).unwrap();
+        // (Off macOS, a see-through window's frames don't draw in a single
+        // pass, so none goes straight to the screen, below.)
+        gpu.set_background(zgx::scene::Color(0, 0, 0, 255));
         let mut ui = Ui::new(W, H);
         let offset = ui.signal(0_f32);
         let mut page = column().w(W).gap(12.);
@@ -641,13 +644,16 @@ fn clips_fading_at_their_head_as_the_view_comes_back() {
             ),
         );
         let to = offset.clone();
-        // (A jump first, which repaints, to come back from.)
+        // (A jump first, which repaints, to come back from. It repaints all
+        // the view shows, here the window: a frame drawn whole straight to
+        // the screen leaves the retained pixels behind, so the step after it
+        // repaints too, and the 29 after that copy.)
         let copies = drawn_alike(gpu, "head", scale, &mut ui, &offset, 31, -6., 1, |step| {
             if step == 0 {
                 to.set(600.);
             }
         });
-        assert_eq!(copies, 30, "head at {scale}x");
+        assert_eq!(copies, 29, "head at {scale}x");
     }
 }
 
