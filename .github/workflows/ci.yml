@@ -684,6 +684,23 @@ jobs:
           start=$SECONDS
           choco install ffmpeg -y --no-progress > "$RUNNER_TEMP/ffmpeg-install.log" || { cat "$RUNNER_TEMP/ffmpeg-install.log"; exit 1; }
           echo "### Video: ffmpeg installed in $(( SECONDS - start )) s" >> "$GITHUB_STEP_SUMMARY"
+          # choco's shims aren't always on this step's PATH once it's done
+          # (ffmpeg not found, exit 127, on some runs): the folder of the
+          # binaries it unpacked goes first, so the tests find ffmpeg.exe
+          # and the ffprobe.exe beside it. None found fails the step: the
+          # tests of what ffmpeg encodes would pass by skipping.
+          choco_root=$(cygpath -u "${ChocolateyInstall:-C:\ProgramData\chocolatey}")
+          found=$(find "$choco_root/lib/ffmpeg" -name ffmpeg.exe 2>/dev/null | head -n 1)
+          dir=${found:+$(dirname "$found")}
+          if [ -z "$dir" ] && [ -f "$choco_root/bin/ffmpeg.exe" ]; then dir="$choco_root/bin"; fi
+          if [ -z "$dir" ] || [ ! -f "$dir/ffprobe.exe" ]; then
+            echo "::error::choco installed ffmpeg, but no ffmpeg.exe with ffprobe.exe beside it is under $choco_root/lib/ffmpeg or $choco_root/bin: the video tests would skip what ffmpeg encodes"
+            find "$choco_root/lib/ffmpeg" -maxdepth 4 2>/dev/null | head -n 40
+            exit 1
+          fi
+          export PATH="$dir:$PATH"
+          echo "### Video: ffmpeg from $dir" >> "$GITHUB_STEP_SUMMARY"
+          [ "$(command -v ffmpeg)" = "$dir/ffmpeg" ] || [ "$(command -v ffmpeg)" = "$dir/ffmpeg.exe" ] || { echo "::error::ffmpeg resolves to '$(command -v ffmpeg)', not $dir"; exit 1; }
           ffmpeg -version > /dev/null
           ffprobe -version > /dev/null
           cargo test -p zgx-video --locked
