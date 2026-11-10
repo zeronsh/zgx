@@ -4129,6 +4129,12 @@ const LAUNCH_FRAMES: u64 = 600;
 fn font_cache_check() {
     font_cache::check_pending();
 }
+/// `ZGX_RING_HANDLER=1`: a direct Metal frame's ring slots are freed by its
+/// command buffer's completion handler; the next frame never waits for the
+/// GPU to finish the one before it.
+#[cfg(target_os = "macos")]
+static RING_HANDLER: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_RING_HANDLER").is_some_and(|v| v != "0"));
 /// Wakes a host's event loop from another thread (`GpuRenderer::set_plane_waker`).
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
@@ -10536,8 +10542,14 @@ impl GpuRenderer {
         let _span = zgx::profile::span(zgx::profile::Phase::Encode);
         // A drawable frame is not waited for as it presents (Metal presents
         // it); its ring buffers are free once it completes, normally long
-        // before the next frame starts.
-        self.finish_direct();
+        // before the next frame starts. With `ZGX_RING_HANDLER` they're
+        // freed as it completes, so one still running isn't waited for.
+        match *RING_HANDLER {
+            true => self.finish_direct_if_done(),
+            false => {
+                self.finish_direct();
+            }
+        }
         let vertices = {
             use objc2::Message;
             let mapped = self
@@ -10774,6 +10786,16 @@ impl GpuRenderer {
                 })
                 .and_then(|present| present.layer.as_mut())
                 .and_then(|layer| layer.take_drawable());
+            // Its ring slots freed as the GPU finishes it, not when the next
+            // frame waits for that (`ZGX_RING_HANDLER`).
+            if *RING_HANDLER && let Some(mapped) = &self.mapped {
+                let slots = mapped.borrow_mut().take_in_flight();
+                pass.on_completed(move || {
+                    for slot in &slots {
+                        slot.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                });
+            }
             pass.commit_presenting(
                 drawable
                     .as_deref()
@@ -11117,6 +11139,20 @@ impl GpuRenderer {
         self.frame_draws = draws;
         Ok(stats)
     }
+    /// `finish_direct` for a frame the GPU has finished already; one still
+    /// running stays in flight (`ZGX_RING_HANDLER`).
+    #[cfg(target_os = "macos")]
+    fn finish_direct_if_done(&self) {
+        use objc2_metal::{MTLCommandBuffer, MTLCommandBufferStatus};
+        let done = self
+            .metal_inflight
+            .borrow()
+            .as_ref()
+            .is_some_and(|buffer| buffer.status().0 >= MTLCommandBufferStatus::Completed.0);
+        if done {
+            self.finish_direct();
+        }
+    }
     /// Wait for a directly encoded frame (`render_direct`) to complete.
     #[cfg(target_os = "macos")]
     fn finish_direct(&self) -> bool {
@@ -11141,7 +11177,8 @@ impl GpuRenderer {
         }
         self.gpu_time
             .set((ran > 0.).then(|| std::time::Duration::from_secs_f64(ran)));
-        if let Some(mapped) = &self.mapped {
+        // (With `ZGX_RING_HANDLER`, its handler freed its slots.)
+        if !*RING_HANDLER && let Some(mapped) = &self.mapped {
             mapped.borrow_mut().completed();
         }
         true

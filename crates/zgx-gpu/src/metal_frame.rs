@@ -865,6 +865,18 @@ impl Frame {
     /// End the pass and commit (the frame then runs after everything already
     /// submitted to wgpu's queue), presenting `drawable` once its work
     /// completes: Metal hands it to the window server for the refresh after.
+    /// Run `done` (on Metal's thread) once the GPU has run this frame.
+    pub(crate) fn on_completed(&self, done: impl Fn() + Send + 'static) {
+        let block = block2::RcBlock::new(
+            move |_: std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| done(),
+        );
+        // SAFETY: the block is Send, touches only what it owns, and Metal
+        // copies it before this returns.
+        unsafe {
+            self.buffer
+                .addCompletedHandler(block2::RcBlock::as_ptr(&block))
+        };
+    }
     pub(crate) fn commit_presenting(
         self,
         drawable: Option<&ProtocolObject<dyn objc2_metal::MTLDrawable>>,

@@ -341,6 +341,19 @@ impl MappedRing {
     /// The GPU has finished every frame written so far (one encoded with
     /// Metal directly, waited for): their buffers are writable again.
     #[cfg(target_os = "macos")]
+    /// The slots written for the coming submission, handed over: freed by
+    /// whoever learns it completed (`ZGX_RING_HANDLER`: its completion
+    /// handler), not by `completed`.
+    pub(crate) fn take_in_flight(&mut self) -> Vec<Arc<AtomicBool>> {
+        self.slots
+            .iter_mut()
+            .filter(|slot| slot.remap)
+            .map(|slot| {
+                slot.remap = false;
+                slot.mapped.clone()
+            })
+            .collect()
+    }
     pub(crate) fn completed(&mut self) {
         for slot in self.slots.iter_mut().filter(|slot| slot.remap) {
             slot.remap = false;
