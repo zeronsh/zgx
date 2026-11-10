@@ -383,10 +383,12 @@ struct Slot<T> {
     value: Option<T>,
 }
 /// Put `value` in the first free slot (or a new one): its index and
-/// generation.
-fn claim<T>(slots: &mut Vec<Slot<T>>, value: T) -> (u32, u32) {
-    let index = match slots.iter().position(|slot| slot.value.is_none()) {
-        Some(free) => free,
+/// generation. Every slot before `first_free` is taken (`release` keeps it
+/// so): adding many objects doesn't look through all those before them.
+fn claim<T>(slots: &mut Vec<Slot<T>>, first_free: &mut usize, value: T) -> (u32, u32) {
+    let start = (*first_free).min(slots.len());
+    let index = match slots[start..].iter().position(|slot| slot.value.is_none()) {
+        Some(free) => start + free,
         None => {
             slots.push(Slot {
                 generation: 0,
@@ -395,13 +397,25 @@ fn claim<T>(slots: &mut Vec<Slot<T>>, value: T) -> (u32, u32) {
             slots.len() - 1
         }
     };
+    *first_free = index + 1;
     let slot = &mut slots[index];
     slot.value = Some(value);
     (index as u32, slot.generation)
 }
+/// Empty slot `index` (its generation moves on, so old ids miss), and the
+/// first free one is at most it.
+fn release<T>(slots: &mut [Slot<T>], first_free: &mut usize, index: usize) {
+    let slot = &mut slots[index];
+    slot.value = None;
+    slot.generation = slot.generation.wrapping_add(1);
+    *first_free = (*first_free).min(index);
+}
 pub(crate) struct Inner {
     objects: Vec<Slot<Object>>,
     lights: Vec<Slot<Light>>,
+    /// No slot before these is free (`claim`).
+    free_object: usize,
+    free_light: usize,
     pub(crate) camera: Camera,
     /// Its clear colour, linear and premultiplied; `None`: transparent, the
     /// box's own background shows.
@@ -1012,6 +1026,8 @@ impl World {
         let inner = Rc::new(RefCell::new(Inner {
             objects: Vec::new(),
             lights: Vec::new(),
+            free_object: 0,
+            free_light: 0,
             camera: Camera::default(),
             background: None,
             shadows: false,
@@ -1058,7 +1074,7 @@ impl World {
         object.geometry = object.geometry.filter(|geometry| !geometry.is_empty());
         let mut id = None;
         self.change(|inner| {
-            let (index, generation) = claim(&mut inner.objects, object);
+            let (index, generation) = claim(&mut inner.objects, &mut inner.free_object, object);
             id = Some(ObjectId { index, generation });
             true
         });
@@ -1066,10 +1082,13 @@ impl World {
     }
     /// Remove `id` (its children stay, drawing nothing until reparented).
     pub fn remove(&self, id: ObjectId) {
-        self.change(|inner| match inner.objects.get_mut(id.index as usize) {
+        self.change(|inner| match inner.objects.get(id.index as usize) {
             Some(slot) if slot.generation == id.generation && slot.value.is_some() => {
-                slot.value = None;
-                slot.generation = slot.generation.wrapping_add(1);
+                release(
+                    &mut inner.objects,
+                    &mut inner.free_object,
+                    id.index as usize,
+                );
                 inner.textures.remove(&id.index);
                 inner.skins.remove(&id.index);
                 inner.morph_weights.remove(&id.index);
@@ -1176,7 +1195,7 @@ impl World {
     pub fn add_light(&self, light: Light) -> LightId {
         let mut id = None;
         self.change(|inner| {
-            let (index, generation) = claim(&mut inner.lights, light);
+            let (index, generation) = claim(&mut inner.lights, &mut inner.free_light, light);
             id = Some(LightId { index, generation });
             true
         });
@@ -1195,10 +1214,9 @@ impl World {
     }
     /// Remove light `id`.
     pub fn remove_light(&self, id: LightId) {
-        self.change(|inner| match inner.lights.get_mut(id.index as usize) {
+        self.change(|inner| match inner.lights.get(id.index as usize) {
             Some(slot) if slot.generation == id.generation && slot.value.is_some() => {
-                slot.value = None;
-                slot.generation = slot.generation.wrapping_add(1);
+                release(&mut inner.lights, &mut inner.free_light, id.index as usize);
                 inner.light_parents.remove(&id.index);
                 inner.spots.remove(&id.index);
                 true
@@ -1552,6 +1570,33 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_object_takes_the_lowest_free_slot() {
+        let world = World::new();
+        let ids: Vec<ObjectId> = (0..6).map(|_| world.add(Object::group())).collect();
+        world.remove(ids[4]);
+        world.remove(ids[1]);
+        let index = |id: ObjectId| id.index;
+        let (a, b, c) = (
+            world.add(Object::group()),
+            world.add(Object::group()),
+            world.add(Object::group()),
+        );
+        assert_eq!([index(a), index(b), index(c)], [1, 4, 6]);
+        assert!(world.object(ids[1]).is_none() && world.object(a).is_some());
+        let light = |world: &World| {
+            world.add_light(Light::Hemisphere {
+                sky: [1.; 3],
+                ground: [0.; 3],
+                intensity: 1.,
+            })
+        };
+        let lights: Vec<LightId> = (0..3).map(|_| light(&world)).collect();
+        world.remove_light(lights[0]);
+        assert_eq!(light(&world).index, 0);
+        assert_eq!(light(&world).index, 3);
+    }
 
     fn sun() -> Light {
         Light::Directional {
