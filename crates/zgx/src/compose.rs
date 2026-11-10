@@ -5205,10 +5205,9 @@ fn paragraph_effect<const LOCATING: bool>(
 /// again. A paragraph no run of which has faded holds none of it, and starts
 /// nothing.
 pub(crate) struct Fading {
-    /// What its frame loop runs on, where the host runs one: taken as the
-    /// paragraph mounts, not the whole scope.
-    runner: Option<Rc<TaskRunner>>,
-    frames: Option<Rc<crate::frame::FrameClock>>,
+    /// Where its frame loop's runner and frame clock are, if the host runs
+    /// one (a copy of a scope is two counts).
+    services: ServiceScope,
     /// The runs fading in, by their place among the runs being made: noted
     /// as the paragraph's spans are, taken as it's drawn.
     pending: Vec<(usize, crate::compose_rich::TextFade)>,
@@ -5249,10 +5248,9 @@ impl FadingRuns {
     }
 }
 impl Fading {
-    fn new(services: &ServiceScope) -> Self {
+    fn new(services: ServiceScope) -> Self {
         Self {
-            runner: services.get::<TaskRunner>(),
-            frames: services.get::<crate::frame::FrameClock>(),
+            services,
             pending: Vec::new(),
             active: None,
         }
@@ -5331,9 +5329,8 @@ impl Fading {
         };
         *active.runs.runs.borrow_mut() = fades;
         if any && !active.task.borrow().as_ref().is_some_and(|t| !t.finished()) {
-            let (runner, frames) = (self.runner.clone(), self.frames.clone());
             let token = ui.runtime.clone().untracked(|| {
-                spawn_fades(runner, frames, active.runs.clone(), weak.clone(), paragraph)
+                spawn_fades(&self.services, active.runs.clone(), weak.clone(), paragraph)
             });
             *active.task.borrow_mut() = token;
         }
@@ -5344,14 +5341,13 @@ impl Fading {
 /// until none fades, then drawn as they end. Without a task runner or a frame
 /// clock (a host that draws no frames), fades show as they were when last built.
 fn spawn_fades(
-    runner: Option<Rc<TaskRunner>>,
-    frames: Option<Rc<crate::frame::FrameClock>>,
+    services: &ServiceScope,
     fading: Rc<FadingRuns>,
     weak: crate::widgets::WeakUi,
     paragraph: NodeId,
 ) -> Option<TaskToken> {
-    let runner = runner?;
-    let frames = (*frames?).clone();
+    let runner = services.get::<TaskRunner>()?;
+    let frames = (*services.get::<crate::frame::FrameClock>()?).clone();
     Some(runner.spawn(Box::pin(async move {
         loop {
             frames.next().await;
@@ -5391,7 +5387,7 @@ mod fading_tests {
         let ui = Ui::new(100., 100.);
         let weak = ui.downgrade();
         let root = ui.scene.borrow().root();
-        let mut fading = Fading::new(&ServiceScope::new());
+        let mut fading = Fading::new(ServiceScope::new());
         let rich = empty_rich_text();
         fading.set_runs(Vec::new(), &weak, root, root);
         assert!(fading.active.is_none());
@@ -5415,7 +5411,7 @@ mod fading_tests {
             TaskToken::new((), |_| false)
         }));
         services.provide(crate::frame::FrameClock::new());
-        let mut hosted = Fading::new(&services);
+        let mut hosted = Fading::new(services);
         hosted.set_runs(Vec::new(), &weak, root, root);
         assert_eq!(spawned.get(), 0);
         hosted.set_runs(vec![(0, fade)], &weak, root, root);
@@ -5496,7 +5492,7 @@ fn mount_rich(
     let weak = ui.downgrade();
     let typography = environment.typography.clone();
     let theme = environment.theme.clone();
-    let fading = Fading::new(&environment.services);
+    let fading = Fading::new(environment.services.clone());
     match locating {
         Some(kept) => ui.bind(
             root,
@@ -9109,7 +9105,7 @@ mod environment_tests {
     fn an_environment_stays_small() {
         // Cloned for every component and region mounted: growing it costs
         // every mount (a flag beside its portal took 8 bytes).
-        assert_eq!(std::mem::size_of::<super::Environment>(), 112);
+        assert_eq!(std::mem::size_of::<super::Environment>(), 72);
     }
 }
 #[cfg(test)]
