@@ -2719,6 +2719,26 @@ impl ShapeLine {
     }
 
     #[inline]
+    /// zgx: the width of the blank word `ranges` end with, if they end with
+    /// one: the one blank a line takes past the width (`layout_to_buffer`).
+    fn trailing_blank(&self, ranges: &[VlRange], font_size: f32) -> f32 {
+        let Some(range) = ranges.last() else {
+            return 0.;
+        };
+        let to = match (range.start.word, range.start.glyph) <= (range.end.word, range.end.glyph) {
+            true => range.end,
+            false => range.start,
+        };
+        match (to.glyph, to.word.checked_sub(1)) {
+            (0, Some(last)) => self.spans[range.span]
+                .words
+                .get(last)
+                .filter(|word| word.blank)
+                .map_or(0., |word| word.width(font_size)),
+            _ => 0.,
+        }
+    }
+
     fn add_to_visual_line(
         &self,
         vl: &mut VisualLine,
@@ -4025,6 +4045,19 @@ impl ShapeLine {
             cached_visual_lines.push(current_visual_line);
         } else {
             visual_lines.push(current_visual_line);
+        }
+
+        // zgx: the one blank a line takes past the width ("it won't be counted
+        // in the final width", above) hangs, as CSS's trailing spaces do: the
+        // line's width leaves it out, so the line measures within the width it
+        // was given, aligns as its words do, and laid out at that width again
+        // breaks as it did. Only lines past the width are looked at.
+        if let Some(width) = width_opt {
+            for visual_line in &mut visual_lines {
+                if visual_line.w > width && !visual_line.ellipsized {
+                    visual_line.w -= self.trailing_blank(&visual_line.ranges, font_size);
+                }
+            }
         }
 
         // Create the LayoutLines using the ranges inside visual lines

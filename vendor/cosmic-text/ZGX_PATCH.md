@@ -493,3 +493,14 @@ line (`ShapeLine::boxes`). `inline_box_tests` check a box's room, a tall box
 growing only its line, breaking around a box, each alignment, a box kept in
 its span, a split line keeping its boxes, and a line said to hold boxes but
 holding none laid out exactly as one that isn't.
+
+## A blank past the width hangs (zgx-cosmic-text 0.19.14)
+
+`layout_to_buffer` lets a line take one blank past the width ("it won't be counted
+in the final width") but counted it in the line's `w` all the same, so a wrapping
+text ending in spaces measured wider than its width, and laid out at that width
+broke otherwise. A line past the width now leaves that blank out of its `w`
+(`trailing_blank`): it measures within its width, and right and centre alignment
+place its words as CSS places a line with hanging spaces. The glyph stays where
+it was. zgx-gpu's `Compact` and `prepared_words` mirror it.
+

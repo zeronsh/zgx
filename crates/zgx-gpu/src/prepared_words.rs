@@ -293,8 +293,17 @@ impl Words {
         let push = |line: &mut Option<(At, At, f32)>,
                     line_w: &mut f32,
                     lines: &mut smallvec::SmallVec<[(At, At, f32); 2]>| {
-            if let Some(done) = line.take() {
-                lines.push(done);
+            if let Some((start, end, mut w)) = line.take() {
+                // Past the width, the blank it ends with hangs, as
+                // `layout_to_buffer` leaves it out.
+                if w > limit
+                    && end.1 == 0
+                    && let Some((_, last)) = end.0.checked_sub(1).map(|at| &self.words[at])
+                    && last.blank
+                {
+                    w -= last.width;
+                }
+                lines.push((start, end, w));
             }
             *line_w = 0.;
         };
