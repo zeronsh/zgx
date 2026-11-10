@@ -3400,6 +3400,9 @@ pub struct Scene {
     /// Tests: a damaged paint walk filters every child (`searched` unused).
     #[cfg(test)]
     pub(crate) linear_walks: bool,
+    /// Long lists a hit test searched (`hit_rows`). For tests.
+    #[cfg(test)]
+    hit_rows_searched: std::cell::Cell<u64>,
     /// Worked out with `ink`, for each node of `SEARCHED_CHILDREN` children
     /// or more whose boxes (in its space, translated) run down in order,
     /// tops and bottoms both never going back up (a column's rows): how far
@@ -3657,6 +3660,8 @@ impl Scene {
             reference_walks: false,
             #[cfg(test)]
             linear_walks: false,
+            #[cfg(test)]
+            hit_rows_searched: Default::default(),
             long_children: std::cell::RefCell::new(std::collections::HashMap::with_hasher(
                 crate::key_hasher(),
             )),
@@ -6123,6 +6128,94 @@ impl Scene {
         }
         extent
     }
+    /// Of a plain walk's node's many `children`, placed by `transform` (the
+    /// node's, summed as the walk sums it), those a hit test at `point` must
+    /// look at. Where their boxes run down in order, none transformed, it
+    /// is the run whose boxes reach the point's height, within the walk's
+    /// rounding (`hit_outside_at`). Those above it prove nothing under them
+    /// reaches past their bottoms, and those below it past their tops, so
+    /// the walk would find nothing in them wherever the point lies across
+    /// (a scrolled list's rows: two searches, not a look at every row).
+    /// Each proof is the one the walk would ask, worked out here where it
+    /// isn't known. Anything else gets all of them. Each frame it checks
+    /// the order and the proofs again, a few loads a row, and walks no row.
+    #[cold]
+    #[inline(never)]
+    fn hit_rows<'a>(
+        &self,
+        children: &'a [NodeId],
+        transform: Transform,
+        point: (f32, f32),
+    ) -> &'a [NodeId] {
+        #[cfg(test)]
+        if self.linear_walks {
+            return children;
+        }
+        // A child's box as the walk places it: top, bottom, and the slack
+        // `hit_outside_at` grants a moved box.
+        let edges = |child: &NodeId| {
+            let node = self.tree_node(*child);
+            let (bx, by) = (
+                transform.x + node.transform.x,
+                transform.y + node.transform.y,
+            );
+            let top = node.bounds.y + by;
+            let bottom = top + node.bounds.height;
+            let slack = match bx == 0. && by == 0. {
+                true => 0.,
+                false => (top.abs().max(bottom.abs()) + by.abs()) * (32. * f32::EPSILON),
+            };
+            (top, bottom, slack)
+        };
+        let mut last = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+        for child in children {
+            let node = self.tree_node(*child);
+            let top = node.bounds.y + (transform.y + node.transform.y);
+            let bottom = top + node.bounds.height;
+            if node.transformed() || !(top >= last.0 && bottom >= last.1) {
+                return children;
+            }
+            last = (top, bottom);
+        }
+        let y = point.1;
+        // Past their bottoms, and above their tops, as the walk tells them.
+        let first = children.partition_point(|child| {
+            let (_, bottom, slack) = edges(child);
+            y >= bottom + slack
+        });
+        let end = children
+            .partition_point(|child| {
+                let (top, _, slack) = edges(child);
+                y >= top - slack
+            })
+            .max(first);
+        // What the walk would ask of each: its bottom, or its top.
+        let proves = |child: &NodeId, bottom: bool| {
+            let node = self.tree_node(*child);
+            if self.children_raw(node).is_empty() {
+                return true;
+            }
+            let bit = HIT_DIRECTION << if bottom { 3 } else { 2 };
+            if node.bounds_valid.get() & bit == 0 {
+                let b = node.bounds;
+                match bottom {
+                    true => self.hit_projection::<3>(node, 0., 0, b.y + b.height),
+                    false => self.hit_projection::<2>(node, 0., 0, b.y),
+                };
+            }
+            node.bounds_valid.get() & bit != 0
+        };
+        match children[..first].iter().all(|child| proves(child, true))
+            && children[end..].iter().all(|child| proves(child, false))
+        {
+            true => {
+                #[cfg(test)]
+                self.hit_rows_searched.set(self.hit_rows_searched.get() + 1);
+                &children[first..end]
+            }
+            false => children,
+        }
+    }
     /// `POPUPS`: popup roots exist, whose subtrees are hit past the viewport.
     fn hit_test_walk<const POPUPS: bool>(&self, x: f32, y: f32) -> Vec<NodeId> {
         let inside = |r: Rect, (x, y): (f32, f32)| {
@@ -6236,7 +6329,12 @@ impl Scene {
             }
             siblings = match POPUPS {
                 true => self.paint_order(id, node).iter(),
-                false => self.children_raw(node).iter(),
+                false => match self.children_raw(node) {
+                    all if all.len() >= SEARCHED_CHILDREN => {
+                        self.hit_rows(all, transform, point).iter()
+                    }
+                    all => all.iter(),
+                },
             };
             parent_transform = transform;
             parent_opacity = opacity;
@@ -15733,6 +15831,99 @@ mod tests {
                 (longer.as_str(), "ab"),
             ] {
                 assert_eq!(nested_stops(align, first, second), None);
+            }
+        }
+    }
+    /// A hit test over a long column searches its rows (`hit_rows`) and
+    /// finds what the walk over every row finds (`linear_walks`): at points
+    /// all over the view, as the column scrolls (by whole and fractional
+    /// points, deep in it too), with rows whose content runs past their
+    /// boxes, a row moved out of order, a turned row, and rows nested in a
+    /// row of the column.
+    #[test]
+    fn a_hit_test_searching_a_long_column_finds_what_the_whole_walk_does() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let quad = |n: u32| {
+            NodeKind::Quad(QuadStyle {
+                fill: Color((n % 251) as u8, 70, 90, 255),
+                ..Default::default()
+            })
+        };
+        // 0: plain rows; 1: some rows' content overflowing their bottoms;
+        // 2: a row moved above its place; 3: a turned row; 4: a row of rows.
+        for case in 0..5 {
+            let mut scene = Scene::new(300., 400.);
+            let root = scene.root();
+            scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+            let column = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+            let mut rows = Vec::new();
+            for i in 0..300u32 {
+                let height = 18. + (i * 7 % 11) as f32 * 0.37;
+                let row = scene.append(
+                    column,
+                    NodeKind::Container(Layout::Row),
+                    sized(300., height),
+                );
+                rows.push(row);
+                scene.append(
+                    row,
+                    quad(i + 1),
+                    sized(40. + (i % 5) as f32 * 30., height / 2.),
+                );
+                let tall = case == 1 && i % 37 == 5;
+                scene.append(
+                    row,
+                    quad(i + 2),
+                    sized(60., if tall { height * 3. } else { height / 3. }),
+                );
+                if case == 4 && i == 150 {
+                    for j in 0..80u32 {
+                        scene.append(row, quad(j), sized(10., 3.));
+                    }
+                }
+            }
+            scene.flush();
+            match case {
+                2 => scene.set_transform(rows[200], Transform { x: 0., y: -900. }),
+                3 => scene.set_local_transform(
+                    rows[120],
+                    LocalTransform {
+                        rotate: 0.3,
+                        ..LocalTransform::IDENTITY
+                    },
+                ),
+                _ => {}
+            }
+            scene.flush();
+            let searched_before = scene.hit_rows_searched.get();
+            for offset in [0., -8., -1003.25, -2_207.617_2, -4100.5] {
+                scene.set_transform(column, Transform { x: 0., y: offset });
+                scene.flush();
+                for yi in 0..80 {
+                    for xi in 0..6 {
+                        let (x, y) = (xi as f32 * 55. + 3., yi as f32 * 5.03 + 0.5);
+                        scene.linear_walks = false;
+                        let searched = scene.hit_test_all_walked(x, y);
+                        scene.linear_walks = true;
+                        let walked = scene.hit_test_all_walked(x, y);
+                        assert_eq!(
+                            searched, walked,
+                            "case {case}, offset {offset}, at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+            // Searched where the column is plain; walked whole out of order or
+            // turned, and where a row above the point overflows its bottom.
+            let searched = scene.hit_rows_searched.get() - searched_before;
+            match case {
+                2 | 3 => assert_eq!(searched, 0, "case {case}"),
+                1 => assert!((100..2400).contains(&searched), "case {case}: {searched}"),
+                _ => assert!(searched > 2000, "case {case}: searched {searched} times"),
             }
         }
     }
