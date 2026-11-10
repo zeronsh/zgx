@@ -297,48 +297,49 @@ impl TermDamageState {
         self.lines[at].expand(left, right);
     }
 
-    /// zgx: the lines' damage in order again, after scrolling rotated it.
-    fn ordered(&mut self) {
-        if self.base != 0 {
-            self.lines.rotate_left(self.base);
-            self.base = 0;
-            for (row, line) in self.lines.iter_mut().enumerate() {
-                line.line = row;
-            }
+    /// zgx: the lines' damage in order again, after scrolling turned it:
+    /// the places the top lines left are the new bottom lines', damaged
+    /// whole.
+    fn ordered(&mut self, num_cols: usize) {
+        if self.base == 0 {
+            return;
+        }
+        self.lines.rotate_left(self.base);
+        self.base = 0;
+        let count = self.lines.len();
+        for (row, line) in self.lines.iter_mut().enumerate() {
+            *line = if row + self.scrolled >= count {
+                LineDamageBounds::new(row, 0, num_cols.saturating_sub(1))
+            } else {
+                LineDamageBounds::new(row, line.left, line.right)
+            };
         }
     }
 
     /// Reset information about terminal damage.
     fn reset(&mut self, num_cols: usize) {
+        // Every line is reset: turned back is only for damage read. (A
+        // scroll changes no line's number, so they stay where they are.)
+        self.base = 0;
         self.full = false;
         self.scrolled = 0;
-        self.ordered();
         self.lines.iter_mut().for_each(|line| line.reset(num_cols));
     }
 
     /// zgx: the whole screen scrolled up `lines`: each line's damage moves up
-    /// with its line, the lines new at the bottom are damaged whole, and the
-    /// old cursor moves up too. Whole damage, if they are all new.
-    fn scroll_up(&mut self, lines: usize, num_cols: usize) {
+    /// with its line (the list turns: `base`), the lines new at the bottom
+    /// are damaged whole (`ordered`), and the old cursor moves up too. Whole
+    /// damage, if they are all new. A count and an offset: no line is read.
+    fn scroll_up(&mut self, lines: usize) {
         let count = self.lines.len();
         // A screen's worth since the last reset: every line is new.
-        if self.full || self.scrolled + lines >= count {
+        if self.scrolled + lines >= count {
             self.full = true;
             return;
         }
-        // Rotated: the top lines' places take the new bottom lines.
-        for row in 0..lines {
-            self.base += 1;
-            if self.base == count {
-                self.base = 0;
-            }
-            let at = if self.base == 0 {
-                count - 1
-            } else {
-                self.base - 1
-            };
-            self.lines[at] =
-                LineDamageBounds::new(count - lines + row, 0, num_cols.saturating_sub(1));
+        self.base += lines;
+        if self.base >= count {
+            self.base -= count;
         }
         // Off the top, it damages the first row (a needless redraw at most).
         self.last_cursor.line = cmp::max(self.last_cursor.line - lines as i32, Line(0));
@@ -582,7 +583,8 @@ impl<T> Term<T> {
 
         // NOTE: damage which changes all the content when the display offset is non-zero (e.g.
         // scrolling) is handled via full damage.
-        self.damage.ordered();
+        let columns = self.columns();
+        self.damage.ordered(columns);
         let display_offset = self.grid().display_offset();
         TermDamage::Partial(TermDamageIterator::new(&self.damage.lines, display_offset))
     }
@@ -997,9 +999,12 @@ impl<T> Term<T> {
         // zgx: the whole screen, its newest lines shown, moves its lines'
         // damage up with them: an embedder moves what it drew of them, and
         // draws only the lines new at the bottom (`scrolled`).
+        if self.damage.full {
+            return;
+        }
         let whole = region.start == 0 && region.end == self.screen_lines();
         if whole && self.grid.display_offset() == 0 {
-            self.damage.scroll_up(lines, self.columns());
+            self.damage.scroll_up(lines);
         } else {
             self.mark_fully_damaged();
         }
