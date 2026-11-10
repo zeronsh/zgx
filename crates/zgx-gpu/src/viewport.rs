@@ -29,9 +29,11 @@ pub trait Viewport: 'static {
     /// one. The next `render` follows.
     fn device_changed(&mut self) {}
     /// The window showing it went idle (its host's idle trim, once frames
-    /// have stopped for a moment): let go of what only drawing needs, such
-    /// as a frame's temporary targets. The next `render` makes them again.
-    /// A view whose window keeps drawing other things isn't asked.
+    /// have stopped for a moment), or its last box went: let go of what only
+    /// drawing needs, such as a frame's temporary targets. The next `render`
+    /// makes them again. A view whose window keeps drawing other things
+    /// isn't asked; one shown in two windows is asked by the one going idle
+    /// while the other may still draw it (its next frame makes them again).
     fn rest(&mut self) {}
 }
 
@@ -92,6 +94,16 @@ impl<'a> ViewportFrame<'a> {
 struct Painter {
     viewport: Box<dyn Viewport>,
     device: Option<std::rc::Weak<crate::GpuContextInner>>,
+}
+
+/// View `view`'s painter rests, if it lives and isn't drawing.
+fn rest(view: u64) {
+    if let Some(painter) = zgx::gpu_view::painter(view)
+        && let Some(painter) = painter.downcast_ref::<RefCell<Painter>>()
+        && let Ok(mut painter) = painter.try_borrow_mut()
+    {
+        painter.viewport.rest();
+    }
 }
 
 /// A GPU view drawn by `painter`: show it with `zgx::compose::gpu_view`.
@@ -368,6 +380,10 @@ pub(crate) struct Views {
     /// comes back for it (`GpuRenderer::planes_owed`).
     #[cfg(target_os = "macos")]
     pub(crate) owed: bool,
+    /// Views painted since they last rested (`Viewport::rest`), shown in a
+    /// box or on a plane or no longer: their painters rest at the idle trim,
+    /// or as their last box goes.
+    painted: rustc_hash::FxHashSet<u64>,
 }
 /// A box on a plane: its node, the frame it last drew, its box, and the
 /// drawables' textures as wgpu's, by Metal texture (the pool's few).
@@ -393,8 +409,19 @@ struct Shown {
 impl Views {
     /// Forget views whose frames' textures are gone (pruned with their
     /// boxes): their texture views go too.
-    pub(crate) fn retain_cached(&mut self, cached: impl Fn(u64) -> bool) {
+    /// Whether any went.
+    pub(crate) fn retain_cached(&mut self, cached: impl Fn(u64) -> bool) -> bool {
+        let before = self.shown.len();
         self.shown.retain(|_, shown| cached(shown.image));
+        self.shown.len() != before
+    }
+    /// Whether a box shows `view`, in the window or on a plane.
+    fn boxed(&self, view: u64) -> bool {
+        #[cfg(target_os = "macos")]
+        if self.planes.keys().any(|&(v, _)| v == view) {
+            return true;
+        }
+        self.shown.keys().any(|&(v, _)| v == view)
     }
     /// The image ids views' textures are cached under: forgotten, their next
     /// frames draw anew (at a new scale).
@@ -436,6 +463,7 @@ impl GpuRenderer {
             ((frame.height * self.scale).ceil() as u32).clamp(1, max),
         );
         let views = self.views.get_or_insert_with(Default::default);
+        views.painted.insert(frame.view);
         // Its last frame's texture, if the same size: drawn over in place.
         let mut kept = None;
         let key = (frame.view, frame.shown_by);
@@ -575,26 +603,36 @@ impl GpuRenderer {
         self.after_view_submit(key);
         Ok(())
     }
-    /// Each view this renderer shows rests (`Viewport::rest`): called by
-    /// `trim`, as the window goes idle. Apart from its code: views are few.
+    /// Each view this renderer painted rests (`Viewport::rest`), whether a
+    /// box still shows it or not: called by `trim`, as the window goes idle.
+    /// Apart from its code: views are few.
     #[cold]
     #[inline(never)]
-    pub(crate) fn rest_views(&self) {
-        let Some(views) = self.views.as_ref() else {
+    pub(crate) fn rest_views(&mut self) {
+        let Some(views) = self.views.as_mut() else {
             return;
         };
-        let mut rested: Vec<u64> = Vec::new();
-        for &(view, _) in views.shown.keys() {
-            if rested.contains(&view) {
-                continue;
-            }
-            rested.push(view);
-            if let Some(painter) = zgx::gpu_view::painter(view)
-                && let Some(painter) = painter.downcast_ref::<RefCell<Painter>>()
-                && let Ok(mut painter) = painter.try_borrow_mut()
-            {
-                painter.viewport.rest();
-            }
+        for view in views.painted.drain() {
+            rest(view);
+        }
+    }
+    /// The painted views no box shows any more rest (their last box went).
+    /// Called only as boxes or planes go.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn rest_boxless(&mut self) {
+        let Some(views) = self.views.as_mut() else {
+            return;
+        };
+        let boxless: Vec<u64> = views
+            .painted
+            .iter()
+            .copied()
+            .filter(|&v| !views.boxed(v))
+            .collect();
+        for view in boxless {
+            views.painted.remove(&view);
+            rest(view);
         }
     }
     /// The device and queue views draw with: the renderer's own, as it
@@ -788,6 +826,7 @@ impl GpuRenderer {
         let texture = plane.drawable.texture();
         let address = &*texture as *const _ as *const u8 as usize;
         let views = self.views.get_or_insert_with(Default::default);
+        views.painted.insert(key.0);
         let planed = views.planes.entry(key).or_insert_with(|| Planed {
             node,
             image: 0,
@@ -960,9 +999,13 @@ impl GpuRenderer {
             }
             alive
         });
+        let rest = !gone.is_empty();
         for key in gone {
             zgx::gpu_view::set_planed(key.0, key.1, false);
             views.gone.push(key);
+        }
+        if rest {
+            self.rest_boxless();
         }
     }
     /// In the frame's transaction: show the planes that moved with their
@@ -1166,8 +1209,31 @@ mod tests {
         assert_eq!(counts.get().1, 0, "no rest while it draws");
         gpu.trim();
         assert_eq!(counts.get().1, 1);
+        let drawn = counts.get().0;
         view.invalidate();
         draw(&ui, &mut gpu);
-        assert!(counts.get().0 > 1, "it draws after resting");
+        assert!(counts.get().0 > drawn, "it draws after resting");
+        gpu.trim();
+        assert_eq!(counts.get().1, 2, "and rests again");
+    }
+
+    #[test]
+    fn a_view_whose_box_goes_rests_then_though_it_lives_on() {
+        // A world on a tab left: its view kept, no box showing it.
+        let Ok(mut gpu) = GpuRenderer::new(64, 64) else {
+            return;
+        };
+        let mut ui = Ui::new(64., 64.);
+        let counts = std::rc::Rc::new(std::cell::Cell::new((0, 0)));
+        let view = view(Counted(counts.clone()));
+        let shown = ui.mount(gpu_view("Model", &view).size(32., 32.));
+        draw(&ui, &mut gpu);
+        assert_eq!(counts.get(), (1, 0));
+        shown.unmount();
+        draw(&ui, &mut gpu);
+        assert_eq!(counts.get().1, 1, "rested as its box went");
+        gpu.trim();
+        assert_eq!(counts.get().1, 1, "once: it hasn't drawn since");
+        assert!(zgx::gpu_view::painter(view.id()).is_some(), "it lives on");
     }
 }

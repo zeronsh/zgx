@@ -6632,7 +6632,10 @@ impl GpuRenderer {
     fn retain_views(&mut self) {
         if let Some(views) = &mut self.views {
             let images = &self.images;
-            views.retain_cached(|image| images.contains_key(&image));
+            // Boxes gone: views no box shows any more rest.
+            if views.retain_cached(|image| images.contains_key(&image)) {
+                self.rest_boxless();
+            }
         }
     }
     /// Bring `id`'s layer texture up to date. `magnification`: how much its
