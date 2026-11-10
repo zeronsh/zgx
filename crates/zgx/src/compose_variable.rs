@@ -474,43 +474,48 @@ struct PassInputs {
     requested: u32,
     request: Option<(u64, usize)>,
     reveal: u64,
-    /// The rows the view around a list scrolled by it shows (`window`): a
-    /// move or a clip changing within them changes nothing it builds.
-    shown: (usize, usize),
 }
-/// The ancestor's visible rows, kept out of the pass for a list that
-/// scrolls itself.
-#[inline(never)]
-fn ancestor_shown(
-    window: &crate::compose::AncestorWindow,
-    weak: &crate::widgets::WeakUi,
-    heights: &VariableHeights,
-    overscan: usize,
-) -> (usize, usize) {
-    let model = heights.index.borrow();
-    let Some((top, height)) = window.shown(weak, model.content_height()) else {
-        return (0, 0);
-    };
-    let (range, _) = model.visible_range_and_row(top, height, overscan);
-    (range.start, range.end)
+/// Only an ancestor-scrolled list keeps the visible-row cache and the
+/// heights' revision its last spare pass saw. Ordinary lists keep neither.
+struct AncestorPass {
+    window: crate::compose::AncestorWindow,
+    inputs: Option<PassInputs>,
+    shown: (usize, usize),
+    kept_revision: Option<u64>,
+}
+impl AncestorPass {
+    #[inline(never)]
+    fn unchanged(
+        &mut self,
+        weak: &crate::widgets::WeakUi,
+        heights: &VariableHeights,
+        overscan: usize,
+        inputs: PassInputs,
+    ) -> bool {
+        let model = heights.index.borrow();
+        let shown = match self.window.shown(weak, model.content_height()) {
+            Some((top, height)) => {
+                let (range, _) = model.visible_range_and_row(top, height, overscan);
+                (range.start, range.end)
+            }
+            None => (0, 0),
+        };
+        let same = self.inputs == Some(inputs) && self.shown == shown;
+        self.inputs = Some(inputs);
+        self.shown = shown;
+        same
+    }
 }
 
 /// Only a list keeping rows needs to distinguish a scroll from heights
 /// settling. Keep that check beside its spare work, out of the ordinary pass.
 #[inline(never)]
-fn kept_settled(
-    anchor: Option<&Anchor>,
-    ancestor: bool,
-    revision: u64,
-    kept_revision: &mut Option<u64>,
-) -> bool {
-    let settled = match anchor {
+fn kept_settled(anchor: Option<&Anchor>, window: Option<&mut AncestorPass>, revision: u64) -> bool {
+    let previous = window.map(|window| window.kept_revision.replace(revision));
+    match anchor {
         Some(anchor) => anchor.revision != revision,
-        None if ancestor => kept_revision.is_none_or(|was| was != revision),
-        None => true,
-    };
-    *kept_revision = Some(revision);
-    settled
+        None => previous.is_none_or(|previous| previous.is_none_or(|was| was != revision)),
+    }
 }
 
 /// `keys`, with what spare time adds (`crate::spare`).
@@ -615,7 +620,14 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             if !ancestor {
                 ui.scene.borrow_mut().set_scroll_copy(content, true);
             }
-            let window = ancestor.then(|| crate::compose::AncestorWindow::new(ui, root, viewport));
+            let mut window = ancestor.then(|| {
+                Box::new(AncestorPass {
+                    window: crate::compose::AncestorWindow::new(ui, root, viewport),
+                    inputs: None,
+                    shown: (0, 0),
+                    kept_revision: None,
+                })
+            });
             let stretch = crate::compose::ListStretch::new(
                 ui,
                 root,
@@ -724,8 +736,6 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             // focus goes with it (the keyboard's, not a scroll's).
             let mut pending_reveal: Option<(usize, RowAlign, f32, Option<NodeId>, bool)> = None;
             let mut anchor: Option<Anchor> = None;
-            // The heights' revision the last pass that kept rows saw (`settled`).
-            let mut kept_revision: Option<u64> = None;
             // The anchor row's key, for a list that keeps its place: rows
             // added or removed above it move it by as many, and it is found
             // there by its key. Beside the anchor, not in it, so that other
@@ -790,12 +800,6 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     runtime.untracked(|| watch.pass(width, &entries));
                 }
                 let revision = heights.revision.get();
-                // A list scrolled by the view around it: the part that view
-                // shows. (Read before any return: the pass follows it.)
-                let shown = match &window {
-                    Some(window) => ancestor_shown(window, &weak, &heights, overscan),
-                    None => (0, 0),
-                };
                 let inputs = PassInputs {
                     revision,
                     mounted,
@@ -803,21 +807,29 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     requested: requested.to_bits(),
                     request,
                     reveal: serial,
-                    shown,
                 };
-                // The same as the last full run read them: nothing to do. A
-                // measured list's own view (rows' sizes published elsewhere),
-                // or one the view around it scrolls, whose boxes move with
-                // every frame of an animation around it (a group easing open
-                // above it) while what it shows of it stays as it was.
-                if (measured && window.is_none() || window.is_some() && !measured)
+                if measured
                     && !W::ON
+                    && window.is_none()
                     && pending_reveal.is_none()
                     && !pending_measurement
                     && !measurement_changed
                     && last_inputs == Some(inputs)
                 {
                     return;
+                }
+                // Read the ancestor's geometry before returning, to keep the
+                // pass subscribed even when the same rows remain visible.
+                if let Some(window) = &mut window {
+                    let unchanged = window.unchanged(&weak, &heights, overscan, inputs);
+                    if !W::ON
+                        && pending_reveal.is_none()
+                        && !pending_measurement
+                        && !measurement_changed
+                        && unchanged
+                    {
+                        return;
+                    }
                 }
                 last_inputs = Some(inputs);
                 // Rows added or removed above the anchor row: it is as many
@@ -891,7 +903,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     }
                     // The part the view around it shows.
                     if let Some(window) = &window
-                        && let Some(shown) = window.shown(&weak, total)
+                        && let Some(shown) = window.window.shown(&weak, total)
                     {
                         (position, height) = shown;
                     }
@@ -914,7 +926,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                         match &window {
                             // The view around it scrolls to it; built as it
                             // shows.
-                            Some(window) => window.reveal_from(&weak, top, row_height),
+                            Some(window) => window.window.reveal_from(&weak, top, row_height),
                             None => {
                                 position = align
                                     .position(top, row_height, height, position)
@@ -1039,8 +1051,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     // Rows' heights changing under the view, not a scroll.
                     // One scrolled by the view around it keeps no anchor (that
                     // view keeps its place): its own last pass says.
-                    let settled =
-                        kept_settled(anchor.as_ref(), ancestor, revision, &mut kept_revision);
+                    let settled = kept_settled(anchor.as_ref(), window.as_deref_mut(), revision);
                     merge_kept(
                         kept,
                         &mut keys,
