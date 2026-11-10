@@ -3350,17 +3350,18 @@ fn kind_view(
             let (when_vm, vm) = (vm.clone(), vm.clone());
             let (then, otherwise, low) = (then.clone(), otherwise.clone(), low.clone());
             let when = Rc::new(resolve_owned(when));
-            switch(
+            switch_or_none(
                 move || {
                     resolve(&when, Ty::Bool, None, &when_vm).is_some_and(|l| l == Lit::Bool(true))
                 },
                 move |on, _| {
                     let _keep = &vm;
                     match (on, &otherwise) {
-                        (true, _) => shown(&then, &low),
-                        (false, Some(otherwise)) => shown(otherwise, &low),
-                        // Nothing: not a flex item either (no gap for it).
-                        (false, None) => div().hidden(),
+                        (true, _) => Some(shown(&then, &low)),
+                        (false, Some(otherwise)) => Some(shown(otherwise, &low)),
+                        // Nothing: no child, so not a flex item either (no
+                        // gap for it), and no node of its own.
+                        (false, None) => None,
                     }
                 },
             )
