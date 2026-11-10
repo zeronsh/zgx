@@ -2086,6 +2086,19 @@ struct ColdMaps {
     layer_inputs: Vec<NodeId>,
     /// Nodes whose boxes layer shaders read by tag (`set_geometry_tag`).
     geometry_nodes: Vec<(u64, NodeId)>,
+    /// Paragraphs whose runs fade in (`Scene::show_fades`).
+    text_fades: NodeMap<TextFades>,
+}
+/// A paragraph's runs fading in (`TextSpan::fade_in`), as `Scene::show_fades`
+/// shows them: the text they were shown for, which of its runs fade and how,
+/// and the time they show at (milliseconds since the Unix epoch, as
+/// `fade_now` says). Its renderer draws each run's alpha as it is then; the
+/// text's own colours stay as they are.
+#[derive(Clone, Debug)]
+struct TextFades {
+    text: Arc<crate::rich_text::RichText>,
+    fades: Arc<[(usize, crate::compose_rich::TextFade)]>,
+    now: f64,
 }
 /// A node painted outside its parent's fade (`Scene::set_outside_fade`).
 #[derive(Clone, Copy, Debug)]
@@ -9419,6 +9432,125 @@ impl Scene {
             let bottom = all.y + all.height;
             (bottom > top).then(|| Rect::new(all.x, top, all.width, bottom - top))
         }))
+    }
+    /// Show `id`'s `text` (its kind) with `fades` among its runs, each run's
+    /// alpha as its fade has it at `now` (milliseconds since the Unix epoch,
+    /// as `fade_now` says): `text` keeps its own colours, and nothing lays
+    /// out or repaints but its pixels, damaged where it shows (and any layer
+    /// holding it drawn again). A renderer draws a frame of it alone again
+    /// with the time changed (`text_fades`). No fades: drawn as it is.
+    pub fn show_fades(
+        &mut self,
+        id: NodeId,
+        text: &Arc<crate::rich_text::RichText>,
+        fades: &[(usize, crate::compose_rich::TextFade)],
+        now: f64,
+    ) {
+        if fades.is_empty() {
+            let gone = self
+                .cold
+                .as_mut()
+                .and_then(|cold| cold.text_fades.remove(&id))
+                .is_some();
+            if gone && self.contains(id) {
+                self.fade_damage(id);
+            }
+            return;
+        }
+        let maps = self.cold.get_or_insert_default();
+        // Those of nodes since gone, let go as fades come and go.
+        if maps.text_fades.len() > 64 {
+            let slots = &self.slots;
+            maps.text_fades.retain(|id, _| {
+                (slots.get(id.index as usize))
+                    .is_some_and(|s| s.generation == id.generation && s.node.is_some())
+            });
+        }
+        match maps.text_fades.get_mut(&id) {
+            Some(shown) => {
+                if !Arc::ptr_eq(&shown.text, text) {
+                    shown.text = text.clone();
+                }
+                if *shown.fades != *fades {
+                    shown.fades = fades.into();
+                }
+                shown.now = now;
+            }
+            None => {
+                maps.text_fades.insert(
+                    id,
+                    TextFades {
+                        text: text.clone(),
+                        fades: fades.into(),
+                        now,
+                    },
+                );
+            }
+        }
+        self.fade_damage(id);
+    }
+    /// The runs of `id`'s text fading in and the time they show at
+    /// (`show_fades`), while its kind is the text they were shown for.
+    pub fn text_fades(
+        &self,
+        id: NodeId,
+    ) -> Option<(&[(usize, crate::compose_rich::TextFade)], f64)> {
+        let shown = self.cold.as_ref()?.text_fades.get(&id)?;
+        match &self.node(id).kind {
+            NodeKind::RichText { text } if Arc::ptr_eq(text, &shown.text) => {
+                Some((&shown.fades, shown.now))
+            }
+            _ => None,
+        }
+    }
+    /// Whether any paragraph's runs fade in (`show_fades`).
+    #[inline]
+    pub fn has_text_fades(&self) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| !cold.text_fades.is_empty())
+    }
+    /// `id`'s text as it shows: its fading runs' colours at the time they
+    /// show at (`show_fades`), each alpha as `TextFade::at` scales it,
+    /// rounded; its kind's text where none fades. `None` for no text.
+    pub fn shown_text(&self, id: NodeId) -> Option<Arc<crate::rich_text::RichText>> {
+        let NodeKind::RichText { text } = &self.node(id).kind else {
+            return None;
+        };
+        let Some((fades, now)) = self.text_fades(id) else {
+            return Some(text.clone());
+        };
+        Some(Arc::new(text.recoloured(
+            |i, color| match fades.iter().find(|(at, _)| *at == i) {
+                Some((_, fade)) => Color(color.0, color.1, color.2, fade.alpha(color.3, now)),
+                None => color,
+            },
+        )))
+    }
+    /// What a fade's frame changes (`show_fades`): `id`'s pixels where it
+    /// shows, and the layers holding it, as a change of its paint marks
+    /// them; nothing else (it is not repainted: its kind is as it was).
+    #[cold]
+    #[inline(never)]
+    fn fade_damage(&mut self, id: NodeId) {
+        if self.isolation_count + self.promoted_count > 0 {
+            let mut current = Some(id);
+            while let Some(ancestor) = current {
+                let node = self.node_mut(ancestor);
+                if node.isolated || node.promoted {
+                    node.layer_revision = node.layer_revision.wrapping_add(1);
+                }
+                current = node.parent;
+            }
+        }
+        self.damage_subtree(id);
+        // Queued with nothing to do, for the next flush to report it (it
+        // reports damage only past a change): no repaint, no layout.
+        let node = self.node_mut(id);
+        if !node.queued {
+            node.queued = true;
+            self.dirty.push(id);
+        }
     }
     /// Where a walk up from `id`'s content change stops to lay out alone:
     /// its parent or its grandparent (a text in a row, in a button in a

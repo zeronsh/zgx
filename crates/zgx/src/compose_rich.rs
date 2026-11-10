@@ -173,6 +173,11 @@ impl TextFade {
         let t = (((now - self.start) / self.ms as f64) as f32).clamp(0., 1.);
         1. - (1. - t).powf(self.power)
     }
+    /// The alpha a run of alpha `alpha` shows at `now`: `alpha` scaled by
+    /// how far in it is (`at`), rounded to the nearest of 0 to 255.
+    pub fn alpha(&self, alpha: u8, now: f64) -> u8 {
+        (alpha as f32 * self.at(now)).round().clamp(0., 255.) as u8
+    }
     /// Whether it's still fading at `now`.
     pub fn fading(&self, now: f64) -> bool {
         self.ms > 0. && now < self.start + self.ms as f64

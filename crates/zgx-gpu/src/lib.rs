@@ -2396,6 +2396,72 @@ fn step_scale(step: i32) -> f32 {
         _ => twos * std::f32::consts::SQRT_2,
     }
 }
+/// Paragraphs' runs fading in (`Scene::show_fades`), as frames draw them
+/// (`fade_text`): each quad of a run fading carries its fade's record in the
+/// frame's region table (`FadeRecord`), whose first lane is the run's alpha
+/// at the frame's time, as `TextFade::alpha` rounds it, over 255. Its vertex
+/// stage (draw.wgsl's `vs`) draws its alpha from there, so a frame whose
+/// only change is fades' time draws the last one's quads and draws again
+/// with those lanes written anew (`replay_fades`): no walk, no quads made.
+/// Held only while some text fades.
+#[derive(Default)]
+struct GpuFades {
+    /// The records of the frame `frame` (`GpuRenderer::frame`) drew.
+    records: Vec<FadeRecord>,
+    frame: u64,
+    /// The window frame (`layer_frame`) a layer drew a fade in, and the
+    /// frame a fading run's quad couldn't carry one in (a dotted line's
+    /// rounded pieces): such frames draw only as usual.
+    layered: u64,
+    boxed: u64,
+    /// The last frame, kept to draw again (`replay_fades`).
+    replay: Option<Box<FadeReplay>>,
+    /// Frames drawn again (`fade_replays`).
+    replays: u64,
+}
+/// A fade's record (`GpuFades::records`): its index plus one in the region
+/// table, the paragraph whose run it fades, its fade, and the run's alpha.
+#[derive(Clone, Copy)]
+struct FadeRecord {
+    index: u32,
+    node: NodeId,
+    fade: zgx::compose::TextFade,
+    alpha: u8,
+}
+impl FadeRecord {
+    /// Its region-table record at `now`: the run's alpha then over 255 in
+    /// its first lane; its index after, so that no two fades' records are
+    /// alike (`region_index` shares alike ones); never a clip's region, and
+    /// read by no quad's `mask`.
+    fn region(&self, now: f64) -> Region {
+        Region {
+            round0: [
+                self.fade.alpha(self.alpha, now) as f32 / 255.,
+                self.index as f32,
+                -7.,
+                -7.,
+            ],
+            ..bytemuck::Zeroable::zeroed()
+        }
+    }
+}
+/// A frame of fading runs, kept to draw again (`replay_fades`): its quads,
+/// draws, regions and damage, its fades' records, and what it was drawn
+/// for. Drawn again only while nothing else changes.
+struct FadeReplay {
+    quads: Vec<Quad>,
+    draws: Vec<Draw>,
+    clips: Vec<Region>,
+    regions: Vec<Rect>,
+    records: Vec<FadeRecord>,
+    flushes: u64,
+    identity: u64,
+    revision: u64,
+    atlas_epoch: u64,
+    viewport: Rect,
+    scale: f32,
+    background: Color,
+}
 /// A whole window's paint as `render_flat` made it, kept to patch where
 /// the scene repaints (`render_kept`): its quads and draws, and where each
 /// item's lie.
@@ -4807,6 +4873,8 @@ pub struct GpuRenderer {
     /// The window's last whole paint, while only leaves repaint
     /// (`render_kept`).
     kept: Option<Box<Kept>>,
+    /// Runs fading in, while any do (`GpuFades`).
+    fades: Option<Box<GpuFades>>,
     /// What keeping the window up to date did in a frame drawn as usual.
     patch_stats: GpuStats,
     /// Whether the last frame patched the window as kept (`render_kept`):
@@ -5557,6 +5625,7 @@ impl GpuRenderer {
             frame_quads: Vec::new(),
             frame_points: Vec::new(),
             kept: None,
+            fades: None,
             patch_stats: GpuStats::default(),
             patched: false,
             patchable: Patchable::default(),
@@ -6503,6 +6572,12 @@ impl GpuRenderer {
             }
             None => damage,
         };
+        // Only runs fading in changed: the last frame again at their time.
+        if self.fades.is_some()
+            && let Some(stats) = self.replay_fades(scene, damage)?
+        {
+            return Ok(stats);
+        }
         if damage.is_empty() && !self.fresh && self.copies.is_empty() {
             return Ok(GpuStats::default());
         }
@@ -8104,6 +8179,11 @@ impl GpuRenderer {
             ],
         })
     }
+    /// Frames drawn again as their runs fading in went on, with nothing
+    /// else changed (`replay_fades`), since the renderer was made.
+    pub fn fade_replays(&self) -> u64 {
+        self.fades.as_ref().map_or(0, |fades| fades.replays)
+    }
     /// Frames in a row, this one included, whose changes a kept window
     /// would have patched and drawn from: leaves alone repainting (no
     /// composite change, nothing mounted or removed), over `KEPT_SHARE` of
@@ -8159,6 +8239,10 @@ impl GpuRenderer {
         merged: Option<Vec<Rect>>,
         viewport: Rect,
     ) -> Result<GpuStats, GpuError> {
+        // Text fading in: drawn as usual, and kept apart (`keep_fades`).
+        if scene.has_text_fades() {
+            return self.render_flat::<FRAME>(scene, items, damage, merged, false);
+        }
         let ids: Vec<NodeId> = items.iter().map(|item| item.id).collect();
         let boxed: Vec<Option<KeptBox>> = items
             .iter()
@@ -8243,6 +8327,176 @@ impl GpuRenderer {
         }));
         Ok(drawn)
     }
+    /// Keep the window's frame just made, of runs fading in (`fade_text`), to
+    /// draw again as their time goes on (`replay_fades`): its quads, draws,
+    /// regions and damage, unless it draws more than them (`apart`: a blur,
+    /// a backdrop read, a fade's bands, a scroll's copy, an effect, strokes),
+    /// a layer drew a fade, or a fade's quad couldn't carry it. With none
+    /// fading, what's held for fades goes.
+    #[cold]
+    #[inline(never)]
+    fn keep_fades(
+        &mut self,
+        scene: &Scene,
+        (quads, draws, clips): (&[Quad], &[Draw], &[Region]),
+        damage: &[Rect],
+        apart: bool,
+    ) {
+        if self.in_layer {
+            return;
+        }
+        let (frame, layer_frame) = (self.frame, self.layer_frame);
+        let Some(fades) = self.fades.as_deref_mut() else {
+            return;
+        };
+        let records = match fades.frame == frame {
+            true => std::mem::take(&mut fades.records),
+            false => Vec::new(),
+        };
+        let mut replay = fades.replay.take();
+        if records.is_empty() {
+            if fades.layered != layer_frame {
+                self.fades = None;
+            }
+            return;
+        }
+        #[cfg(d3d11)]
+        let apart = apart || self.d3d11.is_some();
+        if apart
+            || fades.layered == layer_frame
+            || fades.boxed == frame
+            || self.plane.is_some()
+            || scene.has_backdrop_readers()
+        {
+            return;
+        }
+        let viewport = Rect::new(
+            0.,
+            0.,
+            self.width as f32 / self.scale,
+            self.height as f32 / self.scale,
+        );
+        let flushes = *scene.repaints().0.end();
+        let kept = replay.get_or_insert_with(|| {
+            Box::new(FadeReplay {
+                quads: Vec::new(),
+                draws: Vec::new(),
+                clips: Vec::new(),
+                regions: Vec::new(),
+                records: Vec::new(),
+                flushes,
+                identity: 0,
+                revision: 0,
+                atlas_epoch: 0,
+                viewport,
+                scale: 0.,
+                background: Color(0, 0, 0, 0),
+            })
+        });
+        kept.quads.clear();
+        kept.quads.extend_from_slice(quads);
+        kept.draws.clear();
+        kept.draws.extend_from_slice(draws);
+        kept.clips.clear();
+        kept.clips.extend_from_slice(clips);
+        kept.regions.clear();
+        kept.regions.extend_from_slice(damage);
+        kept.records = records;
+        kept.flushes = flushes;
+        kept.identity = scene.identity();
+        kept.revision = scene.content_revision();
+        kept.atlas_epoch = self.atlas_epoch;
+        kept.viewport = viewport;
+        kept.scale = self.scale;
+        kept.background = self.background;
+        fades.replay = replay;
+    }
+    /// Draw the window's last frame again (`keep_fades`), where its runs
+    /// fading in are the only change since: the same quads and draws, each
+    /// fade's record (`FadeRecord`) written for the time it shows at now,
+    /// the damage its runs' strips. `None` when anything else changed (the
+    /// scene repainted anything, scrolled, a target of another size or
+    /// scale, another background, glyphs placed anew, damage elsewhere):
+    /// then the frame is drawn as usual.
+    #[cold]
+    #[inline(never)]
+    fn replay_fades(
+        &mut self,
+        scene: &Scene,
+        damage: &[Rect],
+    ) -> Result<Option<GpuStats>, GpuError> {
+        let Some(mut replay) = self.fades.as_deref_mut().and_then(|f| f.replay.take()) else {
+            return Ok(None);
+        };
+        let viewport = Rect::new(
+            0.,
+            0.,
+            self.width as f32 / self.scale,
+            self.height as f32 / self.scale,
+        );
+        let (covered, repaints) = scene.repaints();
+        let regions = merge_damage(damage, viewport, self.scale);
+        let within = |rect: &Rect| {
+            replay.regions.iter().any(|kept| {
+                rect.x >= kept.x
+                    && rect.y >= kept.y
+                    && rect.x + rect.width <= kept.x + kept.width
+                    && rect.y + rect.height <= kept.y + kept.height
+            })
+        };
+        if !scene.has_text_fades()
+            || *covered.start() != replay.flushes + 1
+            || !repaints.is_empty()
+            || replay.identity != scene.identity()
+            || replay.revision != scene.content_revision()
+            || replay.atlas_epoch != self.atlas_epoch
+            || replay.viewport != viewport
+            || replay.scale != self.scale
+            || replay.background != self.background
+            || self.fresh
+            || !self.copies.is_empty()
+            || !scene.scroll_moves().is_empty()
+            || self.plane.is_some()
+            || self.in_layer
+            || self.kept.is_some()
+            || !self.effect_jobs.is_empty()
+            || scene.has_backdrop_readers()
+            || scene.has_layer_inputs()
+            || self.atlas_filling()
+            || regions.is_empty()
+            || !regions.iter().all(within)
+        {
+            return Ok(None);
+        }
+        // Each fade's record, as it shows now; a paragraph done fading
+        // shows its text's own alpha (its fades' end).
+        for record in &replay.records {
+            let now = scene
+                .text_fades(record.node)
+                .map_or(f64::INFINITY, |(_, now)| now);
+            replay.clips[record.index as usize - 1] = record.region(now);
+        }
+        let len = replay.quads.len();
+        std::mem::swap(&mut self.frame_quads, &mut replay.quads);
+        self.frame_draws.clone_from(&replay.draws);
+        self.patch_clips.clone_from(&replay.clips);
+        self.frame_points.clear();
+        self.draw_made = true;
+        self.banding = false;
+        // (Held apart while it draws: a frame drawn again keeps nothing.)
+        let mut fades = self.fades.take();
+        let drawn = self.render_flat::<FRAME>(scene, Vec::new(), damage, Some(regions), false);
+        std::mem::swap(&mut self.frame_quads, &mut replay.quads);
+        replay.quads.truncate(len);
+        replay.flushes = *covered.end();
+        self.rendered_serial = Some(scene.flush_serial());
+        if let Some(fades) = fades.as_deref_mut() {
+            fades.replays += 1;
+            fades.replay = Some(replay);
+        }
+        self.fades = fades;
+        Ok(Some(drawn?))
+    }
     /// Draw the window as it was kept, where the scene repainted only
     /// leaves since: each one's instances made again (`render_flat::<PATCH>`,
     /// as a frame makes them) into its place, every other item's as they
@@ -8279,6 +8533,8 @@ impl GpuRenderer {
             || scene.has_backdrop_blur()
             || scene.has_overflow_fades()
             || self.atlas_filling()
+            // (Text fading in: its frames draw again apart, `replay_fades`.)
+            || scene.has_text_fades()
         {
             return Ok(self.recycle_kept(*kept));
         }
@@ -10638,6 +10894,18 @@ impl GpuRenderer {
                                 self.shapes.insert(item.id, shaped);
                             }
                         }
+                        // Runs fading in: their quads carry their fades and
+                        // draw with the full shader, which reads them.
+                        if scene.has_text_fades() {
+                            let from = glyphs_from.get();
+                            glyphs_alone &= !self.fade_text(
+                                scene,
+                                &item,
+                                (&mut quads[from..], &mut clips),
+                                (glyph_x, y, inset),
+                                filled.is_some(),
+                            );
+                        }
                         let (at, mut end) = shadows_at.get();
                         if at != usize::MAX {
                             if blurred || colored_at.get() {
@@ -10820,6 +11088,19 @@ impl GpuRenderer {
             self.frame_points = points;
             self.patch_clips = clips;
             return Ok(stats);
+        }
+        // A frame of runs fading in, kept to draw again as their time goes
+        // on (`replay_fades`), unless more than its quads would be drawn.
+        if self.fades.is_some() {
+            let apart = made
+                || record
+                || has_blur
+                || readers
+                || !bands.is_empty()
+                || !copies.is_empty()
+                || !effect_jobs.is_empty()
+                || !points.is_empty();
+            self.keep_fades(scene, (&quads, &draws, &clips), &damage, apart);
         }
         // Effect passes' quads ride in the frame's vertex buffer.
         let effect_first = quads.len() as u32;
@@ -14334,6 +14615,160 @@ impl GpuRenderer {
             }
         }
         Ok(())
+    }
+    /// The quads of a paragraph's runs fading in (`Scene::text_fades`):
+    /// `quads`, its own just placed from its shape at `origin` (its glyphs'
+    /// x and y, then `inset`, as `place_text_quads` and selection have them),
+    /// those drawn in a fading run's colour (a glyph not selected, a colour
+    /// glyph's alpha, a line in its text's colour: what recolouring its run
+    /// would change) carry their fade's record in `clips` (`FadeRecord`)
+    /// and show its alpha now, as the run recoloured at that time would.
+    /// None in a gradient (`filled`). Whether any does: they draw with the
+    /// full shader, whose vertex stage reads it (draw.wgsl's `vs`).
+    #[cold]
+    #[inline(never)]
+    fn fade_text(
+        &mut self,
+        scene: &Scene,
+        item: &zgx::scene::PaintItem<'_>,
+        (quads, clips): (&mut [Quad], &mut Vec<Region>),
+        (x, y, inset): (f32, f32, f32),
+        filled: bool,
+    ) -> bool {
+        let NodeKind::RichText { text } = item.kind else {
+            return false;
+        };
+        let Some((fades, now)) = scene.text_fades(item.id).filter(|_| !filled) else {
+            return false;
+        };
+        let Some(shaped) = self.shapes.get(&item.id) else {
+            return false;
+        };
+        let state = self.fades.get_or_insert_default();
+        if state.frame != self.frame {
+            state.records.clear();
+            state.frame = self.frame;
+        }
+        if self.in_layer {
+            state.layered = self.layer_frame;
+        }
+        let runs = text.runs();
+        let opacity = item.effects.opacity;
+        // Selected glyphs take the selected-text colour, which doesn't fade.
+        let selected = scene
+            .text_highlight(item.id)
+            .filter(|highlight| highlight.text_color.is_some());
+        // Its lines in their run's colour, of runs that fade.
+        let lines: Vec<(&text::RichDecoration, f32)> = (shaped.decorations.iter())
+            .filter(|d| !d.background && fades.iter().any(|(run, _)| *run == d.run))
+            .filter(|d| {
+                let run = &runs[d.run];
+                let line = if d.strike {
+                    run.strikethrough
+                } else {
+                    run.underline
+                };
+                line.is_some_and(|line| line.color.is_none())
+            })
+            .map(|d| (d, d.bounds.height.max(0.5)))
+            .collect();
+        let (scale, atlas) = (self.scale, self.atlas_size);
+        let (mut next, mut marked, mut boxed) = (0, false, false);
+        for quad in quads.iter_mut() {
+            // A glyph's: the next of its glyphs placed as it is.
+            let mut glyph = None;
+            if quad.options[1] > 0.5 {
+                for (k, g) in shaped.glyphs.iter().enumerate().skip(next) {
+                    let size = f32::from_bits(g.key.font_size_bits);
+                    if !size.is_finite() || size > MAX_ATLAS as f32 {
+                        continue;
+                    }
+                    let Some(&Some(entry)) = self.entries.get(&AtlasKey::from(g.key)) else {
+                        continue;
+                    };
+                    let cached = glyph_quad(g, entry, scale, atlas, [0.; 4]);
+                    if cached.uv == quad.uv
+                        && cached.rect[0] + x == quad.rect[0]
+                        && cached.rect[1] + y == quad.rect[1]
+                    {
+                        next = k + 1;
+                        glyph = Some((g.run, cached, entry.color));
+                        break;
+                    }
+                }
+            }
+            let run = match glyph {
+                Some((run, cached, colour)) => {
+                    let (cx, cy) = (
+                        inset + cached.rect[0] + cached.rect[2] * 0.5,
+                        cached.rect[1] + cached.rect[3] * 0.5,
+                    );
+                    if !colour && selected.is_some_and(|h| h.glyph_color(cx, cy).is_some()) {
+                        continue;
+                    }
+                    run
+                }
+                // A line's: a piece of one of them, in its colour.
+                None => {
+                    let [qx, qy, qw, qh] = quad.rect;
+                    let found = lines.iter().find(|(d, thick)| {
+                        let b = d.bounds;
+                        let colour = rgba(d.color, 1.);
+                        let (left, top) = (b.x + x, b.y + y);
+                        qx >= left - 1e-3
+                            && qx + qw <= left + b.width + 1e-3
+                            && qy + qh * 0.5 >= top - 2. * thick - 1.
+                            && qy + qh * 0.5 <= top + 3. * thick + 1.
+                            && qh <= 4. * thick + 3. / scale + 1e-3
+                            && quad.color[..3] == colour[..3]
+                    });
+                    match found {
+                        Some((d, _)) => d.run,
+                        None => continue,
+                    }
+                }
+            };
+            let Some(&(_, fade)) = fades.iter().find(|(at, _)| *at == run) else {
+                continue;
+            };
+            let alpha = runs[run].color.3;
+            let state = self.fades.as_deref_mut().expect("made above");
+            let record = match (state.records.iter())
+                .find(|r| r.node == item.id && r.fade == fade && r.alpha == alpha)
+            {
+                Some(record) => *record,
+                None => {
+                    let record = FadeRecord {
+                        index: clips.len() as u32 + 1,
+                        node: item.id,
+                        fade,
+                        alpha,
+                    };
+                    clips.push(record.region(now));
+                    state.records.push(record);
+                    record
+                }
+            };
+            // Its alpha now, as its run recoloured would draw it.
+            quad.color[3] = fade.alpha(alpha, now) as f32 / 255. * opacity;
+            // A box's quad (a dotted line's round piece) has its border's
+            // colour there: it shows its alpha only as drawn now.
+            if quad.shape[3] > 0.5 || quad.shape[2] > 0. || quad.options[2] >= 0.5 {
+                boxed = true;
+                continue;
+            }
+            let index = record.index as f32;
+            quad.border = [index, opacity, 0., -1.];
+            // (Not plain: the full shader draws it, `shading`.)
+            if quad.mask[3] <= 0. {
+                quad.mask[3] = index;
+            }
+            marked = true;
+        }
+        if boxed {
+            self.fades.as_deref_mut().expect("made above").boxed = self.frame;
+        }
+        marked
     }
     /// Make `visible_glyphs` the quads of `shaped`'s lines that can reach
     /// the band `top` to `top + height` (from its origin, logical points),
@@ -19502,7 +19937,8 @@ fn create_quad_pipelines(
             },
             wgpu::BindGroupLayoutEntry {
                 binding: 1,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                // (And a fading run's alpha, read where its vertices are.)
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,

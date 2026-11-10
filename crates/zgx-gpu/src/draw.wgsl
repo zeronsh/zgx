@@ -83,7 +83,12 @@ fn faded(b:vec4<f32>, f:vec4<f32>, p:vec2<f32>)->f32 {
  // does after interpolating, so `uv` and `point` stay true across the quad.
  var w=1.;
  if v.options.z>1.5 {w=max(dot(v.border.zw,p)+1.,1e-4);}
- var o:Out; o.position=vec4(position.x/viewport.x*2.-w,w-position.y/viewport.y*2.,0.,w);o.uv=v.uv.xy+corner*v.uv.zw;o.color=v.color;o.point=p;o.fade=v.fade;o.options=v.options;o.shape=v.shape;o.border=v.border;o.mask=v.mask;return o;
+ var o:Out; o.position=vec4(position.x/viewport.x*2.-w,w-position.y/viewport.y*2.,0.,w);o.uv=v.uv.xy+corner*v.uv.zw;o.color=v.color;o.point=p;o.fade=v.fade;o.options=v.options;o.shape=v.shape;o.border=v.border;o.mask=v.mask;
+ // A run fading in (`border.w` -1, untransformed, no box): its alpha its
+ // fade's record's (`border.x`, its index plus one) as the frame's time has
+ // it, times its text's opacity (`border.y`), as `fade_text` draws it.
+ if v.border.w<-.5 && v.options.z<.5 {o.color.a=regions[u32(v.border.x)-1u].round0.x*v.border.y;o.border=vec4(0.);}
+ return o;
 }
 fn shade(input:Out)->vec4<f32> { return shade_texel(input,vec4(0.),false); }
 // How far `at` (a pixel's centre, device pixels) lies from the middle of

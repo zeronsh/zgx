@@ -595,14 +595,19 @@ impl Frame {
                 .setFragmentBytes_length_atIndex(bytes, size_of_val(&self.viewport), 0);
             self.encoder
                 .setVertexBuffer_offset_atIndex(Some(&self.vertices), 0, VERTICES);
+            // (Both stages: a fading run's alpha is read with its vertices.)
             let len = match &self.regions {
                 Regions::Inline(bytes) => {
                     let pointer = std::ptr::NonNull::from(&bytes[..]).cast();
+                    self.encoder
+                        .setVertexBytes_length_atIndex(pointer, bytes.len(), REGIONS);
                     self.encoder
                         .setFragmentBytes_length_atIndex(pointer, bytes.len(), REGIONS);
                     bytes.len()
                 }
                 Regions::Buffer(buffer, len) => {
+                    self.encoder
+                        .setVertexBuffer_offset_atIndex(Some(buffer), 0, REGIONS);
                     self.encoder
                         .setFragmentBuffer_offset_atIndex(Some(buffer), 0, REGIONS);
                     *len
@@ -621,6 +626,11 @@ impl Frame {
                 None => &sizes[..1],
             };
             self.encoder.setFragmentBytes_length_atIndex(
+                std::ptr::NonNull::from(sizes).cast(),
+                size_of_val(sizes),
+                REGION_SIZES,
+            );
+            self.encoder.setVertexBytes_length_atIndex(
                 std::ptr::NonNull::from(sizes).cast(),
                 size_of_val(sizes),
                 REGION_SIZES,
