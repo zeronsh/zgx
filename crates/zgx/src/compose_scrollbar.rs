@@ -754,7 +754,9 @@ pub(crate) fn mount(
     let write_active = active.clone();
     let mut grab = None;
     let (event_fade, event_ui) = (fade.clone(), ui.downgrade());
-    ui.on_event(track, true, move |cx| {
+    // Focusable for its keys, unless its style says not (then out of the
+    // Tab order too, as an app's rail is).
+    ui.on_event(track, look.focusable, move |cx| {
         if cx.phase == EventPhase::Capture {
             return;
         }
