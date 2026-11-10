@@ -5611,6 +5611,71 @@ fn sliding_stream_keeps_prepared_text_to_what_is_drawn() {
     assert!(peak < 1024 * 1024, "prepared text grew to {peak} bytes");
 }
 
+/// A text that changes every frame it is drawn (a counter, a header rolling
+/// its count) leaves the text it showed before, undrawn, each frame: the
+/// cache trims what it keeps of those once past their budget, down to half
+/// of it, so once in many frames, not in every one it shapes. After
+/// a burst of texts, what is held comes back down: to the budget as frames
+/// draw, and at rest (`trim`) to where it was before the burst.
+#[test]
+fn a_changing_text_trims_its_cache_once_in_many_frames() {
+    let _gpu_fixture = gpu_fixture();
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let mut gpu = GpuRenderer::new(480, 200).unwrap();
+    let mut ui = Ui::new(480., 200.);
+    gpu.install_text(&mut ui.scene.borrow_mut());
+    let count = ui.signal(0_u64);
+    let read = count.clone();
+    ui.mount(
+        overlay().w(480.).h(200.).child(
+            text_signal(move || {
+                format!(
+                    "ran {} commands, read {} files and searched the code",
+                    read.get(),
+                    read.get() * 3
+                )
+            })
+            .w(460.)
+            .h(40.),
+        ),
+    );
+    let frame = |ui: &mut Ui, gpu: &mut GpuRenderer| {
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+    };
+    frame(&mut ui, &mut gpu);
+    gpu.trim();
+    let resting = gpu.text_cache().borrow().bytes().0;
+    // Past the budget: every text shown so far but the one drawn is undrawn.
+    for n in 1..=2000 {
+        count.set(n);
+        frame(&mut ui, &mut gpu);
+    }
+    let held = gpu.text_cache().borrow().bytes().0;
+    let before = gpu.text_cache().borrow().trims();
+    for n in 2001..=2400 {
+        count.set(n);
+        frame(&mut ui, &mut gpu);
+    }
+    let trims = gpu.text_cache().borrow().trims() - before;
+    assert!(
+        trims * 5 <= 400,
+        "{trims} trims in 400 frames, each shaping one text"
+    );
+    // Held within the budget as frames draw, and back at rest.
+    assert!(
+        held < resting + 80 * 1024,
+        "{held} bytes held, {resting} at rest"
+    );
+    gpu.trim();
+    let after = gpu.text_cache().borrow().bytes().0;
+    assert!(
+        after <= resting + 64 * 1024,
+        "{after} bytes held at rest after the burst, {resting} before it"
+    );
+}
+
 /// Plain quads draw with a lighter shader, and opaque flat ones without
 /// blending (every run on a software rasterizer, large ones on a GPU; see
 /// `debug_split_shading`): every feature must look the same either way, to
