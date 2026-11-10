@@ -7,6 +7,9 @@
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Memory {
+    /// The frame's temporary targets (colour, depth, what is behind glass):
+    /// none while its window rests.
+    pub targets: u64,
     /// The app's buffers (`World::add_buffer`), live handles only.
     pub app_buffers: u64,
     /// The app's textures (`World::add_texture`), live handles only.
@@ -27,7 +30,10 @@ impl crate::World {
     /// go here, as by the next frame.
     pub fn memory(&self) -> Memory {
         #[allow(unused_mut)]
-        let mut memory = Memory::default();
+        let mut memory = Memory {
+            targets: self.temporary_bytes(),
+            ..Memory::default()
+        };
         #[cfg(feature = "compute")]
         {
             let mut inner = self.inner_mut();

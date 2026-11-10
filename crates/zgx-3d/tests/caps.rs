@@ -45,3 +45,31 @@ fn a_world_drawn_in_a_window_knows_its_devices_tier() {
         assert_eq!(caps.backend, Backend::Metal);
     }
 }
+
+#[test]
+fn a_worlds_memory_counts_its_frames_targets() {
+    let world = World::new();
+    world.add(Object::mesh(
+        Geometry::cuboid(1., 1., 1.),
+        Material::default(),
+    ));
+    assert_eq!(world.memory(), Memory::default(), "nothing before a frame");
+    let mut gpu = match GpuRenderer::new(32, 32) {
+        Ok(gpu) => gpu,
+        Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+            panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
+        }
+        Err(_) => return,
+    };
+    let mut ui = Ui::new(32., 32.);
+    ui.mount(
+        div()
+            .size(32., 32.)
+            .child(gpu_view("World", world.view()).size(32., 32.)),
+    );
+    ui.prepare_frame();
+    let report = ui.scene.borrow_mut().flush();
+    gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+    // Colour and depth, four samples a pixel.
+    assert_eq!(world.memory().targets, 32 * 32 * 4 * (4 + 4));
+}
