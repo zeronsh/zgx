@@ -1801,6 +1801,15 @@ fn repaint_flags(dirty: u8) -> u8 {
 /// Whether `new` differs from `old` in colour alone (`PAINT_ONLY`): a rect's
 /// colour, a text's colour, a box's fill or border colour (with no
 /// decoration, whose rasters are kept apart).
+/// Whether `new`, rich text laid out as `old` is, paints where it does: its
+/// runs' colours alone changed (`RichText::paints_like`). Out of line, as
+/// `Scene::set_kind` asks it of rich text alone.
+#[inline(never)]
+fn rich_recoloured(old: &NodeKind, new: &NodeKind) -> bool {
+    matches!((old, new),
+        (NodeKind::RichText { text: old }, NodeKind::RichText { text: new }) if new.paints_like(old))
+}
+
 fn paints_only(old: &NodeKind, new: &NodeKind) -> bool {
     let colours = |a: &QuadStyle, b: &QuadStyle| {
         a.decoration.is_none()
@@ -7072,16 +7081,12 @@ impl Scene {
         // runs paint where they did: a fade's frame), it paints where it did,
         // so the inks and boxes cached for it and its ancestors stand; worked
         // out again, each frame of a fade walked every ancestor's children.
-        let recoloured = colour
-            || (layout_unchanged
-                && matches!((&self.node(id).kind, &kind),
-                    (NodeKind::RichText { text: old }, NodeKind::RichText { text: new }) if new.paints_like(old)));
+        let recoloured =
+            colour || (layout_unchanged && rich_recoloured(&self.node(id).kind, &kind));
         self.node_mut(id).kind = kind;
         let flags = if colour { PAINT | PAINT_ONLY } else { PAINT };
-        match recoloured {
-            true => self.invalidate_with(id, flags, false, true, false),
-            false => self.invalidate(id, flags),
-        }
+        // (One call: `invalidate_with` is inlined where it's called.)
+        self.invalidate_with(id, flags, false, true, !recoloured);
         if !layout_unchanged {
             self.invalidate_layout(id);
         }
