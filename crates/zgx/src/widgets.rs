@@ -4215,22 +4215,32 @@ impl Ui {
                 .set(Some(geometry_revision));
             let (sizes, bounds): (Vec<_>, Vec<_>) = {
                 let scene = self.scene.borrow();
+                // Only those resized, as the bounds below: most observed
+                // nodes keep their size as something else lays out (each of
+                // a terminal's rows, a line streaming in). Published below
+                // if still resized then.
                 let sizes = if layout_changed {
                     let content = self.storage.content_sizes.borrow();
                     let own = self.storage.observed_sizes.borrow();
-                    content
-                        .iter()
-                        .filter(|(node, _)| scene.contains(**node))
-                        .map(|(node, signal)| {
-                            (*node, signal.clone(), allocated_content_size(&scene, *node))
-                        })
-                        .chain(own.iter().filter(|(node, _)| scene.contains(**node)).map(
-                            |(node, signal)| {
-                                let b = scene.layout_box(*node);
-                                (*node, signal.clone(), (b.width, b.height))
-                            },
-                        ))
-                        .collect()
+                    let mut sizes = Vec::new();
+                    for (node, signal) in content.iter() {
+                        if scene.contains(*node) {
+                            let size = allocated_content_size(&scene, *node);
+                            if signal.with_untracked(|told| resized(*told, size)) {
+                                sizes.push((*node, signal.clone(), size));
+                            }
+                        }
+                    }
+                    for (node, signal) in own.iter() {
+                        if scene.contains(*node) {
+                            let b = scene.layout_box(*node);
+                            let size = (b.width, b.height);
+                            if signal.with_untracked(|told| resized(*told, size)) {
+                                sizes.push((*node, signal.clone(), size));
+                            }
+                        }
+                    }
+                    sizes
                 } else {
                     Vec::new()
                 };
