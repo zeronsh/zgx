@@ -53,6 +53,10 @@ impl TaskToken {
             check: finished,
         }))
     }
+    /// Whether its task has finished.
+    pub fn finished(&self) -> bool {
+        self.0.finished()
+    }
 }
 /// Provider bridging components to a native or headless executor.
 #[derive(Clone)]
@@ -2445,7 +2449,9 @@ pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
 /// Where anchored popovers and menus open (`View::placement`).
 pub use crate::compose_modal::ModalPlacement;
 pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
-pub use crate::compose_rich::{RichTextView, SpanHover, SpanIcon, TextSpan, rich_text, text_span};
+pub use crate::compose_rich::{
+    RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now, rich_text, text_span,
+};
 pub use crate::compose_tooltip::{Tooltip, TooltipTiming, set_tooltip_timing};
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
@@ -4913,6 +4919,7 @@ fn paragraph_effect<const LOCATING: bool>(
     weak: crate::widgets::WeakUi,
     content_state: Signal<crate::compose_rich::Content>,
     locating: Option<std::rc::Rc<std::cell::RefCell<Vec<crate::compose_rich::Run>>>>,
+    mut fading: Fading,
 ) -> impl FnMut() + 'static {
     move || {
         let base = typography.get();
@@ -4939,6 +4946,12 @@ fn paragraph_effect<const LOCATING: bool>(
                     let extras = *extras;
                     let end = extras.padding_end.unwrap_or(span.padding[0]);
                     let apart = extras.icon.is_some() || end != span.padding[0];
+                    // Its text's run comes next, after the room before it
+                    // when that's apart. Noted here, where only spans with
+                    // extras come, so a plain span pays nothing for fades.
+                    if let Some(fade) = extras.fade {
+                        fading.note(runs.len() + usize::from(apart), fade);
+                    }
                     (
                         extras.hover,
                         extras.icon,
@@ -5164,6 +5177,9 @@ fn paragraph_effect<const LOCATING: bool>(
         if content_state.with_untracked(|current| {
             *current.rich == rich && current.links == links && current.icons == icons
         }) {
+            if fading.state.is_some() {
+                fading.runs(&weak, root, paragraph);
+            }
             return;
         }
         let Some(ui) = weak.upgrade() else {
@@ -5182,6 +5198,11 @@ fn paragraph_effect<const LOCATING: bool>(
             let shown = scene.rich_with_languages(paragraph, rich.clone());
             scene.set_leaf_kind(paragraph, NodeKind::RichText { text: shown });
         }
+        // Runs fading in: drawn as they are now, then a frame at a time
+        // while they fade (`Fading`), all of it out of this effect.
+        if fading.state.is_some() {
+            fading.drawn(&weak, root, paragraph);
+        }
         // Icons' placeholders aren't text to read out.
         let content = if icons.is_empty() {
             content
@@ -5193,6 +5214,260 @@ fn paragraph_effect<const LOCATING: bool>(
             .borrow_mut()
             .set_text_content(paragraph, content);
         update_button_labels(&ui, root);
+    }
+}
+
+/// A paragraph's runs fading in (`TextSpan::fade_in`): which, the paragraph as
+/// drawn without them, and the frame loop that recolours them. Each frame while
+/// they fade, the loop writes the paragraph again with its runs' colours as they
+/// are then: alike in shape, so nothing lays out and the renderer recolours
+/// glyphs. No script runs for it, and none of the paragraph's spans are made
+/// again. A paragraph no run of which has faded holds none of it, and starts
+/// nothing.
+pub(crate) struct Fading {
+    /// Where its frame loop's runner and frame clock are, if the host runs
+    /// one (a copy of a scope is two counts).
+    services: ServiceScope,
+    /// What a paragraph that has a run fading keeps for it, made as its
+    /// first fade is noted: a paragraph none of whose runs fades holds a
+    /// scope and an empty box, and asks one question as it's drawn.
+    state: Option<Box<FadingState>>,
+}
+#[derive(Default)]
+struct FadingState {
+    /// The runs fading in, by their place among the runs being made: noted
+    /// as the paragraph's spans are, taken as it's drawn.
+    pending: Vec<(usize, crate::compose_rich::TextFade)>,
+    active: Option<ActiveFades>,
+}
+struct ActiveFades {
+    runs: Rc<FadingRuns>,
+    /// Its frame loop, cancelled with the paragraph (`Ui::retain`).
+    task: Rc<RefCell<Option<TaskToken>>>,
+}
+#[derive(Default)]
+struct FadingRuns {
+    runs: RefCell<Vec<(usize, crate::compose_rich::TextFade)>>,
+    base: RefCell<Option<std::sync::Arc<crate::rich_text::RichText>>>,
+}
+impl FadingRuns {
+    /// `rich`, the paragraph drawn without `fades`, as it shows at `now`.
+    fn faded(
+        &self,
+        rich: &std::sync::Arc<crate::rich_text::RichText>,
+        fades: &[(usize, crate::compose_rich::TextFade)],
+        now: f64,
+    ) -> std::sync::Arc<crate::rich_text::RichText> {
+        if fades.is_empty() {
+            *self.base.borrow_mut() = None;
+            return rich.clone();
+        }
+        *self.base.borrow_mut() = Some(rich.clone());
+        std::sync::Arc::new(rich.recoloured(
+            |i, color| match fades.iter().find(|(at, _)| *at == i) {
+                Some((_, fade)) => {
+                    let alpha = (color.3 as f32 * fade.at(now)).round().clamp(0., 255.);
+                    crate::scene::Color(color.0, color.1, color.2, alpha as u8)
+                }
+                None => color,
+            },
+        ))
+    }
+}
+impl Fading {
+    fn new(services: ServiceScope) -> Self {
+        Self {
+            services,
+            state: None,
+        }
+    }
+    /// Run `at` of those being made fades in.
+    #[cold]
+    #[inline(never)]
+    fn note(&mut self, at: usize, fade: crate::compose_rich::TextFade) {
+        self.state.get_or_insert_default().pending.push((at, fade));
+    }
+    /// The runs fading now, of a paragraph unchanged: those done let go.
+    #[cold]
+    #[inline(never)]
+    fn runs(&mut self, weak: &crate::widgets::WeakUi, root: NodeId, paragraph: NodeId) {
+        let mut fades = self.take_pending();
+        let now = crate::compose_rich::fade_now();
+        fades.retain(|(_, fade)| fade.fading(now));
+        self.set_runs(fades, weak, root, paragraph);
+    }
+    /// The paragraph just drawn as it is, with `fades` among its runs: drawn
+    /// again as they show now, kept as the frame loop's base, and the loop
+    /// started. With none fading, what was kept for them is let go.
+    #[cold]
+    #[inline(never)]
+    fn drawn(&mut self, weak: &crate::widgets::WeakUi, root: NodeId, paragraph: NodeId) {
+        let mut fades = self.take_pending();
+        let now = crate::compose_rich::fade_now();
+        fades.retain(|(_, fade)| fade.fading(now));
+        let Some(mut ui) = weak.upgrade() else {
+            return;
+        };
+        if !fades.is_empty() {
+            self.begin(&mut ui, root);
+        }
+        if let Some(active) = self.active() {
+            let mut scene = ui.scene.borrow_mut();
+            let shown = match scene.kind(paragraph) {
+                NodeKind::RichText { text } => text.clone(),
+                _ => return,
+            };
+            let faded = active.runs.faded(&shown, &fades, now);
+            if !std::sync::Arc::ptr_eq(&faded, &shown) {
+                scene.set_leaf_kind(paragraph, NodeKind::RichText { text: faded });
+            }
+        }
+        drop(ui);
+        self.set_runs(fades, weak, root, paragraph);
+    }
+    /// The fades noted since it was last drawn; a paragraph with none
+    /// noted and none running lets go of what it kept for them.
+    fn take_pending(&mut self) -> Vec<(usize, crate::compose_rich::TextFade)> {
+        let Some(state) = self.state.as_mut() else {
+            return Vec::new();
+        };
+        let fades = std::mem::take(&mut state.pending);
+        if fades.is_empty() && state.active.is_none() {
+            self.state = None;
+        }
+        fades
+    }
+    fn active(&self) -> Option<&ActiveFades> {
+        self.state.as_ref()?.active.as_ref()
+    }
+    /// A run fades: what it takes, once, kept as long as `root` is.
+    fn begin(&mut self, ui: &mut Ui, root: NodeId) {
+        let state = self.state.get_or_insert_default();
+        if state.active.is_none() {
+            let task: Rc<RefCell<Option<TaskToken>>> = Default::default();
+            ui.retain(root, task.clone());
+            state.active = Some(ActiveFades {
+                runs: Default::default(),
+                task,
+            });
+        }
+    }
+    fn set_runs(
+        &mut self,
+        fades: Vec<(usize, crate::compose_rich::TextFade)>,
+        weak: &crate::widgets::WeakUi,
+        root: NodeId,
+        paragraph: NodeId,
+    ) {
+        let Some(mut ui) = weak.upgrade() else {
+            return;
+        };
+        let any = !fades.is_empty();
+        if any {
+            self.begin(&mut ui, root);
+        }
+        let Some(active) = self.active() else {
+            return;
+        };
+        *active.runs.runs.borrow_mut() = fades;
+        if any && !active.task.borrow().as_ref().is_some_and(|t| !t.finished()) {
+            let token = ui.runtime.clone().untracked(|| {
+                spawn_fades(&self.services, active.runs.clone(), weak.clone(), paragraph)
+            });
+            *active.task.borrow_mut() = token;
+        }
+    }
+}
+
+/// The frame loop of a paragraph's fading runs (`Fading`): a frame at a time
+/// until none fades, then drawn as they end. Without a task runner or a frame
+/// clock (a host that draws no frames), fades show as they were when last built.
+fn spawn_fades(
+    services: &ServiceScope,
+    fading: Rc<FadingRuns>,
+    weak: crate::widgets::WeakUi,
+    paragraph: NodeId,
+) -> Option<TaskToken> {
+    let runner = services.get::<TaskRunner>()?;
+    let frames = (*services.get::<crate::frame::FrameClock>()?).clone();
+    Some(runner.spawn(Box::pin(async move {
+        loop {
+            frames.next().await;
+            let now = crate::compose_rich::fade_now();
+            let fades = fading.runs.borrow().clone();
+            let Some(base) = fading.base.borrow().clone() else {
+                return;
+            };
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+            let mut scene = ui.scene.borrow_mut();
+            if !scene.contains(paragraph) {
+                return;
+            }
+            let shown = fading.faded(&base, &fades, now);
+            scene.set_leaf_kind(paragraph, NodeKind::RichText { text: shown });
+            drop(scene);
+            let left: Vec<_> = fades.into_iter().filter(|(_, f)| f.fading(now)).collect();
+            let done = left.is_empty();
+            *fading.runs.borrow_mut() = left;
+            if done {
+                return;
+            }
+        }
+    })))
+}
+
+#[cfg(test)]
+mod fading_tests {
+    use super::*;
+
+    /// Without a run fading a paragraph holds nothing for it, draws the text it
+    /// was given, and reads no clock: fades cost what has them.
+    #[test]
+    fn a_paragraph_with_no_fade_holds_nothing_for_one() {
+        let ui = Ui::new(100., 100.);
+        let weak = ui.downgrade();
+        let root = ui.scene.borrow().root();
+        let mut fading = Fading::new(ServiceScope::new());
+        let rich = empty_rich_text();
+        fading.set_runs(Vec::new(), &weak, root, root);
+        assert!(fading.state.is_none());
+        // A run fading: held from then, with no frame loop where no host runs one.
+        let fade = crate::compose_rich::TextFade {
+            start: 0.,
+            ms: 100.,
+            power: 2.,
+        };
+        fading.set_runs(vec![(0, fade)], &weak, root, root);
+        let active = fading.active().expect("it fades");
+        assert_eq!(active.runs.runs.borrow().len(), 1);
+        assert!(active.task.borrow().is_none());
+        // With a host, one frame loop, however often the runs change; none
+        // for a paragraph without fades.
+        let spawned = Rc::new(std::cell::Cell::new(0));
+        let mut services = ServiceScope::new();
+        let counted = spawned.clone();
+        services.provide(TaskRunner::new(move |_future| {
+            counted.set(counted.get() + 1);
+            TaskToken::new((), |_| false)
+        }));
+        services.provide(crate::frame::FrameClock::new());
+        let mut hosted = Fading::new(services);
+        hosted.set_runs(Vec::new(), &weak, root, root);
+        assert_eq!(spawned.get(), 0);
+        hosted.set_runs(vec![(0, fade)], &weak, root, root);
+        hosted.set_runs(vec![(0, fade), (1, fade)], &weak, root, root);
+        assert_eq!(spawned.get(), 1);
+        // Done: nothing left of it to run or keep.
+        fading.set_runs(Vec::new(), &weak, root, root);
+        let active = fading.active().expect("kept");
+        assert!(active.runs.runs.borrow().is_empty());
+        assert!(std::sync::Arc::ptr_eq(
+            &active.runs.faded(&rich, &[], 0.),
+            &rich
+        ));
+        assert!(active.runs.base.borrow().is_none());
     }
 }
 
@@ -5259,6 +5534,7 @@ fn mount_rich(
     let weak = ui.downgrade();
     let typography = environment.typography.clone();
     let theme = environment.theme.clone();
+    let fading = Fading::new(environment.services.clone());
     match locating {
         Some(kept) => ui.bind(
             root,
@@ -5272,6 +5548,7 @@ fn mount_rich(
                 weak,
                 content_state,
                 Some(kept),
+                fading,
             ),
         ),
         None => ui.bind(
@@ -5286,6 +5563,7 @@ fn mount_rich(
                 weak,
                 content_state,
                 None,
+                fading,
             ),
         ),
     }
@@ -8870,7 +9148,7 @@ mod environment_tests {
     fn an_environment_stays_small() {
         // Cloned for every component and region mounted: growing it costs
         // every mount (a flag beside its portal took 8 bytes).
-        assert_eq!(std::mem::size_of::<super::Environment>(), 112);
+        assert_eq!(std::mem::size_of::<super::Environment>(), 72);
     }
 }
 #[cfg(test)]

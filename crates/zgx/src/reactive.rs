@@ -1245,10 +1245,14 @@ impl<T: 'static> Signal<T> {
 }
 
 /// Lexically scoped, typed service storage for a future compiler's `provide` nodes.
+///
+/// A copy shares this scope's values until either provides one (they're
+/// copied then), so a copy costs two counts, and a scope that provides
+/// nothing holds no map.
 #[derive(Clone, Default)]
 pub struct ServiceScope {
     parent: Option<Rc<ServiceScope>>,
-    values: HashMap<TypeId, Rc<dyn Any>>,
+    values: Option<Rc<HashMap<TypeId, Rc<dyn Any>>>>,
 }
 impl ServiceScope {
     /// An empty scope with no parent.
@@ -1260,19 +1264,21 @@ impl ServiceScope {
     pub fn child(&self) -> Self {
         Self {
             parent: Some(Rc::new(self.clone())),
-            values: HashMap::new(),
+            values: None,
         }
     }
     /// Store `value` as this scope's `T`, replacing any; returns it shared.
     pub fn provide<T: 'static>(&mut self, value: T) -> Rc<T> {
         let value = Rc::new(value);
-        self.values.insert(TypeId::of::<T>(), value.clone());
+        Rc::make_mut(self.values.get_or_insert_with(Default::default))
+            .insert(TypeId::of::<T>(), value.clone());
         value
     }
     /// The nearest `T`: this scope's, else its parent's, and so on up.
     pub fn get<T: 'static>(&self) -> Option<Rc<T>> {
         self.values
-            .get(&TypeId::of::<T>())
+            .as_ref()
+            .and_then(|values| values.get(&TypeId::of::<T>()))
             .cloned()
             .and_then(|value| value.downcast().ok())
             .or_else(|| self.parent.as_ref().and_then(|parent| parent.get()))
@@ -1282,6 +1288,43 @@ impl ServiceScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A copy of a scope shares its values until one provides, and then
+    /// neither sees what the other provided after the copy, either way; a
+    /// child sees its parent's as they were, under what it provides itself.
+    #[test]
+    fn a_copied_scope_never_sees_what_the_other_provides_after() {
+        let mut scope = ServiceScope::new();
+        assert!(scope.get::<u32>().is_none());
+        scope.provide(1_u32);
+        let mut copy = scope.clone();
+        assert!(Rc::ptr_eq(
+            scope.values.as_ref().unwrap(),
+            copy.values.as_ref().unwrap()
+        ));
+        assert_eq!(copy.get::<u32>().as_deref(), Some(&1));
+        // The copy provides: the original doesn't see it.
+        copy.provide(2_u32);
+        copy.provide("copy");
+        assert_eq!(copy.get::<u32>().as_deref(), Some(&2));
+        assert_eq!(scope.get::<u32>().as_deref(), Some(&1));
+        assert!(scope.get::<&str>().is_none());
+        // The original provides: the copy doesn't see it.
+        scope.provide(3_u64);
+        scope.provide(4_u32);
+        assert!(copy.get::<u64>().is_none());
+        assert_eq!(copy.get::<u32>().as_deref(), Some(&2));
+        assert_eq!(scope.get::<u32>().as_deref(), Some(&4));
+        // A child sees its parent's, under its own.
+        let mut child = scope.child();
+        assert_eq!(child.get::<u64>().as_deref(), Some(&3));
+        child.provide(5_u64);
+        assert_eq!(child.get::<u64>().as_deref(), Some(&5));
+        assert_eq!(scope.get::<u64>().as_deref(), Some(&3));
+        assert!(
+            ServiceScope::new().values.is_none(),
+            "an empty scope holds no map"
+        );
+    }
     /// Queued ids come out newest first, as a sort leaves them, whether
     /// they are close together (a bitmap orders them) or far apart.
     /// `settle` skips its clocks on this: true only when it would run nothing.

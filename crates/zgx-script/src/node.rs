@@ -1456,6 +1456,9 @@ pub(crate) struct SpanRare {
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
+    /// `fade_in = { start = ui.now(), ms = 200, power = 1.6 }`: its text
+    /// fading in, drawn in Rust a frame at a time (`TextSpan::fade_in`).
+    pub fade: Option<zgx::compose::TextFade>,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -4723,6 +4726,27 @@ const SPAN_FOLLOWS: &[(&str, Ty)] = &[
 
 /// `ui.span { "text", bold = true, color = "#f80", on_click = fn }`;
 /// `href = "https://…"` makes it a link that opens it.
+/// `fade_in = { start = ui.now(), ms = 200, power = 1.6 }`: from clear at
+/// `start` to its colour `ms` later, easing out by `power` (2 if not given).
+#[cold]
+#[inline(never)]
+fn span_fade_in(lua: &Lua, given: mlua::Value, span: &mut Span) -> mlua::Result<()> {
+    let fade: Table = lua.unpack(given)?;
+    let (Some(start), Some(ms)) = (
+        fade.get::<Option<f64>>("start")?,
+        fade.get::<Option<f32>>("ms")?,
+    ) else {
+        return Err(mlua::Error::runtime(
+            "a span's fade_in takes `start` (ui.now()'s milliseconds) and `ms`",
+        ));
+    };
+    rare_mut(span).fade = Some(zgx::compose::TextFade {
+        start,
+        ms: ms.max(0.),
+        power: fade.get::<Option<f32>>("power")?.unwrap_or(2.).max(0.01),
+    });
+    Ok(())
+}
 fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
     let (content, table) = match arg {
         mlua::Value::Table(t) => (t.get::<mlua::Value>(1)?, Some(t)),
@@ -4863,6 +4887,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                         pad: icon.get::<Option<f32>>("pad")?.unwrap_or(0.).max(0.),
                     });
                 }
+                b"fade_in" => span_fade_in(lua, given, &mut span)?,
                 b"on_click" => span.click = Some(handler(given)?),
                 b"href" => span.href = Some(lua.unpack::<String>(given)?.into()),
                 b"context_menu" => match given {

@@ -8375,51 +8375,78 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         underline_thickness: Option<f32>,
         hover: Option<(bool, Option<zgx::theme::Themed<Color>>)>,
     }
+    // Whether any span fades in: known as they're taken, so a paragraph
+    // none of whose spans does builds them as before, and only one that has
+    // one fades them after (`fade_spans`, out of line).
+    let mut fades = false;
     let owned: Vec<OwnedSpan> = spans
         .iter()
-        .map(|s| OwnedSpan {
-            text: match &s.text {
-                Text::Literal(l) => Text::Literal(l.clone()),
-                Text::Template(segments) => Text::Template(
-                    segments
-                        .iter()
-                        .map(|seg| match seg {
-                            Segment::Literal(l) => Segment::Literal(l.clone()),
-                            Segment::State(s, path) => Segment::State(s.clone(), path.clone()),
-                        })
-                        .collect(),
-                ),
-                Text::Computed(computed) => Text::Computed(computed.clone()),
-            },
-            style: SpanStyle {
-                color: s.color,
-                background: s.background,
-                size: s.size,
-                weight: s.weight,
-                italic: s.italic,
-                underline: s.underline,
-                strike: s.strike,
-                padding: s.padding,
-                radius: s.radius,
-                underline_offset: s.underline_offset,
-                underline_style: s.underline_style,
-                underline_color: s.underline_color,
-                underline_thickness: s.underline_thickness,
-                hover: s.hover,
-            },
-            font: s.font.clone(),
-            lang: s.lang.clone(),
-            followed: (s.followed.iter())
-                .map(|(name, ty, source)| (*name, *ty, resolve_owned(source)))
-                .collect(),
-            click: s.click.clone(),
-            href: s.href.clone(),
-            rare: s.rare.clone(),
+        .map(|s| {
+            if let Some(rare) = &s.rare
+                && rare.fade.is_some()
+            {
+                fades = true;
+            }
+            OwnedSpan {
+                text: match &s.text {
+                    Text::Literal(l) => Text::Literal(l.clone()),
+                    Text::Template(segments) => Text::Template(
+                        segments
+                            .iter()
+                            .map(|seg| match seg {
+                                Segment::Literal(l) => Segment::Literal(l.clone()),
+                                Segment::State(s, path) => Segment::State(s.clone(), path.clone()),
+                            })
+                            .collect(),
+                    ),
+                    Text::Computed(computed) => Text::Computed(computed.clone()),
+                },
+                style: SpanStyle {
+                    color: s.color,
+                    background: s.background,
+                    size: s.size,
+                    weight: s.weight,
+                    italic: s.italic,
+                    underline: s.underline,
+                    strike: s.strike,
+                    padding: s.padding,
+                    radius: s.radius,
+                    underline_offset: s.underline_offset,
+                    underline_style: s.underline_style,
+                    underline_color: s.underline_color,
+                    underline_thickness: s.underline_thickness,
+                    hover: s.hover,
+                },
+                font: s.font.clone(),
+                lang: s.lang.clone(),
+                followed: (s.followed.iter())
+                    .map(|(name, ty, source)| (*name, *ty, resolve_owned(source)))
+                    .collect(),
+                click: s.click.clone(),
+                href: s.href.clone(),
+                rare: s.rare.clone(),
+            }
         })
         .collect();
     let (vm, actions, low) = (vm.clone(), low.actions.clone(), low.clone());
+    /// `spans`, made from `owned` one for one, with those whose spans fade in
+    /// fading.
+    #[cold]
+    #[inline(never)]
+    fn fade_spans(spans: Vec<TextSpan>, owned: &[OwnedSpan]) -> Vec<TextSpan> {
+        spans
+            .into_iter()
+            .zip(owned)
+            .map(
+                |(out, span)| match span.rare.as_ref().and_then(|rare| rare.fade) {
+                    Some(fade) => out.fade_in(fade),
+                    None => out,
+                },
+            )
+            .collect()
+    }
     rich_text_signal(move || {
-        owned
+        let spans: Vec<TextSpan> = owned
             .iter()
             .map(|span| {
                 // Copied only for the few that follow: a span's own is read
@@ -8580,7 +8607,12 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 }
                 out
             })
-            .collect()
+            .collect();
+        if fades {
+            fade_spans(spans, &owned)
+        } else {
+            spans
+        }
     })
 }
 

@@ -2564,6 +2564,14 @@ export type SpanProps = {
 	underline_style: ("solid" | "double" | "dotted" | "dashed" | "wavy")?,
 	underline_color: Color?,
 	underline_thickness: number?,
+	-- Its text fading in: from clear at `start` (`ui.now()`'s milliseconds)
+	-- to its colour `ms` later, its alpha `1 - (1 - t)^power` (power 2 if
+	-- not given). Drawn in Rust a frame at a time: no script per frame.
+	fade_in: {
+		start: number,
+		ms: number,
+		power: number?,
+	}?,
 	-- A link (`on_click`) under the pointer: underlined, recoloured. With
 	-- it, the link isn't underlined at rest unless `underline` says so.
 	hover: { underline: boolean?, color: Color? }?,
