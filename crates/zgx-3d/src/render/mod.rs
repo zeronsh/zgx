@@ -711,10 +711,13 @@ impl Viewport for Renderer {
                     view,
                     (lit, transmits, lighting),
                 );
-                // Cascades cull their casters by the boxes, resting or not.
-                // (And where a custom material moves its vertices: its boxes,
-                // grown, are what the sun's view fits.)
-                if culls || cascaded || custom::boxes_needed(&world) {
+                // Culling's boxes, kept current in every frame making
+                // instances while culling is on, resting or not: a
+                // camera-only frame after one that rested culls with them
+                // (the update is incremental). Cascades cull their casters
+                // by them too, and where a custom material moves its
+                // vertices, its boxes, grown, are what the sun's view fits.
+                if world.culling || cascaded || custom::boxes_needed(&world) {
                     let skinning = gpu.skinning && world.posing();
                     cull::update(scratch, &drawn, (since, unmoved), world.meshes, skinning);
                     #[cfg(feature = "shaders")]

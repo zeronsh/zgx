@@ -1358,7 +1358,9 @@ impl World {
     /// default): off, for tests and benches to compare.
     #[doc(hidden)]
     pub fn set_culling(&self, on: bool) {
-        self.change_view(|inner| std::mem::replace(&mut inner.culling, on) != on);
+        // As a change of its meshes: the next frame makes its instances
+        // and, culling, their boxes (a frame keeping the last's has none).
+        self.change(|inner| std::mem::replace(&mut inner.culling, on) != on);
     }
     /// Meshes the last frame left out, the camera unable to see them.
     #[doc(hidden)]

@@ -2636,3 +2636,96 @@ fn retained_card_against_fresh(cascaded: bool) {
         );
     }
 }
+
+/// 100 cubes before the camera and one far behind it: the world and the
+/// first cube.
+fn culled_row() -> (World, ObjectId) {
+    let world = World::new();
+    let mut first = None;
+    for i in 0..100 {
+        let cube = world.add(Object::mesh(
+            Geometry::cuboid(0.2, 0.2, 0.2),
+            Material::rgb(0x808080),
+        ));
+        world.set_transform(
+            cube,
+            Transform::at([(i % 10) as f32 * 0.4 - 2., (i / 10) as f32 * 0.4 - 2., 0.]),
+        );
+        first.get_or_insert(cube);
+    }
+    let behind = world.add(Object::mesh(
+        Geometry::cuboid(0.2, 0.2, 0.2),
+        Material::rgb(0x808080),
+    ));
+    world.set_transform(behind, Transform::at([0., 0., 40.]));
+    world.set_camera(Camera::looking_at([0., 0., 10.], [0., 0., 0.]));
+    (world, first.unwrap())
+}
+
+#[test]
+fn culling_culls_after_a_mesh_moved_while_it_rested_and_after_turning_on_again() {
+    // The camera turned away from the row, as a fresh world culls it.
+    let away = Camera::looking_at([0., 0., 10.], [0., 0., 20.]);
+    let (fresh, _) = culled_row();
+    let Some(mut window) = Window::new(&fresh) else {
+        return;
+    };
+    fresh.set_camera(away);
+    window.draw();
+    let expected = fresh.culled();
+    assert!(expected >= 100, "a fresh world culls the row: {expected}");
+    let nudge = |world: &World, step: u32| {
+        world.set_camera(Camera::looking_at(
+            [0., 0., 10. + step as f32 * 1e-3],
+            [0., 0., 0.],
+        ));
+    };
+    // Turned away, the most it culls over a rest's frames (it may be
+    // resting as it turns: culling looks again within 16).
+    let turned = |world: &World, window: &mut Window| {
+        (0..17)
+            .map(|step| {
+                world.set_camera(Camera::looking_at(
+                    [0., 0., 10. + step as f32 * 1e-3],
+                    [0., 0., 20.],
+                ));
+                window.draw();
+                world.culled()
+            })
+            .max()
+            .unwrap()
+    };
+    // Culling leaves out 1 of 101 and rests; a cube moves meanwhile; the
+    // rest runs out over frames moving only the camera; then it turns away
+    // (a fresh world culls at once; a retained one within a rest).
+    let (retained, cube) = culled_row();
+    let mut window = Window::new(&retained).unwrap();
+    window.draw();
+    retained.set_transform(cube, Transform::at([-2., -2., 0.1]));
+    window.draw();
+    for step in 1..20 {
+        nudge(&retained, step);
+        window.draw();
+    }
+    assert_eq!(
+        turned(&retained, &mut window),
+        expected,
+        "after a move while resting"
+    );
+    // Off, then on again, then turning away.
+    let (retained, _) = culled_row();
+    let mut window = Window::new(&retained).unwrap();
+    retained.set_culling(false);
+    window.draw();
+    retained.set_culling(true);
+    window.draw();
+    for step in 1..20 {
+        nudge(&retained, step);
+        window.draw();
+    }
+    assert_eq!(
+        turned(&retained, &mut window),
+        expected,
+        "after turning on again"
+    );
+}
