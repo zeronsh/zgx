@@ -10,6 +10,8 @@ pub(super) struct Run {
     pub(super) maps: [u64; MAPS],
     pub(super) variant: Variant,
     pub(super) instances: std::ops::Range<u32>,
+    /// Its geometry's indices: what each instance costs to draw.
+    pub(super) indices: u32,
 }
 
 /// What a pass has bound, by address, so a run sets only what differs from
@@ -59,11 +61,16 @@ impl Bound {
     }
 }
 
-/// Draws `run` in `pass`, its frame and instances bound, setting only
-/// what differs from what `bound` says the pass has. (Inline: called for
-/// every run, it was otherwise a call a run.)
+/// Draws `run`'s `spans` of instances in `pass`, its frame and instances
+/// bound, setting only what differs from what `bound` says the pass has.
+/// (Inline: called for every run, it was otherwise a call a run.)
 #[inline(always)]
-pub(super) fn draw_run(pass: &mut wgpu::RenderPass<'_>, gpu: &Gpu, run: &Run, bound: &mut Bound) {
+pub(super) fn draw_run(
+    pass: &mut wgpu::RenderPass<'_>,
+    gpu: &Gpu,
+    (run, spans): (&Run, &[(u32, std::ops::Range<u32>)]),
+    bound: &mut Bound,
+) {
     let buffers = &gpu.geometries[&run.geometry];
     let maps = gpu.bindings.get(&run.maps).map(|(binding, _)| binding);
     let skin = buffers.skin.as_ref().filter(|_| run.variant.skinned());
@@ -99,14 +106,17 @@ pub(super) fn draw_run(pass: &mut wgpu::RenderPass<'_>, gpu: &Gpu, run: &Run, bo
     }
     bound.vertices(pass, 0, &buffers.vertices);
     bound.indices(pass, &buffers.indices);
-    pass.draw_indexed(0..buffers.count, 0, run.instances.clone());
+    for (_, instances) in spans {
+        pass.draw_indexed(0..buffers.count, 0, instances.clone());
+    }
 }
-/// The meshes' pass: each run drawn into the frame's targets, resolved
+/// The meshes' pass: each run's spans the camera may see (`shown`) drawn
+/// into the frame's targets, resolved
 /// into `target` (multisampled) or straight into it, cleared to `clear`.
 pub(super) fn draw_main(
     encoder: &mut wgpu::CommandEncoder,
     gpu: &Gpu,
-    runs: &[Run],
+    (runs, shown): (&[Run], &[(u32, std::ops::Range<u32>)]),
     target: &wgpu::TextureView,
     frame_bind: &wgpu::BindGroup,
     clear: wgpu::Color,
@@ -156,8 +166,10 @@ pub(super) fn draw_main(
     // Each run sets only what differs from the run before: wgpu records
     // and checks every call, the same pipeline or buffer again too.
     let mut bound = Bound::default();
-    for run in runs.iter() {
-        draw_run(&mut pass, gpu, run, &mut bound);
+    // A run's spans one after another: bound once, drawn each.
+    for spans in shown.chunk_by(|a, b| a.0 == b.0) {
+        let run = &runs[spans[0].0 as usize];
+        draw_run(&mut pass, gpu, (run, spans), &mut bound);
     }
     drop(pass);
 }

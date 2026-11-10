@@ -100,23 +100,14 @@ pub(super) fn box_through(matrix: &Mat4, (low, high): (Vec3, Vec3)) -> (Vec3, Ve
     (Vec3::from(from), Vec3::from(to))
 }
 
-/// The sun going `direction` as it sees the opaque meshes of `all`: an
-/// orthographic view holding them all, onto the shadow map, and how wide a
-/// map texel is in the scene. `None` with nothing to cast a shadow.
-pub(super) fn sun_view(all: &[crate::world::Drawn], direction: Vec3) -> Option<(Mat4, f32)> {
-    // A mesh's box, and what places it. A skinned mesh's is placed by each
-    // of its joints: about where its pose can take it.
-    fn placed<'a>(d: &'a crate::world::Drawn) -> ((Vec3, Vec3), &'a [Mat4]) {
-        let bounds = match &d.morph {
-            Some(active) => d.geometry.morphed_bounds(active),
-            None => d.geometry.bounds(),
-        };
-        let matrices = d.palette;
-        (bounds, matrices.unwrap_or(std::slice::from_ref(&d.matrix)))
-    }
-    let opaque = || all.iter().filter(|d| d.material.color[3] >= 1.);
+/// The box holding the opaque meshes of `all`, as the sun's view fits it: a
+/// mesh's box, placed by its matrix, or a skinned mesh's by each of its
+/// joints (about where its pose can take it).
+// Once a frame, out of its loop: inlined, the frame's code compiled worse.
+#[inline(never)]
+pub(super) fn sun_bounds(all: &[crate::world::Drawn]) -> (Vec3, Vec3) {
     let (mut low, mut high) = (Vec3::from([f32::MAX; 3]), Vec3::from([f32::MIN; 3]));
-    for d in opaque() {
+    for d in all.iter().filter(|d| d.material.color[3] >= 1.) {
         let (bounds, matrices) = placed(d);
         for matrix in matrices {
             let (from, to) = box_through(matrix, bounds);
@@ -124,6 +115,29 @@ pub(super) fn sun_view(all: &[crate::world::Drawn], direction: Vec3) -> Option<(
             high = high.max(to);
         }
     }
+    (low, high)
+}
+/// A mesh's box, and what places it: its matrix, or a skinned mesh's joints.
+fn placed<'a>(d: &'a crate::world::Drawn) -> ((Vec3, Vec3), &'a [Mat4]) {
+    let bounds = match &d.morph {
+        Some(active) => d.geometry.morphed_bounds(active),
+        None => d.geometry.bounds(),
+    };
+    let matrices = d.palette;
+    (bounds, matrices.unwrap_or(std::slice::from_ref(&d.matrix)))
+}
+/// The sun going `direction` as it sees the opaque meshes of `all`, which
+/// `(low, high)` holds (`sun_bounds`, or their boxes' union: the same): an
+/// orthographic view holding them all, onto the shadow map, and how wide a
+/// map texel is in the scene. `None` with nothing to cast a shadow.
+// Once a frame, out of its loop: inlined, the frame's code compiled worse.
+#[inline(never)]
+pub(super) fn sun_view(
+    all: &[crate::world::Drawn],
+    (low, high): (Vec3, Vec3),
+    direction: Vec3,
+) -> Option<(Mat4, f32)> {
+    let opaque = || all.iter().filter(|d| d.material.color[3] >= 1.);
     let direction = direction.normalized();
     if !(low.is_finite() && high.is_finite()) || direction == Vec3::ZERO {
         return None;

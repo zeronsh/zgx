@@ -8,7 +8,8 @@
 //! `SCENE=mixed` is those among skinned, morphing, double-sided cut-out and
 //! placed ones. `SCENE=still` is `textured`'s meshes standing still, the
 //! camera going round them: a frame where only the view changed.
-//! `MESHES` and `FRAMES` size it. None has an environment:
+//! `MESHES` and `FRAMES` size it; `CULLING=0` draws what the camera can't
+//! see too. None has an environment:
 //! prefiltering one takes two thirds of a cell, and its threads move the count.
 //! Run: cargo run --release -p zgx-3d --example world_bench
 use std::{
@@ -185,6 +186,8 @@ fn main() {
         ..Default::default()
     });
     let still = std::env::var("SCENE").is_ok_and(|scene| scene == "still");
+    // `CULLING=0`: every mesh drawn, to compare.
+    world.set_culling(std::env::var("CULLING").map_or(true, |on| on != "0"));
     for frame in 0..frames {
         if still {
             orbit(&world, frame);

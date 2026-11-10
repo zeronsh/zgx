@@ -724,6 +724,126 @@ fn a_still_world_with_nothing_unsettled_draws_no_frames() {
     assert_eq!(world.frames_drawn(), drawn + 1);
 }
 
+/// A world with the camera inside a grid of meshes, some translucent, some
+/// morphing, and a sun casting shadows; culling as `culling` says.
+fn inside_a_grid(culling: bool) -> World {
+    let world = World::new();
+    world.set_culling(culling);
+    world.set_shadows(true);
+    world.add_light(Light::Directional {
+        direction: vec3(-0.3, -1., -0.2),
+        color: [1.; 3],
+        intensity: 2.,
+    });
+    let shapes = [
+        Geometry::cuboid(0.6, 0.6, 0.6),
+        Geometry::sphere(0.4, 12),
+        Geometry::cone(0.3, 0.7, 12),
+    ];
+    for i in 0..9 * 9 * 3 {
+        let (x, z, y) = (i % 9, i / 9 % 9, i / 81);
+        let mut material = Material::rgb([0xcc4422, 0x2266cc, 0x44aa55][i % 3]);
+        if i % 7 == 0 {
+            material.color[3] = 0.5;
+        }
+        // Every fifth morphs: its box follows its weights.
+        let geometry = if i % 5 == 0 {
+            let up = vec![[0., 0.6, 0.]; shapes[i % 3].vertices().len()];
+            let targets = vec![MorphTarget::new(up)];
+            shapes[i % 3].clone().with_morph_targets(targets).unwrap()
+        } else {
+            shapes[i % 3].clone()
+        };
+        let mesh = world.add(Object::mesh(geometry, material));
+        let at = |n: usize| (n as f32 - 4.) * 1.5;
+        world.set_transform(mesh, Transform::at([at(x), y as f32 * 1.5 - 1.5, at(z)]));
+        if i % 5 == 0 {
+            world.set_morph_weights(mesh, &[1.]);
+        }
+    }
+    world
+}
+
+#[test]
+fn culling_leaves_out_what_the_camera_cant_see_and_changes_no_pixel() {
+    let (culled, whole) = (inside_a_grid(true), inside_a_grid(false));
+    let (Some(mut a), Some(mut b)) = (Window::new(&culled), Window::new(&whole)) else {
+        return;
+    };
+    for step in 0..4 {
+        let turned = step as f32 * 1.4;
+        let camera = Camera::looking_at([0.3, 0.2, 0.4], [turned.sin(), 0., turned.cos()]);
+        culled.set_camera(camera);
+        whole.set_camera(camera);
+        a.draw();
+        b.draw();
+        assert!(
+            culled.culled() > 100,
+            "most meshes are out of view: {}",
+            culled.culled()
+        );
+        assert_eq!(whole.culled(), 0);
+        assert!(
+            a.gpu.readback().unwrap() == b.gpu.readback().unwrap(),
+            "the same frame at step {step}"
+        );
+    }
+}
+
+/// A row of 50 cubes the camera sees whole and one wandering in from far
+/// off it, culling as `culling` says: the world and the wanderer.
+fn wandering(culling: bool) -> (World, ObjectId) {
+    let world = World::new();
+    world.set_culling(culling);
+    world.add_light(Light::Directional {
+        direction: vec3(-0.3, -1., -0.5),
+        color: [1.; 3],
+        intensity: 3.,
+    });
+    for i in 0..50 {
+        let cube = world.add(Object::mesh(
+            Geometry::cuboid(0.3, 0.3, 0.3),
+            Material::rgb(0x808080),
+        ));
+        world.set_transform(cube, Transform::at([(i as f32 - 25.) * 0.3, -1., 0.]));
+    }
+    let wanderer = world.add(Object::mesh(
+        Geometry::sphere(0.5, 16),
+        Material::rgb(0xcc3311),
+    ));
+    world.set_transform(wanderer, Transform::at([100., 0., 0.]));
+    world.set_camera(Camera::looking_at([0., 0., 30.], [0., 0., 0.]));
+    (world, wanderer)
+}
+
+#[test]
+fn a_mesh_moving_while_culling_rests_is_drawn_when_it_looks_again() {
+    // Culling leaves out 1 of 51 (under 2%) and rests; the wanderer comes
+    // into view meanwhile and stops there. Looking again, culling must test
+    // where it is now, not where it was when it last looked.
+    let ((culled, a_id), (whole, b_id)) = (wandering(true), wandering(false));
+    let (Some(mut a), Some(mut b)) = (Window::new(&culled), Window::new(&whole)) else {
+        return;
+    };
+    for step in 0..24 {
+        let at = Transform::at([(100. - step as f32 * 12.).max(0.), 0., 0.]);
+        culled.set_transform(a_id, at);
+        whole.set_transform(b_id, at);
+        // A camera's nudge: a frame each step, after it stops too.
+        let camera = Camera::looking_at([0., 0., 30. + step as f32 * 0.01], [0., 0., 0.]);
+        culled.set_camera(camera);
+        whole.set_camera(camera);
+        a.draw();
+        b.draw();
+        assert!(
+            a.gpu.readback().unwrap() == b.gpu.readback().unwrap(),
+            "the same frame at step {step}"
+        );
+    }
+    assert!(culled.frames_drawn() >= 24, "a frame each step");
+    assert_eq!(whole.culled(), 0);
+}
+
 /// A group holding two meshes, a mesh apart, and a sun, as `changes` leave
 /// it (`change_grouped`): the world, and its group, a mesh in it and the
 /// mesh apart.

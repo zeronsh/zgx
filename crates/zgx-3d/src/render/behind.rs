@@ -15,7 +15,7 @@ use zgx_gpu::wgpu;
 pub(super) fn draw_behind(
     encoder: &mut wgpu::CommandEncoder,
     gpu: &Gpu,
-    runs: &[Run],
+    (runs, shown): (&[Run], &[(u32, std::ops::Range<u32>)]),
     frame_bind: &wgpu::BindGroup,
     clear: wgpu::Color,
 ) {
@@ -54,11 +54,11 @@ pub(super) fn draw_behind(
     pass.set_bind_group(0, frame_bind, &[]);
     pass.set_vertex_buffer(1, instances_buffer.slice(..));
     let mut bound = Bound::default();
-    for run in runs
-        .iter()
-        .filter(|run| !run.glass && !run.variant.transmitting())
-    {
-        draw_run(&mut pass, gpu, run, &mut bound);
+    for spans in shown.chunk_by(|a, b| a.0 == b.0) {
+        let run = &runs[spans[0].0 as usize];
+        if !run.glass && !run.variant.transmitting() {
+            draw_run(&mut pass, gpu, (run, spans), &mut bound);
+        }
     }
     drop(pass);
     behind.shrink(encoder);

@@ -480,6 +480,10 @@ pub(crate) struct Inner {
     view: Option<zgx::gpu_view::GpuView>,
     /// Frames drawn (`World::frames_drawn`).
     pub(crate) frames: std::cell::Cell<u64>,
+    /// Whether meshes the camera can't see go undrawn (`World::set_culling`),
+    /// and how many the last frame left out.
+    pub(crate) culling: bool,
+    pub(crate) culled: std::cell::Cell<u32>,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -1149,6 +1153,8 @@ impl World {
             settle: Settle::default(),
             view: None,
             frames: std::cell::Cell::new(0),
+            culling: true,
+            culled: std::cell::Cell::new(0),
         }));
         let view = zgx_gpu::viewport::view(crate::render::Renderer::new(Rc::downgrade(&inner)));
         // Its painter holds it weakly: no cycle.
@@ -1164,6 +1170,17 @@ impl World {
     #[cfg(test)]
     pub(crate) fn renderer(&self) -> crate::render::Renderer {
         crate::render::Renderer::new(Rc::downgrade(&self.inner))
+    }
+    /// Whether meshes the camera can't see are left out of a frame (on by
+    /// default): off, for tests and benches to compare.
+    #[doc(hidden)]
+    pub fn set_culling(&self, on: bool) {
+        self.change_view(|inner| std::mem::replace(&mut inner.culling, on) != on);
+    }
+    /// Meshes the last frame left out, the camera unable to see them.
+    #[doc(hidden)]
+    pub fn culled(&self) -> u32 {
+        self.inner.borrow().culled.get()
     }
     /// Frames drawn of it so far, by any painter: for tests and benches to
     /// tell a world at rest draws none.

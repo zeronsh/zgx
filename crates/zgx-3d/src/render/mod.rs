@@ -13,6 +13,7 @@
 //! (the sun's map), `behind` (what light passing through reads) and `draw`
 //! (runs of meshes in a pass).
 mod behind;
+mod cull;
 mod draw;
 mod frame;
 mod gpu;
@@ -38,7 +39,9 @@ use graph::Pass;
 use instances::{Instance, instance, morph_block, note, write_changed};
 use materials::{make_binding, map_set, placed, upload};
 use pipelines::make_main_pipelines;
-use shadows::{Casting, SHADOW_SIZE, draw_shadows, make_shadow_pipeline, shadow_key, sun_view};
+use shadows::{
+    Casting, SHADOW_SIZE, draw_shadows, make_shadow_pipeline, shadow_key, sun_bounds, sun_view,
+};
 use std::{cell::RefCell, rc::Weak};
 use variant::Variant;
 use zgx_gpu::{
@@ -80,6 +83,17 @@ struct Scratch {
     /// of them this frame changed.
     instances: Vec<Instance>,
     changed: Vec<std::ops::Range<usize>>,
+    /// Each instance's mesh's bounding sphere, and the frame's spans of each
+    /// run the camera may see (`cull`).
+    boxes: cull::Boxes,
+    /// The world's count of changes (`Inner::meshes`) `boxes` are as of, if
+    /// they're whole.
+    boxed: Option<u64>,
+    mask: Vec<bool>,
+    /// Frames to draw without culling, the last that culled having left
+    /// out almost nothing.
+    unculled: u32,
+    shown: Vec<(u32, std::ops::Range<u32>)>,
     /// The world's count of changes (`Inner::meshes`) when `instances` were
     /// last made, and of those reordering (`Inner::ordering`) when `order`
     /// was, if no key read the camera.
@@ -97,7 +111,7 @@ fn recycle<T, U>(mut list: Vec<T>) -> Vec<U> {
 }
 
 /// A frame's meshes when what they draw changed (`Inner::meshes`): sorted
-/// (the list returned), their instances and poses uploaded, their
+/// (the list returned), their instances, boxes and poses uploaded, their
 /// buffers and bindings made and marked used, in runs (`Scratch::runs`).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
@@ -109,6 +123,7 @@ fn prepare<'a>(
     world: &Inner,
     view: Mat4,
     (lit, transmits): (bool, bool),
+    culls: bool,
 ) -> Vec<&'a crate::world::Drawn<'a>> {
     // Meshes by geometry, translucent ones after, back to front: by a
     // key of one integer (a sort of integers, not of meshes).
@@ -188,17 +203,20 @@ fn prepare<'a>(
         }
         base
     };
-    let stale = |d: &crate::world::Drawn| d.stamp > since || skinned(d) || morphing(d);
-    if kept_order
+    // Posed in the world, a mesh's box follows its joints, which may be no
+    // ancestors of it.
+    let moving = |d: &crate::world::Drawn| d.palette.is_some() || d.morph.is_some();
+    let stale = |d: &crate::world::Drawn| d.stamp > since || moving(d);
+    let sparse = kept_order
         && instances.len() == drawn.len()
-        && drawn.iter().filter(|d| stale(d)).count() * 2 <= drawn.len()
-    {
+        && drawn.iter().filter(|d| stale(d)).count() * 2 <= drawn.len();
+    if sparse {
         // Few changed: those made again and written.
         for (at, d) in drawn.iter().enumerate() {
-            let posed = skinned(d) || morphing(d);
-            if !posed && d.stamp <= since {
+            if !stale(d) {
                 continue;
             }
+            let posed = skinned(d) || morphing(d);
             let base = if posed { pose(d) } else { 0 };
             instances[at] = instance(d, base);
             note(changed, at);
@@ -216,6 +234,25 @@ fn prepare<'a>(
             let posed = skinned(d) || morphing(d);
             instance(d, if posed { pose(d) } else { 0 })
         });
+    }
+    // The meshes' boxes, for a frame that culls (`culls`): those that
+    // changed where the rest are as the last frame left them, else all. A
+    // frame that doesn't leaves them stale. On a device drawing posed meshes
+    // in their bind pose, their boxes aren't what draws: not sure, not
+    // culled.
+    let boxes = &mut scratch.boxes;
+    if culls {
+        let sure = |d: &crate::world::Drawn| skinned(d) || morphing(d) || !moving(d);
+        let current = sparse && scratch.boxed == Some(since) && boxes.len() == drawn.len();
+        boxes.resize(drawn.len());
+        for (at, d) in drawn.iter().enumerate() {
+            if !current || stale(d) {
+                boxes.set(at, cull::world_box(d), sure(d));
+            }
+        }
+        scratch.boxed = Some(world.meshes);
+    } else {
+        scratch.boxed = None;
     }
     scratch.prepared = world.meshes;
     if !palette.is_empty() {
@@ -441,6 +478,7 @@ fn prepare<'a>(
             maps,
             variant,
             instances: start as u32..end as u32,
+            indices: first.geometry.indices().len() as u32,
         });
         start = end;
     }
@@ -477,6 +515,8 @@ fn changed_order(
 /// What the shadow map would hold now, the sun's view `shadow` onto the
 /// opaque meshes of `drawn` (the frame's sorted list): drawn only if it
 /// holds something else. Their pipelines made.
+// Once a frame, out of its loop: inlined, the frame's code compiled worse.
+#[inline(never)]
 fn casting_of(
     gpu: &mut Gpu,
     scratch: &mut Scratch,
@@ -577,6 +617,11 @@ impl Viewport for Renderer {
         let lit = world.environment.is_some();
         let mut all = recycle(std::mem::take(&mut scratch.all));
         gpu.written = 0;
+        // Whether this frame culls: where a frame's culling left out almost
+        // nothing (gaps drawn in their spans), the next frames don't look
+        // (`cull::RESTING`): drawing all of them is the same frame.
+        let culls = world.culling && scratch.unculled == 0;
+        scratch.unculled = scratch.unculled.saturating_sub(1);
         let (shadow, casting) = match kept {
             Some(kept) => (kept.shadow, None),
             None => {
@@ -589,8 +634,21 @@ impl Viewport for Renderer {
                     &world,
                     view,
                     (lit, transmits),
+                    culls,
                 );
-                let shadow = sun.and_then(|sun| sun_view(&all, sun));
+                // The sun's view, fit to the opaque meshes' boxes where this
+                // frame made them.
+                let opaque = scratch.runs.iter().filter(|run| !run.glass);
+                let ranges =
+                    opaque.map(|run| run.instances.start as usize..run.instances.end as usize);
+                let shadow = sun.and_then(|sun| {
+                    let bounds = if scratch.boxed == Some(world.meshes) {
+                        scratch.boxes.union(ranges)
+                    } else {
+                        sun_bounds(&all)
+                    };
+                    sun_view(&all, bounds, sun)
+                });
                 let casting = casting_of(gpu, scratch, &drawn, shadow, frame.device);
                 scratch.sorted = recycle(drawn);
                 (shadow, casting)
@@ -620,6 +678,23 @@ impl Viewport for Renderer {
             });
         }
         let (runs, spare) = (&scratch.runs, &mut scratch.casting);
+        // What of each run the camera may see. Where a frame's culling left
+        // out almost nothing (gaps drawn in their spans), the next frames
+        // don't look (`cull::RESTING`): drawing all of them is the same frame.
+        // (With boxes as the meshes are: a frame keeping the last's culls
+        // only if the last made them.)
+        let culling = culls && scratch.boxed == Some(world.meshes);
+        let mask = culling.then(|| {
+            let frustum = cull::Frustum::new(&view_projection);
+            cull::visible(&frustum, &scratch.boxes, &mut scratch.mask);
+            &scratch.mask[..]
+        });
+        let culled = cull::shown(runs, mask, &mut scratch.shown);
+        if culling && cull::hardly(culled, scratch.instances.len()) {
+            scratch.unculled = cull::RESTING;
+        }
+        world.culled.set(culled);
+        let shown = &scratch.shown;
         let mut casting = casting;
         for run in runs.iter() {
             let variant = run.variant;
@@ -656,10 +731,12 @@ impl Viewport for Renderer {
                 // smaller for rough surfaces to read blurred.
                 Pass::Behind => {
                     if runs.iter().any(|run| run.variant.transmitting()) {
-                        draw_behind(frame.encoder, gpu, runs, frame_bind, clear);
+                        draw_behind(frame.encoder, gpu, (runs, shown), frame_bind, clear);
                     }
                 }
-                Pass::Main => draw_main(frame.encoder, gpu, runs, target, frame_bind, clear),
+                Pass::Main => {
+                    draw_main(frame.encoder, gpu, (runs, shown), target, frame_bind, clear)
+                }
             }
         }
         if casting.is_some() {
@@ -784,5 +861,36 @@ mod tests {
         );
         world.set_camera(Camera::looking_at([3., 4., 8.], [8., 0., 0.]));
         assert_eq!(written(&mut renderer, &device, &queue), uniforms);
+    }
+
+    #[test]
+    fn culling_rests_while_it_leaves_out_almost_nothing() {
+        let (device, queue) = testing::device_and_queue();
+        let world = World::new();
+        world.set_camera(Camera::looking_at([0., 0., 30.], [0., 0., 0.]));
+        // 99 in view, one far behind the camera: 1%.
+        for i in 0..100 {
+            let cube = world.add(Object::mesh(
+                Geometry::cuboid(1., 1., 1.),
+                Material::rgb(0x808080),
+            ));
+            let at = if i == 0 {
+                [0., 0., 500.]
+            } else {
+                [(i % 10) as f32 - 5., (i / 10) as f32 - 5., 0.]
+            };
+            world.set_transform(cube, Transform::at(at));
+        }
+        let mut renderer = world.renderer();
+        let culled: Vec<u32> = (0..18)
+            .map(|_| {
+                written(&mut renderer, &device, &queue);
+                world.culled()
+            })
+            .collect();
+        let mut rested = vec![1];
+        rested.extend([0; cull::RESTING as usize]);
+        rested.extend([1, 0]);
+        assert_eq!(culled, rested);
     }
 }
