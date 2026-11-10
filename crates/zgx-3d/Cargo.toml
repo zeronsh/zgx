@@ -84,3 +84,7 @@ required-features = ["shaders"]
 [[example]]
 name = "audio_occlusion"
 required-features = ["audio"]
+
+[[example]]
+name = "post_bench"
+required-features = ["post"]
