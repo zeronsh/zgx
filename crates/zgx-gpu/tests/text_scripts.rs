@@ -912,3 +912,65 @@ fn every_face_is_looked_at_once_a_character() {
     assert_eq!(first, again, "drawn otherwise the second time");
     assert_eq!(other.len(), 4, "{other:?}");
 }
+
+/// The fallback lists of `a_kana_runs_han_takes_the_chinese_list_on_every_platform`:
+/// ZgxKana for Japanese, ZgxHans for Chinese, nothing common.
+struct KanaHanFallback;
+
+impl cosmic_text::Fallback for KanaHanFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        &[]
+    }
+
+    fn script_fallback(&self, script: unicode_script::Script, locale: &str) -> &[&'static str] {
+        match script {
+            unicode_script::Script::Han if locale.starts_with("zh") => &["ZgxHans"],
+            unicode_script::Script::Hiragana | unicode_script::Script::Katakana => &["ZgxKana"],
+            _ => &[],
+        }
+    }
+}
+
+/// `simplified_han_after_kana_takes_a_chinese_face` in fonts of its own,
+/// so every platform runs it (`fonts/make_kana_han.py`): the kana run's
+/// Japanese face lacks 车 and 见, the Chinese list's face has them, and a
+/// face holding everything is the first a search of every face would find
+/// (Arial Unicode MS on macOS). The Chinese list after the Japanese takes
+/// them, and no face is searched.
+#[test]
+fn a_kana_runs_han_takes_the_chinese_list_on_every_platform() {
+    let mut db = cosmic_text::fontdb::Database::new();
+    db.load_font_data(include_bytes!("fonts/ZgxEvery.ttf").to_vec());
+    db.load_font_data(include_bytes!("fonts/ZgxKana.ttf").to_vec());
+    db.load_font_data(include_bytes!("fonts/ZgxHans.ttf").to_vec());
+    let mut fonts = cosmic_text::FontSystem::new_with_locale_and_db_and_fallback(
+        "en-CA".into(),
+        db,
+        KanaHanFallback,
+    );
+    let metrics = cosmic_text::Metrics::new(16., 20.);
+    let mut buffer = cosmic_text::Buffer::new(&mut fonts, metrics);
+    let attrs = cosmic_text::Attrs::new().family(cosmic_text::Family::Name("ZgxKana"));
+    buffer.set_text(
+        "今日は駅で会いましょう。 明天在车站见面吧。",
+        &attrs,
+        cosmic_text::Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts, false);
+    let found = drawn(&fonts, &buffer);
+    for (c, family) in &found {
+        let expected = if "车见".contains(*c) {
+            "ZgxHans"
+        } else {
+            "ZgxKana"
+        };
+        assert_eq!(family, expected, "{c}: {found:?}");
+    }
+    assert_eq!(found.len(), 22, "{found:?}");
+    assert_eq!(fonts.full_scans(), 0, "every face searched for {found:?}");
+}
