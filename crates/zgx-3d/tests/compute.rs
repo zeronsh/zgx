@@ -651,3 +651,24 @@ fn gpu_data_is_held_to_the_devices_own_limits_once_known() {
         Err(ComputeError::Unsupported)
     );
 }
+
+#[test]
+fn passes_compile_on_one_thread_however_many_there_are() {
+    let world = World::new();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let passes: Vec<ComputeId> = (0..200)
+        .map(|i| {
+            world
+                .add_compute(Compute::new(format!(
+                    "@compute @workgroup_size(1) fn main() {{ let x = {i}u; }}"
+                )))
+                .unwrap()
+        })
+        .collect();
+    for pass in &passes {
+        window.compiled(&world, *pass);
+    }
+    assert_eq!(zgx_3d::compile_threads(), 1, "one worker for every pass");
+}

@@ -1070,29 +1070,27 @@ impl Frames {
                     pass.checked.entry.clone(),
                 );
                 let done = slot.clone();
-                let spawned = std::thread::Builder::new()
-                    .name("zgx-3d compute".into())
-                    .spawn(move || {
-                        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-                        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                            label: Some("3D compute"),
-                            source: wgpu::ShaderSource::Wgsl(source.as_ref().into()),
-                        });
-                        let pipeline =
-                            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                                label: Some("3D compute"),
-                                layout: None,
-                                module: &module,
-                                entry_point: Some(&entry),
-                                compilation_options: Default::default(),
-                                cache: None,
-                            });
-                        let result = match now(scope.pop()) {
-                            None => Ok(pipeline),
-                            Some(error) => Err(error.to_string()),
-                        };
-                        *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
+                let spawned = compile_off_the_frame(move || {
+                    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+                    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                        label: Some("3D compute"),
+                        source: wgpu::ShaderSource::Wgsl(source.as_ref().into()),
                     });
+                    let pipeline =
+                        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some("3D compute"),
+                            layout: None,
+                            module: &module,
+                            entry_point: Some(&entry),
+                            compilation_options: Default::default(),
+                            cache: None,
+                        });
+                    let result = match now(scope.pop()) {
+                        None => Ok(pipeline),
+                        Some(error) => Err(error.to_string()),
+                    };
+                    *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
+                });
                 if let Err(error) = spawned {
                     fail(pass, format!("no thread to compile it on: {error}"));
                     continue;
@@ -1501,6 +1499,45 @@ fn fail(pass: &mut Pass, why: String) {
     eprintln!("zgx-3d: a compute pass can't run: {why}");
     pass.failed = Some(why);
     pass.demanded = false;
+}
+
+/// Work for the compile worker: pipelines and shader modules made off the
+/// frame.
+type Job = Box<dyn FnOnce() + Send>;
+
+/// Compile workers started in this process: one, ever.
+static WORKERS: AtomicU64 = AtomicU64::new(0);
+
+/// `job` run on the process's one compile worker, started with the first
+/// job and parked on its queue while there's none: however many passes and
+/// devices, one thread. Its error if the worker can't be started.
+pub(crate) fn compile_off_the_frame(job: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    static QUEUE: Mutex<Option<std::sync::mpsc::Sender<Job>>> = Mutex::new(None);
+    let mut queue = QUEUE.lock().unwrap_or_else(|p| p.into_inner());
+    if queue.is_none() {
+        let (send, receive) = std::sync::mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name("zgx-3d compile".into())
+            .spawn(move || {
+                for job in receive {
+                    job();
+                }
+            })
+            .map_err(|error| error.to_string())?;
+        WORKERS.fetch_add(1, Ordering::Relaxed);
+        *queue = Some(send);
+    }
+    queue
+        .as_ref()
+        .unwrap()
+        .send(Box::new(job))
+        .map_err(|_| "the compile worker stopped".to_owned())
+}
+
+/// Compile workers this process has started: one at most. For tests.
+#[doc(hidden)]
+pub fn compile_threads() -> u64 {
+    WORKERS.load(Ordering::Relaxed)
 }
 
 /// `future`, which resolves at once (wgpu's error scopes on native).

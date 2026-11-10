@@ -554,12 +554,8 @@ impl Device {
                 draw,
             });
         };
-        if std::thread::Builder::new()
-            .name("zgx-3d particles".into())
-            .spawn(make)
-            .is_err()
-        {
-            eprintln!("zgx-3d: no thread to compile particles' pipelines on: none drawn");
+        if let Err(error) = crate::compute::compile_off_the_frame(make) {
+            eprintln!("zgx-3d: particles' pipelines can't be made ({error}): none drawn");
         }
         slot
     }
