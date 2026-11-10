@@ -9179,7 +9179,9 @@ impl Scene {
             || !node.sizes.is_empty()
             || node.measurement.is_none()
             || node.special.any()
-            || node.reads.get() & READS_KNOWN == 0
+            // What it reads known, or kept by a walk that stopped here this
+            // pass already (several changes in one box, one frame).
+            || node.reads.get() & (READS_KNOWN | READS_KEPT) == 0
         {
             return false;
         }
@@ -20148,6 +20150,18 @@ mod set_box_tests {
             });
             let gone = scene.children(group)[1];
             measured(&mut scene, &|scene| scene.remove(gone));
+            // Several in one frame, as a line scrolled in redraws its row: a
+            // run going leaves the group's reads to be read again, and a run
+            // arriving stops at the row; each run's text after them finds the
+            // group, then the row, already stopped at.
+            let runs = scene.children(group).to_vec();
+            measured(&mut scene, &|scene| {
+                scene.remove(runs[0]);
+                scene.append(group, label("one more"), label_style(3));
+                for (at, run) in runs.iter().enumerate().skip(1) {
+                    scene.set_kind(*run, label(&format!("frame text {at}")));
+                }
+            });
             costs.push(cost);
             // As a screen built so places it.
             let (mut fresh, fresh_groups) = screen(lines);
@@ -20157,6 +20171,12 @@ mod set_box_tests {
             fresh.append(fresh_group, label("a run arriving"), label_style(2));
             let gone = fresh.children(fresh_group)[1];
             fresh.remove(gone);
+            let runs = fresh.children(fresh_group).to_vec();
+            fresh.remove(runs[0]);
+            fresh.append(fresh_group, label("one more"), label_style(3));
+            for (at, run) in runs.iter().enumerate().skip(1) {
+                fresh.set_kind(*run, label(&format!("frame text {at}")));
+            }
             fresh.flush();
             for (a, b) in scene
                 .children(group)
@@ -20167,7 +20187,8 @@ mod set_box_tests {
             }
         }
         assert_eq!(costs[0], costs[1], "flat as the screen grows: {costs:?}");
-        assert!(costs[0].1 <= 4, "the group alone: {costs:?}");
+        // The group and its runs, a frame that changes them all.
+        assert!(costs[0].1 <= 6, "the group alone: {costs:?}");
     }
     fn label(text: &str) -> NodeKind {
         NodeKind::Text {
