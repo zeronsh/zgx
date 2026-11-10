@@ -130,6 +130,9 @@ pub(super) struct Gpu {
     /// Irradiance probes, while the world has volumes (`probes.rs`).
     #[cfg(feature = "gi")]
     pub(super) probes: Option<super::probes::Probes>,
+    /// The scene's targets the world's scene draws were prepared for, and
+    /// which (by address).
+    pub(super) draws_prepared: (Option<super::SceneTarget>, Vec<usize>),
     /// Samples a pixel (`World::set_samples`).
     pub(super) samples: u32,
     pub(super) frame: u64,
@@ -377,6 +380,7 @@ impl Gpu {
             behind_held: 0,
             #[cfg(feature = "gi")]
             probes: None,
+            draws_prepared: (None, Vec::new()),
             samples,
             frame: 0,
             #[cfg(feature = "lighting")]

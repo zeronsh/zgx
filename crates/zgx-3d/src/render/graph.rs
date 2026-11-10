@@ -171,6 +171,10 @@ impl Graph {
         self.pool.clear();
         self.bytes = 0;
     }
+    /// The frame's size it was compiled for, in pixels.
+    pub(super) fn size(&self) -> (u32, u32) {
+        self.config.map_or((0, 0), |c| c.size)
+    }
     /// The temporaries' bytes on the device (summed as it compiles).
     pub(super) fn bytes(&self) -> u64 {
         self.bytes

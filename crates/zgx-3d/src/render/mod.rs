@@ -31,6 +31,7 @@ mod pipelines;
 mod probes;
 #[cfg(feature = "gi")]
 mod raytrace;
+mod scene_draw;
 mod shader;
 mod shadows;
 mod targets;
@@ -63,6 +64,10 @@ use graph::Pass;
 use instances::{Instance, instance, morph_block, note, write_changed};
 use materials::{make_binding, map_set, placed, upload_missing};
 use pipelines::make_main_pipelines;
+#[allow(unused_imports)] // Emitters, decals and debug draws will name them.
+pub(crate) use scene_draw::{
+    DrawPoint, FrameResources, SceneDraw, SceneDraws, SceneFrame, SceneTarget,
+};
 #[cfg(feature = "lighting")]
 use shadows::sun_bounds;
 use shadows::{
@@ -650,6 +655,8 @@ impl Viewport for Renderer {
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let view = camera.view();
         let view_projection = camera.projection(aspect) * view;
+        // What draws beside the meshes is given the camera apart.
+        let camera_parts = (view, camera.projection(aspect), view_projection);
         let mut uniforms = frame_uniforms(&world, view_projection, encode);
         #[cfg(feature = "lighting")]
         let (clustered, cascaded) = lights::prepare(
@@ -860,6 +867,16 @@ impl Viewport for Renderer {
                 b: f64::from(b),
                 a: f64::from(a),
             });
+        // What draws beside the meshes, made for the scene's targets.
+        if !world.scene_draws.is_empty() {
+            let made = (gpu.format, gpu.samples);
+            let device = (frame.device, frame.queue);
+            let resources = FrameResources {
+                layout: &gpu.layout,
+                uniforms: &gpu.uniforms,
+            };
+            prepare_draws(&mut gpu.draws_prepared, made, &world, (device, resources));
+        }
         for pass in gpu.graph.passes().iter() {
             match pass {
                 Pass::Shadows => {
@@ -884,7 +901,16 @@ impl Viewport for Renderer {
                     }
                 }
                 Pass::Main => {
-                    draw_main(frame.encoder, gpu, (runs, shown), target, frame_bind, clear)
+                    let draws = &world.scene_draws;
+                    draw_main(
+                        frame.encoder,
+                        gpu,
+                        (runs, shown),
+                        target,
+                        frame_bind,
+                        clear,
+                        (draws, &camera_parts),
+                    )
                 }
             }
         }
@@ -913,6 +939,42 @@ impl Viewport for Renderer {
         gpu.kept = None;
         if let Some(world) = self.world.upgrade() {
             world.borrow().temporaries.set(gpu.temporary_bytes());
+        }
+    }
+}
+
+/// Each of `world`'s scene draws prepared for the scene's targets, once
+/// each for them: again only as the targets change.
+#[cold]
+#[inline(never)]
+fn prepare_draws(
+    (prepared_for, prepared): &mut (Option<SceneTarget>, Vec<usize>),
+    (format, samples): (wgpu::TextureFormat, u32),
+    world: &Inner,
+    ((device, queue), resources): ((&wgpu::Device, &wgpu::Queue), FrameResources<'_>),
+) {
+    let target = SceneTarget {
+        format,
+        samples,
+        depth: DEPTH,
+    };
+    if *prepared_for != Some(target) {
+        *prepared_for = Some(target);
+        prepared.clear();
+    }
+    // Draws gone stay noted by address until the targets change: an
+    // address reused by a new draw is prepared again (`retain` below).
+    prepared.retain(|&p| {
+        world
+            .scene_draws
+            .iter()
+            .any(|d| std::rc::Rc::as_ptr(d) as *const () as usize == p)
+    });
+    for draw in &world.scene_draws {
+        let at = std::rc::Rc::as_ptr(draw) as *const () as usize;
+        if !prepared.contains(&at) {
+            draw.borrow_mut().prepare(device, queue, target, resources);
+            prepared.push(at);
         }
     }
 }

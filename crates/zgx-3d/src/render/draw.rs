@@ -136,6 +136,7 @@ pub(super) fn draw_main(
     target: &wgpu::TextureView,
     frame_bind: &wgpu::BindGroup,
     clear: wgpu::Color,
+    (draws, camera): (&super::SceneDraws, &super::scene_draw::CameraParts),
 ) {
     let Some(targets) = &gpu.graph.targets else {
         return;
@@ -179,6 +180,20 @@ pub(super) fn draw_main(
     };
     pass.set_bind_group(0, frame_bind, &[]);
     pass.set_vertex_buffer(1, instances_buffer.slice(..));
+    // With what draws beside the meshes, out of this loop.
+    if !draws.is_empty() {
+        let meshes = (runs, shown);
+        let (view, projection, view_projection) = *camera;
+        let frame = super::scene_draw::SceneFrame {
+            bind: frame_bind,
+            view,
+            projection,
+            view_projection,
+            size: gpu.graph.size(),
+        };
+        super::scene_draw::draw_with(&mut pass, gpu, meshes, &frame, draws, instances_buffer);
+        return;
+    }
     // Each run sets only what differs from the run before: wgpu records
     // and checks every call, the same pipeline or buffer again too.
     let mut bound = Bound::default();
