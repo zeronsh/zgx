@@ -332,3 +332,90 @@ fn fading_in_it_is_there_from_the_frame_the_user_scrolls() {
         "its first step is due at once"
     );
 }
+
+#[test]
+fn at_sixty_hertz_its_fade_steps_every_frame() {
+    let clock = zgx::clock::VirtualClock::new();
+    let mut ui = Ui::new(300., 200.);
+    let frame = Duration::from_secs_f64(1. / 60.);
+    // The refresh as the display says it (16,666,667 ns), the frames as
+    // they come (16,666,666 ns apart): each step falls due a hair after
+    // its frame.
+    ui.set_refresh_interval(frame + Duration::from_nanos(1));
+    mount(&mut ui, rail());
+    wheel(&mut ui, 0.001);
+    // Frames a 60th of a second apart, as a window's (and a test app's):
+    // the fade in and, 1.4 s on, the fade out change it each frame.
+    let mut alphas = Vec::new();
+    for n in 1..=110 {
+        clock.advance(frame * n, || {});
+        at(&mut ui, clock.now());
+        alphas.push(thumb(&ui).1.3);
+    }
+    let changes =
+        |range: std::ops::Range<usize>| alphas[range].windows(2).filter(|w| w[0] != w[1]).count();
+    // In: 260 ms, 15 frames; out from 1.4 s (frame 84), as long.
+    assert!(changes(0..16) >= 14, "in: {:?}", &alphas[0..16]);
+    assert!(changes(83..100) >= 14, "out: {:?}", &alphas[83..100]);
+}
+
+#[test]
+fn let_go_on_the_thumb_it_stays_lit_until_the_pointer_leaves() {
+    let clock = zgx::clock::VirtualClock::new();
+    let mut ui = Ui::new(300., 200.);
+    mount(&mut ui, rail());
+    wheel(&mut ui, 0.001);
+    clock.advance(Duration::from_millis(300), || {});
+    at(&mut ui, clock.now());
+    // A drag on the thumb, let go there with no move after.
+    let (thumb_box, _) = thumb(&ui);
+    let (x, y) = (195., thumb_box.y + thumb_box.height / 2.);
+    ui.dispatch(InputEvent::PointerMove { x, y });
+    ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    ui.dispatch(InputEvent::PointerMove { x, y: y + 20. });
+    ui.dispatch(InputEvent::PointerUp {
+        x,
+        y: y + 20.,
+        button: PointerButton::Primary,
+    });
+    ui.prepare_frame();
+    assert_eq!(thumb(&ui).0.width, 5., "still under the pointer");
+    clock.advance(Duration::from_secs(5), || {});
+    at(&mut ui, clock.now());
+    assert!(thumb(&ui).0.height > 0., "it stays while the pointer rests");
+    assert_eq!(thumb(&ui).0.width, 5.);
+    // Off it: it goes.
+    ui.dispatch(InputEvent::PointerMove { x: 50., y: 50. });
+    ui.prepare_frame();
+    assert_eq!(thumb(&ui).0.width, 3.);
+    assert!(ui.next_interaction_deadline().is_some(), "it will fade");
+}
+
+#[test]
+fn let_go_off_the_bar_it_is_no_longer_lit() {
+    let mut ui = Ui::new(300., 200.);
+    mount(&mut ui, rail());
+    wheel(&mut ui, 0.001);
+    at(&mut ui, Instant::now() + Duration::from_millis(300));
+    let (thumb_box, _) = thumb(&ui);
+    let (x, y) = (195., thumb_box.y + 4.);
+    ui.dispatch(InputEvent::PointerMove { x, y });
+    ui.dispatch(InputEvent::PointerDown {
+        x,
+        y,
+        button: PointerButton::Primary,
+    });
+    // Dragged out across the view, let go over the rows.
+    ui.dispatch(InputEvent::PointerMove { x: 50., y: 60. });
+    ui.dispatch(InputEvent::PointerUp {
+        x: 50.,
+        y: 60.,
+        button: PointerButton::Primary,
+    });
+    ui.prepare_frame();
+    assert_eq!(thumb(&ui).0.width, 3.);
+}
