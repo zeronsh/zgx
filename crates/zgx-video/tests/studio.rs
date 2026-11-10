@@ -155,9 +155,15 @@ fn a_frame_scrubbed_back_to_is_the_frame_a_render_writes() {
     assert!(*shown == *written, "the preview and a render differ");
 }
 
+/// Its frames come due far faster than they draw, so it plays behind time,
+/// skipping, on any machine: it still ends on the last frame, told before it
+/// stopped, however late its draws.
 #[test]
 fn it_plays_at_real_speed_and_stops_at_the_end_without_loop() {
-    let dir = script_dir("play");
+    let dir = temp_dir("play");
+    let fast = SCRIPT.replace("fps = 30, duration = 60", "fps = 3000, duration = 6000");
+    assert_ne!(fast, SCRIPT);
+    std::fs::write(dir.join("video.luau"), fast).unwrap();
     let mut app = app(&dir);
     app.until("first frame", |state| state["frame"].as_u64() == Some(0));
     app.invoke("studio.loop", json!(false));
@@ -166,7 +172,7 @@ fn it_plays_at_real_speed_and_stops_at_the_end_without_loop() {
     let state = app.until("the end", |state| state["playing"] == json!(false));
     let took = started.elapsed().as_secs_f64();
     assert!(took >= 1.9, "two seconds at real speed took {took}");
-    assert_eq!(state["frame"], 59);
+    assert_eq!(state["frame"], 5999);
 }
 
 #[test]
