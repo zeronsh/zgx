@@ -111,7 +111,7 @@ fn grows(b: &Value) -> Option<u32> {
     match b.field("t") {
         Some(Value::Str(t)) if &**t == "code" => {
             let lang = text_of(b.field("lang"));
-            if lang == "math" || lang.to_ascii_lowercase() == "mermaid" {
+            if lang == "math" || lang.eq_ignore_ascii_case("mermaid") {
                 return None;
             }
             // (Its language, as a key: another fence is another block.)
@@ -1132,9 +1132,48 @@ fn tracked(view: View, look: &Rc<dyn Look>, top: bool, cx: &mut Context) -> View
 /// height told as it changes.
 fn held_runs(list: Signal<Value>, options: &ViewOptions, key: Rc<str>, look: Rc<dyn Look>) -> View {
     use super::window::{RUN, guess, height_of, keep_height};
-    let (counting, reading, options) = (list.clone(), list, options.clone());
+    // Each run's blocks and whether it's the last (cells a run built
+    // keeps): written as the list changes, a run's only where its own
+    // blocks did (a parse keeps a settled block the same table) and its
+    // being last only as that changes, so a chunk written to the last run
+    // reads and writes nothing of the others'.
+    type Run = (Signal<Value>, Signal<bool>);
+    let cells: Rc<RefCell<Vec<Option<Run>>>> = Rc::default();
+    let (keeping, building, options) = (cells.clone(), cells, options.clone());
+    let reading = list.clone();
     keyed(
-        move || counting.with(|l| (0..l.list().len().div_ceil(RUN)).collect::<Vec<usize>>()),
+        move || {
+            list.with(|l| {
+                let blocks = l.list();
+                let n = blocks.len().div_ceil(RUN);
+                // (Runs gone with the blocks they held.)
+                keeping.borrow_mut().truncate(n);
+                for (r, run) in keeping.borrow().iter().enumerate() {
+                    let Some((cell, last)) = run else { continue };
+                    if last.with_untracked(|l| *l) != (r + 1 == n) {
+                        last.set(r + 1 == n);
+                    }
+                    let now = blocks
+                        .get(r * RUN..((r + 1) * RUN).min(blocks.len()))
+                        .unwrap_or(&[]);
+                    let same = cell.with_untracked(|was| {
+                        let was = was.list();
+                        was.len() == now.len()
+                            && was.iter().zip(now).all(|(a, b)| {
+                                let at = identity(a);
+                                (at != 0 && at == identity(b)) || a == b
+                            })
+                    });
+                    if !same {
+                        cell.mutate(|was| {
+                            *was = Value::List(now.to_vec().into());
+                            true
+                        });
+                    }
+                }
+                (0..n).collect::<Vec<usize>>()
+            })
+        },
         move |r: usize, cx: &mut Context| {
             let at = r + 1;
             let slice = move |l: &Value| -> Value {
@@ -1149,16 +1188,18 @@ fn held_runs(list: Signal<Value>, options: &ViewOptions, key: Rc<str>, look: Rc<
                 )
             };
             let cell = cx.runtime().signal(reading.with_untracked(slice));
-            let (from, into) = (reading.clone(), cell.clone());
-            cx.retain(cx.runtime().effect(move || {
-                let now = from.with(slice);
-                put(&into, &now);
-            }));
             // Whether it's the text's last run, followed.
-            let last = {
-                let reading = reading.clone();
-                move || reading.with(|l| l.list().len().div_ceil(RUN) == at)
-            };
+            let is_last = cx
+                .runtime()
+                .signal(reading.with_untracked(|l| l.list().len().div_ceil(RUN) == at));
+            {
+                let mut cells = building.borrow_mut();
+                if cells.len() <= r {
+                    cells.resize(r + 1, None);
+                }
+                cells[r] = Some((cell.clone(), is_last.clone()));
+            }
+            let last = move || is_last.get();
             // The height it's held at: as last laid out, else a guess.
             let held = cx.runtime().signal(
                 height_of(&key, at).unwrap_or_else(|| cell.with_untracked(|b| guess(b.list()))),
