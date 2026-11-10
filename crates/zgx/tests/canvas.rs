@@ -32,7 +32,9 @@ fn canvas_callback_tracks_content_and_size_with_owned_disposal() {
     let first = calls.get();
     assert!(first > 0);
     let root = view.find("canvas").unwrap();
-    let node = ui.scene.borrow().children(root)[0];
+    // The node showing its drawing: the root itself, sized with nothing
+    // around it (`Scene::leaf_target`).
+    let node = ui.scene.borrow().leaf_target(root);
     assert!(matches!(ui.scene.borrow().kind(node), NodeKind::Canvas(_)));
     assert!(frame(&mut ui).is_idle());
     assert_eq!(calls.get(), first);

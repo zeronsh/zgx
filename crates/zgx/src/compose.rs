@@ -2260,6 +2260,23 @@ fn bordered(styles: &Styles) -> bool {
     styles.border_width.get().is_some_and(|width| width > 0.)
         || styles.border_edges.is_some_and(|edges| edges.is_some())
 }
+/// A leaf element's drawing (an svg's, a canvas's) as it first draws: carried
+/// by its root (`Scene::carry_leaf`, None) when its style allows, or a child
+/// of it over its content box.
+fn leaf_apart(scene: &mut crate::scene::Scene, root: NodeId) -> Option<NodeId> {
+    if scene.may_carry_leaf(root) {
+        scene.carry_leaf(root);
+        return None;
+    }
+    Some(scene.append(
+        root,
+        NodeKind::Container(Layout::Overlay),
+        crate::scene::Style {
+            absolute: true,
+            ..Default::default()
+        },
+    ))
+}
 /// A scroll view's size when nothing else sizes it (`Style::intrinsic_width`).
 /// One scrolling across is as tall as what it holds, as CSS's
 /// `overflow-x: auto` box: a tab strip, a row of chips.
@@ -6085,14 +6102,10 @@ fn open_element(
         );
     }
     if let Some(mut source) = svg_compute {
-        let child = ui.container(
-            root,
-            Layout::Overlay,
-            crate::scene::Style {
-                absolute: true,
-                ..Default::default()
-            },
-        );
+        // Decided as it first draws, its style applied: with a size of its
+        // own and nothing around it, the root shows the artwork itself
+        // (`Scene::carry_leaf`); otherwise a child over it.
+        let mut child: Option<Option<NodeId>> = None;
         // Its size arrives with the frame's layout (deferred: an icon
         // mounting forces no layout of its own, so a thread of hundreds
         // lays out once).
@@ -6110,16 +6123,21 @@ fn open_element(
                 data = std::sync::Arc::new(data.tinted(typography.get().color_in(Some(&theme))));
             }
             let mut scene = scene.borrow_mut();
-            scene.set_kind(child, NodeKind::Svg(data));
-            scene.set_style(
-                child,
-                crate::scene::Style {
-                    width: Some(width),
-                    height: Some(height),
-                    absolute: true,
-                    ..Default::default()
-                },
-            );
+            let apart = *child.get_or_insert_with(|| leaf_apart(&mut scene, root));
+            // The root's own while it carries it; its child once split.
+            let target = apart.unwrap_or_else(|| scene.leaf_target(root));
+            scene.set_kind(target, NodeKind::Svg(data));
+            if target != root {
+                scene.set_style(
+                    target,
+                    crate::scene::Style {
+                        width: Some(width),
+                        height: Some(height),
+                        absolute: true,
+                        ..Default::default()
+                    },
+                );
+            }
         });
     }
     let pictured = canvas_compute.is_some();
@@ -6132,14 +6150,22 @@ fn open_element(
     if let Some(mut draw) = canvas_compute {
         // As an icon's: with the frame's layout, forcing none.
         let size = ui.observe_content_size_deferred(root);
-        let drawing = ui.scene.borrow_mut().append(
-            root,
-            NodeKind::Canvas(Default::default()),
-            crate::scene::Style {
-                absolute: true,
-                ..Default::default()
-            },
-        );
+        // With a view or a grid, its drawing apart from the start (they
+        // follow it). Otherwise decided as it first draws, its style
+        // applied: with a size of its own and nothing around it, the root
+        // shows the drawing itself (`Scene::carry_leaf`) until it draws
+        // text (its labels are children) or needs a box.
+        let drawing = (canvas_view.is_some() || grid_fill.is_some()).then(|| {
+            ui.scene.borrow_mut().append(
+                root,
+                NodeKind::Canvas(Default::default()),
+                crate::scene::Style {
+                    absolute: true,
+                    ..Default::default()
+                },
+            )
+        });
+        let mut decided: Option<Option<NodeId>> = drawing.map(Some);
         let scene = ui.scene.clone();
         let labels = Rc::new(RefCell::new(CanvasLabels::default()));
         let shown = labels.clone();
@@ -6154,25 +6180,36 @@ fn open_element(
                 crate::canvas::Canvas::new()
             };
             let mut scene = scene.borrow_mut();
+            let apart = *decided.get_or_insert_with(|| leaf_apart(&mut scene, root));
+            let mut target = apart.unwrap_or_else(|| scene.leaf_target(root));
+            // Text drawn: its labels are the root's children, so the drawing
+            // moves into one first.
+            if target == root && !content.texts().is_empty() {
+                target = scene.split_leaf(root, NodeKind::Container(Layout::Overlay));
+            }
             if !content.texts().is_empty() || !shown.borrow().nodes.is_empty() {
                 shown
                     .borrow_mut()
                     .show(&mut scene, root, content.texts(), (width, height));
             }
-            scene.set_kind(drawing, NodeKind::Canvas(std::sync::Arc::new(content)));
-            scene.set_style(
-                drawing,
-                crate::scene::Style {
-                    width: Some(width),
-                    height: Some(height),
-                    absolute: true,
-                    ..Default::default()
-                },
-            );
+            scene.set_kind(target, NodeKind::Canvas(std::sync::Arc::new(content)));
+            if target != root {
+                scene.set_style(
+                    target,
+                    crate::scene::Style {
+                        width: Some(width),
+                        height: Some(height),
+                        absolute: true,
+                        ..Default::default()
+                    },
+                );
+            }
         });
         // Its pan and zoom, and the grid under it, apart from its drawing:
         // following them repaints it as it is.
+        // A canvas with a view or a grid has its drawing apart (never carried).
         if let Some(mut view) = canvas_view {
+            let drawing = drawing.expect("a canvas with a view draws apart");
             let scene = ui.scene.clone();
             ui.bind(root, move || {
                 let view = view();
@@ -6182,6 +6219,7 @@ fn open_element(
             });
         }
         if let Some(mut grid) = grid_fill {
+            let drawing = drawing.expect("a canvas with a grid draws apart");
             let scene = ui.scene.clone();
             ui.bind(root, move || {
                 let grid = grid();

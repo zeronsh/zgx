@@ -2005,9 +2005,20 @@ struct Local {
     /// compare the transform with the identity field by field.
     maps: bool,
 }
+/// A node carrying the leaf it shows (an svg's, a canvas's drawing) as its
+/// own kind (`Scene::carry_leaf`), or one whose leaf moved to a child once
+/// its box was needed (`Scene::leaf_target`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum LeafState {
+    Carried,
+    Split(NodeId),
+}
 /// What few scenes have, by node; each entry goes with its node.
 #[derive(Default)]
 struct ColdMaps {
+    /// Nodes carrying a leaf of their own (`carry_leaf`), and where a split
+    /// one's leaf went (`LeafState`).
+    leaves: NodeMap<LeafState>,
     /// Track lists of grids that have them (`set_grid_template`): none kept
     /// for a list no node has any more.
     grid_templates: NodeMap<Arc<crate::grid_tracks::GridTemplate>>,
@@ -7028,10 +7039,124 @@ impl Scene {
         }
         self.set_kind(id, kind);
     }
+    /// Show leaf `id`'s drawing as `id` itself while nothing needs a box
+    /// around it: an svg or a canvas with a size of its own, no padding and
+    /// no quad. Its style keeps giving it a container's kind; `set_kind`
+    /// keeps the leaf while that holds, and moves it into a child of `id`
+    /// (`leaf_target`) once it doesn't. `id` stays the node its semantics,
+    /// hit testing and ref name.
+    #[cold]
+    #[inline(never)]
+    pub fn carry_leaf(&mut self, id: NodeId) {
+        self.cold
+            .get_or_insert_default()
+            .leaves
+            .insert(id, LeafState::Carried);
+        self.sync_cold(id);
+    }
+    /// Whether `id`, a leaf's root with its style applied, may carry its leaf
+    /// (`carry_leaf`): a plain container whose style gives its width and
+    /// height, with no padding.
+    pub(crate) fn may_carry_leaf(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        let style = &node.style;
+        matches!(node.kind, NodeKind::Container(_))
+            && style.width.is_some()
+            && style.height.is_some()
+            && style.padding == 0.
+            && style
+                .padding_edges
+                .is_none_or(|edges| edges == Insets::default())
+    }
+    /// The node leaf `id`'s drawing shows in: `id` while it carries it
+    /// (`carry_leaf`), the child it moved to once split.
+    pub fn leaf_target(&self, id: NodeId) -> NodeId {
+        match self.cold.as_ref().and_then(|cold| cold.leaves.get(&id)) {
+            Some(LeafState::Split(child)) => *child,
+            _ => id,
+        }
+    }
+    /// Whether `id` carries its leaf (`carry_leaf`).
+    pub fn carries_leaf(&self, id: NodeId) -> bool {
+        self.cold
+            .as_ref()
+            .is_some_and(|cold| cold.leaves.get(&id) == Some(&LeafState::Carried))
+    }
+    /// `set_kind` of carried leaf `id` to `kind`, its box's: kept (true) while
+    /// `kind` is a plain container and its style gives its size with no
+    /// padding; otherwise its leaf moves to a child first (`split_leaf`).
+    /// False for any other node.
+    #[cold]
+    #[inline(never)]
+    fn restyles_carried(&mut self, id: NodeId, kind: &NodeKind) -> bool {
+        if !self.carries_leaf(id)
+            || !matches!(self.node(id).kind, NodeKind::Svg(_) | NodeKind::Canvas(_))
+            || !matches!(kind, NodeKind::Container(_) | NodeKind::Panel { .. })
+        {
+            return false;
+        }
+        let style = &self.node(id).style;
+        let padded = style.padding != 0.
+            || style
+                .padding_edges
+                .is_some_and(|edges| edges != Insets::default());
+        if matches!(kind, NodeKind::Container(_))
+            && style.width.is_some()
+            && style.height.is_some()
+            && !padded
+        {
+            return true;
+        }
+        self.split_leaf(id, kind.clone());
+        true
+    }
+    /// Move carried leaf `id`'s drawing into a fresh child of it, absolute
+    /// over its content box, and give `id` its box's `kind`: once and for
+    /// good (`leaf_target`). The child's size follows `id`'s content box
+    /// from its next layout; until then, what its style gives.
+    #[cold]
+    #[inline(never)]
+    pub fn split_leaf(&mut self, id: NodeId, kind: NodeKind) -> NodeId {
+        let node = self.node(id);
+        let leaf = node.kind.clone();
+        let style = &node.style;
+        let padding = style.padding_edges.unwrap_or(Insets::all(style.padding));
+        let child_style = Style {
+            absolute: true,
+            width: style
+                .width
+                .map(|w| (w - padding.left.max(0.) - padding.right.max(0.)).max(0.)),
+            height: style
+                .height
+                .map(|h| (h - padding.top.max(0.) - padding.bottom.max(0.)).max(0.)),
+            ..Default::default()
+        };
+        if let Some(cold) = self.cold.as_mut() {
+            cold.leaves.remove(&id);
+        }
+        self.set_kind(id, kind);
+        let child = self.append(id, leaf, child_style);
+        self.cold
+            .get_or_insert_default()
+            .leaves
+            .insert(id, LeafState::Split(child));
+        self.sync_cold(id);
+        child
+    }
     /// Change what `id` is or paints, invalidating only what the change
     /// affects.
     pub fn set_kind(&mut self, id: NodeId, kind: NodeKind) {
-        if self.node(id).kind == kind {
+        let node = self.node(id);
+        if node.kind == kind {
+            return;
+        }
+        // A node carrying its leaf, given its box's kind by its style: the
+        // leaf stays while nothing needs the box, and moves out once it
+        // does (`carry_leaf`). Only a leaf's kind asks further.
+        if matches!(node.kind, NodeKind::Svg(_) | NodeKind::Canvas(_))
+            && node.special.has(COLD)
+            && self.restyles_carried(id, &kind)
+        {
             return;
         }
         // Renderer caches are keyed by node and kind; only a different kind or
@@ -7653,6 +7778,7 @@ impl Scene {
                 || cold.text_gradients.contains_key(&id)
                 || cold.languages.contains_key(&id)
                 || cold.drop_shadows.contains_key(&id)
+                || cold.leaves.contains_key(&id)
         }) || self.has_own_text_shadows(id);
         self.set_special(id, COLD, cold);
     }
@@ -8355,6 +8481,7 @@ impl Scene {
             if maps.drop_shadows.remove(&id).is_some() {
                 self.filtered.set(self.filtered.get() - 1);
             }
+            maps.leaves.remove(&id);
         }
     }
     /// Hit `id` and what it holds where an animation is taking it, not

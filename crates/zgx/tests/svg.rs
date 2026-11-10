@@ -17,7 +17,9 @@ fn svg_component_retains_semantics_size_and_reactive_transform() {
     ui.prepare_frame();
     ui.scene.borrow_mut().flush();
     let root = view.find("icon").unwrap();
-    let node = ui.scene.borrow().children(root)[0];
+    // The node showing its artwork: the root itself, sized with nothing
+    // around it (`Scene::leaf_target`).
+    let node = ui.scene.borrow().leaf_target(root);
     assert!(matches!(ui.scene.borrow().kind(node), NodeKind::Svg(_)));
     assert_eq!(ui.scene.borrow().bounds(root).width, 40.);
     assert_eq!(ui.semantics.borrow().get(root).unwrap().label, "Icon");
@@ -26,5 +28,5 @@ fn svg_component_retains_semantics_size_and_reactive_transform() {
     let report = ui.scene.borrow_mut().flush();
     assert_eq!(report.layout_nodes, 0);
     assert!(!report.damage.is_empty());
-    assert_eq!(ui.scene.borrow().children(root)[0], node);
+    assert_eq!(ui.scene.borrow().leaf_target(root), node);
 }
