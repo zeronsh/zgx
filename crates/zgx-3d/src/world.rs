@@ -416,6 +416,11 @@ pub(crate) struct Inner {
     /// Each object's matrix in its parent's frame, `None` hidden: kept as
     /// its transform changes, by index (a frame reads every object's).
     locals: Vec<Option<Mat4>>,
+    /// When each object last changed what its mesh's instance reads (its
+    /// place, material, cutoff or pose), as `meshes` counted then, by index:
+    /// a frame makes again only the instances of meshes stamped since the
+    /// last (their own or an ancestor's stamp).
+    stamps: Vec<u64>,
     /// No slot before these is free (`claim`).
     free_object: usize,
     free_light: usize,
@@ -463,6 +468,51 @@ pub(crate) struct Inner {
     /// seen (`World::change_view`). A frame where it's as before draws the
     /// meshes as the last did.
     pub(crate) meshes: u64,
+    /// Counts changes that may change the order its meshes draw in: all to
+    /// what they draw but moves, poses and cutoffs (`World::change_object`).
+    /// Translucent meshes' order follows the camera besides.
+    pub(crate) ordering: u64,
+    /// What keeps it drawing by itself (`Settle`), and its view, which
+    /// animates while anything does.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) settle: Settle,
+    #[cfg_attr(not(test), allow(dead_code))]
+    view: Option<zgx::gpu_view::GpuView>,
+    /// Frames drawn (`World::frames_drawn`).
+    pub(crate) frames: std::cell::Cell<u64>,
+}
+
+/// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
+/// clip playing, particles alive, temporal accumulation short of its frames.
+/// Each is a bit, set while it's unsettled; the world's view animates while
+/// any is, and stops as the last settles. Nothing sets one yet: a world
+/// draws only as it changes.
+#[derive(Default)]
+#[cfg_attr(not(test), allow(dead_code))] // Design 4.4's features set its reasons; none does yet.
+pub(crate) struct Settle {
+    unsettled: std::cell::Cell<u32>,
+}
+#[cfg_attr(not(test), allow(dead_code))]
+impl Settle {
+    /// For the tests of this: a reason no feature uses.
+    #[cfg(test)]
+    pub(crate) const TEST: u32 = 1 << 31;
+    /// Whether nothing keeps it drawing.
+    pub(crate) fn settled(&self) -> bool {
+        self.unsettled.get() == 0
+    }
+    /// `reason` unsettled (`on`) or settled: whether that changed whether
+    /// anything is.
+    fn set(&self, reason: u32, on: bool) -> bool {
+        let before = self.unsettled.get();
+        let after = if on {
+            before | reason
+        } else {
+            before & !reason
+        };
+        self.unsettled.set(after);
+        (before == 0) != (after == 0)
+    }
 }
 /// How a world's lit colours are brought into the display's range
 /// (`World::set_tone_mapping`).
@@ -516,7 +566,7 @@ type ByIndex<V> = std::collections::HashMap<u32, V, std::hash::BuildHasherDefaul
 pub(crate) struct Poses {
     joints: Vec<Mat4>,
     weights: Vec<[f32; 2]>,
-    matrices: Vec<Option<Option<Mat4>>>,
+    matrices: Vec<Option<Option<(Mat4, u64)>>>,
     posed: Vec<Posed>,
 }
 /// A posed mesh: its place in a frame's list, and where its joints and
@@ -614,6 +664,9 @@ pub(crate) struct Drawn<'a> {
     /// Its placements and transmission, if it has either.
     pub(crate) extras: Option<&'a Extras>,
     pub(crate) matrix: Mat4,
+    /// When what its instance reads last changed (`Inner::stamps`, its
+    /// ancestors' included).
+    pub(crate) stamp: u64,
 }
 impl Inner {
     pub(crate) fn lights(&self) -> impl Iterator<Item = &Light> {
@@ -687,6 +740,24 @@ impl Inner {
             f(light, spot);
         }
     }
+    /// `reason` (a `Settle` bit) unsettled or settled: its view animates
+    /// while any is. A frame may call it as it draws.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn unsettle(&self, reason: u32, on: bool) {
+        if self.settle.set(reason, on)
+            && let Some(view) = &self.view
+        {
+            view.animate(!self.settle.settled());
+        }
+    }
+    /// Object `index` changed what its instance reads: stamped with the
+    /// count of changes this one makes (`World::change` counts it next).
+    fn stamp(&mut self, index: usize) {
+        if self.stamps.len() <= index {
+            self.stamps.resize(index + 1, 0);
+        }
+        self.stamps[index] = self.meshes.wrapping_add(1);
+    }
     /// Object `index`'s matrix in its parent's frame is `local` (`None`:
     /// hidden).
     fn place(&mut self, index: usize, local: Option<Mat4>) {
@@ -722,7 +793,7 @@ impl Inner {
         for index in 0..self.objects.len() {
             if let Some(object) = &self.objects[index].value
                 && let Some(geometry) = &object.geometry
-                && let Some(matrix) = world_matrix(self, index, matrices, 0)
+                && let Some((matrix, stamp)) = placed(self, index, matrices, 0)
             {
                 let generation = self.objects[index].generation;
                 let (from_joint, from_weight) = (joints.len(), weights.len());
@@ -744,6 +815,7 @@ impl Inner {
                     morph: None,
                     surface: self.surface(index, generation),
                     extras: self.extras(index, generation),
+                    stamp,
                 });
             }
         }
@@ -883,7 +955,7 @@ impl Inner {
         index: usize,
         generation: u32,
         geometry: &Geometry,
-        matrices: &mut [Option<Option<Mat4>>],
+        matrices: &mut [Option<Option<(Mat4, u64)>>],
     ) -> Option<Vec<Mat4>> {
         let mut palette = Vec::new();
         self.palette_into(index, generation, geometry, matrices, &mut palette)
@@ -895,7 +967,7 @@ impl Inner {
         index: usize,
         generation: u32,
         geometry: &Geometry,
-        matrices: &mut [Option<Option<Mat4>>],
+        matrices: &mut [Option<Option<(Mat4, u64)>>],
         out: &mut Vec<Mat4>,
     ) -> bool {
         if geometry.skin().is_none() {
@@ -919,7 +991,7 @@ impl Inner {
     /// The nearest visible mesh the world segment `from` to `to` meets, and
     /// where along it (0 to 1).
     fn nearest(&self, from: Vec3, to: Vec3) -> Option<(ObjectId, f32)> {
-        let mut matrices: Vec<Option<Option<Mat4>>> = vec![None; self.objects.len()];
+        let mut matrices: Vec<Option<Option<(Mat4, u64)>>> = vec![None; self.objects.len()];
         let mut nearest: Option<(ObjectId, f32)> = None;
         for index in 0..self.objects.len() {
             let slot = &self.objects[index];
@@ -963,23 +1035,35 @@ impl Inner {
 fn world_matrix(
     inner: &Inner,
     index: usize,
-    memo: &mut [Option<Option<Mat4>>],
+    memo: &mut [Option<Option<(Mat4, u64)>>],
     depth: u32,
 ) -> Option<Mat4> {
+    placed(inner, index, memo, depth).map(|(matrix, _)| matrix)
+}
+/// Object `index`'s place in the world (its ancestors' applied), and its
+/// stamp or its ancestors' latest (`Inner::stamps`): `memo` holds those
+/// found this frame.
+fn placed(
+    inner: &Inner,
+    index: usize,
+    memo: &mut [Option<Option<(Mat4, u64)>>],
+    depth: u32,
+) -> Option<(Mat4, u64)> {
     if let Some(known) = memo[index] {
         return known;
     }
     let object = inner.objects[index].value.as_ref()?;
     let local = inner.locals[index];
+    let stamp = inner.stamps.get(index).copied().unwrap_or(0);
     let found = match (local, object.parent) {
         (None, _) => None,
-        (Some(local), None) => Some(local),
+        (Some(local), None) => Some((local, stamp)),
         // A cycle (or one too deep to be meant) draws nothing.
         (Some(_), Some(_)) if depth > 64 => None,
         (Some(local), Some(parent)) => inner
             .live(parent.index, parent.generation)
-            .and_then(|p| world_matrix(inner, p, memo, depth + 1))
-            .map(|parent| parent * local),
+            .and_then(|p| placed(inner, p, memo, depth + 1))
+            .map(|(parent, since)| (parent * local, stamp.max(since))),
     };
     memo[index] = Some(found);
     found
@@ -1042,6 +1126,7 @@ impl World {
             objects: Vec::new(),
             lights: Vec::new(),
             locals: Vec::new(),
+            stamps: Vec::new(),
             free_object: 0,
             free_light: 0,
             camera: Camera::default(),
@@ -1060,8 +1145,14 @@ impl World {
             surfaces: Default::default(),
             revision: 0,
             meshes: 0,
+            ordering: 0,
+            settle: Settle::default(),
+            view: None,
+            frames: std::cell::Cell::new(0),
         }));
         let view = zgx_gpu::viewport::view(crate::render::Renderer::new(Rc::downgrade(&inner)));
+        // Its painter holds it weakly: no cycle.
+        inner.borrow_mut().view = Some(view.clone());
         Self { inner, view }
     }
     /// What draws it, for `world_bench` to draw it with no view.
@@ -1069,20 +1160,56 @@ impl World {
     pub fn viewport(&self) -> impl zgx_gpu::viewport::Viewport + use<> {
         crate::render::Renderer::new(Rc::downgrade(&self.inner))
     }
+    /// A renderer of its own, for the renderer's tests to draw it with.
+    #[cfg(test)]
+    pub(crate) fn renderer(&self) -> crate::render::Renderer {
+        crate::render::Renderer::new(Rc::downgrade(&self.inner))
+    }
+    /// Frames drawn of it so far, by any painter: for tests and benches to
+    /// tell a world at rest draws none.
+    #[doc(hidden)]
+    pub fn frames_drawn(&self) -> u64 {
+        self.inner.borrow().frames.get()
+    }
     /// The GPU view drawing it: show it with `zgx::compose::gpu_view`.
     pub fn view(&self) -> &zgx::gpu_view::GpuView {
         &self.view
     }
     /// Change it with `f`; the view draws a frame if `f` says it changed.
     fn change(&self, f: impl FnOnce(&mut Inner) -> bool) {
+        self.change_meshes(f, true);
+    }
+    /// Change what its meshes draw with `f`, and the order they draw in
+    /// unless `reorders` is false (`Inner::ordering`).
+    fn change_meshes(&self, f: impl FnOnce(&mut Inner) -> bool, reorders: bool) {
         let changed = f(&mut self.inner.borrow_mut());
         if changed {
             let mut inner = self.inner.borrow_mut();
             inner.revision = inner.revision.wrapping_add(1);
             inner.meshes = inner.meshes.wrapping_add(1);
+            if reorders {
+                inner.ordering = inner.ordering.wrapping_add(1);
+            }
             drop(inner);
             self.view.invalidate();
         }
+    }
+    /// Change object `id` with `f`: if it says it changed, what its instance
+    /// reads may have (`Inner::stamps`).
+    /// The order its meshes draw in stays as it was (a move, a pose, a
+    /// cutoff: no key of the order reads them); `f` bumps `Inner::ordering`
+    /// itself where it changes more.
+    fn change_object(&self, id: ObjectId, f: impl FnOnce(&mut Inner) -> bool) {
+        self.change_meshes(
+            |inner| {
+                let changed = f(inner);
+                if changed {
+                    inner.stamp(id.index as usize);
+                }
+                changed
+            },
+            false,
+        );
     }
     /// Change how it's seen with `f` (the camera, lights, background,
     /// exposure): what its meshes draw stays as it was (`Inner::meshes`).
@@ -1106,6 +1233,7 @@ impl World {
             let local = object.visible.then(|| object.transform.matrix());
             let (index, generation) = claim(&mut inner.objects, &mut inner.free_object, object);
             inner.place(index as usize, local);
+            inner.stamp(index as usize);
             id = Some(ObjectId { index, generation });
             true
         });
@@ -1168,7 +1296,7 @@ impl World {
     /// (`Geometry::with_skin`), each vertex placed by its joints (`None`:
     /// as its own place says, in the pose it was bound in).
     pub fn set_skin(&self, id: ObjectId, skin: Option<Skin>) {
-        self.change(|inner| {
+        self.change_object(id, |inner| {
             if inner.live(id.index, id.generation).is_none() {
                 return false;
             }
@@ -1196,7 +1324,7 @@ impl World {
     /// Change object `id` with `f` (nothing if it is gone). The view draws a
     /// frame only if the object changed.
     pub fn update(&self, id: ObjectId, f: impl FnOnce(&mut Object)) {
-        self.change(|inner| {
+        self.change_object(id, |inner| {
             let Some(index) = inner.live(id.index, id.generation) else {
                 return false;
             };
@@ -1206,6 +1334,15 @@ impl World {
             object.transform = object.transform.sanitized();
             let placed = (object.transform, object.visible) != (before.transform, before.visible);
             let changed = *object != before;
+            // What else than its place changed may change the order meshes
+            // draw in: which draw, their geometry, their material's alpha.
+            let reordered = object.geometry != before.geometry
+                || object.material != before.material
+                || object.visible != before.visible
+                || object.parent != before.parent;
+            if reordered {
+                inner.ordering = inner.ordering.wrapping_add(1);
+            }
             if placed {
                 let local = object.visible.then(|| object.transform.matrix());
                 inner.place(index, local);
@@ -1459,7 +1596,7 @@ impl World {
         self.change_surface(id, |surface| surface.alpha_cutoff = cutoff);
     }
     fn change_surface(&self, id: ObjectId, f: impl FnOnce(&mut Surface)) {
-        self.change(|inner| {
+        self.change_object(id, |inner| {
             if inner.live(id.index, id.generation).is_none() {
                 return false;
             }
@@ -1480,7 +1617,7 @@ impl World {
     /// past those further (targets without one stay at 0). A frame is drawn
     /// if they changed.
     pub fn set_morph_weights(&self, id: ObjectId, weights: &[f32]) {
-        self.change(|inner| {
+        self.change_object(id, |inner| {
             if inner.live(id.index, id.generation).is_none() {
                 return false;
             }
@@ -1501,7 +1638,7 @@ impl World {
     }
     /// Target `target`'s weight of object `id` alone.
     pub fn set_morph_weight(&self, id: ObjectId, target: usize, weight: f32) {
-        self.change(|inner| {
+        self.change_object(id, |inner| {
             if inner.live(id.index, id.generation).is_none() {
                 return false;
             }
@@ -1607,6 +1744,20 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_world_animates_while_anything_is_unsettled() {
+        let world = World::new();
+        let inner = || world.inner.borrow();
+        assert!(inner().settle.settled() && !world.view().animating());
+        inner().unsettle(Settle::TEST, true);
+        assert!(world.view().animating());
+        inner().unsettle(Settle::TEST | 1, true);
+        inner().unsettle(Settle::TEST, false);
+        assert!(world.view().animating(), "one more still is");
+        inner().unsettle(1, false);
+        assert!(inner().settle.settled() && !world.view().animating());
+    }
 
     #[test]
     fn a_new_object_takes_the_lowest_free_slot() {

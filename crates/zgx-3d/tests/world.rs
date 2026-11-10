@@ -700,6 +700,106 @@ fn frames_where_only_the_view_changed_draw_as_a_fresh_window_does() {
 }
 
 #[test]
+fn a_still_world_with_nothing_unsettled_draws_no_frames() {
+    // What every feature keeping a world drawing (design 4.4) must leave
+    // true once it settles: ticks of the window draw the world no more, and
+    // its view doesn't animate. (This window has no frame clock: a view
+    // animating draws no more frames here, so the second is what fails.)
+    let (world, ids) = lit_scene(&[]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let drawn = world.frames_drawn();
+    assert!(drawn > 0, "it drew");
+    for _ in 0..30 {
+        window.draw();
+    }
+    assert_eq!(world.frames_drawn(), drawn, "frames over 30 ticks at rest");
+    assert!(!world.view().animating());
+    // A change draws one.
+    change_lit_scene(&world, ids, "1");
+    window.draw();
+    window.draw();
+    assert_eq!(world.frames_drawn(), drawn + 1);
+}
+
+/// A group holding two meshes, a mesh apart, and a sun, as `changes` leave
+/// it (`change_grouped`): the world, and its group, a mesh in it and the
+/// mesh apart.
+fn grouped(changes: &[&str]) -> (World, [ObjectId; 3]) {
+    let world = World::new();
+    world.add_light(Light::Directional {
+        direction: vec3(-0.3, -1., -0.6),
+        color: [1.; 3],
+        intensity: 3.,
+    });
+    let group = world.add(Object::group());
+    let mesh = |geometry, rgb| Object::mesh(geometry, Material::rgb(rgb)).child_of(group);
+    let a = world.add(mesh(Geometry::cuboid(0.6, 0.6, 0.6), 0xcc4422));
+    world.set_transform(a, Transform::at([-0.8, 0., 0.]));
+    let b = world.add(mesh(Geometry::sphere(0.4, 12), 0x2266cc));
+    world.set_transform(b, Transform::at([0.8, 0., 0.]));
+    let apart = world.add(Object::mesh(
+        Geometry::cuboid(0.5, 0.5, 0.5),
+        Material::rgb(0x44aa55),
+    ));
+    world.set_transform(apart, Transform::at([0., -1., 0.]));
+    world.set_camera(Camera::looking_at([0., 0.5, 4.], [0., 0., 0.]));
+    let ids = [group, b, apart];
+    for change in changes {
+        change_grouped(&world, ids, change);
+    }
+    (world, ids)
+}
+/// `change` made to `grouped`'s world: `"group"` moves the group,
+/// `"colour"` recolours a mesh in it, `"apart"` moves the other,
+/// `"texture"` gives the first a texture, `"metal"` turns the other to metal.
+fn change_grouped(world: &World, [group, b, apart]: [ObjectId; 3], change: &str) {
+    match change {
+        "group" => world.set_transform(group, Transform::at([0.3, 0.6, 0.])),
+        "colour" => world.set_material(b, Material::rgb(0xeeee22)),
+        "apart" => world.set_transform(apart, Transform::at([0.5, -1., 0.5])),
+        "texture" => {
+            let pixels = [
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 255, 255],
+                [255; 4],
+            ];
+            let texture = Texture::from_rgba8(2, 2, pixels.concat()).unwrap();
+            world.set_texture(b, Some(texture));
+        }
+        _ => world.set_material(apart, Material::rgb(0xcccccc).with(1., 0.3)),
+    }
+}
+
+#[test]
+fn a_change_reaches_the_instances_of_the_meshes_it_moves_or_colours() {
+    // A frame makes again only the instances of meshes stamped since the
+    // last: a group's move must reach the meshes under it.
+    let (world, ids) = grouped(&[]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let mut changes = Vec::new();
+    for change in ["group", "colour", "apart", "texture", "group", "metal"] {
+        changes.push(change);
+        change_grouped(&world, ids, change);
+        window.draw();
+        // (Kept alive: its view's painter holds it weakly.)
+        let (made, _) = grouped(&changes);
+        let mut fresh = Window::new(&made).unwrap();
+        fresh.draw();
+        assert!(
+            window.gpu.readback().unwrap() == fresh.gpu.readback().unwrap(),
+            "after {changes:?}"
+        );
+    }
+}
+
+#[test]
 fn a_volume_takes_out_light_by_how_far_it_goes() {
     let (world, pane) = red_behind_glass(Material::rgb(0xffffff).with(0., 0.));
     let Some(mut window) = Window::new(&world) else {

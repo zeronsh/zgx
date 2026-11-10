@@ -268,6 +268,7 @@ impl Graph {
 
 #[cfg(test)]
 mod tests {
+    use super::super::testing::device;
     use super::*;
 
     #[test]
@@ -285,28 +286,6 @@ mod tests {
             list(&[Pass::Main, Pass::Shadows]),
             Some(vec![Pass::Shadows, Pass::Main])
         );
-    }
-
-    /// `future`, of wgpu's no-op backend, which never waits.
-    fn now<T>(future: impl std::future::Future<Output = T>) -> T {
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        match std::pin::pin!(future).poll(&mut context) {
-            std::task::Poll::Ready(value) => value,
-            std::task::Poll::Pending => panic!("the no-op backend waited"),
-        }
-    }
-
-    /// A device of wgpu's no-op backend: textures made, none drawn.
-    fn device() -> wgpu::Device {
-        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-        descriptor.backends = wgpu::Backends::NOOP;
-        descriptor.backend_options.noop.enable = true;
-        let instance = wgpu::Instance::new(descriptor);
-        let adapter = now(instance.request_adapter(&Default::default()));
-        let adapter = adapter.expect("the no-op adapter");
-        now(adapter.request_device(&Default::default()))
-            .expect("the no-op device")
-            .0
     }
 
     #[test]

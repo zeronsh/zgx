@@ -1,5 +1,6 @@
 //! A mesh's instance: what its draw reads of it beside its geometry.
 use crate::math::Vec3;
+use zgx_gpu::wgpu;
 /// Per mesh: its world matrix, its normals' (the inverse transpose, its
 /// fourth row metallic, roughness, unlit), its colour, its emission.
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -13,6 +14,9 @@ pub(super) struct Instance {
 
 /// `d`'s instance: its place, normals' matrix, material, and where its joint
 /// matrices start (`base`) if it is skinned.
+// Inline: a frame makes one a mesh, at more than one place (out of line, a
+// call a mesh cost 5 M instructions in `3d-textured`).
+#[inline(always)]
 pub(super) fn instance(d: &crate::world::Drawn, base: u32) -> Instance {
     let m = &d.matrix.columns;
     // The inverse transpose of the upper 3x3 (its cofactors, over the
@@ -78,5 +82,58 @@ pub(super) fn surface_word(d: &crate::world::Drawn) -> f32 {
         1. + cutoff
     } else {
         -cutoff
+    }
+}
+
+/// Instances alike but for so few between them are written as one: a write
+/// costs more than the bytes.
+const GAP: usize = 8;
+
+/// Instance `at` changed: into `ranges` (in order), joined to the last if
+/// fewer than `GAP` alike are between them.
+#[inline]
+pub(super) fn note(ranges: &mut Vec<std::ops::Range<usize>>, at: usize) {
+    match ranges.last_mut() {
+        Some(last) if at - last.end < GAP => last.end = at + 1,
+        _ => ranges.push(at..at + 1),
+    }
+}
+
+/// `ranges` of `instances` into `buffer`, which holds them at the same
+/// places: the bytes written.
+pub(super) fn write_changed(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    instances: &[Instance],
+    ranges: &[std::ops::Range<usize>],
+) -> u64 {
+    let size = std::mem::size_of::<Instance>();
+    let mut written = 0;
+    for range in ranges {
+        let bytes: &[u8] = bytemuck::cast_slice(&instances[range.clone()]);
+        queue.write_buffer(buffer, (range.start * size) as u64, bytes);
+        written += bytes.len() as u64;
+    }
+    written
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instances_that_changed_are_written_near_ones_together() {
+        let mut ranges = Vec::new();
+        for at in [3, 9, 30, 31, 40, 41] {
+            note(&mut ranges, at);
+        }
+        // 3 and 9 have 5 alike between them: one write. 31 and 40 have 8:
+        // two.
+        assert_eq!(ranges, vec![3..10, 30..32, 40..42]);
+        let mut ranges = Vec::new();
+        for at in [0, 20] {
+            note(&mut ranges, at);
+        }
+        assert_eq!(ranges, vec![0..1, 20..21], "far apart: two");
     }
 }

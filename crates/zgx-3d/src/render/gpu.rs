@@ -116,6 +116,8 @@ pub(super) struct Gpu {
     /// What the last frame drew its meshes from (`Kept`); `None` before the
     /// first and after the bindings were made again.
     pub(super) kept: Option<Kept>,
+    /// Bytes the last frame wrote into buffers (uniforms, poses, instances).
+    pub(super) written: u64,
     /// Samples a pixel (`World::set_samples`).
     pub(super) samples: u32,
     pub(super) frame: u64,
@@ -336,6 +338,7 @@ impl Gpu {
             geometries: HashMap::new(),
             graph: Graph::new(format, samples),
             kept: None,
+            written: 0,
             samples,
             frame: 0,
         }

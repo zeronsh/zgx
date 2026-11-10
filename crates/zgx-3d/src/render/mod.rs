@@ -35,7 +35,7 @@ use draw::{Run, draw_main};
 use frame::frame_uniforms;
 use gpu::{Buffers, Gpu, Kept};
 use graph::Pass;
-use instances::{Instance, instance, morph_block};
+use instances::{Instance, instance, morph_block, note, write_changed};
 use materials::{make_binding, map_set, placed, upload};
 use pipelines::make_main_pipelines;
 use shadows::{Casting, SHADOW_SIZE, draw_shadows, make_shadow_pipeline, shadow_key, sun_view};
@@ -76,7 +76,15 @@ struct Scratch {
     sorted: Vec<&'static crate::world::Drawn<'static>>,
     order: Vec<((u64, [u64; MAPS]), usize)>,
     palette: Vec<[[f32; 4]; 4]>,
+    /// What the instance buffer holds, kept from frame to frame, and which
+    /// of them this frame changed.
     instances: Vec<Instance>,
+    changed: Vec<std::ops::Range<usize>>,
+    /// The world's count of changes (`Inner::meshes`) when `instances` were
+    /// last made, and of those reordering (`Inner::ordering`) when `order`
+    /// was, if no key read the camera.
+    prepared: u64,
+    ordered: Option<u64>,
     runs: Vec<Run>,
     /// What the shadow map held before, its lists to fill again.
     casting: Option<Casting>,
@@ -88,10 +96,9 @@ fn recycle<T, U>(mut list: Vec<T>) -> Vec<U> {
     list.into_iter().map(|_| unreachable!()).collect()
 }
 
-/// A frame's meshes when what they draw changed (`Inner::meshes`): sorted,
-/// their instances and poses uploaded, their buffers and bindings made and
-/// marked used, in runs (`Scratch::runs`). What the shadow map would hold
-/// now, if the sun casts any (`shadow`).
+/// A frame's meshes when what they draw changed (`Inner::meshes`): sorted
+/// (the list returned), their instances and poses uploaded, their
+/// buffers and bindings made and marked used, in runs (`Scratch::runs`).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn prepare<'a>(
@@ -102,8 +109,7 @@ fn prepare<'a>(
     world: &Inner,
     view: Mat4,
     (lit, transmits): (bool, bool),
-    shadow: Option<(Mat4, f32)>,
-) -> Option<Casting> {
+) -> Vec<&'a crate::world::Drawn<'a>> {
     // Meshes by geometry, translucent ones after, back to front: by a
     // key of one integer (a sort of integers, not of meshes).
     let depth = |m: &Mat4| {
@@ -135,15 +141,23 @@ fn prepare<'a>(
     // mesh's index is in its key, so the order is the one a list made
     // anew sorts to.
     let order = &mut scratch.order;
-    if order.len() == all.len() {
-        for (k, i) in order.iter_mut() {
-            *k = key(&all[*i]);
+    // Nothing changed that its keys read, and no key reads the camera: the
+    // last frame's order holds, keys and all.
+    let unmoved = scratch.ordered == Some(world.ordering) && order.len() == all.len();
+    let kept_order = unmoved
+        || order.len() == all.len() && {
+            for (k, i) in order.iter_mut() {
+                *k = key(&all[*i]);
+            }
+            order.is_sorted()
+        };
+    if !kept_order {
+        if order.len() != all.len() {
+            order.clear();
+            order.extend(all.iter().map(key).zip(0..));
         }
-    } else {
-        order.clear();
-        order.extend(all.iter().map(key).zip(0..));
+        order.sort_unstable();
     }
-    order.sort_unstable();
     let mut drawn: Vec<&crate::world::Drawn> = recycle(std::mem::take(&mut scratch.sorted));
     drawn.extend(order.iter().map(|&(_, i)| &all[i]));
     // Skinned meshes' joint matrices, one after another; each mesh's
@@ -154,9 +168,17 @@ fn prepare<'a>(
     let morphing = |d: &crate::world::Drawn| posing && d.morph.is_some();
     let palette = &mut scratch.palette;
     palette.clear();
+    // The instances the buffer holds, kept from frame to frame. In the same
+    // order as the last frame's, a mesh not stamped since (`Drawn::stamp`)
+    // holds its instance already, one stamped is made again and written;
+    // posed ones always are (their poses move). In another order each is
+    // made again and written where it differs. The ranges written are noted
+    // for the upload.
     let instances = &mut scratch.instances;
-    instances.clear();
-    instances.extend(drawn.iter().map(|d| {
+    let since = scratch.prepared;
+    let changed = &mut scratch.changed;
+    changed.clear();
+    let mut pose = |d: &crate::world::Drawn| {
         let base = palette.len() as u32;
         if morphing(d) {
             morph_block(d, palette);
@@ -164,8 +186,38 @@ fn prepare<'a>(
         if skinned(d) {
             palette.extend(d.palette.iter().copied().flatten().map(|m| m.columns));
         }
-        instance(d, base)
-    }));
+        base
+    };
+    let stale = |d: &crate::world::Drawn| d.stamp > since || skinned(d) || morphing(d);
+    if kept_order
+        && instances.len() == drawn.len()
+        && drawn.iter().filter(|d| stale(d)).count() * 2 <= drawn.len()
+    {
+        // Few changed: those made again and written.
+        for (at, d) in drawn.iter().enumerate() {
+            let posed = skinned(d) || morphing(d);
+            if !posed && d.stamp <= since {
+                continue;
+            }
+            let base = if posed { pose(d) } else { 0 };
+            instances[at] = instance(d, base);
+            note(changed, at);
+        }
+    } else if kept_order && instances.len() == drawn.len() {
+        // Most changed (a world turning): all made again, written whole.
+        instances.clear();
+        instances.extend(drawn.iter().map(|d| {
+            let posed = skinned(d) || morphing(d);
+            instance(d, if posed { pose(d) } else { 0 })
+        }));
+        changed.push(0..drawn.len());
+    } else {
+        changed_order(instances, changed, &drawn, |d| {
+            let posed = skinned(d) || morphing(d);
+            instance(d, if posed { pose(d) } else { 0 })
+        });
+    }
+    scratch.prepared = world.meshes;
     if !palette.is_empty() {
         let bytes: &[u8] = bytemuck::cast_slice(palette);
         if gpu
@@ -191,14 +243,17 @@ fn prepare<'a>(
             gpu.palettes = Some((buffer, capacity, bind));
         }
         queue.write_buffer(&gpu.palettes.as_ref().unwrap().0, 0, bytes);
+        gpu.written += bytes.len() as u64;
     }
     if !instances.is_empty() {
         let bytes: &[u8] = bytemuck::cast_slice(instances);
-        if gpu
+        // The buffer holds the last frame's: only what changed goes up,
+        // unless it's made anew.
+        let kept = gpu
             .instances
             .as_ref()
-            .is_none_or(|(_, capacity)| *capacity < bytes.len())
-        {
+            .is_some_and(|(_, capacity)| *capacity >= bytes.len());
+        if !kept {
             let capacity = bytes.len().next_power_of_two().max(4096);
             gpu.instances = Some((
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -210,7 +265,13 @@ fn prepare<'a>(
                 capacity,
             ));
         }
-        queue.write_buffer(&gpu.instances.as_ref().unwrap().0, 0, bytes);
+        let buffer = &gpu.instances.as_ref().unwrap().0;
+        gpu.written += if kept {
+            write_changed(queue, buffer, instances, changed)
+        } else {
+            queue.write_buffer(buffer, 0, bytes);
+            bytes.len() as u64
+        };
     }
     // What they draw with, kept and marked used. (Meshes sharing it are
     // mostly neighbours by now.)
@@ -383,6 +444,48 @@ fn prepare<'a>(
         });
         start = end;
     }
+    scratch.ordered = (!runs.iter().any(|run| run.glass)).then_some(world.ordering);
+    drawn
+}
+
+/// `instances` made again for `drawn` in another order than the last
+/// frame's (`made` makes one): each kept where it's what the buffer holds
+/// at its place, the rest noted in `changed`. Apart from `prepare`: rare.
+#[cold]
+#[inline(never)]
+fn changed_order(
+    instances: &mut Vec<Instance>,
+    changed: &mut Vec<std::ops::Range<usize>>,
+    drawn: &[&crate::world::Drawn],
+    mut made: impl FnMut(&crate::world::Drawn) -> Instance,
+) {
+    instances.truncate(drawn.len());
+    let held = instances.len();
+    for (at, d) in drawn.iter().enumerate() {
+        let made = made(d);
+        if at >= held {
+            instances.push(made);
+        } else if bytemuck::bytes_of(&instances[at]) == bytemuck::bytes_of(&made) {
+            continue;
+        } else {
+            instances[at] = made;
+        }
+        note(changed, at);
+    }
+}
+
+/// What the shadow map would hold now, the sun's view `shadow` onto the
+/// opaque meshes of `drawn` (the frame's sorted list): drawn only if it
+/// holds something else. Their pipelines made.
+fn casting_of(
+    gpu: &mut Gpu,
+    scratch: &mut Scratch,
+    drawn: &[&crate::world::Drawn],
+    shadow: Option<(Mat4, f32)>,
+    device: &wgpu::Device,
+) -> Option<Casting> {
+    let translucent = |d: &crate::world::Drawn| d.material.color[3] < 1.;
+    let (palette, runs) = (&scratch.palette, &scratch.runs);
     // What the map would hold now; drawn only if it holds something else.
     let spare = &mut scratch.casting;
     let casting = shadow.map(|(matrix, _)| {
@@ -411,7 +514,6 @@ fn prepare<'a>(
             make_shadow_pipeline(gpu, device, run.variant);
         }
     }
-    scratch.sorted = recycle(drawn);
     casting
 }
 
@@ -421,6 +523,7 @@ impl Viewport for Renderer {
             return;
         };
         let world = world.borrow();
+        world.frames.set(world.frames.get() + 1);
         // Shade in linear light: written through the sRGB view where there is
         // one, encoded by the shader where not.
         let (target, format, encode) = match frame.target_srgb {
@@ -471,12 +574,26 @@ impl Viewport for Renderer {
         let kept = gpu
             .kept
             .filter(|k| k.meshes == world.meshes && k.sun == sun && !k.translucent);
+        let lit = world.environment.is_some();
         let mut all = recycle(std::mem::take(&mut scratch.all));
-        let shadow = match kept {
-            Some(kept) => kept.shadow,
+        gpu.written = 0;
+        let (shadow, casting) = match kept {
+            Some(kept) => (kept.shadow, None),
             None => {
                 world.drawn_into(&mut self.poses, &mut all);
-                sun.and_then(|sun| sun_view(&all, sun))
+                let drawn = prepare(
+                    gpu,
+                    scratch,
+                    &all,
+                    (frame.device, frame.queue),
+                    &world,
+                    view,
+                    (lit, transmits),
+                );
+                let shadow = sun.and_then(|sun| sun_view(&all, sun));
+                let casting = casting_of(gpu, scratch, &drawn, shadow, frame.device);
+                scratch.sorted = recycle(drawn);
+                (shadow, casting)
             }
         };
         if let Some((matrix, texel)) = shadow {
@@ -487,28 +604,13 @@ impl Viewport for Renderer {
             uniforms.params[3] = 1.;
         }
         gpu.shadows(frame.device, world.shadows);
-        let lit = world.environment.as_ref();
-        if let Some(environment) = lit {
+        if let Some(environment) = world.environment.as_ref() {
             gpu.environment(frame.device, frame.queue, environment);
         }
-        let lit = lit.is_some();
         frame
             .queue
             .write_buffer(&gpu.uniforms, 0, bytemuck::bytes_of(&uniforms));
-
-        let casting = match kept {
-            Some(_) => None,
-            None => prepare(
-                gpu,
-                scratch,
-                &all,
-                (frame.device, frame.queue),
-                &world,
-                view,
-                (lit, transmits),
-                shadow,
-            ),
-        };
+        gpu.written += std::mem::size_of::<frame::FrameUniforms>() as u64;
         if kept.is_none() {
             gpu.kept = Some(Kept {
                 meshes: world.meshes,
@@ -573,5 +675,114 @@ impl Viewport for Renderer {
         if let Some(gpu) = &mut self.gpu {
             gpu.graph.rest();
         }
+    }
+}
+
+/// What the renderer's tests draw with: wgpu's no-op backend.
+#[cfg(test)]
+mod testing {
+    use zgx_gpu::wgpu;
+
+    /// `future`, of wgpu's no-op backend, which never waits.
+    pub(super) fn now<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::pin::pin!(future).poll(&mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("the no-op backend waited"),
+        }
+    }
+
+    /// A device of wgpu's no-op backend and its queue: textures made, none
+    /// drawn.
+    pub(super) fn device_and_queue() -> (wgpu::Device, wgpu::Queue) {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::NOOP;
+        descriptor.backend_options.noop.enable = true;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = now(instance.request_adapter(&Default::default()));
+        let adapter = adapter.expect("the no-op adapter");
+        now(adapter.request_device(&Default::default())).expect("the no-op device")
+    }
+    /// Its device alone.
+    pub(super) fn device() -> wgpu::Device {
+        device_and_queue().0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Camera, Geometry, Light, Material, Object, Transform, World};
+    use zgx_gpu::viewport::Viewport;
+
+    /// A frame drawn at 64 by 64 by `renderer`: the bytes it wrote into
+    /// buffers.
+    fn written(renderer: &mut Renderer, device: &wgpu::Device, queue: &wgpu::Queue) -> u64 {
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut frame =
+            ViewportFrame::new(device, queue, &mut encoder, &view, format, (64, 64), 1.);
+        renderer.render(&mut frame);
+        queue.submit([encoder.finish()]);
+        renderer.gpu.as_ref().unwrap().written
+    }
+
+    #[test]
+    fn a_frame_where_only_the_camera_moved_writes_the_frames_uniforms_alone() {
+        let (device, queue) = testing::device_and_queue();
+        let world = World::new();
+        world.set_shadows(true);
+        world.add_light(Light::Directional {
+            direction: crate::vec3(-0.5, -1., -0.4),
+            color: [1.; 3],
+            intensity: 2.,
+        });
+        let cubes: Vec<_> = (0..16)
+            .map(|i| {
+                let cube = world.add(Object::mesh(
+                    Geometry::cuboid(1., 1., 1.),
+                    Material::rgb(0x808080),
+                ));
+                world.set_transform(cube, Transform::at([i as f32 * 2., 0., 0.]));
+                cube
+            })
+            .collect();
+        let mut renderer = world.renderer();
+        let uniforms = std::mem::size_of::<frame::FrameUniforms>() as u64;
+        let instance = std::mem::size_of::<Instance>() as u64;
+        assert_eq!(
+            written(&mut renderer, &device, &queue),
+            uniforms + 16 * instance,
+            "the first frame: every instance"
+        );
+        world.set_camera(Camera::looking_at([3., 4., 9.], [8., 0., 0.]));
+        assert_eq!(
+            written(&mut renderer, &device, &queue),
+            uniforms,
+            "the camera alone"
+        );
+        world.set_transform(cubes[5], Transform::at([10., 1., 0.]));
+        assert_eq!(
+            written(&mut renderer, &device, &queue),
+            uniforms + instance,
+            "one mesh moved: its instance"
+        );
+        world.set_camera(Camera::looking_at([3., 4., 8.], [8., 0., 0.]));
+        assert_eq!(written(&mut renderer, &device, &queue), uniforms);
     }
 }
