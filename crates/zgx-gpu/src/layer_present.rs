@@ -857,7 +857,8 @@ impl Uncover {
         this.schedule();
     }
 }
-/// `ZGX_PRESENT_LOG`: every 4 ms on the main queue, the presented state of
+/// `ZGX_PRESENT_LOG` with `ZGX_PRESENT_LAYERS`: every 4 ms on the main queue,
+/// the presented state of
 /// `host` and its layers as Core Animation holds it (not as zgx believes
 /// it set it), logged when it changes.
 struct Sampler {
@@ -1114,7 +1115,7 @@ impl Layer {
         let plain = CALayer::new();
         fill(&plain, host, false);
         transaction(|| host.addSublayer(&plain));
-        if crate::present_log::enabled() {
+        if crate::present_log::sample_layers() {
             Box::new(Sampler {
                 host: host.retain(),
                 last: String::new(),

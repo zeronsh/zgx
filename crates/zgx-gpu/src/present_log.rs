@@ -11,6 +11,12 @@ pub(crate) fn enabled() -> bool {
     *ON.get_or_init(|| zgx::env::var_os("ZGX_PRESENT_LOG").is_some_and(|v| v != "0"))
 }
 
+/// Layer-state polling is a separate observer from timestamped event logs.
+#[cfg(target_os = "macos")]
+pub(crate) fn sample_layers() -> bool {
+    enabled() && zgx::env::var_os("ZGX_PRESENT_LAYERS").is_some_and(|v| v != "0")
+}
+
 /// Nanoseconds on the host clock.
 pub fn now_ns() -> u64 {
     #[cfg(target_os = "macos")]
@@ -60,5 +66,55 @@ pub fn now_ns() -> u64 {
 pub fn log(what: impl FnOnce() -> String) {
     if enabled() {
         eprintln!("PRESENT {:.6} {}", now_ns() as f64 / 1e9, what());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    #[test]
+    fn layer_sampling_requires_both_switches() {
+        const EXPECTED: &str = "ZGX_TEST_PRESENT_LAYERS_EXPECTED";
+        if let Ok(expected) = std::env::var(EXPECTED) {
+            assert_eq!(super::sample_layers(), expected == "1");
+            return;
+        }
+        // Each process reads the real switches and its own cached log flag.
+        for (log, layers, expected) in [
+            (None, None, false),
+            (Some("1"), None, false),
+            (Some("1"), Some("0"), false),
+            (Some("0"), Some("1"), false),
+            (Some("1"), Some("1"), true),
+        ] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+            child.args([
+                "--exact",
+                "present_log::tests::layer_sampling_requires_both_switches",
+            ]);
+            for key in [
+                "ZGX_PRESENT_LOG",
+                "ZGUI_PRESENT_LOG",
+                "ZGX_PRESENT_LAYERS",
+                "ZGUI_PRESENT_LAYERS",
+            ] {
+                child.env_remove(key);
+            }
+            if let Some(value) = log {
+                child.env("ZGX_PRESENT_LOG", value);
+            }
+            if let Some(value) = layers {
+                child.env("ZGX_PRESENT_LAYERS", value);
+            }
+            let output = child
+                .env(EXPECTED, if expected { "1" } else { "0" })
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "log={log:?}, layers={layers:?}: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 }

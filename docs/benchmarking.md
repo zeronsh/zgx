@@ -9,6 +9,11 @@ flushes and gesture-end flushes. Refresh records include the sampling delay
 and display period in milliseconds. The received timestamp marks the desktop
 host handling the event, not its native hardware timestamp.
 
+Layer-state sampling is separate: `ZGX_PRESENT_LAYERS=1` together with
+`ZGX_PRESENT_LOG=1` polls Core Animation layers on the main queue every 4 ms.
+Leave it unset for event-log-only diagnostics; event logging itself still adds
+observer work and does not establish when a plain layer reaches the screen.
+
 Use one window and the same wheel tape for repeated comparisons. On macOS,
 compare `ZGX_PRESENT_DRAWABLE=0` and `ZGX_PRESENT_DRAWABLE=1` at both 60 Hz
 and 120 Hz. Correlate the input and application records with the renderer's
