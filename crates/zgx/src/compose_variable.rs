@@ -474,6 +474,9 @@ struct PassInputs {
     requested: u32,
     request: Option<(u64, usize)>,
     reveal: u64,
+    /// The rows the view around a list scrolled by it shows (`window`): a
+    /// move or a clip changing within them changes nothing it builds.
+    shown: (usize, usize),
 }
 /// `keys`, with what spare time adds (`crate::spare`).
 #[allow(clippy::too_many_arguments)]
@@ -686,6 +689,8 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
             // focus goes with it (the keyboard's, not a scroll's).
             let mut pending_reveal: Option<(usize, RowAlign, f32, Option<NodeId>, bool)> = None;
             let mut anchor: Option<Anchor> = None;
+            // The heights' revision the last pass that kept rows saw (`settled`).
+            let mut kept_revision: Option<u64> = None;
             // The anchor row's key, for a list that keeps its place: rows
             // added or removed above it move it by as many, and it is found
             // there by its key. Beside the anchor, not in it, so that other
@@ -750,6 +755,17 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     runtime.untracked(|| watch.pass(width, &entries));
                 }
                 let revision = heights.revision.get();
+                // A list scrolled by the view around it: the part that view
+                // shows. (Read before any return: the pass follows it.)
+                let shown = window
+                    .as_ref()
+                    .and_then(|window| {
+                        let model = heights.index.borrow();
+                        let (top, height) = window.shown(&weak, model.content_height())?;
+                        let (range, _) = model.visible_range_and_row(top, height, overscan);
+                        Some((range.start, range.end))
+                    })
+                    .unwrap_or((0, 0));
                 let inputs = PassInputs {
                     revision,
                     mounted,
@@ -757,10 +773,15 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     requested: requested.to_bits(),
                     request,
                     reveal: serial,
+                    shown,
                 };
-                if measured
+                // The same as the last full run read them: nothing to do. A
+                // measured list's own view (rows' sizes published elsewhere),
+                // or one the view around it scrolls, whose boxes move with
+                // every frame of an animation around it (a group easing open
+                // above it) while what it shows of it stays as it was.
+                if (measured && window.is_none() || window.is_some() && !measured)
                     && !W::ON
-                    && window.is_none()
                     && pending_reveal.is_none()
                     && !pending_measurement
                     && !measurement_changed
@@ -985,9 +1006,15 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     });
                 }
                 if let Some(kept) = &mut kept {
-                    let settled = anchor
-                        .as_ref()
-                        .is_none_or(|anchor| anchor.revision != revision);
+                    // Rows' heights changing under the view, not a scroll.
+                    // One scrolled by the view around it keeps no anchor (that
+                    // view keeps its place): its own last pass says.
+                    let settled = match &anchor {
+                        Some(anchor) => anchor.revision != revision,
+                        None if ancestor => kept_revision.is_none_or(|was| was != revision),
+                        None => true,
+                    };
+                    kept_revision = Some(revision);
                     merge_kept(
                         kept,
                         &mut keys,
