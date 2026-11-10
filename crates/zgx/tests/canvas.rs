@@ -128,3 +128,111 @@ fn a_sized_canvas_text_is_never_measured() {
     drop(scene);
     view.unmount();
 }
+
+/// A canvas's sized texts changing together (a terminal row's runs: text,
+/// colour and font, wider than the canvas, some coming and going) damage
+/// where each was and is, ink and all, as one, and measure nothing. A text
+/// without a size beside them damages as it changes, as ever.
+#[test]
+fn sized_canvas_texts_changing_together_are_damaged_as_one() {
+    let mut ui = Ui::new(400., 200.);
+    let measured = Rc::new(RefCell::new(Vec::<String>::new()));
+    let seen = measured.clone();
+    ui.scene
+        .borrow_mut()
+        .set_font_text_measurer(move |text, size, _, _| {
+            seen.borrow_mut().push(text.to_string());
+            (text.chars().count() as f32 * size * 0.5, size)
+        });
+    let n = ui.signal(0);
+    let text = |text: String, x: f32, y: f32, step: i32, extent| CanvasText {
+        text: text.into(),
+        x,
+        y,
+        size: 10.,
+        color: rgb(0x10_20_30 * (step as u32 % 4 + 1)),
+        font: zgx::text_layout::FontStyle {
+            weight: if step % 2 == 0 { 400 } else { 700 },
+            ..Default::default()
+        },
+        anchor: TextAnchor::Start,
+        baseline: TextBaseline::Top,
+        extent,
+    };
+    let view = ui.mount(
+        canvas({
+            let n = n.clone();
+            move |_| {
+                let n = n.get();
+                let mut canvas = Canvas::new();
+                canvas.text(text(format!("plain {n}"), 0., 30., n, None));
+                // Each run as wide as the row, from where it starts: past
+                // the canvas's right edge, as a terminal sizes them.
+                let runs = 2 + n % 2;
+                for run in 0..runs {
+                    let x = (run * 40 + n % 3 * 8) as f32;
+                    canvas.text(text(
+                        format!("sized {n} {run}"),
+                        x,
+                        0.,
+                        n + run,
+                        Some((200., 14.)),
+                    ));
+                }
+                canvas
+            }
+        })
+        .absolute()
+        .left(30.)
+        .top(40.)
+        .w(150.)
+        .h(60.),
+    );
+    frame(&mut ui);
+    for step in 1..7 {
+        n.set(step);
+        let report = frame(&mut ui);
+        let damaged = |x: f32, y: f32| {
+            let point = Rect::new(x, y, 0.5, 0.5);
+            report.damage.iter().any(|rect| rect.intersects(point))
+        };
+        // Each run's ink: its box, from where it starts to 200 past, padded
+        // 3 (`text_ink` at size 10), where it was and where it is.
+        let left = |n: i32| 30. + (n % 3 * 8) as f32 - 3.;
+        let right = |n: i32| 30. + ((1 + n % 2) * 40 + n % 3 * 8) as f32 + 203.;
+        let (left, right) = (
+            left(step - 1).min(left(step)),
+            right(step - 1).max(right(step)),
+        );
+        for (x, y) in [
+            (left + 0.25, 37.25),
+            (left + 0.25, 56.25),
+            (right - 1., 37.25),
+            (right - 1., 56.25),
+        ] {
+            assert!(
+                damaged(x, y),
+                "step {step}: ({x}, {y}) not in {:?}",
+                report.damage
+            );
+        }
+        // Past their ink, nothing.
+        for (x, y) in [(right + 2., 45.), (left.min(27.) - 3., 45.), (100., 34.)] {
+            assert!(
+                !damaged(x, y),
+                "step {step}: ({x}, {y}) in {:?}",
+                report.damage
+            );
+        }
+    }
+    let measured = measured.borrow();
+    assert!(
+        !measured.iter().any(|text| text.starts_with("sized")),
+        "{measured:?}"
+    );
+    for step in 0..7 {
+        assert!(measured.contains(&format!("plain {step}")), "{measured:?}");
+    }
+    drop(measured);
+    view.unmount();
+}
