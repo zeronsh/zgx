@@ -219,3 +219,41 @@ fn a_surface_gone_from_the_scene_is_let_go_as_the_window_rests() {
         "a window at rest kept a surface no node shows"
     );
 }
+/// A window that shows only surfaces (a video player, nothing else drawn as
+/// a picture) lets go of each it no longer shows as it draws on, not only
+/// once it rests: playing, it shows a new one every frame.
+#[test]
+fn a_surface_replaced_is_let_go_while_the_window_draws_on() {
+    let id_of = |frame: &NativeSurface| unsafe {
+        // SAFETY: The buffer is IOSurface-backed; its surface lives as long.
+        IOSurfaceGetID(CVPixelBufferGetIOSurface(
+            std::ptr::from_ref(frame.pixel_buffer()).cast(),
+        ))
+    };
+    let first = frame(false);
+    let id = id_of(&first);
+    let mut scene = Scene::new(32., 32.);
+    let style = Style {
+        width: Some(32.),
+        height: Some(32.),
+        ..Default::default()
+    };
+    let node = scene.append(scene.root(), NodeKind::NativeSurface(first), style);
+    let mut gpu = GpuRenderer::new(32, 32).unwrap();
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    scene.set_kind(node, NodeKind::NativeSurface(frame(false)));
+    // Frames on, a while past CoreVideo's second, and no rest between.
+    let until = std::time::Instant::now() + std::time::Duration::from_millis(1500);
+    while std::time::Instant::now() < until {
+        scene.flush();
+        gpu.render(&scene, &[Rect::new(0., 0., 32., 32.)]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    assert!(
+        !surface_exists(id),
+        "a window drawing on kept a surface no node shows"
+    );
+}

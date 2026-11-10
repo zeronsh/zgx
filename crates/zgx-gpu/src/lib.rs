@@ -6134,6 +6134,10 @@ impl GpuRenderer {
         self.frame_scene = Some(std::ptr::NonNull::from(scene));
         let result = self.render_frame(scene, damage);
         self.frame_scene = None;
+        #[cfg(target_os = "macos")]
+        if let Some(cache) = &mut self.native_surfaces {
+            cache.collect();
+        }
         result
     }
     fn render_frame(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
@@ -6517,6 +6521,21 @@ impl GpuRenderer {
             }
         }
         self.svgs.retain(scene);
+        // Surfaces with no picture beside them (a video player alone): let
+        // go of those no longer shown as frames are drawn, as below does with
+        // pictures. Else a playing window kept each frame's until it rested.
+        #[cfg(target_os = "macos")]
+        if self.images.is_empty()
+            && let Some(cache) = &mut self.native_surfaces
+        {
+            let live = (scene.paint_items())
+                .filter_map(|item| match item.kind {
+                    NodeKind::NativeSurface(frame) => Some(frame.id()),
+                    _ => None,
+                })
+                .collect();
+            cache.retain(&live);
+        }
         if !self.images.is_empty() {
             let mut live_images: std::collections::HashSet<u64> = scene
                 .paint_items()
