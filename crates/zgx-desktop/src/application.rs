@@ -1196,6 +1196,24 @@ impl Rest {
             queue: false,
         }
     }
+    /// What a trim at `now` leaves owed. A trim with no frame since the last
+    /// (kept rows let go of, an idle request) keeps what that one still owes, and
+    /// when: no frame drew, so the atlas and the queue are as cold as they were.
+    /// Only a frame starts their delays again (`Rest::none` as it presents).
+    fn after_trim(self, now: std::time::Instant, atlas_grown: bool, queue: bool) -> Self {
+        if self.atlas || self.queue {
+            Self {
+                atlas: self.atlas || atlas_grown,
+                ..self
+            }
+        } else {
+            Self {
+                at: now,
+                atlas: atlas_grown,
+                queue,
+            }
+        }
+    }
     /// When the next of what's owed is due, if anything is.
     fn next(&self) -> Option<std::time::Instant> {
         [
@@ -6335,11 +6353,11 @@ impl Host {
                 // What goes later, each at its own delay past this trim: the
                 // glyph atlas (a window that grew one), and Metal's queue once
                 // a frame would find it cold anyway.
-                self.rest = Rest {
-                    at: std::time::Instant::now(),
-                    atlas: self.renderer.as_ref().is_some_and(|r| r.atlas_grown()),
-                    queue: self.renderer.is_some() && cfg!(target_os = "macos"),
-                };
+                self.rest = self.rest.after_trim(
+                    std::time::Instant::now(),
+                    self.renderer.as_ref().is_some_and(|r| r.atlas_grown()),
+                    self.renderer.is_some() && cfg!(target_os = "macos"),
+                );
                 self.trim_stage = TrimStage::Rest;
                 self.native.trim();
                 self.context.ui.scene.borrow_mut().rest();
@@ -6592,7 +6610,6 @@ impl Host {
         {
             self.trim_at = Some(std::time::Instant::now() + TRIM_DELAY);
             self.trim_stage = TrimStage::Trim;
-            self.rest = Rest::none();
         }
     }
     /// Start, stop or schedule this window's frame source to match demand.
@@ -9206,6 +9223,26 @@ mod tests {
             None
         );
         assert_eq!(Rest::none().next(), None);
+    }
+    /// A trim with no frame since the last (kept rows let go of 30 s on, an idle
+    /// request) leaves the atlas and the queue due when they were: it used to start
+    /// their delays again, and the atlas went a minute after the last frame, not 30 s.
+    #[test]
+    fn a_trim_with_no_frame_since_keeps_what_is_owed_and_when() {
+        use super::{ATLAS_TRIM_DELAY, QUEUE_REST_DELAY, Rest};
+        use std::time::Duration;
+        let first = std::time::Instant::now();
+        let owed = Rest::none().after_trim(first, true, true);
+        assert_eq!(owed.next(), Some(first + QUEUE_REST_DELAY));
+        // The queue went at 10 s; at 30 s kept rows go and the trim runs again.
+        let atlas_only = Rest { queue: false, ..owed };
+        let later = first + Duration::from_secs(30);
+        let again = atlas_only.after_trim(later, true, true);
+        assert_eq!(again.next(), Some(first + ATLAS_TRIM_DELAY), "not 30 s past the second trim");
+        assert!(!again.queue, "the queue rested already, and nothing drew since");
+        // With nothing owed, a trim owes afresh from now.
+        let done = Rest { atlas: false, ..atlas_only };
+        assert_eq!(done.after_trim(later, true, true).next(), Some(later + QUEUE_REST_DELAY));
     }
 
     fn area(rects: &[Rect]) -> f32 {
