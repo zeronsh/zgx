@@ -27,6 +27,9 @@ pub(super) struct Apps {
     /// By pass, target format, and whether it encodes sRGB itself.
     pipelines: HashMap<(PostPassId, wgpu::TextureFormat, bool), wgpu::RenderPipeline>,
     params: HashMap<PostPassId, wgpu::Buffer>,
+    /// Passes the device refused (their shader or pipeline), with why: not
+    /// run, not tried again.
+    pub(super) failed: HashMap<PostPassId, String>,
     /// By pass and the texture it reads (0 scene, 1 its other half, 2 what
     /// the display shows, 3 its other half), for `compiled`.
     binds: HashMap<(PostPassId, usize), wgpu::BindGroup>,
@@ -107,6 +110,7 @@ impl Apps {
             modules: HashMap::new(),
             pipelines: HashMap::new(),
             params: HashMap::new(),
+            failed: HashMap::new(),
             binds: HashMap::new(),
             copy_bind: None,
             compiled: 0,
@@ -159,7 +163,18 @@ impl Apps {
             pad: 0,
         };
         queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
-        let ours: Vec<&AppPass> = passes.iter().filter(|p| p.stage == stage).collect();
+        // Those the device took (each pipeline it may need made first): a
+        // pass it refused is left out, the others still in turn.
+        let mut ours: Vec<&AppPass> = Vec::new();
+        for pass in passes.iter().filter(|p| p.stage == stage) {
+            let mut ok = self.prepare(device, queue, pass, (super::SCENE, false));
+            if stage == PostStage::Display {
+                ok &= self.prepare(device, queue, pass, (format, encode));
+            }
+            if ok {
+                ours.push(pass);
+            }
+        }
         let (a, b) = match stage {
             PostStage::Hdr => (Slot::Scene, Slot::Scene2),
             PostStage::Display => (Slot::Shown, Slot::Shown2),
@@ -175,7 +190,6 @@ impl Apps {
             let (Some(input), Some(into)) = (view(from), into) else {
                 return;
             };
-            self.prepare(device, queue, pass, (format, encode));
             let key = (pass.id, from as usize);
             if !self.binds.contains_key(&key) {
                 let made = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -237,49 +251,33 @@ impl Apps {
     }
 
     /// `pass`'s module, pipeline into `format` and parameters made (once
-    /// each), its parameters written.
+    /// each), its parameters written. Whether it can run: false where the
+    /// device refused its shader or pipeline (naga passed it; a backend's
+    /// translation may not), noted in `failed` and not tried again.
     fn prepare(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pass: &AppPass,
         (format, encode): (wgpu::TextureFormat, bool),
-    ) {
-        let module = self.modules.entry(pass.id).or_insert_with(|| {
-            device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("3D post, app"),
-                source: wgpu::ShaderSource::Wgsl(pass.wgsl.to_string().into()),
-            })
-        });
-        let layout = &self.pipeline_layout;
-        self.pipelines
-            .entry((pass.id, format, encode))
-            .or_insert_with(|| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("3D post, app"),
-                    layout: Some(layout),
-                    vertex: wgpu::VertexState {
-                        module,
-                        entry_point: Some("zgx_vertex"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module,
-                        entry_point: Some("zgx_fragment"),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &[("ZGX_ENCODE", f64::from(u8::from(encode)))],
-                            ..Default::default()
-                        },
-                        targets: &[Some(format.into())],
-                    }),
-                    primitive: Default::default(),
-                    depth_stencil: None,
-                    multisample: Default::default(),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            });
+    ) -> bool {
+        if self.failed.contains_key(&pass.id) {
+            return false;
+        }
+        let key = (pass.id, format, encode);
+        if !self.pipelines.contains_key(&key) {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let made = self.made(device, pass, (format, encode));
+            let error = now(scope.pop()).map(|e| e.to_string());
+            #[cfg(test)]
+            let error = error.or_else(|| tests::refused(pass.id));
+            if let Some(error) = error {
+                self.failed.insert(pass.id, error);
+                self.modules.remove(&pass.id);
+                return false;
+            }
+            self.pipelines.insert(key, made);
+        }
         let bytes: Vec<f32> = pass.values.iter().flatten().copied().collect();
         let size = (bytes.len() as u64 * 4).max(16);
         let buffer = self.params.entry(pass.id).or_insert_with(|| {
@@ -293,6 +291,46 @@ impl Apps {
         if !bytes.is_empty() {
             queue.write_buffer(buffer, 0, bytemuck::cast_slice(&bytes));
         }
+        true
+    }
+
+    /// `pass`'s module (made once) and its pipeline into `format`.
+    fn made(
+        &mut self,
+        device: &wgpu::Device,
+        pass: &AppPass,
+        (format, encode): (wgpu::TextureFormat, bool),
+    ) -> wgpu::RenderPipeline {
+        let module = self.modules.entry(pass.id).or_insert_with(|| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("3D post, app"),
+                source: wgpu::ShaderSource::Wgsl(pass.wgsl.to_string().into()),
+            })
+        });
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("3D post, app"),
+            layout: Some(&self.pipeline_layout),
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some("zgx_vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some("zgx_fragment"),
+                compilation_options: wgpu::PipelineCompilationOptions {
+                    constants: &[("ZGX_ENCODE", f64::from(u8::from(encode)))],
+                    ..Default::default()
+                },
+                targets: &[Some(format.into())],
+            }),
+            primitive: Default::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     /// Lets go of what passes no longer in `passes` had.
@@ -301,6 +339,7 @@ impl Apps {
         self.modules.retain(|id, _| live(id));
         self.pipelines.retain(|(id, ..), _| live(id));
         self.params.retain(|id, _| live(id));
+        self.failed.retain(|id, _| live(id));
         self.binds.retain(|(id, _), _| live(id));
     }
 }
@@ -327,4 +366,91 @@ fn draw(
     pass.set_pipeline(pipeline);
     pass.set_bind_group(0, bind, &[]);
     pass.draw(0..3, 0..1);
+}
+
+/// `future`, which resolves at once (wgpu's error scopes on native).
+fn now<T>(future: impl std::future::Future<Output = T>) -> T {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+        std::thread::yield_now();
+    }
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use super::*;
+    use crate::{Camera, Geometry, Material, Object, PostParam, PostPass, ToneMapping, World};
+    use std::cell::{Cell, RefCell};
+    use zgx::{compose::prelude::*, widgets::Ui};
+    use zgx_gpu::GpuRenderer;
+
+    thread_local! {
+        /// The pass a test has the device refuse, and how often it was
+        /// tried.
+        static REFUSE: Cell<Option<PostPassId>> = const { Cell::new(None) };
+        static TRIED: Cell<u32> = const { Cell::new(0) };
+        /// The HDR passes the last frame's chain counted.
+        pub(in crate::render) static COUNTED: RefCell<Option<u8>> = const { RefCell::new(None) };
+    }
+    /// A refusal, as a backend's would come, for the pass a test names.
+    pub(super) fn refused(id: PostPassId) -> Option<String> {
+        (REFUSE.with(Cell::get) == Some(id)).then(|| {
+            TRIED.with(|t| t.set(t.get() + 1));
+            "refused for the test".into()
+        })
+    }
+
+    const SCALE: &str = "#zgx post 1
+fn post(p: PostIn) -> vec4<f32> {
+    return color(p.uv) * params.k;
+}
+";
+
+    #[test]
+    fn a_pass_the_device_refuses_is_left_out_and_not_tried_again() {
+        const SIZE: u32 = 32;
+        let world = World::new();
+        let grey = Material {
+            color: [0.2, 0.2, 0.2, 1.],
+            unlit: true,
+            ..Default::default()
+        };
+        world.add(Object::mesh(Geometry::cuboid(20., 20., 0.1), grey));
+        world.set_camera(Camera::looking_at([0., 0., 4.], [0., 0., 0.]));
+        world.set_tone_mapping(ToneMapping::Linear);
+        let mut gpu = match GpuRenderer::new(SIZE, SIZE) {
+            Ok(gpu) => gpu,
+            Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+                panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
+            }
+            Err(_) => return,
+        };
+        let mut ui = Ui::new(SIZE as f32, SIZE as f32);
+        ui.mount(gpu_view("World", world.view()).size(SIZE as f32, SIZE as f32));
+        let mut centre = |step: f32| {
+            world.set_camera(Camera::looking_at([0., 0., 4. + step * 1e-4], [0., 0., 0.]));
+            ui.prepare_frame();
+            let report = ui.scene.borrow_mut().flush();
+            gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+            let pixels = gpu.readback().unwrap();
+            pixels[((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize]
+        };
+        let scale = || PostPass::new(SCALE).param("k", PostParam::Float);
+        let double = world.add_post(scale()).unwrap();
+        world.set_post_param(double, "k", 2.).unwrap();
+        let doubled = centre(0.);
+        // A second, halving, refused: left out, the first's light alone.
+        let halve = world.add_post(scale()).unwrap();
+        world.set_post_param(halve, "k", 0.5).unwrap();
+        REFUSE.with(|r| r.set(Some(halve)));
+        for step in 1..4 {
+            assert_eq!(centre(step as f32), doubled, "frame {step}");
+        }
+        assert_eq!(TRIED.with(Cell::get), 1, "tried once");
+        assert_eq!(COUNTED.with(|c| *c.borrow()), Some(1), "counted out");
+    }
 }

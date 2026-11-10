@@ -619,11 +619,13 @@ impl Viewport for Renderer {
         // its last pass writes the target.
         #[cfg(feature = "post")]
         let chain = {
+            // The device's refusals left out (`post::Chain::refused`).
+            let refused = self.gpu.as_ref().and_then(|g| g.post.as_ref());
             let staged = |stage| {
                 let n = world
                     .post_passes
                     .iter()
-                    .filter(|p| p.stage == stage)
+                    .filter(|p| p.stage == stage && !refused.is_some_and(|c| c.refused(p.id)))
                     .count();
                 n.min(usize::from(u8::MAX)) as u8
             };
@@ -631,6 +633,8 @@ impl Viewport for Renderer {
                 staged(crate::PostStage::Hdr),
                 staged(crate::PostStage::Display),
             );
+            #[cfg(test)]
+            post::counted(hdr);
             // Automatic exposure where the device runs compute (else the
             // stops alone: `AutoExposure`).
             let adapts = world.post.auto_exposure.is_some()
