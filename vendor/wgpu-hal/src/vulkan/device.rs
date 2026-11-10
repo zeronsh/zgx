@@ -424,6 +424,8 @@ impl super::Device {
             format: desc.format,
             copy_size: desc.copy_extent(),
             identity,
+            // zgx patch: not a swap chain image (`Texture::presented`).
+            presented: None,
         }
     }
 

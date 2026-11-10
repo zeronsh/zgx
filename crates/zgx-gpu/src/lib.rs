@@ -4470,6 +4470,10 @@ pub struct GpuRenderer {
     /// format, no alpha conversion. A copy is a memcpy for a software
     /// rasterizer, where a full-window shader pass costs as much as drawing.
     copy_present: bool,
+    /// The frame each swap chain image holds, and what recent frames
+    /// changed (Linux, Vulkan): a present copies what its image lacks.
+    #[cfg(target_os = "linux")]
+    swap: SwapHistory,
     /// Frames whose damage was drawn by `present_single_pass`.
     single_pass_frames: u64,
     /// Test hook: an offscreen renderer copies scroll moves' pixels where the
@@ -5116,6 +5120,11 @@ impl GpuRenderer {
                 && caps.usages.contains(wgpu::TextureUsages::COPY_DST)
             {
                 c.usage |= wgpu::TextureUsages::COPY_DST;
+                // `ZGX_SWAP_CHECK` reads each image back (`check_swap`).
+                #[cfg(target_os = "linux")]
+                if *SWAP_CHECK && caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+                    c.usage |= wgpu::TextureUsages::COPY_SRC;
+                }
             }
             if !own_surfaces {
                 s.configure(&device, &c);
@@ -5312,6 +5321,8 @@ impl GpuRenderer {
             layer_root: None,
             present_unpremultiplies,
             copy_present,
+            #[cfg(target_os = "linux")]
+            swap: SwapHistory::default(),
             single_pass_frames: 0,
             debug_scroll_copy: false,
             scroll_copied: std::cell::Cell::new(0),
@@ -5931,6 +5942,14 @@ impl GpuRenderer {
             self.fresh = true;
         }
     }
+    /// What the window's swap chain images hold is no longer known (an
+    /// expose, the window shown again, a change of mode): each present copies
+    /// all of the frame until each image has taken one. Nothing to forget
+    /// where presents copy all of it anyway (all but Linux's Vulkan).
+    pub fn forget_presented(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.swap.forget();
+    }
     /// Whether the size changed.
     pub fn resize(&mut self, width: u32, height: u32) -> bool {
         let (width, height) = (width.max(1), height.max(1));
@@ -6003,6 +6022,9 @@ impl GpuRenderer {
             c.height = height;
             s.configure(&self.device, c);
         }
+        // A new swap chain: what its images hold is unknown.
+        #[cfg(target_os = "linux")]
+        self.swap.forget();
         // AppKit shows the resized layer when its transaction commits. A
         // drawable presented outside it lands a frame late, so the window
         // briefly shows stretched or empty content.
@@ -6031,10 +6053,16 @@ impl GpuRenderer {
             .layer_present
             .as_ref()
             .map(|present| present.changed.clone());
+        #[cfg(target_os = "linux")]
+        let swap_changed = self.swap.changed.clone();
         let stats = self.render(scene, damage);
         #[cfg(own_surfaces)]
         if let (Some(present), Some(changed)) = (self.layer_present.as_mut(), changed) {
             present.changed = changed;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            self.swap.changed = swap_changed;
         }
         stats
     }
@@ -10681,6 +10709,12 @@ impl GpuRenderer {
         {
             present.changed.extend(regions.iter().map(|(_, s)| *s));
             present.changed.extend(copies.iter().map(|(s, _)| *s));
+        }
+        // And for the swap chain's images, which take it at the present.
+        #[cfg(target_os = "linux")]
+        {
+            self.swap.changed.extend(regions.iter().map(|(_, s)| *s));
+            self.swap.changed.extend(copies.iter().map(|(s, _)| *s));
         }
         // What the surface lacks: changes since it was last shown that this
         // frame doesn't repaint, and scrolled content; both drawn from the
@@ -15621,6 +15655,324 @@ impl GpuRenderer {
         }
         status
     }
+    /// Copy into `frame`'s image only what it lacks of the retained target
+    /// (`SwapHistory::lacks`), through Vulkan itself: wgpu tracks a surface
+    /// texture it acquires as uninitialized, and a copy of its own into part
+    /// of one clears all of it first. `encoder` (wgpu's) takes the
+    /// transitions; the copy is recorded in a command buffer of its own,
+    /// returned to submit after it (wgpu takes no encoder holding both).
+    /// `None` if it didn't (another backend, an image whose frame isn't
+    /// known, most of it changed): the caller copies all of it.
+    #[cfg(target_os = "linux")]
+    fn copy_lacking(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &wgpu::SurfaceTexture,
+    ) -> Option<Option<wgpu::CommandBuffer>> {
+        use ash::vk::{self, Handle as _};
+        let size = self.target.size();
+        let image = swap_image(&frame.texture)?;
+        let rects = self.swap.lacks(image, (size.width, size.height))?;
+        let area: u64 = rects.iter().map(|r| u64::from(r.2) * u64::from(r.3)).sum();
+        if rects.len() > SWAP_COPIES || area * 2 > u64::from(size.width) * u64::from(size.height) {
+            return None;
+        }
+        let source = unsafe { self.target.as_hal::<wgpu::hal::api::Vulkan>() }
+            .map(|texture| unsafe { texture.raw_handle() });
+        let device = unsafe { self.device.as_hal::<wgpu::hal::api::Vulkan>() }
+            .map(|device| device.raw_device().clone());
+        let (Some(source), Some(device)) = (source, device) else {
+            return None;
+        };
+        if rects.is_empty() {
+            return Some(None);
+        }
+        // The target to copy from, the image to copy to, as wgpu tracks them
+        // (its barriers; the image's from where it was presented).
+        encoder.transition_resources(
+            std::iter::empty(),
+            [
+                wgpu::TextureTransition {
+                    texture: &self.target,
+                    selector: None,
+                    state: wgpu::TextureUses::COPY_SRC,
+                },
+                wgpu::TextureTransition {
+                    texture: &frame.texture,
+                    selector: None,
+                    state: wgpu::TextureUses::COPY_DST,
+                },
+            ]
+            .into_iter(),
+        );
+        let layers = vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let regions: Vec<vk::ImageCopy> = rects
+            .iter()
+            .map(|&(x, y, width, height)| {
+                let offset = vk::Offset3D {
+                    x: x as i32,
+                    y: y as i32,
+                    z: 0,
+                };
+                vk::ImageCopy {
+                    src_subresource: layers,
+                    src_offset: offset,
+                    dst_subresource: layers,
+                    dst_offset: offset,
+                    extent: vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                }
+            })
+            .collect();
+        // SAFETY: both images are in the layouts the transitions above left
+        // them in (submitted before this command buffer); the regions lie
+        // within both (clipped to the target, the image's size); the command
+        // buffer is the copy encoder's own, recording.
+        let mut copy = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("swap copy"),
+            });
+        unsafe {
+            copy.as_hal_mut::<wgpu::hal::api::Vulkan, _, _>(|raw| {
+                if let Some(raw) = raw {
+                    device.cmd_copy_image(
+                        raw.raw_handle(),
+                        source,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk::Image::from_raw(image),
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &regions,
+                    );
+                }
+            });
+        }
+        present_log::log(|| {
+            format!(
+                "swap copy rects={} px={area} of {}",
+                rects.len(),
+                size.width * size.height
+            )
+        });
+        if *SWAP_CHECK {
+            self.check_swap(encoder, &mut copy, image, source, &device);
+        }
+        Some(Some(copy.finish()))
+    }
+    /// `ZGX_SWAP_CHECK`: after a partial copy, the image and the target read
+    /// back (through Vulkan, as the copy was: wgpu would clear the image it
+    /// takes for uninitialized) and compared once the frame is submitted
+    /// (`swap_check_compare`): an image that kept less than it was taken to
+    /// shows where.
+    #[cfg(target_os = "linux")]
+    fn check_swap(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        copy: &mut wgpu::CommandEncoder,
+        image: u64,
+        source: ash::vk::Image,
+        device: &ash::Device,
+    ) {
+        use ash::vk::{self, Handle as _};
+        let size = self.target.size();
+        let bytes = u64::from(size.width) * u64::from(size.height) * 4;
+        let buffers = [0, 1].map(|_| {
+            self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("swap check"),
+                size: bytes,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            })
+        });
+        // Written through wgpu first, so mapping reads what the copies wrote
+        // rather than clearing a buffer it holds uninitialized.
+        for buffer in &buffers {
+            encoder.clear_buffer(buffer, 0, None);
+        }
+        let raw = buffers.each_ref().map(|buffer| {
+            unsafe { buffer.as_hal::<wgpu::hal::api::Vulkan>() }.map(|b| unsafe { b.raw_handle() })
+        });
+        let [Some(read_image), Some(read_target)] = raw else {
+            return;
+        };
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let region = vk::BufferImageCopy {
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image_subresource: vk::ImageSubresourceLayers {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                mip_level: 0,
+                base_array_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: vk::Offset3D::default(),
+            image_extent: vk::Extent3D {
+                width: size.width,
+                height: size.height,
+                depth: 1,
+            },
+        };
+        let swap = vk::Image::from_raw(image);
+        let barrier = |old, new, from, to| {
+            vk::ImageMemoryBarrier::default()
+                .image(swap)
+                .subresource_range(range)
+                .old_layout(old)
+                .new_layout(new)
+                .src_access_mask(from)
+                .dst_access_mask(to)
+        };
+        // SAFETY: the image is in TRANSFER_DST (the copy's), and goes back
+        // there; the target is in TRANSFER_SRC; the buffers hold the whole of
+        // either, cleared before (the memory barrier orders it).
+        unsafe {
+            copy.as_hal_mut::<wgpu::hal::api::Vulkan, _, _>(|raw| {
+                let Some(raw) = raw else { return };
+                let cmd = raw.raw_handle();
+                let transfer = vk::PipelineStageFlags::TRANSFER;
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    transfer,
+                    transfer,
+                    vk::DependencyFlags::empty(),
+                    &[vk::MemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(
+                            vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::TRANSFER_READ,
+                        )],
+                    &[],
+                    &[barrier(
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk::AccessFlags::TRANSFER_WRITE,
+                        vk::AccessFlags::TRANSFER_READ,
+                    )],
+                );
+                device.cmd_copy_image_to_buffer(
+                    cmd,
+                    swap,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    read_image,
+                    &[region],
+                );
+                device.cmd_copy_image_to_buffer(
+                    cmd,
+                    source,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    read_target,
+                    &[region],
+                );
+                device.cmd_pipeline_barrier(
+                    cmd,
+                    transfer,
+                    transfer | vk::PipelineStageFlags::HOST,
+                    vk::DependencyFlags::empty(),
+                    &[vk::MemoryBarrier::default()
+                        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .dst_access_mask(vk::AccessFlags::HOST_READ)],
+                    &[],
+                    &[barrier(
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        vk::AccessFlags::TRANSFER_READ,
+                        vk::AccessFlags::TRANSFER_WRITE,
+                    )],
+                );
+            });
+        }
+        self.swap.checks.push(buffers);
+    }
+    /// The frame's `ZGX_SWAP_CHECK` reads, now submitted, compared.
+    #[cfg(target_os = "linux")]
+    fn swap_check_compare(&mut self) {
+        let width = self.target.size().width as usize;
+        for [image, target] in std::mem::take(&mut self.swap.checks) {
+            for buffer in [&image, &target] {
+                buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+            }
+            if self
+                .device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .is_err()
+            {
+                return;
+            }
+            let (a, b) = (
+                image.slice(..).get_mapped_range(),
+                target.slice(..).get_mapped_range(),
+            );
+            let stale: Vec<usize> = a
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(b.as_chunks::<4>().0)
+                .enumerate()
+                .filter(|(_, (x, y))| x != y)
+                .map(|(i, _)| i)
+                .collect();
+            self.swap.checked += 1;
+            if let (Some(first), Some(last)) = (stale.first(), stale.last()) {
+                let (x0, y0) = (first % width, first / width);
+                let (x1, y1) = (last % width, last / width);
+                eprintln!(
+                    "ZGX_SWAP_CHECK present {}: {} pixels of the image differ from the frame, ({x0},{y0})..({x1},{y1})",
+                    self.swap.checked,
+                    stale.len()
+                );
+            }
+        }
+    }
+    /// `frame`'s image now holds the frame drawn; what it changed since the
+    /// last present is the next present's regions.
+    #[cfg(target_os = "linux")]
+    fn swap_presented(&mut self, frame: &wgpu::SurfaceTexture) {
+        let Some(image) = swap_image(&frame.texture) else {
+            self.swap.changed.clear();
+            return;
+        };
+        if let Some(surface) = &self.surface
+            && let Some(hal) = unsafe { surface.as_hal::<wgpu::hal::api::Vulkan>() }
+        {
+            let size = self.target.size();
+            let whole = self
+                .swap
+                .changed
+                .iter()
+                .any(|r| r.2 >= size.width && r.3 >= size.height);
+            if !whole && self.swap.changed.len() <= SWAP_COPIES {
+                hal.set_next_present_regions(
+                    self.swap
+                        .changed
+                        .iter()
+                        .map(|&(x, y, width, height)| ash::vk::RectLayerKHR {
+                            offset: ash::vk::Offset2D {
+                                x: x as i32,
+                                y: y as i32,
+                            },
+                            extent: ash::vk::Extent2D { width, height },
+                            layer: 0,
+                        })
+                        .collect(),
+                );
+            }
+        }
+        self.swap.presented(image);
+    }
     fn present_frame(
         &mut self,
         before_present: impl FnOnce(),
@@ -15648,6 +16000,9 @@ impl GpuRenderer {
             .get_mut()
             .take()
             .unwrap_or_else(|| self.device.create_command_encoder(&Default::default()));
+        // A partial copy's own command buffer, after the frame's (Linux).
+        #[allow(unused_mut)]
+        let mut raw_copy: Option<wgpu::CommandBuffer> = None;
         if let Some(deferred) = self.deferred.get_mut().take() {
             let format = self
                 .single_pass_format
@@ -15658,11 +16013,21 @@ impl GpuRenderer {
             });
             self.present_single_pass(&mut encoder, &deferred, &raw, format);
         } else if self.copy_present {
-            encoder.copy_texture_to_texture(
-                self.target.as_image_copy(),
-                frame.texture.as_image_copy(),
-                self.target.size(),
-            );
+            // Linux, Vulkan: what this image lacks of the frame alone.
+            #[cfg(target_os = "linux")]
+            let copied = self
+                .copy_lacking(&mut encoder, &frame)
+                .map(|copy| raw_copy = copy);
+            #[cfg(not(target_os = "linux"))]
+            let copied: Option<()> = None;
+            if copied.is_none() {
+                encoder.copy_texture_to_texture(
+                    self.target.as_image_copy(),
+                    frame.texture.as_image_copy(),
+                    self.target.size(),
+                );
+                present_log::log(|| "swap copy whole".into());
+            }
         } else {
             let view = frame.texture.create_view(&Default::default());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -15681,12 +16046,21 @@ impl GpuRenderer {
             pass.set_bind_group(0, self.blit_bind.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
-        self.queue.submit([encoder.finish()]);
+        self.queue
+            .submit(std::iter::once(encoder.finish()).chain(raw_copy));
         self.belt.get_mut().recall();
         self.submitted();
         if let Some(mapped) = self.mapped.as_mut() {
             mapped.get_mut().submitted();
         }
+        #[cfg(target_os = "linux")]
+        if *SWAP_CHECK {
+            self.swap_check_compare();
+        }
+        // The image holds this frame now; what the frame changed is what
+        // the compositor redraws (`VK_KHR_incremental_present`).
+        #[cfg(target_os = "linux")]
+        self.swap_presented(&frame);
         before_present();
         frame.present();
         #[cfg(windows)]
@@ -19113,8 +19487,14 @@ impl surface::SurfaceSource for GpuRenderer {
         #[cfg(windows)]
         self.match_background()?;
         Ok(match self.surface.as_ref().unwrap().get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Acquisition::Frame(frame),
+            wgpu::CurrentSurfaceTexture::Success(frame) => Acquisition::Frame(frame),
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                // The swap chain is about to change: what its images hold
+                // isn't trusted (each present copies all of the frame).
+                #[cfg(target_os = "linux")]
+                self.swap.forget();
+                Acquisition::Frame(frame)
+            }
             wgpu::CurrentSurfaceTexture::Timeout => Acquisition::Timeout,
             wgpu::CurrentSurfaceTexture::Occluded => Acquisition::Occluded,
             wgpu::CurrentSurfaceTexture::Lost => Acquisition::Lost,
@@ -19158,6 +19538,8 @@ impl surface::SurfaceSource for GpuRenderer {
             .as_ref()
             .unwrap()
             .configure(&self.device, self.config.as_ref().unwrap());
+        #[cfg(target_os = "linux")]
+        self.swap.forget();
         // A new swap chain shows in its visual once the tree commits.
         #[cfg(all(windows, feature = "composition"))]
         if let Some(target) = &self.composition {
@@ -19169,6 +19551,137 @@ impl surface::SurfaceSource for GpuRenderer {
             self.set_drawable_count(3);
         }
     }
+}
+
+/// The most rectangles a present copies apart, or names to the compositor;
+/// past it, all of the window.
+#[cfg(target_os = "linux")]
+const SWAP_COPIES: usize = 64;
+/// How many recent frames' changes `SwapHistory` keeps: an image presented
+/// further back takes all of the frame.
+#[cfg(target_os = "linux")]
+const SWAP_HISTORY: usize = 8;
+/// The swap chain's images on Linux's Vulkan surface (`copy_present`): the
+/// frame each holds, by its image (a `VkImage`), and what recent frames
+/// changed in the retained target, so a present copies what the image it
+/// acquired lacks rather than all of it. Presentation leaves an image's
+/// contents as they were (`vkQueuePresentKHR`).
+#[cfg(target_os = "linux")]
+#[derive(Default)]
+struct SwapHistory {
+    held: Vec<(u64, u64)>,
+    frame: u64,
+    history: std::collections::VecDeque<(u64, Vec<Scissor>)>,
+    /// What the frames drawn since the last present changed.
+    changed: Vec<Scissor>,
+    /// `ZGX_SWAP_CHECK`'s reads of the frame being presented (image, target).
+    checks: Vec<[wgpu::Buffer; 2]>,
+    /// Presents checked so far.
+    checked: u64,
+}
+/// `ZGX_SWAP_CHECK=1`: each partial copy into a swap chain image is read
+/// back and compared with the frame (`check_swap`).
+#[cfg(target_os = "linux")]
+static SWAP_CHECK: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_SWAP_CHECK").is_some_and(|v| v != "0"));
+#[cfg(target_os = "linux")]
+impl SwapHistory {
+    /// A new swap chain: its images hold nothing known.
+    fn forget(&mut self) {
+        self.held.clear();
+        self.history.clear();
+    }
+    /// What `image` lacks of the frame drawn, within `size`: the changes of
+    /// every frame since the one it holds, and the frame's own; `None`
+    /// (all of it) when what it holds isn't known, or is older than the
+    /// history kept.
+    fn lacks(&self, image: u64, (width, height): (u32, u32)) -> Option<Vec<Scissor>> {
+        let held = self
+            .held
+            .iter()
+            .find(|(i, _)| *i == image)
+            .map(|(_, f)| *f)?;
+        let mut rects: Vec<Scissor> = if held == self.frame {
+            Vec::new()
+        } else if self.history.front().is_some_and(|(f, _)| *f <= held + 1) {
+            self.history
+                .iter()
+                .filter(|(frame, _)| *frame > held)
+                .flat_map(|(_, changed)| changed.iter().copied())
+                .collect()
+        } else {
+            return None;
+        };
+        rects.extend(self.changed.iter().copied());
+        Some(
+            rects
+                .into_iter()
+                .filter_map(|(x, y, w, h)| {
+                    let (right, bottom) = ((x + w).min(width), (y + h).min(height));
+                    (x < right && y < bottom).then(|| (x, y, right - x, bottom - y))
+                })
+                .collect(),
+        )
+    }
+    /// `image` was presented: it holds the newest frame, whose changes join
+    /// the history.
+    fn presented(&mut self, image: u64) {
+        self.frame += 1;
+        let changed = std::mem::take(&mut self.changed);
+        self.history.push_back((self.frame, changed));
+        if self.history.len() > SWAP_HISTORY {
+            self.history.pop_front();
+        }
+        match self.held.iter_mut().find(|(i, _)| *i == image) {
+            Some(held) => held.1 = self.frame,
+            None => self.held.push((image, self.frame)),
+        }
+    }
+}
+#[cfg(all(test, target_os = "linux"))]
+mod swap_history_tests {
+    use super::{SWAP_HISTORY, SwapHistory};
+    /// Three images taking turns: each lacks the changes of the frames it
+    /// missed and the frame's own, all of it while unknown or too old, and
+    /// nothing once a new swap chain forgets them.
+    #[test]
+    fn an_image_lacks_what_changed_since_the_frame_it_holds() {
+        let size = (100, 50);
+        let mut swap = SwapHistory::default();
+        // Unknown images: all of it.
+        assert_eq!(swap.lacks(1, size), None);
+        for (image, cell) in [(1, 0), (2, 10), (3, 20)] {
+            swap.changed.push((cell, 0, 4, 4));
+            swap.presented(image);
+        }
+        // Image 1 holds frame 1; frames 2 and 3 changed (10,0) and (20,0),
+        // and the frame drawn now changes (30,0).
+        swap.changed.push((30, 0, 4, 4));
+        assert_eq!(
+            swap.lacks(1, size),
+            Some(vec![(10, 0, 4, 4), (20, 0, 4, 4), (30, 0, 4, 4)])
+        );
+        // Image 3 holds the last frame presented: the frame's own alone.
+        assert_eq!(swap.lacks(3, size), Some(vec![(30, 0, 4, 4)]));
+        // Clipped to a window that shrank.
+        swap.changed.push((95, 45, 10, 10));
+        assert_eq!(swap.lacks(3, size).unwrap().last(), Some(&(95, 45, 5, 5)));
+        // An image last given a frame older than the history kept: all of it.
+        for _ in 0..SWAP_HISTORY + 1 {
+            swap.presented(2);
+        }
+        assert_eq!(swap.lacks(1, size), None);
+        // A new swap chain: nothing is known.
+        swap.forget();
+        assert_eq!(swap.lacks(2, size), None);
+    }
+}
+/// A Vulkan swap chain image's handle, `None` on another backend.
+#[cfg(target_os = "linux")]
+fn swap_image(texture: &wgpu::Texture) -> Option<u64> {
+    use ash::vk::Handle;
+    unsafe { texture.as_hal::<wgpu::hal::api::Vulkan>() }
+        .map(|t| unsafe { t.raw_handle() }.as_raw())
 }
 
 #[cfg(test)]

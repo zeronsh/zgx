@@ -1,4 +1,4 @@
-# zgx patch to wgpu-hal 29.0.4 (Metal backend, three Direct3D 12 additions)
+# zgx patch to wgpu-hal 29.0.4 (Metal backend, three Direct3D 12 additions, one Vulkan)
 
 Vendored from crates.io `wgpu-hal` 29.0.4 (MIT OR Apache-2.0, license files
 unchanged) and applied through `[patch.crates-io]` in the workspace
@@ -6,9 +6,10 @@ unchanged) and applied through `[patch.crates-io]` in the workspace
 the new `src/metal/buffer_writes.rs`, and for Direct3D 12
 `src/dx12/instance.rs`, `src/auxil/dxgi/factory.rs`,
 `src/dx12/shader_compilation.rs`, `src/dx12/mod.rs`, `src/dx12/adapter.rs`
-and the new `src/dx12/shader_disk_cache.rs` (see the last three sections), and
+and the new `src/dx12/shader_disk_cache.rs` (see the Direct3D 12 sections),
 `Cargo.toml`'s `metal` feature (naga's WGSL in, for single-use shader
-modules); search for "zgx patch".
+modules), and for Vulkan `src/vulkan/{adapter,command,device,mod}.rs` and
+`src/vulkan/swapchain/native.rs` (the last section); search for "zgx patch".
 
 ## Why
 
@@ -165,3 +166,40 @@ and `Queue::submit` holds the process-wide `WARP_SUBMITS` lock across
 shares one wgpu device among its renderers on WARP. Tested by
 `crates/zgx-gpu/tests/warp_devices.rs`: sixteen threads, each with a wgpu
 device of its own on WARP, drawing and reading back at once.
+
+## Vulkan: a present copies what its swap chain image lacks
+
+zgx presents on Linux by copying its retained frame into the swap chain
+image it acquires. Copying all of it every frame was most of what was left
+of a frame's CPU under a software rasterizer (a 1280x800 copy for a hover
+changing two cells), so zgx-gpu now copies only what that image lacks: the
+changes of every frame since the one it holds (`SwapHistory`, buffer age by
+image). That rests on the spec alone: presentation "will not affect the
+content of the presentable images", and an image reacquired and moved out of
+`PRESENT_SRC_KHR` holds "the same as they were prior to transitioning the
+image to the present source layout" (`vkQueuePresentKHR`).
+
+- **The barrier out of a presented image.** wgpu-core tracks every surface
+  texture it acquires as `UNINITIALIZED`, which `derive_image_layout` makes
+  `UNDEFINED`, a layout the driver may discard contents leaving.
+  `Texture::presented` (a swap chain image's flag, shared from
+  `NativeSwapchain::presented` into each texture acquired for it, set as it
+  is presented) makes `transition_textures` leave `PRESENT_SRC_KHR`
+  instead, where the image is. An image's first use leaves `UNDEFINED` as
+  before. A new swap chain starts with every flag clear.
+- **Present regions.** `VK_KHR_incremental_present` is enabled where the
+  device has it, and `Surface::set_next_present_regions` (beside
+  `set_next_present_time`) names the next present's changed rectangles,
+  chained as `VkPresentRegionsKHR`; Mesa's WSI hands them to
+  `wl_surface.damage_buffer`, so the compositor redraws them alone. Without
+  the extension the regions are dropped; the partial copy doesn't need it.
+- **`Buffer::raw_handle`**, for the readback `ZGX_SWAP_CHECK` records.
+
+The copy itself is zgx-gpu's (`copy_lacking`), recorded through
+`CommandEncoder::as_hal_mut` in a command buffer of its own: a wgpu copy into
+part of a texture it holds uninitialized clears all of it first. Any doubt
+copies all of it: an image new or of unknown age, a resize or recreate, a
+suboptimal acquire, an expose or the window shown again (`forget_presented`).
+`scripts/partial_repaint_smoke.py` reads every partly copied image back under
+`ZGX_SWAP_CHECK` (sway and X11, a resize and a hide/show mid-stream) and
+finds none differing from its frame.

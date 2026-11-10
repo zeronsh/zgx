@@ -250,6 +250,21 @@ impl Surface {
             .expect("Surface should have a native Vulkan swapchain")
             .set_next_present_time(present_timing);
     }
+
+    /// zgx patch: the areas of the next presented image that changed since
+    /// the last image presented to this swapchain (`VK_KHR_incremental_present`,
+    /// which Mesa's WSI turns into `wl_surface.damage_buffer`), in its
+    /// pixels. Ignored where the device lacks the extension, or the surface
+    /// has no native swapchain (yet).
+    pub fn set_next_present_regions(&self, regions: Vec<vk::RectLayerKHR>) {
+        let mut swapchain = self.swapchain.write();
+        if let Some(native) = swapchain
+            .as_mut()
+            .and_then(|s| s.as_any_mut().downcast_mut::<swapchain::NativeSwapchain>())
+        {
+            native.set_next_present_regions(regions);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -666,6 +681,16 @@ pub struct Buffer {
     allocation: Option<Mutex<BufferMemoryBacking>>,
 }
 impl Buffer {
+    /// zgx patch: the buffer's handle, for commands recorded through Vulkan
+    /// itself.
+    ///
+    /// # Safety
+    ///
+    /// - The buffer handle must not be manually destroyed
+    pub unsafe fn raw_handle(&self) -> vk::Buffer {
+        self.raw
+    }
+
     /// # Safety
     ///
     /// - `vk_buffer`'s memory must be managed by the caller
@@ -728,6 +753,13 @@ pub struct Texture {
     format: wgt::TextureFormat,
     copy_size: crate::CopyExtent,
     identity: ResourceIdentity<vk::Image>,
+    /// zgx patch: a swapchain image's "presented before" flag, set as it is
+    /// presented: wgpu-core tracks every surface texture it acquires as
+    /// uninitialized, and that image is in `PRESENT_SRC_KHR`, its contents
+    /// kept (`vkQueuePresentKHR`: presentation "will not affect the content
+    /// of the presentable images"), so its first barrier leaves that layout
+    /// rather than `UNDEFINED`, which may discard them (`transition_textures`).
+    presented: Option<Arc<core::sync::atomic::AtomicBool>>,
 
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
