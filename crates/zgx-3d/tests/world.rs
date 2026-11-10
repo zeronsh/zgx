@@ -562,6 +562,46 @@ fn a_world_that_rested_draws_its_frames_as_one_that_never_did() {
 }
 
 #[test]
+fn translucent_meshes_crossing_in_depth_draw_back_to_front_again() {
+    let half = |rgb| {
+        let mut material = Material::rgb(rgb);
+        material.unlit = true;
+        material.color[3] = 0.5;
+        material
+    };
+    let (world, red) = one(facing_square(), half(0xff0000));
+    world.set_transform(red, Transform::at([0., 0., -1.]));
+    world.add(Object::mesh(facing_square(), half(0x0000ff)));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    // What a window drawing the world for the first time shows.
+    let fresh = |world: &World| {
+        let mut fresh = Window::new(world).unwrap();
+        fresh.draw();
+        fresh.gpu.readback().unwrap()
+    };
+    window.draw();
+    let blue_over_red = window.pixel(50, 50);
+    assert!(blue_over_red[2] > blue_over_red[0], "{blue_over_red:?}");
+    // The red one comes in front: drawn after the blue one now.
+    world.set_transform(red, Transform::at([0., 0., 1.]));
+    window.draw();
+    let red_over_blue = window.pixel(50, 50);
+    assert!(red_over_blue[0] > red_over_blue[2], "{red_over_blue:?}");
+    assert!(window.gpu.readback().unwrap() == fresh(&world));
+    // Back, and the camera goes round: only the camera moved.
+    world.set_transform(red, Transform::at([0., 0., -1.]));
+    window.draw();
+    assert_eq!(window.pixel(50, 50), blue_over_red);
+    world.set_camera(Camera::looking_at([0., 0., -3.], [0., 0., 0.]));
+    window.draw();
+    let from_behind = window.pixel(50, 50);
+    assert!(from_behind[0] > from_behind[2], "{from_behind:?}");
+    assert!(window.gpu.readback().unwrap() == fresh(&world));
+}
+
+#[test]
 fn a_volume_takes_out_light_by_how_far_it_goes() {
     let (world, pane) = red_behind_glass(Material::rgb(0xffffff).with(0., 0.));
     let Some(mut window) = Window::new(&world) else {

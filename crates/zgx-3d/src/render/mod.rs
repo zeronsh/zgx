@@ -180,9 +180,19 @@ impl Viewport for Renderer {
                 (d.geometry.id() & !(1 << 63), map_set(d))
             }
         };
+        // Last frame's order with this frame's keys, where it had as many
+        // meshes: still in order (most frames), sorting only checks it. Each
+        // mesh's index is in its key, so the order is the one a list made
+        // anew sorts to.
         let order = &mut scratch.order;
-        order.clear();
-        order.extend(all.iter().map(key).zip(0..));
+        if order.len() == all.len() {
+            for (k, i) in order.iter_mut() {
+                *k = key(&all[*i]);
+            }
+        } else {
+            order.clear();
+            order.extend(all.iter().map(key).zip(0..));
+        }
         order.sort_unstable();
         let mut drawn: Vec<&crate::world::Drawn> = recycle(std::mem::take(&mut scratch.sorted));
         drawn.extend(order.iter().map(|&(_, i)| &all[i]));
