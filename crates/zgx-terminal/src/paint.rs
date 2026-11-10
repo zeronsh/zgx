@@ -168,7 +168,7 @@ type Drawn = (Rgb, Option<Rgb>);
 
 /// A cell colour as drawn: one the program set (OSC 4, 10, 11), else the
 /// palette's.
-fn resolve(term: &Term, palette: &Palette, color: VtColor) -> Rgb {
+fn resolve<L>(term: &alacritty_terminal::Term<L>, palette: &Palette, color: VtColor) -> Rgb {
     match color {
         VtColor::Spec(rgb) => rgb,
         VtColor::Named(named) => {
@@ -200,7 +200,7 @@ pub(crate) fn row(
     cursor: Option<CursorAt>,
     selection: Option<&SelectionRange>,
 ) -> RowPaint {
-    let (paint, styled) = row_built::<false>(term, row, look, metrics, cursor, selection);
+    let (paint, styled) = row_built::<_, false, true>(term, row, look, metrics, cursor, selection);
     if styled {
         return row_styled(term, row, look, metrics, cursor, selection);
     }
@@ -220,15 +220,17 @@ fn row_styled(
     cursor: Option<CursorAt>,
     selection: Option<&SelectionRange>,
 ) -> RowPaint {
-    row_built::<true>(term, row, look, metrics, cursor, selection).0
+    row_built::<_, true, true>(term, row, look, metrics, cursor, selection).0
 }
 
 /// The row at viewport `row`, and whether it has an underline in a style or
 /// colour of its own. Without `STYLED` those are left to the text (the row
 /// is built again with it, `row_styled`), so a plain row carries nothing of
-/// them.
-fn row_built<const STYLED: bool>(
-    term: &Term,
+/// them. With `RUNS`, the cells after one in its style, plain ASCII, are
+/// taken as it was (`row`'s; without, each as itself: what a test compares
+/// it with).
+fn row_built<L, const STYLED: bool, const RUNS: bool>(
+    term: &alacritty_terminal::Term<L>,
     row: usize,
     look: &Look,
     metrics: Metrics,
@@ -294,201 +296,278 @@ fn row_built<const STYLED: bool>(
             color,
         });
     };
-    for column in 0..columns {
-        let cell: &Cell = &cells[Column(column)];
-        let flags = cell.flags;
-        if flags.contains(Flags::WIDE_CHAR_SPACER) {
-            paint.text.push(' ');
-        }
-        let (mut fg, mut bg) = match resolved {
-            Some((set, drawn)) if set == (cell.fg, cell.bg) => drawn,
-            _ => {
-                let drawn = (
-                    resolve(term, palette, cell.fg),
-                    match cell.bg {
-                        VtColor::Named(NamedColor::Background) => None,
-                        other => Some(resolve(term, palette, other)),
-                    },
-                );
-                resolved = Some(((cell.fg, cell.bg), drawn));
-                drawn
+    // Where the cursor's cells start after a column: a run stops there.
+    let cursor_from = |column: usize| match cursor {
+        Some(at) if at.column > column => at.column,
+        Some(at) if cursor_wide && at.column + 1 > column => at.column + 1,
+        _ => columns,
+    };
+    let mut column = 0;
+    while column < columns {
+        // What the cell drawn filled, and whether the cursor was on it: the
+        // cells after it in its style take the same (`RUNS`).
+        let (filled, cursored): (Option<Color>, bool);
+        'cell: {
+            let cell: &Cell = &cells[Column(column)];
+            let flags = cell.flags;
+            if flags.contains(Flags::WIDE_CHAR_SPACER) {
+                paint.text.push(' ');
             }
-        };
-        if flags.contains(Flags::DIM) {
-            fg = dim(fg);
-        }
-        if flags.contains(Flags::INVERSE) {
-            let was = fg;
-            fg = bg.unwrap_or(background);
-            bg = Some(was);
-        }
-        let mut fill = bg.map(color);
-        let mut ink = color(fg);
-        if selection.is_some_and(|range| range.contains(Point::new(line, Column(column)))) {
-            fill = Some(look.selection);
-            ink = look.selection_text.unwrap_or(ink);
-        }
-        // The cursor's cell, or a wide one's second half.
-        let under_cursor =
-            cursor.filter(|at| at.column == column || (cursor_wide && at.column + 1 == column));
-        if let Some(at) = under_cursor {
-            let cursor_color =
-                color(term.colors()[NamedColor::Cursor as usize].unwrap_or(palette.cursor));
-            let x = column as f32 * width;
-            let thin = (height / 14.).clamp(1., 2.);
-            match (at.shape, at.focused) {
-                (CursorShape::Hidden, _) => {}
-                (CursorShape::Block, true) => {
-                    fill = Some(cursor_color);
-                    ink = look.cursor_text.unwrap_or(color(background));
-                }
-                (CursorShape::Beam, true) if at.column == column => paint.lines.push(Fill {
-                    x,
-                    y: 0.,
-                    width: thin * 1.5,
-                    height,
-                    color: cursor_color,
-                }),
-                (CursorShape::Underline, true) => paint.lines.push(Fill {
-                    x,
-                    y: height - thin * 1.5,
-                    width,
-                    height: thin * 1.5,
-                    color: cursor_color,
-                }),
-                (CursorShape::Beam, true) => {}
-                // Unfocused (or asked for): an outline.
+            let (mut fg, mut bg) = match resolved {
+                Some((set, drawn)) if set == (cell.fg, cell.bg) => drawn,
                 _ => {
-                    let last = at.column != column
-                        || !cells[Column(column)].flags.contains(Flags::WIDE_CHAR);
-                    let first = at.column == column;
-                    for (x, y, w, h) in [(x, 0., width, thin), (x, height - thin, width, thin)] {
-                        paint.lines.push(Fill {
-                            x,
-                            y,
-                            width: w,
-                            height: h,
-                            color: cursor_color,
-                        });
-                    }
-                    if first {
-                        paint.lines.push(Fill {
-                            x,
-                            y: 0.,
-                            width: thin,
-                            height,
-                            color: cursor_color,
-                        });
-                    }
-                    if last {
-                        paint.lines.push(Fill {
-                            x: x + width - thin,
-                            y: 0.,
-                            width: thin,
-                            height,
-                            color: cursor_color,
-                        });
-                    }
+                    let drawn = (
+                        resolve(term, palette, cell.fg),
+                        match cell.bg {
+                            VtColor::Named(NamedColor::Background) => None,
+                            other => Some(resolve(term, palette, other)),
+                        },
+                    );
+                    resolved = Some(((cell.fg, cell.bg), drawn));
+                    drawn
                 }
-            }
-        }
-        if let Some(fill) = fill {
-            fill_at(&mut paint, column, fill);
-        }
-        if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
-            continue;
-        }
-        let c = cell.c;
-        paint.text.push(if c == '\t' { ' ' } else { c });
-        if flags.contains(Flags::STRIKEOUT) {
-            let span = if flags.contains(Flags::WIDE_CHAR) {
-                2.
-            } else {
-                1.
             };
-            paint.lines.push(Fill {
-                x: column as f32 * width,
-                y: (height / 2.).round() - 0.5,
-                width: width * span,
-                height: (height / 14.).clamp(1., 2.),
-                color: ink,
-            });
-        }
-        let blank = c == ' ' || c == '\t' || c == '\0' || flags.contains(Flags::HIDDEN);
-        let bold = flags.contains(Flags::BOLD);
-        let italic = flags.contains(Flags::ITALIC);
-        let mut underline = flags & Flags::ALL_UNDERLINES;
-        // In a style or a colour of its own: drawn as shapes under the cells,
-        // not by the text (whose underline is a plain line in its colour).
-        // A plain row's runs say whether it has one (`row`).
-        if STYLED
-            && !underline.is_empty()
-            && (underline.intersects(STYLED_UNDERLINES) || cell.underline_color().is_some())
-        {
-            styled_underline(&mut paint, term, palette, cell, column, width, ink);
-            underline = Flags::empty();
-        }
-        if blank && underline.is_empty() {
-            // A blank joins the open run, whatever its colour (which doesn't
-            // show), unless that run is underlined.
-            match &run {
-                Some(open_run) if open_run.underline.is_empty() => {
-                    open.push(' ');
-                    blanks += 1;
-                }
-                _ => finish(&mut run, &mut open, &mut blanks, &mut paint.runs),
+            if flags.contains(Flags::DIM) {
+                fg = dim(fg);
             }
-            continue;
-        }
-        let wide = flags.contains(Flags::WIDE_CHAR);
-        if wide || alone(c) {
-            finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
-            underlines |= underline;
-            let mut text = String::new();
-            text.push(c);
+            if flags.contains(Flags::INVERSE) {
+                let was = fg;
+                fg = bg.unwrap_or(background);
+                bg = Some(was);
+            }
+            let mut fill = bg.map(color);
+            let mut ink = color(fg);
+            if selection.is_some_and(|range| range.contains(Point::new(line, Column(column)))) {
+                fill = Some(look.selection);
+                ink = look.selection_text.unwrap_or(ink);
+            }
+            // The cursor's cell, or a wide one's second half.
+            let under_cursor =
+                cursor.filter(|at| at.column == column || (cursor_wide && at.column + 1 == column));
+            if let Some(at) = under_cursor {
+                let cursor_color =
+                    color(term.colors()[NamedColor::Cursor as usize].unwrap_or(palette.cursor));
+                let x = column as f32 * width;
+                let thin = (height / 14.).clamp(1., 2.);
+                match (at.shape, at.focused) {
+                    (CursorShape::Hidden, _) => {}
+                    (CursorShape::Block, true) => {
+                        fill = Some(cursor_color);
+                        ink = look.cursor_text.unwrap_or(color(background));
+                    }
+                    (CursorShape::Beam, true) if at.column == column => paint.lines.push(Fill {
+                        x,
+                        y: 0.,
+                        width: thin * 1.5,
+                        height,
+                        color: cursor_color,
+                    }),
+                    (CursorShape::Underline, true) => paint.lines.push(Fill {
+                        x,
+                        y: height - thin * 1.5,
+                        width,
+                        height: thin * 1.5,
+                        color: cursor_color,
+                    }),
+                    (CursorShape::Beam, true) => {}
+                    // Unfocused (or asked for): an outline.
+                    _ => {
+                        let last = at.column != column
+                            || !cells[Column(column)].flags.contains(Flags::WIDE_CHAR);
+                        let first = at.column == column;
+                        for (x, y, w, h) in [(x, 0., width, thin), (x, height - thin, width, thin)]
+                        {
+                            paint.lines.push(Fill {
+                                x,
+                                y,
+                                width: w,
+                                height: h,
+                                color: cursor_color,
+                            });
+                        }
+                        if first {
+                            paint.lines.push(Fill {
+                                x,
+                                y: 0.,
+                                width: thin,
+                                height,
+                                color: cursor_color,
+                            });
+                        }
+                        if last {
+                            paint.lines.push(Fill {
+                                x: x + width - thin,
+                                y: 0.,
+                                width: thin,
+                                height,
+                                color: cursor_color,
+                            });
+                        }
+                    }
+                }
+            }
+            if let Some(fill) = fill {
+                fill_at(&mut paint, column, fill);
+            }
+            (filled, cursored) = (fill, under_cursor.is_some());
+            if flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                break 'cell;
+            }
+            let c = cell.c;
+            paint.text.push(if c == '\t' { ' ' } else { c });
+            if flags.contains(Flags::STRIKEOUT) {
+                let span = if flags.contains(Flags::WIDE_CHAR) {
+                    2.
+                } else {
+                    1.
+                };
+                paint.lines.push(Fill {
+                    x: column as f32 * width,
+                    y: (height / 2.).round() - 0.5,
+                    width: width * span,
+                    height: (height / 14.).clamp(1., 2.),
+                    color: ink,
+                });
+            }
+            let blank = c == ' ' || c == '\t' || c == '\0' || flags.contains(Flags::HIDDEN);
+            let bold = flags.contains(Flags::BOLD);
+            let italic = flags.contains(Flags::ITALIC);
+            let mut underline = flags & Flags::ALL_UNDERLINES;
+            // In a style or a colour of its own: drawn as shapes under the cells,
+            // not by the text (whose underline is a plain line in its colour).
+            // A plain row's runs say whether it has one (`row`).
+            if STYLED
+                && !underline.is_empty()
+                && (underline.intersects(STYLED_UNDERLINES) || cell.underline_color().is_some())
+            {
+                styled_underline(&mut paint, term, palette, cell, column, width, ink);
+                underline = Flags::empty();
+            }
+            if blank && underline.is_empty() {
+                // A blank joins the open run, whatever its colour (which doesn't
+                // show), unless that run is underlined.
+                match &run {
+                    Some(open_run) if open_run.underline.is_empty() => {
+                        open.push(' ');
+                        blanks += 1;
+                    }
+                    _ => finish(&mut run, &mut open, &mut blanks, &mut paint.runs),
+                }
+                break 'cell;
+            }
+            let wide = flags.contains(Flags::WIDE_CHAR);
+            if wide || alone(c) {
+                finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
+                underlines |= underline;
+                let mut text = String::new();
+                text.push(c);
+                if let Some(extra) = cell.zerowidth() {
+                    coloured |= !underline.is_empty() && cell.underline_color().is_some();
+                    text.extend(extra);
+                }
+                paint.runs.push(Run {
+                    column: column as u16,
+                    text: text.into(),
+                    color: ink,
+                    bold,
+                    italic,
+                    underline,
+                    alone: true,
+                    cells: if wide { 2 } else { 1 },
+                });
+                break 'cell;
+            }
+            let joins = run.as_ref().is_some_and(|open| {
+                open.color == ink
+                    && open.bold == bold
+                    && open.italic == italic
+                    && open.underline == underline
+            });
+            if joins {
+                blanks = 0;
+            } else {
+                finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
+                underlines |= underline;
+                run = Some(Run {
+                    column: column as u16,
+                    text: Arc::from(""),
+                    color: ink,
+                    bold,
+                    italic,
+                    underline,
+                    alone: false,
+                    cells: 1,
+                });
+            }
+            open.push(if blank { ' ' } else { c });
             if let Some(extra) = cell.zerowidth() {
                 coloured |= !underline.is_empty() && cell.underline_color().is_some();
-                text.extend(extra);
+                open.extend(extra);
             }
-            paint.runs.push(Run {
-                column: column as u16,
-                text: text.into(),
-                color: ink,
-                bold,
-                italic,
-                underline,
-                alone: true,
-                cells: if wide { 2 } else { 1 },
-            });
-            continue;
         }
-        let joins = run.as_ref().is_some_and(|open| {
-            open.color == ink
-                && open.bold == bold
-                && open.italic == italic
-                && open.underline == underline
-        });
-        if joins {
-            blanks = 0;
-        } else {
-            finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
-            underlines |= underline;
-            run = Some(Run {
-                column: column as u16,
-                text: Arc::from(""),
-                color: ink,
-                bold,
-                italic,
-                underline,
-                alone: false,
-                cells: 1,
-            });
+        // The cells after it in its style, plain ASCII, no cursor or
+        // selection on them: each colours, fills and joins as it did, so only
+        // its character is read. (Its style is all those depend on.)
+        if RUNS && selection.is_none() && !cursored {
+            let cell: &Cell = &cells[Column(column)];
+            let flags = cell.flags;
+            let plain = |c: char| (' '..='~').contains(&c);
+            if cell.extra.is_none()
+                && plain(cell.c)
+                && !flags.intersects(
+                    Flags::WIDE_CHAR
+                        | Flags::WIDE_CHAR_SPACER
+                        | Flags::LEADING_WIDE_CHAR_SPACER
+                        | Flags::STRIKEOUT
+                        | Flags::HIDDEN,
+                )
+                && !(STYLED && flags.intersects(Flags::ALL_UNDERLINES))
+            {
+                let (fg, bg) = (cell.fg, cell.bg);
+                let underlined = flags.intersects(Flags::ALL_UNDERLINES);
+                // The open run is in this style: the cell joined or began it.
+                // A blank one joins whatever run is open, in its own style.
+                let mut in_style = cell.c != ' ' || underlined;
+                let end = cursor_from(column);
+                let mut next = column + 1;
+                while next < end {
+                    let cell: &Cell = &cells[Column(next)];
+                    let c = cell.c;
+                    if cell.flags != flags
+                        || cell.fg != fg
+                        || cell.bg != bg
+                        || cell.extra.is_some()
+                        || !plain(c)
+                        || (c != ' ' && !in_style)
+                    {
+                        break;
+                    }
+                    if let Some(fill) = filled {
+                        fill_at(&mut paint, next, fill);
+                    }
+                    paint.text.push(c);
+                    if c == ' ' && !underlined {
+                        match &run {
+                            Some(open_run) if open_run.underline.is_empty() => {
+                                open.push(' ');
+                                blanks += 1;
+                            }
+                            _ => {
+                                finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
+                                in_style = false;
+                            }
+                        }
+                    } else {
+                        blanks = 0;
+                        open.push(c);
+                        in_style = true;
+                    }
+                    next += 1;
+                }
+                column = next - 1;
+            }
         }
-        open.push(if blank { ' ' } else { c });
-        if let Some(extra) = cell.zerowidth() {
-            coloured |= !underline.is_empty() && cell.underline_color().is_some();
-            open.extend(extra);
-        }
+        column += 1;
     }
     finish(&mut run, &mut open, &mut blanks, &mut paint.runs);
     // Its white end gone: blank cells' spaces, most of a row, as bytes, then
@@ -517,9 +596,9 @@ const STYLED_UNDERLINES: Flags = Flags::DOUBLE_UNDERLINE
 /// they meet in the same style and colour.
 #[cold]
 #[inline(never)]
-fn styled_underline(
+fn styled_underline<L>(
     paint: &mut RowPaint,
-    term: &Term,
+    term: &alacritty_terminal::Term<L>,
     palette: &Palette,
     cell: &Cell,
     column: usize,
@@ -722,5 +801,118 @@ fn draw_underline(canvas: &mut Canvas, underline: &Fill, metrics: Metrics) {
                 },
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alacritty_terminal::{
+        event::VoidListener,
+        term::{Config, test::TermSize},
+        vte::ansi::{Processor, StdSyncHandler},
+    };
+
+    /// A row built with the cells after one in its style taken as it was
+    /// (`RUNS`) is the row built a cell at a time, whatever the row holds:
+    /// colours set and inverse, dim, bold, italic, underlines plain and
+    /// styled, strikes, hidden cells, wide characters and emoji, combining
+    /// marks, links, tabs, blanks in runs and between them, with the cursor
+    /// anywhere in any shape and focus, and a selection or none.
+    #[test]
+    fn runs_build_rows_as_cells_do() {
+        let pieces: &[&str] = &[
+            "word ",
+            "text",
+            "  ",
+            " ",
+            "a",
+            "~!{}",
+            "\t",
+            "\x1b[31m",
+            "\x1b[42m",
+            "\x1b[0m",
+            "\x1b[1m",
+            "\x1b[3m",
+            "\x1b[2m",
+            "\x1b[7m",
+            "\x1b[9m",
+            "\x1b[8m",
+            "\x1b[4m",
+            "\x1b[4:3m",
+            "\x1b[58;5;3m",
+            "\x1b[24m",
+            "\x1b[38;2;10;200;30m",
+            "\x1b[48;5;17m",
+            "\x1b[39;49m",
+            "日本",
+            "🙂",
+            "e\u{301}",
+            "\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\",
+            "\x1b[5G",
+            "\r\n",
+            "\u{2500}\u{2500}",
+        ];
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |below: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % below as u64) as usize
+        };
+        let look = Look::default();
+        let metrics = Metrics {
+            font_size: 13.,
+            cell_width: 8.,
+            cell_height: 16.,
+        };
+        let shapes = [
+            CursorShape::Block,
+            CursorShape::Beam,
+            CursorShape::Underline,
+            CursorShape::HollowBlock,
+            CursorShape::Hidden,
+        ];
+        let mut runs_seen = 0;
+        for _ in 0..300 {
+            let mut term = alacritty_terminal::Term::new(
+                Config::default(),
+                &TermSize::new(40, 6),
+                VoidListener,
+            );
+            let mut parser = Processor::<StdSyncHandler>::new();
+            let mut out = String::new();
+            for _ in 0..next(40) {
+                out.push_str(pieces[next(pieces.len())]);
+            }
+            parser.advance(&mut term, out.as_bytes());
+            let selection = (next(3) == 0).then(|| {
+                SelectionRange::new(
+                    Point::new(Line(next(3) as i32), Column(next(40))),
+                    Point::new(Line(3 + next(3) as i32), Column(next(40))),
+                    next(2) == 0,
+                )
+            });
+            for row in 0..6 {
+                let cursor = (next(2) == 0).then(|| CursorAt {
+                    column: next(40),
+                    shape: shapes[next(shapes.len())],
+                    focused: next(2) == 0,
+                });
+                let selection = selection.as_ref();
+                let each =
+                    row_built::<_, false, false>(&term, row, &look, metrics, cursor, selection);
+                let runs =
+                    row_built::<_, false, true>(&term, row, &look, metrics, cursor, selection);
+                assert_eq!(runs, each, "{out:?} row {row}");
+                let each =
+                    row_built::<_, true, false>(&term, row, &look, metrics, cursor, selection);
+                let runs =
+                    row_built::<_, true, true>(&term, row, &look, metrics, cursor, selection);
+                assert_eq!(runs, each, "{out:?} row {row}, styled");
+                runs_seen += each.0.runs.len();
+            }
+        }
+        assert!(runs_seen > 500, "{runs_seen} runs");
     }
 }
