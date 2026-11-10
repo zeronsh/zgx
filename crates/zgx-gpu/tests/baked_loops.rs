@@ -190,6 +190,30 @@ fn what_a_layer_would_show_wrongly_stays_in_the_frames() {
     assert!(!window.played());
     assert_eq!(window.pixel(50, 50), (0, 255));
 
+    // Under what follows it only as the union of what that holds (a panel
+    // the window's size, its boxes at its far corners): played.
+    let window = Window::new(
+        40.,
+        40.,
+        |_, root| root,
+        |scene, root| {
+            let panel = scene.append(
+                root,
+                NodeKind::Container(Layout::Overlay),
+                fixed(200., 200.),
+            );
+            scene.append(panel, NodeKind::Rect(BLUE), fixed(10., 10.));
+            let far = scene.append(panel, NodeKind::Rect(BLUE), fixed(10., 10.));
+            scene.set_transform(far, Transform { x: 190., y: 190. });
+        },
+    );
+    assert_eq!(
+        window.refused.get(),
+        0,
+        "nothing it holds lands on the loop"
+    );
+    assert!(window.played(), "plays under a panel painting elsewhere");
+
     // Holding something.
     let mut window = Window::plain(40., 40.);
     let panel = NodeKind::Panel {
