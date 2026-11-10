@@ -6559,26 +6559,42 @@ impl Scene {
         }
         let current = &self.children_raw(self.tree_node(parent))[from..];
         let children = &children[from..];
-        let place: NodeMap<usize> = current.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-        let Some(places) = children
-            .iter()
-            .map(|id| place.get(id).copied())
-            .collect::<Option<Vec<_>>>()
-        else {
-            return false;
+        let moved = match rotated_by(current, children) {
+            // Turned round (a ring of rows, a terminal's slots taking the
+            // next lines): the longer run stays, as the general path's
+            // longest increasing run would, found in one pass, no map.
+            Some(by) => {
+                let count = children.len();
+                let tail_stays = count - by >= by;
+                (0..count)
+                    .map(|at| (at >= count - by) == tail_stays)
+                    .collect()
+            }
+            None => {
+                let place: NodeMap<usize> =
+                    current.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+                let Some(places) = children
+                    .iter()
+                    .map(|id| place.get(id).copied())
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return false;
+                };
+                // The same children, each once.
+                let mut seen = vec![false; places.len()];
+                if places
+                    .iter()
+                    .any(|&i| std::mem::replace(&mut seen[i], true))
+                {
+                    return false;
+                }
+                let mut moved = vec![true; places.len()];
+                for index in longest_increasing(&places) {
+                    moved[index] = false;
+                }
+                moved
+            }
         };
-        // The same children, each once.
-        let mut seen = vec![false; places.len()];
-        if places
-            .iter()
-            .any(|&i| std::mem::replace(&mut seen[i], true))
-        {
-            return false;
-        }
-        let mut moved = vec![true; places.len()];
-        for index in longest_increasing(&places) {
-            moved[index] = false;
-        }
         // Paint order changes only for the children that moved past others
         // (a keyed list's new row, appended and put in its place): they
         // repaint where they are, the rest stay as they were.
@@ -20438,6 +20454,22 @@ fn finite_effects(mut effects: Effects) -> Effects {
     effects.saturate = finite_factor(effects.saturate);
     effects
 }
+/// How far `children` is `current` turned round (each child `by` places
+/// on, the last round to the front), if that is all it is: two passes, no
+/// map. `current`'s children are each once in it, so `children` is then
+/// the same children, each once.
+fn rotated_by(current: &[NodeId], children: &[NodeId]) -> Option<usize> {
+    let count = current.len();
+    let first = *children.first()?;
+    let by = current.iter().position(|id| *id == first)?;
+    (by != 0
+        && children.len() == count
+        && children
+            .iter()
+            .enumerate()
+            .all(|(at, id)| *id == current[(at + by) % count]))
+    .then_some(by)
+}
 /// The indices of a longest strictly increasing subsequence of `values`
 /// (patience sorting, n log n).
 // Apart: inlined into the reorder that calls it, its read-back loop cost
@@ -20856,6 +20888,30 @@ mod set_box_tests {
         scene.flush();
         assert!(scene.measure_calls > before, "the column laid out");
         same_bounds_by(&scene, &column(&swapped).0, &swapped);
+    }
+    /// A rotation is found as one (`rotated_by`), and it moves as many as
+    /// the general path's longest increasing run leaves; anything else is
+    /// not one.
+    #[test]
+    fn a_rotation_moves_what_the_longest_run_leaves() {
+        let ids: Vec<NodeId> = (0..9)
+            .map(|index| NodeId {
+                index,
+                generation: 0,
+            })
+            .collect();
+        for by in 1..ids.len() {
+            let turned: Vec<NodeId> = ids[by..].iter().chain(&ids[..by]).copied().collect();
+            assert_eq!(rotated_by(&ids, &turned), Some(by));
+            let places: Vec<usize> = turned.iter().map(|id| id.index as usize).collect();
+            let kept = longest_increasing(&places).len();
+            assert_eq!(kept, (ids.len() - by).max(by), "turned by {by}");
+        }
+        let mut swapped = ids.clone();
+        swapped.swap(2, 5);
+        assert_eq!(rotated_by(&ids, &swapped), None);
+        assert_eq!(rotated_by(&ids, &ids), None);
+        assert_eq!(rotated_by(&ids, &ids[1..]), None);
     }
     /// `same_bounds` for scenes whose nodes were made in other orders: the
     /// rows' (and their labels') boxes, matched by what they are.
