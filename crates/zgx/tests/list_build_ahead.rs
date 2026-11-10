@@ -644,9 +644,13 @@ fn a_list_scrolled_by_the_view_around_it_builds_ahead_too() {
     ui.mount(
         scroll(panel.clone()).w(400.).h(100.).child(
             column().w_full().child(
-                variable_virtual_list(ui.signal(0.), heights, 0, |i| i, move |_, i, cx| {
-                    built.row(i, 20., cx)
-                })
+                variable_virtual_list(
+                    ui.signal(0.),
+                    heights,
+                    0,
+                    |i| i,
+                    move |_, i, cx| built.row(i, 20., cx),
+                )
                 .virtualize_in_ancestor()
                 .w_full(),
             ),
@@ -660,10 +664,17 @@ fn a_list_scrolled_by_the_view_around_it_builds_ahead_too() {
     spare(&ui);
     let ahead = rows.take();
     assert!(
-        ahead.iter().max().is_some_and(|last| (*last as f32 + 1.) * 20. >= 200.),
+        ahead
+            .iter()
+            .max()
+            .is_some_and(|last| (*last as f32 + 1.) * 20. >= 200.),
         "a viewport beyond the view, built in spare time: {ahead:?}"
     );
     // Within what was built, the frame builds nothing.
     scroll_to(&ui, &panel, 90.);
-    assert_eq!(rows.take(), Vec::<usize>::new(), "built by the scroll's frame");
+    assert_eq!(
+        rows.take(),
+        Vec::<usize>::new(),
+        "built by the scroll's frame"
+    );
 }
