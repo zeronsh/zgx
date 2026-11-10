@@ -161,6 +161,11 @@ pub(crate) fn color(rgb: Rgb) -> Color {
     Color(rgb.r, rgb.g, rgb.b, 0xff)
 }
 
+/// A cell's foreground and background as set, and as drawn (no background
+/// fill for the default one).
+type Colors = (VtColor, VtColor);
+type Drawn = (Rgb, Option<Rgb>);
+
 /// A cell colour as drawn: one the program set (OSC 4, 10, 11), else the
 /// palette's.
 fn resolve(term: &Term, palette: &Palette, color: VtColor) -> Rgb {
@@ -237,7 +242,12 @@ fn row_built<const STYLED: bool>(
     let (width, height) = (metrics.cell_width, metrics.cell_height);
     let palette = &look.palette;
     let background = palette.background;
-    let mut paint = RowPaint::default();
+    // Its text a cell at a time: room for the row at once, not grown as it
+    // fills.
+    let mut paint = RowPaint {
+        text: String::with_capacity(columns),
+        ..RowPaint::default()
+    };
     // The underlines its runs start with, and whether one is in a colour of
     // its own (`CellExtra`, rare: found where a cell's zero-width characters
     // are read), for a plain row to say whether it has a styled one.
@@ -245,8 +255,16 @@ fn row_built<const STYLED: bool>(
     let mut coloured = false;
     // The open run, its text so far, and how many blanks end it.
     let mut run: Option<Run> = None;
-    let mut open = String::new();
+    let mut open = String::with_capacity(columns);
     let mut blanks = 0usize;
+    // The last cell's colours as set and as drawn: neighbours mostly share
+    // them, and resolving one reads the program's and the palette's.
+    let mut resolved: Option<(Colors, Drawn)> = None;
+    // Whether the cursor's cell is a wide character's (its second half is
+    // under the cursor too).
+    let cursor_wide = cursor.is_some_and(|at| {
+        at.column < columns && cells[Column(at.column)].flags.contains(Flags::WIDE_CHAR)
+    });
     let finish =
         |run: &mut Option<Run>, open: &mut String, blanks: &mut usize, runs: &mut Vec<Run>| {
             if let Some(mut done) = run.take() {
@@ -282,10 +300,19 @@ fn row_built<const STYLED: bool>(
         if flags.contains(Flags::WIDE_CHAR_SPACER) {
             paint.text.push(' ');
         }
-        let mut fg = resolve(term, palette, cell.fg);
-        let mut bg = match cell.bg {
-            VtColor::Named(NamedColor::Background) => None,
-            other => Some(resolve(term, palette, other)),
+        let (mut fg, mut bg) = match resolved {
+            Some((set, drawn)) if set == (cell.fg, cell.bg) => drawn,
+            _ => {
+                let drawn = (
+                    resolve(term, palette, cell.fg),
+                    match cell.bg {
+                        VtColor::Named(NamedColor::Background) => None,
+                        other => Some(resolve(term, palette, other)),
+                    },
+                );
+                resolved = Some(((cell.fg, cell.bg), drawn));
+                drawn
+            }
         };
         if flags.contains(Flags::DIM) {
             fg = dim(fg);
@@ -302,11 +329,8 @@ fn row_built<const STYLED: bool>(
             ink = look.selection_text.unwrap_or(ink);
         }
         // The cursor's cell, or a wide one's second half.
-        let under_cursor = cursor.filter(|at| {
-            at.column == column
-                || (at.column + 1 == column
-                    && cells[Column(at.column)].flags.contains(Flags::WIDE_CHAR))
-        });
+        let under_cursor =
+            cursor.filter(|at| at.column == column || (cursor_wide && at.column + 1 == column));
         if let Some(at) = under_cursor {
             let cursor_color =
                 color(term.colors()[NamedColor::Cursor as usize].unwrap_or(palette.cursor));

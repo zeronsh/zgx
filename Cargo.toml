@@ -11,6 +11,7 @@ exclude = [
     "vendor/alacritty-terminal",
     "vendor/cosmic-text",
     "vendor/harfrust",
+    "vendor/swash",
     "vendor/mlua",
     "vendor/taffy",
     "vendor/winit",

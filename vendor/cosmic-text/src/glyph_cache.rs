@@ -11,6 +11,14 @@ bitflags::bitflags! {
         const DISABLE_HINTING = 2;
         /// Render as a pixel font
         const PIXEL_FONT = 4;
+        /// zgx: an inline box's glyph (`Attrs::inline_box`): it draws
+        /// nothing, and its `y_offset` is how far its box's top is above the
+        /// baseline, in EM.
+        const INLINE_BOX = 8;
+        /// zgx: an inline box placed at its line's top or bottom
+        /// (`InlineAlign::Top`, `Bottom`), with `INLINE_BOX`.
+        const INLINE_LINE_TOP = 16;
+        const INLINE_LINE_BOTTOM = 32;
     }
 }
 

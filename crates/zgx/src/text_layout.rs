@@ -181,6 +181,16 @@ impl FontFeatures {
     /// The settings `features` gives, each a four-byte tag and a value (`1`
     /// on, `0` off); a later tag replaces an earlier one.
     pub fn new(features: impl IntoIterator<Item = ([u8; 4], u32)>) -> Self {
+        // Where a box's tags are its own: a script's `font_features` can
+        // name any four bytes, and they make no box on text.
+        Self::settled(
+            features
+                .into_iter()
+                .filter(|(tag, _)| !Self::BOX_TAGS.contains(tag)),
+        )
+    }
+    /// `new`, keeping an inline box's tags: these remade from what they were.
+    fn settled(features: impl IntoIterator<Item = ([u8; 4], u32)>) -> Self {
         let mut canonical = std::collections::BTreeMap::new();
         for (tag, value) in features {
             canonical.insert(tag, value);
@@ -217,7 +227,7 @@ impl FontFeatures {
         }
         let others = self.settings().iter().copied();
         let others = others.filter(|(tag, _)| *tag != Self::HYPHENS);
-        Self::new(others.chain(hyphens.then_some((Self::HYPHENS, 1))))
+        Self::settled(others.chain(hyphens.then_some((Self::HYPHENS, 1))))
     }
     /// zgx's own tag for the language a text's Han characters are in
     /// (`_han`, never given to a font, as `HYPHENS`): its `lang`'s
@@ -240,7 +250,7 @@ impl FontFeatures {
         }
         let others = self.settings().iter().copied();
         let others = others.filter(|(tag, _)| *tag != Self::HAN);
-        Self::new(others.chain((han != 0).then_some((Self::HAN, han))))
+        Self::settled(others.chain((han != 0).then_some((Self::HAN, han))))
     }
     /// zgx's mark on a style's features that say only a language
     /// (`Styled::lang`): they go over the inherited ones (`layered`), not
@@ -288,7 +298,7 @@ impl FontFeatures {
         let others = self.settings().iter().copied();
         let others = others.filter(|(tag, _)| *tag != Self::HAN && *tag != Self::INHERITED);
         let marks = (han != 0).then_some([(Self::HAN, han), (Self::INHERITED, 1)]);
-        Self::new(others.chain(marks.into_iter().flatten()))
+        Self::settled(others.chain(marks.into_iter().flatten()))
     }
     /// These as a text's resolved features (`Scene::set_font`): without the
     /// mark a style's language alone carries (`INHERITS`).
@@ -297,7 +307,7 @@ impl FontFeatures {
             return self.clone();
         }
         let others = self.settings().iter().copied();
-        Self::new(others.filter(|(tag, _)| *tag != Self::INHERITS))
+        Self::settled(others.filter(|(tag, _)| *tag != Self::INHERITS))
     }
     /// What a text in `language` (a BCP 47 tag: "ja", "zh-Hant-TW") says of
     /// its Han characters (`HAN`): which Chinese, Japanese or Korean, or
@@ -334,6 +344,87 @@ impl FontFeatures {
             traditional |= is(part, "hant");
         }
         if traditional { 5 } else { 4 }
+    }
+    /// zgx's own tags for an inline box (`RichText::with_inline_boxes`, never
+    /// given to a font, as `HYPHENS`): the run these are the features of is
+    /// that box's character, never shaped. Its width, height and baseline as
+    /// a float's bits, and how it sits (`InlineAlign`: which, and how far
+    /// raised). Text without boxes holds none of this, and pays nothing.
+    const BOX_WIDTH: [u8; 4] = *b"_ibw";
+    const BOX_HEIGHT: [u8; 4] = *b"_ibh";
+    const BOX_BASELINE: [u8; 4] = *b"_ibb";
+    const BOX_ALIGN: [u8; 4] = *b"_iba";
+    const BOX_RAISE: [u8; 4] = *b"_ibr";
+    const BOX_TAGS: [[u8; 4]; 5] = [
+        Self::BOX_WIDTH,
+        Self::BOX_HEIGHT,
+        Self::BOX_BASELINE,
+        Self::BOX_ALIGN,
+        Self::BOX_RAISE,
+    ];
+    /// Whether these are an inline box's (`BOX_WIDTH`).
+    pub fn is_inline_box(&self) -> bool {
+        self.settings()
+            .iter()
+            .any(|(tag, _)| *tag == Self::BOX_WIDTH)
+    }
+    /// The inline box these say, its character at `at`.
+    #[inline(never)]
+    pub(crate) fn inline_box(&self, at: usize) -> Option<crate::rich_text::InlineBox> {
+        use crate::rich_text::{InlineAlign as A, InlineBox};
+        if !self.is_inline_box() {
+            return None;
+        }
+        let read = |wanted: [u8; 4]| {
+            self.settings()
+                .iter()
+                .find(|(tag, _)| *tag == wanted)
+                .map_or(0, |(_, value)| *value)
+        };
+        let float = |wanted| f32::from_bits(read(wanted));
+        Some(InlineBox {
+            at,
+            width: float(Self::BOX_WIDTH),
+            height: float(Self::BOX_HEIGHT),
+            baseline: float(Self::BOX_BASELINE),
+            align: match read(Self::BOX_ALIGN) {
+                1 => A::Middle,
+                2 => A::TextTop,
+                3 => A::TextBottom,
+                4 => A::Top,
+                5 => A::Bottom,
+                6 => A::Raise(float(Self::BOX_RAISE)),
+                _ => A::Baseline,
+            },
+        })
+    }
+    /// These saying inline box `b`.
+    pub(crate) fn with_inline_box(&self, b: &crate::rich_text::InlineBox) -> Self {
+        use crate::rich_text::InlineAlign as A;
+        let (align, raise) = match b.align {
+            A::Middle => (1, 0.),
+            A::TextTop => (2, 0.),
+            A::TextBottom => (3, 0.),
+            A::Top => (4, 0.),
+            A::Bottom => (5, 0.),
+            A::Raise(by) => (6, by),
+            _ => (0, 0.),
+        };
+        Self::settled(self.without_inline_box().settings().iter().copied().chain([
+            (Self::BOX_WIDTH, b.width.to_bits()),
+            (Self::BOX_HEIGHT, b.height.to_bits()),
+            (Self::BOX_BASELINE, b.baseline.to_bits()),
+            (Self::BOX_ALIGN, align),
+            (Self::BOX_RAISE, f32::to_bits(raise)),
+        ]))
+    }
+    /// These saying no inline box (an ellipsis cloned from a box's run).
+    pub fn without_inline_box(&self) -> Self {
+        if !self.is_inline_box() {
+            return self.clone();
+        }
+        let others = self.settings().iter().copied();
+        Self::settled(others.filter(|(tag, _)| !Self::BOX_TAGS.contains(tag)))
     }
     /// The bytes the settings take, for cache accounting.
     pub fn storage_bytes(&self) -> usize {
@@ -534,6 +625,13 @@ impl TextLayout for Inset {
         let xs = self.inner.carets_x(offsets);
         xs.into_iter().map(|x| x + self.dx).collect()
     }
+    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
+        let mut boxes = self.inner.inline_boxes();
+        for (_, x, _) in &mut boxes {
+            *x += self.dx;
+        }
+        boxes
+    }
     fn visual_line_range(&self, position: TextPosition) -> (TextPosition, TextPosition) {
         self.inner.visual_line_range(position)
     }
@@ -636,6 +734,13 @@ pub trait TextLayout {
             (right, left)
         }
     }
+    /// Where each inline box shown is laid out (`RichText::inline_boxes`):
+    /// its character's byte offset, its left edge and its top. A box cut off
+    /// (past a line clamp) isn't listed. None for a shaper that doesn't lay
+    /// them out (the default).
+    fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
+        Vec::new()
+    }
     /// Physical left/right edge of the caret's visual line, excluding line endings.
     fn visual_line_edge(&self, position: TextPosition, end: bool) -> TextPosition {
         let caret = self.caret_position(position);
@@ -671,6 +776,9 @@ pub struct FallbackTextLayout {
 impl FallbackTextLayout {
     /// Mixed-size approximate cells used when no native rich shaper is installed.
     pub fn with_rich(rich: &crate::rich_text::RichText, width: Option<f32>) -> Self {
+        if rich.has_inline_boxes() {
+            return Self::with_boxes(rich, width);
+        }
         let mut cells: Vec<(Range<usize>, Rect)> = Vec::new();
         let (mut x, mut y, mut max_x, mut pitch) = (0_f32, 0_f32, 0_f32, 0_f32);
         let mut row_start = 0;
@@ -710,11 +818,52 @@ impl FallbackTextLayout {
         for (_, rect) in &mut cells[row_start..] {
             rect.height = pitch;
         }
-        let mut layout = Self {
+        let layout = Self {
             cells,
             end: Rect::new(x, y, 1., pitch),
             size: (max_x.max(x), y + pitch),
         };
+        layout.finished(rich, width)
+    }
+    /// `with_rich` for text with inline boxes (`fallback_boxes`).
+    #[cold]
+    #[inline(never)]
+    fn with_boxes(rich: &crate::rich_text::RichText, width: Option<f32>) -> Self {
+        let boxes = crate::rich_text::fallback_boxes(rich, width);
+        let (x, y, height) = boxes.end;
+        let wide = boxes.rows.iter().fold(0_f32, |w, row| w.max(row.2));
+        Self {
+            cells: boxes.cells,
+            end: Rect::new(x, y, 1., height),
+            size: (wide, y + height),
+        }
+        .finished(rich, width)
+    }
+    /// Where each of `rich`'s inline boxes is at `width` (as
+    /// `TextLayout::inline_boxes`): its character's offset, left and top.
+    /// Those past a clamp aren't listed.
+    pub fn inline_places(
+        rich: &crate::rich_text::RichText,
+        width: Option<f32>,
+    ) -> Vec<(usize, f32, f32)> {
+        let boxes = crate::rich_text::fallback_boxes(rich, width);
+        let layout = Self::with_boxes(rich, width);
+        // Both in order: each found from where the last was.
+        let mut kept = layout.cells.iter();
+        boxes
+            .places
+            .iter()
+            .filter_map(|&(cell, top)| {
+                let (range, _) = boxes.cells.get(cell)?;
+                let (_, rect) = kept.find(|(kept, _)| kept == range)?;
+                Some((range.start, rect.x, top))
+            })
+            .collect()
+    }
+    /// `with_rich`'s cells cut as its clamp says, and aligned.
+    #[inline(always)]
+    fn finished(self, rich: &crate::rich_text::RichText, width: Option<f32>) -> Self {
+        let mut layout = self;
         if let Some(limit) = rich.options().line_clamp.map(|n| n.get()).or((rich
             .options()
             .overflow

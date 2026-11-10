@@ -7,26 +7,94 @@ use std::{
     path::PathBuf,
 };
 
+/// The longest path a Unix socket binds, in bytes: `sockaddr_un`'s
+/// `sun_path` less its closing NUL (104 bytes on Apple's systems, 108 on
+/// Linux's).
+#[cfg(unix)]
+pub const SOCKET_PATH_MAX: usize = if cfg!(any(target_os = "linux", target_os = "android")) {
+    107
+} else {
+    103
+};
+
 /// Where this user's apps put their sockets: a directory only they may
 /// enter (`$TMPDIR/zgx-inspect-<uid>`, mode 0700; `%LOCALAPPDATA%` on
-/// Windows).
+/// Windows). `ZGX_INSPECT_DIR` names another. Where a socket's path in the
+/// temporary directory would be too long to bind (an iOS simulator app's
+/// container is), `/tmp/zgx-inspect-<uid>` instead.
 pub fn socket_dir() -> PathBuf {
+    first_fitting(socket_dirs())
+}
+
+/// The first of `dirs` a socket binds in, else the first: its bind then
+/// says why ([`socket_path`]).
+fn first_fitting(dirs: Vec<PathBuf>) -> PathBuf {
+    #[cfg(unix)]
+    if let Some(dir) = dirs.iter().find(|dir| fits(dir)) {
+        return dir.clone();
+    }
+    dirs.into_iter().next().expect("a socket directory")
+}
+
+/// Every directory an app may serve from, the one it tries first first:
+/// `ZGX_INSPECT_DIR` alone when set, else the temporary directory's and,
+/// on Unix, the short one beside it.
+pub fn socket_dirs() -> Vec<PathBuf> {
+    if let Some(dir) = zgx::env::var_os("ZGX_INSPECT_DIR").filter(|d| !d.is_empty()) {
+        return vec![PathBuf::from(dir)];
+    }
     #[cfg(unix)]
     {
-        unsafe extern "C" {
-            fn getuid() -> u32;
+        let uid = own_uid();
+        let usual = std::env::temp_dir().join(format!("zgx-inspect-{uid}"));
+        let short = PathBuf::from(format!("/tmp/zgx-inspect-{uid}"));
+        if usual == short {
+            vec![usual]
+        } else {
+            vec![usual, short]
         }
-        // SAFETY: getuid has no preconditions.
-        let uid = unsafe { getuid() };
-        std::env::temp_dir().join(format!("zgx-inspect-{uid}"))
     }
     #[cfg(not(unix))]
     {
         let base = std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
-        base.join("zgx-inspect")
+        vec![base.join("zgx-inspect")]
     }
+}
+
+#[cfg(unix)]
+fn own_uid() -> u32 {
+    unsafe extern "C" {
+        fn getuid() -> u32;
+    }
+    // SAFETY: getuid has no preconditions.
+    unsafe { getuid() }
+}
+
+/// Whether any process's socket in `dir` binds: the longest process id's.
+#[cfg(unix)]
+fn fits(dir: &std::path::Path) -> bool {
+    socket_path(dir, u32::MAX).is_ok()
+}
+
+/// Process `pid`'s socket in `dir`, or why it can't bind there: a path past
+/// [`SOCKET_PATH_MAX`] fails to bind with no word of where.
+#[cfg(unix)]
+pub fn socket_path(dir: &std::path::Path, pid: u32) -> std::io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = dir.join(format!("{pid}.sock"));
+    let length = path.as_os_str().as_bytes().len();
+    if length > SOCKET_PATH_MAX {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "devtools' socket {} is {length} bytes, past the {SOCKET_PATH_MAX} a socket's path may be here: set ZGX_INSPECT_DIR to a shorter directory",
+                path.display()
+            ),
+        ));
+    }
+    Ok(path)
 }
 
 /// A running app serving devtools: its process and what it said it is.
@@ -41,11 +109,13 @@ pub struct App {
 /// The apps serving devtools now, by process id; files of apps gone are
 /// left out (and removed).
 pub fn apps() -> Vec<App> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(socket_dir()) else {
-        return out;
-    };
-    for entry in entries.flatten() {
+    let mut out: Vec<App> = Vec::new();
+    for entry in socket_dirs()
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
+        .flatten()
+    {
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
@@ -58,6 +128,9 @@ pub fn apps() -> Vec<App> {
         };
         let pid = about.field("pid").and_then(Value::as_f64).unwrap_or(0.) as u32;
         let app = about.field("app").map(Value::to_string).unwrap_or_default();
+        if out.iter().any(|known| known.pid == pid) {
+            continue;
+        }
         if connect(pid).is_ok() {
             out.push(App { pid, app });
         } else {
@@ -98,10 +171,13 @@ type Stream = std::net::TcpStream;
 
 #[cfg(unix)]
 fn connect(pid: u32) -> std::io::Result<(Stream, Option<String>)> {
-    Ok((
-        Stream::connect(socket_dir().join(format!("{pid}.sock")))?,
-        None,
-    ))
+    // The directory it serves from: any of them holds its socket.
+    let socket = socket_dirs()
+        .into_iter()
+        .map(|dir| dir.join(format!("{pid}.sock")))
+        .find(|socket| socket.exists())
+        .unwrap_or_else(|| socket_dir().join(format!("{pid}.sock")));
+    Ok((Stream::connect(socket)?, None))
 }
 #[cfg(not(unix))]
 fn connect(pid: u32) -> std::io::Result<(Stream, Option<String>)> {
@@ -133,4 +209,53 @@ pub fn request(pid: u32, request: &Value) -> Result<String, String> {
         return Err(format!("app {pid} closed the connection"));
     }
     Ok(line.trim_end().to_owned())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    /// A directory whose sockets' paths come to `length` bytes for the
+    /// longest process id.
+    fn dir_for(length: usize) -> PathBuf {
+        let name = format!("{}.sock", u32::MAX);
+        PathBuf::from(format!("/{}", "d".repeat(length - name.len() - 2)))
+    }
+
+    #[test]
+    fn a_socket_path_binds_up_to_the_platforms_limit_and_past_it_says_why() {
+        assert!(socket_path(&dir_for(SOCKET_PATH_MAX), u32::MAX).is_ok());
+        let error = socket_path(&dir_for(SOCKET_PATH_MAX + 1), u32::MAX).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        let message = error.to_string();
+        assert!(message.contains("ZGX_INSPECT_DIR"), "{message}");
+        assert!(message.contains(&SOCKET_PATH_MAX.to_string()), "{message}");
+    }
+
+    /// An iOS simulator app's temporary directory is about 150 bytes:
+    /// its sockets go to the short directory, which the client reads too.
+    #[test]
+    fn a_temporary_directory_too_long_for_a_socket_falls_back_to_the_short_one() {
+        let long = dir_for(SOCKET_PATH_MAX + 40);
+        let short = PathBuf::from("/tmp/zgx-inspect-501");
+        assert_eq!(first_fitting(vec![long.clone(), short.clone()]), short);
+        let usual = PathBuf::from("/var/folders/xy/T/zgx-inspect-501");
+        assert_eq!(first_fitting(vec![usual.clone(), short]), usual);
+        // Nothing fits (an override too long): the first, whose bind says why.
+        assert_eq!(first_fitting(vec![long.clone()]), long);
+    }
+
+    #[test]
+    fn a_socket_in_the_short_directory_binds_and_answers() {
+        use std::os::unix::net::{UnixListener, UnixStream};
+        let dir = PathBuf::from(format!("/tmp/zgx-inspect-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = socket_path(&dir, u32::MAX).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let client = UnixStream::connect(&path);
+        let accepted = listener.accept();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(client.is_ok() && accepted.is_ok());
+    }
 }

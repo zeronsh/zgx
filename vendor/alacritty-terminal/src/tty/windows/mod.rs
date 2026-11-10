@@ -56,6 +56,13 @@ impl Pty {
         &self.child_watcher
     }
 
+    /// zgx: whether the pseudoconsole hands on strings it doesn't know (APC,
+    /// DCS), as Windows Terminal's (conpty.dll) does and Windows' own doesn't:
+    /// without them, pictures never arrive.
+    pub fn hands_on_strings(&self) -> bool {
+        self.backend.hands_on_strings()
+    }
+
     /// zgx: once the program has exited, close the pseudoconsole: it renders
     /// the program's last output, which it hadn't yet as the program went,
     /// and ends the output pipe. Read `reader()` until `output_finished`.

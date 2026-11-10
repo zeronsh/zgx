@@ -228,6 +228,16 @@ impl Folded {
 
 /// A value's room in a list or map, for `Value::weight`.
 const SLOT: usize = std::mem::size_of::<Value>();
+/// What values hold on the heap, as a memory report counts it (`Value::holding`).
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct Holding {
+    /// All of it.
+    pub bytes: usize,
+    /// Of that, its strings' text.
+    pub text: usize,
+    /// Rows kept folded (`Value::Folded`): their data is the host's.
+    pub folded: usize,
+}
 
 /// A mounted (or once mounted) element held in state, or a picked folder.
 #[derive(Clone)]
@@ -427,11 +437,57 @@ impl Value {
             Value::Nil | Value::Bool(_) | Value::Num(_) => 0,
         }
     }
+    /// What it holds on the heap, for a memory report: each part shared with
+    /// another counted once (`seen`, by address), its text apart, and its
+    /// folded rows, whose data the host holds, counted but not opened.
+    pub(crate) fn holding(&self, seen: &mut rustc_hash::FxHashSet<usize>, into: &mut Holding) {
+        match self {
+            Value::Str(s) => {
+                if seen.insert(s.as_ptr() as usize) {
+                    into.bytes += 16 + s.len();
+                    into.text += s.len();
+                }
+            }
+            Value::Text(t) => {
+                if seen.insert(t.id() as usize) {
+                    into.bytes += 16 + t.len();
+                    into.text += t.len();
+                }
+            }
+            Value::List(items) => {
+                if seen.insert(items.as_ptr() as usize) {
+                    into.bytes += 16 + items.len() * SLOT;
+                    for item in items.iter() {
+                        item.holding(seen, into);
+                    }
+                }
+            }
+            Value::Map(fields) => {
+                if seen.insert(fields.as_ptr() as usize) {
+                    into.bytes += 16 + fields.len() * (16 + SLOT);
+                    for (_, field) in fields.iter() {
+                        field.holding(seen, into);
+                    }
+                }
+            }
+            Value::Element(_) => into.bytes += 64,
+            Value::Image(image) => {
+                if seen.insert(std::sync::Arc::as_ptr(image) as usize) {
+                    into.bytes += 64 + image.bytes();
+                }
+            }
+            Value::Folded(folded) => {
+                if seen.insert(Rc::as_ptr(folded) as usize) {
+                    into.bytes += 64;
+                    into.folded += 1;
+                }
+            }
+            Value::Nil | Value::Bool(_) | Value::Num(_) => {}
+        }
+    }
     /// JSON as a value (`to_json`'s inverse), or `None` if it is not JSON.
     pub fn from_json(json: &str) -> Option<Value> {
-        serde_json::from_str::<serde_json::Value>(json)
-            .ok()
-            .map(|_| crate::node::json_value(json))
+        crate::json::parse(json).ok()
     }
     /// This value, keeping `old`'s own parts wherever they are equal (as
     /// Solid's `reconcile`): what did not change stays the same `Rc`, so
