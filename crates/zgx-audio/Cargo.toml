@@ -11,3 +11,9 @@ keywords = ["audio", "mixer", "sound", "gamedev", "gui"]
 categories = ["multimedia::audio", "game-development"]
 
 [dependencies]
+
+# The audio thread's rules: a counting allocator, so a process of its own,
+# and no test harness, so no other thread.
+[[test]]
+name = "realtime"
+harness = false

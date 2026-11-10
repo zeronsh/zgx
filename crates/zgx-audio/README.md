@@ -24,6 +24,6 @@ What there is so far:
 - **WAV files** (PCM 8, 16, 24 and 32 bits, float 32 and 64), kept at their own rate and resampled per voice: a four-point cubic by default, or linear (`Config::interpolation`).
 - **An offline renderer** on a clock of its own: what the tests compare, at -90 dB, with references in `tests/references`.
 
-The mixer never locks, allocates, frees or makes a system call. Commands reach it through a fixed queue, and a full queue returns an error rather than waiting. Sounds it has finished with go back to the main thread to be dropped. Device output comes next.
+The mixer never locks, allocates, frees or makes a system call; `tests/realtime.rs` checks it, with a counting allocator and the kernel's count of system calls, over every path a voice or a bus can take. Commands reach it through a fixed queue, and a full queue returns an error rather than waiting. Sounds it has finished with go back to the main thread to be dropped. Device output comes next.
 
 What a voice costs: `cargo run --release -p zgx-audio --example mix_cost -- 64 44100 2` counts the instructions the mixer retires for each voice and frame.
