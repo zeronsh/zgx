@@ -85,6 +85,10 @@ const EFFECTS_DOWN: &[u8] = include_bytes!("dxbc/effects_fs_down.dxbc");
 /// Image effects' pixel stage (image_effects.wgsl after draw.wgsl,
 /// `crate::image_effect_source`).
 const IMAGE_EFFECT_FS: &[u8] = include_bytes!("dxbc/image_effects_zgx_image_effect.dxbc");
+/// Blended layers' pixel stage (blend.wgsl after draw.wgsl,
+/// `crate::blend_source`): its backdrop in `POINTS`'s register, which no
+/// blended draw reads points from.
+const BLEND_FS: &[u8] = include_bytes!("dxbc/blend_zgx_blended.dxbc");
 
 /// Registers the HLSL is written with (`translate`): the sampled texture
 /// (the atlas, or the shown buffer for copies) in t0, the clip regions in
@@ -232,6 +236,9 @@ pub(crate) struct Device {
     /// Image effects' pixel stage (`Shading::ImageEffect`), made when an
     /// image first draws with one (`None`: Direct3D made none).
     image_effect: std::cell::OnceCell<Option<ID3D11PixelShader>>,
+    /// Blended layers' pixel stage (`Shading::Blend`), made when one first
+    /// draws (`None`: Direct3D made none).
+    blend: std::cell::OnceCell<Option<ID3D11PixelShader>>,
     rasterizer: ID3D11RasterizerState,
     sampler: ID3D11SamplerState,
     /// Pixelated images' sampler, the nearest texel's, made with the first
@@ -420,6 +427,7 @@ impl Device {
             pipelines,
             effect_pipelines,
             image_effect: std::cell::OnceCell::new(),
+            blend: std::cell::OnceCell::new(),
             rasterizer,
             sampler,
             nearest: std::cell::OnceCell::new(),
@@ -764,6 +772,7 @@ impl Device {
             current: None,
             scissor: None,
             nearest: false,
+            points: state.points.as_ref().map(|(_, points, _)| points.clone()),
         }
     }
 }
@@ -977,6 +986,9 @@ pub(crate) struct State {
     /// gradients' ramps, canvases, SVGs), each under the shell's texture
     /// standing for it.
     pub(crate) textures: rustc_hash::FxHashMap<wgpu::Texture, Surface>,
+    /// A copy of the target under blended layers (`Frame::blended`), of the
+    /// last target's size that had one.
+    pub(crate) backdrop: Option<Surface>,
     /// The effect atlas's scratch twin and blank mask (`crate::effects`),
     /// under the shell's scratch texture they stand with; the atlas itself
     /// is among `textures`, which its composites sample.
@@ -1011,6 +1023,7 @@ impl State {
             spare: None,
             layers: Default::default(),
             textures: Default::default(),
+            backdrop: None,
             effects: None,
         })
     }
@@ -1328,9 +1341,85 @@ pub(crate) struct Frame<'a> {
     scissor: Option<Scissor>,
     /// Sampling the nearest texel (`nearest`), not the linear sampler.
     nearest: bool,
+    /// The frame's polyline points, bound again after a blended draw takes
+    /// their register for its backdrop.
+    points: Option<ID3D11ShaderResourceView>,
 }
 
 impl Frame<'_> {
+    /// A blended layer's composite (`Shading::Blend`), `instances` within
+    /// `rect` of `target`: the target under it copied to `backdrop` (of the
+    /// target's size), then drawn with blend.wgsl's pixel stage reading it,
+    /// replacing the target's pixels, as Direct3D 12's blend pipeline does.
+    /// Its layer's texture is the one bound (`texture`). Whether it drew.
+    pub(crate) fn blended(
+        &mut self,
+        target: &Surface,
+        backdrop: &Surface,
+        rect: Scissor,
+        instances: std::ops::Range<u32>,
+    ) -> bool {
+        let device = self.device;
+        let pixel = device.blend.get_or_init(|| {
+            let mut shader = None;
+            // SAFETY: DXBC compiled by FXC (`translated_hlsl_matches`).
+            unsafe {
+                device
+                    .device
+                    .CreatePixelShader(BLEND_FS, None, Some(&mut shader))
+            }
+            .ok()?;
+            shader
+        });
+        let Some(pixel) = pixel else {
+            return false;
+        };
+        let (x, y, width, height) = rect;
+        let region = D3D11_BOX {
+            left: x,
+            top: y,
+            front: 0,
+            right: x + width,
+            bottom: y + height,
+            back: 1,
+        };
+        // SAFETY: Two textures of one size and format, the box within both;
+        // the backdrop is bound to no stage while it is written.
+        unsafe {
+            device.context.PSSetShaderResources(POINTS, Some(&[None]));
+            device.context.CopySubresourceRegion(
+                &backdrop.texture,
+                0,
+                x,
+                y,
+                0,
+                &target.texture,
+                0,
+                Some(&region),
+            );
+        }
+        // Replacing (no blending), with the full pipeline's vertex stage
+        // and layout.
+        self.bind(Bound::FullClear);
+        self.current = None;
+        self.scissor(rect);
+        // SAFETY: A pixel stage reading what the full vertex stage writes
+        // (draw.wgsl's `Out`), and its backdrop, in the registers it binds.
+        unsafe {
+            device.context.PSSetShader(pixel, None);
+            device
+                .context
+                .PSSetShaderResources(POINTS, Some(std::slice::from_ref(&backdrop.srv)));
+        }
+        self.draw(instances);
+        // SAFETY: The frame's points again, or nothing where it has none.
+        unsafe {
+            device
+                .context
+                .PSSetShaderResources(POINTS, Some(std::slice::from_ref(&self.points)));
+        }
+        true
+    }
     fn bind(&mut self, bound: Bound) {
         if self.current == Some(bound) {
             return;
@@ -1724,6 +1813,12 @@ mod tests {
                 Module::Copy,
                 "copy_offset",
                 &[("vs", "vs_5_0", COPY_VS), ("fs", "ps_5_0", COPY_FS)][..],
+            ),
+            (
+                crate::blend_source().as_str(),
+                Module::Draw,
+                "blend",
+                &[("zgx_blended", "ps_5_0", BLEND_FS)][..],
             ),
             (
                 crate::image_effect_source().as_str(),

@@ -11,7 +11,8 @@
 //! ready-made shader fill (`zgx_fx`'s, its fragment stage compiled for each
 //! as an app's), and layer effects (content blurs, narrow to wide, and
 //! masks, alone, sliding and under a blur, and drop shadows), and images
-//! drawn dithered and as characters, at 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
+//! drawn dithered and as characters, and layers in every blend mode, at
+//! 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
 //! (Direct3D 12 pinned to it, docs/windows.md). `ZGX_D3D11` is read once a
 //! process, so the test runs itself again with it and compares that run's
 //! frames with its own.
@@ -572,8 +573,135 @@ fn frames(scale: f32) -> Vec<Vec<u8>> {
     all.extend(layer_frames(scale));
     all.extend(effect_frames(scale));
     all.extend(image_effect_frames(scale));
+    all.extend(blend_frames(scale));
     all
 }
+
+/// A layer in each blend mode but `Normal` (`BLEND_NAMES`): a translucent
+/// box holding a bar, over striped content, drawn first normally. Each must
+/// change its cell.
+#[cfg(windows)]
+fn blend_frames(scale: f32) -> Vec<Vec<u8>> {
+    use zgx::scene::*;
+    let (cell, columns) = (LAYER_CELL, LAYER_COLUMNS);
+    let size = (
+        cell.0 * columns as f32,
+        cell.1 * BLEND_NAMES.len().div_ceil(columns) as f32,
+    );
+    let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let mut scene = Scene::new(size.0, size.1);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    for i in 0..(size.1 / 12.).ceil() as usize {
+        let stripe = scene.append(
+            root,
+            NodeKind::Rect(match i % 3 {
+                0 => Color(30, 60, 200, 255),
+                1 => Color(230, 130, 30, 255),
+                _ => Color(40, 170, 90, 160),
+            }),
+            Style {
+                width: Some(size.0),
+                height: Some(12.),
+                ..Default::default()
+            },
+        );
+        scene.set_transform(
+            stripe,
+            Transform {
+                x: 0.,
+                y: i as f32 * 12.,
+            },
+        );
+    }
+    let boxes: Vec<NodeId> = (0..BLEND_NAMES.len())
+        .map(|index| {
+            let id = scene.append(
+                root,
+                NodeKind::Panel {
+                    layout: Layout::Overlay,
+                    quad: QuadStyle {
+                        radius: 6.,
+                        fill: Color(200, 80, 160, 190),
+                        ..Default::default()
+                    },
+                },
+                Style {
+                    width: Some(56.),
+                    height: Some(40.),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(
+                id,
+                Transform {
+                    x: (index % columns) as f32 * cell.0 + 20.,
+                    y: (index / columns) as f32 * cell.1 + 16.,
+                },
+            );
+            let bar = scene.append(
+                id,
+                NodeKind::Rect(Color(250, 240, 120, 255)),
+                Style {
+                    width: Some(28.),
+                    height: Some(10.),
+                    ..Default::default()
+                },
+            );
+            scene.set_transform(bar, Transform { x: 14., y: 15. });
+            // Isolated in both frames, so only the mode differs between them.
+            scene.set_isolated(id, true);
+            id
+        })
+        .collect();
+    let mut draw = |scene: &mut Scene| {
+        let report = scene.flush();
+        gpu.render(scene, &report.damage).unwrap();
+        gpu.readback().unwrap()
+    };
+    let plain = draw(&mut scene);
+    for (&id, (_, mode)) in boxes.iter().zip(BLEND_NAMES) {
+        scene.set_blend(id, mode);
+    }
+    let blended = draw(&mut scene);
+    let width = (size.0 * scale) as usize;
+    for (index, (name, _)) in BLEND_NAMES.iter().enumerate() {
+        let (x0, y0) = (
+            ((index % columns) as f32 * cell.0 * scale) as usize,
+            ((index / columns) as f32 * cell.1 * scale) as usize,
+        );
+        let (w, h) = ((cell.0 * scale) as usize, (cell.1 * scale) as usize);
+        let changed = (y0..y0 + h).any(|y| {
+            (x0..x0 + w)
+                .any(|x| blended[(y * width + x) * 4..][..4] != plain[(y * width + x) * 4..][..4])
+        });
+        assert!(changed, "{name}: draws as normal");
+    }
+    vec![plain, blended]
+}
+/// The blend modes' cells (`blend_frames`), in their order.
+#[cfg(windows)]
+const BLEND_NAMES: [(&str, zgx::scene::BlendMode); 15] = {
+    use zgx::scene::BlendMode::*;
+    [
+        ("multiply", Multiply),
+        ("screen", Screen),
+        ("overlay", Overlay),
+        ("darken", Darken),
+        ("lighten", Lighten),
+        ("color dodge", ColorDodge),
+        ("color burn", ColorBurn),
+        ("hard light", HardLight),
+        ("soft light", SoftLight),
+        ("difference", Difference),
+        ("exclusion", Exclusion),
+        ("hue", Hue),
+        ("saturation", Saturation),
+        ("color", zgx::scene::BlendMode::Color),
+        ("luminosity", Luminosity),
+    ]
+};
 
 /// Images drawn with an effect (`IMAGE_EFFECT_NAMES`): a gradient image
 /// dithered and as characters, at two sizes, one under a transform; plain
@@ -958,6 +1086,13 @@ fn where_(frame: usize, scale: f32, pixel: usize) -> String {
             LAYER_CELL,
             LAYER_COLUMNS,
             EFFECT_NAMES.map(String::from).to_vec(),
+        )
+    } else if frame >= FRAMES + 3 + 5 + 4 + 2 {
+        (
+            LAYER_CELL.0 * LAYER_COLUMNS as f32,
+            LAYER_CELL,
+            LAYER_COLUMNS,
+            BLEND_NAMES.map(|(name, _)| String::from(name)).to_vec(),
         )
     } else {
         (
