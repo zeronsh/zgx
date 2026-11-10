@@ -4774,11 +4774,13 @@ pub struct GpuRenderer {
     backdrop_walk: Option<Box<BackdropWalk>>,
 }
 /// What a window frame's walk grows its damage through (kept for the next),
-/// and that damage grown, for its `render_flat` (readers alone, no blur).
+/// and that damage grown, for its `render_flat` (readers alone, no blur), with
+/// the frame it is for (`GpuRenderer::frame`): taken in that frame alone.
 #[derive(Default)]
 struct BackdropWalk {
     filters: Vec<(Rect, f32)>,
     grown: Option<Vec<Rect>>,
+    frame: u64,
 }
 impl GpuRenderer {
     /// A window frame's items with backdrop readers in it, out of
@@ -4806,9 +4808,10 @@ impl GpuRenderer {
         }
         let reach = blur_damage(damage, filters, viewport, self.scale);
         let items = scene.layer_items_within(None, Some(&reach));
-        if blurs == 0 {
-            walk.grown = Some(reach);
-        }
+        // Damage left, `render_flat` takes it this frame (with none, it
+        // returns before it would).
+        walk.grown = (blurs == 0 && !damage.is_empty()).then_some(reach);
+        walk.frame = self.frame;
         items
     }
 }
@@ -6344,10 +6347,6 @@ impl GpuRenderer {
         }
         let mut inherited = Vec::new();
         scene.take_painted_fades();
-        // (A frame that returned before drawing left none behind.)
-        if let Some(walk) = &mut self.backdrop_walk {
-            walk.grown = None;
-        }
         let (items, merged) = match &merged {
             _ if keep => (
                 scene.layer_items_recorded(&mut inherited),
@@ -8816,6 +8815,7 @@ impl GpuRenderer {
                 && let Some(grown) = self
                     .backdrop_walk
                     .as_mut()
+                    .filter(|walk| walk.frame == self.frame)
                     .and_then(|walk| walk.grown.take())
             {
                 grown
