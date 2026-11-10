@@ -372,6 +372,14 @@ pub struct Term<T> {
     placements: Placements,
     inactive_placements: Placements,
 
+    /// zgx: whether a scroll from the top line scrolls the whole screen at
+    /// its newest lines, so its damage can turn (`TermDamageState::scroll_up`)
+    /// rather than all go: the scroll region is the screen, and the view is
+    /// at the bottom. Worked out again only as those change (`update_ring`),
+    /// so a scroll asks nothing of them. (A caller moving the view through
+    /// `grid_mut` leaves it as it was, which can only turn less.)
+    ring_ok: bool,
+
     /// Index into `charsets`, pointing to what ASCII is currently being mapped to.
     active_charset: CharsetIndex,
 
@@ -487,6 +495,7 @@ impl<T> Term<T> {
     {
         let old_display_offset = self.grid.display_offset();
         self.grid.scroll_display(scroll);
+        self.update_ring();
         self.event_proxy.send_event(Event::MouseCursorDirty);
 
         // Clamp vi mode cursor to the viewport.
@@ -521,6 +530,7 @@ impl<T> Term<T> {
             inactive_grid,
             placements: Placements::default(),
             inactive_placements: Placements::default(),
+            ring_ok: true,
             scroll_region,
             event_proxy,
             damage,
@@ -584,6 +594,13 @@ impl<T> Term<T> {
         TermDamage::Partial(TermDamageIterator::new(&self.damage.lines, display_offset))
     }
 
+    /// zgx: whether a scroll from the top turns the damage (`ring_ok`), after
+    /// the scroll region, the view or the screen's size changed.
+    fn update_ring(&mut self) {
+        let screen = Line(0)..Line(self.screen_lines() as i32);
+        self.ring_ok = self.scroll_region == screen && self.grid.display_offset() == 0;
+    }
+
     /// zgx: lines the whole screen scrolled up since the damage was reset,
     /// when the damage is partial: what was drawn of each line still shown
     /// is that many rows lower, and its damage is where the line is now.
@@ -628,6 +645,7 @@ impl<T> Term<T> {
         if !placements.is_empty() {
             placements.shift(0, grid.history_size(), grid.screen_lines());
         }
+        self.update_ring();
 
         if self.config.kitty_keyboard != old_config.kitty_keyboard {
             self.keyboard_mode_stack = Vec::new();
@@ -873,6 +891,7 @@ impl<T> Term<T> {
 
         // Reset scrolling region.
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.update_ring();
 
         // Resize damage information.
         self.damage.resize(num_cols, num_lines);
@@ -914,6 +933,7 @@ impl<T> Term<T> {
         mem::swap(&mut self.placements, &mut self.inactive_placements);
         self.mode ^= TermMode::ALT_SCREEN;
         self.selection = None;
+        self.update_ring();
         self.mark_fully_damaged();
     }
 
@@ -997,8 +1017,7 @@ impl<T> Term<T> {
         if self.damage.full {
             return;
         }
-        let whole = region.start == 0 && region.end == self.screen_lines();
-        if whole && self.grid.display_offset() == 0 {
+        if self.ring_ok && origin == Line(0) {
             self.damage.scroll_up(lines);
         } else {
             self.mark_fully_damaged();
@@ -2287,6 +2306,7 @@ impl<T: EventListener> Handler for Term<T> {
             }
             ansi::ClearMode::Saved if self.history_size() > 0 => {
                 self.grid.clear_history();
+                self.update_ring();
                 if !self.placements.is_empty() {
                     self.placements
                         .retain(|placement| placement.point.line >= 0);
@@ -2336,6 +2356,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.placements.clear();
         self.inactive_placements.clear();
         self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.update_ring();
         self.tabs = TabStops::new(self.columns());
         self.title_stack = Vec::new();
         self.title = None;
@@ -2688,6 +2709,7 @@ impl<T: EventListener> Handler for Term<T> {
         let screen_lines = Line(self.screen_lines() as i32);
         self.scroll_region.start = cmp::min(start, screen_lines);
         self.scroll_region.end = cmp::min(end, screen_lines);
+        self.update_ring();
         self.goto(0, 0);
     }
 
@@ -3587,6 +3609,74 @@ mod tests {
 
         assert_eq!(term.history_size(), 15);
         assert_eq!(term.grid.cursor.point, Point::new(Line(4), Column(0)));
+    }
+
+    /// zgx: a scroll from the top turns the damage (a line scrolled, not all
+    /// damaged) only while the scroll region is the screen and the view at
+    /// its newest lines: worked out again whenever the region, the view or
+    /// the screen's size changes, whichever way it goes.
+    #[test]
+    fn turning_damage_follows_the_region_view_and_size() {
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 5), VoidListener);
+        // A line at the scroll region's bottom: does the scroll it makes turn
+        // the damage?
+        let turns = |term: &mut Term<VoidListener>| {
+            term.reset_damage();
+            let bottom = term.scroll_region.end.0 - 1;
+            term.goto(bottom, 0);
+            term.linefeed();
+            let turned = term.scrolled() == 1;
+            term.reset_damage();
+            turned
+        };
+        for _ in 0..10 {
+            term.linefeed();
+        }
+        assert!(turns(&mut term), "at first");
+        // The scroll region.
+        term.set_scrolling_region(2, None);
+        assert!(!turns(&mut term), "in a region below the top");
+        term.set_scrolling_region(1, Some(3));
+        assert!(!turns(&mut term), "in a region from the top");
+        term.set_scrolling_region(1, None);
+        assert!(turns(&mut term), "the region the screen again");
+        // The view.
+        term.scroll_display(Scroll::Delta(2));
+        assert!(!turns(&mut term), "scrolled back");
+        term.scroll_display(Scroll::Bottom);
+        assert!(turns(&mut term), "at the bottom again");
+        // The screen's size, which resets the region.
+        term.set_scrolling_region(2, None);
+        term.resize(TermSize::new(10, 6));
+        assert!(turns(&mut term), "resized");
+        // The other screen, whose view is its own.
+        term.scroll_display(Scroll::Delta(2));
+        term.swap_alt();
+        assert!(turns(&mut term), "on the other screen");
+        term.swap_alt();
+        assert!(!turns(&mut term), "back, still scrolled back");
+        term.scroll_display(Scroll::Bottom);
+        // A full reset, which resets the region and the view.
+        term.set_scrolling_region(2, None);
+        term.reset_state();
+        assert!(turns(&mut term), "reset");
+        // The scrollback cleared, which brings the view down.
+        for _ in 0..10 {
+            term.linefeed();
+        }
+        term.scroll_display(Scroll::Delta(2));
+        term.clear_screen(ansi::ClearMode::Saved);
+        assert!(turns(&mut term), "the scrollback cleared");
+        // A scrollback set shorter, which brings it down too.
+        for _ in 0..10 {
+            term.linefeed();
+        }
+        term.scroll_display(Scroll::Delta(2));
+        term.set_options(Config {
+            scrolling_history: 0,
+            ..Config::default()
+        });
+        assert!(turns(&mut term), "the scrollback shortened");
     }
 
     #[test]
