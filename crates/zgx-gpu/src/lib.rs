@@ -16990,7 +16990,8 @@ fn zgx_backdrop(p:vec2<f32>)->vec4<f32> {
 /// For each backdrop-reading layer drawn first in a pass, those after it that
 /// can share its copy of the target: no draw before them since then (the
 /// others sharing it included) paints anywhere they read or paint, so they
-/// read and draw as they would in order. Most frames have none.
+/// read and draw as they would in order (`settle_sharing`). Most frames have
+/// none.
 fn share_backdrops(draws: &[Draw], reads: &[(usize, Rect)]) -> Vec<(usize, Vec<usize>)> {
     /// How far apart readers share, in draws: a screenful, not a long scan.
     const WITHIN: usize = 512;
@@ -17024,7 +17025,44 @@ fn share_backdrops(draws: &[Draw], reads: &[(usize, Rect)]) -> Vec<(usize, Vec<u
             sharing.push((first, shared));
         }
     }
+    if !sharing.is_empty() {
+        settle_sharing(&mut sharing, draws, reads);
+    }
     sharing
+}
+/// `share_backdrops`' groups, each reader in one at most, the first's to take
+/// it (drawn with a second copy, it would read itself), and none drawn at an
+/// earlier copy ahead of a reader between that copies later and reads where
+/// it paints. One let go draws with a copy of its own, as in order. Out of
+/// line: frames sharing no copy never come here.
+#[inline(never)]
+fn settle_sharing(sharing: &mut Vec<(usize, Vec<usize>)>, draws: &[Draw], reads: &[(usize, Rect)]) {
+    // Readers drawn at a copy so far: at an earlier one, or this one's.
+    let mut drawn = rustc_hash::FxHashSet::default();
+    for (first, shared) in sharing.iter_mut() {
+        let first = *first;
+        let mut kept: Vec<usize> = Vec::with_capacity(shared.len());
+        for &next in shared.iter() {
+            if drawn.contains(&next) {
+                continue;
+            }
+            let painted = draws[next].bounds.intersection(draws[next].clip);
+            let unread = reads
+                .iter()
+                .filter(|(reader, _)| (first + 1..next).contains(reader))
+                .all(|(reader, theirs)| {
+                    drawn.contains(reader)
+                        || kept.contains(reader)
+                        || painted.is_none_or(|painted| !painted.intersects(*theirs))
+                });
+            if unread {
+                kept.push(next);
+            }
+        }
+        drawn.extend(kept.iter().copied());
+        *shared = kept;
+    }
+    sharing.retain(|(_, shared)| !shared.is_empty());
 }
 /// A rounded clip in a blur's record, in px: its box and radii, or none's.
 fn round_box(clip: Option<zgx::scene::RoundRect>, scale: f32) -> ([f32; 4], [f32; 4]) {
