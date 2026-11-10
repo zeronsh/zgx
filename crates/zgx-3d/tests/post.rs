@@ -607,3 +607,101 @@ fn grading_with_nothing_changed_leaves_the_frame_and_each_part_does_its_own() {
     let [r, g, b, _] = at(&window.draw(), SIZE / 2, SIZE / 2);
     assert!(r > g + 4 && g > b + 4, "warm: {r} {g} {b}");
 }
+
+const SCALE: &str = "#zgx post 1
+fn post(p: PostIn) -> vec4<f32> {
+    return color(p.uv) * params.k;
+}
+";
+
+#[test]
+fn the_apps_passes_run_in_their_stage_in_turn_with_their_parameters() {
+    let world = flat([0.2, 0.2, 0.2, 1.]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let centre = |window: &mut Window| at(&window.draw(), SIZE / 2, SIZE / 2)[0];
+    let plain = centre(&mut window);
+    let scale = || PostPass::new(SCALE).param("k", PostParam::Float);
+    // One HDR pass doubling the light (before mapping: linear, so its
+    // encoding by about 1.37 here).
+    let double = world.add_post(scale()).unwrap();
+    world.set_post_param(double, "k", 2.).unwrap();
+    let doubled = centre(&mut window);
+    let expected = |linear: f32| {
+        let v = if linear <= 0.003_130_8 {
+            linear * 12.92
+        } else {
+            1.055 * linear.powf(1. / 2.4) - 0.055
+        };
+        (v.clamp(0., 1.) * 255.).round() as u8
+    };
+    assert!(
+        doubled.abs_diff(expected(0.4)) <= 1,
+        "{doubled} for {plain}"
+    );
+    // A second halving it: back to the light it began with (an even count,
+    // ending in the scene with no copy).
+    let halve = world.add_post(scale()).unwrap();
+    world.set_post_param(halve, "k", 0.5).unwrap();
+    assert!(centre(&mut window).abs_diff(plain) <= 1);
+    // A display pass turning what's shown over, encoded by it as the last.
+    let invert = world
+        .add_post(
+            PostPass::new(
+                "#zgx post 1
+fn post(p: PostIn) -> vec4<f32> {
+    let c = color(p.uv);
+    return vec4(vec3(1.0) - c.rgb, 1.0);
+}
+",
+            )
+            .stage(PostStage::Display),
+        )
+        .unwrap();
+    let inverted = centre(&mut window);
+    assert!(inverted.abs_diff(expected(0.8)) <= 1, "{inverted}");
+    // Errors: a parameter of another type, or not the pass's.
+    assert!(matches!(
+        world.set_post_param(double, "k", [1., 2.]),
+        Err(PostError::Param(_))
+    ));
+    assert!(matches!(
+        world.set_post_param(double, "j", 1.),
+        Err(PostError::Param(_))
+    ));
+    // Out again, the frame as without them.
+    for pass in [double, halve, invert] {
+        world.remove_post(pass);
+    }
+    assert_eq!(world.set_post_param(double, "k", 1.), Err(PostError::Pass));
+    assert_eq!(centre(&mut window), plain);
+}
+
+#[test]
+fn an_animated_pass_keeps_its_world_drawing_until_it_goes() {
+    // Its view animates (a frame every refresh while shown: the host's,
+    // tested in zgx) while the pass is in, and only then.
+    let world = flat([0.2, 0.2, 0.2, 1.]);
+    let still = world
+        .add_post(PostPass::new(SCALE).param("k", PostParam::Float))
+        .unwrap();
+    assert!(!world.view().animating(), "a pass not animated");
+    let pulse = world
+        .add_post(
+            PostPass::new(
+                "#zgx post 1
+fn post(p: PostIn) -> vec4<f32> {
+    return color(p.uv) * (1.0 + 0.5 * sin(frame.time));
+}
+",
+            )
+            .animated(),
+        )
+        .unwrap();
+    assert!(world.view().animating());
+    world.remove_post(still);
+    assert!(world.view().animating(), "the animated one still in");
+    world.remove_post(pulse);
+    assert!(!world.view().animating());
+}

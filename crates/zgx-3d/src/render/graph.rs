@@ -32,6 +32,13 @@ pub(super) enum Resource {
     Scene,
     /// Bloom's steps, each half the size of the one before.
     Bloom,
+    /// The scene's other half while the app's HDR passes trade it back and
+    /// forth with the scene.
+    Scene2,
+    /// What the display shows, written by the last pass for the app's
+    /// display passes, and its other half.
+    Shown,
+    Shown2,
     /// The view's own texture (without the post chain, the scene).
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     Target,
@@ -42,7 +49,14 @@ impl Resource {
     fn temporary(self) -> bool {
         matches!(
             self,
-            Self::Behind | Self::Colour | Self::Depth | Self::Scene | Self::Bloom
+            Self::Behind
+                | Self::Colour
+                | Self::Depth
+                | Self::Scene
+                | Self::Bloom
+                | Self::Scene2
+                | Self::Shown
+                | Self::Shown2
         )
     }
 }
@@ -60,16 +74,22 @@ pub(super) enum Pass {
     /// bright it is so a bright edge is as smooth as a dim one.
     #[cfg(feature = "post")]
     Resolve,
+    /// The app's HDR passes (`World::add_post`), in turn.
+    #[cfg(feature = "post")]
+    AppHdr,
     /// The scene's bloom, its steps made smaller then larger again.
     #[cfg(feature = "post")]
     Bloom,
     /// The scene exposed, its tones mapped, bloom mixed in, into the target.
     #[cfg(feature = "post")]
     Final,
+    /// The app's display passes, in turn, the last into the target.
+    #[cfg(feature = "post")]
+    AppDisplay,
 }
 impl Pass {
     /// How many there are: the most a list holds.
-    const COUNT: usize = if cfg!(feature = "post") { 6 } else { 3 };
+    const COUNT: usize = if cfg!(feature = "post") { 8 } else { 3 };
     pub(super) fn reads(self) -> &'static [Resource] {
         match self {
             Self::Shadows => &[],
@@ -77,6 +97,10 @@ impl Pass {
             Self::Main => &[Resource::ShadowMap, Resource::Behind],
             #[cfg(feature = "post")]
             Self::Resolve => &[Resource::Colour],
+            #[cfg(feature = "post")]
+            Self::AppHdr => &[Resource::Scene, Resource::Scene2],
+            #[cfg(feature = "post")]
+            Self::AppDisplay => &[Resource::Shown, Resource::Shown2],
             #[cfg(feature = "post")]
             Self::Bloom => &[Resource::Scene],
             #[cfg(feature = "post")]
@@ -91,9 +115,13 @@ impl Pass {
             #[cfg(feature = "post")]
             Self::Resolve => &[Resource::Scene],
             #[cfg(feature = "post")]
+            Self::AppHdr => &[Resource::Scene, Resource::Scene2],
+            #[cfg(feature = "post")]
+            Self::AppDisplay => &[Resource::Target],
+            #[cfg(feature = "post")]
             Self::Bloom => &[Resource::Bloom],
             #[cfg(feature = "post")]
-            Self::Final => &[Resource::Target],
+            Self::Final => &[Resource::Target, Resource::Shown],
         }
     }
 }
@@ -152,6 +180,9 @@ pub(super) struct Chain {
     /// last pass writes the target.
     pub(super) on: bool,
     pub(super) bloom: bool,
+    /// The app's passes in the HDR stage and the display stage.
+    pub(super) hdr: u8,
+    pub(super) display: u8,
 }
 
 /// The scene's format where the post chain follows: linear light, past 1.
@@ -197,6 +228,10 @@ pub(super) struct Targets {
     /// The samples are kept for the chain to resolve (`Pass::Resolve`), not
     /// resolved as the meshes' pass ends.
     pub(super) stored: bool,
+    /// The scene's other half, what the display shows and its other half,
+    /// for the app's passes (`Resource::Scene2`, `Shown`, `Shown2`).
+    #[cfg_attr(not(feature = "post"), allow(dead_code))]
+    pub(super) others: [Option<wgpu::TextureView>; 3],
     /// Each of bloom's steps, with it on.
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     pub(super) bloom: Vec<wgpu::TextureView>,
@@ -289,9 +324,13 @@ impl Graph {
             #[cfg(feature = "post")]
             resolves.then_some(Pass::Resolve),
             #[cfg(feature = "post")]
+            (config.post.hdr > 0).then_some(Pass::AppHdr),
+            #[cfg(feature = "post")]
             config.post.bloom.then_some(Pass::Bloom),
             #[cfg(feature = "post")]
             config.post.on.then_some(Pass::Final),
+            #[cfg(feature = "post")]
+            (config.post.display > 0).then_some(Pass::AppDisplay),
         ];
         let wanted: Vec<Pass> = wanted.into_iter().flatten().collect();
         self.passes = order(&wanted).expect("the stock passes have an order");
@@ -321,6 +360,15 @@ impl Graph {
                     Resource::Colour if self.samples > 1 => target(config.size, self.format),
                     Resource::Depth => target(config.size, DEPTH),
                     Resource::Scene if config.post.on => scene,
+                    Resource::Scene2 if config.post.hdr > 0 => scene,
+                    Resource::Shown if config.post.display > 0 => Desc {
+                        format: SCENE,
+                        ..scene
+                    },
+                    Resource::Shown2 if config.post.display > 1 => Desc {
+                        format: SCENE,
+                        ..scene
+                    },
                     Resource::Bloom if config.post.bloom => {
                         bloom_desc(config.size, bloom_format(device))
                     }
@@ -347,6 +395,7 @@ impl Graph {
                 Resource::Colour => "3D colour",
                 Resource::Scene => "3D scene",
                 Resource::Bloom => "3D bloom",
+                Resource::Scene2 | Resource::Shown | Resource::Shown2 => "3D post",
                 _ => "3D depth",
             };
             textures[slot].get_or_insert_with(|| self.pool.take(device, desc, label));
@@ -362,6 +411,7 @@ impl Graph {
         };
         let (colour, depth) = (view(Resource::Colour), view(Resource::Depth));
         let scene = view(Resource::Scene);
+        let others = [Resource::Scene2, Resource::Shown, Resource::Shown2].map(view);
         let bloom = match used.iter().position(|(r, ..)| *r == Resource::Bloom) {
             Some(at) => {
                 let texture = &textures[slots[at]].as_ref().expect("taken").texture;
@@ -383,6 +433,7 @@ impl Graph {
             scene,
             bloom,
             stored: resolves,
+            others,
             textures: textures.into_iter().flatten().collect(),
         });
         // What is behind, at the frame's size, while light passes through.
@@ -499,7 +550,11 @@ mod tests {
             size: (64, 32),
             shadows: true,
             transmits: false,
-            post: Chain { on: true, bloom },
+            post: Chain {
+                on: true,
+                bloom,
+                ..Default::default()
+            },
         };
         graph.prepare(&device, config(true));
         assert_eq!(

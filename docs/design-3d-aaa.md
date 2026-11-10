@@ -240,7 +240,7 @@ Water, wetness and puddles are demo materials on this interface. Wetness needs t
 let pass = world.add_post(PostPass::new(include_str!("heat.wgsl"))
     .stage(PostStage::Hdr)                 // or Display, after tone mapping
     .after(Stock::Bloom)                   // order among stock passes
-    .param("strength", Param::Float));
+    .param("strength", PostParam::Float));
 ```
 
 ```wgsl
