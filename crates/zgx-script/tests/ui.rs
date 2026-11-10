@@ -4161,11 +4161,7 @@ fn a_canvas_draws_again_only_the_items_written_since() {
     // The rectangles' x, in the order drawn.
     let xs = |h: &mut Harness| {
         let scene = h.ui.scene.borrow();
-        let id = *scene
-            .children(board)
-            .iter()
-            .find(|id| matches!(scene.kind(**id), zgx::scene::NodeKind::Canvas(_)))
-            .unwrap();
+        let id = scene.leaf_target(board);
         let zgx::scene::NodeKind::Canvas(canvas) = scene.kind(id) else {
             unreachable!()
         };
@@ -5082,10 +5078,13 @@ fn canvas_text_costs_nothing_unused_and_follows_a_view() {
     );
     h.ui.prepare_frame();
     let plain = h.find("plain").unwrap();
-    assert_eq!(
-        h.ui.scene.borrow().children(plain).len(),
-        1,
-        "the drawing alone"
+    assert!(
+        h.ui.scene.borrow().children(plain).is_empty()
+            && matches!(
+                h.ui.scene.borrow().kind(plain),
+                zgx::scene::NodeKind::Canvas(_)
+            ),
+        "the drawing the canvas itself"
     );
     let canvas = h.find("c").unwrap();
     let mark = |h: &mut Harness| {
