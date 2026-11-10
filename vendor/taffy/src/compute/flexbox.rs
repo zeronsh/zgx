@@ -180,12 +180,12 @@ pub fn compute_flexbox_layout(
     let min_size = style
         .min_size()
         .maybe_resolve(parent_size, |val, basis| tree.calc(val, basis))
-        .maybe_apply_aspect_ratio(aspect_ratio)
+        .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(parent_size, |val, basis| tree.calc(val, basis)))
         .maybe_add(box_sizing_adjustment);
     let max_size = style
         .max_size()
         .maybe_resolve(parent_size, |val, basis| tree.calc(val, basis))
-        .maybe_apply_aspect_ratio(aspect_ratio)
+        .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(parent_size, |val, basis| tree.calc(val, basis)))
         .maybe_add(box_sizing_adjustment);
     let clamped_style_size = if inputs.sizing_mode == SizingMode::InherentSize {
         style
@@ -466,12 +466,12 @@ fn compute_constants(
         min_size: style
             .min_size()
             .maybe_resolve(parent_size, |val, basis| tree.calc(val, basis))
-            .maybe_apply_aspect_ratio(aspect_ratio)
+            .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(parent_size, |val, basis| tree.calc(val, basis)))
             .maybe_add(box_sizing_adjustment),
         max_size: style
             .max_size()
             .maybe_resolve(parent_size, |val, basis| tree.calc(val, basis))
-            .maybe_apply_aspect_ratio(aspect_ratio)
+            .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(parent_size, |val, basis| tree.calc(val, basis)))
             .maybe_add(box_sizing_adjustment),
         margin,
         border,
@@ -526,12 +526,12 @@ fn generate_anonymous_flex_items(
                 min_size: child_style
                     .min_size()
                     .maybe_resolve(constants.node_inner_size, |val, basis| tree.calc(val, basis))
-                    .maybe_apply_aspect_ratio(aspect_ratio)
+                    .maybe_apply_aspect_ratio_beside(aspect_ratio, || child_style.size().maybe_resolve(constants.node_inner_size, |val, basis| tree.calc(val, basis)))
                     .maybe_add(box_sizing_adjustment),
                 max_size: child_style
                     .max_size()
                     .maybe_resolve(constants.node_inner_size, |val, basis| tree.calc(val, basis))
-                    .maybe_apply_aspect_ratio(aspect_ratio)
+                    .maybe_apply_aspect_ratio_beside(aspect_ratio, || child_style.size().maybe_resolve(constants.node_inner_size, |val, basis| tree.calc(val, basis)))
                     .maybe_add(box_sizing_adjustment),
 
                 inset: child_style

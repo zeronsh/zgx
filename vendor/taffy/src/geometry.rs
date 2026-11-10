@@ -572,6 +572,27 @@ impl Size<Option<f32>> {
         new
     }
 
+    /// zgx: a min or max size through `aspect_ratio`, transferred only to an
+    /// axis whose preferred `size` is unset, as CSS transfers one: a definite
+    /// width keeps its own minimum and maximum (a `max-height` with a ratio
+    /// caps the height, not the width too).
+    /// `size` is asked for only with a ratio: without one this is `self`.
+    #[inline]
+    pub fn maybe_apply_aspect_ratio_beside(
+        self,
+        aspect_ratio: Option<f32>,
+        size: impl FnOnce() -> Size<Option<f32>>,
+    ) -> Size<Option<f32>> {
+        if aspect_ratio.is_none() {
+            return self;
+        }
+        let size = size();
+        let transferred = self.maybe_apply_aspect_ratio(aspect_ratio);
+        Size {
+            width: if size.width.is_some() { self.width } else { transferred.width },
+            height: if size.height.is_some() { self.height } else { transferred.height },
+        }
+    }
     /// Applies aspect_ratio (if one is supplied) to the Size:
     ///   - If width is `Some` but height is `None`, then height is computed from width and aspect_ratio
     ///   - If height is `Some` but width is `None`, then width is computed from height and aspect_ratio

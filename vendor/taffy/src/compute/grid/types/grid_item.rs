@@ -263,12 +263,12 @@ impl GridItem {
         let min_size = self
             .min_size
             .maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis))
-            .maybe_apply_aspect_ratio(aspect_ratio)
+            .maybe_apply_aspect_ratio_beside(aspect_ratio, || self.size.maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis)))
             .maybe_add(box_sizing_adjustment);
         let max_size = self
             .max_size
             .maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis))
-            .maybe_apply_aspect_ratio(aspect_ratio)
+            .maybe_apply_aspect_ratio_beside(aspect_ratio, || self.size.maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis)))
             .maybe_add(box_sizing_adjustment);
 
         let grid_area_minus_item_margins_size = grid_area_size.maybe_sub(margins);

@@ -103,11 +103,11 @@ pub(super) fn align_and_position_item(
         .maybe_add(box_sizing_adjustment)
         .or(padding_border_size.map(Some))
         .maybe_max(padding_border_size)
-        .maybe_apply_aspect_ratio(aspect_ratio);
+        .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis)));
     let max_size = style
         .max_size()
         .maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis))
-        .maybe_apply_aspect_ratio(aspect_ratio)
+        .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(grid_area_size, |val, basis| tree.calc(val, basis)))
         .maybe_add(box_sizing_adjustment);
 
     // Resolve default alignment styles if they are set on neither the parent or the node itself
