@@ -7,6 +7,13 @@
 - **lab-stream:** +0.37% on arm64 and −0.63% on x86. The font cache's file check (#1307) runs on a thread of its own, and once a process has had a second thread, glibc takes a lock for every allocation for the rest of its life. The check moves to the host's idle tick after 0.1.8.
 - **spans-follow:** +0.02% on arm64, flagged as layout; −0.09% on x86.
 
+# Expo Exact's heavy list (2026-11-10): zgx against Exact, before its fixes
+
+[`exact-heavy-list-2026-11-10`](exact-heavy-list-2026-11-10/): Exact's heavy-list benchmark written in zgx's Luau and run with Exact's own probes, on an iOS simulator (five interleaved rounds) and on macOS (n = 3 a cell).
+- **iOS:** zgx used less CPU (202 against 280 ms a second) and held its frame rate further up the speed ladder. It lost on worst frame (196 against 37 ms), peak memory (229 against 95 MiB) and cold start (449 against 305 ms).
+- **macOS:** zgx's app process used 2.2 to 5 times less CPU, and it showed more frames in every pair, at a higher peak footprint and with more blank bands from 6,000 pt/s.
+- **Fixes:** the worst frames' causes are fixed (#1831, #1835), along with #1826, #1829, #1832 and #1838, and a cold-start gate scene was added (#1836). The interleaved rerun after the fixes is built but parked.
+
 # macOS suite (2026-10-31): 0.1.7, every scene on `afa2960`
 
 [`suite-macos-2026-10-31-afa2960`](suite-macos-2026-10-31-afa2960/): heavy, lab, animate and vlist on the 0.1.7 freeze `afa2960e`, in quiet window 44, on an M5 Max (Mac17,6) with macOS 26.4 (25E246) and two 120 Hz Studio Display XDRs. The tag `b03245c4` adds API-shape fixes off every measured path. It's the suite's protocol with six rounds a cell, each read against its round's desktop, and the still-desktop check (#1092) passed: WindowServer at 0.6% of a core with Zeron hidden, and the desktop alone at 0.4 to 0.6% in nearly every round. Every scene was accepted, and no app exited abnormally. The rivals were built again from suite sources unchanged since 0.1.6. `python scripts/build_site.py docs/results/suite-macos-2026-10-31-afa2960 --startup docs/results/startup-macos-2026-10-26-03a9d89/startup.json --gate docs/results/gate-0.1.6-0.1.7/gate.json --previous docs/results/suite-macos-2026-10-30-e077e95 --field docs/results/field-macos-2026-10-27-238ef98 --rebuilt "…"` publishes it to `site/`.
