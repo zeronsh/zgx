@@ -1221,6 +1221,91 @@ fn cells_are_whole_device_pixels_at_any_scale() {
     term.close();
 }
 
+/// Output trickling in a line a frame scrolls the screen a line a frame:
+/// what the rows drew moves up with them and only the line new at the
+/// bottom is built, while a line higher up rewritten in place (a status
+/// line, as a build's progress is) is built again too. After every frame
+/// each line shows on its row, and nothing shows where it no longer is.
+#[test]
+fn lines_trickling_in_show_on_their_rows() {
+    let ui = Ui::new(640., 360.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    let feed = |app: &Harness, bytes: &[u8]| {
+        replay.feed(bytes);
+        app.ui.prepare_frame();
+    };
+    let shown = |app: &Harness| -> Vec<(String, f32)> {
+        let scene = app.ui.scene.borrow();
+        scene
+            .paint_items()
+            .filter_map(|item| match scene.kind(item.id) {
+                NodeKind::Text { text, .. }
+                    if text.starts_with("line ") || text.starts_with("status ") =>
+                {
+                    Some((text.to_string(), scene.transformed_bounds(item.id).y))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    let rows = usize::from(term.state().get().rows);
+    assert!(rows > 6, "{rows} rows");
+    feed(&app, b"line 0\r\nline 1\r\n");
+    let y = |app: &Harness, text: &str| {
+        shown(app)
+            .into_iter()
+            .find(|(shown, _)| shown == text)
+            .unwrap_or_else(|| panic!("{text} isn't shown"))
+            .1
+    };
+    let (top, line) = (y(&app, "line 0"), y(&app, "line 1") - y(&app, "line 0"));
+    // What each row holds, as the screen model has it.
+    let mut screen = vec![String::new(); rows];
+    (screen[0], screen[1]) = ("line 0".into(), "line 1".into());
+    let mut cursor = 2;
+    for n in 2..(rows * 3) {
+        let mut out = format!("line {n}\r\n");
+        screen[cursor] = format!("line {n}");
+        if cursor == rows - 1 {
+            screen.remove(0);
+            screen.push(String::new());
+        } else {
+            cursor += 1;
+        }
+        // Every fifth frame the third row is rewritten in place.
+        if n % 5 == 0 {
+            out.push_str(&format!("\x1b7\x1b[3;1H\x1b[2Kstatus {n}\x1b8"));
+            screen[2] = format!("status {n}");
+        }
+        feed(&app, out.as_bytes());
+        let mut drawn = shown(&app);
+        drawn.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let expected: Vec<(String, f32)> = (screen.iter().enumerate())
+            .filter(|(_, text)| !text.is_empty())
+            .map(|(row, text)| (text.clone(), top + row as f32 * line))
+            .collect();
+        assert_eq!(drawn.len(), expected.len(), "after line {n}: {drawn:?}");
+        for ((text, y), (want, at)) in drawn.iter().zip(&expected) {
+            assert!(
+                text == want && (y - at).abs() < 0.5,
+                "after line {n}: {drawn:?}, not {expected:?}"
+            );
+        }
+    }
+    term.close();
+}
+
 /// Output read before the view's first layout (a terminal opened while its
 /// window runs, its program quick to write) makes the rows for the session's
 /// own size, from outside any reactive flush: the rows built then find the

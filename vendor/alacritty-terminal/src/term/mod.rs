@@ -241,6 +241,10 @@ struct TermDamageState {
 
     /// Old terminal cursor point.
     last_cursor: Point,
+
+    /// zgx: lines the whole screen scrolled up since the damage was reset,
+    /// with the lines' damage moved up with them (`Term::scrolled`).
+    scrolled: usize,
 }
 
 impl TermDamageState {
@@ -253,6 +257,7 @@ impl TermDamageState {
             full: true,
             lines,
             last_cursor: Default::default(),
+            scrolled: 0,
         }
     }
 
@@ -284,7 +289,30 @@ impl TermDamageState {
     /// Reset information about terminal damage.
     fn reset(&mut self, num_cols: usize) {
         self.full = false;
+        self.scrolled = 0;
         self.lines.iter_mut().for_each(|line| line.reset(num_cols));
+    }
+
+    /// zgx: the whole screen scrolled up `lines`: each line's damage moves up
+    /// with its line, the lines new at the bottom are damaged whole, and the
+    /// old cursor moves up too. Whole damage, if they are all new.
+    fn scroll_up(&mut self, lines: usize, num_cols: usize) {
+        let count = self.lines.len();
+        // A screen's worth since the last reset: every line is new.
+        if self.full || self.scrolled + lines >= count {
+            self.full = true;
+            return;
+        }
+        for row in 0..count - lines {
+            let moved = self.lines[row + lines];
+            self.lines[row] = LineDamageBounds::new(row, moved.left, moved.right);
+        }
+        for row in count - lines..count {
+            self.lines[row] = LineDamageBounds::new(row, 0, num_cols.saturating_sub(1));
+        }
+        // Off the top, it damages the first row (a needless redraw at most).
+        self.last_cursor.line = cmp::max(self.last_cursor.line - lines as i32, Line(0));
+        self.scrolled += lines;
     }
 }
 
@@ -521,6 +549,14 @@ impl<T> Term<T> {
         // scrolling) is handled via full damage.
         let display_offset = self.grid().display_offset();
         TermDamage::Partial(TermDamageIterator::new(&self.damage.lines, display_offset))
+    }
+
+    /// zgx: lines the whole screen scrolled up since the damage was reset,
+    /// when the damage is partial: what was drawn of each line still shown
+    /// is that many rows lower, and its damage is where the line is now.
+    #[inline]
+    pub fn scrolled(&self) -> usize {
+        self.damage.scrolled
     }
 
     /// Resets the terminal damage information.
@@ -922,7 +958,15 @@ impl<T> Term<T> {
         if (top <= *line) && region.end > *line {
             *line = cmp::max(*line - lines, top);
         }
-        self.mark_fully_damaged();
+        // zgx: the whole screen, its newest lines shown, moves its lines'
+        // damage up with them: an embedder moves what it drew of them, and
+        // draws only the lines new at the bottom (`scrolled`).
+        let whole = region.start == 0 && region.end == self.screen_lines();
+        if whole && self.grid.display_offset() == 0 {
+            self.damage.scroll_up(lines, self.columns());
+        } else {
+            self.mark_fully_damaged();
+        }
     }
 
     fn deccolm(&mut self)
