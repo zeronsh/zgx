@@ -1337,6 +1337,33 @@ fn lines_trickling_in_show_on_their_rows() {
     assert!(in_screen_order(&app), "{:?}", shown(&app));
     feed(&app, b"line after\r\n");
     assert!(in_screen_order(&app), "{:?}", shown(&app));
+    // The last line written on the row above the cursor's (the bottom).
+    let last = |app: &Harness, text: &str| {
+        let at = top + (rows - 2) as f32 * line;
+        let y = y(app, text);
+        assert!(
+            (y - at).abs() < 0.5,
+            "{text} at {y}, not {at}: {:?}",
+            shown(app)
+        );
+    };
+    // A reader stopping mid-stream: the rows go on showing their lines.
+    app.ui.set_assistive_technology(false);
+    app.ui.prepare_frame();
+    for n in 0..rows {
+        feed(&app, format!("line more {n}\r\n").as_bytes());
+        last(&app, &format!("line more {n}"));
+    }
+    // One starting in the frame a scroll comes in: it meets the rows top to
+    // bottom, the scroll's line among them.
+    replay.feed(b"line pending\r\n");
+    app.ui.set_assistive_technology(true);
+    app.ui.prepare_frame();
+    last(&app, "line pending");
+    assert!(in_screen_order(&app), "{:?}", shown(&app));
+    feed(&app, b"line then\r\n");
+    last(&app, "line then");
+    assert!(in_screen_order(&app), "{:?}", shown(&app));
     term.close();
 }
 
