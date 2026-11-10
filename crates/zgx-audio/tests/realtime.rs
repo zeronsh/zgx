@@ -690,6 +690,33 @@ fn main() {
         .at(run.at(0.001))
         .set(Compressor::THRESHOLD, -50., Ramp::ms(30.))
         .unwrap();
+    // Binaural, its direction going round: new filters made on the audio
+    // thread as it turns, in buffers made beforehand.
+    #[cfg(feature = "hrtf")]
+    {
+        use zgx_audio::effects::{Binaural, HrtfSet};
+        let directions: Vec<[f32; 3]> = (0..16)
+            .map(|i| {
+                let a = i as f32 / 16. * std::f32::consts::TAU;
+                [a.sin(), 0., -a.cos()]
+            })
+            .collect();
+        let ear = |side: f32| -> Vec<Vec<f32>> {
+            (0..16)
+                .map(|d| {
+                    (0..200)
+                        .map(|k| ((k + d) as f32 * side).sin() * 0.01)
+                        .collect()
+                })
+                .collect()
+        };
+        let set =
+            std::sync::Arc::new(HrtfSet::new(48_000, directions, ear(0.3), ear(0.7)).unwrap());
+        let ears = world.add_effect(Binaural::new(set)).unwrap();
+        ears.at(run.at(0.001))
+            .set(Binaural::AZIMUTH, 170., Ramp::ms(40.))
+            .unwrap();
+    }
     run.render(30);
     run.finish(&mut failures);
 

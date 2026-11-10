@@ -586,3 +586,202 @@ fn a_bus_ducks_under_another_while_it_sounds_and_comes_back_after() {
         after[47_999]
     );
 }
+
+#[cfg(feature = "hrtf")]
+mod binaural {
+    use super::*;
+    use std::sync::Arc;
+    use zgx_audio::effects::{BLOCK, Binaural, HrtfSet};
+
+    const TAPS: usize = 300;
+
+    /// Four directions (ahead, right, behind, left), each ear a response of
+    /// its own: decaying noise, so any mix-up shows.
+    fn set() -> (Arc<HrtfSet>, Vec<[Vec<f32>; 2]>) {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut noise = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        let pairs: Vec<[Vec<f32>; 2]> = (0..4)
+            .map(|_| {
+                [0, 1].map(|_| {
+                    (0..TAPS)
+                        .map(|k| noise() * (-(k as f32) / 80.).exp() * 0.3)
+                        .collect()
+                })
+            })
+            .collect();
+        let directions = vec![[0., 0., -1.], [1., 0., 0.], [0., 0., 1.], [-1., 0., 0.]];
+        let set = HrtfSet::new(
+            RATE,
+            directions,
+            pairs.iter().map(|p| p[0].clone()).collect(),
+            pairs.iter().map(|p| p[1].clone()).collect(),
+        )
+        .unwrap();
+        (Arc::new(set), pairs)
+    }
+
+    fn noise_sound(frames: usize) -> (Sound, Vec<f32>) {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let samples: Vec<f32> = (0..frames)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                ((seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.5
+            })
+            .collect();
+        let mut played = samples.clone();
+        played[0] = 0.;
+        let mut with_zero = samples;
+        with_zero[0] = 0.;
+        (Sound::from_samples(&with_zero, 1, RATE).unwrap(), played)
+    }
+
+    /// `input` through `response`, a block late, at frame `t`.
+    fn direct(input: &[f32], response: &[f32], t: usize) -> f32 {
+        let mut sum = 0f64;
+        for (k, &h) in response.iter().enumerate() {
+            if let Some(i) = t.checked_sub(BLOCK + k) {
+                sum += f64::from(h) * f64::from(input.get(i).copied().unwrap_or(0.));
+            }
+        }
+        sum as f32
+    }
+
+    /// The noise heard through `build`'s binaural effect on master, in
+    /// blocks of several sizes, which must agree.
+    fn render(frames: usize, build: impl Fn(&Audio, Arc<HrtfSet>)) -> Vec<f32> {
+        let (set, _) = set();
+        let (sound, _) = noise_sound(frames);
+        let mut first: Option<Vec<f32>> = None;
+        for block in [512, 1, 37, 128, 300] {
+            let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+            build(&audio, set.clone());
+            audio.play(&sound, Play::new()).unwrap();
+            let mut out = vec![0.; frames * 2];
+            for chunk in out.chunks_mut(block * 2) {
+                mixer.render(chunk);
+            }
+            match &first {
+                None => first = Some(out),
+                Some(first) => {
+                    let at = first.iter().zip(&out).position(|(a, b)| a != b);
+                    assert_eq!(at, None, "blocks of {block} differ from 512's at {at:?}");
+                }
+            }
+        }
+        first.unwrap()
+    }
+
+    #[test]
+    fn each_ear_hears_the_direction_s_response_a_block_late() {
+        let frames = 4_096;
+        let (_, pairs) = set();
+        let (_, input) = noise_sound(frames);
+        for (azimuth, pair) in [(0., 0), (85., 1), (-170., 2), (-95., 3)] {
+            let out = render(frames, |audio, set| {
+                audio
+                    .master()
+                    .add_effect(Binaural::new(set).facing(azimuth, 0.))
+                    .unwrap();
+            });
+            for (side, response) in pairs[pair].iter().enumerate() {
+                let heard = channel(&out, side);
+                let worst = (0..frames)
+                    .map(|t| (heard[t] - direct(&input, response, t)).abs())
+                    .fold(0f32, f32::max);
+                assert!(
+                    worst < 1e-5,
+                    "{azimuth} degrees, ear {side}: off by {worst:e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_direction_crossfades_in_over_a_block() {
+        let frames = 4_096;
+        let (_, pairs) = set();
+        let (_, input) = noise_sound(frames);
+        // Ahead, then right from frame 1000: the block that ends after it
+        // fades from one to the other, and the next is the new one's.
+        let out = render(frames, |audio, set| {
+            let ears = audio.master().add_effect(Binaural::new(set)).unwrap();
+            ears.at(Time(1_000))
+                .set(Binaural::AZIMUTH, 90., Ramp::NONE)
+                .unwrap();
+        });
+        let left = channel(&out, 0);
+        // The effect starts on the first sound, frame 1 (the noise's first
+        // sample is zero), so its blocks end at 1 + 128k. The block over
+        // 897..=1024 decides at its end, where the azimuth is 90: its
+        // output (1025..1153) fades from the old to the new.
+        let fading = (1_000 - 1) / BLOCK * BLOCK + 1 + BLOCK;
+        for t in [1_100, 1_150] {
+            let (old, new) = (
+                direct(&input, &pairs[0][0], t),
+                direct(&input, &pairs[1][0], t),
+            );
+            let fade = (t - fading + 1) as f32 / BLOCK as f32;
+            let want = old + (new - old) * fade;
+            assert!((left[t] - want).abs() < 1e-5, "{t}: {} not {want}", left[t]);
+        }
+        for t in [1_200, 2_000, 4_000] {
+            let want = direct(&input, &pairs[1][0], t);
+            assert!((left[t] - want).abs() < 1e-5, "{t}: {} not {want}", left[t]);
+        }
+    }
+
+    #[test]
+    fn a_set_at_another_rate_keeps_its_loudness_and_its_length() {
+        // A millisecond's response at 96 and at 24 kHz, an average after a
+        // silent onset (as a head's is, before the sound reaches the ear):
+        // a level of 0.5 must come out 0.5 and 0.25 at 48, and the tail
+        // must be the millisecond and two blocks at the output's rate.
+        for rate in [96_000u32, 24_000] {
+            let taps = rate as usize / 1_000;
+            let average = |gain: f32| -> Vec<f32> {
+                (0..taps)
+                    .map(|k| if k < 4 { 0. } else { gain / (taps - 4) as f32 })
+                    .collect()
+            };
+            let (left, right) = (average(1.), average(0.5));
+            let set =
+                Arc::new(HrtfSet::new(rate, vec![[0., 0., -1.]], vec![left], vec![right]).unwrap());
+            let level = Sound::from_samples(&[0.5; 64], 1, RATE).unwrap();
+            let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+            audio
+                .master()
+                .add_effect(Binaural::new(set.clone()))
+                .unwrap();
+            audio
+                .play(&level, Play::new().looping(true).fade_in(0.))
+                .unwrap();
+            let out = mixer.frames(2_048);
+            let [l, r] = [out[4_000], out[4_001]];
+            assert!(
+                (l - 0.5).abs() < 0.005 && (r - 0.25).abs() < 0.0025,
+                "{rate}: {l}, {r}"
+            );
+            let mut ears = Binaural::new(set);
+            ears.prepare(
+                zgx_audio::Format {
+                    rate: RATE,
+                    channels: 2,
+                },
+                512,
+            );
+            let want = 0.001 + 2. * BLOCK as f64 / f64::from(RATE);
+            let tail = ears.tail().as_secs_f64();
+            assert!(
+                (tail - want).abs() < 1e-6,
+                "{rate}: a tail of {tail}, not {want}"
+            );
+        }
+    }
+}

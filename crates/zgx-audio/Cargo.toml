@@ -17,6 +17,10 @@ categories = ["multimedia::audio", "game-development"]
 device = ["dep:cpal"]
 # Ogg Vorbis, loaded whole or streamed: lewton, pure Rust (MIT/Apache).
 vorbis = ["dep:lewton"]
+# Binaural sound for headphones: effects::Binaural, a partitioned
+# convolution with the app's own head-related impulse responses (HrtfSet).
+# No dependency; no response data ships yet.
+hrtf = []
 
 [dependencies]
 cpal = { version = "0.18.2", optional = true, default-features = false }

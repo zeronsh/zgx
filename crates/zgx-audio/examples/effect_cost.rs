@@ -10,7 +10,7 @@
 //! subtracted. Every arm checks that each instance ran on every block.
 //! Effects: `none` (an effect that does nothing: what running one costs),
 //! `gain`, `lowpass`, `lowpass24`, `highpass`, `peaking`, `delay`, `reverb`,
-//! `compressor`, and
+//! `compressor`, `binaural` (with the `hrtf` feature), and
 //! `sweep` (a low-pass whose cutoff moves the whole time).
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -79,6 +79,36 @@ impl Effect for Gain {
     }
 }
 
+/// A set of 64 directions round the head, each ear 256 taps of decaying
+/// noise: SADIE II's length at 48 kHz, two partitions.
+#[cfg(feature = "hrtf")]
+fn synthetic_set() -> Arc<zgx_audio::effects::HrtfSet> {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut noise = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+    };
+    let directions: Vec<[f32; 3]> = (0..64)
+        .map(|i| {
+            let a = i as f32 / 64. * std::f32::consts::TAU;
+            [a.sin(), 0., -a.cos()]
+        })
+        .collect();
+    let mut ear = || -> Vec<Vec<f32>> {
+        (0..64)
+            .map(|_| {
+                (0..256)
+                    .map(|k| noise() * (-(k as f32) / 60.).exp() * 0.3)
+                    .collect()
+            })
+            .collect()
+    };
+    let (left, right) = (ear(), ear());
+    Arc::new(zgx_audio::effects::HrtfSet::new(48_000, directions, left, right).unwrap())
+}
+
 fn add(name: &str, bus: &Bus, frames: Arc<AtomicU64>) -> EffectHandle {
     fn counted<E: Effect>(bus: &Bus, effect: E, frames: Arc<AtomicU64>) -> EffectHandle {
         bus.add_effect(Counted { effect, frames }).unwrap()
@@ -92,6 +122,12 @@ fn add(name: &str, bus: &Bus, frames: Arc<AtomicU64>) -> EffectHandle {
         "peaking" => counted(bus, Peaking::new(1000., 6., 1.), frames),
         "reverb" => counted(bus, Reverb::new(1., 2.), frames),
         "compressor" => counted(bus, Compressor::new(-30., 4.), frames),
+        #[cfg(feature = "hrtf")]
+        "binaural" => counted(
+            bus,
+            zgx_audio::effects::Binaural::new(synthetic_set()),
+            frames,
+        ),
         "delay" => counted(
             bus,
             Delay::new(0.25, 0.25).feedback(0.5).mix(0.5, 1.),

@@ -14,10 +14,16 @@
 //! ```
 mod delay;
 mod dynamics;
+#[cfg(feature = "hrtf")]
+mod fft;
 mod filter;
+#[cfg(feature = "hrtf")]
+mod hrtf;
 mod reverb;
 
 pub use delay::Delay;
 pub use dynamics::{Compressor, Duck};
 pub use filter::{FLAT, HighPass, LowPass, Peaking, Slope};
+#[cfg(feature = "hrtf")]
+pub use hrtf::{BLOCK, Binaural, HrtfSet};
 pub use reverb::Reverb;
