@@ -450,6 +450,22 @@ impl Line {
         self.w += width;
         self.height = taller(self.height, height);
     }
+    /// After `add` where a line can end in a blank past `limit`, as
+    /// `Compact`'s `Visual::hang`: its width leaves that blank out, and the
+    /// width it had, from which a wider limit takes it whole, bounds the
+    /// reach (`Sums::beyond`).
+    #[inline(always)]
+    fn hang(&mut self, sums: &mut Sums, limit: f32, words: &[(usize, Arc<Shape>)], end: At) {
+        if self.w <= limit || end.1 != 0 || end.0 == 0 {
+            return;
+        }
+        let last = &words[end.0 - 1].1;
+        if !last.blank {
+            return;
+        }
+        sums.beyond = sums.beyond.min(self.w);
+        self.w -= last.width;
+    }
     /// Done: counted into `sums`, where it holds any.
     fn push(&mut self, sums: &mut Sums, any: &mut bool, line_height: f32) {
         if self.nonempty {
@@ -510,8 +526,17 @@ impl Words {
         let push = |line: &mut Option<(At, At, f32)>,
                     line_w: &mut f32,
                     lines: &mut smallvec::SmallVec<[(At, At, f32); 2]>| {
-            if let Some(done) = line.take() {
-                lines.push(done);
+            if let Some((start, end, mut w)) = line.take() {
+                // Past the width, the blank it ends with hangs, as
+                // `layout_to_buffer` leaves it out.
+                if w > limit
+                    && end.1 == 0
+                    && let Some((_, last)) = end.0.checked_sub(1).map(|at| &self.words[at])
+                    && last.blank
+                {
+                    w -= last.width;
+                }
+                lines.push((start, end, w));
             }
             *line_w = 0.;
         };
@@ -673,6 +698,7 @@ impl Words {
                 sums.beyond = sums.beyond.min(asks).min(word.width);
                 if range_width > 0. {
                     line.add(fitting, (i, 0), range_width, range_height);
+                    line.hang(&mut sums, limit, words, (i, 0));
                     line.push(&mut sums, &mut any, line_height);
                     range_width = 0.;
                     fitting = (i, 0);
@@ -723,6 +749,7 @@ impl Words {
             }
         }
         line.add(fitting, (words.len(), 0), range_width, range_height);
+        line.hang(&mut sums, limit, words, (words.len(), 0));
         line.push(&mut sums, &mut any, line_height);
         let height = sums.height + if any { 0. } else { line_height };
         let reach = match width {
