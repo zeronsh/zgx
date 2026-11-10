@@ -44,6 +44,68 @@ fn a_lost_device_fails_frames_and_a_new_context_draws() {
     assert_eq!(&pixels[..4], &[255, 0, 0, 255]);
 }
 
+/// A shader fill, the scene made anew (its shader new each time, as a
+/// script's would be after a reload).
+fn filled() -> Scene {
+    use std::sync::Arc;
+    use zgx::decoration::{Background, Decoration, FillShader};
+    let mut scene = Scene::new(64., 64.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let root = scene.root();
+    let fill = FillShader::new(
+        "fn fill(input: FillInput) -> vec4<f32> { return vec4<f32>(0.2, 0.6, 0.9, 1.0); }",
+        None,
+    );
+    scene.append(
+        root,
+        NodeKind::Quad(zgx::scene::QuadStyle {
+            decoration: Some(Arc::new(Decoration {
+                background: Some(Background::Shader(fill)),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }),
+        Style {
+            width: Some(32.),
+            height: Some(32.),
+            ..Default::default()
+        },
+    );
+    scene.flush();
+    scene
+}
+
+/// A shader fill compiled off the frame (with Metal, its module single-use:
+/// its IR goes once its pipeline is made, zgx's wgpu-hal patch) draws
+/// before a device is lost, and the same on a new context after, its
+/// pipeline built again there; frames between draw it from the pipeline
+/// kept.
+#[test]
+fn a_shader_fill_draws_again_on_a_new_context_after_a_loss() {
+    let Ok(context) = GpuContext::new() else {
+        eprintln!("no GPU here");
+        return;
+    };
+    let full = [Rect::new(0., 0., 64., 64.)];
+    let drawn = |gpu: &mut GpuRenderer, scene: &Scene| {
+        gpu.render(scene, &full).unwrap();
+        gpu.readback().unwrap()
+    };
+    let mut gpu = GpuRenderer::new_with_context(64, 64, &context).unwrap();
+    let scene = filled();
+    let before = drawn(&mut gpu, &scene);
+    assert_ne!(&before[..4], &[0, 0, 0, 0], "the fill draws");
+    assert_eq!(
+        drawn(&mut gpu, &scene),
+        before,
+        "again, from the pipeline kept"
+    );
+    context.debug_lose_device();
+    assert!(gpu.render(&scene, &full).unwrap_err().is_device_lost());
+    let mut gpu = GpuRenderer::new(64, 64).unwrap();
+    assert_eq!(drawn(&mut gpu, &filled()), before, "on a new context");
+}
+
 /// A context made on another thread (`prepare_in_background`) draws as one
 /// made on this thread does, and fails as it would where there is no GPU.
 #[test]
