@@ -2,6 +2,8 @@
 //! a test file goes in the group for its area, listed here.
 #[path = "../advanced_layout.rs"]
 mod advanced_layout;
+#[path = "../aspect_limits.rs"]
+mod aspect_limits;
 #[path = "../composition_letter_spacing.rs"]
 mod composition_letter_spacing;
 #[path = "../composition_line_height.rs"]

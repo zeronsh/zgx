@@ -41,10 +41,20 @@ caches as they were.
    every pass and the result dropped: a paragraph a line a word, in Chinese
    or Japanese a line a character, 83 ms for one on an iOS simulator.
    Later taffy releases take a closure there too.
+5. In `src/geometry.rs`, `Size::maybe_apply_aspect_ratio_beside`, and at
+   every place a min or max size goes through an aspect ratio (`compute/`:
+   leaf, flexbox, block, grid): a limit passes to the other axis only where
+   that axis's own size is unset, as CSS transfers one. Upstream passed it
+   always, so `width: 100%; aspect-ratio: 0.75; max-height: 320px` in a 400
+   px column came out 240 wide rather than 400. A flex container's
+   absolutely positioned children keep upstream's transfer: any code added
+   to that loop cost a terminal's layout 0.02-0.05% though no child there
+   has a ratio.
 
 Drop the fork when a taffy release keeps the gaps and keys children's
 results by their parent's layout mode and passes known sizes to a leaf's
-layout and measures an automatic minimum only (the zgx tests are
+layout and measures an automatic minimum only and transfers a limit
+through an aspect ratio only to a side it leaves free (the zgx tests are
 `crates/zgx/tests/layout_gaps.rs`, `layout_history.rs`,
-`viewports_within.rs` and `scene.rs`'s
+`viewports_within.rs`, `aspect_limits.rs` and `scene.rs`'s
 `a_flex_item_naming_its_minimum_is_not_laid_out_at_min_content`).

@@ -80,12 +80,12 @@ pub fn compute_block_layout(
     let min_size = style
         .min_size()
         .maybe_resolve(parent_size, |val, basis| tree.calc(val, basis))
-        .maybe_apply_aspect_ratio(aspect_ratio)
+        .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(parent_size, |val, basis| tree.calc(val, basis)))
         .maybe_add(box_sizing_adjustment);
     let max_size = style
         .max_size()
         .maybe_resolve(parent_size, |val, basis| tree.calc(val, basis))
-        .maybe_apply_aspect_ratio(aspect_ratio)
+        .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(parent_size, |val, basis| tree.calc(val, basis)))
         .maybe_add(box_sizing_adjustment);
     let clamped_style_size = if inputs.sizing_mode == SizingMode::InherentSize {
         style
@@ -161,12 +161,12 @@ fn compute_inner(tree: &mut impl LayoutBlockContainer, node_id: NodeId, inputs: 
     let min_size = style
         .min_size()
         .maybe_resolve(parent_size, |val, basis| tree.calc(val, basis))
-        .maybe_apply_aspect_ratio(aspect_ratio)
+        .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(parent_size, |val, basis| tree.calc(val, basis)))
         .maybe_add(box_sizing_adjustment);
     let max_size = style
         .max_size()
         .maybe_resolve(parent_size, |val, basis| tree.calc(val, basis))
-        .maybe_apply_aspect_ratio(aspect_ratio)
+        .maybe_apply_aspect_ratio_beside(aspect_ratio, || style.size().maybe_resolve(parent_size, |val, basis| tree.calc(val, basis)))
         .maybe_add(box_sizing_adjustment);
 
     // Determine margin collapsing behaviour
@@ -326,12 +326,12 @@ fn generate_item_list(
                 min_size: child_style
                     .min_size()
                     .maybe_resolve(node_inner_size, |val, basis| tree.calc(val, basis))
-                    .maybe_apply_aspect_ratio(aspect_ratio)
+                    .maybe_apply_aspect_ratio_beside(aspect_ratio, || child_style.size().maybe_resolve(node_inner_size, |val, basis| tree.calc(val, basis)))
                     .maybe_add(box_sizing_adjustment),
                 max_size: child_style
                     .max_size()
                     .maybe_resolve(node_inner_size, |val, basis| tree.calc(val, basis))
-                    .maybe_apply_aspect_ratio(aspect_ratio)
+                    .maybe_apply_aspect_ratio_beside(aspect_ratio, || child_style.size().maybe_resolve(node_inner_size, |val, basis| tree.calc(val, basis)))
                     .maybe_add(box_sizing_adjustment),
                 overflow: child_style.overflow(),
                 scrollbar_width: child_style.scrollbar_width(),
@@ -622,14 +622,14 @@ fn perform_absolute_layout_on_absolute_children(
         let min_size = child_style
             .min_size()
             .maybe_resolve(area_size, |val, basis| tree.calc(val, basis))
-            .maybe_apply_aspect_ratio(aspect_ratio)
+            .maybe_apply_aspect_ratio_beside(aspect_ratio, || child_style.size().maybe_resolve(area_size, |val, basis| tree.calc(val, basis)))
             .maybe_add(box_sizing_adjustment)
             .or(padding_border_sum.map(Some))
             .maybe_max(padding_border_sum);
         let max_size = child_style
             .max_size()
             .maybe_resolve(area_size, |val, basis| tree.calc(val, basis))
-            .maybe_apply_aspect_ratio(aspect_ratio)
+            .maybe_apply_aspect_ratio_beside(aspect_ratio, || child_style.size().maybe_resolve(area_size, |val, basis| tree.calc(val, basis)))
             .maybe_add(box_sizing_adjustment);
         let mut known_dimensions = style_size.maybe_clamp(min_size, max_size);
 
