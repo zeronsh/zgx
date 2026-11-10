@@ -4128,9 +4128,9 @@ impl Scene {
         }
         let empty = node.effects.blur_radius <= 0.0
             && !self.platform_nodes.contains(&id)
-            && !self
+            && self
                 .layer_shader(id)
-                .is_some_and(|layer| layer.shader.is_some())
+                .is_none_or(|layer| layer.shader.is_none())
             && match &node.kind {
                 NodeKind::Container(_) => true,
                 NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paints_nothing(),
@@ -4419,6 +4419,13 @@ impl Scene {
             ..self.node(id).effects
         };
         self.set_effects(id, effects);
+    }
+    /// Whether `id` blurs or masks its content (`filter_blur`, `mask`),
+    /// from one look at it.
+    #[inline]
+    pub fn blurs_or_masks(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        node.effects.filter_blur > 0. || node.image_mask.is_some()
     }
     /// `id`'s mask, if it has one.
     pub fn mask(&self, id: NodeId) -> Option<&ImageMask> {
@@ -7689,7 +7696,7 @@ impl Scene {
             })
             .collect();
         changed.then(|| {
-            crate::rich_text::RichText::new(rich.text(), runs)
+            rich.remade(rich.text_arc(), runs)
                 .expect("the same runs")
                 .with_options(rich.options())
         })
@@ -15065,6 +15072,29 @@ impl<'a> Iterator for PaintIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// Taking a language again keeps a text's boxes.
+    #[test]
+    fn review_relayered_text_keeps_its_boxes() {
+        use crate::rich_text::{INLINE_BOX_TEXT, InlineBox, RichText, TextRun};
+        let mut scene = Scene::new(100., 100.);
+        let root = scene.root();
+        let id = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        scene.set_language(id, Some("zh-Hant".into()));
+        let rich = RichText::new(
+            INLINE_BOX_TEXT,
+            vec![TextRun {
+                range: 0..3,
+                font_size: 14.,
+                ..Default::default()
+            }],
+        )
+        .unwrap()
+        .with_inline_boxes(vec![InlineBox::new(0)])
+        .unwrap();
+        let relayered = scene.relayered(id, &rich).expect("its features changed");
+        assert_eq!(relayered.inline_boxes().len(), 1);
+        assert!(relayered.has_inline_boxes());
+    }
     use super::*;
     /// A long column's ink worked out from its kept union and the children
     /// that grew where they were (`grown_ink`) is, to the bit, the ink worked

@@ -295,8 +295,10 @@ fn a_program_draws_a_sixel_image() {
 }
 
 /// Pictures come as strings of their own (APC, DCS) that a pseudoconsole
-/// has to hand on. A program's output through ConPTY, by PowerShell as the
-/// console's own programs write, with the text around them to show it read.
+/// has to hand on. A program's output through ConPTY, by cmd's `echo` as a
+/// console program writes, with the text around them to show it read. (Not
+/// PowerShell: two starting at once on a loaded runner showed nothing in
+/// 20 s, not even their titles.)
 /// What it saw goes to stderr as it is (not captured, so a run that is
 /// cancelled still says), and on failure the session isn't dropped: closing a
 /// pseudoconsole mid-string may block, and did, for the job's whole hour.
@@ -317,9 +319,8 @@ fn through_conpty(name: &str, string: &str, check: impl Fn(&Session) -> Result<(
             std::process::exit(101);
         }
     });
-    let command = format!(
-        r#"powershell.exe -NoProfile -NonInteractive -Command "$e=[char]27; [Console]::Out.Write('ab'+{string}+'cd'); Start-Sleep 30""#
-    );
+    // The escapes are in the command line as they are: echo writes them.
+    let command = format!("cmd.exe /d /c echo ab{string}cd");
     let mut run = Scripted::run(&command, 30, 4);
     let deadline = Instant::now() + Duration::from_secs(20);
     let after = loop {
@@ -367,7 +368,7 @@ fn a_windows_program_places_a_picture() {
     // 2 by 2 black pixels, RGB (twelve zero bytes in base64).
     through_conpty(
         "kitty",
-        "$e+'_Ga=T,f=24,s=2,v=2,i=5,q=2;AAAAAAAAAAAAAAAA'+$e+'\\'",
+        "\x1b_Ga=T,f=24,s=2,v=2,i=5,q=2;AAAAAAAAAAAAAAAA\x1b\\",
         |session| match (session.shows_pictures(), session.image(5)) {
             (true, Some(image)) if image.pixels() == [0, 0, 0, 255].repeat(4) => Ok(()),
             (true, Some(_)) => Err("its pixels differ".into()),
@@ -383,7 +384,7 @@ fn a_windows_program_places_a_picture() {
 #[test]
 fn a_windows_program_draws_a_sixel_image() {
     // 4 red columns of six pixels.
-    through_conpty("sixel", "$e+'Pq#1;2;100;0;0!4~'+$e+'\\'", |session| {
+    through_conpty("sixel", "\x1bPq#1;2;100;0;0!4~\x1b\\", |session| {
         let placed = session.term().placements().first().map(|p| p.image);
         let image = placed.and_then(|id| session.image(id));
         match (session.shows_pictures(), image) {

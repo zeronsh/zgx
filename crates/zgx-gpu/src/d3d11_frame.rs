@@ -23,10 +23,13 @@
 //! Direct3D 12's is. A frame needing more fails, naming
 //! what it lacks: there is no Direct3D 12 to fall back to.
 //!
-//! The shaders are draw.wgsl, copy_offset.wgsl and polyline.wgsl (after
+//! Layer effects (content blurs and masks, `crate::effects`) draw their
+//! passes into the effect atlas here, as on Direct3D 12, with effects.wgsl.
+//!
+//! The shaders are draw.wgsl, copy_offset.wgsl, effects.wgsl and polyline.wgsl (after
 //! draw.wgsl, as `crate::polyline_source` joins them, without areas: FXC
 //! can't compile their shader, so canvases holding one rasterize here),
-//! translated by naga to HLSL (draw.hlsl, copy_offset.hlsl, polyline.hlsl)
+//! translated by naga to HLSL (draw.hlsl, copy_offset.hlsl, effects.hlsl, polyline.hlsl)
 //! and compiled ahead by FXC, as wgpu's Direct3D 12 backend compiles them, to
 //! the DXBC in `dxbc/`:
 //! `translated_hlsl_matches` keeps all of them current. FXC runs on Windows
@@ -75,6 +78,17 @@ const COPY_VS: &[u8] = include_bytes!("dxbc/copy_offset_vs.dxbc");
 const COPY_FS: &[u8] = include_bytes!("dxbc/copy_offset_fs.dxbc");
 const POLYLINE_VS: &[u8] = include_bytes!("dxbc/polyline_vs.dxbc");
 const POLYLINE_FS: &[u8] = include_bytes!("dxbc/polyline_fs_polyline.dxbc");
+/// effects.wgsl's: layer effects' passes (`crate::effects`).
+const EFFECTS_VS: &[u8] = include_bytes!("dxbc/effects_vs.dxbc");
+const EFFECTS_ACROSS: &[u8] = include_bytes!("dxbc/effects_fs_across.dxbc");
+const EFFECTS_DOWN: &[u8] = include_bytes!("dxbc/effects_fs_down.dxbc");
+/// Image effects' pixel stage (image_effects.wgsl after draw.wgsl,
+/// `crate::image_effect_source`).
+const IMAGE_EFFECT_FS: &[u8] = include_bytes!("dxbc/image_effects_zgx_image_effect.dxbc");
+/// Blended layers' pixel stage (blend.wgsl after draw.wgsl,
+/// `crate::blend_source`): its backdrop in `POINTS`'s register, which no
+/// blended draw reads points from.
+const BLEND_FS: &[u8] = include_bytes!("dxbc/blend_zgx_blended.dxbc");
 
 /// Registers the HLSL is written with (`translate`): the sampled texture
 /// (the atlas, or the shown buffer for copies) in t0, the clip regions in
@@ -83,6 +97,8 @@ const TEXTURE: u32 = 0;
 const REGIONS: u32 = 1;
 /// Polyline strokes' and filled areas' points (polyline.wgsl's `points`).
 const POINTS: u32 = 2;
+/// A layer effect's mask (effects.wgsl's `mask`), its source in `TEXTURE`.
+const MASK: u32 = 1;
 
 fn failed(what: &str) -> impl Fn(windows::core::Error) -> GpuError + '_ {
     move |error| GpuError(format!("Direct3D 11 {what}: {error}"))
@@ -215,6 +231,14 @@ pub(crate) struct Device {
     pub(crate) context: ID3D11DeviceContext,
     /// By `Bound`, in its order.
     pipelines: [Pipeline; 8],
+    /// Layer effects' passes (`Device::effects`): across, then down.
+    effect_pipelines: [Pipeline; 2],
+    /// Image effects' pixel stage (`Shading::ImageEffect`), made when an
+    /// image first draws with one (`None`: Direct3D made none).
+    image_effect: std::cell::OnceCell<Option<ID3D11PixelShader>>,
+    /// Blended layers' pixel stage (`Shading::Blend`), made when one first
+    /// draws (`None`: Direct3D made none).
+    blend: std::cell::OnceCell<Option<ID3D11PixelShader>>,
     rasterizer: ID3D11RasterizerState,
     sampler: ID3D11SamplerState,
     /// Pixelated images' sampler, the nearest texel's, made with the first
@@ -353,6 +377,19 @@ impl Device {
             pipeline(&full_vs, &full_fs, &full_layout, &source_in),
             pipeline(&full_vs, &full_fs, &full_layout, &behind),
         ];
+        // Replacing, as effects.wgsl's pipelines write (no blending).
+        let effect_vs = vertex(EFFECTS_VS)?;
+        let effect_layout = layout(&input_layout(7), EFFECTS_VS)?;
+        let effect_pipelines = [EFFECTS_ACROSS, EFFECTS_DOWN].map(|code| {
+            Ok::<_, GpuError>(Pipeline {
+                vertex: effect_vs.clone(),
+                pixel: pixel(code)?,
+                layout: effect_layout.clone(),
+                blend: replace.clone(),
+            })
+        });
+        let [across, down] = effect_pipelines;
+        let effect_pipelines = [across?, down?];
         // As wgpu's quad pipelines: no culling, depth clipped, scissored.
         let rasterizer = {
             let desc = D3D11_RASTERIZER_DESC {
@@ -388,6 +425,9 @@ impl Device {
             device,
             context,
             pipelines,
+            effect_pipelines,
+            image_effect: std::cell::OnceCell::new(),
+            blend: std::cell::OnceCell::new(),
             rasterizer,
             sampler,
             nearest: std::cell::OnceCell::new(),
@@ -626,6 +666,66 @@ impl Device {
     /// Open a frame drawing into `target`, its pixels kept, from `vertices`
     /// (`Ring::write`), with `viewport` (logical width and height, scale)
     /// and the frame's clip `regions` in `state`.
+    /// Layer effects' passes (`crate::GpuRenderer::d3d11_effects`), before
+    /// the frame that composites them: each into its target, the scratch
+    /// atlas cleared first, every draw one instance of `vertices`' quads.
+    pub(crate) fn effects(&self, passes: &[EffectPass<'_>], vertices: &ID3D11Buffer) {
+        let context = &self.context;
+        // SAFETY: Live objects of this device, bound to its context; the
+        // vertex buffer holds 128-byte quads (`crate::Quad`), and each draw
+        // one of them, an effect's (`crate::effects::Job`); its target is
+        // never a texture it samples.
+        unsafe {
+            context.RSSetState(&self.rasterizer);
+            context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            context.IASetVertexBuffers(
+                0,
+                1,
+                Some(&Some(vertices.clone())),
+                Some(&(size_of::<crate::Quad>() as u32)),
+                Some(&0),
+            );
+            context.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
+            for pass in passes {
+                let rtv = pass.target.rtv.clone().expect("a render target");
+                context.PSSetShaderResources(TEXTURE, Some(&[None, None]));
+                context.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
+                let (width, height) = (pass.target.width, pass.target.height);
+                context.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                    TopLeftX: 0.,
+                    TopLeftY: 0.,
+                    Width: width as f32,
+                    Height: height as f32,
+                    MinDepth: 0.,
+                    MaxDepth: 1.,
+                }]));
+                context.RSSetScissorRects(Some(&[RECT {
+                    left: 0,
+                    top: 0,
+                    right: width as i32,
+                    bottom: height as i32,
+                }]));
+                if !pass.down {
+                    context.ClearRenderTargetView(&rtv, &[0.; 4]);
+                }
+                let pipeline = &self.effect_pipelines[usize::from(pass.down)];
+                context.IASetInputLayout(&pipeline.layout);
+                context.VSSetShader(&pipeline.vertex, None);
+                context.PSSetShader(&pipeline.pixel, None);
+                context.OMSetBlendState(&pipeline.blend, None, u32::MAX);
+                for draw in &pass.draws {
+                    context.PSSetShaderResources(
+                        TEXTURE,
+                        Some(&[Some(draw.source.clone()), Some(draw.mask.clone())]),
+                    );
+                    context.DrawInstanced(4, 1, 0, draw.instance);
+                }
+            }
+            context.OMSetRenderTargets(None, None);
+            context.PSSetShaderResources(TEXTURE, Some(&[None, None]));
+        }
+    }
+
     pub(crate) fn begin<'a>(
         &'a self,
         state: &'a State,
@@ -672,6 +772,7 @@ impl Device {
             current: None,
             scissor: None,
             nearest: false,
+            points: state.points.as_ref().map(|(_, points, _)| points.clone()),
         }
     }
 }
@@ -792,6 +893,22 @@ fn query_done(context: &ID3D11DeviceContext, query: &ID3D11Query, flush: bool) -
 
 /// A texture of the device's: what shaders sample, and what a frame draws
 /// into where it has a render target view.
+/// A pass of layer effects (`Device::effects`) into `target`: the scratch
+/// atlas across (cleared first), or the effect atlas down.
+pub(crate) struct EffectPass<'a> {
+    pub(crate) target: &'a Surface,
+    pub(crate) down: bool,
+    pub(crate) draws: Vec<EffectDraw<'a>>,
+}
+/// One effect's quad, instance `instance`, sampling `source` (a layer's
+/// content, or the scratch atlas going down) and `mask` (the blank one but
+/// for a masked layer going down).
+pub(crate) struct EffectDraw<'a> {
+    pub(crate) source: &'a ID3D11ShaderResourceView,
+    pub(crate) mask: &'a ID3D11ShaderResourceView,
+    pub(crate) instance: u32,
+}
+
 pub(crate) struct Surface {
     pub(crate) texture: ID3D11Texture2D,
     pub(crate) rtv: Option<ID3D11RenderTargetView>,
@@ -869,6 +986,13 @@ pub(crate) struct State {
     /// gradients' ramps, canvases, SVGs), each under the shell's texture
     /// standing for it.
     pub(crate) textures: rustc_hash::FxHashMap<wgpu::Texture, Surface>,
+    /// A copy of the target under blended layers (`Frame::blended`), of the
+    /// last target's size that had one.
+    pub(crate) backdrop: Option<Surface>,
+    /// The effect atlas's scratch twin and blank mask (`crate::effects`),
+    /// under the shell's scratch texture they stand with; the atlas itself
+    /// is among `textures`, which its composites sample.
+    pub(crate) effects: Option<(wgpu::Texture, Surface, Surface)>,
 }
 
 impl State {
@@ -899,6 +1023,8 @@ impl State {
             spare: None,
             layers: Default::default(),
             textures: Default::default(),
+            backdrop: None,
+            effects: None,
         })
     }
 
@@ -1215,9 +1341,85 @@ pub(crate) struct Frame<'a> {
     scissor: Option<Scissor>,
     /// Sampling the nearest texel (`nearest`), not the linear sampler.
     nearest: bool,
+    /// The frame's polyline points, bound again after a blended draw takes
+    /// their register for its backdrop.
+    points: Option<ID3D11ShaderResourceView>,
 }
 
 impl Frame<'_> {
+    /// A blended layer's composite (`Shading::Blend`), `instances` within
+    /// `rect` of `target`: the target under it copied to `backdrop` (of the
+    /// target's size), then drawn with blend.wgsl's pixel stage reading it,
+    /// replacing the target's pixels, as Direct3D 12's blend pipeline does.
+    /// Its layer's texture is the one bound (`texture`). Whether it drew.
+    pub(crate) fn blended(
+        &mut self,
+        target: &Surface,
+        backdrop: &Surface,
+        rect: Scissor,
+        instances: std::ops::Range<u32>,
+    ) -> bool {
+        let device = self.device;
+        let pixel = device.blend.get_or_init(|| {
+            let mut shader = None;
+            // SAFETY: DXBC compiled by FXC (`translated_hlsl_matches`).
+            unsafe {
+                device
+                    .device
+                    .CreatePixelShader(BLEND_FS, None, Some(&mut shader))
+            }
+            .ok()?;
+            shader
+        });
+        let Some(pixel) = pixel else {
+            return false;
+        };
+        let (x, y, width, height) = rect;
+        let region = D3D11_BOX {
+            left: x,
+            top: y,
+            front: 0,
+            right: x + width,
+            bottom: y + height,
+            back: 1,
+        };
+        // SAFETY: Two textures of one size and format, the box within both;
+        // the backdrop is bound to no stage while it is written.
+        unsafe {
+            device.context.PSSetShaderResources(POINTS, Some(&[None]));
+            device.context.CopySubresourceRegion(
+                &backdrop.texture,
+                0,
+                x,
+                y,
+                0,
+                &target.texture,
+                0,
+                Some(&region),
+            );
+        }
+        // Replacing (no blending), with the full pipeline's vertex stage
+        // and layout.
+        self.bind(Bound::FullClear);
+        self.current = None;
+        self.scissor(rect);
+        // SAFETY: A pixel stage reading what the full vertex stage writes
+        // (draw.wgsl's `Out`), and its backdrop, in the registers it binds.
+        unsafe {
+            device.context.PSSetShader(pixel, None);
+            device
+                .context
+                .PSSetShaderResources(POINTS, Some(std::slice::from_ref(&backdrop.srv)));
+        }
+        self.draw(instances);
+        // SAFETY: The frame's points again, or nothing where it has none.
+        unsafe {
+            device
+                .context
+                .PSSetShaderResources(POINTS, Some(std::slice::from_ref(&self.points)));
+        }
+        true
+    }
     fn bind(&mut self, bound: Bound) {
         if self.current == Some(bound) {
             return;
@@ -1294,6 +1496,31 @@ impl Frame<'_> {
         // own pixel stage, the full pipeline's vertex stage, layout and
         // blending (as wgpu's `fill_pipeline` builds both). Compiled, or its
         // draw would be `Full` (`GpuRenderer::d3d11_app_shaders`).
+        // An image drawn with an effect: image_effects.wgsl's pixel stage,
+        // the rest as a shader fill's.
+        if let (Shading::ImageEffect, false) = (shading, clear) {
+            let device = self.device;
+            let pixel = device.image_effect.get_or_init(|| {
+                let mut shader = None;
+                // SAFETY: DXBC compiled by FXC (`translated_hlsl_matches`).
+                unsafe {
+                    device
+                        .device
+                        .CreatePixelShader(IMAGE_EFFECT_FS, None, Some(&mut shader))
+                }
+                .ok()?;
+                shader
+            });
+            if let Some(pixel) = pixel {
+                self.bind(Bound::Full);
+                self.current = None;
+                // SAFETY: A pixel stage reading what the full vertex stage
+                // writes (draw.wgsl's `Out`), in the registers it binds.
+                unsafe { device.context.PSSetShader(pixel, None) };
+                self.draw(instances);
+                return;
+            }
+        }
         let app = match (shading, clear) {
             (Shading::Fill(id), false) => Some((id, AppShader::Fill)),
             (Shading::Filter(id), false) => Some((id, AppShader::Filter)),
@@ -1371,7 +1598,18 @@ impl Frame<'_> {
 /// and the sampler in s0. naga writes samplers through Direct3D 12's
 /// sampler heap, which shader model 5.0 has none of: its declarations are
 /// replaced with the plain sampler the module binds.
-fn translate(source: &str, copies: bool) -> Result<(String, Vec<(String, String)>), String> {
+/// Which of zgx's WGSL modules `translate` writes: its bindings' registers.
+#[derive(Clone, Copy, PartialEq)]
+enum Module {
+    /// draw.wgsl and what is built on it (polyline.wgsl, apps' shaders).
+    Draw,
+    /// copy_offset.wgsl.
+    Copy,
+    /// effects.wgsl: its source in `TEXTURE`, its mask in `MASK`.
+    Effects,
+}
+
+fn translate(source: &str, module_kind: Module) -> Result<(String, Vec<(String, String)>), String> {
     use naga::back::hlsl;
     use wgpu::naga;
     let module = naga::front::wgsl::parse_str(source).map_err(|e| e.to_string())?;
@@ -1388,15 +1626,20 @@ fn translate(source: &str, copies: bool) -> Result<(String, Vec<(String, String)
     };
     let binding = |group, binding| naga::ResourceBinding { group, binding };
     let mut binding_map = hlsl::BindingMap::new();
+    let copies = module_kind == Module::Copy;
     if copies {
         binding_map.insert(binding(0, 0), target(TEXTURE));
     } else {
         binding_map.insert(binding(0, 1), target(TEXTURE));
         // The sampler's index in the heap's table (replaced below).
         binding_map.insert(binding(0, 2), target(0));
-        binding_map.insert(binding(1, 0), target(0));
-        binding_map.insert(binding(1, 1), target(REGIONS));
-        binding_map.insert(binding(2, 0), target(POINTS));
+        if module_kind == Module::Effects {
+            binding_map.insert(binding(1, 0), target(MASK));
+        } else {
+            binding_map.insert(binding(1, 0), target(0));
+            binding_map.insert(binding(1, 1), target(REGIONS));
+            binding_map.insert(binding(2, 0), target(POINTS));
+        }
     }
     let mut sampler_buffer_binding_map = hlsl::SamplerIndexBufferBindingMap::new();
     sampler_buffer_binding_map.insert(hlsl::SamplerIndexBufferKey { group: 0 }, target(15));
@@ -1435,9 +1678,15 @@ fn translate(source: &str, copies: bool) -> Result<(String, Vec<(String, String)
             replaced += 1;
             continue;
         }
-        if trimmed.starts_with("static const SamplerState tex_sampler = nagaSamplerHeap[") {
+        // `static const SamplerState tex_sampler = nagaSamplerHeap[…];`
+        // (draw.wgsl's; effects.wgsl's is `linear`).
+        if let Some(name) = trimmed
+            .strip_prefix("static const SamplerState ")
+            .and_then(|rest| rest.split_once(" = nagaSamplerHeap["))
+            .map(|(name, _)| name)
+        {
             replaced += 1;
-            out.push_str("SamplerState tex_sampler : register(s0);\n");
+            out.push_str(&format!("SamplerState {name} : register(s0);\n"));
             continue;
         }
         out.push_str(line);
@@ -1458,7 +1707,7 @@ fn translate(source: &str, copies: bool) -> Result<(String, Vec<(String, String)
 /// (`crate::fxc_child`: FXC's optimizer has overflowed every stack on some
 /// modules), else here.
 fn fragment(source: &str, entry: &str) -> Result<Vec<u8>, String> {
-    let (hlsl, names) = translate(source, false)?;
+    let (hlsl, names) = translate(source, Module::Draw)?;
     let name = names
         .iter()
         .find(|(wgsl, _)| wgsl == entry)
@@ -1547,10 +1796,10 @@ mod tests {
                  `ZGX_BLESS=1 cargo test -p zgx-gpu --features d3d11 --lib translated_hlsl`"
             )
         };
-        for (wgsl, copies, name, entries) in [
+        for (wgsl, module, name, entries) in [
             (
                 include_str!("draw.wgsl"),
-                false,
+                Module::Draw,
                 "draw",
                 &[
                     ("vs", "vs_5_0", DRAW_VS),
@@ -1561,13 +1810,35 @@ mod tests {
             ),
             (
                 include_str!("copy_offset.wgsl"),
-                true,
+                Module::Copy,
                 "copy_offset",
                 &[("vs", "vs_5_0", COPY_VS), ("fs", "ps_5_0", COPY_FS)][..],
             ),
             (
+                crate::blend_source().as_str(),
+                Module::Draw,
+                "blend",
+                &[("zgx_blended", "ps_5_0", BLEND_FS)][..],
+            ),
+            (
+                crate::image_effect_source().as_str(),
+                Module::Draw,
+                "image_effects",
+                &[("zgx_image_effect", "ps_5_0", IMAGE_EFFECT_FS)][..],
+            ),
+            (
+                include_str!("effects.wgsl"),
+                Module::Effects,
+                "effects",
+                &[
+                    ("vs", "vs_5_0", EFFECTS_VS),
+                    ("fs_across", "ps_5_0", EFFECTS_ACROSS),
+                    ("fs_down", "ps_5_0", EFFECTS_DOWN),
+                ][..],
+            ),
+            (
                 crate::polyline_source(false).as_str(),
-                false,
+                Module::Draw,
                 "polyline",
                 &[
                     ("vs", "vs_5_0", POLYLINE_VS),
@@ -1575,7 +1846,7 @@ mod tests {
                 ][..],
             ),
         ] {
-            let (hlsl, names) = translate(wgsl, copies).unwrap();
+            let (hlsl, names) = translate(wgsl, module).unwrap();
             let file = format!("{name}.hlsl");
             if bless {
                 std::fs::write(dir.join(&file), &hlsl).unwrap();

@@ -447,3 +447,49 @@ compares and hashes by its bits, so grids of other cells are other keys. The cra
 `FontSystem::rest` gives back `ShapeBuffer`'s buffers. They hold what the longest
 text shaped since left there, kept for reuse: a visual line's lists, one per line
 of that text, for as long as the app runs. zgx-gpu calls it as a window goes idle.
+
+## Inline boxes (zgx-cosmic-text 0.19.14)
+
+A span can be an atomic inline box (CSS's inline-block): `Attrs::inline_box`
+makes it one, its text one U+FFFC per box: an `InlineBox` of a width, a
+height, its baseline below its top, and an `InlineAlign` (CSS's
+`vertical-align`: baseline, middle, text-top, text-bottom, top, bottom, or
+raised). A box lives in its span: marked in `padding_opt` as a negative NaN
+(`LetterSpacing::INLINE_BOX`; the cell grid is a positive one), its size and
+alignment in its features as private tags (`_ibw` and the like, as `_hyp`),
+which no font is given, a box's span being never shaped. So `Attrs` is no
+bigger, and neither is `AttrsList` nor `BufferLine`, which plain text builds
+for every line (`boxes_make_no_list_or_line_bigger`: a 16-byte list on
+`AttrsList` made every prepared text's frame bigger). A line holding a box
+says so (`BufferLine::set_inline_boxes`, or `Buffer::find_inline_boxes` for a
+buffer's lines, after its text is set): a bool in the line's padding, which
+setting its text or attributes again clears and a split works out again.
+
+A box is never shaped. Its character is a word of its own (U+FFFC's line
+break class is CB: a line breaks before and after it), and a word holding one
+goes apart (`build_boxed`, behind a test of its line's flag, which
+`BufferLine::shape` passes in `ShapeBuffer::boxes`, on the complex path, which
+ASCII never takes): its runs split at each box, whose characters
+become glyphs of their own (`box_glyphs`), as wide as the box, drawing nothing
+(their font's space, or no font at all where it has none: an icon font's
+`.notdef` shows), flagged `CacheKeyFlags::INLINE_BOX` (and
+`INLINE_LINE_TOP` or `INLINE_LINE_BOTTOM`), never in the shape-run cache. A box
+takes its own character alone, so marks after it are text. Its
+`ascent` and `descent` are how far the box reaches above and below the
+baseline, from the run font's ascent, descent and x-height (half an em where
+its OS/2 table has none, as CSS takes it), and its `x_offset` the run font's
+strut.
+
+A line holding a box takes CSS's line box (`ShapeLine::inline_line_box`, cold,
+for a line said to hold boxes and which holds one): as far above the
+baseline as any run reaches (its ascent and half its leading), any box, or a
+box's strut, and as far below; then boxes at the line's top or bottom, a
+taller one growing the line down (or up). It is written as the line's
+`max_ascent`, `max_descent` and `line_height_opt`, so `layout_runs` places the
+line as it places any (no glyph centring left over), and each box glyph's
+`y_offset` says how far its top is above the baseline, for the host to place
+what it holds. Every other line is laid out as before: the check is one bool a
+line (`ShapeLine::boxes`). `inline_box_tests` check a box's room, a tall box
+growing only its line, breaking around a box, each alignment, a box kept in
+its span, a split line keeping its boxes, and a line said to hold boxes but
+holding none laid out exactly as one that isn't.

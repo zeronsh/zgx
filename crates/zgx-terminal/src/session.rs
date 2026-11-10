@@ -577,9 +577,16 @@ impl Parse {
             &mut self.graphics,
         );
         self.sniffer.feed(bytes, |end, osc| {
+            // A picture's body: the screen model reads around it.
+            if let Osc::Body(from) = osc {
+                parser.advance(term, &bytes[parsed..from]);
+                parsed = end;
+                return;
+            }
             parser.advance(term, &bytes[parsed..end]);
             parsed = end;
             let event = match osc {
+                Osc::Body(_) => return,
                 Osc::Pwd(path) => SessionEvent::Pwd(path),
                 Osc::CommandStarted => {
                     *started = Some(Instant::now());
@@ -848,6 +855,70 @@ mod tests {
             })
             .collect();
         (written, session)
+    }
+
+    /// A screen's cells, row by row, and its cursor.
+    fn screen<T: EventListener>(term: &alacritty_terminal::Term<T>) -> (Vec<String>, (i32, usize)) {
+        use alacritty_terminal::index::{Column, Line};
+        let grid = term.grid();
+        let rows = (0..grid.screen_lines() as i32)
+            .map(|line| {
+                let row = &grid[Line(line)];
+                (0..grid.columns()).map(|c| row[Column(c)].c).collect()
+            })
+            .collect();
+        let cursor = grid.cursor.point;
+        (rows, (cursor.line.0, cursor.column.0))
+    }
+
+    /// Spared pictures' bodies, the screen model ends as it would reading
+    /// them, however reads cut the output: the same cells and cursor, the
+    /// pictures placed by the same commands.
+    #[test]
+    fn the_screen_is_the_same_without_reading_picture_bodies() {
+        let output: &[u8] = b"ab\x1b_Ga=T,f=24,s=1,v=1,c=2,r=1,i=3,q=2;AAAA\x1b\\cd\r\n\
+            \x1b[31mred\x1bP0;0q#1;2;100;0;0!8~-!8~\x1b\\ef\x1b_Xapc\x1b\\gh\r\n\
+            \x1bP+q544e\x1b\\\x1b]0;t\x07ij\x1b_Gq=2,a=t,f=24,s=1,v=1,i=4;AAAA\x1b\\kl";
+        let size = GridSize::new(40, 10);
+        // Read whole by the screen model, as before.
+        let reference = {
+            let mut term = alacritty_terminal::Term::new(
+                config(&SessionOptions::default(), true),
+                &size,
+                alacritty_terminal::event::VoidListener,
+            );
+            let (mut parser, mut sniffer) =
+                (Processor::<StdSyncHandler>::new(), Sniffer::default());
+            let (mut graphics, images) = (Graphics::default(), Images::default());
+            let mut parsed = 0;
+            sniffer.feed(output, |end, osc| {
+                parser.advance(&mut term, &output[parsed..end]);
+                parsed = end;
+                match osc {
+                    Osc::Graphics(command) => {
+                        graphics.command(&command, &mut term, (0, 0), &images);
+                    }
+                    Osc::Sixel(body) => {
+                        graphics.sixel(&body, &mut term, (0, 0), [0, 0, 0], &images)
+                    }
+                    _ => {}
+                }
+            });
+            parser.advance(&mut term, &output[parsed..]);
+            (screen(&term), term.placements().len())
+        };
+        assert_eq!(reference.1, 2);
+        for cut in 0..output.len() {
+            let (session, _) = Session::replay_with(&SessionOptions::default(), size, || {}, true);
+            session.feed(&output[..cut]);
+            session.feed(&output[cut..]);
+            let term = session.term();
+            assert_eq!(
+                (screen(&term), term.placements().len()),
+                reference,
+                "cut at {cut}"
+            );
+        }
     }
 
     /// Where pictures can't arrive (Windows' own pseudoconsole), nothing
