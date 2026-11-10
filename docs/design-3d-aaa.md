@@ -120,7 +120,7 @@ With features on, the full list is:
 
 | Kind | Examples | Made | Dropped |
 | --- | --- | --- | --- |
-| Temporary | HDR colour, prepass targets, bloom chain | When the compiled list first needs them; shared between passes whose lifetimes don't overlap | 2 s after the world's last frame (one timer, armed by a frame; nothing polls), on resize, on `device_changed` |
+| Temporary | HDR colour, prepass targets, bloom chain | When the compiled list first needs them; shared between passes whose lifetimes don't overlap | When the host's idle trim runs (`Viewport::rest`: 1.5 s after the window's last present), on resize, on `device_changed`. A still world in a window that other UI keeps presenting isn't trimmed and keeps its temporaries: accepted until a measurement shows it matters. |
 | History | TAA colour, previous depth, exposure, froxel history | First frame | With temporaries, and marked invalid on a camera cut (`World::cut()`), a resize, or a gap longer than 0.25 s of frame time |
 | Kept | Shadow atlases, probe textures, sky LUTs, cluster buffers | When the feature turns on | When the feature turns off or the world drops; redrawn only when their inputs change |
 | App's | Compute buffers and textures, particle state, material parameters | By the app's call | When the app drops its handle |
