@@ -866,9 +866,15 @@ impl Frame {
     /// submitted to wgpu's queue), presenting `drawable` once its work
     /// completes: Metal hands it to the window server for the refresh after.
     /// Run `done` (on Metal's thread) once the GPU has run this frame.
-    pub(crate) fn on_completed(&self, done: impl Fn() + Send + 'static) {
+    /// `done` gets the GPU's start and end of it, in host seconds.
+    pub(crate) fn on_completed(&self, done: impl Fn(f64, f64) + Send + 'static) {
         let block = block2::RcBlock::new(
-            move |_: std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| done(),
+            move |buffer: std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+                // SAFETY: Metal passes the buffer that completed, live for
+                // the call.
+                let buffer = unsafe { buffer.as_ref() };
+                done(buffer.GPUStartTime(), buffer.GPUEndTime());
+            },
         );
         // SAFETY: the block is Send, touches only what it owns, and Metal
         // copies it before this returns.

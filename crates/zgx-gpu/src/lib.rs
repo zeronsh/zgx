@@ -4458,6 +4458,10 @@ pub struct GpuRenderer {
     /// A directly encoded frame, committed, until it is known complete.
     #[cfg(target_os = "macos")]
     metal_inflight: RefCell<Option<metal_frame::CommandBuffer>>,
+    /// GPU start and end of direct frames as their handlers saw them
+    /// (`ZGX_RING_HANDLER`), noted at the next frame on the main thread.
+    #[cfg(target_os = "macos")]
+    gpu_ran: std::sync::Arc<std::sync::Mutex<Vec<(f64, f64)>>>,
     /// The display the window shows on and its refresh rate, for the
     /// full-rate verdict's key (`set_display_key`).
     #[cfg(target_os = "macos")]
@@ -4995,6 +4999,8 @@ impl GpuRenderer {
             metal_frame: Default::default(),
             #[cfg(target_os = "macos")]
             metal_inflight: RefCell::new(None),
+            #[cfg(target_os = "macos")]
+            gpu_ran: Default::default(),
             #[cfg(target_os = "macos")]
             idle: false,
             #[cfg(target_os = "macos")]
@@ -10545,7 +10551,21 @@ impl GpuRenderer {
         // before the next frame starts. With `ZGX_RING_HANDLER` they're
         // freed as it completes, so one still running isn't waited for.
         match *RING_HANDLER {
-            true => self.finish_direct_if_done(),
+            true => {
+                // What the GPU ran of the frames before, as their handlers saw.
+                let ran =
+                    std::mem::take(&mut *self.gpu_ran.lock().unwrap_or_else(|e| e.into_inner()));
+                for (start, end) in ran {
+                    zgx::profile::note(|| {
+                        format!(
+                            "GPU ran (handler) start_ns={} end_ns={}",
+                            (start * 1e9) as u64,
+                            (end * 1e9) as u64
+                        )
+                    });
+                }
+                self.finish_direct_if_done();
+            }
             false => {
                 self.finish_direct();
             }
@@ -10790,9 +10810,17 @@ impl GpuRenderer {
             // frame waits for that (`ZGX_RING_HANDLER`).
             if *RING_HANDLER && let Some(mapped) = &self.mapped {
                 let slots = mapped.borrow_mut().take_in_flight();
-                pass.on_completed(move || {
+                let ran = zgx::profile::enabled().then(|| self.gpu_ran.clone());
+                pass.on_completed(move |start, end| {
                     for slot in &slots {
                         slot.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                    if let Some(ran) = &ran
+                        && end > 0.
+                        && let Ok(mut ran) = ran.lock()
+                        && ran.len() < 64
+                    {
+                        ran.push((start, end));
                     }
                 });
             }
