@@ -1770,6 +1770,13 @@ fn view(engine: Rc<Engine>) -> View {
                 let height = metrics.metrics.get().cell_height;
                 Styles::new().translate(0., -(scrolled.get() as f32) * height)
             })
+            // Scroll content: a move is what was drawn, copied up, and the
+            // line it uncovers, not every row damaged where it was and is.
+            .on_mount(|handle| {
+                if let Some(scene) = handle.scene() {
+                    scene.borrow_mut().set_scroll_copy(handle.node(), true);
+                }
+            })
             .child(rows)
     };
     let input = {
