@@ -6840,16 +6840,21 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })?,
     )?;
     // `print` to stderr, a line at a time (stdout is buffered whole when an
-    // app's output goes to a file, so prints never showed in its log).
+    // app's output goes to a file, so prints never showed in its log), the
+    // line and its newline in one write: another thread's output (C's, as
+    // libwayland's `WAYLAND_DEBUG` trace, which takes no lock of Rust's)
+    // otherwise lands between them, inside the line.
     lua.globals().set(
         "print",
         lua.create_function(|_, args: mlua::Variadic<mlua::Value>| {
-            let line = args
+            let mut line = args
                 .iter()
                 .map(|v| v.to_string().unwrap_or_else(|_| format!("{v:?}")))
                 .collect::<Vec<_>>()
                 .join("\t");
-            eprintln!("{line}");
+            line.push('\n');
+            use std::io::Write;
+            let _ = std::io::stderr().lock().write_all(line.as_bytes());
             Ok(())
         })?,
     )?;
