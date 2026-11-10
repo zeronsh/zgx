@@ -207,7 +207,9 @@ The union of command-buffer intervals counts each moment the GPU worked once, wh
 - **Method:** 1920x1080 offscreen, 300 frames after 60 of warm-up, 3 rounds interleaved; medians of the rounds' medians.
 
 **Where zgx loses:**
-- **Load time against Filament on Bistro:** 2.05 s against 1.24 s. Filament's real figure is lower (about 0.8 s): its arm read files a byte at a time until after this run.
+- **Load time against Filament on Bistro:** 2.05 s against about 0.8 s.
+  - **The table's 1.24 s for Filament was our arm's fault:** it read Bistro's 406 files a byte at a time (`istreambuf_iterator`), 1–2 s of reading charged to Filament.
+  - With whole-file reads, Filament loaded in 0.79 s and 1.10 s in two of three rounds on a busy machine (load 79). It is to be measured again in the next quiet run.
   - zgx's time goes mostly to decoding its 405 PNGs on one thread (about 1.6–1.8 s).
   - Its first frame's CPU mip chains and uploads take about 0.5 s.
   - Its environment prefilter takes only ~40 ms.
@@ -215,6 +217,8 @@ The union of command-buffer intervals counts each moment the GPU worked once, wh
   - Fix tracked in #1954; split by `zgx-load-phases`.
 - **Box scenes on main:** the 100k scene's first frame takes main 3.15 s, the largest number in the tables, against the branch's 79 ms. #1967 fixes it (add's slot scan).
 - **Elsewhere:** zgx leads on GPU, CPU, memory at rest and frames at rest.
+
+**zgx's GPU lead on Bistro isn't from drawing less.** zgx-cull and Bevy draw the same 1,471 meshes a frame, and zgx main draws more (all 1,591).
 
 **100,000 still boxes, camera circling.** Boxes drawn a frame (median): zgx-cull 30,274, against the 36,260 Bevy's frustum kept; zgx main and culling off draw all 100,000.
 
@@ -250,7 +254,7 @@ The union of command-buffer intervals counts each moment the GPU worked once, wh
 | Bevy, no shadows | 2.19 | 39.3 | 2.40 | 4522 | 3625 | 2059 | 3609 |
 | Bevy, CPU path | 2.38 | 42.2 | 2.56 | 4249 | 3512 | 2095 | 3625 |
 | Bevy, environment refiltered every frame (rerun) | 4.30 | 73.1 | 4.64 | 8225 | 4612 | 2117 | 3626 |
-| Filament (rerun) | 2.09 | 38.1 | 2.47 | 3025 | 2993 | 1242 | 4926 |
+| Filament (rerun) | 2.09 | 38.1 | 2.47 | 3025 | 2993 | 1242 (our arm's slow reads; ~800 fixed) | 4926 |
 
 **Bistro, compared at equal work** (shadow map every frame, mip chains everywhere):
 - **Overall:** zgx 1.64 ms, Filament 2.09, Bevy 2.59.
