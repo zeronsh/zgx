@@ -11928,9 +11928,11 @@ impl GpuRenderer {
         let Some(buffer) = self.metal_inflight.borrow_mut().take() else {
             return false;
         };
-        let waiting = std::time::Instant::now();
+        let waiting = zgx::profile::enabled().then(std::time::Instant::now);
         buffer.waitUntilCompleted();
-        zgx::profile::note(|| format!("waited {} us for the GPU", waiting.elapsed().as_micros()));
+        if let Some(waiting) = waiting {
+            zgx::profile::note(|| format!("waited {} us for the GPU", waiting.elapsed().as_micros()));
+        }
         let ran = buffer.GPUEndTime() - buffer.GPUStartTime();
         self.gpu_time
             .set((ran > 0.).then(|| std::time::Duration::from_secs_f64(ran)));
@@ -14952,7 +14954,7 @@ impl GpuRenderer {
                 layer.show(buffer, opaque, present.full_rate);
             }
         };
-        let handing = std::time::Instant::now();
+        let handing = zgx::profile::enabled().then(std::time::Instant::now);
         match self.views.as_deref_mut() {
             // GPU views' planes that moved, showed or hid change with the
             // window's frame, in one transaction: never a frame apart.
@@ -14974,13 +14976,15 @@ impl GpuRenderer {
         }
         // When it went to the window server, on the presentation log's clock,
         // and how long the handover took, for devtools.
-        zgx::profile::note(|| {
-            format!(
-                "handed over at {} ns in {} us",
-                present_log::now_ns(),
-                handing.elapsed().as_micros()
-            )
-        });
+        if let Some(handing) = handing {
+            zgx::profile::note(|| {
+                format!(
+                    "handed over at {} ns in {} us",
+                    present_log::now_ns(),
+                    handing.elapsed().as_micros()
+                )
+            });
+        }
         layer.keep(
             present
                 .buffers
