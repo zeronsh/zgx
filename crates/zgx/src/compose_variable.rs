@@ -639,7 +639,9 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     }
                 }
             });
-            if scrollbar && !ancestor {
+            if let Some(style) = scrollbar.as_deref()
+                && !ancestor
+            {
                 crate::compose_scrollbar::mount(
                     ui,
                     root,
@@ -647,6 +649,7 @@ fn variable_list<K: Eq + std::hash::Hash + Clone + 'static, W: WatchKind>(
                     size.clone(),
                     extent.clone(),
                     false,
+                    Some(style),
                 );
             }
             let weak = ui.downgrade();

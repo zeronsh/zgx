@@ -97,6 +97,8 @@ mod scene3d;
 mod scene3d_off;
 #[path = "../script_crashes.rs"]
 mod script_crashes;
+#[path = "../scrollbar_style.rs"]
+mod scrollbar_style;
 #[path = "../sealed.rs"]
 mod sealed;
 #[path = "../selection.rs"]

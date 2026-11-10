@@ -1098,8 +1098,9 @@ pub(crate) enum Kind {
         offset: Option<Signal<Value>>,
         horizontal: bool,
         follow: bool,
-        /// `scrollbar = true`: an interactive scrollbar over its edge.
-        scrollbar: bool,
+        /// `scrollbar = true` (or a table of how it looks): an interactive
+        /// scrollbar over its edge.
+        scrollbar: Option<Box<ScrollbarSpec>>,
         /// `overscroll = "contain"`: a wheel over it stays with it.
         contain: bool,
         /// `wheel_across = true` (`ui.scroll_x`): a mouse wheel moves it.
@@ -1230,8 +1231,9 @@ pub(crate) enum Kind {
         /// end, it stays there as rows come and are measured (a chat).
         follow: bool,
         offset: Option<Signal<Value>>,
-        /// `scrollbar = true`: an interactive scrollbar over its edge.
-        scrollbar: bool,
+        /// `scrollbar = true` (or a table of how it looks): an interactive
+        /// scrollbar over its edge.
+        scrollbar: Option<Box<ScrollbarSpec>>,
         /// `keyboard = true`: its rows are one Tab stop, and the arrows,
         /// Page Up and Down, Home and End move focus through all of them.
         keyboard: bool,
@@ -5135,8 +5137,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     None => false,
                 };
                 let scrollbar = match &table {
-                    Some(t) => t.get::<Option<bool>>("scrollbar")?.unwrap_or(false),
-                    None => false,
+                    Some(t) => scrollbar_spec(t.get::<mlua::Value>("scrollbar")?)?,
+                    None => None,
                 };
                 let node = fill(
                     lua,
@@ -5857,7 +5859,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         measured,
                         follow: table.get::<Option<bool>>("follow")?.unwrap_or(false),
                         offset,
-                        scrollbar: table.get::<Option<bool>>("scrollbar")?.unwrap_or(false),
+                        scrollbar: scrollbar_spec(table.get::<mlua::Value>("scrollbar")?)?,
                         keyboard: table.get::<Option<bool>>("keyboard")?.unwrap_or(false),
 
                     },
@@ -7188,6 +7190,155 @@ fn retain_in_module(env: &Env, resource: Box<dyn Any>) {
     keep_in(&mut env.retained.borrow_mut(), resource)
 }
 
+/// `scrollbar = true`, or a table drawing and timing it as the app's own
+/// (`zgx::compose::ScrollbarStyle`): its `track` and `hint` a state or a
+/// function, read as they change (not as the view scrolls).
+#[derive(Clone, Default)]
+pub(crate) struct ScrollbarSpec {
+    pub(crate) style: zgx::compose::ScrollbarStyle,
+    pub(crate) track: Option<mlua::Value>,
+    pub(crate) hint: Option<mlua::Value>,
+}
+/// `scrollbar`'s value: off (`nil`, `false`), the platform's (`true`), or
+/// a table of what it changes.
+pub(crate) fn scrollbar_spec(value: mlua::Value) -> mlua::Result<Option<Box<ScrollbarSpec>>> {
+    use std::time::Duration;
+    let table = match value {
+        mlua::Value::Nil | mlua::Value::Boolean(false) => return Ok(None),
+        mlua::Value::Boolean(true) => return Ok(Some(Box::default())),
+        mlua::Value::Table(table) => table,
+        _ => {
+            return Err(mlua::Error::runtime(
+                "`scrollbar` takes true or a table of how it looks",
+            ));
+        }
+    };
+    let mut spec = ScrollbarSpec::default();
+    let number = |key: &str, value: mlua::Value| -> mlua::Result<f32> {
+        match value {
+            mlua::Value::Integer(n) if n >= 0 => Ok(n as f32),
+            mlua::Value::Number(n) if n.is_finite() && n >= 0. => Ok(n as f32),
+            _ => Err(mlua::Error::runtime(format!(
+                "`scrollbar.{key}` takes a number, 0 or more"
+            ))),
+        }
+    };
+    let flag = |key: &str, value: mlua::Value| -> mlua::Result<bool> {
+        match value {
+            mlua::Value::Boolean(on) => Ok(on),
+            _ => Err(mlua::Error::runtime(format!(
+                "`scrollbar.{key}` takes true or false"
+            ))),
+        }
+    };
+    let live = |key: &str, value: mlua::Value| -> mlua::Result<mlua::Value> {
+        match &value {
+            mlua::Value::Function(_) => Ok(value),
+            _ if state_of(&value).is_some() => Ok(value),
+            _ => Err(mlua::Error::runtime(format!(
+                "`scrollbar.{key}` takes a state or a function"
+            ))),
+        }
+    };
+    let choice = |key: &str, value: &mlua::Value, of: &[&str]| -> mlua::Result<usize> {
+        let at = value.as_string().and_then(|s| {
+            s.to_str()
+                .ok()
+                .and_then(|s| of.iter().position(|o| *o == &*s))
+        });
+        at.ok_or_else(|| {
+            mlua::Error::runtime(format!(
+                "`scrollbar.{key}` takes {}",
+                of.iter()
+                    .map(|o| format!("\"{o}\""))
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ))
+        })
+    };
+    let millis = |n: f32| Duration::from_secs_f64(n as f64 / 1000.);
+    for pair in table.pairs::<String, mlua::Value>() {
+        let (key, value) = pair?;
+        let style = &mut spec.style;
+        match key.as_str() {
+            "platform" => style.platform = Some(flag(&key, value)?),
+            "thickness" => style.thickness = Some(number(&key, value)?),
+            "active_thickness" => style.active_thickness = Some(number(&key, value)?),
+            "strip" => style.strip = Some(number(&key, value)?),
+            "side" => style.side = Some(number(&key, value)?),
+            "ends" => style.ends = Some(number(&key, value)?),
+            "inset" => style.inset = Some(number(&key, value)?),
+            "min" => style.min_thumb = Some(number(&key, value)?),
+            "linger" => style.linger = Some(millis(number(&key, value)?)),
+            "fade" => style.fade = Some(millis(number(&key, value)?)),
+            "fade_in" => style.fade_in = Some(flag(&key, value)?),
+            "ease" => {
+                use zgx::compose::ScrollbarEase::*;
+                style.ease = Some(
+                    [Linear, OutQuad, OutCubic]
+                        [choice(&key, &value, &["linear", "outQuad", "outCubic"])?],
+                )
+            }
+            "active_color" => style.active_color = Some(flag(&key, value)?),
+            "track_fill" => style.track_fill = Some(flag(&key, value)?),
+            "press" => style.press_jumps = Some(choice(&key, &value, &["page", "jump"])? == 1),
+            "linger_from" => {
+                style.linger_from_scroll = Some(choice(&key, &value, &["release", "scroll"])? == 1)
+            }
+            "focusable" => style.focusable = Some(flag(&key, value)?),
+            "always_overlay" => style.always_overlay = Some(flag(&key, value)?),
+            "accessible" => style.accessible = Some(flag(&key, value)?),
+            "track" => spec.track = Some(live(&key, value)?),
+            "hint" => spec.hint = Some(live(&key, value)?),
+            _ => {
+                return Err(mlua::Error::runtime(format!("`scrollbar` has no `{key}`")));
+            }
+        }
+    }
+    Ok(Some(Box::new(spec)))
+}
+impl ScrollbarSpec {
+    /// Its style for a view, `track` and `hint` read through `vm` (each in
+    /// an effect of its own, which follows what it reads).
+    pub(crate) fn style(&self, vm: &Rc<crate::Vm>) -> zgx::compose::ScrollbarStyle {
+        let mut style = self.style.clone();
+        fn now(vm: &crate::Vm, source: &mlua::Value) -> mlua::Result<mlua::Value> {
+            match source {
+                mlua::Value::Function(f) => vm.call::<mlua::Value>(f, ()),
+                other => match state_of(other) {
+                    Some(state) => mlua::IntoLua::into_lua(state.get(), &vm.lua),
+                    None => Ok(other.clone()),
+                },
+            }
+        }
+        if let Some(source) = self.track.clone() {
+            let vm = vm.clone();
+            style.track = Some(Rc::new(move || match now(&vm, &source) {
+                Ok(mlua::Value::Number(n)) => n as f32,
+                Ok(mlua::Value::Integer(n)) => n as f32,
+                Ok(_) => {
+                    vm.report(mlua::Error::runtime("`scrollbar.track` says a number"));
+                    0.
+                }
+                Err(error) => {
+                    vm.report(error);
+                    0.
+                }
+            }));
+        }
+        if let Some(source) = self.hint.clone() {
+            let vm = vm.clone();
+            style.hint = Some(Rc::new(move || match now(&vm, &source) {
+                Ok(value) => value.as_boolean().unwrap_or(false),
+                Err(error) => {
+                    vm.report(error);
+                    false
+                }
+            }));
+        }
+        style
+    }
+}
 /// What `scroll_padding` keeps clear: as given, or what a state or a
 /// function says now (`scroll_padding_now`).
 #[derive(Clone)]

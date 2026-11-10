@@ -2972,8 +2972,8 @@ fn kind_view(
                 Some(padding) => with_scroll_padding(view, padding, vm),
                 None => view,
             };
-            if *scrollbar {
-                view.scrollbar(true)
+            if let Some(spec) = scrollbar {
+                view.scrollbar_style(spec.style(vm))
             } else {
                 view
             }
@@ -3583,7 +3583,7 @@ fn kind_view(
             if rare.as_ref().is_some_and(|rare| rare.sticky.is_some()) {
                 return list;
             }
-            list_chrome(list, *scrollbar, rare.as_deref(), vm)
+            list_chrome(list, scrollbar.as_deref(), rare.as_deref(), vm)
         }
         Kind::Modal {
             label,
@@ -7582,12 +7582,12 @@ fn with_scroll_padding(view: View, padding: &crate::node::ScrollPadding, vm: &Rc
 /// A list's scrollbar and what happens at its edges.
 fn list_chrome(
     mut list: View,
-    scrollbar: bool,
+    scrollbar: Option<&crate::node::ScrollbarSpec>,
     rare: Option<&crate::node::ListRare>,
     vm: &Rc<Vm>,
 ) -> View {
-    if scrollbar {
-        list = list.scrollbar(true);
+    if let Some(spec) = scrollbar {
+        list = list.scrollbar_style(spec.style(vm));
     }
     match rare {
         Some(rare) => list_edges(list, rare, vm),
@@ -7759,7 +7759,7 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
         match sticky {
             None => list,
             Some(sticky) => {
-                let list = list_chrome(list, *scrollbar, rare.as_deref(), vm);
+                let list = list_chrome(list, scrollbar.as_deref(), rare.as_deref(), vm);
                 match key {
                     None => sticky_list(
                         list,
@@ -8188,7 +8188,7 @@ fn lower_item_list(
             return list;
         };
         let inset = rare.as_ref().map_or(0., |rare| rare.sticky_top);
-        let list = list_chrome(list, *scrollbar, rare.as_deref(), vm);
+        let list = list_chrome(list, scrollbar.as_deref(), rare.as_deref(), vm);
         return sticky_list(
             list, sticky, inset, offset, rows, sticky_key, sticky_row, vm, cx,
         );
