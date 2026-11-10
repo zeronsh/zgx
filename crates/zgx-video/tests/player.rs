@@ -608,7 +608,8 @@ fn a_players_view_draws_the_same_pixels_as_its_frames_bytes_do() {
     let player = held.unwrap();
     let as_surfaces = drawn_at(&mut stage, &player, 40);
     drop((stage, player));
-    // A script's: its frames' bytes, an image.
+    // A script's (`host:<name>`): on macOS its pixel buffers too, as
+    // `ScriptHost::surface`; elsewhere its frames' bytes, an image.
     let mut held = None;
     let mut stage = Stage::new(options(), |setting| {
         let player = Player::new(setting.runtime, &path, 1.)?;
@@ -943,4 +944,133 @@ return video.compositions { video.composition {
         Some("frame 299"),
         "told before it stopped: {told:?}"
     );
+}
+
+#[cfg(target_os = "macos")]
+mod surfaces {
+    unsafe extern "C" {
+        fn CVPixelBufferGetIOSurface(buffer: *const std::ffi::c_void) -> *const std::ffi::c_void;
+        fn CFRelease(object: *const std::ffi::c_void);
+    }
+    #[link(name = "IOSurface", kind = "framework")]
+    unsafe extern "C" {
+        fn IOSurfaceGetID(surface: *const std::ffi::c_void) -> u32;
+        fn IOSurfaceLookup(id: u32) -> *const std::ffi::c_void;
+    }
+    /// The IOSurfaces of the native surfaces `scene` shows.
+    pub fn shown(scene: &zgx::scene::Scene) -> Vec<u32> {
+        let mut ids = Vec::new();
+        let mut walk = vec![scene.root()];
+        while let Some(id) = walk.pop() {
+            if let zgx::scene::NodeKind::NativeSurface(frame) = scene.kind(id) {
+                // SAFETY: an IOSurface-backed buffer, alive as long as `frame`.
+                ids.push(unsafe {
+                    IOSurfaceGetID(CVPixelBufferGetIOSurface(
+                        std::ptr::from_ref(frame.pixel_buffer()).cast(),
+                    ))
+                });
+            }
+            walk.extend_from_slice(scene.children(id));
+        }
+        ids
+    }
+    /// Whether the IOSurface `id` still exists.
+    pub fn exists(id: u32) -> bool {
+        // SAFETY: Lookup returns a +1 reference or null.
+        unsafe {
+            let surface = IOSurfaceLookup(id);
+            if !surface.is_null() {
+                CFRelease(surface);
+            }
+            !surface.is_null()
+        }
+    }
+}
+
+/// A script's player draws its frames as they are, its decoder's or
+/// renderer's pixel buffers, with no bytes read back. Gone, it leaves no
+/// frame shown and no buffer held: the picture shown stays, as bytes, and the
+/// buffers go back. Another player under its name shows its own.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_scripts_player_shows_its_frames_as_they_are_and_leaves_none_behind() {
+    let dir = temp_dir("player-host-surface");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let path = dir.to_path_buf();
+    const APP: &str = r##"
+        ui.on_mount(function()
+            ui.call("clip.listen", nil)
+            ui.invoke("clip.open", { id = "Bar", props = { color = "#00ff00" }, frame = 40 })
+        end)
+        return ui.column { w = 100, h = 50, ui.image { src = "host:clip", w = 100, h = 50 } }
+    "##;
+    let mut held = None;
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            let host = zgx_script::ScriptHost::inline(setting.runtime, "app", APP);
+            host.lint_strip(false);
+            player.expose(&host, "clip");
+            host.reload()?;
+            let view = host.view();
+            held = Some((player, host));
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let (first, host) = held.unwrap();
+    let drawn = drawn_at(&mut stage, &first, 40);
+    let shown = surfaces::shown(&stage.ui().scene.borrow());
+    assert!(!shown.is_empty(), "the frame shows as a pixel buffer");
+    assert!(host.hosted_surface("clip").is_some());
+
+    // Its frame let go mid-stream: the picture shown stays, as bytes.
+    host.surface("clip", None);
+    let mut pixels = Vec::new();
+    stage.step().unwrap();
+    stage.draw(&mut pixels).unwrap();
+    assert!(
+        surfaces::shown(&stage.ui().scene.borrow()).is_empty(),
+        "a frame let go still shows"
+    );
+    assert!(
+        pixels == drawn,
+        "the picture shown changed as its frame went"
+    );
+
+    // Another under the same name, the script run again: its own frame
+    // shows, not the first's, and the first's buffers go back once the
+    // renderer's cache of them ages out (about a second).
+    drop(first);
+    let second = Player::new(&stage.ui().runtime, &path, 1.).unwrap();
+    second.expose(&host, "clip");
+    host.reload().unwrap();
+    drawn_at(&mut stage, &second, 40);
+    let now = surfaces::shown(&stage.ui().scene.borrow());
+    assert!(
+        !now.is_empty(),
+        "the new player's frame shows as a pixel buffer"
+    );
+    assert!(
+        now.iter().all(|id| !shown.contains(id)),
+        "the first player's frame came back"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while shown.iter().any(|id| surfaces::exists(*id)) {
+        assert!(
+            Instant::now() < deadline,
+            "the first player's buffers are still held"
+        );
+        stage.step().unwrap();
+        stage.draw(&mut pixels).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

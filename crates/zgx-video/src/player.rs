@@ -35,7 +35,9 @@ pub(crate) enum Ask {
     /// `Player::view`), rather than read back to bytes.
     #[cfg(target_os = "macos")]
     Surfaces(bool),
-    /// Bytes wanted too (a script's player): no pixel buffers then.
+    /// Bytes wanted too (a script's player where there are no pixel
+    /// buffers): none then. On macOS a script's player takes pixel buffers.
+    #[cfg_attr(target_os = "macos", expect(dead_code))]
     Pixels(bool),
     /// Lose its renderer's device, as a driver reset would (tests).
     LoseDevice,
@@ -849,9 +851,27 @@ impl Player {
         });
         let (this, shown, image) = (self.clone(), host.clone(), name.to_owned());
         let telling = tell.clone();
+        // What a script's listening ends with: this action, as another
+        // player takes the name or the host goes. Its listening holds the
+        // player (and its frames), which would otherwise outlive both.
+        let stops: RefCell<Vec<zgx::task::LatestSender<()>>> = RefCell::default();
         host.async_action(format!("{name}.listen"), move |_| {
-            // A script shows bytes (`host:<name>`): they're drawn as before.
+            let (stop, mut stopped) = zgx::task::latest::<()>();
+            stops.borrow_mut().push(stop);
+            // A script shows it as `host:<name>`. On macOS, as the frames
+            // are, pixel buffers drawn from their own storage, their bytes
+            // read only if something asks (`Player::image`); elsewhere, as
+            // bytes read back.
+            #[cfg(target_os = "macos")]
+            let _ = this.asks.send(Ask::Surfaces(true));
+            #[cfg(not(target_os = "macos"))]
             let _ = this.asks.send(Ask::Pixels(true));
+            // The frame it set last, and its picture, for when it ends.
+            #[cfg(target_os = "macos")]
+            let set: Set = Rc::default();
+            #[cfg(target_os = "macos")]
+            let (player, ended, setting) =
+                (this.clone(), (shown.clone(), image.clone()), set.clone());
             let (shown, image, tell) = (shown.clone(), image.clone(), telling.clone());
             let listen = this.listen(move |event| {
                 if let Event::Frame {
@@ -860,15 +880,59 @@ impl Player {
                     pixels,
                     ..
                 } = event
-                    && let Ok(picture) =
-                        ImageData::new_premultiplied(*width, *height, pixels.clone())
                 {
-                    shown.image(&image, Some(Arc::new(picture)));
+                    #[cfg(target_os = "macos")]
+                    if pixels.is_empty() {
+                        let surface = player.surface.with_untracked(Clone::clone);
+                        let picture = player.image.with_untracked(Clone::clone);
+                        *setting.borrow_mut() = surface.as_ref().map(|s| (s.id(), picture.clone()));
+                        shown.surface(&image, surface);
+                        shown.image(&image, picture);
+                    }
+                    if !pixels.is_empty()
+                        && let Ok(picture) =
+                            ImageData::new_premultiplied(*width, *height, pixels.clone())
+                    {
+                        shown.image(&image, Some(Arc::new(picture)));
+                    }
                 }
                 tell();
             });
+            // As it ends, or is dropped (the script reloaded, its player
+            // replaced): if what shows is still its frame, that frame's bytes
+            // are read once, to show on as before, and the frame goes, its
+            // buffer back to the pool it came from. One since set under its
+            // name (another player's) stays.
+            #[cfg(target_os = "macos")]
+            struct Leave(zgx_script::ScriptHost, String, Set);
+            #[cfg(target_os = "macos")]
+            impl Drop for Leave {
+                fn drop(&mut self) {
+                    let Leave(host, name, set) = self;
+                    if let Some((id, picture)) = set.borrow_mut().take()
+                        && (host.hosted_surface(name)).is_some_and(|shown| shown.id() == id)
+                    {
+                        if let Some(picture) = picture {
+                            let _ = picture.pixels();
+                        }
+                        host.surface(name, None);
+                    }
+                }
+            }
+            #[cfg(target_os = "macos")]
+            let leave = Leave(ended.0, ended.1, set);
             async move {
-                listen.await;
+                #[cfg(target_os = "macos")]
+                let _leave = leave;
+                let mut listen = std::pin::pin!(listen);
+                let mut stopped = std::pin::pin!(stopped.recv());
+                std::future::poll_fn(|cx| {
+                    if listen.as_mut().poll(cx).is_ready() || stopped.as_mut().poll(cx).is_ready() {
+                        return std::task::Poll::Ready(());
+                    }
+                    std::task::Poll::Pending
+                })
+                .await;
                 Ok(Value::Nil)
             }
         });
@@ -900,6 +964,9 @@ impl Player {
         });
     }
 }
+/// What a script's player set last: its frame's id, and its picture.
+#[cfg(target_os = "macos")]
+type Set = Rc<RefCell<Option<(u64, Option<Arc<ImageData>>)>>>;
 impl Drop for Player {
     fn drop(&mut self) {
         let _ = self.asks.send(Ask::Quit);
