@@ -78,6 +78,38 @@ alternating launches on an RTX 4090:
 | zgx, shaders kept | 278 ms | 219 ms |
 | GPUI Fast | 307 ms | 273 ms |
 
+The six stages of `draw.wgsl` are also shipped as FXC bytecode
+(`crates/zgx-gpu/src/dx12/`). Direct3D 12 takes them directly when using
+FXC without its debug flag and with shader passthrough available. Other
+compiler configurations retain runtime translation. Regenerate or check
+them on Windows with `python scripts/d3d12_shaders.py` or its `--check`
+option. The match test checks every stage; `precompiled_d3d12` also checks
+the four offscreen stages against wgpu's own cached bytecode and compares
+their frame byte for byte.
+
+On WING-PC, 2026-11-10, a simple quad/image/text startup fixture at
+`5f74db23a52e`, five alternating placements per arm and adapter, forty
+fresh-process launches total, had these median shader-module and pipeline
+API costs (milliseconds):
+
+| Adapter and zgx shader cache | Runtime FXC | Precompiled draw stages |
+| --- | ---: | ---: |
+| RTX 4090, empty | 62.715 | 1.322 |
+| RTX 4090, warm | 3.915 | 1.240 |
+| WARP, empty | 63.368 | 2.630 |
+| WARP, warm | 5.310 | 2.622 |
+
+Empty means an owned zgx shader-cache directory; the driver's cache was
+unchanged. Both arms used the same executable with the mode asserted, and
+all mode/cache/placement combinations within each adapter produced identical
+frame hashes. Runtime FXC compiled four stages with an empty cache and read four
+with a warm one; the precompiled arm read and compiled none. These are
+the draw stages' startup costs, not whole-process CPU or a guarantee for
+apps that create other pipelines. All six stages, including the two
+dual-output fragments, separately matched runtime FXC bytecode and built
+their pipeline states; dual-output frame pixels were not compared by that
+diagnostic.
+
 ### Shader compiler
 
 Direct3D 12 compiles shaders with FXC unless the app ships Microsoft's DXC:
