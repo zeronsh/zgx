@@ -6394,6 +6394,34 @@ impl Host {
     /// The plane waker came: a tick deferred for its drawable is drawn now.
     #[cfg(target_os = "macos")]
     fn drawable_woken(&mut self) {
+        // A link update: its frame now, into the drawable it handed over.
+        if let Some((presents, target)) =
+            self.renderer.as_ref().and_then(GpuRenderer::take_link_tick)
+        {
+            let now = zgx_gpu::present_log::now_ns() as f64 / 1e9;
+            let interval = self.frame_interval;
+            let frame = Frame {
+                index: (target / interval.as_secs_f64()).round().max(0.) as u64,
+                time: std::time::Instant::now()
+                    + std::time::Duration::from_secs_f64((presents - now).clamp(0., 1.)),
+                interval,
+            };
+            zgx::profile::note(|| {
+                format!(
+                    "frame from the metal link at_ns={} presents_ns={}",
+                    (now * 1e9) as u64,
+                    (presents * 1e9) as u64
+                )
+            });
+            self.drawable_deferred = None;
+            self.frame_arrived = true;
+            self.frame_deadline = None;
+            self.frame_heartbeat = Some(std::time::Instant::now());
+            if self.frames_presented() {
+                self.frames.deliver(frame);
+            }
+            return;
+        }
         if let Some(frame) = self.drawable_deferred.take() {
             zgx::profile::note(|| {
                 format!(
@@ -6424,6 +6452,16 @@ impl Host {
                 .is_some_and(|link| link.on_view_clock())
         {
             self.rephased(waited);
+            return;
+        }
+        // A `CAMetalDisplayLink` paces the drawables (`ZGX_METAL_LINK`): its
+        // updates draw the frames (`drawable_woken`), not the clock's ticks.
+        #[cfg(target_os = "macos")]
+        if self
+            .renderer
+            .as_ref()
+            .is_some_and(GpuRenderer::metal_link_running)
+        {
             return;
         }
         // Its drawable not come yet: drawn when it does (`drawable_woken`),

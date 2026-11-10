@@ -37,6 +37,8 @@ mod layer_present;
 #[cfg(target_os = "macos")]
 mod loops;
 #[cfg(target_os = "macos")]
+mod metal_link;
+#[cfg(target_os = "macos")]
 mod plane_drawables;
 /// A caret Core Animation draws over the frames (`GpuRenderer::set_caret`).
 #[cfg(target_os = "macos")]
@@ -15039,6 +15041,23 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn areas_on_gpu(&self) -> bool {
         self.context.inner.quads.areas
+    }
+    /// `ZGX_METAL_LINK`: a link update's targets (presentation, then the
+    /// refresh, host seconds), once: the host draws a frame now.
+    #[cfg(target_os = "macos")]
+    pub fn take_link_tick(&self) -> Option<(f64, f64)> {
+        self.layer_present
+            .as_ref()
+            .and_then(|present| present.layer.as_ref())
+            .and_then(|layer| layer.take_link_tick())
+    }
+    /// Whether a `CAMetalDisplayLink` paces frames now (`take_link_tick`).
+    #[cfg(target_os = "macos")]
+    pub fn metal_link_running(&self) -> bool {
+        self.layer_present
+            .as_ref()
+            .and_then(|present| present.layer.as_ref())
+            .is_some_and(|layer| layer.metal_link_running())
     }
     /// Whether the frame drawn now would wait for its drawable: the host
     /// draws it when the plane waker says the drawable came, instead.

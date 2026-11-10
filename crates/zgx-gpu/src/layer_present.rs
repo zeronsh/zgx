@@ -793,6 +793,9 @@ struct Drawables {
     /// The next frame's drawable, waited for off the main thread as soon as
     /// a frame takes one (`ZGX_DRAWABLE_PREFETCH=0`: on it, as it draws).
     prefetch: Option<crate::plane_drawables::Drawables>,
+    /// `ZGX_METAL_LINK`: drawables from a `CAMetalDisplayLink` on the layer,
+    /// its updates pacing the frames (`metal_link`), in place of `prefetch`.
+    metal_link: Option<crate::metal_link::MetalLink>,
 }
 /// A frame whose drawable the thread still waits for is not drawn on its
 /// tick but when the drawable comes: the thread wakes the host
@@ -1412,7 +1415,19 @@ impl Layer {
             layer.setHidden(true);
             transaction(|| self.host.addSublayer(&layer));
             crate::present_log::log(|| "drawables-start".into());
-            let prefetch = DRAWABLE_PREFETCH.then(|| {
+            // Paced by its own link, three drawables, as Zed's GPUI has
+            // (`ZGX_DRAWABLE_COUNT` to choose).
+            let metal_link = (*crate::metal_link::METAL_LINK)
+                .then(|| crate::metal_link::MetalLink::new(&layer, wake.cloned()))
+                .flatten();
+            if metal_link.is_some() {
+                let count = zgx::env::var_os("ZGX_DRAWABLE_COUNT")
+                    .and_then(|v| v.to_str()?.parse::<usize>().ok())
+                    .filter(|count| (2..=3).contains(count))
+                    .unwrap_or(3);
+                layer.setMaximumDrawableCount(count);
+            }
+            let prefetch = (*DRAWABLE_PREFETCH && metal_link.is_none()).then(|| {
                 let wake = wake.filter(|_| *DRAWABLE_DEFER).cloned();
                 crate::plane_drawables::Drawables::new(layer.clone(), wake)
             });
@@ -1424,6 +1439,7 @@ impl Layer {
                 watch: Default::default(),
                 rephase: None,
                 prefetch,
+                metal_link,
             }
         });
         let size = CGSize::new(width as f64, height as f64);
@@ -1441,10 +1457,21 @@ impl Layer {
         let asked = std::time::Instant::now();
         // Waited for already, off the main thread, while the last frame ran
         // its course; else (the first, after a resize) waited for here.
-        let ready = drawables.prefetch.as_ref().and_then(|prefetch| {
-            prefetch.wait_take().filter(|drawable| {
+        // The link's, handed to this frame's update; running from the first
+        // frame on, paused as the layer hides.
+        let linked = drawables.metal_link.as_ref().and_then(|link| {
+            link.set_paused(false);
+            link.take_drawable().filter(|drawable| {
                 let texture = drawable.texture();
                 texture.width() as f64 == size.width && texture.height() as f64 == size.height
+            })
+        });
+        let ready = linked.or_else(|| {
+            drawables.prefetch.as_ref().and_then(|prefetch| {
+                prefetch.wait_take().filter(|drawable| {
+                    let texture = drawable.texture();
+                    texture.width() as f64 == size.width && texture.height() as f64 == size.height
+                })
             })
         });
         let drawable = match ready {
@@ -1479,6 +1506,26 @@ impl Layer {
                         .as_ref()
                         .is_some_and(|prefetch| prefetch.pending())
             })
+    }
+    /// `ZGX_METAL_LINK`: the targets of the link's last update, once
+    /// (presentation, then the refresh), while it runs: a frame for the host
+    /// to draw now, into the drawable the update handed over.
+    pub fn take_link_tick(&self) -> Option<(f64, f64)> {
+        let link = self.drawables.as_ref()?.metal_link.as_ref()?;
+        if link.paused() {
+            return None;
+        }
+        link.take_tick()
+    }
+    /// Whether a link paces the drawables' frames now (`take_link_tick`).
+    pub fn metal_link_running(&self) -> bool {
+        self.drawables.as_ref().is_some_and(|drawables| {
+            drawables.shown
+                && drawables
+                    .metal_link
+                    .as_ref()
+                    .is_some_and(|link| !link.paused())
+        })
     }
     /// Whether drawables show (full-rate frames present through them).
     pub fn drawables_shown(&self) -> bool {
@@ -1555,6 +1602,9 @@ impl Layer {
         {
             drawables.shown = false;
             drawables.layer.setHidden(true);
+            if let Some(link) = &drawables.metal_link {
+                link.set_paused(true);
+            }
             // None held for a frame the plain layer shows instead.
             if let Some(prefetch) = &drawables.prefetch {
                 prefetch.cancel();
