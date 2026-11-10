@@ -222,6 +222,16 @@ pub struct FontSystem {
     /// weight), read from its file the first time a match needs it.
     weight_axes: HashMap<fontdb::ID, Option<(f32, f32)>>,
 
+    /// zgx patch: what a fallback search's last stage, every face in turn,
+    /// found for each character it was asked for: the first face holding
+    /// it, or none. That stage loads each face it looks at (some 400 on
+    /// iOS), so it runs once a character; forgotten when the database can
+    /// change (`db_mut`).
+    pub(crate) scanned: HashMap<char, Option<fontdb::ID>>,
+
+    /// zgx patch: how many times that stage has run (`full_scans`).
+    pub(crate) full_scans: u64,
+
     /// Scratch buffer for shaping and laying out.
     pub(crate) shape_buffer: ShapeBuffer,
 
@@ -396,6 +406,8 @@ impl FontSystem {
             first_font: Vec::new(),
             first_fallback: Vec::new(),
             face_queries: Vec::new(),
+            scanned: HashMap::default(),
+            full_scans: 0,
             hyphenator: None,
             weight_axes: HashMap::default(),
             font_codepoint_support_info_cache: HashMap::default(),
@@ -482,7 +494,15 @@ impl FontSystem {
         self.first_font.clear();
         self.first_fallback.clear();
         self.face_queries.clear();
+        self.scanned.clear();
         &mut self.db
+    }
+
+    /// zgx patch: how many times a fallback search has looked at every face
+    /// for characters no listed fallback holds; once a character at most
+    /// while the database stays as it is. For tests and counters.
+    pub fn full_scans(&self) -> u64 {
+        self.full_scans
     }
 
     /// zgx patch: the face `db().query` gives for one family at a weight

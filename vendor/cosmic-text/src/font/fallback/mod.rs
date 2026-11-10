@@ -220,6 +220,12 @@ pub struct FontFallbackIter<'a> {
     ideal_weight: fontdb::Weight,
     /// zgx: the optical size fonts are instanced at (0: their default).
     optical: u16,
+    /// zgx: where the last stage stands for this word: 0 not looked at,
+    /// 1 looking at every face, 2 or more giving the faces it found before
+    /// for the word's characters (`FontSystem::scanned`), the next being
+    /// the `last - 2`th. One word, not a list: every word's search is made
+    /// and moved, and few reach the last stage.
+    last: u32,
 }
 
 impl<'a> FontFallbackIter<'a> {
@@ -249,6 +255,7 @@ impl<'a> FontFallbackIter<'a> {
             end: false,
             ideal_weight,
             optical,
+            last: 0,
         }
     }
 
@@ -304,6 +311,21 @@ impl<'a> FontFallbackIter<'a> {
     /// passed and none left to look at: one `pass_to` can come back to.
     pub(crate) fn past_default(&self) -> bool {
         self.default_i == 1 && !self.end
+    }
+
+    /// zgx: the `n`th distinct face the last stage found for this word's
+    /// characters, in their order (`FontSystem::scanned`).
+    fn known_face(&self, n: usize) -> Option<fontdb::ID> {
+        let found = |c: char| self.font_system.scanned.get(&c).copied().flatten();
+        let chars = || self.word.chars().filter(|c| !c.is_whitespace());
+        chars()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                let id = found(c)?;
+                // Its first character holding it: each face once.
+                chars().take(i).all(|earlier| found(earlier) != Some(id)).then_some(id)
+            })
+            .nth(n)
     }
 
     pub fn check_missing(&self, word: &str) {
@@ -534,9 +556,25 @@ impl<'a> FontFallbackIter<'a> {
                 _ => None,
             }
             .unwrap_or_else(|| fallbacks.script_fallback(script));
+            // zgx: a Japanese or Korean run's Han that its faces lack
+            // (simplified forms after kana: 车, 见) goes to the Chinese
+            // faces next, as Core Text's cascade does, not to every face
+            // in turn, which drew it in the first that had it (Arial
+            // Unicode MS on macOS) and loaded some 400 faces on iOS.
+            let chinese = match script {
+                Script::Hiragana | Script::Katakana | Script::Hangul => {
+                    let han = self.font_system.shape_buffer.han;
+                    fallbacks.chinese_fallback(if (4..=6).contains(&han) { han } else { 4 })
+                }
+                _ => None,
+            }
+            .unwrap_or(&[]);
 
-            while self.script_i.1 < script_families.len() {
-                let script_family = script_families[self.script_i.1];
+            while self.script_i.1 < script_families.len() + chinese.len() {
+                let script_family = match script_families.get(self.script_i.1) {
+                    Some(family) => *family,
+                    None => chinese[self.script_i.1 - script_families.len()],
+                };
                 self.script_i.1 += 1;
                 for m_key in font_match_keys_iter(false) {
                     if self.face_contains_family(m_key.id, script_family) {
@@ -574,6 +612,28 @@ impl<'a> FontFallbackIter<'a> {
         //TODO: do we need to do this?
         //TODO: do not evaluate fonts more than once!
         let forbidden_families = fallbacks.forbidden_fallback();
+        // zgx: the last stage looks at every face, loading each, so it runs
+        // once a character: a word whose characters it has looked for
+        // before takes the faces it found then (`FontSystem::scanned`).
+        if self.last == 0 {
+            let mut chars = self.word.chars().filter(|c| !c.is_whitespace()).peekable();
+            let all_known =
+                chars.peek().is_some() && chars.all(|c| self.font_system.scanned.contains_key(&c));
+            self.last = if all_known { 2 } else { 1 };
+            if !all_known {
+                self.font_system.full_scans += 1;
+            }
+        }
+        if self.last >= 2 {
+            while let Some(id) = self.known_face((self.last - 2) as usize) {
+                self.last += 1;
+                if let Some(font) = self.font_system.get_font_at(id, self.ideal_weight, self.optical) {
+                    return Some(font);
+                }
+            }
+            self.end = true;
+            return None;
+        }
         while self.other_i < self.font_match_keys.len() {
             let id = self.font_match_keys[self.other_i].id;
             self.other_i += 1;
@@ -582,11 +642,28 @@ impl<'a> FontFallbackIter<'a> {
                 .all(|family_name| !self.face_contains_family(id, family_name))
             {
                 if let Some(font) = self.font_system.get_font_at(id, self.ideal_weight, self.optical) {
+                    // zgx: the characters it holds are found, for next time.
+                    for c in self.word.chars().filter(|c| !c.is_whitespace()) {
+                        let mut one = [0; 4];
+                        if !self.font_system.scanned.contains_key(&c)
+                            && self.font_system.get_font_supported_codepoints_in_word(
+                                id,
+                                self.ideal_weight,
+                                c.encode_utf8(&mut one),
+                            ) == Some(1)
+                        {
+                            self.font_system.scanned.insert(c, Some(id));
+                        }
+                    }
                     return Some(font);
                 }
             }
         }
 
+        // zgx: and what no face holds, so no search looks for it again.
+        for c in self.word.chars().filter(|c| !c.is_whitespace()) {
+            self.font_system.scanned.entry(c).or_insert(None);
+        }
         self.end = true;
         None
     }

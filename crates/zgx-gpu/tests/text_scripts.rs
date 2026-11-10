@@ -846,3 +846,69 @@ fn chinese_text_on_macos_draws() {
         assert!(han > latin, "{sample}: {han} pixels lit, Latin {latin}");
     }
 }
+
+/// Simplified Chinese after Japanese, in an English locale (a chat
+/// message's two sentences): the Han run is taken for Japanese, whose faces
+/// lack simplified forms (车, 见), and then went to every face in the
+/// system for them, loading each, and drew them in the first that had
+/// them. On an iOS simulator that was some 400 faces and 14 ms on the
+/// paragraph's first layout. A kana run's Han falls to the Chinese faces
+/// after the Japanese, as Core Text's cascade does.
+#[test]
+#[cfg(target_os = "macos")]
+fn simplified_han_after_kana_takes_a_chinese_face() {
+    let mut fonts = cosmic_text::FontSystem::new();
+    fonts.set_language(Some("en-CA"));
+    let has = |fonts: &cosmic_text::FontSystem, family: &str| {
+        (fonts.db().faces()).any(|face| face.families.iter().any(|(name, _)| name == family))
+    };
+    if !has(&fonts, "Hiragino Sans") || !(has(&fonts, "PingFang SC") || has(&fonts, "Heiti SC")) {
+        return;
+    }
+    let metrics = cosmic_text::Metrics::new(16., 20.);
+    let mut buffer = cosmic_text::Buffer::new(&mut fonts, metrics);
+    let attrs = cosmic_text::Attrs::new();
+    buffer.set_text(
+        "今日は駅で会いましょう。 明天在车站见面吧。",
+        &attrs,
+        cosmic_text::Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(&mut fonts, false);
+    let found = drawn(&fonts, &buffer);
+    assert_eq!(fonts.full_scans(), 0, "every face walked for {found:?}");
+    let simplified: Vec<&(char, String)> =
+        found.iter().filter(|(c, _)| "车见".contains(*c)).collect();
+    assert_eq!(simplified.len(), 2, "{found:?}");
+    for (c, family) in simplified {
+        assert!(
+            family == "PingFang SC" || family == "Heiti SC",
+            "{c} drawn in {family}, not a Chinese face: {found:?}"
+        );
+    }
+}
+
+/// Characters no listed fallback holds send a search to every face in
+/// turn, each loaded to look: once a character. Shaped again, in this text
+/// or another, they take the face found then, or none.
+#[test]
+fn every_face_is_looked_at_once_a_character() {
+    let mut fonts = cosmic_text::FontSystem::new();
+    let metrics = cosmic_text::Metrics::new(16., 20.);
+    let attrs = cosmic_text::Attrs::new();
+    let shape = |fonts: &mut cosmic_text::FontSystem, text: &str| {
+        let mut buffer = cosmic_text::Buffer::new(fonts, metrics);
+        buffer.set_text(text, &attrs, cosmic_text::Shaping::Advanced, None);
+        buffer.shape_until_scroll(fonts, false);
+        drawn(fonts, &buffer)
+    };
+    // A private-use character: no script's list names a face for it.
+    let first = shape(&mut fonts, "a \u{F8FF}\u{10FFFD} b");
+    let scans = fonts.full_scans();
+    assert!(scans <= 1, "{scans} scans: {first:?}");
+    let again = shape(&mut fonts, "a \u{F8FF}\u{10FFFD} b");
+    let other = shape(&mut fonts, "c \u{10FFFD}\u{F8FF}");
+    assert_eq!(fonts.full_scans(), scans, "looked at every face again");
+    assert_eq!(first, again, "drawn otherwise the second time");
+    assert_eq!(other.len(), 4, "{other:?}");
+}
