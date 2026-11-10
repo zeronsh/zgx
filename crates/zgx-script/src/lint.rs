@@ -277,6 +277,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "bitmap",
     "image_size",
     "raw",
+    "map",
     "tween",
     // Blocks to draw, not an element: what it reads in a computed is followed.
     "markdown",

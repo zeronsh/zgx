@@ -125,6 +125,8 @@ mod text_props;
 mod theme;
 #[path = "../ui.rs"]
 mod ui;
+#[path = "../ui_map.rs"]
+mod ui_map;
 #[path = "../variants.rs"]
 mod variants;
 #[path = "../wheel_across.rs"]
