@@ -633,12 +633,28 @@ fn overscan_is_built_in_spare_time_with_any_to_spare() {
 
 /// The files the kept pictures below decoded, by name, in order.
 static DECODED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Held by a test of pictures decoded ahead: the decodes waiting to be made
+/// ahead are the process's (`AHEAD_MOST`), so two such tests at once would
+/// take each other's room.
+static PICTURES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn pictures_alone() -> std::sync::MutexGuard<'static, ()> {
+    PICTURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+/// The names decoded so far (whatever a failed test left them).
+fn decoded_names() -> Vec<String> {
+    DECODED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
 /// A 300 by 300 picture's file (larger than `SYNC_PIXELS`, so decoded off
 /// the main thread), its name kept as it decodes.
 fn picture(bytes: &[u8]) -> Result<std::sync::Arc<[u8]>, String> {
     DECODED
         .lock()
-        .unwrap()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .push(String::from_utf8_lossy(bytes).into_owned());
     Ok([90, 120, 200, 255].repeat(300 * 300).into())
 }
@@ -647,7 +663,7 @@ fn decoded(row: usize) -> bool {
     let name = format!("row {row}");
     let until = Instant::now() + Duration::from_secs(10);
     while Instant::now() < until {
-        if DECODED.lock().unwrap().contains(&name) {
+        if decoded_names().contains(&name) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(2));
@@ -663,6 +679,7 @@ fn decoded(row: usize) -> bool {
 fn pictures_in_rows_built_ahead_decode_before_they_show() {
     use std::sync::Arc;
     use zgx::image::{AHEAD_MOST, ImageData};
+    let _alone = pictures_alone();
     let mut ui = hosted();
     let pictures: Vec<Arc<ImageData>> = (0..1000)
         .map(|row| {
@@ -696,10 +713,10 @@ fn pictures_in_rows_built_ahead_decode_before_they_show() {
         assert!(
             decoded(row),
             "row {row}'s picture, ahead: {:?}",
-            DECODED.lock().unwrap()
+            decoded_names()
         );
     }
-    let asked = DECODED.lock().unwrap().clone();
+    let asked = decoded_names();
     assert!(
         (0..5).all(|row| !asked.contains(&format!("row {row}"))),
         "a picture in view decoded ahead: {asked:?}"
@@ -707,5 +724,5 @@ fn pictures_in_rows_built_ahead_decode_before_they_show() {
     // The view moves on; the next turn asks for the next row's.
     scroll_to(&ui, &offset, 20.);
     spare(&ui);
-    assert!(decoded(9), "row 9's picture: {:?}", DECODED.lock().unwrap());
+    assert!(decoded(9), "row 9's picture: {:?}", decoded_names());
 }
