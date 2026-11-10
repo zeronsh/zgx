@@ -256,4 +256,24 @@ fn a_surface_replaced_is_let_go_while_the_window_draws_on() {
         !surface_exists(id),
         "a window drawing on kept a surface no node shows"
     );
+    // It polled and flushed to let go of it, and stops a second and a half
+    // after: a window drawing the same surfaces does nothing more.
+    let draw_for = |gpu: &mut GpuRenderer, scene: &mut Scene, millis| {
+        let until = std::time::Instant::now() + std::time::Duration::from_millis(millis);
+        while std::time::Instant::now() < until {
+            scene.flush();
+            gpu.render(scene, &[Rect::new(0., 0., 32., 32.)]).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    };
+    let collected = gpu.debug_cache_stats().surface_collections;
+    assert!(collected > 0, "it let go of a surface without collecting");
+    draw_for(&mut gpu, &mut scene, 600);
+    let stopped = gpu.debug_cache_stats().surface_collections;
+    draw_for(&mut gpu, &mut scene, 500);
+    assert_eq!(
+        gpu.debug_cache_stats().surface_collections,
+        stopped,
+        "it went on collecting past a second and a half"
+    );
 }

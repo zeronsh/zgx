@@ -35,6 +35,8 @@ pub(crate) struct SurfaceCache {
     /// When it last let go of a retired surface, while CoreVideo's cache may
     /// still hold that surface (`collect`).
     released: Option<std::time::Instant>,
+    /// Frames `collect` polled and flushed after (`DebugCacheStats`).
+    collections: u64,
 }
 impl SurfaceCache {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Result<Self, GpuError> {
@@ -73,6 +75,7 @@ impl SurfaceCache {
             completed: Arc::new(AtomicU64::new(0)),
             conversion: None,
             released: None,
+            collections: 0,
         })
     }
     pub fn submitted(&self) {
@@ -131,6 +134,11 @@ impl SurfaceCache {
             self.released = Some(now);
         }
         self.cache.flush(0);
+        self.collections += 1;
+    }
+    /// Frames it polled and flushed after (`collect`).
+    pub fn collections(&self) -> u64 {
+        self.collections
     }
     /// Lets go of what's retired, as a window goes idle: no frame may come to
     /// (`retain`), and the GPU has little left to finish. The flush comes after

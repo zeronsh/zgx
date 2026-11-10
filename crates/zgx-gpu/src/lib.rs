@@ -210,6 +210,10 @@ pub struct DebugCacheStats {
     /// Pipelines of an app's own shaders (fills, layer shaders and their
     /// blends) held.
     pub shader_pipelines: usize,
+    /// Frames after which the native surface cache polled and flushed, to
+    /// let go of surfaces no longer shown (`SurfaceCache::collect`): only in
+    /// the second and a half after one was let go (macOS).
+    pub surface_collections: u64,
 }
 const SHAPE_BUDGET: usize = 8 * 1024 * 1024;
 /// Shaping frames a cached word survives without being used.
@@ -5712,6 +5716,13 @@ impl GpuRenderer {
                     .keys()
                     .filter(|id| **id != BLEND_PLAIN)
                     .count(),
+            #[cfg(target_os = "macos")]
+            surface_collections: self
+                .native_surfaces
+                .as_ref()
+                .map_or(0, |cache| cache.collections()),
+            #[cfg(not(target_os = "macos"))]
+            surface_collections: 0,
         }
     }
     /// At the first frame, a swap chain made opaque under a background that
