@@ -4220,9 +4220,9 @@ impl Scene {
         }
         let empty = node.effects.blur_radius <= 0.0
             && !self.platform_nodes.contains(&id)
-            && !self
+            && self
                 .layer_shader(id)
-                .is_some_and(|layer| layer.shader.is_some())
+                .is_none_or(|layer| layer.shader.is_none())
             && match &node.kind {
                 NodeKind::Container(_) => true,
                 NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.paints_nothing(),
@@ -4511,6 +4511,13 @@ impl Scene {
             ..self.node(id).effects
         };
         self.set_effects(id, effects);
+    }
+    /// Whether `id` blurs or masks its content (`filter_blur`, `mask`),
+    /// from one look at it.
+    #[inline]
+    pub fn blurs_or_masks(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        node.effects.filter_blur > 0. || node.image_mask.is_some()
     }
     /// `id`'s mask, if it has one.
     pub fn mask(&self, id: NodeId) -> Option<&ImageMask> {
@@ -7781,7 +7788,7 @@ impl Scene {
             })
             .collect();
         changed.then(|| {
-            crate::rich_text::RichText::new(rich.text(), runs)
+            rich.remade(rich.text_arc(), runs)
                 .expect("the same runs")
                 .with_options(rich.options())
         })
@@ -13733,8 +13740,9 @@ impl Scene {
             self.set_transform(id, transform);
         }
     }
-    /// Device pixels a point, as the host set it (`set_pixel_scale`).
-    pub(crate) fn pixel_scale(&self) -> f32 {
+    /// Device pixels a point, as the host set it (`set_pixel_scale`); 0
+    /// when unset.
+    pub fn pixel_scale(&self) -> f32 {
         self.pixel_scale
     }
     /// `transform` moved to the nearest whole device pixels.
@@ -15156,6 +15164,29 @@ impl<'a> Iterator for PaintIter<'a> {
 
 #[cfg(test)]
 mod tests {
+    /// Taking a language again keeps a text's boxes.
+    #[test]
+    fn review_relayered_text_keeps_its_boxes() {
+        use crate::rich_text::{INLINE_BOX_TEXT, InlineBox, RichText, TextRun};
+        let mut scene = Scene::new(100., 100.);
+        let root = scene.root();
+        let id = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        scene.set_language(id, Some("zh-Hant".into()));
+        let rich = RichText::new(
+            INLINE_BOX_TEXT,
+            vec![TextRun {
+                range: 0..3,
+                font_size: 14.,
+                ..Default::default()
+            }],
+        )
+        .unwrap()
+        .with_inline_boxes(vec![InlineBox::new(0)])
+        .unwrap();
+        let relayered = scene.relayered(id, &rich).expect("its features changed");
+        assert_eq!(relayered.inline_boxes().len(), 1);
+        assert!(relayered.has_inline_boxes());
+    }
     use super::*;
     /// A long column's ink worked out from its kept union and the children
     /// that grew where they were (`grown_ink`) is, to the bit, the ink worked
@@ -18019,6 +18050,92 @@ mod tests {
 mod measure_work_tests {
     use super::*;
     use crate::layout::{LayoutOptions, Length};
+    /// A chat row laid out once: an avatar and a text column taking the
+    /// rest (`grow`, a basis of 0) with the minimum width `min_width`,
+    /// holding paragraphs, a quote and a row of chips. The scene's measures.
+    fn row_measures(min_width: Option<Length>) -> u64 {
+        let mut scene = Scene::new(402., 2000.);
+        let row = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Row),
+            Style {
+                width: Some(402.),
+                gap: 12.,
+                ..Default::default()
+            },
+        );
+        scene.append(
+            row,
+            NodeKind::Rect(Color(1, 2, 3, 255)),
+            Style {
+                width: Some(40.),
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        let content = scene.append(
+            row,
+            NodeKind::Container(Layout::Column),
+            Style {
+                flex_grow: 1.,
+                layout_options: Some(Arc::new(LayoutOptions {
+                    basis: Some(Length::Px(0.)),
+                    min_width,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+        );
+        let wrap = Style {
+            text_wrap: true,
+            ..Default::default()
+        };
+        for n in 0..4 {
+            let text = format!("paragraph {n}: Maybe dinner could list launch layout good great.");
+            scene.append(
+                content,
+                NodeKind::Text {
+                    text: text.into(),
+                    color: Color(0, 0, 0, 255),
+                    font_size: 16.,
+                },
+                wrap.clone(),
+            );
+        }
+        let chips = scene.append(content, NodeKind::Container(Layout::Row), Style::default());
+        for _ in 0..4 {
+            scene.append(
+                chips,
+                NodeKind::Rect(Color(1, 2, 3, 255)),
+                Style {
+                    width: Some(48.),
+                    height: Some(28.),
+                    ..Default::default()
+                },
+            );
+        }
+        let before = scene.measure_calls;
+        scene.flush();
+        assert_eq!(scene.bounds(content).width, 350.);
+        scene.measure_calls - before
+    }
+    /// A flex item that names its minimum (`min_w`) isn't laid out at
+    /// min-content for an automatic minimum it doesn't use: a chat row's
+    /// text column was, on every pass, its paragraphs a line a word (in
+    /// Chinese or Japanese a line a character, 83 ms for one on an iOS
+    /// simulator). Only an automatic minimum asks for it.
+    #[test]
+    fn a_flex_item_naming_its_minimum_is_not_laid_out_at_min_content() {
+        let automatic = row_measures(None);
+        for named in [Some(Length::Px(0.)), Some(Length::Px(120.))] {
+            let measures = row_measures(named);
+            assert!(
+                measures < automatic,
+                "min_w {named:?}: {measures} measures, an automatic minimum {automatic}: \
+                 naming the minimum should spare the min-content layout"
+            );
+        }
+    }
     /// A stack `depth` deep of layout boxes, each holding wrapping text, a
     /// fixed-width row and the next box, laid out by taffy (their children
     /// set layout options). The boxes of a few levels animate a negative

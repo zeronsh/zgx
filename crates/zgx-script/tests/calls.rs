@@ -966,46 +966,86 @@ return ui.column {
 }
 "#;
 
-fn resources() -> Harness {
-    Harness::new(|runtime| {
-        let host = ScriptHost::inline(runtime, "app", RESOURCE_APP);
-        // The second user is slow to answer, the fourth is gone.
-        host.async_action("user", |arg| async move {
-            let n = arg.as_f64().unwrap_or(0.);
-            let wait = if n == 2. { 40 } else { 2 };
-            zgx::timer::sleep(Duration::from_millis(wait)).await;
-            if n == 4. {
-                return Err("gone".into());
-            }
-            Ok(Value::Str(format!("user {n}").into()))
-        });
-        host
-    })
+/// Answers held while a test reads what shows as a call is out: held, a
+/// call answers once it is opened, never in the time between the call and
+/// the read (a timer of a few ms answers first on a loaded machine).
+#[derive(Clone, Default)]
+struct Gate(std::rc::Rc<std::cell::Cell<bool>>);
+impl Gate {
+    fn held() -> Self {
+        let gate = Self::default();
+        gate.hold();
+        gate
+    }
+    fn hold(&self) {
+        self.0.set(true);
+    }
+    fn open(&self) {
+        self.0.set(false);
+    }
+    async fn pass(self) {
+        while self.0.get() {
+            zgx::timer::sleep(Duration::from_millis(1)).await;
+        }
+    }
+}
+
+/// The resource app, its first loads held at `gate` (`Gate::held`).
+fn resources() -> (Harness, Gate) {
+    let gate = Gate::held();
+    let h = Harness::new({
+        let gate = gate.clone();
+        move |runtime| {
+            let host = ScriptHost::inline(runtime, "app", RESOURCE_APP);
+            // The second user is slow to answer, the fourth is gone.
+            host.async_action("user", move |arg| {
+                let gate = gate.clone();
+                async move {
+                    gate.pass().await;
+                    let n = arg.as_f64().unwrap_or(0.);
+                    let wait = if n == 2. { 40 } else { 2 };
+                    zgx::timer::sleep(Duration::from_millis(wait)).await;
+                    if n == 4. {
+                        return Err("gone".into());
+                    }
+                    Ok(Value::Str(format!("user {n}").into()))
+                }
+            });
+            host
+        }
+    });
+    (h, gate)
 }
 
 #[test]
 fn a_resource_loads_fails_and_loads_again() {
-    let mut h = resources();
+    let (mut h, gate) = resources();
     assert_eq!(h.text("shown"), "loading true none -");
+    gate.open();
     wait_for(&mut h, "shown", "ready false user 1 -");
     // Reloading keeps what it has, loading.
+    gate.hold();
     h.click("reload");
     assert_eq!(h.text("shown"), "ready true user 1 -");
+    gate.open();
     wait_for(&mut h, "shown", "ready false user 1 -");
     h.click("next");
     h.click("next");
     h.click("next");
     wait_for(&mut h, "shown", "failed false user 1 gone");
     // Trying again shows it loading, then what it answered.
+    gate.hold();
     h.click("reload");
     assert_eq!(h.text("shown"), "loading true user 1 gone");
+    gate.open();
     wait_for(&mut h, "shown", "failed false user 1 gone");
     assert_eq!(h.error(), None);
 }
 
 #[test]
 fn a_resource_keyed_by_state_hears_only_its_last_load() {
-    let mut h = resources();
+    let (mut h, gate) = resources();
+    gate.open();
     wait_for(&mut h, "shown", "ready false user 1 -");
     // The slow second user is asked for, then the third: the second's
     // answer, arriving last, is dropped.
@@ -1020,10 +1060,12 @@ fn a_resource_keyed_by_state_hears_only_its_last_load() {
 
 #[test]
 fn a_resource_whose_owner_has_gone_hears_nothing() {
-    let mut h = resources();
+    let (mut h, gate) = resources();
     assert_eq!(h.text("card"), "loading");
     h.click("close");
     assert!(h.find("card").is_none());
+    // Its answer comes after it has gone.
+    gate.open();
     std::thread::sleep(Duration::from_millis(60));
     h.frames(3);
     let calls = h.calls();
@@ -1065,25 +1107,33 @@ return ui.column {
 }
 "#;
 
-fn form_app() -> Harness {
-    Harness::new(|runtime| {
-        let host = ScriptHost::inline(runtime, "app", FORM_APP);
-        // Saved the first time, refused after.
-        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
-        host.async_action("save", move |arg| {
-            let n = calls.get();
-            calls.set(n + 1);
-            async move {
-                zgx::timer::sleep(Duration::from_millis(2)).await;
-                if n == 0 {
-                    Ok(Value::Str(format!("saved {arg}").into()))
-                } else {
-                    Err("refused".into())
+/// The form app, its saves held while `gate` is (open to begin with).
+fn form_app() -> (Harness, Gate) {
+    let gate = Gate::default();
+    let h = Harness::new({
+        let gate = gate.clone();
+        move |runtime| {
+            let host = ScriptHost::inline(runtime, "app", FORM_APP);
+            // Saved the first time, refused after.
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            host.async_action("save", move |arg| {
+                let n = calls.get();
+                calls.set(n + 1);
+                let gate = gate.clone();
+                async move {
+                    gate.pass().await;
+                    zgx::timer::sleep(Duration::from_millis(2)).await;
+                    if n == 0 {
+                        Ok(Value::Str(format!("saved {arg}").into()))
+                    } else {
+                        Err("refused".into())
+                    }
                 }
-            }
-        });
-        host
-    })
+            });
+            host
+        }
+    });
+    (h, gate)
 }
 /// Whether keyboard focus is in node `id`.
 fn focused_in(h: &mut Harness, id: &str) -> bool {
@@ -1109,7 +1159,7 @@ fn error_of(h: &mut Harness, id: &str) -> Option<String> {
 
 #[test]
 fn a_form_checks_as_typed_and_shows_what_is_wrong_once_left() {
-    let mut h = form_app();
+    let (mut h, _) = form_app();
     h.ui.set_assistive_technology(true);
     assert!(h.find("email-error").is_none());
     h.type_text("email", "ada");
@@ -1141,7 +1191,7 @@ fn a_form_checks_as_typed_and_shows_what_is_wrong_once_left() {
 
 #[test]
 fn enter_submits_a_form_focusing_what_is_wrong_and_saving_in_a_task() {
-    let mut h = form_app();
+    let (mut h, gate) = form_app();
     h.type_text("email", "grace@x.org");
     // Enter in the email: the name is wrong, shows so and takes focus.
     h.key(zgx::input::Key::Enter);
@@ -1153,10 +1203,12 @@ fn enter_submits_a_form_focusing_what_is_wrong_and_saving_in_a_task() {
     );
     assert_eq!(h.text("state"), "false - ", "nothing sent");
     h.type_text("name", "Grace Hopper");
+    gate.hold();
     h.key(zgx::input::Key::Enter);
     h.frames(1);
     assert!(h.find("name-error").is_none());
     assert_eq!(h.text("state"), "true - ", "pending");
+    gate.open();
     wait_for(&mut h, "state", "false - saved grace@x.org");
     // The server refuses the next: its message is the form's failure.
     h.click("send");

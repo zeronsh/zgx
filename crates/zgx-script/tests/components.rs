@@ -1391,7 +1391,7 @@ fn a_hint_from_state_follows_it() {
     h.ui.set_assistive_technology(true);
     h.frames(1);
     assert_eq!(h.error(), None);
-    let hint = |h: &mut Harness, id: &str| node(h, id).description;
+    let hint = |h: &mut Harness, id: &str| node(h, id).description.clone();
     assert_eq!(
         hint(&mut h, "grabber").as_deref(),
         Some("Double tap to expand the sheet.")

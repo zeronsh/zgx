@@ -20,6 +20,9 @@ pub struct BufferLine {
     layout_opt: Cached<Vec<LayoutLine>>,
     shaping: Shaping,
     metadata: Option<usize>,
+    /// zgx: whether a span is an inline box (`Attrs::inline_box`), as
+    /// `set_inline_boxes` says: in its padding, so no line is bigger.
+    boxes: bool,
 }
 
 impl BufferLine {
@@ -41,6 +44,7 @@ impl BufferLine {
             layout_opt: Cached::Empty,
             shaping,
             metadata: None,
+            boxes: false,
         }
     }
 
@@ -62,6 +66,7 @@ impl BufferLine {
         self.layout_opt.set_unused();
         self.shaping = shaping;
         self.metadata = None;
+        self.boxes = false;
     }
 
     /// Get current text
@@ -85,6 +90,7 @@ impl BufferLine {
             self.text.push_str(text);
             self.ending = ending;
             self.attrs_list = attrs_list;
+            self.boxes = false;
             self.reset();
             true
         } else {
@@ -128,11 +134,31 @@ impl BufferLine {
     pub fn set_attrs_list(&mut self, attrs_list: AttrsList) -> bool {
         if attrs_list != self.attrs_list {
             self.attrs_list = attrs_list;
+            self.boxes = false;
             self.reset_shaping();
             true
         } else {
             false
         }
+    }
+
+    /// zgx: say whether a span is an inline box (`Attrs::inline_box`):
+    /// only a line said to hold one lays one out, so no other reads its
+    /// spans for them. Its text or attributes set again say none. Resets its
+    /// shape if it differs; returns whether it did.
+    pub fn set_inline_boxes(&mut self, holds: bool) -> bool {
+        if holds != self.boxes {
+            self.reset_shaping();
+            self.boxes = holds;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// zgx: whether it is said to hold an inline box (`set_inline_boxes`).
+    pub const fn holds_inline_boxes(&self) -> bool {
+        self.boxes
     }
 
     /// Get the Text alignment
@@ -190,6 +216,11 @@ impl BufferLine {
         // To preserve line endings, it moves to the new line
         self.ending = LineEnding::None;
         new.align = self.align;
+        // zgx: a line holding boxes holds them in either part now.
+        if self.boxes {
+            self.boxes = self.attrs_list.holds_inline_boxes();
+            new.boxes = new.attrs_list.holds_inline_boxes();
+        }
         new
     }
 
@@ -218,6 +249,8 @@ impl BufferLine {
                 .shape_opt
                 .take_unused()
                 .unwrap_or_else(ShapeLine::empty);
+            // zgx: whether its spans hold an inline box, for its words.
+            font_system.shape_buffer.boxes = self.boxes;
             line.build(
                 font_system,
                 &self.text,
@@ -225,6 +258,7 @@ impl BufferLine {
                 self.shaping,
                 tab_width,
             );
+            font_system.shape_buffer.boxes = false;
             self.shape_opt.set_used(line);
             self.layout_opt.set_unused();
         }
@@ -320,6 +354,7 @@ impl BufferLine {
             layout_opt: Cached::Empty,
             shaping: Shaping::Advanced,
             metadata: None,
+            boxes: false,
         }
     }
 

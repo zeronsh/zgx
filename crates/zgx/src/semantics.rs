@@ -2,6 +2,7 @@
 use crate::scene::{NodeId, Scene};
 use std::{
     collections::HashMap,
+    rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -159,16 +160,19 @@ pub enum PopupKind {
 }
 /// A node's accessibility information: its role, name, value and state,
 /// which the desktop host projects to the platform's accessibility API.
+///
+/// Every node a window labels has one, and most have nothing to say but their
+/// role and name, so what few say ([`SemanticRare`]) takes no room until set.
+/// Its fields read and assign as this struct's own.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SemanticNode {
     /// What it is.
     pub role: Role,
     /// Its accessible name.
     pub label: String,
-    /// Its value as text (a text field's contents).
+    /// Its value as text (a text field's contents, a paragraph's text):
+    /// kept with the node, as every paragraph has one.
     pub value: Option<String>,
-    /// Committed-text UTF-8 byte offsets, preserving anchor/focus direction.
-    pub text_selection: Option<(usize, usize)>,
     /// A checkbox's state: on, off, or `None` for not a checkbox.
     pub checked: Option<bool>,
     /// A checkbox neither on nor off (`View::mixed`): what `checked` says
@@ -184,6 +188,28 @@ pub struct SemanticNode {
     pub expanded: Option<bool>,
     /// What it opens, if anything.
     pub has_popup: Option<PopupKind>,
+    /// None preserves the vertical default of legacy scroll views.
+    pub scroll_axis: Option<ScrollAxis>,
+    /// The label was given (`View::accessible_label`), not derived from the
+    /// node's text: it stays when that text changes.
+    pub named: bool,
+    /// Whether an option, tab or item is the chosen one (`aria-selected`).
+    pub selected: Option<bool>,
+    /// Announce changes to the text in this subtree (`aria-live`).
+    pub live: Option<Live>,
+    /// Left out of the accessibility tree with its subtree (`aria-hidden`):
+    /// decoration, or a copy of what is said elsewhere.
+    pub hidden: bool,
+    /// A checkable menu item that is one of a group: a radio item.
+    pub radio: bool,
+    /// What few nodes have: `None` until one is set.
+    rare: RareFields,
+}
+/// A [`SemanticNode`]'s fields that few nodes have.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SemanticRare {
+    /// Committed-text UTF-8 byte offsets, preserving anchor/focus direction.
+    pub text_selection: Option<(usize, usize)>,
     /// Accessible ownership for a portal whose physical parent differs. Native
     /// projection ignores missing, hidden, self-referential or cyclic parents.
     pub logical_parent: Option<NodeId>,
@@ -193,8 +219,6 @@ pub struct SemanticNode {
     pub max: Option<f64>,
     /// A range's current value.
     pub numeric_value: Option<f64>,
-    /// None preserves the vertical default of legacy scroll views.
-    pub scroll_axis: Option<ScrollAxis>,
     /// One-based position of a retained item in a potentially virtual set.
     pub position_in_set: Option<usize>,
     /// Total set size, including items not currently mounted.
@@ -205,22 +229,10 @@ pub struct SemanticNode {
     /// focus, each a label under this node and a UTF-8 offset into that
     /// label's value.
     pub document_selection: Option<((NodeId, usize), (NodeId, usize))>,
-    /// The label was given (`View::accessible_label`), not derived from the
-    /// node's text: it stays when that text changes.
-    pub named: bool,
     /// A heading's level, 1 for the top (`h1`).
     pub level: Option<usize>,
-    /// Whether an option, tab or item is the chosen one (`aria-selected`).
-    pub selected: Option<bool>,
-    /// Announce changes to the text in this subtree (`aria-live`).
-    pub live: Option<Live>,
     /// Read after the name, as a hint (`aria-description`).
     pub description: Option<String>,
-    /// Left out of the accessibility tree with its subtree (`aria-hidden`):
-    /// decoration, or a copy of what is said elsewhere.
-    pub hidden: bool,
-    /// A checkable menu item that is one of a group: a radio item.
-    pub radio: bool,
     /// The keys that do what it does, as its menu shows them ("⌘C").
     pub shortcut: Option<String>,
     /// The option a combobox's field has highlighted, while focus stays in
@@ -229,15 +241,58 @@ pub struct SemanticNode {
     /// Its place in a grid, or a grid's size (boxed: only grids have one).
     pub table: Option<Box<TablePlace>>,
 }
+/// None set, for a node with none to read as.
+static NO_RARE: SemanticRare = SemanticRare {
+    text_selection: None,
+    logical_parent: None,
+    min: None,
+    max: None,
+    numeric_value: None,
+    position_in_set: None,
+    size_of_set: None,
+    placeholder: None,
+    document_selection: None,
+    level: None,
+    description: None,
+    shortcut: None,
+    active_descendant: None,
+    table: None,
+};
+/// A [`SemanticRare`] made as one is first assigned to. A node's copy shares
+/// it until one of them assigns ([`Semantics::update`] copies each node it
+/// updates, and most updates don't touch these). Two compare as what they
+/// hold: made and left empty is equal to never made.
+#[derive(Clone, Debug, Default)]
+struct RareFields(Option<Rc<SemanticRare>>);
+impl PartialEq for RareFields {
+    fn eq(&self, other: &Self) -> bool {
+        if let (Some(a), Some(b)) = (&self.0, &other.0)
+            && Rc::ptr_eq(a, b)
+        {
+            return true;
+        }
+        self.0.as_deref().unwrap_or(&NO_RARE) == other.0.as_deref().unwrap_or(&NO_RARE)
+    }
+}
+impl std::ops::Deref for SemanticNode {
+    type Target = SemanticRare;
+    fn deref(&self) -> &SemanticRare {
+        self.rare.0.as_deref().unwrap_or(&NO_RARE)
+    }
+}
+impl std::ops::DerefMut for SemanticNode {
+    fn deref_mut(&mut self) -> &mut SemanticRare {
+        Rc::make_mut(self.rare.0.get_or_insert_with(|| Rc::new(NO_RARE.clone())))
+    }
+}
 impl SemanticNode {
     /// A node of `role` named `label`, everything else unset.
     pub fn new(role: Role, label: impl Into<String>) -> Self {
         Self {
             role,
             label: label.into(),
-            named: false,
             value: None,
-            text_selection: None,
+            named: false,
             checked: None,
             mixed: false,
             disabled: false,
@@ -245,24 +300,12 @@ impl SemanticNode {
             modal: false,
             expanded: None,
             has_popup: None,
-            logical_parent: None,
-            min: None,
-            max: None,
-            numeric_value: None,
             scroll_axis: None,
-            position_in_set: None,
-            size_of_set: None,
-            placeholder: None,
-            document_selection: None,
-            level: None,
             selected: None,
             live: None,
-            description: None,
             hidden: false,
             radio: false,
-            shortcut: None,
-            active_descendant: None,
-            table: None,
+            rare: RareFields::default(),
         }
     }
 }
@@ -629,6 +672,25 @@ impl Semantics {
         self.revision = self.revision.wrapping_add(1);
         entry.revision = self.revision;
     }
+    /// Node `id`'s label and value both `text`, as a paragraph says what it
+    /// reads: equal ones change nothing, and nothing is copied to compare
+    /// (`update` copies the node). Missing nodes are ignored.
+    pub fn set_text_content(&mut self, id: NodeId, text: String) {
+        if self.buried(id) {
+            return;
+        }
+        let Some(entry) = self.nodes.get_mut(&id) else {
+            return;
+        };
+        let node = &mut entry.node;
+        if node.label == text && node.value.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        node.label = text.clone();
+        node.value = Some(text);
+        self.revision = self.revision.wrapping_add(1);
+        entry.revision = self.revision;
+    }
     /// What is wrong with field `id`'s value (`aria-invalid` and
     /// `aria-errormessage`), or `None` while it is fine; an equal one
     /// changes nothing.
@@ -808,7 +870,49 @@ impl Semantics {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::scene::{Color, NodeKind, Style};
+
+    /// Fields few nodes have read and assign as the node's own, and take no
+    /// room until one is set; made and emptied again compares as never made,
+    /// so a revision doesn't move for nothing.
+    #[test]
+    fn rare_fields_take_no_room_until_set_and_compare_by_what_they_hold() {
+        let mut node = SemanticNode::new(Role::Button, "Save");
+        assert!(node.rare.0.is_none());
+        assert_eq!(node.description, None);
+        assert_eq!(node.numeric_value, None);
+        assert!(node.rare.0.is_none(), "reading makes nothing");
+        let plain = node.clone();
+        node.description = Some("x".into());
+        node.numeric_value = Some(7.);
+        assert!(node.rare.0.is_some());
+        assert_eq!(node.description.as_deref(), Some("x"));
+        assert_eq!(node.numeric_value, Some(7.));
+        assert_ne!(node, plain);
+        assert_eq!(node.clone(), node);
+        node.description = None;
+        node.numeric_value = None;
+        assert_eq!(node, plain, "made and emptied is never made");
+        // A copy shares them until one of the two assigns, and that leaves the
+        // other as it was.
+        node.description = Some("x".into());
+        let mut copy = node.clone();
+        assert!(Rc::ptr_eq(
+            node.rare.0.as_ref().unwrap(),
+            copy.rare.0.as_ref().unwrap()
+        ));
+        copy.description = Some("y".into());
+        assert_eq!(node.description.as_deref(), Some("x"));
+        assert_eq!(copy.description.as_deref(), Some("y"));
+        assert_ne!(node, copy);
+        // What every labelled node pays, in a table of them.
+        assert!(
+            std::mem::size_of::<SemanticEntry>() <= 80,
+            "{} bytes",
+            std::mem::size_of::<SemanticEntry>()
+        );
+    }
     /// What names a node is kept beside it, setting it again changes
     /// nothing, and its portal clears it.
     #[test]
@@ -924,7 +1028,10 @@ mod tests {
         let mut stored = String::with_capacity(1024);
         stored.push_str("unchanged");
         node.value = Some(stored);
-        semantics.set(id, node.clone());
+        // Assigning makes the copy its own, so the stored node's value is alone.
+        let mut expected = node.clone();
+        expected.text_selection = None;
+        semantics.set(id, node);
         let pointer = semantics.get(id).unwrap().value.as_ref().unwrap().as_ptr();
         let capacity = semantics
             .get(id)
@@ -948,14 +1055,44 @@ mod tests {
         assert_eq!(current.value.as_deref(), Some("new"));
         assert_eq!(current.value.as_ref().unwrap().as_ptr(), pointer);
         assert_eq!(current.value.as_ref().unwrap().capacity(), capacity);
-        node.value = Some("new".into());
-        node.text_selection = Some((0, 3));
-        node.read_only = true;
-        assert_eq!(current, &node, "all unrelated fields remain unchanged");
+        expected.value = Some("new".into());
+        expected.text_selection = Some((0, 3));
+        expected.read_only = true;
+        assert_eq!(current, &expected, "all unrelated fields remain unchanged");
         semantics.remove(id);
         let removed_revision = semantics.revision();
         semantics.update_text_input(id, "missing", (0, 0), false);
         assert_eq!(semantics.revision(), removed_revision);
+        assert!(semantics.get(id).is_none());
+    }
+    /// A paragraph's text sets its label and value together: a change moves
+    /// the revision once, the same text leaves it, and its other fields stay.
+    #[test]
+    fn text_content_sets_label_and_value_and_moves_the_revision_only_for_a_change() {
+        let scene = Scene::new(100., 100.);
+        let id = scene.root();
+        let mut semantics = Semantics::new();
+        let mut node = SemanticNode::new(Role::Label, "");
+        node.description = Some("kept".into());
+        semantics.set(id, node);
+        let revision = semantics.revision();
+        semantics.set_text_content(id, "Some words".into());
+        assert_eq!(semantics.revision(), revision + 1);
+        let entry_revision = semantics.node_revision(id);
+        let set = semantics.get(id).unwrap();
+        assert_eq!(set.label, "Some words");
+        assert_eq!(set.value.as_deref(), Some("Some words"));
+        assert_eq!(set.description.as_deref(), Some("kept"));
+        semantics.set_text_content(id, "Some words".into());
+        assert_eq!(semantics.revision(), revision + 1);
+        assert_eq!(semantics.node_revision(id), entry_revision);
+        semantics.set_text_content(id, "Some more words".into());
+        assert_eq!(semantics.revision(), revision + 2);
+        assert_eq!(semantics.get(id).unwrap().label, "Some more words");
+        semantics.remove(id);
+        let removed = semantics.revision();
+        semantics.set_text_content(id, "gone".into());
+        assert_eq!(semantics.revision(), removed);
         assert!(semantics.get(id).is_none());
     }
     #[test]

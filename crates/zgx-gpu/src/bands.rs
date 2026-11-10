@@ -609,6 +609,7 @@ impl GpuRenderer {
                 step: 0,
                 factor: 1f32.to_bits(),
                 exact: false,
+                placement: None,
                 transformed: false,
                 used: self.layer_frame,
                 parked: false,
@@ -715,6 +716,7 @@ impl GpuRenderer {
         }
         let quads = &self.context.inner.quads;
         pass.set_pipeline(quads.get(crate::Shading::Full));
+        let kept = self.kept_now();
         for (region, (x, y, w, h)) in &band.regions {
             pass.set_scissor_rect(*x, *y, *w, *h);
             self.encode_draws(
@@ -726,6 +728,7 @@ impl GpuRenderer {
                 *region,
                 &band.draws,
                 0,
+                kept,
                 stats,
             );
         }

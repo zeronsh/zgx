@@ -487,9 +487,7 @@ impl Value {
     }
     /// JSON as a value (`to_json`'s inverse), or `None` if it is not JSON.
     pub fn from_json(json: &str) -> Option<Value> {
-        serde_json::from_str::<serde_json::Value>(json)
-            .ok()
-            .map(|_| crate::node::json_value(json))
+        crate::json::parse(json).ok()
     }
     /// This value, keeping `old`'s own parts wherever they are equal (as
     /// Solid's `reconcile`): what did not change stays the same `Rc`, so

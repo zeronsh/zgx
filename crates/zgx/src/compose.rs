@@ -5169,10 +5169,9 @@ fn paragraph_effect<const LOCATING: bool>(
             content.replace(crate::compose_rich::ICON_PLACEHOLDER, "")
         };
         content_state.set(crate::compose_rich::Content { rich, links, icons });
-        ui.semantics.borrow_mut().update(paragraph, |node| {
-            node.label = content.clone();
-            node.value = Some(content);
-        });
+        ui.semantics
+            .borrow_mut()
+            .set_text_content(paragraph, content);
         update_button_labels(&ui, root);
     }
 }
@@ -8203,12 +8202,24 @@ fn update_button_labels(ui: &Ui, node: NodeId) {
         #[cfg(test)]
         LABEL_STEPS.with(|steps| steps.set(steps.get() + 1));
         if named_by_content(&semantics, id) {
-            drop(semantics);
-            name_content(ui, &scene, id);
-            semantics = ui.semantics.borrow();
+            semantics = name_ancestor(ui, &scene, id, semantics);
         }
         current = scene.parent(id);
     }
+}
+/// `update_button_labels`'s rare step, out of its loop: lets go of the
+/// semantics to name `id` from its content, and borrows them again.
+#[cold]
+#[inline(never)]
+fn name_ancestor<'a>(
+    ui: &'a Ui,
+    scene: &crate::scene::Scene,
+    id: NodeId,
+    semantics: std::cell::Ref<'a, crate::semantics::Semantics>,
+) -> std::cell::Ref<'a, crate::semantics::Semantics> {
+    drop(semantics);
+    name_content(ui, scene, id);
+    ui.semantics.borrow()
 }
 /// Text node `id`'s label from its text, and the buttons it names, as its
 /// text binding sets them: deferred while no assistive technology reads
@@ -8411,6 +8422,12 @@ impl NodeHandle {
             .borrow()
             .contains(self.node)
             .then(|| ui.observe_size(self.node))
+    }
+    /// A number that changes when text's geometry may have: the window's
+    /// scale factor (`Scene::pixel_scale`) or the font backend changed. For
+    /// what measures text by device pixels, to measure again.
+    pub fn observe_text_geometry(&self) -> Option<Signal<u64>> {
+        Some(self.ui.upgrade()?.observe_text_geometry_revision())
     }
     /// Whether any of the node shows (inside every clip and viewport above
     /// it), republished after each frame's layout: for building what only
