@@ -7847,13 +7847,6 @@ impl Scene {
     pub(crate) fn set_style_stopping(&mut self, id: NodeId, style: Style) {
         self.restyle_as::<false, true>(id, style, true, id);
     }
-    /// Whether any node is `relative`: a box a relative block above places
-    /// (a scrollbar's rail over a transcript) can only be one then, and a
-    /// style with no such block has no stop to look for (`set_style_stopping`).
-    #[inline(always)]
-    pub(crate) fn has_relative_nodes(&self) -> bool {
-        self.relative_count != 0
-    }
     /// Whether any node has a `special` bit: what a style with nothing rare
     /// must still look at, in case it has lost something.
     #[inline(always)]
@@ -8930,6 +8923,14 @@ impl Scene {
     /// style is used where the caller put it rather than moved again.
     #[inline(never)]
     fn restyle(&mut self, id: NodeId, style: Style, given: bool) {
+        // An absolute node given a style where a relative block can place it
+        // (a scrollbar's thumb in its rail): its walk may stop above it
+        // (`set_style_stopping`). Decided here, once, for every caller, so
+        // that what calls `set_style` (a style effect) carries no test of
+        // its own.
+        if given && style.absolute && self.relative_count != 0 {
+            return self.set_style_stopping(id, style);
+        }
         self.restyle_as::<false, false>(id, style, given, id);
     }
     /// `restyle`; `HELD`: its layout walk stops at `owner` (`set_style_within`);
@@ -9798,7 +9799,7 @@ impl Scene {
     /// otherwise its ancestors marked, for a layout that takes what this
     /// pass measured of it (and what it read): it changed no more than the
     /// walk marked.
-    #[inline]
+    #[inline(always)]
     fn lay_out_stop(&mut self, id: NodeId, parent: NodeId, report: &mut FrameReport) {
         if self.relayout_alone(id) {
             let bounds = self.node(id).bounds;
@@ -20689,8 +20690,8 @@ mod set_box_tests {
                 badge.clone(),
                 escaped.clone(),
             );
-            // Through `set_style` alone (a caller that doesn't opt in), as a
-            // whole layout places it, with no stop.
+            // Through `set_style` alone (a Rust caller, not a composed view):
+            // the same stop, as a whole layout places it.
             let (mut plain, [_, plain_id, ..]) = rail_page(
                 rows,
                 rail.clone(),
@@ -20719,10 +20720,7 @@ mod set_box_tests {
             );
             same_bounds(&plain, &fresh);
             same_bounds(&scene, &fresh);
-            assert!(
-                plain_cost.0 >= cost.0,
-                "the stop is the opt-in's: {plain_cost:?} {cost:?}"
-            );
+            assert_eq!(plain_cost, cost, "`set_style` stops as a style effect does");
             costs.push(cost);
         }
         // The rail and the thumb, whatever the page's length.
@@ -20946,25 +20944,45 @@ mod set_box_tests {
         };
         let mut costs = Vec::new();
         for rows in [10, 400] {
-            let (mut scene, rail, thumb) = page(rows, 0., 100.);
-            assert!(scene.containing_block(rail).is_some(), "placed by the page");
-            let mut cost = (0, 0);
-            for f in 1..5 {
-                let f = f as f32;
-                let before = scene.measure_calls;
-                // Its height, then its top: two writes, one frame.
-                let mut style = scene.style(thumb);
-                style.height = Some(100. - f);
-                scene.set_style_stopping(thumb, style.clone());
-                style.layout_options =
-                    placed(None, None, [Some(Px(f * 5.)), Some(Px(2.)), None]).layout_options;
-                scene.set_style_stopping(thumb, style);
-                let report = scene.flush();
-                cost = cost.max((scene.measure_calls - before, report.layout_nodes));
+            // Through a style effect's entry, and through `set_style` (a Rust
+            // caller): the same stop, the same result.
+            let mut effect_cost = (0, 0);
+            for plain in [false, true] {
+                let (mut scene, rail, thumb) = page(rows, 0., 100.);
+                assert!(scene.containing_block(rail).is_some(), "placed by the page");
+                let mut cost = (0, 0);
+                for f in 1..5 {
+                    let f = f as f32;
+                    let before = scene.measure_calls;
+                    // Its height, then its top: two writes, one frame.
+                    let mut style = scene.style(thumb);
+                    style.height = Some(100. - f);
+                    let write = |scene: &mut Scene, style: Style| match plain {
+                        true => scene.set_style(thumb, style),
+                        false => scene.set_style_stopping(thumb, style),
+                    };
+                    write(&mut scene, style.clone());
+                    style.layout_options =
+                        placed(None, None, [Some(Px(f * 5.)), Some(Px(2.)), None]).layout_options;
+                    write(&mut scene, style);
+                    let report = scene.flush();
+                    cost = cost.max((scene.measure_calls - before, report.layout_nodes));
+                }
+                let (fresh, _, _) = page(rows, 20., 96.);
+                same_bounds(&scene, &fresh);
+                match plain {
+                    true => {
+                        assert_eq!(
+                            cost, effect_cost,
+                            "`set_style` stops as a style effect does"
+                        )
+                    }
+                    false => {
+                        effect_cost = cost;
+                        costs.push(cost);
+                    }
+                }
             }
-            let (fresh, _, _) = page(rows, 20., 96.);
-            same_bounds(&scene, &fresh);
-            costs.push(cost);
         }
         assert_eq!(costs[0], costs[1], "flat as the page grows: {costs:?}");
         assert!(costs[0].1 <= 2, "the rail alone: {costs:?}");

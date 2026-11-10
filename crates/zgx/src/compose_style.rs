@@ -1813,14 +1813,7 @@ fn apply_resolved(
         effects.saturate = value;
     }
     let mut scene = ui.scene.borrow_mut();
-    // An absolute node (a scrollbar's thumb in its rail, which a relative
-    // block above places) may stop its walk at its parent
-    // (`Scene::set_style_stopping`). A scene with no relative block has no
-    // such rail, and its absolute nodes' styles ask nothing more.
-    match style.absolute && scene.has_relative_nodes() {
-        true => scene.set_style_stopping(node, style.clone()),
-        false => scene.set_style(node, style.clone()),
-    }
+    scene.set_style(node, style.clone());
     // Most styles have nothing rare: one test for them, not one a field.
     if resolved.rare_set().is_some() || scene.has_special_nodes() {
         // On what lays the children out: a scroll view's content.
