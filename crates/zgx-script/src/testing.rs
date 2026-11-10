@@ -489,6 +489,10 @@ impl TestApp {
             interval: self.reported.get().unwrap_or(interval),
         });
         self.settle();
+        // What the pointer and the keys leave going (an overlay scrollbar
+        // fading, a key repeating), stepped to now as a window steps it:
+        // this thread's time, a test's own clock where it has one.
+        let _ = self.ui.advance_interactions(zgx::clock::now());
         self.lay_out();
         // The frame is done, as a renderer's present ends one.
         zgx::profile::frame();

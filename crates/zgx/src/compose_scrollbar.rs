@@ -445,6 +445,11 @@ impl Fade {
         self.next
             .set(Some(self.rise.get().map_or(at, |_| now.min(at))));
     }
+    /// Whether it shows (or is fading in, from nothing at its first step):
+    /// drawn, and taking the pointer.
+    fn shows(&self) -> bool {
+        self.rise.get().is_some() || self.alpha.with_untracked(|alpha| *alpha > 0.)
+    }
     fn hide(&self) {
         self.alpha.set(0.);
         self.rise.set(None);
@@ -988,18 +993,14 @@ pub(crate) fn mount(
             // stays while it shows.
             _ if focused || hinted => shown.hold_at(now),
             _ if pointer => {
-                if shown.alpha.with_untracked(|alpha| *alpha > 0.) {
+                if shown.shows() {
                     shown.hold();
                 }
             }
             // The user scrolled it, not the app.
             Some(before) if before != value && ui.is_dispatching() => shown.show(now),
             // Let go: it stays a moment, then fades.
-            _ if shown.fade_at.get().is_none()
-                && (shown.alpha.with_untracked(|a| *a > 0.) || shown.rise.get().is_some()) =>
-            {
-                shown.linger(now)
-            }
+            _ if shown.fade_at.get().is_none() && shown.shows() => shown.linger(now),
             _ => {}
         }
     });
@@ -1011,6 +1012,8 @@ pub(crate) fn mount(
         };
         let overlay_mode = overlay_mode.get();
         let alpha = if overlay_mode { fade.alpha.get() } else { 1. };
+        // Fading in from nothing, it is there from its first step.
+        let there = !overlay_mode || alpha > 0. || fade.rise.get().is_some();
         let (width, height) = size.get();
         let length = main((width, height));
         let total = extent.get();
@@ -1047,7 +1050,7 @@ pub(crate) fn mount(
         // Its track: the view's length, or its own from the view's start.
         let track_len = track_length.as_ref().map_or(length, |track| track.get());
         // Hidden, the pointer reaches what is under it.
-        let track_size = if !visible || alpha <= 0. {
+        let track_size = if !visible || !there {
             (0., 0.)
         } else if horizontal {
             (track_len, thickness)
@@ -1086,7 +1089,7 @@ pub(crate) fn mount(
             (arrow_room + look.ends) as f64,
             look.min_thumb,
         );
-        let (thumb_length, travel, from) = if visible && alpha > 0. {
+        let (thumb_length, travel, from) = if visible && there {
             (thumb_length as f32, travel as f32, from as f32)
         } else {
             (0., 0., 0.)
@@ -1159,7 +1162,7 @@ pub(crate) fn mount(
             (look.arrows, arrows)
         {
             let hovered = arrow_hover.get();
-            let strength = if arrow_room > 0. && visible && alpha > 0. {
+            let strength = if arrow_room > 0. && visible && there {
                 alpha * (arrow_room / cell)
             } else {
                 0.
