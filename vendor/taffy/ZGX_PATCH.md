@@ -41,6 +41,12 @@ caches as they were.
    every pass and the result dropped: a paragraph a line a word, in Chinese
    or Japanese a line a character, 83 ms for one on an iOS simulator.
    Later taffy releases take a closure there too.
+5. In `src/tree/taffy_tree.rs`, a node's context is kept in slotmap's
+   dense `SecondaryMap` with the `std` feature too, where upstream takes
+   the sparse one, a `HashMap` keyed by slot under SipHash. A leaf looks
+   its context up each time it is laid out, and in zgx's trees nearly
+   every node is a leaf with one: the hashing was 0.6% of a dragged split's
+   instructions.
 
 Drop the fork when a taffy release keeps the gaps and keys children's
 results by their parent's layout mode and passes known sizes to a leaf's
