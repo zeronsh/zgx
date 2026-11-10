@@ -8,6 +8,10 @@
 //! hand it over as they please, and the count would move with them. CI's
 //! instruction gate counts it, so what a terminal's output costs is
 //! guarded.
+//! `PER_FRAME` feeds that many lines a frame instead, as output trickling
+//! in does (`tail -f`, a build, a reply streaming): each frame scrolls the
+//! screen a line, and what it costs shouldn't grow with the screen's
+//! height (`HEIGHT`, in points, 600 by default).
 //! Run: cargo run -p zgx-terminal --release --example terminal_bench
 //! (`LINES` sets the lines, 10,000 by default.)
 use std::fmt::Write;
@@ -89,7 +93,12 @@ fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10_000);
-    let mut ui = Ui::new(800., 600.);
+    let per_frame: Option<usize> = std::env::var("PER_FRAME").ok().and_then(|v| v.parse().ok());
+    let height: f32 = std::env::var("HEIGHT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600.);
+    let mut ui = Ui::new(800., height);
     let text = zgx_gpu::TextServices::new();
     let font = zgx_gpu::text::FontData::new(std::sync::Arc::<[u8]>::from(zgx_workload::FONT_BYTES))
         .expect("the bundled font");
@@ -103,15 +112,32 @@ fn main() {
         TerminalRenderer::new(zgx_terminal::terminal_view),
         theme_scope_with(
             || ThemeOverride::new().with(tok::FONT_MONO, FontFamily::from(zgx_workload::FONT)),
-            terminal(&term).w(800.).h(600.),
+            terminal(&term).w(800.).h(height),
         ),
     ));
     ui.prepare_frame();
     ui.scene.borrow_mut().flush();
     let output = output(lines);
+    // A frame's worth each: 4 KB reads, or so many lines.
+    let reads: Vec<&[u8]> = match per_frame {
+        None => output.chunks(4096).collect(),
+        Some(per_frame) => {
+            let mut reads = Vec::new();
+            let (mut start, mut count) = (0, 0);
+            for at in memchr::memmem::find_iter(&output, b"\r\n") {
+                count += 1;
+                if count == per_frame.max(1) {
+                    reads.push(&output[start..at + 2]);
+                    (start, count) = (at + 2, 0);
+                }
+            }
+            reads.push(&output[start..]);
+            reads
+        }
+    };
     let started = std::time::Instant::now();
     let mut frames = 0;
-    for read in output.chunks(4096) {
+    for read in reads {
         replay.feed(read);
         ui.prepare_frame();
         ui.scene.borrow_mut().flush();

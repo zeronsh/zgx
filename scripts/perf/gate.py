@@ -154,6 +154,12 @@ SCENES = [
     # `malloc_consolidate` run or not, and one binary counted 2.2 M (0.3%)
     # apart (arm64), where the change itself was 0.05%.
     ('terminal', 'zgx-terminal', 'terminal_bench', {'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
+    # The same log trickling in a line a frame, as `tail -f`, a build or a
+    # reply streaming arrive: each frame scrolls the screen one line, so its
+    # cost is what one new line costs, which the screen's height shouldn't
+    # multiply.
+    ('terminal-slow', 'zgx-terminal', 'terminal_bench', {'LINES': '1000', 'PER_FRAME': '1',
+                                                          'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
     # Pictures in that terminal, drawn by wgpu's no-op backend: placed (RGBA
     # in chunks, a PNG), scrolled, replaced under their ids and deleted;
     # sixel images placed over one another. What `terminal` guards having no
