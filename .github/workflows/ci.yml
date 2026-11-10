@@ -580,6 +580,9 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        # The merge's base too, for the Video step to see what changed.
+        with:
+          fetch-depth: 2
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -650,3 +653,24 @@ jobs:
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
       - run: cargo test -p zgx-gpu --features d3d11 --lib --locked -- d3d11_frame
+      # zgx-video's tests, as the linux and macOS jobs run them, with
+      # ffmpeg (without it, the tests of what it encodes pass by skipping).
+      # On a pull request only when it changes what zgx-video compiles:
+      # its sources and the workspace crates it builds on (`cargo metadata`
+      # says which), vendor/, the lockfile and this workflow; always on
+      # main. Runner time is shared.
+      - name: Video
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          sources='^crates/zgx(-video|-gpu|-script|-3d|-run|-desktop|-components|-fx|-terminal)?/|^comparisons/workload/|^vendor/|^Cargo\.(lock|toml)$|^\.github/workflows/ci\.yml$'
+          if [ "${{ github.event_name }}" = pull_request ] && ! git diff --name-only HEAD^1 HEAD | grep -qE "$sources"; then
+            echo "### Video: skipped, no change to what zgx-video compiles" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          start=$SECONDS
+          choco install ffmpeg -y --no-progress > "$RUNNER_TEMP/ffmpeg-install.log" || { cat "$RUNNER_TEMP/ffmpeg-install.log"; exit 1; }
+          echo "### Video: ffmpeg installed in $(( SECONDS - start )) s" >> "$GITHUB_STEP_SUMMARY"
+          ffmpeg -version > /dev/null
+          ffprobe -version > /dev/null
+          cargo test -p zgx-video --locked
