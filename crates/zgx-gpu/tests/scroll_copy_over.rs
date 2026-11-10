@@ -641,13 +641,16 @@ fn clips_fading_at_their_head_as_the_view_comes_back() {
             ),
         );
         let to = offset.clone();
-        // (A jump first, which repaints, to come back from.)
+        // (A jump first, which repaints, to come back from. It repaints all
+        // the view shows, here the window: a frame drawn whole straight to
+        // the screen leaves the retained pixels behind, so the step after it
+        // repaints too, and the 29 after that copy.)
         let copies = drawn_alike(gpu, "head", scale, &mut ui, &offset, 31, -6., 1, |step| {
             if step == 0 {
                 to.set(600.);
             }
         });
-        assert_eq!(copies, 30, "head at {scale}x");
+        assert_eq!(copies, 29, "head at {scale}x");
     }
 }
 

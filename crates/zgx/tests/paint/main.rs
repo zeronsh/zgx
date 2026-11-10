@@ -36,5 +36,7 @@ mod image_updates;
 mod repaints;
 #[path = "../rounded_clip.rs"]
 mod rounded_clip;
+#[path = "../scroll_jump_damage.rs"]
+mod scroll_jump_damage;
 #[path = "../svg.rs"]
 mod svg;
