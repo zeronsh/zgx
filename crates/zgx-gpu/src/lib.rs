@@ -8969,16 +8969,6 @@ impl GpuRenderer {
                         .zip(self.effect_slot(item.id, effects::Purpose::Shadow).copied()),
                     false => None,
                 };
-                // Direct3D 11 draws no layer effects: a drop shadow is left
-                // out (named once), the layer drawn without it.
-                #[cfg(d3d11)]
-                let shadow = match shadow.is_some() && self.d3d11.is_some() {
-                    true => {
-                        d3d11_frame::left_out("drop shadows");
-                        None
-                    }
-                    false => shadow,
-                };
                 if !damage.iter().any(|d| {
                     d.intersects(clip)
                         && d.intersects(if item.isolated {
@@ -10654,10 +10644,10 @@ impl GpuRenderer {
         // from the same data `render_direct` takes.
         #[cfg(d3d11)]
         if self.d3d11.is_some() {
-            let (mut draws, mut batches, mut effect_jobs) = (draws, batches, effect_jobs);
+            let (mut draws, mut batches) = (draws, batches);
             self.d3d11_app_shaders(&mut draws);
-            self.d3d11_leave_out(scene, &quads, &mut draws, &mut batches, &mut effect_jobs);
-            if let Some(lacks) = self.d3d11_lacks(&draws, &batches, &effect_jobs) {
+            self.d3d11_leave_out(scene, &quads, &mut draws, &mut batches);
+            if let Some(lacks) = self.d3d11_lacks(&draws, &batches) {
                 let message = format!(
                     "ZGX_D3D11 draws no {lacks} yet, and leaving it out could mislead \
                      (docs/windows.md, Direct3D 11)"
@@ -11481,7 +11471,6 @@ impl GpuRenderer {
     /// What Direct3D 11 leaves out of a frame rather than fail it, where
     /// what's left can't show a picture a user would wrongly trust; each kind
     /// named once (`d3d11_frame::left_out`):
-    /// - drop shadows (left out as the frame is made, their jobs here);
     /// - images a GPU view draws: left empty, visibly missing;
     /// - backdrop blurs and layer shaders reading the backdrop (glass): the
     ///   box drawn opaque in its own colour under its content (built so,
@@ -11491,7 +11480,7 @@ impl GpuRenderer {
     ///
     /// Blend modes and image effects keep the error: without them an
     /// inverted icon or a blended text could read as something else.
-    /// Content blurs and masks draw (`d3d11_effects`).
+    /// Content blurs, masks and drop shadows draw (`d3d11_effects`).
     #[cfg(d3d11)]
     fn d3d11_leave_out(
         &self,
@@ -11499,9 +11488,7 @@ impl GpuRenderer {
         quads: &[Quad],
         draws: &mut [Draw],
         batches: &mut Vec<(usize, Vec<usize>)>,
-        effect_jobs: &mut Vec<effects::Job>,
     ) {
-        effect_jobs.retain(|job| job.purpose != effects::Purpose::Shadow);
         for draw in draws.iter_mut() {
             if let TextureSource::Image(id) | TextureSource::Pixelated(id) = draw.source
                 && id != effects::EFFECT_ATLAS
@@ -11535,22 +11522,10 @@ impl GpuRenderer {
     /// (`d3d11_leave_out`), if anything: it draws what the Windows suite's
     /// scenes do, shader fills and layer shaders not reading the backdrop.
     #[cfg(d3d11)]
-    fn d3d11_lacks(
-        &self,
-        draws: &[Draw],
-        batches: &[(usize, Vec<usize>)],
-        effect_jobs: &[effects::Job],
-    ) -> Option<&'static str> {
+    fn d3d11_lacks(&self, draws: &[Draw], batches: &[(usize, Vec<usize>)]) -> Option<&'static str> {
         if !batches.is_empty() {
             return Some("backdrop blur over a box with no colour of its own");
         }
-        // Content blurs and masks draw (`d3d11_effects`); drop shadows' jobs
-        // are left out (`d3d11_leave_out`).
-        debug_assert!(
-            effect_jobs
-                .iter()
-                .all(|job| job.purpose == effects::Purpose::Content)
-        );
         draws
             .iter()
             .filter(|draw| draw.end > draw.start)

@@ -10,7 +10,7 @@
 //! filled with a gradient (source-in and behind blends), and every
 //! ready-made shader fill (`zgx_fx`'s, its fragment stage compiled for each
 //! as an app's), and layer effects (content blurs, narrow to wide, and
-//! masks, alone, sliding and under a blur), at 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
+//! masks, alone, sliding and under a blur, and drop shadows), at 1×, 1.5× and 2×, byte for byte: both compile the same HLSL with FXC
 //! (Direct3D 12 pinned to it, docs/windows.md). `ZGX_D3D11` is read once a
 //! process, so the test runs itself again with it and compares that run's
 //! frames with its own.
@@ -575,7 +575,8 @@ fn frames(scale: f32) -> Vec<Vec<u8>> {
 
 /// Layer effects' cells (`EFFECT_NAMES`): a box holding a bar on striped
 /// content, blurred (narrow, wide enough to be averaged down, and changing
-/// sigma), masked by a ramp (still and sliding), and both, with nothing
+/// sigma), masked by a ramp (still and sliding), and both, and casting a
+/// drop shadow (hard, blurred, and under a content blur), with nothing
 /// first and at a few moments after, as this process draws them at
 /// `scale`. Each must change its cell: drawn as painted in both processes,
 /// they would match.
@@ -685,6 +686,33 @@ fn effect_frames(scale: f32) -> Vec<Vec<u8>> {
                     scene.set_filter_blur(id, 3. + m);
                     scene.set_mask(id, Some(mask((2. * m, 0.))));
                 }
+                "shadow" => scene.set_drop_shadow(
+                    id,
+                    Some(DropShadow {
+                        offset: Transform { x: 4., y: 6. + m },
+                        blur: 0.,
+                        color: Color(0, 0, 0, 200),
+                    }),
+                ),
+                "shadow blurred" => scene.set_drop_shadow(
+                    id,
+                    Some(DropShadow {
+                        offset: Transform { x: 0., y: 8. },
+                        blur: 4. + 6. * m,
+                        color: Color(10, 200, 120, 255),
+                    }),
+                ),
+                "shadow under blur" => {
+                    scene.set_filter_blur(id, 2. + m);
+                    scene.set_drop_shadow(
+                        id,
+                        Some(DropShadow {
+                            offset: Transform { x: -3., y: 5. },
+                            blur: 3.,
+                            color: Color(120, 0, 160, 230),
+                        }),
+                    );
+                }
                 name => unreachable!("{name}"),
             }
         }
@@ -709,7 +737,7 @@ fn effect_frames(scale: f32) -> Vec<Vec<u8>> {
 }
 /// The layer effects' cells (`effect_frames`), in their order.
 #[cfg(windows)]
-const EFFECT_NAMES: [&str; 7] = [
+const EFFECT_NAMES: [&str; 10] = [
     "blur 1.5",
     "blur 6",
     "blur 24",
@@ -717,6 +745,9 @@ const EFFECT_NAMES: [&str; 7] = [
     "mask",
     "mask sliding",
     "mask under blur",
+    "shadow",
+    "shadow blurred",
+    "shadow under blur",
 ];
 
 /// The suite's view's frames at `scale`.
