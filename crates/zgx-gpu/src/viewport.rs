@@ -28,6 +28,11 @@ pub trait Viewport: 'static {
     /// view shown by a renderer on another): drop what was made with the old
     /// one. The next `render` follows.
     fn device_changed(&mut self) {}
+    /// The window showing it went idle (its host's idle trim, once frames
+    /// have stopped for a moment): let go of what only drawing needs, such
+    /// as a frame's temporary targets. The next `render` makes them again.
+    /// A view whose window keeps drawing other things isn't asked.
+    fn rest(&mut self) {}
 }
 
 /// What a [`Viewport`] draws a frame with.
@@ -570,6 +575,28 @@ impl GpuRenderer {
         self.after_view_submit(key);
         Ok(())
     }
+    /// Each view this renderer shows rests (`Viewport::rest`): called by
+    /// `trim`, as the window goes idle. Apart from its code: views are few.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn rest_views(&self) {
+        let Some(views) = self.views.as_ref() else {
+            return;
+        };
+        let mut rested: Vec<u64> = Vec::new();
+        for &(view, _) in views.shown.keys() {
+            if rested.contains(&view) {
+                continue;
+            }
+            rested.push(view);
+            if let Some(painter) = zgx::gpu_view::painter(view)
+                && let Some(painter) = painter.downcast_ref::<RefCell<Painter>>()
+                && let Ok(mut painter) = painter.try_borrow_mut()
+            {
+                painter.viewport.rest();
+            }
+        }
+    }
     /// The device and queue views draw with: the renderer's own, as it
     /// draws with wgpu.
     fn view_device(&self) -> (&wgpu::Device, &wgpu::Queue) {
@@ -1105,5 +1132,42 @@ mod tests {
         assert!(gpu.views.as_ref().unwrap().shown.is_empty(), "pruned");
         gpu.trim();
         assert!(gpu.views.as_ref().unwrap().shown.is_empty());
+    }
+
+    /// Counts its frames and rests.
+    struct Counted(std::rc::Rc<std::cell::Cell<(u32, u32)>>);
+    impl Viewport for Counted {
+        fn render(&mut self, frame: &mut ViewportFrame<'_>) {
+            Clear.render(frame);
+            let (frames, rests) = self.0.get();
+            self.0.set((frames + 1, rests));
+        }
+        fn rest(&mut self) {
+            let (frames, rests) = self.0.get();
+            self.0.set((frames, rests + 1));
+        }
+    }
+
+    #[test]
+    fn a_shown_view_rests_as_its_renderer_trims_and_draws_again_after() {
+        let Ok(mut gpu) = GpuRenderer::new(64, 64) else {
+            return;
+        };
+        let mut ui = Ui::new(64., 64.);
+        let counts = std::rc::Rc::new(std::cell::Cell::new((0, 0)));
+        let view = view(Counted(counts.clone()));
+        // Shown twice: it rests once.
+        let _row = ui.mount(
+            row()
+                .child(gpu_view("Model", &view).size(32., 32.))
+                .child(gpu_view("Again", &view).size(32., 32.)),
+        );
+        draw(&ui, &mut gpu);
+        assert_eq!(counts.get().1, 0, "no rest while it draws");
+        gpu.trim();
+        assert_eq!(counts.get().1, 1);
+        view.invalidate();
+        draw(&ui, &mut gpu);
+        assert!(counts.get().0 > 1, "it draws after resting");
     }
 }
