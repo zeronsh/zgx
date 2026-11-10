@@ -601,6 +601,104 @@ fn translucent_meshes_crossing_in_depth_draw_back_to_front_again() {
     assert!(window.gpu.readback().unwrap() == fresh(&world));
 }
 
+/// What `lit_scene`'s changes name: its sun, its lamp and its ball.
+type LitScene = (LightId, LightId, ObjectId);
+/// A world of opaque meshes, a sun casting shadows and a point light, as
+/// `changes` (applied in order, `change_lit_scene`) leave it.
+fn lit_scene(changes: &[&str]) -> (World, LitScene) {
+    let world = World::new();
+    world.set_shadows(true);
+    let sun = world.add_light(Light::Directional {
+        direction: vec3(-0.4, -1., -0.3),
+        color: [1.; 3],
+        intensity: 2.,
+    });
+    let lamp = world.add_light(Light::Point {
+        position: vec3(1., 1., 1.),
+        color: [1., 0.5, 0.2],
+        intensity: 4.,
+        range: 6.,
+    });
+    let floor = world.add(Object::mesh(
+        Geometry::plane(6., 6.),
+        Material::rgb(0x808080),
+    ));
+    world.set_transform(floor, Transform::at([0., -0.5, 0.]));
+    let ball = world.add(Object::mesh(
+        Geometry::sphere(0.5, 16),
+        Material::rgb(0x3366cc),
+    ));
+    let cube = world.add(Object::mesh(
+        Geometry::cuboid(0.5, 0.5, 0.5),
+        Material::rgb(0xcc6633),
+    ));
+    world.set_transform(cube, Transform::at([1., 0., -0.5]));
+    world.set_camera(Camera::looking_at([0., 2., 4.], [0., 0., 0.]));
+    for change in changes {
+        change_lit_scene(&world, (sun, lamp, ball), change);
+    }
+    (world, (sun, lamp, ball))
+}
+/// `change` made to `lit_scene`'s world: the camera turned to step `"1"`,
+/// `"2"`…, the lamp moved, a background, the sun turned, the ball moved.
+fn change_lit_scene(world: &World, (sun, lamp, ball): LitScene, change: &str) {
+    match change {
+        "lamp" => world.set_light(
+            lamp,
+            Light::Point {
+                position: vec3(-1., 1., 1.),
+                color: [0.2, 0.5, 1.],
+                intensity: 4.,
+                range: 6.,
+            },
+        ),
+        "background" => world.set_background(Some(0x141e28)),
+        "sun" => world.set_light(
+            sun,
+            Light::Directional {
+                direction: vec3(0.5, -1., 0.2),
+                color: [1.; 3],
+                intensity: 2.,
+            },
+        ),
+        "ball" => world.set_transform(ball, Transform::at([-1., 0., 0.5])),
+        step => {
+            let turned = step.parse::<f32>().unwrap() * 0.6;
+            world.set_camera(Camera::looking_at(
+                [4. * turned.sin(), 2., 4. * turned.cos()],
+                [0., 0., 0.],
+            ));
+        }
+    }
+}
+
+#[test]
+fn frames_where_only_the_view_changed_draw_as_a_fresh_window_does() {
+    // A frame where only the camera or a light but the sun moved draws the
+    // meshes as the last frame did; each must be what a world made as it is
+    // now draws in a window of its own.
+    let (world, ids) = lit_scene(&[]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let first = window.gpu.readback().unwrap();
+    let mut changes: Vec<&str> = Vec::new();
+    for change in ["1", "2", "3", "lamp", "background", "sun", "ball", "1"] {
+        changes.push(change);
+        change_lit_scene(&world, ids, change);
+        window.draw();
+        let drawn = window.gpu.readback().unwrap();
+        assert!(drawn != first, "{change} changed the frame");
+        // (Kept alive: its view's painter holds it weakly.)
+        let (made, _) = lit_scene(&changes);
+        let mut fresh = Window::new(&made).unwrap();
+        fresh.draw();
+        assert!(fresh.pixel(50, 50) != [0, 128, 0, 255], "it drew");
+        assert!(drawn == fresh.gpu.readback().unwrap(), "after {changes:?}");
+    }
+}
+
 #[test]
 fn a_volume_takes_out_light_by_how_far_it_goes() {
     let (world, pane) = red_behind_glass(Material::rgb(0xffffff).with(0., 0.));

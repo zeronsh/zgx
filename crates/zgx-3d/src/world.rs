@@ -459,6 +459,10 @@ pub(crate) struct Inner {
     spots: ByIndex<(u32, Spot)>,
     /// Counts changes: a renderer redraws what changed since it last drew.
     pub(crate) revision: u64,
+    /// Counts changes to what its meshes draw: all but those to how it's
+    /// seen (`World::change_view`). A frame where it's as before draws the
+    /// meshes as the last did.
+    pub(crate) meshes: u64,
 }
 /// How a world's lit colours are brought into the display's range
 /// (`World::set_tone_mapping`).
@@ -1055,6 +1059,7 @@ impl World {
             spots: Default::default(),
             surfaces: Default::default(),
             revision: 0,
+            meshes: 0,
         }));
         let view = zgx_gpu::viewport::view(crate::render::Renderer::new(Rc::downgrade(&inner)));
         Self { inner, view }
@@ -1070,6 +1075,18 @@ impl World {
     }
     /// Change it with `f`; the view draws a frame if `f` says it changed.
     fn change(&self, f: impl FnOnce(&mut Inner) -> bool) {
+        let changed = f(&mut self.inner.borrow_mut());
+        if changed {
+            let mut inner = self.inner.borrow_mut();
+            inner.revision = inner.revision.wrapping_add(1);
+            inner.meshes = inner.meshes.wrapping_add(1);
+            drop(inner);
+            self.view.invalidate();
+        }
+    }
+    /// Change how it's seen with `f` (the camera, lights, background,
+    /// exposure): what its meshes draw stays as it was (`Inner::meshes`).
+    fn change_view(&self, f: impl FnOnce(&mut Inner) -> bool) {
         let changed = f(&mut self.inner.borrow_mut());
         if changed {
             let mut inner = self.inner.borrow_mut();
@@ -1214,7 +1231,7 @@ impl World {
     /// Add `light`.
     pub fn add_light(&self, light: Light) -> LightId {
         let mut id = None;
-        self.change(|inner| {
+        self.change_view(|inner| {
             let (index, generation) = claim(&mut inner.lights, &mut inner.free_light, light);
             id = Some(LightId { index, generation });
             true
@@ -1223,7 +1240,7 @@ impl World {
     }
     /// Light `id` as `light`.
     pub fn set_light(&self, id: LightId, light: Light) {
-        self.change(|inner| match inner.lights.get_mut(id.index as usize) {
+        self.change_view(|inner| match inner.lights.get_mut(id.index as usize) {
             Some(slot) if slot.generation == id.generation && slot.value.is_some() => {
                 let changed = slot.value != Some(light);
                 slot.value = Some(light);
@@ -1234,7 +1251,7 @@ impl World {
     }
     /// Remove light `id`.
     pub fn remove_light(&self, id: LightId) {
-        self.change(|inner| match inner.lights.get(id.index as usize) {
+        self.change_view(|inner| match inner.lights.get(id.index as usize) {
             Some(slot) if slot.generation == id.generation && slot.value.is_some() => {
                 release(&mut inner.lights, &mut inner.free_light, id.index as usize);
                 inner.light_parents.remove(&id.index);
@@ -1255,7 +1272,7 @@ impl World {
     /// moves, turns and scales (`None`: the world's). Under an object gone
     /// or hidden, it shines nothing.
     pub fn set_light_parent(&self, id: LightId, parent: Option<ObjectId>) {
-        self.change(|inner| {
+        self.change_view(|inner| {
             if !Self::light_live(inner, id) {
                 return false;
             }
@@ -1280,7 +1297,7 @@ impl World {
     /// Point light `id` shone as a spot, along `spot`'s direction in its
     /// frame (`None`: all round). Other lights ignore it.
     pub fn set_spot(&self, id: LightId, spot: Option<Spot>) {
-        self.change(|inner| {
+        self.change_view(|inner| {
             if !Self::light_live(inner, id) {
                 return false;
             }
@@ -1302,7 +1319,7 @@ impl World {
     }
     /// How it is seen.
     pub fn set_camera(&self, camera: Camera) {
-        self.change(|inner| std::mem::replace(&mut inner.camera, camera) != camera);
+        self.change_view(|inner| std::mem::replace(&mut inner.camera, camera) != camera);
     }
     /// The camera.
     pub fn camera(&self) -> Camera {
@@ -1315,7 +1332,7 @@ impl World {
             let m = Material::rgb(hex).color;
             [m[0], m[1], m[2], 1.]
         });
-        self.change(|inner| std::mem::replace(&mut inner.background, color) != color);
+        self.change_view(|inner| std::mem::replace(&mut inner.background, color) != color);
     }
     /// Whether the sun (its first directional light) casts shadows: opaque
     /// meshes darken what they hide from it, their own faces included.
@@ -1323,7 +1340,7 @@ impl World {
     /// from the sun, into a 2048 by 2048 depth map (16 MB) kept while
     /// shadows are on.
     pub fn set_shadows(&self, on: bool) {
-        self.change(|inner| std::mem::replace(&mut inner.shadows, on) != on);
+        self.change_view(|inner| std::mem::replace(&mut inner.shadows, on) != on);
     }
     /// Where object `id`'s `map` sits, if it was placed.
     pub fn map_placement(&self, id: ObjectId, map: crate::Map) -> Option<crate::MapPlacement> {
@@ -1522,7 +1539,7 @@ impl World {
     /// brought into its range (unlit meshes and the background are shown as
     /// they are). `Neutral` by default.
     pub fn set_tone_mapping(&self, tone_mapping: ToneMapping) {
-        self.change(|inner| {
+        self.change_view(|inner| {
             std::mem::replace(&mut inner.tone_mapping, tone_mapping) != tone_mapping
         });
     }
@@ -1534,7 +1551,7 @@ impl World {
         } else {
             0.
         };
-        self.change(|inner| std::mem::replace(&mut inner.exposure, stops) != stops);
+        self.change_view(|inner| std::mem::replace(&mut inner.exposure, stops) != stops);
     }
     /// Samples a pixel: 4 (the default) smooths the edges of meshes
     /// (multisampling) and the highlights of curves finer than the pixels
@@ -1545,7 +1562,7 @@ impl World {
     /// again with the next frame.
     pub fn set_samples(&self, samples: u32) {
         let samples = if samples >= 2 { 4 } else { 1 };
-        self.change(|inner| std::mem::replace(&mut inner.samples, samples) != samples);
+        self.change_view(|inner| std::mem::replace(&mut inner.samples, samples) != samples);
     }
     /// Object `id`'s matrix in the world, its ancestors' applied; `None` if
     /// it is gone, hidden or under a hidden one.
@@ -1558,7 +1575,7 @@ impl World {
     /// `None` for transparent.
     pub fn set_background_linear(&self, color: Option<[f32; 4]>) {
         let color = color.filter(|c| c.iter().all(|v| v.is_finite()));
-        self.change(|inner| std::mem::replace(&mut inner.background, color) != color);
+        self.change_view(|inner| std::mem::replace(&mut inner.background, color) != color);
     }
     #[cfg(test)]
     pub(crate) fn inner(&self) -> std::cell::Ref<'_, Inner> {

@@ -10,7 +10,10 @@ use super::{
     shadows::{Casting, SHADOW_SIZE, depth_map, shadow_pipeline},
     variant::ByVariant,
 };
-use crate::texture::MAPS;
+use crate::{
+    math::{Mat4, Vec3},
+    texture::MAPS,
+};
 use std::collections::HashMap;
 use zgx_gpu::wgpu;
 pub(super) struct Buffers {
@@ -27,6 +30,19 @@ pub(super) struct Buffers {
     pub(super) colors: Option<wgpu::Buffer>,
     pub(super) count: u32,
     pub(super) used: u64,
+}
+/// What a frame drew its meshes from: a frame where the world's meshes are
+/// as they were (`Inner::meshes`), the sun the same and no mesh translucent
+/// draws its runs, instances and shadow map again.
+#[derive(Clone, Copy)]
+pub(super) struct Kept {
+    pub(super) meshes: u64,
+    /// The sun casting shadows, if one does.
+    pub(super) sun: Option<Vec3>,
+    /// Its view onto the shadow map, and a map texel's width.
+    pub(super) shadow: Option<(Mat4, f32)>,
+    /// Some mesh is translucent: its order follows the camera.
+    pub(super) translucent: bool,
 }
 pub(super) struct Gpu {
     pub(super) format: wgpu::TextureFormat,
@@ -97,6 +113,9 @@ pub(super) struct Gpu {
     /// The frame's passes and their targets, what is behind meshes light
     /// passes through among them.
     pub(super) graph: Graph,
+    /// What the last frame drew its meshes from (`Kept`); `None` before the
+    /// first and after the bindings were made again.
+    pub(super) kept: Option<Kept>,
     /// Samples a pixel (`World::set_samples`).
     pub(super) samples: u32,
     pub(super) frame: u64,
@@ -316,6 +335,7 @@ impl Gpu {
             instances: None,
             geometries: HashMap::new(),
             graph: Graph::new(format, samples),
+            kept: None,
             samples,
             frame: 0,
         }
