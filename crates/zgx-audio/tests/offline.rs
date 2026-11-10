@@ -535,3 +535,55 @@ fn a_sound_of_no_frames_plays_and_ends_at_once() {
     audio.update();
     assert!(voices.iter().all(|v| !v.playing()));
 }
+
+#[test]
+fn voices_end_and_free_their_slots_while_the_app_makes_no_call() {
+    // 400 blips scheduled up front, then not a call on the engine while
+    // they play: every one is heard on its frame, none left waiting.
+    let click = blip();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    for i in 0..400u64 {
+        audio
+            .play(&click, Play::new().at(Time(100 + i * 50)))
+            .unwrap();
+    }
+    let out = left(&mixer.frames(100 + 400 * 50 + 100));
+    let missing: Vec<u64> = (0..400u64)
+        .filter(|i| out[(100 + i * 50 + 1) as usize] != 1.)
+        .collect();
+    assert_eq!(missing, Vec::<u64>::new(), "blips never heard");
+    assert_eq!(audio.stats().voices, 0);
+}
+
+#[test]
+fn a_stop_for_a_play_still_waiting_for_a_slot_waits_with_it() {
+    // One voice: each play of higher priority steals the one before,
+    // which fades out in a slot of its own; 17 at once leave the 18th
+    // with none until a fade ends. Its stop, sent with it, must still
+    // stop it.
+    let flat = sound(&[0., 0.5], 1, RATE);
+    let (audio, mut mixer) = Audio::offline(Config {
+        voices: 1,
+        ..unlimited()
+    })
+    .unwrap();
+    let mut last = None;
+    for priority in 0..18 {
+        last = Some(
+            audio
+                .play(&flat, Play::new().loop_frames(1..2).priority(priority))
+                .unwrap(),
+        );
+    }
+    let last = last.unwrap();
+    last.stop().unwrap();
+    mixer.frames(4800);
+    assert!(
+        audio.stats().waited > 0,
+        "nothing waited: {:?}",
+        audio.stats()
+    );
+    assert_eq!(audio.stats().voices, 0, "{:?}", audio.stats());
+    audio.update();
+    assert!(!last.playing());
+}

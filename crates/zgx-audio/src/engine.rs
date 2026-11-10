@@ -1,7 +1,7 @@
 //! The main thread's side: [`Audio`] and the handles it gives out. Each
 //! call becomes a command stamped with a frame and goes on a fixed queue;
 //! a full queue is an error, never a wait.
-use crate::mixer::{Command, MAX_BUSES, Meter, Mixer, Return, Setup, VoiceParam};
+use crate::mixer::{Command, FADING_SLOTS, MAX_BUSES, Meter, Mixer, Return, Setup, VoiceParam};
 use crate::queue::{Consumer, Producer, queue};
 use crate::ramp::{Curve, Ramp};
 use crate::resample::{Interpolation, Region};
@@ -184,6 +184,9 @@ pub struct Stats {
     pub dropped: u64,
     /// Commands applied after the frame they asked for.
     pub late: u64,
+    /// Times a play found every slot taken (by voices fading out after a
+    /// steal) and waited a little to try again.
+    pub waited: u64,
 }
 
 struct Control {
@@ -266,7 +269,13 @@ impl Audio {
         config.check()?;
         let voices = config.voices;
         let (commands, from_main) = queue(config.commands);
-        let (to_main, returns) = queue(voices * 2 + 64);
+        // Every sound the mixer's side holds is in one place: the command
+        // queue, the schedule (as much again), a voice's slot, or here.
+        // Each call on the engine empties this queue, so it never holds
+        // more than the rest can: it's never full, and the mixer gives
+        // back a voice the moment it ends, whether the app calls or not.
+        let held = commands.capacity() + config.commands + voices + FADING_SLOTS;
+        let (to_main, returns) = queue(held);
         let meter = Arc::new(Meter::default());
         let setup = Setup {
             rate: config.rate,
@@ -471,6 +480,7 @@ impl Audio {
             stolen: meter.stolen.load(Ordering::Relaxed),
             dropped: meter.dropped.load(Ordering::Relaxed),
             late: meter.late.load(Ordering::Relaxed),
+            waited: meter.waited.load(Ordering::Relaxed),
         }
     }
 }
