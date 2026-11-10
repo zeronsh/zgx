@@ -1082,7 +1082,12 @@ fn post_look(
     let look = post::Look {
         params: [world.exposure.exp2(), tone, f32::from(u8::from(encode)), 0.],
         background: world.background.unwrap_or([0.; 4]),
-        bloom: [intensity, 1. / steps.max(1) as f32, 0., 0.],
+        bloom: [
+            intensity,
+            1. / steps.max(1) as f32,
+            f32::from(u8::from(steps > 1)),
+            0.,
+        ],
         lens: [vignette, grain, aberration, index],
     };
     (look, post::Parts(parts))

@@ -13,7 +13,8 @@ pub(super) struct Look {
     pub(super) params: [f32; 4],
     /// What shows where no mesh drew, premultiplied.
     pub(super) background: [f32; 4],
-    /// Bloom's intensity, and 1 over its steps.
+    /// Bloom's intensity, 1 over its steps, and whether it has a second
+    /// (whose tent the last pass adds to the first).
     pub(super) bloom: [f32; 4],
     /// The vignette's, grain's and chromatic aberration's intensities, and
     /// the frame's index.
@@ -109,6 +110,7 @@ impl Chain {
             entries: &[
                 texture(0),
                 texture(1),
+                texture(4),
                 sampler_entry(2),
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
@@ -277,7 +279,10 @@ impl Chain {
                     ],
                 })
             };
+            // Bloom's first step, and the second (its tent up to the first
+            // is the last pass's own).
             let glow = targets.bloom.first().unwrap_or(&self.stand_in);
+            let wider = targets.bloom.get(1).unwrap_or(&self.stand_in);
             let last = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("3D post, last"),
                 layout: &self.last_layout,
@@ -297,6 +302,10 @@ impl Chain {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: self.look.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(wider),
                     },
                 ],
             });
@@ -412,7 +421,9 @@ impl Chain {
                 _ => draw(encoder, &self.down, &binds.steps[at - 1], target, clear),
             }
         }
-        for at in (0..steps.len().saturating_sub(1)).rev() {
+        // Up to the second: the last pass adds the second's tent to the
+        // first as it reads them.
+        for at in (1..steps.len().saturating_sub(1)).rev() {
             let load = wgpu::LoadOp::Load;
             draw(encoder, &self.up, &binds.steps[at + 1], &steps[at], load);
         }
