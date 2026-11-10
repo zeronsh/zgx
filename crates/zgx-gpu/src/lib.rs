@@ -11931,7 +11931,9 @@ impl GpuRenderer {
         let waiting = zgx::profile::enabled().then(std::time::Instant::now);
         buffer.waitUntilCompleted();
         if let Some(waiting) = waiting {
-            zgx::profile::note(|| format!("waited {} us for the GPU", waiting.elapsed().as_micros()));
+            zgx::profile::note(|| {
+                format!("waited {} us for the GPU", waiting.elapsed().as_micros())
+            });
         }
         let ran = buffer.GPUEndTime() - buffer.GPUStartTime();
         self.gpu_time
