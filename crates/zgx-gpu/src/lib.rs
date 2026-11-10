@@ -239,27 +239,13 @@ const IMAGE_OUTGOING: (u32, u32) = (1, 1);
 /// The longest side a texture is cut to past the budget (`upload_image_at`):
 /// however full it is, a picture shows, and this little goes over it.
 const IMAGE_LEAST_SIDE: u32 = 64;
-/// The size a texture of a `width` by `height` image holds when drawn at
-/// `drawn` device pixels (`None`: all of it): scaled down, its shape kept,
-/// to the least that is at least that large on both axes; never up.
-fn fitted_size(width: u32, height: u32, drawn: Option<(f32, f32)>) -> (u32, u32) {
-    let Some((w, h)) = drawn.filter(|(w, h)| w.is_finite() && h.is_finite()) else {
-        return (width.max(1), height.max(1));
-    };
-    let scale = (w / width.max(1) as f32).max(h / height.max(1) as f32);
-    if scale >= 1. {
-        return (width.max(1), height.max(1));
-    }
-    let side = |v: u32| ((v as f32 * scale).ceil() as u32).clamp(1, v.max(1));
-    (side(width), side(height))
-}
 /// `size` by `scale`, its shape kept, at most `image`'s own size.
 fn scaled_size(size: (u32, u32), image: &zgx::image::ImageData, scale: f32) -> (u32, u32) {
     let side = |v: u32, full: u32| ((v as f32 * scale).ceil() as u32).clamp(1, full.max(1));
     (side(size.0, image.width()), side(size.1, image.height()))
 }
 use zgx::image::{
-    premultiply,
+    fitted_size, premultiply,
     resample::{halve, shrink},
 };
 /// Why an image can have no texture: a frame goes on without it.

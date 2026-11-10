@@ -709,6 +709,51 @@ impl ImageData {
         }
         None
     }
+    /// Ask for its pixels at least `size` (what a renderer will ask, by
+    /// [`fitted_size`]) before it is drawn, off the main thread, after any
+    /// decode a picture drawn is waiting for: a list's row built ahead of its
+    /// view, so the picture shows as the row does. Nothing when its pixels
+    /// come as it is drawn anyway (small, not a kept file, `Decoding::Sync`),
+    /// are decoded or decoding at that size, or `AHEAD_MOST` wait already;
+    /// else what keeps it asked for: let go before it begins, it doesn't run.
+    pub fn decode_ahead(&self, size: (u32, u32)) -> Option<Ahead> {
+        let kept = self.pixels.kept.as_ref()?;
+        let size = (size.0.clamp(1, self.width), size.1.clamp(1, self.height));
+        let small = u64::from(self.width) * u64::from(self.height) <= SYNC_PIXELS;
+        if small
+            || kept.failed.load(Ordering::Relaxed)
+            || kept.decoding.load(Ordering::Relaxed) == Decoding::Sync as u8
+        {
+            return None;
+        }
+        let covers = |(w, h): (u32, u32)| w >= size.0 && h >= size.1;
+        let held = kept.held.lock().unwrap_or_else(|p| p.into_inner());
+        if held
+            .as_ref()
+            .is_some_and(|held| covers((held.width, held.height)))
+        {
+            return None;
+        }
+        drop(held);
+        let mut pending = kept.pending.lock().unwrap_or_else(|p| p.into_inner());
+        if pending.is_some_and(covers) {
+            return None;
+        }
+        let mut ahead = AHEAD.lock().unwrap_or_else(|p| p.into_inner());
+        if ahead.len() >= AHEAD_MOST {
+            return None;
+        }
+        *pending = Some(size);
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        ahead.push_back((
+            (Arc::clone(&self.pixels), (self.width, self.height), size),
+            dropped.clone(),
+        ));
+        drop(ahead);
+        drop(pending);
+        send_work(Work::Ahead);
+        Some(Ahead(dropped))
+    }
 }
 /// Gives back what kept files' decoded pixels hold (pinned ones aside):
 /// a renderer has them as textures, and they decode again if drawn
@@ -865,7 +910,47 @@ type Job = (Arc<Pixels>, (u32, u32), (u32, u32));
 /// made were given back (`release_decoded`).
 enum Work {
     Decode(Job),
+    /// The next of the decodes asked for ahead (`AHEAD`).
+    Ahead,
     Rest,
+}
+/// The most decodes asked for ahead of their pictures being drawn
+/// (`ImageData::decode_ahead`) and not yet begun: a fast scroll past rows
+/// long gone can't pile them up, and a picture drawn waits behind no more.
+pub const AHEAD_MOST: usize = 4;
+/// Decodes asked for ahead, in the order asked, each with word of whether
+/// whoever asked still wants it.
+static AHEAD: std::sync::Mutex<
+    std::collections::VecDeque<(Job, Arc<std::sync::atomic::AtomicBool>)>,
+> = std::sync::Mutex::new(std::collections::VecDeque::new());
+/// A decode asked for ahead of its picture being drawn
+/// (`ImageData::decode_ahead`), held by what asked (a list's row built ahead):
+/// let go before it begins (the row dropped), it doesn't run.
+#[derive(Debug)]
+pub struct Ahead(Arc<std::sync::atomic::AtomicBool>);
+impl Drop for Ahead {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+/// Whether another decode may be asked for ahead (`AHEAD_MOST`).
+pub fn ahead_room() -> bool {
+    AHEAD.lock().unwrap_or_else(|p| p.into_inner()).len() < AHEAD_MOST
+}
+/// The size a texture of a `width` by `height` image holds when drawn at
+/// `drawn` device pixels (`None`: all of it): scaled down, its shape kept,
+/// to the least that is at least that large on both axes; never up. What a
+/// renderer asks `pixels_at` for, and so what a decode ahead makes.
+pub fn fitted_size(width: u32, height: u32, drawn: Option<(f32, f32)>) -> (u32, u32) {
+    let Some((w, h)) = drawn.filter(|(w, h)| w.is_finite() && h.is_finite()) else {
+        return (width.max(1), height.max(1));
+    };
+    let scale = (w / width.max(1) as f32).max(h / height.max(1) as f32);
+    if scale >= 1. {
+        return (width.max(1), height.max(1));
+    }
+    let side = |v: u32| ((v as f32 * scale).ceil() as u32).clamp(1, v.max(1));
+    (side(width), side(height))
 }
 /// The one thread decoding kept files, once one has been queued.
 static WORKER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Work>>> =
@@ -910,6 +995,16 @@ fn send_work(work: Work) {
                                 decode_at(&pixels, full, size, true);
                             }
                         }
+                        Work::Ahead => {
+                            let next = AHEAD.lock().unwrap_or_else(|p| p.into_inner()).pop_front();
+                            if let Some(((pixels, full, size), dropped)) = next {
+                                if dropped.load(Ordering::Relaxed) {
+                                    let_go(&pixels, size);
+                                } else if !superseded(&pixels, size) {
+                                    decode_at(&pixels, full, size, true);
+                                }
+                            }
+                        }
                         Work::Rest => {
                             let rest = *DECODER_REST.read().unwrap_or_else(|p| p.into_inner());
                             if let Some(rest) = rest {
@@ -924,6 +1019,23 @@ fn send_work(work: Work) {
         std::sync::Mutex::new(send)
     });
     let _ = sender.lock().unwrap_or_else(|p| p.into_inner()).send(work);
+}
+/// A decode asked for ahead whose row went before its turn: not made. It
+/// was what `pixels_at` waited on, so a picture drawn since asks again,
+/// woken to.
+fn let_go(pixels: &Pixels, size: (u32, u32)) {
+    let Some(kept) = pixels.kept.as_ref() else {
+        return;
+    };
+    let mut pending = kept.pending.lock().unwrap_or_else(|p| p.into_inner());
+    if *pending == Some(size) {
+        *pending = None;
+        drop(pending);
+        let wake = WAKE.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+    }
 }
 /// A larger decode of `pixels` than `size` has been queued since.
 fn superseded(pixels: &Pixels, size: (u32, u32)) -> bool {
@@ -1334,6 +1446,137 @@ mod kept_tests {
 
     fn broken(_: &[u8]) -> Result<Arc<[u8]>, String> {
         Err("truncated".into())
+    }
+
+    /// Decodes made of each of three 300 by 300 files (`decode_ahead`'s tests).
+    static AHEAD_DECODES: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+    fn counted(which: usize) -> Result<Arc<[u8]>, String> {
+        AHEAD_DECODES[which].fetch_add(1, Ordering::Relaxed);
+        Ok([0, 255, 0, 255].repeat(300 * 300).into())
+    }
+    fn counted_0(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        counted(0)
+    }
+    fn counted_1(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        counted(1)
+    }
+    fn counted_2(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        counted(2)
+    }
+    /// A decode that holds the decoding thread until let go (`SLOW_GO`).
+    static SLOW_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static SLOW_GO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    fn slow(_: &[u8]) -> Result<Arc<[u8]>, String> {
+        SLOW_STARTED.store(true, Ordering::Relaxed);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !SLOW_GO.load(Ordering::Relaxed) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        Ok([0, 0, 0, 255].repeat(300 * 300).into())
+    }
+    /// The decoding thread busy with a slow decode asked ahead: what it held.
+    fn busy() -> (ImageData, Ahead) {
+        SLOW_STARTED.store(false, Ordering::Relaxed);
+        SLOW_GO.store(false, Ordering::Relaxed);
+        let image = ImageData::kept(300, 300, Arc::from(&b"slow"[..]), slow).unwrap();
+        let ahead = image.decode_ahead((300, 300)).expect("asked ahead");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !SLOW_STARTED.load(Ordering::Relaxed) {
+            assert!(
+                std::time::Instant::now() < until,
+                "the slow decode never began"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        (image, ahead)
+    }
+    fn pending(image: &ImageData) -> Option<(u32, u32)> {
+        *image.pixels.kept.as_ref().unwrap().pending.lock().unwrap()
+    }
+
+    /// A decode asked for ahead of a picture being drawn is made off this
+    /// thread, and drawn at that size the picture finds it, decoded once;
+    /// held, there's nothing more to ask.
+    #[test]
+    fn a_decode_asked_ahead_is_there_when_drawn() {
+        let _alone = alone();
+        let image = ImageData::kept(300, 300, Arc::from(&b"ahead"[..]), counted_0).unwrap();
+        let before = AHEAD_DECODES[0].load(Ordering::Relaxed);
+        let ahead = image.decode_ahead((150, 150)).expect("asked ahead");
+        let held = wait_for(&image, (150, 150));
+        assert_eq!((held.width, held.height), (150, 150));
+        assert_eq!(
+            AHEAD_DECODES[0].load(Ordering::Relaxed) - before,
+            1,
+            "decoded once"
+        );
+        assert!(
+            image.decode_ahead((150, 150)).is_none(),
+            "held, and asked again"
+        );
+        assert!(
+            image.decode_ahead((100, 100)).is_none(),
+            "held larger, and asked again"
+        );
+        drop(ahead);
+        release_decoded();
+    }
+
+    /// A decode asked for ahead and let go before its turn (its row dropped)
+    /// isn't made: the file isn't decoded, and nothing is left under way, so
+    /// a picture drawn later asks again.
+    #[test]
+    fn a_decode_let_go_before_its_turn_is_not_made() {
+        let _alone = alone();
+        let (slow, first) = busy();
+        let image = ImageData::kept(300, 300, Arc::from(&b"ahead"[..]), counted_1).unwrap();
+        let before = AHEAD_DECODES[1].load(Ordering::Relaxed);
+        let ahead = image.decode_ahead((300, 300)).expect("asked ahead");
+        assert_eq!(pending(&image), Some((300, 300)));
+        drop(ahead);
+        SLOW_GO.store(true, Ordering::Relaxed);
+        wait_for(&slow, (300, 300));
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pending(&image).is_some() {
+            assert!(std::time::Instant::now() < until, "still under way");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            AHEAD_DECODES[1].load(Ordering::Relaxed),
+            before,
+            "decoded though let go"
+        );
+        drop(first);
+        release_decoded();
+    }
+
+    /// While the decoding thread is busy, `AHEAD_MOST` decodes may wait to
+    /// be made ahead and no more: the next asked gets none.
+    #[test]
+    fn decodes_asked_ahead_wait_no_more_than_the_most() {
+        let _alone = alone();
+        let (slow, first) = busy();
+        let images: Vec<ImageData> = (0..=AHEAD_MOST)
+            .map(|_| ImageData::kept(300, 300, Arc::from(&b"ahead"[..]), counted_2).unwrap())
+            .collect();
+        let asked: Vec<Option<Ahead>> = images
+            .iter()
+            .map(|image| image.decode_ahead((300, 300)))
+            .collect();
+        assert_eq!(
+            asked.iter().filter(|ahead| ahead.is_some()).count(),
+            AHEAD_MOST
+        );
+        assert!(asked[AHEAD_MOST].is_none(), "one past the most was asked");
+        assert!(!ahead_room());
+        SLOW_GO.store(true, Ordering::Relaxed);
+        wait_for(&slow, (300, 300));
+        for image in &images[..AHEAD_MOST] {
+            wait_for(image, (300, 300));
+        }
+        assert!(ahead_room());
+        drop((asked, first));
+        release_decoded();
     }
 
     /// A kept file decodes nothing until drawn; then (asked to decode off

@@ -630,3 +630,82 @@ fn overscan_is_built_in_spare_time_with_any_to_spare() {
     spare(&ui);
     assert_eq!(rows.take(), vec![4]);
 }
+
+/// The files the kept pictures below decoded, by name, in order.
+static DECODED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// A 300 by 300 picture's file (larger than `SYNC_PIXELS`, so decoded off
+/// the main thread), its name kept as it decodes.
+fn picture(bytes: &[u8]) -> Result<std::sync::Arc<[u8]>, String> {
+    DECODED
+        .lock()
+        .unwrap()
+        .push(String::from_utf8_lossy(bytes).into_owned());
+    Ok([90, 120, 200, 255].repeat(300 * 300).into())
+}
+/// Whether `row`'s picture has decoded, waiting for it a while.
+fn decoded(row: usize) -> bool {
+    let name = format!("row {row}");
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
+        if DECODED.lock().unwrap().contains(&name) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    false
+}
+
+/// A picture in a row built ahead, out of view, starts decoding in spare
+/// time, so it is there as the row shows: the rows the view goes towards,
+/// nearest first, a few at a time (`AHEAD_MOST`), the rest once there's
+/// room again. One in view decodes as it is drawn, never ahead.
+#[test]
+fn pictures_in_rows_built_ahead_decode_before_they_show() {
+    use std::sync::Arc;
+    use zgx::image::{AHEAD_MOST, ImageData};
+    let mut ui = hosted();
+    let pictures: Vec<Arc<ImageData>> = (0..1000)
+        .map(|row| {
+            let file: Arc<[u8]> = format!("row {row}").into_bytes().into();
+            Arc::new(ImageData::kept(300, 300, file, picture).unwrap())
+        })
+        .collect();
+    let offset = ui.signal(0.);
+    ui.mount(
+        virtual_list(
+            offset.clone(),
+            20.,
+            0,
+            move || 1000,
+            |i| i,
+            move |_, i, _| {
+                div()
+                    .w_full()
+                    .h(20.)
+                    .child(image("", pictures[i].clone()).w(400.).h(20.))
+            },
+        )
+        .w(400.)
+        .h(100.),
+    );
+    ui.prepare_frame();
+    moves(&ui, &offset);
+    spare(&ui);
+    // Rows 0 to 4 show; 5 to 9 are a viewport ahead.
+    for row in 5..5 + AHEAD_MOST {
+        assert!(
+            decoded(row),
+            "row {row}'s picture, ahead: {:?}",
+            DECODED.lock().unwrap()
+        );
+    }
+    let asked = DECODED.lock().unwrap().clone();
+    assert!(
+        (0..5).all(|row| !asked.contains(&format!("row {row}"))),
+        "a picture in view decoded ahead: {asked:?}"
+    );
+    // The view moves on; the next turn asks for the next row's.
+    scroll_to(&ui, &offset, 20.);
+    spare(&ui);
+    assert!(decoded(9), "row 9's picture: {:?}", DECODED.lock().unwrap());
+}
