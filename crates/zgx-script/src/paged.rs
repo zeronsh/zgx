@@ -240,11 +240,27 @@ fn paged(lua: &Lua, load: Function) -> mlua::Result<Table> {
     Ok(out)
 }
 
-fn debounced(lua: &Lua, (state, ms): (mlua::AnyUserData, f64)) -> mlua::Result<ReadState> {
+fn debounced(
+    lua: &Lua,
+    (state, ms, opts): (mlua::AnyUserData, f64, Option<mlua::Table>),
+) -> mlua::Result<ReadState> {
     if !(ms.is_finite() && ms >= 0.) {
         return Err(mlua::Error::runtime(
             "ui.debounced: a number of milliseconds",
         ));
+    }
+    // `every`: told at each rest, the value it already held included (a
+    // view's offset back where it last rested is still a rest).
+    let mut every = false;
+    if let Some(opts) = &opts {
+        for (key, _) in opts.clone().pairs::<String, mlua::Value>().flatten() {
+            if key != "every" {
+                return Err(mlua::Error::runtime(format!(
+                    "ui.debounced: unknown option `{key}` (it takes `every`)"
+                )));
+            }
+        }
+        every = opts.get::<Option<bool>>("every")?.unwrap_or(false);
     }
     let source = match state.borrow::<State>() {
         Ok(state) => state.0.clone(),
@@ -272,7 +288,15 @@ fn debounced(lua: &Lua, (state, ms): (mlua::AnyUserData, f64)) -> mlua::Result<R
             timers.spawn(async move {
                 zgx::timer::sleep(period).await;
                 if generation.get() == mine {
-                    write.set(read.with_untracked(Clone::clone));
+                    let now = read.with_untracked(Clone::clone);
+                    if every {
+                        write.mutate(|held| {
+                            *held = now;
+                            true
+                        });
+                    } else {
+                        write.set(now);
+                    }
                 }
             });
         }

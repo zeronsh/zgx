@@ -163,3 +163,80 @@ fn a_debounced_state_follows_once_it_settles() {
     assert_eq!(h.text("settled"), "", "not yet: the wait is still on");
     wait_for(&mut h, "settled", "hey");
 }
+
+/// Two states following one that's changed and changed back before it
+/// rests: `every` tells its readers at each rest, the plain one only of a
+/// value it didn't hold.
+const RESTS_APP: &str = r#"
+local typed = ui.state("typed", "")
+local rests = ui.debounced(typed, 30, { every = true })
+local plain = ui.debounced(typed, 30)
+local told = ui.state("told", 0)
+local plain_told = ui.state("plain_told", 0)
+ui.effect(function()
+    rests:get()
+    told:set(told:peek() + 1)
+end)
+ui.effect(function()
+    plain:get()
+    plain_told:set(plain_told:peek() + 1)
+end)
+return ui.column {
+    ui.button { id = "away", w = 40, h = 20, "a", on_click = function()
+        typed:set("x")
+        typed:set("")
+    end },
+    ui.text { id = "told", function() return `{told:get()} {plain_told:get()}` end },
+}
+"#;
+
+#[test]
+fn every_rest_is_told_even_of_the_value_it_held() {
+    let mut h = Harness::new(|runtime| host(runtime, RESTS_APP));
+    h.ui.prepare_frame();
+    assert_eq!(h.text("told"), "1 1", "each read once, as it's made");
+    h.click("away");
+    wait_for(&mut h, "told", "2 1");
+    // Away and back again: told again; the plain one, back where it was,
+    // never.
+    h.click("away");
+    wait_for(&mut h, "told", "3 1");
+    h.frames(5);
+    assert_eq!(h.text("told"), "3 1");
+}
+
+#[test]
+fn a_wait_runs_no_script_until_it_rests() {
+    let mut h = Harness::new(|runtime| host(runtime, RESTS_APP));
+    h.ui.prepare_frame();
+    h.click("away");
+    h.settle();
+    h.ui.prepare_frame();
+    // Frames while it waits (well short of 30 ms): no script runs.
+    let calls = h.host.script_calls();
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_millis(10) {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(h.host.script_calls(), calls, "nothing ran while it waited");
+    assert_eq!(h.text("told"), "1 1");
+    wait_for(&mut h, "told", "2 1");
+}
+
+#[test]
+fn debounced_says_what_option_it_has_no_place_for() {
+    let error = zgx_script::testing::TestApp::try_new(|runtime| {
+        ScriptHost::inline(
+            runtime,
+            "app",
+            r#"local typed = ui.state("typed", "")
+            local settled = ui.debounced(typed, 30, { evry = true })
+            return ui.text { function() return settled:get() end }"#,
+        )
+    })
+    .err()
+    .expect("an error");
+    assert!(error.contains("unknown option `evry`"), "{error}");
+}
