@@ -169,3 +169,11 @@ path = "tests/bundle.rs"
 [[test]]
 name = "reload_memory"
 path = "tests/reload_memory.rs"
+
+[[example]]
+name = "scroll_bench"
+required-features = ["inspect"]
+
+[[example]]
+name = "scroll_reference"
+required-features = ["inspect"]

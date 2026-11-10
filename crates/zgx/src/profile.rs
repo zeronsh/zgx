@@ -191,6 +191,23 @@ pub fn frame() {
     }
 }
 
+/// The frame currently being rendered, for asynchronous presentation
+/// feedback to name the same record as devtools. Zero without tracing.
+pub fn current_frame_index() -> u64 {
+    #[cfg(feature = "trace")]
+    {
+        if crate::trace::enabled() {
+            crate::trace::frame_index() + 1
+        } else {
+            0
+        }
+    }
+    #[cfg(not(feature = "trace"))]
+    {
+        0
+    }
+}
+
 /// What runs in `work` is spare time's (`crate::spare`), no frame's: a trace
 /// keeps it apart, for no frame waited for it.
 pub fn spare_time<R>(work: impl FnOnce() -> R) -> R {
