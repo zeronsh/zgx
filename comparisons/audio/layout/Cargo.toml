@@ -1,0 +1,11 @@
+[package]
+name = "audio-layout"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "The mixer's two inner loops with planar and with interleaved buffers, in instructions a frame"
+
+[workspace]
+
+[profile.release]
+codegen-units = 1
