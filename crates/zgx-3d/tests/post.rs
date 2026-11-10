@@ -90,6 +90,7 @@ fn with_the_chain_on_and_nothing_mixed_in_a_world_draws_as_without() {
         let without = window.draw();
         world.set_post(Post {
             bloom: Some(Bloom { intensity: 0. }),
+            ..Default::default()
         });
         let with = window.draw();
         // Where a pixel and those around it are alike, the same; mapped
@@ -151,10 +152,12 @@ fn bloom_spreads_light_around_what_is_bright_and_adds_none() {
     };
     world.set_post(Post {
         bloom: Some(Bloom { intensity: 0. }),
+        ..Default::default()
     });
     let sharp = window.draw();
     world.set_post(Post {
         bloom: Some(Bloom { intensity: 0.2 }),
+        ..Default::default()
     });
     let glowing = window.draw();
     let at = |pixels: &[u8], x: u32, y: u32| pixels[((y * SIZE + x) * 4) as usize];
@@ -183,6 +186,7 @@ fn bloom_spreads_light_around_what_is_bright_and_adds_none() {
     let plain = window.draw();
     world.set_post(Post {
         bloom: Some(Bloom { intensity: 1. }),
+        ..Default::default()
     });
     let (most, _) = differ(&plain, &window.draw(), 0);
     assert!(most <= 1, "by {most}");
@@ -198,6 +202,7 @@ fn the_chains_targets_go_as_the_world_rests() {
     let plain = world.temporary_bytes();
     world.set_post(Post {
         bloom: Some(Bloom::default()),
+        ..Default::default()
     });
     let held = window.draw();
     // Without: four samples of colour and of depth, 4 bytes each. With, the
@@ -219,4 +224,120 @@ fn the_chains_targets_go_as_the_world_rests() {
     world.set_post(Post::default());
     window.draw();
     assert_eq!(world.temporary_bytes(), plain);
+}
+
+/// A world of one unlit colour filling the view, mapped as it is.
+fn flat(color: [f32; 4]) -> World {
+    let world = World::new();
+    let surface = Material {
+        color,
+        unlit: true,
+        ..Default::default()
+    };
+    world.add(Object::mesh(Geometry::cuboid(20., 20., 0.1), surface));
+    world.set_camera(Camera::looking_at([0., 0., 4.], [0., 0., 0.]));
+    world.set_tone_mapping(ToneMapping::Linear);
+    world
+}
+
+fn at(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
+    pixels[((y * SIZE + x) * 4) as usize..][..4]
+        .try_into()
+        .unwrap()
+}
+
+#[test]
+fn a_vignette_darkens_the_corners_and_leaves_the_centre() {
+    let world = flat([0.5, 0.5, 0.5, 1.]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let plain = window.draw();
+    world.set_post(Post {
+        vignette: Some(Vignette { intensity: 1. }),
+        ..Default::default()
+    });
+    let shaded = window.draw();
+    let (centre, corner) = (SIZE / 2, 0);
+    let by = |p: [u8; 4], q: [u8; 4]| p[0].abs_diff(q[0]);
+    assert!(by(at(&plain, centre, centre), at(&shaded, centre, centre)) <= 1);
+    // A quarter of the light at the corners: in sRGB, about 0.54 of the
+    // centre's value.
+    let ratio =
+        f32::from(at(&shaded, corner, corner)[0]) / f32::from(at(&plain, corner, corner)[0]);
+    assert!((0.5..0.62).contains(&ratio), "{ratio}");
+    // Halfway along an edge, between the two.
+    let edge = at(&shaded, corner, centre)[0];
+    assert!(edge > at(&shaded, corner, corner)[0] && edge < at(&shaded, centre, centre)[0]);
+}
+
+#[test]
+fn grain_is_noise_of_the_frames_index_about_the_tone() {
+    let grainy = || {
+        let world = flat([0.2, 0.2, 0.2, 1.]);
+        world.set_post(Post {
+            grain: Some(Grain { intensity: 0.2 }),
+            ..Default::default()
+        });
+        world
+    };
+    let (world, again) = (grainy(), grainy());
+    let (Some(mut window), Some(mut other)) = (Window::new(&world), Window::new(&again)) else {
+        return;
+    };
+    let first = window.draw();
+    // A frame of another index: other noise.
+    world.set_exposure(1.);
+    world.set_exposure(0.);
+    let second = window.draw();
+    assert_ne!(first, second);
+    // The same index in another view: the same noise.
+    assert_eq!(other.draw(), first);
+    // About the colour without it, and varied.
+    let plain = {
+        let world = flat([0.2, 0.2, 0.2, 1.]);
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        window.draw()[0]
+    };
+    let reds: Vec<u8> = first.chunks(4).map(|p| p[0]).collect();
+    let mean = reds.iter().map(|&r| f32::from(r)).sum::<f32>() / reds.len() as f32;
+    assert!((mean - f32::from(plain)).abs() < 2., "{mean} about {plain}");
+    let (low, high) = (reds.iter().min().unwrap(), reds.iter().max().unwrap());
+    assert!(high - low >= 10, "{low} to {high}");
+}
+
+#[test]
+fn chromatic_aberration_parts_red_outward_and_blue_inward() {
+    // A white bar right of the centre, on black.
+    let world = World::new();
+    let white = Material {
+        color: [1., 1., 1., 1.],
+        unlit: true,
+        ..Default::default()
+    };
+    world.add(Object::mesh(Geometry::cuboid(0.6, 4., 0.1), white).at([1.2, 0., 0.]));
+    world.set_background_linear(Some([0., 0., 0., 1.]));
+    world.set_camera(Camera::looking_at([0., 0., 4.], [0., 0., 0.]));
+    world.set_tone_mapping(ToneMapping::Linear);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    world.set_post(Post {
+        chromatic_aberration: Some(ChromaticAberration { intensity: 1. }),
+        ..Default::default()
+    });
+    let parted = window.draw();
+    let row = SIZE / 2;
+    let lit: Vec<u32> = (0..SIZE)
+        .filter(|&x| at(&parted, x, row)[1] > 128)
+        .collect();
+    let (left, right) = (lit[0], *lit.last().unwrap());
+    assert!(left > SIZE / 2, "right of the centre: {left}");
+    // Just outside its outer edge, red; just inside its inner one, blue.
+    let [r, _, b, _] = at(&parted, right + 1, row);
+    assert!(r > b + 20, "outer edge: {r} red, {b} blue");
+    let [r, _, b, _] = at(&parted, left - 1, row);
+    assert!(b > r + 20, "inner edge: {r} red, {b} blue");
 }

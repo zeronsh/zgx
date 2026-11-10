@@ -961,12 +961,13 @@ impl Viewport for Renderer {
                 }
                 #[cfg(feature = "post")]
                 Pass::Final => {
-                    let look = post_look(&world, &gpu.graph, encode);
+                    let look = post_look(&world, &gpu.graph, encode, gpu.frame);
                     let chain = gpu
                         .post
                         .get_or_insert_with(|| post::Chain::new(frame.device));
                     let device = (frame.device, frame.queue);
-                    chain.last(device, frame.encoder, &gpu.graph, (target, format), &look);
+                    let into = (target, format);
+                    chain.last(device, frame.encoder, &gpu.graph, into, look);
                 }
             }
         }
@@ -1039,23 +1040,45 @@ fn prepare_draws(
     }
 }
 
-/// The post chain's last pass's numbers for `world`, whose frame `graph`
-/// compiled: its exposure and tone mapping, background, and bloom.
+/// The post chain's last pass's numbers for `world`'s `frame`, which
+/// `graph` compiled, and what it compiles in.
 #[cfg(feature = "post")]
 #[cold]
-fn post_look(world: &crate::world::Inner, graph: &graph::Graph, encode: bool) -> post::Look {
+fn post_look(
+    world: &crate::world::Inner,
+    graph: &graph::Graph,
+    encode: bool,
+    frame: u64,
+) -> (post::Look, post::Parts) {
     let steps = graph.targets.as_ref().map_or(0, |t| t.bloom.len());
     let tone = match world.tone_mapping {
         crate::ToneMapping::Neutral => 0.,
         crate::ToneMapping::Aces => 1.,
         crate::ToneMapping::Linear => 2.,
     };
-    let intensity = world.post.bloom.map_or(0., |bloom| bloom.intensity);
-    post::Look {
+    let post = &world.post;
+    let intensity = post.bloom.map_or(0., |bloom| bloom.intensity);
+    let vignette = post.vignette.map_or(0., |v| v.intensity);
+    let grain = post.grain.map_or(0., |g| g.intensity);
+    let aberration = post.chromatic_aberration.map_or(0., |c| c.intensity);
+    let mut parts = 0;
+    for (on, bit) in [
+        (steps > 0, post::Parts::BLOOM),
+        (post.vignette.is_some(), post::Parts::VIGNETTE),
+        (post.grain.is_some(), post::Parts::GRAIN),
+        (post.chromatic_aberration.is_some(), post::Parts::ABERRATION),
+    ] {
+        parts |= if on { bit } else { 0 };
+    }
+    // Grain's seed: the frame's index, kept exact as a float.
+    let index = (frame % (1 << 24)) as f32;
+    let look = post::Look {
         params: [world.exposure.exp2(), tone, f32::from(u8::from(encode)), 0.],
         background: world.background.unwrap_or([0.; 4]),
         bloom: [intensity, 1. / steps.max(1) as f32, 0., 0.],
-    }
+        lens: [vignette, grain, aberration, index],
+    };
+    (look, post::Parts(parts))
 }
 
 /// What the renderer's tests draw with: wgpu's no-op backend.

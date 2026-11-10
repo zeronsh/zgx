@@ -17,7 +17,7 @@ pub(crate) mod lighting;
 #[cfg(feature = "post")]
 mod post;
 #[cfg(feature = "post")]
-pub use post::{Bloom, Post};
+pub use post::{Bloom, ChromaticAberration, Grain, Post, Vignette};
 
 /// How a surface takes light: a metallic-roughness material, as glTF's.
 #[derive(Clone, Copy, Debug, PartialEq)]
