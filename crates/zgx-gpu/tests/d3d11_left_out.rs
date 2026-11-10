@@ -1,9 +1,9 @@
 //! What Direct3D 11 (`ZGX_D3D11=1`, the `d3d11` feature) leaves out of a
 //! frame rather than fail it, and what still fails it
-//! (`GpuRenderer::d3d11_leave_out`): a drop shadow is left out; a backdrop
+//! (`GpuRenderer::d3d11_leave_out`): a drop shadow draws; a backdrop
 //! blur and a layer shader reading the backdrop (glass) draw their box
 //! opaque in its own colour, as the system's Reduce transparency draws
-//! glass; a content blur and a blend mode fail the frame, naming it. Each
+//! glass; a content blur and a blend mode draw. Each
 //! kind left out is named once. `ZGX_D3D11` is read once a process, so this
 //! test is one of its own, setting it first.
 #[cfg(windows)]
@@ -108,7 +108,7 @@ fn main() {
     unsafe { std::env::set_var("ZGX_D3D11", "1") };
     let plain = draw(|_, _| {}).expect("a plain frame");
 
-    // A drop shadow: left out, the frame as without it.
+    // A drop shadow: drawn (d3d11_parity compares it with Direct3D 12's).
     let shadowed = draw(|scene, id| {
         scene.set_drop_shadow(
             id,
@@ -122,10 +122,7 @@ fn main() {
     .expect("a frame with a drop shadow draws");
     // (Against the box a layer without one, as a drop shadow makes it.)
     let layered = draw(|scene, id| scene.set_isolated(id, true)).expect("a layer draws");
-    assert!(
-        shadowed == layered,
-        "a drop shadow left out leaves the frame as it was"
-    );
+    assert!(shadowed != layered, "the drop shadow drew nothing");
 
     // A backdrop blur: the box opaque in its own colour.
     let blurred = draw(|scene, id| {
@@ -153,15 +150,17 @@ fn main() {
         .expect("a frame with a layer shader reading the backdrop draws");
     opaque_box(&read, "a layer shader reading the backdrop");
 
-    // A content blur and a blend mode: the frame fails, naming it.
-    let blur = draw(|scene, id| scene.set_filter_blur(id, 4.)).unwrap_err();
-    assert!(blur.contains("content blur"), "{blur}");
-    let blend = draw(|scene, id| scene.set_blend(id, BlendMode::Multiply)).unwrap_err();
-    assert!(blend.contains("blend mode"), "{blend}");
+    // A content blur and a blend mode draw (d3d11_parity compares them
+    // with Direct3D 12's).
+    let blurred =
+        draw(|scene, id| scene.set_filter_blur(id, 4.)).expect("a frame with a content blur draws");
+    assert_ne!(blurred, plain, "the content blur drew nothing");
+    let blended = draw(|scene, id| scene.set_blend(id, BlendMode::Multiply))
+        .expect("a frame with a blend mode draws");
+    assert_ne!(blended, plain, "the blend mode drew nothing");
 
     let left_out = GpuRenderer::debug_d3d11_left_out();
     for kind in [
-        "drop shadows",
         "backdrop blurs (drawn opaque)",
         "backdrop reads (glass drawn opaque)",
     ] {

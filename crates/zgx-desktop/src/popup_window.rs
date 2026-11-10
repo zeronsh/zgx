@@ -3135,6 +3135,14 @@ mod x11 {
             let Ok((connection, _)) = x11rb::connect(None) else {
                 return;
             };
+            // Where it slides, for a probe watching: its window is moved by
+            // the server, too often for another client to see each place.
+            zgx_gpu::present_log::log(|| {
+                format!(
+                    "popup slide from {},{} to {},{}",
+                    from.x, from.y, to.x, to.y
+                )
+            });
             let start = std::time::Instant::now();
             loop {
                 let t = (start.elapsed().as_secs_f32() / SLIDE.as_secs_f32()).min(1.);
@@ -3153,6 +3161,7 @@ mod x11 {
             // Hidden before the window is shown again from the pool.
             let _ = connection.unmap_window(id);
             let _ = connection.sync();
+            zgx_gpu::present_log::log(|| format!("popup slid home {},{}", to.x, to.y));
         });
         SLIDING.with(|sliding| sliding.borrow_mut().push((slide, popup)));
     }

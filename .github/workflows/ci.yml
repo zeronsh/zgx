@@ -113,6 +113,8 @@ jobs:
         run: python3 scripts/test_xvfb_retry.py -v
       - name: The instruction gate counts each binary warm, with a cache of its own
         run: python3 scripts/perf/test_gate.py -v
+      - name: The inlining check reads MIR and fails on #1740's and #1824's changes
+        run: python3 scripts/perf/test_inline_scopes.py -v
       - run: cargo fmt --all -- --check
       # Every Luau script in the repository (examples and probes too), as
       # stylua.toml and .styluaignore have them.
@@ -303,8 +305,9 @@ jobs:
   perf:
     runs-on: ubuntu-latest
     # With the base's binaries not cached, both sides build: the head's took
-    # 19 minutes and the base's was cut at 26 (Nov 7, as scenes grew).
-    timeout-minutes: 75
+    # 19 minutes and the base's was cut at 26 (Nov 7, as scenes grew); the
+    # inlining check adds a MIR build of three crates.
+    timeout-minutes: 90
     permissions:
       contents: read
       pull-requests: write
@@ -376,10 +379,13 @@ jobs:
         run: |
           python3 scripts/perf/gate.py "$BASE" --stage head
           if [ -f "$ZGX_GATE_BIN_CACHE/built-from" ]; then echo "binaries=yes" >> "$GITHUB_OUTPUT"; fi
-      # One chunk of a streamed Markdown reply should cost the same at 800
-      # sections as at 100 (scripts/perf/flat_chunks.py; by phase,
-      # crates/zgx-script/tests/md_chunk_flat.rs). Reported, not yet failing
-      # the job: it fails while layout and damage still walk every block.
+      # One chunk of a streamed Markdown reply costs the same at 800 sections
+      # as at 100, within 1.25x, in zgx's own instructions (malloc's and
+      # Luau's collector's move ±15% run to run: scripts/perf/flat_chunks.py; by phase,
+      # crates/zgx-script/tests/md_chunk_flat.rs): a pull request that makes
+      # it grow fails at the Gate step, as one the gate refuses does. The
+      # step itself carries on, so a slow or broken one leaves the gate's
+      # counts to run; one that never finished leaves no status, a failure.
       # Here, with the head's crates alone in the target: once the gate has
       # built the base there, cargo links the base's zgx with the head's
       # script crate, a compile error at best and at worst the base's engine
@@ -390,7 +396,11 @@ jobs:
         timeout-minutes: 15
         env:
           ZGX_GATE_TARGET: target/perf-gate
-        run: python3 scripts/perf/flat_chunks.py --report --markdown "$GITHUB_STEP_SUMMARY"
+        run: |
+          chunk=0
+          python3 scripts/perf/flat_chunks.py --markdown "$GITHUB_STEP_SUMMARY" || chunk=$?
+          if [ "${{ github.event_name }}" != pull_request ]; then chunk=0; fi
+          echo "chunk=$chunk" >> "$GITHUB_ENV"
       - uses: actions/cache/save@v4
         if: github.ref == 'refs/heads/main' && steps.head.outputs.binaries == 'yes'
         continue-on-error: true
@@ -430,8 +440,46 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh pr comment ${{ github.event.pull_request.number }} --edit-last --create-if-none --body-file perf.md
+      # Whether the hot functions in zgx, zgx-gpu and zgx-script still
+      # inline what they did (scripts/perf/inline_scopes.py): a change far
+      # from one can make rustc's MIR inliner give up on it (#1740) or pull
+      # a callee into it (#1824). One MIR build of each crate, on the gate's
+      # release dependencies; the base is built only on a failure, to name
+      # the callees. On main, reported and not failing, as the gate. Skipped
+      # when nothing those crates compile changed: their sources and the
+      # crates they inline from (zgx-fx, zgx-components, zgx-3d, vendor/),
+      # the lockfile and profiles, and the check itself.
+      - name: Inlining
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        env:
+          BASE: ${{ steps.base.outputs.sha }}
+        run: |
+          # The default shell (`bash -e`) has no pipefail: the check's status,
+          # not tee's.
+          set -o pipefail
+          inline=0
+          sources='^crates/zgx(-gpu|-script|-fx|-components|-3d)?/.*\.rs$|^vendor/.*\.rs$|^Cargo\.(lock|toml)$|^scripts/perf/inline_scopes\.'
+          if ! git diff --name-only "$BASE" HEAD | grep -qE "$sources"; then
+            echo "### Inlining: skipped, no change to what zgx, zgx-gpu and zgx-script compile" >> "$GITHUB_STEP_SUMMARY"
+            echo "inline=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          start=$SECONDS
+          python3 scripts/perf/inline_scopes.py --target target/perf-gate --base "$BASE" 2>&1 | tee inline.txt || inline=$?
+          minutes=$(( (SECONDS - start + 30) / 60 ))
+          { echo "### Inlining ($minutes min)"; echo '```'; cat inline.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" != pull_request ]; then inline=0; fi
+          echo "inline=$inline" >> "$GITHUB_ENV"
       - name: Gate
-        run: exit "$status"
+        run: |
+          if [ "$inline" != 0 ]; then echo "a hot function inlines differently: see Inlining"; fi
+          if [ "${chunk:-1}" != 0 ]; then
+            echo "A streamed Markdown chunk grew with the reply past 1.25x, or wasn't counted (the 'Streamed Markdown per chunk' step)."
+            exit 1
+          fi
+          if [ "$status" != 0 ]; then exit "$status"; fi
+          exit "$inline"
   macos:
     runs-on: macos-latest
     timeout-minutes: 60

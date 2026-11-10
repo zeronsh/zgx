@@ -95,9 +95,37 @@ pub(crate) struct Watch {
     /// collector a turn, and a loop of them between host calls would fill
     /// the VM with garbage until the limit failed the script.
     collect_at: Cell<usize>,
-    /// The allocator passed `collect_at` (its alarm, `on_memory`): the
-    /// interrupt collects at its next check.
+    /// The allocator passed its alarm (`on_memory`): at `collect_at`, or past
+    /// `GC_TIGHT_FROM` with the collector's goal Luau's own. The interrupt
+    /// looks at its next check.
     collect: Cell<bool>,
+    /// The collector's goal past `GC_TIGHT_FROM`, if the host asked for one
+    /// (`ScriptHost::large_heap_goal`): with none, nothing here changes it.
+    large_goal: Option<c_int>,
+    /// Whether the collector's goal is `large_goal` (`steer_goal`).
+    tight: Cell<bool>,
+    /// Whether the alarm set is the line where the goal tightens, rather than
+    /// `collect_at`: what the interrupt does when it goes. Told by what the
+    /// alarm was set for, not by measuring again: the allocator's count and
+    /// the collector's differ, and one just past the line by the first may be
+    /// just short of it by the second.
+    alarm_tightens: Cell<bool>,
+}
+/// `LUA_GCSETGOAL`, in percent: Luau's own.
+pub(crate) const GC_GOAL_DEFAULT: c_int = 200;
+/// The heap past which the collector's goal is a host's large-heap goal
+/// (`ScriptHost::large_heap_goal`); it goes back below three quarters of
+/// this.
+pub(crate) const GC_TIGHT_FROM: usize = 32 << 20;
+/// The goal to set for a heap of `used` bytes, if it changes: `large` past
+/// `GC_TIGHT_FROM`, Luau's own again only below three quarters of it, so a
+/// heap near the line doesn't switch back and forth.
+pub(crate) fn collector_goal_for(used: usize, tight: bool, large: c_int) -> Option<c_int> {
+    match tight {
+        false if used > GC_TIGHT_FROM => Some(large),
+        true if used < GC_TIGHT_FROM * 3 / 4 => Some(GC_GOAL_DEFAULT),
+        _ => None,
+    }
 }
 impl Watch {
     /// The VM may hold `limit` from now: it collects halfway there.
@@ -107,13 +135,51 @@ impl Watch {
         self.collect_at.set(live + limit.saturating_sub(live) / 2);
         self.set_memory_alarm();
     }
-    /// The allocator's alarm at `collect_at`, if there is a limit.
+    /// The collector's goal for a heap of `used` bytes, set on `state` (the
+    /// VM's, between instructions or between calls) if it changes. The goal
+    /// is read only as a collection cycle ends, so it is set as the heap
+    /// crosses the line (the allocator's alarm) or settles after a
+    /// collection, not at every call.
+    ///
+    /// # Safety
+    ///
+    /// `state` is a thread of this watch's VM, on its thread, not allocating.
+    pub(crate) unsafe fn steer_goal(&self, state: *mut ffi::lua_State, used: usize) {
+        let Some(large) = self.large_goal else {
+            return;
+        };
+        if let Some(goal) = collector_goal_for(used, self.tight.get(), large) {
+            // SAFETY: as this function's.
+            unsafe { self.set_goal(state, goal) };
+        }
+    }
+    /// The collector's goal `goal`, on `state`.
+    ///
+    /// # Safety
+    ///
+    /// As for `steer_goal`.
+    unsafe fn set_goal(&self, state: *mut ffi::lua_State, goal: c_int) {
+        self.tight.set(goal != GC_GOAL_DEFAULT);
+        // SAFETY: sets a field of the VM's global state: no allocation, no
+        // error.
+        unsafe { ffi::lua_gc(state, ffi::LUA_GCSETGOAL, goal) };
+    }
+    /// The allocator's alarm: at `collect_at` if there is a limit, and past
+    /// `GC_TIGHT_FROM` while the goal is Luau's own; the lower of the two.
     fn set_memory_alarm(&self) {
         // A watch kept past its VM (by a meter) sets nothing.
         if !self.alive.get() {
             return;
         }
-        let alarm = (self.limit.get() > 0).then_some(mlua::MemoryAlarm {
+        let collect = (self.limit.get() > 0).then_some(self.collect_at.get());
+        let tighten = (self.large_goal.is_some() && !self.tight.get()).then_some(GC_TIGHT_FROM);
+        let at = match (collect, tighten) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.alarm_tightens
+            .set(tighten.is_some() && at == tighten && collect.is_none_or(|c| c > GC_TIGHT_FROM));
+        let alarm = at.map(|_| mlua::MemoryAlarm {
             call: on_memory,
             data: std::ptr::from_ref(self).cast(),
         });
@@ -123,11 +189,12 @@ impl Watch {
         // watch, which the alarm outlives only by never being called: it is
         // set again, or the VM goes, before the watch does (`Installed`
         // owns it, and clears the alarm as it drops).
-        unsafe { mlua::set_memory_alarm(self.main, self.collect_at.get(), alarm) };
+        unsafe { mlua::set_memory_alarm(self.main, at.unwrap_or(0), alarm) };
     }
 }
 
-/// The allocator's alarm past `collect_at`: collect at the next interrupt.
+/// The allocator's alarm (`Watch::set_memory_alarm`): look at the next
+/// interrupt.
 /// It runs inside an allocation: it only marks the watch and sets the slot.
 ///
 /// # Safety
@@ -138,7 +205,11 @@ unsafe fn on_memory(data: *const c_void) {
     // SAFETY: as above.
     let watch = unsafe { &*data.cast::<Watch>() };
     watch.collect.set(true);
-    watch.alarm.set(true);
+    // The line where the goal tightens: for the call's end (`publish`), the
+    // interrupt left as it is; `collect_at`: for the interrupt's next check.
+    if !watch.alarm_tightens.get() {
+        watch.alarm.set(true);
+    }
 }
 
 /// A VM's alarm, shared with the watchdog thread.
@@ -489,6 +560,37 @@ impl Installed {
     pub(crate) fn watch(&self) -> Rc<Watch> {
         self.watch.clone()
     }
+    /// The VM's heap settled at `used` bytes after a collection between
+    /// calls (`collect_garbage`): a goal tightened for a heap that has since
+    /// shrunk goes back to Luau's own.
+    pub(crate) fn heap_settled(&self, used: usize) {
+        // SAFETY: the VM's main thread, alive while this is (`Drop`), between
+        // calls into it.
+        unsafe {
+            self.watch
+                .steer_goal(self.main as *mut ffi::lua_State, used)
+        };
+        self.watch.set_memory_alarm();
+    }
+    /// The heap passed the line during the call just ended: the goal
+    /// tightens, between calls.
+    #[cold]
+    #[inline(never)]
+    fn tighten(&self) {
+        self.watch.collect.set(false);
+        if let Some(goal) = self.watch.large_goal {
+            // SAFETY: the VM's main thread, alive while this is (`Drop`),
+            // between calls into it.
+            unsafe { self.watch.set_goal(self.main as *mut ffi::lua_State, goal) };
+        }
+        self.watch.set_memory_alarm();
+        self.watch.alarm.set(false);
+    }
+    /// Whether the collector's goal is the tight one, for tests.
+    #[cfg(test)]
+    pub(crate) fn goal_is_tight(&self) -> bool {
+        self.watch.tight.get()
+    }
     /// Whether the watchdog counts a call running, and the interrupt set.
     #[cfg(test)]
     pub(crate) fn state(&self) -> (bool, bool) {
@@ -515,6 +617,8 @@ impl Installed {
                 alarm.due.store(0, Ordering::SeqCst);
                 if !self.watch.collect.get() {
                     alarm.set(false);
+                } else if self.watch.alarm_tightens.get() {
+                    self.tighten();
                 }
             }
         }
@@ -544,8 +648,13 @@ impl Drop for Installed {
 
 /// Watch `lua`: its interrupt, set when `deadline` passes or garbage needs
 /// collecting before `limit`.
-pub(crate) fn install(lua: &Lua, deadline: Rc<Cell<Option<Deadline>>>, limit: usize) -> Installed {
-    install_on(Watchdog::get(), lua, deadline, limit)
+pub(crate) fn install(
+    lua: &Lua,
+    deadline: Rc<Cell<Option<Deadline>>>,
+    limit: usize,
+    large_goal: Option<c_int>,
+) -> Installed {
+    install_on(Watchdog::get(), lua, deadline, limit, large_goal)
 }
 
 /// `install`, watched by `watchdog`.
@@ -554,6 +663,7 @@ fn install_on(
     lua: &Lua,
     deadline: Rc<Cell<Option<Deadline>>>,
     limit: usize,
+    large_goal: Option<c_int>,
 ) -> Installed {
     let (main, slot) = (
         Cell::new(std::ptr::null_mut()),
@@ -586,6 +696,9 @@ fn install_on(
         live: Cell::new(0),
         collect_at: Cell::new(limit / 2),
         collect: Cell::new(false),
+        large_goal,
+        tight: Cell::new(false),
+        alarm_tightens: Cell::new(false),
     });
     watch.set_memory_alarm();
     watchdog.lock().push(Arc::downgrade(&alarm));
@@ -735,23 +848,27 @@ unsafe fn check(state: *mut ffi::lua_State) -> Verdict {
         return Verdict::Continue;
     };
     let limit = watch.limit.get();
-    if watch.collect.replace(false) && limit > 0 {
-        // SAFETY: the counts read the VM's totals. The full collection runs
-        // at a safepoint, where the VM has saved its frame and keeps the
-        // thread's top above every live register, as it does for the
-        // collection steps its own instructions take. Neither raises an
+    // SAFETY: the counts read the VM's totals.
+    let used = |state| unsafe {
+        ffi::lua_gc(state, ffi::LUA_GCCOUNT, 0) as usize * 1024
+            + ffi::lua_gc(state, ffi::LUA_GCCOUNTB, 0) as usize
+    };
+    if watch.collect.get() && !watch.alarm_tightens.get() && limit > 0 {
+        watch.collect.set(false);
+        // SAFETY: the full collection runs at a safepoint, where the VM has
+        // saved its frame and keeps the thread's top above every live
+        // register, as it does for the collection steps its own instructions
+        // take. Neither raises an
         // error (a collection only frees and shrinks). The collector may run
         // userdata destructors (Rust drops), as any allocation's step may;
         // no borrow of `WATCHES` is held meanwhile, so one dropping an
         // `Installed` is fine.
-        let used = |state| unsafe {
-            ffi::lua_gc(state, ffi::LUA_GCCOUNT, 0) as usize * 1024
-                + ffi::lua_gc(state, ffi::LUA_GCCOUNTB, 0) as usize
-        };
         unsafe { ffi::lua_gc(state, ffi::LUA_GCCOLLECT, 0) };
         let live = used(state);
         watch.live.set(live);
         watch.collect_at.set(live + limit.saturating_sub(live) / 2);
+        // SAFETY: as above, at a safepoint.
+        unsafe { watch.steer_goal(state, live) };
         watch.set_memory_alarm();
     }
     match watch.deadline.get() {
@@ -791,7 +908,7 @@ mod tests {
         let limit = 8 << 20;
         lua.set_memory_limit(limit).unwrap();
         let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
-        let installed = install(&lua, deadline, limit);
+        let installed = install(&lua, deadline, limit, None);
         let slot = installed.watch.alarm.slot.load(Ordering::Acquire);
         let set = || unsafe { !(*slot).load(Ordering::Acquire).is_null() };
         installed.publish(Some(Deadline::start(Duration::from_secs(60)).due()));
@@ -817,6 +934,120 @@ mod tests {
         assert!(set(), "a pending collection keeps it set past a call's end");
     }
 
+    /// The goal Luau holds for `installed`'s VM, in percent (read by setting
+    /// it back as it was, between calls).
+    fn luau_goal(installed: &Installed) -> c_int {
+        let state = installed.main as *mut ffi::lua_State;
+        // SAFETY: the VM's main thread, between calls; `LUA_GCSETGOAL` only
+        // sets a field and returns the one before.
+        unsafe {
+            let goal = ffi::lua_gc(state, ffi::LUA_GCSETGOAL, GC_GOAL_DEFAULT);
+            ffi::lua_gc(state, ffi::LUA_GCSETGOAL, goal);
+            goal
+        }
+    }
+
+    /// The collector's goal tightens past `GC_TIGHT_FROM` and loosens only
+    /// well below it: a small heap keeps Luau's own, a heap near the line
+    /// doesn't switch back and forth.
+    #[test]
+    fn the_collector_tightens_for_a_large_heap_alone() {
+        let large = 150;
+        assert_eq!(
+            collector_goal_for(8 << 20, false, large),
+            None,
+            "a small heap keeps Luau's"
+        );
+        assert_eq!(
+            collector_goal_for(GC_TIGHT_FROM + 1, false, large),
+            Some(large)
+        );
+        assert_eq!(
+            collector_goal_for(GC_TIGHT_FROM - 1, true, large),
+            None,
+            "no switch just under"
+        );
+        assert_eq!(
+            collector_goal_for(GC_TIGHT_FROM / 2, true, large),
+            Some(GC_GOAL_DEFAULT)
+        );
+    }
+
+    /// A heap growing past `GC_TIGHT_FROM` tightens the goal Luau holds once
+    /// the call that took it there ends (a call runs at the goal it began
+    /// with), with no call doing anything for it; once freed and collected
+    /// between calls, the goal is Luau's own again. A small heap's is never
+    /// set.
+    #[test]
+    fn a_large_heap_tightens_its_collector_once_its_call_ends() {
+        let lua = Lua::new();
+        let limit = 1 << 30;
+        lua.set_memory_limit(limit).unwrap();
+        let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
+        let installed = install(&lua, deadline, limit, Some(150));
+        // An outermost call, as `Vm::guard` makes one, up to its end.
+        let call = |code: &str| {
+            installed.publish(Some(Deadline::start(Duration::from_secs(60)).due()));
+            lua.load(code).exec().unwrap();
+        };
+        // A small heap: Luau's own goal, untouched.
+        call("small = {} for i = 1, 20000 do small[i] = tostring(i) end");
+        installed.publish(None);
+        assert!(lua.used_memory() < GC_TIGHT_FROM);
+        assert!(!installed.goal_is_tight());
+        assert_eq!(luau_goal(&installed), GC_GOAL_DEFAULT);
+        // Past the line, kept alive: the allocator's alarm marked it, and the
+        // call goes on at Luau's goal; it tightens as the call ends.
+        call("big = {} for i = 1, 1500000 do big[i] = tostring(i) end");
+        assert!(
+            lua.used_memory() > GC_TIGHT_FROM,
+            "{} bytes",
+            lua.used_memory()
+        );
+        assert!(!installed.goal_is_tight(), "not during the call");
+        assert_eq!(luau_goal(&installed), GC_GOAL_DEFAULT);
+        installed.publish(None);
+        assert!(installed.goal_is_tight());
+        assert_eq!(luau_goal(&installed), 150);
+        // No full collection for crossing the line: `collect_at` is far off.
+        assert_eq!(installed.watch.live.get(), 0);
+        // Freed, collected between calls, settled: Luau's own again.
+        call("big = nil small = nil");
+        installed.publish(None);
+        lua.gc_collect().unwrap();
+        lua.gc_collect().unwrap();
+        installed.heap_settled(lua.used_memory());
+        assert!(!installed.goal_is_tight());
+        assert_eq!(luau_goal(&installed), GC_GOAL_DEFAULT);
+    }
+
+    /// A host that asked for no large-heap goal (the default): a heap past
+    /// the line keeps Luau's own, the alarm stays at `collect_at` alone, and
+    /// settling sets nothing.
+    #[test]
+    fn without_a_large_heap_goal_the_collector_keeps_luaus() {
+        let lua = Lua::new();
+        let limit = 1 << 30;
+        lua.set_memory_limit(limit).unwrap();
+        let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
+        let installed = install(&lua, deadline, limit, None);
+        assert!(
+            !installed.watch.alarm_tightens.get(),
+            "the alarm is collect_at's"
+        );
+        installed.publish(Some(Deadline::start(Duration::from_secs(60)).due()));
+        lua.load("big = {} for i = 1, 1500000 do big[i] = tostring(i) end")
+            .exec()
+            .unwrap();
+        assert!(lua.used_memory() > GC_TIGHT_FROM);
+        assert!(!installed.watch.collect.get(), "no alarm at the line");
+        installed.publish(None);
+        assert!(!installed.goal_is_tight());
+        assert_eq!(luau_goal(&installed), GC_GOAL_DEFAULT);
+        installed.heap_settled(lua.used_memory());
+        assert_eq!(luau_goal(&installed), GC_GOAL_DEFAULT);
+    }
+
     /// With no call running the watchdog parks for good: an idle app wakes
     /// nothing. A call due wakes it, and it sleeps until that call is due.
     #[test]
@@ -825,7 +1056,7 @@ mod tests {
         let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
         // A watchdog of its own: other tests' scripts run on the process's.
         let watchdog = Watchdog::spawn();
-        let installed = install_on(watchdog, &lua, deadline, 0);
+        let installed = install_on(watchdog, &lua, deadline, 0, None);
         let settled = |want: &dyn Fn(u64) -> bool| {
             let start = Instant::now();
             while !want(watchdog.sleep_until.load(Ordering::SeqCst)) {
@@ -864,7 +1095,7 @@ mod tests {
         let lua = Lua::new();
         let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
         let watchdog = Watchdog::spawn();
-        let installed = install_on(watchdog, &lua, deadline, 0);
+        let installed = install_on(watchdog, &lua, deadline, 0, None);
         let settled = |want: &dyn Fn(u64) -> bool| {
             let start = Instant::now();
             while !want(watchdog.sleep_until.load(Ordering::SeqCst)) {
@@ -896,7 +1127,7 @@ mod tests {
         let lua = Lua::new();
         let deadline: Rc<Cell<Option<Deadline>>> = Rc::default();
         let watchdog = Watchdog::spawn();
-        let installed = install_on(watchdog, &lua, deadline.clone(), 0);
+        let installed = install_on(watchdog, &lua, deadline.clone(), 0, None);
         let call = Deadline::start(Duration::ZERO);
         deadline.set(Some(call));
         installed.publish(Some(call.due()));

@@ -12,6 +12,11 @@ by colours the shell prints.
   takes the next command at once: blue cells;
 - a program's underline styles in colours of their own (SGR 4:3 and 4:2,
   with 58) draw as a red wave and two green lines;
+- pictures a program prints reach the window's pixels at the size the
+  terminal reports cells: a program reads the cell's size in pixels
+  (TIOCGWINSZ), as chafa does, and sends a kitty graphics picture (cyan) and
+  a sixel image (yellow) eight cells wide by it; each covers eight cells on
+  the screen (`--scale 2`: at a scale factor of 2 as well);
 - resizing the window resizes the grid the shell sees: a bar `tput cols`
   wide shrinks with the window;
 - an idle, focused terminal does no work: the process's CPU time stays put
@@ -40,6 +45,28 @@ from platform_smoke import stop  # noqa: E402
 from web_view_smoke import spoken, start_orca  # noqa: E402
 
 MAGENTA, GREEN, BLUE, ORANGE = (255, 0, 255), (0, 255, 0), (0, 0, 255), (255, 128, 0)
+CYAN, YELLOW = (0, 255, 255), (255, 255, 0)
+# Run by the shell: the cell's size in pixels as the terminal reports it
+# (TIOCGWINSZ), saved beside the captures, then a kitty picture eight cells
+# by two by it (cyan RGB, in chunks, q=2: an answer would reach the shell as
+# typing) and a sixel image eight cells wide (yellow), as programs that size
+# pictures by the cell send them.
+PICTURES = r'''
+import base64, fcntl, struct, sys, termios
+rows, cols, xpix, ypix = struct.unpack("4H", fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8)))
+cw, ch = xpix // cols, ypix // rows
+open(sys.argv[1], "w").write(f"{cw} {ch}")
+out = sys.stdout
+data = base64.b64encode(bytes([0, 255, 255]) * (8 * cw * 2 * ch)).decode()
+chunks = [data[i:i + 4096] for i in range(0, len(data), 4096)]
+for i, chunk in enumerate(chunks):
+    keys = f"a=T,f=24,s={8 * cw},v={2 * ch},q=2," if i == 0 else ""
+    out.write(f"\033_G{keys}m={int(i + 1 < len(chunks))};{chunk}\033\\")
+out.write("\n")
+bands = max(1, (2 * ch) // 6)
+out.write(f'\033Pq"1;1;{8 * cw};{6 * bands}#1;2;100;100;0' + f"!{8 * cw}~-" * bands + "\033\\\n")
+out.flush()
+'''
 
 
 def bar(colour):
@@ -73,12 +100,13 @@ def main():
     parser.add_argument("binary", type=pathlib.Path)
     parser.add_argument("--output", type=pathlib.Path, default=pathlib.Path("/tmp/zgx-terminal"))
     parser.add_argument("--orca", action="store_true", help="check what Orca and AT-SPI read instead")
+    parser.add_argument("--scale", type=int, default=1, help="the X11 scale factor the window has")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     display = os.environ.get("DISPLAY")
     if not display:
         parser.error("DISPLAY must name an X11 display with a window manager")
-    env = dict(os.environ, WINIT_X11_SCALE_FACTOR="1", SHELL="/bin/sh", PS1="$ ", ENV="/dev/null")
+    env = dict(os.environ, WINIT_X11_SCALE_FACTOR=str(args.scale), SHELL="/bin/sh", PS1="$ ", ENV="/dev/null")
     env.pop("WAYLAND_DISPLAY", None)
     owned = []
     if args.orca:
@@ -166,6 +194,29 @@ def main():
                 raise AssertionError(f"underline styles: red rows {sorted(red)}, green rows {sorted(green)}")
             time.sleep(0.1)
         print(f"terminal: a curly underline ({len(red)} rows) and a double one ({len(bands)} lines) in their colours")
+
+        # Pictures sized by the cell the terminal reports, through the
+        # session's parsing, the view's picture layer and the renderer, to
+        # the window's pixels: each covers the cells it was made for.
+        script, reported = args.output / "pictures.py", args.output / "cell.txt"
+        script.write_text(PICTURES)
+        type_line(f"clear; python3 {script} {reported}")
+        kitty = until("a kitty picture", CYAN)
+        sixel = until("a sixel image", YELLOW)
+        cw, ch = map(int, reported.read_text().split())
+        row = magenta[3] - magenta[1]
+        # Within 3 pixels: a cell is a fraction of a pixel wide (15.6 at a
+        # scale of 2), which cells' backgrounds round and a picture covers.
+        for name, found, rows in (("kitty picture", kitty, 2), ("sixel image", sixel, None)):
+            w, h = found[2] - found[0], found[3] - found[1]
+            if abs(w - width) > 3:
+                raise AssertionError(f"a {name} {8 * cw} px wide (8 cells of {cw} px reported) "
+                                     f"drew {w} px wide, eight cells {width}")
+            if rows and abs(h - rows * row) > 3:
+                raise AssertionError(f"a {name} {rows * ch} px tall drew {h} px tall, {rows} rows {rows * row}")
+        print(f"terminal: cells reported {cw}x{ch} px; a kitty picture {8 * cw}x{2 * ch} drew "
+              f"{kitty[2] - kitty[0]}x{kitty[3] - kitty[1]} px over 8x2 cells ({width}x{2 * row}), "
+              f"a sixel image {8 * cw} wide drew {sixel[2] - sixel[0]} px (scale {args.scale})")
 
         orange = "clear; printf '\\033[48;2;255;128;0m%*s\\033[0m\\n' $(tput cols) ''"
         type_line(orange)
