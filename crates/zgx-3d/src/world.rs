@@ -15,9 +15,15 @@ mod grade;
 #[cfg(feature = "post")]
 mod post;
 #[cfg(feature = "post")]
+mod post_pass;
+#[cfg(feature = "post")]
 pub use grade::{Grade, Lut, LutError};
 #[cfg(feature = "post")]
 pub use post::{Bloom, ChromaticAberration, Grain, Post, Vignette};
+#[cfg(feature = "post")]
+pub(crate) use post_pass::AppPass;
+#[cfg(feature = "post")]
+pub use post_pass::{Param, ParamValue, PostError, PostPass, PostPassId, PostStage};
 
 /// How a surface takes light: a metallic-roughness material, as glTF's.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -452,6 +458,12 @@ pub(crate) struct Inner {
     /// What its frame goes through after its meshes (`World::set_post`).
     #[cfg(feature = "post")]
     pub(crate) post: Post,
+    /// The app's own post passes (`World::add_post`), in the order added,
+    /// and the last id given.
+    #[cfg(feature = "post")]
+    pub(crate) post_passes: Vec<post_pass::AppPass>,
+    #[cfg(feature = "post")]
+    pub(crate) post_ids: u64,
     /// Samples a pixel (`World::set_samples`): 4 or 1.
     pub(crate) samples: u32,
     /// Objects' textures (`World::set_map`), by index, in `Map::ALL`'s order,
@@ -1192,6 +1204,10 @@ impl World {
             exposure: 0.,
             #[cfg(feature = "post")]
             post: Post::default(),
+            #[cfg(feature = "post")]
+            post_passes: Vec::new(),
+            #[cfg(feature = "post")]
+            post_ids: 0,
             samples: 4,
             textures: Default::default(),
             skins: Default::default(),

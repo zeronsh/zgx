@@ -1,6 +1,8 @@
 //! The post chain's passes (design-3d-aaa.md, 6.1): bloom's steps, and the
 //! last pass, which mixes bloom in, exposes the scene, maps its tones and
 //! writes the view's target. Made with a world's first frame with one on.
+mod apps;
+
 use super::graph::{Graph, SCENE, bloom_format};
 use zgx_gpu::wgpu;
 
@@ -87,6 +89,10 @@ pub(super) struct Chain {
     stand_in: wgpu::TextureView,
     /// The grading table on the device, by its id.
     table: Option<(u64, wgpu::TextureView)>,
+    /// The app's passes, made with the first; and a copy back into the
+    /// scene after an odd count of HDR ones.
+    apps: Option<apps::Apps>,
+    copy: wgpu::RenderPipeline,
     binds: Option<Binds>,
 }
 
@@ -204,6 +210,12 @@ impl Chain {
             operation: wgpu::BlendOperation::Add,
         };
         let (first, down) = (step("first", None), step("down", None));
+        let copy = pipeline(
+            device,
+            (&shader, "copy", &[]),
+            &step_pipeline_layout,
+            SCENE.into(),
+        );
         let up = step(
             "up",
             Some(wgpu::BlendState {
@@ -253,6 +265,8 @@ impl Chain {
             look,
             stand_in,
             table: None,
+            apps: None,
+            copy,
             binds: None,
         }
     }
@@ -260,6 +274,36 @@ impl Chain {
     /// Lets go of the bindings of the graph's targets (they hold them).
     pub(super) fn rest(&mut self) {
         self.binds = None;
+        if let Some(apps) = &mut self.apps {
+            apps.rest();
+        }
+    }
+
+    /// The app's passes of `stage` (`apps::Apps::run`).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn apps(
+        &mut self,
+        (device, queue): (&wgpu::Device, &wgpu::Queue),
+        encoder: &mut wgpu::CommandEncoder,
+        graph: &Graph,
+        passes: &[crate::world::AppPass],
+        stage: crate::world::PostStage,
+        into: (&wgpu::TextureView, wgpu::TextureFormat, bool),
+        (index, time): (u64, std::time::Instant),
+    ) {
+        let apps = self.apps.get_or_insert_with(|| apps::Apps::new(device));
+        apps.retain(passes);
+        let copy = (index, time, &self.copy);
+        apps.run(
+            (device, queue),
+            encoder,
+            graph,
+            passes,
+            stage,
+            into,
+            copy,
+            &self.step_layout,
+        );
     }
     /// The bytes of the targets its bindings hold: at most those of the
     /// compile they were made for.

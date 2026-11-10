@@ -573,9 +573,25 @@ impl Viewport for Renderer {
         // With the post chain, meshes draw into a scene in linear light, and
         // its last pass writes the target.
         #[cfg(feature = "post")]
-        let chain = graph::Chain {
-            on: world.post.any(),
-            bloom: world.post.bloom.is_some(),
+        let chain = {
+            let staged = |stage| {
+                let n = world
+                    .post_passes
+                    .iter()
+                    .filter(|p| p.stage == stage)
+                    .count();
+                n.min(usize::from(u8::MAX)) as u8
+            };
+            let (hdr, display) = (
+                staged(crate::PostStage::Hdr),
+                staged(crate::PostStage::Display),
+            );
+            graph::Chain {
+                on: world.post.any() || hdr + display > 0,
+                bloom: world.post.bloom.is_some(),
+                hdr,
+                display,
+            }
         };
         #[cfg(not(feature = "post"))]
         let chain = graph::Chain::default();
@@ -870,14 +886,62 @@ impl Viewport for Renderer {
                 }
                 #[cfg(feature = "post")]
                 Pass::Final => {
-                    let look = post_look(&world, &gpu.graph, encode, gpu.frame);
-                    let chain = gpu
+                    // Into what the display shows where the app's display
+                    // passes follow (they encode, the last of them).
+                    let shown = gpu
+                        .graph
+                        .targets
+                        .as_ref()
+                        .and_then(|t| t.others[1].as_ref());
+                    let (into, encodes) = match shown {
+                        Some(shown) if chain.display > 0 => ((shown, graph::SCENE), false),
+                        _ => ((target, format), encode),
+                    };
+                    let mut look = post_look(&world, &gpu.graph, encodes, gpu.frame);
+                    if chain.display > 0 && encode {
+                        // Composited in linear light: the last display pass
+                        // encodes it with the rest.
+                        let [r, g, b, a] = look.0.background;
+                        let decode = |c: f32| {
+                            let c = c / a.max(1e-4);
+                            let linear = if c <= 0.04045 {
+                                c / 12.92
+                            } else {
+                                ((c + 0.055) / 1.055).powf(2.4)
+                            };
+                            linear * a
+                        };
+                        look.0.background = [decode(r), decode(g), decode(b), a];
+                    }
+                    let post = gpu
                         .post
                         .get_or_insert_with(|| post::Chain::new(frame.device));
                     let device = (frame.device, frame.queue);
-                    let into = (target, format);
                     let table = world.post.grade.as_ref().and_then(|g| g.lut.as_ref());
-                    chain.last(device, frame.encoder, &gpu.graph, into, look, table);
+                    post.last(device, frame.encoder, &gpu.graph, into, look, table);
+                }
+                #[cfg(feature = "post")]
+                Pass::AppHdr | Pass::AppDisplay => {
+                    let stage = if pass == Pass::AppHdr {
+                        crate::PostStage::Hdr
+                    } else {
+                        crate::PostStage::Display
+                    };
+                    let post = gpu
+                        .post
+                        .get_or_insert_with(|| post::Chain::new(frame.device));
+                    let device = (frame.device, frame.queue);
+                    let passes = &world.post_passes;
+                    let into = (target, format, encode);
+                    post.apps(
+                        device,
+                        frame.encoder,
+                        &gpu.graph,
+                        passes,
+                        stage,
+                        into,
+                        (gpu.frame, frame.time),
+                    );
                 }
             }
         }

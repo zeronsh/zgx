@@ -308,3 +308,9 @@ fn uncurve(y: f32) -> f32 {
     let l = max(luma(y), 1e-5);
     return vec4(y * (uncurve(l) / l) / exposure * mean.a, mean.a);
 }
+
+// The scene's other half copied back into it (after an odd count of the
+// app's HDR passes).
+@fragment fn copy(in: Out) -> @location(0) vec4<f32> {
+    return textureLoad(source, vec2<i32>(in.position.xy), 0);
+}
