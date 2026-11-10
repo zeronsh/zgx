@@ -51,6 +51,11 @@ webview2 = ["dep:webview2-com", "zgx-gpu/composition", "windows/Win32_Graphics_D
 # (libwebkit2gtk-4.1-0) is opened at run time: building needs none of it,
 # and where it is missing pages are placeholders.
 webkitgtk = []
+# Sound (zgx-audio on the system's output): one engine for the app, made
+# when first asked for (`WindowFactory::audio`), voices ending waking the
+# event loop, and the `ui` bus following the user's interface-sound setting.
+# Off by default: an app that plays nothing carries none of it.
+audio = ["dep:zgx-audio", "zgx-audio/device"]
 # mimalloc as the program's allocator, in place of the system's: 1-10%
 # fewer cycles in zgx's headless scenes (text 7%, layout 6%, animation
 # 9%), for up to 3 MB more resident memory. A program has one allocator:
@@ -60,6 +65,7 @@ mimalloc = ["dep:mimalloc"]
 [dependencies]
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
 zgx-terminal = { path = "../zgx-terminal", version = "0.1.10", optional = true }
+zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 mimalloc = { version = "0.1", default-features = false, optional = true }
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
 winit = "0.30.13"

@@ -26,6 +26,12 @@ components = ["dep:zgx-components"]
 # which a headless host (tests, tools, a server) would not otherwise.
 # zgx-run turns it on, so apps it runs have it.
 scene3d = ["dep:zgx-3d"]
+# The `audio` global (sounds, music, voices and buses on zgx-audio),
+# `sound =` on controls, and their bindings to state. Off by default: an
+# app that plays nothing carries none of it. The host gives scripts its
+# engine (`ScriptHost::set_audio`); this feature opens no device itself
+# (zgx-desktop's `audio` does).
+audio = ["dep:zgx-audio"]
 # Localized messages' plural rules and numbers for every locale (zgx's
 # `i18n`, ICU4X's data: about 90 KB). Off by default: `ui.t` reaches the
 # formatters, so a host would carry them whether or not its scripts call
@@ -51,6 +57,7 @@ inspect = ["zgx/trace", "dep:png"]
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
 zgx-components = { path = "../zgx-components", version = "0.1.10", optional = true }
 zgx-3d = { path = "../zgx-3d", version = "0.1.10", optional = true }
+zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 # Image decoding for `ui.image` (PNG, JPEG).
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
 mlua = { package = "zgx-mlua", version = "0.12.8", path = "../../vendor/mlua", features = ["luau"] }

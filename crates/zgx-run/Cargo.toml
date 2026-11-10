@@ -48,6 +48,11 @@ terminal = ["zgx-desktop/terminal"]
 # languages (zgx-desktop's `hyphens`, about 1.2 MB of the binary). Off by
 # default for now.
 hyphens = ["zgx-desktop/hyphens"]
+# Sound: the `audio` global and `sound =` on controls (zgx-script's
+# `audio`), played on the system's output (zgx-desktop's `audio`), with Ogg
+# Vorbis besides WAV. Off by default for now: without it, a script reading
+# `audio` finds nil.
+audio = ["zgx-desktop/audio", "zgx-script/audio", "dep:zgx-audio", "zgx-audio/vorbis"]
 # `ui.model` (zgx-script's `gltf`): glTF models in 3D scenes. 48.5 KiB
 # of a build for shipping (`dist`, on against off at one commit).
 gltf = ["zgx-script/gltf"]
@@ -56,6 +61,8 @@ gltf = ["zgx-script/gltf"]
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
 zgx-desktop = { path = "../zgx-desktop", version = "0.1.10" }
 zgx-script = { path = "../zgx-script", version = "0.1.10" }
+# Ogg Vorbis for `audio` (the feature): zgx-audio's own `vorbis`.
+zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true }
 serde_json = "1"
 # `~3.5`: the fetcher's connector uses `ureq::unversioned`, which a minor
 # release may change.

@@ -81,6 +81,17 @@
 //!   `thread`?). Types catch the calls; a misspelled `view` case they
 //!   don't (Luau takes a table's extra fields), nor an app past their
 //!   limit.
+//! - `audio-load-in-builder`: `audio.sound` or `audio.music` in a component
+//!   or row: it loads (or opens a stream) for every instance.
+//! - `audio-play-timer`: `audio.play` from a `ui.every` under 50 ms or a
+//!   per-frame callback: it lands on the timer's tick, where `at` lands on
+//!   a frame of the mixer's clock.
+//! - `audio-sound-too-long`: `audio.sound` of a file beside the script that
+//!   lasts over 10 s (its header read, nothing decoded): it's decoded whole
+//!   into memory, where `audio.music` streams it.
+//! - `audio-param-in-loop`: a voice's or bus's `:gain`, `:pan` or `:pitch`
+//!   given a number from a `ui.every` or a per-frame callback: a state or a
+//!   binding moves it with no script.
 
 use crate::check::{CheckError, Diagnostic, Report, Severity, scripts};
 use std::path::{Path, PathBuf};
@@ -228,6 +239,22 @@ pub const RULES: &[(&str, &str)] = &[
     (
         "unknown-route",
         "a route name given to a router's navigate, replace, is or view that no ui.router declares",
+    ),
+    (
+        "audio-load-in-builder",
+        "audio.sound or audio.music in a component or row loads again for every instance",
+    ),
+    (
+        "audio-play-timer",
+        "audio.play from a ui.every under 50 ms or a per-frame callback, rather than `at`",
+    ),
+    (
+        "audio-sound-too-long",
+        "audio.sound of a file over 10 s, decoded whole, rather than streamed with audio.music",
+    ),
+    (
+        "audio-param-in-loop",
+        "a sound's gain, pan or pitch set to a number from a timer or a frame callback",
     ),
 ];
 
@@ -1784,29 +1811,20 @@ impl Linter<'_> {
             && (self.is(at + 2, "state") || self.is(at + 2, "persist"))
             && self.is(at + 3, "(")
             && literal_key
+            && let Some(builder) = builder(stack)
         {
-            let builder = stack.iter().enumerate().rev().find_map(|(index, frame)| {
-                (frame.open == Open::Function).then_some(())?;
-                let parent = index.checked_sub(1).map(|p| &stack[p])?;
-                match parent.callee.as_deref() {
-                    Some(c @ ("ui.component" | "ui.each" | "ui.presence")) => Some(c.to_string()),
-                    _ if frame.key.as_deref() == Some("row") => Some("ui.list".to_string()),
-                    _ => None,
-                }
-            });
-            if let Some(builder) = builder {
-                let what = &self.tokens[at + 2].text;
-                self.report(
-                    at,
-                    "state-in-builder",
-                    format!(
-                        "`ui.{what}` in a `{builder}` builder is keyed to the script, so every \
-                         instance shares one state (and the key collides with any other use). \
-                         Use `ui.use_state(initial)` for state of each instance."
-                    ),
-                );
-            }
+            let what = &self.tokens[at + 2].text;
+            self.report(
+                at,
+                "state-in-builder",
+                format!(
+                    "`ui.{what}` in a `{builder}` builder is keyed to the script, so every \
+                     instance shares one state (and the key collides with any other use). \
+                     Use `ui.use_state(initial)` for state of each instance."
+                ),
+            );
         }
+        self.audio_rules(at, stack, function);
         // A `key` function of `ui.each` reading state.
         if self.is(at, ":")
             && (self.is(at + 1, "get") || self.is(at + 1, "peek"))
@@ -1895,6 +1913,105 @@ impl Linter<'_> {
                     (1000. / ms.max(1.)).round()
                 ),
             );
+        }
+    }
+
+    /// The audio library's rules, at the token `at` (`audio-…`).
+    fn audio_rules(&mut self, at: usize, stack: &[Frame], function: Option<usize>) {
+        let call = |name: &str| {
+            self.is(at, "audio")
+                && self.is(at + 1, ".")
+                && self.is(at + 2, name)
+                && self.is(at + 3, "(")
+                && !self.is(at.wrapping_sub(1), ".")
+        };
+        let (sound, music, play) = (call("sound"), call("music"), call("play"));
+        // A timer faster than 50 ms, or a per-frame callback, around `at`.
+        let ticking = function.and_then(|f| {
+            if let Some(key @ ("onUpdate" | "onRender" | "onBeforeUpdate" | "on_frame")) =
+                stack[f].key.as_deref()
+            {
+                return Some(format!("`{key}`"));
+            }
+            let timer = f.checked_sub(1).map(|p| &stack[p])?;
+            let ms = self.number(timer.at + 1)?;
+            (timer.callee.as_deref() == Some("ui.every") && ms < 50.)
+                .then(|| format!("`ui.every({ms})`"))
+        });
+        if (sound || music)
+            && let Some(builder) = builder(stack)
+        {
+            let what = &self.tokens[at + 2].text;
+            self.report(
+                at,
+                "audio-load-in-builder",
+                format!(
+                    "`audio.{what}` in a `{builder}` builder runs for every instance it builds: \
+                     load once, at the top of the script or a module, and play it from here."
+                ),
+            );
+        }
+        if play && let Some(ticking) = &ticking {
+            self.report(
+                at,
+                "audio-play-timer",
+                format!(
+                    "`audio.play` from {ticking} lands on the timer's tick, which moves with the \
+                     frame. Schedule on the mixer's clock instead: `audio.play(s, {{ at = \
+                     audio.now() + 0.25 }})` starts on that exact frame (several at once for a \
+                     rhythm)."
+                ),
+            );
+        }
+        if sound
+            && let Some(literal) = self.tokens.get(at + 4).filter(|t| t.kind == Kind::Str)
+            && (self.is(at + 5, ")") || self.is(at + 5, ","))
+            && let Some(seconds) = sound_seconds(
+                &self
+                    .file
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join(unquote(&literal.text)),
+            )
+            && seconds > 10.
+        {
+            self.report(
+                at,
+                "audio-sound-too-long",
+                format!(
+                    "this sound lasts {seconds:.0} s, and `audio.sound` decodes it whole into \
+                     memory ({:.0} MB as stereo at 48 kHz). `audio.music` streams it as it \
+                     plays, half a second ahead.",
+                    seconds * 48_000. * 2. * 4. / 1e6
+                ),
+            );
+        }
+        if self.is(at, ":")
+            && ["gain", "pan", "pitch"]
+                .iter()
+                .any(|name| self.is(at + 1, name))
+            && self.is(at + 2, "(")
+            && let Some(ticking) = &ticking
+        {
+            let close = self.closing(at + 2);
+            let argument = &self.tokens[at + 3..close];
+            let bound = argument.first().is_some_and(|t| t.is("ui"));
+            let numeric = argument.iter().any(|t| {
+                t.kind == Kind::Number || ["+", "-", "*", "/", "math"].iter().any(|op| t.is(op))
+            });
+            if numeric && !bound {
+                let what = &self.tokens[at + 1].text;
+                self.report(
+                    at + 1,
+                    "audio-param-in-loop",
+                    format!(
+                        "`:{what}(…)` set to a number from {ticking} runs the script to move a \
+                         sound. Give it a state once (`:{what}(level)`) and set the state, or a \
+                         binding (`:{what}(ui.tween(level))`), which eases in Rust with no \
+                         script per frame."
+                    ),
+                );
+            }
         }
     }
 
@@ -2173,6 +2290,69 @@ const REWRITE_MESSAGE: &str = "this text is rewritten whole each time a chunk ar
     costs the reply's length: rewrite each piece as it's appended (`reply:append(rewrite(piece))`, \
     holding back a delimiter split across pieces) and give `ui.markdown` that state.";
 
+/// The builder (`ui.component`, `ui.each`, `ui.presence`, a `ui.list`'s
+/// `row`) whose function the innermost frames of `stack` are in, if any.
+fn builder(stack: &[Frame]) -> Option<String> {
+    stack.iter().enumerate().rev().find_map(|(index, frame)| {
+        (frame.open == Open::Function).then_some(())?;
+        let parent = index.checked_sub(1).map(|p| &stack[p])?;
+        match parent.callee.as_deref() {
+            Some(c @ ("ui.component" | "ui.each" | "ui.presence")) => Some(c.to_string()),
+            _ if frame.key.as_deref() == Some("row") => Some("ui.list".to_string()),
+            _ => None,
+        }
+    })
+}
+
+/// How long the sound file at `path` lasts, from its header alone: a WAV's
+/// `fmt` and `data` sizes, or an Ogg's rate and its last page's granule
+/// position. None for a file it can't read (a missing file is left to
+/// `zgx check`).
+fn sound_seconds(path: &Path) -> Option<f64> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut head = vec![0u8; 64 * 1024];
+    let read = file.read(&mut head).ok()?;
+    head.truncate(read);
+    let u16_at =
+        |b: &[u8], at: usize| Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?));
+    let u32_at =
+        |b: &[u8], at: usize| Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?));
+    if head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WAVE") {
+        let (mut at, mut rate, mut align) = (12, None, None);
+        while at + 8 <= head.len() {
+            let size = u32_at(&head, at + 4)? as usize;
+            match &head[at..at + 4] {
+                b"fmt " => {
+                    rate = u32_at(&head, at + 12);
+                    align = u16_at(&head, at + 20);
+                }
+                b"data" => {
+                    let frames = size / usize::from(align?.max(1));
+                    return Some(frames as f64 / f64::from(rate?.max(1)));
+                }
+                _ => {}
+            }
+            at += 8 + size + size % 2;
+        }
+        return None;
+    }
+    if head.starts_with(b"OggS") {
+        // The identification header: `\x01vorbis`, version, channels, rate.
+        let id = head.windows(7).position(|w| w == b"\x01vorbis")?;
+        let rate = u32_at(&head, id + 12)?;
+        let length = file.seek(SeekFrom::End(0)).ok()?;
+        let tail_from = length.saturating_sub(64 * 1024);
+        file.seek(SeekFrom::Start(tail_from)).ok()?;
+        let mut tail = Vec::new();
+        file.read_to_end(&mut tail).ok()?;
+        let page = tail.windows(4).rposition(|w| w == b"OggS")?;
+        let granule = u64::from_le_bytes(tail.get(page + 6..page + 14)?.try_into().ok()?);
+        return Some(granule as f64 / f64::from(rate.max(1)));
+    }
+    None
+}
+
 /// A call whose argument is a starting value, read once by design.
 fn is_initial_value(callee: &str) -> bool {
     matches!(
@@ -2329,6 +2509,120 @@ return ui.column {
     }
     fn one(line: u32, rule: &str) -> Vec<(u32, String)> {
         vec![(line, rule.to_string())]
+    }
+
+    #[test]
+    fn audio_loaded_in_a_builder_is_reported() {
+        let source = r#"
+local click = audio.sound("click.wav")
+local Card = ui.component(function(props)
+    local own = audio.sound("card.wav")
+    return ui.button { sound = click, "Card" }
+end)
+ui.each(items, function(item)
+    local music = audio.music("theme.ogg")
+    -- zgx-lint: allow(audio-load-in-builder)
+    local kept = audio.sound("allowed.wav")
+    return ui.text { item }
+end)
+"#;
+        let mut found = one(4, "audio-load-in-builder");
+        found.extend(one(8, "audio-load-in-builder"));
+        assert_eq!(rules(source), found);
+    }
+
+    #[test]
+    fn audio_played_from_a_fast_timer_or_a_frame_callback_is_reported() {
+        let source = r##"
+ui.every(20, function()
+    audio.play(tick)
+end)
+ui.every(100, function()
+    audio.play(tick)
+end)
+anime.animate("#dot", { x = 100, onUpdate = function() audio.play(tick) end })
+audio.play(tick, { at = audio.now() + 0.25 })
+ui.every(10, function()
+    -- zgx-lint: allow(audio-play-timer)
+    audio.play(tick)
+end)
+"##;
+        let mut found = one(3, "audio-play-timer");
+        found.extend(one(8, "audio-play-timer"));
+        // (`ui.every(10)` is faster than a display, a rule of its own.)
+        found.extend(one(10, "timer-interval"));
+        assert_eq!(rules(source), found);
+    }
+
+    #[test]
+    fn a_sound_parameter_set_to_numbers_in_a_loop_is_reported() {
+        let source = r##"
+local level = ui.state("level", 1)
+ui.every(16, function()
+    voice:gain(math.sin(os.clock()))
+    music:gain(level)
+    voice:pitch(1.5)
+    voice:gain(ui.tween(level))
+end)
+ui.every(1000, function() voice:pan(0.5) end)
+anime.animate("#dot", { x = 1, onUpdate = function() bus:gain(0.5) end })
+"##;
+        let mut found = one(4, "audio-param-in-loop");
+        found.extend(one(6, "audio-param-in-loop"));
+        found.extend(one(10, "audio-param-in-loop"));
+        assert_eq!(rules(source), found);
+    }
+
+    #[test]
+    fn a_long_file_given_to_audio_sound_is_reported_from_its_header() {
+        let dir = std::env::temp_dir().join(format!("zgx-lint-audio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A WAV header saying 11 s of 16-bit mono at 48 kHz, its samples
+        // left out: only the header is read.
+        let mut header = Vec::new();
+        let data = 11 * 48_000 * 2u32;
+        header.extend_from_slice(b"RIFF");
+        header.extend_from_slice(&(36 + data).to_le_bytes());
+        header.extend_from_slice(b"WAVEfmt ");
+        header.extend_from_slice(&16u32.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes());
+        header.extend_from_slice(&1u16.to_le_bytes());
+        header.extend_from_slice(&48_000u32.to_le_bytes());
+        header.extend_from_slice(&96_000u32.to_le_bytes());
+        header.extend_from_slice(&2u16.to_le_bytes());
+        header.extend_from_slice(&16u16.to_le_bytes());
+        header.extend_from_slice(b"data");
+        header.extend_from_slice(&data.to_le_bytes());
+        std::fs::write(dir.join("long.wav"), &header).unwrap();
+        let short = &mut header.clone();
+        short[40..44].copy_from_slice(&(48_000 * 2u32).to_le_bytes());
+        std::fs::write(dir.join("short.wav"), short).unwrap();
+        let source = r#"
+local long = audio.sound("long.wav")
+local short = audio.sound("short.wav")
+local missing = audio.sound("missing.wav")
+local score = audio.music("long.wav")
+"#;
+        let found: Vec<_> = lint_source(&dir.join("app.luau"), source)
+            .into_iter()
+            .map(|d| (d.line, d.code))
+            .collect();
+        assert_eq!(found, one(2, "audio-sound-too-long"));
+        // An Ogg's length is its last page's granule position over its rate.
+        let mut ogg = b"OggS".to_vec();
+        ogg.extend_from_slice(&[0; 24]);
+        ogg.extend_from_slice(b"\x01vorbis");
+        ogg.extend_from_slice(&0u32.to_le_bytes());
+        ogg.push(2);
+        ogg.extend_from_slice(&44_100u32.to_le_bytes());
+        ogg.extend_from_slice(&[0; 32]);
+        ogg.extend_from_slice(b"OggS\0\x04");
+        ogg.extend_from_slice(&(44_100u64 * 12).to_le_bytes());
+        ogg.extend_from_slice(&[0; 16]);
+        std::fs::write(dir.join("long.ogg"), &ogg).unwrap();
+        assert_eq!(sound_seconds(&dir.join("long.ogg")), Some(12.));
+        assert_eq!(sound_seconds(&dir.join("short.wav")), Some(1.));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

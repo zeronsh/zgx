@@ -221,6 +221,9 @@ pub struct Stats {
     pub dropped: u64,
     /// Commands applied after the frame they asked for.
     pub late: u64,
+    /// Commands sent to the mixer since the engine was made: what a
+    /// caller counts to show a change made none (a bus's drive).
+    pub commands: u64,
     /// Frames mixed with sound reaching master, before its gain: what a run
     /// at zero gain mixed.
     pub sounding: u64,
@@ -838,6 +841,7 @@ impl Audio {
             stolen: meter.stolen.load(Ordering::Relaxed),
             dropped: meter.dropped.load(Ordering::Relaxed),
             late: meter.late.load(Ordering::Relaxed),
+            commands: meter.sent.load(Ordering::SeqCst),
             sounding: meter.sounding.load(Ordering::Relaxed),
             running: meter.running.load(Ordering::SeqCst),
             starts: meter.starts.load(Ordering::Relaxed),

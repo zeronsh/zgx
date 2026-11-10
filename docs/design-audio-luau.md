@@ -1,6 +1,6 @@
 # zgx-audio in Luau and the desktop host (design addendum, Nov 10 2026)
 
-The spec for A1's last step in [design-audio.md](design-audio.md) (section 10): zgx-desktop's and zgx-script's `audio` features, the Luau `audio` library, `sound =` on controls, types and lint. The user's page is [reference/audio.md](reference/audio.md). Everything below calls zgx-audio's public Rust API as it stands on this branch, so every binding can be built against it unchanged. Nothing here is built yet in zgx-desktop or zgx-script.
+The spec for A1's last step in [design-audio.md](design-audio.md) (section 10): zgx-desktop's and zgx-script's `audio` features, the Luau `audio` library, `sound =` on controls, types and lint. The user's page is [reference/audio.md](reference/audio.md). Everything below calls zgx-audio's public Rust API. Built in zgx-desktop, zgx-script and zgx-run as section 9 says, where it departs from what's above.
 
 ## 1. Features and ownership
 
@@ -160,3 +160,20 @@ Plus a probe on the desktop host: an app made with `audio` that plays nothing ha
 ## 8. Not in A1
 
 Effects (EQ, delay, reverb, compressor, ducking) and `bus:duck` are A3; `ui.sound3d` and `ui.reverb_zone` are A2. A bus's pan, voice drives (an atomic per voice, like a bus's) and a `music:crossfade_to` helper come when a script needs them. `voice:fade` over two voices does a crossfade today.
+
+## 9. As built (Nov 10 2026)
+
+Where the build departs from sections 1 to 7, and why:
+
+- **zgx-run's `audio` is off by default** for now (its `audio` feature turns on zgx-desktop's, zgx-script's and zgx-audio's `vorbis`). `zgx_run::play_through(host, cx)` wires a host to the app's engine.
+- **The engine is made at a script's first call of `audio`** (`ScriptHost::set_audio` takes a function that makes it), not when the global is read: a script that names `audio` and calls nothing makes none. zgx-desktop keeps one per app (`WindowFactory::audio`), on the main thread.
+- **Without the feature, `audio` is nil** and `sound =` an unknown property, with no message naming the feature: a message would be code in every build, and builds without the feature stay byte for byte as they were.
+- **`sound =` takes `{ sound = click, gain, pitch }`** (the sound first works too), and a function choosing a sound as it's activated in place of a state (a state holds values, not handles). Its type is a union luau-lsp can tell apart only with `Sound`, `Voice` and `Bus` as extern types.
+- **States a script reads are `ReadOnlyState`s** (`ready`, `error`, `playing`, `ui_sounds_enabled`), as the engine's other states are: `Readable` has no `get` a script can call.
+- **The interface-sound setting is read as the engine is made and each time the app comes forward** (macOS's global `com.apple.sound.uiaudio.enabled` through CFPreferences, absent meaning on). No notification is known to be posted when System Settings changes it, and the key's dots make it a key path to `NSUserDefaults`' KVO; the setting can only change while another app is in front. Linux and Windows don't read it yet (on).
+- **Suspend**: winit never suspends a desktop app, and zgx-audio has no pause; nothing is done (as section 2 says).
+- **`audio.add_bus` without a parent is under `master`**; made again with a name that exists (a reload), it returns that bus.
+- **Plugins**: their own bus `plugin:<name>` under `ui`, 8 voices (a ninth's voice never plays), no `bus`, `add_bus`, `prewarm` or `ui_sounds_enabled`, and no `bus` option. Their sounds aren't counted against their memory yet.
+- **`sound3d-no-max`** waits for `ui.sound3d` (A2).
+- **Bindings step in zgx-script's audio module**, with the tween and spring of `anim::drive` written again there: a voice's or bus's binding outlives any component, which `anim::drive` needs, and changing `anim::drive` would change builds without the feature.
+- zgx-audio's `Stats` gained `commands` (commands sent), which shows a bus's drive sends none.

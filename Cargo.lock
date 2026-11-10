@@ -5361,6 +5361,7 @@ dependencies = [
  "x11-dl",
  "x11rb",
  "zgx",
+ "zgx-audio",
  "zgx-components",
  "zgx-cosmic-text",
  "zgx-ghostty-sys",
@@ -5458,6 +5459,7 @@ dependencies = [
  "ureq",
  "webpki-roots",
  "zgx",
+ "zgx-audio",
  "zgx-desktop",
  "zgx-script",
 ]
@@ -5480,6 +5482,7 @@ dependencies = [
  "windows",
  "zgx",
  "zgx-3d",
+ "zgx-audio",
  "zgx-components",
  "zgx-desktop",
  "zgx-gpu",

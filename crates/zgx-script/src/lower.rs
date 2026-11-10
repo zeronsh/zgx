@@ -4228,13 +4228,30 @@ fn styled(
         }
         None => {}
     }
+    // `sound =`: it plays on `ui` as the node is activated, before its
+    // handler runs (a press, Enter or Space, assistive technology's).
+    #[cfg(feature = "audio")]
+    let sound = node.events().sound.clone();
     if let Some(handler) = &node.events().click {
         let (handler, vm, actions) = (handler.clone(), vm.clone(), low.actions.clone());
+        #[cfg(feature = "audio")]
+        let sound = sound.clone();
         // Told the keys held: `{ shift, ctrl, alt, meta }` (a ⌘-click).
         view = view.on_click_with(move |held| {
+            #[cfg(feature = "audio")]
+            if let Some(sound) = &sound {
+                crate::audio::activate(sound, &vm);
+            }
             let keys = modifiers_table(&vm.lua, held).ok();
             run(&handler, &vm, &actions, keys);
         });
+    }
+    #[cfg(feature = "audio")]
+    if node.events().click.is_none()
+        && let Some(sound) = sound
+    {
+        let vm = vm.clone();
+        view = view.on_click_with(move |_| crate::audio::activate(&sound, &vm));
     }
     // The node's handle, for local pointer coordinates and elements: made
     // only for what reads it.

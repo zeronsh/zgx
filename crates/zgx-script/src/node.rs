@@ -918,6 +918,10 @@ pub(crate) struct Events {
     /// `context_menu_below = true`: the menu opens under the node (a tab's),
     /// not at the pointer.
     pub context_menu_below: bool,
+    /// `sound = click`: what plays on the `ui` bus as the node is
+    /// activated, before `on_click` (the `audio` feature).
+    #[cfg(feature = "audio")]
+    pub sound: Option<crate::audio::SoundProp>,
     /// Whether any input handler is set (`any_input`): set with them, so
     /// every node reads one flag rather than a dozen handlers.
     pub input: bool,
@@ -995,6 +999,8 @@ impl Events {
         context_menu: None,
         context_menu_style: None,
         context_menu_below: false,
+        #[cfg(feature = "audio")]
+        sound: None,
         input: false,
     };
     pub fn any_input(&self) -> bool {
@@ -3774,6 +3780,11 @@ fn set_handler(
     key: &str,
     value: mlua::Value,
 ) -> mlua::Result<Option<mlua::Value>> {
+    #[cfg(feature = "audio")]
+    if key == "sound" {
+        events.get_or_insert_default().sound = crate::audio::sound_prop(&value)?;
+        return Ok(None);
+    }
     if !(key.starts_with("on_")
         || matches!(
             key,

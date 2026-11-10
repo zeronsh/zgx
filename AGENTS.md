@@ -55,6 +55,11 @@ The interface is built once; Rust re-runs only what reads state that changed. `z
 | percentages, `grow`, insets: layout without the script | `on_resize` writing sizes into state for layout |
 | `ui.every(1000, …)` at the rate a value changes | `ui.every(1, …)` (more calls than frames) |
 | keys of the item alone: `key = function(r) return r.id end` | a `key` reading other state (goes stale) |
+| `local click = audio.sound("click.wav")` once, at the top | `audio.sound` in a component or row (loads per instance) |
+| `ui.button { sound = click, … }` | `on_click = function() audio.play(click) … end` for a control's click (misses keyboard and assistive activation's order) |
+| `audio.play(s, { at = audio.now() + 0.25 })` for rhythm | `audio.play` from `ui.every(16, …)` (lands on the timer's tick) |
+| `bus:gain(volume)` or `bus:gain(ui.tween(volume))` | `voice:gain(n)` from a timer or `onUpdate` (script per frame) |
+| `audio.music("long.ogg")` for anything over ~10 s | `audio.sound("long.ogg")` (decoded whole into memory) |
 
 `-- zgx-lint: allow(rule)` accepts a deliberate exception.
 

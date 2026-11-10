@@ -183,6 +183,15 @@ pub use terminal_process::{
 
 pub mod accessibility;
 
+#[cfg(feature = "audio")]
+mod audio;
+#[cfg(feature = "audio")]
+pub use audio::{AudioEvent, AudioListening};
+/// zgx-audio, as [`WindowFactory::audio`] makes its engine (the `audio`
+/// feature).
+#[cfg(feature = "audio")]
+pub use zgx_audio;
+
 pub mod application;
 pub use application::{
     Application, TaskSpawner, WindowContext, WindowFactory, WindowHandle, WindowOptions,

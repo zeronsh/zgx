@@ -109,6 +109,10 @@ zgx lint --rules            # what it looks for
 | `window-option` | an option of `ui.window { … }` that doesn't exist (`titel`): types take its table's extra fields | the names in `WindowOptions` |
 | `component-id` | `Card { id = … }` where `Card`, in the same file, sets an `id` on its root: the root's goes unseen | another name for data; `id` names the element |
 | `unknown-route` | a literal route name given to a router's `navigate`, `replace` or `is`, or a case of its `view`, that no `ui.router { routes = { … } }` declares (`"thraed"`: did you mean `thread`?). The types catch the calls; this catches a misspelled `view` case (Luau accepts a table's extra fields) and apps past the types' 1,000 routes. Routes built at run time leave every name unchecked | use a declared route's name, or declare it in the router's `routes` |
+| `audio-load-in-builder` | `audio.sound` or `audio.music` in a component, `each` row or `list` row: it loads (or opens a stream) for every instance | load once at the top of the script or a module; play it from the row |
+| `audio-play-timer` | `audio.play` from a `ui.every` under 50 ms or a per-frame callback (`onUpdate`): it lands on the timer's tick | schedule on the mixer's clock: `audio.play(s, { at = audio.now() + 0.25 })` |
+| `audio-sound-too-long` | `audio.sound("file")` of a file beside the script lasting over 10 s (its header read): decoded whole into memory | `audio.music("file")`, which streams it |
+| `audio-param-in-loop` | `:gain`, `:pan` or `:pitch` given a number from a `ui.every` or a per-frame callback: script per tick to move a sound | bind a state once (`:gain(level)`) and set the state, or a binding (`:gain(ui.tween(level))`) |
 
 `-- zgx-lint: allow(rule)` on the finding's line or the line above accepts a deliberate exception (`allow(rule-a, rule-b)` for several).
 

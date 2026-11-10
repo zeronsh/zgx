@@ -202,6 +202,9 @@ enum Event {
     /// The platform's drag, handed it by the window as the drag left it
     /// (`native_drag`).
     NativeDrag(u64, crate::native_drag::NativeDrag),
+    /// The sound engine's voices ended (`audio`): their ids to take.
+    #[cfg(feature = "audio")]
+    AudioVoicesEnded,
 }
 /// Commands are queued onto the UI thread; the operating system may decline requests.
 #[derive(Debug)]
@@ -670,6 +673,29 @@ impl WindowFactory {
         self.set_menus(menus)
     }
 
+    /// The application's sound engine (the `audio` feature): one for every
+    /// window, made by the first call. Making it opens nothing; the device
+    /// starts with the first sound and stops a second after the last. Its
+    /// `ui` bus follows the user's interface-sound setting, and voices
+    /// ending wake the app ([`on_audio`](Self::on_audio) hears them).
+    #[cfg(feature = "audio")]
+    pub fn audio(&self) -> zgx_audio::Audio {
+        let proxy = self.proxy.clone();
+        crate::audio::engine(move || {
+            let _ = proxy.send_event(Event::AudioVoicesEnded);
+        })
+    }
+    /// Calls `listener` on the main thread with what the engine says
+    /// (voices that ended, the interface-sound setting changing) while
+    /// what this returns is held: what a script host's `playing` states
+    /// and `audio.ui_sounds_enabled` follow.
+    #[cfg(feature = "audio")]
+    pub fn on_audio(
+        &self,
+        listener: impl Fn(&crate::AudioEvent<'_>) + 'static,
+    ) -> crate::AudioListening {
+        crate::audio::listen(listener)
+    }
     /// Exit the application, including when it is retained with no open windows.
     pub fn quit(&self) {
         if self.alive.get() {
@@ -978,6 +1004,13 @@ impl Application {
     /// script host) is told apart by it. Elsewhere it does nothing.
     pub fn desktop_id(mut self, id: impl Into<String>) -> Self {
         self.desktop_id = Some(id.into());
+        self
+    }
+    /// How the sound engine is made when it first is
+    /// ([`WindowFactory::audio`]): zgx-audio's defaults otherwise.
+    #[cfg(feature = "audio")]
+    pub fn audio_config(self, config: zgx_audio::Config) -> Self {
+        crate::audio::configure(config);
         self
     }
     /// Call `handler` for each URL or reopen request the system delivers
@@ -7707,6 +7740,8 @@ impl WindowManager {
     fn user_event_turn(&mut self, event_loop: &ActiveEventLoop, event: Event) {
         match event {
             Event::Quit => event_loop.exit(),
+            #[cfg(feature = "audio")]
+            Event::AudioVoicesEnded => crate::audio::voices_ended(),
             #[cfg(target_os = "macos")]
             Event::FullScreen => self.apply_full_screen(),
             Event::Application(event, token) => {
@@ -8154,6 +8189,11 @@ impl WindowManager {
         let active = self.hosts.values().any(|host| host.native_focused);
         if self.app_was_active != active {
             self.app_was_active = active;
+            // The interface-sound setting, changed in another app meanwhile.
+            #[cfg(feature = "audio")]
+            if active {
+                crate::audio::came_forward();
+            }
             for host in self.hosts.values() {
                 host.context.ui.set_app_active(active);
                 host.context.window.request_redraw();
