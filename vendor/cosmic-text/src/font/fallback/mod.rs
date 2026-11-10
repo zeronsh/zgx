@@ -202,6 +202,7 @@ pub struct MonospaceFallbackInfo {
 pub(crate) struct SearchPlace {
     script_i: (usize, usize),
     common_i: usize,
+    han_i: usize,
     other_i: usize,
 }
 
@@ -215,6 +216,9 @@ pub struct FontFallbackIter<'a> {
     word: &'a str,
     script_i: (usize, usize),
     common_i: usize,
+    /// zgx: the Chinese families tried for Han in a run of another script
+    /// (`next_item`), how many so far.
+    han_i: usize,
     other_i: usize,
     end: bool,
     ideal_weight: fontdb::Weight,
@@ -245,6 +249,7 @@ impl<'a> FontFallbackIter<'a> {
             word,
             script_i: (0, 0),
             common_i: 0,
+            han_i: 0,
             other_i: 0,
             end: false,
             ideal_weight,
@@ -259,6 +264,7 @@ impl<'a> FontFallbackIter<'a> {
         self.default_i == 1
             && self.script_i == (0, 0)
             && self.common_i == 0
+            && self.han_i == 0
             && self.other_i == 0
             && !self.end
     }
@@ -288,6 +294,7 @@ impl<'a> FontFallbackIter<'a> {
         SearchPlace {
             script_i: self.script_i,
             common_i: self.common_i,
+            han_i: self.han_i,
             other_i: self.other_i,
         }
     }
@@ -297,6 +304,7 @@ impl<'a> FontFallbackIter<'a> {
         self.default_i = 1;
         self.script_i = place.script_i;
         self.common_i = place.common_i;
+        self.han_i = place.han_i;
         self.other_i = place.other_i;
     }
 
@@ -555,6 +563,38 @@ impl<'a> FontFallbackIter<'a> {
 
             self.script_i.0 += 1;
             self.script_i.1 = 0;
+        }
+
+        // zgx: Han in a run of another script (Japanese kana around a
+        // simplified Chinese character, which Japanese fonts lack): the
+        // Chinese families, before the common ones and every face. An iPhone
+        // has none of the common ones, and walked every face for each such
+        // word, loading each (about 380 kept, for two characters).
+        if !self.scripts.contains(&Script::Han)
+            && self
+                .word
+                .chars()
+                .any(|c| unicode_script::UnicodeScript::script(&c) == Script::Han)
+        {
+            // Its run's Chinese, or simplified Chinese's (`zh-CN`, 4): the
+            // lists' default.
+            let han_families = fallbacks
+                .chinese_fallback(self.font_system.shape_buffer.han)
+                .or_else(|| fallbacks.chinese_fallback(4))
+                .unwrap_or_default();
+            while self.han_i < han_families.len() {
+                let han_family = han_families[self.han_i];
+                self.han_i += 1;
+                for m_key in font_match_keys_iter(false) {
+                    if self.face_contains_family(m_key.id, han_family) {
+                        if let Some(font) =
+                            self.font_system.get_font_at(m_key.id, self.ideal_weight, self.optical)
+                        {
+                            return Some(font);
+                        }
+                    }
+                }
+            }
         }
 
         let common_families = fallbacks.common_fallback();

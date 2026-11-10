@@ -106,6 +106,8 @@ harfrust = { package = "zgx-harfrust", version = "0.5.3", path = "../../vendor/h
 # wgpu's own counts of what it holds (textures, samplers, bind groups), for
 # tests that what a frame no longer shows is given back.
 wgpu = { version = "29.0.4", default-features = false, features = ["counters"] }
+# A fallback list of a test's own, which names scripts (tests/han_in_kana.rs).
+unicode-script = "0.5.8"
 
 [target.'cfg(windows)'.dev-dependencies]
 # Every ready-made shader fill, drawn with Direct3D 11 (tests/d3d11_parity.rs).
