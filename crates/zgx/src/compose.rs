@@ -2276,6 +2276,9 @@ struct CanvasLabels {
     nodes: Vec<(NodeId, crate::canvas::CanvasText)>,
     size: (f32, f32),
     view: Option<crate::scene::CanvasView>,
+    /// The lines whose nodes show another text this time (`show`), kept
+    /// for its next.
+    changed: Vec<usize>,
 }
 impl CanvasLabels {
     fn show(
@@ -2315,56 +2318,137 @@ impl CanvasLabels {
                 },
             );
         }
-        for (gone, _) in self.nodes.drain(texts.len().min(self.nodes.len())..) {
-            scene.remove(gone);
-        }
-        for (index, text) in texts.iter().enumerate() {
-            if self
-                .nodes
-                .get(index)
-                .is_some_and(|(_, shown)| shown == text)
-            {
-                continue;
-            }
-            let kind = NodeKind::Text {
-                text: text.text.clone(),
-                color: text.color,
-                font_size: text.size,
-            };
-            // Sized when its maker knows its size: never measured.
-            let style = |extent: Option<(f32, f32)>| crate::scene::Style {
-                absolute: true,
-                width: extent.map(|(width, _)| width),
-                height: extent.map(|(_, height)| height),
-                ..Default::default()
-            };
-            let node = match self.nodes.get_mut(index) {
-                Some((node, shown)) => {
-                    if shown.extent != text.extent {
-                        scene.set_style(*node, style(text.extent));
-                    }
-                    scene.set_kind(*node, kind);
-                    *shown = text.clone();
-                    *node
+        // Sized lines' ink is known without measuring (`CanvasText::extent`):
+        // where they were and where they go, damaged once for them all
+        // (`Scene::change_within`). The rest damage as each changes.
+        let ink = |text: &crate::canvas::CanvasText| {
+            let extent = text.extent?;
+            let (x, y) = text.origin(extent);
+            let pad = crate::scene::text_ink_pad(text.size);
+            Some(crate::scene::Rect::new(x, y, extent.0, extent.1).expand(pad))
+        };
+        let mut sized = None::<crate::scene::Rect>;
+        let mut measured = false;
+        let mut add = |rect: Option<crate::scene::Rect>| match rect {
+            Some(rect) => sized = Some(sized.map_or(rect, |sized| sized.union(rect))),
+            None => measured = true,
+        };
+        let mut changed = std::mem::take(&mut self.changed);
+        changed.clear();
+        for (at, (_, was)) in self.nodes.iter().enumerate() {
+            match texts.get(at) {
+                Some(now) if now == was => {}
+                // A line new to its node: both, or neither as one damage.
+                Some(now) => {
+                    changed.push(at);
+                    add(ink(was).zip(ink(now)).map(|(was, now)| was.union(now)));
                 }
-                None => {
-                    let node = scene.append(group, kind, style(text.extent));
-                    self.nodes.push((node, text.clone()));
-                    node
-                }
-            };
-            scene.set_font(node, text.font.clone());
-            if let Some(extent) = text.extent {
-                scene.set_text_measured(node, extent);
+                None => add(ink(was)),
             }
-            let size = match (text.anchor, text.baseline, text.extent) {
-                (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top, _) => (0., 0.),
-                (.., Some(extent)) => extent,
-                _ => scene.measure_text_with_font(&text.text, text.size, None, &text.font),
-            };
-            let (x, y) = text.origin(size);
-            scene.set_transform(node, crate::scene::Transform { x, y });
         }
+        match sized {
+            None => self.change(scene, group, texts, &changed, |_, _| true),
+            Some(sized) => {
+                scene.change_within(group, sized, |scene| {
+                    self.change(scene, group, texts, &changed, CanvasLabels::sized);
+                });
+                if measured {
+                    self.change(scene, group, texts, &changed, |was, now| {
+                        !CanvasLabels::sized(was, now)
+                    });
+                }
+            }
+        }
+        self.changed = changed;
+    }
+    /// Whether a line's node, showing `was` (none yet: a node new to the
+    /// scene, which damages nothing until it is laid out) and to show `now`
+    /// (none: to go), changes inside its canvas's one damage (`show`).
+    fn sized(
+        was: Option<&crate::canvas::CanvasText>,
+        now: Option<&crate::canvas::CanvasText>,
+    ) -> bool {
+        was.is_none_or(|was| was.extent.is_some() && now.is_none_or(|now| now.extent.is_some()))
+    }
+    /// Shows the lines of `texts` its nodes show otherwise (`changed`) or
+    /// have no node for yet, and takes away the nodes past them, where
+    /// `which` takes the change (`sized`'s arguments).
+    fn change(
+        &mut self,
+        scene: &mut crate::scene::Scene,
+        group: NodeId,
+        texts: &[crate::canvas::CanvasText],
+        changed: &[usize],
+        which: impl Fn(Option<&crate::canvas::CanvasText>, Option<&crate::canvas::CanvasText>) -> bool,
+    ) {
+        let mut at = texts.len().min(self.nodes.len());
+        while at < self.nodes.len() {
+            if which(Some(&self.nodes[at].1), None) {
+                scene.remove(self.nodes.remove(at).0);
+            } else {
+                at += 1;
+            }
+        }
+        for &index in changed {
+            if which(Some(&self.nodes[index].1), Some(&texts[index])) {
+                self.set(scene, group, index, &texts[index]);
+            }
+        }
+        // New lines, in order: each takes the next node.
+        let new = self.nodes.len();
+        for (index, text) in texts.iter().enumerate().skip(new) {
+            if !which(None, Some(text)) {
+                break;
+            }
+            self.set(scene, group, index, text);
+        }
+    }
+    /// Shows `text` on line `index`'s node, or on one new at the end.
+    fn set(
+        &mut self,
+        scene: &mut crate::scene::Scene,
+        group: NodeId,
+        index: usize,
+        text: &crate::canvas::CanvasText,
+    ) {
+        let kind = NodeKind::Text {
+            text: text.text.clone(),
+            color: text.color,
+            font_size: text.size,
+        };
+        // Sized when its maker knows its size: never measured.
+        let style = |extent: Option<(f32, f32)>| crate::scene::Style {
+            absolute: true,
+            width: extent.map(|(width, _)| width),
+            height: extent.map(|(_, height)| height),
+            ..Default::default()
+        };
+        let node = match self.nodes.get_mut(index) {
+            Some((node, shown)) => {
+                if shown.extent != text.extent {
+                    scene.set_style(*node, style(text.extent));
+                }
+                scene.set_kind(*node, kind);
+                *shown = text.clone();
+                *node
+            }
+            None => {
+                let node = scene.append(group, kind, style(text.extent));
+                self.nodes.push((node, text.clone()));
+                node
+            }
+        };
+        scene.set_font(node, text.font.clone());
+        if let Some(extent) = text.extent {
+            scene.set_text_measured(node, extent);
+        }
+        let size = match (text.anchor, text.baseline, text.extent) {
+            (crate::canvas::TextAnchor::Start, crate::canvas::TextBaseline::Top, _) => (0., 0.),
+            (.., Some(extent)) => extent,
+            _ => scene.measure_text_with_font(&text.text, text.size, None, &text.font),
+        };
+        let (x, y) = text.origin(size);
+        scene.set_transform(node, crate::scene::Transform { x, y });
     }
     /// Pans and zooms the text with its canvas's drawing.
     fn follow(&mut self, scene: &mut crate::scene::Scene, view: crate::scene::CanvasView) {

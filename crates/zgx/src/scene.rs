@@ -9708,6 +9708,49 @@ impl Scene {
     fn damage_subtree(&mut self, id: NodeId) {
         self.damage_subtree_with(id, &mut None);
     }
+    /// Runs `change`, setters on nodes under `id` all of whose damage, as
+    /// they were and as each setter leaves them, lies in `ink`: a rectangle
+    /// in `id`'s box, its corner at 0, 0 (a canvas's labels, sized by their
+    /// maker: their ink is known without measuring). `ink` is damaged once,
+    /// in place of each setter's damage in turn; what they paint after is
+    /// damaged at flush, as ever. Where anything is transformed or
+    /// filtered, the setters damage as they would.
+    // While `change` runs the damage reads as full, so each setter returns
+    // at the check it makes first (`damage_is_full`): the walks the rest of
+    // the scene takes ask nothing more.
+    #[inline(never)]
+    pub(crate) fn change_within(&mut self, id: NodeId, ink: Rect, change: impl FnOnce(&mut Self)) {
+        if self.transformed + self.filtered.get() > 0 || self.damage_is_full() {
+            return change(self);
+        }
+        // As `damage_subtree_with` damages what `id` holds: hidden or never
+        // laid out, nothing; otherwise in its children's context, at its box.
+        let node = self.node(id);
+        let (unplaced, corner) = (
+            node.measurement.is_none() && node.bounds == Rect::default(),
+            node.bounds,
+        );
+        if !unplaced && let Some((transform, clip)) = self.shown_context(id) {
+            let at = Transform {
+                x: corner.x + transform.x,
+                y: corner.y + transform.y,
+            };
+            self.damage_within(Some(ink.translated(at)), clip);
+        }
+        if self.damage_is_full() {
+            return change(self);
+        }
+        // The window first, the first at the end, put back after.
+        let viewport = self.viewport;
+        self.damage.push(viewport);
+        let last = self.damage.len() - 1;
+        self.damage.swap(0, last);
+        change(self);
+        // Every setter checks first: none damaged past it.
+        debug_assert!(self.damage.len() == last + 1 && self.damage[0] == viewport);
+        self.damage.swap(0, last);
+        self.damage.pop();
+    }
     /// What `damage_subtree` works out for a parent's children: nothing if
     /// the parent is not shown, else their translation and clip.
     // Inlined, as `shown_context`: see there.
@@ -10604,8 +10647,7 @@ impl Scene {
                 bounds.x + bounds.width - width
             }
         };
-        // Italic and antialiased edges reach past advances and line boxes.
-        let pad = (font_size * 0.3).max(2.);
+        let pad = text_ink_pad(font_size);
         Rect::new(x - pad, bounds.y - pad, width + 2. * pad, height + 2. * pad)
     }
     /// Whether anything `id` holds is displayed: a child neither
@@ -14931,6 +14973,13 @@ fn clip_axes(style: &Style) -> (bool, bool) {
         options.and_then(|o| o.clip_x).unwrap_or(style.clip),
         options.and_then(|o| o.clip_y).unwrap_or(style.clip),
     )
+}
+/// How far a text's glyphs can reach past its lines' box at `font_size`:
+/// italic and antialiased edges reach past advances and line boxes
+/// (`Scene::text_ink`).
+#[inline(always)]
+pub(crate) fn text_ink_pad(font_size: f32) -> f32 {
+    (font_size * 0.3).max(2.)
 }
 /// `rect` with its edges out to whole points (see `Scene::add_damage`).
 #[inline(always)]
