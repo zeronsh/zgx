@@ -14,6 +14,8 @@
 //!
 //! `LIST=0`: the same window with no list. `HIDE=1`: the list goes while the
 //! window is hidden. `NO_CLICK=1`, `NO_ICON=1`: chips without those.
+//! `IDLE_REQUESTS=1`: ask for CPU-only idle trims every two seconds, and
+//! exit after the first rest: the renderer's rest must still come due.
 use std::sync::Arc;
 use zgx::{
     compose::{VariableHeights, measured_virtual_list, prelude::*},
@@ -62,12 +64,19 @@ fn chip(icon: &Arc<SvgData>, name: View) -> View {
 }
 
 fn name_of(row_index: usize, chip: usize, first: &Signal<String>) -> View {
-    match (row_index, chip) {
+    let name = match (row_index, chip) {
         (0, 0) => {
             let first = first.clone();
             text_signal(move || first.get())
         }
         _ => text(label(row_index, chip)),
+    };
+    if env("IDLE_REQUESTS", 0) != 0 {
+        // Distinct raster sizes grow the atlas on systems with only their
+        // default font too; the probe must have something to give back.
+        name.text_size(8. + ((row_index * CHIPS + chip) % 64) as f32)
+    } else {
+        name
     }
 }
 
@@ -185,7 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             let (icon, name) = (list_svg.clone(), list_first.clone());
                             let built = built.clone();
-                            measured_virtual_list(
+                            let view = measured_virtual_list(
                                 list_offset.clone(),
                                 list_heights.clone(),
                                 2,
@@ -200,10 +209,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 },
                             )
                             .w_full()
-                            .h(HEIGHT)
+                            .h(HEIGHT);
+                            if env("IDLE_REQUESTS", 0) != 0 {
+                                // Isolate CPU-only trims from retained-row
+                                // cleanup, which has its own later pass.
+                                view.list_ahead(0.)
+                            } else {
+                                view
+                            }
                         },
                     )),
             );
+            if env("IDLE_REQUESTS", 0) != 0 {
+                let runtime = cx.ui.runtime.clone();
+                cx.tasks.spawn(async move {
+                    loop {
+                        zgx::timer::sleep(std::time::Duration::from_secs(2)).await;
+                        zgx::idle::request(&runtime);
+                    }
+                });
+            }
             cx.tasks.spawn(async move {
                 let wait = |s: f64| zgx::timer::sleep(std::time::Duration::from_secs_f64(s));
                 async fn host_lines(at: &str) {
@@ -236,12 +261,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     wait(0.008).await;
                 }
+                if env("IDLE_REQUESTS", 0) != 0 {
+                    // The atlas must have unused cells to reclaim: glyphs
+                    // still filling the viewport are deliberately kept.
+                    shown.set(false);
+                }
                 wait(5.).await;
                 host_lines("idle 5 s").await;
                 report("idle 5 s", &scene, &weak);
                 wait(30.).await;
                 host_lines("idle 35 s").await;
                 report("idle 35 s", &scene, &weak);
+                if env("IDLE_REQUESTS", 0) != 0 {
+                    std::process::exit(0);
+                }
                 wait(HOLD).await;
                 // `HIDE=1`: the list goes while the window isn't presenting.
                 if env("HIDE", 0) != 0 {

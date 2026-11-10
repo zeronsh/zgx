@@ -842,6 +842,18 @@ pub(crate) fn rest(lua: &mlua::Lua) {
     order.shrink_to_fit();
 }
 
+/// When a quiet stream next expires, even if no further frames arrive.
+pub(crate) fn rest_due(lua: &mlua::Lua) -> Option<std::time::Instant> {
+    let parsed = lua.app_data_ref::<Parsed>()?;
+    // The next expiry still needs a trim even if no more frames come. A
+    // millisecond past it satisfies the strict quiet comparison above.
+    parsed
+        .stream_order
+        .borrow()
+        .front()
+        .map(|(_, used)| *used + STREAM_QUIET + std::time::Duration::from_millis(1))
+}
+
 /// A stream left this long has ended, or parses again if it goes on. (A
 /// minute: a reply pausing on a tool call keeps its parser, and its next
 /// chunk doesn't parse the whole reply again.)
@@ -2004,6 +2016,52 @@ mod tests {
             streams(&lua),
             0,
             "quiet this long, it has ended, or parses again if it goes on"
+        );
+    }
+    #[test]
+    fn a_quiet_stream_requests_its_expiry_without_another_frame() {
+        use std::time::Duration;
+        let app = crate::testing::TestApp::new(|runtime| {
+            crate::ScriptHost::inline(
+                runtime,
+                "quiet-stream",
+                r#"
+                ui.markdown("Some words", { key = "reply" })
+                return ui.column {}
+            "#,
+            )
+        });
+        let loaded = app.host.0.current.borrow().clone().unwrap();
+        let lua = &loaded._vms[0].lua;
+        zgx::idle::trim(&app.ui.runtime);
+        assert_eq!(
+            lua.app_data_ref::<Parsed>().unwrap().streams.borrow().len(),
+            1
+        );
+        app.settle();
+        // Wall-clock ages in the parser, test-clock timers in the host:
+        // age it explicitly, without waiting a real minute in a unit test.
+        lua.app_data_ref::<Parsed>()
+            .unwrap()
+            .stream_order
+            .borrow_mut()[0]
+            .1 = std::time::Instant::now() - STREAM_QUIET - Duration::from_secs(1);
+        zgx::idle::take_request(&app.ui.runtime);
+        app.host
+            .0
+            .timers
+            .run_test_timers(Duration::from_secs(61), || app.settle());
+        assert!(
+            zgx::idle::take_request(&app.ui.runtime),
+            "expiry asks for a trim with no frame"
+        );
+        zgx::idle::trim(&app.ui.runtime);
+        assert!(
+            lua.app_data_ref::<Parsed>()
+                .unwrap()
+                .streams
+                .borrow()
+                .is_empty()
         );
     }
     fn paths() -> Options {

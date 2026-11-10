@@ -1187,6 +1187,7 @@ struct Rest {
     at: std::time::Instant,
     atlas: bool,
     queue: bool,
+    started: bool,
 }
 impl Rest {
     fn none() -> Self {
@@ -1194,6 +1195,19 @@ impl Rest {
             at: std::time::Instant::now(),
             atlas: false,
             queue: false,
+            started: false,
+        }
+    }
+    /// A CPU-only trim does not make the renderer warm again. Its deadlines
+    /// stand until a frame presents and replaces this with `none`.
+    fn start(&mut self, at: std::time::Instant, atlas: bool, queue: bool) {
+        if !self.started {
+            *self = Self {
+                at,
+                atlas,
+                queue,
+                started: true,
+            };
         }
     }
     /// When the next of what's owed is due, if anything is.
@@ -3963,6 +3977,8 @@ impl Host {
                 renderer.set_display_key(&self.display_key);
                 #[cfg(target_os = "macos")]
                 renderer.set_plane_waker(self.plane_waker());
+                // A new queue has no rest history from the old renderer.
+                self.rest = Rest::none();
                 self.renderer = Some(renderer);
                 self.force = true;
                 eprintln!("zgx: drawing again on a new GPU renderer");
@@ -4228,6 +4244,7 @@ impl Host {
         renderer.set_display_key(&self.display_key);
         #[cfg(target_os = "macos")]
         renderer.set_plane_waker(self.plane_waker());
+        self.rest = Rest::none();
         self.renderer = Some(renderer);
         self.adapter = adapter;
         window.set_maximized(self.state.maximized);
@@ -6335,11 +6352,11 @@ impl Host {
                 // What goes later, each at its own delay past this trim: the
                 // glyph atlas (a window that grew one), and Metal's queue once
                 // a frame would find it cold anyway.
-                self.rest = Rest {
-                    at: std::time::Instant::now(),
-                    atlas: self.renderer.as_ref().is_some_and(|r| r.atlas_grown()),
-                    queue: self.renderer.is_some() && cfg!(target_os = "macos"),
-                };
+                self.rest.start(
+                    std::time::Instant::now(),
+                    self.renderer.as_ref().is_some_and(|r| r.atlas_grown()),
+                    self.renderer.is_some() && cfg!(target_os = "macos"),
+                );
                 self.trim_stage = TrimStage::Rest;
                 self.native.trim();
                 self.context.ui.scene.borrow_mut().rest();
@@ -6592,7 +6609,6 @@ impl Host {
         {
             self.trim_at = Some(std::time::Instant::now() + TRIM_DELAY);
             self.trim_stage = TrimStage::Trim;
-            self.rest = Rest::none();
         }
     }
     /// Start, stop or schedule this window's frame source to match demand.
@@ -9140,6 +9156,7 @@ mod tests {
             at,
             atlas: true,
             queue: true,
+            started: true,
         };
         // The queue goes first: the atlas waits longer.
         assert!(QUEUE_REST_DELAY < ATLAS_TRIM_DELAY);
@@ -9158,6 +9175,31 @@ mod tests {
             None
         );
         assert_eq!(Rest::none().next(), None);
+    }
+    #[test]
+    fn cpu_only_trims_do_not_postpone_renderer_rest() {
+        use super::{ATLAS_TRIM_DELAY, QUEUE_REST_DELAY, Rest};
+        use std::time::{Duration, Instant};
+        let at = Instant::now();
+        let mut rest = Rest::none();
+        rest.start(at, true, true);
+        for seconds in [2, 4, 8] {
+            rest.start(at + Duration::from_secs(seconds), true, true);
+            assert_eq!(rest.next(), Some(at + QUEUE_REST_DELAY));
+        }
+        rest.queue = false;
+        for seconds in [12, 16, 24] {
+            rest.start(at + Duration::from_secs(seconds), true, true);
+            assert_eq!(rest.next(), Some(at + ATLAS_TRIM_DELAY));
+        }
+        rest.atlas = false;
+        rest.start(at + Duration::from_secs(40), true, true);
+        assert_eq!(rest.next(), None);
+        // A presented frame starts a new warm interval.
+        rest = Rest::none();
+        let frame = at + Duration::from_secs(50);
+        rest.start(frame, true, true);
+        assert_eq!(rest.next(), Some(frame + QUEUE_REST_DELAY));
     }
     #[test]
     fn stale_pixels_say_where_and_by_how_much() {
@@ -9952,6 +9994,10 @@ mod tests {
                     std::time::Instant::now(),
                 );
                 assert!(host.presentation.deadline().is_some());
+                let old_rest = std::time::Instant::now() - std::time::Duration::from_secs(90);
+                host.rest.start(old_rest, true, true);
+                host.rest.atlas = false;
+                host.rest.queue = false;
                 host.suspend();
                 host.suspend(); // Platform callbacks may repeat.
                 assert!(host.window.is_none() && host.renderer.is_none() && host.adapter.is_none());
@@ -9968,10 +10014,23 @@ mod tests {
                 assert_eq!(editor.editor.borrow().text(), "updated while suspended");
                 host.create_window(event_loop).unwrap();
                 assert!(host.window.is_some() && host.renderer.is_some() && host.adapter.is_some());
+                assert!(
+                    !host.rest.started,
+                    "a recreated renderer has no old rest history"
+                );
                 assert!(host.force);
                 host.window_event(WindowEvent::Focused(true)).unwrap();
                 assert_eq!(host.context.ui.input.focused(), Some(editor.node));
                 assert_eq!(editor.editor.borrow().text(), "updated while suspended");
+                host.rest.start(old_rest, true, true);
+                host.rest.atlas = false;
+                host.rest.queue = false;
+                host.recover_renderer();
+                assert!(host.renderer.is_some(), "the renderer was recovered");
+                assert!(
+                    !host.rest.started,
+                    "a recovered renderer has no old rest history"
+                );
                 host.context.ui.prepare_frame();
                 let scene = host.context.ui.scene.borrow();
                 let damage = [scene.bounds(scene.root())];
