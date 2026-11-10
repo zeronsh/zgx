@@ -79,7 +79,7 @@ pub use memory::Memory;
 pub use orbit::{Answer, Orbit, OrbitControls};
 #[cfg(feature = "particles")]
 pub use particles::{
-    Blend, CPU_PARTICLES, Collide, Emitter, EmitterId, Force, Response, Shape, Spawn,
+    Blend, CPU_PARTICLES, Collide, Emitter, EmitterError, EmitterId, Force, Response, Shape, Spawn,
 };
 pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};

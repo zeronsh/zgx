@@ -655,6 +655,8 @@ pub(crate) struct Data {
     textures: Vec<Weak<TextureShared>>,
     pub(crate) buffer_bytes: u64,
     pub(crate) texture_bytes: u64,
+    /// The world's particle pools, counted under the same cap.
+    pub(crate) particle_bytes: u64,
     pub(crate) cap: u64,
     pub(crate) budget: u64,
     passes: Vec<(u32, Option<Pass>)>,
@@ -670,6 +672,7 @@ impl Data {
             textures: Vec::new(),
             buffer_bytes: 0,
             texture_bytes: 0,
+            particle_bytes: 0,
             cap: DEFAULT_MEMORY_CAP,
             budget: DEFAULT_READBACK_BUDGET,
             passes: Vec::new(),
@@ -697,7 +700,7 @@ impl Data {
     /// Room for `bytes` more under the cap.
     pub(crate) fn room(&mut self, bytes: u64) -> Result<(), crate::GpuDataError> {
         self.sweep();
-        let used = self.buffer_bytes + self.texture_bytes;
+        let used = self.buffer_bytes + self.texture_bytes + self.particle_bytes;
         if used.saturating_add(bytes) > self.cap {
             return Err(crate::GpuDataError::OverBudget {
                 asked: bytes,
@@ -977,6 +980,11 @@ impl Frames {
             }
         }
         self.finish_reads(data, device);
+        // A world holding data and no passes (or only particle pools under
+        // its cap) runs nothing.
+        if data.passes.iter().all(|(_, p)| p.is_none()) {
+            return;
+        }
         if self.uniforms.is_none() {
             self.uniforms = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("3D compute frame"),
@@ -1436,7 +1444,7 @@ fn fail(pass: &mut Pass, why: String) {
 }
 
 /// `future`, which resolves at once (wgpu's error scopes on native).
-fn now<T>(future: impl std::future::Future<Output = T>) -> T {
+pub(crate) fn now<T>(future: impl std::future::Future<Output = T>) -> T {
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     let mut future = std::pin::pin!(future);
     loop {

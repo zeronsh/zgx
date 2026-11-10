@@ -49,22 +49,26 @@ fn world(alive: Option<u32>) -> World {
         // As design-3d-aaa.md's rain: streaks over 80 by 80 metres, falling
         // from 30 metres, living 0.6 to 0.9 s; the rate keeps `alive` of
         // them at once.
-        world.add_emitter(
-            Emitter::new(alive)
-                .spawn(Spawn::box_([-40., 28., -40.], [40., 32., 40.]).rate(alive as f32 / 0.75))
-                .lifetime(0.6..0.9)
-                .velocity([0., -22., 0.], 1.5)
-                .force(Force::Gravity)
-                .force(Force::Wind([2., 0., 1.]))
-                .force(Force::Drag(0.1))
-                .collide(Collide::Plane {
-                    height: 0.,
-                    then: Response::Die,
-                })
-                .draw(Shape::Streak { length: 0.04 }, Blend::Alpha)
-                .size(0.01..0.015)
-                .color([0.7, 0.75, 0.8, 0.5]),
-        );
+        world
+            .add_emitter(
+                Emitter::new(alive)
+                    .spawn(
+                        Spawn::box_([-40., 28., -40.], [40., 32., 40.]).rate(alive as f32 / 0.75),
+                    )
+                    .lifetime(0.6..0.9)
+                    .velocity([0., -22., 0.], 1.5)
+                    .force(Force::Gravity)
+                    .force(Force::Wind([2., 0., 1.]))
+                    .force(Force::Drag(0.1))
+                    .collide(Collide::Plane {
+                        height: 0.,
+                        then: Response::Die,
+                    })
+                    .draw(Shape::Streak { length: 0.04 }, Blend::Alpha)
+                    .size(0.01..0.015)
+                    .color([0.7, 0.75, 0.8, 0.5]),
+            )
+            .expect("an emitter");
     }
     world
 }

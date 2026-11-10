@@ -168,14 +168,16 @@ fn world() -> World {
 #[test]
 fn a_burst_shows_where_it_was_born_until_its_life_ends() {
     let world = world();
-    world.add_emitter(
-        Emitter::new(16)
-            .spawn(Spawn::point([0., 0., 0.]))
-            .burst(16)
-            .lifetime(0.5..0.5)
-            .size(1.0..1.0)
-            .color([1., 0.5, 0.25, 1.]),
-    );
+    world
+        .add_emitter(
+            Emitter::new(16)
+                .spawn(Spawn::point([0., 0., 0.]))
+                .burst(16)
+                .lifetime(0.5..0.5)
+                .size(1.0..1.0)
+                .color([1., 0.5, 0.25, 1.]),
+        )
+        .unwrap();
     let Some(mut frames) = Frames::new(&world) else {
         return;
     };
@@ -211,23 +213,25 @@ fn particles_fall_and_collide_alike_on_the_gpu_and_the_cpu() {
             let world = world();
             let mut frames = Frames::new(&world)?;
             world.set_particles_on_cpu(on_cpu);
-            let rain = world.add_emitter(
-                Emitter::new(2000)
-                    .spawn(Spawn::box_([-1., 1., -0.2], [1., 1.2, 0.2]).rate(3000.))
-                    .lifetime(2.0..2.0)
-                    .velocity([0., 0., 0.], 0.5)
-                    .force(Force::Gravity)
-                    .force(Force::Drag(0.5))
-                    .collide(Collide::Plane {
-                        height: -0.5,
-                        then: Response::Bounce {
-                            keep: 0.3,
-                            friction: 0.2,
-                        },
-                    })
-                    .size(0.05..0.08)
-                    .color([0.2, 0.6, 1.0, 1.0]),
-            );
+            let rain = world
+                .add_emitter(
+                    Emitter::new(2000)
+                        .spawn(Spawn::box_([-1., 1., -0.2], [1., 1.2, 0.2]).rate(3000.))
+                        .lifetime(2.0..2.0)
+                        .velocity([0., 0., 0.], 0.5)
+                        .force(Force::Gravity)
+                        .force(Force::Drag(0.5))
+                        .collide(Collide::Plane {
+                            height: -0.5,
+                            then: Response::Bounce {
+                                keep: 0.3,
+                                friction: 0.2,
+                            },
+                        })
+                        .size(0.05..0.08)
+                        .color([0.2, 0.6, 1.0, 1.0]),
+                )
+                .unwrap();
             world.set_emitting(rain, false);
             frames.ready(&world, 0.);
             world.set_emitting(rain, true);
@@ -266,13 +270,15 @@ fn particles_fall_and_collide_alike_on_the_gpu_and_the_cpu() {
 fn a_world_draws_while_particles_may_live_and_then_settles() {
     let world = world();
     assert!(!world.view().animating());
-    let rain = world.add_emitter(
-        Emitter::new(1000)
-            .spawn(Spawn::box_([-1., 1., -1.], [1., 1., 1.]).rate(500.))
-            .lifetime(0.3..0.4)
-            .velocity([0., -5., 0.], 0.)
-            .draw(Shape::Streak { length: 0.05 }, Blend::Additive),
-    );
+    let rain = world
+        .add_emitter(
+            Emitter::new(1000)
+                .spawn(Spawn::box_([-1., 1., -1.], [1., 1., 1.]).rate(500.))
+                .lifetime(0.3..0.4)
+                .velocity([0., -5., 0.], 0.)
+                .draw(Shape::Streak { length: 0.05 }, Blend::Additive),
+        )
+        .unwrap();
     assert!(world.view().animating(), "emitting");
     let Some(mut frames) = Frames::new(&world) else {
         return;
@@ -302,7 +308,7 @@ fn a_world_draws_while_particles_may_live_and_then_settles() {
 #[test]
 fn the_cpu_holds_at_most_its_cap() {
     let world = world();
-    world.add_emitter(Emitter::new(100_000));
+    world.add_emitter(Emitter::new(100_000)).unwrap();
     let gpu = world.memory().particles;
     assert_eq!(gpu, 100_000 * 80);
     world.set_particles_on_cpu(true);
@@ -319,14 +325,16 @@ fn drops_hitting_a_plane_give_birth_to_splashes_there() {
             let world = world();
             let mut frames = Frames::new(&world)?;
             world.set_particles_on_cpu(on_cpu);
-            let splashes = world.add_emitter(
-                Emitter::new(4000)
-                    .spawn(Spawn::sphere([0., 0.02, 0.], 0.02))
-                    .lifetime(0.3..0.3)
-                    .velocity([0., 1., 0.], 0.5)
-                    .size(0.06..0.06)
-                    .color([1., 0.05, 0.05, 1.]),
-            );
+            let splashes = world
+                .add_emitter(
+                    Emitter::new(4000)
+                        .spawn(Spawn::sphere([0., 0.02, 0.], 0.02))
+                        .lifetime(0.3..0.3)
+                        .velocity([0., 1., 0.], 0.5)
+                        .size(0.06..0.06)
+                        .color([1., 0.05, 0.05, 1.]),
+                )
+                .unwrap();
             let mut drops = Emitter::new(2000)
                 .spawn(Spawn::box_([-1., 1., -0.1], [1., 1.1, 0.1]).rate(600.))
                 .lifetime(2.0..2.0)
@@ -340,7 +348,7 @@ fn drops_hitting_a_plane_give_birth_to_splashes_there() {
             if splashing {
                 drops = drops.on_hit(splashes, 3);
             }
-            let rain = world.add_emitter(drops);
+            let rain = world.add_emitter(drops).unwrap();
             world.set_emitting(rain, false);
             frames.ready(&world, 0.);
             world.set_emitting(rain, true);
@@ -374,4 +382,49 @@ fn drops_hitting_a_plane_give_birth_to_splashes_there() {
     assert_eq!(none, 0, "no sub-emitter, no splashes");
     let ratio = gpu as f32 / cpu as f32;
     assert!((0.6..1.6).contains(&ratio), "{gpu} against {cpu}");
+}
+
+#[test]
+fn a_pool_is_refused_past_the_devices_limits_and_counts_against_the_cap() {
+    let world = world();
+    // One storage binding holds 128 MiB on WebGPU's default limits (the
+    // shared device's, and every tier A device's): 1,677,721 particles.
+    assert_eq!(
+        world.add_emitter(Emitter::new(2_000_000)),
+        Err(EmitterError::TooMany {
+            asked: 2_000_000,
+            most: 1_677_721
+        })
+    );
+    // The most is made and steps on the device: no error reaches its
+    // handler (which panics in debug builds).
+    world
+        .add_emitter(Emitter::new(1_677_721).rate(100_000.))
+        .unwrap();
+    if let Some(mut frames) = Frames::new(&world) {
+        frames.ready(&world, 0.);
+        frames.run(0., 0.1);
+        frames.pixels();
+    }
+    // Pools count with the app's buffers and textures under the cap.
+    let world = self::world();
+    world.set_memory_cap(1 << 20);
+    let buffer = world.add_buffer(BufferDesc::bytes(512 << 10)).unwrap();
+    assert_eq!(
+        world.add_emitter(Emitter::new(10_000)),
+        Err(EmitterError::OverBudget {
+            asked: 800_000,
+            used: 512 << 10,
+            cap: 1 << 20
+        })
+    );
+    let rain = world.add_emitter(Emitter::new(5_000)).unwrap();
+    assert_eq!(world.memory().particles, 400_000);
+    assert!(
+        world.add_buffer(BufferDesc::bytes(200_000)).is_err(),
+        "the pool's bytes are counted"
+    );
+    world.remove_emitter(rain);
+    assert!(world.add_buffer(BufferDesc::bytes(200_000)).is_ok());
+    drop(buffer);
 }

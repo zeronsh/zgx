@@ -9,38 +9,42 @@ pub(super) fn main() {
     let (meshes, frames) = (setting("MESHES", 2000), setting("FRAMES", 30));
     let (device, queue) = device();
     let (world, root, joint, morphs) = world(false, meshes);
-    world.add_emitter(
-        Emitter::new(200_000)
-            .spawn(Spawn::box_([-40., 30., -40.], [40., 32., 40.]).rate(250_000.))
-            .lifetime(0.6..0.9)
-            .velocity([0., -22., 0.], 1.5)
-            .force(Force::Gravity)
-            .force(Force::Wind([2., 0., 1.]))
-            .force(Force::Drag(0.1))
-            .collide(Collide::Plane {
-                height: 0.,
-                then: Response::Die,
-            })
-            .draw(Shape::Streak { length: 0.04 }, Blend::Alpha)
-            .size(0.01..0.015)
-            .color([0.7, 0.75, 0.8, 0.4]),
-    );
-    let sparks = world.add_emitter(
-        Emitter::new(4096)
-            .spawn(Spawn::cone([0., 1., 0.], [0., 1., 0.], 0.6))
-            .lifetime(0.3..0.8)
-            .velocity([0., 6., 0.], 1.)
-            .force(Force::Gravity)
-            .collide(Collide::Plane {
-                height: 0.,
-                then: Response::Bounce {
-                    keep: 0.4,
-                    friction: 0.3,
-                },
-            })
-            .draw(Shape::Streak { length: 0.02 }, Blend::Additive)
-            .color([4., 2., 0.6, 1.]),
-    );
+    world
+        .add_emitter(
+            Emitter::new(200_000)
+                .spawn(Spawn::box_([-40., 30., -40.], [40., 32., 40.]).rate(250_000.))
+                .lifetime(0.6..0.9)
+                .velocity([0., -22., 0.], 1.5)
+                .force(Force::Gravity)
+                .force(Force::Wind([2., 0., 1.]))
+                .force(Force::Drag(0.1))
+                .collide(Collide::Plane {
+                    height: 0.,
+                    then: Response::Die,
+                })
+                .draw(Shape::Streak { length: 0.04 }, Blend::Alpha)
+                .size(0.01..0.015)
+                .color([0.7, 0.75, 0.8, 0.4]),
+        )
+        .expect("an emitter");
+    let sparks = world
+        .add_emitter(
+            Emitter::new(4096)
+                .spawn(Spawn::cone([0., 1., 0.], [0., 1., 0.], 0.6))
+                .lifetime(0.3..0.8)
+                .velocity([0., 6., 0.], 1.)
+                .force(Force::Gravity)
+                .collide(Collide::Plane {
+                    height: 0.,
+                    then: Response::Bounce {
+                        keep: 0.4,
+                        friction: 0.3,
+                    },
+                })
+                .draw(Shape::Streak { length: 0.02 }, Blend::Additive)
+                .color([4., 2., 0.6, 1.]),
+        )
+        .expect("an emitter");
     if std::env::var_os("ON_CPU").is_some() {
         world.set_particles_on_cpu(true);
     }

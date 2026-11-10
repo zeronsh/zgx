@@ -289,6 +289,64 @@ impl Emitter {
     }
 }
 
+/// Why an emitter was refused (`World::add_emitter`).
+#[non_exhaustive]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EmitterError {
+    /// More particles than one pool holds on the view's device: a pool is
+    /// one storage binding and one dispatch (on WebGPU's default limits,
+    /// what every tier A device has, 1,677,721). Use more emitters.
+    TooMany {
+        /// Its particles.
+        asked: u32,
+        /// The most a pool holds.
+        most: u32,
+    },
+    /// Its pool would take the app's GPU data past the world's cap
+    /// (`World::set_memory_cap`).
+    OverBudget {
+        /// Its pool's bytes.
+        asked: u64,
+        /// The app's live bytes already.
+        used: u64,
+        /// The cap.
+        cap: u64,
+    },
+}
+impl std::fmt::Display for EmitterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooMany { asked, most } => write!(
+                f,
+                "{asked} particles: a pool holds at most {most} on this device"
+            ),
+            Self::OverBudget { asked, used, cap } => write!(
+                f,
+                "a pool of {asked} bytes would take the app's GPU data past its cap ({used} of {cap} used)"
+            ),
+        }
+    }
+}
+impl std::error::Error for EmitterError {}
+
+/// The most particles one pool holds on a device of `caps` (`None`: not yet
+/// known, WebGPU's defaults): one storage binding, one buffer, one dispatch
+/// of 256-wide workgroups.
+pub(crate) fn most(caps: Option<crate::Caps>) -> u32 {
+    let defaults = zgx_gpu::wgpu::Limits::default();
+    let (binding, buffer, groups) = caps.filter(|c| c.compute).map_or(
+        (
+            defaults.max_storage_buffer_binding_size,
+            defaults.max_buffer_size,
+            defaults.max_compute_workgroups_per_dimension,
+        ),
+        |c| (c.max_storage_binding, c.max_buffer, c.max_workgroups),
+    );
+    (binding.min(buffer) / cpu::PARTICLE_BYTES)
+        .min(u64::from(groups) * 256)
+        .min(u64::from(u32::MAX)) as u32
+}
+
 /// An emitter in a world (`World::add_emitter`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EmitterId {
@@ -493,16 +551,18 @@ impl Particles {
     /// Bytes its pools hold on the device: as the GPU holds them, or as many
     /// as the CPU updates.
     pub(crate) fn bytes(&self, on_gpu: bool) -> u64 {
-        let slots = |max: u32| {
-            if on_gpu && !self.on_cpu {
-                max
-            } else {
-                max.min(CPU_PARTICLES)
-            }
-        };
         self.live()
-            .map(|live| u64::from(slots(live.emitter.max)) * cpu::PARTICLE_BYTES)
+            .map(|live| self.pool_bytes(live.emitter.max, on_gpu))
             .sum()
+    }
+    /// Bytes a pool of `max` particles holds.
+    pub(crate) fn pool_bytes(&self, max: u32, on_gpu: bool) -> u64 {
+        let slots = if on_gpu && !self.on_cpu {
+            max
+        } else {
+            max.min(CPU_PARTICLES)
+        };
+        u64::from(slots) * cpu::PARTICLE_BYTES
     }
     /// Whether any emitter keeps the world drawing.
     pub(crate) fn unsettled(&self) -> bool {

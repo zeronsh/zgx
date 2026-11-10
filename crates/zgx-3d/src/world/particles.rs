@@ -1,16 +1,25 @@
 //! A world's particle emitters (design-3d-aaa.md, 5.4): the `World` calls of
 //! `crate::particles`.
 use super::World;
-use crate::particles::{Emitter, EmitterId, Particles, UNSETTLED};
+use crate::particles::{Emitter, EmitterError, EmitterId, Particles, UNSETTLED};
 
 impl World {
     /// Its emitters, made with the first call needing them; the world
     /// unsettled while one keeps it drawing.
     fn particles<T>(&self, f: impl FnOnce(&mut Particles) -> T) -> T {
+        let on_gpu = self.caps().is_none_or(|caps| caps.compute);
+        let view = self.view.clone();
         let mut inner = self.inner.borrow_mut();
+        let inner = &mut *inner;
         let particles = inner.particles.get_or_insert_with(Default::default);
         let out = f(particles);
         let unsettled = particles.unsettled();
+        // Its pools count with the app's data, under its cap.
+        let bytes = particles.bytes(on_gpu);
+        inner
+            .data
+            .get_or_insert_with(|| Box::new(crate::compute::Data::new(view)))
+            .particle_bytes = bytes;
         inner.unsettle(UNSETTLED, unsettled);
         out
     }
@@ -19,10 +28,47 @@ impl World {
     /// while it emits or any of its particles may live. Where the device
     /// runs no compute (`caps().compute` false), its particles are updated
     /// on the CPU, at most `CPU_PARTICLES` of them.
-    pub fn add_emitter(&self, emitter: Emitter) -> EmitterId {
+    ///
+    /// Refused past the most particles one pool holds on the view's device
+    /// (`EmitterError::TooMany`: 1,677,721 on WebGPU's default limits, before
+    /// a frame tells the device), and where its pool would take the app's GPU
+    /// data past the world's cap (`set_memory_cap`).
+    pub fn add_emitter(&self, emitter: Emitter) -> Result<EmitterId, EmitterError> {
+        let caps = self.caps();
+        let on_gpu = caps.is_none_or(|caps| caps.compute);
+        let most = crate::particles::most(caps);
+        if on_gpu && emitter.max > most {
+            return Err(EmitterError::TooMany {
+                asked: emitter.max,
+                most,
+            });
+        }
+        let room = {
+            let view = self.view.clone();
+            let mut inner = self.inner.borrow_mut();
+            let inner = &mut *inner;
+            let bytes = inner
+                .particles
+                .get_or_insert_with(Default::default)
+                .pool_bytes(emitter.max, on_gpu);
+            let data = inner
+                .data
+                .get_or_insert_with(|| Box::new(crate::compute::Data::new(view)));
+            data.room(bytes).map_err(|error| match error {
+                crate::GpuDataError::OverBudget { asked, used, cap } => {
+                    EmitterError::OverBudget { asked, used, cap }
+                }
+                _ => EmitterError::OverBudget {
+                    asked: bytes,
+                    used: 0,
+                    cap: data.cap,
+                },
+            })
+        };
+        room?;
         let id = self.particles(|p| p.add(emitter));
         self.view.invalidate();
-        id
+        Ok(id)
     }
 
     /// Take an emitter out, its particles with it.

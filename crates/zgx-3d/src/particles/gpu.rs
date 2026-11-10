@@ -143,6 +143,8 @@ struct Pool {
     born_cpu: u32,
     /// This frame's numbers, for parents giving birth into it.
     last: Uniforms,
+    /// The device refused to make it: neither updated nor drawn.
+    failed: bool,
     /// Whether any may live this frame (else neither updated nor drawn).
     shown: bool,
     blend: Blend,
@@ -299,6 +301,10 @@ impl Device {
                 .or_insert_with(|| make_pool(device, (update_layout, draw_layout), slots, on_gpu));
             pool.used = index;
             pool.blend = live.emitter.blend;
+            if pool.failed {
+                pool.shown = false;
+                continue;
+            }
             let count = live.step(time, step, slots);
             let base = live.head;
             live.head = (live.head + count) % slots;
@@ -642,6 +648,23 @@ fn make_pool(
     slots: u32,
     on_gpu: bool,
 ) -> Pool {
+    // Checked against the device's limits when the emitter was added; a
+    // refusal still left here, not to the device's handler.
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut pool = make_pool_in_scope(device, (update_layout, draw_layout), slots, on_gpu);
+    if let Some(error) = crate::compute::now(scope.pop()) {
+        eprintln!("zgx-3d: a particle pool of {slots} couldn't be made: {error}");
+        pool.failed = true;
+    }
+    pool
+}
+
+fn make_pool_in_scope(
+    device: &wgpu::Device,
+    (update_layout, draw_layout): (&wgpu::BindGroupLayout, &wgpu::BindGroupLayout),
+    slots: u32,
+    on_gpu: bool,
+) -> Pool {
     let particles = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("3D particles"),
         size: u64::from(slots) * std::mem::size_of::<Particle>() as u64,
@@ -712,6 +735,7 @@ fn make_pool(
         }),
         born_cpu: 0,
         last: Uniforms::default(),
+        failed: false,
         shown: false,
         blend: Blend::Alpha,
         used: 0,
