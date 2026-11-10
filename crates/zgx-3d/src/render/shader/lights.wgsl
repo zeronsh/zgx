@@ -21,9 +21,36 @@
 //X     let first = select(pair.x, pair.z, odd);
 //X     return vec2(first, first + select(pair.y, pair.w, odd));
 //X }
-//X // The `i`th index's light, as a uniform path's slot holds one.
+//X // The `i`th index's light: where it is and how far it reaches, its
+//X // colour times its intensity and its radius, its cone.
 //X fn cluster_light(i: u32) -> array<vec4<f32>, 3> {
 //X     let bases = clusters[2];
 //X     let at = bases.x + clusters[bases.z + i / 4u][i % 4u] * 3u;
 //X     return array(bitcast<vec4<f32>>(clusters[at]), bitcast<vec4<f32>>(clusters[at + 1u]), bitcast<vec4<f32>>(clusters[at + 2u]));
+//X }
+//X // A light reaching a fragment at `world`: which way, how much, and how
+//X // much wider its highlights are than a point's.
+//X struct Lamp {
+//X     l: vec3<f32>,
+//X     radiance: vec3<f32>,
+//X     widen: f32,
+//X }
+//X fn lamp_at(light: array<vec4<f32>, 3>, world: vec3<f32>) -> Lamp {
+//X     let to = light[0].xyz - world;
+//X     let distance = length(to);
+//X     let l = to / distance;
+//X     let radius = light[1].w;
+//X     // Falling as the square of the distance, from a sphere of its radius
+//X     // (bounded where it nearly touches), smoothly to nothing at its reach.
+//X     let window = pow(clamp(1.0 - pow(distance / light[0].w, 4.0), 0.0, 1.0), 2.0);
+//X     let falloff = window / max(distance * distance + radius * radius, 1e-4);
+//X     // Within a spot's cone (all round: 1).
+//X     let cone = clamp(dot(light[2].xyz, -l) + light[2].w, 0.0, 1.0);
+//X     // A sphere's highlight: as a rougher surface's, by the angle it spans
+//X     // (Karis 2013, sphere lights' roughness).
+//X     return Lamp(l, light[1].rgb * (falloff * cone * cone), radius / (2.0 * max(distance, 1e-4)));
+//X }
+//X // `roughness` widened for a light `widen` across (its square, α, grown).
+//X fn widened(roughness: f32, widen: f32) -> f32 {
+//X     return sqrt(min(roughness * roughness + widen, 1.0));
 //X }

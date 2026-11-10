@@ -73,6 +73,8 @@ pub use memory::Memory;
 pub use orbit::{Answer, Orbit, OrbitControls};
 pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};
+#[cfg(feature = "lighting")]
+pub use world::lighting::PointLight;
 pub use world::{
     Camera, Clearcoat, Light, LightId, MAX_JOINTS, Material, Object, ObjectId, POINT_LIGHTS, Skin,
     Specular, Spot, ToneMapping, Transmission, World, srgb_to_linear,

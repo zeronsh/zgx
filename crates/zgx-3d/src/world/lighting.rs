@@ -1,28 +1,177 @@
 //! The lighting milestone's settings on a world (design-3d-aaa.md, 6.3):
-//! clustered lights. Behind the `lighting` feature.
-use super::{Inner, World};
+//! clustered lights and point and spot lights in physical units. Behind the
+//! `lighting` feature.
+use super::{ByIndex, Inner, Light, LightId, Spot, World};
+use crate::math::Vec3;
 
 /// A world's lighting settings.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Lighting {
     /// Point and spot lights shaded through clusters whatever their count
     /// (`World::set_clustered_lights`).
     pub(crate) clustered: bool,
+    /// Point lights' radii (`PointLight::radius`), by light index, with the
+    /// generation they were set for: most have none.
+    radii: ByIndex<(u32, f32)>,
+}
+impl Lighting {
+    /// Whether any light was given a radius (gone or not).
+    pub(crate) fn any_radii(&self) -> bool {
+        !self.radii.is_empty()
+    }
+    /// Light `index` (of `generation`)'s radius: 0 for a point.
+    pub(crate) fn radius(&self, index: usize, generation: u32) -> f32 {
+        match self.radii.get(&(index as u32)) {
+            Some(&(set_for, radius)) if set_for == generation => radius,
+            _ => 0.,
+        }
+    }
+}
+
+impl Inner {
+    /// Whether a light still in the world has a radius.
+    pub(crate) fn has_radii(&self) -> bool {
+        let lighting = &self.lighting;
+        !lighting.radii.is_empty()
+            && lighting.radii.iter().any(|(&index, &(generation, _))| {
+                self.lights
+                    .get(index as usize)
+                    .is_some_and(|slot| slot.generation == generation && slot.value.is_some())
+            })
+    }
+}
+
+/// A point or spot light in physical units (`World::add_point_light`):
+/// `Light::point(position).lumens(800.)`, `Light::spot(position,
+/// direction).lumens(4000.).cone(0.3, 0.5)`.
+///
+/// Its intensity is in candela, as `Light::Point`'s `intensity` is (the
+/// sun's in lux: 3 is a bright day for these materials, at exposure 0).
+/// Given in lumens, a point light's is `lumens / 4π` candela, and a spot's
+/// the same whatever its cone (as Bevy and Filament take a spot's lumens):
+/// narrowing a spot's cone keeps how bright it is where it shines.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointLight {
+    /// Where it is.
+    pub position: Vec3,
+    /// Its colour, linear.
+    pub color: [f32; 3],
+    /// How bright, in candela.
+    pub candela: f32,
+    /// How far it reaches: it falls smoothly to nothing there.
+    pub range: f32,
+    /// How big it is, a sphere of this radius: falling off from its
+    /// surface rather than its centre, so it lights what it nearly touches
+    /// without a burning point, and its highlights on shiny surfaces are
+    /// as wide as it looks. 0: a point.
+    pub radius: f32,
+    /// A spot's cone, if it is one.
+    pub spot: Option<Spot>,
+}
+
+impl Light {
+    /// A point light at `position`: white, 1 candela, reaching 10 m.
+    pub fn point(position: impl Into<Vec3>) -> PointLight {
+        PointLight {
+            position: position.into(),
+            color: [1.; 3],
+            candela: 1.,
+            range: 10.,
+            radius: 0.,
+            spot: None,
+        }
+    }
+    /// A spot light at `position` shining along `direction`: as
+    /// `Light::point`, fully within 30° of its direction and fading to
+    /// nothing at 45° (`PointLight::cone`).
+    pub fn spot(position: impl Into<Vec3>, direction: impl Into<Vec3>) -> PointLight {
+        PointLight {
+            spot: Some(Spot::new(
+                direction,
+                30_f32.to_radians(),
+                45_f32.to_radians(),
+            )),
+            ..Self::point(position)
+        }
+    }
+}
+
+impl PointLight {
+    /// Its colour, linear.
+    pub fn color(self, color: [f32; 3]) -> Self {
+        Self { color, ..self }
+    }
+    /// How bright, in candela (lumens per steradian).
+    pub fn candela(self, candela: f32) -> Self {
+        Self {
+            candela: candela.max(0.),
+            ..self
+        }
+    }
+    /// How bright, as the lumens it gives off in all: `lumens / 4π`
+    /// candela, a spot's too.
+    pub fn lumens(self, lumens: f32) -> Self {
+        self.candela(lumens / (4. * std::f32::consts::PI))
+    }
+    /// How bright, in lumens.
+    pub fn in_lumens(&self) -> f32 {
+        self.candela * 4. * std::f32::consts::PI
+    }
+    /// How far it reaches.
+    pub fn range(self, range: f32) -> Self {
+        Self {
+            range: range.max(1e-3),
+            ..self
+        }
+    }
+    /// How big it is: a sphere of `radius` (`PointLight::radius`).
+    pub fn radius(self, radius: f32) -> Self {
+        Self {
+            radius: radius.max(0.),
+            ..self
+        }
+    }
+    /// A spot's cone: fully within `inner` radians of its direction,
+    /// fading to nothing at `outer`. Ignored for a point light.
+    pub fn cone(self, inner: f32, outer: f32) -> Self {
+        Self {
+            spot: self
+                .spot
+                .map(|spot| Spot::new(spot.direction, inner, outer)),
+            ..self
+        }
+    }
+    /// It as a `Light::Point` (its cone and radius apart).
+    fn light(&self) -> Light {
+        Light::Point {
+            position: self.position,
+            color: self.color,
+            intensity: self.candela,
+            range: self.range,
+        }
+    }
+}
+impl From<PointLight> for Light {
+    /// Its place, colour, candela and range; a cone is set apart
+    /// (`World::set_spot`) and a radius only by `World::add_point_light`.
+    fn from(light: PointLight) -> Self {
+        light.light()
+    }
 }
 
 impl World {
     /// Shade point and spot lights through clusters (on) or, with eight or
     /// fewer, the uniform path's eight (off, the default).
     ///
-    /// A world with more point lights than [`POINT_LIGHTS`](crate::POINT_LIGHTS)
-    /// shades through clusters either way: its view is cut into 16 by 9
-    /// tiles and 24 slices of depth, each light listed in the clusters it
-    /// reaches, and each pixel shades with its own cluster's lights alone, so
-    /// hundreds of lights cost about what the few reaching each pixel do. The
-    /// lists are made on the CPU, again only when a light, the camera or the
-    /// view's size changes. A device without storage buffers in its shaders
-    /// (some GL) shades the eight nearest the camera's target, as without
-    /// the `lighting` feature.
+    /// A world with more point lights than [`POINT_LIGHTS`](crate::POINT_LIGHTS),
+    /// or any with a radius, shades through clusters either way: its view is
+    /// cut into 16 by 9 tiles and 24 slices of depth, each light listed in
+    /// the clusters it reaches, and each pixel shades with its own cluster's
+    /// lights alone, so hundreds of lights cost about what the few reaching
+    /// each pixel do. The lists are made on the CPU, again only when a
+    /// light, the camera or the view's size changes. A device without
+    /// storage buffers in its shaders (some GL) shades the eight nearest the
+    /// camera's target, as without the `lighting` feature.
     pub fn set_clustered_lights(&self, on: bool) {
         self.change_view(|inner: &mut Inner| {
             std::mem::replace(&mut inner.lighting.clustered, on) != on
@@ -32,5 +181,108 @@ impl World {
     /// count (`set_clustered_lights`).
     pub fn clustered_lights(&self) -> bool {
         self.inner.borrow().lighting.clustered
+    }
+    /// Add `light`, a point or spot light in physical units.
+    pub fn add_point_light(&self, light: PointLight) -> LightId {
+        let id = self.add_light(light.light());
+        self.set_point_light(id, light);
+        id
+    }
+    /// Light `id` as `light` (a point or spot light in physical units).
+    pub fn set_point_light(&self, id: LightId, light: PointLight) {
+        self.set_light(id, light.light());
+        self.set_spot(id, light.spot);
+        self.change_view(|inner: &mut Inner| {
+            if !Self::light_live(inner, id) {
+                return false;
+            }
+            let before = inner.lighting.radius(id.index as usize, id.generation);
+            if light.radius > 0. {
+                let entry = (id.generation, light.radius);
+                inner.lighting.radii.insert(id.index, entry);
+            } else {
+                inner.lighting.radii.remove(&id.index);
+            }
+            before != light.radius
+        });
+    }
+    /// Light `id` as a point or spot light in physical units, if it's a
+    /// point light still in the world.
+    pub fn point_light(&self, id: LightId) -> Option<PointLight> {
+        let inner = self.inner.borrow();
+        let slot = inner.lights.get(id.index as usize)?;
+        let Some(Light::Point {
+            position,
+            color,
+            intensity,
+            range,
+        }) = slot.value.filter(|_| slot.generation == id.generation)
+        else {
+            return None;
+        };
+        let spot = inner
+            .spots
+            .get(&id.index)
+            .filter(|(set_for, _)| *set_for == id.generation)
+            .map(|(_, spot)| *spot);
+        Some(PointLight {
+            position,
+            color,
+            candela: intensity,
+            range,
+            radius: inner.lighting.radius(id.index as usize, id.generation),
+            spot,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vec3;
+
+    #[test]
+    fn lumens_are_candela_over_the_whole_sphere() {
+        let bulb = Light::point([0., 2., 0.]).lumens(800.);
+        assert!((bulb.candela - 63.662).abs() < 1e-3);
+        assert!((bulb.in_lumens() - 800.).abs() < 1e-2);
+        // A spot's as a point's, whatever its cone.
+        let spot = Light::spot([0., 2., 0.], [0., -1., 0.]).lumens(800.);
+        assert_eq!(spot.candela, bulb.candela);
+        assert_eq!(spot.cone(0.1, 0.2).candela, bulb.candela);
+    }
+
+    #[test]
+    fn a_point_light_in_physical_units_is_todays_point_light() {
+        let light = Light::point([1., 2., 3.])
+            .color([1., 0.5, 0.25])
+            .candela(7.)
+            .range(4.);
+        assert_eq!(
+            Light::from(light),
+            Light::Point {
+                position: vec3(1., 2., 3.),
+                color: [1., 0.5, 0.25],
+                intensity: 7.,
+                range: 4.,
+            }
+        );
+        let world = World::new();
+        let spot = Light::spot([0., 3., 0.], [0., -1., 0.])
+            .lumens(4000.)
+            .cone(0.3, 0.5)
+            .radius(0.1);
+        let id = world.add_point_light(spot);
+        assert_eq!(world.point_light(id), Some(spot));
+        let revision = world.revision();
+        world.set_point_light(id, spot);
+        assert_eq!(world.revision(), revision, "nothing changed");
+        world.set_point_light(id, spot.radius(0.));
+        assert_eq!(world.point_light(id).unwrap().radius, 0.);
+        // A light gone and its slot taken again has no radius of the old.
+        world.remove_light(id);
+        assert_eq!(world.point_light(id), None);
+        let other = world.add_light(Light::point([0., 1., 0.]).into());
+        assert_eq!(world.point_light(other).unwrap().radius, 0.);
     }
 }

@@ -1,7 +1,8 @@
 //! Point and spot lights past the uniform path's eight: binned into clusters
 //! (`clusters`) and shaded each by the fragments its clusters hold
 //! (design-3d-aaa.md, 6.3). A world shades this way with more point lights
-//! than `POINT_LIGHTS` or when asked (`World::set_clustered_lights`); any
+//! than `POINT_LIGHTS`, any with a radius (`PointLight::radius`), or when
+//! asked (`World::set_clustered_lights`); any
 //! other draws as it did, its pipelines and frame binding untouched.
 //!
 //! The lists go up in one storage buffer, read as `vec4<u32>`s (the
@@ -50,10 +51,12 @@ pub(super) struct Lights {
 }
 
 /// The world's point and spot lights as the shader reads them, into
-/// `out`: as the uniform path packs its eight (`frame_uniforms`).
+/// `out`: as the uniform path packs its eight (`frame_uniforms`) but for
+/// the second word, its colour times its intensity and its radius.
 fn gather(world: &Inner, out: &mut Vec<Packed>) {
     out.clear();
-    world.for_each_light(|light, spot| {
+    let radii = world.lighting.any_radii();
+    world.for_each_light_at(|index, generation, light, spot| {
         if let Light::Point {
             position,
             color,
@@ -67,9 +70,15 @@ fn gather(world: &Inner, out: &mut Vec<Packed>) {
                 let d = spot.direction.normalized() * scale;
                 [d.x, d.y, d.z, -outer * scale]
             });
+            let radius = if radii {
+                world.lighting.radius(index, generation)
+            } else {
+                0.
+            };
+            let [r, g, b] = color.map(|c| c * intensity);
             out.push([
                 [position.x, position.y, position.z, range.max(1e-3)],
-                [color[0], color[1], color[2], intensity],
+                [r, g, b, radius],
                 cone,
             ]);
         }
@@ -82,7 +91,7 @@ fn wanted(gpu: &Gpu, world: &Inner) -> bool {
         // No storage buffers in its shaders (some GL): the nearest eight.
         return false;
     }
-    if world.lighting.clustered {
+    if world.lighting.clustered || world.has_radii() {
         return true;
     }
     let mut points = 0;
@@ -444,7 +453,7 @@ mod tests {
         let clustered = wgsl(Variant::default().with(Variant::CLUSTERED, true), 4);
         assert!(!plain.contains("clusters") && plain.contains("frame.points[i]"));
         assert!(clustered.contains("var<storage, read> clusters: array<vec4<u32>>"));
-        assert!(clustered.contains("let light = cluster_light(i);"));
+        assert!(clustered.contains("let lamp = lamp_at(cluster_light(i), in.world);"));
         assert!(!clustered.contains("frame.points[i]"));
     }
 

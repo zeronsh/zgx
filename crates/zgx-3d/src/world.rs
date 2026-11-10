@@ -6,7 +6,7 @@ use crate::{
 };
 use std::{cell::RefCell, rc::Rc};
 #[cfg(feature = "lighting")]
-mod lighting;
+pub(crate) mod lighting;
 
 /// How a surface takes light: a metallic-roughness material, as glTF's.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -689,6 +689,13 @@ impl Inner {
     /// Each light as it shines now, in the world's frame, with its cone if
     /// it has one; a light under an object gone or hidden shines nothing.
     pub(crate) fn for_each_light(&self, mut f: impl FnMut(Light, Option<Spot>)) {
+        self.for_each_light_at(|_, _, light, spot| f(light, spot));
+    }
+    /// As `for_each_light`, each with its index and generation. (Inlined
+    /// into it: called through it apart, today's frame cost 3 K
+    /// instructions more under 256 lights.)
+    #[inline(always)]
+    pub(crate) fn for_each_light_at(&self, mut f: impl FnMut(usize, u32, Light, Option<Spot>)) {
         let placed = !self.light_parents.is_empty();
         let mut memo = if placed {
             vec![None; self.objects.len()]
@@ -710,7 +717,7 @@ impl Inner {
             };
             let parent = placed.then(|| of(&self.light_parents, index, slot.generation));
             let Some(parent) = parent.flatten() else {
-                f(light, spot);
+                f(index, slot.generation, light, spot);
                 continue;
             };
             let Some(matrix) = self
@@ -751,7 +758,7 @@ impl Inner {
                 direction: turned(spot.direction),
                 ..spot
             });
-            f(light, spot);
+            f(index, slot.generation, light, spot);
         }
     }
     /// `reason` (a `Settle` bit) unsettled or settled: its view animates

@@ -90,18 +90,23 @@
 //L         var coat_lit = shade(vec3(0.0), 0.0, coat_rough, coat_n, v, -frame.sun_direction.xyz, sun);
 //Y         for (var i = 0u; i < u32(frame.params.x); i++) {
 //Y             let light = frame.points[i];
+//Y             let to = light[0].xyz - in.world;
+//Y             let distance = length(to);
+//Y             let falloff = pow(clamp(1.0 - pow(distance / light[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);
+            // Within a spot's cone (all round: 1).
+//Y             let cone = clamp(dot(light[2].xyz, -to / distance) + light[2].w, 0.0, 1.0);
+//Y //Q             lit += shade(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
+//Y //R             lit += shade_specular(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
+//Y //L             coat_lit += shade(vec3(0.0), 0.0, coat_rough, coat_n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
+//Y         }
+        // Clustered: the fragment's cluster's lights (`lights.wgsl`).
 //X         let span = cluster_span(in.position.xy, in.world);
 //X         for (var i = span.x; i < span.y; i++) {
-//X             let light = cluster_light(i);
-            let to = light[0].xyz - in.world;
-            let distance = length(to);
-            let falloff = pow(clamp(1.0 - pow(distance / light[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);
-            // Within a spot's cone (all round: 1).
-            let cone = clamp(dot(light[2].xyz, -to / distance) + light[2].w, 0.0, 1.0);
-//Q             lit += shade(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
-//R             lit += shade_specular(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
-//L             coat_lit += shade(vec3(0.0), 0.0, coat_rough, coat_n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
-        }
+//X             let lamp = lamp_at(cluster_light(i), in.world);
+//X //Q             lit += shade(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
+//X //R             lit += shade_specular(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
+//X //L             coat_lit += shade(vec3(0.0), 0.0, widened(coat_rough, lamp.widen), coat_n, v, lamp.l, lamp.radiance);
+//X         }
         // Ambient light: the hemisphere seen by the surface for its diffuse
         // part, and along its reflection, by Fresnel, for its specular one
         // (what makes metals their colour away from the lights).

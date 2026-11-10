@@ -243,3 +243,131 @@ fn a_light_added_moved_and_removed_relights_as_a_fresh_world_draws() {
         .count();
     assert_eq!(differing, 0, "a retained world's lights went stale");
 }
+
+/// A floor lit by one light 0.3 above it, seen from above, and the pixel
+/// under the light.
+fn one_light_over_a_floor(add: impl Fn(&World)) -> Option<(Vec<u8>, usize, usize)> {
+    let world = World::new();
+    world.add(Object::mesh(
+        Geometry::plane(20., 20.),
+        Material::rgb(0xb0b0b0).with(0., 0.4),
+    ));
+    world.set_camera(Camera::looking_at([0., 4., 2.], [0., 0., 0.]));
+    add(&world);
+    let mut window = Window::new(&world)?;
+    let pixels = window.draw();
+    Some((
+        pixels,
+        seen_at(&world, vec3(0., 0., 0.)),
+        seen_at(&world, vec3(1.2, 0., 0.)),
+    ))
+}
+
+#[test]
+fn a_light_in_candela_draws_as_todays_point_light_of_that_intensity() {
+    let at = vec3(0., 0.3, 0.);
+    let Some((today, ..)) = one_light_over_a_floor(|world| {
+        world.set_clustered_lights(true);
+        world.add_light(Light::Point {
+            position: at,
+            color: [1., 0.8, 0.6],
+            intensity: 0.4,
+            range: 3.,
+        });
+    }) else {
+        return;
+    };
+    // 0.4 cd as lumens: 0.4 * 4π.
+    let lumens = 0.4 * 4. * std::f32::consts::PI;
+    let (physical, ..) = one_light_over_a_floor(|world| {
+        world.add_point_light(
+            Light::point(at)
+                .color([1., 0.8, 0.6])
+                .lumens(lumens)
+                .range(3.),
+        );
+        world.set_clustered_lights(true);
+    })
+    .unwrap();
+    let differing = today
+        .iter()
+        .zip(&physical)
+        .filter(|(a, b)| a.abs_diff(**b) > 1)
+        .count();
+    assert_eq!(differing, 0);
+}
+
+#[test]
+fn a_lights_radius_softens_it_near_and_hardly_changes_it_far() {
+    let red = |pixels: &[u8], at: usize| f32::from(pixels[at]);
+    let draw = |light: PointLight| {
+        one_light_over_a_floor(|world| {
+            world.add_point_light(light);
+            world.set_clustered_lights(true);
+        })
+    };
+    let dim = Light::point([0., 0.3, 0.]).candela(0.4).range(4.);
+    let Some((point, under, _)) = draw(dim) else {
+        return;
+    };
+    let (sphere, ..) = draw(dim.radius(0.2)).unwrap();
+    // Under it, 0.3 away: a sphere of 0.2 gives 0.09 / 0.13 of a point's.
+    let (p, s) = (red(&point, under), red(&sphere, under));
+    assert!(s < p - 10., "under: point {p} sphere {s}");
+    // 1.2 aside, 1.24 away: within a few percent (1.24² against
+    // 1.24² + 0.2²), brighter so a percent shows.
+    let bright = dim.candela(8.).range(6.);
+    let (point, _, aside) = draw(bright).unwrap();
+    let (sphere, ..) = draw(bright.radius(0.2)).unwrap();
+    let (p, s) = (red(&point, aside), red(&sphere, aside));
+    assert!(
+        p > 40. && (p - s).abs() <= p * 0.05 + 1.,
+        "aside: point {p} sphere {s}"
+    );
+}
+
+/// Side-by-side frames of how a radius looks, for the look's decision:
+/// written to `$ZGX_LOOK_DIR` when set.
+#[test]
+#[ignore]
+fn look_of_a_lights_radius() {
+    let Some(dir) = std::env::var_os("ZGX_LOOK_DIR") else {
+        return;
+    };
+    for radius in [0., 0.05, 0.15, 0.4] {
+        let world = World::new();
+        world.add(Object::mesh(
+            Geometry::plane(8., 8.),
+            Material::rgb(0x707070).with(0., 0.25),
+        ));
+        for (i, roughness) in [0.1f32, 0.35, 0.7].into_iter().enumerate() {
+            world.add(
+                Object::mesh(
+                    Geometry::sphere(0.35, 48),
+                    Material::rgb(0xc04030).with(0., roughness),
+                )
+                .at([i as f32 * 0.9 - 0.9, 0.35, 0.]),
+            );
+        }
+        world.add_point_light(
+            Light::point([0.2, 0.9, 0.8])
+                .color([1., 0.85, 0.7])
+                .lumens(40.)
+                .range(6.)
+                .radius(radius),
+        );
+        world.set_camera(Camera::looking_at([0., 1.3, 2.6], [0., 0.3, 0.]));
+        world.set_background(Some(0x101418));
+        let mut window = Window::new(&world).unwrap();
+        let pixels = window.draw();
+        let path = std::path::Path::new(&dir).join(format!("radius-{radius}.png"));
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(file, SIDE, SIDE);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&pixels)
+            .unwrap();
+    }
+}
