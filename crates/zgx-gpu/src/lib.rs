@@ -17838,15 +17838,17 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
     // Each region redraws every batch it touches: nearby small ones (the
     // dots of a spinner) are fewer draws as one, for a few more pixels. The
     // pixels gained are bounded by the smaller region, so a large region
-    // doesn't swallow every small one in reach, growing as it goes.
-    // (In whole device pixels, where parts and unions are exact.)
-    let area = |r: PixelBox| r.area() as f32;
-    let close = |a: PixelBox, b: PixelBox| {
+    // doesn't swallow every small one in reach, growing as it goes. Regions
+    // overlapping are no exception: one whose union is no bargain (a glass's
+    // ink over a fade's band across the view) would grow to their whole
+    // span, as wide as the larger and as tall as both.
+    let area = |r: Rect| r.width * r.height * scale * scale;
+    let close = |a: Rect, b: Rect| {
         let (a, b) = (area(a), area(b));
         a + b + a.min(b) * 0.5 + NEAR_PIXELS
     };
-    let close = |a: PixelBox, b: PixelBox| area(a.union(b)) <= close(a, b);
-    let mut regions: Vec<PixelBox> = Vec::new();
+    let close = |a: Rect, b: Rect| area(a.union(b)) <= close(a, b);
+    let mut regions: Vec<Rect> = Vec::new();
     let rounded: Vec<Rect>;
     let damage = if damage.len() > MAX_REGIONS {
         rounded = cluster_damage(damage, viewport);
@@ -17854,16 +17856,10 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
     } else {
         damage
     };
-    // Regions overlapping whose union is no bargain (a glass's ink over a
-    // fade's band across the view) aren't merged for it: they'd grow to
-    // their whole span, as wide as the larger and as tall as both. Each is
-    // left whole here, and the overlap goes after (each later one less what
-    // came before it), so the regions drawn never overlap.
     for r in damage {
-        let Some(r) = rounded_damage(*r, viewport, scale) else {
+        let Some(mut r) = rounded_damage(*r, viewport, scale) else {
             continue;
         };
-        let mut r = PixelBox::of(r, scale);
         let mut i = 0;
         while i < regions.len() {
             if close(regions[i], r) {
@@ -17875,9 +17871,22 @@ fn merge_damage(damage: &[Rect], viewport: Rect, scale: f32) -> Vec<Rect> {
         }
         regions.push(r);
     }
-    let mut apart: Vec<PixelBox> = Vec::with_capacity(regions.len());
+    // What's left overlapping goes (`apart`), so none is drawn twice: rare.
+    let overlap = (0..regions.len())
+        .any(|i| (i + 1..regions.len()).any(|j| regions[i].intersection(regions[j]).is_some()));
+    match overlap {
+        true => apart(regions, scale),
+        false => regions,
+    }
+}
+/// `regions`, each less those before it, so that none overlap: in whole
+/// device pixels, where the cuts are exact.
+#[cold]
+#[inline(never)]
+fn apart(regions: Vec<Rect>, scale: f32) -> Vec<Rect> {
+    let mut apart: Vec<PixelBox> = Vec::with_capacity(regions.len() + 4);
     for region in regions {
-        let mut parts = vec![region];
+        let mut parts = vec![PixelBox::of(region, scale)];
         for before in &apart {
             parts = parts
                 .into_iter()
@@ -17899,7 +17908,8 @@ struct PixelBox(i64, i64, i64, i64);
 impl PixelBox {
     /// `rect`, on whole device pixels already (`rounded_damage`).
     fn of(rect: Rect, scale: f32) -> Self {
-        let px = |v: f32| (v * scale).round() as i64;
+        // (Within the viewport: never negative, so no libm `round`.)
+        let px = |v: f32| (v * scale + 0.5) as i64;
         Self(
             px(rect.x),
             px(rect.y),
@@ -17918,14 +17928,6 @@ impl PixelBox {
     }
     fn area(self) -> i64 {
         (self.2 - self.0).max(0) * (self.3 - self.1).max(0)
-    }
-    fn union(self, other: Self) -> Self {
-        Self(
-            self.0.min(other.0),
-            self.1.min(other.1),
-            self.2.max(other.2),
-            self.3.max(other.3),
-        )
     }
     /// Where the two overlap, by a pixel or more.
     fn meet(self, other: Self) -> Option<Self> {
