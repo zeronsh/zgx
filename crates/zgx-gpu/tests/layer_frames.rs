@@ -1131,6 +1131,8 @@ fn main() {
         println!("layer_frames: switches between tiles and drawables match drawing whole");
         a_scroll_under_glass_copies_beside_it_and_matches_drawing_whole();
         println!("layer_frames: a scroll under glass copies beside it and matches drawing whole");
+        a_scroll_under_a_composers_glass_copies_up_to_its_shadow();
+        println!("layer_frames: a scroll under a composer's glass copies up to its shadow");
         faded_scrolls_copy_their_interior_and_match_drawing_whole();
         println!("layer_frames: faded scrolls copy their interior and match drawing whole");
         rounded_corners_scrolled_by_a_copy_match_drawing_whole();
@@ -1254,6 +1256,82 @@ fn a_scroll_under_glass_copies_beside_it_and_matches_drawing_whole() {
         let copies = scrolled_matches_drawing_whole_at(under_glass, &steps, scale);
         assert!(copies > 0, "scale {scale}: no copy beside the glass");
     }
+}
+/// A composer's glass over a transcript's foot: wide frost (sigma 28, its
+/// reach 84 points) and a shadow of its own. What a copy must leave is the
+/// glass and its shadow; past them, within the blur's reach, it copies.
+#[cfg(target_os = "macos")]
+fn under_composer(offset: Signal<f32>) -> View {
+    let mut rows = column().gap(4.).p(4.);
+    for i in 0..60 {
+        rows = rows.child(div().w(500.).h(22.).bg(if i % 3 == 0 {
+            Color(170, 60, 60, 255)
+        } else if i % 3 == 1 {
+            Color(60, 170, 60, 255)
+        } else {
+            Color(60, 60, 170, 255)
+        }));
+    }
+    overlay()
+        .size(SIZE.0, SIZE.1)
+        .bg(Color(17, 17, 17, 255))
+        .child(
+            scroll(offset)
+                .w(SIZE.0)
+                .h(SIZE.1)
+                .bg(Color(17, 17, 17, 255))
+                .child(rows),
+        )
+        .child(
+            div()
+                .w(260.)
+                .h(48.)
+                .left(60.)
+                .top(SIZE.1 - 60.)
+                .rounded(16.)
+                .bg(Color(255, 255, 255, 50))
+                .shadow(zgx::scene::BoxShadow {
+                    color: Color(0, 0, 0, 90),
+                    offset: zgx::scene::Transform { x: 0., y: 4. },
+                    blur_radius: 10.,
+                    spread: 0.,
+                })
+                .backdrop_blur(28.),
+        )
+}
+#[cfg(target_os = "macos")]
+fn a_scroll_under_a_composers_glass_copies_up_to_its_shadow() {
+    let steps = [0., 3., 7., 30., 31., 90., 89., 0.];
+    for scale in [2., 1., 1.5] {
+        let copies = scrolled_matches_drawing_whole_at(under_composer, &steps, scale);
+        assert!(copies > 0, "scale {scale}: no copy over the composer");
+    }
+    // The copy reaches down to the glass's shadow, not its blur's reach.
+    let mut ui = Ui::new(SIZE.0, SIZE.1);
+    ui.scene.borrow_mut().set_pixel_scale(2.);
+    let offset = ui.signal(0.);
+    ui.mount(under_composer(offset.clone()));
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    offset.set(8.);
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    let scene = ui.scene.borrow();
+    let moves = scene.scroll_moves();
+    assert_eq!(moves.len(), 1, "one copy");
+    let clip = moves[0].clip;
+    let glass_top = SIZE.1 - 60.;
+    // The shadow: blur 10 (a reach of 3 x 10 / 2 past its box, or so), down 4.
+    assert!(
+        clip.y + clip.height > glass_top - 30.,
+        "the copy stops {} points above the glass, short of its shadow",
+        glass_top - clip.y - clip.height
+    );
+    assert!(
+        clip.y + clip.height <= glass_top,
+        "the copy runs into the glass: to {}",
+        clip.y + clip.height
+    );
 }
 /// A faded scroll copies its interior and repaints its bands and what it
 /// scrolls in: each frame as the scene drawn whole, at scale 1 and 1.5.
