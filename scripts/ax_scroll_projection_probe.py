@@ -1,5 +1,9 @@
 """Native AT-SPI checks invoked by atspi_smoke on its private desktop."""
 import json
+import select
+import subprocess
+import sys
+import time
 
 
 def run(Atspi, find, wait_for, events, output):
@@ -17,7 +21,37 @@ def run(Atspi, find, wait_for, events, output):
         action = node.get_action_iface()
         assert action is not None and Atspi.Action.do_action(action, 0)
 
-    initial = bounds(target)
+    # Keep input arriving while reading geometry: coalescing all updates
+    # until idle must fail this part even if the final stopped box is right.
+    origin = bounds(target)
+    driver = subprocess.Popen([sys.executable, __file__, "--drive"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    moving = []
+    try:
+        assert select.select([driver.stdout], [], [], 10)[0], "scroll driver startup"
+        assert driver.stdout.readline().strip() == "READY", "scroll driver ready"
+        previous = bounds(target)
+        for _ in range(6):
+            def changed_while_scrolling():
+                current = bounds(target)
+                return current if driver.poll() is None and current != previous else None
+            current = wait_for(changed_while_scrolling, "bounds refreshed during continuous nested scrolling", timeout=3)
+            text = target.get_text_iface()
+            r = text.get_range_extents(0, 10, Atspi.CoordType.SCREEN)
+            # Native queries are separate calls while input continues; the
+            # next geometry update may land between them. Both containers
+            # move within 0..20 points, so the range must remain in this live envelope.
+            assert origin[1] - 41 <= r.y <= origin[1] + origin[3], (origin, r.y)
+            moving.append(current)
+            previous = current
+        assert driver.wait(timeout=8) == 0, driver.stderr.read()
+    finally:
+        if driver.poll() is None:
+            driver.terminate()
+            driver.wait(timeout=3)
+        driver.stdout.close()
+        driver.stderr.close()
+
+    initial = wait_for(lambda: origin if bounds(target) == origin else None, "final nested scroll reset")
     offsets = [0, 0]
     samples = []
     for step in range(24):
@@ -61,4 +95,36 @@ def run(Atspi, find, wait_for, events, output):
         samples.append(dict(step=step, offsets=list(offsets), bounds=current, hit_names=names))
     wait_for(lambda: any(e["type"].startswith("object:bounds-changed") for e in events), "native bounds events")
     (output / "events.json").write_text(json.dumps(events, indent=2) + "\n")
-    (output / "results.json").write_text(json.dumps(dict(ok=True, samples=samples), indent=2) + "\n")
+    (output / "results.json").write_text(json.dumps(dict(ok=True, moving_snapshots=moving, samples=samples), indent=2) + "\n")
+
+
+def drive():
+    import gi
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+    Atspi.init()
+
+    def find(node, name, depth=0):
+        if node is None or depth > 30:
+            return None
+        if node.get_name() == name:
+            return node
+        for i in range(node.get_child_count()):
+            found = find(node.get_child_at_index(i), name, depth + 1)
+            if found is not None:
+                return found
+        return None
+
+    desktop = Atspi.get_desktop(0)
+    buttons = [find(desktop, name) for name in ("Move outer", "Move inner")]
+    assert all(button is not None for button in buttons)
+    print("READY", flush=True)
+    # 180 actions finish with both offsets back at zero (90 moves each).
+    for step in range(180):
+        assert buttons[step % 2].get_action_iface().do_action(0)
+        time.sleep(.012)
+
+
+if __name__ == "__main__":
+    assert sys.argv[1:] == ["--drive"]
+    drive()

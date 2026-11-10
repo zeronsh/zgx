@@ -1388,8 +1388,8 @@ default to include consumer application. This does not measure native adapter
 cost or prove native query freshness.
 
 The registered `ax-scroll-projection` Linux smoke uses a private AT-SPI bus and
-normal client activation. It scrolls two nested containers repeatedly, then
-queries native bounds, hit tests and text-range extents, and exercises focus
+normal client activation. It requires changing bounds during continuous nested input, then
+scrolls both containers repeatedly and queries native bounds, hit tests and text-range extents, and exercises focus
 and selection after every move. It retains the existing geometry pacing.
 
 ```sh
