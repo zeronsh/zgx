@@ -1,5 +1,5 @@
-//! The meshes' WGSL (`shader.wgsl`), one text with tagged lines, and the
-//! variants cut from it.
+//! The meshes' WGSL (`shader/*.wgsl`, a part a feature), one text with
+//! tagged lines, and the variants cut from it.
 use super::Variant;
 /// The shader, sampling textures or not, skinning or not, lit by an
 /// environment or not, drawing `samples` a pixel: its lines marked `//T `
@@ -83,10 +83,29 @@ pub(super) fn shader_chunks() -> &'static Chunks {
     })
 }
 
-/// Metallic-roughness shading (GGX, Smith, Schlick) under a sun, up to four
-/// point lights and a hemisphere's ambient, mapped to display range by
-/// Khronos's PBR Neutral, premultiplied.
-pub(super) const SHADER: &str = include_str!("shader.wgsl");
+/// The shader's parts (`shader/*.wgsl`), in order, as one text.
+macro_rules! parts {
+    ($($name:literal),* $(,)?) => {
+        /// Metallic-roughness shading (GGX, Smith, Schlick) under a sun, up
+        /// to eight point or spot lights and a hemisphere's or an
+        /// environment's ambient, mapped to display range, premultiplied:
+        /// its parts joined, read as one text with tagged lines.
+        pub(super) const SHADER: &str = concat!($(include_str!(concat!("shader/", $name, ".wgsl"))),*);
+        /// Each part's name and text.
+        #[cfg(test)]
+        const PARTS: &[(&str, &str)] =
+            &[$(($name, include_str!(concat!("shader/", $name, ".wgsl")))),*];
+    };
+}
+// A feature's WGSL is a part of its own, listed here. Its lines carry its
+// feature's tag (`wgsl`'s `on`), so a variant without the feature keeps
+// today's text (`every_variants_text_is_todays`); WGSL declares in any
+// order, so a part of functions and bindings goes anywhere, and only what
+// the stages call it from (a tagged line in `vertex` or `fragment`) has a
+// place. Comments and blank lines cost nothing: they're dropped once.
+parts![
+    "frame", "maps", "skin", "vertex", "caster", "light", "display", "fragment",
+];
 
 #[cfg(test)]
 mod tests {
@@ -162,6 +181,44 @@ mod tests {
         });
         assert!(specular.contains("lit = shade_specular(") && !specular.contains("lit = shade("));
         assert!(textured.contains("lit = shade(") && !textured.contains("shade_specular"));
+    }
+
+    /// FNV-1a over every variant's text (every `Variant` bit, one sample a
+    /// pixel and four), in order.
+    fn every_variants_text() -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for bits in 0..1u16 << 11 {
+            for samples in [1, 4] {
+                for byte in wgsl(Variant(bits), samples).bytes().chain([0]) {
+                    hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        hash
+    }
+
+    #[test]
+    fn every_variants_text_is_todays() {
+        // What the shader was before it came from several files, byte for
+        // byte, for every variant. A part a feature adds keeps its lines
+        // behind its own tag, so a world that turns nothing on parses what
+        // it did; change this only with a change to today's shading.
+        assert_eq!(
+            every_variants_text(),
+            0x0a4b_2237_f883_7a85,
+            "{:#018x}",
+            every_variants_text()
+        );
+    }
+
+    #[test]
+    fn each_part_ends_its_last_line() {
+        // Else its last line and the next part's first would be one.
+        for (name, text) in PARTS {
+            assert!(text.ends_with('\n'), "{name}");
+        }
+        let joined: String = PARTS.iter().map(|(_, text)| *text).collect();
+        assert_eq!(joined, SHADER);
     }
 
     #[test]
