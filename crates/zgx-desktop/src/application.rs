@@ -1741,12 +1741,9 @@ struct Host {
     shown: std::rc::Rc<std::cell::RefCell<Option<(zgx_gpu::ShownFrame, f64)>>>,
     /// The next frame repaints the whole window, and its popups.
     force: bool,
-    /// The next frame repaints the whole window, but its popups only as
-    /// they changed: on Wayland (`frame_paced`), a frame the compositor
-    /// grants (`RedrawRequested`) or one put off until it does. Its popups'
-    /// surfaces keep their contents, and each popup frame drawn again for
-    /// nothing is one more to wait for (`popup_window::wayland`).
-    redraw_whole: bool,
+    /// Damage the scene reported while the window waited for a frame
+    /// (Wayland, `frame_paced`): painted with the next frame's.
+    held_damage: FrameDamage,
     presentation: Presentation,
     native_occluded: bool,
     frame_paced: bool,
@@ -2230,7 +2227,7 @@ impl Host {
             #[cfg(target_os = "macos")]
             shown,
             force: true,
-            redraw_whole: false,
+            held_damage: FrameDamage::default(),
             presentation: Presentation::default(),
             native_occluded: false,
             frame_paced: false,
@@ -2910,16 +2907,20 @@ impl Host {
         self.accessibility_geometry_dirty |= !report.damage.is_empty()
             || std::mem::replace(&mut self.popup_revisions, popup_revisions) != popup_revisions;
         let full = [scene.bounds(scene.root())];
-        let forced = self.force || self.redraw_whole;
+        let forced = self.force;
         let popups_forced = self.force;
         // Painting only what changed can be switched off, to compare
         // (`zgx inspect switch partial_repaint off`): a frame that changes
         // anything then paints the whole window.
         let whole = !zgx::switches::PARTIAL_REPAINT.on() && !report.damage.is_empty();
+        let joined;
         let damage = if forced || whole {
             &full[..]
+        } else if self.held_damage.is_empty() {
+            &report.damage[..]
         } else {
-            &report.damage
+            joined = self.held_damage.with(&report.damage, full[0]);
+            &joined[..]
         };
         // Native views: split this frame's paint into the planes under and
         // over them; paint moving between planes repaints on both.
@@ -2944,9 +2945,9 @@ impl Host {
         let mut undrawn = false;
         if !damage.is_empty() {
             if self.frame_paced && !self.present_ready {
-                // Layout/model work proceeds, but defer GPU work until a frame
-                // is granted. A full repaint retains damage across scene flushes.
-                self.redraw_whole = true;
+                // Layout/model work proceeds, but GPU work waits until a
+                // frame is granted: its damage is the next frame's too.
+                self.held_damage.hold(damage);
                 window.request_redraw();
             } else {
                 // Steady frames render at a time of their own within their
@@ -3023,7 +3024,7 @@ impl Host {
                     }
                 }
                 self.force = undrawn;
-                self.redraw_whole = false;
+                self.held_damage.clear();
             }
         }
         // GPU views on planes of their own: their new frames, which damage
@@ -4907,12 +4908,11 @@ impl Host {
                 self.presentation.expose();
                 // Other platforms may have lost the window's contents; on
                 // macOS a redraw AppKit asks for (as the window first shows)
-                // repaints only what changed. A frame Wayland's compositor
-                // grants repaints the window's, not its popups': their
-                // surfaces keep theirs.
-                if self.frame_paced {
-                    self.redraw_whole = true;
-                } else {
+                // repaints only what changed. So does a frame Wayland's
+                // compositor grants: each present copies the whole retained
+                // target, which holds every frame drawn (what waited for this
+                // one is `held_damage`).
+                if !self.frame_paced {
                     self.force |= !cfg!(target_os = "macos");
                 }
                 if std::mem::take(&mut self.frame_redraw_requested) {
@@ -6407,7 +6407,7 @@ impl Host {
         #[cfg(not(any(target_os = "macos", windows)))]
         let paced = false;
         // Scene damage accumulates until the refresh paints it in one frame.
-        if !paced || due || self.frame_arrived || self.force || self.redraw_whole {
+        if !paced || due || self.frame_arrived || self.force {
             #[cfg(target_os = "macos")]
             {
                 self.refresh_frame = paced && self.frame_arrived;
@@ -8789,6 +8789,52 @@ fn continuous_lines(x: f32, y: f32) -> bool {
     let fraction = |lines: f32| (lines * 120.).round() as i32 % 120 != 0;
     cfg!(windows) && (fraction(x) || fraction(y))
 }
+/// Damage a frame-paced window's frame waited with (Wayland: the scene was
+/// flushed before the compositor granted the frame), painted with the next
+/// frame's rather than the whole window: input and state changing each
+/// refresh almost always land in that wait. Kept as the scene keeps its own:
+/// rectangles that meet are joined, and past `HELD_RECTS` one rectangle
+/// holds them all.
+#[derive(Default)]
+struct FrameDamage(Vec<Rect>);
+/// The most rectangles `FrameDamage` keeps apart.
+const HELD_RECTS: usize = 16;
+impl FrameDamage {
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    fn hold(&mut self, damage: &[Rect]) {
+        for &rect in damage {
+            join(&mut self.0, rect);
+        }
+        if self.0.len() > HELD_RECTS
+            && let Some(all) = self.0.iter().copied().reduce(Rect::union)
+        {
+            self.0 = vec![all];
+        }
+    }
+    /// A frame's `damage` with what waited for it, within the window's
+    /// `bounds` (it may have shrunk since; a resize repaints it whole).
+    fn with(&self, damage: &[Rect], bounds: Rect) -> Vec<Rect> {
+        let mut joined = FrameDamage(self.0.clone());
+        joined.hold(damage);
+        joined
+            .0
+            .into_iter()
+            .filter_map(|rect| rect.intersection(bounds))
+            .collect()
+    }
+    fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+/// `rect` into `rects`, joined with every rectangle it meets.
+fn join(rects: &mut Vec<Rect>, mut rect: Rect) {
+    while let Some(at) = rects.iter().position(|other| other.intersects(rect)) {
+        rect = rects.swap_remove(at).union(rect);
+    }
+    rects.push(rect);
+}
 /// Report where a partially repainted frame differs from a full repaint:
 /// the bounding box of stale device pixels, and the frame's damage.
 fn check_damage(
@@ -9130,6 +9176,8 @@ impl WindowCursor {
 
 #[cfg(test)]
 mod tests {
+    use zgx::scene::Rect;
+
     /// A window at rest gives back Metal's queue, then its glyph atlas, each
     /// at its own delay past the trim, and nothing once both have gone.
     #[test]
@@ -9159,6 +9207,64 @@ mod tests {
         );
         assert_eq!(Rest::none().next(), None);
     }
+
+    fn area(rects: &[Rect]) -> f32 {
+        rects.iter().map(|r| r.width * r.height).sum()
+    }
+
+    /// A frame-paced window (Wayland) flushes its scene while it waits for
+    /// the compositor's frame: the frame it is granted paints what changed
+    /// meanwhile and since, not the whole window.
+    #[test]
+    fn damage_flushed_while_a_frame_waits_is_painted_with_the_next() {
+        let window = Rect::new(0., 0., 1280., 800.);
+        let mut held = super::FrameDamage::default();
+        // Hover: two 24-point cells, a flush apart, then a third in the
+        // granted frame's own flush.
+        let first = Rect::new(100., 100., 24., 24.);
+        let second = Rect::new(400., 300., 24., 24.);
+        let third = Rect::new(700., 500., 24., 24.);
+        held.hold(&[first]);
+        held.hold(&[second]);
+        let painted = held.with(&[third], window);
+        assert_eq!(painted.len(), 3);
+        for cell in [first, second, third] {
+            assert!(painted.contains(&cell), "{cell:?} in {painted:?}");
+        }
+        assert_eq!(area(&painted), 3. * 24. * 24.);
+        assert!(area(&painted) < area(&[window]) / 100.);
+        // The same area again (a switch toggled back and forth) is held once.
+        held.hold(&[first]);
+        assert_eq!(held.with(&[], window).len(), 2);
+        // Rectangles that meet are one: their union.
+        let mut met = super::FrameDamage::default();
+        met.hold(&[Rect::new(0., 0., 50., 20.)]);
+        let painted = met.with(&[Rect::new(40., 0., 50., 20.)], window);
+        assert_eq!(painted, vec![Rect::new(0., 0., 90., 20.)]);
+        // Painted, nothing waits.
+        held.clear();
+        assert!(held.is_empty());
+        assert_eq!(held.with(&[third], window), vec![third]);
+    }
+
+    /// However many waits pile up, what is kept stays bounded and holds all
+    /// of them; what lies past a window shrunk since is left out.
+    #[test]
+    fn held_damage_stays_bounded_and_within_the_window() {
+        let mut held = super::FrameDamage::default();
+        let cells: Vec<Rect> = (0..40)
+            .map(|i| Rect::new(i as f32 * 30., 0., 10., 10.))
+            .collect();
+        held.hold(&cells);
+        let painted = held.with(&[], Rect::new(0., 0., 2000., 2000.));
+        assert!(painted.len() <= super::HELD_RECTS, "{}", painted.len());
+        for cell in &cells {
+            assert!(painted.iter().any(|r| r.intersection(*cell) == Some(*cell)));
+        }
+        let shrunk = held.with(&[], Rect::new(0., 0., 100., 100.));
+        assert!(shrunk.iter().all(|r| r.x + r.width <= 100.));
+    }
+
     #[test]
     fn stale_pixels_say_where_and_by_how_much() {
         let fresh = vec![10_u8; 3 * 2 * 4];

@@ -50,6 +50,8 @@ SMOKES = [
     ("paint-media", "python3 scripts/paint_media_smoke.py --binaries {bin} --output {out}", True),
     ("cursors", "python3 scripts/cursors_smoke.py {bin}/cursors --output {out}", True),
     ("wayland-cursors", "python3 scripts/wayland_cursors_smoke.py {bin}/cursors --output {out}", False),
+    ("partial-repaint", "python3 scripts/partial_repaint_smoke.py {bin}/frame_clock --output {out}", False),
+    ("partial-repaint-wayland", "python3 scripts/partial_repaint_smoke.py {bin}/frame_clock --wayland --output {out}", False),
     ("rich-text", "python3 scripts/rich_text_smoke.py {bin}/rich_text --output {out}", False),
     ("actions", "python3 scripts/actions_smoke.py {bin}/actions --output {out}", False),
     ("layout", "python3 scripts/layout_smoke.py {bin}/layout --output {out}", False),
