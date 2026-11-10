@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The most frames a sound can have: 12 hours at 48 kHz. Longer is streamed.
+const MAX_FRAMES: usize = 1 << 31;
+
 /// The most a sample can be, either way: +18 dB over full scale.
 pub const MAX_SAMPLE: f32 = 8.;
 
@@ -40,9 +43,16 @@ impl Sound {
     /// Interleaved samples of `channels` channels at `rate` frames a second.
     /// Past two channels, the first two (front left and right) are kept.
     /// Samples are kept to ±[`MAX_SAMPLE`] (+18 dB over full scale), and any
-    /// that isn't a number or is infinite is silence.
+    /// that isn't a number or is infinite is silence. The rate must be one
+    /// an engine can run at (1 kHz to 768 kHz), and there can be at most
+    /// 2^31 frames: a voice's place in it is a frame shifted 32 bits, with
+    /// room for its step.
     pub fn from_samples(samples: &[f32], channels: usize, rate: u32) -> Result<Sound, Error> {
-        if channels == 0 || rate == 0 || !samples.len().is_multiple_of(channels) {
+        if channels == 0
+            || !(1_000..=768_000).contains(&rate)
+            || !samples.len().is_multiple_of(channels)
+            || samples.len() / channels > MAX_FRAMES
+        {
             return Err(Error::Format(format!(
                 "{} samples can't be frames of {channels} channels at {rate} Hz",
                 samples.len()
