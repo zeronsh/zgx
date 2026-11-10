@@ -5,7 +5,8 @@ use crate::device::{Device, Host, Message, Renderer};
 use crate::effect::{Effect, Slot};
 use crate::mixer::Streamed;
 use crate::mixer::{
-    Command, FADING_SLOTS, Feed, MAX_BUSES, MAX_EFFECTS, Meter, Mixer, Return, Setup, VoiceParam,
+    Command, FADING_SLOTS, Feed, MAX_BUSES, MAX_EFFECTS, Meter, Mixer, PanLaw, Return, Setup,
+    VoiceParam,
 };
 use crate::queue::{Consumer, Producer, queue};
 use crate::ramp::{Curve, Ramp};
@@ -651,6 +652,7 @@ impl Audio {
             region,
             priority: play.priority,
             fade_in: play.fade_in,
+            law: play.law,
         };
         let time = play.at.map_or(0, |at| at.0);
         self.push(&mut control, time, command)?;
@@ -694,6 +696,7 @@ impl Audio {
             },
             priority: play.priority,
             fade_in: play.fade_in,
+            law: play.law,
         };
         let time = play.at.map_or(0, |at| at.0);
         // The decode thread starts filling before the mixer hears of it.
@@ -883,6 +886,7 @@ pub struct Play {
     region: Option<Range<u64>>,
     priority: i8,
     fade_in: Option<Ramp>,
+    law: PanLaw,
 }
 
 impl Default for Play {
@@ -903,6 +907,7 @@ impl Play {
             region: None,
             priority: 0,
             fade_in: None,
+            law: PanLaw::Balance,
         }
     }
     /// The bus it plays into: one of the engine's it's played on (another
@@ -942,6 +947,12 @@ impl Play {
     pub fn loop_frames(mut self, frames: Range<u64>) -> Play {
         self.looping = true;
         self.region = Some(frames);
+        self
+    }
+    /// How its pan shares it between left and right: a balance (the
+    /// default) or equal power (for sounds in space).
+    pub fn law(mut self, law: PanLaw) -> Play {
+        self.law = law;
         self
     }
     /// Kept over voices of lower priority when there are too many.

@@ -39,6 +39,7 @@ mod ramp;
 mod resample;
 mod ring;
 mod sound;
+pub mod spatial;
 mod stream;
 #[cfg(feature = "device")]
 mod via_cpal;
@@ -50,7 +51,7 @@ pub use engine::{
     Audio, Bus, BusDrive, Config, EffectHandle, Error, MAX_GAIN, MAX_VOICES, Offline, Play, Stats,
     Time, Voice,
 };
-pub use mixer::Timing;
+pub use mixer::{PanLaw, Timing};
 pub use ramp::{Curve, Ramp};
 pub use resample::Interpolation;
 pub use sound::{MAX_SAMPLE, Sound, Source};

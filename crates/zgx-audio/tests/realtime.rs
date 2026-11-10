@@ -380,6 +380,19 @@ fn main() {
                     .unwrap(),
             );
         }
+        // One shared by equal power, its pan to move with the rest.
+        voices.push(
+            run.audio
+                .play(
+                    &sounds[0],
+                    Play::new()
+                        .law(zgx_audio::PanLaw::EqualPower)
+                        .gain(0.2)
+                        .looping(true)
+                        .at(run.at(0.002)),
+                )
+                .unwrap(),
+        );
         run.render(8);
         // Every ramp and curve on every voice, timed inside the next blocks.
         let curves = [Curve::Linear, Curve::EqualPower, Curve::Exponential];

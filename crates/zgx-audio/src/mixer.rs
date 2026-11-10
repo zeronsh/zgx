@@ -48,6 +48,7 @@ pub(crate) enum Command {
         priority: i8,
         /// A fade in; `None`, a click-free start.
         fade_in: Option<Ramp>,
+        law: PanLaw,
     },
     // Ramps are in seconds, made frames by the mixer at its rate: a device
     // may set the rate after a command was sent.
@@ -313,6 +314,8 @@ struct Voice {
     fresh: bool,
     priority: i8,
     resampler: Resampler,
+    /// How its pan shares it between left and right.
+    law: PanLaw,
 }
 
 impl Voice {
@@ -337,6 +340,7 @@ impl Voice {
             fresh: false,
             priority: 0,
             resampler: Resampler::new(Interpolation::Linear),
+            law: PanLaw::Balance,
         }
     }
 
@@ -435,7 +439,7 @@ impl Voice {
         if self.gain.settled() && self.envelope.settled() && self.pan.settled() && level_settled {
             let gain = self.gain.value() * self.envelope.value() * level.map_or(1., |l| l.value());
             if gain != 0. {
-                let (pl, pr) = pan_gains(self.pan.value());
+                let (pl, pr) = self.law.gains(self.pan.value());
                 let (gl, gr) = (gain * pl, gain * pr);
                 for i in 0..got {
                     left[i] += source_left[i] * gl;
@@ -460,7 +464,7 @@ impl Voice {
                 }
             }
             if self.pan.settled() {
-                let (pl, pr) = pan_gains(self.pan.value());
+                let (pl, pr) = self.law.gains(self.pan.value());
                 for i in 0..got {
                     left[i] += source_left[i] * gains[i] * pl;
                     right[i] += source_right[i] * gains[i] * pr;
@@ -468,10 +472,24 @@ impl Voice {
             } else {
                 let pans = &mut scratch.values[..n];
                 self.pan.fill(pans);
-                for i in 0..got {
-                    let (pl, pr) = pan_gains(pans[i]);
-                    left[i] += source_left[i] * gains[i] * pl;
-                    right[i] += source_right[i] * gains[i] * pr;
+                // A loop for each law, chosen once: either vectorises, a
+                // choice inside it wouldn't.
+                match self.law {
+                    PanLaw::Balance => {
+                        for i in 0..got {
+                            let (pl, pr) = pan_gains(pans[i]);
+                            left[i] += source_left[i] * gains[i] * pl;
+                            right[i] += source_right[i] * gains[i] * pr;
+                        }
+                    }
+                    PanLaw::EqualPower => equal_power_into(
+                        &source_left[..got],
+                        &source_right[..got],
+                        &gains[..got],
+                        &pans[..got],
+                        &mut left[..got],
+                        &mut right[..got],
+                    ),
                 }
             }
         }
@@ -628,6 +646,59 @@ impl Streamed {
             self.filled -= passed;
             *at -= (passed as u64) << 32;
         }
+    }
+}
+
+/// How a voice's pan shares it between left and right.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PanLaw {
+    /// A balance: the near side stays whole and the far one falls along an
+    /// equal-power curve, so a sound in the middle plays as it was made.
+    /// For sounds placed on a stage: UI, music.
+    #[default]
+    Balance,
+    /// Equal power: a quarter turn of cosine and sine, the same power
+    /// wherever it is, -3 dB a side in the middle. For sounds in space,
+    /// moving round the listener.
+    EqualPower,
+}
+
+impl PanLaw {
+    #[inline]
+    fn gains(self, pan: f32) -> (f32, f32) {
+        match self {
+            PanLaw::Balance => pan_gains(pan),
+            PanLaw::EqualPower => equal_power_once(pan),
+        }
+    }
+}
+
+#[inline]
+fn equal_power(pan: f32) -> (f32, f32) {
+    let [l, r] = crate::spatial::equal_power(pan);
+    (l, r)
+}
+
+#[inline(never)]
+fn equal_power_once(pan: f32) -> (f32, f32) {
+    equal_power(pan)
+}
+
+/// A voice's frames into its bus by the equal-power law, its pan moving:
+/// out of line, so a mix that doesn't use it carries none of its code.
+#[inline(never)]
+fn equal_power_into(
+    source_left: &[f32],
+    source_right: &[f32],
+    gains: &[f32],
+    pans: &[f32],
+    left: &mut [f32],
+    right: &mut [f32],
+) {
+    for i in 0..left.len().min(right.len()) {
+        let (pl, pr) = equal_power(pans[i]);
+        left[i] += source_left[i] * gains[i] * pl;
+        right[i] += source_right[i] * gains[i] * pr;
     }
 }
 
@@ -1238,6 +1309,7 @@ impl Mixer {
             region,
             priority,
             fade_in,
+            law,
         } = command
         else {
             unreachable!("only plays come here");
@@ -1273,6 +1345,7 @@ impl Mixer {
                         region,
                         priority,
                         fade_in,
+                        law,
                     }),
                     Err(_) => unreachable!("a dropped play is given back as one"),
                 };
@@ -1309,6 +1382,7 @@ impl Mixer {
             fresh: true,
             priority,
             resampler: Resampler::new(interpolation),
+            law,
         };
         match fade_in {
             Some(ramp) => {
