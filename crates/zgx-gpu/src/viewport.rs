@@ -435,7 +435,7 @@ impl GpuRenderer {
         let mut kept = None;
         let key = (frame.view, frame.shown_by);
         if let Some(last) = views.shown.remove(&key)
-            && let Some((bind, bytes, Some(texture), ..)) = self.images.remove(&last.image)
+            && let Some((bind, bytes, Some(texture), _)) = self.images.remove(&last.image)
             && last.size == size
         {
             kept = Some((bind, bytes, texture, last.targets));
@@ -511,10 +511,8 @@ impl GpuRenderer {
             views.hidden.push(key);
             zgx::gpu_view::set_planed(key.0, key.1, false);
         }
-        self.images.insert(
-            image.id(),
-            (bind, bytes, Some(texture), (0, 0), image.resident()),
-        );
+        self.images
+            .insert(image.id(), (bind, bytes, Some(texture), (0, 0)));
         self.views.as_mut().unwrap().shown.insert(
             key,
             Shown {

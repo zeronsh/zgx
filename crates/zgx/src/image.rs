@@ -190,9 +190,6 @@ struct Kept {
     /// When `held` was last asked for (`USES`), for which goes first past the
     /// budget (`set_decoded_budget`).
     used: AtomicU64,
-    /// How many renderers hold it as a texture (`ImageData::resident`): its
-    /// copy then only duplicates one, and goes first past the budget.
-    resident: std::sync::atomic::AtomicU32,
     /// When it decodes (`Decoding`, as a `u8`).
     decoding: std::sync::atomic::AtomicU8,
     /// Its file didn't decode: not tried again (each try would draw again).
@@ -579,7 +576,6 @@ impl ImageData {
                 held: std::sync::Mutex::new(None),
                 pending: std::sync::Mutex::new(None),
                 used: AtomicU64::new(0),
-                resident: std::sync::atomic::AtomicU32::new(0),
                 decoding: std::sync::atomic::AtomicU8::new(Decoding::Auto as u8),
                 failed: std::sync::atomic::AtomicBool::new(false),
                 pinned: std::sync::OnceLock::new(),
@@ -659,17 +655,6 @@ impl ImageData {
     /// Whether it keeps its file (`kept`), its pixels decoded as drawn.
     pub fn keeps_file(&self) -> bool {
         self.pixels.kept.is_some()
-    }
-    /// A renderer now holds it as a texture, until the returned guard drops
-    /// (with the texture): its decoded copy, if a kept file's, then goes
-    /// before others past the budget (`set_decoded_budget`). `None` for an
-    /// image that keeps no file.
-    pub fn resident(&self) -> Option<Resident> {
-        let kept = self.pixels.kept.as_ref()?;
-        kept.resident.fetch_add(1, Ordering::Relaxed);
-        Some(Resident(std::mem::ManuallyDrop::new(Arc::downgrade(
-            &self.pixels,
-        ))))
     }
     /// Its pixels at least `size` large (a renderer's drawn size), shrunk
     /// and premultiplied, if they are decoded; else `None`, and they are
@@ -773,15 +758,14 @@ fn hold(kept: &Kept, held: Option<Held>) -> usize {
     old
 }
 /// Past the budget: count what the copies hold again (`HELD` may count
-/// dropped images'), then give back copies until it is under, those a
-/// renderer holds as textures first (each a duplicate), then those used
-/// least recently; never `keep`'s (just decoded) nor one whose decode is
-/// under way.
+/// dropped images'), then give back copies until it is under, those used
+/// least recently first; never `keep`'s (just decoded) nor one whose decode
+/// is under way.
 #[cold]
 #[inline(never)]
 fn shed(keep: &Pixels) {
     let mut total = 0;
-    let mut held: Vec<(bool, u64, Arc<Pixels>)> = {
+    let mut held: Vec<(u64, Arc<Pixels>)> = {
         let mut list = registry();
         list.retain(|weak| weak.strong_count() > 0);
         list.iter()
@@ -801,14 +785,13 @@ fn shed(keep: &Pixels) {
                     .unwrap_or_else(|p| p.into_inner())
                     .is_some();
                 let used = kept.used.load(Ordering::Relaxed);
-                let shown = kept.resident.load(Ordering::Relaxed) > 0;
                 let spare = bytes.is_some() && !decoding && !std::ptr::eq(&*pixels, keep);
-                spare.then_some((!shown, used, pixels))
+                spare.then_some((used, pixels))
             })
             .collect()
     };
     HELD.store(total, Ordering::Relaxed);
-    held.sort_unstable_by_key(|(evicted, used, _)| (*evicted, *used));
+    held.sort_unstable_by_key(|(used, _)| *used);
     let budget = BUDGET.load(Ordering::Relaxed);
     for (.., pixels) in held {
         if HELD.load(Ordering::Relaxed) <= budget {
@@ -817,33 +800,6 @@ fn shed(keep: &Pixels) {
         if let Some(kept) = &*pixels.kept {
             hold(kept, None);
         }
-    }
-}
-/// A renderer holding a kept file as a texture (`ImageData::resident`):
-/// while it lives, the file's decoded copy only duplicates that texture.
-///
-/// Its drop is one call to `drop_resident`, which can't unwind: inline, its
-/// upgrade and the drops after it gave every drop of a renderer's texture
-/// entry a cleanup path, on scenes drawing pictures that keep no file too.
-pub struct Resident(std::mem::ManuallyDrop<std::sync::Weak<Pixels>>);
-impl Drop for Resident {
-    fn drop(&mut self) {
-        drop_resident(&mut self.0);
-    }
-}
-#[inline(never)]
-extern "C" fn drop_resident(pixels: &mut std::mem::ManuallyDrop<std::sync::Weak<Pixels>>) {
-    if let Some(pixels) = pixels.upgrade()
-        && let Some(kept) = &*pixels.kept
-    {
-        kept.resident.fetch_sub(1, Ordering::Relaxed);
-    }
-    // SAFETY: once, from `Resident::drop`; nothing reads it after.
-    unsafe { std::mem::ManuallyDrop::drop(pixels) }
-}
-impl std::fmt::Debug for Resident {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("Resident")
     }
 }
 /// What kept files' decoded pixels hold now (pinned ones too).
@@ -1182,41 +1138,6 @@ mod kept_tests {
         set_decoded_budget(before.0);
         release_decoded();
         assert_eq!(HELD.load(Ordering::Relaxed), 0);
-    }
-
-    /// A copy whose image a renderer holds as a texture duplicates it: past
-    /// the budget it goes before an older one whose texture has gone, and
-    /// once the texture goes, it counts as any other.
-    #[test]
-    fn copies_of_resident_textures_go_first() {
-        let _alone = alone();
-        release_decoded();
-        let budget = decoded_budget();
-        let file = || ImageData::kept(8, 4, Arc::from(&b"file"[..]), decode).unwrap();
-        let (a, b, c, d) = (file(), file(), file(), file());
-        let held = |image: &ImageData| {
-            let kept = image.pixels.kept.as_ref().unwrap();
-            kept.held.lock().unwrap().is_some()
-        };
-        set_decoded_budget(2 * 128 + 64);
-        assert!(a.pixels_at((8, 4)).is_some());
-        assert!(b.pixels_at((8, 4)).is_some());
-        // `b` drawn as a texture: its copy a duplicate, though newer than `a`'s.
-        let texture = b.resident().expect("a kept file");
-        assert!(c.pixels_at((8, 4)).is_some());
-        assert!(held(&a) && !held(&b) && held(&c), "the duplicate went");
-        // Its texture gone, `b` decodes again and is like any other: `a`,
-        // the least recently used, goes now.
-        drop(texture);
-        assert!(b.pixels_at((8, 4)).is_some());
-        assert!(!held(&a) && held(&b) && held(&c));
-        assert!(d.pixels_at((8, 4)).is_some());
-        assert!(
-            held(&b) && !held(&c) && held(&d),
-            "the least recently used of those left"
-        );
-        set_decoded_budget(budget);
-        release_decoded();
     }
 
     /// Read whole for a moment (a copy to the clipboard), a kept file holds

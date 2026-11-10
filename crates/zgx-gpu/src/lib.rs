@@ -226,16 +226,7 @@ const IMAGES_GONE_BYTES: usize = 32 * 1024 * 1024;
 const IMAGES_GONE_COUNT: usize = 256;
 /// An image's texture: its bind group, bytes, texture and the size it
 /// holds (`fitted_size`; (0, 0): all of it).
-/// A picture's texture: its binding, bytes, texture (none for a view's
-/// frame), size held (`(0, 0)`: whole), and, for a kept file, the guard that
-/// marks its decoded copy a duplicate while the texture lives.
-type ImageTexture = (
-    wgpu::BindGroup,
-    usize,
-    Option<wgpu::Texture>,
-    (u32, u32),
-    Option<zgx::image::Resident>,
-);
+type ImageTexture = (wgpu::BindGroup, usize, Option<wgpu::Texture>, (u32, u32));
 /// A kept file's pixels aren't decoded yet (`ImageData::pixels_at`).
 const IMAGE_PENDING: &str = "an image's pixels are decoding";
 /// The size in `images` of a texture on its way out (`images_outgoing`): smaller
@@ -9677,8 +9668,7 @@ impl GpuRenderer {
                             let view = cache.texture(frame.id()).create_view(&Default::default());
                             let bytes = cache.bytes(frame.id());
                             let bind = self.texture_bind(&view, "native CoreVideo frame");
-                            self.images
-                                .insert(frame.id(), (bind, bytes, None, (0, 0), None));
+                            self.images.insert(frame.id(), (bind, bytes, None, (0, 0)));
                         }
                         canvas_image = Some(frame.id());
                         quads.push(Quad {
@@ -13663,10 +13653,8 @@ impl GpuRenderer {
             false => (width, height),
         };
         self.images_outgoing.remove(&image.id());
-        self.images.insert(
-            image.id(),
-            (bind, bytes, Some(texture), held_size, image.resident()),
-        );
+        self.images
+            .insert(image.id(), (bind, bytes, Some(texture), held_size));
         self.image_drawn.insert(image.id(), self.image_frame);
         Ok(())
     }
