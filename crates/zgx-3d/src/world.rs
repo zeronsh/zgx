@@ -23,7 +23,7 @@ mod post_pass;
 #[cfg(feature = "post")]
 pub use grade::{Grade, Lut, LutError};
 #[cfg(feature = "post")]
-pub use post::{Bloom, ChromaticAberration, Grain, Post, Vignette};
+pub use post::{AutoExposure, Bloom, ChromaticAberration, Grain, Post, Vignette};
 #[cfg(feature = "post")]
 pub(crate) use post_pass::AppPass;
 #[cfg(feature = "post")]
@@ -670,6 +670,8 @@ pub(crate) enum Reason {
     Audio = 1 << 12,
     /// An animated post pass is in the chain (`world::post_pass`).
     PostPass = 1 << 13,
+    /// Automatic exposure is still adapting (`world::post`).
+    Exposure = 1 << 14,
     /// For the tests of `Settle`: a reason no feature uses.
     Test = 1 << 31,
 }
@@ -2062,6 +2064,7 @@ mod tests {
             Reason::ShaderCompiling,
             Reason::Audio,
             Reason::PostPass,
+            Reason::Exposure,
             Reason::Test,
         ]
         .map(|r| r as u32);

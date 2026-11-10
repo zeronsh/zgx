@@ -71,6 +71,7 @@ fn main() {
                     lut: Some(Lut::identity(32)),
                     ..Default::default()
                 }),
+                auto_exposure: Some(AutoExposure::default()),
             },
         ),
     ];

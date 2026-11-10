@@ -631,11 +631,16 @@ impl Viewport for Renderer {
                 staged(crate::PostStage::Hdr),
                 staged(crate::PostStage::Display),
             );
+            // Automatic exposure where the device runs compute (else the
+            // stops alone: `AutoExposure`).
+            let adapts = world.post.auto_exposure.is_some()
+                && world.caps.get().is_some_and(|caps| caps.compute);
             graph::Chain {
                 on: world.post.any() || hdr + display > 0,
                 bloom: world.post.bloom.is_some(),
                 hdr,
                 display,
+                adapts,
             }
         };
         #[cfg(not(feature = "post"))]
@@ -1019,6 +1024,19 @@ impl Viewport for Renderer {
                     post.last(device, frame.encoder, &gpu.graph, into, look, table);
                 }
                 #[cfg(feature = "post")]
+                Pass::Exposure => {
+                    let post = gpu
+                        .post
+                        .get_or_insert_with(|| post::Chain::new(frame.device));
+                    let device = (frame.device, frame.queue);
+                    if let Some(settings) = &world.post.auto_exposure {
+                        let settled =
+                            post.expose(device, frame.encoder, &gpu.graph, settings, frame.time);
+                        // Drawing until a frame reads back it got there.
+                        world.unsettle(crate::world::Settle::EXPOSURE, settled != Some(true));
+                    }
+                }
+                #[cfg(feature = "post")]
                 Pass::AppHdr | Pass::AppDisplay => {
                     let stage = if pass == Pass::AppHdr {
                         crate::PostStage::Hdr
@@ -1150,7 +1168,12 @@ fn post_look(
     // Grain's seed: the frame's index, kept exact as a float.
     let index = (frame % (1 << 24)) as f32;
     let look = post::Look {
-        params: [world.exposure.exp2(), tone, f32::from(u8::from(encode)), 0.],
+        params: [
+            world.exposure.exp2(),
+            tone,
+            f32::from(u8::from(encode)),
+            f32::from(u8::from(graph.adapts())),
+        ],
         background: world.background.unwrap_or([0.; 4]),
         bloom: [
             intensity,

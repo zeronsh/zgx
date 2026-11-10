@@ -39,6 +39,9 @@ pub(super) enum Resource {
     /// display passes, and its other half.
     Shown,
     Shown2,
+    /// The exposure automatic exposure adapted to: kept between frames.
+    #[cfg_attr(not(feature = "post"), allow(dead_code))]
+    Exposure,
     /// The view's own texture (without the post chain, the scene).
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     Target,
@@ -77,6 +80,9 @@ pub(super) enum Pass {
     /// The app's HDR passes (`World::add_post`), in turn.
     #[cfg(feature = "post")]
     AppHdr,
+    /// The scene's histogram, and the exposure adapted toward it.
+    #[cfg(feature = "post")]
+    Exposure,
     /// The scene's bloom, its steps made smaller then larger again.
     #[cfg(feature = "post")]
     Bloom,
@@ -89,7 +95,7 @@ pub(super) enum Pass {
 }
 impl Pass {
     /// How many there are: the most a list holds.
-    const COUNT: usize = if cfg!(feature = "post") { 8 } else { 3 };
+    const COUNT: usize = if cfg!(feature = "post") { 9 } else { 3 };
     pub(super) fn reads(self) -> &'static [Resource] {
         match self {
             Self::Shadows => &[],
@@ -104,7 +110,9 @@ impl Pass {
             #[cfg(feature = "post")]
             Self::Bloom => &[Resource::Scene],
             #[cfg(feature = "post")]
-            Self::Final => &[Resource::Scene, Resource::Bloom],
+            Self::Exposure => &[Resource::Scene],
+            #[cfg(feature = "post")]
+            Self::Final => &[Resource::Scene, Resource::Bloom, Resource::Exposure],
         }
     }
     pub(super) fn writes(self) -> &'static [Resource] {
@@ -118,6 +126,8 @@ impl Pass {
             Self::AppHdr => &[Resource::Scene, Resource::Scene2],
             #[cfg(feature = "post")]
             Self::AppDisplay => &[Resource::Target],
+            #[cfg(feature = "post")]
+            Self::Exposure => &[Resource::Exposure],
             #[cfg(feature = "post")]
             Self::Bloom => &[Resource::Bloom],
             #[cfg(feature = "post")]
@@ -183,6 +193,8 @@ pub(super) struct Chain {
     /// The app's passes in the HDR stage and the display stage.
     pub(super) hdr: u8,
     pub(super) display: u8,
+    /// Automatic exposure, where the device runs compute.
+    pub(super) adapts: bool,
 }
 
 /// The scene's format where the post chain follows: linear light, past 1.
@@ -232,6 +244,9 @@ pub(super) struct Targets {
     /// for the app's passes (`Resource::Scene2`, `Shown`, `Shown2`).
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     pub(super) others: [Option<wgpu::TextureView>; 3],
+    /// The frame's size, in pixels.
+    #[cfg_attr(not(feature = "post"), allow(dead_code))]
+    pub(super) size: (u32, u32),
     /// Each of bloom's steps, with it on.
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     pub(super) bloom: Vec<wgpu::TextureView>,
@@ -300,6 +315,11 @@ impl Graph {
     pub(super) fn size(&self) -> (u32, u32) {
         self.config.map_or((0, 0), |c| c.size)
     }
+    /// Whether the list adapts its exposure (`Pass::Exposure`).
+    #[cfg(feature = "post")]
+    pub(super) fn adapts(&self) -> bool {
+        self.config.is_some_and(|c| c.post.adapts)
+    }
     /// The temporaries' bytes on the device (summed as it compiles).
     pub(super) fn bytes(&self) -> u64 {
         self.bytes
@@ -325,6 +345,8 @@ impl Graph {
             resolves.then_some(Pass::Resolve),
             #[cfg(feature = "post")]
             (config.post.hdr > 0).then_some(Pass::AppHdr),
+            #[cfg(feature = "post")]
+            config.post.adapts.then_some(Pass::Exposure),
             #[cfg(feature = "post")]
             config.post.bloom.then_some(Pass::Bloom),
             #[cfg(feature = "post")]
@@ -434,6 +456,7 @@ impl Graph {
             bloom,
             stored: resolves,
             others,
+            size: config.size,
             textures: textures.into_iter().flatten().collect(),
         });
         // What is behind, at the frame's size, while light passes through.

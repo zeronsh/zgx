@@ -2,6 +2,7 @@
 //! last pass, which mixes bloom in, exposes the scene, maps its tones and
 //! writes the view's target. Made with a world's first frame with one on.
 mod apps;
+mod exposure;
 
 use super::graph::{Graph, SCENE, bloom_format};
 use zgx_gpu::wgpu;
@@ -93,6 +94,10 @@ pub(super) struct Chain {
     /// scene after an odd count of HDR ones.
     apps: Option<apps::Apps>,
     copy: wgpu::RenderPipeline,
+    /// Automatic exposure's state (kept between frames, zero until it runs:
+    /// unused), and its passes, made with the first frame adapting.
+    state: wgpu::Buffer,
+    exposure: Option<exposure::Exposure>,
     binds: Option<Binds>,
 }
 
@@ -141,6 +146,16 @@ impl Chain {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
         let uniform = |binding| wgpu::BindGroupLayoutEntry {
@@ -167,6 +182,7 @@ impl Chain {
                     count: None,
                 },
                 uniform(3),
+                uniform(6),
             ],
         });
         let resolve = pipeline(
@@ -267,6 +283,15 @@ impl Chain {
             table: None,
             apps: None,
             copy,
+            state: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("3D exposure state"),
+                size: exposure::STATE,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::UNIFORM
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            exposure: None,
             binds: None,
         }
     }
@@ -277,6 +302,25 @@ impl Chain {
         if let Some(apps) = &mut self.apps {
             apps.rest();
         }
+        if let Some(exposure) = &mut self.exposure {
+            exposure.rest();
+        }
+    }
+
+    /// Automatic exposure's passes (`exposure::Exposure::run`): whether it
+    /// had settled, where that came back.
+    pub(super) fn expose(
+        &mut self,
+        device: (&wgpu::Device, &wgpu::Queue),
+        encoder: &mut wgpu::CommandEncoder,
+        graph: &Graph,
+        settings: &crate::world::AutoExposure,
+        time: std::time::Instant,
+    ) -> Option<bool> {
+        let exposure = self
+            .exposure
+            .get_or_insert_with(|| exposure::Exposure::new(device.0));
+        exposure.run(device, encoder, graph, &self.state, settings, time)
     }
 
     /// The app's passes of `stage` (`apps::Apps::run`).
@@ -371,6 +415,10 @@ impl Chain {
                             self.table.as_ref().map_or(&self.stand_in, |(_, view)| view),
                         ),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.state.as_entire_binding(),
+                    },
                 ],
             });
             let samples = targets.colour.as_ref().filter(|_| targets.stored);
@@ -386,6 +434,10 @@ impl Chain {
                         wgpu::BindGroupEntry {
                             binding: 3,
                             resource: self.look.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: self.state.as_entire_binding(),
                         },
                     ],
                 })

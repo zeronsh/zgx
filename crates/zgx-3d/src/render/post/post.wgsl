@@ -87,6 +87,22 @@ struct Look {
 @group(0) @binding(1) var bloom: texture_2d<f32>;
 @group(0) @binding(2) var bloom_sampler: sampler;
 @group(0) @binding(3) var<uniform> look: Look;
+// Automatic exposure's state (`exposure.wgsl`'s), as the last frame left
+// it; with it on (look.params.w), the scene's mean brought to middle grey.
+struct Adapted {
+    adapted: f32,
+    target_: f32,
+    made: f32,
+    pad: f32,
+}
+@group(0) @binding(6) var<uniform> adapted: Adapted;
+fn exposure() -> f32 {
+    var e = look.params.x;
+    if look.params.w > 0.5 && adapted.made > 0.5 {
+        e *= exp2(log2(0.18) - adapted.adapted);
+    }
+    return e;
+}
 @group(0) @binding(4) var bloom_wider: texture_2d<f32>;
 override BLOOM: bool = false;
 override VIGNETTE: bool = false;
@@ -212,7 +228,7 @@ fn tent(uv: vec2<f32>) -> vec3<f32> {
     // premultiplied light), then multiplied by its coverage again.
     let alpha = drawn.a;
     let coverage = select(1.0, alpha, alpha > 1e-3);
-    var exposed = light / coverage * look.params.x;
+    var exposed = light / coverage * exposure();
     if GRADE {
         // White balance: the eye adapted to another white, in LMS.
         exposed = FROM_LMS * ((TO_LMS * exposed) * look.balance.xyz);
@@ -253,7 +269,9 @@ fn tent(uv: vec2<f32>) -> vec3<f32> {
 // of that luma shows as, and what luma shows as that.
 fn curve(l: f32) -> f32 {
     if look.params.y > 1.5 {
-        return min(l, 1.0);
+        // Linear clamps at 1, which can't be undone: as it up to 0.5, then
+        // toward 1 (1 - 0.25 / l), so light past 1 survives the resolve.
+        return select(1.0 - 0.25 / l, l, l <= 0.5);
     }
     if look.params.y > 0.5 {
         let v = l / 0.6;
@@ -268,7 +286,7 @@ fn curve(l: f32) -> f32 {
 fn uncurve(y: f32) -> f32 {
     let t = min(y, 0.9999);
     if look.params.y > 1.5 {
-        return t;
+        return select(0.25 / (1.0 - t), t, t <= 0.5);
     }
     if look.params.y > 0.5 {
         // v² + a v - b = t (c v² + d v + e), for v.
@@ -291,14 +309,14 @@ fn uncurve(y: f32) -> f32 {
 @fragment fn resolve(in: Out) -> @location(0) vec4<f32> {
     let at = vec2<i32>(in.position.xy);
     let n = textureNumSamples(samples);
-    let exposure = look.params.x;
+    let exposed_by = exposure();
     var sum = vec4(0.0);
     for (var i = 0u; i < n; i++) {
         let c = textureLoad(samples, at, i32(i));
         // A sample's own colour (its coverage divided out, as the last pass
         // maps a pixel's), mapped, and its coverage again.
         let a = max(c.a, 1e-4);
-        let x = c.rgb / a * exposure;
+        let x = c.rgb / a * exposed_by;
         let l = max(luma(x), 1e-5);
         sum += vec4(x * (curve(l) / l) * c.a, c.a);
     }
@@ -306,7 +324,7 @@ fn uncurve(y: f32) -> f32 {
     let a = max(mean.a, 1e-4);
     let y = mean.rgb / a;
     let l = max(luma(y), 1e-5);
-    return vec4(y * (uncurve(l) / l) / exposure * mean.a, mean.a);
+    return vec4(y * (uncurve(l) / l) / exposed_by * mean.a, mean.a);
 }
 
 // The scene's other half copied back into it (after an odd count of the
