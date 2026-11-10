@@ -460,3 +460,20 @@ fn the_apps_data_counts_against_its_cap_while_its_handles_live() {
         Err(GpuDataError::Size(0))
     ));
 }
+
+#[test]
+fn a_buffer_too_large_to_count_is_refused_not_a_panic() {
+    let world = World::new();
+    assert!(matches!(
+        world.add_buffer(BufferDesc::storage::<[f32; 4]>(usize::MAX)),
+        Err(GpuDataError::Size(_))
+    ));
+    assert!(matches!(
+        world.add_buffer(BufferDesc::bytes(u64::MAX)),
+        Err(GpuDataError::Size(_))
+    ));
+    assert!(matches!(
+        world.add_buffer(BufferDesc::bytes(u64::MAX - 1)),
+        Err(GpuDataError::Size(_))
+    ));
+}

@@ -96,14 +96,16 @@ pub struct BufferDesc {
     pub(crate) contents: Option<Vec<u8>>,
 }
 impl BufferDesc {
-    /// Room for `count` values of `T`, zeroed.
+    /// Room for `count` values of `T`, zeroed. (One too large to count is
+    /// refused by `add_buffer`.)
     pub fn storage<T: bytemuck::Pod>(count: usize) -> Self {
-        Self::bytes((count * std::mem::size_of::<T>()) as u64)
+        let size = (count as u64).checked_mul(std::mem::size_of::<T>() as u64);
+        Self::bytes(size.unwrap_or(u64::MAX))
     }
     /// `size` bytes, zeroed (rounded up to a multiple of 4).
     pub fn bytes(size: u64) -> Self {
         Self {
-            size: size.next_multiple_of(4),
+            size: size.checked_next_multiple_of(4).unwrap_or(u64::MAX),
             contents: None,
         }
     }
