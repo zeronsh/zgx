@@ -967,7 +967,8 @@ fn describe(name: &str, error: &mlua::Error) -> String {
         message.push_str(
             "\n(state values are read-only: change state with state:set_key(key, value), \
              state:patch({ … }), state:update(function(t) … end), state:insert(i, v) \
-             or state:set(value))",
+             or state:set(value); ui.json.data's parts are read-only too: \
+             ui.json.decode(text) gives tables a script can change)",
         );
     }
     // Luau says only "not enough memory": say which limit and its knob.
@@ -1701,137 +1702,18 @@ struct Require {
 
 /// `require(name)` from a VM.
 fn require_module(state: &Require, lua: &Lua, name: String) -> mlua::Result<mlua::Value> {
-    // (As `within` has it, each folder followed once a load.)
-    use real_paths::within;
+    let fail = |why: String| mlua::Error::runtime(format!("require(\"{name}\"): {why}"));
+    let (path, files) = resolve(state, lua, &name, false, &fail)?;
     let Require {
         host,
         modules,
         root,
-        app,
-        aliases,
         packages,
-        files,
         recorded,
+        ..
     } = state;
-    let files = files.clone();
     let Some(root) = &root else {
-        return Err(mlua::Error::runtime(
-            "require needs a script loaded from a file",
-        ));
-    };
-    let fail = |why: String| mlua::Error::runtime(format!("require(\"{name}\"): {why}"));
-    // The requiring file, from its chunk name (its path in the root).
-    let caller = lua
-        .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
-        .flatten()
-        .and_then(|s| s.strip_prefix('@').map(|rel| root.join(rel)));
-    let here = caller
-        .as_deref()
-        .and_then(std::path::Path::parent)
-        .unwrap_or(root)
-        .to_path_buf();
-    // `@app/…`: the root script's module, or the module a script replaced
-    // it with (`ui.override`); `@app-original/…`: the root script's own.
-    let app_dir = app.as_ref().unwrap_or(root);
-    let mut overridden = None;
-    let joined = if let Some(rest) = name
-        .strip_prefix("@app/")
-        .or_else(|| name.strip_prefix("@app-original/"))
-    {
-        let module = node::module_name(rest);
-        let replacement = host
-            .upgrade()
-            .and_then(|host| host.overrides.borrow().get(&module).cloned());
-        if name.starts_with("@app-original/") {
-            app_dir.join(rest)
-        } else if let Some(replacement) = replacement {
-            let with = replacement.with.clone();
-            overridden = Some(replacement);
-            with
-        } else {
-            app_dir.join(rest)
-        }
-    } else if let Some(rest) = name.strip_prefix("@self") {
-        here.join(rest.trim_start_matches('/'))
-    } else if let Some(rest) = name.strip_prefix('@') {
-        let (alias, rest) = rest.split_once('/').unwrap_or((rest, ""));
-        let base = aliases
-            .get(alias)
-            .or_else(|| {
-                packages
-                    .iter()
-                    .find(|(name, _)| name == alias)
-                    .map(|(_, dir)| dir)
-            })
-            .ok_or_else(|| {
-                fail(format!(
-                    "no alias `@{alias}` in .luaurc, nor a package of that name"
-                ))
-            })?;
-        base.join(rest)
-    } else if name.starts_with("./") || name.starts_with("../") {
-        // An `init.luau` is its directory as a module: its relative
-        // requires start beside that directory (as Luau's and
-        // luau-lsp's do); `@self` reaches inside it.
-        let is_init = caller
-            .as_deref()
-            .and_then(std::path::Path::file_stem)
-            .is_some_and(|stem| stem == "init");
-        let base = if is_init {
-            here.parent().unwrap_or(&here)
-        } else {
-            &here
-        };
-        base.join(&name)
-    } else {
-        root.join(&name)
-    };
-    let mut path = normalize(&joined);
-    if files.is_dir(&path) {
-        path = path.join("init.luau");
-    } else if path.extension().is_none() {
-        path.set_extension("luau");
-    }
-    // A replacement and what it requires come from its script's
-    // directory; the others' from their own, or the root script's.
-    let replacements: Vec<node::ModuleOverride> = host
-        .upgrade()
-        .map(|host| host.overrides.borrow().values().cloned().collect())
-        .unwrap_or_default();
-    let replacing = replacements
-        .iter()
-        .find(|r| overridden.as_ref() == Some(*r) || within(&r.dir, &path));
-    let in_app = app.as_ref().is_some_and(|app| within(app, &path));
-    if !within(root, &path)
-        && !in_app
-        && replacing.is_none()
-        && !packages.iter().any(|(_, dir)| within(dir, &path))
-    {
-        return Err(fail(
-            "modules come from the script's directory or below, the root script's, or \
-             a package (ScriptHost::package, zgx.json's \"packages\")"
-                .into(),
-        ));
-    }
-    // A replacement's files are on the disk, whatever the root script's are.
-    let files = if replacing.is_some() && !within(root, &path) {
-        Files::Disk
-    } else {
-        files
-    };
-    // A module of the app's own checked bundle (a package it lends, its
-    // design system, say) is the bundle's bytecode whichever VM requires
-    // it, and can't change it. (A
-    // VM reading the bundle already, the root script's, asks nothing more: `within`
-    // costs each require a walk of its path.)
-    let files = match files {
-        Files::Folder(..) => files,
-        files => match host.upgrade().map(|h| h.files.borrow().clone()) {
-            Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(checked, _) if within(checked.dir(), &path)) => {
-                app
-            }
-            _ => files,
-        },
+        unreachable!("resolved from a root");
     };
     // While the host watches its files: who requires what (`reloads`).
     let tracker = if !recorded || !reloads::recording() {
@@ -1917,6 +1799,190 @@ fn require_module(state: &Require, lua: &Lua, name: String) -> mlua::Result<mlua
     };
     modules.borrow_mut().insert(path, Some(value.clone()));
     Ok(value)
+}
+
+/// `ui.json.load(name)`: the JSON file `name` names, found as `require`
+/// finds a module (`.json` when it has no extension), with its sandbox, as
+/// `ui.json.data` reads it. Read once per load, and watched as modules are.
+fn load_json(state: &Require, lua: &Lua, name: String) -> mlua::Result<mlua::Value> {
+    let fail = |why: String| mlua::Error::runtime(format!("ui.json.load(\"{name}\"): {why}"));
+    let (path, files) = resolve(state, lua, &name, true, &fail)?;
+    let Require {
+        host,
+        modules,
+        recorded,
+        ..
+    } = state;
+    if *recorded
+        && reloads::recording()
+        && let Some(tracker) = host.upgrade().and_then(|host| tracking(&host))
+    {
+        tracker.required(&path);
+    }
+    if let Some(Some(value)) = modules.borrow().get(&path) {
+        return Ok(value.clone());
+    }
+    let text = files
+        .read(&path)
+        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    if let Some(host) = host.upgrade() {
+        host.required.borrow_mut().push(path.clone());
+    }
+    let value = json::parse_bytes(&text).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    let data = json::data(lua, &value)?;
+    modules.borrow_mut().insert(path, Some(data.clone()));
+    Ok(data)
+}
+
+/// Where `require(name)` (or `ui.json.load(name)`, `json`) finds its file,
+/// and how it reads it: the sandbox's checks passed.
+fn resolve(
+    state: &Require,
+    lua: &Lua,
+    name: &str,
+    json: bool,
+    fail: &dyn Fn(String) -> mlua::Error,
+) -> mlua::Result<(PathBuf, Files)> {
+    // (As `within` has it, each folder followed once a load.)
+    use real_paths::within;
+    let Require {
+        host,
+        root,
+        app,
+        aliases,
+        packages,
+        files,
+        ..
+    } = state;
+    let files = files.clone();
+    let Some(root) = &root else {
+        return Err(mlua::Error::runtime(if json {
+            "ui.json.load needs a script loaded from a file"
+        } else {
+            "require needs a script loaded from a file"
+        }));
+    };
+    // The requiring file, from its chunk name (its path in the root).
+    let caller = lua
+        .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
+        .flatten()
+        .and_then(|s| s.strip_prefix('@').map(|rel| root.join(rel)));
+    let here = caller
+        .as_deref()
+        .and_then(std::path::Path::parent)
+        .unwrap_or(root)
+        .to_path_buf();
+    // `@app/…`: the root script's module, or the module a script replaced
+    // it with (`ui.override`); `@app-original/…`: the root script's own.
+    let app_dir = app.as_ref().unwrap_or(root);
+    let mut overridden = None;
+    let joined = if let Some(rest) = name
+        .strip_prefix("@app/")
+        .or_else(|| name.strip_prefix("@app-original/"))
+    {
+        let module = node::module_name(rest);
+        let replacement = host
+            .upgrade()
+            .and_then(|host| host.overrides.borrow().get(&module).cloned());
+        if name.starts_with("@app-original/") {
+            app_dir.join(rest)
+        } else if let Some(replacement) = replacement {
+            let with = replacement.with.clone();
+            overridden = Some(replacement);
+            with
+        } else {
+            app_dir.join(rest)
+        }
+    } else if let Some(rest) = name.strip_prefix("@self") {
+        here.join(rest.trim_start_matches('/'))
+    } else if let Some(rest) = name.strip_prefix('@') {
+        let (alias, rest) = rest.split_once('/').unwrap_or((rest, ""));
+        let base = aliases
+            .get(alias)
+            .or_else(|| {
+                packages
+                    .iter()
+                    .find(|(name, _)| name == alias)
+                    .map(|(_, dir)| dir)
+            })
+            .ok_or_else(|| {
+                fail(format!(
+                    "no alias `@{alias}` in .luaurc, nor a package of that name"
+                ))
+            })?;
+        base.join(rest)
+    } else if name.starts_with("./") || name.starts_with("../") {
+        // An `init.luau` is its directory as a module: its relative
+        // requires start beside that directory (as Luau's and
+        // luau-lsp's do); `@self` reaches inside it.
+        let is_init = caller
+            .as_deref()
+            .and_then(std::path::Path::file_stem)
+            .is_some_and(|stem| stem == "init");
+        let base = if is_init {
+            here.parent().unwrap_or(&here)
+        } else {
+            &here
+        };
+        base.join(name)
+    } else {
+        root.join(name)
+    };
+    let mut path = normalize(&joined);
+    if json {
+        if files.is_dir(&path) {
+            return Err(fail("names a folder, not a JSON file".into()));
+        }
+        if path.extension().is_none() {
+            path.set_extension("json");
+        }
+    } else if files.is_dir(&path) {
+        path = path.join("init.luau");
+    } else if path.extension().is_none() {
+        path.set_extension("luau");
+    }
+    // A replacement and what it requires come from its script's
+    // directory; the others' from their own, or the root script's.
+    let replacements: Vec<node::ModuleOverride> = host
+        .upgrade()
+        .map(|host| host.overrides.borrow().values().cloned().collect())
+        .unwrap_or_default();
+    let replacing = replacements
+        .iter()
+        .find(|r| overridden.as_ref() == Some(*r) || within(&r.dir, &path));
+    let in_app = app.as_ref().is_some_and(|app| within(app, &path));
+    if !within(root, &path)
+        && !in_app
+        && replacing.is_none()
+        && !packages.iter().any(|(_, dir)| within(dir, &path))
+    {
+        return Err(fail(
+            "modules come from the script's directory or below, the root script's, or \
+             a package (ScriptHost::package, zgx.json's \"packages\")"
+                .into(),
+        ));
+    }
+    // A replacement's files are on the disk, whatever the root script's are.
+    let files = if replacing.is_some() && !within(root, &path) {
+        Files::Disk
+    } else {
+        files
+    };
+    // A module of the app's own checked bundle (a package it lends, its
+    // design system, say) is the bundle's bytecode whichever VM requires
+    // it, and can't change it. (A
+    // VM reading the bundle already, the root script's, asks nothing more: `within`
+    // costs each require a walk of its path.)
+    let files = match files {
+        Files::Folder(..) => files,
+        files => match host.upgrade().map(|h| h.files.borrow().clone()) {
+            Some(app @ Files::Folder(_, Code::VerifiedBytecode)) if matches!(&app, Files::Folder(checked, _) if within(checked.dir(), &path)) => {
+                app
+            }
+            _ => files,
+        },
+    };
+    Ok((path, files))
 }
 
 /// `path` as `require` keys the modules it ran: canonical (a temporary
@@ -5004,8 +5070,15 @@ impl ScriptHost {
             files,
             recorded: root_script,
         };
+        let state = Rc::new(state);
+        let loads = state.clone();
         let require =
             lua.create_function(move |lua, name: String| require_module(&state, lua, name))?;
+        // `ui.json.load`, made into a function only when a script first
+        // names `ui.json` (`data::install`).
+        lua.set_app_data(json::Load(Rc::new(move |lua: &Lua, name: String| {
+            load_json(&loads, lua, name)
+        })));
         lua.globals().set("require", require)
     }
 
