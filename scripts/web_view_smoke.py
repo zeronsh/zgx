@@ -731,6 +731,37 @@ def drag_checks(session):
     return found
 
 
+def composing(session, seconds=20):
+    """Type "n" until IBus composes it in the page's field, and say how many
+    tries that took. IBus starts composing for the field a moment after it
+    reports its engine running, longer on a loaded machine (CI saw the
+    first key of "nihao" reach the page as typed, its candidates never
+    showing); a key sent before then goes straight to the page, as to any
+    client of the input method, which takes it as typed: cleared, it is
+    sent again. zgx allows the input method within milliseconds of the
+    click (the page's editable focus), well before."""
+    deadline = time.monotonic() + seconds
+    tries = 0
+    while True:
+        tries += 1
+        heard = len(session.messages())
+        session.xdo("type", "--clearmodifiers", "n")
+
+        def outcome():
+            new = [m[0] for m in session.messages()[heard:]]
+            if any(m.get("composition") == "start" for m in new):
+                return "composing"
+            if any(m.get("value") == "n" for m in new):
+                return "typed"
+            return None
+
+        if session.wait(outcome, "an n typed reached neither IBus nor the page") == "composing":
+            return tries
+        if time.monotonic() > deadline:
+            raise AssertionError(f"IBus never composed in the page's field ({tries} tries)")
+        session.key("BackSpace")
+
+
 def compose(session, checks):
     """Pinyin "nihao", then Space: 你好 composed in the page's field."""
     session.wait(lambda: any(m[0].get("composition") == "start" for m in session.messages()), "no composition started", 15)
@@ -1047,7 +1078,8 @@ def x11(args, output, private):
         def ime_x11(session, checks):
             session.click(120, 80)
             use_ibus_engine(env, "libpinyin", ime)
-            session.type("nihao")
+            checks["tries before IBus composed"] = composing(session)
+            session.type("ihao")
             # IBus's candidates show under the page's caret, in its field
             # (window points 60 to 360 across, 60 to 100 down).
             def candidates():
