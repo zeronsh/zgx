@@ -2855,7 +2855,8 @@ struct Filter {
     rounded: [Option<zgx::scene::RoundRect>; 2],
 }
 /// Backdrop blur pipelines (blur.wgsl): average each area down into its
-/// atlas slots, blur them across and down at that size, then draw them back
+/// atlas slots, blur them across and down at that size (the three as
+/// dispatches of one compute pass, `stages`), then draw them back
 /// over the target, mixed by dual-source blending (`mix`) where the device
 /// has it, else over a copy of the area's pixels, into the target or, at
 /// presentation, the target and a drawable of `both`'s format.
@@ -2864,9 +2865,12 @@ struct BlurPipelines {
     /// Shared by every pipeline so one bind group layout serves each.
     layout: wgpu::BindGroupLayout,
     linear: wgpu::Sampler,
+    /// `layout` seen by compute stages, and where they write.
+    stage_layout: wgpu::BindGroupLayout,
+    /// Reduce (every slot, or the blurred alone), across and down.
+    stages: [wgpu::ComputePipeline; 4],
+    /// A popup's areas copied from its own target (`blur`'s originals).
     reduce: wgpu::RenderPipeline,
-    across: wgpu::RenderPipeline,
-    down: wgpu::RenderPipeline,
     vertical: wgpu::RenderPipeline,
     mix: Option<wgpu::RenderPipeline>,
     both: Option<(wgpu::TextureFormat, wgpu::RenderPipeline)>,
@@ -2933,12 +2937,52 @@ impl BlurPipelines {
             });
             Self::pipeline(device, &shader, Some(&layout), entry, &[target])
         };
-        let (reduce, across, down, vertical) = (
-            pipeline("fs_reduce", BLUR_FORMAT),
-            pipeline("fs_across", BLUR_FORMAT),
-            pipeline("fs_down", BLUR_FORMAT),
-            pipeline("fs", FORMAT),
-        );
+        let (reduce, vertical) = (pipeline("fs_reduce", BLUR_FORMAT), pipeline("fs", FORMAT));
+        let stage_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("backdrop blur stages"),
+            entries: &[
+                texture(0),
+                texture(1),
+                records(2),
+                records(3),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: BLUR_FORMAT,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ]
+            .map(|entry| wgpu::BindGroupLayoutEntry {
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ..entry
+            }),
+        });
+        let stage_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("backdrop blur stages"),
+                bind_group_layouts: &[Some(&stage_layout)],
+                immediate_size: 0,
+            });
+        let stages = ["cs_reduce", "cs_reduce_blurred", "cs_across", "cs_down"].map(|entry| {
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("backdrop blur"),
+                layout: Some(&stage_pipeline_layout),
+                module: &shader,
+                entry_point: Some(entry),
+                compilation_options: Default::default(),
+                cache: None,
+            })
+        });
         // Bilinear: each sample averages up to four texels (see blur.wgsl).
         let linear = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("backdrop blur"),
@@ -2967,9 +3011,9 @@ impl BlurPipelines {
             shader,
             layout,
             linear,
+            stage_layout,
+            stages,
             reduce,
-            across,
-            down,
             vertical,
             mix,
             both: None,
@@ -11440,12 +11484,11 @@ impl GpuRenderer {
                 };
                 let blur = blur_atlas.as_ref().expect("planned");
                 pass.blur(frame, &target, [&blur[0], &blur[1]], &records, rects);
-                pass.resume(&target);
                 pass.texture(&atlas);
                 sampled = TextureSource::Atlas;
-                stats.draw_calls += 3 * rects.iter().filter(|r| r.2 > 0 && r.3 > 0).count();
-                stats.render_passes += 4;
-                stats.blur_passes += 3;
+                stats.draw_calls += 3;
+                stats.render_passes += 2;
+                stats.blur_passes += 1;
                 blurred = Some((plan, slots, rects));
                 from = end;
             }
@@ -13018,7 +13061,8 @@ impl GpuRenderer {
                     SlotRecord {
                         atlas: [0., 0., size.0 as f32, size.1 as f32],
                         region: [x0, y0, factor, level / factor],
-                        owner: [index, 0, 0, 0],
+                        // Blurred (blur.wgsl's compute stages).
+                        owner: [index, 1, 0, 0],
                     },
                     size,
                     true,
@@ -13179,63 +13223,73 @@ impl GpuRenderer {
         // (its shadow), not the window's pixels.
         let backdrop = self.backdrop.as_ref().map(|(_, view)| view);
         let source = backdrop.unwrap_or(&self.view);
-        let passes = [
+        // The three stages, each over every slot, as dispatches of one
+        // compute pass (wgpu orders them): averaged down into the first
+        // atlas, blurred across into the second, down into the first.
+        let stage_bind =
+            |source: &wgpu::TextureView, other: &wgpu::TextureView, into: &wgpu::TextureView| {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("backdrop blur stage"),
+                    layout: &pipelines.stage_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(source),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(other),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: records(ranges[0]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: records(ranges[1]),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::Sampler(&pipelines.linear),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(into),
+                        },
+                    ],
+                })
+            };
+        // A popup's copies come from its own target, below.
+        let reduce = &pipelines.stages[usize::from(backdrop.is_some())];
+        let stages = [
+            (reduce, stage_bind(source, &views[1], &views[0])),
             (
-                "blur reduce",
-                &pipelines.reduce,
-                bind(source, &views[1]),
-                &views[0],
-                backdrop.is_some(),
-                false,
+                &pipelines.stages[2],
+                stage_bind(&views[0], &views[0], &views[1]),
             ),
             (
-                "blur across",
-                &pipelines.across,
-                bind(&views[0], &views[0]),
-                &views[1],
-                true,
-                false,
-            ),
-            (
-                "blur down",
-                &pipelines.down,
-                bind(&views[1], &views[1]),
-                &views[0],
-                true,
-                copies,
+                &pipelines.stages[3],
+                stage_bind(&views[1], &views[1], &views[0]),
             ),
         ];
-        for (label, pipeline, group, target, blurred_only, keep) in &passes {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(label),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: if *keep {
-                            wgpu::LoadOp::Load
-                        } else {
-                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                        },
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
+        let (width, height) = slots
+            .iter()
+            .fold((0, 0), |(w, h), (_, (sw, sh), _)| (w.max(*sw), h.max(*sh)));
+        if width > 0 && height > 0 {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("backdrop blur"),
+                timestamp_writes: None,
             });
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, group, &[]);
-            for (k, (record, (w, h), blurred)) in slots.iter().enumerate() {
-                if *w == 0 || *h == 0 || (*blurred_only && !blurred) {
-                    continue;
-                }
-                pass.set_scissor_rect(record.atlas[0] as u32, record.atlas[1] as u32, *w, *h);
-                pass.draw(0..3, k as u32..k as u32 + 1);
+            for (pipeline, group) in &stages {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), slots.len() as u32);
                 stats.draw_calls += 1;
             }
+            drop(pass);
+            stats.render_passes += 1;
+            stats.blur_passes += 1;
         }
-        stats.render_passes += passes.len();
-        stats.blur_passes += passes.len();
         if backdrop.is_some() && copies {
             let group = bind(&self.view, &views[1]);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -15409,8 +15463,8 @@ impl GpuRenderer {
         })
     }
     /// Diagnostics: split each frame drawn with Metal directly at its
-    /// backdrop blur's passes (reduce, across, down), each committed on its
-    /// own, for `debug_take_pass_times`. Off by default; it adds a command
+    /// backdrop blur (its stages' one compute pass), each part committed on
+    /// its own, for `debug_take_pass_times`. Off by default; it adds a command
     /// buffer a pass while on. Process-wide.
     #[cfg(target_os = "macos")]
     pub fn debug_time_passes(&self, on: bool) {
@@ -16653,7 +16707,10 @@ fn atlas_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textur
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: BLUR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        // Written by blur.wgsl's compute stages.
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING,
         view_formats: &[],
     })
 }

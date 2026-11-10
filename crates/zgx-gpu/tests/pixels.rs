@@ -3547,7 +3547,7 @@ fn bounded_blur_damage_distant_and_backdrop_halo_updates() {
         "small blur halo should remain local: {stats:?}"
     );
     assert_blur_matches_fresh(&gpu, &scene, 240, 160, 1.);
-    assert_eq!(stats.blur_passes, 3);
+    assert_eq!(stats.blur_passes, 1);
     assert!(stats.render_passes > stats.blur_passes);
     let after = gpu.readback().unwrap();
     let sample = (53 * 240 + 37) * 4;
@@ -4391,7 +4391,7 @@ fn clean_blur_streaming_uses_one_pass_including_isolated_layer_accounting() {
         scene.set_transform(text, Transform { x: 130., y: 120. });
         let damage = scene.flush().damage;
         let initial = gpu.render(&scene, &damage).unwrap();
-        assert_eq!(initial.blur_passes, 3);
+        assert_eq!(initial.blur_passes, 1);
         assert!(initial.render_passes > initial.blur_passes);
         for n in 1..5 {
             scene.set_kind(text, text_kind(n));
@@ -4743,10 +4743,10 @@ fn damaged_blur_batches_surrounding_draws_instead_of_one_pass_each() {
         );
         let d = s.flush().damage;
         let stats = gpu.render(&s, &d).unwrap();
-        assert_eq!(stats.blur_passes, 3);
-        // Clear+draws, the three blur passes, then the blur drawn back and the rest.
+        assert_eq!(stats.blur_passes, 1);
+        // Clear+draws, the blur's compute pass, then the blur drawn back and the rest.
         assert!(
-            stats.render_passes <= 5,
+            stats.render_passes <= 3,
             "{} render passes for one filter",
             stats.render_passes
         );

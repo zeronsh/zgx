@@ -15,15 +15,17 @@ use crate::{GpuError, Shading, compile::Compiled};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLBlendFactor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
-    MTLDevice, MTLLibrary, MTLLoadAction, MTLPixelFormat, MTLPrimitiveType,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLRenderPipelineDescriptor,
-    MTLRenderPipelineState, MTLScissorRect, MTLStoreAction, MTLTexture, MTLVertexDescriptor,
-    MTLVertexFormat, MTLVertexStepFunction,
+    MTLBarrierScope, MTLBlendFactor, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue,
+    MTLCompileOptions, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLLibrary,
+    MTLLoadAction, MTLPixelFormat, MTLPrimitiveType, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor, MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLScissorRect,
+    MTLSize, MTLStoreAction, MTLTexture, MTLVertexDescriptor, MTLVertexFormat,
+    MTLVertexStepFunction,
 };
 use wgpu::naga;
 
 type Pipeline = Retained<ProtocolObject<dyn MTLRenderPipelineState>>;
+type Stage = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 
 /// A Metal object handed to the shader compiling thread, or back.
 struct Threaded<T>(T);
@@ -135,14 +137,13 @@ pub(crate) struct EffectDraw {
 
 /// The backdrop blur pipelines (blur.wgsl), as `BlurPipelines`' mixed ones.
 struct Blur {
-    reduce: Pipeline,
-    across: Pipeline,
-    down: Pipeline,
+    /// Reduce, across and down: dispatches of one compute pass.
+    stages: [Stage; 3],
     mix: Pipeline,
 }
 
 /// The blur's slots: its source in texture 1 (2 holds the area's original
-/// pixels where copied), its filters and slots in buffers 2 and 3, and those
+/// pixels where copied; a compute stage writes texture 3), its filters and slots in buffers 2 and 3, and those
 /// two records' lengths in buffer 4 (naga reads runtime-sized arrays'
 /// lengths from there).
 const BLUR_SOURCE: usize = 1;
@@ -369,11 +370,9 @@ impl MetalFrame {
                         .pipeline(&self.device, "vs", fragment, format, blend)
                         .ok()
                 };
-                let half = MTLPixelFormat::RGBA16Float;
+                let stage = |entry: &str| library.stage(&self.device, entry).ok();
                 Some(Blur {
-                    reduce: pipeline("fs_reduce", half, Blend::Replace)?,
-                    across: pipeline("fs_across", half, Blend::Replace)?,
-                    down: pipeline("fs_down", half, Blend::Replace)?,
+                    stages: [stage("cs_reduce")?, stage("cs_across")?, stage("cs_down")?],
                     mix: pipeline("fs_mix", MTLPixelFormat::BGRA8Unorm, Blend::Mix)?,
                 })
             })
@@ -691,11 +690,12 @@ impl Frame {
             }
         }
     }
-    /// A batch of backdrop filters' blur passes (`GpuRenderer::plan_blur`):
-    /// `target` averaged down into `atlas[0]`, blurred across into
-    /// `atlas[1]` and down into `atlas[0]`, each slot (atlas x, y, width,
-    /// height) drawn in each. The pass into the target ends; `resume` opens
-    /// the next.
+    /// A batch of backdrop filters' blur (`GpuRenderer::plan_blur`): the
+    /// pass into `target` ends, and one compute pass averages `target` down
+    /// into `atlas[0]`, blurs that across into `atlas[1]` and down into
+    /// `atlas[0]`, each stage a dispatch over every slot (`slots`: atlas x,
+    /// y, width, height) after the last one's writes; then a pass into
+    /// `target` opens again, as `resume` opens one.
     pub(crate) fn blur(
         &mut self,
         frame: &MetalFrame,
@@ -705,41 +705,94 @@ impl Frame {
         slots: &[(u32, u32, u32, u32)],
     ) {
         let blur = frame.blur().expect("checked by `blurs`");
-        let passes = [
-            (&blur.reduce, target, atlas[0]),
-            (&blur.across, atlas[0], atlas[1]),
-            (&blur.down, atlas[1], atlas[0]),
-        ];
+        self.encoder.endEncoding();
         let timing = TIME_PASSES.load(std::sync::atomic::Ordering::Relaxed);
-        let ran = ["frame before the blur", "blur reduce", "blur across"];
-        for (step, (pipeline, source, into)) in passes.into_iter().enumerate() {
-            self.encoder.endEncoding();
-            if timing {
-                self.split(frame, ran[step]);
-            }
-            self.encoder = pass(&self.buffer, into, MTLLoadAction::Clear);
-            self.encoder.setRenderPipelineState(pipeline);
-            // SAFETY: Live textures for the blur's source slot.
-            unsafe {
-                self.encoder
-                    .setFragmentTexture_atIndex(Some(source), BLUR_SOURCE);
-            }
-            self.records(frame, records);
-            for (index, &(x, y, width, height)) in slots.iter().enumerate() {
-                if width == 0 || height == 0 {
-                    continue;
+        if timing {
+            self.split(frame, "frame before the blur");
+        }
+        let (width, height) = slots
+            .iter()
+            .fold((0, 0), |(w, h), &(_, _, sw, sh)| (w.max(sw), h.max(sh)));
+        if width > 0 && height > 0 {
+            let encoder = self
+                .buffer
+                .computeCommandEncoder()
+                .expect("a compute encoder");
+            Self::stage_records(&encoder, frame, records);
+            let stages = [
+                (&blur.stages[0], target, atlas[0]),
+                (&blur.stages[1], atlas[0], atlas[1]),
+                (&blur.stages[2], atlas[1], atlas[0]),
+            ];
+            for (index, (stage, source, into)) in stages.into_iter().enumerate() {
+                if index > 0 {
+                    encoder.memoryBarrierWithScope(MTLBarrierScope::Textures);
                 }
-                self.scissor((x, y, width, height));
-                self.triangle(index as u32);
+                encoder.setComputePipelineState(stage);
+                // SAFETY: Live textures: the stage's source, and where it
+                // writes (each slot's texels, from the records bound above).
+                unsafe {
+                    encoder.setTexture_atIndex(Some(source), BLUR_SOURCE);
+                    encoder.setTexture_atIndex(Some(into), BLUR_SOURCE + 2);
+                }
+                let group = MTLSize {
+                    width: 8,
+                    height: 8,
+                    depth: 1,
+                };
+                let groups = MTLSize {
+                    width: width.div_ceil(8) as usize,
+                    height: height.div_ceil(8) as usize,
+                    depth: slots.len(),
+                };
+                encoder.dispatchThreadgroups_threadsPerThreadgroup(groups, group);
             }
+            encoder.endEncoding();
         }
         if timing {
-            self.encoder.endEncoding();
-            self.split(frame, "blur down");
-            // An empty pass for `resume` to end.
-            self.encoder = pass(&self.buffer, atlas[0], MTLLoadAction::Load);
+            self.split(frame, "blur");
         }
+        self.encoder = pass(&self.buffer, target, MTLLoadAction::Load);
         self.current = None;
+        self.scissor = None;
+        self.quad_state();
+    }
+    /// A batch's records (`records`), for a compute stage.
+    fn stage_records(
+        encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+        frame: &MetalFrame,
+        records: &BlurRecords<'_>,
+    ) {
+        let sizes = [records.blurs.len() as u32, records.slots.len() as u32];
+        // SAFETY: Eight bytes of lengths, copied by Metal.
+        unsafe {
+            encoder.setBytes_length_atIndex(
+                std::ptr::NonNull::from(&sizes).cast(),
+                size_of_val(&sizes),
+                BLUR_SIZES,
+            );
+        }
+        for (index, bytes) in [records.blurs, records.slots].into_iter().enumerate() {
+            let slot = BLUR_RECORDS + index;
+            let pointer = std::ptr::NonNull::from(bytes).cast();
+            // SAFETY: The bytes outlive the call (Metal copies them), or a
+            // buffer made from them is retained by the encoder.
+            unsafe {
+                if bytes.len() <= 4096 {
+                    encoder.setBytes_length_atIndex(pointer, bytes.len(), slot);
+                } else {
+                    let buffer = frame
+                        .device
+                        .newBufferWithBytes_length_options(
+                            pointer,
+                            bytes.len(),
+                            objc2_metal::MTLResourceOptions::StorageModeShared,
+                        )
+                        .expect("a records buffer");
+                    encoder.setBuffer_offset_atIndex(Some(&buffer), 0, slot);
+                }
+            }
+        }
     }
     /// `TIME_PASSES`: commit what the frame has encoded as `ran`, and go on
     /// in a command buffer of its own.
@@ -765,14 +818,6 @@ impl Frame {
             false => pass(&self.buffer, target, MTLLoadAction::Load),
         };
         self.viewport = viewport;
-        self.current = None;
-        self.scissor = None;
-        self.quad_state();
-    }
-    /// Open the next pass into `target` after a batch's blur passes.
-    pub(crate) fn resume(&mut self, target: &ProtocolObject<dyn MTLTexture>) {
-        self.encoder.endEncoding();
-        self.encoder = pass(&self.buffer, target, MTLLoadAction::Load);
         self.current = None;
         self.scissor = None;
         self.quad_state();
@@ -1053,6 +1098,7 @@ fn translate(
     if kind == Kind::Blur {
         resources.insert(binding(0, 0), texture(BLUR_SOURCE as u8));
         resources.insert(binding(0, 1), texture(BLUR_SOURCE as u8 + 1));
+        resources.insert(binding(0, 5), texture(BLUR_SOURCE as u8 + 2));
         resources.insert(binding(0, 2), buffer(BLUR_RECORDS as u8));
         resources.insert(binding(0, 3), buffer(BLUR_RECORDS as u8 + 1));
         resources.insert(
@@ -1160,6 +1206,21 @@ fn translate(
 }
 
 impl Library {
+    /// The compute pipeline of `entry`.
+    fn stage(
+        &self,
+        device: &ProtocolObject<dyn MTLDevice>,
+        entry: &str,
+    ) -> Result<Stage, GpuError> {
+        let function = self
+            .names
+            .get(entry)
+            .and_then(|name| self.library.newFunctionWithName(&NSString::from_str(name)))
+            .ok_or_else(|| GpuError(format!("direct Metal shaders: no `{entry}`")))?;
+        device
+            .newComputePipelineStateWithFunction_error(&function)
+            .map_err(|e| GpuError(format!("direct Metal compute pipeline: {e}")))
+    }
     fn pipeline(
         &self,
         device: &ProtocolObject<dyn MTLDevice>,
