@@ -97,6 +97,38 @@ pub struct Config {
 /// The most voices an engine can have.
 pub const MAX_VOICES: usize = 4096;
 
+/// The most a voice's or a bus's gain can be: +18 dB. With samples kept
+/// to ±[`MAX_SAMPLE`](crate::MAX_SAMPLE), the loudest a sum can get through
+/// the deepest tree of buses is about 2^115, so every sample the mixer
+/// sends is a finite number, with no check on the way.
+pub const MAX_GAIN: f32 = 8.;
+
+/// Values from the app, made what the mixer can rely on: here, on the main
+/// thread, so the audio thread checks nothing. A gain is kept from 0 to
+/// [`MAX_GAIN`] (not a number: 0), a pan from -1 to 1 (not a number: 0), a
+/// pitch from 1/64 to 16 (not a number: 1).
+fn gain(value: f32) -> f32 {
+    if value.is_nan() {
+        0.
+    } else {
+        value.clamp(0., MAX_GAIN)
+    }
+}
+fn pan(value: f32) -> f32 {
+    if value.is_nan() {
+        0.
+    } else {
+        value.clamp(-1., 1.)
+    }
+}
+fn pitch(value: f32) -> f32 {
+    if value.is_nan() {
+        1.
+    } else {
+        value.clamp(1. / 64., 16.)
+    }
+}
+
 impl Config {
     /// Whether an engine can be made with it: a rate from 1 kHz to
     /// 768 kHz, 1 to 64 channels, 1 to [`MAX_VOICES`] voices, 16 to 2^20
@@ -348,9 +380,9 @@ impl Audio {
             id,
             sound: sound.0.clone(),
             bus,
-            gain: play.gain,
-            pan: play.pan,
-            pitch: play.pitch,
+            gain: gain(play.gain),
+            pan: pan(play.pan),
+            pitch: pitch(play.pitch),
             region,
             priority: play.priority,
             fade_in: play
@@ -485,7 +517,7 @@ impl Play {
         self.bus = Some((bus.audio.0.id, bus.index));
         self
     }
-    /// Its gain, 1 as recorded.
+    /// Its gain, 1 as recorded, kept from 0 to [`MAX_GAIN`].
     pub fn gain(mut self, gain: f32) -> Play {
         self.gain = gain;
         self
@@ -496,6 +528,7 @@ impl Play {
         self
     }
     /// Speed and pitch together: 2 is an octave up and twice as fast.
+    /// Kept from 1/64 to 16.
     pub fn pitch(mut self, pitch: f32) -> Play {
         self.pitch = pitch;
         self
@@ -579,6 +612,11 @@ impl Voice {
 
     fn set(&self, param: VoiceParam, value: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         let ramp = ramp.into();
+        let value = match param {
+            VoiceParam::Gain => gain(value),
+            VoiceParam::Pan => pan(value),
+            VoiceParam::Pitch => pitch(value),
+        };
         self.send(Command::Voice {
             id: self.id,
             param,
@@ -588,7 +626,7 @@ impl Voice {
         })
     }
 
-    /// Moves its gain to `gain`.
+    /// Moves its gain to `gain`, kept from 0 to [`MAX_GAIN`].
     pub fn set_gain(&self, gain: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         self.set(VoiceParam::Gain, gain, ramp)
     }
@@ -627,14 +665,15 @@ impl Bus {
         }
     }
 
-    /// Moves its gain to `gain`: a fade, with a [`Ramp`]'s curve.
+    /// Moves its gain to `gain` (kept from 0 to [`MAX_GAIN`]): a fade, with
+    /// a [`Ramp`]'s curve.
     pub fn set_gain(&self, gain: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         let ramp = ramp.into();
         self.audio.send(
             self.time,
             Command::BusGain {
                 bus: self.index,
-                value: gain,
+                value: self::gain(gain),
                 frames: ramp.frames(self.audio.rate()),
                 curve: ramp.curve,
             },

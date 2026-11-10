@@ -465,3 +465,73 @@ fn a_bus_from_another_engine_is_an_error() {
     b4.solo(true).unwrap();
     assert_eq!(left(&mixer.frames(8))[1], 1.);
 }
+
+#[test]
+fn nothing_but_finite_samples_leave_the_mixer_whatever_comes_in() {
+    let wild = [
+        0.,
+        f32::NAN,
+        f32::INFINITY,
+        -f32::INFINITY,
+        1e30,
+        -1e30,
+        0.5,
+    ];
+    let wild = sound(&wild, 1, RATE);
+    let tone = sound(&tone(440., 0.1, RATE), 1, RATE);
+    for limiter in [None, Some(1.)] {
+        let (audio, mut mixer) = Audio::offline(Config {
+            limiter,
+            ..Config::default()
+        })
+        .unwrap();
+        // A tree as deep as there can be, every bus as loud as it goes.
+        let mut deep = audio.master();
+        for i in 0..28 {
+            deep = audio.add_bus(&format!("deep {i}"), &deep).unwrap();
+            deep.set_gain(f32::INFINITY, Ramp::NONE).unwrap();
+        }
+        for bad in [f32::NAN, f32::INFINITY, -f32::INFINITY, 1e30] {
+            audio
+                .play(
+                    &wild,
+                    Play::new().bus(&deep).gain(bad).pan(bad).looping(true),
+                )
+                .unwrap();
+            let voice = audio
+                .play(&tone, Play::new().gain(bad).pitch(bad).pan(bad))
+                .unwrap();
+            voice.set_gain(bad, Ramp::ms(1.)).unwrap();
+            voice.set_pitch(bad, Ramp::ms(1.)).unwrap();
+            voice.set_pan(bad, Ramp::ms(1.)).unwrap();
+        }
+        audio.master().set_gain(f32::NAN, Ramp::ms(2.)).unwrap();
+        audio.master().set_gain(1., Ramp::ms(2.)).unwrap();
+        let out = mixer.frames(48_000);
+        let bad = out.iter().position(|s| !s.is_finite());
+        assert_eq!(
+            bad, None,
+            "limiter {limiter:?}: not finite at sample {bad:?}"
+        );
+        // A pitch that wasn't a number plays at 1, and its tone ends: left
+        // are the four loops and the tone at -inf, kept to 1/64 (6.4 s).
+        assert_eq!(audio.stats().voices, 5);
+    }
+}
+
+#[test]
+fn a_sound_of_no_frames_plays_and_ends_at_once() {
+    let empty = sound(&[], 2, RATE);
+    assert_eq!(empty.frames(), 0);
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let voices = [
+        audio.play(&empty, Play::new()).unwrap(),
+        audio.play(&empty, Play::new().looping(true)).unwrap(),
+        audio
+            .play(&empty, Play::new().loop_frames(0..10).pitch(3.))
+            .unwrap(),
+    ];
+    assert!(mixer.frames(64).iter().all(|&s| s == 0.));
+    audio.update();
+    assert!(voices.iter().all(|v| !v.playing()));
+}

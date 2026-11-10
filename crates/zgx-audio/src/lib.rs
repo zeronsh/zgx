@@ -17,6 +17,11 @@
 //! # Ok::<(), zgx_audio::Error>(())
 //! ```
 //!
+//! What it sends is always a finite number: whatever samples, gains, pans
+//! or pitches come in (infinite, not a number, absurdly large) are made
+//! finite and kept within bounds ([`MAX_SAMPLE`], [`MAX_GAIN`]) on the way
+//! in, on the caller's thread, so the mixer checks nothing as it runs.
+//!
 //! Threads: the [`Audio`] handle and every [`Voice`] and [`Bus`] are the
 //! main thread's (or any thread's); the mixer runs on the audio thread and
 //! never waits for them. Sounds it has finished with are dropped by the
@@ -31,7 +36,9 @@ mod resample;
 mod sound;
 pub mod wav;
 
-pub use engine::{Audio, Bus, Config, Error, MAX_VOICES, Offline, Play, Stats, Time, Voice};
+pub use engine::{
+    Audio, Bus, Config, Error, MAX_GAIN, MAX_VOICES, Offline, Play, Stats, Time, Voice,
+};
 pub use ramp::{Curve, Ramp};
 pub use resample::Interpolation;
-pub use sound::{Sound, Source};
+pub use sound::{MAX_SAMPLE, Sound, Source};
