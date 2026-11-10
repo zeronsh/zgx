@@ -104,6 +104,9 @@ struct Engine {
     /// Whether `pictured` holds, read as each paint begins; and the
     /// pictures a paint worked out, for its batch to show.
     any_pictures: Cell<bool>,
+    /// The rows a paint builds (`paint`), kept between paints: none is
+    /// allocated for each.
+    damaged_rows: RefCell<Vec<usize>>,
     pictures_due: Cell<Option<Vec<(i32, Picture)>>>,
     /// An input method's composition, drawn at the cursor.
     preedit: Signal<String>,
@@ -221,6 +224,7 @@ impl EngineTerminal {
             pictured: runtime.signal(false),
             listening: runtime.signal(false),
             any_pictures: Cell::new(false),
+            damaged_rows: RefCell::default(),
             pictures_due: Cell::new(None),
             preedit: runtime.signal(String::new()),
             news: runtime.signal(String::new()),
@@ -500,7 +504,10 @@ impl Engine {
             // focus, a selection) are no news to a reader.
             output = !all;
             *self.last_selection.borrow_mut() = selection;
-            let mut damaged = vec![false; rows];
+            // The rows damaged, a line or two as output streams in: those
+            // alone are visited (`all`: every one is).
+            let mut damaged = std::mem::take(&mut *self.damaged_rows.borrow_mut());
+            damaged.clear();
             // Lines the screen scrolled up, their damage moved with them:
             // what the slots drew moves up as many rows, and only the rows
             // damaged since are built (the lines new at the bottom, and any
@@ -509,10 +516,8 @@ impl Engine {
             match term.damage() {
                 alacritty_terminal::term::TermDamage::Full => all = true,
                 alacritty_terminal::term::TermDamage::Partial(lines) => {
-                    for line in lines {
-                        if let Some(row) = damaged.get_mut(line.line) {
-                            *row = true;
-                        }
+                    if !all {
+                        damaged.extend(lines.map(|line| line.line).filter(|&row| row < rows));
                     }
                 }
             }
@@ -522,16 +527,23 @@ impl Engine {
                 .last_cursor
                 .replace(cursor_row)
                 .and_then(|row| row.checked_sub(scrolled));
-            for row in [was, cursor_row].into_iter().flatten() {
-                if let Some(row) = damaged.get_mut(row) {
-                    *row = true;
-                }
+            damaged.extend(
+                [was, cursor_row]
+                    .into_iter()
+                    .flatten()
+                    .filter(|&row| row < rows),
+            );
+            // In screen order, each once (the damage's lines come in order,
+            // the cursor's rows after them); every row where all are.
+            if all {
+                damaged.clear();
+                damaged.extend(0..rows);
+            } else {
+                damaged.sort_unstable();
+                damaged.dedup();
             }
             self.look.with_untracked(|look| {
-                for (row, damaged) in damaged.into_iter().enumerate() {
-                    if !(all || damaged) {
-                        continue;
-                    }
+                for &row in &damaged {
                     let cursor = (cursor_row == Some(row)).then_some(CursorAt {
                         column: point.column.0,
                         shape,
@@ -543,6 +555,7 @@ impl Engine {
                     ));
                 }
             });
+            *self.damaged_rows.borrow_mut() = damaged;
             if !term.placements().is_empty() || self.any_pictures.get() {
                 self.work_out_pictures(&term, session, metrics);
             }
@@ -704,6 +717,22 @@ impl Engine {
         self.rebase();
     }
 
+    /// A reader starting or stopping (`listening`): one starting meets the
+    /// rows in screen order, worked out now (scrolls keep it only while one
+    /// listens, `scroll_slots`).
+    fn set_listening(&self, now: bool) {
+        if self.listening.with_untracked(|was| *was == now) {
+            return;
+        }
+        self.runtime.batch(|| {
+            if now {
+                self.order
+                    .set(self.slots.borrow().iter().copied().collect());
+            }
+            self.listening.set(now);
+        });
+    }
+
     /// Each slot's line counted from the top of the screen again: lines
     /// counted from far back would be placed less exactly.
     fn rebase(&self) {
@@ -748,7 +777,11 @@ impl Engine {
             lines[slots[row]].set(top + row);
         }
         self.scrolled.set(top);
-        self.order.set(slots.iter().copied().collect());
+        // Only a reader meets the rows in screen order (`view`): with none,
+        // the order is worked out as one starts (`set_listening`).
+        if self.listening.with_untracked(|listening| *listening) {
+            self.order.set(slots.iter().copied().collect());
+        }
     }
 
     /// Fit the grid to the view's `size` (its content box, in points).
@@ -1934,13 +1967,10 @@ fn view(engine: Rc<Engine>) -> View {
             }
             // The rows in screen order while a reader listens.
             if let Some(at) = handle.observe_assistive_technology() {
-                let listening = engine.listening.clone();
-                let effect = engine.runtime.effect(move || {
-                    let now = at.get();
-                    if listening.with_untracked(|was| *was != now) {
-                        listening.set(now);
-                    }
-                });
+                let listen = engine.clone();
+                let effect = engine
+                    .runtime
+                    .effect(move || listen.set_listening(at.get()));
                 handle.retain(effect);
             }
             if let Some(size) = handle.observe_size() {
