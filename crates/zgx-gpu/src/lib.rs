@@ -51,6 +51,7 @@ mod surfaces;
 pub use surfaces::{PixelBuffer, SurfaceReadback, blank_surface};
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod phase_watch;
+mod pictures;
 mod planes;
 pub use planes::plane_size;
 pub mod present_log;
@@ -4452,6 +4453,8 @@ pub struct GpuRenderer {
     /// Test hook: an offscreen renderer copies scroll moves' pixels where the
     /// platform would repaint them (`debug_allow_scroll_copies`).
     debug_scroll_copy: bool,
+    /// Test hook: no scroll move is copied (`debug_refuse_scroll_copies`).
+    debug_no_scroll_copy: bool,
     /// Scroll moves applied as a copy of their pixels, ever.
     scroll_copied: std::cell::Cell<u64>,
     /// A scroll this frame could have copied, had the pixels not been new.
@@ -4487,6 +4490,10 @@ pub struct GpuRenderer {
     text_cache: Rc<RefCell<prepared::TextCache>>,
     swash: SwashCache,
     layers: FxHashMap<NodeId, LayerCache>,
+    /// Scroll content kept in textures of its own while it scrolls
+    /// (`pictures.rs`); each one's texture is its entry in `layers`.
+    /// `None` until pictures are turned on (`set_scroll_pictures`).
+    pictures: Option<Box<pictures::Pictures>>,
     /// The items `render_flat` draws next came from a walk that passed a
     /// fade (`Scene::take_painted_fades`): their fade bands draw as one
     /// (bands.rs).
@@ -5243,6 +5250,7 @@ impl GpuRenderer {
             copy_present,
             single_pass_frames: 0,
             debug_scroll_copy: false,
+            debug_no_scroll_copy: false,
             scroll_copied: std::cell::Cell::new(0),
             copy_next: std::cell::Cell::new(false),
             direct_frames: 0,
@@ -5260,6 +5268,7 @@ impl GpuRenderer {
             text_cache: context.text_cache(),
             swash: SwashCache::new(),
             layers: FxHashMap::default(),
+            pictures: None,
             banding: false,
             bands_off: false,
             bands_seen: false,
@@ -6176,12 +6185,18 @@ impl GpuRenderer {
         if self.scene_identity != Some(scene.identity()) {
             self.scene_identity = Some(scene.identity());
             self.layers.clear();
+            if let Some(pictures) = &mut self.pictures {
+                pictures.map.clear();
+            }
             self.shapes.clear();
             self.node_images.clear();
             self.outlines = None;
             self.shaped_bytes = 0;
             self.fresh = true;
             self.pruned_revision = None;
+        }
+        if self.pictures.is_some() {
+            self.sync_pictures(scene);
         }
         // Caches only go stale when nodes are added, removed or change kind.
         if self.pruned_revision != Some(scene.content_revision()) {
@@ -6212,6 +6227,7 @@ impl GpuRenderer {
             None => self.scroll_copies(scene, damage),
         };
         self.copies = copies;
+        let pictured = self.pictures.is_some() && scene.has_pictures();
         let extended;
         let damage = if repaint.is_empty() {
             damage
@@ -6290,7 +6306,7 @@ impl GpuRenderer {
         // Lost (a change it couldn't patch, before it had patched): kept
         // again once a few frames in a row show it would patch.
         let patchable = match (&merged, maintained) {
-            (Some(regions), false) => self.would_patch(scene, regions, viewport),
+            (Some(regions), false) if !pictured => self.would_patch(scene, regions, viewport),
             _ => 0,
         };
         // A frame that would patch: the next drawn whole keeps again.
@@ -6303,6 +6319,7 @@ impl GpuRenderer {
         // frames it would have patched.
         let keep = !maintained
             && !self.never_keep
+            && !pictured
             && !loops_baked
             && self.plane.is_none()
             && !self.in_layer
@@ -6370,8 +6387,14 @@ impl GpuRenderer {
         self.layer_frame += 1;
         // Where layers drawn from another corner show: damaged whole.
         let mut shifted = Vec::new();
+        if pictured {
+            self.prepare_pictures(scene, &items, damage, viewport, &mut layer_stats)?;
+        }
         for item in &items {
-            if item.isolated && item.effects.opacity > 0. {
+            if item.isolated
+                && item.effects.opacity > 0.
+                && !(pictured && scene.is_picture(item.id))
+            {
                 let shown = self.shown(item, damage, viewport);
                 let placing = Placing {
                     item,
@@ -9033,6 +9056,21 @@ impl GpuRenderer {
                 let mut fill_shading = None;
                 if item.isolated {
                     let layer = self.layers.get(&item.id).expect("prepared layer");
+                    if layer.step == pictures::PICTURE_STEP {
+                        let plain = self.picture_quads(&item, &mut clips, &mut quads);
+                        draws.push(Draw {
+                            // Colour times a texture sample, unless a fade or a
+                            // rounded clip around it cuts it.
+                            shading: if plain { Shading::Basic } else { Shading::Full },
+                            start,
+                            end: quads.len() as u32,
+                            clip,
+                            bounds: quad_bounds(&quads[start as usize..]),
+                            source: TextureSource::Layer(item.id),
+                            blur: None,
+                        });
+                        continue;
+                    }
                     let bounds = Rect::new(
                         layer.bounds.x - self.layer_origin.0,
                         layer.bounds.y - self.layer_origin.1,
@@ -12003,7 +12041,7 @@ impl GpuRenderer {
         };
         #[cfg(not(own_surfaces))]
         let copyable = true;
-        let copyable = copyable || self.debug_scroll_copy;
+        let copyable = (copyable || self.debug_scroll_copy) && !self.debug_no_scroll_copy;
         for scroll in scene.scroll_moves() {
             if scroll.serial != serial {
                 continue;
@@ -12093,6 +12131,24 @@ impl GpuRenderer {
                     blocker => (copy, blocker),
                 }
             });
+            // Refused by what it holds or how it shows, not by this frame
+            // alone (a first frame, one not drawn): a picture next time.
+            let lasting = zgx::switches::SCROLL_COPY.on()
+                && !self.fresh
+                && self.rendered_serial == Some(serial - 1);
+            if let Some(pictures) = self.pictures.as_ref().filter(|pictures| pictures.on)
+                && match &refused {
+                    Ok((_, blocker)) => {
+                        blocker.is_some() || scene.scroll_corners(scroll.node).is_none()
+                    }
+                    Err(_) => lasting,
+                }
+            {
+                let mut wanted = pictures.wanted.borrow_mut();
+                if !wanted.contains(&scroll.node) {
+                    wanted.push(scroll.node);
+                }
+            }
             match refused {
                 Ok((copy, blocker)) => match blocker {
                     None => match scene.scroll_corners(scroll.node) {
@@ -15605,6 +15661,7 @@ impl GpuRenderer {
         let images = &self.images;
         self.ramps.retain(|_, ramp| images.contains_key(&ramp.id()));
         self.spare = None;
+        self.drop_pictures();
         self.layers.retain(|_, cache| !cache.parked);
         // Surfaces the last frame took out: no frame may come to let them go.
         #[cfg(target_os = "macos")]
@@ -15840,6 +15897,12 @@ impl GpuRenderer {
     /// check what a copy leaves on screen.
     pub fn debug_allow_scroll_copies(&mut self) {
         self.debug_scroll_copy = true;
+    }
+    /// Test hook: no scroll move's pixels are copied, on any platform, as
+    /// offscreen on macOS: what can't be copied is drawn otherwise (a
+    /// picture, a repaint), for a test of that.
+    pub fn debug_refuse_scroll_copies(&mut self) {
+        self.debug_no_scroll_copy = true;
     }
     /// How many scroll moves were applied as a copy of their pixels.
     pub fn debug_scroll_copies(&self) -> u64 {

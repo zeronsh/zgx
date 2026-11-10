@@ -2818,6 +2818,9 @@ impl Host {
                 }
             }
         }
+        if let Some(renderer) = &mut self.renderer {
+            renderer.set_scroll_pictures(true);
+        }
         self.sync_ime_cancellation();
         let Some(window) = self.window.clone() else {
             self.context.ui.cancel_interactions();
@@ -2898,6 +2901,16 @@ impl Host {
         }
         let scene = self.context.ui.scene.clone();
         let mut scene = scene.borrow_mut();
+        // What the renderer last found of scroll pictures, before the moves
+        // this flush resolves.
+        if let Some((allowed, wanted)) = self
+            .renderer
+            .as_mut()
+            .and_then(GpuRenderer::pictures_for_scene)
+        {
+            scene.set_pictures_allowed(allowed);
+            scene.want_pictures(wanted);
+        }
         let report = scene.flush();
         // Reading it is a list a client's update needs and no other update:
         // not with none reading the tree.

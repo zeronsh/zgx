@@ -9,7 +9,7 @@ zgx	43	591	scene::<impl in crates/zgx/src/scene.rs>::store_measurement
 zgx	47	845	scene::<impl in crates/zgx/src/scene.rs>::invalidate_layout_with
 zgx	177	3027	scene::<impl in crates/zgx/src/scene.rs>::column_end
 zgx	520	5600	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk
-zgx	261	2181	scene::<impl in crates/zgx/src/scene.rs>::flush
+zgx	263	2263	scene::<impl in crates/zgx/src/scene.rs>::flush
 zgx	121	1225	scene::<impl in crates/zgx/src/scene.rs>::ink
 zgx	90	1502	scene::<impl in crates/zgx/src/scene.rs>::set_kind
 zgx	131	1214	scene::<impl in crates/zgx/src/scene.rs>::append
