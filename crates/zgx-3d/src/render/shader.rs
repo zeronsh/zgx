@@ -190,32 +190,111 @@ mod tests {
         assert!(textured.contains("lit = shade(") && !textured.contains("shade_specular"));
     }
 
-    /// FNV-1a over every variant's text (every `Variant` bit, one sample a
-    /// pixel and four), in order.
-    fn every_variants_text() -> u64 {
+    /// FNV-1a over the text of every variant whose bits are under `below`
+    /// (one sample a pixel and four), in order.
+    fn variants_text(below: u32) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for bits in 0..1u16 << 11 {
+        for bits in 0..below {
             for samples in [1, 4] {
-                for byte in wgsl(Variant(bits), samples).bytes().chain([0]) {
+                for byte in wgsl(Variant(bits as u16), samples).bytes().chain([0]) {
                     hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
                 }
             }
         }
         hash
     }
+    /// The bits `variant.rs` declares (`const NAME: u16 = 1 << n;`).
+    fn declared_bits() -> Vec<u32> {
+        include_str!("variant.rs")
+            .lines()
+            .filter_map(|line| {
+                line.split_once(": u16 = 1 << ")?
+                    .1
+                    .strip_suffix(';')?
+                    .parse()
+                    .ok()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_variant_bit_is_covered() {
+        // A new bit joins `Variant::ALL`, and with it the text and the
+        // validation checks below (and their digest moves on purpose).
+        let bits = declared_bits();
+        let all = bits.iter().fold(0u32, |all, bit| all | 1 << bit);
+        assert_eq!(all, u32::from(Variant::ALL), "{bits:?}");
+        assert_eq!(all & (all + 1), 0, "bits from 0 up, none skipped: {bits:?}");
+    }
 
     #[test]
     fn every_variants_text_is_todays() {
         // What the shader was before it came from several files, byte for
-        // byte, for every variant. A part a feature adds keeps its lines
-        // behind its own tag, so a world that turns nothing on parses what
-        // it did; change this only with a change to today's shading.
-        assert_eq!(
-            every_variants_text(),
-            0x0a4b_2237_f883_7a85,
-            "{:#018x}",
-            every_variants_text()
-        );
+        // byte, for every variant of the bits it had then (0 to 10). A part
+        // a feature adds keeps its lines behind its own tag, so a world that
+        // turns nothing on parses what it did; change this only with a
+        // change to today's shading.
+        let before = variants_text(1 << 11);
+        assert_eq!(before, 0x0a4b_2237_f883_7a85, "{before:#018x}");
+        // And every variant of every bit there is now, as it is now.
+        let all = variants_text(u32::from(Variant::ALL) + 1);
+        assert_eq!(all, 0x82d7_0223_946b_8ba5, "{all:#018x}");
+    }
+
+    /// `bits` as a variant a mesh can have: a cut-out, placed, glass, coated
+    /// or specular one is textured (`variant_of`).
+    fn possible(bits: u16) -> Variant {
+        let needs = Variant::MASKED
+            | Variant::PLACED
+            | Variant::TRANSMITTING
+            | Variant::COATED
+            | Variant::SPECULAR;
+        Variant(bits).with(Variant::TEXTURED, bits & (needs | Variant::TEXTURED) != 0)
+    }
+    /// `variant`'s shader at `samples` parsed and validated by naga, as the
+    /// device's compiler is given it.
+    fn validates(variant: Variant, samples: u32) -> Result<(), String> {
+        use zgx_gpu::wgpu::naga;
+        let text = wgsl(variant, samples);
+        let module = naga::front::wgsl::parse_str(&text).map_err(|e| e.emit_to_string(&text))?;
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .map_err(|e| e.emit_to_string(&text))?;
+        Ok(())
+    }
+
+    #[test]
+    fn every_variant_bit_and_pair_of_bits_validates() {
+        // Each bit alone and with each other: what one feature's lines do to
+        // another's. (`every_variant_validates` tries them all, in release.)
+        let bits = declared_bits();
+        let mut tried = 0;
+        for (i, &a) in bits.iter().enumerate() {
+            for &b in &bits[i..] {
+                let variant = possible((1 << a | 1 << b) as u16);
+                for samples in [1, 4] {
+                    validates(variant, samples)
+                        .unwrap_or_else(|e| panic!("{variant:?} at {samples}: {e}"));
+                    tried += 1;
+                }
+            }
+        }
+        validates(Variant::default(), 4).unwrap();
+        assert_eq!(tried, bits.len() * (bits.len() + 1));
+    }
+
+    #[test]
+    #[ignore = "every variant: run in release (cargo test --release -- --ignored)"]
+    fn every_variant_validates() {
+        for bits in 0..=Variant::ALL {
+            for samples in [1, 4] {
+                validates(possible(bits), samples)
+                    .unwrap_or_else(|e| panic!("{:?} at {samples}: {e}", possible(bits)));
+            }
+        }
     }
 
     #[test]

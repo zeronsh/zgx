@@ -37,6 +37,10 @@ impl Variant {
             && Self::COATED == crate::world::COAT as u16 * Self::TRANSMITTING
             && Self::SPECULAR == crate::world::SPECULAR as u16 * Self::TRANSMITTING
     );
+    /// Every bit there is (`shader`'s tests cover each, and fail on one
+    /// left out of this).
+    #[cfg(test)]
+    pub(super) const ALL: u16 = (Self::CASCADED << 1) - 1;
     /// It with `bit` on or off.
     pub(super) fn with(self, bit: u16, on: bool) -> Self {
         Self(if on { self.0 | bit } else { self.0 & !bit })
