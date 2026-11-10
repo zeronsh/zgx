@@ -235,13 +235,10 @@ impl From<Slot> for View {
 type Builder = Box<dyn FnOnce(&mut Context) -> View>;
 type RegionBuilder = Box<dyn FnOnce(&mut Ui, NodeId, Environment)>;
 type VirtualBuilder = Box<dyn FnOnce(&mut Ui, NodeId, Environment, ListOptions)>;
-/// A view's scrollbar, if it has one: its style over the platform's look
-/// (the default, the platform's own).
-pub(crate) type Bar = Option<Rc<crate::compose_scrollbar::ScrollbarStyle>>;
 /// What a virtual list is mounted with, beside its rows: its scrollbar,
 /// keyboard navigation, and what it reports of its edges.
 pub(crate) struct ListOptions {
-    pub(crate) scrollbar: Bar,
+    pub(crate) scrollbar: bool,
     pub(crate) keyboard_navigation: bool,
     /// `View::overscroll_contain`.
     pub(crate) contain: bool,
@@ -289,7 +286,7 @@ const AT_END: f32 = 4.;
 #[inline(never)]
 fn virtual_region(
     build: VirtualBuilder,
-    scrollbar: Bar,
+    scrollbar: bool,
     keyboard_navigation: bool,
     contain: bool,
     edges: Option<Box<ListEdges>>,
@@ -533,8 +530,9 @@ pub(crate) struct Rare {
     pub(crate) context_menu_below: Option<bool>,
     /// Whether the pointer stops at the view (`pointer_events`), followed.
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
-    /// `View::scrollbar`, `View::scrollbar_style`: on (with its style) or off.
-    scrollbar: Option<Bar>,
+    scrollbar: Option<bool>,
+    /// `View::scrollbar_style`: how its scrollbar is drawn and timed.
+    scrollbar_style: Option<Rc<crate::compose_scrollbar::ScrollbarStyle>>,
     follow_end: Option<bool>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
     overscroll_contain: bool,
@@ -642,7 +640,10 @@ impl Rare {
             inner.keyboard_navigation = self.keyboard_navigation;
         }
         if self.scrollbar.is_some() {
-            inner.scrollbar = self.scrollbar.clone();
+            inner.scrollbar = self.scrollbar;
+        }
+        if self.scrollbar_style.is_some() {
+            inner.scrollbar_style = self.scrollbar_style;
         }
         if self.follow_end.is_some() {
             inner.follow_end = self.follow_end;
@@ -947,13 +948,15 @@ impl View {
     }
     /// Show an interactive overlay scrollbar on a scroll viewport or virtual list.
     pub fn scrollbar(mut self, visible: bool) -> Self {
-        self.rare_mut().scrollbar = Some(visible.then(Default::default));
+        self.rare_mut().scrollbar = Some(visible);
         self
     }
     /// `scrollbar(true)`, drawn and timed as `style` says over the
     /// platform's look (an app's own floating rail).
     pub fn scrollbar_style(mut self, style: crate::compose_scrollbar::ScrollbarStyle) -> Self {
-        self.rare_mut().scrollbar = Some(Some(Rc::new(style)));
+        let rare = self.rare_mut();
+        rare.scrollbar = Some(true);
+        rare.scrollbar_style = Some(Rc::new(style));
         self
     }
     /// Keep a wheel or trackpad gesture that starts over this scroll view,
@@ -2408,7 +2411,7 @@ fn mount_ancestor_list(
     view: &mut View,
     rare: Option<&mut Rare>,
     build: VirtualBuilder,
-    scrollbar: Bar,
+    scrollbar: bool,
     keyboard_navigation: bool,
 ) -> (NodeId, RegionBuilder) {
     let mut defaults = Styles::new();
@@ -2996,7 +2999,7 @@ pub fn scrollbar(offset: Signal<f32>, mut extent: impl FnMut() -> f32 + 'static)
         ui.bind(root, move || {
             write.set(extent());
         });
-        crate::compose_scrollbar::mount(ui, root, offset, size, length, false, None);
+        crate::compose_scrollbar::mount(ui, root, offset, size, length, false);
     })))
 }
 /// A conditional region. Equal selector values retain their component and
@@ -3662,9 +3665,7 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     }
                 }
             });
-            if let Some(style) = scrollbar.as_deref()
-                && !ancestor
-            {
+            if scrollbar && !ancestor {
                 crate::compose_scrollbar::mount(
                     ui,
                     root,
@@ -3672,7 +3673,6 @@ pub fn virtual_list<K: Eq + std::hash::Hash + Clone + 'static>(
                     size.clone(),
                     extent.clone(),
                     false,
-                    Some(style),
                 );
             }
             let weak = ui.downgrade();
@@ -5652,7 +5652,7 @@ fn mount_element(
             || matches!(kind, Kind::Scroll { .. } | Kind::VirtualList(_)),
         "scrollbar is only supported on scroll, scroll_x, and virtual_list views"
     );
-    let scrollbar = rare.as_ref().and_then(|r| r.scrollbar.clone()).flatten();
+    let scrollbar = rare.as_ref().and_then(|r| r.scrollbar).unwrap_or(false);
     let follow_end = rare.as_ref().and_then(|r| r.follow_end).unwrap_or(false);
     let mut opened = open_element(
         ui,
@@ -5665,11 +5665,24 @@ fn mount_element(
         scrollbar,
         follow_end,
     );
+    if scrollbar {
+        keep_scrollbar_style(ui, opened.root, &mut rare);
+    }
     ui.open_element(opened.root);
     for child in std::mem::take(&mut opened.children) {
         mount(ui, opened.child_parent, child, opened.environment.clone());
     }
     close_element(ui, opened)
+}
+/// A scroll view's or a list's own scrollbar style, kept for its bar to
+/// take as it mounts (`compose_scrollbar::mount`). Apart: every other
+/// element's mount reads nothing of it.
+#[cold]
+#[inline(never)]
+fn keep_scrollbar_style(ui: &Ui, root: NodeId, rare: &mut Option<Box<Rare>>) {
+    if let Some(style) = rare.as_mut().and_then(|rare| rare.scrollbar_style.take()) {
+        ui.keep_scrollbar_style(root, style);
+    }
 }
 /// An element mounted up to its children: what the rest of its mounting
 /// needs once they are in (`mount_element`).
@@ -5689,7 +5702,7 @@ struct Opened {
     submenu_indicator: bool,
     scroll_offset: Option<ScrollOpen>,
     scroll_nodes: Option<(NodeId, NodeId)>,
-    scrollbar: Bar,
+    scrollbar: bool,
     follow_end: bool,
     compute: Option<Box<dyn FnMut() -> String>>,
     region: Option<RegionBuilder>,
@@ -5712,7 +5725,7 @@ fn open_element(
     mut rare: Option<&mut Rare>,
     mut environment: Environment,
     keyboard_navigation: bool,
-    scrollbar: Bar,
+    scrollbar: bool,
     follow_end: bool,
 ) -> Opened {
     // A text holds no views (above): no one reads what it passes on.
@@ -6135,7 +6148,7 @@ fn open_element(
                     &mut view,
                     rare.as_deref_mut(),
                     build,
-                    scrollbar.clone(),
+                    scrollbar,
                     keyboard_navigation,
                 );
                 region = Some(built);
@@ -6151,7 +6164,7 @@ fn open_element(
                 }
                 region = Some(virtual_region(
                     build,
-                    scrollbar.clone(),
+                    scrollbar,
                     keyboard_navigation,
                     rare.as_deref().is_some_and(|r| r.overscroll_contain),
                     rare.as_deref_mut().and_then(|r| r.edges.take()),
@@ -7243,7 +7256,7 @@ fn mount_scroll(
     viewport: NodeId,
     content: NodeId,
     scroll: ScrollOpen,
-    scrollbar: Bar,
+    scrollbar: bool,
     follow_end: bool,
 ) {
     use crate::scene::{Style, Transform};
@@ -7294,7 +7307,7 @@ fn mount_scroll(
         });
         paged
     });
-    if let Some(style) = scrollbar.as_deref() {
+    if scrollbar {
         let main_extent = ui.signal(main_size(extent.get()));
         let read_extent = extent.clone();
         let write_extent = main_extent.clone();
@@ -7308,7 +7321,6 @@ fn mount_scroll(
             size.clone(),
             main_extent,
             horizontal,
-            Some(style),
         );
     }
     let wheel_size = size.clone();
