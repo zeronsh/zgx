@@ -30,7 +30,7 @@
 //! ```
 #![warn(missing_docs)]
 
-#[cfg(all(doctest, feature = "gltf"))]
+#[cfg(all(doctest, feature = "gltf", feature = "post"))]
 #[doc = include_str!("../../../docs/3d.md")]
 mod guide {}
 
@@ -111,6 +111,8 @@ pub use world::audio::{
 pub use world::gi::{MAX_PROBE_VOLUMES, MAX_PROBES, ProbeVolume, ProbesId, ProbesStatus};
 #[cfg(feature = "lighting")]
 pub use world::lighting::{Cascades, PointLight};
+#[cfg(feature = "post")]
+pub use world::{Bloom, Post};
 pub use world::{
     Camera, Clearcoat, Light, LightId, MAX_JOINTS, Material, Object, ObjectId, POINT_LIGHTS, Skin,
     Specular, Spot, ToneMapping, Transmission, World, srgb_to_linear,

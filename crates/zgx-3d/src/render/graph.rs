@@ -25,14 +25,24 @@ pub(super) enum Resource {
     Colour,
     /// The depth meshes test against.
     Depth,
-    /// The view's own texture.
+    /// What the meshes drew, one sample a pixel: in linear light into a
+    /// float texture of its own where the post chain follows, else the
+    /// view's target.
+    Scene,
+    /// Bloom's steps, each half the size of the one before.
+    Bloom,
+    /// The view's own texture (without the post chain, the scene).
+    #[cfg_attr(not(feature = "post"), allow(dead_code))]
     Target,
 }
 impl Resource {
     /// Whether the list's textures hold it, a frame's alone: the shadow map
     /// is kept, the target the view's.
     fn temporary(self) -> bool {
-        matches!(self, Self::Behind | Self::Colour | Self::Depth)
+        matches!(
+            self,
+            Self::Behind | Self::Colour | Self::Depth | Self::Scene | Self::Bloom
+        )
     }
 }
 
@@ -43,24 +53,38 @@ pub(super) enum Pass {
     Shadows,
     /// The meshes but those light passes through, into what is behind them.
     Behind,
-    /// The meshes, into the target.
+    /// The meshes, into the scene.
     Main,
+    /// The scene's bloom, its steps made smaller then larger again.
+    #[cfg(feature = "post")]
+    Bloom,
+    /// The scene exposed, its tones mapped, bloom mixed in, into the target.
+    #[cfg(feature = "post")]
+    Final,
 }
 impl Pass {
     /// How many there are: the most a list holds.
-    const COUNT: usize = 3;
+    const COUNT: usize = if cfg!(feature = "post") { 5 } else { 3 };
     pub(super) fn reads(self) -> &'static [Resource] {
         match self {
             Self::Shadows => &[],
             Self::Behind => &[Resource::ShadowMap],
             Self::Main => &[Resource::ShadowMap, Resource::Behind],
+            #[cfg(feature = "post")]
+            Self::Bloom => &[Resource::Scene],
+            #[cfg(feature = "post")]
+            Self::Final => &[Resource::Scene, Resource::Bloom],
         }
     }
     pub(super) fn writes(self) -> &'static [Resource] {
         match self {
             Self::Shadows => &[Resource::ShadowMap],
             Self::Behind => &[Resource::Colour, Resource::Depth, Resource::Behind],
-            Self::Main => &[Resource::Colour, Resource::Depth, Resource::Target],
+            Self::Main => &[Resource::Colour, Resource::Depth, Resource::Scene],
+            #[cfg(feature = "post")]
+            Self::Bloom => &[Resource::Bloom],
+            #[cfg(feature = "post")]
+            Self::Final => &[Resource::Target],
         }
     }
 }
@@ -108,12 +132,49 @@ pub(super) struct Config {
     pub(super) shadows: bool,
     /// Light passes through some mesh (`World::set_transmission`).
     pub(super) transmits: bool,
+    /// The post chain's passes (`World::set_post`).
+    pub(super) post: Chain,
 }
 
-/// The multisampled colour and the depth meshes draw into.
+/// The post chain's passes on: with none, the meshes draw into the target.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Chain {
+    /// Any pass is on: the scene is drawn into a float texture, and the
+    /// last pass writes the target.
+    pub(super) on: bool,
+    pub(super) bloom: bool,
+}
+
+/// The scene's format where the post chain follows: linear light, past 1.
+pub(super) const SCENE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// Bloom's steps for a frame of `size`: the first half its size, each half
+/// the last, at most 6, the smallest at least 2 pixels a side where the
+/// frame allows.
+pub(super) fn bloom_desc(size: (u32, u32)) -> Desc {
+    let half = ((size.0 / 2).max(1), (size.1 / 2).max(1));
+    let levels = half.0.min(half.1).ilog2().clamp(1, 6);
+    Desc {
+        size: half,
+        format: SCENE,
+        samples: 1,
+        levels,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+    }
+}
+
+/// The multisampled colour and the depth meshes draw into, and the post
+/// chain's.
 pub(super) struct Targets {
     pub(super) colour: Option<wgpu::TextureView>,
     pub(super) depth: wgpu::TextureView,
+    /// The scene, where the post chain follows (else the meshes draw into
+    /// the target).
+    #[cfg_attr(not(feature = "post"), allow(dead_code))]
+    pub(super) scene: Option<wgpu::TextureView>,
+    /// Each of bloom's steps, with it on.
+    #[cfg_attr(not(feature = "post"), allow(dead_code))]
+    pub(super) bloom: Vec<wgpu::TextureView>,
     textures: Vec<Temporary>,
 }
 
@@ -132,6 +193,9 @@ pub(super) struct Graph {
     pool: Pool,
     /// What its temporaries hold (`bytes`).
     bytes: u64,
+    /// Compiles so far: bindings of its targets are made again as it
+    /// changes.
+    pub(super) compiled: u64,
 }
 impl Graph {
     pub(super) fn new(format: wgpu::TextureFormat, samples: u32) -> Self {
@@ -147,6 +211,7 @@ impl Graph {
             behind: None,
             pool: Pool::default(),
             bytes: 0,
+            compiled: 0,
         }
     }
     /// The list for `config`, compiled if it was for another: whether what
@@ -194,6 +259,10 @@ impl Graph {
             config.shadows.then_some(Pass::Shadows),
             config.transmits.then_some(Pass::Behind),
             Some(Pass::Main),
+            #[cfg(feature = "post")]
+            config.post.bloom.then_some(Pass::Bloom),
+            #[cfg(feature = "post")]
+            config.post.on.then_some(Pass::Final),
         ];
         let wanted: Vec<Pass> = wanted.into_iter().flatten().collect();
         self.passes = order(&wanted).expect("the stock passes have an order");
@@ -206,12 +275,20 @@ impl Graph {
             levels: 1,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         };
+        let read = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+        let scene = Desc {
+            samples: 1,
+            usage: read,
+            ..target(config.size, self.format)
+        };
         let mut used: Vec<(Resource, Desc, usize, usize)> = Vec::new();
         for (at, pass) in self.passes.iter().enumerate() {
             for &resource in pass.reads().iter().chain(pass.writes()) {
                 let desc = match resource {
                     Resource::Colour if self.samples > 1 => target(config.size, self.format),
                     Resource::Depth => target(config.size, DEPTH),
+                    Resource::Scene if config.post.on => scene,
+                    Resource::Bloom if config.post.bloom => bloom_desc(config.size),
                     _ => continue,
                 };
                 debug_assert!(resource.temporary());
@@ -233,6 +310,8 @@ impl Graph {
         for (&slot, &(resource, desc, ..)) in slots.iter().zip(&used) {
             let label = match resource {
                 Resource::Colour => "3D colour",
+                Resource::Scene => "3D scene",
+                Resource::Bloom => "3D bloom",
                 _ => "3D depth",
             };
             textures[slot].get_or_insert_with(|| self.pool.take(device, desc, label));
@@ -247,9 +326,27 @@ impl Graph {
             )
         };
         let (colour, depth) = (view(Resource::Colour), view(Resource::Depth));
+        let scene = view(Resource::Scene);
+        let bloom = match used.iter().position(|(r, ..)| *r == Resource::Bloom) {
+            Some(at) => {
+                let texture = &textures[slots[at]].as_ref().expect("taken").texture;
+                (0..used[at].1.levels)
+                    .map(|level| {
+                        texture.create_view(&wgpu::TextureViewDescriptor {
+                            base_mip_level: level,
+                            mip_level_count: Some(1),
+                            ..Default::default()
+                        })
+                    })
+                    .collect()
+            }
+            None => Vec::new(),
+        };
         self.targets = Some(Targets {
             colour,
             depth: depth.expect("the meshes' pass tests depth"),
+            scene,
+            bloom,
             textures: textures.into_iter().flatten().collect(),
         });
         // What is behind, at the frame's size, while light passes through.
@@ -272,6 +369,7 @@ impl Graph {
         self.pool.clear();
         self.config = Some(config);
         self.bytes = self.summed();
+        self.compiled += 1;
         behind_made
     }
 }
@@ -306,6 +404,7 @@ mod tests {
             size: (64, 32),
             shadows: false,
             transmits: false,
+            post: Chain::default(),
         };
         assert!(!graph.prepare(&device, plain));
         assert_eq!(graph.passes().iter().collect::<Vec<_>>(), [Pass::Main]);
@@ -353,5 +452,36 @@ mod tests {
         assert!(graph.targets.is_none() && graph.behind.is_none());
         assert!(graph.prepare(&device, plain) || graph.targets.is_some());
         assert_eq!(graph.bytes(), targets);
+    }
+
+    #[cfg(feature = "post")]
+    #[test]
+    fn the_post_chain_runs_after_the_meshes_from_a_scene_of_its_own() {
+        let device = device();
+        let mut graph = Graph::new(SCENE, 1);
+        let config = |bloom| Config {
+            size: (64, 32),
+            shadows: true,
+            transmits: false,
+            post: Chain { on: true, bloom },
+        };
+        graph.prepare(&device, config(true));
+        assert_eq!(
+            graph.passes().iter().collect::<Vec<_>>(),
+            [Pass::Shadows, Pass::Main, Pass::Bloom, Pass::Final]
+        );
+        let targets = graph.targets.as_ref().unwrap();
+        assert!(targets.scene.is_some() && targets.colour.is_none());
+        // Bloom from 32 by 16 down to 2 by 1 (16 is 2 to the 4th: 4 steps).
+        assert_eq!(targets.bloom.len(), 4);
+        let steps: u64 = (0..4).map(|l| (32u64 >> l) * (16u64 >> l) * 8).sum();
+        assert_eq!(graph.bytes(), 64 * 32 * (8 + 4) + steps);
+        graph.prepare(&device, config(false));
+        assert_eq!(
+            graph.passes().iter().collect::<Vec<_>>(),
+            [Pass::Shadows, Pass::Main, Pass::Final]
+        );
+        assert!(graph.targets.as_ref().unwrap().bloom.is_empty());
+        assert_eq!(graph.bytes(), 64 * 32 * (8 + 4));
     }
 }

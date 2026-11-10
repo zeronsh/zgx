@@ -46,6 +46,8 @@ audio = ["dep:zgx-audio"]
 # WGSL functions plugged into the lit pipeline. Off, a world draws as
 # without them, and none of their code is built.
 shaders = []
+# The post chain (`World::set_post`): a scene target in linear light, bloom.
+post = []
 
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop", default-features = false }

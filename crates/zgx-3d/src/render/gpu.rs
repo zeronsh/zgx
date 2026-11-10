@@ -133,6 +133,9 @@ pub(super) struct Gpu {
     /// The scene's targets the world's scene draws were prepared for, and
     /// which (by address).
     pub(super) draws_prepared: (Option<super::SceneTarget>, Vec<usize>),
+    /// The post chain's passes, made with the first frame with one on.
+    #[cfg(feature = "post")]
+    pub(super) post: Option<super::post::Chain>,
     /// Samples a pixel (`World::set_samples`).
     pub(super) samples: u32,
     pub(super) frame: u64,
@@ -153,6 +156,13 @@ impl Gpu {
         } else {
             0
         };
+        // The post chain's bindings hold its targets as they were bound.
+        #[cfg(feature = "post")]
+        let behind = behind
+            + match &self.post {
+                Some(chain) if self.graph.targets.is_none() => chain.held(),
+                _ => 0,
+            };
         self.graph.bytes() + behind
     }
     /// The shadow map made while `on` (dropped while off), and the frame's
@@ -381,6 +391,8 @@ impl Gpu {
             #[cfg(feature = "gi")]
             probes: None,
             draws_prepared: (None, Vec::new()),
+            #[cfg(feature = "post")]
+            post: None,
             samples,
             frame: 0,
             #[cfg(feature = "lighting")]
