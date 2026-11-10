@@ -246,3 +246,77 @@ fn a_sound_that_is_not_a_known_format_says_so() {
     );
     let _ = Sound::from_samples(&[0.], 1, 48_000);
 }
+
+#[test]
+fn a_stream_takes_a_bus_and_values_as_a_sound_does() {
+    let (audio, mut mixer) = engine();
+    let (other, _) = engine();
+    let bytes = noise(4_800, 2, 48_000);
+    let foreign = other.bus("music").unwrap();
+    assert!(matches!(
+        audio.stream(Source::bytes(bytes.clone()), Play::new().bus(&foreign)),
+        Err(zgx_audio::Error::Foreign)
+    ));
+    let wild = Play::new()
+        .gain(f32::INFINITY)
+        .pan(f32::NAN)
+        .pitch(f32::NAN);
+    audio.stream(Source::bytes(bytes), wild).unwrap();
+    audio.settle();
+    let out = blocks(&mut mixer, 4_800);
+    assert!(out.iter().all(|s| s.is_finite()));
+    assert!(out.iter().any(|&s| s != 0.), "it played");
+}
+
+/// The test's Ogg Vorbis with its header saying `rate`, its page's
+/// checksum made again (CRC-32, polynomial 0x04c11db7, unreflected).
+#[cfg(feature = "vorbis")]
+fn ogg_at(rate: u32) -> Vec<u8> {
+    let mut bytes = include_bytes!("assets/tone.ogg").to_vec();
+    // One segment: the identification packet starts at 28, its rate at 40.
+    bytes[40..44].copy_from_slice(&rate.to_le_bytes());
+    let page = 27
+        + usize::from(bytes[26])
+        + bytes[27..27 + usize::from(bytes[26])]
+            .iter()
+            .map(|&b| usize::from(b))
+            .sum::<usize>();
+    bytes[22..26].fill(0);
+    let mut crc = 0u32;
+    for &byte in &bytes[..page] {
+        crc ^= u32::from(byte) << 24;
+        for _ in 0..8 {
+            crc = if crc & 0x8000_0000 != 0 {
+                (crc << 1) ^ 0x04c1_1db7
+            } else {
+                crc << 1
+            };
+        }
+    }
+    bytes[22..26].copy_from_slice(&crc.to_le_bytes());
+    bytes
+}
+
+#[test]
+#[cfg(feature = "vorbis")]
+fn an_ogg_vorbis_at_a_rate_the_mixer_can_t_play_is_an_error() {
+    let (audio, _mixer) = engine();
+    // The checksum is made right: the same file at its own rate plays.
+    audio
+        .stream(Source::bytes(ogg_at(44_100)), Play::new())
+        .unwrap();
+    // A rate past what an engine runs at (whose stream's ring, sized by it,
+    // would be as absurd) is refused, loaded whole or streamed.
+    for rate in [10_000_000, 999] {
+        assert!(
+            audio.load(Source::bytes(ogg_at(rate))).is_err(),
+            "{rate} Hz"
+        );
+        assert!(
+            audio
+                .stream(Source::bytes(ogg_at(rate)), Play::new())
+                .is_err(),
+            "{rate} Hz streamed"
+        );
+    }
+}
