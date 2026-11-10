@@ -1683,6 +1683,10 @@ struct Shaped {
     scale: f32,
     glyphs: Vec<Glyph>,
     quads: Vec<TextQuad>,
+    /// Whose colour each of `quads` is, once a recolour has worked it out
+    /// (`recolour_shape`): its glyph's run, or a decoration's
+    /// (`DECORATION_OWNER` past its index). Of another length, not known.
+    owners: Vec<u32>,
     /// Whether `quads` hold colour glyphs (`COLOR_GLYPH`).
     colored: bool,
     atlas_epoch: u64,
@@ -1701,7 +1705,98 @@ impl Shaped {
             // (Charged as the GPU quads they are placed as: the cache keeps
             // as many shapes as when it held those.)
             + self.quads.capacity() * std::mem::size_of::<Quad>()
+            + self.owners.capacity() * std::mem::size_of::<u32>()
     }
+}
+/// `Shaped::owners` of a decoration's quads: past its index.
+const DECORATION_OWNER: u32 = 1 << 31;
+/// A kept shape's text recoloured, laid out as it was (`same_shape`: a
+/// fade's frame, a highlight): its decorations take their new colours, and
+/// its quads too where they were placed in this atlas (`epoch`), each its
+/// run's or decoration's colour as placing it made it, rather than placed
+/// again glyph by glyph from the atlas with its decorations. Out of line:
+/// the paint walk asks one test of each text, and comes here only for one
+/// recoloured.
+#[cold]
+#[inline(never)]
+fn recolour_shape(
+    shaped: &mut Shaped,
+    new: &Arc<zgx::rich_text::RichText>,
+    epoch: u64,
+    entries: &FxHashMap<AtlasKey, Option<AtlasEntry>>,
+) {
+    let kept = shaped.atlas_epoch == epoch && shaped_owners(shaped, entries);
+    for decoration in &mut shaped.decorations {
+        decoration.color = decoration.color_in(new);
+    }
+    if kept {
+        let runs = new.runs();
+        for (quad, &owner) in shaped.quads.iter_mut().zip(&shaped.owners) {
+            let color = match owner.checked_sub(DECORATION_OWNER) {
+                Some(index) => shaped.decorations[index as usize].color,
+                None => runs[owner as usize].color,
+            };
+            quad.color = rgba(color, 1.);
+        }
+    } else {
+        shaped.atlas_epoch = epoch.wrapping_sub(1);
+    }
+    shaped.rich = Some(new.clone());
+}
+/// Whether `shaped`'s quads' owners are known (`Shaped::owners`), working
+/// them out if not as placing them made them: its washes, then a quad for
+/// each glyph the atlas holds a raster of, then its lines (one each, or
+/// all of a lone line's pieces). Each must have the colour its owner gave
+/// it; else they aren't known, and it is placed again.
+fn shaped_owners(shaped: &mut Shaped, entries: &FxHashMap<AtlasKey, Option<AtlasEntry>>) -> bool {
+    let Some(rich) = shaped.rich.as_deref() else {
+        return false;
+    };
+    if shaped.owners.len() != shaped.quads.len() {
+        let owners = &mut shaped.owners;
+        owners.clear();
+        let decorations = shaped.decorations.iter().enumerate();
+        owners.extend(
+            decorations
+                .clone()
+                .filter(|(_, d)| d.background)
+                .map(|(index, _)| DECORATION_OWNER + index as u32),
+        );
+        for glyph in &shaped.glyphs {
+            let size = f32::from_bits(glyph.key.font_size_bits);
+            if !size.is_finite() || size > MAX_ATLAS as f32 {
+                continue;
+            }
+            match entries.get(&AtlasKey::from(glyph.key)) {
+                Some(Some(_)) => owners.push(glyph.run as u32),
+                Some(None) => {}
+                None => return false,
+            }
+        }
+        let lines: Vec<u32> = decorations
+            .filter(|(_, d)| !d.background)
+            .map(|(index, _)| DECORATION_OWNER + index as u32)
+            .collect();
+        let pieces = shaped.quads.len().saturating_sub(owners.len());
+        match lines[..] {
+            _ if pieces == lines.len() => owners.extend(lines),
+            [line] => owners.resize(shaped.quads.len(), line),
+            _ => return false,
+        }
+    }
+    let runs = rich.runs();
+    shaped.owners.len() == shaped.quads.len()
+        && shaped
+            .quads
+            .iter()
+            .zip(&shaped.owners)
+            .all(|(quad, &owner)| {
+                let color = match owner.checked_sub(DECORATION_OWNER) {
+                    Some(index) => shaped.decorations.get(index as usize).map(|d| d.color),
+                    None => runs.get(owner as usize).map(|run| run.color),
+                };
+                color.is_some_and(|color| quad.color == rgba(color, 1.))
+            })
 }
 /// The atlas's key: cosmic-text's, losslessly, with its scalar fields
 /// packed into words so it hashes and compares in a few operations.
@@ -9809,11 +9904,7 @@ impl GpuRenderer {
                                 && shaped.text_options == item.text_options
                                 && shaped.font == *item.font
                             {
-                                for decoration in &mut shaped.decorations {
-                                    decoration.color = decoration.color_in(new);
-                                }
-                                shaped.rich = Some(new.clone());
-                                shaped.atlas_epoch = self.atlas_epoch.wrapping_sub(1);
+                                recolour_shape(shaped, new, self.atlas_epoch, &self.entries);
                             }
                             shaped.rich != rich
                                 || shaped.text_options != item.text_options
@@ -9994,6 +10085,7 @@ impl GpuRenderer {
                                 scale: self.scale,
                                 glyphs,
                                 quads: spare_quads,
+                                owners: Vec::new(),
                                 colored: twin_colored,
                                 atlas_epoch: epoch.unwrap_or(0),
                                 last_used: self.frame,
@@ -20179,6 +20271,7 @@ mod atlas_glyph_errors_tests {
                 })
                 .collect(),
             quads: Vec::new(),
+            owners: Vec::new(),
             colored: false,
             atlas_epoch: 0,
             last_used: 0,
