@@ -28,6 +28,8 @@ lighting = []
 # Particle emitters (`World::add_emitter`): updated by compute where the
 # device runs it, on the CPU elsewhere.
 particles = ["compute"]
+# The post chain (`World::set_post`): a scene target in linear light, bloom.
+post = []
 
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop", default-features = false }

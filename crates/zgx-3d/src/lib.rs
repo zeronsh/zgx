@@ -30,7 +30,7 @@
 //! ```
 #![warn(missing_docs)]
 
-#[cfg(all(doctest, feature = "gltf"))]
+#[cfg(all(doctest, feature = "gltf", feature = "post"))]
 #[doc = include_str!("../../../docs/3d.md")]
 mod guide {}
 
@@ -85,6 +85,8 @@ pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};
 #[cfg(feature = "lighting")]
 pub use world::lighting::{Cascades, PointLight};
+#[cfg(feature = "post")]
+pub use world::{Bloom, Post};
 pub use world::{
     Camera, Clearcoat, Light, LightId, MAX_JOINTS, Material, Object, ObjectId, POINT_LIGHTS, Skin,
     Specular, Spot, ToneMapping, Transmission, World, srgb_to_linear,

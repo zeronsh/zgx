@@ -197,7 +197,7 @@ jobs:
       # whole workflow would fail to load.
       - run: "cargo test -p zgx --no-default-features --lib --test editor --test text --locked -- words:: chinese_japanese_or_thai"
       - run: cargo test --workspace --doc --locked
-      - run: cargo test -p zgx-3d --features gltf --doc --locked
+      - run: cargo test -p zgx-3d --features gltf,post --doc --locked
       # The API docs build without a warning (a broken link, a name collision).
       - run: cargo doc --workspace --no-deps --locked
         env:
@@ -250,7 +250,7 @@ jobs:
         env:
           XDG_RUNTIME_DIR: /tmp
           ZGX_REQUIRE_GPU: "1"
-        run: cargo test -p zgx-3d --features gltf --locked
+        run: cargo test -p zgx-3d --features gltf,post --locked
       # Without ffmpeg, the tests of what it encodes pass by skipping: here it
       # must be there.
       - name: Video

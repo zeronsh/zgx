@@ -25,6 +25,8 @@ mod instances;
 mod lights;
 mod materials;
 mod pipelines;
+#[cfg(feature = "post")]
+mod post;
 mod scene_draw;
 mod shader;
 mod shadows;
@@ -568,12 +570,22 @@ impl Viewport for Renderer {
             None => (frame.target, frame.format, !frame.format.is_srgb()),
         };
         let samples = world.samples;
+        // With the post chain, meshes draw into a scene in linear light, and
+        // its last pass writes the target.
+        #[cfg(feature = "post")]
+        let chain = graph::Chain {
+            on: world.post.any(),
+            bloom: world.post.bloom.is_some(),
+        };
+        #[cfg(not(feature = "post"))]
+        let chain = graph::Chain::default();
+        let scene_format = if chain.on { graph::SCENE } else { format };
         if self
             .gpu
             .as_ref()
-            .is_none_or(|gpu| gpu.format != format || gpu.samples != samples)
+            .is_none_or(|gpu| gpu.format != scene_format || gpu.samples != samples)
         {
-            self.gpu = Some(Gpu::new(frame.device, format, samples));
+            self.gpu = Some(Gpu::new(frame.device, scene_format, samples));
         }
         let gpu = self.gpu.as_mut().unwrap();
         gpu.frame += 1;
@@ -585,6 +597,7 @@ impl Viewport for Renderer {
             size,
             shadows: world.shadows,
             transmits,
+            post: chain,
         };
         if gpu.graph.prepare(frame.device, config) {
             // Bindings of what was behind before, and runs drawing with them.
@@ -597,7 +610,12 @@ impl Viewport for Renderer {
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let view = camera.view();
         let view_projection = camera.projection(aspect) * view;
-        let mut uniforms = frame_uniforms(&world, view_projection, encode);
+        let mut uniforms = frame_uniforms(&world, view_projection, encode && !chain.on);
+        if chain.on {
+            // Exposed and mapped by the chain's last pass.
+            uniforms.params[2] = 1.;
+            uniforms.look[0] = 2.;
+        }
         #[cfg(feature = "lighting")]
         let (clustered, cascaded) = lights::prepare(
             gpu,
@@ -803,6 +821,7 @@ impl Viewport for Renderer {
                         draw_behind(frame.encoder, gpu, (runs, shown), frame_bind, clear);
                     }
                 }
+                #[cfg(not(feature = "post"))]
                 Pass::Main => {
                     let draws = &world.scene_draws;
                     draw_main(
@@ -814,6 +833,42 @@ impl Viewport for Renderer {
                         clear,
                         draws,
                     )
+                }
+                #[cfg(feature = "post")]
+                Pass::Main => {
+                    // Into the scene where the chain follows: the background
+                    // shows past it, after its tones are mapped.
+                    let scene = gpu.graph.targets.as_ref().and_then(|t| t.scene.as_ref());
+                    let (into, clear) = match scene {
+                        Some(scene) => (scene, wgpu::Color::TRANSPARENT),
+                        None => (target, clear),
+                    };
+                    let draws = &world.scene_draws;
+                    draw_main(
+                        frame.encoder,
+                        gpu,
+                        (runs, shown),
+                        into,
+                        frame_bind,
+                        clear,
+                        draws,
+                    )
+                }
+                #[cfg(feature = "post")]
+                Pass::Bloom => {
+                    let chain = gpu
+                        .post
+                        .get_or_insert_with(|| post::Chain::new(frame.device));
+                    chain.bloom(frame.device, frame.encoder, &gpu.graph);
+                }
+                #[cfg(feature = "post")]
+                Pass::Final => {
+                    let look = post_look(&world, &gpu.graph, encode);
+                    let chain = gpu
+                        .post
+                        .get_or_insert_with(|| post::Chain::new(frame.device));
+                    let device = (frame.device, frame.queue);
+                    chain.last(device, frame.encoder, &gpu.graph, (target, format), &look);
                 }
             }
         }
@@ -833,6 +888,10 @@ impl Viewport for Renderer {
             return;
         };
         gpu.graph.rest();
+        #[cfg(feature = "post")]
+        if let Some(chain) = &mut gpu.post {
+            chain.rest();
+        }
         gpu.bindings.clear();
         gpu.behind_held = 0;
         // The last frame's runs drew with those bindings: the next frame
@@ -877,6 +936,25 @@ fn prepare_draws(
             draw.borrow_mut().prepare(device, queue, target);
             prepared.push(at);
         }
+    }
+}
+
+/// The post chain's last pass's numbers for `world`, whose frame `graph`
+/// compiled: its exposure and tone mapping, background, and bloom.
+#[cfg(feature = "post")]
+#[cold]
+fn post_look(world: &crate::world::Inner, graph: &graph::Graph, encode: bool) -> post::Look {
+    let steps = graph.targets.as_ref().map_or(0, |t| t.bloom.len());
+    let tone = match world.tone_mapping {
+        crate::ToneMapping::Neutral => 0.,
+        crate::ToneMapping::Aces => 1.,
+        crate::ToneMapping::Linear => 2.,
+    };
+    let intensity = world.post.bloom.map_or(0., |bloom| bloom.intensity);
+    post::Look {
+        params: [world.exposure.exp2(), tone, f32::from(u8::from(encode)), 0.],
+        background: world.background.unwrap_or([0.; 4]),
+        bloom: [intensity, 1. / steps.max(1) as f32, 0., 0.],
     }
 }
 

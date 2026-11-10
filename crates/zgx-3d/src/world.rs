@@ -10,6 +10,11 @@ pub(crate) mod animation;
 #[cfg(feature = "lighting")]
 pub(crate) mod lighting;
 
+#[cfg(feature = "post")]
+mod post;
+#[cfg(feature = "post")]
+pub use post::{Bloom, Post};
+
 /// How a surface takes light: a metallic-roughness material, as glTF's.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Material {
@@ -440,6 +445,9 @@ pub(crate) struct Inner {
     pub(crate) tone_mapping: ToneMapping,
     /// Stops of exposure (`World::set_exposure`): light times 2 to it.
     pub(crate) exposure: f32,
+    /// What its frame goes through after its meshes (`World::set_post`).
+    #[cfg(feature = "post")]
+    pub(crate) post: Post,
     /// Samples a pixel (`World::set_samples`): 4 or 1.
     pub(crate) samples: u32,
     /// Objects' textures (`World::set_map`), by index, in `Map::ALL`'s order,
@@ -1178,6 +1186,8 @@ impl World {
             environment: None,
             tone_mapping: ToneMapping::Neutral,
             exposure: 0.,
+            #[cfg(feature = "post")]
+            post: Post::default(),
             samples: 4,
             textures: Default::default(),
             skins: Default::default(),
