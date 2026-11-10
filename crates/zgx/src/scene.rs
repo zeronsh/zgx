@@ -4238,17 +4238,26 @@ impl Scene {
             x: offset.x + node.transform.x,
             y: offset.y + node.transform.y,
         };
-        let own = match &node.kind {
-            NodeKind::Container(_) => false,
-            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => !quad.paints_nothing(),
-            _ => true,
-        };
-        if own
-            && self
-                .own_ink(id)
-                .is_some_and(|ink| ink.translated(inner).intersects(rect))
-        {
-            return true;
+        // Its own paint, from what is kept: a leaf's ink is its own (met
+        // above), a box's its quad's; anything else holding children counts
+        // its whole ink, as before.
+        let children = self.children_raw(node);
+        match &node.kind {
+            NodeKind::Container(_) => {}
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } if quad.paints_nothing() => {}
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } if !children.is_empty() => {
+                if quad
+                    .paint_bounds(node.bounds)
+                    .translated(inner)
+                    .intersects(rect)
+                {
+                    return true;
+                }
+            }
+            _ => return true,
+        }
+        if children.is_empty() {
+            return false;
         }
         // What it holds paints only inside its clip.
         let local = Rect::new(rect.x - inner.x, rect.y - inner.y, rect.width, rect.height);
@@ -4258,7 +4267,7 @@ impl Scene {
         else {
             return false;
         };
-        self.children_raw(node)
+        children
             .iter()
             .any(|child| crate::deep(0, || self.paints_within(*child, inner, within)))
     }
