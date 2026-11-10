@@ -1147,6 +1147,20 @@ impl Bus {
         self.add(effect, Some(side.index))
     }
 
+    /// Ducks this bus under `side` (music under dialogue): `side`'s level
+    /// drives a [`Duck`](crate::effects::Duck) at the end of this bus's
+    /// chain.
+    /// ```
+    /// # use zgx_audio::{Audio, Config, effects::Duck};
+    /// let (audio, _mixer) = Audio::offline(Config::default())?;
+    /// let (music, dialogue) = (audio.bus("music").unwrap(), audio.add_bus("dialogue", &audio.master())?);
+    /// music.duck(&dialogue, Duck::new(-9., 0.05, 0.4))?;
+    /// # Ok::<(), zgx_audio::Error>(())
+    /// ```
+    pub fn duck(&self, side: &Bus, duck: crate::effects::Duck) -> Result<EffectHandle, Error> {
+        self.add_effect_keyed(duck, side)
+    }
+
     fn add<E: Effect>(&self, effect: E, side: Option<u16>) -> Result<EffectHandle, Error> {
         // Its parameters as the mixer will keep to them: a range the right
         // way up, all of it numbers. Checked here: the mixer can't refuse.

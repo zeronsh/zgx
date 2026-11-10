@@ -9,11 +9,12 @@
 //! with a control of the same scene without the effects, which is
 //! subtracted. Every arm checks that each instance ran on every block.
 //! Effects: `none` (an effect that does nothing: what running one costs),
-//! `gain`, `lowpass`, `lowpass24`, `highpass`, `peaking`, `delay`, `reverb`, and
+//! `gain`, `lowpass`, `lowpass24`, `highpass`, `peaking`, `delay`, `reverb`,
+//! `compressor`, and
 //! `sweep` (a low-pass whose cutoff moves the whole time).
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use zgx_audio::effects::{Delay, HighPass, LowPass, Peaking, Reverb, Slope};
+use zgx_audio::effects::{Compressor, Delay, HighPass, LowPass, Peaking, Reverb, Slope};
 use zgx_audio::{Audio, Bus, Config, Context, Effect, EffectHandle, Format, Play, Ramp, Sound};
 
 const SECONDS: usize = 10;
@@ -90,6 +91,7 @@ fn add(name: &str, bus: &Bus, frames: Arc<AtomicU64>) -> EffectHandle {
         "highpass" => counted(bus, HighPass::new(200.), frames),
         "peaking" => counted(bus, Peaking::new(1000., 6., 1.), frames),
         "reverb" => counted(bus, Reverb::new(1., 2.), frames),
+        "compressor" => counted(bus, Compressor::new(-30., 4.), frames),
         "delay" => counted(
             bus,
             Delay::new(0.25, 0.25).feedback(0.5).mix(0.5, 1.),

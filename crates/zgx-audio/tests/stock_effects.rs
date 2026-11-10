@@ -8,7 +8,9 @@
 //! the references anew; say why they changed.
 use std::f64::consts::PI;
 use std::path::PathBuf;
-use zgx_audio::effects::{Delay, FLAT, HighPass, LowPass, Peaking, Reverb, Slope};
+use zgx_audio::effects::{
+    Compressor, Delay, Duck, FLAT, HighPass, LowPass, Peaking, Reverb, Slope,
+};
 use zgx_audio::{Audio, Bus, Config, Effect, Play, Ramp, Sound, Time, wav};
 
 const RATE: u32 = 48_000;
@@ -437,4 +439,150 @@ fn a_reverb_rings_on_after_its_sound_and_rests_after_its_tail() {
         "silent too soon"
     );
     assert!(left[40_000..].iter().all(|&s| s == 0.), "run past its tail");
+}
+
+/// A steady sine of `db` decibels (peak) through `effect` on master, and
+/// its level (peak, dB) once settled.
+fn level_through(effect: impl Effect + Clone, db: f64) -> f64 {
+    let amplitude = 10f64.powf(db / 20.);
+    let tone: Vec<f32> = (0..48_000)
+        .map(|i| ((2. * PI * 1000. * i as f64 / f64::from(RATE)).sin() * amplitude) as f32)
+        .collect();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    audio.master().add_effect(effect).unwrap();
+    let tone = Sound::from_samples(&tone, 1, RATE).unwrap();
+    audio.play(&tone, Play::new().fade_in(0.)).unwrap();
+    let left = channel(&mixer.frames(48_000), 0);
+    let peak = left[36_000..].iter().fold(0f32, |m, s| m.max(s.abs()));
+    20. * f64::from(peak).log10()
+}
+
+#[test]
+fn a_compressor_s_curve_is_its_ratio_above_its_threshold_through_its_knee() {
+    // -30 dB, 4 to 1, a 6 dB knee; an attack quick enough to reach each
+    // peak's reduction and a release slow enough to hold it through the
+    // cycle (a slower attack settles short of the curve on a sine, as a
+    // detector smoothed in decibels does).
+    let make = || Compressor::new(-30., 4.).times(0.0001, 1.);
+    for (input, want) in [
+        (-40., -40.),           // below the knee: untouched
+        (-24., -30. + 6. / 4.), // above it: a quarter of what's over
+        (-6., -30. + 24. / 4.),
+        (-30., -30. - 3. * 0.75 * 3. / 6. / 2.), // the knee's middle
+    ] {
+        let got = level_through(make(), input);
+        assert!(
+            (got - want).abs() < 0.1,
+            "{input} dB in: {got:.2} out, not {want:.2}"
+        );
+    }
+    // Makeup lifts it all.
+    let got = level_through(make().knee(6., 6.), -6.);
+    assert!((got - (-24. + 6.)).abs() < 0.1, "{got:.2}");
+}
+
+#[test]
+fn a_compressor_takes_its_attack_to_come_down_and_its_release_to_come_back() {
+    // A burst 20 dB over the threshold, then quiet again.
+    let (attack, release) = (0.01, 0.1);
+    let samples: Vec<f32> = (0..48_000)
+        .map(|i| {
+            let loud = if (4_800..14_400).contains(&i) {
+                1.
+            } else {
+                0.01
+            };
+            ((2. * PI * 1000. * i as f64 / f64::from(RATE)).sin() * loud) as f32
+        })
+        .collect();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    audio
+        .master()
+        .add_effect(
+            Compressor::new(-20., 20.)
+                .times(attack, release)
+                .knee(0., 0.),
+        )
+        .unwrap();
+    let sound = Sound::from_samples(&samples, 1, RATE).unwrap();
+    audio.play(&sound, Play::new().fade_in(0.)).unwrap();
+    let left = channel(&mixer.frames(48_000), 0);
+    let peak = |from: usize| {
+        20. * f64::from(
+            left[from..from + 48]
+                .iter()
+                .fold(0f32, |m, s| m.max(s.abs())),
+        )
+        .log10()
+    };
+    // An attack's time in, two thirds of the way down (1 - 1/e).
+    let (start, settled) = (peak(4_800), peak(13_000));
+    let at = peak(4_800 + 480);
+    let fraction = (start - at) / (start - settled);
+    assert!(
+        (0.5..0.8).contains(&fraction),
+        "{fraction:.2} of the way down after its attack"
+    );
+    // After the burst the quiet tone comes back over the release: still
+    // held down a release in, and whole after five.
+    let quiet = 20. * 0.01f64.log10();
+    assert!(peak(14_400 + 480) < quiet - 3., "back too soon");
+    assert!((peak(14_400 + 5 * 4_800) - quiet).abs() < 0.5, "not back");
+}
+
+#[test]
+fn a_compressor_responds_as_its_reference_its_threshold_moving_on_its_frames() {
+    let out = respond(|_, master| {
+        let squeeze = master
+            .add_effect(Compressor::new(-24., 6.).times(0.001, 0.05))
+            .unwrap();
+        squeeze
+            .at(Time(IMPULSE as u64))
+            .set(
+                Compressor::THRESHOLD,
+                -40.,
+                Ramp::seconds(SWEEP as f64 / f64::from(RATE)),
+            )
+            .unwrap();
+    });
+    reference("compressor", &out);
+}
+
+#[test]
+fn a_bus_ducks_under_another_while_it_sounds_and_comes_back_after() {
+    let flat = Sound::from_samples(&[0., 0.5], 1, RATE).unwrap();
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let (music, dialogue) = (
+        audio.bus("music").unwrap(),
+        audio.add_bus("dialogue", &audio.master()).unwrap(),
+    );
+    audio
+        .play(&flat, Play::new().bus(&music).loop_frames(1..2))
+        .unwrap();
+    // No side chain, nothing: added keyed on nothing.
+    music.add_effect(Duck::new(-12., 0.01, 0.1)).unwrap();
+    music.duck(&dialogue, Duck::new(-12., 0.01, 0.1)).unwrap();
+    let before = channel(&mixer.frames(4_800), 0);
+    assert_eq!(before[4_799], 0.5, "ducked with no dialogue");
+    let line = audio
+        .play(
+            &flat,
+            Play::new().bus(&dialogue).loop_frames(1..2).gain(0.1),
+        )
+        .unwrap();
+    let during = channel(&mixer.frames(9_600), 0);
+    // Music down 12 dB (a quarter), with the dialogue's 0.05 on top.
+    let want = 0.5 * 10f32.powf(-12. / 20.) + 0.05;
+    assert!(
+        (during[9_599] - want).abs() < 1e-3,
+        "{} not {want}",
+        during[9_599]
+    );
+    line.stop().unwrap();
+    let after = channel(&mixer.frames(48_000), 0);
+    assert!(
+        (after[47_999] - 0.5).abs() < 1e-3,
+        "{} not back",
+        after[47_999]
+    );
 }

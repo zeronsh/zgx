@@ -619,7 +619,7 @@ fn main() {
         run.audio.bus("music").unwrap(),
         run.audio.bus("world").unwrap(),
     );
-    use zgx_audio::effects::{Delay, HighPass, LowPass, Peaking, Reverb, Slope};
+    use zgx_audio::effects::{Compressor, Delay, Duck, HighPass, LowPass, Peaking, Reverb, Slope};
     let low = music
         .add_effect(LowPass::new(4000.).slope(Slope::Db24).resonance(3.))
         .unwrap();
@@ -630,6 +630,10 @@ fn main() {
         .add_effect(Delay::new(0.01, 0.05).feedback(0.6))
         .unwrap();
     ui.add_effect(Delay::new(0.0004, 0.001)).unwrap();
+    let squeeze = world
+        .add_effect(Compressor::new(-30., 6.).times(0.001, 0.05))
+        .unwrap();
+    music.duck(&ui, Duck::new(-12., 0.005, 0.05)).unwrap();
     let room = run
         .audio
         .master()
@@ -668,6 +672,10 @@ fn main() {
         .unwrap();
     room.at(run.at(0.002))
         .set(Reverb::DECAY, 3., Ramp::ms(20.))
+        .unwrap();
+    squeeze
+        .at(run.at(0.001))
+        .set(Compressor::THRESHOLD, -50., Ramp::ms(30.))
         .unwrap();
     run.render(30);
     run.finish(&mut failures);

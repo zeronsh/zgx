@@ -88,12 +88,13 @@ def effects(target):
         cwd=ROOT,
         check=True,
     )
-    # Nor has it a reverb.
-    subprocess.run(
-        ["cargo", "run", "-q", "--release", "-p", "zgx-audio", "--example", "effect_cost", "--", "reverb", "16"],
-        cwd=ROOT,
-        check=True,
-    )
+    # Nor has it a reverb or a compressor.
+    for ours in ("reverb", "compressor"):
+        subprocess.run(
+            ["cargo", "run", "-q", "--release", "-p", "zgx-audio", "--example", "effect_cost", "--", ours, "16"],
+            cwd=ROOT,
+            check=True,
+        )
 
 
 def fetch_header():

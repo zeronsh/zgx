@@ -13,9 +13,11 @@
 //! # Ok::<(), zgx_audio::Error>(())
 //! ```
 mod delay;
+mod dynamics;
 mod filter;
 mod reverb;
 
 pub use delay::Delay;
+pub use dynamics::{Compressor, Duck};
 pub use filter::{FLAT, HighPass, LowPass, Peaking, Slope};
 pub use reverb::Reverb;
