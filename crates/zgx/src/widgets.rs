@@ -1627,6 +1627,9 @@ pub(crate) struct UiStorage {
     /// Of those, the ones that count as shown within a margin of the view
     /// (`observe_visibility_within`): only nodes asked so are here.
     visibility_margins: RefCell<crate::scene::NodeMap<f32>>,
+    /// How many nodes were observed when those margins were last checked
+    /// against them (`forget_unobserved_margins`): fewer since, one went.
+    margins_checked: Cell<usize>,
     /// Scroll views' insets kept clear scrolling into view
     /// (`set_scroll_padding`).
     scroll_padding: RefCell<crate::scene::NodeMap<crate::scene::Insets>>,
@@ -2002,6 +2005,7 @@ impl Ui {
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
             visibility_margins: RefCell::default(),
+            margins_checked: Cell::new(0),
             scroll_padding: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
             layout_listeners: RefCell::default(),
@@ -2815,6 +2819,12 @@ impl Ui {
             self.storage.observed_visibility.borrow().len(),
         ]
     }
+    /// How many nodes are observed with a margin (`observe_visibility_within`):
+    /// for tests that what unmounts lets go.
+    #[doc(hidden)]
+    pub fn visibility_margin_count(&self) -> usize {
+        self.storage.visibility_margins.borrow().len()
+    }
     pub(crate) fn observe_size(&self, node: NodeId) -> Signal<(f32, f32)> {
         if let Some(signal) = self.storage.observed_sizes.borrow().get(&node) {
             return signal.clone();
@@ -3485,6 +3495,19 @@ impl Ui {
             self.storage.bounds_geometry_revision.set(None);
         }
         self.observe_visibility(node)
+    }
+    /// Lets go of the margins of nodes no longer observed (removed).
+    #[cold]
+    #[inline(never)]
+    fn forget_unobserved_margins(&self) {
+        let observed = self.storage.observed_visibility.borrow();
+        if observed.len() < self.storage.margins_checked.get() {
+            self.storage
+                .visibility_margins
+                .borrow_mut()
+                .retain(|node, _| observed.contains_key(node));
+        }
+        self.storage.margins_checked.set(observed.len());
     }
     pub(crate) fn observe_visibility(&self, node: NodeId) -> Signal<bool> {
         if let Some(signal) = self.storage.observed_visibility.borrow().get(&node) {
@@ -4185,6 +4208,11 @@ impl Ui {
             };
             let mut visibility = Vec::new();
             if geometry_changed {
+                // Margins of nodes no longer observed go here, not as each
+                // node is removed: removal stays as it is for every node.
+                if !self.storage.visibility_margins.borrow().is_empty() {
+                    self.forget_unobserved_margins();
+                }
                 let scene = self.scene.borrow();
                 let margins = self.storage.visibility_margins.borrow();
                 for (node, signal) in self.storage.observed_visibility.borrow().iter() {
@@ -4782,9 +4810,6 @@ impl Ui {
             }
             if !self.storage.observed_visibility.borrow().is_empty() {
                 self.storage.observed_visibility.borrow_mut().remove(id);
-                if !self.storage.visibility_margins.borrow().is_empty() {
-                    self.storage.visibility_margins.borrow_mut().remove(id);
-                }
             }
             if !self.storage.layout_listeners.borrow().is_empty() {
                 listeners.extend(self.storage.layout_listeners.borrow_mut().remove(id));
@@ -4936,7 +4961,6 @@ impl Ui {
             self.storage.observed_sizes.borrow_mut().remove(&id);
             self.storage.observed_bounds.borrow_mut().remove(&id);
             self.storage.observed_visibility.borrow_mut().remove(&id);
-            self.storage.visibility_margins.borrow_mut().remove(&id);
             if !self.storage.layout_listeners.borrow().is_empty() {
                 // Dropped outside the borrow: a listener's captures may reenter.
                 let listeners = self.storage.layout_listeners.borrow_mut().remove(&id);

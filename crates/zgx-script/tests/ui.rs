@@ -3472,6 +3472,30 @@ fn on_visible_tells_a_node_mounted_in_a_frame_within_that_frame() {
 }
 
 #[test]
+fn visible_margin_goes_with_its_node() {
+    // Removed, a node's margin goes too, at the next frame that looks at
+    // visibility: removal itself does nothing more for it.
+    let mut h = common::Harness::inline(
+        r##"local shown = ui.state("shown", true)
+        return ui.column { w = 200,
+            ui.show(shown,
+                ui.div { h = 20, visible_margin = 100, on_visible = function() end }),
+            ui.div { h = 20, on_visible = function() end },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    assert_eq!(h.ui.visibility_margin_count(), 1);
+    h.host
+        .set_state("shown", zgx_script::Value::Bool(false))
+        .unwrap();
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    assert_eq!(h.ui.visibility_margin_count(), 0, "gone with its node");
+    assert_eq!(h.ui.observer_counts()[3], 1, "the other still observed");
+}
+
+#[test]
 fn visible_margin_is_judged_inside_nested_scroll_views() {
     // A row across a view 200 wide that scrolls sideways, inside a view
     // that scrolls down: the chip 350 to the right is within its margin of
