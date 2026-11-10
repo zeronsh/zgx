@@ -102,6 +102,12 @@ pub fn ffmpeg() -> Option<PathBuf> {
 
 const NO_FFMPEG: &str = "zgx video needs ffmpeg for this format, and found none on the PATH. Install it (`brew install ffmpeg`, `apt install ffmpeg`, `winget install ffmpeg`), or render PNGs or a GIF, which need nothing";
 
+/// rav1e's quantizer (0-255) for a `quality` on libx264's scale: the
+/// quantizer the AV1 encoders' CRF (0-63) is a quarter of.
+fn rav1e_qp(quality: u32) -> u32 {
+    ((quality + 14).min(63) * 4).min(255)
+}
+
 /// A frame, its pixels straight or premultiplied as the sink was told.
 pub type Pixels = Vec<u8>;
 
@@ -121,7 +127,11 @@ impl Sink {
             .name("zgx-video encode".into())
             .spawn(move || {
                 for (index, frame) in incoming.into_iter().enumerate() {
-                    encoder.write(&frame, index)?;
+                    if let Err(error) = encoder.write(&frame, index) {
+                        // A closed pipe says only that ffmpeg quit: what it
+                        // said as it did is why.
+                        return Err(encoder.finish().err().unwrap_or(error));
+                    }
                     let _ = give_back.try_send(frame);
                 }
                 encoder.finish()
@@ -324,6 +334,16 @@ impl Encoder {
                 command.args(["-auto-alt-ref", "0"]);
             }
             Format::WebM => return Err("this ffmpeg has no VP9 encoder (libvpx-vp9)".into()),
+            // SVT-AV1 before 2.0 (Ubuntu 24.04's 1.7) takes nothing under 64
+            // pixels a side: a small frame goes to another encoder first.
+            Format::Av1 if (width < 64 || height < 64) && has("libaom-av1") => {
+                command.args(["-vf", limited, "-c:v", "libaom-av1", "-cpu-used", "6"]);
+                command.args(["-crf", &(quality + 14).min(63).to_string(), "-b:v", "0"]);
+            }
+            Format::Av1 if (width < 64 || height < 64) && has("librav1e") => {
+                command.args(["-vf", limited, "-c:v", "librav1e", "-speed", "6"]);
+                command.args(["-qp", &rav1e_qp(quality).to_string()]);
+            }
             Format::Av1 if has("libsvtav1") => {
                 command.args(["-vf", limited, "-c:v", "libsvtav1", "-preset", "6"]);
                 command.args(["-crf", &(quality + 14).min(63).to_string()]);
@@ -333,8 +353,14 @@ impl Encoder {
                 command.args(["-vf", limited, "-c:v", "libaom-av1", "-cpu-used", "6"]);
                 command.args(["-crf", &(quality + 14).min(63).to_string(), "-b:v", "0"]);
             }
+            Format::Av1 if has("librav1e") => {
+                command.args(["-vf", limited, "-c:v", "librav1e", "-speed", "6"]);
+                command.args(["-qp", &rav1e_qp(quality).to_string()]);
+            }
             Format::Av1 => {
-                return Err("this ffmpeg has no AV1 encoder (libsvtav1 or libaom-av1)".into());
+                return Err(
+                    "this ffmpeg has no AV1 encoder (libsvtav1, libaom-av1 or librav1e)".into(),
+                );
             }
             _ => unreachable!("not ffmpeg's"),
         }

@@ -633,6 +633,38 @@ fn a_webm_keeps_its_alpha() {
 }
 
 #[test]
+fn ffmpeg_quitting_says_why() {
+    if zgx_video::encode::ffmpeg().is_none() {
+        eprintln!("no ffmpeg here: skipped");
+        return;
+    }
+    // A file it can't open (a folder of that name): ffmpeg quits on the
+    // first frame, and the frames after find its pipe closed.
+    let dir = temp_dir("quits");
+    std::fs::create_dir_all(dir.join("out.mp4")).unwrap();
+    let mut sink = zgx_video::encode::Sink::start(zgx_video::encode::EncodeOptions {
+        format: Format::H264,
+        output: dir.join("out.mp4"),
+        size: (64, 48),
+        fps: 30.,
+        quality: None,
+        audio: None,
+        first_index: 0,
+    })
+    .unwrap();
+    let mut error = None;
+    for _ in 0..400 {
+        if let Err(stopped) = sink.push(vec![0; 64 * 48 * 4]) {
+            error = Some(stopped);
+            break;
+        }
+    }
+    let error = error.or_else(|| sink.finish().err()).expect("it failed");
+    assert!(error.contains("ffmpeg couldn't write"), "{error}");
+    assert!(!error.contains("Broken pipe"), "{error}");
+}
+
+#[test]
 fn an_av1_has_every_frame() {
     let Some(ffmpeg) = zgx_video::encode::ffmpeg() else {
         eprintln!("no ffmpeg here: skipped");
