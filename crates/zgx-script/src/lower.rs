@@ -3982,11 +3982,16 @@ fn styled(
         view = swept(view, low);
     }
     let shaders = node.shaders.as_deref();
+    // Driven fills resolve their tokens in the drive; a style binding would
+    // put the clock's time back when the theme changes.
     let shader = shaders.and_then(|s| {
         Some((
             s.fill.clone()?,
             s.params.unwrap_or_default(),
-            s.tokens,
+            match s.drive.is_some() {
+                true => [None; 4],
+                false => s.tokens,
+            },
             s.drive.is_some(),
         ))
     });
@@ -4098,14 +4103,10 @@ fn styled(
                         params: *params,
                     });
                     // Theme colours bind to their slots: resolved where the
-                    // node is styled, and again when the theme changes. A
-                    // driven fill's are the drive's (`ShaderDrive::tokens`):
-                    // in the style they'd put its time back.
+                    // node is styled, and again when the theme changes.
                     let mut styles = styles;
                     for (slot, token) in tokens.iter().enumerate() {
-                        if let Some(token) = token
-                            && !driven
-                        {
+                        if let Some(token) = token {
                             styles =
                                 styles.token(zgx::theme::Field::ShaderParam(slot as u8), *token);
                         }
