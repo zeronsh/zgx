@@ -157,3 +157,22 @@ VT220 with sixel graphics and ANSI colour, as foot answers, rather than
 alacritty's `CSI ? 6 c`: programs sending sixel images (chafa, lsix,
 img2sixel's callers) look for the 4. zgx-terminal reads the images (DCS
 `q`, which vte passes over) and places them as pictures. Also in 0.26.3.
+
+## A run of printable ASCII written at once
+
+The crate parses with `zgx-vte` (vte 0.15.0, `vendor/vte/ZGX_PATCH.md`),
+which hands a run of printable ASCII over in one call. `Term::input_str`
+writes it: the cells to the line's end at a time, the cursor's template and
+charset read once for them, up to a cell holding a wide character, which
+`write_at_cursor` writes as before. A wrap due and insert mode go through
+`input_rest`, character by character, as `input` sends them. The cursor
+ends where `input` would leave it, its wrap due at the line's end.
+
+`term::tests::a_run_writes_as_its_characters_do` writes runs (one cell,
+past a line, across several) by `input_str` and by `input` a character at a
+time on terms set up with wide characters and their spacers under the run,
+a wrap due, insert mode, the line drawing charset and colours, and finds
+every cell, the history's too, and the cursor alike (with the wide
+character case left out, the first setup differs).
+`a_run_is_repeated_by_its_last_character` checks REP after a run. Version
+0.26.4.

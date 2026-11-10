@@ -3950,9 +3950,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
 dependencies = [
  "arrayvec",
- "bitflags 2.13.2",
- "cursor-icon",
- "log",
  "memchr",
 ]
 
@@ -5072,7 +5069,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-alacritty-terminal"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
@@ -5090,8 +5087,8 @@ dependencies = [
  "smallvec",
  "unicode-segmentation",
  "unicode-width",
- "vte",
  "windows-sys 0.59.0",
+ "zgx-vte",
 ]
 
 [[package]]
@@ -5362,6 +5359,17 @@ dependencies = [
  "zgx-gpu",
  "zgx-run",
  "zgx-script",
+]
+
+[[package]]
+name = "zgx-vte"
+version = "0.15.0"
+dependencies = [
+ "arrayvec",
+ "bitflags 2.13.2",
+ "cursor-icon",
+ "log",
+ "memchr",
 ]
 
 [[package]]
