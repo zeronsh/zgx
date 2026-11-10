@@ -3290,6 +3290,10 @@ pub struct Scene {
     /// A walk stopped at a child of a row or column (`stops_alone`), to
     /// lay out alone if its parent sees no change (`layout_alone`).
     alone_pending: bool,
+    /// A walk stopped above an absolute node since the last layout
+    /// (`absolute_stop`): such a stop may hold another inside it, so
+    /// `layout_alone` takes the deepest first.
+    absolute_alone: bool,
     /// The nodes `set_style_within` stopped walks at, for `relayout_alone`.
     held_alone: Vec<NodeId>,
     /// How deep the contents syncs running now nest (`sync_contents`).
@@ -3575,6 +3579,7 @@ impl Scene {
             walk_hints: Default::default(),
             layout_roots: Vec::new(),
             alone_pending: false,
+            absolute_alone: false,
             held_alone: Vec::new(),
             syncing: 0,
             overfull: Vec::new(),
@@ -7568,6 +7573,17 @@ impl Scene {
     pub fn set_style(&mut self, id: NodeId, style: Style) {
         self.restyle(id, style, true);
     }
+    /// `set_style` for a node that may be laid out above alone: an absolute
+    /// one placed by its parent (a scrollbar's thumb in its rail) stops its
+    /// walk at that parent (`invalidate_absolute_layout`). For callers that
+    /// style such nodes (a script's or a composed view's style); `set_style`
+    /// asks nothing, and lays out as it always has.
+    #[cfg(test)]
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn set_style_stopping(&mut self, id: NodeId, style: Style) {
+        self.restyle_as::<false, true>(id, style, true, id);
+    }
     /// Whether any node has a `special` bit: what a style with nothing rare
     /// must still look at, in case it has lost something.
     #[inline(always)]
@@ -8637,18 +8653,19 @@ impl Scene {
         if !self.held_alone.contains(&owner) {
             self.held_alone.push(owner);
         }
-        self.restyle_as::<true>(id, style, true, owner);
+        self.restyle_as::<true, false>(id, style, true, owner);
     }
     /// `set_style` (`given`: the style a caller gave `id`, which a contents
     /// node keeps as its own) or `apply_style`. One function, so that the
     /// style is used where the caller put it rather than moved again.
     #[inline(never)]
     fn restyle(&mut self, id: NodeId, style: Style, given: bool) {
-        self.restyle_as::<false>(id, style, given, id);
+        self.restyle_as::<false, false>(id, style, given, id);
     }
-    /// `restyle`; `HELD`: its layout walk stops at `owner` (`set_style_within`).
+    /// `restyle`; `HELD`: its layout walk stops at `owner` (`set_style_within`);
+    /// `STOPS`: an absolute node's may stop above it (`set_style_stopping`).
     #[inline(always)]
-    fn restyle_as<const HELD: bool>(
+    fn restyle_as<const HELD: bool, const STOPS: bool>(
         &mut self,
         id: NodeId,
         mut style: Style,
@@ -8725,6 +8742,7 @@ impl Scene {
         self.move_context = None;
         let node = self.node_mut(id);
         node.style = style;
+        let absolute = node.style.absolute;
         node.style_writes = node.style_writes.wrapping_add(1);
         if paints {
             self.damage_subtree(id);
@@ -8735,6 +8753,7 @@ impl Scene {
         }
         match HELD {
             true => self.invalidate_layout_with::<true>(id, false, true, owner),
+            false if STOPS && absolute => self.invalidate_absolute_layout(id),
             false => self.invalidate_layout(id),
         }
         if containing {
@@ -9106,6 +9125,45 @@ impl Scene {
     fn invalidate_layout(&mut self, id: NodeId) {
         self.invalidate_layout_with::<false>(id, false, true, id);
     }
+    /// Whether absolute node `id`'s parent may be where its change's walk
+    /// stops (`absolute_stop`), by its own fields alone: laid out once, under
+    /// one question, and what it reads known or kept. Or, with a relative
+    /// block somewhere, an absolute box of a fixed size, which one may place
+    /// (`escaped_fixed`). Most absolute nodes' parents are refused here,
+    /// without the calls that walk.
+    #[inline(always)]
+    fn absolute_may_stop(&self, id: NodeId) -> bool {
+        let node = self.node(id);
+        node.measurement.is_some()
+            && node.parent.is_some_and(|parent| {
+                let parent = self.tree_node(parent);
+                parent.alternates.is_empty()
+                    && parent.sizes.is_empty()
+                    && parent.measurement.is_some()
+                    && !parent.special.any()
+                    && (parent.reads.get() & (READS_KNOWN | READS_KEPT) != 0
+                        || (self.relative_count != 0
+                            && parent.style.absolute
+                            && parent.style.width.is_some()
+                            && parent.style.height.is_some()))
+            })
+    }
+    /// `invalidate_layout` for absolute node `id`: one placed by its parent (a
+    /// thumb, a badge, a run of a row's text) changes nothing of its parent's
+    /// answer, so the walk stops there, to lay it out alone
+    /// (`absolute_stop`). Its callers ask only for absolute nodes, which
+    /// keeps every other change's walk as it was.
+    #[cold]
+    #[inline(never)]
+    fn invalidate_absolute_layout(&mut self, id: NodeId) {
+        if !self.absolute_may_stop(id) {
+            return self.invalidate_layout(id);
+        }
+        match self.absolute_stop(id) {
+            Some(stop) => self.invalidate_layout_with::<true>(id, false, true, stop),
+            None => self.invalidate_layout(id),
+        }
+    }
     /// `invalidate_layout` for a change of a leaf's content (a text's): its
     /// ancestors may answer as they did, so the walk may stop at a child of
     /// a plain row or column (`alone_stop`) and lay that out alone.
@@ -9271,11 +9329,26 @@ impl Scene {
         if !node.alternates.is_empty()
             || !node.sizes.is_empty()
             || node.measurement.is_none()
-            || node.style.absolute
             || node.special.any()
-            || node.reads.get() & READS_KNOWN == 0
         {
             return false;
+        }
+        // What it reads known, or kept by a walk that stopped here this pass
+        // already (several changes in one box, one frame). Or neither, for an
+        // absolute box a relative block above places (`place_escaped`): its
+        // parent leaves it out of its layout, and a size its style gives on
+        // both axes moves nothing of the block's, so what it reads matters to
+        // no parent: laid out again under what it was asked, it stands.
+        if node.reads.get() & (READS_KNOWN | READS_KEPT) == 0 {
+            return node.style.absolute && self.escaped_fixed(id);
+        }
+        // Absolute, placed by its parent: out of its flow, whatever its
+        // layout, it stands where its size does (its place comes from its
+        // size and its own insets, against its parent's box).
+        // Or placed by a relative block above, of a fixed size, its reads
+        // kept by a walk that stopped here this pass (as above).
+        if node.style.absolute {
+            return self.absolute_stops(id, parent);
         }
         let parent = self.tree_node(parent);
         matches!(
@@ -9290,6 +9363,43 @@ impl Scene {
             && parent.measurement.is_some()
             && parent.alternates.is_empty()
             && parent.sizes.is_empty()
+    }
+    /// `stops_alone` for absolute node `id` under `parent`, out of its way:
+    /// placed by `parent`, laid out once, or placed by a relative block above
+    /// with a size its style gives on both axes.
+    #[cold]
+    #[inline(never)]
+    fn absolute_stops(&self, id: NodeId, parent: NodeId) -> bool {
+        let style = &self.tree_node(id).style;
+        match self.containing_block(id) {
+            None => self.tree_node(parent).measurement.is_some(),
+            Some(_) => style.width.is_some() && style.height.is_some(),
+        }
+    }
+    /// Whether absolute node `id` is placed by a relative block above its
+    /// parent (`containing_block`) and its style gives its width and height.
+    #[cold]
+    #[inline(never)]
+    fn escaped_fixed(&self, id: NodeId) -> bool {
+        let style = &self.tree_node(id).style;
+        style.width.is_some() && style.height.is_some() && self.containing_block(id).is_some()
+    }
+    /// Where the walk up from absolute node `id`'s change stops: its parent,
+    /// laid out alone (`relayout_alone`), as `id` is out of its flow and its
+    /// size and place change nothing of the parent's own answer, which
+    /// stands if it gives what it did. Not one its containing block above
+    /// places (`containing_block`): its parent leaves it out of its layout.
+    #[cold]
+    #[inline(never)]
+    fn absolute_stop(&mut self, id: NodeId) -> Option<NodeId> {
+        let node = self.node(id);
+        node.measurement.as_ref()?;
+        let parent = node.parent?;
+        let stops = self.stops_alone(parent) && self.containing_block(id).is_none();
+        if stops {
+            self.absolute_alone = true;
+        }
+        stops.then_some(parent)
     }
     /// `id`, where a walk stopped (`stops_alone`), laid out again under the
     /// one constraint its parent asked it: if it gives what it did, and it
@@ -9311,12 +9421,25 @@ impl Scene {
         let kept_reads = match (read & READS_KEPT != 0, read & READS_KNOWN != 0) {
             (true, _) => (read & !READS_KEPT) | READS_KNOWN,
             (false, true) => read,
+            // A rail a block above places, of a fixed size: what it reads
+            // decides nothing of its parent's (`stops_alone`).
+            (false, false)
+                if node.style.absolute
+                    && node.style.width.is_some()
+                    && node.style.height.is_some()
+                    && self.escaped_fixed(id) =>
+            {
+                self.reads_bits(id)
+            }
             (false, false) => return false,
         };
         // Sized along by its parent (grown or shrunk: flexed): how far it
         // gives depends on more than the result it holds (its content's
-        // floor), so its parent lays it out.
+        // floor), so its parent lays it out. Not an absolute one: what its
+        // parent forces on it is its own style's, or its insets' in its
+        // parent's box, which stands.
         let flexed = match self.node(parent).kind {
+            _ if node.style.absolute => None,
             NodeKind::Container(Layout::Row)
             | NodeKind::Panel {
                 layout: Layout::Row,
@@ -9349,39 +9472,72 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn layout_alone(&mut self, report: &mut FrameReport) {
+        // Above an absolute node, one stop may be inside another (a text's
+        // row inside the box laid out alone): the deepest first, so that the
+        // one around it measures it as it now is, and its arrange then
+        // leaves nothing marked. Otherwise, as the queue holds them.
+        if std::mem::take(&mut self.absolute_alone) {
+            self.lay_out_deepest_stops(report);
+        }
         let mut at = 0;
         while let Some(&id) = self.dirty.get(at) {
             at += 1;
-            if !self.contains(id) {
-                continue;
-            }
-            let node = self.tree_node(id);
-            let Some(parent) = node.parent else {
-                continue;
-            };
-            if node.dirty & LAYOUT == 0
-                || self.tree_node(parent).dirty & LAYOUT != 0
-                || Self::is_layout_boundary(node)
-            {
-                continue;
-            }
-            if self.relayout_alone(id) {
-                let bounds = self.node(id).bounds;
-                self.arrange_from(id, bounds.x, bounds.y, report);
-            } else {
-                // Its ancestors, for a layout that takes what this pass
-                // measured of it (and what it read): it changed no more
-                // than the walk marked.
-                let mut above = Some(parent);
-                while let Some(ancestor) = above {
-                    self.invalidate_with(ancestor, LAYOUT, false, false);
-                    self.expire_this_pass(ancestor);
-                    above = self.node(ancestor).parent;
-                }
+            if let Some(parent) = self.stop_marked(id) {
+                self.lay_out_stop(id, parent, report);
             }
         }
         self.alone_pending = false;
         self.held_alone.clear();
+    }
+    /// `layout_alone`'s stops, deepest first (`absolute_alone`).
+    #[cold]
+    #[inline(never)]
+    fn lay_out_deepest_stops(&mut self, report: &mut FrameReport) {
+        let mut stops: Vec<(usize, NodeId)> = self
+            .dirty
+            .iter()
+            .filter(|id| self.stop_marked(**id).is_some())
+            .map(|id| (self.depth(*id), *id))
+            .collect();
+        stops.sort_by_key(|(depth, id)| (std::cmp::Reverse(*depth), id.index, id.generation));
+        stops.dedup_by_key(|(_, id)| *id);
+        for (_, id) in stops {
+            if let Some(parent) = self.stop_marked(id) {
+                self.lay_out_stop(id, parent, report);
+            }
+        }
+    }
+    /// `id`'s parent, if `id` is a stop `layout_alone` lays out: marked
+    /// under a parent that isn't, neither the root nor a boundary.
+    #[inline]
+    fn stop_marked(&self, id: NodeId) -> Option<NodeId> {
+        if !self.contains(id) {
+            return None;
+        }
+        let node = self.tree_node(id);
+        let parent = node.parent?;
+        (node.dirty & LAYOUT != 0
+            && self.tree_node(parent).dirty & LAYOUT == 0
+            && !Self::is_layout_boundary(node))
+        .then_some(parent)
+    }
+    /// Stop `id` laid out alone and placed where it is, if it stands;
+    /// otherwise its ancestors marked, for a layout that takes what this
+    /// pass measured of it (and what it read): it changed no more than the
+    /// walk marked.
+    #[inline]
+    fn lay_out_stop(&mut self, id: NodeId, parent: NodeId, report: &mut FrameReport) {
+        if self.relayout_alone(id) {
+            let bounds = self.node(id).bounds;
+            self.arrange_from(id, bounds.x, bounds.y, report);
+        } else {
+            let mut above = Some(parent);
+            while let Some(ancestor) = above {
+                self.invalidate_with(ancestor, LAYOUT, false, false);
+                self.expire_this_pass(ancestor);
+                above = self.node(ancestor).parent;
+            }
+        }
     }
     /// `id`, around a child just found not to stand: what it answered this
     /// pass, if it was laid out alone too (a stop this one is inside, which
@@ -13440,9 +13596,11 @@ impl Scene {
         };
         // Columns streamed into (`column_end`): none in most scenes, which
         // make no call.
+        // One a node laid out alone moved (a column centered in a box of a
+        // fixed size, grown) is arranged again where no full layout follows.
         let (kept, memos) = self.column_work();
         if kept {
-            self.return_kept_children(None);
+            self.return_kept_children((!full).then_some(&mut report));
         }
         if memos {
             self.restore_column_reads();
@@ -19947,6 +20105,493 @@ mod set_box_tests {
             style.height = Some(25.);
             style.padding = 6.;
         });
+    }
+    /// A page of `rows` rows under a few columns, in an overlay 700 high with
+    /// an absolute rail over it (`rail`), holding an absolute thumb
+    /// (`thumb`); an absolute badge (`badge`) on the last row, and a box
+    /// placed by a `relative` page (`escaped`). Each style is given whole.
+    fn rail_page(
+        rows: usize,
+        rail: Style,
+        thumb: Style,
+        badge: Style,
+        escaped: Style,
+    ) -> (Scene, [NodeId; 4]) {
+        let mut scene = Scene::new(1240., 820.);
+        scene.set_text_measurer(|text: &str, size: f32, _: Option<f32>| {
+            (text.len() as f32 * size * 0.5, size)
+        });
+        let mut at = scene.root();
+        for _ in 0..4 {
+            at = scene.append(
+                at,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    align: Align::Stretch,
+                    ..Default::default()
+                },
+            );
+        }
+        let page = scene.append(
+            at,
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                width_percent: Some(1.),
+                height: Some(700.),
+                relative: true,
+                ..Default::default()
+            },
+        );
+        let content = scene.append(
+            page,
+            NodeKind::Container(Layout::Column),
+            Style {
+                align: Align::Stretch,
+                ..Default::default()
+            },
+        );
+        let mut last = content;
+        for i in 0..rows {
+            last = scene.append(
+                content,
+                NodeKind::Container(Layout::Row),
+                Style {
+                    gap: 4.,
+                    ..Default::default()
+                },
+            );
+            scene.append(
+                last,
+                NodeKind::Text {
+                    text: format!("row {i}").into(),
+                    color: Color(1, 1, 1, 255),
+                    font_size: 14.,
+                },
+                Default::default(),
+            );
+        }
+        let badge = scene.append(last, NodeKind::Rect(Color(1, 1, 1, 255)), badge);
+        let holder = scene.append(content, NodeKind::Container(Layout::Row), Style::default());
+        let escaped = scene.append(holder, NodeKind::Rect(Color(1, 1, 1, 255)), escaped);
+        let rail = scene.append(page, NodeKind::Container(Layout::Column), rail);
+        let thumb = scene.append(rail, NodeKind::Rect(Color(1, 1, 1, 255)), thumb);
+        scene.flush();
+        (scene, [rail, thumb, badge, escaped])
+    }
+    /// An absolute box at `top`/`right`/`bottom` (as given), `width` by
+    /// `height` (or as its insets and content make it).
+    fn placed(
+        width: Option<f32>,
+        height: Option<f32>,
+        insets: [Option<crate::layout::Length>; 3],
+    ) -> Style {
+        use crate::layout::{EdgeLengths, LayoutOptions};
+        Style {
+            absolute: true,
+            width,
+            height,
+            layout_options: Some(Arc::new(LayoutOptions {
+                inset: EdgeLengths {
+                    top: insets[0],
+                    right: insets[1],
+                    bottom: insets[2],
+                    left: None,
+                },
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+    /// Every node of `live` where `fresh` (the same page built with the
+    /// styles `live` was changed to) has it.
+    fn same_bounds(live: &Scene, fresh: &Scene) {
+        let (a, b): (Vec<_>, Vec<_>) = (live.ids().collect(), fresh.ids().collect());
+        assert_eq!(a.len(), b.len());
+        for (x, y) in a.into_iter().zip(b) {
+            assert_eq!(
+                live.bounds(x),
+                fresh.bounds(y),
+                "{x:?} placed apart from a page built so"
+            );
+        }
+    }
+    /// A scrollbar's thumb moved and resized every frame inside its rail, an
+    /// absolute box of a fixed size over a page: the rail is laid out alone,
+    /// its thumb with it, however long the page; nothing above it is (the
+    /// walk up from the thumb stops at the rail, its size unchanged).
+    #[test]
+    fn a_thumb_restyled_in_a_fixed_rail_lays_out_the_rail_alone() {
+        use crate::layout::Length::{Percent, Px};
+        let rail = placed(Some(8.), Some(700.), [Some(Px(0.)), Some(Px(0.)), None]);
+        let thumb = |f: f32| {
+            placed(
+                Some(4.),
+                Some(100. - f),
+                [Some(Px(f * 5.)), Some(Px(2.)), None],
+            )
+        };
+        let badge = placed(Some(6.), Some(6.), [Some(Px(0.)), Some(Px(0.)), None]);
+        let escaped = placed(
+            Some(10.),
+            Some(10.),
+            [None, Some(Px(0.)), Some(Percent(0.5))],
+        );
+        let mut costs = Vec::new();
+        for rows in [10, 400] {
+            let (mut scene, [_, id, ..]) = rail_page(
+                rows,
+                rail.clone(),
+                thumb(0.),
+                badge.clone(),
+                escaped.clone(),
+            );
+            // Through `set_style` alone (a caller that doesn't opt in), as a
+            // whole layout places it, with no stop.
+            let (mut plain, [_, plain_id, ..]) = rail_page(
+                rows,
+                rail.clone(),
+                thumb(0.),
+                badge.clone(),
+                escaped.clone(),
+            );
+            let mut plain_cost = (0, 0);
+            let mut cost = (0, 0);
+            for f in 1..5 {
+                let before = plain.measure_calls;
+                plain.set_style(plain_id, thumb(f as f32));
+                let report = plain.flush();
+                plain_cost = plain_cost.max((plain.measure_calls - before, report.layout_nodes));
+                let before = scene.measure_calls;
+                scene.set_style_stopping(id, thumb(f as f32));
+                let report = scene.flush();
+                cost = cost.max((scene.measure_calls - before, report.layout_nodes));
+            }
+            let (fresh, _) = rail_page(
+                rows,
+                rail.clone(),
+                thumb(4.),
+                badge.clone(),
+                escaped.clone(),
+            );
+            same_bounds(&plain, &fresh);
+            same_bounds(&scene, &fresh);
+            assert!(
+                plain_cost.0 >= cost.0,
+                "the stop is the opt-in's: {plain_cost:?} {cost:?}"
+            );
+            costs.push(cost);
+        }
+        // The rail and the thumb, whatever the page's length.
+        assert_eq!(costs[0], costs[1], "flat as the page grows: {costs:?}");
+        assert!(
+            costs[0].0 <= 6 && costs[0].1 <= 2,
+            "the rail alone: {costs:?}"
+        );
+    }
+    /// A terminal's screen: an absolute rows box holding one absolute row
+    /// per line (its whole width, a cell high), each with an absolute group
+    /// of its size holding the row's text runs as absolute labels. A run's
+    /// text changing, one at a time or several in a frame, lays out its
+    /// row's group alone, however many rows the screen has.
+    #[test]
+    fn a_rows_labels_changing_lay_out_its_group_alone() {
+        let screen = |lines: usize| {
+            let mut scene = Scene::new(1240., 820.);
+            scene.set_text_measurer(|text: &str, size: f32, _: Option<f32>| {
+                (text.len() as f32 * size * 0.5, size)
+            });
+            let at = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    align: Align::Stretch,
+                    ..Default::default()
+                },
+            );
+            let rows = scene.append(
+                at,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    absolute: true,
+                    width_percent: Some(1.),
+                    height: Some(800.),
+                    ..Default::default()
+                },
+            );
+            let mut groups = Vec::new();
+            for line in 0..lines {
+                let row = scene.append(
+                    rows,
+                    NodeKind::Container(Layout::Overlay),
+                    Style {
+                        absolute: true,
+                        width_percent: Some(1.),
+                        height: Some(17.),
+                        ..Default::default()
+                    },
+                );
+                let group = scene.append(
+                    row,
+                    NodeKind::Container(Layout::Overlay),
+                    Style {
+                        absolute: true,
+                        width: Some(1200.),
+                        height: Some(17.),
+                        ..Default::default()
+                    },
+                );
+                for run in 0..2 {
+                    scene.append(
+                        group,
+                        label(&format!("line {line} run {run}")),
+                        label_style(run),
+                    );
+                }
+                groups.push(group);
+            }
+            scene.flush();
+            (scene, groups)
+        };
+        let mut costs = Vec::new();
+        for lines in [30, 120] {
+            let (mut scene, groups) = screen(lines);
+            let group = groups[lines / 2];
+            let mut cost = (0, 0);
+            let mut measured = |scene: &mut Scene, change: &dyn Fn(&mut Scene)| {
+                let before = scene.measure_calls;
+                change(scene);
+                let report = scene.flush();
+                cost = cost.max((scene.measure_calls - before, report.layout_nodes));
+            };
+            let first = scene.children(group)[0];
+            measured(&mut scene, &|scene| {
+                scene.set_text(first, "changed text, longer")
+            });
+            // A run arriving and one going lay out as before, to the root:
+            // right, if not the cheapest.
+            scene.append(group, label("a run arriving"), label_style(2));
+            scene.flush();
+            let gone = scene.children(group)[1];
+            scene.remove(gone);
+            scene.flush();
+            // Several runs' text in one frame, as a line scrolled in redraws
+            // its row: each walk after the first finds the group already
+            // stopped at (its reads kept).
+            let runs = scene.children(group).to_vec();
+            measured(&mut scene, &|scene| {
+                for (at, run) in runs.iter().enumerate() {
+                    scene.set_text(*run, format!("frame text {at}"));
+                }
+            });
+            costs.push(cost);
+            // As a screen built so places it.
+            let (mut fresh, fresh_groups) = screen(lines);
+            let fresh_group = fresh_groups[lines / 2];
+            let first = fresh.children(fresh_group)[0];
+            fresh.set_text(first, "changed text, longer");
+            fresh.append(fresh_group, label("a run arriving"), label_style(2));
+            let gone = fresh.children(fresh_group)[1];
+            fresh.remove(gone);
+            let runs = fresh.children(fresh_group).to_vec();
+            for (at, run) in runs.iter().enumerate() {
+                fresh.set_text(*run, format!("frame text {at}"));
+            }
+            fresh.flush();
+            for (a, b) in scene
+                .children(group)
+                .iter()
+                .zip(fresh.children(fresh_group))
+            {
+                assert_eq!(scene.bounds(*a), fresh.bounds(*b));
+            }
+        }
+        assert_eq!(costs[0], costs[1], "flat as the screen grows: {costs:?}");
+        // The group and its runs, a frame that changes them all.
+        assert!(costs[0].1 <= 6, "the group alone: {costs:?}");
+    }
+    fn label(text: &str) -> NodeKind {
+        NodeKind::Text {
+            text: text.into(),
+            color: Color(1, 1, 1, 255),
+            font_size: 14.,
+        }
+    }
+    fn label_style(run: usize) -> Style {
+        use crate::layout::{EdgeLengths, LayoutOptions, Length};
+        Style {
+            absolute: true,
+            layout_options: Some(Arc::new(LayoutOptions {
+                inset: EdgeLengths {
+                    left: Some(Length::Px(run as f32 * 200.)),
+                    top: Some(Length::Px(0.)),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+    /// Zeron's transcript rail: an absolute rail of a fixed size in an
+    /// overlay, placed by the relative page above that (not by its parent),
+    /// its thumb restyled twice a frame (its height, then its top). The rail
+    /// is laid out alone, however long the page: its parent leaves it out
+    /// of its layout, and its size is its style's.
+    #[test]
+    fn a_thumb_in_a_rail_a_relative_block_places_lays_out_the_rail_alone() {
+        use crate::layout::Length::Px;
+        let page = |rows: usize, top: f32, height: f32| {
+            let mut scene = Scene::new(1240., 820.);
+            scene.set_text_measurer(|text: &str, size: f32, _: Option<f32>| {
+                (text.len() as f32 * size * 0.5, size)
+            });
+            let mut at = scene.root();
+            for depth in 0..3 {
+                at = scene.append(
+                    at,
+                    NodeKind::Container(Layout::Column),
+                    Style {
+                        align: Align::Stretch,
+                        width: (depth == 0).then_some(1240.),
+                        ..Default::default()
+                    },
+                );
+            }
+            let transcript = scene.append(
+                at,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    relative: true,
+                    width_percent: Some(1.),
+                    height: Some(742.),
+                    ..Default::default()
+                },
+            );
+            let overlay = scene.append(
+                transcript,
+                NodeKind::Container(Layout::Overlay),
+                Style {
+                    width_percent: Some(1.),
+                    height_percent: Some(1.),
+                    ..Default::default()
+                },
+            );
+            let content = scene.append(
+                overlay,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    align: Align::Stretch,
+                    ..Default::default()
+                },
+            );
+            for i in 0..rows {
+                let row = scene.append(content, NodeKind::Container(Layout::Row), Style::default());
+                scene.append(row, label(&format!("row {i}")), Default::default());
+            }
+            let rail = scene.append(
+                overlay,
+                NodeKind::Container(Layout::Column),
+                placed(Some(10.), Some(742.), [Some(Px(0.)), Some(Px(0.)), None]),
+            );
+            let thumb = scene.append(
+                rail,
+                NodeKind::Rect(Color(1, 1, 1, 255)),
+                placed(Some(3.), Some(height), [Some(Px(top)), Some(Px(2.)), None]),
+            );
+            scene.flush();
+            (scene, rail, thumb)
+        };
+        let mut costs = Vec::new();
+        for rows in [10, 400] {
+            let (mut scene, rail, thumb) = page(rows, 0., 100.);
+            assert!(scene.containing_block(rail).is_some(), "placed by the page");
+            let mut cost = (0, 0);
+            for f in 1..5 {
+                let f = f as f32;
+                let before = scene.measure_calls;
+                // Its height, then its top: two writes, one frame.
+                let mut style = scene.style(thumb);
+                style.height = Some(100. - f);
+                scene.set_style_stopping(thumb, style.clone());
+                style.layout_options =
+                    placed(None, None, [Some(Px(f * 5.)), Some(Px(2.)), None]).layout_options;
+                scene.set_style_stopping(thumb, style);
+                let report = scene.flush();
+                cost = cost.max((scene.measure_calls - before, report.layout_nodes));
+            }
+            let (fresh, _, _) = page(rows, 20., 96.);
+            same_bounds(&scene, &fresh);
+            costs.push(cost);
+        }
+        assert_eq!(costs[0], costs[1], "flat as the page grows: {costs:?}");
+        assert!(costs[0].1 <= 2, "the rail alone: {costs:?}");
+    }
+    /// Where its parent's answer may change, or another box places it, an
+    /// absolute node's change walks as before; every case lands where a page
+    /// built with the new styles does.
+    #[test]
+    fn absolute_changes_that_may_move_more_lay_out_as_before() {
+        use crate::layout::Length::{Percent, Px};
+        let rail = placed(Some(8.), Some(700.), [Some(Px(0.)), Some(Px(0.)), None]);
+        let thumb = placed(Some(4.), Some(100.), [Some(Px(0.)), Some(Px(2.)), None]);
+        let badge = placed(Some(6.), Some(6.), [Some(Px(0.)), Some(Px(0.)), None]);
+        let escaped = placed(
+            Some(10.),
+            Some(10.),
+            [None, Some(Px(0.)), Some(Percent(0.5))],
+        );
+        // A rail sized by its content and insets, a thumb sized against it,
+        // one placed from its bottom (its size moves it), a badge, and a box
+        // its relative page places past its parent.
+        let fit = placed(None, None, [Some(Px(0.)), Some(Px(0.)), Some(Px(0.))]);
+        let cases: [(usize, Style); 6] = [
+            (0, fit.clone()),
+            (
+                1,
+                Style {
+                    height_percent: Some(0.25),
+                    ..placed(Some(4.), None, [Some(Percent(0.25)), Some(Px(2.)), None])
+                },
+            ),
+            (
+                1,
+                Style {
+                    height_percent: Some(0.3),
+                    ..placed(Some(4.), None, [None, Some(Px(2.)), Some(Px(8.))])
+                },
+            ),
+            (
+                1,
+                placed(Some(4.), Some(60.), [None, Some(Px(2.)), Some(Px(8.))]),
+            ),
+            (
+                2,
+                placed(Some(12.), Some(9.), [Some(Px(3.)), None, Some(Px(1.))]),
+            ),
+            (
+                3,
+                placed(
+                    Some(30.),
+                    Some(20.),
+                    [Some(Percent(0.1)), Some(Px(4.)), None],
+                ),
+            ),
+        ];
+        for (at, changed) in cases {
+            let mut styles = [rail.clone(), thumb.clone(), badge.clone(), escaped.clone()];
+            let (mut scene, ids) = rail_page(
+                40,
+                styles[0].clone(),
+                styles[1].clone(),
+                styles[2].clone(),
+                styles[3].clone(),
+            );
+            scene.set_style(ids[at], changed.clone());
+            scene.flush();
+            styles[at] = changed;
+            let [a, b, c, d] = styles;
+            let (fresh, _) = rail_page(40, a, b, c, d);
+            same_bounds(&scene, &fresh);
+        }
     }
     #[test]
     fn set_box_weighs_a_style_again_once_another_write_changed_it() {

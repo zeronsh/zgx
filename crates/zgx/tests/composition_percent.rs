@@ -263,3 +263,135 @@ fn growing_split_retains_full_height_siblings_through_editor_refresh_and_window_
     assert_eq!(mounted.find("editor"), Some(editor.node));
     assert!(value.get().contains('!'));
 }
+
+#[test]
+fn absolute_style_opt_in_keeps_late_positioning_changes_equal_to_a_fresh_layout() {
+    fn view(read: zgx::reactive::Signal<(bool, bool, f32)>) -> View {
+        let parent = read.clone();
+        column()
+            .size(300., 220.)
+            .p(13.)
+            .reactive_style(move || {
+                if parent.get().0 {
+                    Styles::new().relative()
+                } else {
+                    Styles::new()
+                }
+            })
+            .child(
+                column()
+                    .size(100., 120.)
+                    .p(7.)
+                    .child(div().id("thumb").reactive_style(move || {
+                        let (_, absolute, top) = read.get();
+                        let style = Styles::new().size(10., 24.).top(top).left(4.);
+                        if absolute { style.absolute() } else { style }
+                    })),
+            )
+    }
+    // Exercise both a plain first style and an eligible first style, then
+    // change the containing block and positioning without remounting.
+    for initial in [(false, false, 0.), (true, true, 4.)] {
+        let mut ui = Ui::new(400., 300.);
+        let state = ui.signal(initial);
+        let mounted = ui.mount(view(state.clone()));
+        ui.prepare_frame();
+        let thumb = mounted.find("thumb").unwrap();
+        for next in [
+            (true, true, 18.),
+            (true, true, 41.),
+            (false, true, 23.),
+            (false, false, 9.),
+            (true, true, 6.),
+        ] {
+            state.set(next);
+            ui.prepare_frame();
+            let mut fresh = Ui::new(400., 300.);
+            let current = fresh.signal(next);
+            let rebuilt = fresh.mount(view(current));
+            fresh.prepare_frame();
+            let expected = fresh.scene.borrow().bounds(rebuilt.find("thumb").unwrap());
+            assert_eq!(
+                ui.scene.borrow().bounds(thumb),
+                expected,
+                "{initial:?} -> {next:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_rail_change_with_a_sibling_or_containing_block_change_matches_fresh_layout() {
+    fn view(
+        top: zgx::reactive::Signal<f32>,
+        height: zgx::reactive::Signal<f32>,
+        width: zgx::reactive::Signal<f32>,
+    ) -> View {
+        column()
+            .relative()
+            .h(220.)
+            .top(0.)
+            .id("page")
+            .reactive_style(move || Styles::new().w(width.get()))
+            .child(
+                div()
+                    .id("flow")
+                    .reactive_style(move || Styles::new().h(height.get())),
+            )
+            .child(div().h(10.).id("after"))
+            .child(
+                div()
+                    .size(8., 200.)
+                    .absolute()
+                    .top(0.)
+                    .right(0.)
+                    .id("rail")
+                    .child(
+                        div()
+                            .size(4., 24.)
+                            .absolute()
+                            .id("thumb")
+                            .reactive_style(move || Styles::new().top(top.get())),
+                    ),
+            )
+    }
+    let mut ui = Ui::new(500., 300.);
+    let top = ui.signal(4.);
+    let height = ui.signal(20.);
+    let width = ui.signal(300.);
+    let mounted = ui.mount(view(top.clone(), height.clone(), width.clone()));
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    // Let the parent's pure box animation take its retained set_box path.
+    for next in [320., 300., 310., 300.] {
+        width.set(next);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+    }
+    for (y, h, w) in [
+        (18., 20., 300.),
+        (31., 70., 300.),
+        (45., 70., 400.),
+        (6., 30., 260.),
+    ] {
+        // Queue the thumb's chain first, then changes it must not hide.
+        top.set(y);
+        height.set(h);
+        width.set(w);
+        ui.prepare_frame();
+        let mut fresh = Ui::new(500., 300.);
+        let y = fresh.signal(y);
+        let h = fresh.signal(h);
+        let w = fresh.signal(w);
+        let rebuilt = fresh.mount(view(y, h, w));
+        fresh.prepare_frame();
+        for id in ["page", "flow", "after", "rail", "thumb"] {
+            assert_eq!(
+                ui.scene.borrow().bounds(mounted.find(id).unwrap()),
+                fresh.scene.borrow().bounds(rebuilt.find(id).unwrap()),
+                "{id} after a compound change"
+            );
+        }
+        ui.scene.borrow_mut().flush();
+    }
+}
