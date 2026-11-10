@@ -202,6 +202,9 @@ pub enum TermDamage<'a> {
 #[derive(Clone, Debug)]
 pub struct TermDamageIterator<'a> {
     line_damage: slice::Iter<'a, LineDamageBounds>,
+    /// zgx: the next line's number: its place, not its entry's (a list
+    /// turned back after scrolling keeps the numbers it had, `ordered`).
+    line: usize,
     display_offset: usize,
 }
 
@@ -213,6 +216,7 @@ impl<'a> TermDamageIterator<'a> {
         Self {
             display_offset,
             line_damage: line_damage.iter(),
+            line: 0,
         }
     }
 }
@@ -221,13 +225,18 @@ impl Iterator for TermDamageIterator<'_> {
     type Item = LineDamageBounds;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.line_damage.find_map(|line| {
-            line.is_damaged().then_some(LineDamageBounds::new(
-                line.line + self.display_offset,
-                line.left,
-                line.right,
-            ))
-        })
+        loop {
+            let damage = self.line_damage.next()?;
+            let line = self.line;
+            self.line += 1;
+            if damage.is_damaged() {
+                return Some(LineDamageBounds::new(
+                    line + self.display_offset,
+                    damage.left,
+                    damage.right,
+                ));
+            }
+        }
     }
 }
 
@@ -299,7 +308,8 @@ impl TermDamageState {
 
     /// zgx: the lines' damage in order again, after scrolling turned it:
     /// the places the top lines left are the new bottom lines', damaged
-    /// whole.
+    /// whole. Turned back as it lies: each line's number is its place
+    /// (`TermDamageIterator`), so only the new lines are written.
     fn ordered(&mut self, num_cols: usize) {
         if self.base == 0 {
             return;
@@ -307,12 +317,8 @@ impl TermDamageState {
         self.lines.rotate_left(self.base);
         self.base = 0;
         let count = self.lines.len();
-        for (row, line) in self.lines.iter_mut().enumerate() {
-            *line = if row + self.scrolled >= count {
-                LineDamageBounds::new(row, 0, num_cols.saturating_sub(1))
-            } else {
-                LineDamageBounds::new(row, line.left, line.right)
-            };
+        for row in count.saturating_sub(self.scrolled)..count {
+            self.lines[row] = LineDamageBounds::new(row, 0, num_cols.saturating_sub(1));
         }
     }
 
@@ -3612,6 +3618,59 @@ mod tests {
 
         assert_eq!(term.history_size(), 15);
         assert_eq!(term.grid.cursor.point, Point::new(Line(4), Column(0)));
+    }
+
+    /// zgx: the damage read after scrolls turned it (turned back as it lies,
+    /// each line numbered by its place) is what a list moved line by line
+    /// would hold: each
+    /// line's damage where its line is now, the lines new at the bottom whole,
+    /// frame after frame, each read and reset in turn.
+    #[test]
+    fn turned_damage_reads_as_damage_moved_with_its_lines() {
+        let (columns, count) = (20, 12);
+        let mut state = TermDamageState::new(columns, count);
+        state.reset(columns);
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        for frame in 0..300 {
+            // Each line's damage as a list moved with its lines would have it.
+            let mut model: Vec<Option<(usize, usize)>> = vec![None; count];
+            let mut full = false;
+            for _ in 0..1 + next(4) {
+                if next(3) == 0 {
+                    let lines = 1 + next(2);
+                    state.scroll_up(lines);
+                    full |= state.full;
+                    model.drain(..lines);
+                    model.extend(std::iter::repeat_n(Some((0, columns - 1)), lines));
+                } else {
+                    let (line, left) = (next(count), next(columns));
+                    let right = (left + next(5)).min(columns - 1);
+                    state.damage_line(line, left, right);
+                    let span =
+                        model[line].map_or((left, right), |(l, r)| (l.min(left), r.max(right)));
+                    model[line] = Some(span);
+                }
+            }
+            if !full {
+                state.ordered(columns);
+                let read: Vec<(usize, usize, usize)> = TermDamageIterator::new(&state.lines, 0)
+                    .map(|line| (line.line, line.left, line.right))
+                    .collect();
+                let expected: Vec<(usize, usize, usize)> = model
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(line, span)| span.map(|(left, right)| (line, left, right)))
+                    .collect();
+                assert_eq!(read, expected, "frame {frame}");
+            }
+            state.reset(columns);
+        }
     }
 
     /// zgx: a scroll from the top turns the damage (a line scrolled, not all
