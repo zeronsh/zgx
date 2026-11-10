@@ -604,6 +604,8 @@ pub(crate) struct Inner {
     /// Its sound (`World::set_audio`).
     #[cfg(feature = "audio")]
     pub(crate) audio: Option<Box<audio::Sound3d>>,
+    /// What draws into the scene with the meshes (`World::add_scene_draw`).
+    pub(crate) scene_draws: crate::render::SceneDraws,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -1269,6 +1271,7 @@ mod caps;
 mod compute;
 #[cfg(feature = "particles")]
 mod particles;
+mod scene_draw;
 
 /// A 3D scene shown by a GPU view (`view`): change it and the view draws a
 /// frame, before the window's next; leave it and it draws nothing. Clones
@@ -1344,6 +1347,7 @@ impl World {
             gi: Default::default(),
             #[cfg(feature = "audio")]
             audio: None,
+            scene_draws: Vec::new(),
         }));
         let view = zgx_gpu::viewport::view(crate::painter::Painter::new(
             crate::render::Renderer::new(Rc::downgrade(&inner)),
