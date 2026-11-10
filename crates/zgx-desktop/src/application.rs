@@ -131,6 +131,30 @@ fn host_ns(at: std::time::Instant) -> u64 {
         None => now_ns.saturating_sub(now.duration_since(at).as_nanos() as u64),
     }
 }
+/// When refresh `index`'s frame samples scroll input, the last sample's
+/// (`last`: its refresh and time) a refresh apart for each refresh since, but
+/// never after `now` nor over half a refresh before it. A first frame, a gap
+/// of more than 8 refreshes or an index going back samples at `now`.
+fn paced_sample(
+    last: Option<(u64, std::time::Instant)>,
+    index: u64,
+    now: std::time::Instant,
+    interval: std::time::Duration,
+) -> std::time::Instant {
+    match last {
+        Some((last, at)) if index > last && index - last <= 8 => {
+            let paced = at + interval * (index - last) as u32;
+            let earliest = now.checked_sub(interval / 2).unwrap_or(now);
+            paced.clamp(earliest, now)
+        }
+        Some((last, at)) if index == last => at.min(now),
+        _ => now,
+    }
+}
+/// `ZGX_RESAMPLE_CADENCE=1`: scroll input is sampled a refresh apart, by the
+/// frames' indices, not when each frame runs (`resample_time`).
+static RESAMPLE_CADENCE: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_RESAMPLE_CADENCE").is_some_and(|v| v != "0"));
 /// A scroll delta the host applies (`scroll-applied source=… dx dy`): on
 /// stderr with `ZGX_PRESENT_LOG`, and as a devtools note with its time on the
 /// host clock (CLOCK_UPTIME_RAW, the present log's), while recording.
@@ -1854,6 +1878,10 @@ struct Host {
     /// drawn when the plane waker says it has, not waited for on this thread.
     #[cfg(target_os = "macos")]
     drawable_deferred: Option<Frame>,
+    /// The refresh index of the last frame delivered, and when scroll input
+    /// was last sampled for it (`RESAMPLE_CADENCE`).
+    delivered_index: Option<u64>,
+    sampled_at: Option<(u64, std::time::Instant)>,
     #[cfg(target_os = "macos")]
     frame_starts: std::collections::VecDeque<std::time::Instant>,
     /// A display refresh arrived since the last paint. While the display link
@@ -2308,6 +2336,8 @@ impl Host {
             rephases: 0,
             #[cfg(target_os = "macos")]
             drawable_deferred: None,
+            delivered_index: None,
+            sampled_at: None,
             #[cfg(target_os = "macos")]
             frame_starts: std::collections::VecDeque::new(),
             frame_deadline: None,
@@ -6146,8 +6176,8 @@ impl Host {
                 });
                 self.scroll.flush()
             } else if self.frame_arrived {
-                self.scroll
-                    .sample(std::time::Instant::now(), self.frame_interval)
+                let at = self.resample_time();
+                self.scroll.sample(at, self.frame_interval)
             } else {
                 None
             };
@@ -6391,6 +6421,22 @@ impl Host {
             link.consumed();
         }
     }
+    /// When this frame samples scroll input: now, or with `RESAMPLE_CADENCE`
+    /// a refresh after the last sample for each refresh since (the frames'
+    /// own indices), held within half a refresh behind now: the motion each
+    /// shows is then a refresh's, whenever on the main thread the frame runs.
+    fn resample_time(&mut self) -> std::time::Instant {
+        let now = std::time::Instant::now();
+        if !*RESAMPLE_CADENCE {
+            return now;
+        }
+        let Some(index) = self.delivered_index else {
+            return now;
+        };
+        let at = paced_sample(self.sampled_at, index, now, self.frame_interval);
+        self.sampled_at = Some((index, at));
+        at
+    }
     /// The plane waker came: a tick deferred for its drawable is drawn now.
     #[cfg(target_os = "macos")]
     fn drawable_woken(&mut self) {
@@ -6417,6 +6463,7 @@ impl Host {
             self.frame_arrived = true;
             self.frame_deadline = None;
             self.frame_heartbeat = Some(std::time::Instant::now());
+            self.delivered_index = Some(frame.index);
             if self.frames_presented() {
                 self.frames.deliver(frame);
             }
@@ -6489,6 +6536,7 @@ impl Host {
         self.frame_arrived = true;
         self.frame_deadline = None;
         self.frame_heartbeat = Some(std::time::Instant::now());
+        self.delivered_index = Some(frame.index);
         if self.frames_presented() {
             self.frames.deliver(frame);
         }
@@ -9072,6 +9120,57 @@ impl WindowCursor {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scroll_samples_a_refresh_apart_whenever_frames_run() {
+        use std::time::Duration;
+        let interval = Duration::from_micros(8333);
+        let start = std::time::Instant::now();
+        let ms = |m: f64| start + Duration::from_secs_f64(m / 1e3);
+        // A first frame samples now.
+        assert_eq!(super::paced_sample(None, 10, ms(5.), interval), ms(5.));
+        // Frames run 2 ms late, then 0.5 ms: the samples stay a refresh apart.
+        let first = ms(5.);
+        let second = super::paced_sample(
+            Some((10, first)),
+            11,
+            first + interval + Duration::from_millis(2),
+            interval,
+        );
+        assert_eq!(second, first + interval);
+        let third = super::paced_sample(
+            Some((11, second)),
+            12,
+            second + interval + Duration::from_micros(500),
+            interval,
+        );
+        assert_eq!(third, second + interval);
+        // Never ahead of now: a frame run early samples at now.
+        let early = second + interval - Duration::from_millis(1);
+        assert_eq!(
+            super::paced_sample(Some((11, second)), 12, early, interval),
+            early
+        );
+        // Never over half a refresh behind: a long stall catches up.
+        let late = second + interval * 3;
+        assert_eq!(
+            super::paced_sample(Some((11, second)), 12, late, interval),
+            late - interval / 2
+        );
+        // A skipped refresh steps two; a long gap or a going-back index, now.
+        assert_eq!(
+            super::paced_sample(Some((11, second)), 13, second + interval * 2, interval),
+            second + interval * 2
+        );
+        assert_eq!(
+            super::paced_sample(Some((11, second)), 30, ms(400.), interval),
+            ms(400.)
+        );
+        assert_eq!(
+            super::paced_sample(Some((11, second)), 9, ms(400.), interval),
+            ms(400.)
+        );
+    }
+
     #[test]
     fn stale_pixels_say_where_and_by_how_much() {
         let fresh = vec![10_u8; 3 * 2 * 4];
