@@ -96,8 +96,12 @@ pub(crate) mod vorbis {
             let reader = open(&bytes)?;
             let channels = usize::from(reader.ident_hdr.audio_channels);
             let rate = reader.ident_hdr.audio_sample_rate;
-            if channels == 0 || rate == 0 {
-                return Err(Error::Format("Ogg Vorbis of no channels or no rate".into()));
+            // The rates an engine runs at: a stream's ring is sized by its
+            // rate, so a header's absurd one mustn't size it.
+            if channels == 0 || !(1_000..=768_000).contains(&rate) {
+                return Err(Error::Format(format!(
+                    "Ogg Vorbis of {channels} channels at {rate} Hz"
+                )));
             }
             Ok(Vorbis {
                 bytes,
