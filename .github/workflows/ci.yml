@@ -113,6 +113,8 @@ jobs:
         run: python3 scripts/test_xvfb_retry.py -v
       - name: The instruction gate counts each binary warm, with a cache of its own
         run: python3 scripts/perf/test_gate.py -v
+      - name: The inlining check reads MIR and fails on #1740's and #1824's changes
+        run: python3 scripts/perf/test_inline_scopes.py -v
       - run: cargo fmt --all -- --check
       # Every Luau script in the repository (examples and probes too), as
       # stylua.toml and .styluaignore have them.
@@ -303,8 +305,9 @@ jobs:
   perf:
     runs-on: ubuntu-latest
     # With the base's binaries not cached, both sides build: the head's took
-    # 19 minutes and the base's was cut at 26 (Nov 7, as scenes grew).
-    timeout-minutes: 75
+    # 19 minutes and the base's was cut at 26 (Nov 7, as scenes grew); the
+    # inlining check adds a MIR build of three crates.
+    timeout-minutes: 90
     permissions:
       contents: read
       pull-requests: write
@@ -430,8 +433,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh pr comment ${{ github.event.pull_request.number }} --edit-last --create-if-none --body-file perf.md
+      # Whether the hot functions in zgx, zgx-gpu and zgx-script still
+      # inline what they did (scripts/perf/inline_scopes.py): a change far
+      # from one can make rustc's MIR inliner give up on it (#1740) or pull
+      # a callee into it (#1824). One MIR build of each crate, on the gate's
+      # release dependencies; the base is built only on a failure, to name
+      # the callees. On main, reported and not failing, as the gate.
+      - name: Inlining
+        if: ${{ !cancelled() }}
+        timeout-minutes: 20
+        env:
+          BASE: ${{ steps.base.outputs.sha }}
+        run: |
+          inline=0
+          python3 scripts/perf/inline_scopes.py --target target/perf-gate --base "$BASE" 2>&1 | tee inline.txt || inline=$?
+          { echo '### Inlining'; echo '```'; cat inline.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ github.event_name }}" != pull_request ]; then inline=0; fi
+          echo "inline=$inline" >> "$GITHUB_ENV"
       - name: Gate
-        run: exit "$status"
+        run: |
+          if [ "$inline" != 0 ]; then echo "a hot function inlines differently: see Inlining"; fi
+          if [ "$status" != 0 ]; then exit "$status"; fi
+          exit "$inline"
   macos:
     runs-on: macos-latest
     timeout-minutes: 60

@@ -71,6 +71,26 @@ samples inside one function to source lines and inlined helpers (build with
 `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only`). `frames.py` lists stack
 frame sizes, which finds functions paying for large values on the stack.
 
+## Inlining of hot functions
+
+```sh
+python3 scripts/perf/inline_scopes.py                       # check, as CI's perf job
+python3 scripts/perf/inline_scopes.py --base origin/main    # and name the callees on a failure
+python3 scripts/perf/inline_scopes.py record                # write the counts again
+```
+
+rustc's MIR inliner gives up on a function past a depth and a budget, so a
+change far from a hot function can change what that function inlines, with
+no change in its source: #1740 left `Scene::layer_items_walk` 411 of its
+520 inlined scopes (+2.8% in fx-layer), and #1824 grew `batches` from 69
+lines to 136, and LLVM folded it into `encode_draws`. `inline_scopes.txt`
+lists the gate's top functions in zgx, zgx-gpu and zgx-script, each with
+its inlined scopes and body lines in release MIR. The check fails on more
+than 2 scopes lost, or on growth by both 25% and 30 lines. The counts are
+one rustc's (named in the file): under another, the check prints what to
+record and passes. A pull request that changes a function's inlining on
+purpose records the counts again, so the change is a line in its diff.
+
 ## Profile-guided builds
 
 `python3 scripts/perf/pgo.py -p PACKAGE --bin NAME [TRAINING COMMAND ...]`

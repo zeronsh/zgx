@@ -1,0 +1,45 @@
+# Hot functions' inlined scopes in release MIR (scripts/perf/inline_scopes.py),
+# from the gate's top functions in each crate: crate, scopes, lines, function.
+# `python3 scripts/perf/inline_scopes.py record` writes the counts again.
+# rustc (not yet recorded)
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::measured
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::arrange
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::store_measurement
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::invalidate_layout_with
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::column_end
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::layer_items_walk
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::flush
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::ink
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::set_kind
+zgx	0	0	scene::<impl in crates/zgx/src/scene.rs>::append
+zgx	0	0	advanced_layout::<impl in crates/zgx/src/scene_layout.rs>::resolved_leaf_style
+zgx	0	0	reactive::<impl in crates/zgx/src/reactive.rs>::flush
+zgx	0	0	reactive::<impl in crates/zgx/src/reactive.rs>::flush_watched
+zgx	0	0	selection::<impl in crates/zgx/src/selection.rs>::refresh_selection
+zgx	0	0	mount_style_with_intrinsic
+zgx	0	0	mount_style_with_intrinsic::{closure#10}
+zgx	0	0	mount_element
+zgx	0	0	compose::<impl in crates/zgx/src/compose.rs>::mount
+zgx-gpu	0	0	<impl in crates/zgx-gpu/src/lib.rs>::prepare
+zgx-gpu	0	0	<impl in crates/zgx-gpu/src/lib.rs>::prepare_layer
+zgx-gpu	0	0	<impl in crates/zgx-gpu/src/lib.rs>::encode_damage
+zgx-gpu	0	0	<impl in crates/zgx-gpu/src/lib.rs>::encode_draws
+zgx-gpu	0	0	<impl in crates/zgx-gpu/src/lib.rs>::batches
+zgx-gpu	0	0	<impl in crates/zgx-gpu/src/lib.rs>::batches_of
+zgx-gpu	0	0	<impl in crates/zgx-gpu/src/lib.rs>::catch_up_draws
+zgx-gpu	0	0	<impl in crates/zgx-gpu/src/lib.rs>::flush_pending
+zgx-gpu	0	0	effects::<impl in crates/zgx-gpu/src/effects.rs>::prepare_effects
+zgx-gpu	0	0	effects::<impl in crates/zgx-gpu/src/effects.rs>::encode_effects
+zgx-gpu	0	0	upload::<impl in crates/zgx-gpu/src/upload.rs>::encode
+zgx-gpu	0	0	passes::<impl in crates/zgx-gpu/src/passes.rs>::prepare_inputs
+zgx-script	0	0	kind_view
+zgx-script	0	0	kind_view::{closure#27}::{closure#0}
+zgx-script	0	0	lower::apply
+zgx-script	0	0	lower_list
+zgx-script	0	0	lower_item_list
+zgx-script	0	0	lower_rich::{closure#1}::{closure#0}
+zgx-script	0	0	to_lua
+zgx-script	0	0	value::<impl in crates/zgx-script/src/value.rs>::reconcile
+zgx-script	0	0	<impl in crates/zgx-script/src/lib.rs>::set_state
+zgx-script	0	0	element::<impl in crates/zgx-script/src/element.rs>::flush
+zgx-script	0	0	engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush
