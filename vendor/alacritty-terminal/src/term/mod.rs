@@ -1381,10 +1381,12 @@ impl<T> Dimensions for Term<T> {
     }
 }
 
-impl<T: EventListener> Handler for Term<T> {
-    /// A character to be displayed.
+impl<T: EventListener> Term<T> {
+    /// zgx: `input` for what isn't printable ASCII written plainly: a
+    /// character's width, zero-width and grapheme characters, a wrap due,
+    /// insert mode, wide characters.
     #[inline(never)]
-    fn input(&mut self, c: char) {
+    fn input_rest(&mut self, c: char) {
         // Number of cells the char will occupy.
         // zgx: printable ASCII as unicode-width has it; anything else above
         // U+00FF that may continue a grapheme cluster goes through
@@ -1497,6 +1499,28 @@ impl<T: EventListener> Handler for Term<T> {
         } else {
             self.grid.cursor.input_needs_wrap = true;
         }
+    }
+}
+
+impl<T: EventListener> Handler for Term<T> {
+    /// A character to be displayed.
+    #[inline(always)]
+    fn input(&mut self, c: char) {
+        // zgx: printable ASCII, most of most output, written as it is: one
+        // cell, no wrap due, no insert mode. The rest out of line.
+        if (' '..'\u{7f}').contains(&c)
+            && !self.grid.cursor.input_needs_wrap
+            && !self.mode.contains(TermMode::INSERT)
+        {
+            self.write_at_cursor(c);
+            if self.grid.cursor.point.column + 1 < self.columns() {
+                self.grid.cursor.point.column += 1;
+            } else {
+                self.grid.cursor.input_needs_wrap = true;
+            }
+            return;
+        }
+        self.input_rest(c);
     }
 
     #[inline]
