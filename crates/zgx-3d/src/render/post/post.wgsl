@@ -70,7 +70,8 @@ struct Look {
     params: vec4<f32>,
     // What shows where nothing was drawn, premultiplied, as given.
     background: vec4<f32>,
-    // Bloom's intensity, and 1 over its steps (its first holds their sum).
+    // Bloom's intensity, 1 over its steps (its first and the second's tent
+    // hold their sum), and whether there is a second (1) or not (0).
     bloom_mix: vec4<f32>,
     // The vignette's, grain's and chromatic aberration's intensities, and
     // the frame's index (grain's seed).
@@ -80,6 +81,7 @@ struct Look {
 @group(0) @binding(1) var bloom: texture_2d<f32>;
 @group(0) @binding(2) var bloom_sampler: sampler;
 @group(0) @binding(3) var<uniform> look: Look;
+@group(0) @binding(4) var bloom_wider: texture_2d<f32>;
 override BLOOM: bool = false;
 override VIGNETTE: bool = false;
 override GRAIN: bool = false;
@@ -134,6 +136,17 @@ fn hash(x: u32, y: u32, frame: u32) -> f32 {
     return f32(v) / 4294967295.0;
 }
 
+// Bloom's second step, blurred by a 3 by 3 tent at the first's place.
+fn wide(uv: vec2<f32>, x: f32, y: f32) -> vec3<f32> {
+    let texel = 1.0 / vec2<f32>(textureDimensions(bloom_wider));
+    return textureSampleLevel(bloom_wider, bloom_sampler, uv + vec2(x, y) * texel, 0.0).rgb;
+}
+fn tent(uv: vec2<f32>) -> vec3<f32> {
+    let edges = wide(uv, -1.0, 0.0) + wide(uv, 1.0, 0.0) + wide(uv, 0.0, -1.0) + wide(uv, 0.0, 1.0);
+    let corners = wide(uv, -1.0, -1.0) + wide(uv, 1.0, -1.0) + wide(uv, -1.0, 1.0) + wide(uv, 1.0, 1.0);
+    return (wide(uv, 0.0, 0.0) * 4.0 + edges * 2.0 + corners) / 16.0;
+}
+
 @fragment fn last(in: Out) -> @location(0) vec4<f32> {
     var drawn = textureLoad(scene, vec2<i32>(in.position.xy), 0);
     let size = vec2<f32>(textureDimensions(scene));
@@ -150,7 +163,12 @@ fn hash(x: u32, y: u32, frame: u32) -> f32 {
     }
     var light = drawn.rgb;
     if BLOOM {
-        let glow = textureSampleLevel(bloom, bloom_sampler, in.uv, 0.0).rgb * look.bloom_mix.y;
+        // The first step, with the second's tent added (bloom's last step
+        // up, here rather than a pass of its own); a 1 by 1 stand-in where
+        // there's one step adds nothing (bloom_mix.z 0).
+        var glow = textureSampleLevel(bloom, bloom_sampler, in.uv, 0.0).rgb;
+        glow += tent(in.uv) * look.bloom_mix.z;
+        glow *= look.bloom_mix.y;
         light = mix(light, glow, look.bloom_mix.x);
     }
     // Mapped as the meshes' shader maps a pixel's colour (not its
