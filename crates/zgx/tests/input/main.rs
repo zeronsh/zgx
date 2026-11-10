@@ -30,6 +30,8 @@ mod focus_visible;
 mod hit_targets;
 #[path = "../hover_nested.rs"]
 mod hover_nested;
+#[path = "../hover_passed.rs"]
+mod hover_passed;
 #[path = "../hover_refresh.rs"]
 mod hover_refresh;
 #[path = "../hover_removal.rs"]

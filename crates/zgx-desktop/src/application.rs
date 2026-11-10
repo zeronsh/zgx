@@ -4756,6 +4756,29 @@ impl Host {
         self.window = None;
         self.force = true;
     }
+    /// Hover through where the pointer passed in a turn whose moves folded
+    /// into its last (`WindowManager::held_move_now`): each place moves
+    /// hover, telling what it enters and leaves, and nothing else of a move
+    /// happens there (its listeners, a drag: the last move's). Not while
+    /// the pointer is locked, a title bar is held, or native views share
+    /// the window (they keep pointer state of their own).
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn pointer_passed(&mut self, passed: &[WindowEvent]) -> Result<(), Box<dyn Error>> {
+        if self.pointer_lock.is_some() || self.native.active() {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if self.title_press.is_some() {
+            return Ok(());
+        }
+        for event in passed {
+            if let WindowEvent::CursorMoved { position, .. } = event {
+                let p = position.to_logical::<f32>(self.scale_factor);
+                self.context.ui.try_pointer_passed(p.x, p.y)?;
+            }
+        }
+        Ok(())
+    }
     /// A window event winit reported, as `window_event` has it, though a
     /// button or wheel heard after a popup moved the cursor is where winit
     /// last put the pointer, the popup's point restored after. Winit's events
@@ -6970,36 +6993,82 @@ impl WindowManager {
     /// The pointer move held back (`pending_move`), handled now.
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     fn flush_move(&mut self, event_loop: &ActiveEventLoop) {
-        if let Some((id, event)) = self.pending_move.take() {
-            self.window_event_now(event_loop, id, event);
+        if let Some(held) = self.pending_move.take() {
+            self.held_move_now(event_loop, held);
         }
+    }
+    /// A window's last move of a turn, after hover has followed the
+    /// pointer through the moves it folded: a cell crossed between two of
+    /// them hears its enter and leave, as it would have heard them apart.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn held_move_now(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        (id, event, passed): Passed<WindowId, WindowEvent>,
+    ) {
+        if !passed.is_empty() {
+            self.pointer_passed(event_loop, id, passed);
+        }
+        self.window_event_now(event_loop, id, event);
+    }
+    /// Hover through the moves a turn folded (`held_move_now`), the
+    /// window's own: a popup window's go where its input goes, folded.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[inline(never)]
+    fn pointer_passed(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        id: WindowId,
+        passed: Vec<WindowEvent>,
+    ) {
+        let Some(token) = self.native.get(&id).copied() else {
+            return;
+        };
+        self.contain(event_loop, Some(token), |this| {
+            if let Some(host) = this.hosts.get_mut(&token)
+                && let Err(e) = host.pointer_passed(&passed)
+            {
+                this.fail(event_loop, e);
+            }
+        });
     }
 }
 /// The pointer moves of one turn of the event loop, as one (Linux,
-/// Windows): the last move heard, for window `W`, not yet handled.
+/// Windows): the last move heard, for window `W`, not yet handled, and the
+/// window's moves before it in the turn, which it folded (`Passed`).
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
-struct HeldMove<W, E>(Option<(W, E)>);
+struct HeldMove<W, E>(Option<(W, E)>, Vec<E>);
 impl<W, E> Default for HeldMove<W, E> {
     fn default() -> Self {
-        Self(None)
+        Self(None, Vec::new())
     }
 }
+/// A window's last move of a turn, and the moves it folded: where the
+/// pointer passed on the way, each of which hover still reaches
+/// (`Host::pointer_passed`); none, and nothing allocated, when the turn
+/// heard one move.
+type Passed<W, E> = (W, E, Vec<E>);
 #[cfg_attr(not(any(target_os = "linux", target_os = "windows")), allow(dead_code))]
 impl<W: PartialEq, E> HeldMove<W, E> {
     /// A move for window `id`, held in place of the one before; that one is
     /// handed back to handle now if it was another window's (each window
-    /// hears its own last move, in order).
-    fn moved(&mut self, id: W, event: E) -> Option<(W, E)> {
+    /// hears its own last move, in order), else kept as passed.
+    fn moved(&mut self, id: W, event: E) -> Option<Passed<W, E>> {
         let before = self.0.replace((id, event));
         match before {
-            Some((window, _)) if Some(&window) == self.0.as_ref().map(|(id, _)| id) => None,
-            before => before,
+            Some((window, before)) if Some(&window) == self.0.as_ref().map(|(id, _)| id) => {
+                self.1.push(before);
+                None
+            }
+            Some((window, before)) => Some((window, before, std::mem::take(&mut self.1))),
+            None => None,
         }
     }
     /// The move held, to handle now: before another event, or as the turn
     /// ends.
-    fn take(&mut self) -> Option<(W, E)> {
-        self.0.take()
+    fn take(&mut self) -> Option<Passed<W, E>> {
+        let (window, event) = self.0.take()?;
+        Some((window, event, std::mem::take(&mut self.1)))
     }
 }
 /// The app's window a drag is over, and the pointer in its coordinates.
@@ -8328,8 +8397,8 @@ impl ApplicationHandler<Event> for WindowManager {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             if matches!(event, WindowEvent::CursorMoved { .. }) {
-                if let Some((other, moved)) = self.pending_move.moved(id, event) {
-                    self.window_event_now(event_loop, other, moved);
+                if let Some(other) = self.pending_move.moved(id, event) {
+                    self.held_move_now(event_loop, other);
                 }
                 return;
             }
@@ -9114,8 +9183,25 @@ mod tests {
         for x in 0..1000 {
             assert_eq!(held.moved(1, x), None);
         }
-        assert_eq!(held.take(), Some((1, 999)));
+        // The 999 before it passed on the way, for hover.
+        assert_eq!(held.take(), Some((1, 999, (0..999).collect())));
         assert_eq!(held.take(), None);
+    }
+
+    /// One move a turn (the common case) passes nothing on the way and
+    /// allocates nothing; two (a cell crossed between them) pass the first.
+    #[test]
+    fn a_turns_folded_moves_are_where_the_pointer_passed() {
+        let mut held = super::HeldMove::default();
+        assert_eq!(held.moved(1, "at"), None);
+        let (_, _, passed) = held.take().unwrap();
+        assert!(passed.is_empty() && passed.capacity() == 0);
+        assert_eq!(held.moved(1, "over a cell"), None);
+        assert_eq!(held.moved(1, "past it"), None);
+        assert_eq!(held.take(), Some((1, "past it", vec!["over a cell"])));
+        // The next turn starts with nothing passed.
+        assert_eq!(held.moved(1, "again"), None);
+        assert_eq!(held.take(), Some((1, "again", vec![])));
     }
 
     /// Moves for two windows come apart, each window's last, in order: the
@@ -9125,9 +9211,9 @@ mod tests {
         let mut held = super::HeldMove::default();
         assert_eq!(held.moved(1, "a1"), None);
         assert_eq!(held.moved(1, "a2"), None);
-        assert_eq!(held.moved(2, "b1"), Some((1, "a2")));
+        assert_eq!(held.moved(2, "b1"), Some((1, "a2", vec!["a1"])));
         assert_eq!(held.moved(2, "b2"), None);
-        assert_eq!(held.take(), Some((2, "b2")));
+        assert_eq!(held.take(), Some((2, "b2", vec!["b1"])));
     }
 
     /// Every `on_closed` handler runs, in order: a window's own state and

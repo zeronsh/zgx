@@ -1736,6 +1736,12 @@ impl InputDispatcher {
         let hit = self.hit_target(&scene.borrow(), x, y);
         self.set_hover(scene, hit);
     }
+    /// Hover where the pointer passed (`Ui::try_pointer_passed`): what a
+    /// move to `x, y` does to hover, its enters and leaves, and nothing more.
+    pub fn pointer_passed(&self, scene: &Rc<RefCell<Scene>>, x: f32, y: f32) {
+        let hit = self.hit_target(&scene.borrow(), x, y);
+        self.set_hover(scene, hit);
+    }
     /// What a press at `x, y` lands on, as dispatch finds it: the nearest
     /// node with listeners under it, past pass-through and empty overlays.
     pub fn pointer_target(&self, scene: &Scene, x: f32, y: f32) -> Option<NodeId> {
