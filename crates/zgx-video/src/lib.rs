@@ -12,6 +12,7 @@ pub mod film;
 pub mod player;
 pub mod render;
 pub mod script;
+mod speaker;
 pub mod stage;
 pub mod studio;
 pub use encode::Format;

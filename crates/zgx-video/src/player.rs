@@ -5,14 +5,15 @@
 //! it's neither playing nor asked for a frame: its thread waits for a message.
 use crate::film::Timing;
 use crate::script::{Composition, ScriptStage, compositions};
+use crate::speaker::{Speaker, Tape, lock};
 use serde_json::{Value as Json, json};
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zgx::image::ImageData;
 use zgx::reactive::{Runtime, Signal};
@@ -37,6 +38,8 @@ pub(crate) enum Ask {
     Surfaces(bool),
     /// Bytes wanted too (a script's player): no pixel buffers then.
     Pixels(bool),
+    /// Its sounds through the speakers as it plays, or not.
+    Sound(bool),
     Quit,
 }
 
@@ -296,6 +299,14 @@ impl Preview {
     }
 }
 
+/// What the thread keeps that its `Player` reads too.
+pub(crate) struct Shared {
+    /// Bytes of drawn frames it holds.
+    pub held: Arc<AtomicUsize>,
+    /// What its speakers play.
+    pub tape: Arc<Mutex<Tape>>,
+}
+
 /// The thread's loop. Playing, it keeps to real time, drawing the frame due
 /// now; else it sleeps until it's asked something.
 pub(crate) fn run(
@@ -304,7 +315,7 @@ pub(crate) fn run(
     asks: Receiver<Ask>,
     tell: Sender<Event>,
     wake: Box<dyn Fn() + Send>,
-    held: Arc<AtomicUsize>,
+    shared: Shared,
     #[cfg(target_os = "macos")] surfaces_to: Sender<(u64, zgx_gpu::PixelBuffer)>,
 ) {
     let wake: Rc<dyn Fn()> = Rc::from(wake as Box<dyn Fn()>);
@@ -314,7 +325,7 @@ pub(crate) fn run(
         composition: None,
         props: json!({}),
         stage: None,
-        cache: Cache::new(held),
+        cache: Cache::new(shared.held),
         tell,
         wake,
         tracks: 0,
@@ -332,6 +343,10 @@ pub(crate) fn run(
     let mut watched = true;
     let mut stale = false;
     let mut keep_for = CACHE_KEPT;
+    // Its sounds, off until asked for, following `playing` as `heard` was.
+    let mut speaker = Speaker::new(shared.tape);
+    let mut sound = false;
+    let mut heard: Option<(Instant, u64)> = None;
     loop {
         // Until the next frame is due, or for ever: an idle preview waits.
         // Unseen and playing, only its end matters (not looping), or nothing.
@@ -397,6 +412,21 @@ pub(crate) fn run(
                             Ok(Some(comp)) => {
                                 let same =
                                     preview.composition.as_ref().is_some_and(|was| *was == comp);
+                                // The same composition (other props) keeps its
+                                // mix until the new one's made.
+                                let kept = preview
+                                    .composition
+                                    .as_ref()
+                                    .is_some_and(|was| was.id == comp.id);
+                                if sound {
+                                    speaker.mix(
+                                        &preview.path,
+                                        &comp.id,
+                                        &preview.props,
+                                        comp.duration,
+                                        kept,
+                                    );
+                                }
                                 preview.composition = Some(comp.clone());
                                 preview.stage = None;
                                 if !same {
@@ -460,6 +490,27 @@ pub(crate) fn run(
                     preview.cache.clear();
                     result = preview.build();
                     seek.get_or_insert(at);
+                    if sound && let Some(comp) = &preview.composition {
+                        speaker.mix(&preview.path, &comp.id, &preview.props, comp.duration, true);
+                    }
+                }
+                Ask::Sound(on) => {
+                    if on && !sound {
+                        if let Some(comp) = &preview.composition {
+                            speaker.mix(
+                                &preview.path,
+                                &comp.id,
+                                &preview.props,
+                                comp.duration,
+                                false,
+                            );
+                        }
+                    } else if !on {
+                        speaker.clear();
+                    }
+                    sound = on;
+                    // Turned on playing, it starts where the picture is.
+                    heard = None;
                 }
             }
         }
@@ -490,6 +541,9 @@ pub(crate) fn run(
                     seek = Some(due.max(at + 1));
                 }
             }
+            // Heard from when it's played, not once the frame it shows is drawn
+            // (a frame slow to draw comes late; its sound doesn't).
+            follow(&mut speaker, sound, playing, &mut heard, preview.fps());
             if let Some(frame) = seek {
                 at = frame.min(
                     preview
@@ -516,7 +570,29 @@ pub(crate) fn run(
             preview.say(Event::Stopped);
             preview.say(Event::Error(error));
         }
+        // Stopped for an error, the speakers stop too.
+        follow(&mut speaker, sound, playing, &mut heard, preview.fps());
     }
+}
+
+/// The speakers keep the clock the frames keep: started again from the frame
+/// due whenever it's played, sought or looped, and stopped with it.
+fn follow(
+    speaker: &mut Speaker,
+    sound: bool,
+    playing: Option<(Instant, u64)>,
+    heard: &mut Option<(Instant, u64)>,
+    fps: f64,
+) {
+    if sound && playing != *heard {
+        match playing {
+            Some((started, from)) => {
+                speaker.play_at(from as f64 / fps + started.elapsed().as_secs_f64())
+            }
+            None => speaker.stop(),
+        }
+    }
+    *heard = playing.filter(|_| sound);
 }
 
 /// A composition playing live: ask it for frames, play it, give it props;
@@ -540,6 +616,8 @@ pub struct Player {
     pub image: Signal<Option<Arc<ImageData>>>,
     /// Bytes of drawn frames its thread keeps.
     cached: Arc<AtomicUsize>,
+    /// What its speakers play (`sound`).
+    tape: Arc<Mutex<Tape>>,
     /// Its frames as pixel buffers, as its thread sends them (`view`, macOS).
     #[cfg(target_os = "macos")]
     surfaces: Receiver<(u64, zgx_gpu::PixelBuffer)>,
@@ -560,6 +638,8 @@ impl Player {
         let path = path.to_owned();
         let cached = Arc::new(AtomicUsize::new(0));
         let held = cached.clone();
+        let tape = Arc::new(Mutex::new(Tape::default()));
+        let played = tape.clone();
         std::thread::Builder::new()
             .name("zgx-video player".into())
             .spawn(move || {
@@ -571,7 +651,7 @@ impl Player {
                     Box::new(move || {
                         wake_up.send(());
                     }),
-                    held,
+                    Shared { held, tape: played },
                     #[cfg(target_os = "macos")]
                     surfaces_to,
                 );
@@ -587,6 +667,7 @@ impl Player {
             error: runtime.signal(None),
             image: runtime.signal(None),
             cached,
+            tape,
             #[cfg(target_os = "macos")]
             surfaces,
             #[cfg(target_os = "macos")]
@@ -615,6 +696,10 @@ impl Player {
     /// Play at real speed, or stop.
     pub fn play(&self, on: bool) {
         self.playing.set(on);
+        // Stopped, silent at once, though its thread may be drawing a frame.
+        if !on {
+            lock(&self.tape).playing = false;
+        }
         let _ = self.asks.send(Ask::Play(on));
     }
     /// Whether what it shows is seen (true to begin with). Unseen, it draws
@@ -632,6 +717,20 @@ impl Player {
     /// Build the script again (it changed), staying at the frame it shows.
     pub fn reload(&self) {
         let _ = self.asks.send(Ask::Reload);
+    }
+    /// Play its sounds through the speakers as it plays (off to begin with):
+    /// the mix a render would make, made again as its composition, props or
+    /// script change, from the frame it plays. On macOS; silent elsewhere
+    /// for now.
+    pub fn sound(&self, on: bool) {
+        let _ = self.asks.send(Ask::Sound(on));
+    }
+    /// What its speakers have: the mix, once made, and whether they play.
+    /// For tests.
+    #[doc(hidden)]
+    pub fn sounding(&self) -> (Option<Arc<[f32]>>, bool) {
+        let tape = lock(&self.tape);
+        (tape.samples.clone(), tape.playing)
     }
     /// Follow what its thread tells, keeping its signals current and telling
     /// `heard` too, for as long as the returned future runs: spawn it on the
@@ -782,8 +881,8 @@ impl Player {
     /// Give a script `host` runs this player as `name`: `ui.image { src =
     /// "host:<name>" }` shows it, `ui.call("<name>.listen")` (once, as the
     /// script mounts) follows it, and `ui.invoke("<name>.open", { id, props,
-    /// frame })`, `"<name>.seek"` (a frame), `"<name>.play"` and `"<name>.loop"`
-    /// (booleans) drive it. `ui.shared("<name>")` holds `{ frame, playing,
+    /// frame })`, `"<name>.seek"` (a frame), `"<name>.play"`, `"<name>.loop"`
+    /// and `"<name>.sound"` (booleans) drive it. `ui.shared("<name>")` holds `{ frame, playing,
     /// composition, error }`.
     pub fn expose(self: &Rc<Self>, host: &zgx_script::ScriptHost, name: &str) {
         use zgx_script::Value;
@@ -858,6 +957,10 @@ impl Player {
         let this = self.clone();
         host.action(format!("{name}.watch"), move |arg| {
             this.watch(json_of(&arg).as_bool().unwrap_or(true))
+        });
+        let this = self.clone();
+        host.action(format!("{name}.sound"), move |arg| {
+            this.sound(json_of(&arg).as_bool().unwrap_or(true))
         });
     }
 }

@@ -563,7 +563,16 @@ local function timeline(): any
 			},
 			ui.div { grow = 1 },
 			ui.checkbox {
+				label = "Sound",
+				text_size = 13,
+				value = ui.state("sound", true),
+				on_change = function(on: boolean)
+					ui.invoke("studio.sound", on)
+				end,
+			},
+			ui.checkbox {
 				label = "Loop",
+				ml = 14,
 				text_size = 13,
 				value = ui.state("loop", true),
 				on_change = function(on: boolean)
