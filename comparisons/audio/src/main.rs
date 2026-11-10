@@ -88,7 +88,7 @@ fn zgx(scene: Scene, noises: &[Vec<f32>], keep: bool) -> (u64, Vec<f32>) {
         interpolation,
         ..Config::default()
     };
-    let (audio, mut mixer) = Audio::offline(config);
+    let (audio, mut mixer) = Audio::offline(config).expect("a config the engine runs with");
     let sounds: Vec<Sound> = noises
         .iter()
         .map(|n| Sound::from_samples(n, 2, scene.rate).unwrap())
