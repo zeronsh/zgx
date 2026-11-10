@@ -669,6 +669,12 @@ impl AccessibilityTree {
         geometry: bool,
     ) -> TreeUpdate {
         let root = self.id(scene.root());
+        // Native bounds and character geometry are in physical pixels.
+        // The same logical text box at a new scale cannot reuse the old
+        // snapshot; keep IDs as on reconnect, but project its geometry again.
+        if self.walk.as_ref().is_some_and(|walk| walk.scale != scale) {
+            self.reset();
+        }
         if scene.language_revision() != self.language_revision {
             self.language_revision = scene.language_revision();
             self.projection_revisions.clear();
@@ -4603,5 +4609,76 @@ mod language_tests {
         language.set("zh-HK".into());
         ui.prepare_frame();
         assert_eq!(sent(&mut adapter, &ui), [some("zh-HK"), None, None]);
+    }
+}
+
+#[cfg(test)]
+mod scale_snapshot_tests {
+    use super::*;
+    use zgx::{compose::prelude::*, widgets::Ui};
+
+    #[test]
+    fn a_scale_change_reprojects_text_geometry_with_stable_native_ids() {
+        let mut ui = Ui::new(400., 300.);
+        ui.set_assistive_technology(true);
+        ui.mount(
+            column()
+                .child(text("Readable text 你好").id("label"))
+                .child(button().child("Focus")),
+        );
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        let mut tree = AccessibilityTree::new();
+        tree.note_flush(&ui.scene.borrow());
+        tree.update(&ui.scene.borrow(), &ui.semantics.borrow(), None, "Test", 1.);
+        let original_ids = tree.ids.clone();
+        let original_runs = tree.text_runs.clone();
+        for scale in [2., 1.25, 1.] {
+            // A fresh snapshot uses the same IDs, but none of the old native
+            // geometry. Changing scale must produce exactly these nodes.
+            let mut fresh = AccessibilityTree::new();
+            fresh.ids = tree.ids.clone();
+            fresh.next = tree.next;
+            fresh.text_runs = tree.text_runs.clone();
+            fresh.update(
+                &ui.scene.borrow(),
+                &ui.semantics.borrow(),
+                None,
+                "Test",
+                scale,
+            );
+            let update = tree.update(
+                &ui.scene.borrow(),
+                &ui.semantics.borrow(),
+                None,
+                "Test",
+                scale,
+            );
+            assert!(
+                update
+                    .nodes
+                    .iter()
+                    .any(|(_, node)| node.role() == accesskit::Role::TextRun),
+                "scaled text runs must reach the client"
+            );
+            assert_eq!(
+                tree.cache, fresh.cache,
+                "all bounds and character geometry at scale {scale}"
+            );
+            assert_eq!(tree.ids, original_ids, "scale keeps native node IDs");
+            assert_eq!(tree.text_runs, original_runs, "scale keeps run IDs");
+            assert!(
+                tree.update(
+                    &ui.scene.borrow(),
+                    &ui.semantics.borrow(),
+                    None,
+                    "Test",
+                    scale
+                )
+                .nodes
+                .is_empty(),
+                "an unchanged snapshot is quiet"
+            );
+        }
     }
 }
