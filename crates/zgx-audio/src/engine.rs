@@ -27,6 +27,8 @@ pub enum Error {
     Io(String),
     /// A [`Config`] the engine can't be made with, and why.
     Config(String),
+    /// A handle (a [`Bus`]) from another engine.
+    Foreign,
 }
 
 impl Error {
@@ -47,6 +49,7 @@ impl std::fmt::Display for Error {
             Error::BusExists(name) => write!(f, "a bus named {name:?} exists already"),
             Error::Format(why) | Error::Io(why) => f.write_str(why),
             Error::Config(why) => write!(f, "an audio engine can't be made with {why}"),
+            Error::Foreign => f.write_str("a bus from another audio engine"),
         }
     }
 }
@@ -161,7 +164,13 @@ struct Control {
     live: HashSet<u64>,
 }
 
+/// Engines made so far: each takes the next as its identity, which its
+/// handles carry.
+static ENGINES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 struct Inner {
+    /// Which engine this is: a handle from another is refused.
+    id: u64,
     control: Mutex<Control>,
     meter: Arc<Meter>,
     rate: u32,
@@ -240,6 +249,7 @@ impl Audio {
             .map(|name| (name.to_string(), 0))
             .to_vec();
         let audio = Audio(Arc::new(Inner {
+            id: ENGINES.fetch_add(1, Ordering::Relaxed),
             control: Mutex::new(Control {
                 commands,
                 returns,
@@ -327,9 +337,13 @@ impl Audio {
                 looping,
             },
         };
+        let bus = match play.bus {
+            None => 0,
+            Some((engine, bus)) if engine == self.0.id => bus,
+            Some(_) => return Err(Error::Foreign),
+        };
         let mut control = self.control();
         let id = control.next_id;
-        let bus = play.bus.unwrap_or(0);
         let command = Command::Play {
             id,
             sound: sound.0.clone(),
@@ -384,8 +398,11 @@ impl Audio {
         })
     }
 
-    /// A new bus feeding `parent`.
+    /// A new bus feeding `parent`, one of this engine's.
     pub fn add_bus(&self, name: &str, parent: &Bus) -> Result<Bus, Error> {
+        if parent.audio.0.id != self.0.id {
+            return Err(Error::Foreign);
+        }
         let mut control = self.control();
         if control.buses.iter().any(|(bus, _)| bus == name) {
             return Err(Error::BusExists(name.into()));
@@ -430,7 +447,8 @@ impl Audio {
 /// its own pitch, now, once.
 #[derive(Clone, Debug)]
 pub struct Play {
-    bus: Option<u16>,
+    /// The bus's engine, and the bus.
+    bus: Option<(u64, u16)>,
     gain: f32,
     pan: f32,
     pitch: f32,
@@ -461,9 +479,10 @@ impl Play {
             fade_in: None,
         }
     }
-    /// The bus it plays into.
+    /// The bus it plays into: one of the engine's it's played on (another
+    /// engine's is an error).
     pub fn bus(mut self, bus: &Bus) -> Play {
-        self.bus = Some(bus.index);
+        self.bus = Some((bus.audio.0.id, bus.index));
         self
     }
     /// Its gain, 1 as recorded.

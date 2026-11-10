@@ -6,7 +6,7 @@
 //! `ZGX_AUDIO_BLESS=1 cargo test -p zgx-audio --test offline` writes the
 //! references anew; listen to them, and say why they changed.
 use std::path::PathBuf;
-use zgx_audio::{Audio, Config, Curve, Interpolation, Play, Ramp, Sound, Source, Time, wav};
+use zgx_audio::{Audio, Config, Curve, Error, Interpolation, Play, Ramp, Sound, Source, Time, wav};
 
 const RATE: u32 = 48_000;
 
@@ -435,4 +435,33 @@ fn a_full_queue_is_an_error_not_a_wait() {
     assert_eq!(sent, 13);
     mixer.frames(1);
     assert!(audio.play(&click, Play::new()).is_ok());
+}
+
+#[test]
+fn a_bus_from_another_engine_is_an_error() {
+    let click = blip();
+    let (a, _) = Audio::offline(unlimited()).unwrap();
+    let (b, mut mixer) = Audio::offline(unlimited()).unwrap();
+    // A's buses past any B has: as a parent, it was read out of bounds.
+    let mut deep = a.master();
+    for i in 0..20 {
+        deep = a.add_bus(&format!("a{i}"), &deep).unwrap();
+    }
+    assert!(matches!(b.add_bus("x", &deep), Err(Error::Foreign)));
+    // Indices B has too: made B's buses a cycle, and a solo hung the mixer.
+    let (a4, a5) = (
+        a.add_bus("four", &a.master()).unwrap(),
+        a.add_bus("five", &a.master()).unwrap(),
+    );
+    let b4 = b.add_bus("four", &b.master()).unwrap();
+    assert!(matches!(b.add_bus("five", &a5), Err(Error::Foreign)));
+    let _ = a4;
+    assert!(matches!(
+        b.play(&click, Play::new().bus(&deep)),
+        Err(Error::Foreign)
+    ));
+    // B's own still work.
+    b.play(&click, Play::new().bus(&b4)).unwrap();
+    b4.solo(true).unwrap();
+    assert_eq!(left(&mixer.frames(8))[1], 1.);
 }
