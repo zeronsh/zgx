@@ -493,3 +493,23 @@ line (`ShapeLine::boxes`). `inline_box_tests` check a box's room, a tall box
 growing only its line, breaking around a box, each alignment, a box kept in
 its span, a split line keeping its boxes, and a line said to hold boxes but
 holding none laid out exactly as one that isn't.
+
+## A kana run's Han in a Chinese face; the last stage once a character
+
+A Han run beside kana is taken for Japanese, and Japanese faces lack
+simplified forms (车, 见 in "明天在车站见面吧" after a Japanese sentence).
+Hiragana's, Katakana's and Hangul's lists name no Chinese face and nor does
+the common list, so the search went to its last stage, every face in turn,
+and drew them in the first that had them: Arial Unicode MS on macOS. On an
+iOS simulator, where PingFang is loaded last, that stage loaded some 400
+faces, 14 ms on a paragraph's first layout. A kana or Hangul run now tries
+the Chinese list after its own (its run's Chinese where `han` says one,
+simplified otherwise), as Core Text's cascade does.
+
+That last stage loads each face it looks at, so it now runs once a
+character: `FontSystem::scanned` keeps the first face it found holding each
+character it was asked for, or none, and a word whose characters it has all
+looked for takes those faces (in their order) without looking again. It is
+forgotten when the database can change (`db_mut`). `FontSystem::full_scans`
+counts the stage's runs. zgx-gpu's `simplified_han_after_kana_takes_a_chinese_face`
+and `every_face_is_looked_at_once_a_character` check both.
