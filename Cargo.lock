@@ -5228,6 +5228,7 @@ name = "zgx-3d"
 version = "0.1.10"
 dependencies = [
  "bytemuck",
+ "png 0.18.1",
  "serde_json",
  "wgpu",
  "zgx",

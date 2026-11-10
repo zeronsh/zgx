@@ -26,6 +26,8 @@ zgx-desktop = { path = "../zgx-desktop", default-features = false }
 # `world_bench` draws by the no-op backend. The gate builds this crate alone
 # (Cargo would turn it on for every bench built beside it).
 wgpu = { version = "29.0.4", default-features = false, features = ["noop"] }
+# The reference images (tests/reference.rs): already in the tree, by `image`.
+png = "0.18"
 
 [[example]]
 name = "model"
