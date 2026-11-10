@@ -5157,7 +5157,7 @@ fn paragraph_effect<const LOCATING: bool>(
         if content_state.with_untracked(|current| {
             *current.rich == rich && current.links == links && current.icons == icons
         }) {
-            if !fading.pending.is_empty() || fading.active.is_some() {
+            if fading.state.is_some() {
                 fading.runs(&weak, root, paragraph);
             }
             return;
@@ -5180,7 +5180,7 @@ fn paragraph_effect<const LOCATING: bool>(
         }
         // Runs fading in: drawn as they are now, then a frame at a time
         // while they fade (`Fading`), all of it out of this effect.
-        if !fading.pending.is_empty() || fading.active.is_some() {
+        if fading.state.is_some() {
             fading.drawn(&weak, root, paragraph);
         }
         // Icons' placeholders aren't text to read out.
@@ -5208,10 +5208,17 @@ pub(crate) struct Fading {
     /// Where its frame loop's runner and frame clock are, if the host runs
     /// one (a copy of a scope is two counts).
     services: ServiceScope,
+    /// What a paragraph that has a run fading keeps for it, made as its
+    /// first fade is noted: a paragraph none of whose runs fades holds a
+    /// scope and an empty box, and asks one question as it's drawn.
+    state: Option<Box<FadingState>>,
+}
+#[derive(Default)]
+struct FadingState {
     /// The runs fading in, by their place among the runs being made: noted
     /// as the paragraph's spans are, taken as it's drawn.
     pending: Vec<(usize, crate::compose_rich::TextFade)>,
-    active: Option<Box<ActiveFades>>,
+    active: Option<ActiveFades>,
 }
 struct ActiveFades {
     runs: Rc<FadingRuns>,
@@ -5251,21 +5258,20 @@ impl Fading {
     fn new(services: ServiceScope) -> Self {
         Self {
             services,
-            pending: Vec::new(),
-            active: None,
+            state: None,
         }
     }
     /// Run `at` of those being made fades in.
     #[cold]
     #[inline(never)]
     fn note(&mut self, at: usize, fade: crate::compose_rich::TextFade) {
-        self.pending.push((at, fade));
+        self.state.get_or_insert_default().pending.push((at, fade));
     }
     /// The runs fading now, of a paragraph unchanged: those done let go.
     #[cold]
     #[inline(never)]
     fn runs(&mut self, weak: &crate::widgets::WeakUi, root: NodeId, paragraph: NodeId) {
-        let mut fades = std::mem::take(&mut self.pending);
+        let mut fades = self.take_pending();
         let now = crate::compose_rich::fade_now();
         fades.retain(|(_, fade)| fade.fading(now));
         self.set_runs(fades, weak, root, paragraph);
@@ -5276,7 +5282,7 @@ impl Fading {
     #[cold]
     #[inline(never)]
     fn drawn(&mut self, weak: &crate::widgets::WeakUi, root: NodeId, paragraph: NodeId) {
-        let mut fades = std::mem::take(&mut self.pending);
+        let mut fades = self.take_pending();
         let now = crate::compose_rich::fade_now();
         fades.retain(|(_, fade)| fade.fading(now));
         let Some(mut ui) = weak.upgrade() else {
@@ -5285,7 +5291,7 @@ impl Fading {
         if !fades.is_empty() {
             self.begin(&mut ui, root);
         }
-        if let Some(active) = &self.active {
+        if let Some(active) = self.active() {
             let mut scene = ui.scene.borrow_mut();
             let shown = match scene.kind(paragraph) {
                 NodeKind::RichText { text } => text.clone(),
@@ -5299,15 +5305,31 @@ impl Fading {
         drop(ui);
         self.set_runs(fades, weak, root, paragraph);
     }
+    /// The fades noted since it was last drawn; a paragraph with none
+    /// noted and none running lets go of what it kept for them.
+    fn take_pending(&mut self) -> Vec<(usize, crate::compose_rich::TextFade)> {
+        let Some(state) = self.state.as_mut() else {
+            return Vec::new();
+        };
+        let fades = std::mem::take(&mut state.pending);
+        if fades.is_empty() && state.active.is_none() {
+            self.state = None;
+        }
+        fades
+    }
+    fn active(&self) -> Option<&ActiveFades> {
+        self.state.as_ref()?.active.as_ref()
+    }
     /// A run fades: what it takes, once, kept as long as `root` is.
     fn begin(&mut self, ui: &mut Ui, root: NodeId) {
-        if self.active.is_none() {
+        let state = self.state.get_or_insert_default();
+        if state.active.is_none() {
             let task: Rc<RefCell<Option<TaskToken>>> = Default::default();
             ui.retain(root, task.clone());
-            self.active = Some(Box::new(ActiveFades {
+            state.active = Some(ActiveFades {
                 runs: Default::default(),
                 task,
-            }));
+            });
         }
     }
     fn set_runs(
@@ -5324,7 +5346,7 @@ impl Fading {
         if any {
             self.begin(&mut ui, root);
         }
-        let Some(active) = &self.active else {
+        let Some(active) = self.active() else {
             return;
         };
         *active.runs.runs.borrow_mut() = fades;
@@ -5390,7 +5412,7 @@ mod fading_tests {
         let mut fading = Fading::new(ServiceScope::new());
         let rich = empty_rich_text();
         fading.set_runs(Vec::new(), &weak, root, root);
-        assert!(fading.active.is_none());
+        assert!(fading.state.is_none());
         // A run fading: held from then, with no frame loop where no host runs one.
         let fade = crate::compose_rich::TextFade {
             start: 0.,
@@ -5398,7 +5420,7 @@ mod fading_tests {
             power: 2.,
         };
         fading.set_runs(vec![(0, fade)], &weak, root, root);
-        let active = fading.active.as_ref().expect("it fades");
+        let active = fading.active().expect("it fades");
         assert_eq!(active.runs.runs.borrow().len(), 1);
         assert!(active.task.borrow().is_none());
         // With a host, one frame loop, however often the runs change; none
@@ -5419,7 +5441,7 @@ mod fading_tests {
         assert_eq!(spawned.get(), 1);
         // Done: nothing left of it to run or keep.
         fading.set_runs(Vec::new(), &weak, root, root);
-        let active = fading.active.as_ref().expect("kept");
+        let active = fading.active().expect("kept");
         assert!(active.runs.runs.borrow().is_empty());
         assert!(std::sync::Arc::ptr_eq(
             &active.runs.faded(&rich, &[], 0.),
