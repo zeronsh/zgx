@@ -9912,6 +9912,56 @@ impl GpuRenderer {
                                     )
                         })
                     });
+                // Why a filter starts a batch of its own (devtools): the
+                // first draw since the last batch's start that reaches it.
+                if !joins && let (Some(area), Some((start, filters))) = (area, batches.last()) {
+                    let area = area.expand(margin);
+                    let blocker = (*start..i).find(|&k| {
+                        let before = &draws[k];
+                        reaches(before, area) && !filters.contains(&k)
+                    });
+                    let (start, count, scale) = (*start, filters.len(), self.scale);
+                    zgx::profile::note(|| {
+                        let px = |r: Rect| {
+                            format!(
+                                "{:.0},{:.0} {:.0}x{:.0}",
+                                r.x * scale,
+                                r.y * scale,
+                                r.width * scale,
+                                r.height * scale
+                            )
+                        };
+                        let why = match blocker {
+                            Some(k) => {
+                                let before = &draws[k];
+                                format!(
+                                    "draw {k} ({}{}, {} quads, bounds {} px, clip {} px) \
+                                     paints its area",
+                                    if before.blur.is_some() {
+                                        "filter, "
+                                    } else {
+                                        ""
+                                    },
+                                    match before.source {
+                                        TextureSource::Atlas => "atlas",
+                                        TextureSource::Image(_) => "image",
+                                        TextureSource::Pixelated(_) => "pixelated image",
+                                        TextureSource::Layer(_) => "layer",
+                                    },
+                                    before.end - before.start,
+                                    px(before.bounds),
+                                    px(before.clip)
+                                )
+                            }
+                            None => "a filter of the batch blurs it too widely".into(),
+                        };
+                        format!(
+                            "blur batch break: filter draw {i} (area {} px) after batch at \
+                             draw {start} ({count} filters): {why}",
+                            px(area)
+                        )
+                    });
+                }
                 match batches.last_mut() {
                     Some((_, filters)) if joins => filters.push(i),
                     _ => batches.push((i, vec![i])),
