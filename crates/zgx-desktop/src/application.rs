@@ -150,6 +150,11 @@ fn paced_sample(
         _ => now,
     }
 }
+/// `ZGX_COAST_AT_TARGET=1`: a coast samples where it is at the delivered
+/// frame's own target (`Frame::time`), not a refresh from when it runs.
+#[cfg(target_os = "macos")]
+static COAST_AT_TARGET: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_COAST_AT_TARGET").is_some_and(|v| v != "0"));
 /// `ZGX_RESAMPLE_CADENCE=1`: scroll input is sampled a refresh apart, by the
 /// frames' indices, not when each frame runs (`resample_time`).
 static RESAMPLE_CADENCE: std::sync::LazyLock<bool> =
@@ -1880,6 +1885,8 @@ struct Host {
     /// The refresh index of the last frame delivered, and when scroll input
     /// was last sampled for it (`RESAMPLE_CADENCE`).
     delivered_index: Option<u64>,
+    /// When the last frame delivered reaches the screen (`COAST_AT_TARGET`).
+    delivered_target: Option<std::time::Instant>,
     sampled_at: Option<(u64, std::time::Instant)>,
     #[cfg(target_os = "macos")]
     frame_starts: std::collections::VecDeque<std::time::Instant>,
@@ -2336,6 +2343,7 @@ impl Host {
             #[cfg(target_os = "macos")]
             drawable_deferred: None,
             delivered_index: None,
+            delivered_target: None,
             sampled_at: None,
             #[cfg(target_os = "macos")]
             frame_starts: std::collections::VecDeque::new(),
@@ -6220,6 +6228,17 @@ impl Host {
         #[cfg(target_os = "macos")]
         if self.coast.active() && (self.frame_arrived || !self.frames_presented()) {
             let shows = match self.frames_presented() {
+                // The refresh this frame was delivered for, when that's this
+                // one's (`ZGX_COAST_AT_TARGET`): the coast's samples then a
+                // refresh apart whenever the main thread runs them.
+                true if *COAST_AT_TARGET
+                    && let Some(target) = self.delivered_target.filter(|target| {
+                        let now = std::time::Instant::now();
+                        *target >= now && *target <= now + self.frame_interval * 3
+                    }) =>
+                {
+                    target
+                }
                 true => std::time::Instant::now() + self.frame_interval,
                 false => self.coast.ends().unwrap_or_else(std::time::Instant::now),
             };
@@ -6470,6 +6489,7 @@ impl Host {
             self.frame_deadline = None;
             self.frame_heartbeat = Some(std::time::Instant::now());
             self.delivered_index = Some(frame.index);
+            self.delivered_target = Some(frame.time);
             if self.frames_presented() {
                 self.frames.deliver(frame);
             }
@@ -6543,6 +6563,7 @@ impl Host {
         self.frame_deadline = None;
         self.frame_heartbeat = Some(std::time::Instant::now());
         self.delivered_index = Some(frame.index);
+        self.delivered_target = Some(frame.time);
         if self.frames_presented() {
             self.frames.deliver(frame);
         }
