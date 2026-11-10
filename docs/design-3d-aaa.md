@@ -500,7 +500,7 @@ Each ends with a report to the maintainer: what landed with numbers, what was co
 11. **Stability promises** as written in section 5: versioned WGSL contracts (`#zgx material 1`), additions only within a version.
 12. **Where the demo lives:** `examples/harbor` in this repository if its assets stay under about 20 MB (procedural and generated), otherwise a repository of its own that depends on published zgx crates, which is also the stricter proof of "public API only". I lean to its own repository.
 13. **Surface layers** (5.1) are in the engine as the general form of wetness. If that reads as a game system by another name, the demo instead sets the same shader on every mesh.
-14. **iOS.** The brief lists iOS, and main has no iOS host. Either the iOS spike lands a host first and iOS joins each primitive's definition of done from then on, or iOS is dropped from "every backend" for this plan. Until you say, primitives are done on macOS, Windows and Linux, with iOS builds kept compiling.
+14. **iOS.** The brief lists iOS, and main has no iOS host. A host is in draft (#1591, #1592 and the PRs stacked with them), held for review. Either it lands first and iOS joins each primitive's definition of done from then on, built on that host and no other, or iOS is dropped from "every backend" for this plan. Until you say, primitives are done on macOS, Windows and Linux, with iOS builds kept compiling.
 
 ## 15. Lanes and who owns what
 
