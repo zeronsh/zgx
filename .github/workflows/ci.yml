@@ -438,7 +438,10 @@ jobs:
       # from one can make rustc's MIR inliner give up on it (#1740) or pull
       # a callee into it (#1824). One MIR build of each crate, on the gate's
       # release dependencies; the base is built only on a failure, to name
-      # the callees. On main, reported and not failing, as the gate.
+      # the callees. On main, reported and not failing, as the gate. Skipped
+      # when nothing those crates compile changed: their sources and the
+      # crates they inline from (zgx-fx, zgx-components, zgx-3d, vendor/),
+      # the lockfile and profiles, and the check itself.
       - name: Inlining
         if: ${{ !cancelled() }}
         timeout-minutes: 20
@@ -446,8 +449,16 @@ jobs:
           BASE: ${{ steps.base.outputs.sha }}
         run: |
           inline=0
+          sources='^crates/zgx(-gpu|-script|-fx|-components|-3d)?/.*\.rs$|^vendor/.*\.rs$|^Cargo\.(lock|toml)$|^scripts/perf/inline_scopes\.'
+          if ! git diff --name-only "$BASE" HEAD | grep -qE "$sources"; then
+            echo "### Inlining: skipped, no change to what zgx, zgx-gpu and zgx-script compile" >> "$GITHUB_STEP_SUMMARY"
+            echo "inline=0" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          start=$SECONDS
           python3 scripts/perf/inline_scopes.py --target target/perf-gate --base "$BASE" 2>&1 | tee inline.txt || inline=$?
-          { echo '### Inlining'; echo '```'; cat inline.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          minutes=$(( (SECONDS - start + 30) / 60 ))
+          { echo "### Inlining ($minutes min)"; echo '```'; cat inline.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           if [ "${{ github.event_name }}" != pull_request ]; then inline=0; fi
           echo "inline=$inline" >> "$GITHUB_ENV"
       - name: Gate
