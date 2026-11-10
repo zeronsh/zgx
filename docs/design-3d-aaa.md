@@ -52,7 +52,25 @@ What that bar changes in this design, against a simpler plan:
 4. **Pipelines compiled ahead:** wgpu's pipeline cache is turned on and persisted, and variants a scene will need are compiled off the frame, so the first frame with a new material doesn't hitch.
 5. **Bindless textures where the device has them** (texture binding arrays), so draws batch across materials; the per-material bind groups stay as the fallback.
 6. **Meshlets and a visibility buffer are measured, not assumed:** they're built if the comparison scenes show clustered forward losing to them at high triangle counts.
-7. **Hardware ray tracing is an optional path** (Metal and Direct3D 12, when wgpu exposes it) for probe updates and reflections; the rasterised paths stay the default everywhere.
+7. **Hardware ray tracing is a quality tier, not an afterthought** (see 2b): where the device has it, probe updates, reflections and contact shadows trace rays; the rasterised paths are the fallback everywhere else.
+
+## 2b. The look: what an Unreal-class frame needs
+
+Speed is half the bar. The other half is the picture: the demo should look the way a current AAA frame does, and Unreal Engine 5 is the reference for that look (as a reference for our own eyes, not for published numbers). Path-traced Cycles renders stay the ground truth for whether light is *right*; Unreal frames of the same scene say whether it reads as a modern game.
+
+What makes that look, and what it asks of this plan beyond the first pass:
+
+| What reads as "Unreal quality" | First pass (sections 6.x) | What closes the gap |
+| --- | --- | --- |
+| Bounce light and reflections that follow moving lights and objects | Rasterised probes, screen-space reflections, reflection probes | Ray-traced probe updates and reflections on devices with ray queries; a surface cache or screen-space GI where they're missing |
+| Shadow detail at every distance, soft where it should be | Four cascades, local atlas, PCSS, contact shadows | Higher-resolution virtual or per-object shadow pages where the demo shows cascades running out |
+| Geometric density with no popping | Culling, LODs with crossfade | Meshlets with a visibility buffer, built if the demo's close-ups show the limit |
+| A stable, sharp image | TAA and our upscaler | The same, tuned against a supersampled reference until thin geometry, foliage-like detail and specular don't shimmer |
+| Atmosphere | Physical sky, froxel fog, light shafts | Volumetric shadows from local lights, fog lit by GI |
+| Filmic colour | Exposure, tone map, grading, bloom, depth of field, motion blur | Lens effects tuned by eye against references |
+| Materials that hold up close | The glTF extension set, subsurface, decals | Detail normals and parallax through the custom material interface |
+
+The order of work doesn't change: the first pass builds every row's left column. What changes is that GI and reflections start with a study of what wgpu exposes for ray queries on Metal and Direct3D 12, so the probe and reflection designs take ray-traced updates as a first-class path from the start, and that each primitive is judged against an Unreal frame of the same setup as well as its performance target. Which right-column items get built is decided with frames side by side once the first pass exists.
 
 ## 3. Backends and tiers
 
@@ -512,11 +530,11 @@ Settled Nov 10 2026 by the coordinator, the maintainer having said designs need 
 2. **Each primitive sits behind a zgx-3d Cargo feature** (`post`, `lighting`, `shaders`, `compute`, `particles`, `media`, `gi`, `scale`, `ktx2`), measured in KiB on `zgx-run`'s `dist` build. None is a default of `zgx-run` or `zgx-video` until the maintainer chooses.
 3. **The Direct3D 11 view host is built in R0,** by the lane that owns D3D11 parity. It's needed whatever is decided about Windows' default renderer.
 4. **GL is the reduced tier** tabled in section 3.
-5. **Probe GI is rasterised by default,** with ray-traced updates as an optional path later (2a.7).
+5. **Probe GI has two update paths from the start:** ray-traced where the device has ray queries, rasterised elsewhere (2b).
 6. **Particle transparency defaults to weighted blended OIT,** with a per-emitter sort. Side-by-side frames go to the maintainer before R7 merges; work doesn't wait on them.
 7. **No display HDR in this plan.**
 8. **The 4090 stands in for a mid-range GPU** at a 4 ms budget for the demo at 1080p until a 4060-class machine can be measured.
-9. **Reference renderers:** the Khronos viewer for materials, Cycles for light transport, Filament for post; FLIP as the metric; every visible difference stated in the PR. Looks are shown to the maintainer.
+9. **Reference renderers:** the Khronos viewer for materials, Cycles for light transport, Filament for post, and Unreal Engine 5 for the overall look (internal comparison only, nothing published); FLIP as the metric; every visible difference stated. Looks are shown to the maintainer.
 10. **Dependencies** under MIT, Apache-2.0, BSD or zlib are added on a size measurement; anything else goes to the maintainer first.
 11. **Stability promises** are section 5's: versioned WGSL contracts, additions only within a version.
 12. **The demo lives in this repository,** `examples/harbor`, as a crate outside the workspace's default members that depends on the zgx crates by their public API only. Its assets are generated by code or scripts in it.
