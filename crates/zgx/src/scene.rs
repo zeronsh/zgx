@@ -13675,7 +13675,7 @@ impl Scene {
     /// the bar blurs it. Beside a bar narrower than the view, the content
     /// copies too: a part each side. All of `clip` if none touches it; none
     /// if little's left.
-    fn clear_of_blurs(&self, clip: Rect) -> Vec<Rect> {
+    fn clear_of_blurs(&self, id: NodeId, clip: Rect) -> Vec<Rect> {
         let mut clear = vec![clip];
         let mut touched = false;
         for blur in &self.blur_nodes {
@@ -13711,6 +13711,14 @@ impl Scene {
         if !touched {
             return clear;
         }
+        // Under a fade, what of a part lies in its bands repaints (its mask
+        // holds still as the content moves); the interior copies.
+        if let Some(interior) = self.fade_interior(id) {
+            clear = clear
+                .into_iter()
+                .filter_map(|part| part.intersection(interior))
+                .collect();
+        }
         // A part too small for its copy to pay repaints; so do all, if what
         // copies is too little of the view.
         let area = |rect: &Rect| rect.width * rect.height;
@@ -13722,6 +13730,47 @@ impl Scene {
             clear.clear();
         }
         clear
+    }
+    /// Where the nearest fade around scroll content `id` (`fade_edges`) is
+    /// whole, in the window: its box less its bands and insets, in to whole
+    /// device pixels. `None` with no fade around it.
+    #[cold]
+    #[inline(never)]
+    fn fade_interior(&self, id: NodeId) -> Option<Rect> {
+        let band = |band: f32| if band.is_finite() { band.max(0.) } else { 0. };
+        let mut at = self.node(id).parent;
+        let fade = loop {
+            let node = at?;
+            let style = &self.node(node).style;
+            if style
+                .fade_edges
+                .iter()
+                .chain(&style.fade_edges_x)
+                .any(|edge| band(*edge) > 0.)
+            {
+                break node;
+            }
+            at = self.node(node).parent;
+        };
+        let style = &self.node(fade).style;
+        let edge = |band_at: f32, inset: f32| match band(band_at) > 0. {
+            true => band(band_at) + band(inset),
+            false => 0.,
+        };
+        let top = edge(style.fade_edges[0], style.fade_insets[0]);
+        let bottom = edge(style.fade_edges[1], style.fade_insets[1]);
+        let left = edge(style.fade_edges_x[0], style.fade_insets_x[0]);
+        let right = edge(style.fade_edges_x[1], style.fade_insets_x[1]);
+        let bounds = self.world(fade).0;
+        let scale = match self.pixel_scale > 0. {
+            true => self.pixel_scale,
+            false => 1.,
+        };
+        let x0 = ((bounds.x + left) * scale).ceil() / scale;
+        let y0 = ((bounds.y + top) * scale).ceil() / scale;
+        let x1 = ((bounds.x + bounds.width - right) * scale).floor() / scale;
+        let y1 = ((bounds.y + bounds.height - bottom) * scale).floor() / scale;
+        (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
     }
     /// What backdrop blur `id`, its box `bounds` in the window, paints there:
     /// its ink's reach past its own box, on each side, added to `bounds`, and
@@ -14006,7 +14055,7 @@ impl Scene {
             // only the view's band it reaches, and what's beside it still moves.
             let usable: Vec<Rect> = match (clip, isolated) {
                 (Some(clip), false) => self
-                    .clear_of_blurs(clip)
+                    .clear_of_blurs(id, clip)
                     .into_iter()
                     .filter(|clear| dx.abs() < clear.width && dy.abs() < clear.height)
                     .collect(),
