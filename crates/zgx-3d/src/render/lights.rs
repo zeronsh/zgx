@@ -7,7 +7,8 @@
 //!
 //! The lists go up in one storage buffer, read as `vec4<u32>`s (the
 //! shader's `clusters`): a header (the grid's scales and slicing, the
-//! camera's facing, where each part starts), the lights three words each,
+//! camera's facing, where each part starts, its tiles and slices), the
+//! lights three words each,
 //! each cluster's first index and count two to a word, and the indices four
 //! to a word. Binned, and written, only on a frame where a light, the
 //! camera or the view's size changed.
@@ -154,7 +155,7 @@ pub(super) fn prepare(
     let f = f32::to_bits;
     let words = &mut lights.words;
     words.clear();
-    let base_lights = 3;
+    let base_lights = 4;
     let base_clusters = base_lights + 3 * binned.lights.len() as u32;
     let base_indices = base_clusters + CLUSTERS.div_ceil(2) as u32;
     words.push([
@@ -175,6 +176,7 @@ pub(super) fn prepare(
         base_indices,
         binned.lights.len() as u32,
     ]);
+    words.push([TILES_X, TILES_Y, super::clusters::SLICES, 0]);
     words.extend(binned.lights.iter().flat_map(|l| l.map(|v| v.map(f))));
     words.extend(
         binned
