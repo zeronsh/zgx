@@ -69,8 +69,9 @@ pub(crate) fn compile(job: &Job<'_>) -> Option<Result<Vec<u8>, String>> {
 }
 
 /// `job` compiled in this process, where no child can be started (as
-/// wgpu's Direct3D 12 compiles an app's shader then).
-#[cfg(d3d11)]
+/// wgpu's Direct3D 12 compiles an app's shader then), and for tests
+/// (`precompiled_shaders_match`).
+#[cfg(any(d3d11, test))]
 pub(crate) fn compile_here(job: &Job<'_>) -> Result<Vec<u8>, String> {
     child_compile(fxc()?, &encode(job))
 }
