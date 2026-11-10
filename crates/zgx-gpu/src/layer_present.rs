@@ -1483,6 +1483,16 @@ impl Layer {
         });
         let drawable = match ready {
             Some(drawable) => drawable,
+            // A layer a `CAMetalDisplayLink` drives is never asked for one
+            // (Metal raises if it is): before the link's first update this
+            // frame goes to the tiles instead.
+            None if drawables.metal_link.is_some() => {
+                crate::present_log::log(|| "metal-link: no drawable yet, a tile frame".into());
+                zgx::profile::note(|| {
+                    "metal link: no drawable handed over yet, drawn to tiles".into()
+                });
+                return None;
+            }
             None => drawables.layer.nextDrawable()?,
         };
         if let Some(prefetch) = &mut drawables.prefetch {
