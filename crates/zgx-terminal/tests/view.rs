@@ -1277,6 +1277,8 @@ fn cells_are_whole_device_pixels_at_any_scale() {
 #[test]
 fn lines_trickling_in_show_on_their_rows() {
     let ui = Ui::new(640., 360.);
+    // No reader yet, as a desktop starts.
+    ui.set_assistive_technology(false);
     let term = Terminal::new(&ui.runtime, TerminalOptions::default());
     let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
     let mut app = Harness {
@@ -1351,6 +1353,38 @@ fn lines_trickling_in_show_on_their_rows() {
             );
         }
     }
+    // With no reader, the rows' nodes kept their places as the screen
+    // scrolled (each drawn at its line): not top to bottom now. A reader
+    // listening, they are, as it meets them.
+    // The rows as their container holds them, which is the order a reader
+    // meets them in: its children's places down the screen.
+    let in_screen_order = |app: &Harness| {
+        let scene = app.ui.scene.borrow();
+        let first = scene
+            .paint_items()
+            .find(|item| matches!(item.kind, NodeKind::Canvas(_)))
+            .expect("a row")
+            .id;
+        let mut rows = first;
+        while scene.children(rows).len() < 4 {
+            rows = scene.parent(rows).expect("the rows' container");
+        }
+        let ys: Vec<f32> = (scene.children(rows).iter())
+            .map(|id| scene.transformed_bounds(*id).y)
+            .collect();
+        ys.windows(2).all(|pair| pair[0] < pair[1])
+    };
+    assert!(
+        !in_screen_order(&app),
+        "the nodes moved as the screen scrolled: {:?} listening {}",
+        shown(&app),
+        app.ui.assistive_technology()
+    );
+    app.ui.set_assistive_technology(true);
+    app.ui.prepare_frame();
+    assert!(in_screen_order(&app), "{:?}", shown(&app));
+    feed(&app, b"line after\r\n");
+    assert!(in_screen_order(&app), "{:?}", shown(&app));
     term.close();
 }
 

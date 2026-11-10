@@ -98,6 +98,9 @@ struct Engine {
     /// then).
     pictures: Signal<Rc<[Picture]>>,
     pictured: Signal<bool>,
+    /// Assistive technology reads the UI: the rows' nodes keep screen order
+    /// for it (`view`), which a scroll otherwise needn't change.
+    listening: Signal<bool>,
     /// Whether `pictured` holds, read as each paint begins; and the
     /// pictures a paint worked out, for its batch to show.
     any_pictures: Cell<bool>,
@@ -216,6 +219,7 @@ impl EngineTerminal {
             caret: runtime.signal((PAD_X, PAD_Y)),
             pictures: runtime.signal(Rc::from([])),
             pictured: runtime.signal(false),
+            listening: runtime.signal(false),
             any_pictures: Cell::new(false),
             pictures_due: Cell::new(None),
             preedit: runtime.signal(String::new()),
@@ -1759,19 +1763,26 @@ fn view(engine: Rc<Engine>) -> View {
                 let layout = engine.layout.clone();
                 let order = engine.order.clone();
                 let pictured = engine.pictured.clone();
+                let listening = engine.listening.clone();
                 move || {
                     let (_, generation) = layout.get();
                     let pictured = pictured.get();
-                    order.with(|order| {
-                        let rows = order.iter().map(|slot| (*slot, generation));
-                        if !pictured {
-                            return rows.collect::<Vec<_>>();
-                        }
-                        std::iter::once((UNDER, 0))
-                            .chain(rows)
-                            .chain(std::iter::once((OVER, 0)))
-                            .collect()
-                    })
+                    // Each slot is drawn at its line whatever its place among
+                    // the nodes: only a reader meets them in that order. With
+                    // none, they keep theirs, and a scroll moves no node.
+                    let slots: Vec<usize> = if listening.get() {
+                        order.with(|order| order.to_vec())
+                    } else {
+                        (0..order.with_untracked(|order| order.len())).collect()
+                    };
+                    let rows = slots.into_iter().map(|slot| (slot, generation));
+                    if !pictured {
+                        return rows.collect::<Vec<_>>();
+                    }
+                    std::iter::once((UNDER, 0))
+                        .chain(rows)
+                        .chain(std::iter::once((OVER, 0)))
+                        .collect()
                 }
             },
             move |(slot, _), _cx| match slot {
@@ -1949,6 +1960,17 @@ fn view(engine: Rc<Engine>) -> View {
                     if let Some(scene) = scene {
                         remeasure.measure(&scene.borrow());
                         remeasure.fit(remeasure.size.get());
+                    }
+                });
+                handle.retain(effect);
+            }
+            // The rows in screen order while a reader listens.
+            if let Some(at) = handle.observe_assistive_technology() {
+                let listening = engine.listening.clone();
+                let effect = engine.runtime.effect(move || {
+                    let now = at.get();
+                    if listening.with_untracked(|was| *was != now) {
+                        listening.set(now);
                     }
                 });
                 handle.retain(effect);
