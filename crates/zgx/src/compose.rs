@@ -8423,6 +8423,11 @@ impl NodeHandle {
             .contains(self.node)
             .then(|| ui.observe_size(self.node))
     }
+    /// Whether assistive technology reads the UI (`Ui::assistive_technology`),
+    /// as it changes: for what keeps an order only readers meet.
+    pub fn observe_assistive_technology(&self) -> Option<Signal<bool>> {
+        Some(self.ui.upgrade()?.assistive())
+    }
     /// A number that changes when text's geometry may have: the window's
     /// scale factor (`Scene::pixel_scale`) or the font backend changed. For
     /// what measures text by device pixels, to measure again.

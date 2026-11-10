@@ -153,7 +153,8 @@ pub(crate) struct RowPaint {
     /// Lines over the text: strikes and the cursor's bars, and underlines
     /// in a style or colour of their own (`UnderlineStyle`).
     pub lines: Vec<Fill>,
-    /// The row's text, for assistive technology.
+    /// The row's text, for assistive technology: empty while none listens
+    /// (rows are built again as one starts, `view::Engine::paint`).
     pub text: String,
 }
 
@@ -199,10 +200,11 @@ pub(crate) fn row(
     metrics: Metrics,
     cursor: Option<CursorAt>,
     selection: Option<&SelectionRange>,
+    reading: bool,
 ) -> RowPaint {
-    let (paint, styled) = row_built::<false>(term, row, look, metrics, cursor, selection);
+    let (paint, styled) = row_built::<false>(term, row, look, metrics, cursor, selection, reading);
     if styled {
-        return row_styled(term, row, look, metrics, cursor, selection);
+        return row_styled(term, row, look, metrics, cursor, selection, reading);
     }
     paint
 }
@@ -219,8 +221,9 @@ fn row_styled(
     metrics: Metrics,
     cursor: Option<CursorAt>,
     selection: Option<&SelectionRange>,
+    reading: bool,
 ) -> RowPaint {
-    row_built::<true>(term, row, look, metrics, cursor, selection).0
+    row_built::<true>(term, row, look, metrics, cursor, selection, reading).0
 }
 
 /// The row at viewport `row`, and whether it has an underline in a style or
@@ -234,6 +237,7 @@ fn row_built<const STYLED: bool>(
     metrics: Metrics,
     cursor: Option<CursorAt>,
     selection: Option<&SelectionRange>,
+    reading: bool,
 ) -> (RowPaint, bool) {
     let grid = term.grid();
     let line = Line(row as i32 - grid.display_offset() as i32);
@@ -242,10 +246,10 @@ fn row_built<const STYLED: bool>(
     let (width, height) = (metrics.cell_width, metrics.cell_height);
     let palette = &look.palette;
     let background = palette.background;
-    // Its text a cell at a time: room for the row at once, not grown as it
-    // fills.
+    // Its text a cell at a time, while a reader listens (`reading`): room
+    // for the row at once, not grown as it fills.
     let mut paint = RowPaint {
-        text: String::with_capacity(columns),
+        text: String::with_capacity(if reading { columns } else { 0 }),
         ..RowPaint::default()
     };
     // The underlines its runs start with, and whether one is in a colour of
@@ -297,7 +301,7 @@ fn row_built<const STYLED: bool>(
     for column in 0..columns {
         let cell: &Cell = &cells[Column(column)];
         let flags = cell.flags;
-        if flags.contains(Flags::WIDE_CHAR_SPACER) {
+        if reading && flags.contains(Flags::WIDE_CHAR_SPACER) {
             paint.text.push(' ');
         }
         let (mut fg, mut bg) = match resolved {
@@ -399,7 +403,9 @@ fn row_built<const STYLED: bool>(
             continue;
         }
         let c = cell.c;
-        paint.text.push(if c == '\t' { ' ' } else { c });
+        if reading {
+            paint.text.push(if c == '\t' { ' ' } else { c });
+        }
         if flags.contains(Flags::STRIKEOUT) {
             let span = if flags.contains(Flags::WIDE_CHAR) {
                 2.

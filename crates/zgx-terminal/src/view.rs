@@ -138,6 +138,9 @@ struct Engine {
     last_selection: RefCell<Option<SelectionRange>>,
     last_offset: Cell<usize>,
     last_focus: Cell<bool>,
+    /// Whether assistive technology read the rows last paint: their text
+    /// is built only while it does.
+    last_reading: Cell<bool>,
     /// The content box last laid out, in points.
     size: Cell<(f32, f32)>,
     /// A press being dragged: selecting, or reported to the program.
@@ -239,6 +242,7 @@ impl EngineTerminal {
             last_selection: RefCell::new(None),
             last_offset: Cell::new(0),
             last_focus: Cell::new(false),
+            last_reading: Cell::new(false),
             size: Cell::new((0., 0.)),
             pressed: Cell::new(None),
             scroll_rest: Cell::new(0.),
@@ -467,6 +471,13 @@ impl Engine {
             return;
         }
         let focused = self.focused.get();
+        // A screen reader listening: the rows' text is worked out (and what
+        // is new told), for every row again as it starts.
+        let listening = self
+            .root
+            .borrow()
+            .as_ref()
+            .is_some_and(NodeHandle::assistive_technology);
         let mut changed = Vec::new();
         let caret;
         let output;
@@ -490,6 +501,7 @@ impl Engine {
             let mut all = self.full.replace(false)
                 || offset != self.last_offset.replace(offset)
                 || focused != self.last_focus.replace(focused)
+                || listening != self.last_reading.replace(listening)
                 || selection != *self.last_selection.borrow();
             // Rows drawn again for the view's sake (mounted, scrolled back,
             // focus, a selection) are no news to a reader.
@@ -524,7 +536,15 @@ impl Engine {
                     });
                     changed.push((
                         row,
-                        paint::row(&term, row, look, metrics, cursor, selection.as_ref()),
+                        paint::row(
+                            &term,
+                            row,
+                            look,
+                            metrics,
+                            cursor,
+                            selection.as_ref(),
+                            listening,
+                        ),
                     ));
                 }
             });
@@ -534,12 +554,6 @@ impl Engine {
             term.reset_damage();
         }
         self.fit_slots(screen_rows);
-        // Worked out only while a screen reader listens.
-        let listening = self
-            .root
-            .borrow()
-            .as_ref()
-            .is_some_and(NodeHandle::assistive_technology);
         let every_row = changed.len() == screen_rows;
         let shown: Vec<Rc<RowPaint>> = if every_row || (output && listening) {
             let rows = self.rows.borrow();
@@ -1876,6 +1890,19 @@ fn view(engine: Rc<Engine>) -> View {
                 engine.measure(&scene.borrow());
             }
             *engine.root.borrow_mut() = Some(handle.clone());
+            // A reader starting or stopping: the rows built again, their
+            // text with them or without.
+            if let Some(at) = handle.observe_assistive_technology() {
+                let painted = engine.clone();
+                let mut was = at.with_untracked(|listening| *listening);
+                let effect = engine.runtime.effect(move || {
+                    let now = at.get();
+                    if std::mem::replace(&mut was, now) != now {
+                        painted.paint();
+                    }
+                });
+                handle.retain(effect);
+            }
             // Measured again as the window's scale factor changes.
             if let Some(geometry) = handle.observe_text_geometry() {
                 let remeasure = engine.clone();
