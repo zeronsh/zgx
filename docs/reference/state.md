@@ -635,7 +635,7 @@ return ui.column {
 | `navigate(name, params?)` | to a route by its name and params (`navigate("thread", { id = 7 })`): an app's route names and params are typed, so a misspelling is a type error; a name with no such route, or a missing param, is an error as it runs |
 | `replace(name, params?)` | the same, in place of the route now |
 | `open(path, { replace? }?)` | to the route a path matches (`open("/thread/7")`), as a deep link goes; a path no route matches is an error |
-| `back()`, `forward()`, `can_back`, `can_forward` | the history, and whether there is any behind or ahead |
+| `back()`, `forward()`, `can_back`, `can_forward` | the history, and whether there is any behind or ahead. It keeps the last 100 places behind, as a browser keeps a tab's |
 | `is(name)` | whether the route is `name` now, tracked |
 | `view(cases, props?)` | what each route shows: a node, or a function of its params made again as they change. It takes the mouse's back and forward buttons and a trackpad's swipe between pages (`grow = 1` unless sized) |
 

@@ -105,6 +105,16 @@ local function router(spec)
     local self = {}
     self.route = new_state(route_at(spec.initial or "/", 2))
     local behind, ahead = {}, {}
+    -- A place behind, the oldest let go past the last 100, as a browser
+    -- keeps a tab's. Each is a few small tables made as the app moves, among
+    -- what that move made and dropped: kept without end, they hold a page of
+    -- the heap each long after the rest of it is free.
+    local function leave(route)
+        table.insert(behind, route)
+        if #behind > 100 then
+            table.remove(behind, 1)
+        end
+    end
     local depth = new_state({ 0, 0 })
     local function moved()
         depth:set({ #behind, #ahead })
@@ -121,7 +131,7 @@ local function router(spec)
             return
         end
         ui.batch(function()
-            table.insert(behind, self.route:peek())
+            leave(self.route:peek())
             table.clear(ahead)
             self.route:set(next)
             moved()
@@ -155,7 +165,7 @@ local function router(spec)
             return
         end
         ui.batch(function()
-            table.insert(behind, self.route:peek())
+            leave(self.route:peek())
             self.route:set(table.remove(ahead))
             moved()
         end)

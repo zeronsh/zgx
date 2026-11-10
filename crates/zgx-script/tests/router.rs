@@ -148,6 +148,42 @@ fn history_goes_back_and_forward() {
     );
 }
 
+/// The history keeps the last 100 places behind: an app moving all day
+/// (a chat switcher's every step) holds no more of them than that.
+#[test]
+fn history_keeps_the_last_hundred_places_behind() {
+    let mut h = Harness::inline(
+        r##"local router = ui.router { routes = { home = "/", thread = "/thread/:id" } }
+        local moved = ui.state("moved", "")
+        return ui.column {
+            ui.text { id = "where", function() return router.route:get().path end },
+            ui.text { id = "moved", "{moved}" },
+            ui.button { id = "go", w = 40, h = 20, "go", on_click = function()
+                for i = 1, 150 do router.navigate("thread", { id = i }) end
+            end },
+            ui.button { id = "all-back", w = 40, h = 20, "back", on_click = function()
+                local steps = 0
+                while router.can_back:peek() do router.back() steps += 1 end
+                moved:set(`{steps} {router.route:peek().path}`)
+            end },
+            ui.button { id = "all-forward", w = 40, h = 20, "fwd", on_click = function()
+                local steps = 0
+                while router.can_forward:peek() do router.forward() steps += 1 end
+                moved:set(`{steps} {router.route:peek().path}`)
+            end },
+        }"##,
+    );
+    h.click("go");
+    assert_eq!(h.text("where"), "/thread/150");
+    h.click("all-back");
+    assert_eq!(h.text("moved"), "100 /thread/50", "the oldest let go");
+    // What was behind is all ahead, and back again.
+    h.click("all-forward");
+    assert_eq!(h.text("moved"), "100 /thread/150");
+    h.click("all-back");
+    assert_eq!(h.text("moved"), "100 /thread/50");
+}
+
 #[test]
 fn a_swipe_between_pages_over_the_view_goes_back_and_forward() {
     use zgx::input::{Navigation, ScrollGesture};
