@@ -1,12 +1,34 @@
 #!/usr/bin/env python3
 """Measurement integrity: half-rate, idle gaps, quantization and missing evidence."""
 import argparse
+import io
+from unittest.mock import MagicMock
 from pathlib import Path
 import tempfile
 from unittest.mock import patch
 import unittest
 import scroll
 import scroll_motion
+
+
+class InspectSocketPaths(unittest.TestCase):
+    def test_explicit_directory_does_not_fall_back_to_another_server(self):
+        with patch.dict(scroll.os.environ, {'ZGX_INSPECT_DIR':'/owned/inspect'}):
+            self.assertEqual(scroll.inspect_socket_paths(123),[Path('/owned/inspect/123.sock')])
+
+    def test_short_directory_is_tried_after_the_normal_temp_directory(self):
+        with patch.dict(scroll.os.environ, {'ZGX_INSPECT_DIR':''}), patch.object(scroll.tempfile,'gettempdir',return_value='/long/temp'):
+            paths=scroll.inspect_socket_paths(123)
+        self.assertEqual(paths,[Path(f'/long/temp/zgx-inspect-{scroll.os.getuid()}/123.sock'),Path(f'/tmp/zgx-inspect-{scroll.os.getuid()}/123.sock')])
+
+    def test_client_connects_to_the_short_socket_when_the_old_path_is_absent(self):
+        old,new=MagicMock(),MagicMock()
+        for connection in (old,new):connection.__enter__.return_value=connection
+        old.connect.side_effect=FileNotFoundError()
+        new.makefile.return_value.__enter__.return_value=io.StringIO('{"ok":true,"data":{"frame":7}}\n')
+        with patch.object(scroll,'inspect_socket_paths',return_value=[Path('/long/123.sock'),Path('/short/123.sock')]),patch.object(scroll.socket,'socket',side_effect=[old,new]):
+            self.assertEqual(scroll.request(123,'mark')['data']['frame'],7)
+        new.connect.assert_called_once_with('/short/123.sock')
 
 
 class ScrollMetrics(unittest.TestCase):
