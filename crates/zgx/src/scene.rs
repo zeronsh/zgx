@@ -13675,8 +13675,8 @@ impl Scene {
     /// the bar blurs it. Beside a bar narrower than the view, the content
     /// copies too: a part each side. All of `clip` if none touches it; none
     /// if little's left.
-    fn clear_of_blurs(&self, id: NodeId, clip: Rect) -> Vec<Rect> {
-        let mut clear = vec![clip];
+    fn clear_of_blurs(&self, id: NodeId, clip: Rect) -> smallvec::SmallVec<[Rect; 1]> {
+        let mut clear: smallvec::SmallVec<[Rect; 1]> = smallvec::smallvec![clip];
         let mut touched = false;
         for blur in &self.blur_nodes {
             let (bounds, effects, _) = self.world(*blur);
@@ -13690,10 +13690,10 @@ impl Scene {
             touched = true;
             clear = clear
                 .into_iter()
-                .flat_map(|part| -> Vec<Rect> {
+                .flat_map(|part| -> smallvec::SmallVec<[Rect; 4]> {
                     match part.intersection(wide) {
                         Some(inner) => rect_minus(part, inner).collect(),
-                        None => vec![part],
+                        None => smallvec::smallvec![part],
                     }
                 })
                 .collect();
@@ -14053,18 +14053,18 @@ impl Scene {
             let isolated = layered;
             // Clear of what blurs what's behind it: a glass bar over the view takes
             // only the view's band it reaches, and what's beside it still moves.
-            let usable: Vec<Rect> = match (clip, isolated) {
+            let usable: smallvec::SmallVec<[Rect; 1]> = match (clip, isolated) {
                 (Some(clip), false) => self
                     .clear_of_blurs(id, clip)
                     .into_iter()
                     .filter(|clear| dx.abs() < clear.width && dy.abs() < clear.height)
                     .collect(),
-                _ => Vec::new(),
+                _ => smallvec::SmallVec::new(),
             };
             // What of the view the parts leave repaints.
             if let Some(clip) = clip
                 && !usable.is_empty()
-                && usable != [clip]
+                && usable[..] != [clip]
             {
                 let mut rest = vec![clip];
                 for part in &usable {
