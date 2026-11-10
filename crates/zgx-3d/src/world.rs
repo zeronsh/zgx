@@ -5,6 +5,8 @@ use crate::{
     math::{Mat4, Transform, Vec3, vec3},
 };
 use std::{cell::RefCell, rc::Rc};
+#[cfg(feature = "lighting")]
+mod lighting;
 
 /// How a surface takes light: a metallic-roughness material, as glTF's.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -490,6 +492,8 @@ pub(crate) struct Inner {
     /// The app's GPU data and compute passes, once it has any.
     #[cfg(feature = "compute")]
     pub(crate) data: Option<Box<crate::compute::Data>>,
+    #[cfg(feature = "lighting")]
+    pub(crate) lighting: lighting::Lighting,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -1168,6 +1172,8 @@ impl World {
             caps: std::cell::Cell::new(None),
             #[cfg(feature = "compute")]
             data: None,
+            #[cfg(feature = "lighting")]
+            lighting: Default::default(),
         }));
         let view = zgx_gpu::viewport::view(crate::painter::Painter::new(
             crate::render::Renderer::new(Rc::downgrade(&inner)),

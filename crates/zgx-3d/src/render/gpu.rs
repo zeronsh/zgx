@@ -121,6 +121,9 @@ pub(super) struct Gpu {
     /// Samples a pixel (`World::set_samples`).
     pub(super) samples: u32,
     pub(super) frame: u64,
+    /// Clustered lights' lists and bindings (`lights`).
+    #[cfg(feature = "lighting")]
+    pub(super) lights: super::lights::Lights,
 }
 
 impl Gpu {
@@ -341,6 +344,8 @@ impl Gpu {
             written: 0,
             samples,
             frame: 0,
+            #[cfg(feature = "lighting")]
+            lights: Default::default(),
         }
     }
 }

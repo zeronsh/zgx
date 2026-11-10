@@ -27,6 +27,8 @@ impl Variant {
     pub(super) const COATED: u16 = 1 << 9;
     /// It reflects as its specular says (`World::set_specular`).
     pub(super) const SPECULAR: u16 = 1 << 10;
+    /// Its world shades point and spot lights through clusters (`lights`).
+    pub(super) const CLUSTERED: u16 = 1 << 11;
     // `Extras::kinds`' bits, shifted, are these (see `variant_of`).
     pub(super) const _KINDS: () = assert!(
         Self::TRANSMITTING == crate::world::GLASS as u16 * Self::TRANSMITTING
@@ -69,6 +71,9 @@ impl Variant {
     }
     pub(super) fn specular(self) -> bool {
         self.0 & Self::SPECULAR != 0
+    }
+    pub(super) fn clustered(self) -> bool {
+        self.0 & Self::CLUSTERED != 0
     }
 }
 /// Hashes a `Variant` by its own bits: they're few and its, and the

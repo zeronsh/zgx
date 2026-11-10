@@ -23,6 +23,8 @@ gltf = ["dep:serde_json", "zgx-gpu/png", "zgx-gpu/jpeg"]
 # The app's GPU data and compute passes (`World::add_buffer`,
 # `add_texture`, `add_compute`): WGSL checked by the naga wgpu brings.
 compute = []
+# The lighting milestone (design-3d-aaa.md, 6.3): clustered lights.
+lighting = []
 
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop", default-features = false }

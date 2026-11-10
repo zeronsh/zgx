@@ -13,12 +13,16 @@
 //! (the sun's map), `behind` (what light passing through reads) and `draw`
 //! (runs of meshes in a pass).
 mod behind;
+#[cfg(feature = "lighting")]
+mod clusters;
 mod cull;
 mod draw;
 mod frame;
 mod gpu;
 mod graph;
 mod instances;
+#[cfg(feature = "lighting")]
+mod lights;
 mod materials;
 mod pipelines;
 mod shader;
@@ -122,7 +126,7 @@ fn prepare<'a>(
     (device, queue): (&wgpu::Device, &wgpu::Queue),
     world: &Inner,
     view: Mat4,
-    (lit, transmits): (bool, bool),
+    (lit, transmits, clustered): (bool, bool, bool),
     culls: bool,
 ) -> Vec<&'a crate::world::Drawn<'a>> {
     // Meshes by geometry, translucent ones after, back to front: by a
@@ -484,6 +488,13 @@ fn prepare<'a>(
         });
         start = end;
     }
+    // A clustered world's pipelines read its lights' lists: its runs'
+    // alone, so the meshes' loop above reads nothing more.
+    if clustered {
+        for run in runs.iter_mut() {
+            run.variant = run.variant.with(Variant::CLUSTERED, true);
+        }
+    }
     scratch.ordered = (!runs.iter().any(|run| run.glass)).then_some(world.ordering);
     drawn
 }
@@ -602,6 +613,17 @@ impl Viewport for Renderer {
         let view = camera.view();
         let view_projection = camera.projection(aspect) * view;
         let mut uniforms = frame_uniforms(&world, view_projection, encode);
+        #[cfg(feature = "lighting")]
+        let clustered = lights::prepare(
+            gpu,
+            &world,
+            (view, camera.projection(aspect)),
+            size,
+            (frame.device, frame.queue),
+            &mut uniforms,
+        );
+        #[cfg(not(feature = "lighting"))]
+        let clustered = false;
         let scratch = &mut self.scratch;
         let sun = world
             .shadows
@@ -635,7 +657,7 @@ impl Viewport for Renderer {
                     (frame.device, frame.queue),
                     &world,
                     view,
-                    (lit, transmits),
+                    (lit, transmits, clustered),
                     culls,
                 );
                 // The sun's view, fit to the opaque meshes' boxes where this
@@ -667,6 +689,8 @@ impl Viewport for Renderer {
         if let Some(environment) = world.environment.as_ref() {
             gpu.environment(frame.device, frame.queue, environment);
         }
+        #[cfg(feature = "lighting")]
+        lights::bind(gpu, frame.device, lit);
         frame
             .queue
             .write_buffer(&gpu.uniforms, 0, bytemuck::bytes_of(&uniforms));
@@ -709,6 +733,8 @@ impl Viewport for Renderer {
             Some(bind) if lit => bind,
             _ => &gpu.bind,
         };
+        #[cfg(feature = "lighting")]
+        let frame_bind = gpu.lights.frame_bind(lit).unwrap_or(frame_bind);
         let clear = world
             .background
             .map_or(wgpu::Color::TRANSPARENT, |[r, g, b, a]| wgpu::Color {

@@ -88,8 +88,11 @@
 //R         lit = shade_specular(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
         // A coat's own highlights: glass's (a black dielectric's alone).
 //L         var coat_lit = shade(vec3(0.0), 0.0, coat_rough, coat_n, v, -frame.sun_direction.xyz, sun);
-        for (var i = 0u; i < u32(frame.params.x); i++) {
-            let light = frame.points[i];
+//Y         for (var i = 0u; i < u32(frame.params.x); i++) {
+//Y             let light = frame.points[i];
+//X         let span = cluster_span(in.position.xy, in.world);
+//X         for (var i = span.x; i < span.y; i++) {
+//X             let light = cluster_light(i);
             let to = light[0].xyz - in.world;
             let distance = length(to);
             let falloff = pow(clamp(1.0 - pow(distance / light[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);

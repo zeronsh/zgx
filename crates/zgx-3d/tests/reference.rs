@@ -188,7 +188,8 @@ fn sky() -> Option<Environment> {
 }
 
 fn scenes() -> Vec<Scene> {
-    vec![
+    #[cfg_attr(not(feature = "lighting"), allow(unused_mut))]
+    let mut scenes = vec![
         Scene {
             name: "lighting",
             tolerance: CLOSE,
@@ -373,7 +374,60 @@ fn scenes() -> Vec<Scene> {
         tone("tone_neutral", ToneMapping::Neutral),
         tone("tone_aces", ToneMapping::Aces),
         tone("tone_linear", ToneMapping::Linear),
-    ]
+    ];
+    #[cfg(feature = "lighting")]
+    scenes.push(clustered_lights());
+    scenes
+}
+
+/// 48 point and spot lights over a floor and two meshes, shaded through
+/// clusters (the `lighting` feature), a sun casting shadows.
+#[cfg(feature = "lighting")]
+fn clustered_lights() -> Scene {
+    Scene {
+        name: "lights_clustered",
+        tolerance: EDGES,
+        build: |world| {
+            let ball = world.add(
+                Object::mesh(
+                    Geometry::sphere(0.5, 48),
+                    Material::rgb(0xe0e0e0).with(0., 0.35),
+                )
+                .at([-0.7, 0.5, 0.]),
+            );
+            let cube = world.add(
+                Object::mesh(
+                    Geometry::cuboid(0.8, 0.8, 0.8),
+                    Material::rgb(0xc0c0c0).with(0.9, 0.3),
+                )
+                .at([0.8, 0.4, -0.3]),
+            );
+            let f = floor(world);
+            sun(world, [-0.4, -1., -0.6], 0.4);
+            for i in 0..48 {
+                let (x, z) = ((i % 8) as f32 * 0.8 - 2.8, (i / 8) as f32 * 0.9 - 2.4);
+                let hue = i as f32 * 0.37;
+                let light = world.add_light(Light::Point {
+                    position: vec3(x, 0.25 + (i % 3) as f32 * 0.3, z),
+                    color: [
+                        0.5 + 0.5 * hue.cos(),
+                        0.5 + 0.5 * (hue + 2.1).cos(),
+                        0.5 + 0.5 * (hue + 4.2).cos(),
+                    ],
+                    intensity: 0.8,
+                    range: 0.6 + (i % 5) as f32 * 0.2,
+                });
+                if i % 7 == 0 {
+                    world.set_spot(light, Some(Spot::new([0.3, -1., 0.2], 0.2, 0.5)));
+                }
+            }
+            vec![ball, cube, f]
+        },
+        shadows: true,
+        tone: ToneMapping::Neutral,
+        environment: || None,
+        camera: camera([0., 2.6, 3.6], [0., 0.2, -0.3]),
+    }
 }
 
 fn tone(name: &'static str, tone: ToneMapping) -> Scene {

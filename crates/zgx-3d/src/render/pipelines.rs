@@ -25,7 +25,13 @@ pub(super) fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant:
         variant.textured().then_some(Extent::Maps)
     };
     make_layout(gpu, device, extent);
+    #[cfg(feature = "lighting")]
+    if variant.clustered() {
+        super::lights::make_layouts(gpu, device);
+    }
     let group0 = match &gpu.environment_layout {
+        #[cfg(feature = "lighting")]
+        _ if variant.clustered() => super::lights::layout_of(gpu, variant.lit()),
         Some((layout, _)) if variant.lit() => layout,
         _ => &gpu.layout,
     };
