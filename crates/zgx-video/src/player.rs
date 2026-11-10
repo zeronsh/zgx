@@ -382,6 +382,8 @@ pub(crate) fn run(
         // frame asked for before it in the same batch.
         let mut seek = None;
         let mut result = Ok(());
+        // At its end, not looping: `Stopped` once its last frame is drawn.
+        let mut ended = false;
         for ask in asked {
             match ask {
                 Ask::Quit => return,
@@ -489,9 +491,11 @@ pub(crate) fn run(
                         ));
                         seek = Some(into);
                     } else {
+                        // Told once the last frame is drawn: stopped, it
+                        // shows its last, not the one before it.
                         playing = None;
                         seek = Some(last);
-                        preview.say(Event::Stopped);
+                        ended = true;
                     }
                 } else {
                     seek = Some(due.max(at + 1));
@@ -528,6 +532,9 @@ pub(crate) fn run(
                     stale = true;
                 }
             }
+        }
+        if ended && result.is_ok() {
+            preview.say(Event::Stopped);
         }
         if let Err(error) = result {
             playing = None;
@@ -672,39 +679,47 @@ impl Player {
             };
             while woken.recv().await.is_some() {
                 // The latest frame only: a picture each frame is enough to show.
+                // A frame before another event is told before it: a stop
+                // after the last frame comes after that frame.
                 let mut frame = None;
                 for event in told.try_iter() {
                     match &event {
                         Event::Frame { .. } => frame = Some(event),
                         other => {
+                            if let Some(shown) = frame.take() {
+                                this.show_frame(&shown, &mut heard);
+                            }
                             this.keep(other);
                             heard(other);
                         }
                     }
                 }
-                // The latest pixel buffer, before the frame it is of says so.
-                #[cfg(target_os = "macos")]
-                if let Some((_, buffer)) = this.surfaces.try_iter().last() {
-                    // The picture shown, as bytes when asked for: read from
-                    // the buffer then, once, and not at all if no one asks.
-                    if let Ok(surface) = buffer.native_surface() {
-                        let (width, height) = (surface.width(), surface.height());
-                        this.surface.set(Some(Rc::new(surface)));
-                        if let Ok(image) =
-                            ImageData::on_demand_premultiplied(width, height, move || {
-                                buffer.to_rgba().into()
-                            })
-                        {
-                            this.image.set(Some(Arc::new(image)));
-                        }
-                    }
-                }
                 if let Some(event) = frame {
-                    this.keep(&event);
-                    heard(&event);
+                    this.show_frame(&event, &mut heard);
                 }
             }
         }
+    }
+    /// Tells `frame` (`Event::Frame`): its pixel buffer first, on macOS,
+    /// as the picture it shows.
+    fn show_frame<F: FnMut(&Event)>(&self, frame: &Event, heard: &mut F) {
+        // The latest pixel buffer, before the frame it is of says so.
+        #[cfg(target_os = "macos")]
+        if let Some((_, buffer)) = self.surfaces.try_iter().last() {
+            // The picture shown, as bytes when asked for: read from
+            // the buffer then, once, and not at all if no one asks.
+            if let Ok(surface) = buffer.native_surface() {
+                let (width, height) = (surface.width(), surface.height());
+                self.surface.set(Some(Rc::new(surface)));
+                if let Ok(image) = ImageData::on_demand_premultiplied(width, height, move || {
+                    buffer.to_rgba().into()
+                }) {
+                    self.image.set(Some(Arc::new(image)));
+                }
+            }
+        }
+        self.keep(frame);
+        heard(frame);
     }
     fn keep(&self, event: &Event) {
         match event {
