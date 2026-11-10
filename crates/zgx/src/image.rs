@@ -667,7 +667,9 @@ impl ImageData {
     pub fn resident(&self) -> Option<Resident> {
         let kept = self.pixels.kept.as_ref()?;
         kept.resident.fetch_add(1, Ordering::Relaxed);
-        Some(Resident(Arc::downgrade(&self.pixels)))
+        Some(Resident(std::mem::ManuallyDrop::new(Arc::downgrade(
+            &self.pixels,
+        ))))
     }
     /// Its pixels at least `size` large (a renderer's drawn size), shrunk
     /// and premultiplied, if they are decoded; else `None`, and they are
@@ -819,15 +821,25 @@ fn shed(keep: &Pixels) {
 }
 /// A renderer holding a kept file as a texture (`ImageData::resident`):
 /// while it lives, the file's decoded copy only duplicates that texture.
-pub struct Resident(std::sync::Weak<Pixels>);
+///
+/// Its drop is one call to `drop_resident`, which can't unwind: inline, its
+/// upgrade and the drops after it gave every drop of a renderer's texture
+/// entry a cleanup path, on scenes drawing pictures that keep no file too.
+pub struct Resident(std::mem::ManuallyDrop<std::sync::Weak<Pixels>>);
 impl Drop for Resident {
     fn drop(&mut self) {
-        if let Some(pixels) = self.0.upgrade()
-            && let Some(kept) = &*pixels.kept
-        {
-            kept.resident.fetch_sub(1, Ordering::Relaxed);
-        }
+        drop_resident(&mut self.0);
     }
+}
+#[inline(never)]
+extern "C" fn drop_resident(pixels: &mut std::mem::ManuallyDrop<std::sync::Weak<Pixels>>) {
+    if let Some(pixels) = pixels.upgrade()
+        && let Some(kept) = &*pixels.kept
+    {
+        kept.resident.fetch_sub(1, Ordering::Relaxed);
+    }
+    // SAFETY: once, from `Resident::drop`; nothing reads it after.
+    unsafe { std::mem::ManuallyDrop::drop(pixels) }
 }
 impl std::fmt::Debug for Resident {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
