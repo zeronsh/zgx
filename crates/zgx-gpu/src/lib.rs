@@ -4783,6 +4783,24 @@ struct BackdropWalk {
     frame: u64,
 }
 impl GpuRenderer {
+    /// A window frame's items with backdrop blurs or readers in it, its
+    /// damage grown first through what they filter or read: out of
+    /// `render_once`'s line, which most frames (with neither) never take.
+    #[inline(never)]
+    fn walk_through_filters<'s>(
+        &mut self,
+        scene: &'s Scene,
+        damage: &[Rect],
+        viewport: Rect,
+    ) -> Vec<zgx::scene::PaintItem<'s>> {
+        match scene.has_backdrop_readers() {
+            false => {
+                let reach = blur_damage(damage, &scene.backdrop_filters(), viewport, self.scale);
+                scene.layer_items_within(None, Some(&reach))
+            }
+            true => self.walk_over_readers(scene, damage, viewport),
+        }
+    }
     /// A window frame's items with backdrop readers in it, out of
     /// `render_once`'s line: the damage grown first through all each reader
     /// could read (`backdrop_read`, a pixel past it) as well as the blurs,
@@ -6371,14 +6389,7 @@ impl GpuRenderer {
             // With readers alone (no blur), what the frame draws is that
             // reach: `render_flat` takes it rather than work it out again.
             None if !self.fresh && start.is_none() && self.plane.is_none() && !self.in_layer => {
-                match scene.has_backdrop_readers() {
-                    false => {
-                        let reach =
-                            blur_damage(damage, &scene.backdrop_filters(), viewport, self.scale);
-                        (scene.layer_items_within(None, Some(&reach)), merged)
-                    }
-                    true => (self.walk_over_readers(scene, damage, viewport), merged),
-                }
+                (self.walk_through_filters(scene, damage, viewport), merged)
             }
             None => (scene.layer_items(start), merged),
         };
