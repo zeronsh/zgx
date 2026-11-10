@@ -105,6 +105,11 @@ zgx-desktop = { path = "../zgx-desktop" }
 # The benchmark workload of the vlist_luau example.
 zgx-workload = { path = "../../comparisons/workload" }
 
+# CoreVideo frames for `ScriptHost::surface` (tests/host_surfaces.rs).
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-core-foundation = "0.3.2"
+objc2-core-video = "0.3.2"
+
 [[test]]
 name = "luau_pages"
 path = "tests/luau_pages.rs"

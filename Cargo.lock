@@ -5294,6 +5294,8 @@ dependencies = [
  "icu_plurals",
  "libc",
  "memchr",
+ "objc2-core-foundation",
+ "objc2-core-video",
  "png 0.18.1",
  "pulldown-cmark",
  "rustc-hash 2.1.3",

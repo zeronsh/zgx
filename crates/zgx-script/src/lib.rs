@@ -2373,6 +2373,28 @@ impl ScriptHost {
     pub fn image(&self, name: &str, image: Option<std::sync::Arc<zgx::image::ImageData>>) {
         self.0.assets.set_hosted(name, image, &self.0.runtime);
     }
+    /// A frame the app shows as it is (a video's, as its decoder or
+    /// renderer made it), for `ui.image { src = "host:<name>" }`: drawn
+    /// from its own storage, with no bytes read back or uploaded, and
+    /// followed as it's replaced. Its `host:<name>` image, if the app sets
+    /// one too, is what reads its pixels (`bg_image`, `dither`,
+    /// `characters`) and what shows once this is `None`.
+    #[cfg(target_os = "macos")]
+    pub fn surface(
+        &self,
+        name: &str,
+        surface: Option<std::rc::Rc<zgx::native_surface::NativeSurface>>,
+    ) {
+        self.0.assets.set_surface(name, surface, &self.0.runtime);
+    }
+    /// The frame set as `host:<name>` ([`ScriptHost::surface`]), if any.
+    #[cfg(target_os = "macos")]
+    pub fn hosted_surface(
+        &self,
+        name: &str,
+    ) -> Option<std::rc::Rc<zgx::native_surface::NativeSurface>> {
+        self.0.assets.hosted_surface(name)
+    }
     /// The transport for `ui.fetch` (and remote images): the app owns the
     /// HTTP stack, headers and credentials (a token minted per request), and
     /// answers each `Request` with a `Response`, or an error message that

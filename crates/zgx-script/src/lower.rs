@@ -71,6 +71,10 @@ pub(crate) struct Assets {
     /// Images the host made (`ScriptHost::image`), as `host:<name>`
     /// sources: what shows one follows its version.
     hosted: std::cell::RefCell<HashMap<String, zgx::reactive::Signal<u64>>>,
+    /// Frames the host shows as they are (`ScriptHost::surface`), by
+    /// `host:<name>`: a `ui.image` of one draws it, with no bytes read.
+    #[cfg(target_os = "macos")]
+    surfaces: std::cell::RefCell<HashMap<String, Rc<zgx::native_surface::NativeSurface>>>,
 }
 /// A cached picture, its size, and when it was last shown.
 struct Cached<T> {
@@ -95,6 +99,8 @@ impl Default for Assets {
             failed: Default::default(),
             links: Default::default(),
             hosted: Default::default(),
+            #[cfg(target_os = "macos")]
+            surfaces: Default::default(),
         }
     }
 }
@@ -296,6 +302,45 @@ impl Assets {
         let version = self.hosted(&src, runtime);
         version.update(|v| *v = v.wrapping_add(1));
     }
+    /// The host sets (or, with None, clears) the frame `host:<name>`
+    /// shows as it is.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_surface(
+        &self,
+        name: &str,
+        surface: Option<Rc<zgx::native_surface::NativeSurface>>,
+        runtime: &zgx::reactive::Runtime,
+    ) {
+        let src = format!("host:{name}");
+        match surface {
+            Some(surface) => drop(self.surfaces.borrow_mut().insert(src.clone(), surface)),
+            None => drop(self.surfaces.borrow_mut().remove(&src)),
+        }
+        let version = self.hosted(&src, runtime);
+        version.update(|v| *v = v.wrapping_add(1));
+    }
+    /// The frame the host set as `host:<name>`, untracked.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn hosted_surface(
+        &self,
+        name: &str,
+    ) -> Option<Rc<zgx::native_surface::NativeSurface>> {
+        self.surfaces.borrow().get(&format!("host:{name}")).cloned()
+    }
+    /// The frame `src` (a `host:` one) shows as it is, followed as the host
+    /// replaces it.
+    #[cfg(target_os = "macos")]
+    fn surface(
+        &self,
+        src: &str,
+        runtime: &zgx::reactive::Runtime,
+    ) -> Option<Rc<zgx::native_surface::NativeSurface>> {
+        if !src.starts_with("host:") {
+            return None;
+        }
+        self.hosted(src, runtime).get();
+        self.surfaces.borrow().get(src).cloned()
+    }
     /// Whether the host set image `host:<name>`.
     pub(crate) fn is_hosted(&self, name: &str) -> bool {
         self.images.borrow().contains_key(&format!("host:{name}"))
@@ -305,6 +350,10 @@ impl Assets {
     fn forget_hosted(&self, name: &str) {
         let src = format!("host:{name}");
         self.forget(&src);
+        #[cfg(target_os = "macos")]
+        if let Ok(mut surfaces) = self.surfaces.try_borrow_mut() {
+            surfaces.remove(&src);
+        }
         if let Ok(mut hosted) = self.hosted.try_borrow_mut() {
             hosted.remove(&src);
         }
@@ -7047,6 +7096,13 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
             .map(|(_, source)| resolve_owned(source))
     };
     let (dither, characters) = (prop(Prop::Dither), prop(Prop::Characters));
+    // Drawn as a frame the host shows as it is, when it sets one: a `src`
+    // written `host:<name>` (any other lowers as an image alone, its view
+    // as it was), not dithered or drawn in characters, which read pixels.
+    #[cfg(target_os = "macos")]
+    let surfaced = dither.is_none()
+        && characters.is_none()
+        && matches!(src, Source::Lit(Lit::Str(path)) if path.starts_with("host:"));
     // When its file decodes (`ImageData::set_decoding`): as written.
     let decoding = match prop(Prop::Decode)
         .as_ref()
@@ -7100,6 +7156,68 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     (None, None) => image,
                 }
             })
+        }
+    };
+    // A frame the host shows as it is (`ScriptHost::surface`): drawn from
+    // its own storage while the host sets one, its image (pixels read when
+    // asked for) otherwise. Either fills the switch between them, which takes
+    // the node's styles, and takes how the picture fills it (`placement`).
+    #[cfg(target_os = "macos")]
+    let picture = {
+        let plain = Rc::new(picture);
+        let placed = Rc::new(placement(node, vm));
+        let (src, vm2, low2, label) = (resolve_owned(src), vm.clone(), low.clone(), label.clone());
+        let (told, low4, vm4) = (told.clone(), low.clone(), vm.clone());
+        move || -> View {
+            if !surfaced {
+                return plain();
+            }
+            let (src, vm2, low2) = (src.clone(), vm2.clone(), low2.clone());
+            let current = Rc::new(move || match picture_of(&src, &vm2) {
+                Some(Picture::Path(path)) => {
+                    let surface = low2.assets.surface(&path, &low2.runtime)?;
+                    Some((path, surface))
+                }
+                _ => None,
+            });
+            let (plain, label, told, low3, vm3, placed) = (
+                plain.clone(),
+                label.clone(),
+                told.clone(),
+                low4.clone(),
+                vm4.clone(),
+                placed.clone(),
+            );
+            let shown = current.clone();
+            zgx::compose::switch(
+                move || shown().is_some(),
+                move |on, _| match on {
+                    false => placed(plain().w_full().h_full()),
+                    true => {
+                        let (current, told, low3, vm3) =
+                            (current.clone(), told.clone(), low3.clone(), vm3.clone());
+                        // The frame last shown, while its replacement is told:
+                        // dropped with this branch, as the host's goes.
+                        let mut last = None;
+                        let surface =
+                            zgx::compose::native_surface_signal(label.clone(), move || {
+                                if let Some((path, surface)) = current() {
+                                    if let Some(image) = low3.assets.image(&path) {
+                                        told.loaded(&vm3, path, &image);
+                                    }
+                                    last = Some(surface);
+                                }
+                                last.clone().expect("a surface while one shows")
+                            });
+                        placed(
+                            surface
+                                .object_fit(zgx::style::ObjectFit::default())
+                                .w_full()
+                                .h_full(),
+                        )
+                    }
+                },
+            )
         }
     };
     // As it unmounts, the cache lets go of pictures no node shows.
