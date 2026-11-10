@@ -7336,10 +7336,7 @@ impl Scene {
         self.node_mut(id).kind = kind;
         self.invalidate(id, if colour { PAINT | PAINT_ONLY } else { PAINT });
         if !layout_unchanged {
-            match self.node(id).style.absolute && self.absolute_may_stop(id) {
-                true => self.invalidate_absolute_layout(id),
-                false => self.invalidate_layout(id),
-            }
+            self.invalidate_layout(id);
         }
     }
     /// Show `image`, a GPU view's next frame (`crate::gpu_view`), where `id`
@@ -7394,10 +7391,7 @@ impl Scene {
         self.relative_count += usize::from(style.relative);
         let overflow_fade = style.fade_overflow;
         // It runs as its parent does until it says otherwise.
-        let (rtl, parent_absolute) = {
-            let parent = self.node(parent);
-            (parent.rtl, parent.style.absolute)
-        };
+        let rtl = self.node(parent).rtl;
         let way = Way {
             own: rtl,
             parent: rtl,
@@ -7488,10 +7482,7 @@ impl Scene {
             self.overflow_fades.push((id, [0.; 4]));
         }
         self.dirty.push(id);
-        match parent_absolute && self.absolute_may_stop(parent) {
-            true => self.invalidate_absolute_layout(parent),
-            false => self.invalidate_layout(parent),
-        }
+        self.invalidate_layout(parent);
         self.children_changed(parent);
         id
     }
@@ -7571,10 +7562,7 @@ impl Scene {
             inert.retain(|n| self.contains(*n));
             self.inert = inert;
         }
-        match self.node(parent).style.absolute && self.absolute_may_stop(parent) {
-            true => self.invalidate_absolute_layout(parent),
-            false => self.invalidate_layout(parent),
-        }
+        self.invalidate_layout(parent);
         // Children removed or moved: its kept ink union goes unless only
         // its tail changed (`KeptInk`).
         if self.kept_any.get() {
@@ -7848,6 +7836,16 @@ impl Scene {
     /// Change `id`'s layout style, invalidating its layout.
     pub fn set_style(&mut self, id: NodeId, style: Style) {
         self.restyle(id, style, true);
+    }
+    /// `set_style` for a node that may be laid out above alone: an absolute
+    /// one placed by its parent (a scrollbar's thumb in its rail) stops its
+    /// walk at that parent (`invalidate_absolute_layout`). For callers that
+    /// style such nodes (a script's or a composed view's style); `set_style`
+    /// asks nothing, and lays out as it always has.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn set_style_stopping(&mut self, id: NodeId, style: Style) {
+        self.restyle_as::<false, true>(id, style, true, id);
     }
     /// Whether any node has a `special` bit: what a style with nothing rare
     /// must still look at, in case it has lost something.
@@ -8918,18 +8916,19 @@ impl Scene {
         if !self.held_alone.contains(&owner) {
             self.held_alone.push(owner);
         }
-        self.restyle_as::<true>(id, style, true, owner);
+        self.restyle_as::<true, false>(id, style, true, owner);
     }
     /// `set_style` (`given`: the style a caller gave `id`, which a contents
     /// node keeps as its own) or `apply_style`. One function, so that the
     /// style is used where the caller put it rather than moved again.
     #[inline(never)]
     fn restyle(&mut self, id: NodeId, style: Style, given: bool) {
-        self.restyle_as::<false>(id, style, given, id);
+        self.restyle_as::<false, false>(id, style, given, id);
     }
-    /// `restyle`; `HELD`: its layout walk stops at `owner` (`set_style_within`).
+    /// `restyle`; `HELD`: its layout walk stops at `owner` (`set_style_within`);
+    /// `STOPS`: an absolute node's may stop above it (`set_style_stopping`).
     #[inline(always)]
-    fn restyle_as<const HELD: bool>(
+    fn restyle_as<const HELD: bool, const STOPS: bool>(
         &mut self,
         id: NodeId,
         mut style: Style,
@@ -9017,7 +9016,7 @@ impl Scene {
         }
         match HELD {
             true => self.invalidate_layout_with::<true>(id, false, true, owner),
-            false if absolute && self.absolute_may_stop(id) => self.invalidate_absolute_layout(id),
+            false if STOPS && absolute => self.invalidate_absolute_layout(id),
             false => self.invalidate_layout(id),
         }
         if containing {
@@ -9423,6 +9422,9 @@ impl Scene {
     #[cold]
     #[inline(never)]
     fn invalidate_absolute_layout(&mut self, id: NodeId) {
+        if !self.absolute_may_stop(id) {
+            return self.invalidate_layout(id);
+        }
         match self.absolute_stop(id) {
             Some(stop) => self.invalidate_layout_with::<true>(id, false, true, stop),
             None => self.invalidate_layout(id),
@@ -20680,10 +20682,24 @@ mod set_box_tests {
                 badge.clone(),
                 escaped.clone(),
             );
+            // Through `set_style` alone (a caller that doesn't opt in), as a
+            // whole layout places it, with no stop.
+            let (mut plain, [_, plain_id, ..]) = rail_page(
+                rows,
+                rail.clone(),
+                thumb(0.),
+                badge.clone(),
+                escaped.clone(),
+            );
+            let mut plain_cost = (0, 0);
             let mut cost = (0, 0);
             for f in 1..5 {
+                let before = plain.measure_calls;
+                plain.set_style(plain_id, thumb(f as f32));
+                let report = plain.flush();
+                plain_cost = plain_cost.max((plain.measure_calls - before, report.layout_nodes));
                 let before = scene.measure_calls;
-                scene.set_style(id, thumb(f as f32));
+                scene.set_style_stopping(id, thumb(f as f32));
                 let report = scene.flush();
                 cost = cost.max((scene.measure_calls - before, report.layout_nodes));
             }
@@ -20694,7 +20710,12 @@ mod set_box_tests {
                 badge.clone(),
                 escaped.clone(),
             );
+            same_bounds(&plain, &fresh);
             same_bounds(&scene, &fresh);
+            assert!(
+                plain_cost.0 >= cost.0,
+                "the stop is the opt-in's: {plain_cost:?} {cost:?}"
+            );
             costs.push(cost);
         }
         // The rail and the thumb, whatever the page's length.
@@ -20707,8 +20728,8 @@ mod set_box_tests {
     /// A terminal's screen: an absolute rows box holding one absolute row
     /// per line (its whole width, a cell high), each with an absolute group
     /// of its size holding the row's text runs as absolute labels. A run's
-    /// text changing, a run arriving and one going: each lays out its row's
-    /// group alone, however many rows the screen has.
+    /// text changing, one at a time or several in a frame, lays out its
+    /// row's group alone, however many rows the screen has.
     #[test]
     fn a_rows_labels_changing_lay_out_its_group_alone() {
         let screen = |lines: usize| {
@@ -20781,23 +20802,22 @@ mod set_box_tests {
             };
             let first = scene.children(group)[0];
             measured(&mut scene, &|scene| {
-                scene.set_kind(first, label("changed text, longer"))
+                scene.set_text(first, "changed text, longer")
             });
-            measured(&mut scene, &|scene| {
-                scene.append(group, label("a run arriving"), label_style(2));
-            });
+            // A run arriving and one going lay out as before, to the root:
+            // right, if not the cheapest.
+            scene.append(group, label("a run arriving"), label_style(2));
+            scene.flush();
             let gone = scene.children(group)[1];
-            measured(&mut scene, &|scene| scene.remove(gone));
-            // Several in one frame, as a line scrolled in redraws its row: a
-            // run going leaves the group's reads to be read again, and a run
-            // arriving stops at the row; each run's text after them finds the
-            // group, then the row, already stopped at.
+            scene.remove(gone);
+            scene.flush();
+            // Several runs' text in one frame, as a line scrolled in redraws
+            // its row: each walk after the first finds the group already
+            // stopped at (its reads kept).
             let runs = scene.children(group).to_vec();
             measured(&mut scene, &|scene| {
-                scene.remove(runs[0]);
-                scene.append(group, label("one more"), label_style(3));
-                for (at, run) in runs.iter().enumerate().skip(1) {
-                    scene.set_kind(*run, label(&format!("frame text {at}")));
+                for (at, run) in runs.iter().enumerate() {
+                    scene.set_text(*run, format!("frame text {at}"));
                 }
             });
             costs.push(cost);
@@ -20805,15 +20825,13 @@ mod set_box_tests {
             let (mut fresh, fresh_groups) = screen(lines);
             let fresh_group = fresh_groups[lines / 2];
             let first = fresh.children(fresh_group)[0];
-            fresh.set_kind(first, label("changed text, longer"));
+            fresh.set_text(first, "changed text, longer");
             fresh.append(fresh_group, label("a run arriving"), label_style(2));
             let gone = fresh.children(fresh_group)[1];
             fresh.remove(gone);
             let runs = fresh.children(fresh_group).to_vec();
-            fresh.remove(runs[0]);
-            fresh.append(fresh_group, label("one more"), label_style(3));
-            for (at, run) in runs.iter().enumerate().skip(1) {
-                fresh.set_kind(*run, label(&format!("frame text {at}")));
+            for (at, run) in runs.iter().enumerate() {
+                fresh.set_text(*run, format!("frame text {at}"));
             }
             fresh.flush();
             for (a, b) in scene
@@ -20930,10 +20948,10 @@ mod set_box_tests {
                 // Its height, then its top: two writes, one frame.
                 let mut style = scene.style(thumb);
                 style.height = Some(100. - f);
-                scene.set_style(thumb, style.clone());
+                scene.set_style_stopping(thumb, style.clone());
                 style.layout_options =
                     placed(None, None, [Some(Px(f * 5.)), Some(Px(2.)), None]).layout_options;
-                scene.set_style(thumb, style);
+                scene.set_style_stopping(thumb, style);
                 let report = scene.flush();
                 cost = cost.max((scene.measure_calls - before, report.layout_nodes));
             }
