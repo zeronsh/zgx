@@ -35,6 +35,11 @@ pub(crate) struct Limiter {
     sample: u64,
     /// Samples since the delay last held anything but silence.
     quiet: usize,
+    /// Samples the last clamp brought back by more than rounding: none,
+    /// if the gain did its work. Tests read it, so a clamp that hides a
+    /// broken gain fails them.
+    #[cfg(test)]
+    clipped: u64,
 }
 
 impl Limiter {
@@ -55,6 +60,8 @@ impl Limiter {
             decay: (-1. / (0.08 * rate as f32)).exp(),
             sample: 0,
             quiet: look,
+            #[cfg(test)]
+            clipped: 0,
         }
     }
 
@@ -112,6 +119,12 @@ impl Limiter {
         let scale = 1. / (f64::from(UNIT) * self.look as f64);
         for (l, r) in left.iter_mut().zip(right.iter_mut()) {
             let n = self.sample;
+            // Gains asked for before the window first: then what's kept is
+            // within the last `look + 1` samples, which the ring holds.
+            while self.least_len > 0 && self.least[self.least_head].0 + (self.look as u64) < n {
+                self.least_head = (self.least_head + 1) % capacity;
+                self.least_len -= 1;
+            }
             let loudest = l.abs().max(r.abs());
             if loudest > self.ceiling {
                 let asked = self.ceiling / loudest;
@@ -124,10 +137,6 @@ impl Limiter {
                 }
                 self.least[(self.least_head + self.least_len) % capacity] = (n, asked);
                 self.least_len += 1;
-            }
-            while self.least_len > 0 && self.least[self.least_head].0 + (self.look as u64) < n {
-                self.least_head = (self.least_head + 1) % capacity;
-                self.least_len -= 1;
             }
             let least = if self.least_len > 0 {
                 self.least[self.least_head].1
@@ -148,6 +157,13 @@ impl Limiter {
             let (out_l, out_r) = (slot[0] * applied, slot[1] * applied);
             (slot[0], slot[1]) = (*l, *r);
             // Rounding in the last bit is the only way past the ceiling.
+            #[cfg(test)]
+            {
+                let over = out_l.abs().max(out_r.abs()) - self.ceiling;
+                if over > self.ceiling * 4. * f32::EPSILON {
+                    self.clipped += 1;
+                }
+            }
             *l = out_l.clamp(-self.ceiling, self.ceiling);
             *r = out_r.clamp(-self.ceiling, self.ceiling);
             self.at = if self.at + 1 == self.look {
@@ -191,6 +207,7 @@ mod tests {
             limiter.process(l, r);
         }
         assert!(l.iter().all(|s| s.abs() <= 0.5));
+        assert_eq!(limiter.clipped, 0, "the gain let samples past the ceiling");
         let look = limiter.latency();
         // The burst is brought down to the ceiling, not below it by much.
         let burst = l[1000 + look..1400 + look]
@@ -200,5 +217,24 @@ mod tests {
         // Two seconds later the quiet signal is back as it was.
         assert_eq!(&l[n - 100..], &input[n - 100 - look..n - look]);
         assert!(limiter.at_rest());
+    }
+
+    #[test]
+    fn a_loud_low_tone_is_brought_to_the_ceiling_by_the_gain_alone() {
+        // Below about 160 Hz a falling half-cycle asks for more gains than
+        // the window holds: each must be kept, or the gain lets samples
+        // past the ceiling and only the final clamp hides it.
+        for hz in [30f32, 80., 150., 400.] {
+            let mut limiter = Limiter::new(48_000, 0.5);
+            let input: Vec<f32> = (0..48_000)
+                .map(|i| (i as f32 * hz * std::f32::consts::TAU / 48_000.).sin() * 2.)
+                .collect();
+            let (mut l, mut r) = (input.clone(), input.clone());
+            for (l, r) in l.chunks_mut(128).zip(r.chunks_mut(128)) {
+                limiter.process(l, r);
+            }
+            assert_eq!(limiter.clipped, 0, "{hz} Hz: the gain let samples through");
+            assert!(l.iter().all(|s| s.abs() <= 0.5));
+        }
     }
 }

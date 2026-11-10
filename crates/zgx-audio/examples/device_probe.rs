@@ -64,7 +64,7 @@ mod probe {
             ..Config::default()
         };
         assert_eq!(config.gain, 0., "every automated run is silent");
-        Audio::with_device(config, Cpal::new().stopping(stopping))
+        Audio::with_device(config, Cpal::new().stopping(stopping)).expect("a config it runs with")
     }
 
     fn click() -> Sound {

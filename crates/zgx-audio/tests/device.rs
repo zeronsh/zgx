@@ -122,7 +122,8 @@ fn engine(hold: Duration) -> (Audio, Controls) {
                 ..Config::default()
             },
             fake,
-        ),
+        )
+        .unwrap(),
         controls,
     )
 }
