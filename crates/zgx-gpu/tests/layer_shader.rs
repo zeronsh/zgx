@@ -1126,3 +1126,138 @@ fn readers_overlapping_abutting_or_reading_past_neighbours_draw_as_a_whole_repai
         }
     }
 }
+
+/// A backdrop reader's read is never split between damage regions, however
+/// the window's damage is cut: a box reads a bar 140 points below it
+/// (`zgx_backdrop` at an offset, its reach past it) while a box beside the
+/// read, from below the box down, and 80 dots far off change with the bar.
+/// That many rects put the scene's damage on its grid (`DAMAGE_RECTS`),
+/// whose runs cut the read in two at the side box's top. The renderer joins
+/// it again (`blur_damage`: each reader's read is a region of its own, the
+/// damage it meets joined to it), so each region's draws land before what it
+/// reads is copied, whatever order the regions are drawn in; the glass shows
+/// the bar's new colour, as a full repaint draws it.
+#[test]
+fn a_backdrop_read_is_never_split_between_regions() {
+    let _gpu_fixture = gpu_fixture();
+    let (width, height) = (1200_u32, 900_u32);
+    let reading = FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+    let behind = zgx_backdrop(input.p + vec2(0., input.params[0].x));
+    return vec4(mix(behind.rgb, input.color.rgb, 0.2), 1.);
+}",
+        None,
+    );
+    for direct in [true, false] {
+        let mut gpu = GpuRenderer::new(width, height).unwrap();
+        gpu.set_direct_metal(direct);
+        gpu.debug_keep_regions();
+        let mut scene = Scene::new(width as f32, height as f32);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        let bar = scene.append(root, NodeKind::Rect(RED), fixed(200., 20.));
+        scene.set_transform(bar, Transform { x: 40., y: 180. });
+        // Beside the glass's read (to x 390), from below the glass: the
+        // grid's runs change width there, cutting the read between the
+        // glass's rows and the bar's.
+        let side = scene.append(
+            root,
+            NodeKind::Rect(Color(30, 60, 200, 255)),
+            fixed(410., 300.),
+        );
+        scene.set_transform(side, Transform { x: 390., y: 176. });
+        let glass = scene.append(
+            root,
+            NodeKind::Panel {
+                layout: Layout::Overlay,
+                quad: QuadStyle {
+                    fill: Color(20, 24, 32, 255),
+                    ..Default::default()
+                },
+            },
+            fixed(200., 20.),
+        );
+        scene.set_transform(glass, Transform { x: 40., y: 40. });
+        scene.set_layer_shader(glass, Some(reading.clone()));
+        scene.set_layer_extent(glass, 0., 150.);
+        let uniforms = |changed: f32| ShaderUniforms {
+            time: 0.,
+            params: [[140., changed, 0., 0.], [0.; 4], [0.; 4], [0.; 4]],
+        };
+        scene.set_layer_uniforms(glass, uniforms(0.));
+        let dots: Vec<NodeId> = (0..80)
+            .map(|i| {
+                let dot = scene.append(
+                    root,
+                    NodeKind::Rect(Color(250, 250, 250, 255)),
+                    fixed(2., 2.),
+                );
+                scene.set_transform(
+                    dot,
+                    // Far off, a cell apart: past `DAMAGE_RECTS`, the damage goes
+                    // on the grid, where they are one block (under
+                    // `MAX_REGIONS`, so not clustered).
+                    Transform {
+                        x: 1000. + (i % 10) as f32 * 8.,
+                        y: 700. + (i / 10) as f32 * 8.,
+                    },
+                );
+                dot
+            })
+            .collect();
+        let frame = scene.flush();
+        gpu.render(&scene, &frame.damage).unwrap();
+        let before = gpu.readback().unwrap();
+        scene.set_kind(bar, NodeKind::Rect(GREEN));
+        scene.set_kind(side, NodeKind::Rect(Color(200, 60, 30, 255)));
+        for &dot in &dots {
+            scene.set_kind(dot, NodeKind::Rect(Color(250, 200, 40, 255)));
+        }
+        scene.set_layer_uniforms(glass, uniforms(1.));
+        let frame = scene.flush();
+        let stats = gpu.render(&scene, &frame.damage).unwrap();
+        let regions = gpu.debug_regions().to_vec();
+        // The scene's damage cut where the side box starts (the read's
+        // rows above it, and the rows with it).
+        assert!(
+            frame.damage.iter().any(|d| d.y + d.height == 176.)
+                && frame.damage.iter().any(|d| d.y == 176.),
+            "direct={direct}: the damage isn't cut at the side box: {:?}",
+            frame.damage
+        );
+        assert_eq!(stats.regions, regions.len());
+        let pixels = gpu.readback().unwrap();
+        let at = |x: f32, y: f32| {
+            regions
+                .iter()
+                .position(|r| x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height)
+        };
+        let (own, read) = (at(140., 50.), at(140., 190.));
+        assert!(
+            own.is_some() && own == read,
+            "direct={direct}: the glass (region {own:?}) and what it reads (region {read:?}) \
+             are drawn as one region: {regions:?}"
+        );
+        gpu.render(&scene, &[Rect::new(0., 0., width as f32, height as f32)])
+            .unwrap();
+        let full = gpu.readback().unwrap();
+        let whole = |x: u32, y: u32| full[((y * width + x) * 4) as usize..][..4].to_vec();
+        let shown_at = |x: u32, y: u32| pixels[((y * width + x) * 4) as usize..][..4].to_vec();
+        assert_eq!(
+            shown_at(140, 50),
+            whole(140, 50),
+            "direct={direct}: the glass, as a full repaint draws it"
+        );
+        // Mostly the bar it reads (a fifth the box): red, then green.
+        let at = ((50 * width + 140) * 4) as usize;
+        let (was, now) = (&before[at..at + 4], shown_at(140, 50));
+        assert!(
+            was[0] > 150 && was[1] < 60,
+            "direct={direct}: the glass doesn't show the bar: {was:?}"
+        );
+        assert!(
+            now[1] > 150 && now[0] < 60,
+            "direct={direct}: the glass doesn't show the bar's new colour: {now:?}"
+        );
+    }
+}

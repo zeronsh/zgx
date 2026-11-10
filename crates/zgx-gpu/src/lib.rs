@@ -168,6 +168,9 @@ pub struct GpuStats {
     /// Layer effect passes (content blurs and masks drawn anew; at most two
     /// a frame however many), included in render_passes.
     pub effect_passes: usize,
+    /// Damage regions the window's frame drew, once nearby damage is joined
+    /// (`merge_damage`): each drawn over by every batch it touches.
+    pub regions: usize,
 }
 /// Retained allocation counters for diagnostics; excludes driver/font database allocations.
 #[derive(Debug, Clone, Copy)]
@@ -2504,16 +2507,11 @@ fn plain_box(item: &zgx::scene::PaintItem<'_>) -> bool {
         && item.rounded().iter().all(Option::is_none)
         && item.color().is_none()
 }
-/// Whether node `id` reads what lies behind it: a backdrop blur, or a layer
-/// shader reading the backdrop (glass). Direct3D 11 reads none
-/// (`GpuRenderer::d3d11_leave_out`).
+/// Whether node `id` blurs what lies behind it (frosted glass among them),
+/// which Direct3D 11 doesn't (`GpuRenderer::d3d11_leave_out`).
 #[cfg(d3d11)]
-fn d3d11_reads_backdrop(scene: &Scene, id: NodeId) -> bool {
+fn d3d11_blurs_backdrop(scene: &Scene, id: NodeId) -> bool {
     scene.effects(id).blur_radius > 0.
-        || scene
-            .layer_shader(id)
-            .and_then(|layer| layer.shader.as_ref())
-            .is_some_and(|shader| shader.reads_backdrop())
 }
 /// A box's own colour drawn opaque, as the system's Reduce transparency
 /// draws glass: its translucent, untextured quads inside its box (`fade`;
@@ -4949,6 +4947,9 @@ pub struct GpuRenderer {
     /// A window with backdrop readers: its walk's damage grown over what
     /// they can read (`render_once`). Boxed: most renderers have none.
     backdrop_walk: Option<Box<BackdropWalk>>,
+    /// The last window frame's damage regions, kept only once a test asks
+    /// (`debug_keep_regions`).
+    debug_regions: Option<Vec<Rect>>,
 }
 /// What a window frame's walk grows its damage through (kept for the next),
 /// and that damage grown, for its `render_flat` (readers alone, no blur), with
@@ -5592,6 +5593,7 @@ impl GpuRenderer {
             filter_shaders: FxHashMap::default(),
             plane: None,
             backdrop_walk: None,
+            debug_regions: None,
         })
     }
     /// Bytes the native device reports as allocated (Metal only), including
@@ -7808,6 +7810,17 @@ impl GpuRenderer {
     #[doc(hidden)]
     pub fn debug_d3d11_left_out() -> Vec<&'static str> {
         d3d11_frame::left_out_so_far()
+    }
+    /// Keep each window frame's damage regions from now on, for
+    /// `debug_regions`: a test placing what a frame reads across them.
+    #[doc(hidden)]
+    pub fn debug_keep_regions(&mut self) {
+        self.debug_regions.get_or_insert_default();
+    }
+    /// The last window frame's damage regions, once `debug_keep_regions`.
+    #[doc(hidden)]
+    pub fn debug_regions(&self) -> &[Rect] {
+        self.debug_regions.as_deref().unwrap_or_default()
     }
     /// Have this renderer's frames wait for shaders compiling, though it
     /// presents: a test comparing its pixels with an offscreen one's.
@@ -10732,10 +10745,10 @@ impl GpuRenderer {
                     true => cull_on_cpu(&mut quads, start as usize, clip, viewport, self.scale),
                     false => (clip, None),
                 };
-                // Direct3D 11 reads no backdrop: a box reading it draws its
+                // Direct3D 11 blurs no backdrop: a box blurring it draws its
                 // own colour opaque instead (`d3d11_leave_out`).
                 #[cfg(d3d11)]
-                if self.d3d11.is_some() && d3d11_reads_backdrop(scene, item.id) {
+                if self.d3d11.is_some() && d3d11_blurs_backdrop(scene, item.id) {
                     d3d11_opaque(&mut quads[start as usize..], fade);
                 }
                 if quads.len() as u32 > start || item.effects.blur_radius > 0. {
@@ -10847,6 +10860,13 @@ impl GpuRenderer {
             .collect();
         for (_, (_, _, w, h)) in &regions {
             stats.damaged_pixels += u64::from(*w) * u64::from(*h);
+        }
+        if !self.in_layer {
+            stats.regions = regions.len();
+            if let Some(kept) = &mut self.debug_regions {
+                kept.clear();
+                kept.extend(regions.iter().map(|(region, _)| *region));
+            }
         }
         // What this frame changes in the retained target, for surfaces that
         // must catch up later (`begin_layer_frame`).
@@ -10999,6 +11019,7 @@ impl GpuRenderer {
                 &clips,
                 &points,
                 (&effect_jobs, effect_first),
+                &reads,
                 stats,
             )?;
             self.frame_points = points;
@@ -11782,17 +11803,28 @@ impl GpuRenderer {
             let (id, shaders, kind) = match draw.shading {
                 Shading::Fill(id) => (id, &self.fill_shaders, AppShader::Fill),
                 Shading::Filter(id) => (id, &self.filter_shaders, AppShader::Filter),
+                // Glass blurring its backdrop draws opaque (`d3d11_leave_out`).
+                Shading::FilterBlend(id) if draw.blur.is_none() => {
+                    (id, &self.filter_shaders, AppShader::FilterBlend)
+                }
                 _ => continue,
             };
             let ready = shaders
                 .get(&id)
                 .map(|shader| state.device.app_shader(shader, kind, wait));
+            // Glass not compiled yet isn't drawn, as Direct3D 12's blended
+            // draw waits for its pipeline; anything else draws as painted.
+            let glass = kind == AppShader::FilterBlend;
             match ready {
                 Some(Some(true)) => {}
                 Some(None) => {
                     awaited = true;
-                    draw.shading = Shading::Full;
+                    match glass {
+                        true => draw.end = draw.start,
+                        false => draw.shading = Shading::Full,
+                    }
                 }
+                _ if glass => draw.end = draw.start,
                 _ => draw.shading = Shading::Full,
             }
         }
@@ -11802,13 +11834,14 @@ impl GpuRenderer {
     /// what's left can't show a picture a user would wrongly trust; each kind
     /// named once (`d3d11_frame::left_out`):
     /// - images a GPU view draws: left empty, visibly missing;
-    /// - backdrop blurs and layer shaders reading the backdrop (glass): the
-    ///   box drawn opaque in its own colour under its content (built so,
-    ///   `d3d11_opaque`), as the system's Reduce transparency draws glass,
-    ///   so what's over it stays legible. A box with no colour of its own
-    ///   keeps the frame's error.
+    /// - backdrop blurs (frosted glass among them): the box drawn opaque in
+    ///   its own colour under its content (built so, `d3d11_opaque`), as the
+    ///   system's Reduce transparency draws glass, so what's over it stays
+    ///   legible. A box with no colour of its own keeps the frame's error.
     ///
-    /// Content blurs, masks and drop shadows draw (`d3d11_effects`).
+    /// Content blurs, masks and drop shadows draw (`d3d11_effects`), and
+    /// layer shaders reading the backdrop unblurred (glass) over a copy of it
+    /// (`render_d3d11`).
     #[cfg(d3d11)]
     fn d3d11_leave_out(
         &self,
@@ -11828,16 +11861,12 @@ impl GpuRenderer {
             }
         }
         for draw in draws.iter_mut() {
-            let glass = matches!(draw.shading, Shading::FilterBlend(_));
-            if !(draw.blur.is_some() || glass) || !d3d11_has_colour(scene, quads, draw) {
+            if draw.blur.is_none() || !d3d11_has_colour(scene, quads, draw) {
                 continue;
             }
-            d3d11_frame::left_out(match glass {
-                true => "backdrop reads (glass drawn opaque)",
-                false => "backdrop blurs (drawn opaque)",
-            });
+            d3d11_frame::left_out("backdrop blurs (drawn opaque)");
             draw.blur = None;
-            if glass {
+            if matches!(draw.shading, Shading::FilterBlend(_)) {
                 draw.shading = Shading::Full;
             }
         }
@@ -11876,6 +11905,8 @@ impl GpuRenderer {
                     | Shading::Fill(_)
                     | Shading::Filter(_),
                 ) => None,
+                // Compiled (`d3d11_app_shaders`), over a copy of the backdrop.
+                (_, Shading::FilterBlend(_)) if draw.blur.is_none() => None,
                 (_, Shading::FilterBlend(_)) => {
                     Some("layer shader reading the backdrop over a box with no colour of its own")
                 }
@@ -12038,6 +12069,7 @@ impl GpuRenderer {
         clips: &[Region],
         points: &[[f32; 2]],
         (effect_jobs, effect_first): (&[effects::Job], u32),
+        reads: &[(usize, Rect)],
         mut stats: GpuStats,
     ) -> Result<GpuStats, GpuError> {
         let _span = zgx::profile::span(zgx::profile::Phase::Encode);
@@ -12100,7 +12132,10 @@ impl GpuRenderer {
         let blended: Vec<usize> = draws
             .iter()
             .enumerate()
-            .filter(|(_, draw)| draw.shading == Shading::Blend && draw.end > draw.start)
+            .filter(|(_, draw)| {
+                matches!(draw.shading, Shading::Blend | Shading::FilterBlend(_))
+                    && draw.end > draw.start
+            })
             .map(|(index, _)| index)
             .collect();
         if !blended.is_empty()
@@ -12150,22 +12185,58 @@ impl GpuRenderer {
             Shading::Full
         };
         let kept = self.kept_now();
-        for (index, (region, region_scissor)) in regions.iter().enumerate() {
-            frame.scissor(*region_scissor);
-            if first[index] == 0 {
-                frame.quads(clear, true, 0..1);
-                stats.draw_calls += 1;
-            }
-            // The draws up to each blended one, then it, over what they drew.
-            let mut from = 0;
-            for &at in blended.iter().chain(std::iter::once(&draws.len())) {
+        // As Direct3D 12 splits its pass (`render_flat`): every region's draws
+        // up to each blended one, then the target under that one copied (all
+        // it reads, within the regions), then it in every region. A layer
+        // shader reading the backdrop (glass) may read past its own region.
+        let mut from = 0;
+        for &at in blended.iter().chain(std::iter::once(&draws.len())) {
+            for (index, (region, region_scissor)) in regions.iter().enumerate() {
+                frame.scissor(*region_scissor);
+                if from == 0 && first[index] == 0 {
+                    frame.quads(clear, true, 0..1);
+                    stats.draw_calls += 1;
+                }
                 self.batches(*region, &draws[from..at], first[index], kept, |batch| {
                     self.d3d11_batch(&mut frame, &mut sampled, &mut unpainted, &mut stats, batch)
                 });
-                from = at + 1;
-                let Some(draw) = draws.get(at) else {
+            }
+            from = at + 1;
+            let Some(draw) = draws.get(at) else {
+                continue;
+            };
+            // What it reads (`backdrop_read`), or what lies under it.
+            let under = reads
+                .iter()
+                .filter(|(reader, _)| *reader == at)
+                .map(|(_, read)| *read)
+                .reduce(Rect::union)
+                .or_else(|| draw.bounds.intersection(draw.clip));
+            let copied = regions
+                .iter()
+                .filter_map(|(region, _)| region.intersection(under?))
+                .reduce(Rect::union)
+                .and_then(|area| scissor(area, self.scale, self.width, self.height));
+            let Some(copied) = copied else {
+                continue;
+            };
+            let backdrop = state.backdrop.as_ref().expect("made above");
+            frame.copy_backdrop(target, backdrop, copied);
+            stats.backdrop_copies += 1;
+            if draw.source != sampled {
+                let Some(view) = self.d3d11_texture(draw.source) else {
+                    unpainted = true;
                     continue;
                 };
+                frame.texture(view);
+                frame.nearest(matches!(draw.source, TextureSource::Pixelated(_)));
+                sampled = draw.source;
+            }
+            let glass = match draw.shading {
+                Shading::FilterBlend(id) => Some(id),
+                _ => None,
+            };
+            for (index, (region, _)) in regions.iter().enumerate() {
                 let Some(rect) = region
                     .intersection(draw.clip)
                     .and_then(|rect| rect.intersection(draw.bounds))
@@ -12174,17 +12245,7 @@ impl GpuRenderer {
                 else {
                     continue;
                 };
-                if draw.source != sampled {
-                    let Some(view) = self.d3d11_texture(draw.source) else {
-                        unpainted = true;
-                        continue;
-                    };
-                    frame.texture(view);
-                    frame.nearest(matches!(draw.source, TextureSource::Pixelated(_)));
-                    sampled = draw.source;
-                }
-                let backdrop = state.backdrop.as_ref().expect("made above");
-                if frame.blended(target, backdrop, rect, draw.start..draw.end) {
+                if frame.blended(glass, backdrop, rect, draw.start..draw.end) {
                     stats.draw_calls += 1;
                     stats.instances += (draw.end - draw.start) as usize;
                 } else {
