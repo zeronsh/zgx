@@ -153,7 +153,7 @@ pub(crate) mod clock {
 }
 
 /// An output: the system's default device through some API. zgx-audio's
-/// own is [`Cpal`](crate::Cpal) (the `device` feature); another goes in
+/// own is `Cpal`, with the `device` feature; another goes in
 /// [`Audio::with_device`](crate::Audio::with_device).
 ///
 /// Every method is called from the engine's host thread, never the audio
