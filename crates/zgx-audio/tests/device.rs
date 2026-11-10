@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use zgx_audio::{Audio, Config, Device, Format, Play, Ramp, Renderer, Sound, Source, Time, Timing};
+use zgx_audio::{
+    Audio, Config, Context, Device, Effect, Format, Play, Ramp, Renderer, Sound, Source, Time,
+    Timing,
+};
 
 #[derive(Clone, Default)]
 struct Controls {
@@ -332,4 +335,32 @@ fn the_app_is_told_when_voices_end() {
     assert_eq!(audio.take_ended(), [voice.id()]);
     assert_eq!(audio.voices_playing(), 0);
     assert_eq!(audio.take_ended(), Vec::<u64>::new());
+}
+
+/// An effect whose sound outlasts its input by as long as it holds (a
+/// reverb's tail).
+struct Ringing(Duration);
+impl Effect for Ringing {
+    fn prepare(&mut self, _: Format, _: usize) {}
+    fn process(&mut self, _: &mut [f32], _: &Context<'_>) {}
+    fn tail(&self) -> Duration {
+        self.0
+    }
+}
+
+#[test]
+fn an_effect_s_tail_keeps_the_device_running_until_it_has_rung() {
+    let (audio, controls) = engine(Duration::from_millis(100));
+    let world = audio.bus("world").unwrap();
+    world
+        .add_effect(Ringing(Duration::from_millis(600)))
+        .unwrap();
+    let began = Instant::now();
+    audio.play(&blip(), Play::new().bus(&world)).unwrap();
+    until("a start", || audio.stats().running);
+    until("a stop", || audio.stats().stops == 1);
+    // Four frames of blip, 600 ms of tail, then the 100 ms hold.
+    let took = began.elapsed();
+    assert!(took >= Duration::from_millis(700), "stopped after {took:?}");
+    assert_eq!(controls.log(), ["format", "start 48000", "stop"]);
 }

@@ -14,7 +14,10 @@
 //! thread's work and may allocate; applying them is the mixer's and mustn't.
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering};
-use zgx_audio::{Audio, Config, Curve, Interpolation, Offline, Play, Ramp, Sound, Time};
+use zgx_audio::{
+    Audio, Config, Context, Curve, Effect, Format, Interpolation, Offline, Parameter, Play, Ramp,
+    Sound, Time,
+};
 
 struct Counting;
 
@@ -258,6 +261,47 @@ fn sounds() -> Vec<Sound> {
         );
     }
     sounds
+}
+
+/// An effect that does what effects do on the audio thread: a delay line
+/// made in `prepare`, a parameter read each frame, a side chain, a tail.
+struct Busy {
+    line: Vec<f32>,
+    at: usize,
+}
+
+impl Effect for Busy {
+    fn parameters(&self) -> &[Parameter] {
+        const PARAMS: [Parameter; 2] = [
+            Parameter::new("mix", 0.5, 0., 1.),
+            Parameter::new("feedback", 0.3, 0., 0.9),
+        ];
+        &PARAMS
+    }
+    fn prepare(&mut self, format: Format, _: usize) {
+        self.line = vec![0.; format.rate as usize / 50 * 2];
+        self.at = 0;
+    }
+    fn process(&mut self, block: &mut [f32], context: &Context<'_>) {
+        let duck = 1. - context.side_chain().unwrap_or(0.).min(1.);
+        for (i, s) in block.iter_mut().enumerate() {
+            let (mix, feedback) = (context.value_at(0, i / 2), context.value_at(1, i / 2));
+            let delayed = self.line[self.at];
+            self.line[self.at] = *s + delayed * feedback;
+            self.at = (self.at + 1) % self.line.len();
+            *s = (*s * (1. - mix) + delayed * mix) * duck;
+        }
+    }
+    fn tail(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(100)
+    }
+}
+
+fn busy() -> Busy {
+    Busy {
+        line: Vec::new(),
+        at: 0,
+    }
 }
 
 fn main() {
@@ -527,6 +571,39 @@ fn main() {
     // ...and once the main thread takes them back, the waiting plays start.
     run.audio.update();
     run.render(4);
+    run.finish(&mut failures);
+
+    // Effects: on buses and master, keyed on another bus, their
+    // parameters ramping, one taken off mid-run (given back, not freed),
+    // and tails ringing on silence after their voices end.
+    let mut run = Run::new("effects", Config::default(), floor);
+    let (ui, music, world) = (
+        run.audio.bus("ui").unwrap(),
+        run.audio.bus("music").unwrap(),
+        run.audio.bus("world").unwrap(),
+    );
+    let on_music = music.add_effect(busy()).unwrap();
+    let keyed = world.add_effect_keyed(busy(), &ui).unwrap();
+    run.audio.master().add_effect(busy()).unwrap();
+    for (i, bus) in [&ui, &music, &world].into_iter().enumerate() {
+        run.audio
+            .play(
+                &sounds[i],
+                Play::new().bus(bus).gain(0.3).at(run.at(0.001 * i as f64)),
+            )
+            .unwrap();
+    }
+    run.render(4);
+    on_music
+        .at(run.at(0.001))
+        .set(0, 0.9, Ramp::ms(20.).curve(Curve::EqualPower))
+        .unwrap();
+    on_music
+        .at(run.at(0.002))
+        .set(1, 0.8, Ramp::ms(30.))
+        .unwrap();
+    keyed.at(run.at(0.003)).remove().unwrap();
+    run.render(30);
     run.finish(&mut failures);
 
     if failures.is_empty() {

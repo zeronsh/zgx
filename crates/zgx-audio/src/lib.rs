@@ -1,7 +1,7 @@
 //! Sound for zgx apps: a mixer that places every start, stop and change on
-//! an exact frame, buses with gains, mutes, solos and fades, a look-ahead
-//! limiter, and WAV files, rendered offline on a clock of its own (this is
-//! what tests compare) or, later, to a device.
+//! an exact frame, buses with gains, mutes, solos, fades and [effects](Effect),
+//! a look-ahead limiter, and WAV files, rendered offline on a clock of its
+//! own (this is what tests compare) or to a device.
 //!
 //! ```
 //! use zgx_audio::{Audio, Config, Play, Ramp, Sound};
@@ -24,6 +24,7 @@
 
 mod decode;
 mod device;
+mod effect;
 mod engine;
 mod limiter;
 mod mixer;
@@ -38,7 +39,10 @@ mod via_cpal;
 pub mod wav;
 
 pub use device::{Device, Format, Renderer};
-pub use engine::{Audio, Bus, BusDrive, Config, Error, Offline, Play, Stats, Time, Voice};
+pub use effect::{Checked, Context, Effect, Parameter};
+pub use engine::{
+    Audio, Bus, BusDrive, Config, EffectHandle, Error, Offline, Play, Stats, Time, Voice,
+};
 pub use mixer::Timing;
 pub use ramp::{Curve, Ramp};
 pub use resample::Interpolation;
