@@ -118,6 +118,9 @@ pub(super) struct Gpu {
     pub(super) kept: Option<Kept>,
     /// Bytes the last frame wrote into buffers (uniforms, poses, instances).
     pub(super) written: u64,
+    /// The bytes of what is behind glass a binding holds (`bindings`' glass
+    /// ones keep it alive past the graph's): at most what it was.
+    pub(super) behind_held: u64,
     /// Samples a pixel (`World::set_samples`).
     pub(super) samples: u32,
     pub(super) frame: u64,
@@ -127,6 +130,16 @@ pub(super) struct Gpu {
 }
 
 impl Gpu {
+    /// The bytes its frame's temporaries hold: the graph's, and what is
+    /// behind glass while a binding holds it though the graph let go.
+    pub(super) fn temporary_bytes(&self) -> u64 {
+        let behind = if self.graph.behind.is_none() {
+            self.behind_held
+        } else {
+            0
+        };
+        self.graph.bytes() + behind
+    }
     /// The shadow map made while `on` (dropped while off), and the frame's
     /// binding following it.
     pub(super) fn shadows(&mut self, device: &wgpu::Device, on: bool) {
@@ -342,6 +355,7 @@ impl Gpu {
             graph: Graph::new(format, samples),
             kept: None,
             written: 0,
+            behind_held: 0,
             samples,
             frame: 0,
             #[cfg(feature = "lighting")]

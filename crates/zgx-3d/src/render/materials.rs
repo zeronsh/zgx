@@ -195,6 +195,9 @@ pub(super) fn make_binding(
             }
         }
     }
+    if let Some((_, behind)) = glass {
+        gpu.behind_held = behind.texture.desc.bytes();
+    }
     let glass = glass.map(|(_, behind)| (&behind.whole, &behind.sampler));
     let layout = if glass.is_some() {
         glass_layout.get_or_insert_with(|| map_layout(device, Extent::Glass))

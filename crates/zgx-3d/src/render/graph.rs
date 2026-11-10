@@ -130,6 +130,8 @@ pub(super) struct Graph {
     /// What is behind meshes light passes through, while any does.
     pub(super) behind: Option<Behind>,
     pool: Pool,
+    /// What its temporaries hold (`bytes`).
+    bytes: u64,
 }
 impl Graph {
     pub(super) fn new(format: wgpu::TextureFormat, samples: u32) -> Self {
@@ -144,6 +146,7 @@ impl Graph {
             targets: None,
             behind: None,
             pool: Pool::default(),
+            bytes: 0,
         }
     }
     /// The list for `config`, compiled if it was for another: whether what
@@ -166,11 +169,13 @@ impl Graph {
         self.targets = None;
         self.behind = None;
         self.pool.clear();
+        self.bytes = 0;
     }
-    // (`World::memory` will read it: design-3d-aaa.md, 4.3.)
-    #[cfg(test)]
-    /// The temporaries' bytes on the device.
+    /// The temporaries' bytes on the device (summed as it compiles).
     pub(super) fn bytes(&self) -> u64 {
+        self.bytes
+    }
+    fn summed(&self) -> u64 {
         let targets = self.targets.iter().flat_map(|t| &t.textures);
         let behind = self.behind.iter().map(|b| &b.texture);
         targets.chain(behind).map(|t| t.desc.bytes()).sum()
@@ -262,6 +267,7 @@ impl Graph {
         };
         self.pool.clear();
         self.config = Some(config);
+        self.bytes = self.summed();
         behind_made
     }
 }

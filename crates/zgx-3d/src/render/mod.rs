@@ -609,6 +609,7 @@ impl Viewport for Renderer {
             // Bindings of what was behind before, and runs drawing with them.
             gpu.bindings.clear();
             gpu.kept = None;
+            gpu.behind_held = 0;
         }
 
         let camera = world.camera;
@@ -813,14 +814,25 @@ impl Viewport for Renderer {
             *spare = casting;
         }
         scratch.all = recycle(all);
+        world.temporaries.set(gpu.temporary_bytes());
     }
     fn device_changed(&mut self) {
         self.gpu = None;
     }
     fn rest(&mut self) {
-        // The frame's temporaries go; the next frame takes them again.
-        if let Some(gpu) = &mut self.gpu {
-            gpu.graph.rest();
+        // The frame's temporaries go, and the bindings holding what was
+        // behind glass with them: the next frame makes them again.
+        let Some(gpu) = &mut self.gpu else {
+            return;
+        };
+        gpu.graph.rest();
+        gpu.bindings.clear();
+        gpu.behind_held = 0;
+        // The last frame's runs drew with those bindings: the next frame
+        // makes its meshes' anew.
+        gpu.kept = None;
+        if let Some(world) = self.world.upgrade() {
+            world.borrow().temporaries.set(gpu.temporary_bytes());
         }
     }
 }

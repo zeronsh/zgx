@@ -15,8 +15,6 @@ pub(super) struct Desc {
     pub(super) usage: wgpu::TextureUsages,
 }
 impl Desc {
-    // (`World::memory` will read it: design-3d-aaa.md, 4.3.)
-    #[cfg(test)]
     /// Its bytes on the device, every level and sample (block-compressed
     /// formats aren't targets).
     pub(super) fn bytes(&self) -> u64 {

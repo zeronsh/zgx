@@ -624,6 +624,67 @@ fn textures_read_from_files_draw_as_textures_given_their_pixels() {
 }
 
 #[test]
+fn a_resting_world_holds_no_temporaries() {
+    // A plain world, and one with glass (bindings read what's behind it).
+    let glass = |on: bool| {
+        let (world, pane) = red_behind_glass(Material::rgb(0xffffff).with(0., 0.));
+        if on {
+            world.set_transmission(pane, Some(Transmission::new(1.)));
+        }
+        world
+    };
+    // And one textured: its binding goes at rest too, and comes back.
+    let textured = glass(false);
+    let pixels = [
+        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+    ];
+    let cube = textured.add(Object::mesh(
+        Geometry::cuboid(0.5, 0.5, 0.5),
+        Material::default(),
+    ));
+    textured.set_texture(
+        cube,
+        Some(Texture::from_rgba8(2, 2, pixels.to_vec()).unwrap()),
+    );
+    let worlds = [
+        (glass(false), "plain"),
+        (glass(true), "glass"),
+        (textured, "textured"),
+    ];
+    for (world, what) in worlds {
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        window.draw();
+        let held = world.temporary_bytes();
+        // Multisampled colour and depth, 100 by 100 by 4 samples, at least.
+        assert!(held >= 100 * 100 * 4 * 8, "{what}: {held}");
+        window.gpu.trim();
+        assert_eq!(world.temporary_bytes(), 0, "{what} at rest");
+        world.view().invalidate();
+        window.draw();
+        assert_eq!(world.temporary_bytes(), held, "{what} drawn again");
+    }
+    // A world whose box went, the world kept (a tab left): it rests then.
+    let world = glass(true);
+    let Ok(mut gpu) = GpuRenderer::new(SIZE as u32, SIZE as u32) else {
+        return;
+    };
+    let mut ui = Ui::new(SIZE, SIZE);
+    let shown = ui.mount(gpu_view("World", world.view()).size(SIZE, SIZE));
+    let draw = |ui: &Ui, gpu: &mut GpuRenderer| {
+        ui.prepare_frame();
+        let report = ui.scene.borrow_mut().flush();
+        gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+    };
+    draw(&ui, &mut gpu);
+    assert!(world.temporary_bytes() > 0);
+    shown.unmount();
+    draw(&ui, &mut gpu);
+    assert_eq!(world.temporary_bytes(), 0, "rested as its box went");
+}
+
+#[test]
 fn a_world_that_rested_draws_its_frames_as_one_that_never_did() {
     // Glass: what is behind it is a temporary too, and its binding reads it.
     let unlit = |rgb| {

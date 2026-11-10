@@ -502,6 +502,8 @@ pub(crate) struct Inner {
     /// Its animators (`World::add_animator`).
     #[cfg(feature = "gltf")]
     animators: animation::Animators,
+    /// The bytes its renderer's frame temporaries hold (`World::temporary_bytes`).
+    pub(crate) temporaries: std::cell::Cell<u64>,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -1198,6 +1200,7 @@ impl World {
             particles: None,
             #[cfg(feature = "gltf")]
             animators: Default::default(),
+            temporaries: std::cell::Cell::new(0),
         }));
         let view = zgx_gpu::viewport::view(crate::painter::Painter::new(
             crate::render::Renderer::new(Rc::downgrade(&inner)),
@@ -1236,6 +1239,13 @@ impl World {
     #[doc(hidden)]
     pub fn frames_drawn(&self) -> u64 {
         self.inner.borrow().frames.get()
+    }
+    /// The bytes its renderer's frame temporaries hold now (its targets and
+    /// what is behind glass): none once its window rests. For tests, until
+    /// `World::memory` says it by kind.
+    #[doc(hidden)]
+    pub fn temporary_bytes(&self) -> u64 {
+        self.inner.borrow().temporaries.get()
     }
     /// The GPU view drawing it: show it with `zgx::compose::gpu_view`.
     pub fn view(&self) -> &zgx::gpu_view::GpuView {
