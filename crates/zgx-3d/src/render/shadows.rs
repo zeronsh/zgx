@@ -8,6 +8,8 @@ use super::{
 };
 use crate::math::{Mat4, Vec3};
 use zgx_gpu::wgpu;
+#[cfg(feature = "lighting")]
+pub(super) mod cascades;
 /// The shadow map's side, in texels.
 pub(super) const SHADOW_SIZE: u32 = 2048;
 
@@ -40,8 +42,21 @@ pub(super) fn shadow_key(variant: Variant) -> u8 {
 #[cold]
 #[inline(never)]
 pub(super) fn make_shadow_pipeline(gpu: &mut Gpu, device: &wgpu::Device, variant: Variant) {
-    let (skinned, morphing) = (variant.skinned(), variant.morphing());
     let key = shadow_key(variant);
+    let pipeline = caster_pipeline(gpu, device, variant, DEPTH);
+    gpu.shadow_variants.insert(key, pipeline);
+}
+/// The pipeline drawing `variant`'s meshes' depth from the sun into a map
+/// of `format`: today's map's or a cascade's.
+#[cold]
+#[inline(never)]
+pub(super) fn caster_pipeline(
+    gpu: &mut Gpu,
+    device: &wgpu::Device,
+    variant: Variant,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let (skinned, morphing) = (variant.skinned(), variant.morphing());
     // A mesh light passes through casts its whole shadow.
     let masked = variant.masked() && !variant.transmitting();
     let placed = masked && variant.placed();
@@ -77,8 +92,7 @@ pub(super) fn make_shadow_pipeline(gpu: &mut Gpu, device: &wgpu::Device, variant
         (true, false) => 3,
         (false, false) => 2,
     };
-    let pipeline = shadow_pipeline(device, &shader, &layouts[..count], variant);
-    gpu.shadow_variants.insert(key, pipeline);
+    shadow_pipeline_in(device, &shader, &layouts[..count], variant, format)
 }
 
 /// The box holding the box `(low, high)` after `matrix`, which has no
@@ -181,6 +195,16 @@ pub(super) fn shadow_pipeline(
     layouts: &[Option<&wgpu::BindGroupLayout>],
     variant: Variant,
 ) -> wgpu::RenderPipeline {
+    shadow_pipeline_in(device, shader, layouts, variant, DEPTH)
+}
+/// `shadow_pipeline`, into a map of `format`.
+pub(super) fn shadow_pipeline_in(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layouts: &[Option<&wgpu::BindGroupLayout>],
+    variant: Variant,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("3D shadows"),
         layout: Some(
@@ -205,7 +229,7 @@ pub(super) fn shadow_pipeline(
         // Both faces: a plane or an open mesh casts from either side.
         primitive: Default::default(),
         depth_stencil: Some(wgpu::DepthStencilState {
-            format: DEPTH,
+            format,
             depth_write_enabled: Some(true),
             depth_compare: Some(wgpu::CompareFunction::Less),
             stencil: Default::default(),
@@ -297,6 +321,57 @@ pub(super) fn draw_shadows(
         pass.set_vertex_buffer(0, buffers.vertices.slice(..));
         pass.set_index_buffer(buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.draw_indexed(0..buffers.count, 0, run.instances.clone());
+    }
+}
+
+/// Spans `spans` of `runs` (`cull::shown`) drawn as casters into `pass`,
+/// its frame and instances bound, with `pipelines` (by `shadow_key`): a
+/// cascade's casters. Translucent runs cast nothing.
+#[cfg(feature = "lighting")]
+pub(super) fn draw_casters(
+    pass: &mut wgpu::RenderPass<'_>,
+    gpu: &Gpu,
+    runs: &[Run],
+    spans: &[(u32, std::ops::Range<u32>)],
+    pipelines: &std::collections::HashMap<u8, wgpu::RenderPipeline>,
+) {
+    let mut bound = super::draw::Bound::default();
+    for spans in spans.chunk_by(|a, b| a.0 == b.0) {
+        let run = &runs[spans[0].0 as usize];
+        if run.glass {
+            continue;
+        }
+        let key = shadow_key(run.variant);
+        let Some(pipeline) = pipelines.get(&key) else {
+            continue;
+        };
+        let buffers = &gpu.geometries[&run.geometry];
+        let (skinned, morphing) = (run.variant.skinned(), run.variant.morphing());
+        let (masked, placed) = (key & CUT_OUT != 0, key & PLACED != 0);
+        bound.pipeline(pass, pipeline);
+        let maps = gpu.bindings.get(&run.maps).filter(|_| masked);
+        bound.group(
+            pass,
+            1,
+            maps.map_or(&gpu.empty_bind, |(binding, _)| binding),
+        );
+        if let Some((_, _, joints)) = gpu.palettes.as_ref().filter(|_| skinned || morphing) {
+            bound.group(pass, 2, joints);
+        }
+        if let Some(skin) = buffers.skin.as_ref().filter(|_| skinned) {
+            bound.vertices(pass, 2, skin);
+        }
+        if let Some(uvs) = buffers.second_uvs.as_ref().filter(|_| placed) {
+            bound.vertices(pass, 2 + u32::from(skinned), uvs);
+        }
+        if let Some(morphs) = buffers.morphs.as_ref().filter(|_| morphing) {
+            bound.group(pass, 3, morphs);
+        }
+        bound.vertices(pass, 0, &buffers.vertices);
+        bound.indices(pass, &buffers.indices);
+        for (_, instances) in spans {
+            pass.draw_indexed(0..buffers.count, 0, instances.clone());
+        }
     }
 }
 

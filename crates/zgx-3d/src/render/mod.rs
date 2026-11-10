@@ -126,7 +126,7 @@ fn prepare<'a>(
     (device, queue): (&wgpu::Device, &wgpu::Queue),
     world: &Inner,
     view: Mat4,
-    (lit, transmits, clustered): (bool, bool, bool),
+    (lit, transmits, lighting): (bool, bool, u16),
     culls: bool,
 ) -> Vec<&'a crate::world::Drawn<'a>> {
     // Meshes by geometry, translucent ones after, back to front: by a
@@ -488,11 +488,12 @@ fn prepare<'a>(
         });
         start = end;
     }
-    // A clustered world's pipelines read its lights' lists: its runs'
-    // alone, so the meshes' loop above reads nothing more.
-    if clustered {
+    // A clustered or cascaded world's pipelines read its lights' lists or
+    // cascades (`lighting`, `Variant` bits): its runs' alone, so the
+    // meshes' loop above reads nothing more.
+    if lighting != 0 {
         for run in runs.iter_mut() {
-            run.variant = run.variant.with(Variant::CLUSTERED, true);
+            run.variant = Variant(run.variant.0 | lighting);
         }
     }
     scratch.ordered = (!runs.iter().any(|run| run.glass)).then_some(world.ordering);
@@ -616,7 +617,7 @@ impl Viewport for Renderer {
         let view_projection = camera.projection(aspect) * view;
         let mut uniforms = frame_uniforms(&world, view_projection, encode);
         #[cfg(feature = "lighting")]
-        let clustered = lights::prepare(
+        let (clustered, cascaded) = lights::prepare(
             gpu,
             &world,
             (view, camera.projection(aspect)),
@@ -625,10 +626,12 @@ impl Viewport for Renderer {
             &mut uniforms,
         );
         #[cfg(not(feature = "lighting"))]
-        let clustered = false;
+        let (clustered, cascaded) = (false, false);
+        let lighting = if clustered { Variant::CLUSTERED } else { 0 }
+            | if cascaded { Variant::CASCADED } else { 0 };
         let scratch = &mut self.scratch;
-        let sun = world
-            .shadows
+        // The sun's single map's (none while its shadow is in cascades).
+        let sun = (world.shadows && !cascaded)
             .then(|| {
                 let [x, y, z, _] = uniforms.sun_direction;
                 (uniforms.sun_color != [0.; 4]).then_some(crate::vec3(x, y, z))
@@ -659,8 +662,9 @@ impl Viewport for Renderer {
                     (frame.device, frame.queue),
                     &world,
                     view,
-                    (lit, transmits, clustered),
-                    culls,
+                    (lit, transmits, lighting),
+                    // Cascades cull their casters by the boxes, resting or not.
+                    culls || cascaded,
                 );
                 // The sun's view, fit to the opaque meshes' boxes where this
                 // frame made them.
@@ -676,6 +680,20 @@ impl Viewport for Renderer {
                     sun_view(&all, bounds, sun)
                 });
                 let casting = casting_of(gpu, scratch, &drawn, shadow, frame.device);
+                // The cascades' casters' box, where it may have changed.
+                #[cfg(feature = "lighting")]
+                if cascaded {
+                    let opaque = scratch.runs.iter().filter(|run| !run.glass);
+                    let ranges =
+                        opaque.map(|run| run.instances.start as usize..run.instances.end as usize);
+                    lights::cascade_scene(
+                        gpu,
+                        match scratch.boxed == Some(world.meshes) {
+                            true => scratch.boxes.union(ranges),
+                            false => sun_bounds(&all),
+                        },
+                    );
+                }
                 scratch.sorted = recycle(drawn);
                 (shadow, casting)
             }
@@ -687,7 +705,7 @@ impl Viewport for Renderer {
             uniforms.shadow_texel = [texel, 1. / SHADOW_SIZE as f32, texel * 7.5, texel * 6.];
             uniforms.params[3] = 1.;
         }
-        gpu.shadows(frame.device, world.shadows);
+        gpu.shadows(frame.device, world.shadows && !cascaded);
         if let Some(environment) = world.environment.as_ref() {
             gpu.environment(frame.device, frame.queue, environment);
         }
@@ -722,6 +740,24 @@ impl Viewport for Renderer {
             scratch.unculled = cull::RESTING;
         }
         world.culled.set(culled);
+        // The sun's cascades: fit to the view, their casters culled, which
+        // to draw again decided.
+        #[cfg(feature = "lighting")]
+        if cascaded {
+            let boxes = (scratch.boxed == Some(world.meshes)).then_some(&scratch.boxes);
+            let changed: &[std::ops::Range<usize>] = match kept {
+                Some(_) => &[],
+                None => &scratch.changed,
+            };
+            lights::cascades(
+                gpu,
+                &world,
+                (aspect, &uniforms),
+                (boxes, changed, scratch.instances.len()),
+                runs,
+                (frame.device, frame.queue),
+            );
+        }
         let shown = &scratch.shown;
         let mut casting = casting;
         for run in runs.iter() {
@@ -748,6 +784,10 @@ impl Viewport for Renderer {
         for pass in gpu.graph.passes().iter() {
             match pass {
                 Pass::Shadows => {
+                    #[cfg(feature = "lighting")]
+                    if cascaded {
+                        lights::draw_cascades(frame.encoder, gpu, runs);
+                    }
                     if casting.is_some()
                         && casting != gpu.shadow_drawn
                         && let (Some(map), Some((instances, _))) = (&gpu.shadow_map, &gpu.instances)

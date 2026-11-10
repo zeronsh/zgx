@@ -377,7 +377,47 @@ fn scenes() -> Vec<Scene> {
     ];
     #[cfg(feature = "lighting")]
     scenes.push(clustered_lights());
+    #[cfg(feature = "lighting")]
+    scenes.push(cascaded_shadow());
     scenes
+}
+
+/// A row of posts receding from the camera, their shadows in three
+/// cascades (the `lighting` feature) reaching 12 m.
+#[cfg(feature = "lighting")]
+fn cascaded_shadow() -> Scene {
+    Scene {
+        name: "shadow_cascades",
+        tolerance: EDGES,
+        build: |world| {
+            let mut ids = vec![world.add(Object::mesh(
+                Geometry::plane(30., 30.),
+                Material::rgb(0x9a948a).with(0., 0.8),
+            ))];
+            for i in 0..8 {
+                let z = 1.5 - i as f32 * 1.6;
+                ids.push(world.add(
+                    Object::mesh(Geometry::cuboid(0.25, 1.4, 0.25), Material::rgb(0xe0e0e0)).at([
+                        0.6 * (i % 2) as f32 - 0.3,
+                        0.7,
+                        z,
+                    ]),
+                ));
+            }
+            sun(world, [-0.7, -1., 0.2], 3.);
+            world.add_light(Light::Hemisphere {
+                sky: [0.25, 0.3, 0.4],
+                ground: [0.1, 0.1, 0.1],
+                intensity: 1.,
+            });
+            world.set_cascades(Some(Cascades::new(3).distance(12.).size(512)));
+            ids
+        },
+        shadows: true,
+        tone: ToneMapping::Neutral,
+        environment: || None,
+        camera: camera([1.2, 1.6, 3.5], [-0.3, 0.4, -4.]),
+    }
 }
 
 /// 48 point and spot lights over a floor and two meshes, shaded through

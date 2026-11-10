@@ -1,8 +1,13 @@
 //! The lighting milestone's settings on a world (design-3d-aaa.md, 6.3):
 //! clustered lights and point and spot lights in physical units. Behind the
 //! `lighting` feature.
-use super::{ByIndex, Inner, Light, LightId, Spot, World};
+use super::{ByIndex, Inner, Light, LightId, Settle, Spot, World};
 use crate::math::Vec3;
+
+impl Settle {
+    /// The sun's cascades have one still to follow the camera.
+    pub(crate) const CASCADES: u32 = 1 << 0;
+}
 
 /// A world's lighting settings.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -13,6 +18,8 @@ pub(crate) struct Lighting {
     /// Point lights' radii (`PointLight::radius`), by light index, with the
     /// generation they were set for: most have none.
     radii: ByIndex<(u32, f32)>,
+    /// The sun's cascades (`World::set_cascades`), while it casts shadows.
+    pub(crate) cascades: Option<Cascades>,
 }
 impl Lighting {
     /// Whether any light was given a radius (gone or not).
@@ -38,6 +45,57 @@ impl Inner {
                     .get(index as usize)
                     .is_some_and(|slot| slot.generation == generation && slot.value.is_some())
             })
+    }
+}
+
+/// The sun's shadow cut into cascades (`World::set_cascades`): the view
+/// cut by depth into `count` slices up to `distance` in front of the
+/// camera, each shadowed by a map of its own `size` texels square, the
+/// nearer the sharper.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cascades {
+    /// How many: 1 to 4.
+    pub count: u32,
+    /// How far in front of the camera they reach (and the camera's far
+    /// plane at most); beyond, nothing is in shadow.
+    pub distance: f32,
+    /// Each one's map's side, in texels.
+    pub size: u32,
+    /// Where they split: 0 evenly, 1 each a constant ratio deeper than the
+    /// one before (the near ones smallest); between, a mix.
+    pub split: f32,
+}
+impl Cascades {
+    /// `count` cascades (1 to 4) of 2048 texels reaching 100 m, split 0.75
+    /// of the way to logarithmically.
+    pub fn new(count: u32) -> Self {
+        Self {
+            count: count.clamp(1, 4),
+            distance: 100.,
+            size: 2048,
+            split: 0.75,
+        }
+    }
+    /// How far in front of the camera they reach.
+    pub fn distance(self, distance: f32) -> Self {
+        Self {
+            distance: distance.max(1e-2),
+            ..self
+        }
+    }
+    /// Each one's map's side, in texels (64 to 4096).
+    pub fn size(self, size: u32) -> Self {
+        Self {
+            size: size.clamp(64, 4096),
+            ..self
+        }
+    }
+    /// Where they split, 0 (evenly) to 1 (logarithmically).
+    pub fn split(self, split: f32) -> Self {
+        Self {
+            split: split.clamp(0., 1.),
+            ..self
+        }
     }
 }
 
@@ -181,6 +239,25 @@ impl World {
     /// count (`set_clustered_lights`).
     pub fn clustered_lights(&self) -> bool {
         self.inner.borrow().lighting.clustered
+    }
+    /// Cut the sun's shadow into cascades (`None`: one map over every
+    /// caster, as before). They apply while the sun casts shadows
+    /// (`set_shadows`).
+    ///
+    /// Each cascade holds its slice of the view's bounding sphere and moves
+    /// by whole texels of its map, so shadow edges hold still as the camera
+    /// moves; its map is drawn again only when it moved, the sun did, or a
+    /// caster in it did. The farther ones follow a moving camera at a lower
+    /// rate: one of them a frame, while the nearest follows every frame.
+    /// They cost `count × size² × 2` bytes (32 MB for four of 2048).
+    pub fn set_cascades(&self, cascades: Option<Cascades>) {
+        self.change_view(|inner: &mut Inner| {
+            std::mem::replace(&mut inner.lighting.cascades, cascades) != cascades
+        });
+    }
+    /// The sun's cascades, if its shadow is cut into them.
+    pub fn cascades(&self) -> Option<Cascades> {
+        self.inner.borrow().lighting.cascades
     }
     /// Add `light`, a point or spot light in physical units.
     pub fn add_point_light(&self, light: PointLight) -> LightId {

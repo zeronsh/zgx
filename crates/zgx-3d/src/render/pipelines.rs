@@ -26,12 +26,14 @@ pub(super) fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant:
     };
     make_layout(gpu, device, extent);
     #[cfg(feature = "lighting")]
-    if variant.clustered() {
-        super::lights::make_layouts(gpu, device);
+    let key = super::lights::key_of(variant) & !super::lights::LIT;
+    #[cfg(feature = "lighting")]
+    if key != 0 {
+        super::lights::make_layouts(gpu, device, super::lights::key_of(variant));
     }
     let group0 = match &gpu.environment_layout {
         #[cfg(feature = "lighting")]
-        _ if variant.clustered() => super::lights::layout_of(gpu, variant.lit()),
+        _ if key != 0 => super::lights::layout_of(gpu, super::lights::key_of(variant)),
         Some((layout, _)) if variant.lit() => layout,
         _ => &gpu.layout,
     };

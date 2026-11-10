@@ -82,7 +82,8 @@
 //G         base *= 1.0 - see_through;
         var sun = frame.sun_color.rgb;
         if frame.params.w > 0.5 {
-            sun *= sunlit(in.world, n);
+//I             sun *= sunlit(in.world, n);
+//H             sun *= sunlit_cascaded(in.world, n);
         }
 //Q         lit = shade(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
 //R         lit = shade_specular(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);

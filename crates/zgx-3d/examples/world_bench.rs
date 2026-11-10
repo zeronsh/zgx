@@ -17,10 +17,12 @@
 //! `crowd`, each skinned mesh a chain of its own playing the clip from its
 //! own time. Frames are then 1/60 s apart, whenever drawn.
 //! `MESHES` and `FRAMES` size it; `CULLING=0` draws what the camera can't
-//! see too. `SCENE=compute`, with the `compute` feature, adds the app's GPU
-//! data and compute passes to `textured` (`world_bench/compute.rs`), and
-//! `SCENE=particles`, with `particles`, rain and sparks
-//! (`world_bench/particles.rs`). None has an environment:
+//! see too; `CASCADES=n`, with the `lighting` feature, casts the sun's
+//! shadow through n cascades (`still`: they follow the camera; `textured`:
+//! their casters move). `SCENE=compute`, with the `compute` feature, adds
+//! the app's GPU data and compute passes to `textured`
+//! (`world_bench/compute.rs`), and `SCENE=particles`, with `particles`, rain
+//! and sparks (`world_bench/particles.rs`). None has an environment:
 //! prefiltering one takes two thirds of a cell, and its threads move the count.
 //! Run: cargo run --release -p zgx-3d --example world_bench
 use std::{
@@ -234,6 +236,12 @@ fn main() {
     let still = std::env::var("SCENE").is_ok_and(|scene| scene == "still");
     // `CULLING=0`: every mesh drawn, to compare.
     world.set_culling(std::env::var("CULLING").map_or(true, |on| on != "0"));
+    // `CASCADES=n`, with the `lighting` feature: the sun's shadow in n
+    // cascades (of 2048, reaching 100 m) instead of one map, in any scene.
+    #[cfg(feature = "lighting")]
+    if let Some(count) = std::env::var("CASCADES").ok().and_then(|n| n.parse().ok()) {
+        world.set_cascades(Some(Cascades::new(count)));
+    }
     for frame in 0..frames {
         if still {
             orbit(&world, frame);

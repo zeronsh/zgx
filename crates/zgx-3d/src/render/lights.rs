@@ -41,12 +41,16 @@ pub(super) struct Lights {
     key: Option<Key>,
     words: Vec<[u32; 4]>,
     buffer: Option<(wgpu::Buffer, u64)>,
-    /// The frame's layouts with the lists: without an environment and with.
-    layouts: Option<[wgpu::BindGroupLayout; 2]>,
-    /// Their bindings, and the renderer's frame bindings they were made
-    /// beside (a shadow map or environment made again makes them again).
-    binds: [Option<wgpu::BindGroup>; 2],
-    made_from: [Option<wgpu::BindGroup>; 2],
+    /// The sun's cascades, while its shadow is cut into them.
+    pub(super) sun: Option<super::shadows::cascades::Sun>,
+    /// The frame's layouts with the lists or the cascades, by `key`.
+    layouts: [Option<wgpu::BindGroupLayout>; 8],
+    /// Their bindings, the renderer's frame binding each was made beside
+    /// and the count of this one's own remakes (`made`) then: a shadow
+    /// map, an environment, a list's buffer or cascades made again make
+    /// them again.
+    binds: [Option<(wgpu::BindGroup, Option<wgpu::BindGroup>, u64)>; 8],
+    made: u64,
     /// Times the lights were binned, for tests.
     pub(super) binnings: u64,
 }
@@ -101,13 +105,47 @@ fn wanted(gpu: &Gpu, world: &Inner) -> bool {
 }
 
 /// The frame's lights, before its meshes are prepared: whether it shades
-/// through clusters, and if so its lists binned (where a light, the camera
-/// or the size changed) and uploaded, and the uniform path's lights turned
-/// off. Turning clusters on or off draws the meshes again (their pipelines
-/// differ). Once a frame, out of its loop: inlined, the frame's code
-/// compiled worse.
+/// through clusters (and if so its lists binned, where a light, the camera
+/// or the size changed, and uploaded, and the uniform path's lights turned
+/// off), and whether the sun's shadow is cut into cascades (their maps
+/// made with them, today's single map's lookup turned on). Turning either
+/// on or off draws the meshes again (their pipelines differ). Once a
+/// frame, out of its loop: inlined, the frame's code compiled worse.
 #[inline(never)]
 pub(super) fn prepare(
+    gpu: &mut Gpu,
+    world: &Inner,
+    (view, projection): (Mat4, Mat4),
+    size: (u32, u32),
+    (device, queue): (&wgpu::Device, &wgpu::Queue),
+    uniforms: &mut super::frame::FrameUniforms,
+) -> (bool, bool) {
+    let cascades = world
+        .lighting
+        .cascades
+        .filter(|_| world.shadows && uniforms.sun_color != [0.; 4]);
+    if cascades != gpu.lights.sun.as_ref().map(|sun| sun.settings) {
+        gpu.lights.sun =
+            cascades.map(|c| super::shadows::cascades::Sun::new(device, &gpu.shadow_layout, c));
+        gpu.lights.made += 1;
+        gpu.kept = None;
+    }
+    if cascades.is_some() {
+        uniforms.params[3] = 1.;
+    }
+    let clustered = clusters(
+        gpu,
+        world,
+        (view, projection),
+        size,
+        (device, queue),
+        uniforms,
+    );
+    (clustered, cascades.is_some())
+}
+
+/// `prepare`'s clusters: whether the frame shades through them.
+fn clusters(
     gpu: &mut Gpu,
     world: &Inner,
     (view, projection): (Mat4, Mat4),
@@ -197,11 +235,155 @@ pub(super) fn prepare(
     {
         let capacity = (bytes.len() as u64).next_power_of_two().max(1 << 16);
         lights.buffer = Some((make_buffer(device, capacity), capacity));
-        lights.binds = [None, None];
+        lights.made += 1;
     }
     queue.write_buffer(&lights.buffer.as_ref().unwrap().0, 0, bytes);
     gpu.written += bytes.len() as u64;
     true
+}
+
+/// The casters' box along the sun, from a frame that drew the meshes
+/// again (`cascades` keeps it for frames that don't). Out of the frame's
+/// code, as `cascades` is.
+#[inline(never)]
+pub(super) fn cascade_scene(gpu: &mut Gpu, scene: (crate::math::Vec3, crate::math::Vec3)) {
+    if let Some(sun) = &mut gpu.lights.sun {
+        sun.scene = Some(scene);
+    }
+}
+
+/// The sun's cascades this frame: each fit to its slice of the view, its
+/// casters culled against it (where the meshes' `boxes` are current), and
+/// which to draw again decided (`Sun::decide`), their frames and the main
+/// pass's uniforms written. `changed` are the instances written this frame
+/// (none where the meshes were kept), of `instances`. A world with a
+/// cascade left waiting draws again (`Settle::CASCADES`). Their pipelines
+/// made. Once a frame, out of its loop.
+#[inline(never)]
+pub(super) fn cascades(
+    gpu: &mut Gpu,
+    world: &Inner,
+    (aspect, uniforms): (f32, &super::frame::FrameUniforms),
+    (boxes, changed, instances): (
+        Option<&super::cull::Boxes>,
+        &[std::ops::Range<usize>],
+        usize,
+    ),
+    runs: &[super::Run],
+    (device, queue): (&wgpu::Device, &wgpu::Queue),
+) {
+    use super::shadows::{cascades as c, shadow_key};
+    // Their casters' pipelines, made once.
+    for run in runs.iter().filter(|run| !run.glass) {
+        let key = shadow_key(run.variant);
+        if gpu
+            .lights
+            .sun
+            .as_ref()
+            .is_some_and(|sun| !sun.pipelines.contains_key(&key))
+        {
+            let pipeline =
+                super::shadows::caster_pipeline(gpu, device, run.variant, c::CASCADE_DEPTH);
+            if let Some(sun) = &mut gpu.lights.sun {
+                sun.pipelines.insert(key, pipeline);
+            }
+        }
+    }
+    let Some(sun) = &mut gpu.lights.sun else {
+        return;
+    };
+    let [x, y, z, _] = uniforms.sun_direction;
+    let direction = crate::vec3(x, y, z);
+    let camera = &world.camera;
+    let eye = c::Eye::new(camera, aspect);
+    let count = sun.count();
+    let settings = sun.settings;
+    let splits = c::splits(
+        camera.near,
+        settings.distance.min(camera.far),
+        count,
+        settings.split,
+    );
+    let frame = c::sun_frame(direction);
+    let nothing = (
+        crate::math::Vec3::from([f32::MAX; 3]),
+        crate::math::Vec3::from([f32::MIN; 3]),
+    );
+    let scene = sun.scene.unwrap_or(nothing);
+    let mut fits = [c::Fit {
+        matrix: Mat4::IDENTITY,
+        texel: 0.,
+    }; c::MAX_CASCADES];
+    for (i, fit) in fits.iter_mut().enumerate().take(count) {
+        *fit = c::fit(
+            &eye,
+            (splits[i], splits[i + 1]),
+            &frame,
+            scene,
+            settings.size,
+        );
+        if let Some(boxes) = boxes {
+            let frustum = super::cull::Frustum::new(&fit.matrix);
+            super::cull::visible(&frustum, boxes, &mut sun.masks[i]);
+        }
+    }
+    let left = sun.decide(&c::Frame {
+        fits: &fits[..count],
+        sun: direction,
+        changed,
+        instances,
+        masked: boxes.is_some(),
+    });
+    world.unsettle(crate::world::Settle::CASCADES, left);
+    let mut drawn = 0;
+    for (i, fit) in fits.iter().enumerate().take(count) {
+        if !sun.redraw[i] {
+            continue;
+        }
+        drawn += 1;
+        let mask = boxes.map(|_| &sun.masks[i][..]);
+        super::cull::shown(runs, mask, &mut sun.spans[i]);
+        // Its caster pass's frame: today's map's, its view the cascade's.
+        let mut frame: super::frame::FrameUniforms = bytemuck::Zeroable::zeroed();
+        frame.shadow = fit.matrix.columns;
+        queue.write_buffer(&sun.casters[i].0, 0, bytemuck::bytes_of(&frame));
+    }
+    if drawn > 0 {
+        sun.draws += drawn;
+        let out = sun.uniforms();
+        queue.write_buffer(&sun.uniforms, 0, bytemuck::bytes_of(&out));
+    }
+}
+
+/// The cascades this frame draws again, each its casters' depth into its
+/// layer. Out of the frame's code: inlined there, a frame of a world
+/// without cascades cost 27 K instructions more (`mixed`).
+#[inline(never)]
+pub(super) fn draw_cascades(encoder: &mut wgpu::CommandEncoder, gpu: &Gpu, runs: &[super::Run]) {
+    let (Some(sun), Some((instances, _))) = (&gpu.lights.sun, &gpu.instances) else {
+        return;
+    };
+    for c in 0..sun.count() {
+        if !sun.redraw[c] {
+            continue;
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("3D sun cascade"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &sun.layers[c],
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            ..Default::default()
+        });
+        pass.set_bind_group(0, &sun.casters[c].1, &[]);
+        pass.set_vertex_buffer(1, instances.slice(..));
+        super::shadows::draw_casters(&mut pass, gpu, runs, &sun.spans[c], &sun.pipelines);
+    }
 }
 
 #[cold]
@@ -215,36 +397,74 @@ fn make_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
     })
 }
 
-/// The clustered frame's bindings, made again where the renderer's frame
-/// bindings (its shadow map, its environment) or the lists' buffer were.
-/// After the frame's shadow map and environment are made.
+/// A frame's layout and binding: lit by an environment (1), shading
+/// through clusters (2), shadowed by cascades (4). 0 is today's own.
+pub(super) const LIT: usize = 1;
+pub(super) const CLUSTERED: usize = 2;
+pub(super) const CASCADED: usize = 4;
+/// `on`'s bit of a key.
+fn bit(on: bool, bit: usize) -> usize {
+    if on { bit } else { 0 }
+}
+/// `variant`'s frame's key.
+pub(super) fn key_of(variant: super::Variant) -> usize {
+    bit(variant.lit(), LIT)
+        | bit(variant.clustered(), CLUSTERED)
+        | bit(variant.cascaded(), CASCADED)
+}
+
+impl Lights {
+    /// This frame's key but for its environment: clustered, cascaded.
+    pub(super) fn key(&self) -> usize {
+        bit(self.on, CLUSTERED) | bit(self.sun.is_some(), CASCADED)
+    }
+    /// The frame's binding where it shades through clusters or cascades.
+    pub(super) fn frame_bind(&self, lit: bool) -> Option<&wgpu::BindGroup> {
+        let key = self.key();
+        if key == 0 {
+            return None;
+        }
+        self.binds[key | bit(lit, LIT)]
+            .as_ref()
+            .map(|(bind, ..)| bind)
+    }
+}
+
+/// The frame's binding where it shades through clusters or cascades, made
+/// again where the renderer's frame binding (its shadow map, its
+/// environment), the lists' buffer or the cascades were. After the
+/// frame's shadow map and environment are made.
 #[inline(never)]
 pub(super) fn bind(gpu: &mut Gpu, device: &wgpu::Device, lit: bool) {
-    if !gpu.lights.on {
+    let key = gpu.lights.key();
+    if key == 0 {
         return;
     }
+    let key = key | bit(lit, LIT);
     let from = if lit {
         gpu.environment_bind.as_ref()
     } else {
         Some(&gpu.bind)
     };
-    let at = usize::from(lit);
-    if gpu.lights.binds[at].is_some() && gpu.lights.made_from[at].as_ref() == from {
+    let made = gpu.lights.made;
+    if let Some((_, made_from, at)) = &gpu.lights.binds[key]
+        && made_from.as_ref() == from
+        && *at == made
+    {
         return;
     }
     let from = from.cloned();
-    make_bind(gpu, device, lit);
-    gpu.lights.made_from[at] = from;
+    if let Some(bind) = make_bind(gpu, device, key) {
+        gpu.lights.binds[key] = Some((bind, from, made));
+    }
 }
 
 #[cold]
 #[inline(never)]
-fn make_bind(gpu: &mut Gpu, device: &wgpu::Device, lit: bool) {
-    make_layouts(gpu, device);
+fn make_bind(gpu: &mut Gpu, device: &wgpu::Device, key: usize) -> Option<wgpu::BindGroup> {
+    make_layouts(gpu, device, key);
     let lights = &gpu.lights;
-    let (Some(layouts), Some((buffer, _))) = (&lights.layouts, &lights.buffer) else {
-        return;
-    };
+    let layout = lights.layouts[key].as_ref()?;
     let map = gpu.shadow_map.as_ref().unwrap_or(&gpu.stand_in);
     let mut entries = vec![
         wgpu::BindGroupEntry {
@@ -259,15 +479,11 @@ fn make_bind(gpu: &mut Gpu, device: &wgpu::Device, lit: bool) {
             binding: 2,
             resource: wgpu::BindingResource::Sampler(&gpu.sampler),
         },
-        wgpu::BindGroupEntry {
-            binding: 5,
-            resource: buffer.as_entire_binding(),
-        },
     ];
-    if lit {
+    if key & LIT != 0 {
         let (Some((_, cube)), Some((_, sampler))) = (&gpu.environment, &gpu.environment_layout)
         else {
-            return;
+            return None;
         };
         entries.push(wgpu::BindGroupEntry {
             binding: 3,
@@ -278,33 +494,48 @@ fn make_bind(gpu: &mut Gpu, device: &wgpu::Device, lit: bool) {
             resource: wgpu::BindingResource::Sampler(sampler),
         });
     }
-    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("3D frame, clustered lights"),
-        layout: &layouts[usize::from(lit)],
-        entries: &entries,
-    });
-    gpu.lights.binds[usize::from(lit)] = Some(bind);
-}
-
-impl Lights {
-    /// The clustered frame's binding, if this frame shades through
-    /// clusters.
-    pub(super) fn frame_bind(&self, lit: bool) -> Option<&wgpu::BindGroup> {
-        self.on.then(|| self.binds[usize::from(lit)].as_ref())?
+    if key & CLUSTERED != 0 {
+        let (buffer, _) = lights.buffer.as_ref()?;
+        entries.push(wgpu::BindGroupEntry {
+            binding: 5,
+            resource: buffer.as_entire_binding(),
+        });
     }
+    if key & CASCADED != 0 {
+        let sun = lights.sun.as_ref()?;
+        entries.push(wgpu::BindGroupEntry {
+            binding: 6,
+            resource: sun.uniforms.as_entire_binding(),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 7,
+            resource: wgpu::BindingResource::TextureView(&sun.array),
+        });
+    }
+    Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("3D frame, clustered lights or cascades"),
+        layout,
+        entries: &entries,
+    }))
 }
 
-/// The frame's layout for a clustered pipeline, lit by an environment or
-/// not (`make_layouts` made it).
-pub(super) fn layout_of(gpu: &Gpu, lit: bool) -> &wgpu::BindGroupLayout {
-    &gpu.lights.layouts.as_ref().expect("made with the pipeline")[usize::from(lit)]
+/// The frame's layout for a pipeline of `key` (`key_of`), which
+/// `make_layouts` made.
+pub(super) fn layout_of(gpu: &Gpu, key: usize) -> &wgpu::BindGroupLayout {
+    gpu.lights.layouts[key]
+        .as_ref()
+        .expect("made with the pipeline")
 }
 
-/// The clustered frame's layouts, made once.
+/// The frame's layout of `key`, made once.
 #[cold]
 #[inline(never)]
-pub(super) fn make_layouts(gpu: &mut Gpu, device: &wgpu::Device) {
-    if gpu.lights.layouts.is_some() {
+pub(super) fn make_layouts(gpu: &mut Gpu, device: &wgpu::Device, key: usize) {
+    // The environment's sampler, which a lit binding takes.
+    if key & LIT != 0 && gpu.environment_layout.is_none() {
+        gpu.environment_layout = Some(super::frame::environment_layout(device));
+    }
+    if gpu.lights.layouts[key].is_some() {
         return;
     }
     let entry = |binding, visibility, ty| wgpu::BindGroupLayoutEntry {
@@ -314,31 +545,43 @@ pub(super) fn make_layouts(gpu: &mut Gpu, device: &wgpu::Device) {
         count: None,
     };
     let fragment = wgpu::ShaderStages::FRAGMENT;
-    let plain = [
-        entry(
-            0,
-            wgpu::ShaderStages::VERTEX_FRAGMENT,
-            wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-        ),
-        entry(
-            1,
-            fragment,
-            wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Depth,
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-        ),
+    let uniform = wgpu::BindingType::Buffer {
+        ty: wgpu::BufferBindingType::Uniform,
+        has_dynamic_offset: false,
+        min_binding_size: None,
+    };
+    let depth = |dimension| wgpu::BindingType::Texture {
+        sample_type: wgpu::TextureSampleType::Depth,
+        view_dimension: dimension,
+        multisampled: false,
+    };
+    let mut entries = vec![
+        entry(0, wgpu::ShaderStages::VERTEX_FRAGMENT, uniform),
+        entry(1, fragment, depth(wgpu::TextureViewDimension::D2)),
         entry(
             2,
             fragment,
             wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
         ),
-        entry(
+    ];
+    if key & LIT != 0 {
+        entries.push(entry(
+            3,
+            fragment,
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::Cube,
+                multisampled: false,
+            },
+        ));
+        entries.push(entry(
+            4,
+            fragment,
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        ));
+    }
+    if key & CLUSTERED != 0 {
+        entries.push(entry(
             5,
             fragment,
             wgpu::BindingType::Buffer {
@@ -346,34 +589,22 @@ pub(super) fn make_layouts(gpu: &mut Gpu, device: &wgpu::Device) {
                 has_dynamic_offset: false,
                 min_binding_size: None,
             },
-        ),
-    ];
-    let mut lit = plain.to_vec();
-    lit.push(entry(
-        3,
-        fragment,
-        wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::Cube,
-            multisampled: false,
+        ));
+    }
+    if key & CASCADED != 0 {
+        entries.push(entry(6, fragment, uniform));
+        entries.push(entry(
+            7,
+            fragment,
+            depth(wgpu::TextureViewDimension::D2Array),
+        ));
+    }
+    gpu.lights.layouts[key] = Some(device.create_bind_group_layout(
+        &wgpu::BindGroupLayoutDescriptor {
+            label: Some("3D frame, clustered lights or cascades"),
+            entries: &entries,
         },
     ));
-    lit.push(entry(
-        4,
-        fragment,
-        wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-    ));
-    let layout = |entries: &[wgpu::BindGroupLayoutEntry]| {
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("3D frame, clustered lights"),
-            entries,
-        })
-    };
-    gpu.lights.layouts = Some([layout(&plain), layout(&lit)]);
-    // The environment's sampler, which a lit binding takes.
-    if gpu.environment_layout.is_none() {
-        gpu.environment_layout = Some(super::frame::environment_layout(device));
-    }
 }
 
 #[cfg(test)]
@@ -470,9 +701,71 @@ mod tests {
         let mut renderer = world.renderer();
         draw(&mut renderer, &device, &queue);
         let gpu = renderer.gpu.as_ref().unwrap();
-        assert!(!gpu.lights.on && gpu.lights.layouts.is_none() && gpu.lights.buffer.is_none());
+        assert!(
+            !gpu.lights.on
+                && gpu.lights.layouts.iter().all(Option::is_none)
+                && gpu.lights.buffer.is_none()
+        );
         world.set_clustered_lights(true);
         draw(&mut renderer, &device, &queue);
         assert!(renderer.gpu.as_ref().unwrap().lights.on);
+    }
+
+    #[test]
+    fn cascades_are_drawn_again_only_as_they_move_the_far_ones_one_a_frame() {
+        let (device, queue) = device_and_queue();
+        let world = World::new();
+        world.add(Object::mesh(Geometry::plane(40., 40.), Material::default()));
+        let cube = world.add(Object::mesh(
+            Geometry::cuboid(1., 1., 1.),
+            Material::default(),
+        ));
+        world.add_light(Light::Directional {
+            direction: vec3(-0.4, -1., -0.3),
+            color: [1.; 3],
+            intensity: 2.,
+        });
+        world.set_shadows(true);
+        world.set_cascades(Some(crate::Cascades::new(4).distance(40.).size(256)));
+        world.set_camera(Camera::looking_at([0., 4., 9.], [0., 0., 0.]));
+        let mut renderer = world.renderer();
+        let draws = |r: &super::super::Renderer| {
+            let sun = r.gpu.as_ref().unwrap().lights.sun.as_ref().unwrap();
+            (sun.draws, sun.redraw)
+        };
+        draw(&mut renderer, &device, &queue);
+        assert_eq!(draws(&renderer), (4, [true; 4]), "all, the first frame");
+        assert!(world.inner().settle.settled());
+        draw(&mut renderer, &device, &queue);
+        assert_eq!(draws(&renderer).0, 4, "none: nothing moved");
+        // The camera moves far enough to move every cascade: the nearest
+        // and one far one now, the other two in the frames after, the
+        // world drawing again until they have.
+        world.set_camera(Camera::looking_at([3., 5., 12.], [1., 0., 0.]));
+        draw(&mut renderer, &device, &queue);
+        let (count, redraw) = draws(&renderer);
+        assert_eq!(count, 6);
+        assert!(redraw[0] && redraw.iter().filter(|r| **r).count() == 2);
+        assert!(
+            !world.inner().settle.settled(),
+            "waiting cascades keep it drawing"
+        );
+        draw(&mut renderer, &device, &queue);
+        draw(&mut renderer, &device, &queue);
+        assert_eq!(draws(&renderer).0, 8);
+        assert!(world.inner().settle.settled());
+        draw(&mut renderer, &device, &queue);
+        assert_eq!(draws(&renderer).0, 8, "caught up");
+        // The cube, 13 m from the camera (where the third cascade meets the
+        // fourth), moves: the cascades holding it, at once, not the two
+        // nearer.
+        world.set_transform(cube, crate::Transform::at([0.2, 0., 0.]));
+        draw(&mut renderer, &device, &queue);
+        assert_eq!(draws(&renderer), (10, [false, false, true, true]));
+        // Off: today's single map again, the cascades gone.
+        world.set_cascades(None);
+        draw(&mut renderer, &device, &queue);
+        let gpu = renderer.gpu.as_ref().unwrap();
+        assert!(gpu.lights.sun.is_none() && gpu.shadow_map.is_some());
     }
 }

@@ -13,7 +13,8 @@ use super::Variant;
 /// other's, `//W ` any of those three's (their numbers), `//K ` a
 /// cut-out one's and `//N ` any other's, and `//A ` a multisampled one's
 /// (geometric specular anti-aliasing), `//X ` a clustered one's and `//Y `
-/// any other's (`shader/lights.wgsl`). (A cut-out or placed one is
+/// any other's (`shader/lights.wgsl`), `//H ` one shadowed by the sun's
+/// cascades and `//I ` any other's (`shader/shadows.wgsl`). (A cut-out or placed one is
 /// textured; a line with two prefixes is for a variant with both.) Only
 /// its code is kept, without comments or others' lines: naga reads every
 /// byte of a shader, and most of these are others'.
@@ -39,6 +40,8 @@ pub(super) fn wgsl(variant: Variant, samples: u32) -> String {
         b'A' => samples > 1,
         b'X' => variant.clustered(),
         b'Y' => !variant.clustered(),
+        b'H' => variant.cascaded(),
+        b'I' => !variant.cascaded(),
         _ => false,
     };
     // The kept chunks, copied whole.
@@ -108,6 +111,7 @@ macro_rules! parts {
 // place. Comments and blank lines cost nothing: they're dropped once.
 parts![
     "frame", "maps", "skin", "vertex", "caster", "light", "display", "fragment", "lights",
+    "shadows",
 ];
 
 #[cfg(test)]
