@@ -14660,29 +14660,6 @@ impl GpuRenderer {
             present.shown = None;
             present.history.clear();
         }
-        // Tiles have no native feedback. The opt-in benchmark presents a
-        // one-pixel probe in the same transaction as each tile flip.
-        if present_log::scroll_bench() && !present.drawable_frame() {
-            present.attach(self.surface.as_ref())?;
-            if present
-                .layer
-                .as_ref()
-                .is_some_and(|layer| layer.probe_feedback().is_none())
-            {
-                // SAFETY: retain only; both HAL guards end before drawing.
-                let device = unsafe { self.device.as_hal::<wgpu::hal::api::Metal>() }
-                    .map(|hal| hal.raw_device().clone());
-                let queue = unsafe { self.queue.as_hal::<wgpu::hal::api::Metal>() }.map(|hal| {
-                    use objc2::Message;
-                    hal.as_raw().retain()
-                });
-                if let (Some(layer), Some(device), Some(queue)) =
-                    (present.layer.as_mut(), device, queue)
-                {
-                    layer.start_probe(&device, queue);
-                }
-            }
-        }
         // At full rate through drawables, the next drawable's surface is the
         // target; the renderer's own surfaces go but the one shown (it brings
         // the drawable up to date), and out of full rate, the drawables do.
@@ -14690,9 +14667,8 @@ impl GpuRenderer {
             present.attach(self.surface.as_ref())?;
             present.retain_buffers(|_, buffer| buffer.drawable);
             // Presented feedback while the trial reads it, or a log does.
-            let wants_feedback = present_log::enabled()
-                || present_log::scroll_bench()
-                || matches!(present.trial, Trial::Drawables { .. });
+            let wants_feedback =
+                present_log::enabled() || matches!(present.trial, Trial::Drawables { .. });
             // SAFETY: The raw device is only retained; the guard is dropped
             // before wgpu is called again.
             let device = unsafe { self.device.as_hal::<wgpu::hal::api::Metal>() }

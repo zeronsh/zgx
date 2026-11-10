@@ -873,26 +873,6 @@ impl Frame {
         if let Some(drawable) = drawable {
             self.buffer.presentDrawable(drawable);
         }
-        if crate::present_log::scroll_bench() {
-            let frame = zgx::profile::current_frame_index();
-            let completed = block2::RcBlock::new(
-                move |buffer: std::ptr::NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
-                    // SAFETY: Metal supplies the completed command buffer and
-                    // keeps it alive throughout this callback.
-                    let buffer = unsafe { buffer.as_ref() };
-                    let ran = buffer.GPUEndTime() - buffer.GPUStartTime();
-                    if buffer.GPUStartTime() > 0. && ran >= 0. {
-                        eprintln!("SCROLL_GPU {frame} {:.3}", ran * 1e6);
-                    }
-                },
-            );
-            // SAFETY: Metal copies the block before commit and invokes it
-            // with a live command buffer once its GPU timestamps are final.
-            unsafe {
-                self.buffer
-                    .addCompletedHandler(block2::RcBlock::as_ptr(&completed));
-            }
-        }
         self.buffer.commit();
         self.buffer
     }

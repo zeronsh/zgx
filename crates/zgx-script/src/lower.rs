@@ -7639,14 +7639,12 @@ fn lower_list(kind: &Kind, vm: &Rc<Vm>, low: &Rc<Lowering>, cx: &mut Option<&mut
     let plain_row = {
         let (builder, vm, low) = (builder.clone(), vm.clone(), low.clone());
         move |index: Signal<usize>, _: usize, cx: &mut Context| -> View {
-            zgx::profile::note(|| "list built row".into());
             build_scoped(&vm, cx, &low, &builder, index.with_untracked(|i| *i) + 1)
         }
     };
     let row = {
         let (builder, vm, low, keyed) = (builder.clone(), vm.clone(), low.clone(), key.is_some());
         move |index: Signal<usize>, key: ListKey, cx: &mut Context| -> View {
-            zgx::profile::note(|| "list built row".into());
             if !keyed {
                 return build_scoped(&vm, cx, &low, &builder, index.with_untracked(|i| *i) + 1);
             }
@@ -7997,7 +7995,6 @@ fn lower_item_list(
     let row = {
         let (items, builder, vm, low) = (items.clone(), builder.clone(), vm.clone(), low.clone());
         move |index: Signal<usize>, _: ListKey, cx: &mut Context| -> View {
-            zgx::profile::note(|| "list built row".into());
             let at = |list: &Value, i: usize| list.item(i).cloned().unwrap_or(Value::Nil);
             let runtime = cx.runtime();
             let first = index.with_untracked(|i| *i);

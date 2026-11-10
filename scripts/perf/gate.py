@@ -144,10 +144,6 @@ SCENES = [
     # A 400-section Markdown reply streaming in a chunk at a time, parsed
     # by a keyed `ui.markdown` in a computed and drawn by `ui.each`.
     ('md-stream', 'zgx-script', 'md_stream_bench', {}),
-    ('scroll-transcript', 'zgx-script', 'scroll_bench', {'SCENE': 'transcript'}),
-    ('scroll-plain', 'zgx-script', 'scroll_bench', {'SCENE': 'plain'}),
-    ('scroll-grid', 'zgx-script', 'scroll_bench', {'SCENE': 'grid'}),
-    ('scroll-nested', 'zgx-script', 'scroll_bench', {'SCENE': 'nested'}),
     ('style', 'zgx', 'style_bench', {}),
     # A terminal streaming a build log (16, 256 and true colours, styles,
     # wrapping, a progress line rewritten), its output replayed on the
@@ -331,9 +327,8 @@ def build(checkout, target, into):
     # apart, the other benches link the wgpu they always did. zgx-terminal's
     # benches bring dev-dependencies of their own, that backend among them,
     # apart for the same reason.
-    parts = [[s for s in scenes if s[1] not in ALONE and s[2] != "scroll_bench"]]
+    parts = [[s for s in scenes if s[1] not in ALONE]]
     parts += [[s for s in scenes if s[1] == alone] for alone in ALONE]
-    parts += [[s for s in scenes if s[2] == "scroll_bench"]]
     for part in parts:
         if not part:
             continue
@@ -342,8 +337,6 @@ def build(checkout, target, into):
             command += ['-p', package_in(checkout, package)]
             for example in dict.fromkeys(s[2] for s in part if s[1] == package):
                 command += ['--example', example]
-        if any(s[2] == "scroll_bench" for s in part):
-            command += ['--features', 'zgx-script/inspect']
         subprocess.run(command, cwd=checkout, env=env, check=True)
     # One target directory serves both sides (their dependencies are
     # shared): keep this side's binaries before the other overwrites them.
