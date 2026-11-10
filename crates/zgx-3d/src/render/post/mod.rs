@@ -15,6 +15,29 @@ pub(super) struct Look {
     pub(super) background: [f32; 4],
     /// Bloom's intensity, and 1 over its steps.
     pub(super) bloom: [f32; 4],
+    /// The vignette's, grain's and chromatic aberration's intensities, and
+    /// the frame's index.
+    pub(super) lens: [f32; 4],
+}
+
+/// What the last pass has compiled in: bloom, vignette, grain, chromatic
+/// aberration, a bit each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Parts(pub(super) u8);
+impl Parts {
+    pub(super) const BLOOM: u8 = 1;
+    pub(super) const VIGNETTE: u8 = 2;
+    pub(super) const GRAIN: u8 = 4;
+    pub(super) const ABERRATION: u8 = 8;
+    fn constants(self) -> [(&'static str, f64); 4] {
+        let on = |bit: u8| f64::from(u8::from(self.0 & bit != 0));
+        [
+            ("BLOOM", on(Self::BLOOM)),
+            ("VIGNETTE", on(Self::VIGNETTE)),
+            ("GRAIN", on(Self::GRAIN)),
+            ("ABERRATION", on(Self::ABERRATION)),
+        ]
+    }
 }
 
 /// The bindings of a compile's targets.
@@ -41,8 +64,8 @@ pub(super) struct Chain {
     first: wgpu::RenderPipeline,
     down: wgpu::RenderPipeline,
     up: wgpu::RenderPipeline,
-    /// The last pass by the target's format and whether bloom is mixed in.
-    lasts: Vec<((wgpu::TextureFormat, bool), wgpu::RenderPipeline)>,
+    /// The last pass by the target's format and what it has compiled in.
+    lasts: Vec<((wgpu::TextureFormat, Parts), wgpu::RenderPipeline)>,
     look: wgpu::Buffer,
     /// What the last pass reads for bloom without it.
     stand_in: wgpu::TextureView,
@@ -297,38 +320,34 @@ impl Chain {
         }
     }
 
-    /// The last pass: the scene, with bloom mixed in if `bloom`, exposed and
-    /// mapped as `look` says, into `target` (of `format`).
+    /// The last pass: the scene with `parts`, exposed and mapped as `look`
+    /// says, into `target` (of `format`).
     pub(super) fn last(
         &mut self,
         (device, queue): (&wgpu::Device, &wgpu::Queue),
         encoder: &mut wgpu::CommandEncoder,
         graph: &Graph,
         (target, format): (&wgpu::TextureView, wgpu::TextureFormat),
-        look: &Look,
+        (look, parts): (Look, Parts),
     ) {
-        let bloom = graph.targets.as_ref().is_some_and(|t| !t.bloom.is_empty());
-        if !self.lasts.iter().any(|(key, _)| *key == (format, bloom)) {
+        let key = (format, parts);
+        if !self.lasts.iter().any(|(k, _)| *k == key) {
             let made = pipeline(
                 device,
-                (
-                    &self.shader,
-                    "last",
-                    &[("BLOOM", f64::from(u8::from(bloom)))],
-                ),
+                (&self.shader, "last", &parts.constants()),
                 &self.last_pipeline_layout,
                 format.into(),
             );
-            self.lasts.push(((format, bloom), made));
+            self.lasts.push((key, made));
         }
-        queue.write_buffer(&self.look, 0, bytemuck::bytes_of(look));
+        queue.write_buffer(&self.look, 0, bytemuck::bytes_of(&look));
         if self.made(device, graph).is_none() {
             return;
         }
         let Some(binds) = &self.binds else {
             return;
         };
-        let pipeline = &self.lasts.iter().find(|(key, _)| *key == (format, bloom));
+        let pipeline = &self.lasts.iter().find(|(k, _)| *k == key);
         let Some((_, pipeline)) = pipeline else {
             return;
         };

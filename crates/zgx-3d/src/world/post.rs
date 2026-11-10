@@ -12,12 +12,32 @@ use super::World;
 pub struct Post {
     /// Light spreading around what is bright, as a lens's glare does.
     pub bloom: Option<Bloom>,
+    /// The frame darker toward its corners, as a lens's is.
+    pub vignette: Option<Vignette>,
+    /// Film's grain: noise in the middle tones, a function of the frame's
+    /// index (a recorded frame repeats).
+    pub grain: Option<Grain>,
+    /// Colours parted toward the frame's edges, red outward and blue
+    /// inward, as a simple lens refracts them.
+    pub chromatic_aberration: Option<ChromaticAberration>,
 }
 impl Post {
     /// Whether any pass is on: if not, the meshes draw into the view's
     /// target as they do with no chain.
     pub(crate) fn any(&self) -> bool {
         self.bloom.is_some()
+            || self.vignette.is_some()
+            || self.grain.is_some()
+            || self.chromatic_aberration.is_some()
+    }
+}
+
+/// An intensity from 0 to 1, 0 where it isn't a number.
+fn unit(intensity: f32) -> f32 {
+    if intensity.is_finite() {
+        intensity.clamp(0., 1.)
+    } else {
+        0.
     }
 }
 
@@ -38,6 +58,45 @@ impl Default for Bloom {
     }
 }
 
+/// The frame darker toward its corners: light falls as the fourth power
+/// of the cosine of its angle off the lens's axis, as through a real lens.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Vignette {
+    /// 0 none; at 1 the corners have a quarter of the light. 0.4 by
+    /// default.
+    pub intensity: f32,
+}
+impl Default for Vignette {
+    fn default() -> Self {
+        Self { intensity: 0.4 }
+    }
+}
+
+/// Film's grain, after tone mapping, most in the middle tones.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Grain {
+    /// How strong: 0 none, 1 coarse. 0.05 by default.
+    pub intensity: f32,
+}
+impl Default for Grain {
+    fn default() -> Self {
+        Self { intensity: 0.05 }
+    }
+}
+
+/// Colours parted toward the frame's edges.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChromaticAberration {
+    /// How far: at 1, red and blue each a hundredth of the frame's width
+    /// apart from green at its edges. 0.3 by default.
+    pub intensity: f32,
+}
+impl Default for ChromaticAberration {
+    fn default() -> Self {
+        Self { intensity: 0.3 }
+    }
+}
+
 impl World {
     /// The passes its frame goes through after its meshes (none by
     /// default). With one on, meshes draw in linear light into a target of
@@ -46,12 +105,17 @@ impl World {
     /// background still shows as given.
     pub fn set_post(&self, post: Post) {
         let post = Post {
-            bloom: post.bloom.map(|bloom| Bloom {
-                intensity: if bloom.intensity.is_finite() {
-                    bloom.intensity.clamp(0., 1.)
-                } else {
-                    0.
-                },
+            bloom: post.bloom.map(|b| Bloom {
+                intensity: unit(b.intensity),
+            }),
+            vignette: post.vignette.map(|v| Vignette {
+                intensity: unit(v.intensity),
+            }),
+            grain: post.grain.map(|g| Grain {
+                intensity: unit(g.intensity),
+            }),
+            chromatic_aberration: post.chromatic_aberration.map(|c| ChromaticAberration {
+                intensity: unit(c.intensity),
             }),
         };
         self.change_view(|inner| std::mem::replace(&mut inner.post, post) != post);

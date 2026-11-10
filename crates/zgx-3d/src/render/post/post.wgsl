@@ -72,12 +72,18 @@ struct Look {
     background: vec4<f32>,
     // Bloom's intensity, and 1 over its steps (its first holds their sum).
     bloom_mix: vec4<f32>,
+    // The vignette's, grain's and chromatic aberration's intensities, and
+    // the frame's index (grain's seed).
+    lens: vec4<f32>,
 }
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var bloom: texture_2d<f32>;
 @group(0) @binding(2) var bloom_sampler: sampler;
 @group(0) @binding(3) var<uniform> look: Look;
 override BLOOM: bool = false;
+override VIGNETTE: bool = false;
+override GRAIN: bool = false;
+override ABERRATION: bool = false;
 
 // The tone mappings, as the meshes' shader has them.
 fn neutral(color: vec3<f32>) -> vec3<f32> {
@@ -119,8 +125,29 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
     return select(high, low, c <= vec3(0.0031308));
 }
 
+// A number from 0 to 1 for each pixel and frame (PCG's hash).
+fn hash(x: u32, y: u32, frame: u32) -> f32 {
+    var v = x * 1664525u + y * 1013904223u + frame * 2654435769u;
+    v = v * 747796405u + 2891336453u;
+    v = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+    v = (v >> 22u) ^ v;
+    return f32(v) / 4294967295.0;
+}
+
 @fragment fn last(in: Out) -> @location(0) vec4<f32> {
-    let drawn = textureLoad(scene, vec2<i32>(in.position.xy), 0);
+    var drawn = textureLoad(scene, vec2<i32>(in.position.xy), 0);
+    let size = vec2<f32>(textureDimensions(scene));
+    // From the centre, the longer side's half 1.
+    let off = (in.uv - 0.5) * 2.0 * size / max(size.x, size.y);
+    if ABERRATION {
+        // Red spread outward and blue inward, the more toward the edges, as
+        // a lens refracts them apart: a hundredth of the frame's width at
+        // its edge at intensity 1.
+        let shift = (in.uv - 0.5) * look.lens.z * 0.02;
+        let red = textureSampleLevel(scene, bloom_sampler, in.uv - shift, 0.0);
+        let blue = textureSampleLevel(scene, bloom_sampler, in.uv + shift, 0.0);
+        drawn = vec4(red.r, drawn.g, blue.b, max(drawn.a, max(red.a, blue.a)));
+    }
     var light = drawn.rgb;
     if BLOOM {
         let glow = textureSampleLevel(bloom, bloom_sampler, in.uv, 0.0).rgb * look.bloom_mix.y;
@@ -130,7 +157,23 @@ fn encode(c: vec3<f32>) -> vec3<f32> {
     // premultiplied light), then multiplied by its coverage again.
     let alpha = drawn.a;
     let coverage = select(1.0, alpha, alpha > 1e-3);
-    var mapped = clamp(tone_map(light / coverage * look.params.x), vec3(0.0), vec3(1.0));
+    var exposed = light / coverage * look.params.x;
+    if VIGNETTE {
+        // Darker toward the corners, as cos⁴ of the angle off the axis
+        // falls: at intensity 1, the corners a quarter.
+        let r2 = dot(off, off) * 0.5 * look.lens.x;
+        exposed *= 1.0 / ((1.0 + r2) * (1.0 + r2));
+    }
+    var mapped = clamp(tone_map(exposed), vec3(0.0), vec3(1.0));
+    if GRAIN {
+        // Noise of the frame's index, so a recorded frame repeats, most in
+        // the middle tones, in a space near the eye's.
+        let at = vec2<u32>(in.position.xy);
+        let noise = hash(at.x, at.y, u32(look.lens.w)) - 0.5;
+        var tone = sqrt(mapped);
+        tone = clamp(tone + noise * look.lens.y * 4.0 * tone * (1.0 - tone), vec3(0.0), vec3(1.0));
+        mapped = tone * tone;
+    }
     if look.params.z > 0.5 {
         mapped = encode(mapped);
     }
