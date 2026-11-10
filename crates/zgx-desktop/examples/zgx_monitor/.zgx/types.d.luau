@@ -17006,6 +17006,10 @@ export type ListProps = {
 	-- where they are (a measured list's, by key).
 	on_start: (() -> ())?,
 	start_distance: number?,
+	-- Viewports of rows built ahead of each edge of its view in time frames
+	-- leave over, and kept as it scrolls away: 1 unless set; 0, it builds
+	-- what shows and its `overscan` alone.
+	ahead: number?,
 	-- Kept saying whether it rests at its end (within a few points): a
 	-- "jump to the latest" button shows while it does not.
 	at_end: State<boolean>?,

@@ -236,7 +236,8 @@ struct Compact {
 impl Compact {
     /// The measurements of shaped `lines`, or None where arithmetic over them
     /// would not match cosmic-text: right-to-left or mixed-direction lines,
-    /// justified lines, or a word whose glyphs set different line heights.
+    /// justified lines, lines holding inline boxes (CSS's line box), or a
+    /// word whose glyphs set different line heights.
     /// Its words and advances go at the end of `slab`'s lists.
     fn of(lines: &[BufferLine], font_size: f32, slab: &mut Slab) -> Option<Self> {
         // Counted first, the lists grow once: a text changing every frame
@@ -244,7 +245,9 @@ impl Compact {
         let (mut spans, mut words, mut glyphs) = (0, 0, 0);
         for line in lines {
             let shape = line.shape_opt()?;
-            if shape.rtl || line.align() == Some(Align::Justified) {
+            // (The box test here, not in `TextCache::prepare`: there it cost
+            // every call into the cache a larger frame.)
+            if shape.rtl || shape.boxes || line.align() == Some(Align::Justified) {
                 return None;
             }
             spans += shape.spans.len();
@@ -1231,6 +1234,23 @@ impl TextCache {
     ) -> Laid<'_> {
         let hash = self.entry(fonts, Source::Rich(rich), false, Need::Layout);
         self.laid_out(fonts, hash, width)
+    }
+    /// Where `rich`'s inline boxes are laid out at `width`: each one's
+    /// character's offset, its left and its top (`TextLayout::inline_boxes`),
+    /// from the lines drawn. Clamped or ellipsized text, laid out by its own
+    /// path, lists those it keeps.
+    pub fn inline_boxes(
+        &mut self,
+        fonts: &mut FontSystem,
+        rich: &RichText,
+        width: Option<f32>,
+    ) -> Vec<(usize, f32, f32)> {
+        if !Self::handles(rich) {
+            use zgx::text_layout::TextLayout;
+            return crate::text::ShapedText::with_runs(fonts, rich, width).inline_boxes();
+        }
+        let laid = self.layout(fonts, rich, width);
+        crate::text::inline_box_places(laid.runs(None), &laid.line_starts())
     }
     /// Whether plain text goes through the cache: nonempty, at a valid size.
     pub fn handles_plain(text: &str, font_size: f32) -> bool {
@@ -2745,6 +2765,285 @@ mod tests {
             .collect();
         assert_eq!(long.len(), 1, "earlier states were superseded");
         assert_eq!(long[0].key.text.len(), end - 7);
+    }
+
+    /// Text with inline boxes: `parts`' text, a `Some` part a box that big
+    /// (width, height, baseline), its text one U+FFFC, a run of its own.
+    /// A part: its text, or a box's (width, height, baseline).
+    type Part<'a> = (&'a str, Option<(f32, f32, f32)>);
+    fn boxed(parts: &[Part<'_>]) -> RichText {
+        use zgx::rich_text::{INLINE_BOX_TEXT, InlineBox};
+        let (mut text, mut runs, mut boxes) = (String::new(), Vec::new(), Vec::new());
+        for (part, inline) in parts {
+            let at = text.len();
+            match inline {
+                Some((width, height, baseline)) => {
+                    text.push_str(INLINE_BOX_TEXT);
+                    boxes.push(InlineBox {
+                        width: *width,
+                        height: *height,
+                        baseline: *baseline,
+                        ..InlineBox::new(at)
+                    });
+                }
+                None => text.push_str(part),
+            }
+            runs.push(TextRun {
+                range: at..text.len(),
+                font_size: 14.,
+                ..Default::default()
+            });
+        }
+        RichText::new(text, runs)
+            .unwrap()
+            .with_inline_boxes(boxes)
+            .unwrap()
+    }
+
+    /// A paragraph's inline boxes take their room in its lines, measured
+    /// and laid out from prepared lines as a shaped text lays them out: the
+    /// text after a box moves over by its width, and the box sits on the
+    /// baseline, its line grown to hold it.
+    #[test]
+    fn inline_boxes_measure_and_lay_out_as_shaped_text() {
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let plain = boxed(&[("Ask  to review", None)]);
+        let rich = boxed(&[
+            ("Ask ", None),
+            ("", Some((40., 30., 26.))),
+            (" to review", None),
+        ]);
+        let (without, with) = (
+            cache.measure(&mut fonts, &plain, None),
+            cache.measure(&mut fonts, &rich, None),
+        );
+        let shaped = ShapedText::with_runs(&mut fonts, &rich, None);
+        use zgx::text_layout::TextLayout;
+        assert_eq!(with, shaped.size());
+        assert!(
+            (with.0 - without.0 - 40.).abs() < 0.5,
+            "{with:?} {without:?}"
+        );
+        assert!(with.1 > without.1, "the line grew to hold it");
+        let places = cache.inline_boxes(&mut fonts, &rich, None);
+        assert_eq!(places, shaped.inline_boxes());
+        let [(at, x, top)] = places[..] else {
+            panic!("one box: {places:?}")
+        };
+        assert_eq!(at, 4);
+        assert!((x - TextLayout::caret(&shaped, 4).x).abs() < 0.01);
+        assert!(top.abs() < 0.01, "the tallest thing in its line: {top}");
+        // Wrapped where it doesn't fit, it starts the next line.
+        let narrow = TextLayout::caret(&shaped, 4).x + 20.;
+        let places = cache.inline_boxes(&mut fonts, &rich, Some(narrow));
+        assert!(places[0].1 < 0.01 && places[0].2 > 0., "{places:?}");
+    }
+
+    /// A font feature tag a script can write (`font_features =
+    /// "_ibw"`) on an ordinary padded span: it stays text, with its padding,
+    /// and no box.
+    #[test]
+    fn review_a_private_tag_on_text_is_no_box() {
+        use zgx::text_layout::FontFeatures;
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let padded = |features: FontFeatures| {
+            let mut run = TextRun {
+                range: 0..5,
+                font_size: 14.,
+                padding: [6., 0.],
+                ..Default::default()
+            };
+            run.font.features = features;
+            RichText::new("hello", vec![run]).unwrap()
+        };
+        let plain = padded(FontFeatures::default());
+        let tagged = padded(FontFeatures::new([(*b"_ibw", 1)]));
+        assert!(tagged.inline_boxes().is_empty(), "no box on text");
+        assert_eq!(
+            cache.measure(&mut fonts, &tagged, None),
+            cache.measure(&mut fonts, &plain, None),
+            "its padding kept"
+        );
+    }
+
+    /// Text starting with a combining mark right after a box. The
+    /// mark joins the box's grapheme; it mustn't become a second box glyph.
+    #[test]
+    fn review_a_combining_mark_after_a_box_is_not_a_second_box() {
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let rich = boxed(&[("", Some((40., 10., 10.))), ("\u{301}x", None)]);
+        let without = boxed(&[("", Some((40., 10., 10.))), ("x", None)]);
+        let (a, b) = (
+            cache.measure(&mut fonts, &rich, None),
+            cache.measure(&mut fonts, &without, None),
+        );
+        assert!((a.0 - b.0).abs() < 2., "one box's width: {a:?} {b:?}");
+        assert_eq!(cache.inline_boxes(&mut fonts, &rich, None).len(), 1);
+    }
+
+    /// Where a box is, in a right-to-left paragraph: after the first
+    /// word, so left of it.
+    #[test]
+    fn review_a_box_in_right_to_left_text_sits_between_its_words() {
+        use zgx::text_layout::TextLayout;
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let first = "\u{5E9}\u{5DC}\u{5D5}\u{5DD} ";
+        let rich = boxed(&[
+            (first, None),
+            ("", Some((40., 10., 10.))),
+            (" \u{5E2}\u{5D5}\u{5DC}\u{5DD}", None),
+        ]);
+        let shaped = ShapedText::with_runs(&mut fonts, &rich, None);
+        let places = cache.inline_boxes(&mut fonts, &rich, None);
+        assert_eq!(places, shaped.inline_boxes());
+        let [(at, x, _)] = places[..] else {
+            panic!("{places:?}")
+        };
+        assert_eq!(at, first.len());
+        let start_of_first = TextLayout::caret(&shaped, 0).x;
+        let width = shaped.size().0;
+        assert!(
+            start_of_first > width / 2.,
+            "starts at the right: {start_of_first} of {width}"
+        );
+        assert!(
+            x + 40. <= start_of_first + 0.5,
+            "left of the first word: {x}"
+        );
+        assert!(x > 0., "right of the last word: {x}");
+    }
+
+    /// boxes side by side keep their own sizes, and a box's offset
+    /// counts the lines before it.
+    #[test]
+    fn review_adjacent_boxes_and_a_later_line() {
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let rich = boxed(&[
+            ("a\n", None),
+            ("", Some((30., 10., 10.))),
+            ("", Some((50., 20., 20.))),
+        ]);
+        let places = cache.inline_boxes(&mut fonts, &rich, None);
+        let [(at0, x0, _), (at1, x1, _)] = places[..] else {
+            panic!("{places:?}")
+        };
+        assert_eq!((at0, at1), (2, 5));
+        assert!(x0.abs() < 0.01 && (x1 - 30.).abs() < 0.01, "{places:?}");
+    }
+
+    /// A line clamp leaves out a box past it, as the shaped text says.
+    #[test]
+    fn review_a_clamped_box_is_not_listed_by_the_cache() {
+        use zgx::text_layout::{TextLayout, TextOptions};
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let rich = boxed(&[("first\nsecond ", None), ("", Some((30., 10., 10.)))]).with_options(
+            TextOptions {
+                line_clamp: std::num::NonZeroU32::new(1),
+                ..Default::default()
+            },
+        );
+        let shaped = ShapedText::with_runs(&mut fonts, &rich, None);
+        assert_eq!(shaped.inline_boxes(), Vec::new());
+        assert_eq!(cache.inline_boxes(&mut fonts, &rich, None), Vec::new());
+    }
+
+    /// Two sizes whose padding marks match are still two texts.
+    #[test]
+    fn review_sizes_with_the_same_mark_are_apart() {
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let a = boxed(&[("x", None), ("", Some((1., 64., 64.)))]);
+        let b = boxed(&[("x", None), ("", Some((2., 0., 0.)))]);
+        assert_ne!(
+            cache.measure(&mut fonts, &a, None),
+            cache.measure(&mut fonts, &b, None)
+        );
+    }
+
+    /// A box resized is a new text: measured and laid out at its new size.
+    #[test]
+    fn a_box_resized_measures_at_its_new_size() {
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let small = boxed(&[("a ", None), ("", Some((20., 10., 10.))), (" b", None)]);
+        let large = small.with_box_sizes([(50., 10., 10.)]);
+        let (a, b) = (
+            cache.measure(&mut fonts, &small, None),
+            cache.measure(&mut fonts, &large, None),
+        );
+        assert!((b.0 - a.0 - 30.).abs() < 0.5, "{a:?} {b:?}");
+        assert_eq!(b, ShapedText::with_runs(&mut fonts, &large, None).size());
+    }
+
+    /// A box resized shapes no word again: those beside it come from the
+    /// run cache as they were, and it is no word of its own to cache.
+    #[test]
+    fn a_box_resized_shapes_no_word_again() {
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let start = boxed(&[
+            ("Ask about ", None),
+            ("", Some((20., 10., 10.))),
+            (" this change, and more words", None),
+        ]);
+        cache.layout(&mut fonts, &start, Some(200.));
+        let words = fonts.shape_run_cache.len();
+        assert!(words > 3, "{words}");
+        for width in [30., 45., 60., 20.] {
+            let resized = start.with_box_sizes([(width, 12., 9.)]);
+            cache.layout(&mut fonts, &resized, Some(200.));
+        }
+        assert_eq!(fonts.shape_run_cache.len(), words);
+    }
+
+    /// A stream of text with a box in an early line keeps that line's
+    /// shapes as it grows (the line moves to the grown text, not shaped
+    /// again), and a box added at its end leaves the lines before it too.
+    #[test]
+    fn a_stream_with_boxes_keeps_its_earlier_lines() {
+        let mut fonts = FontSystem::new();
+        let mut cache = TextCache::default();
+        let first_line = |cache: &TextCache, rich: &RichText| {
+            let entry = cache.entries.get(&Key::of(rich, false).hash()).unwrap();
+            let line = &entry.lines.as_ref().unwrap()[0];
+            line.shape_opt().unwrap().spans[0].words.as_ptr() as usize
+        };
+        let start = boxed(&[
+            ("Ask ", None),
+            ("", Some((40., 20., 16.))),
+            (" about this.\nIt grows", None),
+        ]);
+        cache.layout(&mut fonts, &start, Some(300.));
+        let kept = first_line(&cache, &start);
+        let grown = boxed(&[
+            ("Ask ", None),
+            ("", Some((40., 20., 16.))),
+            (" about this.\nIt grows as it streams", None),
+        ]);
+        cache.layout(&mut fonts, &grown, Some(300.));
+        assert_eq!(
+            first_line(&cache, &grown),
+            kept,
+            "its first line moved over"
+        );
+        let more = boxed(&[
+            ("Ask ", None),
+            ("", Some((40., 20., 16.))),
+            (" about this.\nIt grows as it streams ", None),
+            ("", Some((30., 20., 16.))),
+        ]);
+        cache.layout(&mut fonts, &more, Some(300.));
+        assert_eq!(first_line(&cache, &more), kept, "a box after it leaves it");
+        assert_eq!(
+            cache.measure(&mut fonts, &more, Some(300.)),
+            ShapedText::with_runs(&mut fonts, &more, Some(300.)).size()
+        );
     }
 
     /// A text of no words sits at its chunk's start: one made at a chunk's

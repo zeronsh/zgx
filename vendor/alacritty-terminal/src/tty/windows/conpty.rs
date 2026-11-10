@@ -46,6 +46,8 @@ struct ConptyApi {
     create: CreatePseudoConsoleFn,
     resize: ResizePseudoConsoleFn,
     close: ClosePseudoConsoleFn,
+    /// zgx: from conpty.dll (Windows Terminal's), not Windows' own.
+    dll: bool,
 }
 
 impl ConptyApi {
@@ -62,6 +64,7 @@ impl ConptyApi {
                     create: CreatePseudoConsole,
                     resize: ResizePseudoConsole,
                     close: ClosePseudoConsole,
+                    dll: false,
                 }
             }
         }
@@ -83,6 +86,7 @@ impl ConptyApi {
                 create: mem::transmute::<LoadedFn, CreatePseudoConsoleFn>(create_fn),
                 resize: mem::transmute::<LoadedFn, ResizePseudoConsoleFn>(resize_fn),
                 close: mem::transmute::<LoadedFn, ClosePseudoConsoleFn>(close_fn),
+                dll: true,
             })
         }
     }
@@ -97,6 +101,12 @@ pub struct Conpty {
 }
 
 impl Conpty {
+    /// zgx: whether it is Windows Terminal's (conpty.dll), which hands on
+    /// strings it doesn't know (APC, DCS: pictures); Windows' own drops them.
+    pub fn hands_on_strings(&self) -> bool {
+        self.api.dll
+    }
+
     /// zgx: close the pseudoconsole on a thread of its own. It renders what
     /// the program last wrote (after the program has gone) and then ends
     /// the output pipe, which the caller reads to its end meanwhile:

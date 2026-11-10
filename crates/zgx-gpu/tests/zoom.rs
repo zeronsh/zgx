@@ -105,8 +105,8 @@ fn a_zoomed_panel_draws_as_the_window_zoom_draws_it() {
             off <= 4,
             "at {zoom}: {off} pixels differ from the window's zoom"
         );
-        // A scale transform of the same panel rasterizes at a step and
-        // resamples: far from the window's zoom.
+        // A scale transform of the same panel, magnifying, rasterizes at
+        // its scale too: as the window's zoom draws it, not resampled.
         if zoom == 1.25 {
             let mut scaled = scene(PIXELS as f32, None);
             let panel = scaled.children(scaled.root())[0];
@@ -120,9 +120,12 @@ fn a_zoomed_panel_draws_as_the_window_zoom_draws_it() {
             );
             scaled.flush();
             let mut gpu = GpuRenderer::new(PIXELS, PIXELS).unwrap();
-            let resampled = draw(&mut gpu, &scaled, PIXELS as f32);
-            let blurred = differing(&at_window_zoom, &resampled, 32);
-            assert!(blurred > 4 * off.max(10), "resampled: {blurred}");
+            let scaled = draw(&mut gpu, &scaled, PIXELS as f32);
+            let off = differing(&at_window_zoom, &scaled, 32);
+            assert!(
+                off <= 4,
+                "scaled: {off} pixels differ from the window's zoom"
+            );
         }
     }
 }

@@ -1815,6 +1815,9 @@ struct Host {
     /// When kept images' decoded pixels go, `TRIM_DELAY` past the last
     /// upload, whether or not the window keeps presenting (an animated page).
     release_images_at: Option<std::time::Instant>,
+    /// When lists let go of rows kept out of view, `KEPT_REST` past the
+    /// last frame presented.
+    release_rows_at: Option<std::time::Instant>,
     /// `trim_at` is for the glyph atlas (`ATLAS_TRIM_DELAY`).
     trim_atlas: bool,
     /// When to save the window's frame (`frame_autosave`, Linux): once its
@@ -1946,6 +1949,8 @@ impl Host {
         // No reader has asked for the window's tree yet: names and values
         // made from state wait for one (`InitialTreeRequested`).
         ui.set_assistive_technology(false);
+        // What a refresh has to spare goes to what comes next (`Host::draw`).
+        ui.host_spare_time();
         // A layout that doesn't settle is reported, and the app goes on.
         ui.contain_layout_feedback();
         // Each issue logged once, and kept for this window's banner alone.
@@ -2236,6 +2241,7 @@ impl Host {
             refresh_frame: false,
             trim_at: None,
             release_images_at: None,
+            release_rows_at: None,
             trim_atlas: false,
             frame_save_at: None,
             startup_trim: StartupTrim::Pending,
@@ -2698,6 +2704,7 @@ impl Host {
         {
             self.recover_renderer();
         }
+        self.spend_spare_time()?;
         match self.draw_frame() {
             Err(error)
                 if error
@@ -2731,6 +2738,28 @@ impl Host {
             }
             other => other,
         }
+    }
+    /// The first half of a refresh just delivered, on the rows about to come
+    /// into view (`zgx::spare`): the frame then draws what that changed, its
+    /// wait for its point in the refresh that much shorter. What the frame
+    /// has to do itself is done first, as its own. A draw that isn't a
+    /// refresh's (input, drawn at once) has no time to spare.
+    fn spend_spare_time(&mut self) -> Result<(), Box<dyn Error>> {
+        if !self.context.ui.spare_work_wanted() || !self.frames_presented() {
+            return Ok(());
+        }
+        let now = std::time::Instant::now();
+        let Some(started) = self
+            .frame_heartbeat
+            .filter(|at| now.duration_since(*at) < self.frame_interval / 2)
+        else {
+            return Ok(());
+        };
+        self.context.ui.try_prepare_frame()?;
+        self.context
+            .ui
+            .run_spare_work(started, self.frame_interval)?;
+        Ok(())
     }
     fn draw_frame(&mut self) -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "macos")]
@@ -3149,6 +3178,7 @@ impl Host {
                     self.present_ready = false;
                     let now = std::time::Instant::now();
                     self.trim_at = Some(now + TRIM_DELAY);
+                    self.release_rows_at = Some(now + zgx::spare::KEPT_REST);
                     if renderer.take_images_uploaded() {
                         self.release_images_at = Some(now + TRIM_DELAY);
                     }
@@ -6210,6 +6240,15 @@ impl Host {
             zgx::image::release_decoded();
         }
         if self
+            .release_rows_at
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.release_rows_at = None;
+            self.context.ui.release_kept_rows()?;
+            // And what that freed goes back to the system.
+            self.trim_at = Some(std::time::Instant::now());
+        }
+        if self
             .trim_at
             .is_some_and(|at| std::time::Instant::now() >= at)
         {
@@ -6473,7 +6512,9 @@ impl Host {
     fn sync_frames(&mut self) {
         let now = std::time::Instant::now();
         let scrolling = self.scroll_live(now);
-        let wanted = (self.frames.wants_frame() || scrolling) && self.frames_presented();
+        let wanted =
+            (self.frames.wants_frame() || scrolling || self.context.ui.spare_work_wanted())
+                && self.frames_presented();
         if !wanted {
             self.frame_heartbeat = None;
             self.frame_deadline = None;
@@ -8143,6 +8184,7 @@ impl WindowManager {
                     host.touch.hold_deadline(),
                     host.trim_at,
                     host.release_images_at,
+                    host.release_rows_at,
                     host.frame_save_at,
                     host.accessibility_pacer.deadline(),
                     host.wheel_tape.borrow().deadline(),

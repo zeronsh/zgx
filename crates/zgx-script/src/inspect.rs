@@ -145,7 +145,7 @@ const NOT_PRESENTING: &str = "the window isn't presenting (hidden, minimized or 
 fn pacing(from: f64, named: &dyn Fn(&str) -> String) -> (String, Value) {
     let frames: Vec<_> = zgx::trace::frames(usize::MAX)
         .into_iter()
-        .filter(|f| f.ended_ms >= from)
+        .filter(|f| f.ended_ms >= from && !f.spare)
         .collect();
     interaction(&frames, named)
 }
@@ -1088,6 +1088,7 @@ impl Session {
                 if field("summary").is_some_and(|v| v.truthy()) {
                     let frames: Vec<_> = zgx::trace::frames(usize::MAX)
                         .into_iter()
+                        .filter(|f| !f.spare)
                         .filter(|f| since.is_none_or(|s| f.index > s))
                         .filter(|f| until.is_none_or(|u| f.index <= u))
                         .collect();
@@ -1626,7 +1627,8 @@ impl Session {
                 .sum();
             let frame_micros: f32 = frame.phases.iter().map(|p| p.2).sum::<f32>() - waited;
             let mut line = format!(
-                "frame {} ({:.2} ms{}): {} → {} runs, {:.0} µs",
+                "{} {} ({:.2} ms{}): {} → {} runs, {:.0} µs",
+                if frame.spare { "spare" } else { "frame" },
                 frame.index,
                 frame_micros / 1000.,
                 if waited >= 1. {
@@ -1728,6 +1730,7 @@ impl Session {
             text.push(line);
             data.push(Value::record([
                 ("frame", Value::Num(frame.index as f64)),
+                ("spare", Value::Bool(frame.spare)),
                 (
                     "ended_ms",
                     Value::Num((frame.ended_ms * 100.).round() / 100.),
@@ -2147,7 +2150,7 @@ fn connection(stream: impl std::io::Read + Write, queue: Queue, token: Option<St
 #[cfg(unix)]
 fn listen(dir: &std::path::Path, pid: u32, about: &str, queue: Queue) -> std::io::Result<PathBuf> {
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
-    let path = dir.join(format!("{pid}.sock"));
+    let path = crate::inspect_client::socket_path(dir, pid)?;
     let _ = std::fs::remove_file(&path);
     let listener = UnixListener::bind(&path)?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;

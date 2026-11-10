@@ -1111,7 +1111,11 @@ impl Ui {
             leaves.clear();
             self.selectable_leaves(&scene, root, |leaf| leaves.push(leaf));
             // The leaves from the start to the end: an end that does not show
-            // (hidden, or in an unmounted row) by where it would be.
+            // (hidden, or in an unmounted row) by where it would be. A parked
+            // end's own row, if mounted (back, its text not where it was:
+            // still building), shows none of it: where in it the end lies
+            // isn't known, and taking it all lit a whole message for a
+            // caret. A copy takes that row's part as it was cut.
             let first = match &start {
                 End::Live(point) => leaves.iter().position(|l| l.id == point.node).or_else(|| {
                     leaves
@@ -1120,7 +1124,7 @@ impl Ui {
                 }),
                 End::Parked(row, _) => leaves
                     .iter()
-                    .position(|l| row_order(rows, &scene, l.id, row).is_ge()),
+                    .position(|l| row_order(rows, &scene, l.id, row).is_gt()),
                 End::Gone => None,
             };
             let last = match &end {
@@ -1131,7 +1135,7 @@ impl Ui {
                 }),
                 End::Parked(row, _) => leaves
                     .iter()
-                    .rposition(|l| row_order(rows, &scene, l.id, row).is_le()),
+                    .rposition(|l| row_order(rows, &scene, l.id, row).is_lt()),
                 End::Gone => None,
             };
             let (first, last) = match (first, last) {
@@ -1734,11 +1738,12 @@ impl Ui {
             // none of it (the selection collapsed there, or ending at its
             // start); one between the ends that shows no text (drawn, not
             // written) takes its row text.
+            // (A parked end's row shows none of the selection, mounted or
+            // not: it copies from the end's cut.)
             let in_row = |end: &End| match end {
                 End::Live(point) => row_of(rows, &scene, point.node)
                     .filter(|(list, _)| list == content)
                     .map(|(_, index)| index),
-                End::Parked(row, _) if row.content == *content => Some(row.index),
                 _ => None,
             };
             let ends = [in_row(&start), in_row(&end)];

@@ -121,7 +121,7 @@ def trial(binary, mode, repeat, args, sample):
         report = reports[0]
         if report.get('renderer') != 'gpu' or report.get('adapter') != 'components':
             raise RuntimeError('expected the native GPU component adapter')
-        if not 1 <= report['mounted_rows'] <= 32:
+        if not 1 <= report['mounted_rows'] <= 256:
             raise RuntimeError('mounted row bound exceeded')
         if not args.seconds - .1 <= report['elapsed_seconds'] <= args.seconds + 2:
             raise RuntimeError('reported workload duration does not match request')
