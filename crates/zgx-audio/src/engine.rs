@@ -2,9 +2,10 @@
 //! call becomes a command stamped with a frame and goes on a fixed queue;
 //! a full queue is an error, never a wait.
 use crate::device::{Device, Host, Message, Renderer};
+use crate::effect::{Effect, Slot};
 use crate::mixer::Streamed;
 use crate::mixer::{
-    Command, FADING_SLOTS, Feed, MAX_BUSES, Meter, Mixer, Return, Setup, VoiceParam,
+    Command, FADING_SLOTS, Feed, MAX_BUSES, MAX_EFFECTS, Meter, Mixer, Return, Setup, VoiceParam,
 };
 use crate::queue::{Consumer, Producer, queue};
 use crate::ramp::{Curve, Ramp};
@@ -28,6 +29,8 @@ pub enum Error {
     QueueFull,
     /// [`Audio::add_bus`] past the most buses there can be (32).
     TooManyBuses,
+    /// [`Bus::add_effect`] past the most effects a bus can hold (8).
+    TooManyEffects,
     /// A bus of this name is there already.
     BusExists(String),
     /// Bytes that aren't a sound zgx-audio reads, and why.
@@ -40,6 +43,9 @@ pub enum Error {
     Config(String),
     /// A handle (a [`Bus`]) from another engine.
     Foreign,
+    /// An effect whose parameters can't be kept to (a range upside down, or
+    /// not a number), and why.
+    Effect(String),
 }
 
 impl Error {
@@ -57,11 +63,15 @@ impl std::fmt::Display for Error {
         match self {
             Error::QueueFull => f.write_str("the audio command queue is full"),
             Error::TooManyBuses => write!(f, "there can be at most {MAX_BUSES} buses"),
+            Error::TooManyEffects => {
+                write!(f, "a bus can hold at most {MAX_EFFECTS} effects")
+            }
             Error::BusExists(name) => write!(f, "a bus named {name:?} exists already"),
             Error::Format(why) | Error::Io(why) => f.write_str(why),
             Error::Device(why) => write!(f, "the audio device: {why}"),
             Error::Config(why) => write!(f, "an audio engine can't be made with {why}"),
             Error::Foreign => f.write_str("a bus from another audio engine"),
+            Error::Effect(why) => write!(f, "an effect with {why}"),
         }
     }
 }
@@ -264,6 +274,8 @@ struct Control {
     buses: Vec<(String, u16)>,
     /// Voices sent and not yet given back.
     live: HashSet<u64>,
+    /// Each effect sent and not removed, by id: its bus.
+    effects: Vec<(u64, u16)>,
 }
 
 /// The device and its host thread, made when first needed.
@@ -448,12 +460,14 @@ impl Audio {
         config.check()?;
         let voices = config.voices;
         let (commands, from_main) = queue(config.commands);
-        // Every sound the mixer's side holds is in one place: the command
-        // queue, the schedule (as much again), a voice's slot, or here.
+        // Every sound (and effect) the mixer's side holds is in one place:
+        // the command queue, the schedule (as much again), a voice's slot
+        // (a bus's chain), or here.
         // Each call on the engine empties this queue, so it never holds
         // more than the rest can: it's never full, and the mixer gives
         // back a voice the moment it ends, whether the app calls or not.
-        let held = commands.capacity() + config.commands + voices + FADING_SLOTS;
+        let held =
+            commands.capacity() + config.commands + voices + FADING_SLOTS + MAX_BUSES * MAX_EFFECTS;
         let (to_main, returns) = queue(held);
         let meter = Arc::new(Meter::new(config.rate));
         let setup = Setup {
@@ -479,6 +493,7 @@ impl Audio {
                 ui_sounds: true,
                 buses,
                 live: HashSet::new(),
+                effects: Vec::new(),
             }),
             meter,
             latency,
@@ -511,15 +526,31 @@ impl Audio {
             .control
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // Sounds the mixer is done with are dropped here, on this thread.
-        while let Some(Return::Ended { id, sound }) = control.returns.pop() {
-            control.live.remove(&id);
-            if control.ended.len() >= MAX_ENDED {
-                // No one has asked for a long while: the oldest half go.
-                control.ended.drain(..MAX_ENDED / 2);
+        // Sounds and effects the mixer is done with are dropped here, on
+        // this thread.
+        let mut again = Vec::new();
+        while let Some(back) = control.returns.pop() {
+            match back {
+                Return::Ended { id, sound } => {
+                    control.live.remove(&id);
+                    if control.ended.len() >= MAX_ENDED {
+                        // No one has asked for a long while: the oldest half go.
+                        control.ended.drain(..MAX_ENDED / 2);
+                    }
+                    control.ended.push(id);
+                    drop(sound);
+                }
+                Return::Effect(slot) => drop(slot),
+                Return::Unprepared { bus, mut slot } => {
+                    slot.prepare(self.rate());
+                    again.push(Command::AddEffect { bus, slot });
+                }
             }
-            control.ended.push(id);
-            drop(sound);
+        }
+        for command in again {
+            // Sent again as soon as it can be; on a full queue it's lost,
+            // as any command sent then would be.
+            let _ = self.push(&mut control, 0, command);
         }
         control
     }
@@ -1089,6 +1120,112 @@ impl Bus {
             .0
             .clone()
     }
+
+    /// Adds `effect` at the end of its chain: it runs on the bus's sum,
+    /// after the effects before it, before the bus's gain. Prepared here,
+    /// on this thread, then sent to the mixer.
+    pub fn add_effect<E: Effect>(&self, effect: E) -> Result<EffectHandle, Error> {
+        self.add(effect, None)
+    }
+
+    /// As [`add_effect`](Bus::add_effect), with `side`'s level given to the
+    /// effect each block ([`Context::side_chain`](crate::Context::side_chain)):
+    /// that bus's level over the block before, so neither bus waits on the
+    /// other. `side` must be this engine's.
+    pub fn add_effect_keyed<E: Effect>(
+        &self,
+        effect: E,
+        side: &Bus,
+    ) -> Result<EffectHandle, Error> {
+        if side.audio.0.id != self.audio.0.id {
+            return Err(Error::Foreign);
+        }
+        self.add(effect, Some(side.index))
+    }
+
+    fn add<E: Effect>(&self, effect: E, side: Option<u16>) -> Result<EffectHandle, Error> {
+        // Its parameters as the mixer will keep to them: a range the right
+        // way up, all of it numbers. Checked here: the mixer can't refuse.
+        for p in effect.parameters() {
+            if !(p.min.is_finite() && p.max.is_finite() && p.min <= p.max && !p.default.is_nan()) {
+                return Err(Error::Effect(format!(
+                    "a parameter {:?} from {} to {}, starting at {}",
+                    p.name, p.min, p.max, p.default
+                )));
+            }
+        }
+        let mut control = self.audio.control();
+        let held = control
+            .effects
+            .iter()
+            .filter(|(_, bus)| *bus == self.index)
+            .count();
+        if held >= MAX_EFFECTS {
+            return Err(Error::TooManyEffects);
+        }
+        let id = control.next_id;
+        let slot = Box::new(Slot::new(id, effect, self.audio.rate(), side));
+        let command = Command::AddEffect {
+            bus: self.index,
+            slot,
+        };
+        self.audio.push(&mut control, self.time, command)?;
+        control.next_id += 1;
+        control.effects.push((id, self.index));
+        Ok(EffectHandle {
+            audio: self.audio.clone(),
+            id,
+            time: self.time,
+        })
+    }
+}
+
+/// An effect on a bus: its parameters, and taking it off again.
+#[derive(Clone, Debug)]
+pub struct EffectHandle {
+    audio: Audio,
+    id: u64,
+    /// The frame its commands happen on (0: as soon as they can).
+    time: u64,
+}
+
+impl EffectHandle {
+    /// The same effect, for commands that happen on exactly this frame.
+    pub fn at(&self, time: Time) -> EffectHandle {
+        EffectHandle {
+            time: time.0,
+            ..self.clone()
+        }
+    }
+
+    /// Moves parameter `index` to `value`, kept to its range, along `ramp`:
+    /// the effect sees each frame's value. An index the effect hasn't is
+    /// ignored.
+    pub fn set(&self, index: usize, value: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
+        let ramp = ramp.into();
+        self.audio.send(
+            self.time,
+            Command::EffectParam {
+                id: self.id,
+                index: index.min(usize::from(u16::MAX)) as u16,
+                value,
+                ramp,
+            },
+        )
+    }
+
+    /// Takes it off its bus, at once: its tail is cut. It's dropped on
+    /// this thread by a later call.
+    pub fn remove(&self) -> Result<(), Error> {
+        let mut control = self.audio.control();
+        self.audio.push(
+            &mut control,
+            self.time,
+            Command::RemoveEffect { id: self.id },
+        )?;
+        control.effects.retain(|(id, _)| *id != self.id);
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1128,6 +1265,41 @@ mod tests {
         audio.update();
         assert!(!voice.playing());
         assert_eq!(Arc::strong_count(&click.0), 1);
+    }
+
+    #[test]
+    fn an_effect_prepared_for_a_rate_gone_by_is_prepared_again_and_sent_back() {
+        struct Doubles(Arc<Mutex<Vec<u32>>>);
+        impl Effect for Doubles {
+            fn prepare(&mut self, format: crate::Format, _: usize) {
+                self.0.lock().unwrap().push(format.rate);
+            }
+            fn process(&mut self, block: &mut [f32], _: &crate::Context<'_>) {
+                block.iter_mut().for_each(|s| *s *= 2.);
+            }
+        }
+        let flat = Sound::from_samples(&[0., 0.25], 1, 48_000).unwrap();
+        let (audio, mut mixer) = Audio::offline(Config {
+            limiter: None,
+            ..Config::default()
+        })
+        .unwrap();
+        audio.play(&flat, Play::new().loop_frames(1..2)).unwrap();
+        // The rate the main thread reads moves under it, as a device's
+        // starting at another rate would move it.
+        let prepared = Arc::new(Mutex::new(Vec::new()));
+        audio.0.meter.rate.store(44_100, Ordering::Release);
+        audio
+            .master()
+            .add_effect(Doubles(prepared.clone()))
+            .unwrap();
+        audio.0.meter.rate.store(48_000, Ordering::Release);
+        // Not run at the wrong rate: given back...
+        assert_eq!(mixer.frames(64)[2], 0.25);
+        // ...prepared again here, and sent again.
+        audio.update();
+        assert_eq!(mixer.frames(64)[2], 0.5);
+        assert_eq!(*prepared.lock().unwrap(), [44_100, 48_000]);
     }
 
     #[test]
