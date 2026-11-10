@@ -18,7 +18,7 @@ pub(crate) const MAX_BLOCK: usize = 128;
 /// Buses at most, master included.
 pub(crate) const MAX_BUSES: usize = 32;
 /// Slots past the voice limit, for voices fading out after being stolen.
-const FADING_SLOTS: usize = 16;
+pub(crate) const FADING_SLOTS: usize = 16;
 /// Frames before a play that found no slot tries again.
 const RETRY: u64 = 64;
 
@@ -91,6 +91,10 @@ pub(crate) struct Meter {
     pub dropped: AtomicU64,
     pub late: AtomicU64,
     pub blocks: AtomicU64,
+    pub waited: AtomicU64,
+    /// Commands the mixer is done with: applied, or found nothing to
+    /// apply to. The main thread counts those it sent against it.
+    pub taken: AtomicU64,
 }
 
 /// A command and the frame it's for (0: as soon as it can be).
@@ -349,6 +353,9 @@ pub(crate) struct Mixer {
     returns: Producer<Return>,
     meter: Arc<Meter>,
     schedule: BinaryHeap<Scheduled>,
+    /// Commands the schedule holds at most: its room, as configured (the
+    /// heap's own capacity may be more).
+    room: usize,
     seq: u64,
     voices: Box<[Voice]>,
     max_live: usize,
@@ -361,6 +368,10 @@ pub(crate) struct Mixer {
     dropped: u64,
     late: u64,
     blocks: u64,
+    /// Times a play found no free slot and waited.
+    waited: u64,
+    /// Commands done with.
+    taken: u64,
     /// Frames of the shortest de-click fade (1 ms), and of a steal's or a
     /// mute's (5 ms).
     click: u32,
@@ -383,6 +394,7 @@ impl Mixer {
             returns,
             meter,
             schedule: BinaryHeap::with_capacity(setup.commands),
+            room: setup.commands,
             seq: 0,
             voices: (0..setup.voices + FADING_SLOTS)
                 .map(|_| Voice::free())
@@ -405,6 +417,8 @@ impl Mixer {
             dropped: 0,
             late: 0,
             blocks: 0,
+            waited: 0,
+            taken: 0,
             click: (setup.rate / 1000).max(1),
             declick: (setup.rate / 200).max(1),
         }
@@ -424,7 +438,13 @@ impl Mixer {
             self.apply_due();
             let mut n = (frames - done).min(MAX_BLOCK);
             if let Some(next) = self.schedule.peek() {
-                n = n.min(next.time.saturating_sub(self.now).max(1) as usize);
+                // Kept to a block in u64 before it's a usize: a command
+                // 2^32 frames away is no block of 0 on a 32-bit target.
+                let until = next
+                    .time
+                    .saturating_sub(self.now)
+                    .clamp(1, MAX_BLOCK as u64);
+                n = n.min(until as usize);
             }
             self.mix(n);
             let master = &self.buses[0];
@@ -469,12 +489,14 @@ impl Mixer {
         meter.dropped.store(self.dropped, Ordering::Relaxed);
         meter.late.store(self.late, Ordering::Relaxed);
         meter.blocks.store(self.blocks, Ordering::Relaxed);
+        meter.waited.store(self.waited, Ordering::Relaxed);
+        meter.taken.store(self.taken, Ordering::Release);
         meter.now.store(self.now, Ordering::Release);
     }
 
     /// Moves commands from the queue into the schedule, as many as fit.
     fn collect(&mut self) {
-        while self.schedule.len() < self.schedule.capacity() {
+        while self.schedule.len() < self.room {
             let Some((time, command)) = self.commands.pop() else {
                 break;
             };
@@ -498,9 +520,17 @@ impl Mixer {
             if time != 0 && time < self.now && matches!(command, Command::Play { .. }) {
                 self.late += 1;
             }
-            if let Err(command) = self.apply(command) {
-                // No slot yet: tried again a little later. The heap has
-                // room: this one just left it.
+            let result = self.apply(command);
+            if result.is_ok() {
+                self.taken += 1;
+            }
+            if let Err(command) = result {
+                // No slot yet (or, for a stop or a change, its play has
+                // none yet): tried again a little later, in the order sent.
+                // The heap has room: this one just left it.
+                if matches!(command, Command::Play { .. }) {
+                    self.waited += 1;
+                }
                 self.schedule.push(Scheduled {
                     time: self.now + RETRY,
                     seq,
@@ -512,6 +542,14 @@ impl Mixer {
 
     fn voice(&mut self, id: u64) -> Option<&mut Voice> {
         self.voices.iter_mut().find(|v| v.id == id && !v.ended)
+    }
+
+    /// Whether the play of voice `id` waits in the schedule for a slot:
+    /// then what's sent for it after waits too, rather than be lost.
+    fn waiting(&self, id: u64) -> bool {
+        self.schedule
+            .iter()
+            .any(|s| matches!(s.command, Command::Play { id: play, .. } if play == id))
     }
 
     fn apply(&mut self, command: Command) -> Result<(), Command> {
@@ -527,6 +565,8 @@ impl Mixer {
                         voice.envelope.set(0., frames.max(click), curve);
                         voice.stopping = true;
                     }
+                } else if self.waiting(id) {
+                    return Err(command);
                 }
             }
             Command::Voice {
@@ -536,6 +576,9 @@ impl Mixer {
                 frames,
                 curve,
             } => {
+                if self.voice(id).is_none() && self.waiting(id) {
+                    return Err(command);
+                }
                 if let Some(voice) = self.voice(id) {
                     match param {
                         VoiceParam::Gain => voice.gain.set(value.max(0.), frames, curve),

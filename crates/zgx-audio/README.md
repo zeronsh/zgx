@@ -1,6 +1,6 @@
 # zgx-audio
 
-Sound for [zgx](../zgx) apps, in a crate of its own: an app that doesn't depend on it pays nothing. The design is `docs/design-audio.md` (on the `design/3d-aaa-and-audio` branch until it merges).
+Sound for [zgx](../zgx) apps, in a crate of its own: an app that doesn't depend on it pays nothing.
 
 ```rust
 use zgx_audio::{Audio, Config, Curve, Play, Ramp, Source};

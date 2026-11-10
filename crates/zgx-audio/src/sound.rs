@@ -5,6 +5,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The most a sample can be, either way: +18 dB over full scale.
+pub const MAX_SAMPLE: f32 = 8.;
+
+/// A sample as the mixer may rely on it: finite, and within ±[`MAX_SAMPLE`].
+fn sample(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(-MAX_SAMPLE, MAX_SAMPLE)
+    } else {
+        0.
+    }
+}
+
 /// Decoded samples at the file's own rate: one channel or two, interleaved.
 #[derive(Debug)]
 pub(crate) struct SoundData {
@@ -27,6 +39,8 @@ pub struct Sound(pub(crate) Arc<SoundData>);
 impl Sound {
     /// Interleaved samples of `channels` channels at `rate` frames a second.
     /// Past two channels, the first two (front left and right) are kept.
+    /// Samples are kept to ±[`MAX_SAMPLE`] (+18 dB over full scale), and any
+    /// that isn't a number or is infinite is silence.
     pub fn from_samples(samples: &[f32], channels: usize, rate: u32) -> Result<Sound, Error> {
         if channels == 0 || rate == 0 || !samples.len().is_multiple_of(channels) {
             return Err(Error::Format(format!(
@@ -35,10 +49,10 @@ impl Sound {
             )));
         }
         let samples: Box<[f32]> = match channels {
-            1 | 2 => samples.into(),
+            1 | 2 => samples.iter().map(|&s| sample(s)).collect(),
             _ => samples
                 .chunks_exact(channels)
-                .flat_map(|frame| [frame[0], frame[1]])
+                .flat_map(|frame| [sample(frame[0]), sample(frame[1])])
                 .collect(),
         };
         Ok(Sound(Arc::new(SoundData {

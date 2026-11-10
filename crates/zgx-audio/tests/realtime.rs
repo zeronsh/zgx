@@ -5,7 +5,8 @@
 //! thread's voluntary context switches). Every path a voice or a bus can
 //! take is driven through it: plays at each rate and channel count, both
 //! interpolators, every ramp and curve, starts, stops, steals, drops, loops,
-//! the limiter, a return queue left full, outputs of 1, 2 and 6 channels.
+//! the limiter, voices given back with no call on the engine, outputs of
+//! 1, 2 and 6 channels.
 //!
 //! A binary of its own without the test harness: no other thread runs, so
 //! the kernel's counts for the task are this thread's. Commands are sent,
@@ -154,7 +155,7 @@ struct Run {
 impl Run {
     fn new(name: &'static str, config: Config, floor: Broke) -> Run {
         let channels = config.channels;
-        let (audio, mixer) = Audio::offline(config);
+        let (audio, mixer) = Audio::offline(config).unwrap();
         Run {
             name,
             audio,
@@ -442,10 +443,12 @@ fn main() {
         run.finish(&mut failures);
     }
 
-    // Nobody drops what the mixer gives back: the return queue fills, and
-    // ended voices keep their sounds (and slots) until there's room.
+    // Voices given back with no call on the engine to take them: the
+    // return queue has room for every sound the mixer can hold, so each
+    // voice leaves its slot when it ends, and nothing is dropped (freed)
+    // here.
     let mut run = Run::new(
-        "a full return queue",
+        "given back without a call",
         Config {
             voices: 2,
             ..Config::default()
@@ -464,21 +467,22 @@ fn main() {
         let (mixer, out) = (&mut run.mixer, &mut run.out);
         let broke = armed(|| mixer.render(out));
         if let Some(at) = out.iter().rposition(|&s| s != 0.) {
-            last = block * 256 + at;
+            last = block * 256 + at / 2;
+            run.heard = true;
         }
         run.worst.allocs = run.worst.allocs.max(broke.allocs);
         run.worst.frees = run.worst.frees.max(broke.frees);
         run.worst.calls = run.worst.calls.max(broke.calls - floor.calls);
         run.worst.switches = run.worst.switches.max(broke.switches - floor.switches);
     }
-    // The last blip is due at frame 607 and sounds to 610. The return queue
-    // (128 places) and then every slot filled with sounds waiting to go
-    // back, so the blips stopped before it...
+    // The last blip is due at frame 607 and sounds to 610 (and leaves the
+    // limiter its look-ahead later): heard, with two voices' slots, so
+    // every voice before it was given back on time.
+    let latency = run.audio.latency();
     assert!(
-        last > 0 && last < 600,
-        "the return queue never filled: last sound at frame {last}"
+        (608 + latency..=610 + latency).contains(&last),
+        "blips stopped coming: the last sound at frame {last}"
     );
-    // ...and once the main thread takes them back, the waiting plays start.
     run.audio.update();
     run.render(4);
     run.finish(&mut failures);
