@@ -23,6 +23,13 @@ struct State {
 
 var<workgroup> local: array<atomic<u32>, 256>;
 
+// A pixel with a part not finite (an infinite light's NaN) as nothing, so
+// it can't spread through bloom or the exposure: by its bits, which fast
+// maths can't fold away as it may `c != c`.
+fn sane(c: vec4<f32>) -> vec4<f32> {
+    let bad = (bitcast<vec4<u32>>(c) & vec4(0x7f800000u)) == vec4(0x7f800000u);
+    return select(c, vec4(0.0), any(bad));
+}
 fn luma(c: vec3<f32>) -> f32 {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
 }
@@ -34,7 +41,7 @@ fn histogram(@builtin(global_invocation_id) at: vec3<u32>, @builtin(local_invoca
     workgroupBarrier();
     let size = textureDimensions(scene);
     if at.x < size.x && at.y < size.y {
-        let c = textureLoad(scene, vec2<i32>(at.xy), 0);
+        let c = sane(textureLoad(scene, vec2<i32>(at.xy), 0));
         // A pixel's own colour, its coverage divided out; the background
         // (nothing drawn) not counted.
         if c.a > 0.004 {

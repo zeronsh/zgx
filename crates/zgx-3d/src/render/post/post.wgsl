@@ -13,9 +13,16 @@ struct Out {
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var linear: sampler;
 
+// A pixel with a part not finite (an infinite light's NaN) as nothing, so
+// it can't spread through bloom or the exposure: by its bits, which fast
+// maths can't fold away as it may `c != c`.
+fn sane(c: vec4<f32>) -> vec4<f32> {
+    let bad = (bitcast<vec4<u32>>(c) & vec4(0x7f800000u)) == vec4(0x7f800000u);
+    return select(c, vec4(0.0), any(bad));
+}
 fn at(uv: vec2<f32>, x: f32, y: f32) -> vec3<f32> {
     let texel = 1.0 / vec2<f32>(textureDimensions(source));
-    return textureSampleLevel(source, linear, uv + vec2(x, y) * texel, 0.0).rgb;
+    return sane(textureSampleLevel(source, linear, uv + vec2(x, y) * texel, 0.0)).rgb;
 }
 fn luma(c: vec3<f32>) -> f32 {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -201,7 +208,7 @@ fn tent(uv: vec2<f32>) -> vec3<f32> {
 }
 
 @fragment fn last(in: Out) -> @location(0) vec4<f32> {
-    var drawn = textureLoad(scene, vec2<i32>(in.position.xy), 0);
+    var drawn = sane(textureLoad(scene, vec2<i32>(in.position.xy), 0));
     let size = vec2<f32>(textureDimensions(scene));
     // From the centre, the longer side's half 1.
     let off = (in.uv - 0.5) * 2.0 * size / max(size.x, size.y);
@@ -210,8 +217,8 @@ fn tent(uv: vec2<f32>) -> vec3<f32> {
         // a lens refracts them apart: a hundredth of the frame's width at
         // its edge at intensity 1.
         let shift = (in.uv - 0.5) * look.lens.z * 0.02;
-        let red = textureSampleLevel(scene, bloom_sampler, in.uv - shift, 0.0);
-        let blue = textureSampleLevel(scene, bloom_sampler, in.uv + shift, 0.0);
+        let red = sane(textureSampleLevel(scene, bloom_sampler, in.uv - shift, 0.0));
+        let blue = sane(textureSampleLevel(scene, bloom_sampler, in.uv + shift, 0.0));
         drawn = vec4(red.r, drawn.g, blue.b, max(drawn.a, max(red.a, blue.a)));
     }
     var light = drawn.rgb;
@@ -312,7 +319,7 @@ fn uncurve(y: f32) -> f32 {
     let exposed_by = exposure();
     var sum = vec4(0.0);
     for (var i = 0u; i < n; i++) {
-        let c = textureLoad(samples, at, i32(i));
+        let c = sane(textureLoad(samples, at, i32(i)));
         // A sample's own colour (its coverage divided out, as the last pass
         // maps a pixel's), mapped, and its coverage again.
         let a = max(c.a, 1e-4);
