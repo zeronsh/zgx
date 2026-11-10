@@ -2113,3 +2113,126 @@ fn a_parked_selection_comes_back_on_its_own_row_after_rows_are_added_above() {
     ui.prepare_frame();
     assert!(!ui.has_text_selection(), "{:?}", ui.selected_text());
 }
+
+/// A list whose row 1 is built as `shape` says when it mounts: its text
+/// alone, or (a reply still building its blocks) under a note, where the
+/// path to its text leads elsewhere.
+fn shaped_rows(
+    ui: &mut Ui,
+    offset: zgx::reactive::Signal<f32>,
+    building: zgx::reactive::Signal<bool>,
+) -> zgx::compose::ViewHandle {
+    let handle = ui.mount(
+        column()
+            .w(300.)
+            .text_size(10.)
+            .line_height(20.)
+            .selectable(true)
+            .child(
+                virtual_list(
+                    offset,
+                    20.,
+                    1,
+                    || 100,
+                    |index| index,
+                    move |_, key, _| {
+                        if key == 1 && building.with_untracked(|b| *b) {
+                            column()
+                                .child(text("Note"))
+                                .child(text(format!("Row {key}")))
+                        } else {
+                            text(format!("Row {key}"))
+                        }
+                    },
+                )
+                // (A transcript's: what a copy takes of rows not showing.)
+                .row_text(|index| (index < 100).then(|| format!("Row {index}")))
+                .w(300.)
+                .h(100.),
+            ),
+    );
+    ui.prepare_frame();
+    handle
+}
+
+/// A caret put down in a row (a click: nothing selected) whose row is
+/// recycled, then mounted again before its text is where it was (a reply
+/// still building its blocks), selects nothing there; once the row is
+/// built as it was, the caret is back in it.
+#[test]
+fn a_caret_parked_in_a_row_mounted_again_another_way_selects_nothing() {
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0.);
+    let building = ui.signal(false);
+    let _view = shaped_rows(&mut ui, offset.clone(), building.clone());
+    // Row 1 at 20: a click in it.
+    press(&mut ui, 12., 30., false);
+    release(&mut ui, 12., 30.);
+    let caret = ui.text_selection().expect("a caret");
+    assert_eq!(caret.0, caret.1);
+    // Scrolled until the row recycles, other rows mounting.
+    for at in [40., 200., 1_000.] {
+        offset.set(at);
+        ui.prepare_frame();
+        assert_eq!(ui.selected_text(), "");
+    }
+    // Back, the row still building.
+    building.set(true);
+    offset.set(0.);
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "", "a caret took the whole row");
+    assert!(highlighted(&ui).is_empty(), "{:?}", highlighted(&ui));
+    assert!(
+        ui.text_selection().is_some(),
+        "the caret is kept for its row"
+    );
+    // Away and back built as it was: the caret is in it again.
+    offset.set(1_000.);
+    ui.prepare_frame();
+    building.set(false);
+    offset.set(0.);
+    ui.prepare_frame();
+    let (anchor, focus) = ui.text_selection().expect("the caret");
+    assert_eq!((anchor, focus.offset), (focus, 2));
+    assert!(ui.scene.borrow().contains(anchor.node));
+    assert_eq!(ui.selected_text(), "");
+}
+
+/// A selection parked in a row mounted again another way keeps what it
+/// selected: the rows between show selected, that row shows nothing until
+/// its text is back, and a copy takes just what was selected.
+#[test]
+fn a_selection_parked_in_a_row_mounted_again_another_way_keeps_its_size() {
+    let mut ui = Ui::new(400., 300.);
+    let offset = ui.signal(0.);
+    let building = ui.signal(false);
+    let _view = shaped_rows(&mut ui, offset.clone(), building.clone());
+    // Row 1 at 20 to row 3 at 60.
+    drag(&mut ui, (6., 30.), (18., 70.));
+    assert_eq!(ui.selected_text(), "ow 1\nRow 2\nRow");
+    offset.set(1_000.);
+    ui.prepare_frame();
+    building.set(true);
+    offset.set(0.);
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "ow 1\nRow 2\nRow", "its size, no more");
+    // Row 2 and row 3's start show it; row 1's note and text don't.
+    let scene = ui.scene.borrow();
+    let lit: Vec<String> = texts(&ui)
+        .into_iter()
+        .filter(|id| scene.text_highlight(*id).is_some())
+        .filter_map(|id| match scene.kind(id) {
+            NodeKind::Text { text, .. } => Some(text.to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lit, ["Row 2", "Row 3"]);
+    drop(scene);
+    offset.set(1_000.);
+    ui.prepare_frame();
+    building.set(false);
+    offset.set(0.);
+    ui.prepare_frame();
+    assert_eq!(ui.selected_text(), "ow 1\nRow 2\nRow");
+    assert_eq!(highlighted(&ui).len(), 3);
+}

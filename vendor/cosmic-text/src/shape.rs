@@ -6,7 +6,7 @@ use crate::fallback::FontFallbackIter;
 use crate::{
     math, Align, Attrs, AttrsList, AttrsOwned, CacheKeyFlags, Color, DecorationMetrics,
     DecorationSpan, Ellipsize, EllipsizeHeightLimit, Family, Font, FontFeatures, FontSystem,
-    GlyphDecorationData, Hinting, LetterSpacing,
+    GlyphDecorationData, Hinting, InlineBox, LetterSpacing,
     LayoutGlyph, LayoutLine, Metrics, Wrap,
 };
 #[cfg(not(feature = "std"))]
@@ -136,6 +136,11 @@ pub struct ShapeBuffer {
     /// (`FontFeatures::HAN`, from `run_scripts`), which the fallback search
     /// reads for Han's fonts: written only where a run has Han.
     pub(crate) han: u32,
+
+    /// zgx: whether the line being shaped holds an inline box
+    /// (`BufferLine::set_inline_boxes`), for its words: false outside
+    /// `BufferLine::shape`.
+    pub(crate) boxes: bool,
 }
 
 impl ShapeBuffer {
@@ -1405,6 +1410,18 @@ impl ShapeWord {
                 word_range.end,
                 span_rtl,
             );
+        } else if font_system.shape_buffer.boxes && word.contains('\u{FFFC}') {
+            // zgx: a word holding inline boxes (`Attrs::inline_box`), apart:
+            // every other word reads no more for them than this test.
+            build_boxed(
+                &mut glyphs,
+                font_system,
+                line,
+                attrs_list,
+                word_range,
+                span_rtl,
+                shaping,
+            );
         } else {
             // Complex text path: Full grapheme iteration and attribute processing
             let mut start_run = word_range.start;
@@ -1451,6 +1468,151 @@ impl ShapeWord {
             width += glyph.width(font_size);
         }
         width
+    }
+}
+
+/// zgx: `ShapeWord::build`'s complex path for a word holding inline boxes:
+/// runs split as there, and also at each box. A box takes exactly its own
+/// character, a glyph of its own (`box_glyphs`) rather than shaped; what a
+/// grapheme holds past it (a combining mark, its own span) is text.
+#[cold]
+#[inline(never)]
+fn build_boxed(
+    glyphs: &mut Vec<ShapeGlyph>,
+    font_system: &mut FontSystem,
+    line: &str,
+    attrs_list: &AttrsList,
+    word_range: Range<usize>,
+    span_rtl: bool,
+    shaping: Shaping,
+) {
+    let word = &line[word_range.clone()];
+    let mut start_run = word_range.start;
+    let mut attrs = attrs_list.defaults();
+    for (egc_i, egc) in word.grapheme_indices(true) {
+        let start_egc = word_range.start + egc_i;
+        let attrs_egc = attrs_list.get_span(start_egc);
+        let inline = egc
+            .starts_with('\u{FFFC}')
+            .then(|| attrs_egc.inline_box_of())
+            .flatten();
+        if let Some(inline) = inline {
+            if start_run < start_egc {
+                shaping.run(glyphs, font_system, line, attrs_list, start_run, start_egc, span_rtl);
+            }
+            let after = start_egc + '\u{FFFC}'.len_utf8();
+            box_glyphs(glyphs, font_system, line, &attrs_egc, inline, start_egc, after);
+            start_run = after;
+            attrs = if after < word_range.end {
+                attrs_list.get_span(after)
+            } else {
+                attrs_list.defaults()
+            };
+        } else if !attrs.compatible(&attrs_egc) {
+            if start_run < start_egc {
+                shaping.run(glyphs, font_system, line, attrs_list, start_run, start_egc, span_rtl);
+            }
+            start_run = start_egc;
+            attrs = attrs_egc;
+        }
+    }
+    if start_run < word_range.end {
+        shaping.run(glyphs, font_system, line, attrs_list, start_run, word_range.end, span_rtl);
+    }
+}
+
+/// zgx: the glyphs of inline box `inline`'s characters `start..end` of
+/// `line` (U+FFFC, each a box), with the run attributes `attrs`: never
+/// shaped, each as wide as the box and drawing nothing (its font's space, or
+/// without one no font at all),
+/// flagged `INLINE_BOX`. Its `ascent` and `descent` are the box's above and
+/// below the baseline (`InlineBox::extents`, from the run font's metrics), or,
+/// for a box at its line's top or bottom, its height and none, and its
+/// `y_offset` how far its top is above the baseline; its `x_offset` holds
+/// what the run font's strut (its ascent and half its leading) adds above
+/// the baseline, its line height the rest (`ShapeLine::inline_line_box`).
+fn box_glyphs(
+    glyphs: &mut Vec<ShapeGlyph>,
+    font_system: &mut FontSystem,
+    line: &str,
+    attrs: &Attrs,
+    inline: InlineBox,
+    start: usize,
+    end: usize,
+) {
+    // A span without metrics of its own has none here to scale by (the
+    // buffer's come at layout): its glyph is sized in pixels, at a size of 1,
+    // and alignment by the text's metrics reads them at that size.
+    let metrics: Metrics = attrs
+        .metrics_opt
+        .map_or_else(|| Metrics::new(1.0, inline.height.max(1.0)), Into::into);
+    let size = metrics.font_size.max(f32::MIN_POSITIVE);
+    let (fonts, kept) = font_matches(font_system, attrs);
+    let font = kept.or_else(|| {
+        fonts
+            .iter()
+            .find_map(|key| font_system.get_font(key.id, attrs.weight))
+    });
+    let (font_id, glyph_id, ascent, descent, x_height) = match &font {
+        Some(font) => {
+            let m = font.metrics();
+            let upem = f32::from(m.units_per_em.max(1));
+            // A font without its x-height in its OS/2 table (version 1)
+            // has it from its `x` (swash), else half an EM.
+            #[cfg(feature = "swash")]
+            let (space, x_height) = {
+                let swash = font.as_swash();
+                let x = swash.metrics(&[]).x_height;
+                (swash.charmap().map(' '), (x > 0.0).then(|| x / upem))
+            };
+            #[cfg(not(feature = "swash"))]
+            let (space, x_height) = (0, None);
+            (
+                // No space (an icon font): no font, not its `.notdef`, which
+                // would draw. A glyph of no font has nothing to draw.
+                if space == 0 { fontdb::ID::dummy() } else { font.id() },
+                space,
+                m.ascent / upem * size,
+                -m.descent / upem * size,
+                m.x_height.map(|x| x / upem).or(x_height).unwrap_or(0.5) * size,
+            )
+        }
+        None => (fontdb::ID::dummy(), 0, 0.8 * size, 0.2 * size, 0.5 * size),
+    };
+    let line_height = metrics.line_height;
+    let strut_top = ascent + (line_height - ascent - descent) / 2.0;
+    let mut flags = attrs.cache_key_flags | CacheKeyFlags::INLINE_BOX;
+    let (above, below) = match inline.align {
+        crate::InlineAlign::Top => {
+            flags |= CacheKeyFlags::INLINE_LINE_TOP;
+            (inline.height, 0.0)
+        }
+        crate::InlineAlign::Bottom => {
+            flags |= CacheKeyFlags::INLINE_LINE_BOTTOM;
+            (inline.height, 0.0)
+        }
+        _ => inline.extents(ascent, descent, x_height),
+    };
+    for (at, c) in line[start..end].char_indices() {
+        glyphs.push(ShapeGlyph {
+            start: start + at,
+            end: start + at + c.len_utf8(),
+            x_advance: inline.width / size,
+            y_advance: 0.0,
+            x_offset: strut_top / size,
+            y_offset: above / size,
+            ascent: above / size,
+            descent: below / size,
+            font_monospace_em_width: None,
+            font_id,
+            font_weight: attrs.weight,
+            font_optical: 0,
+            glyph_id,
+            color_opt: attrs.color_opt,
+            metadata: attrs.metadata,
+            cache_key_flags: flags,
+            metrics_opt: Some(metrics),
+        });
     }
 }
 
@@ -1837,6 +1999,10 @@ impl ShapeSpan {
 #[derive(Clone, Debug)]
 pub struct ShapeLine {
     pub rtl: bool,
+    /// zgx: its spans hold an inline box (`Attrs::inline_box`,
+    /// `BufferLine::set_inline_boxes`): its lines that hold one take CSS's
+    /// line box (`inline_line_box`).
+    pub boxes: bool,
     pub spans: Vec<ShapeSpan>,
     pub metrics_opt: Option<Metrics>,
     ellipsis_span: Option<ShapeSpan>,
@@ -1977,6 +2143,7 @@ impl ShapeLine {
     pub(crate) fn empty() -> Self {
         Self {
             rtl: false,
+            boxes: false,
             spans: Vec::default(),
             metrics_opt: None,
             ellipsis_span: None,
@@ -2205,6 +2372,7 @@ impl ShapeLine {
         }
 
         self.rtl = rtl;
+        self.boxes = font_system.shape_buffer.boxes;
         self.spans = spans;
         self.metrics_opt = attrs_list.defaults_owned().metrics_opt.map(Into::into);
 
@@ -2977,6 +3145,92 @@ impl ShapeLine {
     }
 
     /// Returns the words for a given span index, handling the ellipsis sentinel.
+    /// zgx: CSS's line box for `visual_line` (laid out as `glyphs`), if it
+    /// holds an inline box: how far it reaches above and below its baseline,
+    /// as the most any of its runs reaches (its ascent and descent, each with
+    /// half its leading), any box's margin box, and each box's run font's
+    /// strut; then the boxes at the line's top or bottom, growing it down
+    /// (or up) if taller. Its boxes' `y_offset`s are then where their tops
+    /// are. `None`, laid out as before, for a line holding none.
+    #[cold]
+    #[inline(never)]
+    fn inline_line_box(
+        &self,
+        visual_line: &VisualLine,
+        hyphenation: Option<&Hyphenation>,
+        font_size: f32,
+        glyphs: &mut [LayoutGlyph],
+    ) -> Option<(f32, f32)> {
+        if !glyphs
+            .iter()
+            .any(|g| g.cache_key_flags.contains(CacheKeyFlags::INLINE_BOX))
+        {
+            return None;
+        }
+        let normal = self.metrics_opt.map(|m| m.line_height);
+        let (mut above, mut below, mut at_top, mut at_bottom) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        for r in &visual_line.ranges {
+            let words = match hyphenation {
+                Some(hyphenation) if r.span == HYPHEN_SPAN => &hyphenation.span.words[..],
+                _ => self.get_span_words(r.span),
+            };
+            for i in r.start.word..r.end.word + usize::from(r.end.glyph != 0) {
+                let word = &words[i];
+                let included = match (i == r.start.word, i == r.end.word) {
+                    (false, false) => &word.glyphs[..],
+                    (true, false) => &word.glyphs[r.start.glyph..],
+                    (false, true) => &word.glyphs[..r.end.glyph],
+                    (true, true) => &word.glyphs[r.start.glyph..r.end.glyph],
+                };
+                for glyph in included {
+                    let size = glyph.metrics_opt.map_or(font_size, |m| m.font_size);
+                    let (a, d) = (glyph.ascent * size, glyph.descent * size);
+                    let line_height = glyph
+                        .metrics_opt
+                        .map(|m| m.line_height)
+                        .or(normal)
+                        .unwrap_or(a + d);
+                    if glyph.cache_key_flags.contains(CacheKeyFlags::INLINE_BOX) {
+                        // The run font's strut, as the text beside it reaches.
+                        let strut = glyph.x_offset * size;
+                        above = above.max(strut);
+                        below = below.max(line_height - strut);
+                        if glyph.cache_key_flags.contains(CacheKeyFlags::INLINE_LINE_TOP) {
+                            at_top = at_top.max(a);
+                        } else if glyph.cache_key_flags.contains(CacheKeyFlags::INLINE_LINE_BOTTOM) {
+                            at_bottom = at_bottom.max(a);
+                        } else {
+                            above = above.max(a);
+                            below = below.max(d);
+                        }
+                    } else {
+                        let half = (line_height - a - d) / 2.0;
+                        above = above.max(a + half);
+                        below = below.max(d + half);
+                    }
+                }
+            }
+        }
+        // A box at the top hangs down from it; one at the bottom stands up.
+        below = below.max(at_top - above);
+        above = above.max(at_bottom - below);
+        for glyph in glyphs.iter_mut() {
+            let flags = glyph.cache_key_flags;
+            if !flags.contains(CacheKeyFlags::INLINE_BOX) {
+                continue;
+            }
+            glyph.x_offset = 0.0;
+            let size = glyph.font_size.max(f32::MIN_POSITIVE);
+            if flags.contains(CacheKeyFlags::INLINE_LINE_TOP) {
+                glyph.y_offset = above / size;
+            } else if flags.contains(CacheKeyFlags::INLINE_LINE_BOTTOM) {
+                // Its height was its `y_offset` (its ascent).
+                glyph.y_offset = (glyph.y_offset * size - below) / size;
+            }
+        }
+        Some((above, below))
+    }
+
     fn get_span_words(&self, span_index: usize) -> &[ShapeWord] {
         if span_index == ELLIPSIS_SPAN {
             &self
@@ -4036,6 +4290,29 @@ impl ShapeLine {
                 }
             }
 
+            // zgx: a line holding an inline box takes CSS's line box.
+            if self.boxes {
+                if let Some((above, below)) =
+                    self.inline_line_box(visual_line, hyphenation.as_deref(), font_size, &mut glyphs)
+                {
+                    layout_lines.push(LayoutLine {
+                        w: if align != Align::Justified {
+                            visual_line.w
+                        } else if self.rtl {
+                            start_x - x
+                        } else {
+                            x
+                        },
+                        max_ascent: above,
+                        max_descent: below,
+                        line_height_opt: Some(above + below),
+                        glyphs,
+                        decorations,
+                    });
+                    continue;
+                }
+            }
+
             let mut line_height_opt: Option<f32> = None;
             for glyph in &glyphs {
                 if let Some(glyph_line_height) = glyph.line_height_opt {
@@ -4174,5 +4451,270 @@ mod ascii_script_tests {
         // Not ASCII: still guessed.
         let [guessed, known] = both("caf\u{e9} \u{65e5}\u{672c}");
         assert_eq!(guessed, known);
+    }
+}
+
+#[cfg(test)]
+mod inline_box_tests {
+    //! zgx: inline boxes (`Attrs::inline_box`) in a line.
+    use crate::{
+        Attrs, AttrsList, Buffer, BufferLine, CacheKeyFlags, Family, FontSystem, InlineAlign,
+        InlineBox, LayoutRun, Metrics, Shaping,
+    };
+
+    const SIZE: f32 = 16.0;
+    const LINE: f32 = 22.0;
+
+    fn fonts() -> FontSystem {
+        let mut db = fontdb::Database::new();
+        db.load_font_data(
+            include_bytes!("../../../crates/zgx-desktop/assets/DejaVuSans.ttf").to_vec(),
+        );
+        FontSystem::new_with_locale_and_db("en-US".into(), db)
+    }
+
+    fn attrs() -> Attrs<'static> {
+        Attrs::new()
+            .family(Family::Name("DejaVu Sans"))
+            .metrics(Metrics::new(SIZE, LINE))
+    }
+
+    /// `parts` laid out `width` wide: a `None` part is text, a `Some` a box
+    /// (its text one U+FFFC).
+    fn laid(fonts: &mut FontSystem, parts: &[(&str, Option<InlineBox>)], width: Option<f32>) -> Buffer {
+        let mut buffer = Buffer::new(fonts, Metrics::new(SIZE, LINE));
+        let spans: Vec<_> = parts
+            .iter()
+            .map(|(text, inline)| match inline {
+                Some(inline) => (*text, attrs().inline_box(*inline)),
+                None => (*text, attrs()),
+            })
+            .collect();
+        buffer.set_rich_text(spans, &attrs(), Shaping::Advanced, None);
+        if parts.iter().any(|(_, inline)| inline.is_some()) {
+            buffer.find_inline_boxes();
+        }
+        buffer.set_size(width, None);
+        buffer.shape_until_scroll(fonts, false);
+        buffer
+    }
+
+    fn runs(buffer: &Buffer) -> Vec<LayoutRun<'_>> {
+        buffer.layout_runs().collect()
+    }
+
+    fn chip(width: f32, height: f32, baseline: f32, align: InlineAlign) -> Option<InlineBox> {
+        Some(InlineBox { width, height, baseline, align })
+    }
+
+    /// A box takes its width in the line, as one glyph that draws nothing,
+    /// and the text after it moves over by that much.
+    #[test]
+    fn a_box_takes_its_width_in_the_line() {
+        let mut fonts = fonts();
+        let plain = laid(&mut fonts, &[("ab", None)], None);
+        let boxed = laid(
+            &mut fonts,
+            &[("a", None), ("\u{FFFC}", chip(40.0, 10.0, 10.0, InlineAlign::Baseline)), ("b", None)],
+            None,
+        );
+        let (plain, boxed) = (runs(&plain), runs(&boxed));
+        assert!((boxed[0].line_w - (plain[0].line_w + 40.0)).abs() < 0.01);
+        let glyph = &boxed[0].glyphs[1];
+        assert!(glyph.cache_key_flags.contains(CacheKeyFlags::INLINE_BOX));
+        assert_eq!((glyph.start, glyph.end), (1, 4));
+        assert!((glyph.w - 40.0).abs() < 0.01);
+        assert!((boxed[0].glyphs[2].x - (plain[0].glyphs[1].x + 40.0)).abs() < 0.01);
+        // As short as the text: the line is the text's.
+        assert_eq!(boxed[0].line_height, plain[0].line_height);
+        assert!((boxed[0].line_y - plain[0].line_y).abs() < 0.01);
+    }
+
+    /// A box taller than the text grows its line as CSS's line box does: its
+    /// baseline on the text's, the line reaching as far above as the box and
+    /// as far below as the text (its descent and half its leading). A line
+    /// without a box, in the same paragraph, is laid out as before.
+    #[test]
+    fn a_tall_box_grows_its_line_and_only_its_line() {
+        let mut fonts = fonts();
+        let plain = laid(&mut fonts, &[("ab\ncd", None)], None);
+        let boxed = laid(
+            &mut fonts,
+            &[("a", None), ("\u{FFFC}", chip(20.0, 40.0, 36.0, InlineAlign::Baseline)), ("b\ncd", None)],
+            None,
+        );
+        let (plain, boxed) = (runs(&plain), runs(&boxed));
+        let text_below = plain[0].line_height - (plain[0].line_y - plain[0].line_top);
+        assert!((boxed[0].line_y - boxed[0].line_top - 36.0).abs() < 0.01);
+        assert!((boxed[0].line_height - (36.0 + text_below)).abs() < 0.01);
+        // The box's top is its `y_offset` above the baseline.
+        let glyph = &boxed[0].glyphs[1];
+        assert!((glyph.y_offset * glyph.font_size - 36.0).abs() < 0.01);
+        // The next line: as plain text's, moved down by what the first grew.
+        let grown = boxed[0].line_height - plain[0].line_height;
+        assert_eq!(boxed[1].line_height, plain[1].line_height);
+        assert!((boxed[1].line_y - (plain[1].line_y + grown)).abs() < 0.01);
+    }
+
+    /// A line can break before and after a box, never inside it: one too
+    /// wide for what is left of a line starts the next.
+    #[test]
+    fn lines_break_around_a_box() {
+        let mut fonts = fonts();
+        let one = laid(&mut fonts, &[("aaaa", None)], None);
+        let text = runs(&one)[0].line_w;
+        let boxed = laid(
+            &mut fonts,
+            &[("aaaa", None), ("\u{FFFC}", chip(60.0, 10.0, 10.0, InlineAlign::Baseline)), ("aaaa", None)],
+            Some(text + 30.0),
+        );
+        let runs = runs(&boxed);
+        assert_eq!(runs.len(), 3, "the box on a line of its own");
+        assert!(runs[1].glyphs[0].cache_key_flags.contains(CacheKeyFlags::INLINE_BOX));
+        assert_eq!(runs[1].glyphs.len(), 1);
+    }
+
+    /// Middle, text-top and text-bottom place a box by the run font's
+    /// metrics; top and bottom at the line's edges, a box taller than the
+    /// rest growing the line down (top) or up (bottom).
+    #[test]
+    fn a_box_aligns_as_vertical_align_says() {
+        let mut fonts = fonts();
+        let top_of = |buffer: &Buffer| {
+            let run = runs(buffer).into_iter().next().unwrap();
+            let glyph = run.glyphs.iter().find(|g| g.cache_key_flags.contains(CacheKeyFlags::INLINE_BOX)).unwrap();
+            (run.line_top, run.line_y, run.line_height, run.line_y - glyph.y_offset * glyph.font_size)
+        };
+        let with = |fonts: &mut FontSystem, inline| {
+            laid(fonts, &[("x", None), ("\u{FFFC}", inline), ("x", None)], None)
+        };
+        // A small box: the line stays the text's.
+        let middle = with(&mut fonts, chip(8.0, 8.0, 8.0, InlineAlign::Middle));
+        let (_, baseline, height, top) = top_of(&middle);
+        assert_eq!(height, LINE);
+        // Its middle half an x-height above the baseline: half an EM's, as
+        // CSS takes for a font that doesn't say (DejaVu Sans's OS/2 table is
+        // version 1, without one).
+        assert!((top + 4.0 - (baseline - 0.5 * 0.5 * SIZE)).abs() < 0.01, "{top} {baseline}");
+        let text_top = with(&mut fonts, chip(8.0, 8.0, 8.0, InlineAlign::TextTop));
+        let (_, baseline, _, top) = top_of(&text_top);
+        assert!((baseline - top - 0.928 * SIZE).abs() < 0.2, "at the font's ascent");
+        let at_top = with(&mut fonts, chip(8.0, 8.0, 8.0, InlineAlign::Top));
+        let (line_top, _, _, top) = top_of(&at_top);
+        assert!((top - line_top).abs() < 0.01);
+        let at_bottom = with(&mut fonts, chip(8.0, 8.0, 8.0, InlineAlign::Bottom));
+        let (line_top, _, height, top) = top_of(&at_bottom);
+        assert!((top + 8.0 - (line_top + height)).abs() < 0.01);
+        // Taller than the text, at the top: the line grows down to hold it.
+        let tall = with(&mut fonts, chip(8.0, 50.0, 50.0, InlineAlign::Top));
+        let (line_top, baseline, height, top) = top_of(&tall);
+        assert!((top - line_top).abs() < 0.01);
+        assert!((height - 50.0).abs() < 0.01);
+        assert!(baseline - line_top < LINE, "the baseline stays the text's");
+        // Raised: its baseline that much above the line's.
+        let raised = with(&mut fonts, chip(8.0, 8.0, 6.0, InlineAlign::Raise(3.0)));
+        let (_, baseline, _, top) = top_of(&raised);
+        assert!((baseline - top - 9.0).abs() < 0.01);
+    }
+
+    /// A span without metrics of its own takes the buffer's, as text
+    /// does: a box is as wide as it says.
+    #[test]
+    fn review_a_box_in_a_span_without_metrics() {
+        let mut fonts = fonts();
+        let plain = Attrs::new().family(Family::Name("DejaVu Sans"));
+        let mut buffer = Buffer::new(&mut fonts, Metrics::new(SIZE, LINE));
+        let inline = InlineBox {
+            width: 40.0,
+            height: 10.0,
+            baseline: 10.0,
+            align: InlineAlign::Baseline,
+        };
+        buffer.set_rich_text(
+            [("\u{FFFC}", plain.clone().inline_box(inline))],
+            &plain,
+            Shaping::Advanced,
+            None,
+        );
+        buffer.find_inline_boxes();
+        buffer.shape_until_scroll(&mut fonts, false);
+        let w = buffer.layout_runs().next().unwrap().line_w;
+        assert!((w - 40.0).abs() < 0.01, "{w}");
+    }
+
+    /// A line said to hold boxes but holding none lays out exactly as one
+    /// that isn't.
+    #[test]
+    fn a_line_without_a_box_is_as_before() {
+        let mut fonts = fonts();
+        let plain = laid(&mut fonts, &[("Résumé naïve", None)], None);
+        let mut listed = Buffer::new(&mut fonts, Metrics::new(SIZE, LINE));
+        listed.set_rich_text([("Résumé naïve", attrs())], &attrs(), Shaping::Advanced, None);
+        assert!(listed.lines[0].set_inline_boxes(true));
+        listed.shape_until_scroll(&mut fonts, false);
+        let (a, b) = (runs(&plain), runs(&listed));
+        assert_eq!((a[0].line_y, a[0].line_top, a[0].line_height, a[0].line_w),
+            (b[0].line_y, b[0].line_top, b[0].line_height, b[0].line_w));
+        let place = |run: &LayoutRun<'_>| {
+            run.glyphs.iter().map(|g| (g.start, g.x, g.y, g.w, g.glyph_id)).collect::<Vec<_>>()
+        };
+        assert_eq!(place(&a[0]), place(&b[0]));
+    }
+
+    /// A line split keeps each box said to be in its part.
+    #[test]
+    fn a_split_line_keeps_its_boxes() {
+        let mut fonts = fonts();
+        let chip = InlineBox {
+            width: 30.0,
+            height: 12.0,
+            baseline: 10.0,
+            align: InlineAlign::Baseline,
+        };
+        let mut buffer = laid(&mut fonts, &[("ab ", None), ("\u{FFFC}", Some(chip))], None);
+        let second = buffer.lines[0].split_off(3);
+        assert!(!buffer.lines[0].holds_inline_boxes(), "its box went");
+        assert!(second.holds_inline_boxes(), "its box came along");
+        buffer.lines.push(second);
+        buffer.shape_until_scroll(&mut fonts, false);
+        let boxes = runs(&buffer)
+            .iter()
+            .flat_map(|run| run.glyphs.iter())
+            .filter(|g| g.cache_key_flags.contains(CacheKeyFlags::INLINE_BOX))
+            .count();
+        assert_eq!(boxes, 1);
+    }
+
+    /// Plain text builds these on every line: a box adds nothing to them
+    /// (it lives in its span's attributes, and a line's flag in its
+    /// padding). A field more would cost every prepared text a bigger frame.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn boxes_make_no_list_or_line_bigger() {
+        assert_eq!(core::mem::size_of::<AttrsList>(), 160);
+        assert_eq!(core::mem::size_of::<BufferLine>(), 344);
+    }
+
+    /// A box's size and alignment come back from its span's attributes.
+    #[test]
+    fn a_box_is_kept_in_its_span() {
+        for align in [
+            InlineAlign::Baseline,
+            InlineAlign::Middle,
+            InlineAlign::TextTop,
+            InlineAlign::TextBottom,
+            InlineAlign::Top,
+            InlineAlign::Bottom,
+            InlineAlign::Raise(-2.5),
+        ] {
+            let inline = InlineBox {
+                width: 12.5,
+                height: 7.0,
+                baseline: 6.0,
+                align,
+            };
+            assert_eq!(attrs().inline_box(inline).inline_box_of(), Some(inline));
+        }
+        assert_eq!(attrs().inline_box_of(), None);
     }
 }

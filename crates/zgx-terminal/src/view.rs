@@ -765,7 +765,11 @@ impl Engine {
         self.paint();
     }
 
-    /// Measure the cell for the font size (on mounting, and as it changes).
+    /// Measure the cell for the font size (on mounting, and as it or the
+    /// window's scale factor changes): whole device pixels, as terminals
+    /// make it, so every column's edge, background and glyph is on the
+    /// pixel grid, not each a different fraction off it (a cell 15.6 pixels
+    /// wide at a scale of 2). The width the nearest, the height up.
     fn measure(&self, scene: &zgx::scene::Scene) {
         let mut metrics = self.metrics.get();
         let (width, height) = scene.measure_text_with_font(
@@ -774,8 +778,15 @@ impl Engine {
             None,
             &self.font.borrow(),
         );
-        metrics.cell_width = width / 10.;
-        metrics.cell_height = height.ceil();
+        let (width, height) = match scene.pixel_scale() {
+            0. => (width / 10., height.ceil()),
+            scale => (
+                (width / 10. * scale).round().max(1.) / scale,
+                (height * scale).ceil() / scale,
+            ),
+        };
+        metrics.cell_width = width;
+        metrics.cell_height = height;
         if metrics != self.metrics.get() {
             self.metrics.set(metrics);
             self.generation.set(self.generation.get().wrapping_add(1));
@@ -1865,6 +1876,23 @@ fn view(engine: Rc<Engine>) -> View {
                 engine.measure(&scene.borrow());
             }
             *engine.root.borrow_mut() = Some(handle.clone());
+            // Measured again as the window's scale factor changes.
+            if let Some(geometry) = handle.observe_text_geometry() {
+                let remeasure = engine.clone();
+                let mut seen = geometry.with_untracked(|revision| *revision);
+                let effect = engine.runtime.effect(move || {
+                    let now = geometry.get();
+                    if std::mem::replace(&mut seen, now) == now {
+                        return;
+                    }
+                    let scene = remeasure.root.borrow().as_ref().and_then(NodeHandle::scene);
+                    if let Some(scene) = scene {
+                        remeasure.measure(&scene.borrow());
+                        remeasure.fit(remeasure.size.get());
+                    }
+                });
+                handle.retain(effect);
+            }
             if let Some(size) = handle.observe_size() {
                 let fit = engine.clone();
                 let effect = engine.runtime.effect(move || {

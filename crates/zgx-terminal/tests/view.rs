@@ -1151,6 +1151,76 @@ fn a_picture_keeps_its_node_as_it_scrolls_and_is_replaced() {
     term.close();
 }
 
+/// A cell is whole device pixels, as terminals make it, so columns' edges
+/// and glyphs sit on the pixel grid rather than each a fraction off it; and
+/// measured again as the window's scale factor changes, the grid follows.
+#[test]
+fn cells_are_whole_device_pixels_at_any_scale() {
+    let ui = Ui::new(640., 360.);
+    ui.scene.borrow_mut().set_pixel_scale(2.);
+    let term = Terminal::new(&ui.runtime, TerminalOptions::default());
+    let replay = zgx_terminal::replay_terminal(&term, ui.runtime.clone());
+    let mut app = Harness {
+        ui,
+        executor: Rc::new(RefCell::new(LocalExecutor::new())),
+    };
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.ui.mount(provide(
+        renderer,
+        zgx::terminal::terminal(&term).w(600.).h(300.),
+    ));
+    app.ui.prepare_frame();
+    // A run in a colour of its own ten columns along: where it starts, ten
+    // cells from the row's start.
+    replay.feed(b"0123456789\x1b[31mX\x1b[0m\r\n");
+    app.ui.prepare_frame();
+    let cell = |app: &Harness| {
+        let scene = app.ui.scene.borrow();
+        let x = |shown: &str| {
+            scene
+                .paint_items()
+                .filter_map(|item| match scene.kind(item.id) {
+                    NodeKind::Text { text, .. } if &**text == shown => {
+                        Some(scene.transformed_bounds(item.id).x)
+                    }
+                    _ => None,
+                })
+                .last()
+                .unwrap_or_else(|| panic!("{shown} isn't shown"))
+        };
+        (x("X") - x("0123456789")) / 10.
+    };
+    let whole =
+        |points: f32, scale: f32| ((points * scale) - (points * scale).round()).abs() < 0.001;
+    let at_two = cell(&app);
+    assert!(
+        whole(at_two, 2.),
+        "{at_two} points is {} pixels",
+        at_two * 2.
+    );
+    // On a display of 3, measured again (23 pixels, not 2's 16).
+    app.ui.scene.borrow_mut().set_pixel_scale(3.);
+    app.ui.refresh_text_geometry();
+    app.ui.prepare_frame();
+    replay.feed(b"0123456789\x1b[31mX\x1b[0m\r\n");
+    app.ui.prepare_frame();
+    let at_three = cell(&app);
+    assert!(
+        whole(at_three, 3.),
+        "{at_three} points is {} pixels",
+        at_three * 3.
+    );
+    assert_ne!(at_two, at_three, "never measured again");
+    // The grid follows the cell.
+    let columns = term.state().get().columns;
+    assert_eq!(
+        columns as f32,
+        ((600. - 20.) / at_three).floor(),
+        "{columns} columns of {at_three}"
+    );
+    term.close();
+}
+
 /// Output read before the view's first layout (a terminal opened while its
 /// window runs, its program quick to write) makes the rows for the session's
 /// own size, from outside any reactive flush: the rows built then find the

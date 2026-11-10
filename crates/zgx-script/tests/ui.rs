@@ -843,6 +843,30 @@ fn a_hover_style_underlines_the_label_it_reaches() {
     assert_eq!(underline(&mut h), None);
 }
 
+/// A script's `font_features` can name any four bytes: those an inline box
+/// is said in make no box on its text.
+#[test]
+fn a_script_font_feature_makes_no_inline_box() {
+    let mut h = Harness::inline(
+        r##"return ui.rich { id = "p", font_features = "_ibw=1 _ibh=1 liga=0",
+            ui.span { "text", padding = { 6, 0 } } }"##,
+    );
+    h.frames(2);
+    let p = h.find("p").unwrap();
+    let scene = h.ui.scene.borrow();
+    let paragraph = scene.children(p)[0];
+    let zgx::scene::NodeKind::RichText { text } = scene.kind(paragraph) else {
+        panic!("a paragraph")
+    };
+    assert!(!text.has_inline_boxes());
+    assert!(text.inline_boxes().is_empty());
+    let features = text.runs()[0].font.features.settings();
+    assert!(
+        features.contains(&(*b"liga", 0)),
+        "the rest kept: {features:?}"
+    );
+}
+
 #[test]
 fn a_span_icon_sits_in_the_line_before_its_text() {
     use zgx::scene::NodeKind;
