@@ -20,6 +20,28 @@ def stats(values):
                 stdev=statistics.stdev(values) if len(values)>1 else None, values=values)
 
 
+def lead_phase_check(base, variant, lead_us, period):
+    def leads(metrics):
+        values=[]
+        for sample in metrics.get('presentation_timings',{}).get('samples',[]):
+            if not sample.get('clock_aligned') or sample.get('handover') is None:continue
+            handover=sample['handover'];begin=handover['end_ns']/1e6-handover['micros']/1000
+            values.append((sample['shown_s']*1000-begin)%period)
+        return values
+    a,b=leads(base),leads(variant)
+    def covered(metrics,values):
+        samples=metrics.get('presentation_timings',{}).get('samples',[])
+        return len(values)>=max(10,.9*len(samples)) and not any(s.get('clock_aligned') is False for s in samples)
+    am=statistics.median(a) if a else None;bm=statistics.median(b) if b else None
+    intended=lead_us/1000
+    # The baseline CV-link align target is 1.6ms before refresh. Permit 1ms
+    # jitter in the observed shown grid, and require an earlier handover.
+    valid=(covered(base,a) and covered(variant,b) and abs(am-1.6)<=1 and abs(bm-intended)<=1
+           and bm-am>=.25 and abs((bm-am)-(intended-1.6))<=1)
+    return dict(valid=valid,baseline_lead_ms=am,variant_lead_ms=bm,intended_lead_ms=intended,
+                delta_ms=bm-am if a and b else None,baseline_samples=len(a),variant_samples=len(b),tolerance_ms=1)
+
+
 def summarize(samples, trials):
     rows=[]
     for arm in dict.fromkeys(s['arm'] for s in samples):
@@ -32,6 +54,13 @@ def summarize(samples, trials):
                              condition=next(s['condition'] for s in samples if s['arm']==arm),
                              late_pct=metric('late_pct'),interval_p99_ms=stats([s['metrics']['interval_ms']['p99'] for s in valid]),
                              main_over_4ms=metric('main_over_4ms'),gpu_p99_ms=metric('gpu_p99_ms'),
+                             deferred_drawable_frames=metric('deferred_drawable_frames'),
+                             drawn_on_drawable_arrival_frames=metric('drawn_on_drawable_arrival_frames'),
+                             finger_late_intervals=metric('finger_late_intervals'),
+                             finger_active_intervals=metric('finger_active_intervals'),
+                             coast_late_intervals=metric('coast_late_intervals'),
+                             coast_active_intervals=metric('coast_active_intervals'),
+                             slow_step_intervals=metric('slow_step_intervals'),
                              shown_frames=metric('shown_frames_tape'),
                              same_refresh_extra_frames=metric('same_refresh_extra_frames'),
                              double_then_skip=metric('double_then_skip_intervals'),
@@ -43,7 +72,13 @@ def summarize(samples, trials):
                              exact_latency_p99_ms=stats([s['metrics'].get('start_to_present_ms',{}).get('p99') for s in valid]),
                              estimated_latency_p99_ms=stats([s['metrics'].get('render_start_to_shown_ms_estimate',{}).get('p99') for s in valid]),
                              frame_end_to_shown_p99_ms=stats([s['metrics'].get('frame_end_to_shown_ms_estimate',{}).get('p99') for s in valid]),
+                             acquisition_p99_ms=stats([s['metrics'].get('presentation_timings',{}).get('acquisition_ms',{}).get('p99') for s in valid]),
+                             acquisition_max_ms=stats([s['metrics'].get('presentation_timings',{}).get('acquisition_ms',{}).get('max') for s in valid]),
+                             gpu_wait_p99_ms=stats([s['metrics'].get('presentation_timings',{}).get('gpu_wait_ms',{}).get('p99') for s in valid]),
+                             present_to_display_p99_ms=stats([s['metrics'].get('presentation_timings',{}).get('present_to_display_ms',{}).get('p99') for s in valid]),
                              rss_delta_kib=stats([s['metrics'].get('rss_kib',{}).get('delta') for s in valid]),
+                             rss_rest_kib=stats([s['metrics'].get('rss_kib',{}).get('rest_after') for s in valid]),
+                             rss_rest_delta_kib=stats([s['metrics'].get('rss_kib',{}).get('rest_delta_from_before') for s in valid]),
                              all_gates_pass=bool(valid) and len(valid)==trials and all(s['status']=='pass' for s in valid)))
     for row in rows:
         pairs=[]
@@ -71,7 +106,10 @@ def table(rows):
     def number(v):return '—' if v is None else f'{v:.2f}'
     def spread(s):return f"{number(s['mean'])} [{number(s['min'])},{number(s['max'])}]"
     for r in rows:
-        c=r['condition']
+        c=dict(r['condition'])
+        if c.get('command')=='reference':
+            c['gesture']='reference'
+            if c.get('scene')=='zeron':c['scene']='zeron-idle'
         lines.append(f"| {r['arm']} | {r['role']} | {c.get('scene','zeron')} / {c.get('gesture','wing')} / {c.get('size','W')} / {c.get('present','0')} | {r['n']}/{r['required']} | {spread(r['late_pct'])}; {number(r['late_pct']['stdev'])} | {number(r['interval_p99_ms']['mean'])} | {spread(r['main_over_4ms'])} | {spread(r['shown_frames'])} | {number(r['paired_shown_delta']['mean'])} | {'pass' if r['all_gates_pass'] else 'fail' if r['complete'] else 'incomplete'} |")
     return '\n'.join(lines)+'\n'
 
@@ -94,7 +132,10 @@ def run_one(args, descriptor, arm, role, trial, position):
           '--scale',str(c.get('scale',2)),'--backgrounds',c.get('background','translucent'),
           '--present',str(c.get('present','0')),'--repeats','1','--native-floor',
           '--reset-row',str(c.get('reset_row',160)), '--reference-refresh-grid',c.get('reference_refresh_grid','off'),'--output',str(output)]
-    for key in ('engine_source','engine_pin','zeron_source','zeron_runner','runner','reference_runner'):
+    if 'model_catalog' in c:argv+=['--model-catalog',c['model_catalog']]
+    if c.get('set_refresh'):argv+=['--set-refresh']
+    if 'rest_seconds' in c:argv+=['--rest-seconds',str(c['rest_seconds'])]
+    for key in ('engine_source','engine_pin','zeron_source','zeron_runner','runner','reference_runner','reference_source','scroll_source'):
         if key in descriptor:argv+=['--'+key.replace('_','-'),str(descriptor[key])]
     for value in descriptor.get('env',[]):argv+=['--host-env',value]
     if descriptor.get('require_frame_source'):argv+=['--require-frame-source']
@@ -106,7 +147,7 @@ def run_one(args, descriptor, arm, role, trial, position):
     found=[r for r in data if r['scene']==wanted]
     r=found[-1] if found else dict(status='invalid',failures=['missing requested result'])
     m=r.get('metrics',{})
-    valid=r['status']!='invalid' and m.get('active_intervals',0)>=30 and m.get('gpu_p99_ms') is not None
+    valid=r['status']!='invalid' and m.get('cadence_scoring_complete') is True and m.get('active_intervals',0)>=30 and m.get('gpu_p99_ms') is not None
     refs=[r for r in data if r['scene'] in ('idle','zeron-idle')]
     native_valid=bool(refs) and all(ref.get(k,{}).get('status')=='valid' for ref in refs for k in ('native_floor_before','native_floor_after'))
     sample=dict(arm=arm['name'],role=role,trial=trial,condition=c,descriptor=descriptor,
@@ -136,7 +177,7 @@ def main():
     if frozen.exists() and json.loads(frozen.read_text())!=manifest:p.error('resume manifest differs from saved manifest')
     frozen.write_text(json.dumps(manifest,indent=2)+'\n')
     fingerprint=hashlib.sha256()
-    for name in ('scroll.py','scroll_compare.py','scroll_native.swift','zeron_fixture.luau'):
+    for name in ('scroll.py','scroll_motion.py','scroll_compare.py','scroll_native.swift','zeron_fixture.luau'):
         fingerprint.update((ROOT/'scripts/perf'/name).read_bytes())
     saved=args.output/'harness-sha256.txt'
     if saved.exists() and saved.read_text().strip()!=fingerprint.hexdigest():
@@ -154,12 +195,14 @@ def main():
                     sample=run_one(args,descriptor,arm,role,trial,position)
                     pair.append(sample);samples.append(sample)
                 if any(value.startswith('ZGX_LEAD_US=') for value in arm.get('env',[])):
-                    waits=[s['metrics'].get('wait_ms',{}).get('p50') for s in pair]
-                    shorter=all(v is not None for v in waits) and waits[1]<waits[0]-.25
-                    pair[1]['behavior_checks']['lead_hold_shorter_than_unset']=shorter
-                    if not shorter:
+                    lead=int(next(value.split('=')[1] for value in arm['env'] if value.startswith('ZGX_LEAD_US=')))
+                    proof=lead_phase_check(pair[0]['metrics'],pair[1]['metrics'],lead,1000/arm.get('condition',{}).get('hz',120))
+                    pair[1]['lead_phase_validation']=proof
+                    pair[1]['behavior_checks']['lead_handover_phase']=proof['valid']
+                    if not proof['valid']:
+
                         pair[1]['valid']=False;pair[1]['status']='invalid'
-                        pair[1]['failures'].append('lead arm did not shorten median wait versus paired baseline')
+                        pair[1]['failures'].append('lead arm did not hand over at its intended earlier refresh phase')
                 if arm.get('condition',{}).get('scene','zeron')=='zeron':
                     a,b=[anchor(s) for s in pair]
                     if a is None or b is None or a.get('id')!=b.get('id') or abs(a.get('dy',0)-b.get('dy',0))>.05:

@@ -120,6 +120,25 @@ pub struct WindowOptions {
 fn fixed_size(options: &WindowOptions) -> bool {
     options.min_size.is_some() && options.min_size == options.max_size
 }
+/// A scroll delta the host applies (`scroll-applied source=… dx dy`): on
+/// stderr with `ZGX_PRESENT_LOG`, and as a devtools note with its time on the
+/// host clock (CLOCK_UPTIME_RAW, the present log's), while recording.
+fn scroll_applied(what: impl FnOnce() -> String) {
+    let log = zgx_gpu::present_log::enabled();
+    let noted = zgx::profile::enabled();
+    if !log && !noted {
+        return;
+    }
+    let what = what();
+    let at = zgx_gpu::present_log::now_ns();
+    if noted {
+        zgx::profile::note(|| format!("{what} at_ns={at}"));
+    }
+    if log {
+        eprintln!("PRESENT {:.6} {what}", at as f64 / 1e9);
+    }
+}
+
 impl WindowOptions {
     /// Whether the window is transparent where zgx paints nothing.
     pub fn is_transparent(&self) -> bool {
@@ -2807,6 +2826,30 @@ impl Host {
     fn draw_frame(&mut self) -> Result<(), Box<dyn Error>> {
         #[cfg(target_os = "macos")]
         {
+            // What paced this frame, for devtools.
+            zgx::profile::note(|| {
+                let view = self
+                    .display_link
+                    .as_ref()
+                    .is_some_and(|link| link.on_view_clock());
+                let now = std::time::Instant::now();
+                let refresh = 1. / self.frame_interval.as_secs_f64();
+                format!(
+                    "frame source: {} (wanted {}, rate {:?}, scroll live {}, coasting {}, \
+                     input {})",
+                    match (self.link_paced, self.vsync_paced, view) {
+                        (true, _, true) => "view link",
+                        (true, _, false) => "display link",
+                        (false, true, _) => "timer on the grid",
+                        (false, false, _) => "input or other",
+                    },
+                    self.frames.wants_frame(),
+                    self.frames.demanded_rate(refresh),
+                    self.scroll_live(now),
+                    self.coast.active(),
+                    self.input_until.is_some_and(|until| now < until),
+                )
+            });
             let now = std::time::Instant::now();
             if let Some(renderer) = &mut self.renderer {
                 renderer.set_frame_start(now);
@@ -3175,6 +3218,7 @@ impl Host {
                         });
                         // One wakeup, not `sleep_until`'s two: running late
                         // only moves it nearer the point, still before it.
+                        let _wait = zgx::profile::span(zgx::profile::Phase::Wait);
                         std::thread::sleep(wait);
                     }
                 })?;
@@ -5367,7 +5411,7 @@ impl Host {
                         MouseScrollDelta::LineDelta(..) => self.scroll.push_wheel(now, (dx, dy)),
                     }
                 } else {
-                    zgx_gpu::present_log::log(|| {
+                    scroll_applied(|| {
                         format!("scroll-applied source=direct dx={dx:.3} dy={dy:.3}")
                     });
                     let event = InputEvent::Scroll {
@@ -5398,7 +5442,7 @@ impl Host {
                     // What the refreshes have not applied yet, first.
                     let wheel = self.scroll.wheel_only();
                     if let Some((delta_x, delta_y)) = self.scroll.flush() {
-                        zgx_gpu::present_log::log(|| {
+                        scroll_applied(|| {
                             format!("scroll-applied source=end dx={delta_x:.3} dy={delta_y:.3}")
                         });
                         let (x, y) = self.scroll.position;
@@ -6197,7 +6241,7 @@ impl Host {
                 None
             };
             if let Some((delta_x, delta_y)) = delta {
-                zgx_gpu::present_log::log(|| {
+                scroll_applied(|| {
                     format!(
                         "scroll-applied source={} dx={delta_x:.3} dy={delta_y:.3} delay_ms={:.3} refresh_ms={:.3}",
                         if self.frames_presented() {
@@ -6241,7 +6285,7 @@ impl Host {
             };
             if let Some(((delta_x, delta_y), done)) = self.coast.sample(shows) {
                 if delta_x != 0. || delta_y != 0. {
-                    zgx_gpu::present_log::log(|| {
+                    scroll_applied(|| {
                         format!("scroll-applied source=coast dx={delta_x:.3} dy={delta_y:.3}")
                     });
                     let (x, y) = self.scroll.position;

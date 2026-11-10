@@ -5,6 +5,18 @@ local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 local shared = require("@app/screens/chat/shared")
 local material = require("@ds/material")
+-- A known fixture model is settled, as in an opened real conversation.
+-- The driver can retain the loading case explicitly for animation regressions.
+local settle_model_catalog = true
+if settle_model_catalog then
+	local catalog: any = table.clone(store.catalog:peek())
+	catalog.complete = true
+	store.catalog:set(catalog)
+end
+local effective_catalog = ui.state("bench_catalog_complete", false)
+ui.effect(function()
+	effective_catalog:set((store.catalog:get() :: any).complete == true)
+end)
 local chats = ui.shared("fixture.chats", {} :: { [string]: any })
 local reference = ui.shared("scroll.reference", false):peek()
 local beat = ui.shared("scroll.reference.beat", false)

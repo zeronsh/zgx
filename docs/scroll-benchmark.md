@@ -28,7 +28,8 @@ script errors and type errors invalidate a run.
 Defaults run three trials per scene/gesture/size/background. Use
 `--repeats 1 --scenes tables --gestures flick --sizes M --backgrounds opaque`
 for a quick reproduction. `--gestures slow` uses subpixel steps;
-`flick` and `fling` decay velocity; `reversals` changes direction every quarter
+`flick` and `fling` send a 600 ms finger gesture ending at speed, then
+let the app generate its own coast; `reversals` changes direction every quarter
 second; `notches` sends line deltas; `stream` changes transcript row 400 near the bottom while
 scrolling. `wing` preserves the original 94.56-second tape byte for byte from
 [Wing's recording](https://gist.github.com/wing-anara/fa7628315d83138923947bd7a562645a).
@@ -81,17 +82,16 @@ trace entry. Callback records are bounded by the sampled frame indices, so
 frames submitted after the sample cannot become unaccounted-for late frames.
 The report preserves all raw presented times and frame-completion times.
 
-Idle tape gaps, isolated notches, and slow steps that accumulate less than one
-device pixel do not require a new picture every refresh. The analyzer derives
-motion windows from the tape, accumulates fractional device-pixel motion and
-counts long intervals only inside dense moving input. It reports idle intervals
-separately. These are **input-demand windows**, not a claim of optical pixel
-tracking or OS hardware-event latency. Autonomous momentum after the tape's
-moving-input region is retained in raw feedback but excluded from the late gate. For
-pixel-limited `slow` and isolated `notches`, a 120 Hz interval distribution is
-not meaningful: sparse cells instead require at least 80% of the planned
-quantized pixel updates to appear, ten traced moving frames, and all the same
-work/GPU/row/repaint and late-attribution checks. Idle gaps remain separate.
+Idle gaps, isolated notches and pixel-limited finger steps do not require a
+new picture every refresh. Current cadence demand comes from actual dispatched
+scroll deltas and observed app coast, matched by trace frame to whole-device-pixel
+positions. Nominal tape motion windows remain diagnostic; they must not demand
+movement from an older queued presentation. The app’s moving coast stays in the
+gate until it settles; ignored system momentum does not extend it. These are
+instrumented presentation measurements, not optical pixel tracking or OS
+hardware-event latency. Sparse `slow` and `notches` cells also require at least
+80% of planned quantized updates, ten traced moving frames, and the same
+work/GPU/row/repaint and late-attribution checks. Idle intervals stay separate.
 
 The target is **zero late frames attributable to the app or GPU**. Every late
 or skipped presentation cites its frame record(s) in `late_attributions`:
@@ -128,8 +128,9 @@ Before each distinct size/refresh/scale/background/present-mode condition, a
 static window. Its tiny host (`scroll_reference`) advances the marker through
 `cx.frames.next()` on the actual display clock. A timer-driven heartbeat would
 add timer jitter to the supposed system floor. The reference disables the
-optional `refresh_grid` cadence-holding policy, which the real scene runs still
-test, and saves that switch in its evidence. A completely still idle window has no
+optional timer/latch `refresh_grid` policy and saves that switch in its
+evidence. The CV display-link path can still align its handover independently;
+its hold notes remain part of the host floor, not an OS-only reference. A completely still idle window has no
 presentations and cannot establish a floor. The reference uses the same host,
 presentation path and telemetry. Its late frames remain unattributed and are reported
 separately and linked from each matched scene run. If the reference fails its
@@ -354,15 +355,113 @@ child process. Inherited `ZGX_*` settings are intentionally stripped; use
 or failed behaviour checks invalidate a run. Pacing probes require the engine's
 `frame source:` mode notes, with at least95% in the expected steady mode
 (the complete histogram retains transition frames). ASAP and view-link arms
-must show no hold, lead arms must shorten median wait versus their paired
-baseline, and hybrid presentation must show drawable callbacks during scroll
+must show no hold, lead arms must hand over at their intended earlier phase
+versus their paired baseline, and hybrid presentation must show drawable callbacks during scroll
 and tile callbacks at rest. Historical unverified single clock trials are
 exploratory and cannot certify an arm.
 
 For a marker **pacing probe**, use `--reference-refresh-grid on` on both baseline
 and candidates. This deliberately exercises the latch, so LEAD_US can change
-its hold; the default off would bypass it. These marker numbers must not be
-compared with earlier minimum-host references taken with the grid off.
+its timer/latch hold. The switch does not disable the separate CV-link align
+hold; inspect its notes too. Compare controls in the same batch rather than
+crediting a grid switch for a difference from older runs.
 Independent native brackets remain separate and contain no zgx pacing policy.
 
 The actual shell also verifies `bench_effective_frost` against the requested background. A setting or platform policy that keeps the effective material opaque invalidates a requested frosted cell rather than silently changing the condition.
+
+### Acquisition and handover timing
+
+Tracing records window `nextDrawable` acquisition and tile GPU waiting separately
+from painting. The per-frame handover note and direct drawable submission note
+are joined to presented feedback by frame id. Handover-to-display values are
+reported only when the clocks and frame bounds agree; missing notes and clock
+mismatches are counted, never replaced with zero. The handover timestamp is the
+API return; the recorded call duration reconstructs its start. API return can
+follow the display timestamp, so return-to-display latency may be negative.
+
+Raw captures, screenshots, source snapshots and build logs remain private.
+To export reviewed conditions and numeric results only, run
+`python3 scripts/perf/scroll_public.py target/scroll-results/summary.json --output target/scroll-public/summary.json`.
+The manual workflow uploads only this allowlisted summary and keeps actual-app
+build and replay logs out of its public output. Unknown fields and free-text
+notes are omitted. Physical certification remains manual: run
+`scripts/perf/scroll.py` on a quiet Mac and attach the table.
+
+The independent Swift native brackets record the same commit/flip-to-shown
+latency and acquisition time. Their numeric summaries accompany the app
+results. A refresh-phase value is modulo the observed presented-time grid;
+it is not an absolute display-link timestamp. Late and on-time frames are
+kept separately when interpreting that phase.
+
+LEAD validation uses exact handover timestamps modulo the observed shown-frame
+refresh grid, with at least ten clock-aligned samples, at least 90% handover coverage, and
+zero detected clock mismatches in each arm. Its median
+lead must be within 1 ms of the requested value and move earlier by the intended
+amount (also within 1 ms) versus the CV-link baseline's 1.6 ms target. Timer-source
+notes are required independently. Wait duration is not a substitute: the timer
+and link start at different phases, and older CV-link holds were recorded inside
+`present` without a `Wait` span. Phase labels are not absolute link timestamps.
+
+For an engine whose default clock changed, a comparison descriptor can declare
+`reference_source` and `scroll_source` (CLI `--reference-source` and
+`--scroll-source`) as `view link`, `display link`, or `timer on the grid`.
+These expectations are checked against observed notes without forcing the
+candidate's default on through an environment flag. Declare the same-binary
+control's expected modes separately and adjust expectations for the requested
+refresh rate; unsupported or mismatched source notes invalidate the cell.
+
+The desktop trace emits frame-source mode notes on macOS. CV-link alignment sleeps are recorded as Wait, separately from present. These trace-only diagnostics leave untraced idle windows idle; do not compare wait/present phase totals to older builds that put that alignment sleep inside present. Numeric exports retain only the known source modes and diagnostic flags.
+
+Drawable acquisition experiments accept `--host-env ZGX_DRAWABLE_PREFETCH=0`
+(or `1`) and verify the override in the actual child process. Pair hybrid
+scrolling with prefetch on and off in the same binary, with a tiles control.
+Use `--rest-seconds 3` to record RSS after an input-free settling period.
+No inspector requests run during that wait. `rest_after` and
+`rest_delta_from_before` are KiB; the latter compares against the warmed
+pre-replay RSS. This short sample tests immediate drawable release, not the
+list cache’s separate 30-second trim. It does not measure GPU allocations.
+
+Real-shell runs default to `--model-catalog settled`. The benchmark wrapper
+marks its known fixture catalog complete and checks the actual observed state
+before and after each replay, including the idle marker. `--model-catalog loading`
+retains the model-chip loading animation as an explicit regression condition.
+An absent or changed state invalidates a run. Public summaries carry the intended
+enum and observed completion boolean. Earlier wrappers omitted catalog completion;
+their real-shell data must not certify a settled composer. Keep comparisons within
+the same catalog condition and rerun headline decisions on the settled fixture.
+
+The manual workflow also runs a real-shell momentum flick with
+`--model-catalog loading`, in addition to the settled headline runs. A loading
+animation must not reduce the scroll's refresh rate. Its result is separate;
+fixing fixture settlement does not waive this regression case. To reproduce it
+locally, run the actual-shell command with `--gestures flick --model-catalog loading`
+and retain the default three trials. The workflow still has only
+`workflow_dispatch` as a trigger and exports numeric summaries only.
+
+Cadence scoring uses the host’s actual dispatched deltas after macOS momentum
+filtering and resampling. Profiling records `scroll-applied` with the host-clock
+time in the frame that applies each delta. Only the target axis demands movement:
+vertical for transcript/list/grid cells, horizontal for the nested viewport.
+The app’s own coast remains demand while it moves. Missing applied-input notes,
+ambiguous target mapping, stale coast context or unexplained whole-pixel applied
+motion with no position change fail coverage instead of certifying zero late.
+
+Each scroll content’s whole-device-pixel translation is recorded on rendered
+frames; non-rendering frames carry its last position. Ranges across canceled
+frames still detect skipped intermediate movement. Moving coast intervals must
+meet the deadline even at a one-pixel step. Pixel-limited fingers can be exempt;
+slow-step, stationary, finger and coast counts remain separate. Captures and warm
+resets wait for the observed coast to settle, with a bounded timeout that
+invalidates unfinished captures.
+
+Historical raw-input-demand tables are qualified and cannot certify app missed
+refreshes. Capture snapshots and comparison fingerprints include
+`scroll_motion.py`, preventing a silent rescore mid-batch.
+
+During continuous `scroll live` demand the cadence interval starts at the last
+presentation that moved the target. A background-only presentation cannot hide
+a held scroll position. An inactive trace state separates a new motion onset
+from the preceding idle gap. Motion outside applied input and app coast is
+flagged as app-animated; it fails settled non-streaming coverage and is reported
+separately for the explicit streaming condition. All live-scroll frames remain
+in the main/GPU work population, including background frames without move notes.

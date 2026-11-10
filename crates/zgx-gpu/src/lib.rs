@@ -6162,6 +6162,22 @@ impl GpuRenderer {
         }
     }
     fn render_once(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
+        // Where each scroll view's content is as this frame draws it, in
+        // device pixels, for devtools (only while tracing: a walk of every
+        // node). Its translation is the offset, negated.
+        if zgx::profile::enabled() {
+            let scale = self.scale;
+            for (id, at) in scene.scroll_contents() {
+                zgx::profile::note(|| {
+                    format!(
+                        "scroll @{} position {} {} px",
+                        id.number(),
+                        (at.x * scale).round(),
+                        (at.y * scale).round()
+                    )
+                });
+            }
+        }
         // Layer shaders with inputs: their pipelines and this frame's passes,
         // before anything draws them.
         if scene.has_layer_inputs() {
@@ -11936,7 +11952,13 @@ impl GpuRenderer {
         let Some(buffer) = self.metal_inflight.borrow_mut().take() else {
             return false;
         };
+        let waiting = zgx::profile::enabled().then(std::time::Instant::now);
         buffer.waitUntilCompleted();
+        if let Some(waiting) = waiting {
+            zgx::profile::note(|| {
+                format!("waited {} us for the GPU", waiting.elapsed().as_micros())
+            });
+        }
         let ran = buffer.GPUEndTime() - buffer.GPUStartTime();
         self.gpu_time
             .set((ran > 0.).then(|| std::time::Duration::from_secs_f64(ran)));
@@ -12092,6 +12114,15 @@ impl GpuRenderer {
                     },
                     blocker => (copy, blocker),
                 }
+            });
+            // How far it moved this frame, in device pixels, for devtools.
+            zgx::profile::note(|| {
+                format!(
+                    "scroll @{} moved {} {} px",
+                    scroll.node.number(),
+                    (scroll.dx * self.scale).round(),
+                    (scroll.dy * self.scale).round()
+                )
             });
             match refused {
                 Ok((copy, blocker)) => match blocker {
@@ -14949,6 +14980,7 @@ impl GpuRenderer {
                 layer.show(buffer, opaque, present.full_rate);
             }
         };
+        let handing = zgx::profile::enabled().then(std::time::Instant::now);
         match self.views.as_deref_mut() {
             // GPU views' planes that moved, showed or hid change with the
             // window's frame, in one transaction: never a frame apart.
@@ -14967,6 +14999,17 @@ impl GpuRenderer {
                 });
             }
             None => show(layer),
+        }
+        // When it went to the window server, on the presentation log's clock,
+        // and how long the handover took, for devtools.
+        if let Some(handing) = handing {
+            zgx::profile::note(|| {
+                format!(
+                    "handed over at {} ns in {} us",
+                    present_log::now_ns(),
+                    handing.elapsed().as_micros()
+                )
+            });
         }
         layer.keep(
             present

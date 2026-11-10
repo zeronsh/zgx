@@ -893,7 +893,18 @@ impl Frame {
                     .addCompletedHandler(block2::RcBlock::as_ptr(&completed));
             }
         }
+        let submitting = (crate::present_log::scroll_bench() && drawable.is_some())
+            .then(std::time::Instant::now);
         self.buffer.commit();
+        if let Some(submitting) = submitting {
+            zgx::profile::note(|| {
+                format!(
+                    "submitted drawable at {} ns in {} us",
+                    crate::present_log::now_ns(),
+                    submitting.elapsed().as_micros()
+                )
+            });
+        }
         self.buffer
     }
 }
