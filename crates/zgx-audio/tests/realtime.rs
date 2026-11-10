@@ -619,13 +619,17 @@ fn main() {
         run.audio.bus("music").unwrap(),
         run.audio.bus("world").unwrap(),
     );
-    use zgx_audio::effects::{HighPass, LowPass, Peaking, Slope};
+    use zgx_audio::effects::{Delay, HighPass, LowPass, Peaking, Slope};
     let low = music
         .add_effect(LowPass::new(4000.).slope(Slope::Db24).resonance(3.))
         .unwrap();
     let high = world.add_effect(HighPass::new(80.)).unwrap();
     let peak = ui.add_effect(Peaking::new(1000., 9., 2.)).unwrap();
     music.add_effect(Peaking::new(300., -12., 0.7)).unwrap();
+    let echo = world
+        .add_effect(Delay::new(0.01, 0.05).feedback(0.6))
+        .unwrap();
+    ui.add_effect(Delay::new(0.0004, 0.001)).unwrap();
     for (i, bus) in [&ui, &music, &world].into_iter().enumerate() {
         run.audio
             .play(
@@ -650,6 +654,9 @@ fn main() {
         .unwrap();
     peak.at(run.at(0.003))
         .set(Peaking::GAIN, -24., Ramp::ms(25.))
+        .unwrap();
+    echo.at(run.at(0.002))
+        .set(Delay::TIME, 0.04, Ramp::ms(30.))
         .unwrap();
     run.render(30);
     run.finish(&mut failures);

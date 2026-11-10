@@ -63,6 +63,7 @@ EFFECT_ARMS = [
     ("lpf4", "lowpass24"),
     ("hpf2", "highpass"),
     ("peak2", "peaking"),
+    ("delay", "delay"),
 ]
 
 

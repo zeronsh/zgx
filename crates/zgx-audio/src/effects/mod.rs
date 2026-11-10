@@ -12,6 +12,8 @@
 //! muffle.set(LowPass::CUTOFF, 400., Ramp::ms(300.))?; // under water
 //! # Ok::<(), zgx_audio::Error>(())
 //! ```
+mod delay;
 mod filter;
 
+pub use delay::Delay;
 pub use filter::{FLAT, HighPass, LowPass, Peaking, Slope};

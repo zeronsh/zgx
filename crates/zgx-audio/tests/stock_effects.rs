@@ -8,7 +8,7 @@
 //! the references anew; say why they changed.
 use std::f64::consts::PI;
 use std::path::PathBuf;
-use zgx_audio::effects::{FLAT, HighPass, LowPass, Peaking, Slope};
+use zgx_audio::effects::{Delay, FLAT, HighPass, LowPass, Peaking, Slope};
 use zgx_audio::{Audio, Bus, Config, Effect, Play, Ramp, Sound, Time, wav};
 
 const RATE: u32 = 48_000;
@@ -257,4 +257,66 @@ fn a_ringing_filter_runs_on_after_its_sound_until_its_tail_is_quiet() {
     let peak = left.iter().fold(0f32, |m, s| m.max(s.abs()));
     assert!(late < peak * 3.2e-4, "{late} still loud, against {peak}");
     assert!(left[17_000..].iter().all(|&s| s == 0.), "run past its tail");
+}
+
+#[test]
+fn a_delay_echoes_on_its_frames_each_echo_its_feedback_as_loud() {
+    // 10 ms (480 frames), half as loud each time, the echoes at half.
+    let out = respond(|_, master| {
+        master
+            .add_effect(Delay::new(0.01, 0.05).feedback(0.5).mix(0.5, 1.))
+            .unwrap();
+    });
+    reference("delay", &out);
+    let left = channel(&out, 0);
+    // The impulse (0.5) on frame 1, then 0.25, 0.125, 0.0625 on its frames.
+    assert_eq!(left[1], 0.5);
+    for (k, want) in [(1, 0.25), (2, 0.125), (3, 0.0625)] {
+        assert_eq!(left[1 + 480 * k], want, "echo {k}");
+        assert_eq!(left[480 * k], 0., "before echo {k}");
+    }
+    // Shorter than a block: the runs split at the delay, and the echoes
+    // still land on their frames.
+    let short = respond(|_, master| {
+        master
+            .add_effect(Delay::new(0.0005, 0.01).feedback(0.5).mix(1., 0.))
+            .unwrap();
+    });
+    let left = channel(&short, 0);
+    assert_eq!(
+        (left[1], left[25], left[49], left[73]),
+        (0., 0.5, 0.25, 0.125)
+    );
+}
+
+#[test]
+fn a_delay_s_time_glides_without_a_click_at_any_block_size() {
+    let out = respond(|_, master| {
+        let echo = master
+            .add_effect(Delay::new(0.01, 0.05).feedback(0.3).mix(0.7, 1.))
+            .unwrap();
+        echo.at(Time(IMPULSE as u64))
+            .set(
+                Delay::TIME,
+                0.03,
+                Ramp::seconds(SWEEP as f64 / f64::from(RATE)),
+            )
+            .unwrap();
+    });
+    reference("delay_moving", &out);
+    assert!(out.iter().all(|s| s.is_finite() && s.abs() < 1.));
+}
+
+#[test]
+fn a_delay_rings_on_until_its_echoes_are_quiet() {
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let world = audio.bus("world").unwrap();
+    // 0.1 s apart, feedback 0.5: 4.5 / log10(2) = 15 echoes to -90 dB.
+    world
+        .add_effect(Delay::new(0.1, 0.2).feedback(0.5).mix(1., 1.))
+        .unwrap();
+    audio.play(&impulse(), Play::new().bus(&world)).unwrap();
+    let left = channel(&mixer.frames(96_000), 0);
+    assert!(left[1 + 4800 * 12].abs() > 0., "the 12th echo");
+    assert!(left[78_000..].iter().all(|&s| s == 0.), "run past its tail");
 }

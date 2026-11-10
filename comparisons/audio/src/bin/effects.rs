@@ -1,11 +1,11 @@
 //! zgx-audio's side of the effect comparison: one instance of a stock
 //! effect on 10 s of the noise miniaudio/effects.c runs its own through,
-//! compared with what miniaudio wrote. Past the first 0.1 s (a zgx-audio
-//! voice starting away from zero fades in over 1 ms) the two must agree to
-//! 90 dB under the signal, where the algorithms are the same.
+//! compared with what miniaudio wrote: played with no fade in, as
+//! miniaudio's is, the two must agree to 90 dB under the signal past the
+//! first 0.1 s, where the algorithms are the same.
 //!
-//!   effects <lowpass|lowpass24|highpass|peaking> <miniaudio's output.f32>
-use zgx_audio::effects::{HighPass, LowPass, Peaking, Slope};
+//!   effects <lowpass|lowpass24|highpass|peaking|delay> <miniaudio's output.f32>
+use zgx_audio::effects::{Delay, HighPass, LowPass, Peaking, Slope};
 use zgx_audio::{Audio, Config, Play, Sound};
 
 /// The first of effects.c's sounds: a second of stereo noise.
@@ -25,7 +25,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let (name, theirs) = match &args[..] {
         [name, path] => (name.as_str(), path),
-        _ => panic!("effects <lowpass|lowpass24|highpass|peaking> <miniaudio's output.f32>"),
+        _ => panic!("effects <lowpass|lowpass24|highpass|peaking|delay> <miniaudio's output.f32>"),
     };
     let (audio, mut mixer) = Audio::offline(Config {
         limiter: None,
@@ -39,11 +39,18 @@ fn main() {
         "lowpass24" => master.add_effect(LowPass::new(2000.).slope(Slope::Db24)),
         "highpass" => master.add_effect(HighPass::new(200.)),
         "peaking" => master.add_effect(Peaking::new(1000., 6., 1.)),
+        // ma_delay's comb, y[n] = x[n] + 0.5 y[n - d]: dry 1, wet as the
+        // feedback.
+        "delay" => master.add_effect(Delay::new(0.25, 0.25).feedback(0.5).mix(0.5, 1.)),
         other => panic!("no effect named {other:?}"),
     };
     added.expect("an effect the bus holds");
     let sound = Sound::from_samples(&noise(), 2, 48_000).unwrap();
-    audio.play(&sound, Play::new().looping(true)).unwrap();
+    // No fade in: miniaudio's input starts on its first sample too (and a
+    // delay would echo the difference).
+    audio
+        .play(&sound, Play::new().looping(true).fade_in(0.))
+        .unwrap();
     let ours = mixer.frames(480_000);
     let theirs: Vec<f32> = std::fs::read(theirs)
         .expect("miniaudio's output")
@@ -55,7 +62,11 @@ fn main() {
         signal += f64::from(*b).powi(2);
         difference += f64::from(a - b).powi(2);
     }
-    let under = 10. * (signal / difference.max(1e-300)).log10();
+    if difference == 0. {
+        println!("  zgx-audio {name}: identical to miniaudio's, bit for bit");
+        return;
+    }
+    let under = 10. * (signal / difference).log10();
     println!("  zgx-audio {name}: {under:.1} dB under the signal from miniaudio's");
-    assert!(under >= 90., "{name} isn't miniaudio's filter: {under:.1} dB");
+    assert!(under >= 90., "{name} isn't miniaudio's: {under:.1} dB");
 }
