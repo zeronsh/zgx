@@ -11,14 +11,6 @@ pub(crate) fn enabled() -> bool {
     *ON.get_or_init(|| zgx::env::var_os("ZGX_PRESENT_LOG").is_some_and(|v| v != "0"))
 }
 
-/// Raw presentation feedback for the scroll gate, without the verbose
-/// presentation log and its layer sampler.
-#[cfg(target_os = "macos")]
-pub(crate) fn scroll_bench() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| zgx::env::var_os("ZGX_SCROLL_BENCH").is_some_and(|v| v == "1"))
-}
-
 /// Nanoseconds on the host clock.
 pub fn now_ns() -> u64 {
     #[cfg(target_os = "macos")]

@@ -613,11 +613,10 @@ impl Probe {
             encoder.endEncoding();
         }
         let feedback = self.feedback.clone();
-        let frame = zgx::profile::current_frame_index();
         let handler = block2::RcBlock::new(
             move |shown: std::ptr::NonNull<ProtocolObject<dyn MTLDrawable>>| {
                 // SAFETY: Metal passes the drawable presented, alive for the call.
-                feedback.record(unsafe { shown.as_ref() }.presentedTime(), frame, None);
+                feedback.record(unsafe { shown.as_ref() }.presentedTime());
             },
         );
         // SAFETY: A live block taking the drawable, as the handler's type
@@ -659,12 +658,11 @@ fn watch_presented(
     started: Option<f64>,
 ) {
     let feedback = feedback.clone();
-    let frame = zgx::profile::current_frame_index();
     let handler = block2::RcBlock::new(
         move |shown: std::ptr::NonNull<ProtocolObject<dyn MTLDrawable>>| {
             // SAFETY: Metal passes the drawable presented, alive for the call.
             let presented = unsafe { shown.as_ref() }.presentedTime();
-            feedback.record(presented, frame, started);
+            feedback.record(presented);
             if let Some(started) = started {
                 feedback.record_latency(started, presented);
             }
@@ -710,18 +708,7 @@ impl Feedback {
         };
         Some((at(0.5)?, at(0.99)?))
     }
-    fn record(&self, presented: f64, frame: u64, started: Option<f64>) {
-        // Opt-in raw feedback for the scroll gate. A zero timestamp is a
-        // drawable skipped by the compositor, not a successfully shown frame.
-        if crate::present_log::scroll_bench() {
-            eprintln!(
-                "SCROLL_PRESENT {:.9} {:.9} {} {:.9}",
-                crate::present_log::now_ns() as f64 / 1e9,
-                presented,
-                frame,
-                started.unwrap_or(0.)
-            );
-        }
+    fn record(&self, presented: f64) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if presented <= 0. {
             state.skipped += 1;

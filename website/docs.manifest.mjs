@@ -222,7 +222,6 @@ export const sets = [
         description: 'The heavy dashboard in zgx, GPUI and GPUI’s fast path on an Apple Silicon Mac, with and without PGO.' },
       '---Method---',
       { slug: 'methodology', src: 'docs/benchmarking.md', title: 'Methodology' },
-      { slug: 'scroll-benchmark', src: 'docs/scroll-benchmark.md', title: 'Scroll regression gates' },
     ],
   },
 ];

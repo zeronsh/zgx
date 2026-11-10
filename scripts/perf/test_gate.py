@@ -116,28 +116,6 @@ class ExplainTests(unittest.TestCase):
                 patch.object(gate, 'count', side_effect=OSError('not run here')):
             table = gate.by_function(rows, scenes, None, budget=600, clock=lambda: next(times))
         self.assertTrue(any('(out of time)' in line and 'c' in line for line in table), table)
-class ScrollBuildTests(unittest.TestCase):
-    def test_tracing_is_not_unified_into_existing_benchmarks(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = pathlib.Path(directory)
-            target = root / 'target'
-            binaries = target / 'release/examples'
-            binaries.mkdir(parents=True)
-            scenes = [('list-state', 'zgx-script', 'list_state_bench', {}),
-                      ('scroll-plain', 'zgx-script', 'scroll_bench', {})]
-            for scene in scenes:
-                (binaries / scene[2]).write_text('fixture')
-            with patch.object(gate, 'SCENES', scenes), patch.object(gate, 'touch'), \
-                 patch.object(gate, 'stamp', return_value=None), \
-                 patch.object(gate, 'has_example', return_value=True), \
-                 patch.object(gate.subprocess, 'run', return_value=WARMED) as run:
-                gate.build(root, target, root / 'into')
-            commands = [call.args[0] for call in run.call_args_list]
-            self.assertEqual(len(commands), 2)
-            self.assertNotIn('--features', commands[0])
-            self.assertNotIn('scroll_bench', commands[0])
-            self.assertIn('scroll_bench', commands[1])
-            self.assertIn('zgx-script/inspect', commands[1])
 
 
 if __name__ == '__main__':

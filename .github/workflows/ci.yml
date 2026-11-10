@@ -113,8 +113,6 @@ jobs:
         run: python3 scripts/test_xvfb_retry.py -v
       - name: The instruction gate counts each binary warm, with a cache of its own
         run: python3 scripts/perf/test_gate.py -v
-      - name: Scroll measurement integrity
-        run: python3 -m unittest discover -s scripts/perf -p 'test_scroll*.py' -v
       - name: The inlining check reads MIR and fails on #1740's and #1824's changes
         run: python3 scripts/perf/test_inline_scopes.py -v
       - run: cargo fmt --all -- --check
@@ -183,16 +181,6 @@ jobs:
       # what the i18n lint finds, and each feature may add lazy `ui`
       # modules (`lazy_ui::` checks each against what its maker sets).
       - run: cargo test -p zgx-script --all-features --locked
-      - name: Warm scroll rows, table copies and stale pixels
-        env:
-          GPU: "1"
-          ZGX_SCROLL_STRICT: "1"
-        run: |
-          for scene in transcript plain grid nested; do
-            for scale in 1 2; do
-              SCALE="$scale" SCENE="$scene" cargo run --locked -p zgx-script --features inspect --example scroll_bench
-            done
-          done
       # zgx audit over the Luau examples (zgx-run's own tests need sockets).
       - run: cargo test -p zgx-run --test audit --locked
       # Devtools tracing (zgx's `trace`, off by default; zgx-script's

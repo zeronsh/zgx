@@ -1196,28 +1196,6 @@ impl Session {
                     Value::record([
                         ("name", Value::from(name.as_str())),
                         ("frame", Value::Num(after as f64)),
-                        ("trace_ms", Value::Num(zgx::trace::now_ms())),
-                        ("host_ns", Value::Num(zgx_gpu::present_log::now_ns() as f64)),
-                        (
-                            "refresh_ms",
-                            Value::Num(ui.refresh_interval().as_secs_f64() * 1e3),
-                        ),
-                        (
-                            "pixel_scale",
-                            Value::Num(ui.scene.borrow().pixel_scale() as f64),
-                        ),
-                        (
-                            "width",
-                            Value::Num(
-                                ui.scene.borrow().bounds(ui.scene.borrow().root()).width as f64,
-                            ),
-                        ),
-                        (
-                            "height",
-                            Value::Num(
-                                ui.scene.borrow().bounds(ui.scene.borrow().root()).height as f64,
-                            ),
-                        ),
                     ]),
                 ))
             }
@@ -1326,13 +1304,10 @@ impl Session {
                         .find(|l| !l.trim().is_empty() && !l.starts_with('#'))
                         .and_then(|l| l.split_whitespace().next()?.parse::<f64>().ok())
                         .unwrap_or(0.)
-                        .clamp(0., 600_000.);
+                        .clamp(0., 60_000.);
                     let b = ui.scene.borrow().transformed_bounds(node);
                     let at = (b.x + b.width / 2., b.y + b.height / 2.);
                     let from = zgx::trace::now_ms();
-                    if zgx::env::var_os("ZGX_SCROLL_BENCH").is_some_and(|v| v == "1") {
-                        eprintln!("SCROLL_REPLAY {}", zgx_gpu::present_log::now_ns());
-                    }
                     let said = ui.wheel_tape(zgx::widgets::WheelTape::Play {
                         tape: tape.clone(),
                         at,
@@ -1412,7 +1387,7 @@ impl Session {
                 }));
             }
             "sleep" => {
-                let ms = number("ms").unwrap_or(100.).clamp(0., 600_000.);
+                let ms = number("ms").unwrap_or(100.).clamp(0., 60_000.);
                 return Reply::Later(Box::pin(async move {
                     zgx::timer::sleep(Duration::from_millis(ms as u64)).await;
                     ok(format!("slept {ms} ms"), Value::Nil)
@@ -2091,24 +2066,14 @@ pub fn serve(
     let queue = Queue::default();
     let path = listen(&dir, pid, about, queue.clone())?;
     spawn(Box::pin(async move {
-        // A replay or wait must not prevent reading the frame ring while it
-        // runs. Each socket still receives exactly its own answer.
-        let mut pending: Vec<Pin<Box<dyn Future<Output = ()>>>> = Vec::new();
-        std::future::poll_fn(move |cx| -> Poll<()> {
-            while let Poll::Ready((request, reply)) = std::pin::pin!(queue.next()).poll(cx) {
-                match session.answer(&request) {
-                    Reply::Now(answer) => {
-                        let _ = reply.send(answer);
-                    }
-                    Reply::Later(later) => pending.push(Box::pin(async move {
-                        let _ = reply.send(later.await);
-                    })),
-                }
-            }
-            pending.retain_mut(|future| future.as_mut().poll(cx).is_pending());
-            Poll::Pending
-        })
-        .await;
+        loop {
+            let (request, reply) = queue.next().await;
+            let answer = match session.answer(&request) {
+                Reply::Now(answer) => answer,
+                Reply::Later(later) => later.await,
+            };
+            let _ = reply.send(answer);
+        }
     }));
     Ok(Server { path })
 }
