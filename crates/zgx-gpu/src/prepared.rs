@@ -475,6 +475,7 @@ impl Compact {
                         // the word between glyphs.
                         if range_width > 0. {
                             line.add(words, fitting, (i, 0), range_width);
+                            let _ = line.hang(limit, words, (i, 0));
                             push(&mut line);
                             range_width = 0.;
                             fitting = (i, 0);
@@ -511,6 +512,7 @@ impl Compact {
                     }
                 }
                 line.add(words, fitting, (words.len(), 0), range_width);
+                let _ = line.hang(limit, words, (words.len(), 0));
             }
             push(&mut line);
             if !any {
@@ -530,6 +532,9 @@ impl Compact {
         // most that fit (at least this wide) and the least that did not (any
         // narrower than it), between which every one is the same.
         let (mut fit, mut beyond) = (0_f32, f32::INFINITY);
+        // The least whole width of a line whose blank hangs (`hang`): from
+        // there on it counts.
+        let mut hangs = f32::INFINITY;
         for (spans, empty) in &self.lines {
             let spans = &self.spans[spans.start as usize..spans.end as usize];
             let mut line = Visual::default();
@@ -570,6 +575,9 @@ impl Compact {
                         // the word between glyphs.
                         if range_width > 0. {
                             line.add(words, fitting, (i, 0), range_width);
+                            if let Some(whole) = line.hang(limit, words, (i, 0)) {
+                                hangs = hangs.min(whole);
+                            }
                             push(&mut line);
                             range_width = 0.;
                             fitting = (i, 0);
@@ -611,6 +619,9 @@ impl Compact {
                     }
                 }
                 line.add(words, fitting, (words.len(), 0), range_width);
+                if let Some(whole) = line.hang(limit, words, (words.len(), 0)) {
+                    hangs = hangs.min(whole);
+                }
             }
             push(&mut line);
             if !any {
@@ -620,6 +631,7 @@ impl Compact {
         // As a width (`wrap_width` adds to it), short of the least that did
         // not fit by a margin: a width near it is measured, not served. None
         // where a fit went past the widest line (in rounding).
+        let beyond = beyond.min(hangs);
         let reach = match width {
             Some(_) if fit <= widest && beyond.is_finite() => {
                 let reach = beyond - 1e-3;
@@ -763,6 +775,25 @@ struct Visual {
     nonempty: bool,
 }
 impl Visual {
+    /// After `add` where a line can end in a blank past `limit` (a text's
+    /// last line, a line before a word too wide for any; elsewhere a break
+    /// leaves that blank out): run past, its width leaves out the blank it
+    /// ends with, as `layout_to_buffer`'s does (cosmic-text's
+    /// `trailing_blank`), and the width it had, which a wider limit takes
+    /// whole, is returned.
+    #[inline(always)]
+    fn hang(&mut self, limit: f32, words: &[Packed], end: (usize, usize)) -> Option<f32> {
+        if self.w <= limit || end.1 != 0 || end.0 == 0 {
+            return None;
+        }
+        let last = &words[end.0 - 1];
+        if last[1] & Word::BLANK == 0 {
+            return None;
+        }
+        let whole = self.w;
+        self.w -= f32::from_bits(last[0]);
+        Some(whole)
+    }
     /// Add the words from `start` to `end` ((word, glyph) positions), as
     /// cosmic-text's `add_to_visual_line` does.
     fn add(&mut self, words: &[Packed], start: (usize, usize), end: (usize, usize), width: f32) {
@@ -2660,6 +2691,57 @@ mod tests {
             }
             assert!(cache.taken > 0, "grown from its words (in runs: {runs})");
         }
+    }
+
+    /// A line's blank past the width it was given hangs, as CSS's trailing
+    /// spaces do: a wrapping text measures within that width, laid out at the
+    /// width it measures it breaks as it did, and the blank is still there,
+    /// past the width, where a caret after it goes. (It counted: a text ending
+    /// in blanks measured wider than it was given, and a box that took that
+    /// width broke it into fewer lines.)
+    #[test]
+    fn a_blank_past_the_width_hangs() {
+        let font = FontStyle::default();
+        let mut fonts = FontSystem::new();
+        let texts = [
+            "doubled  spaces   and trailing ones   ",
+            "short words then more words      ",
+            "a few words   ",
+        ];
+        let mut hung = 0;
+        for text in texts {
+            let text: Arc<str> = text.into();
+            let mut width = 20_f32;
+            while width < 300. {
+                let (size, _) = TextCache::default().measure_plain_reach(
+                    &mut fonts,
+                    &text,
+                    14.,
+                    &font,
+                    Some(width),
+                );
+                let again =
+                    TextCache::default().measure_plain(&mut fonts, &text, 14., &font, Some(size.0));
+                assert_eq!(again, size, "{text:?} at {width}, again at its widest");
+                let mut cache = TextCache::default();
+                let laid = cache.layout_plain(&mut fonts, &text, 14., &font, Some(width));
+                for run in laid.runs(None) {
+                    // Within the width but for a word wider than it.
+                    let wide = run.glyphs.iter().any(|g| g.w > width);
+                    assert!(wide || run.line_w <= crate::text::wrap_width(Some(width)).unwrap());
+                    // The blank still laid out, past the width.
+                    if let Some(last) = run.glyphs.last()
+                        && last.x + last.w > width + 1e-3
+                        && text[last.start..last.end].trim().is_empty()
+                    {
+                        hung += 1;
+                        assert!(last.x + 1e-3 >= run.line_w - last.w, "{text:?} at {width}");
+                    }
+                }
+                width += 0.25;
+            }
+        }
+        assert!(hung > 10, "{hung} blanks hung");
     }
 
     /// A wrapping text's size holds from its widest line's width to its

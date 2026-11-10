@@ -1059,6 +1059,12 @@ impl FallbackTextLayout {
                     let kept = blanks.iter().take_while(|s| **s <= w).count();
                     let line = if kept < blanks.len() || ink_width <= w {
                         kept.checked_sub(1).map_or(ink_x, |last| blanks[last])
+                    } else if x > w
+                        && let Some(last) = blanks.last()
+                    {
+                        // Past the edge, the last blank hangs (the GPU
+                        // shaper leaves it out of the line's width).
+                        *last
                     } else {
                         x
                     };
@@ -1083,7 +1089,16 @@ impl FallbackTextLayout {
                     }
                 }
             }
-            width = width.max(x);
+            // The last line: past the edge, its last blank hangs too.
+            let last_blank = out
+                .last()
+                .filter(|(r, cell)| cell.y == y && cell.x >= ink_x && r.end <= newline.start)
+                .map(|(_, cell)| cell.x);
+            let line = match (wrap, last_blank) {
+                (Some(w), Some(blank)) if x > w => blank,
+                _ => x,
+            };
+            width = width.max(line);
             end = Rect::new(x, y, 1., *height);
             if paragraph + 1 < paragraphs.len() {
                 out.push((newline, Rect::new(x, y, 0., *height)));
