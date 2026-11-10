@@ -8,6 +8,9 @@
 //! `SCENE=mixed` is those among skinned, morphing, double-sided cut-out and
 //! placed ones. `SCENE=still` is `textured`'s meshes standing still, the
 //! camera going round them: a frame where only the view changed.
+//! `SCENE=lights` is `textured` under 256 point lights, the frame choosing
+//! which to shade (`lit`). `SCENE=anim` is `textured` with a quarter of its
+//! meshes skinned to one 64-joint chain posed every frame (`rig`, `posed`).
 //! `MESHES` and `FRAMES` size it; `CULLING=0` draws what the camera can't
 //! see too. `SCENE=compute`, with the `compute` feature, adds the app's GPU
 //! data and compute passes to `textured` (`world_bench/compute.rs`). None has
@@ -175,6 +178,15 @@ fn main() {
     let (meshes, frames) = (setting("MESHES", 2000), setting("FRAMES", 30));
     let (device, queue) = device();
     let (world, root, joint, morphs) = world(mixed, meshes);
+    let scene = std::env::var("SCENE").unwrap_or_default();
+    if scene == "lights" {
+        lit(&world);
+    }
+    let joints = if scene == "anim" {
+        rig(&world, root)
+    } else {
+        Vec::new()
+    };
     let mut painter = world.viewport();
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("A frame"),
@@ -204,6 +216,7 @@ fn main() {
         } else {
             moved(&world, (root, joint, &morphs), frame);
         }
+        posed(&world, &joints, frame);
         let mut encoder = device.create_command_encoder(&Default::default());
         let mut drawing = ViewportFrame::new(
             &device,
@@ -241,6 +254,74 @@ fn moved(world: &World, (root, joint, morphs): (ObjectId, ObjectId, &[ObjectId])
     );
     for &mesh in morphs {
         world.set_morph_weights(mesh, &[0.5 + turned.sin() * 0.5]);
+    }
+}
+
+/// `SCENE=lights`: 256 point lights over the meshes, each a colour of its
+/// own; a frame shades the nearest the camera's target (`POINT_LIGHTS`).
+fn lit(world: &World) {
+    for i in 0..256u32 {
+        let (x, z) = ((i % 16) as f32 * 8. - 60., (i / 16) as f32 * 8. - 60.);
+        let warm = (i % 5) as f32 / 4.;
+        world.add_light(Light::Point {
+            position: vec3(x, 3., z),
+            color: [1., 0.6 + 0.4 * (1. - warm), 0.4 + 0.6 * warm],
+            intensity: 2.,
+            range: 8.,
+        });
+    }
+}
+
+/// `SCENE=anim`: a chain of 64 joints under the root, and a quarter of the
+/// meshes skinned to it, each vertex to one joint; `posed` turns every
+/// joint each frame, so every skinned mesh's palette is made again.
+fn rig(world: &World, root: ObjectId) -> Vec<ObjectId> {
+    const JOINTS: usize = 64;
+    let mut joints = Vec::with_capacity(JOINTS);
+    let mut parent = root;
+    for _ in 0..JOINTS {
+        parent = world.add(Object::group().at([0., 0.1, 0.]).child_of(parent));
+        joints.push(parent);
+    }
+    let shape = Geometry::cuboid(1., 1., 1.);
+    let count = shape.vertices().len();
+    let skinned = shape
+        .with_skin(
+            (0..count).map(|v| [(v % JOINTS) as u16, 0, 0, 0]).collect(),
+            vec![[1., 0., 0., 0.]; count],
+        )
+        .expect("an entry a vertex");
+    let skin = Skin::new(joints.clone(), vec![Mat4::IDENTITY; JOINTS]).expect("64 joints");
+    let meshes = setting("MESHES", 2000) / 4;
+    let side = (meshes as f32).sqrt().ceil() as usize;
+    for i in 0..meshes {
+        let at = [
+            (i % side) as f32 * 2. - side as f32,
+            4.,
+            (i / side) as f32 * 2. - side as f32,
+        ];
+        let mesh = world.add(
+            Object::mesh(skinned.clone(), Material::rgb(0xd0c0a0).with(0., 0.6))
+                .at(at)
+                .child_of(root),
+        );
+        world.set_skin(mesh, Some(skin.clone()));
+    }
+    joints
+}
+
+/// What a frame of `anim` moves: every joint of the chain, a little.
+fn posed(world: &World, joints: &[ObjectId], frame: usize) {
+    for (i, &joint) in joints.iter().enumerate() {
+        let angle = (frame as f32 * 0.05 + i as f32 * 0.1).sin() * 0.05;
+        world.set_transform(
+            joint,
+            Transform {
+                position: vec3(0., 0.1, 0.),
+                rotation: Quat::from_axis_angle(vec3(0., 0., 1.), angle),
+                ..Transform::default()
+            },
+        );
     }
 }
 

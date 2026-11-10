@@ -168,6 +168,13 @@ SCENES = [
     # those among skinned, morphing, cut-out and placed ones.
     ('3d-textured', 'zgx-3d', 'world_bench', {'SCENE': 'textured', 'MESHES': '2000', 'FRAMES': '30'}),
     ('3d-mixed', 'zgx-3d', 'world_bench', {'SCENE': 'mixed', 'MESHES': '2000', 'FRAMES': '30'}),
+    # The 3D primitives' floors (design-3d-aaa.md section 12), each the CPU
+    # path of one: 100,000 still meshes with the camera going round
+    # (instances, culling); 256 point lights (lights); a 64-joint chain
+    # posed every frame under 500 skinned meshes (animation).
+    ('3d-cull', 'zgx-3d', 'world_bench', {'SCENE': 'still', 'MESHES': '100000', 'FRAMES': '30'}),
+    ('3d-lights', 'zgx-3d', 'world_bench', {'SCENE': 'lights', 'MESHES': '2000', 'FRAMES': '30'}),
+    ('3d-anim', 'zgx-3d', 'world_bench', {'SCENE': 'anim', 'MESHES': '2000', 'FRAMES': '30'}),
     ('widgets', 'zgx', 'widget_bench', {}),
     # A split between six panes dragged, a width a frame: nested panes of
     # wrapping text, text areas and measured lists laid out again, undrawn.
