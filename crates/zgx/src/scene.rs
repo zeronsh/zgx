@@ -3283,8 +3283,10 @@ pub struct Scene {
     scratch: Vec<Scratch>,
     content_revision: u64,
     /// The deepest stack and the item count of the last paint walk
-    /// (`layer_items_within`): the next one starts at those sizes.
-    walk_hints: std::cell::Cell<(usize, usize)>,
+    /// (`layer_items_within`), a whole one's and a damaged one's apart: the
+    /// next of its kind starts at those sizes (a fade's few strips after a
+    /// whole repaint allocate for their few items, not the window's).
+    walk_hints: std::cell::Cell<[(usize, usize); 2]>,
     /// Dirty fixed-size containers whose ancestors stayed clean.
     layout_roots: Vec<NodeId>,
     /// A walk stopped at a child of a row or column (`stops_alone`), to
@@ -14539,7 +14541,7 @@ impl Scene {
         };
         // Sized as the last walk was, rather than grown from nothing each frame.
         let (stack_hint, items_hint) = match from {
-            None => self.walk_hints.get(),
+            None => self.walk_hints.get()[usize::from(damage.is_some())],
             Some(_) => (1, 0),
         };
         let mut stack = Vec::with_capacity(stack_hint.max(1));
@@ -14811,7 +14813,9 @@ impl Scene {
         }
         // (A subtree's walk leaves the window's hints.)
         if from.is_none() {
-            self.walk_hints.set((deepest, result.len()));
+            let mut hints = self.walk_hints.get();
+            hints[usize::from(damage.is_some())] = (deepest, result.len());
+            self.walk_hints.set(hints);
         }
         // Painted outside their parent's fade (a scroll view's scrollbar):
         // put right after the walk, which takes no check for them.
