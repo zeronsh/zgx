@@ -85,6 +85,9 @@ pub struct Parameter {
     pub default: f32,
     pub min: f32,
     pub max: f32,
+    /// Whether its range is one turn of a circle (an angle), its ends the
+    /// same value ([`wrapping`](Parameter::wrapping)).
+    pub wraps: bool,
 }
 
 impl Parameter {
@@ -94,7 +97,15 @@ impl Parameter {
             default,
             min,
             max,
+            wraps: false,
         }
+    }
+    /// Its range one turn of a circle, as an angle's: any value set is
+    /// taken round into it, and a move goes the short way round (from 179
+    /// to -179 degrees, through 180, not through 0).
+    pub const fn wrapping(mut self) -> Parameter {
+        self.wraps = true;
+        self
     }
 }
 
@@ -150,14 +161,45 @@ impl Context<'_> {
 
 /// A parameter as the mixer smooths it.
 pub(crate) struct Param {
+    /// For a wrapping one, unwrapped: it moves the short way, past its
+    /// range's ends, and is taken round into it for the effect.
     pub smoothed: Smoothed,
     pub min: f32,
     pub max: f32,
+    pub wraps: bool,
     /// This block's: the first frame's value, and each frame's while it
     /// moves.
     first: f32,
     moving: bool,
     values: Box<[f32; MAX_BLOCK]>,
+}
+
+impl Param {
+    /// `value` taken round into a wrapping range, `min` up to (not
+    /// including) `max`.
+    pub fn round(min: f32, max: f32, value: f32) -> f32 {
+        let v = min + (value - min).rem_euclid(max - min);
+        // `rem_euclid` can round up to a whole turn.
+        if v >= max { min } else { v }
+    }
+
+    /// `value`, set: for a wrapping one, taken round to within half a turn
+    /// of where it's heading, so it goes the short way (and, once still,
+    /// what it holds taken back into its range, so it never strays far).
+    /// Else kept to its range.
+    pub fn aim(&mut self, value: f32) -> f32 {
+        if !self.wraps {
+            return value.clamp(self.min, self.max);
+        }
+        let (min, max) = (self.min, self.max);
+        if self.smoothed.settled() {
+            self.smoothed = Smoothed::new(Param::round(min, max, self.smoothed.value()));
+        }
+        let turn = max - min;
+        let to = self.smoothed.target();
+        let value = Param::round(min, max, value);
+        value + turn * ((to - value) / turn).round()
+    }
 }
 
 /// An effect as a bus holds it.
@@ -184,6 +226,7 @@ impl Slot {
                 smoothed: Smoothed::new(p.default.clamp(p.min, p.max)),
                 min: p.min,
                 max: p.max,
+                wraps: p.wraps && p.max > p.min,
                 first: p.default,
                 moving: false,
                 values: Box::new([0.; MAX_BLOCK]),
@@ -217,14 +260,22 @@ impl Slot {
     /// by `n` frames.
     pub fn process(&mut self, block: &mut [f32], n: usize, time: u64, side: Option<f32>) {
         for param in self.params.iter_mut() {
-            let (min, max) = (param.min, param.max);
-            param.first = param.smoothed.value().clamp(min, max);
+            let (min, max, wraps) = (param.min, param.max, param.wraps);
+            // Kept to its range whatever a curve's rounding does; a
+            // wrapping one taken round into it.
+            let keep = |v: f32| {
+                if wraps {
+                    Param::round(min, max, v)
+                } else {
+                    v.clamp(min, max)
+                }
+            };
+            param.first = keep(param.smoothed.value());
             param.moving = !param.smoothed.settled();
             if param.moving {
-                // Kept to its range whatever a curve's rounding does.
                 let values = &mut param.values[..n];
                 param.smoothed.fill(values);
-                values.iter_mut().for_each(|v| *v = v.clamp(min, max));
+                values.iter_mut().for_each(|v| *v = keep(*v));
             }
         }
         let context = Context {

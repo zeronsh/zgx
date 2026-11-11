@@ -10,11 +10,16 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 /// What a stop does with cpal's stream.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Stopping {
-    /// Pauses it, keeping it (and its threads) to resume. On macOS this is
-    /// the slower restart (about 40 ms against 9) and leaves three more
-    /// threads parked, so it isn't the default.
+    /// Pauses it, keeping it (and its threads) to resume, for
+    /// [`Config::close_after`](crate::Config::close_after) (10 s), then
+    /// closes it: a paused WASAPI stream still wakes the process (about
+    /// 43 times in 10 s). On macOS this is the slower restart (about 40 ms
+    /// against 9) and leaves three more threads parked, so it isn't the
+    /// default.
     Pause,
-    /// Drops it: nothing of it is left, and the next start builds a new one.
+    /// Drops it: nothing of it is left, and the next start builds a new
+    /// one. The engine's own host thread ends too, and the next sound
+    /// starts another.
     #[default]
     Close,
 }

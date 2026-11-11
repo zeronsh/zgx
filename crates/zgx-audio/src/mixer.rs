@@ -1756,9 +1756,8 @@ impl Mixer {
                     // The curves for gains take values as gains: none
                     // below zero. A range that goes there moves straight.
                     let curve = if param.min < 0. { Curve::Linear } else { curve };
-                    param
-                        .smoothed
-                        .set(value.clamp(param.min, param.max), frames, curve);
+                    let value = param.aim(value);
+                    param.smoothed.set(value, frames, curve);
                 }
             }
         }

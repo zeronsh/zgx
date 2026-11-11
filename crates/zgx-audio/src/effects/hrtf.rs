@@ -258,8 +258,9 @@ struct Filter {
 /// direction, through an [`HrtfSet`]: for headphones. A block
 /// ([`BLOCK`] frames) late.
 ///
-/// Parameters: [`AZIMUTH`](Self::AZIMUTH) in degrees (-180 to 180, 0
-/// ahead, positive right), [`ELEVATION`](Self::ELEVATION) in degrees (-90
+/// Parameters: [`AZIMUTH`](Self::AZIMUTH) in degrees (0 ahead, positive
+/// right; any angle, taken round into -180 to 180, and a change goes the
+/// short way round, behind the head from 179 to -179), [`ELEVATION`](Self::ELEVATION) in degrees (-90
 /// to 90). The nearest direction the set has is used; a change of it
 /// crossfades from the old pair to the new over a block.
 #[derive(Clone, Debug)]
@@ -305,7 +306,7 @@ impl Binaural {
             rate: set.rate,
             set,
             params: [
-                Parameter::new("azimuth", 0., -180., 180.),
+                Parameter::new("azimuth", 0., -180., 180.).wrapping(),
                 Parameter::new("elevation", 0., -90., 90.),
             ],
             fft: None,
@@ -339,7 +340,7 @@ impl Binaural {
 
     /// From this direction at the start.
     pub fn facing(mut self, azimuth: f32, elevation: f32) -> Binaural {
-        self.params[Self::AZIMUTH].default = azimuth.clamp(-180., 180.);
+        self.params[Self::AZIMUTH].default = (azimuth + 180.).rem_euclid(360.) - 180.;
         self.params[Self::ELEVATION].default = elevation.clamp(-90., 90.);
         self
     }

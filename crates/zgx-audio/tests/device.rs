@@ -16,6 +16,21 @@ struct Controls {
     lose: Arc<AtomicBool>,
     fail: Arc<AtomicBool>,
     rate: Arc<AtomicU32>,
+    /// Stops pause, keeping the renderer, rather than close.
+    pause: Arc<AtomicBool>,
+    /// Whether the thread that last started it has ended.
+    host_ended: Arc<AtomicBool>,
+}
+
+/// Set on the thread that starts the fake: says when that thread ends.
+struct Ending(Arc<AtomicBool>);
+impl Drop for Ending {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+thread_local! {
+    static ENDING: std::cell::RefCell<Option<Ending>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Controls {
@@ -30,6 +45,8 @@ impl Controls {
 struct Fake {
     controls: Controls,
     running: Option<(JoinHandle<Box<Renderer>>, Arc<AtomicBool>)>,
+    /// A paused stream's renderer, and its format.
+    paused: Option<(Box<Renderer>, Format)>,
 }
 
 impl Fake {
@@ -40,6 +57,7 @@ impl Fake {
             Fake {
                 controls: controls.clone(),
                 running: None,
+                paused: None,
             },
             controls,
         )
@@ -66,7 +84,7 @@ impl Device for Fake {
 
     fn start(
         &mut self,
-        mut renderer: Box<Renderer>,
+        renderer: Box<Renderer>,
         format: Format,
     ) -> Result<(), (String, Box<Renderer>)> {
         if self.controls.fail.swap(false, Ordering::Relaxed) {
@@ -78,6 +96,51 @@ impl Device for Fake {
             .lock()
             .unwrap()
             .push(format!("start {}", format.rate));
+        self.controls.host_ended.store(false, Ordering::Relaxed);
+        let ended = self.controls.host_ended.clone();
+        ENDING.with(|ending| *ending.borrow_mut() = Some(Ending(ended)));
+        self.run(renderer, format);
+        Ok(())
+    }
+
+    fn resume(&mut self) -> bool {
+        let Some((renderer, format)) = self.paused.take() else {
+            return false;
+        };
+        self.controls.log.lock().unwrap().push("resume".into());
+        self.run(renderer, format);
+        true
+    }
+
+    fn stop(&mut self) -> Option<Box<Renderer>> {
+        if self.controls.pause.load(Ordering::Relaxed) {
+            let format = Format {
+                rate: self.controls.rate.load(Ordering::Relaxed),
+                channels: 2,
+            };
+            let renderer = self.end("pause")?;
+            self.paused = Some((renderer, format));
+            return None;
+        }
+        self.end("stop")
+    }
+
+    fn close(&mut self) -> Option<Box<Renderer>> {
+        if let Some((renderer, _)) = self.paused.take() {
+            self.controls.log.lock().unwrap().push("close".into());
+            return Some(renderer);
+        }
+        self.end("close")
+    }
+
+    fn lost(&mut self) -> bool {
+        self.controls.lose.swap(false, Ordering::Relaxed)
+    }
+}
+
+impl Fake {
+    /// Renders on a thread of its own, at a device's pace.
+    fn run(&mut self, mut renderer: Box<Renderer>, format: Format) {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let thread = std::thread::spawn(move || {
@@ -100,19 +163,6 @@ impl Device for Fake {
             renderer
         });
         self.running = Some((thread, stop));
-        Ok(())
-    }
-
-    fn stop(&mut self) -> Option<Box<Renderer>> {
-        self.end("stop")
-    }
-
-    fn close(&mut self) -> Option<Box<Renderer>> {
-        self.end("close")
-    }
-
-    fn lost(&mut self) -> bool {
-        self.controls.lose.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -247,6 +297,69 @@ fn a_device_that_fails_to_start_says_why_and_is_tried_again_with_the_next_sound(
         controls.log(),
         ["format", "failed", "format", "start 48000", "stop"]
     );
+}
+
+#[test]
+fn a_closed_stream_s_host_thread_ends_and_the_next_sound_starts_another() {
+    let (audio, controls) = engine(Duration::from_millis(50));
+    audio.play(&blip(), Play::new()).unwrap();
+    until("a stop", || audio.stats().stops == 1);
+    until("the host thread to end", || {
+        controls.host_ended.load(Ordering::Relaxed)
+    });
+    audio.play(&blip(), Play::new()).unwrap();
+    until("a second stop", || audio.stats().stops == 2);
+    assert_eq!(
+        controls.log(),
+        [
+            "format",
+            "start 48000",
+            "stop",
+            "format",
+            "start 48000",
+            "stop"
+        ]
+    );
+    until("the second host thread to end", || {
+        controls.host_ended.load(Ordering::Relaxed)
+    });
+}
+
+#[test]
+fn a_paused_stream_is_closed_after_its_grace() {
+    let (fake, controls) = Fake::new();
+    controls.pause.store(true, Ordering::Relaxed);
+    let audio = Audio::with_device(
+        Config {
+            hold: Duration::from_millis(50),
+            close_after: Duration::from_millis(300),
+            gain: 0.,
+            ..Config::default()
+        },
+        fake,
+    )
+    .unwrap();
+    audio.play(&blip(), Play::new()).unwrap();
+    until("a pause", || controls.count("pause") == 1);
+    let paused = Instant::now();
+    // Played again within its grace: resumed, not started.
+    audio.play(&blip(), Play::new()).unwrap();
+    until("a second pause", || controls.count("pause") == 2);
+    let again = Instant::now();
+    until("a close", || controls.count("close") == 1);
+    let grace = again.elapsed();
+    assert!(
+        grace >= Duration::from_millis(250),
+        "closed {grace:?} after its pause"
+    );
+    assert!(paused.elapsed() < Duration::from_secs(5));
+    assert_eq!(
+        controls.log(),
+        ["format", "start 48000", "pause", "resume", "pause", "close"]
+    );
+    until("the host thread to end", || {
+        controls.host_ended.load(Ordering::Relaxed)
+    });
 }
 
 #[test]

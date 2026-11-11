@@ -3,7 +3,7 @@
 //! input, side chains, taking one off, and the debug check that names an
 //! effect breaking the audio thread's rules.
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 use zgx_audio::{
     Audio, Checked, Config, Context, Effect, Error, Format, Parameter, Play, Ramp, Sound, Time,
@@ -540,4 +540,68 @@ fn a_removal_dated_before_its_effect_s_add_takes_it_off_as_it_arrives() {
     for _ in 0..8 {
         ui.add_effect(Scale(1.)).unwrap();
     }
+}
+
+/// One wrapping angle: the nearest it came to 0 (as bits: a positive
+/// float's order is its bits') and the last value it was.
+struct Angle {
+    nearest: Arc<AtomicU32>,
+    last: Arc<AtomicU32>,
+}
+impl Effect for Angle {
+    fn parameters(&self) -> &[Parameter] {
+        const PARAMS: [Parameter; 1] = [Parameter::new("angle", 0., -180., 180.).wrapping()];
+        &PARAMS
+    }
+    fn prepare(&mut self, _: Format, _: usize) {}
+    fn process(&mut self, _: &mut [f32], context: &Context<'_>) {
+        for i in 0..context.frames() {
+            let v = context.value_at(0, i);
+            self.nearest.fetch_min(v.abs().to_bits(), Ordering::Relaxed);
+            self.last.store(v.to_bits(), Ordering::Relaxed);
+        }
+    }
+}
+
+#[test]
+fn a_wrapping_parameter_goes_the_short_way_round() {
+    // 179 to -179 degrees: through 180, never near 0. Any angle is taken
+    // round: 900 is 180 (that is, -180), a degree on from -179.
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let (nearest, last) = (Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)));
+    let angle = audio
+        .bus("music")
+        .unwrap()
+        .add_effect(Angle {
+            nearest: nearest.clone(),
+            last: last.clone(),
+        })
+        .unwrap();
+    let value = |bits: &AtomicU32| f32::from_bits(bits.load(Ordering::Relaxed));
+    angle.set(0, 179., Ramp::NONE).unwrap();
+    // Sound keeps the bus running; nothing is heard of it.
+    audio
+        .play(
+            &flat(0.1),
+            Play::new().bus(&audio.bus("music").unwrap()).looping(true),
+        )
+        .unwrap();
+    mixer.frames(256);
+    nearest.store(f32::MAX.to_bits(), Ordering::Relaxed);
+    angle.set(0, -179., Ramp::ms(10.)).unwrap();
+    mixer.frames(1_024);
+    assert!(
+        value(&nearest) >= 179.,
+        "it came within {} of 0",
+        value(&nearest)
+    );
+    assert_eq!(value(&last), -179.);
+    angle.set(0, 900., Ramp::ms(10.)).unwrap();
+    mixer.frames(1_024);
+    assert!(
+        value(&nearest) >= 179.,
+        "it came within {} of 0",
+        value(&nearest)
+    );
+    assert_eq!(value(&last), -180.);
 }

@@ -904,6 +904,28 @@ fn a_voice_sends_to_other_buses_at_levels_of_its_own() {
 }
 
 #[test]
+fn a_play_s_sends_keep_to_two_as_a_voice_s_do() {
+    // Sends to two buses, then a third (ignored, as `set_send` ignores
+    // it), then the first again at another level (which sets its level).
+    let flat = sound(&[0., 0.25], 1, RATE);
+    let out = left(&render(unlimited(), 200, |audio| {
+        let buses: Vec<_> = ["one", "two", "three"]
+            .iter()
+            .map(|name| audio.add_bus(name, &audio.master()).unwrap())
+            .collect();
+        let play = Play::new()
+            .loop_frames(1..2)
+            .send(&buses[0], 0.5)
+            .send(&buses[1], 1.)
+            .send(&buses[2], 2.)
+            .send(&buses[0], 0.25);
+        audio.play(&flat, play).unwrap();
+    }));
+    // Its own 0.25, the first's 0.0625 and the second's 0.25.
+    assert_eq!(out[100], 0.25 + 0.25 * 0.25 + 0.25);
+}
+
+#[test]
 fn a_send_to_another_engine_s_bus_is_refused() {
     let (audio, _mixer) = Audio::offline(unlimited()).unwrap();
     let (other, _other_mixer) = Audio::offline(unlimited()).unwrap();

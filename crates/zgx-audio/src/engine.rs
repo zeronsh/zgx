@@ -129,6 +129,10 @@ pub struct Config {
     /// limiter's tail and sounds due count as sound): then it stops, and
     /// starts again with the next.
     pub hold: Duration,
+    /// How long a stopped stream may stay paused
+    /// ([`Stopping::Pause`](crate::Stopping::Pause)) before it's closed
+    /// (10 s): a paused stream still wakes the process on some systems.
+    pub close_after: Duration,
     /// Bytes all streams' buffers may take at once (8 MiB): each holds
     /// half a second in its ring and 32,768 frames to read from, 448 KiB
     /// for a stereo stream at 48 kHz. Past it, [`Audio::stream`] says
@@ -225,6 +229,7 @@ impl Default for Config {
             interpolation: Interpolation::Cubic,
             gain: 1.,
             hold: Duration::from_secs(1),
+            close_after: Duration::from_secs(10),
             stream_memory: 8 << 20,
         }
     }
@@ -314,8 +319,9 @@ struct Control {
 enum Hosting {
     /// No device: an offline engine.
     None,
-    /// A device not started yet, and the renderer it will run.
-    Waiting(Box<dyn Device>, Box<Renderer>, Duration),
+    /// A device not started yet (or closed, its thread ended), the
+    /// renderer it will run, and its hold and grace when paused.
+    Waiting(Box<dyn Device>, Box<Renderer>, (Duration, Duration)),
     Running(Host),
 }
 
@@ -329,7 +335,9 @@ struct Inner {
     control: Mutex<Control>,
     meter: Arc<Meter>,
     latency: usize,
-    hosting: Mutex<Hosting>,
+    /// Shared with the host thread, which puts the device back here when
+    /// it ends.
+    hosting: Arc<Mutex<Hosting>>,
     /// The decode thread, made with the first stream.
     decoder: Mutex<Option<Decoder>>,
     /// The bytes streams hold now, and the most they may.
@@ -416,10 +424,10 @@ impl Audio {
     /// config [`Config::check`] refuses.
     pub fn with_device(config: Config, device: impl Device) -> Result<Audio, Error> {
         let channels = config.channels;
-        let hold = config.hold;
+        let times = (config.hold, config.close_after);
         let (audio, mixer) = Audio::with_mixer(&config)?;
         let renderer = Box::new(Renderer::new(mixer, channels, audio.0.meter.clone()));
-        *audio.hosting() = Hosting::Waiting(Box::new(device), renderer, hold);
+        *audio.hosting() = Hosting::Waiting(Box::new(device), renderer, times);
         Ok(audio)
     }
 
@@ -442,7 +450,7 @@ impl Audio {
             return;
         }
         if let Hosting::Waiting(..) = &*hosting {
-            let Hosting::Waiting(device, renderer, hold) =
+            let Hosting::Waiting(device, renderer, times) =
                 std::mem::replace(&mut *hosting, Hosting::None)
             else {
                 unreachable!()
@@ -450,10 +458,30 @@ impl Audio {
             let (messages, inbox) = std::sync::mpsc::channel();
             let (quitting, quit) = std::sync::mpsc::channel::<()>();
             let meter = self.0.meter.clone();
+            // The stream closed and nothing to do: the device and renderer
+            // back here, under this lock (which every message is sent under,
+            // so none is missed), and the thread ends.
+            let slot = Arc::downgrade(&self.0.hosting);
+            let park: crate::device::Park = Box::new(move |device, renderer, inbox| {
+                use crate::device::Parking;
+                let Some(slot) = slot.upgrade() else {
+                    return Parking::Kept(device, renderer, Message::Quit);
+                };
+                let mut hosting = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if let Ok(message) = inbox.try_recv() {
+                    return Parking::Kept(device, renderer, message);
+                }
+                if let Hosting::Running(host) = &mut *hosting {
+                    // Its thread is this one, ending: not waited for.
+                    host.thread = None;
+                }
+                *hosting = Hosting::Waiting(device, renderer, times);
+                Parking::Parked
+            });
             let thread = std::thread::Builder::new()
                 .name("zgx-audio".into())
                 .spawn(move || {
-                    crate::device::host(device, renderer, inbox, meter, hold);
+                    crate::device::host(device, renderer, inbox, meter, times, park);
                     drop(quitting);
                 })
                 .expect("a thread for the audio device");
@@ -537,7 +565,7 @@ impl Audio {
             }),
             meter,
             latency,
-            hosting: Mutex::new(Hosting::None),
+            hosting: Arc::new(Mutex::new(Hosting::None)),
             decoder: Mutex::new(None),
             streamed: Default::default(),
             stream_memory: config.stream_memory,
@@ -1073,12 +1101,19 @@ impl Play {
         self
     }
     /// Mixed into `bus` too, at `level` (a gain, 0 to [`MAX_GAIN`]), from
-    /// its first frame: a send ([`Voice::set_send`]). Two at most; a third
-    /// takes the second's place.
+    /// its first frame: a send ([`Voice::set_send`]). Two buses at most, as
+    /// there: a send to a third is ignored; another to a bus it sends to
+    /// already sets that one's level.
     pub fn send(mut self, bus: &Bus, level: f32) -> Play {
-        let send = Some((bus.audio.0.id, bus.index, gain(level)));
-        let free = self.sends.iter().position(Option::is_none);
-        self.sends[free.unwrap_or(crate::mixer::SENDS - 1)] = send;
+        let (engine, index) = (bus.audio.0.id, bus.index);
+        let send = Some((engine, index, gain(level)));
+        let same = self
+            .sends
+            .iter()
+            .position(|s| s.is_some_and(|(e, b, _)| (e, b) == (engine, index)));
+        if let Some(at) = same.or_else(|| self.sends.iter().position(Option::is_none)) {
+            self.sends[at] = send;
+        }
         self
     }
     /// Kept over voices of lower priority when there are too many.

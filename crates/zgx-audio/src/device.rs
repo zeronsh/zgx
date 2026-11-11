@@ -237,20 +237,67 @@ pub(crate) enum Message {
 /// How often a running host looks for silence (and a lost stream).
 const CHECK: Duration = Duration::from_millis(100);
 
-/// The host thread: owns the device, starts and stops it.
+/// What the engine says to a host that would end: it took the device and
+/// renderer back, or a message came first and the host goes on.
+pub(crate) enum Parking {
+    Parked,
+    Kept(Box<dyn Device>, Box<Renderer>, Message),
+}
+
+/// Gives the device and renderer back to the engine, under its lock,
+/// unless a message is waiting (`try_recv` on the inbox given).
+pub(crate) type Park =
+    Box<dyn Fn(Box<dyn Device>, Box<Renderer>, &Receiver<Message>) -> Parking + Send>;
+
+/// The host thread: owns the device, starts and stops it. With the stream
+/// closed and nothing to do, it gives both back (`park`) and ends: the
+/// next sound starts another. A paused stream is closed after
+/// `close_after`.
 pub(crate) fn host(
     mut device: Box<dyn Device>,
     renderer: Box<Renderer>,
     messages: Receiver<Message>,
     meter: Arc<Meter>,
-    hold: Duration,
+    (hold, close_after): (Duration, Duration),
+    park: Park,
 ) {
     let mut renderer = Some(renderer);
     let mut quit = false;
     while !quit {
-        // Stopped: asleep until a command comes. One that makes no sound
-        // (a gain, a mute) is applied here, without the device.
-        match messages.recv() {
+        // Stopped. Closed (the renderer here): nothing to wait for, so
+        // given back, and the thread ends, unless a command came. Paused:
+        // asleep until a command comes, or closed after `close_after`.
+        let message = match renderer.take() {
+            Some(held) => match messages.try_recv() {
+                Ok(message) => {
+                    renderer = Some(held);
+                    Ok(message)
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    renderer = Some(held);
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => match park(device, held, &messages) {
+                    Parking::Parked => return,
+                    Parking::Kept(kept, held, message) => {
+                        device = kept;
+                        renderer = Some(held);
+                        Ok(message)
+                    }
+                },
+            },
+            None => match messages.recv_timeout(close_after) {
+                Ok(message) => Ok(message),
+                Err(RecvTimeoutError::Timeout) => {
+                    renderer = device.close();
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => Err(()),
+            },
+        };
+        // One that makes no sound (a gain, a mute) is applied here, without
+        // the device.
+        match message {
             Ok(Message::Wake) => {
                 if let Some(held) = renderer.as_mut()
                     && !held.idle()
@@ -366,10 +413,18 @@ pub(crate) struct Host {
 
 impl Drop for Host {
     fn drop(&mut self) {
+        // Its thread gone already (it gave the device back and ended, taking
+        // its handle first): nothing to wait for.
+        let Some(thread) = self.thread.take() else {
+            return;
+        };
+        // Dropped on its own thread (the engine's last handle let go there):
+        // it ends when this returns.
+        if thread.thread().id() == std::thread::current().id() {
+            return;
+        }
         let _ = self.messages.send(Message::Quit);
-        if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) = self.quit.recv_timeout(QUIT)
-            && let Some(thread) = self.thread.take()
-        {
+        if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) = self.quit.recv_timeout(QUIT) {
             let _ = thread.join();
         }
     }
