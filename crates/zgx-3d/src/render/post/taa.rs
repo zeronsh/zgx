@@ -130,7 +130,7 @@ pub(in crate::render) struct At {
 }
 
 /// The most sizes kept at once (boxes of one view drawn at sizes of their
-/// own, in one frame).
+/// own, in one frame): a box past them is drawn without a history.
 const TRACKS: usize = 4;
 
 /// Frames a size has stood before its history is made: a resize drag
@@ -270,26 +270,40 @@ impl Taa {
                     .last
                     .is_some_and(|last| at.time.saturating_duration_since(last).as_secs_f32() < 1.)
         });
-        let index = match self.tracks.iter().position(|t| t.size == size) {
+        let found = self.tracks.iter().position(|t| t.size == size);
+        let others = self.tracks.iter().any(|t| t.ran == Some(at.tick));
+        let index = match found {
             Some(index) => index,
-            // Another box drew at this tick: one of its own. Else the view
-            // was resized: its track made again at the new size.
-            None => match self.tracks.iter().any(|t| t.ran == Some(at.tick)) {
-                false if !self.tracks.is_empty() => {
-                    let last = (0..self.tracks.len())
-                        .max_by_key(|&i| self.tracks[i].ran)
-                        .unwrap_or(0);
-                    self.tracks[last] = Track::new(device, size, false);
-                    last
-                }
-                _ => {
-                    if self.tracks.len() == TRACKS {
-                        self.tracks.remove(0);
-                    }
-                    self.tracks.push(Track::new(device, size, true));
-                    self.tracks.len() - 1
-                }
-            },
+            // The view was resized (no box drew at this tick yet): its
+            // track made again at the new size.
+            None if !others && !self.tracks.is_empty() => {
+                let last = (0..self.tracks.len())
+                    .max_by_key(|&i| self.tracks[i].ran)
+                    .unwrap_or(0);
+                self.tracks[last] = Track::new(device, size, false);
+                last
+            }
+            // Another box at a size of its own: a track of its own, up to
+            // `TRACKS` (none of this tick's given up for it).
+            None if self.tracks.len() < TRACKS => {
+                self.tracks.push(Track::new(device, size, true));
+                self.tracks.len() - 1
+            }
+            // Or in place of one no box drew at this tick (a box gone).
+            None if let Some(idle) = (0..self.tracks.len())
+                .filter(|&i| self.tracks[i].ran != Some(at.tick))
+                .min_by_key(|&i| self.tracks[i].ran) =>
+            {
+                self.tracks[idle] = Track::new(device, size, true);
+                idle
+            }
+            // Past them: drawn as it is, no history.
+            None => {
+                let gathering = (self.tracks.iter())
+                    .filter(|t| t.ran == Some(at.tick))
+                    .any(Track::gathering);
+                return (gathering, false);
+            }
         };
         let (pipeline, layout, sampler) = (&self.pipeline, &self.layout, &self.sampler);
         let track = &mut self.tracks[index];

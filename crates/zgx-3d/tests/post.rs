@@ -1336,3 +1336,31 @@ fn automatic_exposure_in_two_boxes_adapts_once_a_frame() {
     };
     assert_eq!(shown(&[SIZE, SIZE]), Some(once));
 }
+
+#[test]
+fn a_view_in_more_boxes_than_it_keeps_histories_for_rests() {
+    // Five and six boxes of sizes of their own: four smoothed, the rest
+    // drawn as they are; the world rests as in one box, and no history is
+    // made after the first frame.
+    let once = slanted(Antialiasing::Taa);
+    let Some(mut one) = Boxes::new(&once, &[SIZE / 2]) else {
+        return;
+    };
+    let (alone, _) = one.settled(&once);
+    for count in [5, 6] {
+        let sides: Vec<u32> = (0..count).map(|i| 20 + 6 * i).collect();
+        let world = slanted(Antialiasing::Taa);
+        let mut boxes = Boxes::new(&world, &sides).unwrap();
+        world.view().invalidate();
+        boxes.draw();
+        let first = world.temporary_bytes();
+        let (frames, _) = boxes.settled(&world);
+        // (Its first frame drawn before: as many in all as one box.)
+        assert_eq!(frames + 1, alone, "{count} boxes");
+        assert_eq!(
+            world.temporary_bytes(),
+            first,
+            "{count} boxes: nothing made after the first"
+        );
+    }
+}
