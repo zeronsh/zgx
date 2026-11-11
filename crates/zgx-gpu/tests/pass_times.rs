@@ -45,13 +45,8 @@ fn a_blurred_frame_is_timed_pass_by_pass_and_draws_the_same() {
     let ran: Vec<_> = parts.iter().map(|(ran, _)| *ran).collect();
     assert_eq!(
         ran,
-        [
-            "frame before the blur",
-            "blur reduce",
-            "blur across",
-            "blur down",
-            "frame after"
-        ]
+        // The blur's three stages run as one compute pass.
+        ["frame before the blur", "blur", "frame after"]
     );
     assert!(
         parts.iter().all(|(_, us)| us.is_finite() && *us >= 0.),
