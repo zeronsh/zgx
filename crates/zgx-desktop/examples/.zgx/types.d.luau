@@ -5674,6 +5674,12 @@ export type SpanProps = {
 	context_menu: ((e: PointerEvent) -> ...{ Node }?)?,
 	-- Its text as it is, not a template (see TextProps).
 	literal: boolean?,
+	-- The next piece of the span before: one span cut into pieces (a
+	-- fade's, each its own colour), drawn as the span whole where the
+	-- pieces are alike in font, size, padding, background and radius:
+	-- padded at its ends alone, its background and underline going on.
+	-- Spans beside each other, not so marked, draw apart.
+	continues: boolean?,
 	-- Room around it: across (before and after it, taking space in the
 	-- line), or `{ across, down }`, or `{ before, after, down }` (a chip
 	-- whose icon sits near its edge, its name with more room after it);
@@ -6103,6 +6109,10 @@ export type RichProps = {
 	-- rather than at the pointer.
 	context_menu_below: Props_context_menu_below,
 	[number]: Span | Text | SpanProps,
+	-- In place of listed runs: a function returning them, called again when
+	-- what it reads changes. The paragraph stays (its node, selection and
+	-- the layout of text that only grew); only its runs are new.
+	spans: (() -> { Span | Text | SpanProps }?)?,
 	literal: boolean?,
 	-- As an element's, told the run under the click or the focused link
 	-- (`e.span`, nil off the runs). Asked first on its links: nil back for

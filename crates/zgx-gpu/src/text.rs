@@ -479,72 +479,23 @@ impl ShapedText {
     }
     /// Returns visual rectangles, including disjoint spans for mixed-direction text.
     pub fn selection(&self, range: Range<usize>) -> Vec<Rect> {
-        let start = range.start.min(range.end);
-        let end = range.start.max(range.end).min(self.text.len());
-        if start >= end {
-            return Vec::new();
-        }
-        let mut rectangles: Vec<Rect> = Vec::new();
-        for run in self.buffer.layout_runs() {
-            let offset = self.line_offsets[run.line_i];
-            // An empty line in the selection: its line break, a little wide.
-            if run.glyphs.is_empty() && offset >= start && offset < end {
-                let width = zgx::text_layout::empty_line_width(run.line_height);
-                let cursor = TextCursor {
-                    byte_index: offset,
-                    affinity: Affinity::After,
-                };
-                let x = ShapedText::caret(self, cursor).map_or(0., |caret| caret.x);
-                rectangles.push(Rect::new(x, run.line_top, width, run.line_height));
-                continue;
-            }
-            let mut spans = Vec::new();
-            for glyph in run.glyphs {
-                if glyph.metadata == usize::MAX {
-                    continue;
-                }
-                let cluster_start = offset + glyph.start;
-                let cluster_end = offset + glyph.end;
-                if cluster_start >= end || cluster_end <= start {
-                    continue;
-                }
-                let cluster = &self.text[cluster_start..cluster_end];
-                let count = cluster.graphemes(true).count().max(1);
-                for (index, (local, grapheme)) in cluster.grapheme_indices(true).enumerate() {
-                    if cluster_start + local >= end
-                        || cluster_start + local + grapheme.len() <= start
-                    {
-                        continue;
-                    }
-                    let width = glyph.w / count as f32;
-                    let x = if glyph.level.is_rtl() {
-                        glyph.x + glyph.w - (index + 1) as f32 * width
-                    } else {
-                        glyph.x + index as f32 * width
-                    };
-                    // Strong negative tracking can reverse a glyph's advance.
-                    // Selection paint rectangles still need ordered edges.
-                    spans.push(Rect::new(
-                        x.min(x + width),
-                        run.line_top,
-                        width.abs(),
-                        run.line_height,
-                    ));
-                }
-            }
-            spans.sort_by(|a, b| a.x.total_cmp(&b.x));
-            for span in spans {
-                if let Some(last) = rectangles.last_mut()
-                    && last.y == span.y
-                    && last.x + last.width >= span.x - 0.01
-                {
-                    *last = last.union(span);
-                    continue;
-                }
-                rectangles.push(span);
-            }
-        }
-        rectangles
+        let empty = |offset: usize, run: &cosmic_text::LayoutRun<'_>| {
+            let width = zgx::text_layout::empty_line_width(run.line_height);
+            let cursor = TextCursor {
+                byte_index: offset,
+                affinity: Affinity::After,
+            };
+            let x = ShapedText::caret(self, cursor).map_or(0., |caret| caret.x);
+            Some(Rect::new(x, run.line_top, width, run.line_height))
+        };
+        selection_in(
+            self.buffer.layout_runs(),
+            &self.line_offsets,
+            &self.text,
+            range,
+            empty,
+        )
+        .unwrap_or_default()
     }
     /// Its line pitch.
     pub fn line_height(&self) -> f32 {
@@ -577,6 +528,77 @@ pub(crate) fn inline_box_places<'a>(
     }
     boxes
 }
+
+/// `ShapedText::selection` over laid-out `runs` of `text`, its lines
+/// starting at `offsets`: an empty line in the range as `empty` says (None:
+/// not known, and so none of it).
+pub fn selection_in<'a>(
+    runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
+    offsets: &[usize],
+    text: &str,
+    range: Range<usize>,
+    mut empty: impl FnMut(usize, &cosmic_text::LayoutRun<'a>) -> Option<Rect>,
+) -> Option<Vec<Rect>> {
+    let start = range.start.min(range.end);
+    let end = range.start.max(range.end).min(text.len());
+    if start >= end {
+        return Some(Vec::new());
+    }
+    let mut rectangles: Vec<Rect> = Vec::new();
+    for run in runs {
+        let offset = offsets[run.line_i];
+        // An empty line in the selection: its line break, a little wide.
+        if run.glyphs.is_empty() && offset >= start && offset < end {
+            rectangles.push(empty(offset, &run)?);
+            continue;
+        }
+        let mut spans = Vec::new();
+        for glyph in run.glyphs {
+            if glyph.metadata == usize::MAX {
+                continue;
+            }
+            let cluster_start = offset + glyph.start;
+            let cluster_end = offset + glyph.end;
+            if cluster_start >= end || cluster_end <= start {
+                continue;
+            }
+            let cluster = &text[cluster_start..cluster_end];
+            let count = cluster.graphemes(true).count().max(1);
+            for (index, (local, grapheme)) in cluster.grapheme_indices(true).enumerate() {
+                if cluster_start + local >= end || cluster_start + local + grapheme.len() <= start {
+                    continue;
+                }
+                let width = glyph.w / count as f32;
+                let x = if glyph.level.is_rtl() {
+                    glyph.x + glyph.w - (index + 1) as f32 * width
+                } else {
+                    glyph.x + index as f32 * width
+                };
+                // Strong negative tracking can reverse a glyph's advance.
+                // Selection paint rectangles still need ordered edges.
+                spans.push(Rect::new(
+                    x.min(x + width),
+                    run.line_top,
+                    width.abs(),
+                    run.line_height,
+                ));
+            }
+        }
+        spans.sort_by(|a, b| a.x.total_cmp(&b.x));
+        for span in spans {
+            if let Some(last) = rectangles.last_mut()
+                && last.y == span.y
+                && last.x + last.width >= span.x - 0.01
+            {
+                *last = last.union(span);
+                continue;
+            }
+            rectangles.push(span);
+        }
+    }
+    Some(rectangles)
+}
+
 impl zgx::text_layout::TextLayout for ShapedText {
     fn inline_boxes(&self) -> Vec<(usize, f32, f32)> {
         inline_box_places(self.buffer.layout_runs(), &self.line_offsets)
@@ -1980,9 +2002,10 @@ pub(crate) fn rich_buffer_unshaped(
             && runs[end].font == run.font
             && runs[end].font_size == run.font_size
             && runs[end].range.start == runs[end - 1].range.end
-            // A padded run's room goes around it alone (an inline box is one).
-            && run.padding[0] == 0.
-            && runs[end].padding[0] == 0.
+            // A padded run's room goes around it alone (an inline box is
+            // one), or around the span it goes on (`RichText::continues`:
+            // cut by a fade).
+            && ((run.padding[0] == 0. && runs[end].padding[0] == 0.) || rich.continues(end))
         {
             end += 1;
         }
@@ -2071,6 +2094,343 @@ mod rich_tests {
             db.push_face_info(alias);
         }
         FontSystem::new_with_locale_and_db("en-US".into(), db)
+    }
+    /// A padded run (an inline code chip) is padded before its first glyph
+    /// and after its last, however its words were shaped before: the
+    /// shape-run cache keeps a run's glyphs unpadded, so `a` shaped at the
+    /// chip's start (padded before it) is not found again at its end.
+    #[test]
+    fn a_chips_last_word_is_padded_after_it_as_its_first_before_it() {
+        let mut fonts = bundled_test_fonts();
+        let text = "x a + a y";
+        let runs = vec![
+            TextRun {
+                range: 0..2,
+                ..Default::default()
+            },
+            TextRun {
+                range: 2..7,
+                font: FontStyle {
+                    family: zgx::text_layout::FontFamily::Monospace,
+                    ..FontStyle::default()
+                },
+                padding: [4., 0.],
+                ..Default::default()
+            },
+            TextRun {
+                range: 7..9,
+                ..Default::default()
+            },
+        ];
+        let rich = RichText::new(text, runs).unwrap();
+        // Twice: the second from the cache the first filled.
+        for _ in 0..2 {
+            let buffer = rich_buffer(&mut fonts, &rich, None, None);
+            let run = buffer.layout_runs().next().unwrap();
+            let a: Vec<_> = run
+                .glyphs
+                .iter()
+                .filter(|g| g.start == 2 || g.start == 6)
+                .collect();
+            assert_eq!(a.len(), 2);
+            let (first, last) = (a[0], a[1]);
+            assert!(
+                first.x_offset > 0. && last.x_offset == 0.,
+                "{first:?} {last:?}"
+            );
+            assert!(last.w > first.w - first.x_offset * first.font_size - 0.01);
+            assert_eq!(first.w.to_bits(), last.w.to_bits(), "each padded once");
+        }
+    }
+    /// A paragraph whose spans a fade cut into runs at its pieces (Zeron's
+    /// veil: a piece every 24 bytes, anywhere, a chip's span cut after a
+    /// space or inside a word, a link's too), each piece after a span's
+    /// first marked as going on from it (`TextRun::continues`), its fades
+    /// done, draws as the paragraph whole: each chip padded at its ends
+    /// alone, one wash a line, one underline: shaped (cosmic-text's line,
+    /// and the prepared text's words) and decorated alike.
+    #[test]
+    fn a_paragraph_cut_into_pieces_draws_as_whole() {
+        let code = FontStyle {
+            family: zgx::text_layout::FontFamily::Monospace,
+            ..FontStyle::default()
+        };
+        // Zeron's paragraph: its parts, plain (0), chip (1), bold (2), link (3).
+        let parts = [
+            (
+                "The plan costs $5 and $10 a seat, or \\$3 with the discount; the bound is ",
+                0,
+            ),
+            ("$O(n \\log n)$", 1),
+            (" for part 28, and ", 0),
+            ("the rest", 2),
+            (" follows from it. A ", 0),
+            ("link", 3),
+            (" and ", 0),
+            ("inline code", 1),
+            (" too.", 0),
+        ];
+        let text: String = parts.iter().map(|(part, _)| *part).collect();
+        let style = |kind: u8, range: std::ops::Range<usize>| {
+            let mut run = TextRun {
+                range,
+                font_size: 16.,
+                color: Color(228, 228, 232, 255),
+                ..Default::default()
+            };
+            match kind {
+                1 => {
+                    run.font = code.clone();
+                    run.font_size = 14.;
+                    run.background = Some(Color(255, 255, 255, 26));
+                    run.padding = [4., 1.];
+                    run.radius = 4.5;
+                }
+                2 => {
+                    run.font = FontStyle {
+                        weight: 650,
+                        ..FontStyle::default()
+                    }
+                }
+                3 => run.underline = Some(zgx::rich_text::Decoration::new(1.)),
+                _ => {}
+            }
+            run
+        };
+        // Its runs, each part cut where a piece ends (none: whole).
+        let runs = |cuts: &[usize]| {
+            let mut runs = Vec::new();
+            let mut start = 0;
+            for (part, kind) in parts {
+                let end = start + part.len();
+                let mut at = start;
+                for cut in cuts
+                    .iter()
+                    .copied()
+                    .filter(|cut| *cut > start && *cut < end)
+                {
+                    let mut piece = style(kind, at..cut);
+                    piece.continues = at > start;
+                    runs.push(piece);
+                    at = cut;
+                }
+                let mut piece = style(kind, at..end);
+                piece.continues = at > start;
+                runs.push(piece);
+                start = end;
+            }
+            RichText::new(text.clone(), runs).unwrap()
+        };
+        let drawn = |fonts: &mut FontSystem, rich: &RichText, width: f32| {
+            let buffer = rich_buffer(fonts, rich, Some(width), None);
+            let glyphs: Vec<_> = buffer
+                .layout_runs()
+                .flat_map(|run| {
+                    let y = run.line_y;
+                    run.glyphs
+                        .iter()
+                        .map(move |g| {
+                            (
+                                g.start,
+                                g.glyph_id,
+                                [g.x, g.w, g.x_offset, y].map(f32::to_bits),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            let decorations: Vec<_> = rich_decorations(&buffer, rich)
+                .iter()
+                .map(|d| (d.background, d.strike, d.color, d.radius, d.bounds))
+                .collect();
+            (glyphs, decorations)
+        };
+        let mut fonts = bundled_test_fonts();
+        let whole = runs(&[]);
+        // Pieces of 24 bytes, and at once a chip's after its space and
+        // inside a word (`in|line`) and the link's middle.
+        let every: Vec<usize> = (1..text.len() / 24 + 1).map(|i| i * 24).collect();
+        let chip = text.find("$O(n").unwrap();
+        let inline = text.find("inline").unwrap();
+        let link = text.find("link").unwrap();
+        for cuts in [every, vec![chip + 4, inline + 2, link + 2]] {
+            let cut = runs(&cuts);
+            for width in [684., 520., 300.] {
+                assert_eq!(
+                    drawn(&mut fonts, &cut, width),
+                    drawn(&mut fonts, &whole, width),
+                    "cut at {cuts:?}, {width} wide"
+                );
+                // The prepared text, from its words, alike.
+                let mut cache = crate::prepared::TextCache::default();
+                let mut lines =
+                    |cache: &mut crate::prepared::TextCache, rich: &RichText| -> Vec<_> {
+                        cache
+                            .layout(&mut fonts, rich, Some(width))
+                            .runs(None)
+                            .flat_map(|run| {
+                                run.glyphs
+                                    .iter()
+                                    .map(|g| (g.start, [g.x, g.w, g.x_offset].map(f32::to_bits)))
+                                    .collect::<Vec<_>>()
+                            })
+                            .collect()
+                    };
+                let from_cut = lines(&mut cache, &cut);
+                let from_whole = lines(&mut crate::prepared::TextCache::default(), &whole);
+                assert_eq!(
+                    from_cut, from_whole,
+                    "prepared, cut at {cuts:?}, {width} wide"
+                );
+            }
+        }
+    }
+    /// Spans side by side, alike but not marked as one span's pieces (two
+    /// chips, `ab` and `c`; two links), draw as they always have: each
+    /// chip padded at both its ends, its own wash; each link its own
+    /// underline (as main drew them, to the bit). Marked (`continues`),
+    /// the same runs draw as one span.
+    #[test]
+    fn spans_alike_side_by_side_stay_apart_unless_marked() {
+        let code = FontStyle {
+            family: zgx::text_layout::FontFamily::Monospace,
+            ..FontStyle::default()
+        };
+        let text = "see abc then link link end";
+        let chip = |range: std::ops::Range<usize>, continues| TextRun {
+            range,
+            font: code.clone(),
+            font_size: 14.,
+            color: Color(228, 228, 232, 255),
+            background: Some(Color(255, 255, 255, 26)),
+            padding: [4., 1.],
+            radius: 4.5,
+            continues,
+            ..Default::default()
+        };
+        let plain = |range: std::ops::Range<usize>| TextRun {
+            range,
+            font_size: 16.,
+            color: Color(228, 228, 232, 255),
+            ..Default::default()
+        };
+        let link = |range: std::ops::Range<usize>, continues| TextRun {
+            underline: Some(zgx::rich_text::Decoration::new(1.)),
+            continues,
+            ..plain(range)
+        };
+        // `ab` and `c` chips, `link ` and `link` links.
+        let paragraph = |marked: bool| {
+            RichText::new(
+                text,
+                vec![
+                    plain(0..4),
+                    chip(4..6, false),
+                    chip(6..7, marked),
+                    plain(7..13),
+                    link(13..18, false),
+                    link(18..22, marked),
+                    plain(22..text.len()),
+                ],
+            )
+            .unwrap()
+        };
+        let mut fonts = bundled_test_fonts();
+        let drawn = |fonts: &mut FontSystem, rich: &RichText| {
+            let buffer = rich_buffer(fonts, rich, Some(600.), None);
+            let x = |at: usize| {
+                buffer
+                    .layout_runs()
+                    .flat_map(|run| run.glyphs.iter())
+                    .find(|g| g.start == at)
+                    .map(|g| g.x)
+                    .unwrap()
+            };
+            let decorations = rich_decorations(&buffer, rich);
+            let washes = decorations.iter().filter(|d| d.background).count();
+            let lines = decorations.iter().filter(|d| !d.background).count();
+            // From `b` to after `c` (the room at their join), and their
+            // decorations.
+            (x(7) - x(5), washes, lines)
+        };
+        let apart = drawn(&mut fonts, &paragraph(false));
+        let whole = drawn(&mut fonts, &paragraph(true));
+        // Two chips: `b` padded after it, `c` before it (8 points more than
+        // the one chip `abc` has between them); two washes, two underlines.
+        assert!((apart.0 - whole.0 - 8.).abs() < 0.01, "{apart:?} {whole:?}");
+        assert_eq!((apart.1, apart.2), (2, 2), "two chips, two links");
+        assert_eq!((whole.1, whole.2), (1, 1), "one span each, cut");
+        // The prepared text's words place them alike.
+        for marked in [false, true] {
+            let rich = paragraph(marked);
+            let buffer = rich_buffer(&mut fonts, &rich, Some(600.), None);
+            let from_buffer: Vec<_> = buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter().map(|g| (g.start, g.x.to_bits())))
+                .collect();
+            let mut cache = crate::prepared::TextCache::default();
+            let from_words: Vec<_> = cache
+                .layout(&mut fonts, &rich, Some(600.))
+                .runs(None)
+                .flat_map(|run| {
+                    run.glyphs
+                        .iter()
+                        .map(|g| (g.start, g.x.to_bits()))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+            assert_eq!(from_words, from_buffer, "marked {marked}");
+        }
+    }
+    /// A chip's words are where they are whatever was shaped before: a
+    /// fade splitting a chip at its spaces (`a` and ` + a` runs of their
+    /// own, each padded) shaped its blank at a padded run's start, and the
+    /// cache kept it padded, so every later chip's blank in that style drew
+    /// 4 points wider (Zeron's chips grew as their replies faded in). Now
+    /// the same as shaped afresh, padded at the chip's own ends alone.
+    #[test]
+    fn a_chip_shaped_after_its_split_pieces_is_as_shaped_afresh() {
+        let code = FontStyle {
+            family: zgx::text_layout::FontFamily::Monospace,
+            ..FontStyle::default()
+        };
+        let chip = |range: std::ops::Range<usize>| TextRun {
+            range,
+            font: code.clone(),
+            font_size: 14.,
+            padding: [4., 1.],
+            ..Default::default()
+        };
+        let plain = |range| TextRun {
+            range,
+            font_size: 16.,
+            ..Default::default()
+        };
+        let text = "x a + a y, `x + x` too";
+        let whole =
+            RichText::new(text, vec![plain(0..2), chip(2..7), plain(7..text.len())]).unwrap();
+        // As a fade splits it: a run of its own from its first space.
+        let split = RichText::new(
+            text,
+            vec![plain(0..2), chip(2..3), chip(3..7), plain(7..text.len())],
+        )
+        .unwrap();
+        let glyphs = |fonts: &mut FontSystem, rich: &RichText| -> Vec<_> {
+            let buffer = rich_buffer(fonts, rich, Some(684.), None);
+            buffer
+                .layout_runs()
+                .flat_map(|run| {
+                    run.glyphs
+                        .iter()
+                        .map(|g| (g.start, [g.x, g.w, g.x_offset].map(f32::to_bits)))
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        };
+        let fresh = glyphs(&mut bundled_test_fonts(), &whole);
+        let mut fonts = bundled_test_fonts();
+        glyphs(&mut fonts, &split);
+        assert_eq!(glyphs(&mut fonts, &whole), fresh, "after its split pieces");
     }
     /// A family without the weight asked for draws in its own nearest
     /// face, as CSS's font matching does: Medium text in a family with
@@ -2661,9 +3021,11 @@ fn joined_wash<'o>(
         !text.is_empty() && text.chars().all(|c| c == '\u{2060}')
     };
     let before = output.iter_mut().rev().find(|d| d.background)?;
+    // A placeholder's beside it, or a padded span cut into runs going on
+    // (`RichText::continues`: a fade's pieces).
     let joins = index > 0
         && before.run + 1 == index
-        && (spacer(&runs[index]) || spacer(&runs[index - 1]))
+        && (spacer(&runs[index]) || spacer(&runs[index - 1]) || rich.continues(index))
         && before.color == color
         && before.radius == radius
         && (before.bounds.y - bounds.y).abs() < 0.01
@@ -2672,6 +3034,60 @@ fn joined_wash<'o>(
             || (before.bounds.x - (bounds.x + bounds.width)).abs() < 0.5);
     if joins {
         // The next run joins it as the run it now ends with.
+        before.run = index;
+        Some(&mut before.bounds)
+    } else {
+        None
+    }
+}
+/// `joined` going on to `bounds`, which ends at `right`: one wash or line,
+/// its right edge where the last glyph's ends (as the run drawn whole
+/// has it, not worked out again from its width), its top and height kept.
+fn join(joined: &mut Rect, bounds: Rect, right: f32) {
+    if bounds.x >= joined.x {
+        joined.width = right - joined.x;
+    } else {
+        *joined = joined.union(bounds);
+    }
+}
+/// The line (underline or strikethrough, `strike`) of the run before
+/// `index` that `bounds` goes on from on its line, where run `index` is the
+/// next piece of that run's span (`RichText::continues`): drawn alike (its
+/// colour, its run's line style, its place and thickness) and touching it.
+/// As `joined_wash` joins washes. Runs beside each other, not so marked,
+/// draw lines of their own.
+fn joined_line<'o>(
+    output: &'o mut [RichDecoration],
+    rich: &zgx::rich_text::RichText,
+    index: usize,
+    bounds: Rect,
+    color: zgx::scene::Color,
+    strike: bool,
+) -> Option<&'o mut Rect> {
+    let before = output
+        .iter_mut()
+        .rev()
+        .find(|d| !d.background && d.strike == strike)?;
+    let style = |run: Option<&zgx::rich_text::TextRun>| {
+        run.and_then(|run| {
+            if strike {
+                run.strikethrough
+            } else {
+                run.underline
+            }
+        })
+        .map(|line| line.line_style())
+    };
+    let runs = rich.runs();
+    let joins = index > 0
+        && before.run + 1 == index
+        && rich.continues(index)
+        && style(runs.get(index - 1)) == style(runs.get(index))
+        && before.color == color
+        && (before.bounds.y - bounds.y).abs() < 0.01
+        && (before.bounds.height - bounds.height).abs() < 0.01
+        && (bounds.x - (before.bounds.x + before.bounds.width)).abs() < 0.5;
+    if joins {
         before.run = index;
         Some(&mut before.bounds)
     } else {
@@ -2689,9 +3105,32 @@ pub fn rich_decorations_in<'a>(
     rich: &zgx::rich_text::RichText,
 ) -> Vec<RichDecoration> {
     let mut output = Vec::new();
+    rich_decorations_into(&mut output, runs, starts, rich);
+    output
+}
+/// `rich_decorations_in`, after `output`'s (those of the lines before):
+/// each line's are its own, a wash joining only its own line's.
+pub fn rich_decorations_into<'a>(
+    output: &mut Vec<RichDecoration>,
+    runs: impl Iterator<Item = cosmic_text::LayoutRun<'a>>,
+    starts: &[usize],
+    rich: &zgx::rich_text::RichText,
+) {
+    let all = rich.runs();
     for line in runs {
         let start = starts[line.line_i];
-        for (index, run) in rich.runs().iter().enumerate() {
+        // Only runs its glyphs are in (a paragraph's runs are many as it
+        // streams): from the one its first byte is in to its last's, the
+        // last run also taking what lies past it (`run_at`).
+        let bytes = line.glyphs.iter().map(|g| start + g.start);
+        let (Some(first), Some(last)) = (bytes.clone().min(), bytes.max()) else {
+            continue;
+        };
+        let from = all.partition_point(|run| run.range.end <= first);
+        let to = (all.partition_point(|run| run.range.start <= last))
+            .max(from + 1)
+            .min(all.len());
+        for (index, run) in all.iter().enumerate().take(to).skip(from) {
             if run.background.is_none() && run.underline.is_none() && run.strikethrough.is_none() {
                 continue;
             }
@@ -2738,9 +3177,9 @@ pub fn rich_decorations_in<'a>(
                     // background and its neighbour's, the same and touching
                     // on its line, are one wash (a chip's), not three.
                     if let Some(joined) =
-                        joined_wash(&mut output, rich, index, bounds, color, run.radius)
+                        joined_wash(output, rich, index, bounds, color, run.radius)
                     {
-                        *joined = joined.union(bounds);
+                        join(joined, bounds, right);
                         continue;
                     }
                     output.push(RichDecoration {
@@ -2765,9 +3204,19 @@ pub fn rich_decorations_in<'a>(
                     (run.strikethrough, line.line_y - run.font_size * 0.3, true),
                 ] {
                     if let Some(style) = decoration {
+                        let bounds = Rect::new(left, y, right - left, style.thickness());
+                        let color = style.color.unwrap_or(run.color);
+                        // The run before's line, going on (a link cut into
+                        // runs by a fade): one line, as it is drawn whole.
+                        if let Some(joined) =
+                            joined_line(output, rich, index, bounds, color, strike)
+                        {
+                            join(joined, bounds, right);
+                            continue;
+                        }
                         output.push(RichDecoration {
-                            bounds: Rect::new(left, y, right - left, style.thickness()),
-                            color: style.color.unwrap_or(run.color),
+                            bounds,
+                            color,
                             background: false,
                             radius: 0.,
                             run: index,
@@ -2778,7 +3227,6 @@ pub fn rich_decorations_in<'a>(
             }
         }
     }
-    output
 }
 
 #[cfg(test)]

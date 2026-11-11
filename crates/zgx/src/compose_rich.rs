@@ -147,6 +147,8 @@ pub(crate) struct SpanExtras {
     pub padding_end: Option<f32>,
     /// Its text fading in (`TextSpan::fade_in`).
     pub fade: Option<TextFade>,
+    /// The next piece of the span before (`TextSpan::continues`).
+    pub continues: bool,
 }
 /// A run's text fading in (`TextSpan::fade_in`): from clear at `start`
 /// (milliseconds since the Unix epoch, as `ui.now()` says, on the thread's
@@ -242,6 +244,16 @@ impl TextSpan {
     /// edge, its name with more room after it.
     pub fn padding_end(mut self, end: f32) -> Self {
         self.extras.get_or_insert_default().padding_end = Some(end.max(0.));
+        self
+    }
+    /// The next piece of the span before: a span cut into pieces (a fade's,
+    /// each piece its own colour) that draws as the span whole where the
+    /// pieces are alike in font, size, padding, background and radius:
+    /// padded at its ends alone, its background and lines going on from
+    /// piece to piece. Spans beside each other, not so marked, draw apart
+    /// (two chips are two chips).
+    pub fn continues(mut self) -> Self {
+        self.extras.get_or_insert_default().continues = true;
         self
     }
     /// The span background's corner radius.
@@ -785,19 +797,19 @@ pub(crate) fn mount_links(
             } else {
                 // At the width its lines wrap at, where they show
                 // (balanced). A change of balance moves `engine`.
+                // From its laid-out lines where the scene has them
+                // (`rich_text_selections`), moved by the inset.
                 let scene = ui.scene.borrow();
                 let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
-                let layout = crate::text_layout::Inset::around(
-                    scene.shape_rich_text(&data.rich, Some(wrap)),
-                    inset,
-                );
+                let ranges: Vec<_> = data.links.iter().map(|link| link.range.clone()).collect();
+                let rects = scene.rich_text_selections(&data.rich, Some(wrap), &ranges);
                 drop(scene);
-                data.links
-                    .iter()
-                    .map(|link| {
-                        layout
-                            .selection(link.range.clone())
+                rects
+                    .into_iter()
+                    .map(|rects| {
+                        rects
                             .into_iter()
+                            .map(|rect| Rect::new(rect.x + inset, rect.y, rect.width, rect.height))
                             .filter_map(|rect| {
                                 rect.intersection(Rect::new(0., 0., bounds.width, bounds.height))
                             })
@@ -1111,14 +1123,19 @@ pub(crate) fn mount_icons(
             let scene = ui.scene.borrow();
             // As links' (above).
             let (wrap, inset) = scene.text_wrap(paragraph, bounds.width);
-            let layout = crate::text_layout::Inset::around(
-                scene.shape_rich_text(&data.rich, Some(wrap)),
-                inset,
-            );
-            rects = data
-                .icons
-                .iter()
-                .map(|icon| layout.selection(icon.range.clone()).into_iter().next())
+            let ranges: Vec<_> = data.icons.iter().map(|icon| icon.range.clone()).collect();
+            rects = scene
+                .rich_text_selections(&data.rich, Some(wrap), &ranges)
+                .into_iter()
+                .map(|rects| {
+                    let rect = rects.into_iter().next()?;
+                    Some(crate::scene::Rect::new(
+                        rect.x + inset,
+                        rect.y,
+                        rect.width,
+                        rect.height,
+                    ))
+                })
                 .collect();
             drop(scene);
             geometry_key = Some(key);

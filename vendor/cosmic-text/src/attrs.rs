@@ -812,6 +812,17 @@ impl AttrsList {
             || self.spans.iter().any(|(_, attrs)| attrs.padding_opt.is_some())
     }
 
+    /// zgx: whether the defaults or a span over `range` set padding: a
+    /// run's glyphs there are padded only by their own spans (`pad_spans`).
+    pub(crate) fn pads(&self, range: Range<usize>) -> bool {
+        self.defaults.padding_opt.is_some()
+            || (!self.spans.is_empty()
+                && self
+                    .spans
+                    .overlapping(&range)
+                    .any(|(_, attrs)| attrs.padding_opt.is_some()))
+    }
+
     /// zgx: the defaults, borrowed (`defaults` copies them out).
     pub(crate) fn defaults_owned(&self) -> &AttrsOwned {
         &self.defaults

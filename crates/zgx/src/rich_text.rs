@@ -147,6 +147,12 @@ pub struct TextRun {
     pub padding: [f32; 2],
     /// The background's corner radius.
     pub radius: f32,
+    /// The next piece of the run before's span (`TextSpan::continues`: a
+    /// span a fade cut into runs, one a piece): padded, washed and lined as
+    /// that span, whole, where both are alike in font, size, padding,
+    /// background and radius (`RichText::continues`). A run beside another
+    /// alike, not marked, is a span of its own.
+    pub continues: bool,
 }
 impl TextRun {
     /// The approximate advance of `grapheme` at byte `at` (no shaper): 0.6
@@ -176,6 +182,7 @@ impl Default for TextRun {
             strikethrough: None,
             padding: [0.; 2],
             radius: 0.,
+            continues: false,
         }
     }
 }
@@ -442,16 +449,81 @@ impl RichText {
                         == b.strikethrough.map(|d| (d.thickness(), d.line))
             })
     }
+    /// Whether run `index` is the next piece of the run before's span
+    /// (`TextRun::continues`), drawn as that span whole: marked so, and
+    /// alike in font, size, padding, background and radius, right after it.
+    /// Padded so, the pieces are padded at the span's ends alone; their
+    /// washes and lines go on from one to the next.
+    pub fn continues(&self, index: usize) -> bool {
+        let (Some(before), Some(run)) = (
+            index.checked_sub(1).and_then(|i| self.runs.get(i)),
+            self.runs.get(index),
+        ) else {
+            return false;
+        };
+        run.continues
+            && run.padding == before.padding
+            && run.font_size == before.font_size
+            && run.background == before.background
+            && run.radius == before.radius
+            && run.range.start == before.range.end
+            && run.font == before.font
+    }
+    /// Whether `other` is this very text: its text and runs the same
+    /// allocations (clones of one), and its options. Asked of a text the
+    /// same frame asks about again (measured, drawn): its runs are not
+    /// compared.
+    pub fn shares(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.text, &other.text)
+            && Arc::ptr_eq(&self.runs, &other.runs)
+            && self.options() == other.options()
+    }
+    /// Where `self`, `old`'s text (as it is, or with text added at its
+    /// end: a streamed paragraph) in `old`'s options, starts to be styled
+    /// otherwise than `old`: the first byte whose run differs in anything,
+    /// its index among the runs too (a run split in two at a chunk, or two
+    /// merged as a fade ends), else `old`'s end. Before it, both style each
+    /// byte alike, by the same run. None where `self` is not such a text.
+    pub fn restyled_from(&self, old: &Self) -> Option<usize> {
+        if self.options() != old.options() || !self.text.starts_with(&*old.text) {
+            return None;
+        }
+        for (now, was) in self.runs.iter().zip(old.runs.iter()) {
+            if now == was {
+                continue;
+            }
+            // The font, a family's name and more, compared last: a
+            // restyle (a fade's colour) differs before it.
+            let alike = now.range.start == was.range.start
+                && now.font_size == was.font_size
+                && now.color == was.color
+                && now.background == was.background
+                && now.underline == was.underline
+                && now.strikethrough == was.strikethrough
+                && now.padding == was.padding
+                && now.radius == was.radius
+                && now.continues == was.continues
+                && now.font == was.font;
+            return Some(match alike {
+                // Alike but where it ends (the last run going on).
+                true => now.range.end.min(was.range.end),
+                false => now.range.start.min(was.range.start),
+            });
+        }
+        Some(old.text.len())
+    }
     pub(crate) fn same_metrics(&self, other: &Self) -> bool {
         self.overflow == other.overflow
             && self.line_clamp == other.line_clamp
             && self.text == other.text
             && self.runs.len() == other.runs.len()
             && self.runs.iter().zip(other.runs.iter()).all(|(a, b)| {
-                // A run's padding across takes room in its line.
+                // A run's padding across takes room in its line (at a
+                // span's ends alone where its pieces go on: `continues`).
                 a.range == b.range
                     && a.font_size == b.font_size
                     && a.padding[0] == b.padding[0]
+                    && a.continues == b.continues
                     && a.font == b.font
             })
     }
@@ -467,6 +539,7 @@ impl RichText {
                 a.range != b.range
                     || a.font_size != b.font_size
                     || a.padding[0] != b.padding[0]
+                    || a.continues != b.continues
                     || a.font != b.font
             })
     }

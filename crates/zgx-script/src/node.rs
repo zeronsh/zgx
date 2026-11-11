@@ -1117,7 +1117,7 @@ pub(crate) enum Kind {
         text: Text,
         options: crate::markdown::view::ViewOptions,
     },
-    Rich(Vec<Span>),
+    Rich(RichSpans),
     Image {
         label: String,
         src: Source,
@@ -1405,6 +1405,18 @@ pub(crate) enum Segment {
     State(Signal<Value>, Rc<[Box<str>]>),
 }
 
+/// `ui.rich`'s runs.
+#[derive(Clone)]
+pub(crate) enum RichSpans {
+    /// Listed in it, made once.
+    Listed(Vec<Span>),
+    /// `spans = function() … end`: made by the function, called again (in
+    /// place: the paragraph and its layout are kept) when what it reads
+    /// changes. `literal` is the paragraph's, for runs written as strings
+    /// or tables.
+    Made { build: Function, literal: bool },
+}
+
 /// A rich text run.
 #[derive(Clone)]
 pub(crate) struct Span {
@@ -1463,6 +1475,9 @@ pub(crate) struct SpanRare {
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
+    /// `continues = true`: the next piece of the span before
+    /// (`TextSpan::continues`).
+    pub continues: bool,
     /// `fade_in = { start = ui.now(), ms = 200, power = 1.6 }`: its text
     /// fading in, drawn in Rust a frame at a time (`TextSpan::fade_in`).
     pub fade: Option<zgx::compose::TextFade>,
@@ -3576,6 +3591,17 @@ const LATE_FIELDS: &[&str] = &[
     "container",
     "queries",
 ];
+/// A property no node takes: or `spans` beside a `ui.rich`'s listed runs.
+#[cold]
+#[inline(never)]
+fn unknown_property(name: &str, kind: &Kind) -> mlua::Error {
+    match (name, kind) {
+        ("spans", Kind::Rich(_)) => {
+            mlua::Error::runtime("ui.rich takes its runs listed or from `spans`, not both")
+        }
+        _ => mlua::Error::runtime(format!("unknown property `{name}`")),
+    }
+}
 
 /// A key no style property names, taken where it lies once the walk finds
 /// it, so no style key compares against it: an input's caret (few set it,
@@ -3771,7 +3797,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 )));
             }
         },
-        _ => return Err(mlua::Error::runtime(format!("unknown property `{name}`"))),
+        _ => return Err(unknown_property(name, &node.kind)),
     }
     Ok(())
 }
@@ -4731,6 +4757,16 @@ pub(crate) fn label(table: &Table) -> mlua::Result<String> {
         _ => Ok(table.get::<Option<String>>("label")?.unwrap_or_default()),
     }
 }
+/// A span's `continues`: out of line, as few spans are pieces, so the
+/// walk over a span's options stays as it was.
+#[cold]
+#[inline(never)]
+fn span_continues(lua: &Lua, given: mlua::Value, span: &mut Span) -> mlua::Result<()> {
+    if lua.unpack::<Value>(given)?.truthy() {
+        rare_mut(span).continues = true;
+    }
+    Ok(())
+}
 
 /// A span's options that follow a state or function, and their types.
 const SPAN_FOLLOWS: &[(&str, Ty)] = &[
@@ -4873,6 +4909,8 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 b"underline_color" => span.underline_color = themed_color(&lua.unpack(given)?),
                 b"underline_thickness" => span.underline_thickness = number(given)?,
+                // The next piece of the span before: one span cut in pieces.
+                b"continues" => span_continues(lua, given, &mut span)?,
                 // `hover = { underline = true, color = … }`: a link's look
                 // under the pointer (CSS's `a:hover`).
                 b"hover" => {
@@ -4939,6 +4977,43 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
         }
     }
     Ok(span)
+}
+
+/// The runs a list holds, in order: `ui.span`s (each used once), strings
+/// and tables (made as `ui.span`'s are, taking the paragraph's `literal`).
+pub(crate) fn spans_of(lua: &Lua, list: &Table, literal: bool) -> mlua::Result<Vec<Span>> {
+    let mut spans = Vec::with_capacity(list.raw_len());
+    for item in list.sequence_values::<mlua::Value>() {
+        match item? {
+            mlua::Value::UserData(ud) if ud.is::<SpanUd>() => spans.push(
+                ud.borrow::<SpanUd>()?
+                    .0
+                    .borrow_mut()
+                    .take()
+                    .ok_or_else(|| mlua::Error::runtime("a span can be used once"))?,
+            ),
+            other => spans.push(span(lua, other, literal)?),
+        }
+    }
+    Ok(spans)
+}
+
+/// `ui.rich`'s runs where none are listed: made by its `spans` function,
+/// or none.
+#[cold]
+#[inline(never)]
+fn made_rich(table: &Table, literal: bool) -> mlua::Result<RichSpans> {
+    match table.get::<mlua::Value>("spans")? {
+        mlua::Value::Nil => Ok(RichSpans::Listed(Vec::new())),
+        mlua::Value::Function(build) => {
+            table.raw_set("spans", mlua::Value::Nil)?;
+            Ok(RichSpans::Made { build, literal })
+        }
+        other => Err(mlua::Error::runtime(format!(
+            "ui.rich's `spans` is a function returning its runs, not {}",
+            other.type_name()
+        ))),
+    }
 }
 
 /// Installs the read-only `ui` global.
@@ -5238,6 +5313,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                     other => spans.push(span(lua, other, literal)?),
                 }
             }
+            // None listed: made by its `spans` function, if it has one (one
+            // beside listed runs is left to `fill`, which turns it away).
+            let spans = match spans.is_empty() {
+                true => made_rich(&table, literal)?,
+                false => RichSpans::Listed(spans),
+            };
             for i in (1..=table.raw_len()).rev() {
                 table.raw_remove(i)?;
             }
