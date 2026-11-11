@@ -151,7 +151,7 @@ step "test zgx no default features" cargo test -p zgx --no-default-features --li
 step "doc tests" cargo test --workspace --doc --locked
 step "doc tests zgx-3d gltf" cargo test -p zgx-3d --features gltf --doc --locked
 step "cargo doc" cargo doc --workspace --no-deps --locked
-step "zgx-3d GPU tests (Metal)" env ZGX_REQUIRE_GPU=1 cargo test -p zgx-3d --features gltf --locked
+step "zgx-3d GPU tests, every feature (Metal)" env ZGX_REQUIRE_GPU=1 cargo test -p zgx-3d --all-features --locked
 if command -v ffmpeg >/dev/null; then
   step "test zgx-video" cargo test -p zgx-video --locked
 else
@@ -173,7 +173,7 @@ if [ $linux = 1 ]; then
     "cargo test -p zgx-terminal --locked && cargo test -p zgx-fx --locked && cargo test -p zgx-audio --locked"
   step "linux: software Vulkan adapter" in_linux "vulkaninfo --summary | grep -E 'deviceName|driverName|driverInfo'"
   step "linux: zgx-gpu (Vulkan)" in_linux "cargo test -p zgx-gpu --locked"
-  step "linux: zgx-3d GPU tests (llvmpipe)" in_linux "ZGX_REQUIRE_GPU=1 cargo test -p zgx-3d --features gltf --locked"
+  step "linux: zgx-3d GPU tests, every feature (llvmpipe)" in_linux "ZGX_REQUIRE_GPU=1 cargo test -p zgx-3d --all-features --locked"
   skip "linux: native probes (real X11/Wayland windows), the patched Vulkan loader"
   if [ $gate = 1 ]; then
     step "linux: gate against $base_sha" in_linux \

@@ -13,8 +13,9 @@
 //! family an adapter kind (`llvmpipe`, `warp`, `metal`, …: software and
 //! hardware rasterise differently), with a tolerance per image: how far a
 //! channel may differ, and the fraction of pixels allowed past that.
-//! `ZGX_BLESS=1` writes the running family's images. A family with no
-//! goldens is reported, and fails where a GPU is required
+//! `ZGX_BLESS=1` writes the running family's images, every one;
+//! `ZGX_BLESS=missing` writes only those it has none of yet (a new scene's),
+//! keeping the rest. A family with no golden for a scene is reported, and fails where a GPU is required
 //! (`ZGX_REQUIRE_GPU`, as in CI) or `ZGX_REQUIRE_GOLDENS` is set. A failing
 //! comparison writes the actual, expected and difference images to a
 //! temporary folder and prints their paths; where a GPU is required it also
@@ -731,7 +732,9 @@ fn keep_failure(name: &str, size: (u32, u32), actual: &[u8], expected: &[u8]) ->
 
 #[test]
 fn each_scene_matches_its_golden() {
-    let bless = std::env::var_os("ZGX_BLESS").is_some_and(|v| v == "1");
+    let bless = std::env::var_os("ZGX_BLESS");
+    let bless_all = bless.as_ref().is_some_and(|v| v == "1");
+    let bless_missing = bless.as_ref().is_some_and(|v| v == "missing");
     let required = std::env::var_os("ZGX_REQUIRE_GPU").is_some();
     let mut failures = Vec::new();
     let mut lines = Vec::new();
@@ -746,7 +749,7 @@ fn each_scene_matches_its_golden() {
         let family = family.get_or_insert_with(|| window.family()).clone();
         let actual = window.pixels();
         let path = golden(&family, scene.name);
-        if bless {
+        if bless_all || (bless_missing && !path.exists()) {
             write_png(&path, window.size, &actual);
             continue;
         }
@@ -771,7 +774,12 @@ fn each_scene_matches_its_golden() {
     }
     if !missing.is_empty() {
         let report = format!(
-            "no golden for this adapter's family; bless with ZGX_BLESS=1:\n  {}",
+            "no golden for these scenes in this adapter's family ({}); on a machine of that \
+             family, bless them alone (the others kept) with\n  \
+             ZGX_BLESS=missing cargo test -p zgx-3d --features gltf --test reference -- each_scene_matches_its_golden\n  \
+             or from a CI log's ZGX-GOLDEN lines with scripts/goldens_from_log.py, then look \
+             at each image beside another family's before keeping it:\n  {}",
+            family.as_deref().unwrap_or("unknown"),
             missing.join("\n  ")
         );
         if required || std::env::var_os("ZGX_REQUIRE_GOLDENS").is_some() {

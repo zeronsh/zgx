@@ -250,7 +250,9 @@ jobs:
         env:
           XDG_RUNTIME_DIR: /tmp
           ZGX_REQUIRE_GPU: "1"
-        run: cargo test -p zgx-3d --features gltf,post --locked
+        # Every feature: the lighting, compute and particles scenes' goldens
+        # and tests run only with theirs on.
+        run: cargo test -p zgx-3d --all-features --locked
       # Without ffmpeg, the tests of what it encodes pass by skipping: here it
       # must be there.
       - name: Video

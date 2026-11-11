@@ -2,3 +2,9 @@ Blessed from CI's Linux job (run 42867067828, ubuntu-24.04 image
 20261101.360) with `scripts/goldens_from_log.py`: Vulkan 1.4.318,
 llvmpipe (LLVM 20.1.2, 256 bits). A runner image whose llvmpipe differs
 may move these pixels: compare its `vulkaninfo` lines with these first.
+
+`lights_clustered`, `shadow_cascades` and `material` were blessed on arm64
+Linux (Ubuntu 24.04, Mesa 25.2.8-0ubuntu0.24.04.4): Vulkan 1.4.318,
+llvmpipe (LLVM 20.1.2, 128 bits), with `ZGX_BLESS=missing`, then read
+unblessed with the others there. Each is within 11 levels of its Metal
+image (one pixel past 8). The others pass there as blessed on x86-64.
