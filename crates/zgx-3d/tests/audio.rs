@@ -544,3 +544,32 @@ fn a_frame_s_rays_test_a_bounded_number_of_triangles() {
         .collect();
     assert_eq!(cast, [1, 1, 1, 1, 1, 1, 1, 1, 0, 0]);
 }
+
+#[test]
+fn a_world_shown_twice_a_frame_sounds_as_one_shown_once() {
+    // Two boxes (or two renderers) each run the world's sound after their
+    // frame, at the same frame time: the second must change nothing, or a
+    // moving sound's Doppler and pan flip each frame.
+    let run = |shown: usize| -> (u64, Vec<f32>) {
+        let (audio, mut mixer) = engine();
+        let world = world(&audio);
+        let at = |k: usize| [-20. + 40. * k as f32 * 0.01, 0., -4.];
+        let car = spot(&world, at(0));
+        world
+            .add_emitter3d(car, Emitter3d::new(&tone(400.)).looping(true))
+            .unwrap();
+        let clock = Clock(Instant::now());
+        let mut out = Vec::new();
+        for k in 0..60 {
+            world.set_transform(car, Transform::at(at(k)));
+            for _ in 0..shown {
+                world.update_audio(clock.at(k));
+            }
+            out.extend(mixer.frames(FRAME));
+        }
+        (audio.stats().commands, out)
+    };
+    let (once, twice) = (run(1), run(2));
+    assert_eq!(once.0, twice.0, "commands sent");
+    assert!(once.1 == twice.1, "what was heard differs");
+}

@@ -535,6 +535,9 @@ pub(crate) struct Sound3d {
     listener: Listener,
     heard: Option<Heard>,
     last_frame: Option<Instant>,
+    /// Whether anything moved in the last frame, for a second call at its
+    /// time to say the same.
+    moving: bool,
     /// Objects' transmission, set by the app, and a count of its changes.
     transmission: std::collections::HashMap<ObjectId, f32>,
     transmissions: u64,
@@ -835,6 +838,13 @@ impl Sound3d {
     /// One frame at `time`: sends what moved. Returns whether anything
     /// moved, so another frame must follow.
     fn frame(&mut self, inner: &Inner, time: Instant) -> bool {
+        // Once a frame time: a view shown in two boxes, or drawn by two
+        // renderers, runs this after each, and a second step of no time
+        // would make every velocity nothing, and Doppler and pan flip each
+        // frame. Whichever comes first does it.
+        if self.last_frame == Some(time) {
+            return self.moving;
+        }
         let step = self
             .last_frame
             .map_or(0., |last| {
@@ -966,6 +976,7 @@ impl Sound3d {
                 self.mixed = sent.then_some(mix);
             }
         }
+        self.moving = moving;
         moving
     }
 }
@@ -1067,6 +1078,7 @@ impl World {
             listener: Listener::Camera,
             heard: None,
             last_frame: None,
+            moving: false,
             transmission: Default::default(),
             transmissions: 0,
             blocking: (None, Vec::new()),
