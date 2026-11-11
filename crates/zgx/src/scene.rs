@@ -7837,13 +7837,10 @@ impl Scene {
     pub fn set_style(&mut self, id: NodeId, style: Style) {
         self.restyle(id, style, true);
     }
-    /// `set_style` for a node that may be laid out above alone: an absolute
-    /// one placed by its parent (a scrollbar's thumb in its rail) stops its
-    /// walk at that parent (`invalidate_absolute_layout`). For callers that
-    /// style such nodes (a script's or a composed view's style); `set_style`
-    /// asks nothing, and lays out as it always has.
-    #[cold]
-    #[inline(never)]
+    /// `set_style` that asks for the absolute stop whatever the scene holds
+    /// (`restyle_as`'s `STOPS`), for tests to compare with `set_style`,
+    /// which asks where a relative block exists.
+    #[cfg(test)]
     pub(crate) fn set_style_stopping(&mut self, id: NodeId, style: Style) {
         self.restyle_as::<false, true>(id, style, true, id);
     }
@@ -8923,14 +8920,6 @@ impl Scene {
     /// style is used where the caller put it rather than moved again.
     #[inline(never)]
     fn restyle(&mut self, id: NodeId, style: Style, given: bool) {
-        // An absolute node given a style where a relative block can place it
-        // (a scrollbar's thumb in its rail): its walk may stop above it
-        // (`set_style_stopping`). Decided here, once, for every caller, so
-        // that what calls `set_style` (a style effect) carries no test of
-        // its own.
-        if given && style.absolute && self.relative_count != 0 {
-            return self.set_style_stopping(id, style);
-        }
         self.restyle_as::<false, false>(id, style, given, id);
     }
     /// `restyle`; `HELD`: its layout walk stops at `owner` (`set_style_within`);
@@ -9022,9 +9011,15 @@ impl Scene {
             // (`interaction_revision`).
             self.geometry_revision = self.geometry_revision.wrapping_add(1);
         }
+        // An absolute node where a relative block can place it (a scrollbar's
+        // thumb in its rail): its walk may stop above it. Decided as the walk
+        // starts, from what is already at hand, for every caller of
+        // `set_style`. The scene's count first: most scenes have no such block.
         match HELD {
             true => self.invalidate_layout_with::<true>(id, false, true, owner),
-            false if STOPS && absolute => self.invalidate_absolute_layout(id),
+            false if (STOPS || self.relative_count != 0) && absolute => {
+                self.invalidate_absolute_layout(id)
+            }
             false => self.invalidate_layout(id),
         }
         if containing {
