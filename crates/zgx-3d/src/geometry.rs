@@ -18,6 +18,7 @@ pub struct Vertex {
     pub uv: [f32; 2],
 }
 
+#[derive(Clone)]
 struct Data {
     id: u64,
     vertices: Vec<Vertex>,
@@ -105,6 +106,11 @@ impl PartialEq for Geometry {
         self.0.id == other.0.id
     }
 }
+/// A geometry's number: each new one's the next.
+fn next_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 impl Geometry {
     /// Triangles of `indices` into `vertices`, three a triangle,
     /// counter-clockwise from their front. Fails on an index past the
@@ -123,9 +129,8 @@ impl Geometry {
                 (low.min(p), high.max(p))
             },
         );
-        static NEXT: AtomicU64 = AtomicU64::new(1);
         Ok(Self(Arc::new(Data {
-            id: NEXT.fetch_add(1, Ordering::Relaxed),
+            id: next_id(),
             vertices,
             indices,
             bounds: if bounds.0.x <= bounds.1.x {
@@ -278,6 +283,15 @@ impl Geometry {
     /// Stable for its lifetime: renderers cache its buffers by it.
     pub fn id(&self) -> u64 {
         self.0.id
+    }
+    /// The same, numbered anew: geometries made on several threads at once
+    /// (a model's meshes) take numbers in an order no run repeats, and
+    /// frames order meshes by them; numbered again in their own order, they
+    /// draw as made on one thread.
+    #[cfg(feature = "gltf")]
+    pub(crate) fn renumbered(mut self) -> Self {
+        Arc::make_mut(&mut self.0).id = next_id();
+        self
     }
     /// Its vertices.
     pub fn vertices(&self) -> &[Vertex] {

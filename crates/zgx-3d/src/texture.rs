@@ -23,7 +23,7 @@ struct Data {
     /// not a copy.
     pixels: Mutex<Option<Arc<zgx::image::ImageData>>>,
     /// The PNG or JPEG it was read from, if it was.
-    encoded: Option<Arc<[u8]>>,
+    encoded: Option<Vec<u8>>,
     /// Its file failed to decode at an upload: it draws as if it had none,
     /// and isn't tried again.
     failed: std::sync::atomic::AtomicBool,
@@ -109,6 +109,50 @@ impl Map {
 /// Of this many pixels or fewer, a texture's file is decoded on the thread
 /// that uploads it: under a millisecond, less than a thread's start.
 pub(crate) const SMALL: u32 = 128 * 128;
+/// The most a texture's file, or its pixels, may hold (as zgx-gpu's
+/// decoder allows).
+#[cfg(feature = "gltf")]
+const MAX_FILE: usize = 64 << 20;
+/// A PNG's or a baseline or progressive JPEG's width and height, from its
+/// header (`None`: neither, or no size found).
+#[cfg(feature = "gltf")]
+fn size_of_file(bytes: &[u8]) -> Option<(u32, u32)> {
+    let be16 = |at: usize| {
+        Some(u32::from(u16::from_be_bytes(
+            bytes.get(at..at + 2)?.try_into().ok()?,
+        )))
+    };
+    let be32 = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    // A PNG: its signature, then the IHDR chunk's width and height.
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return (bytes.get(12..16)? == b"IHDR").then(|| Some((be32(16)?, be32(20)?)))?;
+    }
+    // A JPEG: segments after its start, to the first frame's.
+    if !bytes.starts_with(&[0xff, 0xd8]) {
+        return None;
+    }
+    let mut at = 2;
+    loop {
+        // Fill bytes before a marker.
+        while *bytes.get(at)? == 0xff && *bytes.get(at + 1)? == 0xff {
+            at += 1;
+        }
+        if *bytes.get(at)? != 0xff {
+            return None;
+        }
+        let marker = *bytes.get(at + 1)?;
+        match marker {
+            // Markers with no length.
+            0x01 | 0xd0..=0xd9 => at += 2,
+            // A frame's start (not a table's or an arithmetic coding's):
+            // precision, then height and width.
+            0xc0..=0xcf if !matches!(marker, 0xc4 | 0xc8 | 0xcc) => {
+                return Some((be16(at + 7)?, be16(at + 5)?));
+            }
+            _ => at += 2 + be16(at + 2)? as usize,
+        }
+    }
+}
 /// The longest side a texture may have.
 pub(crate) const MAX_SIDE: u32 = 8192;
 impl Texture {
@@ -133,11 +177,28 @@ impl Texture {
     /// fail to decode draws as if it had none. (Another format, a GIF,
     /// decodes here.)
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let bytes: Arc<[u8]> = bytes.into();
-        let header =
-            zgx_gpu::assets::decode_image_kept(bytes.clone()).map_err(|e| e.to_string())?;
+        Self::decode_owned(bytes.to_vec())
+    }
+    /// `decode`, keeping `bytes` themselves (a model's file, read for it):
+    /// no copy of them.
+    pub(crate) fn decode_owned(bytes: Vec<u8>) -> Result<Self, String> {
+        let too_large = || "a texture is 1 to 8192 pixels on a side".to_owned();
+        #[cfg(feature = "gltf")]
+        if let Some((width, height)) = size_of_file(&bytes) {
+            // PNG and JPEG, which the `gltf` feature decodes: read as they
+            // are, their headers' size checked as `decode_image_kept` does.
+            if width == 0 || width > MAX_SIDE || height == 0 || height > MAX_SIDE {
+                return Err(too_large());
+            }
+            if bytes.len() > MAX_FILE || width as usize * height as usize * 4 > MAX_FILE {
+                return Err("a texture's file or pixels exceed 64 MiB".into());
+            }
+            return Ok(Self::made((width, height), None, Some(bytes)));
+        }
+        let header = zgx_gpu::assets::decode_image_kept(bytes.as_slice().into())
+            .map_err(|e| e.to_string())?;
         if header.width() > MAX_SIDE || header.height() > MAX_SIDE {
-            return Err("a texture is 1 to 8192 pixels on a side".into());
+            return Err(too_large());
         }
         let (width, height) = (header.width(), header.height());
         // Decoded now (a format it doesn't keep), its pixels are held.
@@ -147,7 +208,7 @@ impl Texture {
     fn made(
         (width, height): (u32, u32),
         pixels: Option<Arc<zgx::image::ImageData>>,
-        encoded: Option<Arc<[u8]>>,
+        encoded: Option<Vec<u8>>,
     ) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(Arc::new(Data {
@@ -293,6 +354,32 @@ mod tests {
         assert!(texture.pixels().is_none());
         // A file that isn't an image fails as it's read.
         assert!(Texture::decode(b"not an image").is_err());
+    }
+
+    #[cfg(feature = "gltf")]
+    #[test]
+    fn a_files_size_is_read_from_its_header() {
+        assert_eq!(size_of_file(RED_BLUE), Some((2, 1)));
+        // A JPEG: a table and an application segment before its frame's
+        // start, fill bytes and a restart marker on the way; its frame says
+        // 48 high, 640 wide.
+        let jpeg = [
+            &[0xff, 0xd8][..],
+            &[0xff, 0xe0, 0, 4, 1, 2],
+            &[0xff, 0xff, 0xd0],
+            &[0xff, 0xc4, 0, 3, 9],
+            &[0xff, 0xc2, 0, 11, 8, 0, 48, 2, 128, 3, 1, 0x11, 0],
+        ]
+        .concat();
+        assert_eq!(size_of_file(&jpeg), Some((640, 48)));
+        // Neither, or cut short: no size (another path reads it, or fails).
+        assert_eq!(size_of_file(b"GIF89a"), None);
+        assert_eq!(size_of_file(&RED_BLUE[..20]), None);
+        assert_eq!(size_of_file(&jpeg[..jpeg.len() - 6]), None);
+        // As a texture: its size, its file kept, nothing decoded.
+        let texture = Texture::decode_owned(RED_BLUE.to_vec()).unwrap();
+        assert_eq!((texture.width(), texture.height()), (2, 1));
+        assert!(!texture.holds_pixels());
     }
 
     #[test]

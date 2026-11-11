@@ -13,7 +13,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc, Condvar, Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
 };
@@ -37,6 +37,8 @@ pub(crate) struct Loads {
     /// Cleared as the renderer goes: what it asked for and hasn't taken is
     /// left undone.
     wanted: Arc<AtomicBool>,
+    /// Whose its jobs are in the pool's queue (`Queue`).
+    owner: u64,
 }
 /// A map put on the GPU (`None`: its file didn't decode).
 type Arrived = ((u64, bool), Option<wgpu::Texture>);
@@ -48,6 +50,10 @@ impl Default for Loads {
             arrived,
             pending: HashSet::new(),
             wanted: Arc::new(AtomicBool::new(true)),
+            owner: {
+                static NEXT: AtomicU64 = AtomicU64::new(1);
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            },
         }
     }
 }
@@ -87,22 +93,30 @@ impl Loads {
         self.pending.insert(key);
         let (texture, device, queue) = (texture.clone(), device.clone(), queue.clone());
         let (sent, wanted) = (self.sent.clone(), self.wanted.clone());
-        pool().run(Box::new(move |scratch: &mut Vec<u8>| {
-            // A renderer gone, or remade: no one to take it.
-            if !wanted.load(Ordering::Relaxed) {
-                return;
-            }
-            // One whose decoder panics is lost alone, as one that fails;
-            // either way it's answered, so nothing waits on it.
-            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                put_on_gpu(&device, &queue, &texture, srgb, scratch)
-            }));
-            let made = made.unwrap_or_else(|_| {
-                texture.failed_to_decode();
-                None
-            });
-            let _ = sent.send((key, made));
-        }));
+        let queued = pool().run(
+            self.owner,
+            Box::new(move |scratch: &mut Vec<u8>| {
+                // A renderer gone, or remade: no one to take it.
+                if !wanted.load(Ordering::Relaxed) {
+                    return;
+                }
+                // One whose decoder panics is lost alone, as one that fails;
+                // either way it's answered, so nothing waits on it.
+                let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    put_on_gpu(&device, &queue, &texture, srgb, scratch)
+                }));
+                let made = made.unwrap_or_else(|_| {
+                    texture.failed_to_decode();
+                    None
+                });
+                let _ = sent.send((key, made));
+            }),
+        );
+        // No thread to load it (the system made none): this frame does.
+        if !queued {
+            self.pending.remove(&key);
+            return Wanted::Now;
+        }
         Wanted::Coming
     }
     /// Maps that have arrived, as views into `views` (by texture and sRGB;
@@ -178,26 +192,46 @@ fn put_on_gpu(
 /// less two (the frame's thread and the system's), at least 1 and at most
 /// `MAX_THREADS`, made as work comes and parked on a condition while there
 /// is none (no wakeups at rest). Each keeps one map's levels' worth of
-/// memory (`put_on_gpu`'s scratch).
+/// memory (`put_on_gpu`'s scratch). Renderers take turns (`Queue`).
 struct Pool {
     jobs: Mutex<Jobs>,
     ready: Condvar,
+    /// Most threads it makes.
+    limit: usize,
 }
 /// Most threads the pool makes.
 const MAX_THREADS: usize = 8;
 #[derive(Default)]
 struct Jobs {
-    queue: VecDeque<Job>,
+    queue: Queue,
     threads: usize,
     idle: usize,
 }
 type Job = Box<dyn FnOnce(&mut Vec<u8>) + Send>;
+/// Jobs by whose they are (a renderer's `Loads`), taken in turn: one of
+/// each in line before a second of any, so a world's one map doesn't wait
+/// behind another's hundreds.
+#[derive(Default)]
+struct Queue(VecDeque<(u64, VecDeque<Job>)>);
+impl Queue {
+    fn push(&mut self, owner: u64, job: Job) {
+        match self.0.iter_mut().find(|(o, _)| *o == owner) {
+            Some((_, jobs)) => jobs.push_back(job),
+            None => self.0.push_back((owner, VecDeque::from([job]))),
+        }
+    }
+    fn pop(&mut self) -> Option<Job> {
+        let (owner, mut jobs) = self.0.pop_front()?;
+        let job = jobs.pop_front();
+        if !jobs.is_empty() {
+            self.0.push_back((owner, jobs));
+        }
+        job
+    }
+}
 fn pool() -> &'static Pool {
     static POOL: OnceLock<Pool> = OnceLock::new();
-    POOL.get_or_init(|| Pool {
-        jobs: Mutex::new(Jobs::default()),
-        ready: Condvar::new(),
-    })
+    POOL.get_or_init(|| Pool::new(most_threads()))
 }
 fn most_threads() -> usize {
     std::thread::available_parallelism()
@@ -205,12 +239,24 @@ fn most_threads() -> usize {
         .clamp(1, MAX_THREADS)
 }
 impl Pool {
-    fn run(&'static self, job: Job) {
+    fn new(limit: usize) -> Self {
+        Self {
+            jobs: Mutex::new(Jobs::default()),
+            ready: Condvar::new(),
+            limit,
+        }
+    }
+    /// `job`, of `owner`'s, queued for a thread: whether one will run it.
+    /// None will if the pool has no thread and can't make one (the system
+    /// refusing it): the job is dropped, for its owner to do itself.
+    fn run(&'static self, owner: u64, job: Job) -> bool {
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
-        jobs.queue.push_back(job);
         if jobs.idle > 0 {
+            jobs.queue.push(owner, job);
             self.ready.notify_one();
-        } else if jobs.threads < most_threads() {
+            return true;
+        }
+        if jobs.threads < self.limit {
             let spawned = std::thread::Builder::new()
                 .name("zgx-3d textures".into())
                 .spawn(move || self.work());
@@ -218,12 +264,17 @@ impl Pool {
                 jobs.threads += 1;
             }
         }
+        if jobs.threads == 0 {
+            return false;
+        }
+        jobs.queue.push(owner, job);
+        true
     }
     fn work(&self) {
         let mut scratch = Vec::new();
         let mut jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            if let Some(job) = jobs.queue.pop_front() {
+            if let Some(job) = jobs.queue.pop() {
                 drop(jobs);
                 job(&mut scratch);
                 jobs = self.jobs.lock().unwrap_or_else(|e| e.into_inner());
@@ -233,5 +284,52 @@ impl Pool {
             jobs = self.ready.wait(jobs).unwrap_or_else(|e| e.into_inner());
             jobs.idle -= 1;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A job noting `tag` in `log` as it runs.
+    fn noting(log: &Arc<Mutex<Vec<u32>>>, tag: u32) -> Job {
+        let log = log.clone();
+        Box::new(move |_| log.lock().unwrap().push(tag))
+    }
+
+    #[test]
+    fn renderers_take_turns_in_the_queue() {
+        // Five of one renderer's, then one of another's: the other's goes
+        // second, not sixth.
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let mut queue = Queue::default();
+        for i in 0..5 {
+            queue.push(1, noting(&log, 10 + i));
+        }
+        queue.push(2, noting(&log, 20));
+        queue.push(1, noting(&log, 15));
+        while let Some(job) = queue.pop() {
+            job(&mut Vec::new());
+        }
+        assert_eq!(*log.lock().unwrap(), [10, 20, 11, 12, 13, 14, 15]);
+    }
+
+    #[test]
+    fn a_pool_with_no_thread_runs_nothing_and_says_so() {
+        // No thread can be made (here, none allowed): the job isn't kept
+        // waiting for one, and its owner is told to do it itself.
+        let none: &'static Pool = Box::leak(Box::new(Pool::new(0)));
+        let log = Arc::new(Mutex::new(Vec::new()));
+        assert!(!none.run(1, noting(&log, 1)));
+        assert_eq!(none.jobs.lock().unwrap().queue.pop().map(|_| ()), None);
+        // With one, it runs.
+        let one: &'static Pool = Box::leak(Box::new(Pool::new(1)));
+        assert!(one.run(1, noting(&log, 2)));
+        let started = std::time::Instant::now();
+        while log.lock().unwrap().is_empty() {
+            assert!(started.elapsed().as_secs() < 10, "it ran");
+            std::thread::yield_now();
+        }
+        assert_eq!(*log.lock().unwrap(), [2]);
     }
 }

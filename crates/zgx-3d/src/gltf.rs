@@ -184,7 +184,7 @@ impl Model {
                         .get_mut(image)?
                         .get_or_insert_with(|| {
                             let bytes = reader.image(image, &mut resolve)?;
-                            Texture::decode(&bytes).ok()
+                            Texture::decode_owned(bytes).ok()
                         })
                         .clone()
                 });
@@ -194,10 +194,25 @@ impl Model {
                 (material(value), maps, surface(value), placements, layers)
             })
             .collect::<Vec<_>>();
-        let meshes = list(&doc, "meshes")
-            .iter()
-            .map(|mesh| reader.mesh(mesh, &materials))
+        // A scene's meshes are most of reading it (Bistro's 1,296: 110 ms
+        // on one thread): built on several.
+        let meshes = in_parallel(list(&doc, "meshes"), |mesh| reader.mesh(mesh, &materials))
+            .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
+        // Numbered here, in their order: as made on one thread
+        // (`Geometry::renumbered`).
+        let meshes: Vec<Vec<Mesh>> = meshes
+            .into_iter()
+            .map(|primitives| {
+                primitives
+                    .into_iter()
+                    .map(|mut mesh| {
+                        mesh.0 = mesh.0.renumbered();
+                        mesh
+                    })
+                    .collect()
+            })
+            .collect();
         let nodes = list(&doc, "nodes")
             .iter()
             .map(|node| {
@@ -446,6 +461,46 @@ impl World {
             cameras,
         }
     }
+}
+
+/// `f` of each of `items`, in their order: on up to 8 threads (the
+/// machine's cores) where there are many, a chunk of them at a time, each
+/// thread taking the next; here where there are few. The threads are gone
+/// when it returns; a panic in one is this one's.
+fn in_parallel<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> U + Sync) -> Vec<U> {
+    const FEW: usize = 64;
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    if items.len() < FEW || threads < 2 {
+        return items.iter().map(f).collect();
+    }
+    let chunks: Vec<&[T]> = items.chunks(items.len().div_ceil(threads * 4)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut done: Vec<(usize, Vec<U>)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..threads)
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(chunk) = chunks.get(at) else {
+                            return done;
+                        };
+                        done.push((at, chunk.iter().map(&f).collect()));
+                    }
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|e| std::panic::resume_unwind(e))
+            })
+            .collect()
+    });
+    done.sort_unstable_by_key(|(at, _)| *at);
+    done.into_iter().flat_map(|(_, made)| made).collect()
 }
 
 /// Extensions a file's geometry may be compressed with.
@@ -2436,6 +2491,49 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(huge.contains("too many zeros"), "{huge}");
+    }
+
+    #[test]
+    fn a_large_models_geometries_are_numbered_in_its_order() {
+        // 200 meshes, made on threads: numbered as one thread would number
+        // them (frames order meshes by these numbers).
+        let (doc, bin) = square(json!([]), |doc| {
+            let mesh = doc["meshes"][0].clone();
+            doc["meshes"] = Value::Array(vec![mesh; 200]);
+            doc["nodes"] = (0..200).map(|i| json!({ "mesh": i })).collect();
+            doc["scenes"][0]["nodes"] = (0..200).map(|i| json!(i)).collect();
+        });
+        for _ in 0..5 {
+            let model = Model::from_bytes(&glb_of(&doc, &bin)).unwrap();
+            let ids: Vec<u64> = model.nodes.iter().map(|n| n.meshes[0].0.id()).collect();
+            assert!(
+                ids.is_sorted() && ids.windows(2).all(|w| w[0] != w[1]),
+                "{ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn many_are_made_on_threads_in_their_order() {
+        let items: Vec<u32> = (0..1000).collect();
+        let threads = std::sync::Mutex::new(std::collections::HashSet::new());
+        let made = in_parallel(&items, |&i| {
+            threads.lock().unwrap().insert(std::thread::current().id());
+            // Work enough that one thread doesn't take every chunk first.
+            std::thread::sleep(std::time::Duration::from_micros(50));
+            i * 2
+        });
+        assert_eq!(made, (0..1000).map(|i| i * 2).collect::<Vec<_>>());
+        if std::thread::available_parallelism().map_or(1, |n| n.get()) > 1 {
+            assert!(threads.lock().unwrap().len() > 1, "on threads");
+        }
+        // Few: here.
+        let here = std::thread::current().id();
+        assert!(
+            in_parallel(&items[..10], |_| std::thread::current().id())
+                .iter()
+                .all(|&t| t == here)
+        );
     }
 
     #[test]
