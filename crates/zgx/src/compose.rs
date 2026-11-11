@@ -260,6 +260,9 @@ pub(crate) struct ListEdges {
     at_end: Option<Box<dyn FnMut(bool)>>,
     /// `View::list_ahead`.
     ahead: Option<f32>,
+    /// `View::scrollbar_style` (a scroll view's too): with what few views
+    /// have, so `Rare` stays the size it was.
+    scrollbar_style: Option<Rc<crate::compose_scrollbar::ScrollbarStyle>>,
     /// `View::virtualize_in_ancestor`: it scrolls with the scroll view
     /// around it, building the rows that view shows.
     pub(crate) ancestor: bool,
@@ -320,6 +323,7 @@ pub(crate) fn watch_edges(
         mut at_end,
         ancestor: _,
         ahead: _,
+        scrollbar_style: _,
     } = edges;
     let runtime = ui.runtime.clone();
     let weak = ui.downgrade();
@@ -531,8 +535,6 @@ pub(crate) struct Rare {
     /// Whether the pointer stops at the view (`pointer_events`), followed.
     pointer_events: Option<Box<dyn FnMut() -> bool>>,
     scrollbar: Option<bool>,
-    /// `View::scrollbar_style`: how its scrollbar is drawn and timed.
-    scrollbar_style: Option<Rc<crate::compose_scrollbar::ScrollbarStyle>>,
     follow_end: Option<bool>,
     /// `View::overscroll_contain`: a wheel over it stays with it.
     overscroll_contain: bool,
@@ -641,9 +643,6 @@ impl Rare {
         }
         if self.scrollbar.is_some() {
             inner.scrollbar = self.scrollbar;
-        }
-        if self.scrollbar_style.is_some() {
-            inner.scrollbar_style = self.scrollbar_style;
         }
         if self.follow_end.is_some() {
             inner.follow_end = self.follow_end;
@@ -954,9 +953,8 @@ impl View {
     /// `scrollbar(true)`, drawn and timed as `style` says over the
     /// platform's look (an app's own floating rail).
     pub fn scrollbar_style(mut self, style: crate::compose_scrollbar::ScrollbarStyle) -> Self {
-        let rare = self.rare_mut();
-        rare.scrollbar = Some(true);
-        rare.scrollbar_style = Some(Rc::new(style));
+        self.rare_mut().scrollbar = Some(true);
+        self.edges_mut().scrollbar_style = Some(Rc::new(style));
         self
     }
     /// Keep a wheel or trackpad gesture that starts over this scroll view,
@@ -5654,6 +5652,9 @@ fn mount_element(
     );
     let scrollbar = rare.as_ref().and_then(|r| r.scrollbar).unwrap_or(false);
     let follow_end = rare.as_ref().and_then(|r| r.follow_end).unwrap_or(false);
+    if scrollbar {
+        hold_scrollbar_style(ui, &mut rare);
+    }
     let mut opened = open_element(
         ui,
         parent,
@@ -5666,7 +5667,7 @@ fn mount_element(
         follow_end,
     );
     if scrollbar {
-        keep_scrollbar_style(ui, opened.root, &mut rare);
+        keep_scrollbar_style(ui, opened.root);
     }
     ui.open_element(opened.root);
     for child in std::mem::take(&mut opened.children) {
@@ -5674,13 +5675,25 @@ fn mount_element(
     }
     close_element(ui, opened)
 }
-/// A scroll view's or a list's own scrollbar style, kept for its bar to
-/// take as it mounts (`compose_scrollbar::mount`). Apart: every other
-/// element's mount reads nothing of it.
+/// A scroll view's or a list's own scrollbar style, taken before its
+/// element opens (a list's edges go to its region there) and held for the
+/// node its bar mounts on (`keep_scrollbar_style`). Apart: every other
+/// element's mount reads nothing of it, nor allocates for it.
 #[cold]
 #[inline(never)]
-fn keep_scrollbar_style(ui: &Ui, root: NodeId, rare: &mut Option<Box<Rare>>) {
-    if let Some(style) = rare.as_mut().and_then(|rare| rare.scrollbar_style.take()) {
+fn hold_scrollbar_style(ui: &Ui, rare: &mut Option<Box<Rare>>) {
+    let style = rare
+        .as_mut()
+        .and_then(|rare| rare.edges.as_mut())
+        .and_then(|edges| edges.scrollbar_style.take());
+    ui.hold_scrollbar_style(style);
+}
+/// The style held for the element just opened, kept by `root` for its bar
+/// to take as it mounts (`compose_scrollbar::mount`).
+#[cold]
+#[inline(never)]
+fn keep_scrollbar_style(ui: &Ui, root: NodeId) {
+    if let Some(style) = ui.held_scrollbar_style() {
         ui.keep_scrollbar_style(root, style);
     }
 }
