@@ -7613,7 +7613,7 @@ impl GpuRenderer {
         // An app's own shader (not the built-in radial one): on Direct3D 12
         // with FXC its fragment stage compiles in a process of its own.
         let apps = shader.source() != zgx::decoration::radial_shader().source();
-        let slot = compile::spawn(move || {
+        let slot = compile::start(self.waits_for_shaders(), move || {
             fill_validates(&source)
                 .then(|| {
                     Self::app_built(
@@ -7634,7 +7634,7 @@ impl GpuRenderer {
         (self.fill_pipelines).insert(shader.id(), compile::Compiled::Pending(slot));
         #[cfg(target_os = "macos")]
         if let Some(Some(frame)) = self.metal_frame.get() {
-            frame.start_fill(shader);
+            frame.start_fill(shader, self.waits_for_shaders());
         }
         #[cfg(d3d11)]
         if let Some(state) = &self.d3d11 {
@@ -7681,7 +7681,7 @@ impl GpuRenderer {
             let (device, layout) = (self.device.clone(), self.context.inner.quad_layout.clone());
             let source = filter_source(shader.source());
             let backend = self.info.backend;
-            let slot = compile::spawn(move || {
+            let slot = compile::start(self.waits_for_shaders(), move || {
                 fill_validates(&source)
                     .then(|| {
                         Self::app_built(
@@ -7764,7 +7764,7 @@ impl GpuRenderer {
             let layout = self.blend_layouts().1.clone();
             let device = self.device.clone();
             let backend = self.info.backend;
-            let slot = compile::spawn(move || {
+            let slot = compile::start(self.waits_for_shaders(), move || {
                 fill_validates(&source)
                     .then(|| {
                         Self::app_built(
@@ -20804,6 +20804,24 @@ mod shader_compile_tests {
         let (pixel, awaited) = frame(&mut gpu, &mut scene);
         assert_eq!(pixel, [0, 255, 0, 255]);
         assert!(!awaited);
+    }
+
+    /// Offscreen, where frames wait for their shaders anyway, a fill
+    /// compiles on the renderer's own thread: compiled as it is started,
+    /// with no second thread allocating beside the frame (which made the
+    /// gate's fx cells count differently run to run).
+    #[test]
+    fn offscreen_a_fill_is_compiled_as_it_starts() {
+        let (mut gpu, _) = renderer();
+        gpu.offscreen_waits = true;
+        let shader = green();
+        gpu.start_fill(&shader);
+        assert!(
+            gpu.fill_pipelines
+                .get(&shader.id())
+                .is_some_and(|c| c.get().is_some()),
+            "compiled when start_fill returned"
+        );
     }
 
     /// Offscreen, nothing wakes a host: a frame waits for the compile.

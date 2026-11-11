@@ -213,6 +213,7 @@ impl Chain {
         queue: &wgpu::Queue,
         layouts: (wgpu::BindGroupLayout, wgpu::BindGroupLayout),
         inputs: &ShaderInputs,
+        here: bool,
     ) -> Self {
         let count = textures(inputs) as usize;
         let mut entries = vec![
@@ -299,7 +300,7 @@ impl Chain {
                 let (device, layout, format) =
                     (device.clone(), layout.clone(), target_format(pass.format));
                 let source = pass_source(&pass.source, inputs);
-                let slot = compile::spawn(move || {
+                let slot = compile::start(here, move || {
                     crate::fill_validates(&source)
                         .then(|| {
                             crate::shader_pipeline(&device, || {
@@ -586,7 +587,7 @@ impl GpuRenderer {
             blend: reading,
             textures,
         };
-        let slot = compile::spawn(move || {
+        let slot = compile::start(self.waits_for_shaders(), move || {
             crate::fill_validates(&source)
                 .then(|| {
                     Self::app_built(
@@ -616,11 +617,12 @@ impl GpuRenderer {
     }
     /// `id`'s chain, made if new.
     pub(crate) fn chain(&mut self, id: u64, inputs: &ShaderInputs) -> &Chain {
+        let here = self.waits_for_shaders();
         let (device, queue) = (&self.device, &self.queue);
         let inner = &self.context.inner;
         self.chains.entry(id).or_insert_with(|| {
             let layouts = (inner.texture_layout.clone(), inner.viewport_layout.clone());
-            Chain::new(device, queue, layouts, inputs)
+            Chain::new(device, queue, layouts, inputs, here)
         })
     }
     /// Bind what the layer shader `shading` draws with at `GROUP`, if it
@@ -836,5 +838,47 @@ impl GpuRenderer {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zgx::decoration::ShaderPass;
+
+    fn inputs() -> ShaderInputs {
+        ShaderInputs {
+            passes: vec![ShaderPass {
+                name: "state".into(),
+                source:
+                    "fn run(input: PassInput) -> vec4<f32> { return zgx_state(input.uv) * 0.5; }"
+                        .into(),
+                size: PassSize::Pixels(8, 8),
+                format: PassFormat::Rgba16Float,
+                feedback: true,
+                steps: 1,
+                once: false,
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Offscreen, where frames wait for their shaders anyway, a shader's
+    /// passes compile on the renderer's own thread: compiled as their chain
+    /// is made, with nothing left on the compile thread.
+    #[test]
+    fn offscreen_passes_are_compiled_as_their_chain_is_made() {
+        let Ok(mut gpu) = GpuRenderer::new(64, 64) else {
+            return;
+        };
+        let chain = gpu.chain(1, &inputs());
+        assert!(!chain.passes.is_empty());
+        assert!(
+            chain.passes.iter().all(
+                |pass| matches!(pass.pipeline, compile::Compiled::Pending(_))
+                    && pass.pipeline.get().is_some()
+            ),
+            "every pass compiled when the chain returned"
+        );
     }
 }
