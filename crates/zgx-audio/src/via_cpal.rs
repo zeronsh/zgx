@@ -78,6 +78,66 @@ impl Drop for Held {
     }
 }
 
+/// Whether the mixer's floats can be written as `format`: every PCM
+/// format cpal has, not DSD's one-bit streams.
+fn writable(format: cpal::SampleFormat) -> bool {
+    use cpal::SampleFormat::*;
+    matches!(
+        format,
+        I8 | I16 | I24 | I32 | I64 | U8 | U16 | U24 | U32 | U64 | F32 | F64
+    )
+}
+
+fn unwritable(format: cpal::SampleFormat) -> String {
+    format!("the device's samples are {format}, which zgx-audio can't write")
+}
+
+/// The largest float below 1: 1 itself is a step past the largest 24-bit
+/// sample, which wraps to the most negative.
+const BELOW_ONE: f32 = 1. - f32::EPSILON / 2.;
+
+/// The mixer's floats as `T`, kept to full scale. Not a number is silence
+/// (in an unsigned format, 0 is the most negative sample).
+fn write<T: cpal::Sample + cpal::FromSample<f32>>(floats: &[f32], out: &mut [T]) {
+    for (out, &sample) in out.iter_mut().zip(floats) {
+        let sample = if sample.is_nan() { 0. } else { sample };
+        *out = T::from_sample(sample.clamp(-1., BELOW_ONE));
+    }
+}
+
+/// A stream for a device whose samples are `T`: mixed in floats into a
+/// buffer made here, then converted.
+fn converting<T>(
+    device: &cpal::Device,
+    config: cpal::StreamConfig,
+    mut held: Held,
+    errors: impl FnMut(cpal::Error) + Send + 'static,
+    channels: usize,
+) -> Result<cpal::Stream, cpal::Error>
+where
+    T: cpal::SizedSample + cpal::FromSample<f32> + Send + 'static,
+{
+    let mut floats = vec![0f32; 8192 * channels.max(1)];
+    device.build_output_stream(
+        config,
+        move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+            let renderer = held.renderer.as_mut().expect("held while streaming");
+            let stamp = info.timestamp();
+            let mut timing = Some(Timing {
+                asked: nanos(stamp.callback),
+                heard: nanos(stamp.playback),
+            });
+            for chunk in data.chunks_mut(floats.len()) {
+                let floats = &mut floats[..chunk.len()];
+                renderer.render(floats, timing.take());
+                write(floats, chunk);
+            }
+        },
+        errors,
+        None,
+    )
+}
+
 fn nanos(instant: cpal::StreamInstant) -> u64 {
     instant.as_nanos().min(u128::from(u64::MAX)) as u64
 }
@@ -89,6 +149,9 @@ impl Device for Cpal {
             .default_output_device()
             .ok_or("no default output device")?;
         let config = device.default_output_config().map_err(|e| e.to_string())?;
+        if !writable(config.sample_format()) {
+            return Err(unwritable(config.sample_format()));
+        }
         let format = Format {
             rate: config.sample_rate(),
             channels: usize::from(config.channels()),
@@ -130,33 +193,10 @@ impl Device for Cpal {
             renderer: Some(renderer),
             back: self.back.0.clone(),
         };
+        let channels = format.channels;
         let built = match supported.sample_format() {
-            cpal::SampleFormat::I16 => {
-                // Mixed in floats into a buffer made here, converted in place.
-                let mut held = held;
-                let mut floats = vec![0f32; 8192 * format.channels];
-                device.build_output_stream(
-                    config,
-                    move |data: &mut [i16], info: &cpal::OutputCallbackInfo| {
-                        let renderer = held.renderer.as_mut().expect("held while streaming");
-                        let stamp = info.timestamp();
-                        let mut timing = Some(Timing {
-                            asked: nanos(stamp.callback),
-                            heard: nanos(stamp.playback),
-                        });
-                        for chunk in data.chunks_mut(floats.len()) {
-                            let floats = &mut floats[..chunk.len()];
-                            renderer.render(floats, timing.take());
-                            for (out, &sample) in chunk.iter_mut().zip(floats.iter()) {
-                                *out = (sample.clamp(-1., 1.) * 32767.) as i16;
-                            }
-                        }
-                    },
-                    errors,
-                    None,
-                )
-            }
-            _ => {
+            cpal::SampleFormat::F32 => {
+                // Mixed straight into the device's buffer.
                 let mut held = held;
                 device.build_output_stream(
                     config,
@@ -174,6 +214,27 @@ impl Device for Cpal {
                     errors,
                     None,
                 )
+            }
+            cpal::SampleFormat::I8 => converting::<i8>(&device, config, held, errors, channels),
+            cpal::SampleFormat::I16 => converting::<i16>(&device, config, held, errors, channels),
+            cpal::SampleFormat::I24 => {
+                converting::<cpal::I24>(&device, config, held, errors, channels)
+            }
+            cpal::SampleFormat::I32 => converting::<i32>(&device, config, held, errors, channels),
+            cpal::SampleFormat::I64 => converting::<i64>(&device, config, held, errors, channels),
+            cpal::SampleFormat::U8 => converting::<u8>(&device, config, held, errors, channels),
+            cpal::SampleFormat::U16 => converting::<u16>(&device, config, held, errors, channels),
+            cpal::SampleFormat::U24 => {
+                converting::<cpal::U24>(&device, config, held, errors, channels)
+            }
+            cpal::SampleFormat::U32 => converting::<u32>(&device, config, held, errors, channels),
+            cpal::SampleFormat::U64 => converting::<u64>(&device, config, held, errors, channels),
+            cpal::SampleFormat::F64 => converting::<f64>(&device, config, held, errors, channels),
+            // Refused by `format`, which chose the device.
+            _ => {
+                drop(held);
+                let renderer = self.back.1.recv().expect("the renderer, given back");
+                return Err((unwritable(supported.sample_format()), renderer));
             }
         };
         let stream = match built {
@@ -260,5 +321,31 @@ mod tests {
         // an app that never plays a sound never loads the system's audio.
         let cpal = Cpal::new();
         assert!(cpal.host.is_none() && cpal.device.is_none() && cpal.stream.is_none());
+    }
+
+    #[test]
+    fn every_pcm_format_a_device_can_ask_for_is_written_at_full_scale() {
+        use cpal::SampleFormat::*;
+        for format in [I8, I16, I24, I32, I64, U8, U16, U24, U32, U64, F32, F64] {
+            assert!(writable(format), "{format}");
+        }
+        assert!(!writable(DsdU8) && unwritable(DsdU8).contains("can't write"));
+        let floats = [0., 1., -1., 0.5, 2., f32::NAN];
+        let mut i32s = [0i32; 6];
+        write(&floats, &mut i32s);
+        assert_eq!((i32s[0], i32s[2], i32s[5]), (0, i32::MIN, 0));
+        assert!(i32s[1] > i32::MAX - 256 && i32s[4] == i32s[1]);
+        assert!((i32s[3] - (1 << 30)).abs() <= 1);
+        let mut u16s = [0u16; 6];
+        write(&floats, &mut u16s);
+        assert_eq!(&u16s[..3], &[32_768, u16::MAX, 0], "silence in the middle");
+        assert_eq!(u16s[5], 32_768, "not a number is silence, not the floor");
+        use cpal::Sample;
+        let mut i24s = [cpal::I24::EQUILIBRIUM; 3];
+        write(&floats[..3], &mut i24s);
+        assert_eq!(i24s.map(|s| s.inner()), [0, (1 << 23) - 1, -(1 << 23)]);
+        let mut i16s = [0i16; 3];
+        write(&floats[..3], &mut i16s);
+        assert_eq!(i16s, [0, i16::MAX, i16::MIN]);
     }
 }
