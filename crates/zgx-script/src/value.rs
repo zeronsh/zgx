@@ -1039,6 +1039,12 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
         held: Option<std::cell::Ref<'a, FxHashMap<usize, (Value, usize)>>>,
         /// By the Luau string's address (no script chooses it, so Fx).
         strings: FxHashMap<usize, Rc<str>>,
+        /// The items and fields of the tables being read, on one stack each:
+        /// a table, once read, is its own moved off into one allocation,
+        /// where a vector of its own would grow, then be copied (as
+        /// `json::parse` reads).
+        items: Vec<(usize, Value)>,
+        keyed: Vec<(Rc<str>, Value)>,
     }
     const TABLE: c_int = 1;
     const IDS: c_int = 2;
@@ -1134,8 +1140,8 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
                 Some(Value::Map(f)) => f,
                 _ => &[],
             };
-            let mut items: Vec<(usize, Value)> = Vec::with_capacity(len);
-            let mut keyed: Vec<(Rc<str>, Value)> = Vec::new();
+            let (items_from, keyed_from) = (cx.items.len(), cx.keyed.len());
+            cx.items.reserve(len);
             let mut iter = 0;
             loop {
                 iter = ffi::lua_rawiter(state, idx, iter);
@@ -1149,7 +1155,7 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
                         if n.fract() == 0. && n >= 1. && n as usize <= len {
                             let i = n as usize;
                             read(state, top, was.get(i - 1), depth + 1, cx)
-                                .map(|v| items.push((i, v)))
+                                .map(|v| cx.items.push((i, v)))
                         } else {
                             Err(Unread::General)
                         }
@@ -1167,21 +1173,30 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
                             None => string(cx, data as usize, bytes),
                         };
                         read(state, top, prior.map(|(_, v)| v), depth + 1, cx)
-                            .map(|v| keyed.push((key, v)))
+                            .map(|v| cx.keyed.push((key, v)))
                     }
                     _ => Err(Unread::General),
                 };
                 ffi::lua_pop(state, 2);
-                read_one?;
+                if let Err(unread) = read_one {
+                    // Read by the general walk: what this table put on the
+                    // stacks goes (a table inside it already took its own).
+                    cx.items.truncate(items_from);
+                    cx.keyed.truncate(keyed_from);
+                    return Err(unread);
+                }
             }
-            if !keyed.is_empty() {
-                if len > 0 {
+            if cx.keyed.len() > keyed_from {
+                if cx.items.len() > items_from || len > 0 {
+                    cx.items.truncate(items_from);
+                    cx.keyed.truncate(keyed_from);
                     return Err(Unread::Error(
                         "a state table is a list or has string keys, not both",
                     ));
                 }
+                let keyed = &mut cx.keyed[keyed_from..];
                 keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-                let fresh = Value::Map(keyed.into());
+                let fresh = Value::Map(cx.keyed.drain(keyed_from..).collect());
                 return Ok(match old {
                     Some(old) if *old == fresh => old.clone(),
                     _ => fresh,
@@ -1189,19 +1204,24 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
             }
             // The array part comes in order; items run up to the first
             // hole, as a sequence does.
+            let items = &mut cx.items[items_from..];
             if !items.is_sorted_by_key(|(i, _)| *i) {
                 items.sort_unstable_by_key(|(i, _)| *i);
             }
-            let mut list = Vec::with_capacity(items.len());
-            for (at, (i, item)) in items.into_iter().enumerate() {
-                if i != at + 1 {
-                    break;
-                }
-                list.push(item);
-            }
+            let run = items
+                .iter()
+                .enumerate()
+                .take_while(|(at, (i, _))| *i == at + 1)
+                .count();
+            let list: Rc<[Value]> = cx
+                .items
+                .drain(items_from..)
+                .take(run)
+                .map(|(_, item)| item)
+                .collect();
             Ok(match old {
                 Some(old @ Value::List(o)) if o[..] == list[..] => old.clone(),
-                _ => Value::List(list.into()),
+                _ => Value::List(list),
             })
         }
     }
@@ -1211,6 +1231,8 @@ fn raw_table(t: &Table, old: Option<&Value>) -> Option<mlua::Result<Value>> {
     let mut cx = Cx {
         held: cache.as_ref().map(|c| c.held.borrow()),
         strings: FxHashMap::default(),
+        items: Vec::new(),
+        keyed: Vec::new(),
     };
     let mut out = Err(Unread::General);
     // SAFETY: `exec_raw` runs the closure as a C function inside a protected
