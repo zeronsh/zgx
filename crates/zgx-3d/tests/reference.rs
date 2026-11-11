@@ -384,6 +384,29 @@ fn scenes() -> Vec<Scene> {
             environment: sky,
             camera: camera([0., 1.2, 3.4], [0., 0.55, 0.]),
         },
+        // Sheen, anisotropy and iridescence (`zgx_3d::finish`): velvet,
+        // brushed metal and a soap film.
+        Scene {
+            name: "finishes",
+            tolerance: CLOSE,
+            build: |world| {
+                let ball = |x: f32, material: Material| {
+                    world.add(Object::mesh(Geometry::sphere(0.45, 48), material).at([x, 0.5, 0.]))
+                };
+                let velvet = ball(-1., Material::rgb(0x400818).with(0., 0.9));
+                world.set_sheen(velvet, Some(Sheen::new([1., 0.45, 0.6]).roughness(0.4)));
+                let brushed = ball(0., Material::rgb(0xc8c8d0).with(1., 0.45));
+                world.set_anisotropy(brushed, Some(Anisotropy::new(0.85)));
+                let film = ball(1., Material::rgb(0x101010).with(0., 0.15));
+                world.set_iridescence(film, Some(Iridescence::new(1.).thickness(450.)));
+                sun(world, [-0.3, -0.7, -1.], 3.);
+                vec![velvet, brushed, film, floor(world)]
+            },
+            shadows: false,
+            tone: ToneMapping::Neutral,
+            environment: sky,
+            camera: camera([0., 1.1, 3.2], [0., 0.45, 0.]),
+        },
         Scene {
             name: "environment",
             tolerance: CLOSE,
