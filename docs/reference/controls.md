@@ -38,7 +38,19 @@ A focusable box whose children lie in a row; `on_click` runs on a click, Enter (
 | `bg` | `Color` | `"$button.bg"` | `hover` defaults to `"$button.hover"` |
 | `rounded` | `number` | `6` | |
 | `focus` | `Styles` | an accent ring | `focus = { border = 0 }` removes it |
-| `variant` | `"primary"`, `"ghost"`, `"danger"`, `"default"` | `"default"` | how it looks where its own styles don't say: `primary` the accent (`$accent`, `$accent.text`, `$accent.hover` under the pointer), `ghost` no background until hovered (`$hover`), `danger` `$danger` |
+| `variant` | `"primary"`, `"ghost"`, `"danger"`, `"glass"`, `"prominent_glass"`, `"default"` | `"default"` | how it looks where its own styles don't say: `primary` the accent (`$accent`, `$accent.text`, `$accent.hover` under the pointer), `ghost` no background until hovered (`$hover`), `danger` `$danger`, `glass` and `prominent_glass` a capsule of the system's glass (drawn where the system has none), the prominent one tinted `$accent` |
+| `native` | `boolean` | `true` | iOS: the system's `UIButton`, below. `false` draws it. Elsewhere always drawn. |
+
+On iOS a button is the system's `UIButton` when its content is a text, a plain `ui.symbol`, or the symbol ahead of the text, and it sets only where it lies, what it is called and what pressing it does (`w`, `h`, margins, `grow`, `id`, `label`, `on_click`, `disabled` as a condition and the like). Its highlight, its press, its size for what it says and how it looks while disabled are all UIKit's. Anything else (other children, `bg`, `hover`, `px`, other handlers) keeps the drawn button; `native = true` shows the system's anyway and leaves those out, unless its children can't be shown on one, which keeps it drawn. Each variant is one `UIButton.Configuration`:
+
+| `variant` | On iOS |
+| --- | --- |
+| `"default"` | `.gray()` |
+| `"primary"` | `.filled()` |
+| `"ghost"` | `.plain()` |
+| `"danger"` | `.plain()`, its foreground `systemRed` |
+| `"glass"` | `.glass()` |
+| `"prominent_glass"` | `.prominentGlass()` |
 
 ## input and textarea
 
@@ -57,7 +69,7 @@ A text editor bound to a string state: selection, undo, clipboard and IME includ
 | `select_on_focus` | `boolean` | `false` | focusing selects all the text (an address bar) |
 | `inputmode` | `"text" \| "decimal" \| "numeric" \| "tel" \| "search" \| "email" \| "url" \| "none"` | `"text"` | what kind of text it takes (HTML's `inputmode`): which touch keyboard Windows shows (digits, `@`, `.com`) and what a Wayland input method offers; `"none"` shows no virtual keyboard, for a field with its own keypad. A hint, never a check of what is typed |
 | `on_paste` | `(e: { text: string?, files: { File } }) -> boolean?` | none | hears a person's paste before it goes in, from a key, a menu or a middle click (HTML's `paste` event): `e.text` is the clipboard's, `nil` where it holds no text, as with an image (`ui.clipboard.read_image`), and `e.files` the files copied in Finder, Explorer or a file manager, readable as `ui.open_files`'s are (a copied file may also put its name in `e.text`: look at `files` first). A plugin hears files with both the `Clipboard` and `Files` grants. Returning `true` takes the paste, so nothing goes in; otherwise the text goes in as usual. With it, the context menu's Paste stays enabled on a clipboard without text. It isn't called for a read-only field, or for `el:replace_selection` |
-| `spellcheck` | `boolean \| Readable<boolean> \| (() -> boolean)` | `false` | check the spelling as it is typed (HTML's `spellcheck`): misspelled words get a dotted line (not the word being typed), and the context menu offers the system checker's guesses, Learn Spelling and Ignore Spelling. Never in a password field |
+| `spellcheck` | `boolean \| Readable<boolean> \| (() -> boolean)` | `false` | check the spelling as it is typed (HTML's `spellcheck`): misspelled words get a dotted line (not the word being typed), and the context menu offers the system checker's guesses, Learn Spelling and Ignore Spelling. On iOS, as UITextField does, text already there isn't marked, only a word a typed delimiter just ended. Never in a password field |
 | `autocorrect` | `boolean` | `false` | correct a misspelled word as it ends and expand the person's text replacements ("omw" to "On my way!"), as the system's own fields do where the person has them on (macOS: System Settings, Keyboard, Text Input). Windows' spelling checker (`ISpellChecker`) carries no corrections of its own and has no smart quotes, so on Windows and Linux both options change nothing. Each is an undo step of its own: undo puts back what was typed, and it stays. Never in a password field |
 | `smart_punctuation` | `boolean` | `false` | curly quotes and dashes for straight ones as they are typed (“ ” ‘ ’ for `"` and `'`, — for `--`), in the forms the person chose, where they have the system's smart quotes and dashes on (macOS). Undo puts back what was typed. Leave it off for code and data |
 | `overscroll` | `"auto"` \| `"contain"` | `"auto"` | `"contain"`: a wheel over the field stays with it at its edges, the scroll views around it never moving ([scrolling](scrolling.md)) |
@@ -159,6 +171,7 @@ A horizontal number control: dragging, the arrow keys (1% of the range) and Home
 | `px`, `py` | `Length` | `8`, `6` | |
 | `bg`, `rounded` | | `"$input.bg"`, `"$radius.md"` | the rail |
 | `color` | `Color` | inherited | the thumb |
+| `native` | `boolean` | `true` | iOS: the system's `UISlider`, its glass thumb, its glide after a release and its haptics at the ends all UIKit's; `false` draws it. Setting `bg`, `rounded`, `color` or padding draws it too, unless `native = true`, which shows the system's and leaves them out. Elsewhere always drawn. |
 
 ## segmented
 
@@ -169,6 +182,7 @@ One of a few options side by side, as AppKit's segmented control: a radio group 
 | `value` | `State<any>`, or `() -> any` | required | the chosen option's value, both ways; a function controls it, a choice going to `on_change` |
 | `options` | `{ string \| number \| { label, value } }` | required | what each shows; a bare string or number is its own value |
 | `label` | `string` | `""` | the group's accessible name |
+| `native` | `boolean` | `true` | iOS: the system's `UISegmentedControl`, its glass lens sliding to the choice, each segment a button to VoiceOver; `false` draws it, as do `bg`, `rounded`, `color` or padding unless `native = true`. Elsewhere always drawn. |
 
 ## stepper
 
@@ -181,6 +195,28 @@ A number field with buttons that step it, a spin button to assistive technology.
 | `step` | `number` | `1` | |
 | `decimals` | `number` | `0` | digits shown after the point |
 | `label` | `string` | `""` | its accessible name |
+| `native` | `boolean` | `true` | iOS: the system's `UIStepper` when `min` is below `max`: its − and + alone, repeating while held as UIKit's do, and no number, as UIKit's shows none (put the value beside it). `false` draws it, as do `bg`, `rounded`, `color` or padding unless `native = true`. Elsewhere always drawn. |
+
+## page_control
+
+Dots for pages, the page shown marked. On iOS the system's `UIPageControl`: a tap steps one page, by the half of the control it lands on; elsewhere each dot goes to its page. One adjustable element to assistive technology, saying "page 1 of 5". It takes the width of its dots, to 8 pages. UIKit's dots are white, for a dark or tinted page: on white they can't be seen.
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `value` | `State<number>`, or `() -> number` | required | the page shown, from 1; a function controls it, a change going to `on_change` |
+| `count` | `number` | required | how many pages, at least 1 |
+| `label` | `string` | `""` | its accessible name |
+
+## native_tabs
+
+The system's tab bar: its glass, and the lens that moves between tabs. Give it the window's bottom edge and 83 points. Elsewhere, a row of buttons.
+
+| Option | Type | Default | |
+| --- | --- | --- | --- |
+| `value` | `State<number>`, or `() -> number` | required | the chosen tab, from 1 |
+| `on_change` | `(tab: number) -> ()` | none | with a function `value`: the person chose a tab |
+| `items` | `{ { title: string, symbol: string } }` | required | each tab's title and SF Symbol |
+| `minimize` | `"never"`, `"on_scroll_down"`, `"on_scroll_up"` | `"never"` | iOS: when it shrinks to its chosen tab, with the window's scrolling, as a `UITabBarController`'s `tabBarMinimizeBehavior` does: a tap on the circle or a scroll back to the top brings it back. Touches beside the bar reach the page under it. Elsewhere, ignored |
 
 ## select
 

@@ -43,6 +43,8 @@ context_menu_below: boolean?
 | `on_click` (`menu_item`) | `Handler \| Action` | none | runs once the menu has closed |
 | `checked`, `radio` (`menu_item`) | `boolean \| Readable<boolean> \| (() -> boolean)`, `boolean` | none | a check in the item's gutter while true (a toggle item), or a dot with `radio = true` (one of a group); assistive technology hears a checkbox or radio item |
 | `shortcut` (`menu_item`) | `string` | none | the keys that do it, shown at its end in the tertiary text colour: keys (`"cmd+c"`) as the platform shows them (⌘C on macOS, Ctrl+C elsewhere), or text as it is (`"⌘C"`) |
+| `symbol` (`menu_item`) | `string` | none | an SF Symbol ahead of what it says |
+| `style` (`menu_item`) | `"destructive"`, `"default"` | `"default"` | `"destructive"`: what can't be undone, marked as the platform marks it (`$danger`, drawn) |
 | `match_anchor_width` (`popover`, `menu`) | `boolean` | `false` | at least as wide as its trigger, as a select's list is |
 | `at_caret` (`popover`) | `boolean` | `false` | at the caret of the input or textarea in its `anchor`, not at the anchor's box, as a mention's or a slash command's suggestions are (tiptap's suggestion, a chat composer's `@`): it follows the caret as text is typed, a line wraps or breaks, the field scrolls and an input method composes. It takes no focus and has no backdrop: keys go on to the field, whose `on_key` moves through the suggestions (with `active_descendant` naming the one it is on) and chooses one; `open` says when it shows, and a click elsewhere passes through |
 | `dismiss_on_backdrop` (`modal`, `popover`) | `boolean` | `true` | `false`: a click outside doesn't close it (a dialog that must be answered); Escape still does |
@@ -54,6 +56,10 @@ context_menu_below: boolean?
 Panels start with 16 points of padding, the theme's surface color and rounded corners; a modal is 360 wide, a popover or menu 240, and each is as tall as its content, at most the window.
 
 ## Behavior
+
+On iOS a `ui.menu` is the system's `UIMenu`, which grows out of its button, when its `anchor` is a system `ui.button` (see `ui.button`), it sets no `placement`, `match_anchor`, `open_over` or styles, and it holds only `ui.menu_item`s with a label and perhaps a `symbol`: their `checked`, `disabled`, `keep_open` and `style` go to UIKit, the items are asked for as it opens, `open` works both ways, and `shortcut`s, which a touch menu doesn't show, are left out. Anything else keeps the drawn menu.
+
+On iOS, `ui.modal` and `ui.popover` are drawn and appear at once. For UIKit's motion use `ui.ios.popover { open, anchor, w, build }`, out of its arrow on UIKit's springs and placed by its rules, and `ui.ios.cover { open, bg, build }`, a full-screen cover from below. Each goes where it fills the window, as `ui.ios.sheet` does. Real alerts and action sheets are `ui.alert` and `ui.action_sheet`.
 
 - Escape closes the top panel; a click on blank panel space does not. A click outside a modal or a menu closes it and does nothing else.
 - A click outside a popover closes it and still does what it does there, as on the web and in AppKit: a button acts and a field takes focus; on blank space, focus goes back to its anchor, as Escape gives it. A click on its own anchor runs the anchor's `on_click` once (a toggle closes it, rather than it closing and opening again).

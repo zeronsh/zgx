@@ -150,13 +150,16 @@ export const sets = [
   {
     dir: 'platforms',
     title: 'Platforms',
-    description: 'macOS, Windows and Linux hosts, and their checks',
+    description: 'macOS, Windows, Linux and iOS hosts, and their checks',
     icon: 'MonitorSmartphone',
     pages: [
       { slug: 'index', mdx: 'platforms/index.mdx' },
       '---Hosts---',
       { slug: 'windows', src: 'docs/windows.md', title: 'Windows' },
       { slug: 'linux', src: 'docs/linux.md', title: 'Linux' },
+      { slug: 'ios', src: 'docs/ios.md', title: 'iOS' },
+      { slug: 'ios-device', src: 'docs/ios-device.md', title: 'iOS on a phone',
+        description: 'Build, sign and run a zgx app on an iPhone, and measure it there.' },
       '---Native surfaces---',
       { slug: 'window-controls', src: 'docs/window-controls.md', title: 'Window controls' },
       { slug: 'native-surfaces', src: 'docs/native-surfaces.md', title: 'CoreVideo surfaces (macOS)',
