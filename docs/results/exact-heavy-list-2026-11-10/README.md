@@ -51,7 +51,7 @@ The models differ here, and the numbers are the app's process only. Exact's AppK
 - **CPU:** zgx's app process used 2.2 to 5.0 times less: 80 against 207 ms per second (trackpad, 1,000 pt/s), 348 against 1,322 (trackpad, 24,000), and 241 against 1,200 (wheel, 24,000). At rest, 0.50 against 1.73 ms per second.
 - **Memory:** zgx's peak footprint was higher in every pair (582 against 363 MiB at trackpad 24,000; 308 against 131 at wheel 1,000). Ten seconds after the input stopped the two were level: 153 to 209 MiB for zgx, 128 to 205 MiB for Exact. #1838 bounds the copies behind that peak; it hasn't been measured on this scene.
 - **Blank bands:** frames with a band over 250 points without ink. Both had none to 3,000 pt/s. zgx had 19 to 42 per run from 6,000 pt/s (trackpad) and 12,000 (wheel). Exact had 0 to 8. The detector can't tell an unbuilt white row from a photo's grey placeholder (`#E5E5EA`), so the cause isn't established. They came mostly in steady motion, not at reversals.
-- **Cold start:** the first window at 271.5 ms for zgx and 268.9 for Exact. Settled content at 354.8 and 318.9.
+- **Cold start:** the first window at 271.5 ms for zgx and 268.9 for Exact. Settled content at 354.8 and 318.9. A binary's first launch after it's built or copied also includes macOS checking the new binary before it runs. That was 1.0 to 1.9 s before zgx-run's `main` on an M5 Max, outside either app's code. These cells, near 270 ms, don't include it. A first launch compares only with the other app's first.
 
 ## Not compared
 
