@@ -88,3 +88,7 @@ required-features = ["audio"]
 [[example]]
 name = "post_bench"
 required-features = ["post"]
+
+[[example]]
+name = "audio_scene"
+required-features = ["audio"]
