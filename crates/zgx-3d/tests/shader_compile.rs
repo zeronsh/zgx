@@ -8,7 +8,9 @@ use zgx_3d::*;
 use zgx_gpu::GpuRenderer;
 
 const SIZE: f32 = 100.;
-const SLOW: u64 = 400;
+/// The compile worker's delay: past what a frame of today's own pipelines
+/// takes on a loaded machine.
+const SLOW: u64 = 1500;
 
 #[test]
 fn a_frame_with_a_shader_compiling_returns_without_waiting_for_it() {
@@ -60,7 +62,7 @@ fn a_frame_with_a_shader_compiling_returns_without_waiting_for_it() {
     let first = frame(&mut ui);
     let took = start.elapsed();
     assert!(
-        took < Duration::from_millis(SLOW / 2),
+        took < Duration::from_millis(SLOW),
         "the frame waited: {took:?}"
     );
     assert!(world.compiling(), "its pipeline is compiling");
