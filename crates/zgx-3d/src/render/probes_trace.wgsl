@@ -21,10 +21,11 @@ struct RayInstance {
 @group(0) @binding(17) var<storage, read> vertices: array<f32>;
 @group(0) @binding(18) var<storage, read> indices: array<u32>;
 @group(0) @binding(19) var<storage, read> instances: array<RayInstance>;
-// Whether anything lies between `from` and `distance` along `d`.
+// Whether anything casting shadows (an instance's mask bit 1: `CASTS` in
+// `raytrace.rs`) lies between `from` and `distance` along `d`.
 fn blocked(start: vec3<f32>, d: vec3<f32>, distance: f32) -> bool {
     var q: ray_query;
-    rayQueryInitialize(&q, scene, RayDesc(RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT, 0xffu, 0.0, distance, start, d));
+    rayQueryInitialize(&q, scene, RayDesc(RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_TERMINATE_ON_FIRST_HIT, 1u, 0.0, distance, start, d));
     rayQueryProceed(&q);
     return rayQueryGetCommittedIntersection(&q).kind != RAY_QUERY_INTERSECTION_NONE;
 }
