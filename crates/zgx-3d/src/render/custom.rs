@@ -19,7 +19,7 @@ use crate::{
     texture::MAPS,
     world::Inner,
 };
-use std::{collections::HashMap, rc::Rc, time::Instant};
+use std::{collections::HashMap, rc::Rc};
 use zgx_gpu::{viewport::ViewportFrame, wgpu};
 
 /// The `Settle` reason of a mesh in view whose shader reads time.
@@ -75,10 +75,6 @@ pub(super) struct State {
     /// Which custom runs the shadow map was last drawn with (a number):
     /// it holds what their shaders made of them.
     casting: u64,
-    /// When the first frame was drawn, and the last; frames drawn.
-    epoch: Option<Instant>,
-    last: Option<Instant>,
-    index: u32,
 }
 impl State {
     /// Its pipelines and those compiling for it gone (its layers changed,
@@ -973,12 +969,8 @@ fn now<T>(future: impl std::future::Future<Output = T>) -> T {
 /// The frame's tail: view, projection, size, time, its step and count, and
 /// the surface layers' numbers.
 fn write_tail(gpu: &mut Gpu, world: &Inner, frame: &ViewportFrame<'_>) {
-    let state = &mut gpu.custom;
-    let epoch = *state.epoch.get_or_insert(frame.time);
-    let delta = state.last.map_or(0., |last| {
-        frame.time.saturating_duration_since(last).as_secs_f32()
-    });
-    state.last = Some(frame.time);
+    // The renderer's clock, as post passes read it (outliving `gpu`).
+    let super::Tick { time, delta, index } = gpu.tick;
     let (width, height) = frame.size;
     let aspect = width as f32 / height.max(1) as f32;
     let mut tail: Vec<f32> = Vec::with_capacity(FRAME_TAIL as usize / 4);
@@ -987,14 +979,13 @@ fn write_tail(gpu: &mut Gpu, world: &Inner, frame: &ViewportFrame<'_>) {
     tail.extend([
         width as f32,
         height as f32,
-        frame.time.saturating_duration_since(epoch).as_secs_f32(),
+        time,
         delta,
-        f32::from_bits(state.index),
+        f32::from_bits(index),
         0.,
         0.,
         0.,
     ]);
-    state.index = state.index.wrapping_add(1);
     let layers = &world.shaders.layers;
     if !layers.is_empty() {
         let (offsets, size) = layer_offsets(layers.iter().map(|l| &**l));

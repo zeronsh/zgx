@@ -97,6 +97,62 @@ pub(crate) struct Renderer {
     /// past the scene's format changing as the chain turns on.
     #[cfg(feature = "post")]
     apps: Option<post::Apps>,
+    /// Its clock: one epoch for custom materials and post passes alike,
+    /// past the GPU state being made anew.
+    clock: Clock,
+}
+/// The frame's time as shaders read it (`frame.time`, `.delta`, `.index`):
+/// seconds since the renderer's first frame, since its last, and frames
+/// before this one.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Tick {
+    pub(crate) time: f32,
+    pub(crate) delta: f32,
+    pub(crate) index: u32,
+}
+/// A renderer's clock, read from its frames' times (never the wall's: a
+/// recorded frame repeats).
+#[derive(Default)]
+struct Clock {
+    epoch: Option<std::time::Instant>,
+    last: Option<(std::time::Instant, Tick)>,
+}
+impl Clock {
+    /// The tick of a frame at `now`: the last's again for the same instant
+    /// (one view drawn twice in a frame), else the next.
+    fn tick(&mut self, now: std::time::Instant) -> Tick {
+        let epoch = *self.epoch.get_or_insert(now);
+        let tick = match self.last {
+            Some((last, tick)) if last == now => return tick,
+            Some((last, tick)) => Tick {
+                time: now.saturating_duration_since(epoch).as_secs_f32(),
+                delta: now.saturating_duration_since(last).as_secs_f32(),
+                index: tick.index.wrapping_add(1),
+            },
+            None => Tick::default(),
+        };
+        self.last = Some((now, tick));
+        tick
+    }
+}
+#[cfg(test)]
+mod clock_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_clock_ticks_once_an_instant_from_its_first() {
+        let mut clock = Clock::default();
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        assert_eq!(clock.tick(at(0)), Tick::default());
+        let next = clock.tick(at(16));
+        assert_eq!((next.index, next.delta), (1, 0.016));
+        // The same instant again (one view drawn twice a frame): the same.
+        assert_eq!(clock.tick(at(16)), next);
+        let later = clock.tick(at(48));
+        assert_eq!((later.index, later.time, later.delta), (2, 0.048, 0.032));
+    }
 }
 impl Renderer {
     pub(crate) fn new(world: Weak<RefCell<Inner>>) -> Self {
@@ -107,6 +163,7 @@ impl Renderer {
             scratch: Scratch::default(),
             #[cfg(feature = "post")]
             apps: None,
+            clock: Clock::default(),
         }
     }
 }
@@ -628,7 +685,11 @@ impl Viewport for Renderer {
             // The app's passes whose pipelines are in: those still being
             // made (off the frame), or refused, are left out.
             let ((hdr, display), compiling) = match world.post_passes.is_empty() {
-                true => ((0, 0), false),
+                // The last gone: its pipelines and bindings with it.
+                true => {
+                    self.apps = None;
+                    ((0, 0), false)
+                }
                 false => self
                     .apps
                     .get_or_insert_with(|| post::Apps::new(frame.device))
@@ -669,6 +730,7 @@ impl Viewport for Renderer {
         }
         let gpu = self.gpu.as_mut().unwrap();
         gpu.frame += 1;
+        gpu.tick = self.clock.tick(frame.time);
         // Maps loaded since the last frame (`crate::assets`): bound in place
         // of the stand-ins their meshes drew with, and shadows drawn again
         // (a cut-out cast its shadow whole without its base colour).
@@ -1080,7 +1142,7 @@ impl Viewport for Renderer {
                         passes,
                         stage,
                         into,
-                        (gpu.frame, frame.time),
+                        gpu.tick,
                     );
                 }
             }
@@ -1089,7 +1151,13 @@ impl Viewport for Renderer {
             *spare = casting;
         }
         scratch.all = recycle(all);
-        world.temporaries.set(gpu.temporary_bytes());
+        // The app's passes' bindings hold the targets of the compile they
+        // were made for until they run on the next.
+        #[cfg(feature = "post")]
+        let stale = apps.as_ref().map_or(0, |a| a.stale(gpu.graph.compiled));
+        #[cfg(not(feature = "post"))]
+        let stale = 0;
+        world.temporaries.set(gpu.temporary_bytes() + stale);
         // Frames keep coming while maps are on their way.
         world.unsettle(crate::world::Settle::LOADING, gpu.loads.pending());
     }

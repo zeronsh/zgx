@@ -832,3 +832,53 @@ fn a_pass_returning_less_than_nothing_is_taken_as_nothing() {
     };
     assert_eq!(shown("-0.5"), Some(nothing));
 }
+
+#[test]
+fn the_last_pass_gone_its_bindings_let_go_of_the_chains_targets() {
+    let world = flat([0.2, 0.2, 0.2, 1.]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let plain = world.temporary_bytes();
+    let pass = world
+        .add_post(PostPass::new(SCALE).param("k", PostParam::Float))
+        .unwrap();
+    window.compiled(&world);
+    assert!(world.temporary_bytes() > plain, "the chain's targets");
+    world.remove_post(pass);
+    window.draw();
+    assert_eq!(world.temporary_bytes(), plain, "only the meshes' again");
+}
+
+#[test]
+fn the_frames_index_counts_on_as_the_gpu_state_is_made_anew() {
+    // A pass showing the frame's index; the samples changed between two
+    // frames (the renderer's GPU state made again): it goes on counting.
+    let world = flat([0.2, 0.2, 0.2, 1.]);
+    world
+        .add_post(PostPass::new(
+            "#zgx post 1\nfn post(p: PostIn) -> vec4<f32> { return vec4(f32(frame.index) / 255.0, 0.0, 0.0, 1.0); }\n",
+        ))
+        .unwrap();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.compiled(&world);
+    let mut step = 0.;
+    let mut red = || {
+        // A frame drawn: the camera nudged.
+        step += 1e-4;
+        world.set_camera(Camera::looking_at([0., 0., 4. + step], [0., 0., 0.]));
+        at(&window.draw(), SIZE / 2, SIZE / 2)[0]
+    };
+    for _ in 0..20 {
+        red();
+    }
+    let before = red();
+    world.set_samples(1);
+    let after = red();
+    // And on from there (the passes' bindings of the new targets).
+    assert!(red() > after);
+    assert!(after > before, "{after} after {before}");
+}

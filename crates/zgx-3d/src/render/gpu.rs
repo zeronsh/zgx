@@ -133,6 +133,8 @@ pub(super) struct Gpu {
     /// The scene's targets the world's scene draws were prepared for, and
     /// which (by address).
     pub(super) draws_prepared: (Option<super::SceneTarget>, Vec<u64>),
+    /// The renderer's clock this frame (`Renderer`'s, outliving this).
+    pub(super) tick: super::Tick,
     /// The post chain's passes, made with the first frame with one on.
     #[cfg(feature = "post")]
     pub(super) post: Option<super::post::Chain>,
@@ -391,6 +393,7 @@ impl Gpu {
             #[cfg(feature = "gi")]
             probes: None,
             draws_prepared: (None, Vec::new()),
+            tick: Default::default(),
             #[cfg(feature = "post")]
             post: None,
             samples,

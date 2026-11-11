@@ -341,9 +341,9 @@ impl Chain {
         passes: &[crate::world::AppPass],
         stage: crate::world::PostStage,
         into: (&wgpu::TextureView, wgpu::TextureFormat, bool),
-        (index, time): (u64, std::time::Instant),
+        tick: super::Tick,
     ) {
-        let copy = (index, time, &self.copy);
+        let copy = (tick, &self.copy);
         apps.run(
             (device, queue),
             encoder,

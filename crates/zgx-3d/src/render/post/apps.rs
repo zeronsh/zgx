@@ -9,7 +9,6 @@
 use crate::world::{AppPass, PostPassId, PostStage};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use zgx_gpu::wgpu;
 
 /// A pipeline's key: its pass, target format, and whether it encodes sRGB
@@ -48,8 +47,9 @@ pub(in crate::render) struct Apps {
     /// The scene's other half, for the copy back into the scene.
     copy_bind: Option<wgpu::BindGroup>,
     compiled: u64,
-    /// The first frame's time and the last's (`ViewportFrame::time`).
-    clock: Option<(Instant, Instant)>,
+    /// The bytes of the targets its bindings hold: those of the compile
+    /// they were made for (`compiled`).
+    held: u64,
 }
 
 /// Which of the graph's views a pass reads or writes.
@@ -126,7 +126,7 @@ impl Apps {
             binds: HashMap::new(),
             copy_bind: None,
             compiled: 0,
-            clock: None,
+            held: 0,
         }
     }
 
@@ -134,6 +134,7 @@ impl Apps {
     pub(in crate::render) fn rest(&mut self) {
         self.binds.clear();
         self.copy_bind = None;
+        self.held = 0;
     }
 
     /// `passes` of `stage` run in turn: HDR passes on the scene, display
@@ -148,7 +149,7 @@ impl Apps {
         passes: &[AppPass],
         stage: PostStage,
         (target, format, encode): (&wgpu::TextureView, wgpu::TextureFormat, bool),
-        (index, now, copy): (u64, Instant, &wgpu::RenderPipeline),
+        (tick, copy): (crate::render::Tick, &wgpu::RenderPipeline),
         copy_layout: &wgpu::BindGroupLayout,
     ) {
         let Some(targets) = graph.targets.as_ref() else {
@@ -164,14 +165,11 @@ impl Apps {
             self.rest();
             self.compiled = graph.compiled;
         }
-        // The frame's clock (its own time, never the wall's: a recorded
-        // frame repeats), for every pass of it.
-        let (first, last) = *self.clock.get_or_insert((now, now));
-        self.clock = Some((first, now));
+        // The renderer's clock, as custom materials read it.
         let frame = Frame {
-            time: now.duration_since(first).as_secs_f32(),
-            delta: now.duration_since(last).as_secs_f32(),
-            index: index as u32,
+            time: tick.time,
+            delta: tick.delta,
+            index: tick.index,
             pad: 0,
         };
         queue.write_buffer(&self.frame, 0, bytemuck::bytes_of(&frame));
@@ -224,6 +222,7 @@ impl Apps {
                     ],
                 });
                 self.binds.insert(key, made);
+                self.held = graph.bytes();
             }
             draw(
                 encoder,
@@ -291,6 +290,16 @@ impl Apps {
             }
         }
         (counts, !self.pending.is_empty())
+    }
+
+    /// The bytes its bindings hold of targets a compile since let go (none
+    /// once it has run on `compiled`, or rested).
+    pub(in crate::render) fn stale(&self, compiled: u64) -> u64 {
+        if self.compiled == compiled {
+            0
+        } else {
+            self.held
+        }
     }
 
     /// Whether `pass`'s pipelines into `out` are in (and the device took

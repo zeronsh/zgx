@@ -268,8 +268,9 @@ pub(super) struct Graph {
     pool: Pool,
     /// What its temporaries hold (`bytes`).
     bytes: u64,
-    /// Compiles so far: bindings of its targets are made again as it
-    /// changes.
+    /// Its last compile, by a stamp no other list's compile has (0 before
+    /// the first): bindings of its targets are made again as it changes,
+    /// those kept past it being made anew too (`post::Apps`).
     pub(super) compiled: u64,
 }
 impl Graph {
@@ -479,7 +480,8 @@ impl Graph {
         self.pool.clear();
         self.config = Some(config);
         self.bytes = self.summed();
-        self.compiled += 1;
+        static COMPILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        self.compiled = COMPILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         behind_made
     }
 }
