@@ -247,7 +247,25 @@ struct ProcessorState<T: Timeout> {
 
     /// State for synchronized terminal updates.
     sync_state: SyncState<T>,
+
+    /// zgx: a request a program sends as a DCS string, its bytes gathered as
+    /// they arrive.
+    dcs_request: DcsRequest,
 }
+
+/// zgx: the DCS string being read, if it is a request answered as it ends.
+#[derive(Debug, Default)]
+enum DcsRequest {
+    /// Not a request (a sixel image, say, or nothing).
+    #[default]
+    None,
+    /// XTGETTCAP (`DCS + q`): terminfo capabilities' names, hex, split by `;`.
+    Termcap(Vec<u8>),
+}
+
+/// zgx: the longest request kept; one longer is left unanswered. Room for
+/// every capability a program asks for, hex encoded, many times over.
+const DCS_REQUEST_LIMIT: usize = 1024;
 
 #[derive(Debug)]
 struct SyncState<T: Timeout> {
@@ -706,6 +724,11 @@ pub trait Handler {
 
     /// Report text area size in characters.
     fn text_area_size_chars(&mut self) {}
+
+    /// zgx: XTGETTCAP, the terminfo capabilities a program asks for: their
+    /// names, each hex encoded, split by `;` (should write back to the pty
+    /// stream).
+    fn request_termcap(&mut self, _names: &[u8]) {}
 
     /// Set hyperlink.
     fn set_hyperlink(&mut self, _: Option<Hyperlink>) {}
@@ -1325,22 +1348,36 @@ where
         }
     }
 
+    // zgx: XTGETTCAP's names are gathered, and asked for as the string ends.
     #[inline]
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
-        debug!(
-            "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}, action: {:?}",
-            params, intermediates, ignore, action
-        );
+        self.state.dcs_request = match (intermediates, action) {
+            (b"+", 'q') if !ignore => DcsRequest::Termcap(Vec::new()),
+            _ => {
+                debug!(
+                    "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}, action: {:?}",
+                    params, intermediates, ignore, action
+                );
+                DcsRequest::None
+            },
+        };
     }
 
     #[inline]
     fn put(&mut self, byte: u8) {
-        debug!("[unhandled put] byte={:?}", byte);
+        match &mut self.state.dcs_request {
+            DcsRequest::Termcap(bytes) if bytes.len() < DCS_REQUEST_LIMIT => bytes.push(byte),
+            DcsRequest::Termcap(_) => self.state.dcs_request = DcsRequest::None,
+            DcsRequest::None => debug!("[unhandled put] byte={:?}", byte),
+        }
     }
 
     #[inline]
     fn unhook(&mut self) {
-        debug!("[unhandled unhook]");
+        match mem::take(&mut self.state.dcs_request) {
+            DcsRequest::Termcap(names) => self.handler.request_termcap(&names),
+            DcsRequest::None => debug!("[unhandled unhook]"),
+        }
     }
 
     #[inline]
@@ -2120,6 +2157,31 @@ mod tests {
         parser.advance(&mut handler, BYTES);
 
         assert_eq!(handler.attr, Some(Attr::Bold));
+    }
+
+    /// zgx: XTGETTCAP's names reach the handler as the string ends, whole
+    /// across reads; other DCS strings, and one too long to keep, don't.
+    #[test]
+    fn termcap_requests_reach_the_handler_whole() {
+        #[derive(Default)]
+        struct Requests(Vec<Vec<u8>>);
+        impl Handler for Requests {
+            fn request_termcap(&mut self, names: &[u8]) {
+                self.0.push(names.to_vec());
+            }
+        }
+
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = Requests::default();
+        parser.advance(&mut handler, b"\x1bP+q544e;5463\x1b\\");
+        parser.advance(&mut handler, b"\x1bP+q52");
+        parser.advance(&mut handler, b"4742\x1b\\");
+        parser.advance(&mut handler, b"\x1bPq#0;2;0;0;0#0~~\x1b\\\x1bP$qm\x1b\\\x1bP+q\x1b\\");
+        let long = [b'4'; DCS_REQUEST_LIMIT + 1];
+        parser.advance(&mut handler, b"\x1bP+q");
+        parser.advance(&mut handler, &long);
+        parser.advance(&mut handler, b"\x1b\\");
+        assert_eq!(handler.0, [&b"544e;5463"[..], b"524742", b""]);
     }
 
     #[test]

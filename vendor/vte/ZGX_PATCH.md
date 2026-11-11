@@ -44,3 +44,14 @@ what one taking characters is given.
 With `zgx-alacritty-terminal` 0.26.4 writing a run at once
 (`Term::input_str`), `terminal` went from 730.4 M to 665.3 M instructions
 (−8.9%), and `terminal-pictures` −0.19%.
+
+## XTGETTCAP gathered and asked for
+
+`src/ansi.rs`: a DCS string `+q` (XTGETTCAP, a program asking the terminal
+for terminfo capabilities by name, as nvim does for direct colour where
+`COLORTERM` isn't set) is gathered as it arrives, up to 1,024 bytes, and given to
+`Handler::request_termcap(&[u8])` as it ends: the names, each hex encoded,
+split by `;`. By default it does nothing; other DCS strings, and one longer
+than that, go unanswered as before. `termcap_requests_reach_the_handler_whole`
+checks a request split across reads, a sixel image, DECRQSS and an empty and
+a long request beside it. Version 0.15.1.

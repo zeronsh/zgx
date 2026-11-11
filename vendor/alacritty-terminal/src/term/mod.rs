@@ -2788,6 +2788,80 @@ impl<T: EventListener> Handler for Term<T> {
         let text = format!("\x1b[8;{};{}t", self.screen_lines(), self.columns());
         self.event_proxy.send_event(Event::PtyWrite(text));
     }
+
+    // zgx: XTGETTCAP, answered a name at a time as kitty and foot do: `1+r`
+    // with the name and its value (none for a flag), each hex encoded, for a
+    // capability this terminal has; `0+r` and the name as asked for one it
+    // hasn't.
+    fn request_termcap(&mut self, names: &[u8]) {
+        let mut text = String::new();
+        for name in names.split(|&byte| byte == b';') {
+            let capability = decode_hex(name)
+                .and_then(|name| TERMCAPS.iter().find(|(known, _)| known.as_bytes() == name));
+            match capability {
+                Some((known, value)) => {
+                    text.push_str("\x1bP1+r");
+                    push_hex(&mut text, known.as_bytes());
+                    if let Some(value) = value {
+                        text.push('=');
+                        push_hex(&mut text, value.as_bytes());
+                    }
+                }
+                None => {
+                    text.push_str("\x1bP0+r");
+                    text.push_str(str::from_utf8(name).unwrap_or_default());
+                }
+            }
+            text.push_str("\x1b\\");
+        }
+        self.event_proxy.send_event(Event::PtyWrite(text));
+    }
+}
+
+/// zgx: the terminfo capabilities XTGETTCAP reports, as `TERM`
+/// (xterm-256color) has them or beyond it, in terminfo's own notation, and
+/// none for a flag: the name and colours, direct colour (`RGB`, tmux's `Tc`
+/// and the sequences setting it), the clipboard through OSC 52 (`Ms`), the
+/// cursor's shape, and underlines styled and coloured (`Smulx`, `Setulc`,
+/// kitty's `Su`).
+const TERMCAPS: &[(&str, Option<&str>)] = &[
+    ("TN", Some("xterm-256color")),
+    ("name", Some("xterm-256color")),
+    ("Co", Some("256")),
+    ("colors", Some("256")),
+    ("RGB", None),
+    ("Tc", None),
+    ("setrgbf", Some("\\E[38;2;%p1%d;%p2%d;%p3%dm")),
+    ("setrgbb", Some("\\E[48;2;%p1%d;%p2%d;%p3%dm")),
+    ("Ms", Some("\\E]52;%p1%s;%p2%s\\007")),
+    ("Ss", Some("\\E[%p1%d q")),
+    ("Se", Some("\\E[0 q")),
+    ("Smulx", Some("\\E[4:%p1%dm")),
+    (
+        "Setulc",
+        Some("\\E[58:2::%p1%{65536}%/%d:%p1%{256}%/%{255}%&%d:%p1%{255}%&%d%;m"),
+    ),
+    ("Su", None),
+];
+
+/// zgx: hex text (either case) as the bytes it encodes, or none if it isn't.
+fn decode_hex(hex: &[u8]) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    let digit = |byte: u8| (byte as char).to_digit(16);
+    hex.chunks(2)
+        .map(|pair| Some((digit(pair[0])? * 16 + digit(pair[1])?) as u8))
+        .collect()
+}
+
+/// zgx: `bytes` hex encoded onto `text`, upper case as xterm answers.
+fn push_hex(text: &mut String, bytes: &[u8]) {
+    const DIGITS: &[u8; 16] = b"0123456789ABCDEF";
+    for &byte in bytes {
+        text.push(DIGITS[usize::from(byte >> 4)] as char);
+        text.push(DIGITS[usize::from(byte & 15)] as char);
+    }
 }
 
 /// The state of the [`Mode`] and [`PrivateMode`].
@@ -4362,5 +4436,65 @@ mod grapheme_tests {
             ]
         );
         assert_eq!(term.grid.cursor.point, Point::new(Line(0), Column(3)));
+    }
+}
+
+/// zgx: XTGETTCAP's answers.
+#[cfg(test)]
+mod termcap_tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::event::{Event, EventListener};
+    use crate::term::test::TermSize;
+    use crate::vte::ansi::Handler;
+
+    /// What the terminal answered.
+    #[derive(Clone, Default)]
+    struct Answers(Arc<Mutex<String>>);
+    impl EventListener for Answers {
+        fn send_event(&self, event: Event) {
+            if let Event::PtyWrite(text) = event {
+                self.0.lock().unwrap().push_str(&text);
+            }
+        }
+    }
+
+    fn answer(names: &[u8]) -> String {
+        let answers = Answers::default();
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 3), answers.clone());
+        term.request_termcap(names);
+        answers.0.lock().unwrap().clone()
+    }
+
+    /// A value and a flag found, each in an answer of its own, the names
+    /// asked for in either case; one not known, and one not hex, answered as
+    /// not found with the name as asked.
+    #[test]
+    fn capabilities_are_answered_a_name_at_a_time() {
+        // TN, RGB, "zz" and a name that isn't hex.
+        assert_eq!(
+            answer(b"544e;524742;7a7a;5x"),
+            "\x1bP1+r544E=787465726D2D323536636F6C6F72\x1b\\\x1bP1+r524742\x1b\\\
+             \x1bP0+r7a7a\x1b\\\x1bP0+r5x\x1b\\"
+        );
+        // Ms: the clipboard's sequence in terminfo's notation.
+        assert_eq!(
+            answer(b"4D73"),
+            "\x1bP1+r4D73=5C455D35323B25703125733B25703225735C303037\x1b\\"
+        );
+    }
+
+    /// Every capability reported is found by its name, hex encoded.
+    #[test]
+    fn every_capability_is_found() {
+        for (name, _) in TERMCAPS {
+            let mut hex = String::new();
+            push_hex(&mut hex, name.as_bytes());
+            assert!(
+                answer(hex.as_bytes()).starts_with(&format!("\x1bP1+r{hex}")),
+                "{name}"
+            );
+        }
     }
 }

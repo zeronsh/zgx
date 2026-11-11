@@ -120,6 +120,43 @@ fn device_and_status_reports() {
     assert_eq!(answer(b"\x1b[18t"), "\x1b[8;10;40t");
 }
 
+/// The terminfo capabilities a program asks the terminal itself for
+/// (XTGETTCAP), as nvim does for direct colour without `COLORTERM`: each found
+/// one answered with its value hex encoded, a flag with none, one not known
+/// as not found, and every answer in order and its own.
+#[test]
+fn terminfo_capabilities_asked_of_the_terminal() {
+    let hex = |text: &str| -> String { text.bytes().map(|b| format!("{b:02X}")).collect() };
+    let found = |name: &str, value: Option<&str>| match value {
+        Some(value) => format!("\x1bP1+r{}={}\x1b\\", hex(name), hex(value)),
+        None => format!("\x1bP1+r{}\x1b\\", hex(name)),
+    };
+    let ask = format!(
+        "\x1bP+q{};{};{};{}\x1b\\\x1bP+q{}\x1b\\",
+        hex("Tc"),
+        hex("RGB"),
+        hex("setrgbf"),
+        hex("nope"),
+        hex("Ms"),
+    );
+    assert_eq!(
+        answer(ask.as_bytes()),
+        [
+            found("Tc", None),
+            found("RGB", None),
+            found("setrgbf", Some("\\E[38;2;%p1%d;%p2%d;%p3%dm")),
+            format!("\x1bP0+r{}\x1b\\", hex("nope")),
+            found("Ms", Some("\\E]52;%p1%s;%p2%s\\007")),
+        ]
+        .concat()
+    );
+    assert_eq!(
+        answer(format!("\x1bP+q{}\x1b\\", hex("TN")).as_bytes()),
+        found("TN", Some("xterm-256color")),
+        "the name TERM gives"
+    );
+}
+
 /// The mouse modes a program sets decide what a click sends it: nothing
 /// until it asks, X10 bytes or SGR as it asks, motion only with a button
 /// held (1002) or always (1003).
