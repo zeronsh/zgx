@@ -53,13 +53,15 @@ hyphens = ["zgx-desktop/hyphens"]
 # voices and buses, the core a UI app's clicks need. Off by default for now:
 # without it, a script reading `audio` finds nil.
 audio = ["zgx-desktop/audio", "zgx-script/audio"]
-# Effects on buses (`bus:add_effect`, `bus:duck`), Ogg Vorbis and sound in
-# 3D scenes, each on its own; `audio-all` is every part.
+# Effects on buses (`bus:add_effect`, `bus:duck`), Ogg Vorbis, streamed
+# music (`audio.music`) and sound in 3D scenes, each on its own; `audio-all`
+# is every part.
 audio-effects = ["audio", "zgx-script/audio-effects"]
 audio-vorbis = ["audio", "zgx-script/audio-vorbis"]
+audio-streams = ["audio", "zgx-script/audio-streams"]
 # `ui.sound3d` and `ui.reverb_zone` in 3D scenes.
 audio-spatial = ["audio", "zgx-script/audio-spatial"]
-audio-all = ["audio-effects", "audio-vorbis", "audio-spatial"]
+audio-all = ["audio-effects", "audio-vorbis", "audio-streams", "audio-spatial"]
 # `ui.model` (zgx-script's `gltf`): glTF models in 3D scenes. 48.5 KiB
 # of a build for shipping (`dist`, on against off at one commit).
 gltf = ["zgx-script/gltf"]

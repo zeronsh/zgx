@@ -1,7 +1,7 @@
 -- Sound: clicks on controls, a metronome on the mixer's clock, and a pad
 -- whose volume a slider eases, and whose filter a checkbox sweeps, with no
 -- script per frame. Run it with
--- `cargo run -p zgx-run --features audio-effects -- crates/zgx-script/examples/sounds`.
+-- `cargo run -p zgx-run --features audio-effects,audio-streams -- crates/zgx-script/examples/sounds`.
 -- Its sounds are synthesized for it (assets/).
 
 -- Loaded once, at the top: decoded off the main thread.

@@ -408,6 +408,8 @@ fn a_play_before_its_sound_is_ready_plays_when_ready_within_250_ms() {
     drop(clock);
 }
 
+// Streamed music: zgx-script's `audio-streams`.
+#[cfg(feature = "audio-streams")]
 #[test]
 fn a_reload_stops_the_voices_and_streams_the_old_script_started() {
     let tone = wav("reload", 2.);
@@ -549,8 +551,8 @@ fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
     assert_eq!(*level.last().unwrap(), 0.);
 }
 
-// The mixer's effects: zgx-script's `audio-effects`.
-#[cfg(feature = "audio-effects")]
+// The example's effects and music: `audio-effects` and `audio-streams`.
+#[cfg(all(feature = "audio-effects", feature = "audio-streams"))]
 #[test]
 fn the_sounds_example_runs_and_plays() {
     let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/sounds/app.luau");
@@ -666,18 +668,29 @@ fn a_plugin_loads_sounds_from_its_own_directory_alone() {
             try(audio.sound, \"../beside.wav\")
             try(audio.sound, \"link.wav\")
             try(audio.sound, \"{missing}\")
-            try(audio.music, \"../beside.wav\")
+            {music}
             try(audio.sound, \"own.wav\")
             ui.contribute(\"bar\", ui.text {{ id = \"said\", table.concat(said, \"|\") }})",
             outside = outside.display(),
             missing = dir.join("nothing-here.wav").display(),
+            // `audio.music` with `audio-streams`.
+            music = if cfg!(feature = "audio-streams") {
+                "try(audio.music, \"../beside.wav\")"
+            } else {
+                ""
+            },
         ),
     );
     let said = s.app.text("said");
     let said: Vec<&str> = said.split('|').collect();
-    assert_eq!(said.len(), 6, "{said:?}");
-    assert_eq!(said[5], "loaded", "its own sound");
-    for refused in &said[..5] {
+    let calls = if cfg!(feature = "audio-streams") {
+        6
+    } else {
+        5
+    };
+    assert_eq!(said.len(), calls, "{said:?}");
+    assert_eq!(said[calls - 1], "loaded", "its own sound");
+    for refused in &said[..calls - 1] {
         assert!(
             refused.contains("a plugin's sounds come from its directory or below"),
             "{said:?}"
@@ -732,6 +745,8 @@ fn a_binding_given_nan_lets_the_window_go_idle() {
     assert!(level.iter().all(|l| l.is_finite() && *l > 0.), "{level:?}");
 }
 
+// Streamed music: zgx-script's `audio-streams`.
+#[cfg(feature = "audio-streams")]
 #[test]
 fn a_plugins_streams_count_among_its_voices() {
     let dir = std::env::temp_dir().join(format!("zgx-audio-streams-{}", std::process::id()));

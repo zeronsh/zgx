@@ -2,7 +2,7 @@
 
 Sounds, music and the buses they play through, mixed by [zgx-audio](../../crates/zgx-audio): every start, stop and change lands on an exact frame, nothing clicks, and a limiter on master keeps the sum below full scale. The Rust side of each call is in [design-audio-luau.md](../design-audio-luau.md).
 
-**Where it is.** zgx-script's `audio` feature, off by default, in parts: `audio` is the core (WAV, voices, buses, `sound =`), `audio-effects` adds the effects on buses, `audio-vorbis` adds Ogg Vorbis, and `audio-spatial` adds sound in 3D scenes. `zgx-run` has the same features (`cargo run -p zgx-run --features audio -- app/`, or `audio-all` for every part); its `audio` turns on zgx-desktop's for the device. A Rust host turns on zgx-script's and gives the host an engine (`ScriptHost::set_audio`; a desktop app `zgx_run::play_through`). Without `audio`, `audio` is nil and `sound =` an unknown property; without `audio-effects`, `audio.low_pass` and the others, `bus:add_effect` and `bus:duck` are nil.
+**Where it is.** zgx-script's `audio` feature, off by default, in parts: `audio` is the core (WAV, voices, buses, `sound =`), `audio-effects` adds the effects on buses, `audio-vorbis` adds Ogg Vorbis, `audio-streams` adds `audio.music`, and `audio-spatial` adds sound in 3D scenes. `zgx-run` has the same features (`cargo run -p zgx-run --features audio -- app/`, or `audio-all` for every part); its `audio` turns on zgx-desktop's for the device. A Rust host turns on zgx-script's and gives the host an engine (`ScriptHost::set_audio`; a desktop app `zgx_run::play_through`). Without `audio`, `audio` is nil and `sound =` an unknown property; without `audio-effects`, `audio.low_pass` and the others, `bus:add_effect` and `bus:duck` are nil.
 
 **What it costs.** Nothing until a script calls `audio`: the engine is made then. Loading a sound, setting a bus's gain or muting one opens no device and touches nothing of the system's audio. The first play starts the output; a second after the last sound (fades and tails included) it stops, and the app is as idle as one without sound.
 
@@ -72,7 +72,7 @@ Load sounds once, at the top of a script or a module. Loading in a component or 
 
 `gain`, `pan` and `pitch` may be states, functions or bindings: they follow for as long as the voice plays. A value that isn't a finite number (`0 / 0`) is passed over: the sound keeps the last one it had.
 
-`audio.music(src, opts)` streams a file as it decodes (half a second ahead, on one thread for every stream): for music, ambience and anything long. Its options are `play`'s, on the `music` bus by default (`loop_start` and `loop_end` aside: a stream loops whole). A stream loops without a seam. If its decoding falls behind it fades out and back in over 5 ms rather than clicking (`audio.stats().dry`).
+`audio.music(src, opts)` (with `audio-streams`) streams a file as it decodes (half a second ahead, on one thread for every stream): for music, ambience and anything long. Its options are `play`'s, on the `music` bus by default (`loop_start` and `loop_end` aside: a stream loops whole). A stream loops without a seam. If its decoding falls behind it fades out and back in over 5 ms rather than clicking (`audio.stats().dry`).
 
 When 64 voices play, a new one takes the place of the quietest of the lowest priority (with a 5 ms fade), or doesn't start if it's quieter and no higher.
 
@@ -92,7 +92,7 @@ When 64 voices play, a new one takes the place of the quietest of the lowest pri
 
 ## Buses
 
-Every voice plays into a bus, and every bus into `master`. `ui`, `music` and `world` exist from the start; `audio.add_bus(name, { parent = "world" })` makes more (32 at most), under `master` unless `parent` says. Made again (a reload), the bus there is returned.
+Every voice plays into a bus, and every bus into `master`. `ui`, `music` and `world` exist from the start; `audio.add_bus(name, { parent = "world" })` makes more (64 at most), under `master` unless `parent` says. Made again (a reload), the bus there is returned.
 
 | | |
 | --- | --- |
@@ -182,7 +182,7 @@ return ui.scene3d {
 | `occlusion` | whether the meshes between dull it (by a quarter, through each) | true |
 | `air` | whether the air dulls its highs with distance | true |
 
-`ui.reverb_zone` is a box (`position` its centre, `size` its `{ x, y, z }` in metres, in the scene's coordinates) whose reverb the camera hears inside it, fading in over `fade` metres outside (2). `preset` is `"room"` (the default), `"hall"`, `"warehouse"` or `{ size, decay, damping, wet }`. Zones work in a scene that has a `ui.sound3d`: the scene plays through its sounds' engine, on the `world` bus. The first zone makes the world's two reverbs, each on a bus of its own under `world`: two of the engine's 32 buses, for as long as the scene lasts. The camera hears at most two zones at once (the one it's in and the one it's leaving, which rings out), and each sound sends to a zone as much as the camera hears it, half that from outside it.
+`ui.reverb_zone` is a box (`position` its centre, `size` its `{ x, y, z }` in metres, in the scene's coordinates) whose reverb the camera hears inside it, fading in over `fade` metres outside (2). `preset` is `"room"` (the default), `"hall"`, `"warehouse"` or `{ size, decay, damping, wet }`. Zones work in a scene that has a `ui.sound3d`: the scene plays through its sounds' engine, on the `world` bus. The first zone makes the world's two reverbs, each on a bus of its own under `world`: two of the engine's 64 buses, for as long as the scene lasts. The camera hears at most two zones at once (the one it's in and the one it's leaving, which rings out), and each sound sends to a zone as much as the camera hears it, half that from outside it.
 
 The scene's sound goes with the scene: a reload, or the scene leaving, stops it. A scene where nothing moves sends nothing to the mixer. A plugin can't place sound in a scene (its sound plays on its own bus). A looping `ui.sound3d` without `falloff.max` is flagged (`sound3d-no-max`): heard to 100 m by default, a far one costs as a near one does.
 

@@ -1337,11 +1337,9 @@ pub(crate) fn install(
     let audio = lua.create_table()?;
     // One closure for every function, each a branch of `call`: mlua's glue
     // is made once, not once a function.
-    let names: &[&str] = match plugin {
-        None => &[
-            "sound", "play", "music", "now", "stats", "bus", "add_bus", "prewarm",
-        ],
-        Some(_) => &["sound", "play", "music", "now", "stats", "bus"],
+    let names = match plugin {
+        None => NAMES,
+        Some(_) => PLUGIN_NAMES,
     };
     for &name in names {
         let (host, plugin) = (host.clone(), plugin.clone());
@@ -1379,6 +1377,29 @@ fn unpack<T: mlua::FromLuaMulti>(
     lua.unpack_multi(args)
         .map_err(|error| mlua::Error::runtime(format!("{kind}{name}: bad arguments ({error})")))
 }
+
+/// `audio`'s functions: `music` with `audio-streams`; a plugin's want the
+/// app's buses, the clock's prewarm and the system setting.
+const NAMES: &[&str] = &[
+    "sound",
+    "play",
+    #[cfg(feature = "audio-streams")]
+    "music",
+    "now",
+    "stats",
+    "bus",
+    "add_bus",
+    "prewarm",
+];
+const PLUGIN_NAMES: &[&str] = &[
+    "sound",
+    "play",
+    #[cfg(feature = "audio-streams")]
+    "music",
+    "now",
+    "stats",
+    "bus",
+];
 
 /// `audio.<name>(args)`.
 fn call(
@@ -1497,6 +1518,10 @@ fn call(
             )?;
             let cell = match source {
                 Ok(slot) => slot.play(host, &audio, spec),
+                // `audio.music`: registered with `audio-streams` alone.
+                #[cfg(not(feature = "audio-streams"))]
+                Err(_) => unreachable!("audio.music is `audio-streams`'s"),
+                #[cfg(feature = "audio-streams")]
                 Err(path) => {
                     let (gain, pan, pitch) = (spec.gain.now(), spec.pan.now(), spec.pitch.now());
                     let mut play = Play::new()

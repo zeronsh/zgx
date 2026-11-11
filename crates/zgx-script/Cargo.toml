@@ -39,6 +39,9 @@ audio-effects = ["audio"]
 # Ogg Vorbis for `audio.sound` and `audio.music` (zgx-audio's `vorbis`),
 # besides WAV.
 audio-vorbis = ["audio", "zgx-audio/vorbis"]
+# `audio.music`: files streamed as they decode, on one thread for every
+# stream. Apart from `audio`: a UI app's clicks don't stream.
+audio-streams = ["audio"]
 # `ui.sound3d` and `ui.reverb_zone` in `ui.scene3d`: sound placed in the
 # scene by zgx-3d's world audio (distance, cones, Doppler, occlusion,
 # reverb zones).
