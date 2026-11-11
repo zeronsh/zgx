@@ -22,7 +22,7 @@
 use cosmic_text::{
     Align, BufferLine, Ellipsize, FontSystem, Hinting, LayoutRunIter, Metrics, Wrap,
 };
-use rustc_hash::{FxHashMap, FxHasher};
+use rustc_hash::FxHasher;
 use std::{
     collections::VecDeque,
     hash::{Hash, Hasher},
@@ -902,7 +902,7 @@ impl Slab {
     /// end: a stream's previous state, dropped just after it was made); a
     /// chunk left with no texts is freed, and one mostly gaps has its
     /// texts, found among `entries`, moved to the newest chunk.
-    fn drop(&mut self, compact: &Compact, entries: &mut FxHashMap<u64, Entry>) {
+    fn drop(&mut self, compact: &Compact, entries: &mut Hashed<Entry>) {
         let index = compact.chunk as usize;
         let chunk = self.chunks[index].as_mut().expect("live chunk");
         if compact.end as usize == chunk.data.len() {
@@ -1247,6 +1247,26 @@ impl<'a> Laid<'a> {
     }
 }
 
+/// A map by a key's hash (`Key::hash`, `Key::plain_hash`): already mixed,
+/// it is the map's hash as it is, not hashed again at every lookup.
+type Hashed<V> = std::collections::HashMap<u64, V, std::hash::BuildHasherDefault<KeyHash>>;
+/// A key's hash passed through (`Hashed`).
+#[derive(Default)]
+struct KeyHash(u64);
+impl std::hash::Hasher for KeyHash {
+    fn write(&mut self, bytes: &[u8]) {
+        // Only a `u64` is hashed (`write_u64`); anything else, folded in.
+        for &byte in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(byte);
+        }
+    }
+    fn write_u64(&mut self, hash: u64) {
+        self.0 = hash;
+    }
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
 /// Prepared rich texts, shared by layout measurement and the renderer.
 #[derive(Default)]
 pub struct TextCache {
@@ -1256,7 +1276,7 @@ pub struct TextCache {
     /// The stream plain text last grew in: its next state's hash read on
     /// from its last's (`plain_entry`).
     stream: StreamHash,
-    entries: FxHashMap<u64, Entry>,
+    entries: Hashed<Entry>,
     recent: VecDeque<u64>,
     clock: u64,
     shaped_bytes: usize,
@@ -1293,7 +1313,7 @@ pub struct TextCache {
     /// measured from its prepared lines broken at that width, its cut alone
     /// shaped (`clamped_measure`); a list of them moving by a row (a mail
     /// archived) measures every row again.
-    clamped: FxHashMap<u64, Clamped>,
+    clamped: Hashed<Clamped>,
 }
 /// A clamped or ellipsized text's sizes (`TextCache::clamped`).
 struct Clamped {
@@ -1594,6 +1614,39 @@ impl TextCache {
         font: &FontStyle,
         need: Need,
     ) -> u64 {
+        // A text long enough to be a stream's (`STREAMED`), looked up out of
+        // line: every other text's lookup is as it was.
+        if text.len() >= STREAMED {
+            return self.plain_stream_entry(fonts, text, font_size, font, need);
+        }
+        let hash = Key::plain_hash(text, font_size, font);
+        if let Some(entry) = self.entries.get_mut(&hash)
+            && entry.key.is_plain(text, font_size, font)
+            && (entry.shaped() || (need != Need::Layout && entry.compact.is_some()))
+        {
+            self.clock += 1;
+            entry.used = self.clock;
+            self.hits += 1;
+            return hash;
+        }
+        let source = Source::Plain {
+            text,
+            font_size,
+            font,
+        };
+        self.entry_hashed(fonts, source, true, need, Some(hash))
+    }
+    /// `plain_entry` for a text at least `STREAMED` long, which may be a
+    /// stream's state.
+    #[inline(never)]
+    fn plain_stream_entry(
+        &mut self,
+        fonts: &mut FontSystem,
+        text: &Arc<str>,
+        font_size: f32,
+        font: &FontStyle,
+        need: Need,
+    ) -> u64 {
         // A stream's state, or a later one: hashed on from where its last
         // one's bytes left off (no stream: never longer than `usize::MAX`).
         let hash = match text.len() >= self.stream.len {
@@ -1618,7 +1671,7 @@ impl TextCache {
         // A long text just prepared from the words of one it grew from: a
         // stream (`armed_if_grown`). Apart from `entry_hashed`, whose body
         // every new text runs.
-        if text.len() >= STREAMED && self.stream.from != hash {
+        if self.stream.from != hash {
             self.armed_if_grown(text, hash);
         }
         hash
@@ -1815,7 +1868,7 @@ impl TextCache {
         self.spare_long = Vec::new();
         self.spare_lists = Vec::new();
         self.spare_words = Vec::new();
-        self.clamped = FxHashMap::default();
+        self.clamped = Hashed::default();
         self.stream = StreamHash::default();
     }
     /// cosmic-text's run cache swept of words unused lately, once it has
@@ -2716,6 +2769,47 @@ mod tests {
     /// text at another size, and texts of one length dropped and made again
     /// (likely at the address the last one had), each get the hash their
     /// whole text makes, and their own entry.
+    /// The text cache's maps take a key's hash as it is (`Hashed`): it is
+    /// spread at both ends, its low bits (a table's bucket) and its top
+    /// seven (hashbrown's tag), over texts that differ by little (rows
+    /// numbered in turn, a terminal's lines, numbers, a long shared start).
+    #[test]
+    fn a_keys_hash_spreads_at_both_ends() {
+        let font = FontStyle::default();
+        let filler = "the same words in every row of the list, ".repeat(13);
+        let rows = |i: usize| format!("Row {i}");
+        let terminal = |i: usize| format!("user@host:~/src/zgx$ ls -la build/{i:05}.o");
+        let numbers = |i: usize| format!("{}", i * 7);
+        let long = |i: usize| format!("{filler}{i}");
+        let sets: [(&str, &dyn Fn(usize) -> String); 4] = [
+            ("rows", &rows),
+            ("terminal", &terminal),
+            ("numbers", &numbers),
+            ("long", &long),
+        ];
+        // 16,384 keys in 32,768 buckets: a table at half its room.
+        let (keys, buckets) = (1usize << 14, 1usize << 15);
+        for (name, text) in sets {
+            let mut bucket = vec![0u32; buckets];
+            let mut tags = [0u32; 128];
+            for i in 0..keys {
+                let hash = Key::plain_hash(&text(i), 14., &font);
+                bucket[hash as usize & (buckets - 1)] += 1;
+                tags[(hash >> 57) as usize] += 1;
+            }
+            // As many empty buckets as keys placed at random leave (e^-0.5).
+            let empty = bucket.iter().filter(|&&n| n == 0).count() as f64 / buckets as f64;
+            assert!(
+                (empty - (-0.5f64).exp()).abs() < 0.02,
+                "{name}: {empty} empty"
+            );
+            let fullest = *bucket.iter().max().unwrap();
+            assert!(fullest <= 8, "{name}: a bucket of {fullest}");
+            // Every tag near its share (128 each).
+            let (least, most) = (tags.iter().min().unwrap(), tags.iter().max().unwrap());
+            assert!(*least >= 64 && *most <= 192, "{name}: tags {least}..{most}");
+        }
+    }
     #[test]
     fn a_long_texts_kept_hash_is_never_another_texts() {
         let mut fonts = FontSystem::new();
