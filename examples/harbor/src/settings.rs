@@ -72,19 +72,15 @@ impl Settings {
                 .push(runtime.effect(move || w.set_light(sun, scene::sun_light(s.get(), azimuth))));
         }
         {
-            let (s, auto, w, sea) = (
+            let (s, auto, w) = (
                 self.exposure.clone(),
                 self.auto_exposure.clone(),
                 world.clone(),
-                harbor.sea.clone(),
             );
             effects.push(runtime.effect(move || {
                 let stops = s.get();
                 // Adapting, the stops are compensation over where it is.
                 w.set_exposure(if auto.get() { stops } else { stops - scene::EV });
-                if let Some(sea) = &sea {
-                    sea.set_exposure(&w, stops);
-                }
             }));
         }
         {

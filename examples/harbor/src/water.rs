@@ -9,11 +9,7 @@
 //!
 //! A paused sea turns its pass off; its calm material reads no time, so
 //! with nothing else moving the world rests.
-use crate::{
-    rng::Rng,
-    scene::{EV, WATER_LEVEL},
-    shapes::Builder,
-};
+use crate::{rng::Rng, scene::WATER_LEVEL, shapes::Builder};
 use zgx_3d::{
     Access, BufferDesc, Compute, ComputeId, Format, GpuBuffer, GpuTexture, Material,
     MaterialShader, Object, ObjectId, Param, ShaderId, TextureDesc, World, vec3,
@@ -205,7 +201,6 @@ impl Water {
                 .param("deep", Param::Color)
                 .param("wind", Param::Float)
                 .param("rain", Param::Float)
-                .param("unexpose", Param::Float)
                 .displaces_by(reach);
             let shader = if animated { shader.animated() } else { shader };
             if parts.refraction {
@@ -282,7 +277,6 @@ impl Water {
             clock,
         };
         water.set_rain(world, 0.);
-        water.set_exposure(world, 0.);
         Ok(water)
     }
 
@@ -304,17 +298,6 @@ impl Water {
     pub fn set_moving(&self, world: &World, on: bool) {
         world.set_compute_enabled(self.tick, on);
         world.set_compute_enabled(self.waves, on);
-    }
-
-    /// The panel's exposure, `stops` over the harbor's own: what the water
-    /// undoes on the scene behind it where that's the scene as displayed
-    /// (no post chain); with the chain, `scene_color` is already the
-    /// scene's light and the shader leaves it (`scene_is_light`).
-    pub fn set_exposure(&self, world: &World, stops: f32) {
-        let unexpose = (EV - stops).exp2();
-        for shader in [self.calm, self.raining] {
-            let _ = world.set_param(shader, "unexpose", unexpose);
-        }
     }
 
     /// Whether its materials' pipelines are in.

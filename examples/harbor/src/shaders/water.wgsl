@@ -21,8 +21,6 @@
 //   deep      the water body's colour (linear RGBA), its albedo
 //   wind      the wind's speed over the water, m/s
 //   rain      0 to 1: rain on it
-//   unexpose  what undoes the frame's exposure on `scene_color`, where
-//             it's the scene as displayed (`scene_is_light()` false)
 //
 // `frame.time` is read by the rings alone: the harbor makes this shader
 // twice, once with them (raining, animated) and once without (calm, so a
@@ -110,10 +108,7 @@ fn surface(s: SurfaceIn) -> Surface {
     let cos_v = clamp(dot(n, s.view), 0.0, 1.0);
     let reflected = 0.02 + 0.98 * pow(1.0 - cos_v, 5.0);
     let bend = 0.004 * smoothstep(0.15, 0.5, cos_v) * (1.0 - smoothstep(0.05, 0.4, footprint));
-    var behind = scene_color(s.screen_uv + slope * bend, 0.0);
-    if !scene_is_light() {
-        behind *= params.unexpose;
-    }
+    let behind = scene_light(s.screen_uv + slope * bend, 0.0);
     // A metre or two of murk: dark green-grey, most of it gone.
     let murk = vec3(0.012, 0.022, 0.02);
     m.emissive += behind * murk * (1.0 - reflected);

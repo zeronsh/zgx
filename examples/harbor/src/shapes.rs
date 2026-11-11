@@ -211,10 +211,15 @@ pub fn container(length: f32) -> Geometry {
 }
 
 /// A ship's hull `length` along X and `beam` across, its deck at `deck`
-/// and keel at `keel` (m), about X = 0: lofted from superellipse sections,
-/// boxy amidships, a raked bow and a transom stern, with its deck and
-/// transom closed. Vertex colours paint the bottom red below the boot top
-/// at `boot` and the topsides `topsides`.
+/// and keel at `keel` (m), about X = 0 (+X the bow). Lofted from
+/// superellipse sections, stations packed toward the ends where the shape
+/// changes: boxy amidships; toward the stern the run rises to a transom
+/// whose foot is just under the water line (`boot` is the boot top's
+/// lower edge), the sections turning to a rounded V over the skeg; toward
+/// the bow the sheer rises, the forefoot lifts and the sections sharpen.
+/// The transom is a flat panel closed by strips, the deck a strip
+/// between the deck edges. Vertex colours paint the bottom red below the
+/// boot top, the boot top black, the topsides `topsides`.
 pub fn hull(
     length: f32,
     beam: f32,
@@ -223,19 +228,21 @@ pub fn hull(
     boot: f32,
     topsides: [f32; 4],
 ) -> Geometry {
-    let stations = 72;
-    let half = 14; // section points from the deck edge to the keel
+    let stations = 96;
+    let half = 16; // section points from the deck edge to the keel
+    // The transom's foot: a metre under the boot top's lower edge.
+    let transom_foot = boot - 1.;
     let section = |s: f32| -> Vec<Vec3> {
         let x = -length * 0.5 + s * length;
-        // Half-beam: full amidships, rounding in at the bow, slightly in at
-        // the stern.
         let bow = ((s - 0.72) / 0.28).clamp(0., 1.);
-        let stern = ((0.1 - s) / 0.1).clamp(0., 1.);
-        let b = beam * 0.5 * (1. - bow * bow).max(0.).sqrt().max(0.02) * (1. - 0.12 * stern);
-        // The sheer rises toward the bow; the forefoot lifts the keel.
-        let top = deck + 2.5 * bow * bow;
-        let bottom = keel + (deck - keel) * 0.55 * bow.powf(3.) + 2. * stern * stern;
-        let n = 7. - 4.5 * bow;
+        // The run: over the last 18% toward the stern the bottom rises.
+        let run = ((0.18 - s) / 0.18).clamp(0., 1.);
+        let run = run * run * (3. - 2. * run);
+        let b = beam * 0.5 * (1. - bow * bow).max(0.).sqrt().max(0.02) * (1. - 0.1 * run);
+        let top = deck + 2.5 * bow * bow + 0.6 * run;
+        let bottom = keel + (deck - keel) * 0.55 * bow.powf(3.) + (transom_foot - keel) * run;
+        // Boxy amidships, a rounded V at the ends.
+        let n = 7. - 4.5 * bow - 4.2 * run;
         (0..=half)
             .map(|k| {
                 let phi = k as f32 / half as f32 * std::f32::consts::FRAC_PI_2;
@@ -249,8 +256,10 @@ pub fn hull(
     let columns = half * 2 + 1;
     let mut points = Vec::with_capacity((stations + 1) * columns);
     let mut tops = Vec::new();
+    let mut transom = Vec::new();
     for i in 0..=stations {
-        let s = i as f32 / stations as f32;
+        // Packed toward both ends (cosine spacing).
+        let s = 0.5 - 0.5 * (std::f32::consts::PI * i as f32 / stations as f32).cos();
         let one = section(s);
         // Starboard (+Z) from the deck edge down to the keel, then port up.
         let mut row: Vec<Vec3> = one.clone();
@@ -259,6 +268,9 @@ pub fn hull(
             points.push((*p, [s, c as f32 / (columns - 1) as f32]));
         }
         tops.push((one[0], vec3(one[0].x, one[0].y, -one[0].z)));
+        if i == 0 {
+            transom = one;
+        }
     }
     let mut b = Builder::default();
     b.grid(stations + 1, columns, &points);
@@ -267,14 +279,12 @@ pub fn hull(
         let ((s0, p0), (s1, p1)) = (pair[0], pair[1]);
         b.quad([s0, s1, p1, p0], [[0., 0.], [1., 0.], [1., 1.], [0., 1.]]);
     }
-    // Transom: the stern's section, closed as a fan from its middle.
-    let stern: Vec<Vec3> = points[..columns].iter().map(|(p, _)| *p).collect();
-    let middle = stern.iter().fold(Vec3::ZERO, |a, p| a + *p) * (1. / stern.len() as f32);
-    for pair in stern.windows(2) {
-        b.quad(
-            [middle, pair[1], pair[0], middle],
-            [[0.5, 0.5], [0., 0.], [1., 0.], [0.5, 0.5]],
-        );
+    // Transom: a flat panel facing aft, closed by strips from starboard to
+    // port, row by row down the stern's section.
+    for pair in transom.windows(2) {
+        let (p0, p1) = (pair[0], pair[1]);
+        let (q0, q1) = (vec3(p0.x, p0.y, -p0.z), vec3(p1.x, p1.y, -p1.z));
+        b.quad([p0, q0, q1, p1], [[0., 0.], [1., 0.], [1., 1.], [0., 1.]]);
     }
     let colors = b
         .vertices()
@@ -377,6 +387,17 @@ mod tests {
         assert!(bad.is_empty(), "the side faces out: {bad:?}");
         let deck = g.vertices().iter().filter(|v| v.normal[1] > 0.99).count();
         assert!(deck > 0, "the deck faces up");
+        // The transom is a flat panel facing aft, its foot under the water
+        // and none of it below the boot top's band but that.
+        let aft: Vec<_> = g
+            .vertices()
+            .iter()
+            .filter(|v| v.normal[0] < -0.99)
+            .collect();
+        assert!(!aft.is_empty(), "a transom facing aft");
+        let foot = aft.iter().map(|v| v.position[1]).fold(f32::MAX, f32::min);
+        assert!((foot - (-4.)).abs() < 0.1, "its foot: {foot}");
+        wound_toward_normals(&g);
     }
 
     #[test]
