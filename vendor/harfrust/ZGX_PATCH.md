@@ -33,6 +33,9 @@ kerning pairs and mark anchors work their deltas out again the same way.
    `src/hb/ot/gpos/mod.rs` and `resolve_anchor` read it.
 4. `zgx_keep_variations` (hidden) turns both off process-wide, for a test
    comparing shaping with and without (zgx-gpu's `variable_advances.rs`).
+5. `heap_bytes` on `UnicodeBuffer` and `ShapePlan` (its OpenType and AAT
+   maps): what each holds on the heap, for zgx's memory report
+   (zgx-harfrust 0.5.4). Read when a report asks; nothing else changes.
 
 A shaper's instance is fixed for its life, so a glyph's advance and a delta
 set's delta are too: neither cache changes a glyph, offset or advance.
