@@ -19,7 +19,7 @@
 //!   keeps the wet layer dry; `WATER=dry` makes none, `WATER=opaque` a sea
 //!   that sees nothing behind it;
 //!   `POST=0` turns the post chain off, `AUTO=0` its adapting exposure;
-//!   `RAIN=0` makes no rain; `SOUND=0` no sound (offline, gain 0 otherwise); `CRANES=idle` gives the cranes animators
+//!   `PROBES=0` adds no probes; `RAIN=0` makes no rain; `SOUND=0` no sound (offline, gain 0 otherwise); `CRANES=idle` gives the cranes animators
 //!   playing nothing, `CRANES=still` none; `GANTRIES` (4) how many;
 //!   `LAMP_REACH` scales every lamp's range (0: none built); `EXPOSURE`
 //!   adds stops (as the panel's slider).
@@ -120,6 +120,8 @@ fn main() {
             refraction: std::env::var("WATER").as_deref() != Ok("opaque"),
             wet: std::env::var("WATER").as_deref() != Ok("dry"),
         },
+        // `PROBES=0`: no bounced light.
+        probes: std::env::var("PROBES").as_deref() != Ok("0"),
         // `RAIN=0`: no rain made at all.
         rain: std::env::var("RAIN").as_deref() != Ok("0"),
         ..Config::default()
@@ -136,12 +138,14 @@ fn main() {
     let world = World::new();
     let harbor = Harbor::build(&world, &config, environment);
     let build_ms = started.elapsed().as_secs_f64() * 1e3 - sky_ms;
-    // Sound, offline at master gain zero (`SOUND=0`: none).
+    // Sound, mixed offline: no device (`SOUND=0`: none).
     let mut sound = (std::env::var("SOUND").as_deref() != Ok("0"))
         .then(|| zgx_harbor::sound::HarborSound::new(&world, &harbor).expect("the harbor's sound"));
     let mut rays = 0usize;
     // The mixer's own instructions, apart from the world's sound work.
     let mixing = std::cell::Cell::new(0u64);
+    // The master mix's sum of squares, peak and samples: proof it ran.
+    let mut level = (0f64, 0f32, 0usize);
 
     let (points_w, points_h) = (width as f32 / scale, height as f32 / scale);
     let mut ui = Ui::new(points_w, points_h);
@@ -186,6 +190,10 @@ fn main() {
         &settings,
         stats.clone(),
     )));
+    // SAFETY: the bench takes on wgpu's experimental contract for ray
+    // queries (zgx_gpu::request_ray_queries), for the probes to trace;
+    // asked before the renderer, and its device, are made.
+    unsafe { zgx_gpu::request_ray_queries() };
     let mut gpu = GpuRenderer::new(width, height).expect("a GPU");
     gpu.set_scale_factor(scale);
     // The renderer's text services on the scene: layout measures text as
@@ -212,7 +220,11 @@ fn main() {
     // readout, a render, and a wait for it by reading it back.
     let mut draw = |seconds: f32, pixels: &mut Vec<u8>| -> (f64, f64, bool) {
         let begin = Instant::now();
-        clock.advance(std::time::Duration::from_secs_f32(step), || {});
+        // `advance` goes to a time since the clock's start, not by a step.
+        clock.advance(
+            clock.elapsed() + std::time::Duration::from_secs_f32(step),
+            || {},
+        );
         let before = world.revision();
         let camera = path::camera(seconds, base);
         world.set_camera(camera);
@@ -235,8 +247,13 @@ fn main() {
         // The sound of the frame's step, as a device would ask for it.
         if let Some(sound) = sound.as_mut() {
             let before = perf::sample();
-            sound.mix(step);
+            let mixed = sound.mix(step);
             mixing.set(mixing.get() + (perf::sample().instructions - before.instructions));
+            for &x in &mixed {
+                level.0 += f64::from(x) * f64::from(x);
+                level.1 = level.1.max(x.abs());
+            }
+            level.2 += mixed.len();
             rays += world.audio_rays();
         }
         let rendered = begin.elapsed().as_secs_f64() * 1e3;
@@ -401,12 +418,22 @@ fn main() {
     if let Some(sound) = &sound {
         let stats = sound.audio.stats();
         println!(
-            "sound: {} emitters, {} voices; mixing {:.2} M instructions a second of sound; {:.0}% of frames mixed with sound (before master's gain of 0); {:.1} occlusion rays a frame",
+            "sound: {} emitters, {} voices; mixing {:.2} M instructions a second of sound; master {:.1} dBFS RMS, {:.1} dBFS peak; {:.0}% of frames mixed with sound; {:.1} occlusion rays a frame",
             sound.emitters,
             stats.voices,
             mixing.get() as f64 / ((frames + warm) as f64 * f64::from(step)) / 1e6,
+            10. * (level.0 / level.2.max(1) as f64).max(1e-30).log10(),
+            20. * f64::from(level.1).max(1e-15).log10(),
             stats.sounding as f64 * 100. / stats.frames.max(1) as f64,
             rays as f64 / (frames + warm) as f64,
+        );
+    }
+    if harbor.probes > 0 {
+        println!(
+            "probes: {} volumes, {:?} (ray queries: {:?})",
+            harbor.probes,
+            world.probes_status(),
+            zgx_gpu::ray_queries_status(),
         );
     }
     match gpu_busy {

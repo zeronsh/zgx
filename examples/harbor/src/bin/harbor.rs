@@ -53,6 +53,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // GPU timestamps and compressed textures where the GPU has them: asked
     // before `run`, which decides before it starts the device.
     zgx_3d::request_view_features();
+    // SAFETY: the harbor takes on wgpu's experimental contract for ray
+    // queries (zgx_gpu::request_ray_queries), for its probes to trace;
+    // asked before the first window, and its device, are made.
+    unsafe { zgx_gpu::request_ray_queries() };
     Application::new()
         .window(WindowOptions {
             title: "Harbor at dawn".into(),

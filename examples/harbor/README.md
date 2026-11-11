@@ -25,7 +25,9 @@ The sun's shadow is cut into four cascades over 600 m. It rains (`weather.rs`): 
 - rain as a bed;
 - reverb zones under the gantries and in the container canyons.
 
-Every sound is synthesised in code. The engine is always offline: no device is built in (zgx-audio without `device`), master gain is zero, and only the bench mixes it. The window doesn't play sound yet.
+Every sound is synthesised in code. The engine is always offline: no device is built in (zgx-audio without `device`), so nothing can be heard. The bench mixes it at master gain 1 and reports the master mix's RMS and peak. The window doesn't play sound yet; when it does, its device opens at gain zero until the maintainer says otherwise.
+
+**Bounced light:** irradiance probes fill the apron under the gantries and the yard's canyons (`World::add_probes`). They're traced by ray queries, which the bench and the window ask for (`zgx_gpu::request_ray_queries`, unsafe: wgpu's experimental feature).
 
 What the API can't express yet is in [GAPS.md](GAPS.md). Those gaps are reported, not worked around.
 
@@ -82,7 +84,8 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | `LAMPS=0` | | Every lamp at zero lumens |
 | `LAMP_REACH` | 1 | Scales every lamp's range (0: none built) |
 | `RAIN=0` | | No rain made |
-| `SOUND=0` | | No sound (otherwise offline, at master gain zero) |
+| `SOUND=0` | | No sound (otherwise mixed offline, no device) |
+| `PROBES=0` | | No probes |
 | `WATER` | | `stock`: the plain material, no wet; `dry`: no wet layer; `opaque`: no refraction |
 | `WET=0` | | Rain, but nothing made wet |
 | `POST=0` | | No post chain (exposure fixed at EV 11, no bloom) |

@@ -12,8 +12,8 @@ use crate::{
 };
 use zgx_3d::{
     Camera, Cascades, Clearcoat, Environment, Geometry, Light, LightId, Map, MapPlacement,
-    Material, Object, ObjectId, PointLight, Quat, ToneMapping, Transform, Transmission, Vec3,
-    World, vec3,
+    Material, Object, ObjectId, PointLight, ProbeVolume, Quat, ToneMapping, Transform,
+    Transmission, Vec3, World, vec3,
 };
 
 /// The water's surface, below the quay's deck.
@@ -55,6 +55,9 @@ pub struct Config {
     pub water: bool,
     /// Which of the water's parts are made.
     pub water_parts: crate::water::Parts,
+    /// Irradiance probes under the gantries and through the yard (traced
+    /// where the device has ray queries).
+    pub probes: bool,
 }
 
 impl Default for Config {
@@ -72,6 +75,7 @@ impl Default for Config {
             cranes: Cranes::Working,
             water: true,
             water_parts: Default::default(),
+            probes: true,
         }
     }
 }
@@ -150,6 +154,8 @@ pub struct Harbor {
     pub funnel: ObjectId,
     /// The buoy out in the water (its bell).
     pub buoy: ObjectId,
+    /// Probe volumes added.
+    pub probes: usize,
     /// The sea's and the wet's materials, if made (`Config::water`).
     pub sea: Option<crate::water::Water>,
     /// The rain, if it was made (`Config::rain`, and a device for it).
@@ -327,7 +333,21 @@ impl Harbor {
             }
             None => None,
         };
+        // Bounced light: under the gantries, over the apron and the ship's
+        // side; and down the yard's canyons, low.
+        let probes = if config.probes {
+            [
+                ProbeVolume::new([-140., 0.5, -10.], [140., 50., 62.], [36, 7, 10]),
+                ProbeVolume::new([-320., 0.5, 62.], [320., 16., 380.], [54, 2, 27]),
+            ]
+            .into_iter()
+            .filter_map(|volume| world.add_probes(volume))
+            .count()
+        } else {
+            0
+        };
         Self {
+            probes,
             sea,
             funnel,
             buoy,

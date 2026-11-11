@@ -12,16 +12,19 @@ Each entry is a primitive any game would need, in general form, with the smalles
 | G4 | No per-mesh opt-out of the sun's shadow | lighting lane | partly closed by cascades |
 | G5 | The offscreen renderer has no wait but a readback | zgx-gpu (another team) | open |
 | G6 | Animators play glTF clips only: nothing made in code can be animated by one | animation lane | open |
-| G7 | A GPU view's frame time is the wall clock's, even under a `VirtualClock` | zgx-gpu (assigned by the coordinator) | open (bug) |
+| G7 | A GPU view's frame time is the wall clock's, even under a `VirtualClock` | zgx-gpu | closed (73933e56b) |
 | G8 | An emitter's rate, velocity and forces can't change once it's added | compute lane | open |
 | G9 | A 3D emitter can't start partway into its sound or take its own pitch | audio lane | open |
 | G10 | `scene_color` is the scene as displayed, not its light: a material can't put it back | graph lane (HDR target) | open |
 | G11 | Nothing says when a surface layer has taken effect | materials lane | open |
 | G12 | The exposure automatic exposure has adapted to can't be read | graph lane (post) | open |
-| L1 | Spot lights are binned by their sphere, not their cone | lighting lane | open (performance) |
+| G13 | A bus's level can't be read | audio lane | open |
+| P1 | GPU particles aren't reproducible run to run, under a virtual clock | particles lane | open (bug) |
+| L1 | Spot lights are binned by their sphere, not their cone | lighting lane | closed (dedd5f83f); cost re-measured |
 | L2 | A light at zero intensity is still binned and shaded | lighting lane | open (performance) |
 | L3 | Frames aren't reproducible run to run with cascades or with clustered lights | this M1 Max's GPU at MSAA edges | M1 Max only, under investigation |
 | L4 | One moving caster redraws every caster in its cascades | lighting lane | open (performance) |
+| L6 | One moving mesh restarts every probe's rounds | GI lane | open (performance) |
 | L5 | Sound occlusion tests a large mesh's triangles one by one, spending the frame's budget | audio lane | open (performance) |
 | M2 | The post chain's memory: 108 MB measured against the docs' 33 MB at 1080p | graph lane (post) | measurement |
 | M1 | Anything moving costs about 1.3 M instructions a frame over a camera-only frame | graph lane | measurement |
@@ -113,7 +116,13 @@ let animator = world.add_animator_for(&[trolley, spreader]);          // targets
 world.play(animator, &clip, Play::new())?;
 ```
 
-## G7. A GPU view's frame time is the wall clock's, even under a `VirtualClock`
+## G7. A GPU view's frame time is the wall clock's, even under a `VirtualClock`: closed
+
+**Closed by 73933e56b** (one clock per window frame): `ViewportFrame::time` is now `zgx::clock::now()`. Measured from the harbor: working cranes on their animators, under the bench's `VirtualClock`, give the same 600 frames run to run (0 differ; before, 600 of 600). Rain still doesn't repeat: P1.
+
+(The harbor's own bench had a bug here too, found by the animation lane's copy of it: `VirtualClock::advance` takes the time since the clock's start, and the bench passed the step, so its clock stood at 0.1 s. Fixed. G7's evidence stands: with the clock standing still, frames that differed could only have followed the wall clock.)
+
+### As first found
 
 **Needed by:** video renders, benchmarks, reference images, any offline render of moving 3D; design §4.4 promises it ("time comes from the frame, never the wall clock, so zgx-video's virtual clock renders a world deterministically").
 
@@ -126,6 +135,26 @@ So a 3D world drawn under a virtual clock moves by the wall clock. That includes
 A world's own way to be given a time, `World::animate(time)`, is `#[doc(hidden)]` and covers animators alone.
 
 **Smallest change:** the view frame's `time` from `zgx::clock::now()`. An app drawing a world itself would need a public `World::advance_to(time)` for particles and animators alike.
+
+## G13. A bus's level can't be read
+
+**Needed by:** any mixer view, any game ducking music under dialogue by level, and any test proving a mix ran.
+
+zgx-audio keeps an output-peak meter of its own, but nothing public reads a bus's level, or master's. The harbor's bench therefore measures master's RMS and peak from the offline mixer's samples itself (−21.7 dBFS RMS, −9.3 dBFS peak), and can't say what each bus (world, ui, its reverb) contributed.
+
+```rust
+impl Bus { pub fn level(&self) -> Level; } // RMS and peak since last asked, per channel
+```
+
+## P1. GPU particles aren't reproducible run to run, under a virtual clock
+
+**Needed by:** video renders and reference images of anything with particles (design §4.4: "particles, noise and TAA jitter are functions of frame time and a frame index").
+
+With G7 closed, the harbor's frames repeat run to run without rain (0–3 of 600 differ, within L3's edge noise), but not with it: 427–444 of 600 frames differ. Those frames differ in 4–439 pixels by up to 170 levels, so drops are in different places or blended in a different order.
+
+Arm: `POST=0 PROBES=0 CASCADES=0 LAMP_REACH=0 SOUND=0 CRANES=still WATER=stock`, with and without `RAIN=0`, twice each with `HASHES=`.
+
+The particles' own randomness (or the order a compute pass hands out slots in, which alpha blending shows) depends on something besides the frame's time and index.
 
 ## G8. An emitter's rate, velocity and forces can't change once it's added
 
@@ -184,7 +213,18 @@ By night (`SUN=-12`) the exposure adapts about nine stops brighter, and the wate
 impl World { pub fn exposure_now(&self) -> Option<f32>; } // stops, a frame or so late
 ```
 
-## L1. Spot lights are binned by their sphere, not their cone
+## L1. Spot lights are binned by their sphere, not their cone: closed
+
+**Closed by dedd5f83f** (spots binned by their cones). Re-measured on it (600 frames, `POST=0 PROBES=0 RAIN=0 SOUND=0 CRANES=still WATER=stock`, GPU busy ms a frame). `LAMP_REACH` now scales each lamp's physical reach (to 0.5 lux: 71 m for a mast flood); 1.7 is about the first sweep's hand-set ranges:
+
+| LAMP_REACH | 0 | 0.25 | 0.5 | 1 | 1.7 |
+| --- | --- | --- | --- | --- | --- |
+| GPU busy ms/frame | 5.53–5.57 | 5.88 | 6.89 | 8.81–9.51 | 13.07–13.78 |
+| Minstr/frame | 9.2 | 9.9 | 10.0 | 10.6 | 11.6–11.8 |
+
+So at the first sweep's ranges the lamps cost +7.5 to +8.2 ms, where before cone binning they cost +13.2 ms: about 40% less. At their physical reach, +3.3 to +4.0 ms. They're still the frame's largest cost.
+
+### As first found
 
 **Needed by:** any scene of floodlights, street lights or stage lights, aimed down or narrow.
 
@@ -230,6 +270,25 @@ Measured (`CRANES=working` against `CRANES=still`, no rain, 600 frames, M1 Max):
 So about 0.9 M instructions and most of the GPU time are the cascades' redraws.
 
 **What would close it:** keep still casters' depth apart from moving ones' (a static layer redrawn when the cascade or the sun moves, the dynamic casters drawn over a copy of it each frame), as the larger engines do.
+
+## L6. One moving mesh restarts every probe's rounds
+
+**Needed by:** any probe-lit world with something moving in it: vehicles, doors, cranes, characters that rays see.
+
+Per `docs/3d.md` a volume updates until every probe has had 16 rounds "since what rays see … last changed", and a traced mesh moving is such a change. The harbor has 5,184 probes in two volumes, and at the default 64 probes a frame a round is 81 frames, so settling takes about 1,300 frames.
+
+Its four cranes move every frame, so the probes never settle:
+
+| | Minstr/frame | GPU busy ms/frame |
+| --- | --- | --- |
+| cranes working, probes on | 44.8 | 15.9 |
+| cranes working, `PROBES=0` | 31.0 | 12.2 |
+| cranes still, no rain, probes on | 27.1 | 13.5 |
+| cranes still, no rain, `PROBES=0` | 23.8 | 10.9 |
+
+With the cranes working, probes cost 13.8 M instructions, 3.7 ms of GPU and about 97 MB. A crane on the quay changes what the probes near it see, not those 300 m away in the yard.
+
+**What would close it:** restart the rounds of the probes whose rays could meet what moved (a box test against the volume's grid), not all of them.
 
 ## L5. Sound occlusion tests a large mesh's triangles one by one
 
@@ -306,12 +365,13 @@ The frames' hashes changed with the HUD's text. The figures in the stage 0 and s
 | Water's depth: shallows clear, deep water dark, the hull fading into it | `scene_depth` (with the depth prepass) | R2 |
 | Waves from a spectrum (FFT) | A compute pass writing a texture the water reads; the water now sums six waves in its own shader | R4's compute feeding materials |
 | Light shafts between the cranes | Froxel fog, density volumes | R6 |
-| Bounce light under the gantries | Probes, GTAO | R8 |
+| Ambient occlusion in the stacks' corners | GTAO | R8 |
 
 ## Closed
 
 - **Lamps by the hundred:** 221 point and spot lights in lumens through clusters (stage 1). There were 8 nearest at stage 0.
 - **Shadow detail over the quay:** four cascades over 600 m (stage 1).
+- **Bounce light (probes):** two volumes, 5,184 probes, under the gantries over the apron and down the yard's canyons. Traced on the M1 Max (`ProbesStatus::Traced`).
 - **Dawn to night, and glow (the post chain):** automatic exposure follows the harbor's physical light from a hazy dawn to a lamp-lit night (`SUN=-12`), and bloom spreads the lamp heads and windows.
 - **Water and wet (custom materials):**
   - the sea is a material of the demo's own (`shaders/water.wgsl`): six wind waves moving a 1.6 km grid on frame time, ripples and rain rings in its normal, the scene behind seen through it;
@@ -322,5 +382,5 @@ The frames' hashes changed with the HUD's text. The figures in the stage 0 and s
   - a bell on a buoy;
   - rain as a bed;
   - reverb under each gantry's portal and in the container canyons;
-  - all synthesised, mixed offline at master gain zero.
+  - all synthesised, mixed offline (no device can be opened).
 - **Rain:** 45,000 streaks a second in a 160 m box following the camera, splashing where they land through a sub-emitter (stage 1).

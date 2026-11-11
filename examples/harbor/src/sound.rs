@@ -6,8 +6,9 @@
 //!
 //! The engine is offline here, always: `Audio::offline`, a mixer the caller
 //! runs, with no device built in (zgx-audio without its `device` feature),
-//! and master gain at zero. Nothing reaches a speaker; `Stats::sounding`
-//! says what was mixed before master's gain.
+//! so nothing can reach a speaker. Offline, master's gain is 1 and the
+//! mix is measured; a device, when there is one, opens at gain zero until
+//! the maintainer says otherwise.
 use crate::{
     scene::Harbor,
     sounds::{self, RATE},
@@ -47,12 +48,9 @@ fn sound(samples: &[f32]) -> Result<Sound, Error> {
 }
 
 impl HarborSound {
-    /// Sound for `harbor` in `world`, at master gain zero.
+    /// Sound for `harbor` in `world`, mixed offline (no device).
     pub fn new(world: &World, harbor: &Harbor) -> Result<Self, Error> {
-        let (audio, mixer) = Audio::offline(Config {
-            gain: 0.,
-            ..Config::default()
-        })?;
+        let (audio, mixer) = Audio::offline(Config::default())?;
         let bus = audio
             .bus("world")
             .ok_or_else(|| Error::Effect("no world bus".into()))?;
@@ -132,10 +130,10 @@ impl HarborSound {
         })
     }
 
-    /// Mix the next `seconds` of sound (offline): what a device would ask
-    /// for over a frame.
-    pub fn mix(&mut self, seconds: f32) {
+    /// Mix the next `seconds` of sound (offline), what a device would ask
+    /// for over a frame: the master's samples, interleaved.
+    pub fn mix(&mut self, seconds: f32) -> Vec<f32> {
         let frames = (seconds * RATE as f32).round() as usize;
-        let _ = self.mixer.frames(frames);
+        self.mixer.frames(frames)
     }
 }
