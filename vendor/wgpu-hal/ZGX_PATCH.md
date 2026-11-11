@@ -1,12 +1,12 @@
-# zgx patch to wgpu-hal 29.0.4 (Metal backend, two Direct3D 12 additions)
+# zgx patch to wgpu-hal 29.0.4 (Metal backend, three Direct3D 12 additions)
 
 Vendored from crates.io `wgpu-hal` 29.0.4 (MIT OR Apache-2.0, license files
 unchanged) and applied through `[patch.crates-io]` in the workspace
 `Cargo.toml`. Only `src/metal/{command,mod,device,adapter}.rs` differ, plus
 the new `src/metal/buffer_writes.rs`, and for Direct3D 12
 `src/dx12/instance.rs`, `src/auxil/dxgi/factory.rs`,
-`src/dx12/shader_compilation.rs`, `src/dx12/mod.rs` and the new
-`src/dx12/shader_disk_cache.rs` (see the last two sections), and
+`src/dx12/shader_compilation.rs`, `src/dx12/mod.rs`, `src/dx12/adapter.rs`
+and the new `src/dx12/shader_disk_cache.rs` (see the last three sections), and
 `Cargo.toml`'s `metal` feature (naga's WGSL in, for single-use shader
 modules); search for "zgx patch".
 
@@ -141,3 +141,27 @@ mark carries them (`ZGX_PROFILE=1`: `first frame presented (shaders: 6
 read, 0 compiled, 0 not kept)`), so a start slowed by compiling says so.
 `ZGX_SHADER_LOG=1` prints that line alone, for a probe timing starts
 (`ZGX_PROFILE`'s spans add about 25 ms to a start).
+
+## Direct3D 12: WARP's submissions one at a time
+
+On WARP 10.0.26100 (Windows 11 24H2 and 25H2), wgpu devices in one process
+that execute command lists at the same time make the driver fault
+(`d3d10warp.dll`, an access violation under `ExecuteCommandLists`), or draw
+nothing with no error. Direct3D 12 hands every caller the one device of the
+adapter, so each wgpu device is a queue of its own on that device. The
+fault needs those queues executing together: on 16 threads drawing a
+triangle each, a debug build faulted in 38 of 40 runs; with one lock
+around `ExecuteCommandLists` and the fence signal after it, or one queue
+for every device, in 0 of 20 each. Locking pipeline creation, shader
+compiles, resource creation or device creation, or committed resources in
+place of placed ones, didn't help. Raw Direct3D 12 drawing from 8 threads
+with a queue each did not fault, so something in what wgpu records is also
+needed. What that is remains unknown: the lock works around the fault, and
+the trigger inside wgpu's recording is still to be found.
+
+The adapter's `Workarounds::serialize_submits` is set for WARP (any version),
+and `Queue::submit` holds the process-wide `WARP_SUBMITS` lock across
+`ExecuteCommandLists` and `Signal`. A GPU's queues take no lock. zgx-gpu also
+shares one wgpu device among its renderers on WARP. Tested by
+`crates/zgx-gpu/tests/warp_devices.rs`: sixteen threads, each with a wgpu
+device of its own on WARP, drawing and reading back at once.

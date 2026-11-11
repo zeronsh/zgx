@@ -683,7 +683,16 @@ struct Workarounds {
     // On WARP 1.0.13+, debug information in shaders in certain situations causes the device
     // to hang. https://github.com/gfx-rs/wgpu/issues/8368
     avoid_shader_debug_info: bool,
+    // zgx patch: on WARP 10.0.26100, command lists executed at once on the
+    // queues of several devices in one process (Direct3D 12's one device for
+    // the adapter, a queue each) fault in d3d10warp.dll or draw nothing.
+    // Submissions to WARP take one process-wide lock (`WARP_SUBMITS`).
+    serialize_submits: bool,
 }
+
+/// zgx patch: held across `ExecuteCommandLists` and the fence signal after
+/// it by queues of WARP devices (`Workarounds::serialize_submits`).
+static WARP_SUBMITS: Mutex<()> = Mutex::new(());
 
 pub struct Adapter {
     raw: DxgiAdapter,
@@ -790,6 +799,8 @@ unsafe impl Sync for Device {}
 pub struct Queue {
     raw: Direct3D12::ID3D12CommandQueue,
     temp_lists: Mutex<Vec<Option<Direct3D12::ID3D12CommandList>>>,
+    /// zgx patch: `Workarounds::serialize_submits`.
+    serialize_submits: bool,
 }
 
 impl Queue {
@@ -1611,6 +1622,7 @@ impl crate::Queue for Queue {
             temp_lists.push(Some(cmd_buf.raw.clone().into()));
         }
 
+        let _serial = self.serialize_submits.then(|| WARP_SUBMITS.lock());
         {
             profiling::scope!("ID3D12CommandQueue::ExecuteCommandLists");
             unsafe { self.raw.ExecuteCommandLists(&temp_lists) }

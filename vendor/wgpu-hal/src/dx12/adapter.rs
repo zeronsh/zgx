@@ -169,6 +169,8 @@ impl super::Adapter {
         let mut workarounds = super::Workarounds::default();
 
         let is_warp = device_name.contains("Microsoft Basic Render Driver");
+        // zgx patch: every WARP, as no version is known to be safe.
+        workarounds.serialize_submits = is_warp;
 
         // WARP uses two different versioning schemes. Versions that ship with windows
         // use a version that starts with 10.x.x.x. Versions that ship from Nuget use 1.0.x.x.
@@ -1066,6 +1068,7 @@ impl crate::Adapter for super::Adapter {
             queue: super::Queue {
                 raw: queue,
                 temp_lists: Mutex::new(Vec::new()),
+                serialize_submits: self.private_caps.workarounds.serialize_submits,
             },
         })
     }
