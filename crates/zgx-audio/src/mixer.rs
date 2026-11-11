@@ -279,8 +279,9 @@ struct Scheduled {
 /// The ids of plays waiting for a slot, so a command for a voice not found
 /// asks this, not every command waiting, whether its play is still to
 /// come. A fixed table, open addressed: made up front, it never
-/// allocates. Past half full, an id isn't kept but counted, and only then
-/// are the waiting commands searched.
+/// allocates. Made to hold the schedule's whole room, which those waiting
+/// never pass, it's never more than half full; were it, an id would be
+/// counted rather than kept, and the waiting commands searched.
 pub(crate) struct Retrying {
     /// 0: empty (no voice has id 0).
     slots: Box<[u64]>,
@@ -292,9 +293,9 @@ pub(crate) struct Retrying {
 }
 
 impl Retrying {
-    /// Room for `held` at once (made a power of two, from 16 to 2^16).
+    /// Room for `held` at once (made a power of two, 16 or more).
     fn new(held: usize) -> Retrying {
-        let held = held.clamp(16, 1 << 16).next_power_of_two();
+        let held = held.max(16).next_power_of_two();
         Retrying {
             slots: vec![0; held * 2].into(),
             held,
@@ -948,6 +949,10 @@ pub(crate) struct Mixer {
     underruns: u64,
     /// The frame the last play was applied on, this block.
     started: Option<u64>,
+    /// Work the tests count, not time: plays tried, and commands looked
+    /// through for a waiting play.
+    #[cfg(test)]
+    pub(crate) work: [std::cell::Cell<u64>; 2],
     /// Times a play found no free slot and waited.
     waited: u64,
     /// Commands done with.
@@ -1019,6 +1024,8 @@ impl Mixer {
             ended: 0,
             underruns: 0,
             started: None,
+            #[cfg(test)]
+            work: Default::default(),
             waited: 0,
             taken: 0,
             click: (setup.rate / 1000).max(1),
@@ -1329,10 +1336,11 @@ impl Mixer {
     fn waiting(&self, id: u64) -> bool {
         self.retrying.contains(id)
             || (self.retrying.overflow > 0
-                && self
-                    .waiting
-                    .iter()
-                    .any(|c| matches!(c, Command::Play { id: play, .. } if *play == id)))
+                && self.waiting.iter().any(|c| {
+                    #[cfg(test)]
+                    self.work[1].set(self.work[1].get() + 1);
+                    matches!(c, Command::Play { id: play, .. } if *play == id)
+                }))
     }
 
     fn apply(&mut self, command: Command) -> Result<(), Command> {
@@ -1482,6 +1490,8 @@ impl Mixer {
     }
 
     fn play(&mut self, command: Command) -> Result<(), Command> {
+        #[cfg(test)]
+        self.work[0].set(self.work[0].get() + 1);
         let Command::Play {
             id,
             ref sound,

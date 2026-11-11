@@ -1408,6 +1408,63 @@ mod tests {
         }
     }
 
+    /// An offline engine with room for 2^17 commands, the 64 voices of
+    /// which have played and ended, and `plays` plays due at frame 1024.
+    fn crowded(plays: usize) -> (Audio, Offline, Vec<Voice>) {
+        let (audio, mut mixer) = Audio::offline(Config {
+            commands: 131_072,
+            limiter: None,
+            ..Config::default()
+        })
+        .unwrap();
+        let blip = Sound::from_samples(&[0., 0.5], 1, 48_000).unwrap();
+        let ended = (0..64)
+            .map(|_| audio.play(&blip, Play::new()).unwrap())
+            .collect();
+        mixer.frames(256);
+        let long = Sound::from_samples(&[0.25; 48_000], 1, 48_000).unwrap();
+        for _ in 0..plays {
+            audio.play(&long, Play::new().at(Time(1_024))).unwrap();
+        }
+        (audio, mixer, ended)
+    }
+
+    fn work(mixer: &Offline) -> [u64; 2] {
+        mixer
+            .renderer
+            .mixer
+            .work
+            .each_ref()
+            .map(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn a_crowd_of_plays_waiting_for_voices_is_tried_from_its_head() {
+        // Far more plays due on one frame than there are voices: those
+        // that find no slot wait. Each block while they wait tries the
+        // first, and those that then find slots, not every one of them.
+        let (_audio, mut mixer, _) = crowded(90_000);
+        // The block they come due in looks at each once, as any command due.
+        mixer.frames(1_024 + 128 - 256);
+        let before = work(&mixer)[0];
+        mixer.frames(128 * 40);
+        let tried = work(&mixer)[0] - before;
+        assert!(tried < 2_000, "{tried} plays tried in 40 blocks");
+    }
+
+    #[test]
+    fn commands_for_ended_voices_search_nothing_however_many_plays_wait() {
+        let (audio, mut mixer, ended) = crowded(90_000);
+        mixer.frames(1_024 + 128 - 256);
+        let before = work(&mixer)[1];
+        for voice in &ended {
+            let _ = voice.set_gain(0.5, Ramp::NONE);
+        }
+        mixer.frames(128);
+        assert_eq!(work(&mixer)[1] - before, 0, "searched for waiting plays");
+        drop(audio);
+    }
+
     #[test]
     fn a_config_an_engine_can_t_be_made_with_is_an_error_not_a_panic() {
         let bad = [

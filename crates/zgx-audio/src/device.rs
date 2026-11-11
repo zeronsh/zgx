@@ -37,7 +37,7 @@ impl Format {
 
 /// The mixer as a device runs it, block by block on its own thread.
 pub struct Renderer {
-    mixer: Mixer,
+    pub(crate) mixer: Mixer,
     channels: usize,
     meter: Arc<Meter>,
 }
