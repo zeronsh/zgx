@@ -3232,6 +3232,11 @@ pub struct Scene {
     /// row no longer holding one, or its slot reused) costs one layout from
     /// that row, which clears it.
     shrank: Vec<u64>,
+    /// Whether rows and columns shrank their children (`layout_shrinks`),
+    /// by slot: the generation of the node, the pass of the layout found so
+    /// (none: 0) and what was found. Asked again of their children as each
+    /// is laid out alone, frame after frame, while that layout stands.
+    shrinks_of: Vec<(u32, u64, bool)>,
     slots: Vec<Slot>,
     free: Vec<u32>,
     /// Slots of nodes removed and not yet freed (`kill`).
@@ -3514,6 +3519,7 @@ impl Scene {
         Self {
             pending_children: std::cell::Cell::new(u32::MAX),
             shrank: Default::default(),
+            shrinks_of: Vec::new(),
             identity: NEXT_SCENE_ID
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
                 .expect("scene identity exhausted"),
@@ -3984,6 +3990,7 @@ impl Scene {
             + vec_bytes(&self.repaints)
             + vec_bytes(&self.inert)
             + vec_bytes(&self.shrank)
+            + vec_bytes(&self.shrinks_of)
             + map_bytes(&self.contents_styles)
             + map_bytes(&self.given_styles)
             + map_bytes(&self.directions)
@@ -9594,9 +9601,16 @@ impl Scene {
         // Held (`set_style_within`): its parent chose its size, and it answers
         // that as it did or isn't let stand.
         let held = !self.held_alone.is_empty() && self.held_alone.contains(&id);
+        // Or, not sized by its parent along its axis, held at its floor by
+        // a parent that shrank it, a floor its content just lowered: its
+        // parent shrinks it now (as for a boundary, `floor_dropped`), though
+        // its own size answers as it did. Asked only under a row or column
+        // that shrank (`shrank`).
+        let floor = flexed.is_none() && !self.shrank.is_empty() && self.shrank_bit(parent);
         let stands = (held || flexed.is_none())
             && self.reads_bits(id) == kept_reads
-            && self.measure_full(id, asked) == was;
+            && self.measure_full(id, asked) == was
+            && !(floor && self.floor_dropped_alone(id));
         if stands && held {
             // What it answered to other questions read what just changed.
             let node = self.tree_node_mut(id);
@@ -9703,7 +9717,8 @@ impl Scene {
     /// held there and no longer holds: at its size under a parent that
     /// shrank its children (`shrank`), it was held at its automatic minimum,
     /// and that is now less than its size, so its parent would shrink it.
-    /// Asked only of the few boundaries a frame lays out alone.
+    /// Asked only of the few boundaries a frame lays out alone (and of the
+    /// stops `floor_dropped_alone` finds held).
     #[inline(never)]
     fn floor_dropped(&mut self, id: NodeId, constraints: Constraints, size: (f32, f32)) -> bool {
         let node = self.node(id);
@@ -9740,6 +9755,189 @@ impl Scene {
         }
         dropped
     }
+    /// `floor_dropped` for `id`, a stop laid out alone (`relayout_alone`)
+    /// at the size it holds, not sized by its parent along its axis, under a row or
+    /// column that shrank its children (`shrank`, set by any layout of
+    /// `parent`, a probe's too): only if the layout `parent` holds shrank
+    /// them, which held it at its automatic minimum, where it stands. Else
+    /// it stands where nothing was shrunk, and a floor below it changes
+    /// nothing. Its parent's layout told apart (`layout_shrinks`) or not,
+    /// as before.
+    #[cold]
+    #[inline(never)]
+    fn floor_dropped_alone(&mut self, id: NodeId) -> bool {
+        let Some(parent) = self.node(id).parent else {
+            return false;
+        };
+        // Of a pass: an expired result's (`EXPIRED_PASS`) is no layout's,
+        // and 0 is an empty slot's.
+        let pass = self.node(parent).measurement.as_ref().map(|m| m.pass);
+        let pass = pass.filter(|&pass| pass != EXPIRED_PASS && pass != 0);
+        let slot = parent.index as usize;
+        let known = pass.and_then(|pass| match self.shrinks_of.get(slot) {
+            Some(&(generation, of, shrinks)) if generation == parent.generation && of == pass => {
+                Some(shrinks)
+            }
+            _ => None,
+        });
+        let shrinks = match known {
+            Some(shrinks) => shrinks,
+            None => match self.layout_shrinks(parent) {
+                Some(shrinks) => {
+                    if let Some(pass) = pass {
+                        if self.shrinks_of.len() <= slot {
+                            self.shrinks_of.resize(slot + 1, (0, 0, false));
+                        }
+                        self.shrinks_of[slot] = (parent.generation, pass, shrinks);
+                    }
+                    shrinks
+                }
+                // Not told apart: the floor is looked at, as before.
+                None => true,
+            },
+        };
+        if !shrinks {
+            return false;
+        }
+        // Under the constraint it was laid out again at, at the size it
+        // answered as before: the result it holds.
+        let Some((constraints, size)) = self
+            .node(id)
+            .measurement
+            .as_ref()
+            .map(|m| (m.constraints, m.size))
+        else {
+            return false;
+        };
+        self.floor_dropped(id, constraints, size)
+    }
+    /// Whether the layout row or column `id` holds (its only result, with
+    /// its children's places) shrank its children: its children's bases
+    /// and gaps, more than the room along its axis, as the flex loop finds
+    /// them. A child its parent sized along that axis has its base in the
+    /// result it was measured at first (without that size); None where one
+    /// is gone, or the layout is not one this can tell.
+    fn layout_shrinks(&self, id: NodeId) -> Option<bool> {
+        let node = self.node(id);
+        let horizontal = match node.kind {
+            NodeKind::Container(Layout::Row) => true,
+            NodeKind::Container(Layout::Column) => false,
+            _ => return None,
+        };
+        let measured = node.measurement.as_ref()?;
+        let constraints = measured.constraints;
+        let resolved;
+        let style = match node.style.layout_options {
+            None => &node.style,
+            Some(_) => {
+                resolved = self.resolved_leaf_style(id, constraints);
+                &resolved
+            }
+        };
+        let padding = style.padding_edges.unwrap_or(Insets::all(style.padding));
+        // Along its axis, as its layout has them: its padding, the size it
+        // was given or sets, and the room its children were measured in.
+        let (padding, explicit, min, max, room) = if horizontal {
+            let explicit = constraints
+                .force_width
+                .or(style.width)
+                .or_else(|| percentage(style.width_percent, constraints.percent_width));
+            let (min, max) = (style.min_width, style.max_width);
+            (
+                padding.left.max(0.0) + padding.right.max(0.0),
+                explicit,
+                min,
+                max,
+                constraints.width,
+            )
+        } else {
+            let explicit = constraints
+                .force_height
+                .or(style.height)
+                .or_else(|| percentage(style.height_percent, constraints.percent_height));
+            let (min, max) = (style.min_height, style.max_height);
+            (
+                padding.top.max(0.0) + padding.bottom.max(0.0),
+                explicit,
+                min,
+                max,
+                constraints.height,
+            )
+        };
+        // Sized by its children, with no maximum (or room, across a row),
+        // it holds them all: it shrinks none.
+        if explicit.is_none() && max.is_none() && (!horizontal || room.is_none()) {
+            return Some(false);
+        }
+        let explicit = explicit.map(|size| dimension(size, min, max));
+        let room = explicit
+            .or_else(|| room.map(|size| size.min(max.unwrap_or(f32::INFINITY))))
+            .or(max)
+            .map(|size| (size - padding).max(0.0));
+        let mut bases = 0.0;
+        let mut count = 0usize;
+        for &(child, place, under) in &measured.children {
+            let child_node = self.node(child);
+            if child_node.style.absolute {
+                continue;
+            }
+            count += 1;
+            let m = child_node.style.margin;
+            bases += if horizontal {
+                m.left + m.right
+            } else {
+                m.top + m.bottom
+            };
+            let sized = if horizontal {
+                under.force_width
+            } else {
+                under.force_height
+            };
+            if sized.is_none() {
+                bases += if horizontal {
+                    place.width
+                } else {
+                    place.height
+                };
+                continue;
+            }
+            // Its base: the result it was measured at before it was sized,
+            // in the room it then had.
+            let natural = self.relevant(
+                child,
+                if horizontal {
+                    Constraints {
+                        width: room,
+                        force_width: None,
+                        ..under
+                    }
+                } else {
+                    Constraints {
+                        height: room,
+                        force_height: None,
+                        ..under
+                    }
+                },
+            );
+            let base = child_node
+                .measurement
+                .iter()
+                .chain(&child_node.alternates)
+                .map(|m| (m.constraints, m.size))
+                .chain(child_node.sizes.iter().map(|s| (s.constraints, s.size)))
+                .find(|(asked, _)| *asked == natural)?
+                .1;
+            bases += if horizontal { base.0 } else { base.1 };
+        }
+        bases += style.gap * count.saturating_sub(1) as f32;
+        // A row sized by its content fits it in its room (`measure_uncached`).
+        let content = explicit.unwrap_or(match room.filter(|_| horizontal) {
+            Some(room) => bases.min(room) + padding,
+            None => bases + padding,
+        });
+        let limit = dimension(content, min, max) - padding;
+        Some(limit - bases <= -0.001)
+    }
     /// Whether the row or column in slot `id` shrank its children when last
     /// laid out (`shrank`).
     fn shrank_bit(&self, id: NodeId) -> bool {
@@ -9767,11 +9965,18 @@ impl Scene {
         let style = &self.node(id).style;
         style.absolute && style.layout_options.is_none()
     }
-    /// Mark every ancestor up to the root, ignoring boundaries.
+    /// Mark every ancestor up to the root, ignoring boundaries. What one
+    /// answered this pass, laid out alone before this boundary was found
+    /// not to stand (`layout_alone`, which runs first), took its old
+    /// answer, and serves no more (`expire_this_pass`): the layout that
+    /// follows would keep it, and leave the boundary's subtree unarranged.
     fn invalidate_layout_to_root(&mut self, mut id: NodeId) {
         let mut own = true;
         loop {
-            self.invalidate_with(id, LAYOUT, false, std::mem::take(&mut own));
+            self.invalidate_with(id, LAYOUT, false, own);
+            if !std::mem::take(&mut own) {
+                self.expire_this_pass(id);
+            }
             match self.node(id).parent {
                 Some(parent) => id = parent,
                 None => break,
