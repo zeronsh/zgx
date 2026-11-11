@@ -48,6 +48,18 @@ impl Default for AatMapBuilder {
     }
 }
 
+impl AatMap {
+    /// zgx: the bytes its chains' flags hold on the heap.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.chain_flags.capacity() * size_of::<Vec<RangeFlags>>()
+            + self
+                .chain_flags
+                .iter()
+                .map(|f| f.capacity() * size_of::<RangeFlags>())
+                .sum::<usize>()
+    }
+}
+
 impl AatMapBuilder {
     pub fn add_feature(&mut self, face: &hb_font_t, feature: &Feature) -> Option<()> {
         let feat = face.aat_tables.feat.as_ref()?;

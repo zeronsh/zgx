@@ -148,6 +148,96 @@ fn heap(report: &mut Report) {
     report.add("heap", "mimalloc committed", None, Some(commit));
     report.add("heap", "mimalloc peak committed", None, Some(peak));
     report.add("heap", "mimalloc in use", None, Some(used));
+    // What footprint charges for its pages, and of that what holds nothing
+    // live: pages a few blocks keep, size classes' rounding, its own
+    // records. Freed pages it keeps aren't among them (they go at idle).
+    match mimalloc_resident() {
+        Some(resident) => {
+            report.add("heap", "mimalloc resident", None, Some(resident));
+            report.add(
+                "heap",
+                "mimalloc resident, not in use",
+                None,
+                Some(resident.saturating_sub(used)),
+            );
+        }
+        None => report.add("heap", "mimalloc resident (unavailable here)", None, None),
+    }
+}
+/// The dirty and swapped-out pages of the regions mimalloc maps (those of
+/// its VM tag), as footprint counts them: walked when a report asks.
+#[cfg(all(feature = "mimalloc", target_os = "macos"))]
+fn mimalloc_resident() -> Option<usize> {
+    /// `vm_region_extended_info` (mach/vm_region.h).
+    #[repr(C)]
+    #[derive(Default)]
+    struct Extended {
+        protection: u32,
+        user_tag: u32,
+        pages_resident: u32,
+        pages_shared_now_private: u32,
+        pages_swapped_out: u32,
+        pages_dirtied: u32,
+        ref_count: u32,
+        shadow_depth: u16,
+        external_pager: u8,
+        share_mode: u8,
+        pages_reusable: u32,
+    }
+    const VM_REGION_EXTENDED_INFO: i32 = 13;
+    const KERN_SUCCESS: i32 = 0;
+    /// `mi_option_os_tag` (mimalloc.h).
+    const OS_TAG: std::ffi::c_int = 18;
+    unsafe extern "C" {
+        static mach_task_self_: u32;
+        fn mach_vm_region(
+            task: u32,
+            address: *mut u64,
+            size: *mut u64,
+            flavor: i32,
+            info: *mut Extended,
+            count: *mut u32,
+            object: *mut u32,
+        ) -> i32;
+        fn mi_option_get(option: std::ffi::c_int) -> std::ffi::c_long;
+        fn sysconf(name: std::ffi::c_int) -> std::ffi::c_long;
+    }
+    const SC_PAGESIZE: std::ffi::c_int = 29;
+    // SAFETY: mimalloc's option getter and the C library's page size.
+    let (tag, page) = unsafe { (mi_option_get(OS_TAG) as u32, sysconf(SC_PAGESIZE)) };
+    let page = usize::try_from(page).ok().filter(|p| *p > 0)?;
+    let (mut address, mut pages) = (0u64, 0usize);
+    loop {
+        let (mut size, mut object) = (0u64, 0u32);
+        let mut info = Extended::default();
+        let mut count = (size_of::<Extended>() / 4) as u32;
+        // SAFETY: this task's own map, read into a correctly sized
+        // `vm_region_extended_info` with its count; the object port it
+        // returns names no right (extended info gives none).
+        let read = unsafe {
+            mach_vm_region(
+                mach_task_self_,
+                &mut address,
+                &mut size,
+                VM_REGION_EXTENDED_INFO,
+                &mut info,
+                &mut count,
+                &mut object,
+            )
+        };
+        if read != KERN_SUCCESS {
+            break;
+        }
+        if info.user_tag == tag {
+            pages += (info.pages_dirtied + info.pages_swapped_out) as usize;
+        }
+        address += size;
+    }
+    Some(pages * page)
+}
+#[cfg(all(feature = "mimalloc", not(target_os = "macos")))]
+fn mimalloc_resident() -> Option<usize> {
+    None
 }
 #[cfg(all(not(feature = "mimalloc"), target_os = "macos"))]
 fn heap(report: &mut Report) {
@@ -230,6 +320,25 @@ mod tests {
                 .find(|l| l.name.ends_with("in use"))
                 .unwrap_or_else(|| panic!("{report:?}"));
             assert!(in_use.bytes.unwrap() >= 8 << 20, "{in_use:?}");
+        }
+        // What footprint charges for mimalloc's pages: at least what's in
+        // use of them, where the system says; elsewhere, said to be unknown.
+        #[cfg(feature = "mimalloc")]
+        {
+            let bytes = |name: &str| {
+                (report.lines.iter())
+                    .find(|l| l.name.starts_with(name))
+                    .unwrap_or_else(|| panic!("no {name}: {report:?}"))
+                    .bytes
+            };
+            #[cfg(target_os = "macos")]
+            {
+                let resident = bytes("mimalloc resident").unwrap();
+                assert!(resident >= bytes("mimalloc in use").unwrap(), "{report:?}");
+                assert!(resident >= 8 << 20, "{report:?}");
+            }
+            #[cfg(not(target_os = "macos"))]
+            assert_eq!(bytes("mimalloc resident (unavailable here)"), None);
         }
     }
 }

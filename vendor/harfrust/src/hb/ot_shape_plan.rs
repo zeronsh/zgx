@@ -48,6 +48,11 @@ pub struct hb_ot_shape_plan_t {
 }
 
 impl hb_ot_shape_plan_t {
+    /// zgx: about the bytes it holds on the heap: its OpenType and AAT maps
+    /// (a complex shaper's own data, boxed, is left out).
+    pub fn heap_bytes(&self) -> usize {
+        self.ot_map.heap_bytes() + self.aat_map.heap_bytes()
+    }
     /// Returns a plan that can be used for shaping any buffer with the
     /// provided properties.
     pub fn new(

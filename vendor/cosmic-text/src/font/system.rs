@@ -478,6 +478,53 @@ impl FontSystem {
         Some(hyphenator(word, &self.locale))
     }
 
+    /// zgx: about the bytes shaping holds on the heap between runs, for a
+    /// memory report: its reused buffers (`ShapeBuffer::heap_bytes`) and the
+    /// caches its font searches keep (matches, first fonts and fallbacks,
+    /// characters scanned, codepoint support, weight axes, monospace ids).
+    /// The parsed fonts and the database are counted apart. Walked when
+    /// asked, nothing kept as it runs.
+    pub fn cache_bytes(&self) -> usize {
+        fn table<K, V>(map: &HashMap<K, V>) -> usize {
+            map.capacity() * (size_of::<K>() + size_of::<V>() + 1)
+        }
+        let matches: usize = self
+            .font_matches_cache
+            .values()
+            .map(|keys| keys.capacity() * size_of::<FontMatchKey>())
+            .sum();
+        let support: usize = self
+            .font_codepoint_support_info_cache
+            .values()
+            .map(|info| (info.supported.capacity() + info.not_supported.capacity()) * 4)
+            .sum();
+        let per_script: usize = self
+            .per_script_monospace_font_ids
+            .values()
+            .map(|ids| ids.capacity() * size_of::<fontdb::ID>())
+            .sum();
+        self.shape_buffer.heap_bytes()
+            + table(&self.font_matches_cache)
+            + matches
+            + self.first_font.capacity() * size_of::<FirstFont>()
+            + self.first_fallback.capacity() * size_of::<FirstFallback>()
+            + self
+                .first_fallback
+                .iter()
+                .map(|first| first.scripts.capacity() * size_of::<unicode_script::Script>())
+                .sum::<usize>()
+            + self.face_queries.capacity()
+                * size_of::<(FamilyOwned, fontdb::Weight, fontdb::Style, Option<fontdb::ID>)>()
+            + table(&self.scanned)
+            + table(&self.font_codepoint_support_info_cache)
+            + support
+            + table(&self.weight_axes)
+            + table(&self.per_script_monospace_font_ids)
+            + per_script
+            + self.monospace_font_ids.capacity() * size_of::<fontdb::ID>()
+            + table(&self.font_cache)
+    }
+
     /// zgx: how many fonts are loaded (parsed and kept), for a memory report.
     pub fn loaded_fonts(&self) -> usize {
         self.font_cache.values().filter(|font| font.is_some()).count()

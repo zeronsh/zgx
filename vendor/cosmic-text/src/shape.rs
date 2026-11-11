@@ -144,6 +144,35 @@ pub struct ShapeBuffer {
 }
 
 impl ShapeBuffer {
+    /// zgx patch: about the bytes it holds on the heap between runs: cached
+    /// shape plans, harfrust's buffer, and the spans, words and lines it
+    /// reuses (each with what it holds), for a memory report.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        let word = |w: &ShapeWord| w.glyphs.capacity() * size_of::<ShapeGlyph>();
+        let span = |s: &ShapeSpan| {
+            s.words.capacity() * size_of::<ShapeWord>()
+                + s.words.iter().map(word).sum::<usize>()
+                + s.decoration_spans.capacity() * size_of::<(Range<usize>, GlyphDecorationData)>()
+        };
+        let line = |l: &VisualLine| l.ranges.capacity() * size_of::<VlRange>();
+        self.shape_plan_cache.capacity() * size_of::<(fontdb::ID, harfrust::ShapePlan)>()
+            + self.shape_plan_cache.iter().map(|(_, plan)| plan.heap_bytes()).sum::<usize>()
+            + self.harfrust_buffer.as_ref().map_or(0, harfrust::UnicodeBuffer::heap_bytes)
+            + self.scripts.capacity() * size_of::<Script>()
+            + self.spans.capacity() * size_of::<ShapeSpan>()
+            + self.spans.iter().map(span).sum::<usize>()
+            + self.words.capacity() * size_of::<ShapeWord>()
+            + self.words.iter().map(word).sum::<usize>()
+            + self.hyphenation.as_ref().map_or(0, |h| {
+                size_of::<Hyphenation>()
+                    + h.points.capacity() * size_of::<((usize, usize), Vec<u16>)>()
+                    + h.points.iter().map(|p| p.1.capacity() * 2).sum::<usize>()
+                    + h.soft.capacity() * size_of::<(usize, usize)>()
+            })
+            + (self.visual_lines.capacity() + self.cached_visual_lines.capacity())
+                * size_of::<VisualLine>()
+            + self.visual_lines.iter().chain(&self.cached_visual_lines).map(line).sum::<usize>()
+    }
     /// zgx patch: gives back what the longest text shaped lately left in these
     /// buffers, its lines' lists above all. They fill again as they're needed.
     pub(crate) fn rest(&mut self) {
