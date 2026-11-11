@@ -3192,6 +3192,19 @@ impl PaintItem<'_> {
 }
 type FontMeasurer =
     dyn Fn(&std::sync::Arc<str>, f32, Option<f32>, &crate::text_layout::FontStyle) -> (f32, f32);
+/// Text services installed on a scene that has none of its host's
+/// (`Scene::set_default_text_services`): false, installing nothing, once
+/// they are gone.
+pub type DefaultTextServices = dyn Fn(&mut Scene) -> bool;
+thread_local! {
+    /// This thread's (`Scene::set_default_text_services`).
+    static DEFAULT_TEXT_SERVICES: std::cell::RefCell<Option<std::rc::Rc<DefaultTextServices>>> =
+        const { std::cell::RefCell::new(None) };
+    /// How many times they were set: a scene with none of its own looks at
+    /// them only when this moved (`Scene::text_epoch`), so one that never
+    /// gets any (headless) costs a load and a compare a layout.
+    static DEFAULT_TEXT_EPOCH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 /// A plain text's size, and the width up to which its lines break as they
 /// do at the limit given (`Scene::set_font_text_reach_measurer`).
 type FontReach = dyn Fn(
@@ -3315,6 +3328,15 @@ pub struct Scene {
     rich_measurer: crate::rich_text::TextMeasure,
     rich_shaper: Option<std::rc::Rc<crate::rich_text::RichShaper>>,
     text_shaper_revision: u32,
+    /// The thread's default text services as it last looked at them
+    /// (`DEFAULT_TEXT_EPOCH`), with none of its own: looked at again once
+    /// they are set again (`settle_text_services`).
+    text_epoch: u32,
+    /// The default text services it took (`set_default_text_services`),
+    /// none once its host installs its own; and whether a renderer has drawn
+    /// it (`drawn_with_other_text_services`).
+    text_default: Option<std::rc::Rc<DefaultTextServices>>,
+    text_drawn: std::cell::Cell<bool>,
     pending_layout_nodes: usize,
     layout_revision: u64,
     layout_pass: u64,
@@ -3638,6 +3660,9 @@ impl Scene {
             rich_measurer: Default::default(),
             rich_shaper: None,
             text_shaper_revision: 0,
+            text_epoch: 0,
+            text_default: None,
+            text_drawn: std::cell::Cell::new(false),
             pending_layout_nodes: 0,
             layout_revision: 0,
             layout_pass: 0,
@@ -6929,6 +6954,63 @@ impl Scene {
             |shaper| shaper(rich, width),
         )
     }
+    /// Make `install` the text services of every scene on this thread whose
+    /// host installed none (no font measurer), at its next layout: a
+    /// renderer's, which `zgx_gpu` makes it, so that text a renderer draws
+    /// was measured as it is drawn and not by the estimate (a label laid out
+    /// narrower than its glyphs, its last one cut). `install` returns false,
+    /// installing nothing, once its services are gone; a host's own always
+    /// win. `None` takes it back.
+    pub fn set_default_text_services(install: Option<std::rc::Rc<DefaultTextServices>>) {
+        DEFAULT_TEXT_SERVICES.with_borrow_mut(|default| *default = install);
+        DEFAULT_TEXT_EPOCH.set(DEFAULT_TEXT_EPOCH.get().wrapping_add(1));
+    }
+    /// The default text services it took (`set_default_text_services`),
+    /// none if its host installed its own.
+    pub fn default_text_services(&self) -> Option<&std::rc::Rc<DefaultTextServices>> {
+        self.text_default.as_ref()
+    }
+    /// A renderer drawing it, `ours` its text services: whether this is the
+    /// first to draw it and it took other default ones (two contexts on one
+    /// thread, the last made the default), which it keeps (installing them
+    /// again would lay out and repaint all its text, for the same system
+    /// fonts on each); its host chooses with `install_text`. Once: two
+    /// drawing it each frame (a reference renderer's) say it no more.
+    pub fn drawn_with_other_text_services(&self, ours: &std::rc::Rc<DefaultTextServices>) -> bool {
+        !self.text_drawn.replace(true)
+            && self.text_default.as_ref().is_some_and(|taken| {
+                !std::ptr::addr_eq(std::rc::Rc::as_ptr(taken), std::rc::Rc::as_ptr(ours))
+            })
+    }
+    /// At layout, a scene with no font measurer takes this thread's default
+    /// text services, if there are any (`set_default_text_services`), unless
+    /// its host installed text measurement of another kind (a plain text
+    /// measurer or a shaper): what it chose stays, and nothing is laid out
+    /// again.
+    #[cold]
+    #[inline(never)]
+    fn settle_text_services(&mut self, epoch: u32) {
+        self.text_epoch = epoch;
+        let chosen = self.text_measurer.is_some()
+            || self.text_shaper.is_some()
+            || self.font_shaper.is_some()
+            || self.rich_shaper.is_some();
+        if chosen {
+            return;
+        }
+        if let Some(install) = DEFAULT_TEXT_SERVICES.with_borrow(Option::clone) {
+            match install(self) {
+                true => self.text_default = Some(install),
+                false => DEFAULT_TEXT_SERVICES.with_borrow_mut(|default| {
+                    if default.as_ref().is_some_and(|d| {
+                        std::ptr::addr_eq(std::rc::Rc::as_ptr(d), std::rc::Rc::as_ptr(&install))
+                    }) {
+                        *default = None;
+                    }
+                }),
+            }
+        }
+    }
     /// Install wrapping plain text's measurement with the widths it holds
     /// for: its size at a limit, and the width up to which (from its widest
     /// line's) its lines break the same. Layout serves a width between from
@@ -6970,6 +7052,8 @@ impl Scene {
         + 'static,
     ) {
         self.font_measurer = Some(Box::new(measure));
+        // Its host's own (or a default's, which says so after).
+        self.text_default = None;
         self.text_shaper_revision = self.text_shaper_revision.wrapping_add(1);
         let ids: Vec<_> = self
             .paint_items()
@@ -14109,6 +14193,16 @@ impl Scene {
     // Materializing children and starting the profile span do not dirty root.
     #[inline(never)]
     fn prepare_layout_active(&mut self, full: bool) {
+        // With no text services of its own, the thread's default, set since
+        // it last looked (a renderer made): its text then measured as drawn.
+        let epoch = DEFAULT_TEXT_EPOCH.get();
+        let full = match self.font_measurer.is_none() && self.text_epoch != epoch {
+            true => {
+                self.settle_text_services(epoch);
+                full || self.node(self.root).dirty & LAYOUT != 0
+            }
+            false => full,
+        };
         self.settle_children();
         let _span = crate::profile::span(crate::profile::Phase::Layout);
         self.layout_pass = self.layout_pass.wrapping_add(1);

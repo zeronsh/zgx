@@ -35,6 +35,120 @@ fn text_services_measure_as_a_renderer_does() {
     assert_eq!(without, laid_out(|scene| gpu.install_text(scene)));
 }
 
+/// The widths of a word in a row, as a text and as a checkbox's label (each
+/// as wide as it measures), in a scene `install` gave text services or not.
+fn row_widths(install: impl FnOnce(&mut zgx::scene::Scene)) -> [f32; 2] {
+    let mut ui = Ui::new(200., 60.);
+    install(&mut ui.scene.borrow_mut());
+    let on = ui.signal(true);
+    let view = ui.mount(column().w(200.).text_size(12.).children([
+        row().child(text("Lamps").id("text")),
+        row().child(checkbox("Lamps", on).id("checkbox")),
+    ]));
+    ui.prepare_frame();
+    let scene = ui.scene.borrow();
+    ["text", "checkbox"].map(|id| scene.layout_bounds(view.find(id).expect(id)).width)
+}
+
+/// A scene its host installed no text services on, drawn by a renderer, is
+/// measured by the renderer's text: a row's word as wide as the glyphs it
+/// draws, not zgx's estimate, which laid a checkbox's "Lamps" out narrower
+/// than them and its last glyph was cut. Once the renderer is gone, a scene
+/// is left with the estimate again.
+#[test]
+fn a_scene_drawn_without_text_services_is_measured_by_its_renderer() {
+    let Ok(gpu) = GpuRenderer::new(200, 60) else {
+        eprintln!("no GPU adapter: compared with nothing");
+        return;
+    };
+    let installed = row_widths(|scene| gpu.install_text(scene));
+    assert_eq!(row_widths(|_| {}), installed);
+    drop(gpu);
+    let estimated = row_widths(|_| {});
+    assert_ne!(
+        estimated, installed,
+        "the estimate measures as the renderer does"
+    );
+}
+
+/// Two renderers on contexts of their own, on one thread: a scene with no
+/// text services takes the last one's and keeps them, drawn by both each
+/// frame (a reference renderer's): never traded back and forth, its text
+/// laid out again each time. Its host's own installing leaves it none taken.
+#[test]
+fn a_scene_keeps_the_text_services_it_took_whichever_renderer_draws_it() {
+    let (Ok(mut drawing), Ok(mut last)) = (GpuRenderer::new(200, 60), GpuRenderer::new(200, 60))
+    else {
+        eprintln!("no GPU adapter: compared with nothing");
+        return;
+    };
+    let same = |a: &std::rc::Rc<zgx::scene::DefaultTextServices>,
+                b: &std::rc::Rc<zgx::scene::DefaultTextServices>| {
+        std::ptr::addr_eq(std::rc::Rc::as_ptr(a), std::rc::Rc::as_ptr(b))
+    };
+    let mut ui = Ui::new(200., 60.);
+    let _view = ui.mount(row().child(text("Lamps")));
+    let frame = |ui: &mut Ui, gpu: &mut GpuRenderer| {
+        ui.prepare_frame();
+        let taken = ui.scene.borrow().default_text_services().cloned();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        taken
+    };
+    // The first to draw it, with other text services, says so (an issue a
+    // host hands on), once.
+    let said = |gpu: &mut GpuRenderer| {
+        gpu.take_issues()
+            .iter()
+            .filter(|issue| issue.contains("another renderer's text services"))
+            .count()
+    };
+    let taken = frame(&mut ui, &mut drawing).expect("the last renderer's taken");
+    assert_eq!(said(&mut drawing), 1);
+    for each in 0..4 {
+        let gpu = if each % 2 == 0 {
+            &mut last
+        } else {
+            &mut drawing
+        };
+        let kept = frame(&mut ui, gpu).expect("kept");
+        assert!(same(&taken, &kept));
+    }
+    assert_eq!((said(&mut drawing), said(&mut last)), (0, 0));
+    drawing.install_text(&mut ui.scene.borrow_mut());
+    assert!(frame(&mut ui, &mut drawing).is_none());
+    assert!(frame(&mut ui, &mut drawing).is_none());
+}
+
+/// A scene whose host measures its text another way (a plain text measurer,
+/// as `fx_bench` installs) keeps it: a renderer's text services are taken
+/// only by a scene with none of any kind.
+#[test]
+fn a_scene_measured_its_hosts_way_takes_no_default_text_services() {
+    let Ok(mut gpu) = GpuRenderer::new(200, 60) else {
+        eprintln!("no GPU adapter: compared with nothing");
+        return;
+    };
+    let mut scene = zgx::scene::Scene::new(200., 60.);
+    scene.set_text_measurer(|text: &str, size: f32, _: Option<f32>| {
+        (text.chars().count() as f32 * size, size)
+    });
+    let root = scene.root();
+    let label = scene.append(
+        root,
+        zgx::scene::NodeKind::Text {
+            text: "Lamps".into(),
+            color: zgx::scene::Color(255, 255, 255, 255),
+            font_size: 12.,
+        },
+        zgx::scene::Style::default(),
+    );
+    let damage = scene.flush().damage;
+    gpu.render(&scene, &damage).unwrap();
+    assert!(scene.default_text_services().is_none());
+    assert_eq!(scene.layout_bounds(label).width, 60.);
+}
+
 /// Without a renderer to trim the words it shapes as it draws, the text
 /// cache sweeps them as they grow: 450,000 labels' values churned headless
 /// leave cosmic-text's words bounded (untrimmed, they grow about 2.7 KB a
