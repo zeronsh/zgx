@@ -1920,3 +1920,44 @@ fn a_state_given_a_speed_starts_with_it_and_stopping_says_it() {
     h.run_ms(100.);
     assert_eq!(h.x("box"), at, "and it stays where it was stopped");
 }
+
+/// What a host's memory report counts of the engine (`anime` lines).
+fn anime_counts(h: &Harness) -> (usize, usize) {
+    let mut report = zgx::memory::Report::default();
+    h.host.memory(&mut report);
+    let count = |name: &str| {
+        report
+            .lines
+            .iter()
+            .find(|l| l.area == "anime" && l.name == name)
+            .and_then(|l| l.entries)
+            .unwrap_or_else(|| panic!("no anime line `{name}`"))
+    };
+    (
+        count("clips playing"),
+        count("state and table properties owned"),
+    )
+}
+
+/// A finished animation of a state or a table lets its properties go, as a
+/// cancelled one does: an app animating a fresh state a time (a reply's
+/// clock) holds nothing for the ones that ended. While they play, each
+/// property is owned; a restart owns it again.
+#[test]
+fn finished_animations_of_states_and_tables_let_their_properties_go() {
+    let mut h = Harness::inline(&script(
+        r##"local handles = {}
+        for i = 1, 20 do
+            anime.animate({ x = 0 }, { x = 1, duration = 100 })
+            table.insert(handles, anime.animate(ui.state("s" .. i, 0), { value = 1, duration = 100 }))
+        end"##,
+    ));
+    h.frame();
+    assert_eq!(anime_counts(&h), (40, 40), "playing, each property owned");
+    h.run_ms(300.);
+    assert_eq!(
+        anime_counts(&h),
+        (0, 0),
+        "ended (their handles kept): nothing owned"
+    );
+}
