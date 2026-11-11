@@ -102,6 +102,18 @@ impl Ktx2 {
             file
         };
         std::panic::catch_unwind(|| {
+            // The transcoder parses the file again for itself: its header,
+            // level index, data format descriptor and (ETC1S) global data.
+            // What it's given has passed `read`: a KTX2 file (so never taken
+            // for a `.basis` file, which `new` also opens), of Vulkan format 0,
+            // at most a full chain of levels, each within the file and 64 MiB
+            // (`MAX_LEVEL`), and each level's output size checked against its
+            // target before it's asked for (`transcodes_within`). Its own
+            // allocations from the file are bounded before it makes them, as
+            // read for basisu 0.1.0 (pinned): the level index and ETC1S image
+            // descriptions checked against the file's length, the codebooks
+            // of at most 65,535 entries (u16 counts). Whatever it refuses is
+            // `None`; whatever panics is caught here, on any thread.
             let transcoder = basisu::Transcoder::new(input).ok()?;
             if transcoder.level_count() as usize != self.level_count() {
                 return None;
