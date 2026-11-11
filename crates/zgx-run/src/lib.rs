@@ -149,6 +149,11 @@ struct WindowConfig {
     /// How tall `titlebar: "inset"`'s caption buttons are on Windows, in the
     /// content's points (`caption_height`; `WindowOptions::caption_height`).
     caption_height: Option<f64>,
+    /// Whether its device asks for what GPU views can use (`"gpu": {
+    /// "view_features": true }`: `zgx_gpu::request_view_features`, asked
+    /// before `Application::run`). Absent, false: the device is asked for
+    /// what it always was.
+    view_features: bool,
 }
 impl AppConfig {
     /// The config for the script at `script`: its directory's `zgx.json`
@@ -194,6 +199,7 @@ impl AppConfig {
                     visible: true,
                     max_size: None,
                     caption_height: None,
+                    view_features: false,
                 },
             ));
         };
@@ -237,6 +243,7 @@ impl AppConfig {
                 "application_id",
                 "frame_autosave",
                 "visible",
+                "gpu",
             ]
             .contains(&key.as_str())
                 && !zgx_script::app_config::KEYS.contains(&key.as_str())
@@ -299,6 +306,21 @@ impl AppConfig {
                 return Err(fail("`frame_autosave` is not true, false or a name".into()));
             }
         };
+        let view_features = match object.get("gpu") {
+            None => false,
+            Some(serde_json::Value::Object(gpu)) => {
+                if let Some(key) = gpu.keys().find(|key| *key != "view_features") {
+                    return Err(fail(format!("unknown key `gpu.{key}` (view_features)")));
+                }
+                match gpu.get("view_features") {
+                    None => false,
+                    Some(v) => v
+                        .as_bool()
+                        .ok_or_else(|| fail("`gpu.view_features` is not a boolean".into()))?,
+                }
+            }
+            Some(_) => return Err(fail("`gpu` is not an object".into())),
+        };
         let app = zgx_script::app_config::from_object(dir, object).map_err(fail)?;
         Ok((
             config,
@@ -308,6 +330,7 @@ impl AppConfig {
                 visible,
                 max_size,
                 caption_height,
+                view_features,
             },
         ))
     }
@@ -385,7 +408,14 @@ pub fn run_hosting(
         visible,
         max_size,
         caption_height,
+        view_features,
     } = window_config;
+    // Asked before `run`, which decides before it starts the device: GPU
+    // timestamps and compressed textures where the GPU has them (a 3D
+    // scene's `caps`). Not asked, the device is what it always was.
+    if view_features {
+        zgx_desktop::request_view_features();
+    }
     let options = WindowOptions {
         title: config.title.clone(),
         width: config.width,
@@ -836,6 +866,36 @@ mod tests {
         .unwrap();
         let error = AppConfig::read(&script).unwrap_err();
         assert!(error.contains("is not a folder"), "{error}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_zgx_json_asks_for_view_features_only_where_it_says_so() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-gpu-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        let asks = |json: &str| {
+            std::fs::write(dir.join("zgx.json"), json).unwrap();
+            AppConfig::read(&script).map(|(_, _, window)| window.view_features)
+        };
+        // Absent, the device is asked for what it always was.
+        std::fs::remove_file(dir.join("zgx.json")).ok();
+        assert!(!AppConfig::read(&script).unwrap().2.view_features);
+        assert_eq!(asks("{}"), Ok(false));
+        assert_eq!(asks(r#"{ "gpu": {} }"#), Ok(false));
+        assert_eq!(asks(r#"{ "gpu": { "view_features": false } }"#), Ok(false));
+        assert_eq!(asks(r#"{ "gpu": { "view_features": true } }"#), Ok(true));
+        // What it doesn't know is refused, as the other keys' are.
+        let error = asks(r#"{ "gpu": { "view_feature": true } }"#).unwrap_err();
+        assert!(error.contains("unknown key `gpu.view_feature`"), "{error}");
+        let error = asks(r#"{ "gpu": { "view_features": "yes" } }"#).unwrap_err();
+        assert!(
+            error.contains("`gpu.view_features` is not a boolean"),
+            "{error}"
+        );
+        let error = asks(r#"{ "gpu": true }"#).unwrap_err();
+        assert!(error.contains("`gpu` is not an object"), "{error}");
         std::fs::remove_dir_all(dir).ok();
     }
 
