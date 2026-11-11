@@ -235,6 +235,15 @@ impl Default for Config {
     }
 }
 
+/// A bus's level ([`Bus::level`]), as gains (1 is full scale).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Level {
+    /// The root mean square of both sides, over about 300 ms.
+    pub rms: f32,
+    /// The loudest sample since last asked.
+    pub peak: f32,
+}
+
 /// What the mixer has done, as of its last block.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stats {
@@ -1293,6 +1302,31 @@ impl Bus {
         BusDrive {
             meter: self.audio.0.meter.clone(),
             index: usize::from(self.index),
+        }
+    }
+
+    /// Measures its level from now on, or stops: [`level`](Bus::level).
+    /// A bus not metered costs nothing for it.
+    pub fn set_metered(&self, on: bool) -> Result<(), Error> {
+        self.audio.send(
+            self.time,
+            Command::Meter {
+                bus: self.index,
+                on,
+            },
+        )
+    }
+
+    /// Its level, as [`set_metered`](Bus::set_metered) measures it (0
+    /// unmetered), after its gain (master's after its limiter, as it goes
+    /// out): its root mean square over about 300 ms, and its loudest
+    /// sample since this was last asked (by anyone).
+    pub fn level(&self) -> Level {
+        let meter = &self.audio.0.meter;
+        let i = usize::from(self.index);
+        Level {
+            rms: f32::from_bits(meter.mean_squares[i].load(Ordering::Relaxed)).sqrt(),
+            peak: f32::from_bits(meter.peaks[i].swap(0, Ordering::Relaxed)),
         }
     }
 

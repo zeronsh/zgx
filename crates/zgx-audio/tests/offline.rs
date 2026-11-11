@@ -1001,3 +1001,38 @@ fn a_sound_started_partway_plays_from_that_frame() {
     audio.update();
     assert!(!voice.playing());
 }
+
+#[test]
+fn a_metered_bus_says_its_level_after_its_gain() {
+    // 0.25 on both sides into music at gain 0.5: 0.125 out. Two seconds
+    // in, its RMS is that (its 300 ms average long settled) and its peak
+    // too; asked again with nothing played since, the peak is 0. An
+    // unmetered bus says nothing. Master's, after its limiter, is under
+    // its ceiling with a sound twice full scale.
+    let (audio, mut mixer) = Audio::offline(Config::default()).unwrap();
+    let music = audio.bus("music").unwrap();
+    let ui = audio.bus("ui").unwrap();
+    music.set_gain(0.5, Ramp::NONE).unwrap();
+    music.set_metered(true).unwrap();
+    audio.master().set_metered(true).unwrap();
+    let flat = sound(&[0., 0.25], 1, RATE);
+    audio
+        .play(&flat, Play::new().bus(&music).loop_frames(1..2))
+        .unwrap();
+    let loud = sound(&[0., 2.], 1, RATE);
+    audio
+        .play(&loud, Play::new().bus(&ui).loop_frames(1..2))
+        .unwrap();
+    mixer.frames(2 * RATE as usize);
+    let level = music.level();
+    assert!((level.rms - 0.125).abs() < 1e-4, "{level:?}");
+    assert_eq!(level.peak, 0.125);
+    assert_eq!(music.level().peak, 0., "read: none since");
+    assert_eq!(ui.level(), zgx_audio::Level::default(), "not metered");
+    let master = audio.master().level();
+    assert!(master.peak > 0.5 && master.peak <= 1., "{master:?}");
+    // Stopped measuring: nothing.
+    music.set_metered(false).unwrap();
+    mixer.frames(512);
+    assert_eq!(music.level(), zgx_audio::Level::default());
+}

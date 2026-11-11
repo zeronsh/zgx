@@ -21,6 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 pub(crate) const MAX_BLOCK: usize = 128;
 /// Buses at most, master included.
 pub(crate) const MAX_BUSES: usize = 64;
+/// How long a bus's metered level takes to move most of the way: an
+/// average over about this long, as a VU meter's.
+pub(crate) const METER_SECONDS: f32 = 0.3;
 /// Effects a bus can hold.
 pub(crate) const MAX_EFFECTS: usize = 8;
 /// The most a sample can be as it leaves a bus's effects, either way: 2^18.
@@ -102,6 +105,11 @@ pub(crate) enum Command {
         bus: u16,
         parent: u16,
         memory: BusMemory,
+    },
+    /// A bus's level measured, or not.
+    Meter {
+        bus: u16,
+        on: bool,
     },
     /// An effect, prepared, for the end of a bus's chain.
     AddEffect {
@@ -206,6 +214,12 @@ pub(crate) struct Meter {
     /// ([`UNDRIVEN`] until driven): read by the mixer each block, so a
     /// slider or an animation moves it with no command at all.
     pub drives: [AtomicU32; MAX_BUSES],
+    /// Each metered bus's level ([`Bus::level`](crate::Bus::level)), f32
+    /// bits: its mean square over about [`METER_SECONDS`], and its
+    /// loudest sample since it was last read (positive floats order as
+    /// their bits: kept with `fetch_max`, read with `swap`).
+    pub mean_squares: [AtomicU32; MAX_BUSES],
+    pub peaks: [AtomicU32; MAX_BUSES],
     /// Voices given back, so far: the host tells the app when it moves.
     pub ended: AtomicU64,
     /// Called by the host when voices end: the app's waker.
@@ -248,6 +262,8 @@ impl Meter {
             dry: zero(),
             running: AtomicBool::new(false),
             drives: std::array::from_fn(|_| AtomicU32::new(UNDRIVEN)),
+            mean_squares: std::array::from_fn(|_| AtomicU32::new(0)),
+            peaks: std::array::from_fn(|_| AtomicU32::new(0)),
             ended: zero(),
             notify: Mutex::new(None),
             error: Mutex::new(None),
@@ -1043,6 +1059,8 @@ struct Bus {
     soloed: bool,
     /// Silenced by the system's setting.
     quiet: bool,
+    /// Its level measured each block ([`Mixer::meter`]).
+    metered: bool,
     /// The drive's bits last applied (NaN's: not driven).
     driven: u32,
     left: Box<[f32; MAX_BLOCK]>,
@@ -1115,6 +1133,7 @@ impl Bus {
             muted: false,
             soloed: false,
             quiet: false,
+            metered: false,
             driven: UNDRIVEN,
             left,
             right,
@@ -1216,6 +1235,9 @@ pub(crate) struct Mixer {
     /// another.
     levels: [f32; MAX_BUSES],
     heard: [f32; MAX_BUSES],
+    /// Buses metered, and each one's mean square as it moves.
+    metered: u32,
+    mean_squares: [f32; MAX_BUSES],
     /// Effects with a side chain, anywhere.
     keyed: u32,
     /// Each bus's effects, by its index.
@@ -1294,6 +1316,8 @@ impl Mixer {
             declick: (setup.rate / 200).max(1),
             levels: [0.; MAX_BUSES],
             heard: [0.; MAX_BUSES],
+            metered: 0,
+            mean_squares: [0.; MAX_BUSES],
             keyed: 0,
             chains,
             effects: 0,
@@ -1698,6 +1722,20 @@ impl Mixer {
                 self.buses[usize::from(bus)].quiet = on;
                 self.gate();
             }
+            Command::Meter { bus, on } => {
+                let b = usize::from(bus);
+                if self.buses[b].metered != on {
+                    self.buses[b].metered = on;
+                    self.metered = if on {
+                        self.metered + 1
+                    } else {
+                        self.metered - 1
+                    };
+                    self.mean_squares[b] = 0.;
+                    self.meter.mean_squares[b].store(0, Ordering::Relaxed);
+                    self.meter.peaks[b].store(0, Ordering::Relaxed);
+                }
+            }
             Command::AddBus {
                 bus,
                 parent,
@@ -2098,6 +2136,47 @@ impl Mixer {
         }
         if let Some(limiter) = &mut self.limiter {
             limiter.process(&mut master.left[..n], &mut master.right[..n]);
+        }
+        if self.metered > 0 {
+            self.meter(n);
+        }
+    }
+
+    /// The metered buses' levels this block: each one's sound after its
+    /// gain (master's after its limiter, as it goes out), its mean square
+    /// moved toward this block's over about [`METER_SECONDS`], and its
+    /// loudest sample kept until read. Only those metered; not inlined:
+    /// a mix with none doesn't carry it.
+    #[cold]
+    #[inline(never)]
+    fn meter(&mut self, n: usize) {
+        let keep = crate::math::expf(-(n as f32) / (METER_SECONDS * self.rate as f32));
+        for b in 0..self.bus_count {
+            let bus = &self.buses[b];
+            if !bus.metered {
+                continue;
+            }
+            let (mean_square, peak) = if bus.touched {
+                // Master's buffer is after its gain; another's is before.
+                let gain = if b == 0 {
+                    1.
+                } else {
+                    bus.gain.value() * bus.gate.value()
+                };
+                let (sum, most) = bus.left[..n]
+                    .iter()
+                    .zip(&bus.right[..n])
+                    .fold((0f32, 0f32), |(sum, most), (l, r)| {
+                        (sum + l * l + r * r, most.max(l.abs()).max(r.abs()))
+                    });
+                (sum / (2 * n) as f32 * gain * gain, most * gain)
+            } else {
+                (0., 0.)
+            };
+            let moved = mean_square + (self.mean_squares[b] - mean_square) * keep;
+            self.mean_squares[b] = moved;
+            self.meter.mean_squares[b].store(moved.to_bits(), Ordering::Relaxed);
+            self.meter.peaks[b].fetch_max(peak.to_bits(), Ordering::Relaxed);
         }
     }
 

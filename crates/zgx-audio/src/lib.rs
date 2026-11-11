@@ -49,8 +49,8 @@ pub mod wav;
 pub use device::{Device, Format, Renderer};
 pub use effect::{Checked, Context, Effect, Parameter};
 pub use engine::{
-    Audio, Bus, BusDrive, Config, EffectHandle, Error, MAX_GAIN, MAX_VOICES, Offline, Play, Stats,
-    Time, Voice,
+    Audio, Bus, BusDrive, Config, EffectHandle, Error, Level, MAX_GAIN, MAX_VOICES, Offline, Play,
+    Stats, Time, Voice,
 };
 pub use mixer::{PanLaw, Timing};
 pub use ramp::{Curve, Ramp};

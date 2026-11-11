@@ -359,6 +359,10 @@ fn main() {
             floor,
         );
         let buses = ["ui", "music", "world"].map(|b| run.audio.bus(b).unwrap());
+        // Metered, two of them and master: their levels measured each block.
+        buses[1].set_metered(true).unwrap();
+        buses[2].set_metered(true).unwrap();
+        run.audio.master().set_metered(true).unwrap();
         let mut voices = Vec::new();
         for (i, sound) in sounds.iter().enumerate() {
             let at = run.at(0.001 * i as f64);
