@@ -145,6 +145,9 @@ fn main() {
         zgx_harbor::sound::HarborSound::offline(&world, &harbor).expect("the harbor's sound")
     });
     let mut rays = 0usize;
+    // Frames the world's view asked to be drawn (animating): none, for a
+    // world at rest.
+    let asked = std::cell::Cell::new(0usize);
     // The mixer's own instructions, apart from the world's sound work.
     let mixing = std::cell::Cell::new(0u64);
     // The master mix's sum of squares, peak and samples: proof it ran.
@@ -259,6 +262,13 @@ fn main() {
             // Shaded: all but those the last frame left out.
             s.lights.1 = s.lights.0.saturating_sub(world.lights_left_out() as usize);
         });
+        // No frame clock drives this renderer: an animating view (compiles
+        // in flight, a compute pass, rain, a clip) is drawn again each frame
+        // by asking, as a window's clock would.
+        if world.view().animating() {
+            world.view().invalidate();
+            asked.set(asked.get() + 1);
+        }
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
         gpu.render(&ui.scene.borrow(), &report.damage)
@@ -387,7 +397,8 @@ fn main() {
         build_ms,
     );
     println!(
-        "frames drawn: {frames} rendered, {changed} with the world changed (World::revision; World::frames_drawn is hidden: GAPS.md G1)"
+        "frames drawn: {frames} rendered, {changed} with the world changed (World::revision), {} where its view asked to be drawn (animating; World::frames_drawn is hidden: GAPS.md G1)",
+        asked.get(),
     );
     if perf::AVAILABLE {
         println!(
