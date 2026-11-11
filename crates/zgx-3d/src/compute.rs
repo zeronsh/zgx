@@ -765,6 +765,16 @@ pub(crate) struct Data {
     owners: Vec<(Arc<str>, u8)>,
     /// The last frame's time and step, in seconds: when the next frame is.
     clock: (f64, f64),
+    /// The device its resources' copies are made on, and its generation:
+    /// every painter of the world on that device shares them (`World::view`
+    /// and any `World::viewport`), and one on another device takes them
+    /// over, made anew.
+    device: Option<(wgpu::Device, u64)>,
+    /// The frame time it last stepped at (its passes run, its reads moved
+    /// along) and its clock's start: a frame time steps it once however
+    /// many painters, or boxes showing its view, draw it.
+    stepped: Option<Instant>,
+    start: Option<Instant>,
     passes: Vec<(u32, Option<Pass>)>,
     /// Each point's passes in the order they run.
     order: [Vec<u32>; 3],
@@ -784,6 +794,9 @@ impl Data {
             limits: ComputeBudget::default(),
             owners: Vec::new(),
             clock: (0., 0.),
+            device: None,
+            stepped: None,
+            start: None,
             passes: Vec::new(),
             order: Default::default(),
             added: 0,
@@ -1031,8 +1044,8 @@ impl Data {
     }
 }
 
-/// Device generations: each painter's device gets a number of its own, so
-/// a resource made on another is made again.
+/// Device generations: each device a world's data is made on gets a number
+/// of its own, so a resource made on another is made again.
 static GENERATIONS: AtomicU64 = AtomicU64::new(1);
 
 /// The most bytes of WGSL a sandboxed pass's shader may have: parsed on the
@@ -1066,12 +1079,15 @@ struct FrameUniforms {
 /// frame's time.
 #[derive(Default)]
 pub(crate) struct Frames {
+    /// Its device's generation this frame (`Data::device`).
     generation: u64,
+    /// Whether its device was read (caps, timestamps).
+    made: bool,
+    /// Whether this frame steps the world (the first at its frame time).
+    stepping: bool,
     compute: bool,
     uniforms: Option<wgpu::Buffer>,
     sampler: Option<wgpu::Sampler>,
-    start: Option<Instant>,
-    last: Option<Instant>,
     index: u64,
     time: f64,
     /// Staging buffers of reads done, mapped no more, for the next to take.
@@ -1125,8 +1141,16 @@ impl Timing {
 }
 
 impl Frames {
-    pub(crate) fn device_changed(&mut self) {
+    /// Its device gone: the world's copies are made again on the next (a
+    /// device's id can be a gone one's: `Data::device` alone isn't enough).
+    pub(crate) fn device_changed(&mut self, world: &Weak<RefCell<Inner>>) {
+        if let Some(world) = world.upgrade()
+            && let Some(data) = &mut world.borrow_mut().data
+        {
+            data.device = None;
+        }
         self.generation = 0;
+        self.made = false;
         self.uniforms = None;
         self.sampler = None;
         self.spare.clear();
@@ -1298,25 +1322,39 @@ impl Frames {
     #[inline(never)]
     fn prepare(&mut self, data: &mut Data, frame: &mut ViewportFrame<'_>) {
         let (device, queue) = (frame.device, frame.queue);
-        if self.generation == 0 {
-            self.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
+        if !self.made {
+            self.made = true;
             self.compute = crate::Caps::of(device).compute;
             self.timing = device
                 .features()
                 .contains(wgpu::Features::TIMESTAMP_QUERY)
                 .then(|| Timing::new(device, queue, 64));
         }
-        self.spent = 0;
+        // The world's copies are its device's, whichever painter made them.
+        self.generation = match &data.device {
+            Some((made_on, generation)) if made_on == device => *generation,
+            _ => {
+                let generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
+                data.device = Some((device.clone(), generation));
+                generation
+            }
+        };
         let generation = self.generation;
-        let start = *self.start.get_or_insert(frame.time);
-        let delta = self.last.map_or(0., |last| {
+        // The world steps once a frame time: a second painter, or its view
+        // shown again, at the same time only draws.
+        self.stepping = data.stepped != Some(frame.time);
+        let delta = data.stepped.map_or(0., |last| {
             frame.time.saturating_duration_since(last).as_secs_f32()
         });
-        self.last = Some(frame.time);
-        self.time = frame.time.saturating_duration_since(start).as_secs_f64();
-        // A display's step, if frames come at one.
-        data.clock = (self.time, f64::from(delta).clamp(1. / 120., 1. / 30.));
-        self.index += 1;
+        if self.stepping {
+            self.spent = 0;
+            data.stepped = Some(frame.time);
+            let start = *data.start.get_or_insert(frame.time);
+            self.time = frame.time.saturating_duration_since(start).as_secs_f64();
+            // A display's step, if frames come at one.
+            data.clock = (self.time, f64::from(delta).clamp(1. / 120., 1. / 30.));
+            self.index += 1;
+        }
 
         data.sweep();
         for buffer in data.buffers.iter().filter_map(Weak::upgrade) {
@@ -1414,6 +1452,10 @@ impl Frames {
         if data.passes.iter().all(|(_, p)| p.is_none()) {
             return;
         }
+        if !self.stepping {
+            self.compile(data, device);
+            return;
+        }
         if self.uniforms.is_none() {
             self.uniforms = Some(device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("3D compute frame"),
@@ -1463,7 +1505,18 @@ impl Frames {
         let Some(mut data) = world.borrow_mut().data.take() else {
             return;
         };
-        self.run(&mut data, Point::AfterFrame, frame.encoder);
+        if self.stepping {
+            self.after_frame(&mut data, frame);
+        }
+        let wants = data.wants_frames();
+        let mut inner = world.borrow_mut();
+        inner.data = Some(data);
+        inner.unsettle(UNSETTLED, wants);
+    }
+
+    /// The passes after a frame that steps the world, and its reads copied.
+    fn after_frame(&mut self, data: &mut Data, frame: &mut ViewportFrame<'_>) {
+        self.run(data, Point::AfterFrame, frame.encoder);
         if let Some(timing) = &mut self.timing
             && !timing.timed.is_empty()
         {
@@ -1485,11 +1538,7 @@ impl Frames {
                 .jobs
                 .push((timed, staging, Stage::Copied(self.index)));
         }
-        self.copy_reads(&mut data, frame);
-        let wants = data.wants_frames();
-        let mut inner = world.borrow_mut();
-        inner.data = Some(data);
-        inner.unsettle(UNSETTLED, wants);
+        self.copy_reads(data, frame);
     }
 
     /// Each pass's pipeline for this device: compiling, or made ready.

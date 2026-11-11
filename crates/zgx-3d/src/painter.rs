@@ -73,7 +73,7 @@ impl<V: Viewport> Viewport for Painter<V> {
     fn device_changed(&mut self) {
         self.read = false;
         #[cfg(feature = "compute")]
-        self.data.device_changed();
+        self.data.device_changed(&self.world);
         #[cfg(feature = "particles")]
         self.particles.device_changed();
         self.painter.device_changed();

@@ -81,6 +81,76 @@ impl Window {
     }
 }
 
+/// Painters drawn on a device of the test's own at frame times it
+/// chooses: what's counted is frame time, however fast this machine draws.
+struct TimedFrames {
+    device: zgx_gpu::wgpu::Device,
+    queue: zgx_gpu::wgpu::Queue,
+    view: zgx_gpu::wgpu::TextureView,
+    start: std::time::Instant,
+}
+impl TimedFrames {
+    fn device() -> Option<(zgx_gpu::wgpu::Device, zgx_gpu::wgpu::Queue)> {
+        use zgx_gpu::wgpu;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let found = block(instance.request_adapter(&Default::default()))
+            .ok()
+            .and_then(|adapter| block(adapter.request_device(&Default::default())).ok());
+        assert!(
+            found.is_some() || std::env::var_os("ZGX_REQUIRE_GPU").is_none(),
+            "no device"
+        );
+        found
+    }
+    fn new((device, queue): (zgx_gpu::wgpu::Device, zgx_gpu::wgpu::Queue)) -> Self {
+        use zgx_gpu::wgpu;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 8,
+                height: 8,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        Self {
+            view: target.create_view(&Default::default()),
+            device,
+            queue,
+            start: std::time::Instant::now(),
+        }
+    }
+    /// One frame at `ms` of frame time: each of `painters` renders it, in
+    /// turn, as a world's view shown in several boxes is (or as several
+    /// viewports of one world are).
+    fn draw(&mut self, painters: &mut [&mut dyn zgx_gpu::viewport::Viewport], ms: u64) {
+        use zgx_gpu::viewport::ViewportFrame;
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        for painter in painters {
+            let mut frame = ViewportFrame::new(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &self.view,
+                zgx_gpu::wgpu::TextureFormat::Bgra8Unorm,
+                (8, 8),
+                1.,
+            );
+            frame.time = self.start + std::time::Duration::from_millis(ms);
+            painter.render(&mut frame);
+        }
+        self.queue.submit([encoder.finish()]);
+        let _ = self
+            .device
+            .poll(zgx_gpu::wgpu::PollType::wait_indefinitely());
+    }
+}
+
 fn words(bytes: &[u8]) -> Vec<u32> {
     bytemuck::pod_collect_to_vec(bytes)
 }
@@ -326,18 +396,9 @@ fn a_world_draws_while_a_pass_is_due_and_settles_when_none_is() {
 
 #[test]
 fn a_rated_pass_runs_at_its_rate_of_frame_time() {
-    use zgx_gpu::{
-        viewport::{Viewport, ViewportFrame},
-        wgpu,
-    };
     // Frames at times of the test's own: what it counts is frame time,
     // however fast this machine draws.
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let Some((device, queue)) = block(instance.request_adapter(&Default::default()))
-        .ok()
-        .and_then(|adapter| block(adapter.request_device(&Default::default())).ok())
-    else {
-        assert!(std::env::var_os("ZGX_REQUIRE_GPU").is_none(), "no device");
+    let Some(device) = TimedFrames::device() else {
         return;
     };
     let world = World::new();
@@ -352,33 +413,9 @@ fn a_rated_pass_runs_at_its_rate_of_frame_time() {
             .at_rate(20.),
         )
         .unwrap();
+    let mut frames = TimedFrames::new(device);
     let mut painter = world.viewport();
-    let format = wgpu::TextureFormat::Bgra8Unorm;
-    let target = device.create_texture(&wgpu::TextureDescriptor {
-        label: None,
-        size: wgpu::Extent3d {
-            width: 8,
-            height: 8,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        view_formats: &[],
-    });
-    let view = target.create_view(&Default::default());
-    let start = std::time::Instant::now();
-    let mut draw = |ms: u64| {
-        let mut encoder = device.create_command_encoder(&Default::default());
-        let mut frame =
-            ViewportFrame::new(&device, &queue, &mut encoder, &view, format, (8, 8), 1.);
-        frame.time = start + std::time::Duration::from_millis(ms);
-        painter.render(&mut frame);
-        queue.submit([encoder.finish()]);
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    };
+    let mut draw = |ms: u64| frames.draw(&mut [&mut painter], ms);
     // Compiled at frame time 0 (it runs once there when ready).
     for _ in 0..1000 {
         draw(0);
@@ -387,11 +424,13 @@ fn a_rated_pass_runs_at_its_rate_of_frame_time() {
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    draw(0);
+    // It runs once at the next frame time (a frame at the same time only
+    // draws).
+    draw(1);
     // Counted from none: frames 4 ms of frame time apart for half a
     // second. Due at 0.05, 0.1, ... 0.5: ten runs, not one a frame.
     count.write(0, &[0u32]).unwrap();
-    let mut ms = 0;
+    let mut ms = 1;
     while ms < 500 {
         ms += 4;
         draw(ms);
@@ -1415,4 +1454,114 @@ fn an_owners_passes_over_its_budget_together_are_all_turned_off() {
             world.compute_status(pass)
         );
     }
+}
+
+type Painters<'a, 'b> = &'a mut [&'b mut dyn zgx_gpu::viewport::Viewport];
+
+/// A buffer holding 1000 and a pass adding 1 to it every frame, made
+/// ready by frames at time 0 (each of `painters` drawing each `boxes`
+/// times).
+fn counting(
+    world: &World,
+    frames: &mut TimedFrames,
+    painters: Painters,
+    boxes: usize,
+) -> GpuBuffer {
+    let count = world
+        .add_buffer(BufferDesc::from_slice(&[1000u32]))
+        .unwrap();
+    let pass = world
+        .add_compute(
+            Compute::new(
+                "@group(0) @binding(0) var<storage, read_write> count: array<u32>;
+                 @compute @workgroup_size(1) fn main() { count[0] += 1u; }",
+            )
+            .buffer("count", &count, Access::ReadWrite)
+            .every_frame(),
+        )
+        .unwrap();
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(10) {
+        for _ in 0..boxes {
+            frames.draw(painters, 0);
+        }
+        if world.compute_status(pass) == Some(ComputeStatus::Ready) {
+            return count;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("not compiled");
+}
+
+/// `count` after frames 16 ms apart to 320 ms (each of `painters` drawing
+/// each `boxes` times), and then until it reads back.
+fn count_after(
+    count: &GpuBuffer,
+    frames: &mut TimedFrames,
+    painters: Painters,
+    boxes: usize,
+) -> u32 {
+    let frame = |ms: u64, frames: &mut TimedFrames, painters: Painters| {
+        for _ in 0..boxes {
+            frames.draw(painters, ms);
+        }
+    };
+    let mut ms = 0;
+    while ms < 320 {
+        ms += 16;
+        frame(ms, frames, painters);
+    }
+    // Copied after the next frame's passes: what later frames run isn't
+    // in it.
+    let read = count.read(0..4);
+    for _ in 0..100 {
+        ms += 16;
+        frame(ms, frames, painters);
+        if read.is_ready() {
+            return words(&read.try_take().unwrap().unwrap())[0];
+        }
+    }
+    panic!("not read");
+}
+
+/// What a world's every-frame pass counts drawn once a frame by one painter
+/// (`count_after`): the control.
+fn counted_once(frames: &mut TimedFrames) -> u32 {
+    let world = World::new();
+    let mut painter = world.viewport();
+    let count = counting(&world, frames, &mut [&mut painter], 1);
+    count_after(&count, frames, &mut [&mut painter], 1)
+}
+
+#[test]
+fn a_world_shown_in_two_boxes_runs_its_passes_once_a_frame() {
+    let Some(device) = TimedFrames::device() else {
+        return;
+    };
+    let mut frames = TimedFrames::new(device);
+    let once = counted_once(&mut frames);
+    assert!(once > 1000 + 15, "{once}: it ran");
+    let world = World::new();
+    // One painter drawing each frame twice, as a view in two boxes does.
+    let mut painter = world.viewport();
+    let count = counting(&world, &mut frames, &mut [&mut painter], 2);
+    let twice = count_after(&count, &mut frames, &mut [&mut painter], 2);
+    assert_eq!(twice, once, "shown twice a frame, as shown once");
+}
+
+#[test]
+fn two_viewports_of_one_world_share_its_gpu_data_and_step_it_once_a_frame() {
+    let Some(device) = TimedFrames::device() else {
+        return;
+    };
+    let mut frames = TimedFrames::new(device);
+    let once = counted_once(&mut frames);
+    let world = World::new();
+    // Its own view's painter and a second (a thumbnail beside it), on
+    // one device, taking turns each frame: its buffer not made again by
+    // each in turn (from none), nor its pass run by each.
+    let (mut first, mut second) = (world.viewport(), world.viewport());
+    let count = counting(&world, &mut frames, &mut [&mut first, &mut second], 1);
+    let shared = count_after(&count, &mut frames, &mut [&mut first, &mut second], 1);
+    assert_eq!(shared, once, "two painters, as one");
 }
