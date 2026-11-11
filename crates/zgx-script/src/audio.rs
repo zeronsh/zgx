@@ -65,7 +65,7 @@ pub(crate) struct AudioHost {
     voices: RefCell<HashMap<u64, Live>>,
     /// What follows state into a bus (its gain, mute or solo), by bus and
     /// what: the load that set it, and the follower.
-    buses: RefCell<HashMap<BusParam, (u64, Follow)>>,
+    buses: RefCell<Vec<(BusParam, u64, Follow)>>,
     /// The app's sounds by path, with the file's time when read: kept
     /// across reloads while a script holds them (`trim`). A plugin's are
     /// its own, counted against its memory, and go with it.
@@ -237,7 +237,7 @@ impl AudioHost {
             }
         });
         drop(stopped);
-        self.buses.borrow_mut().retain(|_, (of, _)| !replaced(*of));
+        self.buses.borrow_mut().retain(|(_, of, _)| !replaced(*of));
         #[cfg(feature = "audio-effects")]
         self.remove_effects(replaced);
         let slots: Vec<Rc<SoundSlot>> = {
@@ -298,6 +298,20 @@ impl AudioHost {
             .expect("made above")
             .spawn(move || audio.load(Source::file(path)).map_err(|e| e.to_string()))
             .map_err(|error| format!("too many sounds loading at once: {error}"))
+    }
+
+    /// Stops following state into a bus's `what`.
+    fn unfollow(&self, key: &BusParam) {
+        // Dropped outside the borrow: a follower's drop wakes its task.
+        let gone: Vec<_> = {
+            let mut buses = self.buses.borrow_mut();
+            let (gone, kept) = std::mem::take(&mut *buses)
+                .into_iter()
+                .partition(|(k, _, _)| k == key);
+            *buses = kept;
+            gone
+        };
+        drop(gone);
     }
 
     pub(crate) fn sounds_held(&self) -> usize {
@@ -800,12 +814,9 @@ fn spec(
             )));
         }
     };
-    let at = match get("at")? {
-        mlua::Value::Nil => None,
-        value => Some(time(audio, lua.unpack::<f64>(value)?)),
-    };
-    let loop_start = lua.unpack::<Option<f64>>(get("loop_start")?)?;
-    let loop_end = lua.unpack::<Option<f64>>(get("loop_end")?)?;
+    let at = opt_number(get("at")?, call, "at")?.map(|s| time(audio, s));
+    let loop_start = opt_number(get("loop_start")?, call, "loop_start")?;
+    let loop_end = opt_number(get("loop_end")?, call, "loop_end")?;
     let loop_points =
         (loop_start.is_some() || loop_end.is_some()).then(|| (loop_start.unwrap_or(0.), loop_end));
     Ok(Spec {
@@ -814,11 +825,9 @@ fn spec(
         pan: Param::read(lua, get("pan")?, 0., "`pan`")?,
         pitch: Param::read(lua, get("pitch")?, 1., "`pitch`")?,
         at,
-        looping: lua.unpack::<Option<bool>>(get("loop")?)?.unwrap_or(false)
-            || loop_points.is_some(),
+        looping: opt_bool(get("loop")?, call, "loop")?.unwrap_or(false) || loop_points.is_some(),
         loop_points,
-        priority: lua
-            .unpack::<Option<f64>>(get("priority")?)?
+        priority: opt_number(get("priority")?, call, "priority")?
             .unwrap_or(0.)
             .clamp(-128., 127.) as i8,
         fade_in: match get("fade_in")? {
@@ -828,6 +837,32 @@ fn spec(
         epoch: host.epoch.get(),
         plugin: plugin.cloned(),
     })
+}
+
+/// An option that is a number, or nil; anything else an error naming it.
+/// One reader for every option, not a conversion made for each.
+fn opt_number(value: mlua::Value, call: &str, key: &str) -> mlua::Result<Option<f64>> {
+    match value {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::Integer(n) => Ok(Some(n as f64)),
+        mlua::Value::Number(n) => Ok(Some(n)),
+        other => Err(mlua::Error::runtime(format!(
+            "{call}'s `{key}` is a number, not {}",
+            other.type_name()
+        ))),
+    }
+}
+
+/// An option that is a boolean, or nil.
+fn opt_bool(value: mlua::Value, call: &str, key: &str) -> mlua::Result<Option<bool>> {
+    match value {
+        mlua::Value::Nil => Ok(None),
+        mlua::Value::Boolean(b) => Ok(Some(b)),
+        other => Err(mlua::Error::runtime(format!(
+            "{call}'s `{key}` is true or false, not {}",
+            other.type_name()
+        ))),
+    }
 }
 
 /// Seconds on the mixer's clock as its frame.
@@ -1213,15 +1248,16 @@ impl BusUd {
             }
             Some(followed) => self.host.follow(followed, on),
             None => {
-                self.host.buses.borrow_mut().remove(&key);
+                self.host.unfollow(&key);
                 on(&lua.unpack::<Value>(value)?);
                 return Ok(());
             }
         };
+        self.host.unfollow(&key);
         self.host
             .buses
             .borrow_mut()
-            .insert(key, (self.host.epoch.get(), follow));
+            .push((key, self.host.epoch.get(), follow));
         Ok(())
     }
 }
@@ -1280,10 +1316,7 @@ impl BusUd {
                     None => zgx_audio::Curve::Linear,
                 };
                 // A fade takes the gain over from what followed state.
-                self.host
-                    .buses
-                    .borrow_mut()
-                    .remove(&(self.name.clone(), "gain"));
+                self.host.unfollow(&(self.name.clone(), "gain"));
                 self.bus
                     .fade_to(gain, seconds, curve)
                     .map_err(|e| fail("bus:fade", e))?;
