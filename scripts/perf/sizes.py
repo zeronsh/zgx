@@ -31,6 +31,16 @@ For each binary, it compares:
   something else in each build, so every one would read as removed and
   added. Their bytes are counted in their sections.
 
+Where Mach-O's `__TEXT,__cstring` moved, its strings are compared too
+(`llvm-objcopy --dump-section`): the same strings in another order is
+padding (strings are aligned, and their order follows the code's), said
+as such, not a string added. ELF keeps strings among other constants in
+`.rodata`, where this isn't read.
+
+Both sides build at paths of one length (`base_dir`, and target
+directories named alike): a path a binary keeps (a panic's location, an
+`include_str!`) would move a size by its length. It stops if they differ.
+
 Prints each binary's stripped size, the sections that moved and the
 symbols that moved (largest first; added and removed included). Exits 1 if
 any binary's stripped size, any section's size or any symbol's size moved,
@@ -142,6 +152,32 @@ def llvm_nm():
     return llvm_tool('llvm-nm')
 
 
+def strings_in(data):
+    """The NUL-terminated strings in a `__cstring` section's bytes, as a
+    multiset (the empty ones, padding, left out)."""
+    return collections.Counter(s for s in data.split(b'\0') if s)
+
+
+def cstrings(binary, objcopy, scratch):
+    """Mach-O's `__TEXT,__cstring` strings (`strings_in`), or None."""
+    dumped = scratch / (binary.name + '.cstring')
+    result = subprocess.run([objcopy, f'--dump-section=__TEXT,__cstring={dumped}', str(binary), str(scratch / 'none')],
+                            capture_output=True)
+    if result.returncode != 0 or not dumped.exists():
+        return None
+    found = strings_in(dumped.read_bytes())
+    dumped.unlink()
+    (scratch / 'none').unlink(missing_ok=True)
+    return found
+
+
+def same_lengths(*paths):
+    """Stops unless every path is as long as the first (see the top)."""
+    lengths = {len(str(pathlib.Path(p).resolve())) for p in paths}
+    if len(lengths) > 1:
+        sys.exit(f'paths of different lengths, which would move sizes: {", ".join(map(str, paths))}')
+
+
 def section_sizes(mach_o, sysv):
     """Sizes by section from `llvm-size -m` (Mach-O: `SEGMENT,section`)
     or, where that isn't Mach-O's, `llvm-size -A` (ELF: `.section`)."""
@@ -229,10 +265,12 @@ def moved(before, after):
     return rows
 
 
-def report(name, size_before, size_after, rows, shown=15, section_rows=()):
+def report(name, size_before, size_after, rows, shown=15, section_rows=(), notes=None):
     lines = [f'{name}: stripped {size_before:,} -> {size_after:,} bytes ({size_after - size_before:+,})']
     for section, b, h in section_rows:
-        lines.append(f'  section {section}: {b or 0:,} -> {h or 0:,} ({(h or 0) - (b or 0):+,})')
+        note = (notes or {}).get(section)
+        lines.append(f'  section {section}: {b or 0:,} -> {h or 0:,} ({(h or 0) - (b or 0):+,})'
+                     + (f', {note}' if note else ''))
     for symbol, b, h in rows[:shown]:
         change = (h or 0) - (b or 0)
         state = 'added' if b is None else 'removed' if h is None else f'{b:,} -> {h:,}'
@@ -248,8 +286,10 @@ def main():
     parser.add_argument('--markdown', type=pathlib.Path)
     parser.add_argument('--keep', action='store_true', help="keep the base's worktree")
     args = parser.parse_args()
-    nm, size = llvm_nm(), llvm_tool('llvm-size')
+    nm, size, objcopy = llvm_nm(), llvm_tool('llvm-size'), llvm_tool('llvm-objcopy')
     base = base_dir()
+    same_lengths(ROOT, base)
+    same_lengths(WORK / 'sizes-target-head', WORK / 'sizes-target-base')
     if base.exists():
         subprocess.run(['git', 'worktree', 'remove', '--force', str(base)], cwd=ROOT, capture_output=True)
         shutil.rmtree(base, ignore_errors=True)
@@ -272,9 +312,19 @@ def main():
         size_h, syms_h, secs_h = measure(scratch / 'head' / name, scratch, nm, size)
         rows = moved(syms_b, syms_h)
         section_rows = sorted(moved(secs_b, secs_h))
+        notes = {}
+        if any(section == '__TEXT,__cstring' for section, _, _ in section_rows):
+            strings_b = cstrings(scratch / 'base' / name, objcopy, scratch)
+            strings_h = cstrings(scratch / 'head' / name, objcopy, scratch)
+            if strings_b is not None and strings_b == strings_h:
+                notes['__TEXT,__cstring'] = 'the same strings: padding'
+            elif strings_b is not None:
+                added = sum((strings_h - strings_b).values())
+                removed = sum((strings_b - strings_h).values())
+                notes['__TEXT,__cstring'] = f'{added} strings added, {removed} removed'
         if size_b != size_h or rows or section_rows:
             changed.append(name)
-        lines += report(name, size_b, size_h, rows, section_rows=section_rows)
+        lines += report(name, size_b, size_h, rows, section_rows=section_rows, notes=notes)
     print('\n'.join(lines))
     verdict = (f'SIZES MOVED: {", ".join(changed)}' if changed
                else f'SIZES UNCHANGED: {len(head_names)} binaries, every section and symbol the same size')

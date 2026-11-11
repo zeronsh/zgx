@@ -78,6 +78,22 @@ Total         1314816
         self.assertEqual(sizes.section_sizes('', sysv),
                          {'.text': 1048576, '.rodata': 262144, '.data.rel.ro': 4096})
 
+    def test_strings_are_compared_without_their_padding(self):
+        a = sizes.strings_in(b'panic\0\0\0\0abc\0')
+        b = sizes.strings_in(b'abc\0panic\0\0\0\0\0\0')
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, sizes.strings_in(b'abc\0panicked\0'))
+
+    def test_paths_of_different_lengths_stop_it(self):
+        sizes.same_lengths('/tmp/abc', '/tmp/xyz')
+        with self.assertRaises(SystemExit):
+            sizes.same_lengths('/tmp/abc', '/tmp/abcd')
+
+    def test_a_note_follows_its_section(self):
+        text = '\n'.join(sizes.report('app', 1, 1, [], section_rows=[('__TEXT,__cstring', 16, 32)],
+                                       notes={'__TEXT,__cstring': 'the same strings: padding'}))
+        self.assertIn('section __TEXT,__cstring: 16 -> 32 (+16), the same strings: padding', text)
+
     def test_moved_lists_changes_additions_and_removals_largest_first(self):
         before = {'same': 10, 'grew': 10, 'gone': 5}
         after = {'same': 10, 'grew': 30, 'new': 100}
@@ -131,6 +147,7 @@ class VerdictTests(unittest.TestCase):
                 patch.object(sizes, 'llvm_nm', return_value='llvm-nm'), \
                 patch.object(sizes, 'llvm_tool', return_value='llvm-size'), \
                 patch.object(sizes, 'base_dir', return_value=pathlib.Path(work) / 'base'), \
+                patch.object(sizes, 'same_lengths'), \
                 patch.object(sizes.subprocess, 'run'), \
                 patch.object(sizes, 'build', side_effect=fake_build), \
                 patch.object(sizes, 'measure', side_effect=lambda binary, scratch, nm, size: measured[str(binary)]), \
