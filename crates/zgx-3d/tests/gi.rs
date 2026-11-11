@@ -461,6 +461,11 @@ fn a_world_says_what_its_probes_did() {
         "{status:?}"
     );
     assert_eq!(world.probes_traced(), status == ProbesStatus::Traced);
+    // The device says why it traces or not.
+    assert_eq!(
+        status == ProbesStatus::Traced,
+        zgx_gpu::ray_queries_status() == Some(zgx_gpu::RayQueries::Available)
+    );
 }
 
 #[cfg(feature = "lighting")]

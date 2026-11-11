@@ -4117,12 +4117,16 @@ impl GpuContext {
                     _ => Ok(adapter),
                 });
             let areas = areas_on_gpu(backends, &compiler);
-            found = adapter.map(|adapter| (instance, adapter, areas));
+            // Direct3D 12 through FXC, which compiles no ray queries
+            // (`ray_queries_status`).
+            let fxc =
+                backends == wgpu::Backends::DX12 && matches!(compiler, wgpu::Dx12Compiler::Fxc);
+            found = adapter.map(|adapter| (instance, adapter, areas, fxc));
             if found.is_ok() {
                 break;
             }
         }
-        let (instance, adapter, areas) = found?;
+        let (instance, adapter, areas, fxc) = found?;
         let info = adapter.get_info();
         // CPU-written vertex buffers avoid a GPU copy per frame; only worth it
         // where CPU and GPU share memory.
@@ -4144,10 +4148,15 @@ impl GpuContext {
         zgx::profile::mark("GPU adapter");
         // Ray queries, where asked for (`request_ray_queries`) and the
         // adapter has them: wgpu marks them experimental.
-        let ray_queries = RAY_QUERIES.load(std::sync::atomic::Ordering::Relaxed)
+        let requested = RAY_QUERIES.load(std::sync::atomic::Ordering::Relaxed);
+        let ray_queries = requested
             && adapter
                 .features()
                 .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        RAY_QUERY_STATUS.store(
+            RayQueries::of(requested, ray_queries, fxc) as u8,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("zgx shared device"),
             required_features: if ray_queries {
@@ -18099,6 +18108,63 @@ fn quad_pipeline(
 static APP_SHADER_FXC: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
 /// Devices made from now on ask for ray queries (`request_ray_queries`).
 static RAY_QUERIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What the last device made said of ray queries (`RayQueries`, 0 before
+/// one is made).
+static RAY_QUERY_STATUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// Whether the shared device traces rays, and why not
+/// (`ray_queries_status`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RayQueries {
+    /// It traces rays.
+    Available = 1,
+    /// `request_ray_queries` wasn't called before the device was made.
+    NotRequested = 2,
+    /// Asked for, but the adapter has none (a GPU or driver without them,
+    /// macOS before 15, Vulkan without `VK_KHR_ray_query`).
+    AdapterLacks = 3,
+    /// Asked for on Direct3D 12 compiling with FXC, which compiles no ray
+    /// queries: ship `dxcompiler.dll` beside the app, or set
+    /// `WGPU_DX12_COMPILER=dxc`.
+    CompilerIsFxc = 4,
+}
+impl RayQueries {
+    /// What a device asked for them (`requested`) and made with them
+    /// (`on`, or not), compiling through FXC or not, says.
+    fn of(requested: bool, on: bool, fxc: bool) -> Self {
+        match (requested, on, fxc) {
+            (false, ..) => Self::NotRequested,
+            (true, true, _) => Self::Available,
+            (true, false, true) => Self::CompilerIsFxc,
+            (true, false, false) => Self::AdapterLacks,
+        }
+    }
+}
+/// Whether the last device made traces rays, and why not (`None` before
+/// one is made). Read once a window or renderer exists; cold.
+pub fn ray_queries_status() -> Option<RayQueries> {
+    match RAY_QUERY_STATUS.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(RayQueries::Available),
+        2 => Some(RayQueries::NotRequested),
+        3 => Some(RayQueries::AdapterLacks),
+        4 => Some(RayQueries::CompilerIsFxc),
+        _ => None,
+    }
+}
+#[cfg(test)]
+mod ray_query_tests {
+    use super::RayQueries;
+
+    #[test]
+    fn a_device_says_why_it_traces_no_rays() {
+        use RayQueries::*;
+        assert_eq!(RayQueries::of(false, false, false), NotRequested);
+        assert_eq!(RayQueries::of(false, false, true), NotRequested);
+        assert_eq!(RayQueries::of(true, true, false), Available);
+        assert_eq!(RayQueries::of(true, false, true), CompilerIsFxc);
+        assert_eq!(RayQueries::of(true, false, false), AdapterLacks);
+    }
+}
 /// Devices made after this call ask for ray queries where the adapter has
 /// them (wgpu's `Features::EXPERIMENTAL_RAY_QUERY`, with the adapter's
 /// acceleration-structure limits): a `GpuView`'s painter can then build

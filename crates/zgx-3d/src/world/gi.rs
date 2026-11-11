@@ -96,7 +96,8 @@ pub enum ProbesStatus {
     /// diffuse light from them.
     Traced,
     /// Its device has no ray queries (`zgx_gpu::request_ray_queries` not
-    /// called before the first window, or the adapter has none): its
+    /// called before the first window, the adapter has none, or Direct3D 12
+    /// compiles with FXC: `zgx_gpu::ray_queries_status` says which): its
     /// volumes light nothing.
     NoRayQueries,
     /// It shades through clustered lights or the sun's cascades (the
