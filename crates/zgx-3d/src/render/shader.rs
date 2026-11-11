@@ -14,8 +14,10 @@ use super::Variant;
 /// cut-out one's and `//N ` any other's, and `//A ` a multisampled one's
 /// (geometric specular anti-aliasing), `//X ` a clustered one's and `//Y `
 /// any other's (`shader/lights.wgsl`), `//H ` one shadowed by the sun's
-/// cascades and `//I ` any other's (`shader/shadows.wgsl`). (A cut-out or placed one is
-/// textured; a line with two prefixes is for a variant with both.) Only
+/// cascades and `//I ` any other's (`shader/shadows.wgsl`), and lanes'
+/// tags of more than a letter, `//probed ` and the rest of `NAMED`. (A
+/// cut-out or placed one is textured; a line with two prefixes is for a
+/// variant with both, three at most.) Only
 /// its code is kept, without comments or others' lines: naga reads every
 /// byte of a shader, and most of these are others'.
 // Made with a pipeline, rarely: kept out of the frame's code.
@@ -48,7 +50,34 @@ pub(super) fn wgsl_full(
     custom: Option<&Custom>,
     prepass: bool,
 ) -> String {
-    let on = |tag: u8| match tag {
+    let on = |tag: u8| tag_on(tag, (variant, samples, custom, prepass)).unwrap_or(false);
+    // The kept chunks, copied whole.
+    let (text, chunks) = shader_chunks();
+    let mut source = String::with_capacity(SHADER.len() / 2);
+    for (tags, range) in chunks {
+        if tags.iter().all(|&tag| tag == 0 || on(tag)) {
+            source.push_str(&text[range.clone()]);
+        }
+    }
+    if let Some(custom) = custom {
+        source.push_str(code_of(custom));
+    }
+    source
+}
+/// Whether a line tagged `tag` is kept for `variant` at `samples`, with
+/// `custom` code and the prepass or not; `None` for a tag no line should
+/// carry (`every_tag_is_known`). Its letters, then its names (`NAMED`, a
+/// code from `NAMED_FROM`).
+fn tag_on(
+    tag: u8,
+    (variant, samples, custom, prepass): (Variant, u32, Option<&Custom>, bool),
+) -> Option<bool> {
+    let named = |name: &str| match name {
+        "probed" => variant.probed(),
+        "probed_unlit" => variant.probed() && !variant.lit(),
+        _ => false,
+    };
+    Some(match tag {
         b'T' => variant.textured(),
         b'S' => variant.skinned(),
         b'M' => variant.morphing(),
@@ -77,20 +106,31 @@ pub(super) fn wgsl_full(
         b'J' => custom.is_some_and(|c| !times(c)),
         b'g' => variant.probed(),
         b'h' => variant.probed() && !variant.lit(),
-        _ => false,
-    };
-    // The kept chunks, copied whole.
-    let (text, chunks) = shader_chunks();
-    let mut source = String::with_capacity(SHADER.len() / 2);
-    for (tags, range) in chunks {
-        if tags.iter().all(|&tag| tag == 0 || on(tag)) {
-            source.push_str(&text[range.clone()]);
+        NAMED_FROM.. => named(NAMED.get(usize::from(tag - NAMED_FROM))?),
+        _ => return None,
+    })
+}
+/// The tags of more than one letter (`//name `: lowercase letters, digits
+/// and `_`), by their codes from `NAMED_FROM`: a lane adds its own here and
+/// in `tag_on`. (Names cost nothing a frame: the text is read once.)
+const NAMED: &[&str] = &["probed", "probed_unlit"];
+const NAMED_FROM: u8 = 128;
+/// The code of a line's tag `name`, if it is one: a letter's own byte, a
+/// name's from `NAMED` (one not there, `u8::MAX`: no variant keeps it).
+fn tag_code(name: &[u8]) -> Option<u8> {
+    match name {
+        [letter] if letter.is_ascii_alphabetic() => Some(*letter),
+        [first, ..]
+            if first.is_ascii_lowercase()
+                && name
+                    .iter()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_') =>
+        {
+            let at = NAMED.iter().position(|n| n.as_bytes() == name);
+            Some(at.map_or(u8::MAX, |at| NAMED_FROM + at as u8))
         }
+        _ => None,
     }
-    if let Some(custom) = custom {
-        source.push_str(code_of(custom));
-    }
-    source
 }
 /// The shader's code, and its chunks by the prefixes they need (0s:
 /// none): runs of lines needing the same ones, comments and blank lines
@@ -105,11 +145,16 @@ pub(super) fn shader_chunks() -> &'static Chunks {
         let mut chunks: Vec<([u8; 3], std::ops::Range<usize>)> = Vec::with_capacity(256);
         for line in SHADER.lines() {
             let (mut tags, mut count, mut rest) = ([0; 3], 0, line);
-            while let [b'/', b'/', tag, b' ', ..] = *rest.as_bytes() {
-                // (Three at most: more needs a wider index.)
+            // Its prefixes, `//T ` or `//name `: three at most (more needs a
+            // wider index; `every_tag_is_known` says so).
+            while count < 3
+                && let Some(after) = rest.strip_prefix("//")
+                && let Some((name, code)) = after.split_once(' ')
+                && let Some(tag) = tag_code(name.as_bytes())
+            {
                 tags[count] = tag;
                 count += 1;
-                rest = &rest[4..];
+                rest = code;
             }
             let code = rest.trim_ascii_start();
             if code.is_empty() || code.starts_with("//") {
@@ -450,6 +495,31 @@ mod tests {
                     .unwrap_or_else(|e| panic!("{:?} at {samples}: {e}", possible(bits)));
             }
         }
+    }
+
+    #[test]
+    fn every_tag_is_known() {
+        // A line tagged with a letter or name `tag_on` doesn't know would be
+        // left out of every variant, silently; one with a fourth tag would
+        // keep it as code.
+        for line in SHADER.lines() {
+            let (mut rest, mut count) = (line, 0);
+            while let Some(after) = rest.strip_prefix("//")
+                && let Some((name, code)) = after.split_once(' ')
+                && let Some(tag) = tag_code(name.as_bytes())
+            {
+                let known = tag_on(tag, (Variant::default(), 1, None, false));
+                assert!(known.is_some(), "an unknown tag `{name}`: {line}");
+                count += 1;
+                rest = code;
+            }
+            assert!(count <= 3, "more than three tags: {line}");
+        }
+        assert_eq!(tag_code(b"probed"), Some(NAMED_FROM));
+        assert_eq!(tag_code(b"T"), Some(b'T'));
+        assert_eq!(tag_code(b"nowhere"), Some(u8::MAX));
+        assert_eq!(tag_code(b""), None);
+        assert_eq!(tag_code(b"The"), None, "a comment's word");
     }
 
     #[test]
