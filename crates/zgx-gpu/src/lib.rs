@@ -3887,8 +3887,113 @@ pub fn shader_cache_counts() -> Option<ShaderCacheCounts> {
 pub fn shader_cache_counts() -> Option<ShaderCacheCounts> {
     None
 }
+/// A device on `adapter` and its queue, with zgx's handlers of a lost
+/// device and of errors (`GpuContext::prepare`).
+fn request_device(
+    adapter: &wgpu::Adapter,
+    info: &wgpu::AdapterInfo,
+    vertex_ring: bool,
+) -> Result<(wgpu::Device, wgpu::Queue, LostCell), GpuError> {
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("zgx shared device"),
+        required_features: if vertex_ring {
+            wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
+        } else {
+            wgpu::Features::empty()
+        } | (adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING)
+            // An app's shaders' bytecode, compiled by FXC elsewhere
+            // (`app_fragment`).
+            | if info.backend == wgpu::Backend::Dx12 {
+                adapter.features() & wgpu::Features::PASSTHROUGH_SHADERS
+            } else {
+                wgpu::Features::empty()
+            },
+        required_limits: wgpu::Limits {
+            // Direct3D 12 makes its shader-visible view heap this large, in
+            // write-combined memory: 30 MiB at the default million, 2 MiB
+            // here. An image holds one view and a window holds at most
+            // `MAX_IMAGES`: windows share the device, and four at their
+            // budget still fit beside their other bind groups.
+            max_non_sampler_bindings: if cfg!(windows) {
+                1 << 16
+            } else {
+                wgpu::Limits::default().max_non_sampler_bindings
+            },
+            // GL (Linux's fallback) asks no more than older GPUs give,
+            // with the textures as large as this one makes.
+            ..if info.backend == wgpu::Backend::Gl {
+                wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits())
+            } else {
+                Default::default()
+            }
+        },
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        ..Default::default()
+    }))
+    .map_err(|e| GpuError(e.to_string()))?;
+    // wgpu clears a buffer of its own while creating the device and holds
+    // that command buffer until the first submission. Finish it now, so
+    // it is never alive beside a frame's: Metal keeps memory for as many
+    // command buffers as were ever alive at once, for good.
+    queue.submit([]);
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    // A lost device (a driver reset, a GPU removed) fails what follows
+    // instead of panicking, as wgpu's default handler does: renders
+    // then return `GpuError::is_device_lost`, and the host makes a new
+    // renderer. Other errors are logged; a validation error is a bug,
+    // which still panics in debug builds.
+    let lost: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
+    {
+        let lost = lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            let mut slot = lost.lock().unwrap_or_else(|p| p.into_inner());
+            if slot.is_none() {
+                if message.is_empty() {
+                    eprintln!("zgx: the GPU device was lost ({reason:?})");
+                } else {
+                    eprintln!("zgx: the GPU device was lost ({reason:?}): {message}");
+                }
+                *slot = Some(if message.is_empty() {
+                    format!("{reason:?}")
+                } else {
+                    message
+                });
+            }
+        });
+    }
+    {
+        let lost = lost.clone();
+        device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+            if lost.lock().map_or(true, |lost| lost.is_some()) {
+                return;
+            }
+            if cfg!(debug_assertions) && matches!(error, wgpu::Error::Validation { .. }) {
+                panic!("wgpu: {error}");
+            }
+            eprintln!("zgx: GPU error: {error}");
+        }));
+    }
+    Ok((device, queue, lost))
+}
+/// Why a device was lost, once it is (set from any thread).
+type LostCell = Arc<std::sync::Mutex<Option<String>>>;
+/// What contexts on one device share: on WARP, every context in the process
+/// (`WARP_DEVICE`), and elsewhere the one context made with it.
+struct SharedDevice {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    lost: Arc<std::sync::Mutex<Option<String>>>,
+}
+/// WARP's device while a context holds it (`GpuContext::prepare`): held
+/// weakly, so it goes with the last context on it.
+static WARP_DEVICE: std::sync::Mutex<std::sync::Weak<SharedDevice>> =
+    std::sync::Mutex::new(std::sync::Weak::new());
 /// What a `GpuContext` holds that another thread can make (`GpuContext::prepare`).
 struct Prepared {
+    /// Keeps WARP's process-wide device for `WARP_DEVICE` to find.
+    shared: Arc<SharedDevice>,
     lost: Arc<std::sync::Mutex<Option<String>>>,
     instance: wgpu::Instance,
     adapter: wgpu::Adapter,
@@ -3927,6 +4032,10 @@ pub struct GpuContext {
     inner: Rc<GpuContextInner>,
 }
 struct GpuContextInner {
+    /// Keeps WARP's process-wide device for `WARP_DEVICE` to find.
+    shared: Arc<SharedDevice>,
+    /// Lost by `debug_lose_device` while other contexts drew on its device.
+    lost_here: RefCell<Option<String>>,
     /// Why the device was lost (driver reset, removal, `debug_lose_device`):
     /// set from wgpu's callback, from any thread.
     lost: Arc<std::sync::Mutex<Option<String>>>,
@@ -4126,90 +4235,59 @@ impl GpuContext {
         let vertex_ring =
             !noop && mappable && (mapped_uploads || info.backend == wgpu::Backend::Dx12);
         zgx::profile::mark("GPU adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("zgx shared device"),
-            required_features: if vertex_ring {
-                wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
-            } else {
-                wgpu::Features::empty()
-            } | (adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING)
-                // An app's shaders' bytecode, compiled by FXC elsewhere
-                // (`app_fragment`).
-                | if info.backend == wgpu::Backend::Dx12 {
-                    adapter.features() & wgpu::Features::PASSTHROUGH_SHADERS
-                } else {
-                    wgpu::Features::empty()
-                },
-            required_limits: wgpu::Limits {
-                // Direct3D 12 makes its shader-visible view heap this large, in
-                // write-combined memory: 30 MiB at the default million, 2 MiB
-                // here. An image holds one view and a window holds at most
-                // `MAX_IMAGES`: windows share the device, and four at their
-                // budget still fit beside their other bind groups.
-                max_non_sampler_bindings: if cfg!(windows) {
-                    1 << 16
-                } else {
-                    wgpu::Limits::default().max_non_sampler_bindings
-                },
-                // GL (Linux's fallback) asks no more than older GPUs give,
-                // with the textures as large as this one makes.
-                ..if info.backend == wgpu::Backend::Gl {
-                    wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits())
-                } else {
-                    Default::default()
+        // WARP (Direct3D 12 on the CPU) takes one device for the process:
+        // renderers on threads, each with a device of its own, made WARP
+        // 10.0.26100 fault in `ExecuteCommandLists`, or draw nothing, when
+        // they drew at once; one device shared by all of them never did.
+        // Direct3D 12 already hands each the same device for the adapter,
+        // and it is each wgpu device's own queue that breaks it.
+        let warp = !noop
+            && info.backend == wgpu::Backend::Dx12
+            && info.device_type == wgpu::DeviceType::Cpu;
+        let mut warp_slot = warp.then(|| WARP_DEVICE.lock().unwrap_or_else(|p| p.into_inner()));
+        // (Not a lost one: a context made after a loss takes a new device.)
+        let reusable = warp_slot
+            .as_ref()
+            .and_then(|slot| slot.upgrade())
+            .filter(|shared| shared.lost.lock().is_ok_and(|lost| lost.is_none()));
+        let shared = match reusable {
+            Some(shared) => shared,
+            None => {
+                let (device, queue, lost) = request_device(&adapter, &info, vertex_ring)?;
+                let shared = Arc::new(SharedDevice {
+                    instance,
+                    adapter,
+                    device,
+                    queue,
+                    lost,
+                });
+                if let Some(slot) = &mut warp_slot {
+                    **slot = Arc::downgrade(&shared);
                 }
-            },
-            memory_hints: wgpu::MemoryHints::MemoryUsage,
-            ..Default::default()
-        }))
-        .map_err(|e| GpuError(e.to_string()))?;
-        // wgpu clears a buffer of its own while creating the device and holds
-        // that command buffer until the first submission. Finish it now, so
-        // it is never alive beside a frame's: Metal keeps memory for as many
-        // command buffers as were ever alive at once, for good.
-        queue.submit([]);
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        // A lost device (a driver reset, a GPU removed) fails what follows
-        // instead of panicking, as wgpu's default handler does: renders
-        // then return `GpuError::is_device_lost`, and the host makes a new
-        // renderer. Other errors are logged; a validation error is a bug,
-        // which still panics in debug builds.
-        let lost: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
-        {
-            let lost = lost.clone();
-            device.set_device_lost_callback(move |reason, message| {
-                let mut slot = lost.lock().unwrap_or_else(|p| p.into_inner());
-                if slot.is_none() {
-                    if message.is_empty() {
-                        eprintln!("zgx: the GPU device was lost ({reason:?})");
-                    } else {
-                        eprintln!("zgx: the GPU device was lost ({reason:?}): {message}");
-                    }
-                    *slot = Some(if message.is_empty() {
-                        format!("{reason:?}")
-                    } else {
-                        message
-                    });
-                }
-            });
-        }
-        {
-            let lost = lost.clone();
-            device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
-                if lost.lock().map_or(true, |lost| lost.is_some()) {
-                    return;
-                }
-                if cfg!(debug_assertions) && matches!(error, wgpu::Error::Validation { .. }) {
-                    panic!("wgpu: {error}");
-                }
-                eprintln!("zgx: GPU error: {error}");
-            }));
-        }
+                shared
+            }
+        };
+        drop(warp_slot);
+        let SharedDevice {
+            instance,
+            adapter,
+            device,
+            queue,
+            lost,
+        } = &*shared;
+        let (instance, adapter, device, queue, lost) = (
+            instance.clone(),
+            adapter.clone(),
+            device.clone(),
+            queue.clone(),
+            lost.clone(),
+        );
         let (texture_layout, viewport_layout, quad_layout) = create_quad_pipelines(&device);
         zgx::profile::mark("GPU device and pipelines");
         let fonts = font_cache::system_fonts();
         zgx::profile::mark("system fonts");
         Ok(Prepared {
+            shared,
             lost,
             instance,
             adapter,
@@ -4230,6 +4308,7 @@ impl GpuContext {
     /// The context of what `prepare` made, on the thread that uses it.
     fn finish(prepared: Prepared) -> Self {
         let Prepared {
+            shared,
             lost,
             instance,
             adapter,
@@ -4263,6 +4342,8 @@ impl GpuContext {
         };
         Self {
             inner: Rc::new(GpuContextInner {
+                shared,
+                lost_here: RefCell::new(None),
                 lost,
                 instance,
                 adapter,
@@ -4285,14 +4366,19 @@ impl GpuContext {
     /// Why its device was lost, once it is: every renderer on it then
     /// fails with `GpuError::is_device_lost`, and a new context is needed.
     pub fn lost(&self) -> Option<String> {
-        self.inner
-            .lost
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clone()
+        let lost = self.inner.lost.lock().unwrap_or_else(|p| p.into_inner());
+        lost.clone()
+            .or_else(|| self.inner.lost_here.borrow().clone())
     }
-    /// Lose the device, as a driver reset would: for tests of recovery.
+    /// Lose the device, as a driver reset would: for tests of recovery. On
+    /// WARP's process-wide device (`WARP_DEVICE`), while other contexts draw
+    /// on it, only this context fails from then on.
     pub fn debug_lose_device(&self) {
+        if Arc::strong_count(&self.inner.shared) > 1 {
+            let mut lost = self.inner.lost_here.borrow_mut();
+            lost.get_or_insert_with(|| "destroyed for a test".into());
+            return;
+        }
         self.inner.device.destroy();
         let _ = self.inner.device.poll(wgpu::PollType::Poll);
         let mut lost = self.inner.lost.lock().unwrap_or_else(|p| p.into_inner());
