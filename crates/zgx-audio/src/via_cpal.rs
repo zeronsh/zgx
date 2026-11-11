@@ -105,37 +105,34 @@ fn write<T: cpal::Sample + cpal::FromSample<f32>>(floats: &[f32], out: &mut [T])
     }
 }
 
-/// A stream for a device whose samples are `T`: mixed in floats into a
-/// buffer made here, then converted.
-fn converting<T>(
-    device: &cpal::Device,
-    config: cpal::StreamConfig,
-    mut held: Held,
-    errors: impl FnMut(cpal::Error) + Send + 'static,
-    channels: usize,
-) -> Result<cpal::Stream, cpal::Error>
-where
-    T: cpal::SizedSample + cpal::FromSample<f32> + Send + 'static,
-{
-    let mut floats = vec![0f32; 8192 * channels.max(1)];
-    device.build_output_stream(
-        config,
-        move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
-            let renderer = held.renderer.as_mut().expect("held while streaming");
-            let stamp = info.timestamp();
-            let mut timing = Some(Timing {
-                asked: nanos(stamp.callback),
-                heard: nanos(stamp.playback),
-            });
-            for chunk in data.chunks_mut(floats.len()) {
-                let floats = &mut floats[..chunk.len()];
-                renderer.render(floats, timing.take());
-                write(floats, chunk);
-            }
-        },
-        errors,
-        None,
-    )
+/// `floats` written into `data` from sample `at` on, as its format's
+/// samples: one loop, chosen once for the buffer.
+fn write_into(data: &mut cpal::Data, at: usize, floats: &[f32]) {
+    use cpal::SampleFormat::*;
+    fn into<T: cpal::SizedSample + cpal::FromSample<f32>>(
+        data: &mut cpal::Data,
+        at: usize,
+        floats: &[f32],
+    ) {
+        if let Some(out) = data.as_slice_mut::<T>() {
+            write(floats, &mut out[at..at + floats.len()]);
+        }
+    }
+    match data.sample_format() {
+        I8 => into::<i8>(data, at, floats),
+        I16 => into::<i16>(data, at, floats),
+        I24 => into::<cpal::I24>(data, at, floats),
+        I32 => into::<i32>(data, at, floats),
+        I64 => into::<i64>(data, at, floats),
+        U8 => into::<u8>(data, at, floats),
+        U16 => into::<u16>(data, at, floats),
+        U24 => into::<cpal::U24>(data, at, floats),
+        U32 => into::<u32>(data, at, floats),
+        U64 => into::<u64>(data, at, floats),
+        F64 => into::<f64>(data, at, floats),
+        // Floats are mixed in place; DSD is refused before a stream.
+        _ => {}
+    }
 }
 
 fn nanos(instant: cpal::StreamInstant) -> u64 {
@@ -194,49 +191,44 @@ impl Device for Cpal {
             back: self.back.0.clone(),
         };
         let channels = format.channels;
-        let built = match supported.sample_format() {
-            cpal::SampleFormat::F32 => {
-                // Mixed straight into the device's buffer.
-                let mut held = held;
-                device.build_output_stream(
-                    config,
-                    move |data: &mut [f32], info: &cpal::OutputCallbackInfo| {
-                        let renderer = held.renderer.as_mut().expect("held while streaming");
-                        let stamp = info.timestamp();
-                        renderer.render(
-                            data,
-                            Some(Timing {
-                                asked: nanos(stamp.callback),
-                                heard: nanos(stamp.playback),
-                            }),
-                        );
-                    },
-                    errors,
-                    None,
-                )
-            }
-            cpal::SampleFormat::I8 => converting::<i8>(&device, config, held, errors, channels),
-            cpal::SampleFormat::I16 => converting::<i16>(&device, config, held, errors, channels),
-            cpal::SampleFormat::I24 => {
-                converting::<cpal::I24>(&device, config, held, errors, channels)
-            }
-            cpal::SampleFormat::I32 => converting::<i32>(&device, config, held, errors, channels),
-            cpal::SampleFormat::I64 => converting::<i64>(&device, config, held, errors, channels),
-            cpal::SampleFormat::U8 => converting::<u8>(&device, config, held, errors, channels),
-            cpal::SampleFormat::U16 => converting::<u16>(&device, config, held, errors, channels),
-            cpal::SampleFormat::U24 => {
-                converting::<cpal::U24>(&device, config, held, errors, channels)
-            }
-            cpal::SampleFormat::U32 => converting::<u32>(&device, config, held, errors, channels),
-            cpal::SampleFormat::U64 => converting::<u64>(&device, config, held, errors, channels),
-            cpal::SampleFormat::F64 => converting::<f64>(&device, config, held, errors, channels),
+        let format_of = supported.sample_format();
+        if !writable(format_of) {
             // Refused by `format`, which chose the device.
-            _ => {
-                drop(held);
-                let renderer = self.back.1.recv().expect("the renderer, given back");
-                return Err((unwritable(supported.sample_format()), renderer));
-            }
-        };
+            drop(held);
+            let renderer = self.back.1.recv().expect("the renderer, given back");
+            return Err((unwritable(format_of), renderer));
+        }
+        // One callback for every format, built once (not one a sample
+        // type): floats mixed straight into a float device's buffer, and
+        // into one of their own for the rest, converted after.
+        let mut held = held;
+        let mut floats = vec![0f32; 8192 * channels.max(1)];
+        let built = device.build_output_stream_raw(
+            config,
+            format_of,
+            move |data: &mut cpal::Data, info: &cpal::OutputCallbackInfo| {
+                let renderer = held.renderer.as_mut().expect("held while streaming");
+                let stamp = info.timestamp();
+                let mut timing = Some(Timing {
+                    asked: nanos(stamp.callback),
+                    heard: nanos(stamp.playback),
+                });
+                if let Some(out) = data.as_slice_mut::<f32>() {
+                    renderer.render(out, timing);
+                    return;
+                }
+                let mut at = 0;
+                while at < data.len() {
+                    let n = (data.len() - at).min(floats.len());
+                    let floats = &mut floats[..n];
+                    renderer.render(floats, timing.take());
+                    write_into(data, at, floats);
+                    at += n;
+                }
+            },
+            errors,
+            None,
+        );
         let stream = match built {
             Ok(stream) => stream,
             Err(error) => {
@@ -347,5 +339,28 @@ mod tests {
         let mut i16s = [0i16; 3];
         write(&floats[..3], &mut i16s);
         assert_eq!(i16s, [0, i16::MAX, i16::MIN]);
+    }
+
+    #[test]
+    fn one_callback_writes_any_format_s_buffer_a_piece_at_a_time() {
+        // A device's buffer in three formats, written in two pieces as the
+        // callback does when its float buffer is smaller.
+        let floats = [0., 0.5, -1., 1., 0.25, -0.25];
+        let mut i16s = [0i16; 6];
+        let mut data =
+            unsafe { cpal::Data::from_parts(i16s.as_mut_ptr().cast(), 6, cpal::SampleFormat::I16) };
+        write_into(&mut data, 0, &floats[..4]);
+        write_into(&mut data, 4, &floats[4..]);
+        assert_eq!(i16s, [0, 16_384, i16::MIN, i16::MAX, 8_192, -8_192]);
+        let mut u8s = [0u8; 6];
+        let mut data =
+            unsafe { cpal::Data::from_parts(u8s.as_mut_ptr().cast(), 6, cpal::SampleFormat::U8) };
+        write_into(&mut data, 0, &floats);
+        assert_eq!(u8s[0], 128, "silence in the middle");
+        let mut f64s = [0f64; 6];
+        let mut data =
+            unsafe { cpal::Data::from_parts(f64s.as_mut_ptr().cast(), 6, cpal::SampleFormat::F64) };
+        write_into(&mut data, 2, &floats[..4]);
+        assert_eq!(f64s, [0., 0., 0., 0.5, -1., f64::from(BELOW_ONE)]);
     }
 }
