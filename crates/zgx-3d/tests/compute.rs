@@ -1245,17 +1245,19 @@ fn passes_past_a_frames_invocations_take_turns() {
     for pass in &passes {
         window.compiled(&world, *pass);
     }
+    // From none once both are ready: while the second compiled, the first
+    // ran alone each frame (as many as the machine's load made it).
+    counts.write(0, &[0u32, 0]).unwrap();
     for _ in 0..20 {
         window.draw();
     }
     let read = counts.read(0..8);
-    window.until(&read, 100);
+    let more = window.until(&read, 100) as u32;
     let ran = words(&read.try_take().unwrap().unwrap());
-    assert!(
-        ran[0] >= 8 && ran[1] >= 8,
-        "each ran about half the frames: {ran:?}"
-    );
-    assert!(ran[0] + ran[1] <= 30, "one a frame: {ran:?}");
+    // One a frame, in turn: 20 frames, and those until the read's copy.
+    let all = ran[0] + ran[1];
+    assert!((20..=20 + more).contains(&all), "one a frame: {ran:?}");
+    assert!(ran[0].abs_diff(ran[1]) <= 1, "in turn: {ran:?}");
 }
 
 #[test]

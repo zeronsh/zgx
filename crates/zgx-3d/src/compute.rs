@@ -1349,6 +1349,17 @@ impl Frames {
         // The world's copies are its device's, whichever painter made them.
         self.generation = match &data.device {
             Some((made_on, generation)) if *made_on == frame.device_id() => *generation,
+            // A device of no identity (0) beside one with: see
+            // `particles::gpu`'s same check.
+            Some((made_on, _)) if (*made_on == 0) != (frame.device_id() == 0) => {
+                debug_assert!(
+                    false,
+                    "a world drawn with a device of no identity (0) beside one with: give it one, `zgx_gpu::viewport::new_device_id`"
+                );
+                let generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
+                data.device = Some((frame.device_id(), generation));
+                generation
+            }
             _ => {
                 let generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
                 data.device = Some((frame.device_id(), generation));

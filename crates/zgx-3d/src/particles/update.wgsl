@@ -53,6 +53,15 @@ struct Emitter {
 // Its births: in all (where the next goes in its ring), and this frame
 // (none past its slots).
 @group(0) @binding(4) var<storage, read_write> born: array<atomic<u32>, 2>;
+// The frame's births, in the parents' order (not the order invocations
+// happen to run in, which differs run to run): each parent's count
+// (`update_events`), then for each 256 of them their sum, then where their
+// births begin (`events_offsets`), and last the ring's head this frame.
+// One buffer, so a device binding four storage buffers to a stage has
+// room: a slot's count at its index, a group's at the slots' count past.
+@group(0) @binding(5) var<storage, read_write> scratch: array<u32>;
+
+var<workgroup> scan: array<u32, 256>;
 
 fn pcg(v: u32) -> u32 {
     let s = v * 747796405u + 2891336453u;
@@ -187,15 +196,8 @@ fn update(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
-// As `update`, its particles' deaths and hits giving birth in its
-// sub-emitter's pool, as many each as `emitter.events` says.
-@compute @workgroup_size(256)
-fn update_events(@builtin(global_invocation_id) id: vec3<u32>) {
-    if id.x >= emitter.spawn.w {
-        return;
-    }
-    let happened = step(id.x);
-    // At most its pool an event and a frame, whatever was asked.
+// Births a parent's `happened` gives, at most its sub-emitter's slots.
+fn births_of(happened: u32) -> u32 {
     let most = emitter.events.x;
     var births = 0u;
     if (happened & DIED) != 0u {
@@ -204,19 +206,107 @@ fn update_events(@builtin(global_invocation_id) id: vec3<u32>) {
     if (happened & HIT) != 0u {
         births = min(births + min(emitter.events.z, most), most);
     }
+    return births;
+}
+
+// `scan` summed from its first to each entry (inclusive), each sum at most
+// `most`. Every invocation of the workgroup calls it.
+fn scan_up(local: u32, most: u32) {
+    for (var stride = 1u; stride < 256u; stride <<= 1u) {
+        var add = 0u;
+        if local >= stride {
+            add = scan[local - stride];
+        }
+        workgroupBarrier();
+        scan[local] = min(scan[local] + add, most);
+        workgroupBarrier();
+    }
+}
+
+// As `update`, each particle's births this frame counted (its deaths and
+// hits, as many as `emitter.events` says), and each 256's in all.
+@compute @workgroup_size(256)
+fn update_events(
+    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(local_invocation_index) local: u32,
+    @builtin(workgroup_id) group: vec3<u32>,
+) {
+    var births = 0u;
+    if id.x < emitter.spawn.w {
+        births = births_of(step(id.x));
+        scratch[id.x] = births;
+    }
+    scan[local] = births;
+    workgroupBarrier();
+    scan_up(local, emitter.events.x);
+    if local == 255u {
+        scratch[emitter.spawn.w + group.x] = scan[255];
+    }
+}
+
+// One workgroup: where each 256 parents' births begin, in their order, and
+// the ring's head this frame (`groups`' last), the head moved on by the
+// frame's births (a pool's worth at most).
+@compute @workgroup_size(256)
+fn events_offsets(@builtin(local_invocation_index) local: u32) {
+    let most = emitter.events.x;
+    let n = (emitter.spawn.w + 255u) / 256u;
+    let per = (n + 255u) / 256u;
+    let first = local * per;
+    let last = min(first + per, n);
+    var sum = 0u;
+    for (var g = first; g < last; g++) {
+        sum = min(sum + scratch[emitter.spawn.w + g], most);
+    }
+    scan[local] = sum;
+    workgroupBarrier();
+    scan_up(local, most);
+    var at = 0u;
+    if local > 0u {
+        at = scan[local - 1u];
+    }
+    for (var g = first; g < last; g++) {
+        let count = scratch[emitter.spawn.w + g];
+        scratch[emitter.spawn.w + g] = at;
+        at = min(at + count, most);
+    }
+    if local == 255u {
+        let head = atomicLoad(&born[0]);
+        scratch[emitter.spawn.w + n] = head;
+        atomicStore(&born[0], (head + scan[255]) % most);
+    }
+}
+
+// Each parent's births written into its sub-emitter's ring, in the
+// parents' order from the frame's head: none past a pool's worth.
+@compute @workgroup_size(256)
+fn events_births(
+    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(local_invocation_index) local: u32,
+    @builtin(workgroup_id) group: vec3<u32>,
+) {
+    let most = emitter.events.x;
+    var births = 0u;
+    if id.x < emitter.spawn.w {
+        births = scratch[id.x];
+    }
+    scan[local] = births;
+    workgroupBarrier();
+    scan_up(local, most);
+    var before = 0u;
+    if local > 0u {
+        before = scan[local - 1u];
+    }
     if births == 0u {
         return;
     }
-    let granted = atomicAdd(&born[1], births);
-    if granted >= most {
-        return;
-    }
-    births = min(births, most - granted);
+    let n = (emitter.spawn.w + 255u) / 256u;
+    let start = min(scratch[emitter.spawn.w + group.x] + before, most);
+    let head = scratch[emitter.spawn.w + n];
     let p = particles[id.x];
-    let first = atomicAdd(&born[0], births);
     let seed = bitcast<u32>(child.life.w) ^ pcg(id.x);
-    for (var k = 0u; k < births; k++) {
-        let slot = (first + k) % emitter.events.x;
+    for (var k = 0u; k < births && start + k < most; k++) {
+        let slot = (head + start + k) % most;
         children[slot] = spawn(child, slot, seed ^ (k * 0x9e3779b9u), p.position);
     }
 }

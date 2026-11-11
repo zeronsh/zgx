@@ -867,9 +867,19 @@ fn a_bright_spark_blooms_with_the_scene() {
 /// `frames` to 0.6 s of frame time: whether they still show in each
 /// painter's target (at double the world's rate they'd have died).
 fn alive_at_six_tenths(world: &World, frames: &mut Frames) -> (bool, Option<bool>) {
-    frames.ready(world, 0.);
-    frames.run(0., 0.6);
     let lit = |pixels: Vec<u8>| pixel(&pixels, 32, 32)[0] > 200;
+    frames.ready(world, 0.);
+    // A second painter's pipelines made too (the world is ready with the
+    // first's): frames at the same time, which step nothing more. Up to 10
+    // s of wall time: compiling isn't what's tested.
+    if frames.second.is_some() {
+        let started = Instant::now();
+        while !lit(frames.second_pixels()) && started.elapsed() < Duration::from_secs(10) {
+            frames.draw(0.);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    frames.run(0., 0.6);
     let second = frames.second.is_some().then(|| lit(frames.second_pixels()));
     (lit(frames.pixels()), second)
 }
@@ -1134,5 +1144,68 @@ fn a_world_drawn_on_devices_of_two_instances_keeps_each_its_own() {
         assert!(started.elapsed() < Duration::from_secs(10), "not drawn");
         both(&mut third, &mut second, &mut frame);
         std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Rain giving birth to splashes where it lands, on the GPU, run twice at
+/// the same frame times: the same pixels each time. A frame's births go to
+/// slots in the parents' order, not the order their invocations happen to
+/// reach a counter in, so which are kept (a pool's worth a frame at most),
+/// which older ones they replace and the order they draw in are the same.
+#[test]
+fn rain_giving_birth_to_splashes_draws_the_same_twice() {
+    let run = || {
+        let world = world();
+        let mut frames = Frames::new(&world)?;
+        // Few slots for many births: the frame's cap and the ring's
+        // replacing both decide what shows.
+        let splashes = world
+            .add_emitter(
+                Emitter::new(300)
+                    .spawn(Spawn::sphere([0., 0.02, 0.], 0.02))
+                    .lifetime(0.2..0.6)
+                    .velocity([0., 1.2, 0.], 0.8)
+                    .size(0.08..0.08)
+                    .color_over_life([
+                        [1., 0.1, 0.1, 0.9],
+                        [0.1, 1., 0.1, 0.7],
+                        [0.1, 0.1, 1., 0.5],
+                        [1., 1., 1., 0.2],
+                    ]),
+            )
+            .unwrap();
+        let rain = world
+            .add_emitter(
+                Emitter::new(4000)
+                    .spawn(Spawn::box_([-1.5, 1., -0.3], [1.5, 1.2, 0.3]).rate(3000.))
+                    .lifetime(2.0..2.0)
+                    .force(Force::Gravity)
+                    .collide(Collide::Plane {
+                        height: -0.5,
+                        then: Response::Die,
+                    })
+                    .size(0.03..0.03)
+                    .color([0.2, 0.6, 1.0, 0.8])
+                    .on_hit(splashes, 4),
+            )
+            .unwrap();
+        world.set_emitting(rain, false);
+        frames.ready(&world, 0.);
+        world.set_emitting(rain, true);
+        let mut images = Vec::new();
+        let mut at = 0.;
+        for _ in 0..8 {
+            at = frames.run(at, at + 10. / 60.);
+            images.push(frames.pixels());
+        }
+        Some(images)
+    };
+    let Some(first) = run() else {
+        return;
+    };
+    let second = run().unwrap();
+    for (frame, (a, b)) in first.iter().zip(&second).enumerate() {
+        let differ = a.chunks(4).zip(b.chunks(4)).filter(|(p, q)| p != q).count();
+        assert_eq!(differ, 0, "{differ} pixels differ at the {frame}th image");
     }
 }

@@ -148,6 +148,10 @@ struct Pool {
     last: Uniforms,
     /// The device refused to make it: neither updated nor drawn.
     failed: bool,
+    /// Where it gives birth into a sub-emitter's on the GPU: each
+    /// particle's births this frame (4 bytes each), then each 256's offset
+    /// and the child's ring head (`update.wgsl`'s `scratch`).
+    events: Option<wgpu::Buffer>,
     /// Whether any may live this frame (else neither updated nor drawn).
     shown: bool,
     blend: Blend,
@@ -159,8 +163,10 @@ struct Pool {
 /// where the device runs no compute).
 struct Pipelines {
     update: Option<wgpu::ComputePipeline>,
-    /// `update` giving birth into a sub-emitter's pool.
-    update_events: Option<wgpu::ComputePipeline>,
+    /// `update` giving birth into a sub-emitter's pool, in the parents'
+    /// order: counting each parent's births, placing each 256's, writing
+    /// them (`update_events`, `events_offsets`, `events_births`).
+    events: Option<[wgpu::ComputePipeline; 3]>,
 }
 type Compiling = Arc<Mutex<Option<Pipelines>>>;
 
@@ -411,6 +417,20 @@ impl Shared {
                 .queue
                 .write_buffer(&pool.draw, 0, bytemuck::bytes_of(&planned.draw));
             let child = planned.child.filter(|id| self.pools.contains_key(id));
+            // A parent's place to count its births, made with its first.
+            if child.is_some()
+                && let Some(pool) = self.pools.get_mut(&planned.id)
+                && pool.cpu.is_none()
+                && pool.events.is_none()
+            {
+                let words = u64::from(slots) + u64::from(slots.div_ceil(256)) + 1;
+                pool.events = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("3D particles births"),
+                    size: words * 4,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                }));
+            }
             let pool = &self.pools[&planned.id];
             if pool.cpu.is_none() {
                 let compute = pass.get_or_insert_with(|| {
@@ -422,11 +442,13 @@ impl Shared {
                         })
                         .forget_lifetime()
                 });
+                let groups = slots.div_ceil(256);
                 let feeding = child
-                    .zip(pipelines.update_events.as_ref())
-                    .zip(self.events_layout.as_ref());
+                    .zip(pipelines.events.as_ref())
+                    .zip(self.events_layout.as_ref())
+                    .zip(pool.events.as_ref());
                 match feeding {
-                    Some(((child, pipeline), layout)) => {
+                    Some((((child, [count, place, write]), layout), scratch)) => {
                         let into = &self.pools[&child];
                         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("3D particles giving birth"),
@@ -437,17 +459,26 @@ impl Shared {
                                 entry(2, &into.update),
                                 entry(3, &into.particles),
                                 entry(4, into.born.as_ref().unwrap()),
+                                entry(5, scratch),
                             ],
                         });
-                        compute.set_pipeline(pipeline);
+                        // Stepped and counted, placed in the parents'
+                        // order, written: the same births in the same
+                        // slots each run.
                         compute.set_bind_group(0, &bind, &[]);
+                        compute.set_pipeline(count);
+                        compute.dispatch_workgroups(groups, 1, 1);
+                        compute.set_pipeline(place);
+                        compute.dispatch_workgroups(1, 1, 1);
+                        compute.set_pipeline(write);
+                        compute.dispatch_workgroups(groups, 1, 1);
                     }
                     None => {
                         compute.set_pipeline(pipelines.update.as_ref().unwrap());
                         compute.set_bind_group(0, pool.update_bind.as_ref().unwrap(), &[]);
+                        compute.dispatch_workgroups(groups, 1, 1);
                     }
                 }
-                compute.dispatch_workgroups(slots.div_ceil(256), 1, 1);
             } else if let Some(child) = child
                 && !events.is_empty()
                 && let Some(into) = self.pools.get_mut(&child)
@@ -549,6 +580,7 @@ impl Shared {
                         layout_entry(2, wgpu::ShaderStages::COMPUTE, uniform),
                         layout_entry(3, wgpu::ShaderStages::COMPUTE, storage),
                         layout_entry(4, wgpu::ShaderStages::COMPUTE, storage),
+                        layout_entry(5, wgpu::ShaderStages::COMPUTE, storage),
                     ],
                 })
             })
@@ -582,11 +614,14 @@ impl Shared {
                 )
             };
             let update = update_pipeline(&update_layout, "update");
-            let update_events = update_pipeline(&events_layout, "update_events");
-            *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(Pipelines {
-                update,
-                update_events,
-            });
+            let events = (|| {
+                Some([
+                    update_pipeline(&events_layout, "update_events")?,
+                    update_pipeline(&events_layout, "events_offsets")?,
+                    update_pipeline(&events_layout, "events_births")?,
+                ])
+            })();
+            *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(Pipelines { update, events });
         };
         if let Err(error) = crate::compute::compile_off_the_frame(make) {
             eprintln!("zgx-3d: particles' pipelines can't be made ({error}): none updated");
@@ -670,6 +705,17 @@ impl Device {
         // By the device's identity, never its equality (which holds across
         // wgpu instances).
         let id = frame.device_id();
+        // A device without an identity (0: a frame made with
+        // `ViewportFrame::new` and given none) beside one with: the two would
+        // be told apart only by luck. One a painter of its own draws with
+        // takes one (`viewport::new_device_id`).
+        debug_assert!(
+            particles
+                .devices
+                .iter()
+                .all(|(d, _)| (*d == 0) == (id == 0)),
+            "a world drawn with a device of no identity (0) beside one with ({id}): give it one, `zgx_gpu::viewport::new_device_id`"
+        );
         let mut shared = match particles.devices.iter().position(|(d, _)| *d == id) {
             Some(at) => particles.devices.remove(at).1,
             None => Shared::new(device),
@@ -847,6 +893,7 @@ fn make_pool_in_scope(
         born_cpu: 0,
         last: Uniforms::default(),
         failed: false,
+        events: None,
         shown: false,
         blend: Blend::Alpha,
         used: 0,

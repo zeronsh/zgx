@@ -5,7 +5,8 @@
 //! of its frames' pixels differ from the background, to show it drew.
 //!
 //! Run: cargo run --release -p zgx-3d --features particles --example particles_bench
-//! (`ROUNDS`, `FRAMES`; `ALIVE`: the rain's particles alive at once.)
+//! (`ROUNDS`, `FRAMES`; `ALIVE`: the rain's particles alive at once;
+//! `SPLASH=1`: its drops give birth to splashes where they land.)
 use std::time::{Duration, Instant};
 use zgx_3d::*;
 use zgx_gpu::{
@@ -46,29 +47,42 @@ fn world(alive: Option<u32>) -> World {
     world.set_background(Some(0x0b0e14));
     world.set_camera(Camera::looking_at([0., 1.7, 0.], [0., 1.5, -10.]));
     if let Some(alive) = alive {
+        // `SPLASH=1`: drops landing give birth to splashes there, 2 each,
+        // into a pool of a fifth as many (as the harbor's rain does).
+        let splashes = (setting("SPLASH", 0) == 1).then(|| {
+            world
+                .add_emitter(
+                    Emitter::new(alive / 5)
+                        .spawn(Spawn::sphere([0., 0.02, 0.], 0.02))
+                        .lifetime(0.15..0.3)
+                        .velocity([0., 1.5, 0.], 0.8)
+                        .force(Force::Gravity)
+                        .size(0.02..0.03)
+                        .color([0.7, 0.75, 0.8, 0.4]),
+                )
+                .expect("a splash emitter")
+        });
         // As design-3d-aaa.md's rain: streaks over 80 by 80 metres, falling
         // from 30 metres, living 0.6 to 0.9 s; the rate keeps `alive` of
         // them at once.
-        world
-            .add_emitter(
-                Emitter::new(alive)
-                    .spawn(
-                        Spawn::box_([-40., 28., -40.], [40., 32., 40.]).rate(alive as f32 / 0.75),
-                    )
-                    .lifetime(0.6..0.9)
-                    .velocity([0., -22., 0.], 1.5)
-                    .force(Force::Gravity)
-                    .force(Force::Wind([2., 0., 1.]))
-                    .force(Force::Drag(0.1))
-                    .collide(Collide::Plane {
-                        height: 0.,
-                        then: Response::Die,
-                    })
-                    .draw(Shape::Streak { length: 0.04 }, Blend::Alpha)
-                    .size(0.01..0.015)
-                    .color([0.7, 0.75, 0.8, 0.5]),
-            )
-            .expect("an emitter");
+        let mut rain = Emitter::new(alive)
+            .spawn(Spawn::box_([-40., 28., -40.], [40., 32., 40.]).rate(alive as f32 / 0.75))
+            .lifetime(0.6..0.9)
+            .velocity([0., -22., 0.], 1.5)
+            .force(Force::Gravity)
+            .force(Force::Wind([2., 0., 1.]))
+            .force(Force::Drag(0.1))
+            .collide(Collide::Plane {
+                height: 0.,
+                then: Response::Die,
+            })
+            .draw(Shape::Streak { length: 0.04 }, Blend::Alpha)
+            .size(0.01..0.015)
+            .color([0.7, 0.75, 0.8, 0.5]);
+        if let Some(splashes) = splashes {
+            rain = rain.on_hit(splashes, 2);
+        }
+        world.add_emitter(rain).expect("an emitter");
     }
     world
 }
