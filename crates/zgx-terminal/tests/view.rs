@@ -259,8 +259,13 @@ fn a_reader_hears_the_one_line_changed_among_identical_lines() {
         });
         app.pump();
     };
+    // Every row showing the line, the last one too: the script's final
+    // `printf same` (no newline) has been read. Until then the bottom row is
+    // blank, and on a loaded machine that last line could arrive after this
+    // frame, with the rewrite, and be heard as news beside it.
     app.until("a screen of identical lines", |app| {
-        app.shows("same") && term.state().get().rows > 5
+        let rows = term.state().get().rows;
+        rows > 5 && app.texts().iter().filter(|shown| *shown == "same").count() >= usize::from(rows)
     });
     // What the lines' arrival said goes with this frame.
     frame(&mut app);
