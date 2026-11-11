@@ -17277,7 +17277,9 @@ fn shown_image(kind: &NodeKind) -> Option<u64> {
 }
 
 /// The images `scene`'s nodes show: images (native surfaces' frames too)
-/// and boxes' background images, each id once.
+/// and boxes' background images, each id once. Debug builds alone check the
+/// counts against it (`prune_images`).
+#[cfg(debug_assertions)]
 fn scene_image_ids(scene: &Scene) -> FxHashSet<u64> {
     scene
         .paint_items()
