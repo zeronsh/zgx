@@ -2,7 +2,7 @@
 
 Sounds, music and the buses they play through, mixed by [zgx-audio](../../crates/zgx-audio): every start, stop and change lands on an exact frame, nothing clicks, and a limiter on master keeps the sum below full scale. The Rust side of each call is in [design-audio-luau.md](../design-audio-luau.md).
 
-**Where it is.** zgx-script's `audio` feature, off by default: `zgx-run` has it as its own `audio` feature (`cargo run -p zgx-run --features audio -- app/`), which also turns on zgx-desktop's for the device and Ogg Vorbis. A Rust host turns on zgx-script's `audio` and gives the host an engine (`ScriptHost::set_audio`; a desktop app `zgx_run::play_through`). Without the feature, `audio` is nil and `sound =` an unknown property.
+**Where it is.** zgx-script's `audio` feature, off by default, in parts: `audio` is the core (WAV, voices, buses, `sound =`), `audio-effects` adds the effects on buses, and `audio-vorbis` adds Ogg Vorbis. `zgx-run` has the same features (`cargo run -p zgx-run --features audio -- app/`, or `audio-all` for every part); its `audio` turns on zgx-desktop's for the device. A Rust host turns on zgx-script's and gives the host an engine (`ScriptHost::set_audio`; a desktop app `zgx_run::play_through`). Without `audio`, `audio` is nil and `sound =` an unknown property; without `audio-effects`, `audio.low_pass` and the others, `bus:add_effect` and `bus:duck` are nil.
 
 **What it costs.** Nothing until a script calls `audio`: the engine is made then. Loading a sound, setting a bus's gain or muting one opens no device and touches nothing of the system's audio. The first play starts the output; a second after the last sound (fades and tails included) it stops, and the app is as idle as one without sound.
 
@@ -45,7 +45,7 @@ return ui.column {
 
 ## Sounds
 
-`audio.sound(src, opts)` loads a sound whole: WAV (PCM 8, 16, 24 or 32 bits, float), and Ogg Vorbis where the app was built with zgx-audio's `vorbis` (zgx-run's `audio` has it). It returns at once with a handle. The file is read and decoded on a thread of its own, and `sound.ready` (a read-only state) turns true when it's done. Paths are relative to the script, like images. A sound is kept by its path and file time: a reload loads it again only if the file changed. One no script holds any more is let go after a reload (and as the app goes idle), but for the most recent 64 MB of them. Sounds decode on two threads that sleep while nothing loads.
+`audio.sound(src, opts)` loads a sound whole: WAV (PCM 8, 16, 24 or 32 bits, float), and Ogg Vorbis with `audio-vorbis`. It returns at once with a handle. The file is read and decoded on a thread of its own, and `sound.ready` (a read-only state) turns true when it's done. Paths are relative to the script, like images. A sound is kept by its path and file time: a reload loads it again only if the file changed. One no script holds any more is let go after a reload (and as the app goes idle), but for the most recent 64 MB of them. Sounds decode on two threads that sleep while nothing loads.
 
 - A play asked for before the sound is ready starts when it is, if that's within 250 ms of the ask. Later than that it's dropped and counted in `audio.stats().late`, so a click never plays long after its button.
 - `sound.error` (a read-only state) holds why a sound couldn't be loaded, or nil. A sound that failed plays nothing.
@@ -105,7 +105,7 @@ Every voice plays into a bus, and every bus into `master`. `ui`, `music` and `wo
 
 ## Effects
 
-A bus runs its effects in order on its sum, before its gain: 8 at most. `audio.<effect> { … }` describes one, and `bus:add_effect` puts it on:
+With `audio-effects`. A bus runs its effects in order on its sum, before its gain: 8 at most. `audio.<effect> { … }` describes one, and `bus:add_effect` puts it on:
 
 ```luau
 local music = audio.bus("music")

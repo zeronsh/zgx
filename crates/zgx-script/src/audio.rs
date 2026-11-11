@@ -7,6 +7,7 @@
 //!
 //! The engine is the host's (`ScriptHost::set_audio`), made the first time
 //! a script calls `audio`: a script that never does makes none.
+#[cfg(feature = "audio-effects")]
 mod effects;
 
 use crate::Vm;
@@ -74,7 +75,9 @@ pub(crate) struct AudioHost {
     /// nothing loads.
     loader: RefCell<Option<zgx::background::BackgroundPool>>,
     /// Effects scripts put on buses, by their own count.
+    #[cfg(feature = "audio-effects")]
     effects: RefCell<HashMap<u64, effects::LiveEffect>>,
+    #[cfg(feature = "audio-effects")]
     next_effect: Cell<u64>,
 }
 
@@ -109,7 +112,9 @@ impl AudioHost {
             sounds: RefCell::default(),
             slots: RefCell::default(),
             loader: RefCell::default(),
+            #[cfg(feature = "audio-effects")]
             effects: RefCell::default(),
+            #[cfg(feature = "audio-effects")]
             next_effect: Cell::new(0),
         })
     }
@@ -206,6 +211,7 @@ impl AudioHost {
         });
         drop(stopped);
         self.buses.borrow_mut().retain(|_, (of, _)| !replaced(*of));
+        #[cfg(feature = "audio-effects")]
         self.remove_effects(replaced);
         let slots: Vec<Rc<SoundSlot>> = {
             let mut slots = self.slots.borrow_mut();
@@ -533,6 +539,7 @@ impl Drop for AudioHost {
             let _ = live.voice.stop();
         }
         // And its effects come off their buses.
+        #[cfg(feature = "audio-effects")]
         self.remove_effects(|_| true);
     }
 }
@@ -1238,6 +1245,7 @@ impl UserData for BusUd {
                 plugin: b.plugin.clone(),
             })
         });
+        #[cfg(feature = "audio-effects")]
         effects::bus_methods(methods);
     }
 }
@@ -1482,6 +1490,7 @@ pub(crate) fn install(
             })?,
         )?;
     }
+    #[cfg(feature = "audio-effects")]
     effects::install(lua, &audio)?;
     if plugin.is_none() {
         {

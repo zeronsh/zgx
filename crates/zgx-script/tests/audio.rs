@@ -543,6 +543,8 @@ fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
     assert_eq!(*level.last().unwrap(), 0.);
 }
 
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
 #[test]
 fn the_sounds_example_runs_and_plays() {
     let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/sounds/app.luau");
@@ -820,6 +822,7 @@ fn sounds_no_script_holds_are_let_go_after_a_reload() {
 }
 
 /// A WAV file of `seconds` of a sine at `hz`, at half scale.
+#[cfg(feature = "audio-effects")]
 fn sine(name: &str, hz: f64, seconds: f64) -> PathBuf {
     let dir =
         std::env::temp_dir().join(format!("zgx-audio-script-{}-{}", std::process::id(), name));
@@ -836,6 +839,8 @@ fn sine(name: &str, hz: f64, seconds: f64) -> PathBuf {
     path
 }
 
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
 #[test]
 fn a_low_pass_bound_to_a_tween_moves_with_no_script_per_frame() {
     let tone = sine("lowpass", 5_000., 2.);
@@ -885,6 +890,8 @@ fn a_low_pass_bound_to_a_tween_moves_with_no_script_per_frame() {
     );
 }
 
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
 #[test]
 fn an_effect_parameter_following_state_is_a_command_a_change() {
     let tone = sine("peaking", 1_000., 2.);
@@ -936,6 +943,8 @@ fn an_effect_parameter_following_state_is_a_command_a_change() {
     assert!((off - flat).abs() < 0.01, "taken off: {off}");
 }
 
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
 #[test]
 fn a_reload_takes_off_the_effects_the_old_script_added() {
     let tone = sine("reload-effects", 5_000., 2.);
@@ -972,6 +981,8 @@ fn a_reload_takes_off_the_effects_the_old_script_added() {
     assert!(open > 0.45, "the old script's filter is off: {open}");
 }
 
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
 #[test]
 fn a_bus_ducks_under_another() {
     let tone = wav("duck", 2.);
@@ -1040,6 +1051,8 @@ fn a_voice_crossfades_to_another() {
     assert!(middle > 0.45, "{middle}: {levels:?}");
 }
 
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
 #[test]
 fn a_plugin_puts_effects_on_its_own_bus_within_its_limits() {
     let dir = std::env::temp_dir().join(format!("zgx-audio-plugin-fx-{}", std::process::id()));
@@ -1069,6 +1082,8 @@ fn a_plugin_puts_effects_on_its_own_bus_within_its_limits() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
 #[test]
 fn a_plugins_effects_count_against_its_memory() {
     let dir = std::env::temp_dir().join(format!("zgx-audio-plugin-fx-mem-{}", std::process::id()));
@@ -1105,6 +1120,8 @@ fn a_plugins_effects_count_against_its_memory() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
 #[test]
 fn an_effect_says_which_parameters_it_has() {
     let mut app = TestApp::inline(

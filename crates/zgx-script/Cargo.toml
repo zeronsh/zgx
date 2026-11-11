@@ -32,6 +32,13 @@ scene3d = ["dep:zgx-3d"]
 # engine (`ScriptHost::set_audio`); this feature opens no device itself
 # (zgx-desktop's `audio` does).
 audio = ["dep:zgx-audio"]
+# `bus:add_effect` with the mixer's stock effects (`audio.low_pass`,
+# `reverb`…) and `bus:duck`. Apart from `audio`: a UI app playing clicks
+# carries none of them.
+audio-effects = ["audio"]
+# Ogg Vorbis for `audio.sound` and `audio.music` (zgx-audio's `vorbis`),
+# besides WAV.
+audio-vorbis = ["audio", "zgx-audio/vorbis"]
 # Localized messages' plural rules and numbers for every locale (zgx's
 # `i18n`, ICU4X's data: about 90 KB). Off by default: `ui.t` reaches the
 # formatters, so a host would carry them whether or not its scripts call

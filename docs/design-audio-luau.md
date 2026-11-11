@@ -190,3 +190,7 @@ The mixer's stock effects (zgx-audio's `effects`) on buses, built in `crates/zgx
 - Plugins reach their own bus as `audio.bus()` (nil for any name), with `PLUGIN_EFFECTS` (4) effects at most and no `duck`. What an effect holds is charged to the plugin's meter (`hold_native`) while it's on: a delay its line (`longest` seconds of stereo), a reverb its eight lines at their largest and 250 ms of pre-delay.
 - `voice:crossfade(to, seconds, gain?)`: this voice's `stop_after` and `to`'s `set_gain` along `Curve::EqualPower`, both over `seconds`, taking the gains over from what followed them.
 - Lint: `audio-effect-in-builder`.
+
+## 11. What it costs, in parts (Nov 10 2026)
+
+A dist build of zgx-run measured by what each part links (unstripped, symbol sizes by crate; `audio` with Vorbis against none, at fc9cc48f4: +846,032 bytes): zgx-script's bindings about 250 KB with the effects' share, zgx-audio's engine, mixer, device host, streams and decoding about 145 KB, cpal and its glue about 123 KB, lewton and ogg 69 KB, the stock effects 32 KB, std's share 42 KB. A UI app playing clicks needs neither effects nor Vorbis, so they're features of their own: zgx-script's `audio` is the core (WAV), `audio-effects` adds `bus:add_effect` and `bus:duck` and with them the stock effects, `audio-vorbis` adds lewton. zgx-run has the same, and `audio-all`. (An earlier "WAV only" figure, +298,560 bytes, measured a build whose zgx-run made no engine, so the device's code wasn't linked: it understated the core.)
