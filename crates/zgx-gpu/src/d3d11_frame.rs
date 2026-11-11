@@ -778,11 +778,18 @@ impl Device {
 }
 
 /// The adapter DXGI lists first for low power, as the Direct3D 12 path
-/// takes it (`crate::POWER`, `preferred_dx12_adapter`).
+/// takes it (`crate::POWER`, `preferred_dx12_adapter`); WARP where the
+/// software adapter is asked for (`crate::fallback_adapter_forced`).
 fn first_adapter() -> Option<IDXGIAdapter> {
+    adapter_for(crate::fallback_adapter_forced())
+}
+fn adapter_for(software: bool) -> Option<IDXGIAdapter> {
     // SAFETY: Plain DXGI calls on a factory made here.
     unsafe {
         let factory: IDXGIFactory6 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0)).ok()?;
+        if software {
+            return factory.EnumWarpAdapter().ok();
+        }
         factory
             .EnumAdapterByGpuPreference(0, DXGI_GPU_PREFERENCE_MINIMUM_POWER)
             .ok()
@@ -1785,6 +1792,18 @@ fn compile(hlsl: &str, entry: &str, target: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `WGPU_FORCE_FALLBACK_ADAPTER=1`: Direct3D 11's device is on WARP,
+    /// Microsoft's Basic Render Driver, as Direct3D 12's is.
+    #[test]
+    fn the_software_adapter_is_warp() {
+        let adapter = adapter_for(true).expect("every Windows has WARP");
+        // SAFETY: A plain query of an adapter made here.
+        let desc = unsafe { adapter.GetDesc() }.unwrap();
+        let name = String::from_utf16_lossy(&desc.Description);
+        assert_eq!(desc.VendorId, 0x1414, "{name}");
+        assert!(name.contains("Basic Render Driver"), "{name}");
+    }
 
     #[test]
     fn translated_hlsl_matches() {

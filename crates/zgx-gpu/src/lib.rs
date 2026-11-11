@@ -3796,6 +3796,15 @@ pub fn measure_text(
 /// The GPU an interface draws on: the integrated one of a machine with two,
 /// which keeps a laptop's discrete GPU asleep.
 const POWER: wgpu::PowerPreference = wgpu::PowerPreference::LowPower;
+/// `WGPU_FORCE_FALLBACK_ADAPTER=1` (wgpu's own name): the software adapter
+/// even where there is a GPU (WARP on Windows, for both Direct3D 12 and
+/// 11), as a machine without one draws: to run CI's software lines, or
+/// bless a software family of goldens, on a machine with a GPU. Linux takes
+/// a software Vulkan driver; macOS has none for Metal, so there the renderer
+/// fails to start. Read when a device is made, never per frame.
+pub(crate) fn fallback_adapter_forced() -> bool {
+    std::env::var_os("WGPU_FORCE_FALLBACK_ADAPTER").is_some_and(|value| value == "1")
+}
 /// The adapter DXGI ranks first for `POWER`, a GPU before software, with a
 /// device opened on it alone (none when Direct3D 12 isn't the instance's
 /// backend). wgpu's
@@ -4030,6 +4039,7 @@ impl GpuContext {
                     .map(move |compiler| (backends, compiler))
             })
             .collect();
+        let fallback = fallback_adapter_forced();
         let mut found = Err(GpuError("no graphics backend".into()));
         for (backends, compiler) in attempts {
             let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -4070,12 +4080,18 @@ impl GpuContext {
                     continue;
                 }
             };
+            // The software adapter asked for: `request_adapter` alone, keeping
+            // only software adapters (Direct3D 11's device takes WARP itself,
+            // and the no-op backend has none).
             #[cfg(windows)]
-            let preferred = preferred_dx12_adapter(&instance).filter(|adapter| {
-                surface
-                    .as_ref()
-                    .is_none_or(|surface| adapter.is_surface_supported(surface))
-            });
+            let preferred = (!fallback)
+                .then(|| preferred_dx12_adapter(&instance))
+                .flatten()
+                .filter(|adapter| {
+                    surface
+                        .as_ref()
+                        .is_none_or(|surface| adapter.is_surface_supported(surface))
+                });
             #[cfg(not(windows))]
             let preferred = None;
             let adapter = match preferred {
@@ -4084,7 +4100,7 @@ impl GpuContext {
                     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                         power_preference: POWER,
                         compatible_surface: surface.as_ref(),
-                        force_fallback_adapter: false,
+                        force_fallback_adapter: fallback && !noop,
                     }))
                 }
             };
