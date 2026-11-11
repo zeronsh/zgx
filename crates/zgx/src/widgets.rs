@@ -2224,6 +2224,7 @@ impl Ui {
     /// [`Ui::bind`]. `mount_pure`: `f` reads no layout, so a mount's
     /// deferred input draws need not be made before it runs
     /// (`watch_geometry`).
+    #[inline]
     pub(crate) fn bind_marked(
         &mut self,
         owner: NodeId,
@@ -2235,28 +2236,41 @@ impl Ui {
             "cannot bind a removed UI node"
         );
         let mut initial = self.storage.mount_initialization.borrow().clone();
-        let callback: Rc<RefCell<dyn FnMut()>> = Rc::new(RefCell::new(move || {
-            let Some(token) = initial.take() else {
+        // Its place made first and the callback built in it: `f` holds what
+        // the binding renders from (a node's styles, hundreds of bytes), moved
+        // again otherwise by `Rc::new`.
+        let mut callback = Rc::new_uninit();
+        Rc::get_mut(&mut callback)
+            .expect("just made")
+            .write(RefCell::new(move || {
+                let Some(token) = initial.take() else {
+                    f();
+                    return;
+                };
+                if token.failed.get()
+                    || token
+                        .ui
+                        .upgrade()
+                        .is_none_or(|ui| !ui.scene.borrow().contains(owner))
+                {
+                    return;
+                }
+                let scope = token.enter();
+                let mut guard = InitialBindingGuard {
+                    token,
+                    scope: Some(scope),
+                    completed: false,
+                };
                 f();
-                return;
-            };
-            if token.failed.get()
-                || token
-                    .ui
-                    .upgrade()
-                    .is_none_or(|ui| !ui.scene.borrow().contains(owner))
-            {
-                return;
-            }
-            let scope = token.enter();
-            let mut guard = InitialBindingGuard {
-                token,
-                scope: Some(scope),
-                completed: false,
-            };
-            f();
-            guard.completed = true;
-        }));
+                guard.completed = true;
+            }));
+        // SAFETY: written just above.
+        let callback: Rc<RefCell<dyn FnMut()>> = unsafe { callback.assume_init() };
+        self.add_binding(owner, mount_pure, callback);
+    }
+    /// `bind_marked`'s effect, kept by `owner`: apart, so what is generic
+    /// over the callback stays small enough to inline where it is built.
+    fn add_binding(&mut self, owner: NodeId, mount_pure: bool, callback: Rc<RefCell<dyn FnMut()>>) {
         self.runtime.clone().batch(|| {
             let effect = self.runtime.effect_callback(mount_pure, callback);
             #[cfg(feature = "trace")]
