@@ -839,6 +839,10 @@ fn exit_code(status: std::process::ExitStatus) -> i32 {
 }
 
 #[cfg(test)]
+#[path = "conformance_tests.rs"]
+mod conformance_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
