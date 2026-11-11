@@ -6103,7 +6103,10 @@ impl GpuRenderer {
             .is_some_and(|layer| layer.planes_room())
     }
     /// Draw `scene`'s `damage` (logical rectangles) to the target, and report
-    /// what it did.
+    /// what it did. A GPU view that animates (`GpuView::animating`) gets its
+    /// frames from a window's frame clock: a driver without one (headless)
+    /// invalidates it before each frame while it animates, or it isn't
+    /// drawn again.
     pub fn render(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
         #[cfg(target_os = "macos")]
         {

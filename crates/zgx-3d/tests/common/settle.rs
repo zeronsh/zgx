@@ -14,12 +14,28 @@ pub fn caught(world: &World, window: &mut Window) -> bool {
     world.view().animating()
 }
 
+/// How a row's window draws its frames.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Draw {
+    /// Every frame asked for: the world's view invalidated each time, as
+    /// the other harnesses draw.
+    Always,
+    /// As a window does: a frame only while the view animates (its frame
+    /// clock) or where something invalidated it. What the world fails to
+    /// ask a frame for, it doesn't get.
+    AsAWindow,
+}
+
 pub struct Window {
     ui: Ui,
     gpu: GpuRenderer,
+    mode: Draw,
 }
 impl Window {
     pub fn new(world: &World) -> Option<Self> {
+        Self::drawing(world, Draw::Always)
+    }
+    pub fn drawing(world: &World, mode: Draw) -> Option<Self> {
         let gpu = match GpuRenderer::new(64, 64) {
             Ok(gpu) => gpu,
             Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
@@ -34,12 +50,15 @@ impl Window {
                 .bg(Color(0, 0, 0, 255))
                 .child(gpu_view("World", world.view()).size(64., 64.)),
         );
-        Some(Self { ui, gpu })
+        Some(Self { ui, gpu, mode })
     }
     /// A frame, as a window's frame clock draws one while the view
-    /// animates (a headless window has none: it's asked for here).
+    /// animates (a headless window has none: it's asked for here, every
+    /// frame or, `Draw::AsAWindow`, only while the view animates).
     pub fn draw(&mut self, world: &World) {
-        world.view().invalidate();
+        if self.mode == Draw::Always || world.view().animating() {
+            world.view().invalidate();
+        }
         self.ui.prepare_frame();
         let report = self.ui.scene.borrow_mut().flush();
         self.gpu
@@ -100,8 +119,12 @@ pub type Hold = fn(&World, ObjectId, &mut Window) -> Option<Box<dyn FnOnce(&Worl
 /// whether it could (a device that can't hold it, or a hold already over
 /// before the row caught it, couldn't).
 pub fn try_rests(name: &str, hold: Hold) -> bool {
+    try_rests_drawing(name, hold, Draw::Always)
+}
+/// `try_rests`, its window drawing as `mode` says.
+pub fn try_rests_drawing(name: &str, hold: Hold, mode: Draw) -> bool {
     let (world, mesh) = world();
-    let Some(mut window) = Window::new(&world) else {
+    let Some(mut window) = Window::drawing(&world, mode) else {
         return false;
     };
     window.draw(&world);
@@ -113,22 +136,30 @@ pub fn try_rests(name: &str, hold: Hold) -> bool {
         || window.until(&world, 2, Duration::from_secs(10), || {
             world.view().animating()
         });
-    assert!(held, "{name}: the control, its world never drew by itself");
+    assert!(
+        held,
+        "{name} ({mode:?}): the control, its world never drew by itself"
+    );
     off(&world);
     let rested = window.until(&world, 8, Duration::from_secs(10), || {
         !world.view().animating()
     });
     assert!(
         rested,
-        "{name}: turned off, its world still draws by itself"
+        "{name} ({mode:?}): turned off, its world still draws by itself"
     );
     true
 }
 
 /// `try_rests` for a reason a device may not hold (it says so and passes).
+/// Each row twice: drawn every frame, then as a window draws (a frame
+/// only while it animates or something invalidated it), so a frame the
+/// world needs and doesn't ask for shows.
 pub fn rests(name: &str, hold: Hold) {
-    if !try_rests(name, hold) {
-        eprintln!("SETTLE-SKIPPED {name}: this device can't hold it");
+    for mode in [Draw::Always, Draw::AsAWindow] {
+        if !try_rests_drawing(name, hold, mode) {
+            eprintln!("SETTLE-SKIPPED {name} ({mode:?}): this device can't hold it");
+        }
     }
 }
 
@@ -141,9 +172,11 @@ pub fn rests_caught(name: &str, hold: Hold) {
     if GpuRenderer::new(1, 1).is_err() && std::env::var_os("ZGX_REQUIRE_GPU").is_none() {
         return;
     }
-    let caught = (0..TRIES).any(|_| try_rests(name, hold));
-    assert!(
-        caught,
-        "{name}: its hold was over before a frame in all {TRIES} tries: it tested nothing"
-    );
+    for mode in [Draw::Always, Draw::AsAWindow] {
+        let caught = (0..TRIES).any(|_| try_rests_drawing(name, hold, mode));
+        assert!(
+            caught,
+            "{name} ({mode:?}): its hold was over before a frame in all {TRIES} tries: it tested nothing"
+        );
+    }
 }
