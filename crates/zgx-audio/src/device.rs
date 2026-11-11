@@ -79,9 +79,14 @@ impl Renderer {
 
     /// Fills `out` (interleaved, `format().channels` wide) with the next
     /// frames. `timing`, when the device knows it, places the block on the
-    /// device's clock, which is how the time a sound is heard is known.
+    /// device's clock, which is how the time a sound is heard is known. A
+    /// block asked for at 0 is untimed: WASAPI fills its first block before
+    /// its clock runs, and ALSA's clock may read 0 before its first
+    /// interrupt. A play in an untimed block is placed by the first timed
+    /// one after it.
     /// Never locks, allocates, frees or calls the system.
     pub fn render(&mut self, out: &mut [f32], timing: Option<Timing>) {
+        let timing = timing.filter(|t| t.asked != 0);
         let plays = self.meter.play_heard.load(Ordering::Relaxed);
         let began = clock::now();
         self.mixer.render(out, self.channels, timing);

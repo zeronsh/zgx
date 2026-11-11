@@ -1167,7 +1167,9 @@ pub(crate) struct Mixer {
     ended: u64,
     /// Times a stream ran dry.
     underruns: u64,
-    /// The frame the last play was applied on, this block.
+    /// The frame the last play was applied on, until a block timed on the
+    /// device's clock places it there: a device's first blocks may come
+    /// untimed.
     started: Option<u64>,
     /// Work the tests count, not time: plays tried, and commands looked
     /// through for a waiting play.
@@ -1341,7 +1343,6 @@ impl Mixer {
         let first = self.now;
         let mut done = 0;
         let mut peak = 0u32;
-        self.started = None;
         self.collect();
         self.follow_drives(self.frames(GLIDE_SECONDS));
         while done < frames {
@@ -1438,13 +1439,22 @@ impl Mixer {
             };
             meter.block_asked.store(timing.asked, Ordering::Relaxed);
             meter.block_heard.store(timing.heard, Ordering::Relaxed);
-            if let Some(started) = self.started {
+            if let Some(started) = self.started.take() {
+                // Placed from this block's first frame, which a play in an
+                // untimed block came before.
                 let latency = self.limiter.as_ref().map_or(0, Limiter::latency) as u64;
-                meter.play_asked.store(timing.asked, Ordering::Relaxed);
-                meter.play_heard.store(
-                    after(started.saturating_sub(first) + latency),
-                    Ordering::Release,
-                );
+                let rate = u64::from(self.rate);
+                let (asked, heard) = if started >= first {
+                    (timing.asked, after(started - first + latency))
+                } else {
+                    let ago = (first - started).saturating_mul(1_000_000_000) / rate;
+                    (
+                        timing.asked.saturating_sub(ago),
+                        after(latency).saturating_sub(ago),
+                    )
+                };
+                meter.play_asked.store(asked, Ordering::Relaxed);
+                meter.play_heard.store(heard, Ordering::Release);
             }
         }
         meter.collected.store(self.collected, Ordering::SeqCst);

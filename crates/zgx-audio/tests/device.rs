@@ -381,6 +381,91 @@ fn a_device_that_reports_a_format_the_mixer_can_t_run_at_is_a_failure_not_a_pani
     }
 }
 
+/// A device whose first block comes untimed (asked at 0), as WASAPI's
+/// does: it renders two blocks at once as it starts, the second timed.
+struct ColdClock {
+    held: Option<Box<Renderer>>,
+    first: Option<Timing>,
+}
+
+/// The second block's time: a second on.
+const COLD_SECOND: u64 = 1_000_000_000;
+/// 256 frames at 48 kHz, in nanoseconds.
+const COLD_BLOCK: u64 = 5_333_333;
+
+impl Device for ColdClock {
+    fn format(&mut self) -> Result<Format, String> {
+        Ok(Format {
+            rate: 48_000,
+            channels: 2,
+        })
+    }
+    fn start(
+        &mut self,
+        mut renderer: Box<Renderer>,
+        _: Format,
+    ) -> Result<(), (String, Box<Renderer>)> {
+        let mut out = vec![0f32; 256 * 2];
+        renderer.render(&mut out, self.first);
+        renderer.render(
+            &mut out,
+            Some(Timing {
+                asked: COLD_SECOND,
+                heard: COLD_SECOND + 10_000_000,
+            }),
+        );
+        self.held = Some(renderer);
+        Ok(())
+    }
+    fn stop(&mut self) -> Option<Box<Renderer>> {
+        self.held.take()
+    }
+    fn close(&mut self) -> Option<Box<Renderer>> {
+        self.held.take()
+    }
+    fn lost(&mut self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_play_starting_an_untimed_first_block_is_timed_by_the_next() {
+    // A play that starts the stream, its block asked at 0 (WASAPI's first,
+    // filled before its clock runs): placed by the next block, it's heard
+    // when it would be had the first block been timed a block earlier.
+    let heard = |first: Option<Timing>| {
+        let audio = Audio::with_device(
+            Config {
+                gain: 0.,
+                ..Config::default()
+            },
+            ColdClock { held: None, first },
+        )
+        .unwrap();
+        let sound = Sound::from_samples(&vec![0.25f32; 48_000], 1, 48_000).unwrap();
+        audio.play(&sound, Play::new()).unwrap();
+        until("a start", || audio.stats().running);
+        let stats = audio.stats();
+        (stats.play_asked, stats.play_heard)
+    };
+    let timed = heard(Some(Timing {
+        asked: COLD_SECOND - COLD_BLOCK,
+        heard: COLD_SECOND - COLD_BLOCK + 10_000_000,
+    }));
+    let cold = heard(Some(Timing {
+        asked: 0,
+        heard: 10_000_000,
+    }));
+    let untimed = heard(None);
+    assert!(timed.1 > COLD_SECOND - COLD_BLOCK, "{timed:?}");
+    for (name, got) in [("cold", cold), ("untimed", untimed)] {
+        assert!(
+            got.0.abs_diff(timed.0) <= 2 && got.1.abs_diff(timed.1) <= 2,
+            "{name}: {got:?} against {timed:?}"
+        );
+    }
+}
+
 /// A device whose clock is at its end: it renders one block at once, as it
 /// starts, timed there, and says whether that went through.
 struct FarClock {
