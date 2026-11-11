@@ -10,7 +10,7 @@ Everything is made by code here, from a seed: the quay, about 5,000 containers, 
 - the sky's radiance and emissive surfaces on the same scale;
 - all of it brought to the display by an exposure of EV 11 (`scene::EV`).
 
-The sun's shadow is cut into four cascades over 600 m.
+The sun's shadow is cut into four cascades over 600 m. It rains (`weather.rs`): particle streaks in a box that follows the camera, splashing where they land.
 
 What the API can't express yet is in [GAPS.md](GAPS.md). Those gaps are reported, not worked around.
 
@@ -41,6 +41,8 @@ Its `[patch.crates-io]` and profiles mirror the root's, so it builds against the
 
 It draws the app as it runs (HUD over world) through the public offscreen renderer `zgx_gpu::GpuRenderer`. `FRAMES` frames are spread evenly over the 60 s fly-through. Each frame is waited for by reading it back (GAPS.md, G5).
 
+It installs a `zgx::clock::VirtualClock` and moves it a fixed step a frame, so whatever moves by itself is placed by the path's time. GPU views don't follow it yet (GAPS.md, G7).
+
 It prints:
 - frames rendered, and frames where the world changed;
 - instructions and CPU time per frame (macOS, `proc_pid_rusage`);
@@ -64,6 +66,7 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | `CASCADES=0` | | One shadow map instead of cascades |
 | `LAMPS=0` | | Every lamp at zero lumens |
 | `LAMP_REACH` | 1 | Scales every lamp's range (0: none built) |
+| `RAIN=0` | | No rain made |
 | `SUN` | 7 | The sun's elevation in degrees, its light and the sky's |
 | `EXPOSURE` | 0 | Stops over the harbor's own (the panel's slider) |
 | `HASHES=file` | | Each frame's hash, a line each |

@@ -12,6 +12,8 @@ Each entry is a primitive any game would need, in general form, with the smalles
 | G4 | No per-mesh opt-out of the sun's shadow | lighting lane | partly closed by cascades |
 | G5 | The offscreen renderer has no wait but a readback | zgx-gpu (another team) | open |
 | G6 | Animators play glTF clips only: nothing made in code can be animated by one | animation lane | open |
+| G7 | A GPU view's frame time is the wall clock's, even under a `VirtualClock` | zgx-gpu's view seam | open (bug) |
+| G8 | An emitter's rate, velocity and forces can't change once it's added | particles lane | open |
 | L1 | Spot lights are binned by their sphere, not their cone | lighting lane | open (performance) |
 | L2 | A light at zero intensity is still binned and shaded | lighting lane | open (performance) |
 | L3 | Frames aren't reproducible run to run with cascades or with clustered lights | lighting lane | open (bug) |
@@ -94,6 +96,33 @@ let animator = world.add_animator_for(&[trolley, spreader]);          // targets
 world.play(animator, &clip, Play::new())?;
 ```
 
+## G7. A GPU view's frame time is the wall clock's, even under a `VirtualClock`
+
+**Needed by:** video renders, benchmarks, reference images, any offline render of moving 3D; design §4.4 promises it ("time comes from the frame, never the wall clock, so zgx-video's virtual clock renders a world deterministically").
+
+`zgx::clock::VirtualClock` makes `zgx::clock::now()` the clock's time on its thread. But zgx-gpu stamps each GPU view's frame with `std::time::Instant::now()` (`viewport.rs`, the `ViewportFrame` a renderer hands a painter). A world reads its particles' and animators' time from that stamp.
+
+So a 3D world drawn under a virtual clock moves by the wall clock. That includes zgx-video's `Stage`, which installs one.
+
+**Measured:** `harbor_bench` installs a `VirtualClock` and advances it a fixed step a frame. With rain, two runs of the same binary differ in all 600 of 600 frames, the last frame included. Without rain, the stage-0 scene repeated exactly.
+
+A world's own way to be given a time, `World::animate(time)`, is `#[doc(hidden)]` and covers animators alone.
+
+**Smallest change:** the view frame's `time` from `zgx::clock::now()`. An app drawing a world itself would need a public `World::advance_to(time)` for particles and animators alike.
+
+## G8. An emitter's rate, velocity and forces can't change once it's added
+
+**Needed by:** any weather, fire or effect whose strength changes (rain easing off, wind rising, a jet throttling).
+
+After `add_emitter`, only `set_emitting` (on or off), `burst` and `move_emitter` change one. To vary rain or wind, an app removes the emitter and adds a new one, and a new pool loses the drops in flight. The harbor's panel has "Rain" on and off, not an intensity, and its wind can't follow a wind setting.
+
+```rust
+impl World {
+    pub fn set_emitter_rate(&self, id: EmitterId, per_second: f32);
+    pub fn set_emitter_forces(&self, id: EmitterId, forces: &[Force]);   // or update_emitter(id, |e| ...)
+}
+```
+
 ## L1. Spot lights are binned by their sphere, not their cone
 
 **Needed by:** any scene of floodlights, street lights or stage lights, aimed down or narrow.
@@ -150,6 +179,9 @@ It reproduces on main `d7d9fec52`: `examples/repro-b1` on branch `lane/aaa-demo-
 | Haze and depth: the far ridge reads as a dark wall | Height and distance fog, aerial perspective | R6 |
 | A sky that follows the sun | The physical sky; the environment's prefilter on the GPU (a new sun costs 30–70 ms of CPU to relight, so the panel's sun slider moves the light, not the sky) | R6, R8 |
 | Lamp heads and lit windows that glow | Bloom: their emission clips to white today | R1 |
+| Rain landing on the water, the containers and the cranes | Collision with the depth buffer (`Collide::Depth`, design §5.4); today one plane, so drops over the water stop at the quay's height, 3 m above it | R7 |
+| Rain hidden behind what's in front of it | Particles drawn against the scene's depth: today they draw over every mesh (`docs/3d.md`, Particles) | R7, the pass list |
+| Rain that takes the lamps' and the sky's light | Lit particles: today they're unlit, so the rain's colour is set by hand on the harbor's physical scale | R7 |
 | Water | Custom materials, compute for waves | R4 |
 | Light shafts between the cranes | Froxel fog, density volumes | R6 |
 | Bounce light under the gantries | Probes, GTAO | R8 |
@@ -158,3 +190,4 @@ It reproduces on main `d7d9fec52`: `examples/repro-b1` on branch `lane/aaa-demo-
 
 - **Lamps by the hundred:** 221 point and spot lights in lumens through clusters (stage 1). There were 8 nearest at stage 0.
 - **Shadow detail over the quay:** four cascades over 600 m (stage 1).
+- **Rain:** 45,000 streaks a second in a 160 m box following the camera, splashing where they land through a sub-emitter (stage 1).

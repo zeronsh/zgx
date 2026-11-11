@@ -25,6 +25,8 @@ pub struct Settings {
     pub msaa: Signal<bool>,
     /// The yard's lamps are lit.
     pub lamps: Signal<bool>,
+    /// It rains.
+    pub rain: Signal<bool>,
     /// How much of the yard's containers show, 0 to 1.
     pub yard: Signal<f32>,
     /// The HUD shows.
@@ -43,6 +45,7 @@ impl Settings {
             cascades: runtime.signal(true),
             msaa: runtime.signal(true),
             lamps: runtime.signal(true),
+            rain: runtime.signal(harbor.rain.is_some()),
             yard: runtime.signal(1.),
             hud: runtime.signal(true),
         }
@@ -88,6 +91,10 @@ impl Settings {
                     w.set_point_light(id, scene::lamp(light, on));
                 }
             }));
+        }
+        if let Some(rain) = harbor.rain {
+            let (s, w) = (self.rain.clone(), world.clone());
+            effects.push(runtime.effect(move || rain.set(&w, s.get())));
         }
         {
             let (s, w, yard) = (self.yard.clone(), world.clone(), harbor.yard.clone());

@@ -44,6 +44,10 @@ pub struct Config {
     pub lamp_reach: f32,
     /// The sun's elevation and azimuth, degrees (`sky::sun_toward`).
     pub sun: (f32, f32),
+    /// It rains (the emitters are made; the panel turns it on and off).
+    pub rain: bool,
+    /// The wind, m/s.
+    pub wind: [f32; 3],
 }
 
 impl Default for Config {
@@ -56,6 +60,8 @@ impl Default for Config {
             masts: (11, 4),
             lamp_reach: 1.,
             sun: (7., 28.),
+            rain: true,
+            wind: [2.5, 0., 1.],
         }
     }
 }
@@ -130,6 +136,8 @@ pub struct Harbor {
     pub gantries: Vec<Gantry>,
     /// The water's surface.
     pub water: ObjectId,
+    /// The rain, if it was made (`Config::rain`, and a device for it).
+    pub rain: Option<crate::weather::Rain>,
     /// Objects added, of every kind.
     pub objects: usize,
     /// Triangles in every mesh added (as made, each instance counted).
@@ -278,7 +286,18 @@ impl Harbor {
         // The shore across the water.
         let ridge = shapes::ridge(-1500., 5000., WATER_LEVEL - 1., 90., config.seed as u32);
         b.add(Object::mesh(ridge, Material::rgb(0x3c4250).with(0., 0.95)));
+        let rain = config
+            .rain
+            .then(|| crate::weather::Rain::new(world, config.wind));
+        let rain = match rain {
+            Some(Err(error)) => {
+                eprintln!("harbor: no rain: {error}");
+                None
+            }
+            other => other.and_then(Result::ok),
+        };
         Self {
+            rain,
             config: config.clone(),
             sun,
             ambient,

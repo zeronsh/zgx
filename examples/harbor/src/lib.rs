@@ -11,6 +11,7 @@
 //! - [`path`] is the camera's fly-through, a function of frame time.
 //! - [`settings`] are the panel's values, each bound to the world.
 //! - [`hud`] is the zgx interface over the view.
+//! - [`weather`] is the rain, on particle emitters.
 //! - [`perf`] reads the process's counters, for `harbor_bench`.
 pub mod hud;
 pub mod path;
@@ -21,3 +22,4 @@ pub mod settings;
 pub mod shapes;
 pub mod sky;
 pub mod textures;
+pub mod weather;

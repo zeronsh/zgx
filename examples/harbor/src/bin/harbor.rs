@@ -16,6 +16,7 @@ use zgx_harbor::{
     scene::{Config, Harbor},
     settings::Settings,
     sky,
+    weather::Rain,
 };
 
 /// The orbit that keeps `camera`'s view: its target, and where it is
@@ -31,6 +32,14 @@ fn orbit_of(camera: Camera) -> Orbit {
         elevations: (0.02, 1.5),
         distances: (8., 1500.),
         ..Orbit::default()
+    }
+}
+
+/// The camera at `camera`, the rain's box over it.
+fn look(world: &World, rain: Option<Rain>, camera: Camera) {
+    world.set_camera(camera);
+    if let Some(rain) = rain {
+        rain.follow(world, camera.position);
     }
 }
 
@@ -51,6 +60,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .run(move |cx| {
             let world = World::new();
             let harbor = Harbor::build(&world, &config, environment.join().ok());
+            let rain = harbor.rain;
             let settings = Settings::new(&cx.ui.runtime, &harbor);
             let mut keep = settings.bind(&cx.ui.runtime, &world, &harbor);
             let stats = cx.ui.signal(Stats {
@@ -93,7 +103,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let frame = frames.next().await;
                             let t = (flown.get() + frame.interval.as_secs_f32()) % path::LOOP;
                             flown.set(t);
-                            world.set_camera(path::camera(t, base));
+                            look(&world, rain, path::camera(t, base));
                             count += 1;
                             let elapsed = since.elapsed().as_secs_f32();
                             if elapsed >= 0.25 {
@@ -141,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .handle(&event.event, modifiers, Instant::now());
                         if answer.moved {
                             let camera = controls.borrow().orbit.camera(world.camera());
-                            world.set_camera(camera);
+                            look(&world, rain, camera);
                             stats.update(|s| s.revision = world.revision());
                         }
                         if answer.coasting {
@@ -152,7 +162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let frame = frames.next().await;
                                     let mut c = controls.borrow_mut();
                                     let going = c.coast(frame.interval.as_secs_f32());
-                                    world.set_camera(c.orbit.camera(world.camera()));
+                                    look(&world, rain, c.orbit.camera(world.camera()));
                                     if !going {
                                         break;
                                     }

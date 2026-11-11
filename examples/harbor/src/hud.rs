@@ -130,6 +130,7 @@ pub fn view(viewport: View, settings: &Settings, stats: Signal<Stats>) -> View {
         .child(checkbox("Shadow cascades", s.cascades.clone()))
         .child(checkbox("4x multisampling", s.msaa.clone()))
         .child(checkbox("Lamps", s.lamps.clone()))
+        .child(checkbox("Rain", s.rain.clone()))
         .child(label("Yard filled"))
         .child(
             row()

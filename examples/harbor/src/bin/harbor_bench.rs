@@ -15,6 +15,7 @@
 //! - `SHADOWS=0` turns the sun's shadows off, `CASCADES=0` its cascades,
 //!   `LAMPS=0` the lamps;
 //!   `SUN=degrees` sets the sun's elevation, its light's and the sky's;
+//!   `RAIN=0` makes no rain;
 //!   `LAMP_REACH` scales every lamp's range (0: none built); `EXPOSURE`
 //!   adds stops (as the panel's slider).
 //! - `HASHES=file` writes each frame's hash, a line each.
@@ -98,9 +99,15 @@ fn main() {
         // `SUN=degrees`: the sun's elevation, its light and the sky's both.
         sun: (env("SUN", defaults.sun.0), defaults.sun.1),
         lamp_reach: env("LAMP_REACH", 1.),
+        // `RAIN=0`: no rain made at all.
+        rain: std::env::var("RAIN").as_deref() != Ok("0"),
         ..Config::default()
     };
 
+    // The interface's time, and the world's: moved a fixed step a frame,
+    // so what moves by itself (rain) is where the path's time says, not
+    // where the wall clock does.
+    let clock = zgx::clock::VirtualClock::new();
     let started = Instant::now();
     let environment = (std::env::var("SKY").as_deref() != Ok("0"))
         .then(|| sky::dawn(sky::sun_toward(config.sun.0, config.sun.1), 512));
@@ -160,8 +167,13 @@ fn main() {
     // readout, a render, and a wait for it by reading it back.
     let mut draw = |seconds: f32, pixels: &mut Vec<u8>| -> (f64, f64, bool) {
         let begin = Instant::now();
+        clock.advance(std::time::Duration::from_secs_f32(step), || {});
         let before = world.revision();
-        world.set_camera(path::camera(seconds, base));
+        let camera = path::camera(seconds, base);
+        world.set_camera(camera);
+        if let Some(rain) = harbor.rain {
+            rain.follow(&world, camera.position);
+        }
         stats.update(|s| {
             s.time = seconds;
             // The path's own step: the bench's frames are not timed by a
@@ -189,6 +201,7 @@ fn main() {
     let (mut totals, mut renders) = (Vec::with_capacity(frames), Vec::with_capacity(frames));
     let (mut changed, mut hash) = (0usize, 0u64);
     let mut hashes = Vec::with_capacity(frames);
+    let mut pngs = perf::Sample::default();
     let measured = Instant::now();
     for i in 0..frames {
         let seconds = i as f32 * step;
@@ -209,12 +222,17 @@ fn main() {
                 at.contains(&i)
             })
         {
+            // Not the frame's cost: counted apart, and taken off below.
+            let before = perf::sample();
             write_png(
                 &dir.join(format!("harbor-{:05.2}s.png", seconds)),
                 width,
                 height,
                 &pixels,
             );
+            let after = perf::sample();
+            pngs.instructions += after.instructions - before.instructions;
+            pngs.cpu_ns += after.cpu_ns - before.cpu_ns;
         }
     }
     let wall = measured.elapsed().as_secs_f64();
@@ -275,8 +293,8 @@ fn main() {
     if perf::AVAILABLE {
         println!(
             "instructions/frame: {:.2} M; CPU ms/frame: {:.2}; footprint: {:.0} MB",
-            (after.instructions - before.instructions) as f64 / n / 1e6,
-            (after.cpu_ns - before.cpu_ns) / n / 1e6,
+            (after.instructions - before.instructions - pngs.instructions) as f64 / n / 1e6,
+            (after.cpu_ns - before.cpu_ns - pngs.cpu_ns) / n / 1e6,
             after.footprint as f64 / 1e6,
         );
     } else {
@@ -301,6 +319,13 @@ fn main() {
         "readback alone ms (in each frame above): p50 {:.2}",
         p(&readback, 50.)
     );
+    if let Some(rain) = harbor.rain {
+        println!(
+            "rain: drops {:?}, splashes {:?}",
+            world.emitter_status(rain.drops),
+            world.emitter_status(rain.splashes),
+        );
+    }
     match gpu_busy {
         Some(seconds) => println!(
             "GPU busy ms/frame: {:.3} (readback copies included)",

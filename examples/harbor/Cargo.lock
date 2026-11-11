@@ -4001,6 +4001,7 @@ name = "zgx-3d"
 version = "0.1.10"
 dependencies = [
  "bytemuck",
+ "naga",
  "zgx",
  "zgx-gpu",
 ]

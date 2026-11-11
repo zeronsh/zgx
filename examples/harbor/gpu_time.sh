@@ -13,12 +13,15 @@ root=$(cd "$here/../.." && pwd)
 target=${CARGO_TARGET_DIR:-"$here/target"}
 timed="$target/wgpu-hal-timed"
 patch="$root/comparisons/3d/wgpu-hal-gpu-time.patch"
-if ! cmp -s "$patch" "$timed/.patched" 2>/dev/null; then
+# Made again when the patch or the vendored copy changes (its tree's hash,
+# with what's uncommitted under it).
+stamp="$(cat "$patch"; git -C "$root" rev-parse HEAD:vendor/wgpu-hal; git -C "$root" status --porcelain -- vendor/wgpu-hal)"
+if [ "$stamp" != "$(cat "$timed/.stamp" 2>/dev/null)" ]; then
     rm -rf "$timed"
     mkdir -p "$target"
     cp -R "$root/vendor/wgpu-hal" "$timed"
     patch -s -p1 -d "$timed" -i "$patch"
-    cp "$patch" "$timed/.patched"
+    printf '%s' "$stamp" > "$timed/.stamp"
 fi
 cp "$here/Cargo.lock" "$target/harbor-Cargo.lock.saved"
 trap 'cp "$target/harbor-Cargo.lock.saved" "$here/Cargo.lock"' EXIT
