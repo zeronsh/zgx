@@ -356,6 +356,10 @@ impl Default for StreamHash {
 /// paragraphs that do not grow (a page of them) then pay no look at it. A
 /// stream that grows again is taken up again (`grew_from`).
 const LAPSES: u8 = 4;
+/// Bytes from which a text that grew is taken up as a stream: a shorter one
+/// costs less hashed whole again (and every new text's length is compared
+/// with this, not looked up).
+const STREAMED: usize = 256;
 
 /// A shaped word, reduced to what line breaking reads (in a chunk of the
 /// `Slab`, packed: see `Word::pack`).
@@ -1610,7 +1614,14 @@ impl TextCache {
             font_size,
             font,
         };
-        self.entry_hashed(fonts, source, true, need, Some(hash))
+        let hash = self.entry_hashed(fonts, source, true, need, Some(hash));
+        // A long text just prepared from the words of one it grew from: a
+        // stream (`armed_if_grown`). Apart from `entry_hashed`, whose body
+        // every new text runs.
+        if text.len() >= STREAMED && self.stream.from != hash {
+            self.armed_if_grown(text, hash);
+        }
+        hash
     }
     /// The text hash (`TextHash`) of a text at least as long as the
     /// stream's latest state (`stream`): that state again, its hash as it
@@ -1684,9 +1695,24 @@ impl TextCache {
         }
         Some(hash)
     }
+    /// The stream `text` (keyed `hash`) grows in, where it was just prepared
+    /// from the words of a recent text it extends (its entry's words taken,
+    /// and no compact of its own: `prepared_words`): its next states hashed
+    /// on from it.
+    #[cold]
+    #[inline(never)]
+    fn armed_if_grown(&mut self, text: &str, hash: u64) {
+        if self
+            .entries
+            .get(&hash)
+            .is_some_and(|entry| entry.words.is_some() && entry.compact.is_none())
+        {
+            self.arm_stream(text, hash);
+        }
+    }
     /// The stream a text grows in, from its state `text` (prepared, found
-    /// to extend a recent text: `prepare`), keyed `hash`: hashed once whole,
-    /// for its next states to read on from.
+    /// to extend a recent text), keyed `hash`: hashed once whole, for its
+    /// next states to read on from.
     #[cold]
     #[inline(never)]
     fn arm_stream(&mut self, text: &str, hash: u64) {
@@ -1822,6 +1848,7 @@ impl TextCache {
     }
     /// The entry for `rich`, shaped unless it is cached with what is needed:
     /// shaped lines for layout, or either tier for measuring.
+    #[inline(always)]
     fn entry(
         &mut self,
         fonts: &mut FontSystem,
@@ -1837,7 +1864,12 @@ impl TextCache {
             }
             _ => None,
         };
-        self.entry_hashed(fonts, source, caret_row, need, hashed)
+        let hash = self.entry_hashed(fonts, source, caret_row, need, hashed);
+        // As `plain_entry`: a rich stream (a Markdown paragraph) taken up.
+        if source.text().len() >= STREAMED && self.stream.from != hash {
+            self.armed_if_grown(source.text(), hash);
+        }
+        hash
     }
     /// `entry`, with the key's hash if the caller worked it out
     /// (`plain_entry`'s `Key::plain_hash`, which is the plain key's `hash`).
@@ -1905,7 +1937,7 @@ impl TextCache {
         // without a line built around them; a stream's, from the words of
         // the paragraph it grew from (`grew_from`).
         let grew = match long && !known {
-            true => self.grew_from(&key, hash, &extended),
+            true => self.grew_from(&key, &extended),
             false => None,
         };
         if let Some((plain, base, taken)) = self.words_of(fonts, source, caret_row, grew) {
@@ -2086,19 +2118,12 @@ impl TextCache {
     /// Of the recent texts `key`'s extends (`extended_by`), the paragraph
     /// kept with its words that it grew from (`Key::extends`): a stream's
     /// last state, its words taken as far as they hold.
-    /// It grew (plain text, or rich: a Markdown paragraph): a stream, its
-    /// next states hashed on from this one's, `hash` (`stream_text_hash`),
-    /// unless it is already at it.
-    fn grew_from(&mut self, key: &Key, hash: u64, extended: &[u64]) -> Option<u64> {
-        let grew = extended.iter().rev().copied().find(|recent| {
+    fn grew_from(&self, key: &Key, extended: &[u64]) -> Option<u64> {
+        extended.iter().rev().copied().find(|recent| {
             self.entries
                 .get(recent)
                 .is_some_and(|entry| entry.words.is_some() && key.extends(&entry.key))
-        });
-        if grew.is_some() && self.stream.from != hash {
-            self.arm_stream(&key.text, hash);
-        }
-        grew
+        })
     }
     /// The recent texts `text` starts with, shorter and not short: a
     /// stream's earlier states, which go as it is prepared
