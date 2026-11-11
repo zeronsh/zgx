@@ -262,6 +262,12 @@ fn a_child_fxc_cannot_survive_fails_that_shader_alone() {
     // One test at a time (`SERIAL`): this one also sets the environment
     // the children read.
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+    // DXC compiles in the process: there is no child to lose.
+    drop(GpuRenderer::new(8, 8));
+    if zgx_gpu::app_shaders_compile_with_fxc() != Some(true) {
+        eprintln!("skipped: app shaders are compiled with DXC here, in no child process");
+        return;
+    }
     let salt = std::process::id() % 97;
     zgx_gpu::stop_app_shader_child();
     // SAFETY: read only by the child started below.
