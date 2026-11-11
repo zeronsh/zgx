@@ -654,15 +654,16 @@ impl Viewport for Renderer {
         let camera = world.camera;
         let aspect = size.0 as f32 / size.1.max(1) as f32;
         let view = camera.view();
-        let view_projection = camera.projection(aspect) * view;
+        let projection = camera.projection(aspect);
+        let view_projection = projection * view;
         // What draws beside the meshes is given the camera apart.
-        let camera_parts = (view, camera.projection(aspect), view_projection);
+        let camera_parts = (view, projection, view_projection);
         let mut uniforms = frame_uniforms(&world, view_projection, encode);
         #[cfg(feature = "lighting")]
         let (clustered, cascaded) = lights::prepare(
             gpu,
             &world,
-            (view, camera.projection(aspect)),
+            (view, projection),
             size,
             (frame.device, frame.queue),
             &mut uniforms,

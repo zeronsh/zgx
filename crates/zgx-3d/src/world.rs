@@ -618,16 +618,44 @@ pub(crate) struct Inner {
 pub(crate) struct Settle {
     unsettled: std::cell::Cell<u32>,
 }
+/// Every reason a world keeps drawing, a bit each (`Settle`), declared here
+/// alone: two features can't take one bit, as two equal discriminants don't
+/// compile. A feature adds its reason here and names it where it's used
+/// (`Reason::X as u32`), whatever features are on.
+#[repr(u32)]
+#[allow(dead_code)] // Each is used by its feature's code.
+pub(crate) enum Reason {
+    /// An animator plays (`World::add_animator`).
+    Animation = 1 << 0,
+    /// A custom shader on a visible mesh reads time (`render::custom`).
+    AnimatedShader = 1 << 1,
+    /// Maps are on their way to a renderer (`crate::assets`).
+    Loading = 1 << 2,
+    /// The sun's cascades have one still to follow the camera.
+    Cascades = 1 << 3,
+    /// An app's compute pass is due (`crate::compute`).
+    Compute = 1 << 8,
+    /// Particles live or are being emitted (`crate::particles`).
+    Particles = 1 << 9,
+    /// Probe volumes are being traced (`render::probes`).
+    Probes = 1 << 10,
+    /// A custom material's pipeline compiles on the worker
+    /// (`render::custom`). (It had 1 << 10, the probes' too.)
+    ShaderCompiling = 1 << 11,
+    /// Sound in the world plays (`world::audio`).
+    Audio = 1 << 12,
+    /// For the tests of `Settle`: a reason no feature uses.
+    Test = 1 << 31,
+}
 impl Settle {
     /// An animator plays (`World::add_animator`).
     #[cfg(feature = "gltf")]
-    pub(crate) const ANIMATION: u32 = 1;
-    /// Maps are on their way to a renderer (`crate::assets`). (Bit 1 is a
-    /// custom shader's reading time, `render::custom::ANIMATED`.)
-    pub(crate) const LOADING: u32 = 1 << 2;
+    pub(crate) const ANIMATION: u32 = Reason::Animation as u32;
+    /// Maps are on their way to a renderer (`crate::assets`).
+    pub(crate) const LOADING: u32 = Reason::Loading as u32;
     /// For the tests of this: a reason no feature uses.
     #[cfg(test)]
-    pub(crate) const TEST: u32 = 1 << 31;
+    pub(crate) const TEST: u32 = Reason::Test as u32;
     /// Whether nothing keeps it drawing.
     pub(crate) fn settled(&self) -> bool {
         self.unsettled.get() == 0
@@ -1986,6 +2014,31 @@ impl World {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_reason_to_keep_drawing_is_a_bit_of_its_own() {
+        // Distinct is the compiler's (equal discriminants don't build); one
+        // bit each, so no reason clears another's, is this.
+        let reasons = [
+            Reason::Animation,
+            Reason::AnimatedShader,
+            Reason::Loading,
+            Reason::Cascades,
+            Reason::Compute,
+            Reason::Particles,
+            Reason::Probes,
+            Reason::ShaderCompiling,
+            Reason::Audio,
+            Reason::Test,
+        ]
+        .map(|r| r as u32);
+        let mut all = 0;
+        for r in reasons {
+            assert_eq!(r.count_ones(), 1, "{r:#x}");
+            assert_eq!(all & r, 0, "{r:#x} taken twice");
+            all |= r;
+        }
+    }
 
     #[test]
     fn a_world_animates_while_anything_is_unsettled() {

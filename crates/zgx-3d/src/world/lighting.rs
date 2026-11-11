@@ -6,7 +6,7 @@ use crate::math::Vec3;
 
 impl Settle {
     /// The sun's cascades have one still to follow the camera.
-    pub(crate) const CASCADES: u32 = 1 << 0;
+    pub(crate) const CASCADES: u32 = super::Reason::Cascades as u32;
 }
 
 /// A world's lighting settings.

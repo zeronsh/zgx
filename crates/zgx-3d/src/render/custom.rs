@@ -23,10 +23,10 @@ use std::{collections::HashMap, rc::Rc, time::Instant};
 use zgx_gpu::{viewport::ViewportFrame, wgpu};
 
 /// The `Settle` reason of a mesh in view whose shader reads time.
-pub(crate) const ANIMATED: u32 = 1 << 1;
+pub(crate) const ANIMATED: u32 = crate::world::Reason::AnimatedShader as u32;
 /// The `Settle` reason of a custom pipeline compiling on the worker: the
 /// world draws until it's ready, and then by it.
-pub(crate) const COMPILING: u32 = 1 << 10;
+pub(crate) const COMPILING: u32 = crate::world::Reason::ShaderCompiling as u32;
 
 /// What a renderer keeps of custom materials.
 #[derive(Default)]
