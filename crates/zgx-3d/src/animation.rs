@@ -11,7 +11,10 @@ pub struct Clip(pub(crate) std::sync::Arc<ClipData>);
 pub(crate) struct ClipData {
     pub(crate) name: Option<String>,
     pub(crate) duration: f32,
+    /// Its channels moving nodes' places (translation, rotation, scale).
     pub(crate) channels: Vec<Channel>,
+    /// Its channels moving morph weights.
+    pub(crate) morphs: Vec<Channel>,
     /// Its channels' key times, each list once (most clips share one
     /// among all their channels): a time is found among each once a frame.
     pub(crate) tracks: Vec<Vec<f32>>,
@@ -43,10 +46,15 @@ impl Clip {
         let mut nodes: Vec<u32> = channels.iter().map(|c| c.node as u32).collect();
         nodes.sort_unstable();
         nodes.dedup();
+        // Morph weights apart: a pose's loops over places never ask.
+        let (morphs, channels): (Vec<Channel>, Vec<Channel>) = channels
+            .into_iter()
+            .partition(|c| matches!(c.path, Path::Weight(_)));
         Self(std::sync::Arc::new(ClipData {
             name,
             duration,
             channels,
+            morphs,
             tracks,
             nodes,
             events: Vec::new(),
@@ -288,7 +296,7 @@ impl Placed {
     /// the time modulo its `duration`): the nodes its channels move take
     /// their values then. A frame is drawn only if something moved.
     pub fn pose(&self, world: &World, clip: &Clip, seconds: f32) {
-        for channel in &clip.0.channels {
+        for channel in clip.0.channels.iter().chain(&clip.0.morphs) {
             let Some(Some(id)) = self.nodes.get(channel.node) else {
                 continue;
             };

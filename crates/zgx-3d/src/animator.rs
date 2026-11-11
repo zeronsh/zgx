@@ -291,6 +291,10 @@ impl std::fmt::Display for AnimatorError {
 }
 impl std::error::Error for AnimatorError {}
 
+/// The most morph targets a node's weights are animated for: a weight
+/// channel naming one past it (a file's) is left out.
+const MORPH_TARGETS: usize = 4096;
+
 /// The most events an animator keeps for its app: past it, the older
 /// half goes (as zgx-audio's ended voices).
 pub(crate) const EVENTS: usize = 65_536;
@@ -318,6 +322,8 @@ struct State {
     fresh: bool,
     /// Whether its clip moves any node of the model.
     drives: bool,
+    /// A fade begun since its last step: the next takes none of it.
+    held: bool,
     /// Its time before its last step, and whether that step went round
     /// (1 forward, -1 backward): its root motion's span.
     before: f32,
@@ -349,7 +355,14 @@ impl State {
     fn step(&mut self, dt: f32, speed: f32, layer: usize, mut fired: Option<&mut Vec<Fired>>) {
         let first = std::mem::replace(&mut self.fresh, false);
         let dt = if first { 0. } else { dt };
-        self.elapsed = (self.elapsed + dt).min(self.length.max(0.));
+        // A fade starts with the frame after it was asked for, as a new
+        // clip does: the step before it was asked for isn't the fade's.
+        let fading = if std::mem::replace(&mut self.held, false) {
+            0.
+        } else {
+            dt
+        };
+        self.elapsed = (self.elapsed + fading).min(self.length.max(0.));
         let duration = self.clip.duration();
         let before = self.time;
         self.before = before;
@@ -531,6 +544,13 @@ pub(crate) struct Animator {
     /// The world's `ordering` when its IK's parents and its layers' masks
     /// were found from its hierarchy: found again once it moves.
     pub(crate) bound: u64,
+    /// Each node's meshes (sharing its morph weights), by node index.
+    pub(crate) meshes: Vec<Vec<ObjectId>>,
+    /// Nodes any clip it has played moves the morph weights of, each once.
+    pub(crate) morphed: Vec<u32>,
+    /// Their weights as posed, and at rest, by node index.
+    pub(crate) weights: Vec<Vec<f32>>,
+    pub(crate) weights_rest: Vec<Vec<f32>>,
 }
 /// An IK hook: called with the blended pose each frame that poses it.
 pub(crate) type Ik = Box<dyn FnMut(&mut crate::ik::Pose<'_>)>;
@@ -555,6 +575,10 @@ impl Animator {
             outer: Vec::new(),
             ik: None,
             bound: 0,
+            meshes: Vec::new(),
+            morphed: Vec::new(),
+            weights: Vec::new(),
+            weights_rest: Vec::new(),
         }
     }
     /// Layer `index`, made (as `Layer::new`) with those under it if it's
@@ -591,9 +615,32 @@ impl Animator {
     pub(crate) fn play(&mut self, clip: &Clip, play: Play) -> Result<(), AnimatorError> {
         self.layer_mut(play.layer)?;
         let nodes = self.nodes.len() as u32;
-        for &node in clip.0.nodes.iter().filter(|&&n| n < nodes) {
-            if let Err(at) = self.posed.binary_search(&node) {
+        for channel in &clip.0.channels {
+            let node = channel.node as u32;
+            if node < nodes
+                && let Err(at) = self.posed.binary_search(&node)
+            {
                 self.posed.insert(at, node);
+            }
+        }
+        for channel in &clip.0.morphs {
+            let (node, Path::Weight(target)) = (channel.node, channel.path) else {
+                continue;
+            };
+            if node >= self.nodes.len() || target >= MORPH_TARGETS {
+                continue;
+            }
+            if let Err(at) = self.morphed.binary_search(&(node as u32)) {
+                self.morphed.insert(at, node as u32);
+            }
+            if self.weights_rest.len() <= node {
+                self.weights_rest.resize(node + 1, Vec::new());
+                self.weights.resize(node + 1, Vec::new());
+            }
+            let rest = &mut self.weights_rest[node];
+            if rest.len() <= target {
+                rest.resize(target + 1, 0.);
+                self.weights[node].resize(target + 1, 0.);
             }
         }
         let layer = self.layer_mut(play.layer)?;
@@ -624,6 +671,7 @@ impl Animator {
                 state.to = 0.;
                 state.elapsed = 0.;
                 state.length = fade;
+                state.held = true;
             }
         } else {
             layer.states.clear();
@@ -645,6 +693,7 @@ impl Animator {
             between: vec![Between::default(); clip.0.tracks.len()],
             fresh: true,
             drives: clip.0.nodes.iter().any(|&n| n < nodes),
+            held: false,
             before: time,
             wrapped: 0,
             root: None,
@@ -663,6 +712,7 @@ impl Animator {
                 state.to = 0.;
                 state.elapsed = 0.;
                 state.length = fade;
+                state.held = true;
             }
         } else {
             layer.states.clear();
@@ -798,7 +848,68 @@ impl Animator {
                 }
             }
         }
+        if !self.morphed.is_empty() {
+            self.evaluate_morphs();
+        }
         self.dirty = false;
+    }
+    /// Its nodes' morph weights as its layers make them now, into
+    /// `weights`: blended as places are, each weight as a number.
+    #[inline(never)]
+    fn evaluate_morphs(&mut self) {
+        let weights = &mut self.weights;
+        for &node in &self.morphed {
+            let node = node as usize;
+            weights[node].clone_from(&self.weights_rest[node]);
+        }
+        for layer in &mut self.layers {
+            let weight = layer.layer.weight;
+            let total: f32 = layer.states.iter().map(State::weight).sum();
+            if weight <= 0. || total <= 0. {
+                continue;
+            }
+            let mask = layer.mask.as_deref();
+            let additive = layer.layer.blend == Blend::Additive;
+            let alpha = (weight * total.min(1.)).min(1.);
+            let mut sum = 0.;
+            for state in &layer.states {
+                let share = state.weight() / total;
+                sum += share;
+                let clip = &state.clip.0;
+                for channel in &clip.morphs {
+                    let Path::Weight(target) = channel.path else {
+                        continue;
+                    };
+                    let Some(w) = weights
+                        .get_mut(channel.node)
+                        .and_then(|w| w.get_mut(target))
+                    else {
+                        continue;
+                    };
+                    let masked = mask.map_or(1., |m| m[channel.node]);
+                    let value = channel.at(state.between[channel.track])[0];
+                    if additive {
+                        let a = weight * state.weight() * masked;
+                        if a > 0. {
+                            *w += (value - channel.first()[0]) * a;
+                        }
+                    } else {
+                        let a = alpha * masked;
+                        if a > 0. {
+                            let t = a * share / (1. - a + a * sum);
+                            *w += (value - *w) * t;
+                        }
+                    }
+                }
+            }
+        }
+        for &node in &self.morphed {
+            for w in &mut weights[node as usize] {
+                if !w.is_finite() {
+                    *w = 0.;
+                }
+            }
+        }
     }
     /// Its root motion's node's motion this step, blended as its pose is
     /// (`evaluate`'s shares), taken out of its pose and noted.

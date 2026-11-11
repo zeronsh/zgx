@@ -119,6 +119,34 @@ fn write(inner: &mut Inner, animator: &Animator) -> bool {
         inner.stamp(index);
         changed = true;
     }
+    if !animator.morphed.is_empty() {
+        changed |= write_morphs(inner, animator);
+    }
+    changed
+}
+/// `animator`'s morph weights into its nodes' meshes, those that changed.
+#[inline(never)]
+fn write_morphs(inner: &mut Inner, animator: &Animator) -> bool {
+    let mut changed = false;
+    for &node in &animator.morphed {
+        let weights = &animator.weights[node as usize];
+        for &mesh in animator.meshes.get(node as usize).into_iter().flatten() {
+            if inner.live(mesh.index, mesh.generation).is_none() {
+                continue;
+            }
+            let entry = inner
+                .morph_weights
+                .entry(mesh.index)
+                .or_insert((mesh.generation, Vec::new()));
+            if entry.0 == mesh.generation && entry.1 == *weights {
+                continue;
+            }
+            entry.0 = mesh.generation;
+            entry.1.clone_from(weights);
+            inner.stamp(mesh.index as usize);
+            changed = true;
+        }
+    }
     changed
 }
 
@@ -329,6 +357,26 @@ impl World {
             .collect();
         let mut animator = Animator::new(placed.nodes.clone(), rest);
         animator.model = Some(placed.root);
+        // Each node's meshes, and their morph weights at rest (a node's
+        // meshes share them).
+        animator.meshes = placed.meshes.clone();
+        animator.weights_rest = placed
+            .meshes
+            .iter()
+            .map(|meshes| {
+                let first = meshes.first();
+                first
+                    .and_then(|id| {
+                        inner
+                            .morph_weights
+                            .get(&id.index)
+                            .filter(|(g, _)| *g == id.generation)
+                    })
+                    .map(|(_, weights)| weights.clone())
+                    .unwrap_or_default()
+            })
+            .collect();
+        animator.weights = animator.weights_rest.clone();
         let animators = &mut inner.animators;
         let (index, generation) = claim(&mut animators.slots, &mut animators.free, animator);
         AnimatorId { index, generation }
@@ -668,21 +716,30 @@ mod tests {
         let world = World::new();
         let (placed, a, _) = rig(&world);
         let animator = world.add_animator(&placed);
-        world.play(animator, &slide(0., 0.), Play::new()).unwrap();
+        // Both clips away from the rest (x 0), so a fade that lost weight
+        // to it would show.
+        world.play(animator, &slide(1., 1.), Play::new()).unwrap();
         let clock = Clock(Instant::now());
         clock.frame(&world, 0.);
         world
-            .play(animator, &slide(2., 2.), Play::new().fade(1.))
+            .play(animator, &slide(3., 3.), Play::new().fade(1.))
             .unwrap();
         clock.frame(&world, 0.1);
-        assert_eq!(at(&world, a).position.x, 0., "the new clip's first frame");
+        assert_eq!(at(&world, a).position.x, 1., "the new clip's first frame");
         clock.frame(&world, 0.35);
-        assert!(close(at(&world, a).position.x, 0.5), "{:?}", at(&world, a));
+        assert!(close(at(&world, a).position.x, 1.5), "{:?}", at(&world, a));
         clock.frame(&world, 0.6);
-        assert!(close(at(&world, a).position.x, 1.), "halfway");
+        assert!(close(at(&world, a).position.x, 2.), "halfway");
         clock.frame(&world, 0.85);
         clock.frame(&world, 1.1);
-        assert_eq!(at(&world, a).position.x, 2., "done: the new clip alone");
+        assert_eq!(at(&world, a).position.x, 3., "done: the new clip alone");
+        // Stopped over a second: its first frame still all of it, then
+        // fading to the rest.
+        world.stop(animator, 0, 1.);
+        clock.frame(&world, 1.2);
+        assert_eq!(at(&world, a).position.x, 3.);
+        clock.frame(&world, 1.45);
+        assert!(close(at(&world, a).position.x, 2.25), "{:?}", at(&world, a));
     }
 
     #[test]
@@ -941,11 +998,12 @@ mod tests {
         world
             .play(animator, &slide(0., 3.), Play::new().fade(1.))
             .unwrap();
-        // Its first frame takes no time; then four quarter seconds at
-        // weights 0.25 to 1 of the run: speeds 1.5, 2, 2.5 and 3.
+        // The fade's first frame is the walk's alone (speed 1); then four
+        // quarter seconds at weights 0.25 to 1 of the run: speeds 1.5, 2,
+        // 2.5 and 3.
         frames(&clock, &world, 0.25, 1.25);
         let moved = world.animator_update(animator).moved.x;
-        assert!(close(moved, 0.25 * (1.5 + 2. + 2.5 + 3.)), "{moved}");
+        assert!(close(moved, 0.25 * (1. + 1.5 + 2. + 2.5 + 3.)), "{moved}");
     }
 
     #[test]
@@ -1560,5 +1618,116 @@ mod tests {
         });
         world.repose(animator);
         Clock(Instant::now()).frame(&world, 0.);
+    }
+
+    /// Node `a` holding a mesh of two morph targets (weights 0 and 0.7 at
+    /// rest), placed as a model's.
+    fn morphing(world: &World) -> (Placed, ObjectId) {
+        let root = world.add(Object::group());
+        let a = world.add(Object::group().child_of(root));
+        let shape = crate::Geometry::cuboid(1., 1., 1.);
+        let up = vec![[0., 0.5, 0.]; shape.vertices().len()];
+        let geometry = shape
+            .with_morph_targets(vec![
+                crate::MorphTarget::new(up.clone()),
+                crate::MorphTarget::new(up),
+            ])
+            .unwrap();
+        let mesh = world.add(Object::mesh(geometry, crate::Material::default()).child_of(a));
+        world.set_morph_weights(mesh, &[0., 0.7]);
+        let placed = Placed {
+            root,
+            nodes: vec![Some(a)],
+            meshes: vec![vec![mesh]],
+            lights: Vec::new(),
+            cameras: Vec::new(),
+        };
+        (placed, mesh)
+    }
+    /// Target 0's weight going `from` to `to` over a second.
+    fn morph(from: f32, to: f32) -> Clip {
+        clip(vec![(
+            0,
+            Path::Weight(0),
+            vec![0., 1.],
+            vec![x(from), x(to)],
+        )])
+    }
+    fn weights(world: &World, mesh: ObjectId) -> Vec<f32> {
+        let inner = world.inner();
+        inner
+            .morph_weights
+            .get(&mesh.index)
+            .map(|(_, w)| w.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn morph_weights_play_as_placed_pose_plays_them() {
+        let world = World::new();
+        let (placed, mesh) = morphing(&world);
+        let animator = world.add_animator(&placed);
+        let clip = morph(0., 1.);
+        world.play(animator, &clip, Play::new()).unwrap();
+        let other = World::new();
+        let (theirs, their_mesh) = morphing(&other);
+        let clock = Clock(Instant::now());
+        for t in [0., 0.25, 0.5, 0.75] {
+            clock.frame(&world, t);
+            theirs.pose(&other, &clip, t);
+            assert_eq!(weights(&world, mesh), weights(&other, their_mesh), "at {t}");
+        }
+        assert_eq!(
+            weights(&world, mesh),
+            [0.75, 0.7],
+            "target 1 keeps its rest"
+        );
+    }
+
+    #[test]
+    fn morph_weights_crossfade_and_add_and_follow_masks() {
+        let world = World::new();
+        let (placed, mesh) = morphing(&world);
+        let a = placed.node(0).unwrap();
+        let animator = world.add_animator(&placed);
+        world.play(animator, &morph(0.2, 0.2), Play::new()).unwrap();
+        let clock = Clock(Instant::now());
+        clock.frame(&world, 0.);
+        world
+            .play(animator, &morph(0.6, 0.6), Play::new().fade(1.))
+            .unwrap();
+        clock.frame(&world, 0.1);
+        clock.frame(&world, 0.35);
+        clock.frame(&world, 0.6);
+        assert!(
+            close(weights(&world, mesh)[0], 0.4),
+            "halfway: {:?}",
+            weights(&world, mesh)
+        );
+        clock.frame(&world, 0.85);
+        clock.frame(&world, 1.1);
+        assert!(close(weights(&world, mesh)[0], 0.6));
+        // Half of a clip going 0 to 0.5 added, at its end: 0.6 + 0.25.
+        world
+            .set_layer(animator, 1, Layer::additive().weight(0.5))
+            .unwrap();
+        world
+            .play(animator, &morph(0., 0.5), Play::new().layer(1).once())
+            .unwrap();
+        frames(&clock, &world, 1.25, 2.5);
+        assert!(
+            close(weights(&world, mesh)[0], 0.85),
+            "{:?}",
+            weights(&world, mesh)
+        );
+        // Masked off its node: no more.
+        let elsewhere = Layer::additive().weight(0.5).mask(Mask::new().node(a, 0.));
+        world.set_layer(animator, 1, elsewhere).unwrap();
+        clock.frame(&world, 2.75);
+        assert!(close(weights(&world, mesh)[0], 0.6));
+        // Held: nothing written again.
+        let stamp = world.inner().stamps[mesh.index as usize];
+        clock.frame(&world, 3.);
+        assert_eq!(world.inner().stamps[mesh.index as usize], stamp);
     }
 }
