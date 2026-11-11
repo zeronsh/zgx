@@ -1,4 +1,4 @@
-# Vendored from zeronsh/zeron: scripts/tests/test_ci_admit.py at 240aa5749, the
+# Vendored from zeronsh/zeron: scripts/tests/test_ci_admit.py at 381543b16, the
 # tests of admit.py (vendored beside it). Keep in sync with zeron's copy, as
 # admit.py. zgx's changes are marked `zgx:`: admit.py's directory, the cap
 # check (zgx's plan is smaller than zeron's), and no emergency.py here.
@@ -294,8 +294,8 @@ class PriorityAndLockTests(unittest.TestCase):
         snap = Snapshot([waiter(5, 1, linux=3, macos=2)], [held_(macos=6)], locked={90})
         d = decide(5, need(linux=3, macos=2), snap, self.BIG)
         self.assertEqual(d.used["macos"], 6 + full["macos"])
-        self.assertFalse(d.admit)  # 6 + 3 locked + 2 > 10
-        snap.holding = [held_(macos=5)]
+        self.assertFalse(d.admit)  # 6 + 4 locked + 2 > 10
+        snap.holding = [held_(macos=4)]
         self.assertTrue(decide(5, need(linux=3, macos=2), snap, self.BIG).admit)
 
     def test_the_locked_pull_request_goes_ahead_of_everyone_into_its_reservation(self):
@@ -321,7 +321,8 @@ class PriorityAndLockTests(unittest.TestCase):
         # The older lock keeps its runners until it is released; then the newer one goes.
         snap.waiters = [w for w in snap.waiters if w.run_id == 2]
         snap.locked, snap.lock_times = {91}, {91: "2026-10-27T10:05:00Z"}
-        snap.holding = [held_(pr=90, linux=2)]
+        # (One job left of the older lock's run: a full run, 19 runners, still fits in 20.)
+        snap.holding = [held_(pr=90, linux=1)]
         self.assertTrue(decide(2, full, snap, big).admit)
 
     def test_an_unverified_claim_is_an_ordinary_run(self):
