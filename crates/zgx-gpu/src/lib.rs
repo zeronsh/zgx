@@ -18758,6 +18758,16 @@ pub fn stop_app_shader_child() {
     #[cfg(windows)]
     fxc_child::stop();
 }
+/// Whether Direct3D 12's app shaders are compiled by FXC (in a child, as
+/// the first context made in this process chose), not DXC: `None` before
+/// any context (tests).
+#[doc(hidden)]
+pub fn app_shaders_compile_with_fxc() -> Option<bool> {
+    #[cfg(windows)]
+    return APP_SHADER_FXC.get().map(|&(fxc, _)| fxc);
+    #[cfg(not(windows))]
+    None
+}
 /// Compiles handed to a child so far in this process (tests).
 #[doc(hidden)]
 pub fn app_shaders_compiled_in_child() -> usize {
