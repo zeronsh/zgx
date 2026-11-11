@@ -9235,14 +9235,30 @@ mod tests {
         let owed = Rest::none().after_trim(first, true, true);
         assert_eq!(owed.next(), Some(first + QUEUE_REST_DELAY));
         // The queue went at 10 s; at 30 s kept rows go and the trim runs again.
-        let atlas_only = Rest { queue: false, ..owed };
+        let atlas_only = Rest {
+            queue: false,
+            ..owed
+        };
         let later = first + Duration::from_secs(30);
         let again = atlas_only.after_trim(later, true, true);
-        assert_eq!(again.next(), Some(first + ATLAS_TRIM_DELAY), "not 30 s past the second trim");
-        assert!(!again.queue, "the queue rested already, and nothing drew since");
+        assert_eq!(
+            again.next(),
+            Some(first + ATLAS_TRIM_DELAY),
+            "not 30 s past the second trim"
+        );
+        assert!(
+            !again.queue,
+            "the queue rested already, and nothing drew since"
+        );
         // With nothing owed, a trim owes afresh from now.
-        let done = Rest { atlas: false, ..atlas_only };
-        assert_eq!(done.after_trim(later, true, true).next(), Some(later + QUEUE_REST_DELAY));
+        let done = Rest {
+            atlas: false,
+            ..atlas_only
+        };
+        assert_eq!(
+            done.after_trim(later, true, true).next(),
+            Some(later + QUEUE_REST_DELAY)
+        );
     }
 
     fn area(rects: &[Rect]) -> f32 {
