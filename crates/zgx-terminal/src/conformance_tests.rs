@@ -192,6 +192,44 @@ fn sizes_in_pixels_are_the_views() {
     assert_eq!(written(&rx), "\x1b[6;36;18t\x1b[4;360;720t");
 }
 
+/// The settings a program asks for (DECRQSS), each answered as it would
+/// set it: the text's attributes (nvim sets a curly underline and looks for
+/// `4:3` in the answer before drawing them, and a colour and looks for
+/// `48:2:1:2:3` before turning on direct colour), the cursor's style and the
+/// scrolling region; one not kept answered as not valid.
+#[test]
+fn settings_are_reported_as_set() {
+    let ask = |set: &str, setting: &str| answer(format!("{set}\x1bP$q{setting}\x1b\\").as_bytes());
+    let valid = |value: &str| format!("\x1bP1$r{value}\x1b\\");
+    assert_eq!(ask("", "m"), valid("0m"), "nothing set");
+    assert_eq!(ask("\x1b[4:3m", "m"), valid("0;4:3m"), "a curly underline");
+    assert_eq!(
+        ask("\x1b[1;3;9;38;5;196;48;2;1;2;3;58:2::9:8:7m", "m"),
+        valid("0;1;3;9;38:5:196;48:2:1:2:3;58:2:9:8:7m"),
+        "styles and colours"
+    );
+    assert_eq!(
+        ask("\x1b[0m\x1b[48;2;1;2;3m", "m"),
+        valid("0;48:2:1:2:3m"),
+        "nvim's direct colour probe, answered as it reads it"
+    );
+    assert_eq!(
+        ask("\x1b[2;7;91;42m", "m"),
+        valid("0;2;7;91;42m"),
+        "named colours"
+    );
+    assert_eq!(ask("\x1b[1m\x1b[0m", "m"), valid("0m"), "reset");
+    assert_eq!(ask("", " q"), valid("2 q"), "a steady block at first");
+    assert_eq!(ask("\x1b[5 q", " q"), valid("5 q"), "a blinking bar");
+    assert_eq!(ask("", "r"), valid("1;10r"), "the whole screen");
+    assert_eq!(ask("\x1b[2;8r", "r"), valid("2;8r"), "a region");
+    assert_eq!(
+        ask("", "s"),
+        "\x1bP0$r\x1b\\",
+        "left and right margins aren't kept"
+    );
+}
+
 /// The mouse modes a program sets decide what a click sends it: nothing
 /// until it asks, X10 bytes or SGR as it asks, motion only with a button
 /// held (1002) or always (1003).

@@ -261,6 +261,8 @@ enum DcsRequest {
     None,
     /// XTGETTCAP (`DCS + q`): terminfo capabilities' names, hex, split by `;`.
     Termcap(Vec<u8>),
+    /// DECRQSS (`DCS $ q`): the setting's final bytes, `m` for SGR, say.
+    Setting(Vec<u8>),
 }
 
 /// zgx: the longest request kept; one longer is left unanswered. Room for
@@ -736,6 +738,11 @@ pub trait Handler {
     /// names, each hex encoded, split by `;` (should write back to the pty
     /// stream).
     fn request_termcap(&mut self, _names: &[u8]) {}
+
+    /// zgx: DECRQSS, a setting a program asks for by its final bytes (`m`
+    /// for SGR, ` q` for the cursor's style, `r` for the scrolling region;
+    /// should write back to the pty stream).
+    fn report_setting(&mut self, _setting: &[u8]) {}
 
     /// Set hyperlink.
     fn set_hyperlink(&mut self, _: Option<Hyperlink>) {}
@@ -1355,11 +1362,13 @@ where
         }
     }
 
-    // zgx: XTGETTCAP's names are gathered, and asked for as the string ends.
+    // zgx: XTGETTCAP's names and DECRQSS's setting are gathered, and asked
+    // for as the string ends.
     #[inline]
     fn hook(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
         self.state.dcs_request = match (intermediates, action) {
             (b"+", 'q') if !ignore => DcsRequest::Termcap(Vec::new()),
+            (b"$", 'q') if !ignore => DcsRequest::Setting(Vec::new()),
             _ => {
                 debug!(
                     "[unhandled hook] params={:?}, ints: {:?}, ignore: {:?}, action: {:?}",
@@ -1373,8 +1382,14 @@ where
     #[inline]
     fn put(&mut self, byte: u8) {
         match &mut self.state.dcs_request {
-            DcsRequest::Termcap(bytes) if bytes.len() < DCS_REQUEST_LIMIT => bytes.push(byte),
-            DcsRequest::Termcap(_) => self.state.dcs_request = DcsRequest::None,
+            DcsRequest::Termcap(bytes) | DcsRequest::Setting(bytes)
+                if bytes.len() < DCS_REQUEST_LIMIT =>
+            {
+                bytes.push(byte)
+            },
+            DcsRequest::Termcap(_) | DcsRequest::Setting(_) => {
+                self.state.dcs_request = DcsRequest::None
+            },
             DcsRequest::None => debug!("[unhandled put] byte={:?}", byte),
         }
     }
@@ -1383,6 +1398,7 @@ where
     fn unhook(&mut self) {
         match mem::take(&mut self.state.dcs_request) {
             DcsRequest::Termcap(names) => self.handler.request_termcap(&names),
+            DcsRequest::Setting(setting) => self.handler.report_setting(&setting),
             DcsRequest::None => debug!("[unhandled unhook]"),
         }
     }
@@ -2193,6 +2209,26 @@ mod tests {
         parser.advance(&mut handler, &long);
         parser.advance(&mut handler, b"\x1b\\");
         assert_eq!(handler.0, [&b"544e;5463"[..], b"524742", b""]);
+    }
+
+    /// zgx: DECRQSS's setting reaches the handler as the string ends, and
+    /// XTGETTCAP's doesn't reach it.
+    #[test]
+    fn setting_requests_reach_the_handler_whole() {
+        #[derive(Default)]
+        struct Requests(Vec<Vec<u8>>);
+        impl Handler for Requests {
+            fn report_setting(&mut self, setting: &[u8]) {
+                self.0.push(setting.to_vec());
+            }
+        }
+
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = Requests::default();
+        parser.advance(&mut handler, b"\x1bP$qm\x1b\\\x1bP$q q\x1b\\\x1bP+q544e\x1b\\");
+        parser.advance(&mut handler, b"\x1bP$q");
+        parser.advance(&mut handler, b"r\x1b\\");
+        assert_eq!(handler.0, [&b"m"[..], b" q", b"r"]);
     }
 
     /// zgx: a cell's size in pixels asked for (CSI 16 t).
