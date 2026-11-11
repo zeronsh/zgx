@@ -169,6 +169,67 @@ fn it_says_it_needs_keys() {
         estimate = { height = 1 }, row = function() return ui.div {} end }"#,
     );
 }
+/// Folded rows (`Value::folded`: a host's long transcript, each row kept
+/// small until read) are opened to be estimated and let go again: at rest
+/// only the rows built hold what they opened to.
+#[test]
+fn folded_rows_are_estimated_and_let_go() {
+    use std::{cell::RefCell, rc::Rc, rc::Weak};
+    thread_local! {
+        /// Each opened row's body, while anything holds it.
+        static BODIES: RefCell<Vec<Weak<str>>> = const { RefCell::new(Vec::new()) };
+    }
+    struct Row(usize, String);
+    impl zgx_script::Unfold for Row {
+        fn unfold(&self) -> Value {
+            let body: Rc<str> = Rc::from(self.1.as_str());
+            BODIES.with_borrow_mut(|b| b.push(Rc::downgrade(&body)));
+            Value::record([
+                ("id", Value::from(format!("r{}", self.0).as_str())),
+                ("body", Value::Str(body)),
+            ])
+        }
+    }
+    let open = || BODIES.with_borrow(|b| b.iter().filter(|w| w.strong_count() > 0).count());
+    let opens = || BODIES.with_borrow(Vec::len);
+    let mut seed = 7;
+    let mut row = |i: usize| {
+        let count = 3 + next(&mut seed, 120);
+        Value::folded(Rc::from(format!("r{i}")), Row(i, words(&mut seed, count)))
+    };
+    let mut rows: Vec<Value> = (0..2000).map(&mut row).collect();
+    let (app, _services) = mounted(
+        &script(&generated()),
+        Value::List(rows.clone().into()),
+        800.,
+    );
+    let opened = opens();
+    assert!(
+        opened >= 2000,
+        "every row was read to be estimated: {opened}"
+    );
+    zgx::idle::trim(&app.ui.runtime);
+    app.frames(2);
+    let held = open();
+    assert!(
+        held < 100,
+        "{held} of 2000 rows still open: only the built ones may be"
+    );
+    // Scanned once: a row added, or a new width, opens no settled row again.
+    let before = opens();
+    rows.push(row(2000));
+    let list = app.host.shared("list.rows", Value::Nil);
+    list.set(Value::List(rows.into()));
+    app.frames(2);
+    app.ui.scene.borrow_mut().resize(500., 600.);
+    app.frames(2);
+    let again = opens() - before;
+    assert!(
+        again < 100,
+        "{again} rows opened again for an added row and a new width"
+    );
+}
+
 /// Reads this repository's own documents as a list's rows, and says how far an
 /// estimate is from measured, and what it cost: `--ignored --nocapture`.
 #[test]
