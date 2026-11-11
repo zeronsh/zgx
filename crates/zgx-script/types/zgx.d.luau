@@ -2409,10 +2409,10 @@ export type NodeProps = {
 	layer_on: Reactive<boolean>?,
 	-- Events.
 	on_click: (ClickHandler | Handler | Action)?,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: SoundProp?,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: SoundProp?, --@audio
 	-- Primary pointer down and up.
 	on_press: (((e: PointerEvent) -> ...unknown) | Action)?,
 	on_release: (((e: PointerEvent) -> ...unknown) | Action)?,
@@ -2841,10 +2841,10 @@ export type Props = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -3152,7 +3152,7 @@ export type Props_layer_clock = boolean?
 export type Props_shader_clock = boolean?
 export type Props_layer_on = Reactive<boolean>?
 export type Props_on_click = (ClickHandler | Handler | Action)?
-export type Props_sound = SoundProp?
+export type Props_sound = SoundProp? --@audio
 export type Props_on_press = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_release = (((e: PointerEvent) -> ...unknown) | Action)?
 export type Props_on_aux_click = (((e: AuxClickEvent) -> ...unknown) | Action)?
@@ -3523,10 +3523,10 @@ export type ContainerProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -3969,10 +3969,10 @@ export type GlassProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -4424,10 +4424,10 @@ export type ScrollProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -4895,10 +4895,10 @@ export type TextProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -5326,10 +5326,10 @@ export type MarkdownViewProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -5843,10 +5843,10 @@ export type RichProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -6268,10 +6268,10 @@ export type ImageProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -6710,10 +6710,10 @@ export type SvgProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -6877,6 +6877,7 @@ export type LightProps = Object3DProps & {
 	direction: Vec3?,
 	range: number?,
 }
+--@if audio-spatial
 -- A sound placed in the scene (zgx-script's `audio-spatial`): it plays
 -- from where it is, falling off with distance, panned, its pitch moved by
 -- Doppler, dulled by the air and by the meshes between it and the camera.
@@ -6906,6 +6907,7 @@ export type ReverbZoneProps = Object3DProps & {
 	preset: ("room" | "hall" | "warehouse" | { size: number?, decay: number?, damping: number?, wet: number? })?,
 	fade: number?,
 }
+--@end
 export type ModelProps = {
 	-- A .glb or .gltf file, from the script's directory: read off the main
 	-- thread, shown once read (zgx-script's `gltf` feature).
@@ -7292,10 +7294,10 @@ export type Scene3DProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -7740,10 +7742,10 @@ export type CanvasProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -8197,10 +8199,10 @@ export type CheckboxProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -8632,10 +8634,10 @@ export type InputProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -9168,10 +9170,10 @@ export type ProgressProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -9591,10 +9593,10 @@ export type SliderProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -10035,10 +10037,10 @@ export type SegmentedProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -10472,10 +10474,10 @@ export type StepperProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -10910,10 +10912,10 @@ export type DisclosureProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -11359,10 +11361,10 @@ export type AccordionProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -11782,10 +11784,10 @@ export type SectionProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -12230,10 +12232,10 @@ export type SeparatorProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -12661,10 +12663,10 @@ export type TabsProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -13114,10 +13116,10 @@ export type TreeProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -13563,10 +13565,10 @@ export type DataGridProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -14008,10 +14010,10 @@ export type CalendarProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -14446,10 +14448,10 @@ export type DatePickerProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -14882,10 +14884,10 @@ export type TimeFieldProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -15317,10 +15319,10 @@ export type ComboboxProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -15760,10 +15762,10 @@ export type CommandPaletteProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -16191,10 +16193,10 @@ export type SelectProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -16629,10 +16631,10 @@ export type SplitProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -17123,10 +17125,10 @@ export type ListProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -17647,10 +17649,10 @@ export type LayerProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -18092,10 +18094,10 @@ export type ModalProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -18555,10 +18557,10 @@ export type PopoverProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -19024,10 +19026,10 @@ export type MenuItemProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -19458,10 +19460,10 @@ export type SubmenuProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -19909,10 +19911,10 @@ export type WebViewProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -20360,10 +20362,10 @@ export type TerminalProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -20786,10 +20788,10 @@ export type SlotProps = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -21261,10 +21263,10 @@ export type EachOptions = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -21702,10 +21704,10 @@ export type PresenceOptions = {
 	layer_on: Props_layer_on,
 	-- Events.
 	on_click: Props_on_click,
-	-- What plays on the `ui` bus as it's activated (a press, Enter or
-	-- Space, assistive technology's), before `on_click` (zgx-script's
-	-- `audio` feature).
-	sound: Props_sound,
+	-- What plays on the `ui` bus as it's activated (a press, Enter or --@audio
+	-- Space, assistive technology's), before `on_click` (zgx-script's --@audio
+	-- `audio` feature). --@audio
+	sound: Props_sound, --@audio
 	-- Primary pointer down and up.
 	on_press: Props_on_press,
 	on_release: Props_on_release,
@@ -21930,9 +21932,11 @@ declare ui: {
 	light: (props: LightProps) -> Object3D,
 	group: (props: GroupProps) -> Object3D,
 	model: (props: ModelProps) -> Object3D,
+--@if audio-spatial
 	-- Sound in the scene (zgx-script's `audio-spatial`).
 	sound3d: (props: Sound3DProps) -> Object3D,
 	reverb_zone: (props: ReverbZoneProps) -> Object3D,
+--@end
 	webview: (props: WebViewProps) -> Node,
 	-- `ui.web(opts)`: a page for this run. `ui.web(id, opts)`: the host's
 	-- page for `id`, made with `opts` the first time, kept across reloads.
@@ -22989,6 +22993,7 @@ declare extern type Scope with
 end
 export type EaseMaker = (...number) -> AnimeEase
 
+--@if audio
 ---------------------------------------------------------------------------
 -- Sound (`audio`, zgx-script's `audio` feature; docs/reference/audio.md).
 
@@ -23046,6 +23051,7 @@ declare extern type Voice with
 	function crossfade(self, to: Voice, seconds: number, gain: number?): ()
 end
 
+--@if audio-effects
 -- A stock effect described (`audio.low_pass { … }`), to put on a bus with
 -- `bus:add_effect`. Every parameter is a number, a state, a function or a
 -- binding, followed with no script per frame.
@@ -23120,6 +23126,7 @@ declare extern type AudioEffect with
 	function at(self, time: number): AudioEffect
 end
 
+--@end
 declare extern type Bus with
 	-- Read by the mixer each block, gliding over 10 ms: no message, even
 	-- for a binding.
@@ -23128,10 +23135,12 @@ declare extern type Bus with
 	function mute(self, value: Reactive<boolean>): ()
 	function solo(self, value: Reactive<boolean>): ()
 	function at(self, time: number): Bus
+--@if audio-effects
 	-- After the bus's other effects, before its gain: 8 at most.
 	function add_effect(self, effect: EffectSpec): AudioEffect
 	-- Ducks this bus under `side` (music under dialogue).
 	function duck(self, side: Bus, opts: DuckOptions?): AudioEffect
+--@end
 end
 
 export type AudioStats = {
@@ -23154,7 +23163,7 @@ export type SoundProp = Sound | { sound: Sound, gain: number?, pitch: number? } 
 
 declare audio: {
 	sound: (src: string, opts: SoundOptions?) -> Sound,
-	music: (src: string, opts: PlayOptions?) -> Voice,
+	music: (src: string, opts: PlayOptions?) -> Voice, --@audio-streams
 	play: (sound: Sound, opts: PlayOptions?) -> Voice,
 	-- A plugin's `audio.bus()` is its own bus, the only one it reaches.
 	bus: (name: string?) -> Bus?,
@@ -23164,6 +23173,7 @@ declare audio: {
 	now: () -> number,
 	prewarm: () -> (),
 	stats: () -> AudioStats,
+--@if audio-effects
 	low_pass: (opts: FilterOptions?) -> EffectSpec,
 	high_pass: (opts: FilterOptions?) -> EffectSpec,
 	-- A band of EQ.
@@ -23171,10 +23181,12 @@ declare audio: {
 	delay: (opts: DelayOptions?) -> EffectSpec,
 	reverb: (opts: ReverbOptions?) -> EffectSpec,
 	compressor: (opts: CompressorOptions?) -> EffectSpec,
+--@end
 	-- The user's interface-sound setting, which the `ui` bus follows.
 	ui_sounds_enabled: ReadOnlyState<boolean>,
 }
 
+--@end
 -- Besides elements, animations and utils target a state's or a plain
 -- table's fields: the script's own data, so `{ [string]: any }`.
 declare anime: {

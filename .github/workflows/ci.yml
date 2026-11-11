@@ -153,9 +153,11 @@ jobs:
       # Lints too: code only a default feature uses (the component
       # library's) is left out with it, not left unused.
       - run: cargo clippy -p zgx-script --no-default-features --all-targets --locked -- -D warnings
-      # zgx-script's best-practice lint over every example script.
+      # zgx-script's best-practice lint over every example script. The CLI
+      # lints and checks with the rules and definitions of the features it
+      # is built with: those the examples use (the sounds example's).
       - name: Script lint
-        run: cargo run -q -p zgx-script --bin zgx --locked -- lint crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
+        run: cargo run -q -p zgx-script --bin zgx --locked --features audio-effects,audio-streams -- lint crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
       # Every example script type checks (luau-lsp, the shipped ui/anime
       # types); zgx-script's check tests run with it too.
       - name: Script type check
@@ -170,7 +172,7 @@ jobs:
             chmod +x "$dir/luau-lsp"
           fi
           echo "LUAU_LSP=$dir/luau-lsp" >> "$GITHUB_ENV"
-          LUAU_LSP="$dir/luau-lsp" cargo run -q -p zgx-script --bin zgx --locked -- check crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
+          LUAU_LSP="$dir/luau-lsp" cargo run -q -p zgx-script --bin zgx --locked --features audio-effects,audio-streams -- check crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
       # With 3D scenes (zgx-script's `scene3d`, off by default; the Windows
       # and macOS jobs test without it).
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-script --all-targets --features zgx-script/scene3d --locked

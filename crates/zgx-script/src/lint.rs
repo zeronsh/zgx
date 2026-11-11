@@ -245,26 +245,32 @@ pub const RULES: &[(&str, &str)] = &[
         "unknown-route",
         "a route name given to a router's navigate, replace, is or view that no ui.router declares",
     ),
+    #[cfg(feature = "audio")]
     (
         "audio-load-in-builder",
         "audio.sound or audio.music in a component or row loads again for every instance",
     ),
+    #[cfg(feature = "audio")]
     (
         "audio-play-timer",
         "audio.play from a ui.every under 50 ms or a per-frame callback, rather than `at`",
     ),
+    #[cfg(feature = "audio")]
     (
         "audio-sound-too-long",
         "audio.sound of a file over 10 s, decoded whole, rather than streamed with audio.music",
     ),
+    #[cfg(feature = "audio")]
     (
         "audio-param-in-loop",
         "a sound's gain, pan or pitch set to a number from a timer or a frame callback",
     ),
+    #[cfg(feature = "audio-effects")]
     (
         "audio-effect-in-builder",
         "bus:add_effect or bus:duck in a component or row adds one for every instance",
     ),
+    #[cfg(feature = "audio-spatial")]
     (
         "sound3d-no-max",
         "a looping ui.sound3d without falloff.max, heard and mixed to 100 m",
@@ -1824,19 +1830,30 @@ impl Linter<'_> {
             && (self.is(at + 2, "state") || self.is(at + 2, "persist"))
             && self.is(at + 3, "(")
             && literal_key
-            && let Some(builder) = builder(stack)
         {
-            let what = &self.tokens[at + 2].text;
-            self.report(
-                at,
-                "state-in-builder",
-                format!(
-                    "`ui.{what}` in a `{builder}` builder is keyed to the script, so every \
-                     instance shares one state (and the key collides with any other use). \
-                     Use `ui.use_state(initial)` for state of each instance."
-                ),
-            );
+            let builder = stack.iter().enumerate().rev().find_map(|(index, frame)| {
+                (frame.open == Open::Function).then_some(())?;
+                let parent = index.checked_sub(1).map(|p| &stack[p])?;
+                match parent.callee.as_deref() {
+                    Some(c @ ("ui.component" | "ui.each" | "ui.presence")) => Some(c.to_string()),
+                    _ if frame.key.as_deref() == Some("row") => Some("ui.list".to_string()),
+                    _ => None,
+                }
+            });
+            if let Some(builder) = builder {
+                let what = &self.tokens[at + 2].text;
+                self.report(
+                    at,
+                    "state-in-builder",
+                    format!(
+                        "`ui.{what}` in a `{builder}` builder is keyed to the script, so every \
+                         instance shares one state (and the key collides with any other use). \
+                         Use `ui.use_state(initial)` for state of each instance."
+                    ),
+                );
+            }
         }
+        #[cfg(feature = "audio")]
         self.audio_rules(at, stack, function);
         // A `key` function of `ui.each` reading state.
         if self.is(at, ":")
@@ -1930,6 +1947,7 @@ impl Linter<'_> {
     }
 
     /// The audio library's rules, at the token `at` (`audio-…`).
+    #[cfg(feature = "audio")]
     fn audio_rules(&mut self, at: usize, stack: &[Frame], function: Option<usize>) {
         let call = |name: &str| {
             self.is(at, "audio")
@@ -1965,6 +1983,7 @@ impl Linter<'_> {
             );
         }
         // `ui.sound3d { loop = true, … }` with no `falloff = { max = … }`.
+        #[cfg(feature = "audio-spatial")]
         if self.is(at, "ui")
             && self.is(at + 1, ".")
             && self.is(at + 2, "sound3d")
@@ -1990,6 +2009,7 @@ impl Linter<'_> {
             }
         }
         // `bus:add_effect(…)` or `bus:duck(…)` in a component or row.
+        #[cfg(feature = "audio-effects")]
         if self.is(at, ":")
             && (self.is(at + 1, "add_effect") || self.is(at + 1, "duck"))
             && self.is(at + 2, "(")
@@ -2348,6 +2368,7 @@ const REWRITE_MESSAGE: &str = "this text is rewritten whole each time a chunk ar
 
 /// The builder (`ui.component`, `ui.each`, `ui.presence`, a `ui.list`'s
 /// `row`) whose function the innermost frames of `stack` are in, if any.
+#[cfg(feature = "audio")]
 fn builder(stack: &[Frame]) -> Option<String> {
     stack.iter().enumerate().rev().find_map(|(index, frame)| {
         (frame.open == Open::Function).then_some(())?;
@@ -2364,6 +2385,7 @@ fn builder(stack: &[Frame]) -> Option<String> {
 /// `fmt` and `data` sizes, or an Ogg's rate and its last page's granule
 /// position. None for a file it can't read (a missing file is left to
 /// `zgx check`).
+#[cfg(feature = "audio")]
 fn sound_seconds(path: &Path) -> Option<f64> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
@@ -2570,6 +2592,7 @@ return ui.column {
     }
 
     #[test]
+    #[cfg(feature = "audio")]
     fn audio_loaded_in_a_builder_is_reported() {
         let source = r#"
 local click = audio.sound("click.wav")
@@ -2590,6 +2613,7 @@ end)
     }
 
     #[test]
+    #[cfg(feature = "audio")]
     fn audio_played_from_a_fast_timer_or_a_frame_callback_is_reported() {
         let source = r##"
 ui.every(20, function()
@@ -2613,6 +2637,7 @@ end)
     }
 
     #[test]
+    #[cfg(feature = "audio")]
     fn a_sound_parameter_set_to_numbers_in_a_loop_is_reported() {
         let source = r##"
 local level = ui.state("level", 1)
@@ -2632,6 +2657,7 @@ anime.animate("#dot", { x = 1, onUpdate = function() bus:gain(0.5) end })
     }
 
     #[test]
+    #[cfg(feature = "audio-effects")]
     fn an_effect_added_in_a_builder_is_reported() {
         let source = r#"
 local music = audio.bus("music")
@@ -2653,6 +2679,7 @@ end)
     }
 
     #[test]
+    #[cfg(feature = "audio-spatial")]
     fn a_looping_sound3d_without_a_maximum_is_reported() {
         let source = r#"
 local hum = audio.sound("hum.wav")
@@ -2669,6 +2696,7 @@ ui.sound3d { sound = hum, loop = true }
     }
 
     #[test]
+    #[cfg(feature = "audio")]
     fn a_long_file_given_to_audio_sound_is_reported_from_its_header() {
         let dir = std::env::temp_dir().join(format!("zgx-lint-audio-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

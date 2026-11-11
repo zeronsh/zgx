@@ -55,7 +55,7 @@ fn field_kinds() -> &'static HashMap<String, TokenKind> {
     static KINDS: std::sync::OnceLock<HashMap<String, TokenKind>> = std::sync::OnceLock::new();
     KINDS.get_or_init(|| {
         let mut kinds: HashMap<String, Option<TokenKind>> = HashMap::new();
-        for line in include_str!("../types/zgx.d.luau").lines() {
+        for line in crate::check::DEFINITIONS.lines() {
             let Some((field, ty)) = line.trim().split_once(": ") else {
                 continue;
             };

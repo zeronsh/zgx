@@ -17,8 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// The `ui` and `anime` globals' types, as shipped with this crate.
-pub const DEFINITIONS: &str = include_str!("../types/zgx.d.luau");
+/// The `ui` and `anime` globals' types, as shipped with this crate: the
+/// parts of features this build is without left out (build.rs,
+/// `definitions.rs`).
+pub const DEFINITIONS: &str = include_str!(concat!(env!("OUT_DIR"), "/zgx.d.luau"));
 
 /// How to get luau-lsp, shown when it is missing.
 pub const INSTALL: &str = "luau-lsp is not installed. Download it from \

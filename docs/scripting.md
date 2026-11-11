@@ -61,7 +61,7 @@ zgx check app.luau          # a file
 zgx check examples/notes    # every .luau file under a directory
 ```
 
-`zgx check` runs `luau-lsp analyze` with the definitions above built into the binary, the `standard` platform, the new solver (`--flag:LuauSolverV2=true`) and strict mode, unless a `.luaurc` (`languageMode`) or a `--!nonstrict` comment picks another mode (`--nonstrict` changes the default). It prints `file:line:col: error[TypeError]: …` and lint warnings, and exits 1 when there are errors (2 for usage errors, 3 when luau-lsp is missing). It catches what otherwise appears only at run time, such as a local function used before its definition, which is `nil` until called:
+`zgx check` runs `luau-lsp analyze` with the definitions above built into the binary, the `standard` platform, the new solver (`--flag:LuauSolverV2=true`) and strict mode, unless a `.luaurc` (`languageMode`) or a `--!nonstrict` comment picks another mode (`--nonstrict` changes the default). The definitions, like `zgx lint`'s rules, are those of the features the `zgx` binary was built with, so a project using `audio` (or `audio-effects`, `audio-streams`, `audio-spatial`) needs a CLI built with them (`cargo install --path crates/zgx-script --bin zgx --features audio-effects,audio-streams`). It prints `file:line:col: error[TypeError]: …` and lint warnings, and exits 1 when there are errors (2 for usage errors, 3 when luau-lsp is missing). It catches what otherwise appears only at run time, such as a local function used before its definition, which is `nil` until called:
 
 ```lua
 local function render()

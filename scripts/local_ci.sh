@@ -130,11 +130,13 @@ print(" ".join(sorted(f for f in package["features"] if f != "default")))'); do
   step "clippy 1.99 zgx-3d $feature alone" \
     cargo +1.99 clippy -p zgx-3d --no-default-features --features "$feature" --lib --tests --locked -- -D warnings
 done
-step "script lint" cargo run -q -p zgx-script --bin zgx --locked -- lint \
+# With the features the examples use: the CLI lints and checks with those
+# it is built with.
+step "script lint" cargo run -q -p zgx-script --bin zgx --locked --features audio-effects,audio-streams -- lint \
   crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
 lsp=${LUAU_LSP:-$(command -v luau-lsp || true)}
 if [ -n "$lsp" ]; then
-  step "script type check" env LUAU_LSP="$lsp" cargo run -q -p zgx-script --bin zgx --locked -- check \
+  step "script type check" env LUAU_LSP="$lsp" cargo run -q -p zgx-script --bin zgx --locked --features audio-effects,audio-streams -- check \
     crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
 else
   skip "script type check (no luau-lsp; set LUAU_LSP)"

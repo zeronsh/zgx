@@ -3,6 +3,21 @@
 //! `LUAU_LSP`) and skip otherwise.
 use std::{path::PathBuf, process::Command};
 
+#[path = "../src/definitions.rs"]
+mod definitions;
+
+/// Whether this build has the feature a mark in the definitions names.
+fn built_with(feature: &str) -> bool {
+    match feature {
+        "audio" => cfg!(feature = "audio"),
+        "audio-effects" => cfg!(feature = "audio-effects"),
+        "audio-vorbis" => cfg!(feature = "audio-vorbis"),
+        "audio-streams" => cfg!(feature = "audio-streams"),
+        "audio-spatial" => cfg!(feature = "audio-spatial"),
+        other => panic!("zgx.d.luau marks a part of `{other}`, not a feature of zgx-script's"),
+    }
+}
+
 fn zgx() -> Command {
     Command::new(env!("CARGO_BIN_EXE_zgx"))
 }
@@ -188,6 +203,11 @@ fn every_shipped_example_passes_in_strict_mode() {
             &copies.join("terminal"),
         ),
     ];
+    // The sounds example calls `audio`'s effects and music: a build without
+    // them checks against definitions without them.
+    if !(cfg!(feature = "audio-effects") && cfg!(feature = "audio-streams")) {
+        std::fs::remove_dir_all(copies.join("examples/sounds")).unwrap();
+    }
     // Strict where no `.luaurc` picks a mode; the terminal's says strict.
     let out = zgx().arg("check").args(&examples).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
@@ -303,12 +323,63 @@ fn the_examples_types_files_are_what_zgx_types_writes() {
             .unwrap();
         assert!(committed.status.success(), "git show of {name}");
         assert!(
-            String::from_utf8_lossy(&committed.stdout)
+            without_unbuilt(&String::from_utf8_lossy(&committed.stdout))
                 == zgx_script::app_types::definitions(&sources),
             "{name}, as git holds it, is stale: run `zgx types {}` and add it",
             dir.display()
         );
     }
+}
+
+/// The parts of features this build is without, each a run of whole
+/// lines, taken out of `text` (an app's types file, which `zgx types` writes
+/// with them all): what this build writes, if `text` is current.
+fn without_unbuilt(text: &str) -> String {
+    let full = include_str!("../types/zgx.d.luau");
+    let mut runs: Vec<String> = Vec::new();
+    let mut run = String::new();
+    for (line, kept) in definitions::lines(full, built_with) {
+        match kept {
+            false => run.push_str(&line),
+            true if !run.is_empty() => runs.push(std::mem::take(&mut run)),
+            true => {}
+        }
+    }
+    runs.push(run);
+    let mut text = format!("\n{text}");
+    for run in runs.iter().filter(|run| !run.is_empty()) {
+        text = text.replace(&format!("\n{run}"), "\n");
+    }
+    text.split_off(1)
+}
+
+#[test]
+fn a_build_embeds_the_definitions_of_its_features() {
+    let full = include_str!("../types/zgx.d.luau");
+    assert_eq!(
+        zgx_script::check::DEFINITIONS,
+        definitions::filtered(full, built_with)
+    );
+    let none = definitions::filtered(full, |_| false);
+    assert!(!none.contains("--@") && !none.contains("declare audio"));
+    assert_eq!(
+        definitions::filtered(full, |_| true),
+        definitions::lines(full, |_| true)
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect::<String>(),
+        "every part of a feature's is kept with every feature"
+    );
+}
+
+#[test]
+fn a_part_of_a_feature_is_kept_only_with_it() {
+    let full = "a\n--@if x\nb\n--@if y\nc\n--@end\n--@end\nd --@y\ne\n";
+    let keep = |on: &'static [&'static str]| definitions::filtered(full, |f| on.contains(&f));
+    assert_eq!(keep(&[]), "a\ne\n");
+    assert_eq!(keep(&["x"]), "a\nb\ne\n");
+    assert_eq!(keep(&["y"]), "a\nd\ne\n");
+    assert_eq!(keep(&["x", "y"]), "a\nb\nc\nd\ne\n");
 }
 
 #[test]
