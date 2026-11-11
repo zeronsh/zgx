@@ -30,6 +30,7 @@ class RuleTests(unittest.TestCase):
             ("crates/zgx-gpu/README.md", NONE), ("vendor/winit/ZGX_PATCH.md", NONE),
             ("scripts/perf/README.md", NONE), (".github/workflows/release.yml", NONE),
             (".github/workflows/site.yml", NONE),
+            (".github/workflows/perf-base.yml", NONE),
             ("comparisons/gpui/src/main.rs", NONE), ("fuzz/fuzz_targets/parse.rs", NONE),
         ])
 

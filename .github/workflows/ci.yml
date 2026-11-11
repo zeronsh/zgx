@@ -15,6 +15,9 @@ name: Rust
 #   result  "CI result": passes when every job passed or was skipped, fails on
 #           a failure or a cancellation. The one check to require.
 #
+# Beside it: perf-base.yml builds perf's binaries for each push to main, for
+# pull requests to measure against without building their base.
+#
 # Admission is shared with zeronsh/zeron. Both repositories' CI runs on the
 # organization's one pool of hosted runners (20 jobs at once, 5 of them
 # macOS). GitHub starts any queued job when a runner frees up, so under load
@@ -55,7 +58,8 @@ on:
 # A newer push to a PR supersedes its running check (and a waiting one stops
 # waiting). On main every run finishes (a full signal per commit, and the
 # caches and perf binaries it saves); a newer push waits, replacing any run
-# still waiting.
+# still waiting. perf's base binaries for the commits skipped that way come
+# from perf-base.yml, which builds them for every push to main.
 # A cancelled run still runs its `CI result` job (`if: always()`), and the
 # next run in the group waits for it. If that ever holds new runs up, zeron's
 # answer is a group per run, with ci-supersede.yml force-cancelling the older
@@ -399,6 +403,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      actions: read  # main's kept binaries (Actions cache entries)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -490,10 +495,29 @@ jobs:
           path: ${{ runner.temp }}/gate-bin
           key: gate-bin-${{ github.sha }}
       - run: rm -rf "$RUNNER_TEMP/gate-bin"
+      # The base's binaries as main kept them (perf-base.yml, or main's own
+      # perf job): the base's own, or else those of the newest kept commit
+      # that differs from it in nothing perf builds (a docs-only push keeps
+      # none), stamped as the base's. None found, and the gate builds the base.
+      - name: Base binaries kept on main
+        id: kept
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BASE: ${{ steps.base.outputs.sha }}
+        run: python3 .github/ci/gate_base.py pick "$BASE" >> "$GITHUB_OUTPUT"
       - uses: actions/cache/restore@v4
+        if: steps.kept.outputs.key != ''
         with:
           path: ${{ runner.temp }}/gate-bin
-          key: gate-bin-${{ steps.base.outputs.sha }}
+          key: ${{ steps.kept.outputs.key }}
+      - name: The kept binaries stand for the base's
+        if: steps.kept.outputs.from != '' && steps.kept.outputs.from != steps.base.outputs.sha
+        continue-on-error: true
+        env:
+          FROM: ${{ steps.kept.outputs.from }}
+          BASE: ${{ steps.base.outputs.sha }}
+        run: python3 .github/ci/gate_base.py adopt "$RUNNER_TEMP/gate-bin" "$FROM" "$BASE"
       - name: Instruction counts
         env:
           ZGX_GATE_TARGET: target/perf-gate

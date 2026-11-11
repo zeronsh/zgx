@@ -21,7 +21,8 @@ crates on Linux. On a pull request it runs when the change touches what those
 scenes run (rules with "perf": the crates' sources and examples, vendor/,
 Cargo.*, scripts/perf; not tests, docs or one platform's code), or with the
 `ci:perf` label (add it, then re-run). On main it runs with every run that
-tests anything.
+tests anything. (The binaries pull requests measure against come from
+perf-base.yml: gate_base.py.)
 
 Outputs, to $GITHUB_OUTPUT:
 
@@ -84,7 +85,7 @@ MACOS_ONLY = [
     "scripts/*.swift",
 ]
 # Built only for Linux: its windowing, accessibility and desktop services,
-# which perf's headless scenes never run.
+# which perf's headless scenes never run (but do link: gate_base.py).
 LINUX_ONLY = [
     "vendor/accesskit_unix/**",
     "vendor/accesskit_atspi_common/**",
@@ -112,6 +113,7 @@ RULES: list[tuple[tuple[str, ...], list[str]]] = [
         "site/**", "website/**", "changelog.d/**", "CHANGELOG.md", "LICENSE", ".gitignore", ".zed/**",
         ".github/workflows/site.yml", ".github/workflows/changelog.yml", ".github/workflows/release.yml",
         ".github/workflows/d3d12-debug-layer.yml",
+        ".github/workflows/perf-base.yml",
         "docs/results/**", "docs/platform-validation/**", "docs/performance/**", "scripts/**/*.md",
         # Comparisons outside the workspace and the fuzz crate: no job builds them.
         "comparisons/gpui/**", "comparisons/gpui-fast/**", "comparisons/gpui-fast-micro/**",
@@ -157,6 +159,7 @@ def _glob(pattern: str) -> re.Pattern:
 
 
 _COMPILED = [(jobs, [_glob(p) for p in patterns]) for jobs, patterns in RULES]
+_LINUX_ONLY = [_glob(p) for p in LINUX_ONLY]
 
 
 def jobs_for(path: str) -> tuple[str, ...]:
@@ -165,6 +168,13 @@ def jobs_for(path: str) -> tuple[str, ...]:
         if any(p.match(path) for p in patterns):
             return jobs
     return ALL
+
+
+def perf_builds(path: str) -> bool:
+    """Whether `path` can change perf's binaries or what they run: what perf
+    measures, and the Linux-only code linked in beside it. Binaries built from
+    two commits differing in nothing like this are the same (gate_base.py)."""
+    return "perf" in jobs_for(path) or any(p.match(path) for p in _LINUX_ONLY)
 
 
 def select(paths: list[str] | None, event: str, labels: set[str] = frozenset()) -> tuple[dict[str, bool], dict[str, str]]:
