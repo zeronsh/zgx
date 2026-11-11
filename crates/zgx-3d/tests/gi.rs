@@ -16,9 +16,13 @@ struct Window {
 }
 impl Window {
     fn new(world: &World) -> Option<Self> {
-        // SAFETY: a test of ray-traced probes takes on wgpu's experimental
-        // contract (`request_ray_queries`).
-        unsafe { zgx_gpu::request_ray_queries() };
+        // `ZGX_GI_NO_RAY_QUERIES=1`: as on a device without them, to see
+        // these tests say they're skipped.
+        if std::env::var_os("ZGX_GI_NO_RAY_QUERIES").is_none_or(|v| v != "1") {
+            // SAFETY: a test of ray-traced probes takes on wgpu's
+            // experimental contract (`request_ray_queries`).
+            unsafe { zgx_gpu::request_ray_queries() };
+        }
         let gpu = match GpuRenderer::new(SIZE.0, SIZE.1) {
             Ok(gpu) => gpu,
             Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
@@ -127,6 +131,34 @@ fn around(rgba: &[u8], (x, y): (u32, u32), side: u32) -> [f32; 3] {
     sum.map(|v| v / (side * side) as f32)
 }
 
+/// Whether `world`'s last frame traced its probes. Where not (a device
+/// without ray queries: `zgx_gpu::ray_queries_status` says why), the test
+/// fails where a GPU is required (`ZGX_REQUIRE_GPU`, or
+/// `ZGX_REQUIRE_RAY_QUERIES=1`) or a golden is being blessed, naming the
+/// reason: a probe test that checked nothing never passes as one that did.
+/// `ZGX_GI_ALLOW_SKIP=1` lets it pass as skipped (a `GI-SKIPPED` line,
+/// shown with `--nocapture`), for a run on a device known to have none.
+fn traced(world: &World, test: &str) -> bool {
+    if world.probes_traced() {
+        return true;
+    }
+    let why = zgx_gpu::ray_queries_status();
+    let set = |name: &str| std::env::var_os(name).is_some_and(|v| v == "1");
+    let required = (std::env::var_os("ZGX_REQUIRE_GPU").is_some() && !set("ZGX_GI_ALLOW_SKIP"))
+        || set("ZGX_REQUIRE_RAY_QUERIES")
+        || set("ZGX_BLESS");
+    assert!(
+        !required,
+        "{test} traced no probes ({:?}; ray queries {why:?}): set ZGX_GI_ALLOW_SKIP=1 to skip",
+        world.probes_status()
+    );
+    eprintln!(
+        "GI-SKIPPED {test}: probes not traced ({:?}; ray queries {why:?})",
+        world.probes_status()
+    );
+    false
+}
+
 /// Draws as a window's frame clock would while the world's view animates
 /// (this window has none), until it stops (at most `most` frames): the
 /// frames it drew.
@@ -155,8 +187,10 @@ fn probes_carry_the_walls_colours_into_the_room_and_light_what_the_lamp_misses()
     save("room-direct", &direct);
     let probes = world.add_probes(volume()).unwrap();
     let frames = settle(&mut window, &world, 2000);
-    if !world.probes_traced() {
-        eprintln!("no ray queries on this device: probes untested");
+    if !traced(
+        &world,
+        "probes_carry_the_walls_colours_into_the_room_and_light_what_the_lamp_misses",
+    ) {
         return;
     }
     let lit = window.pixels();
@@ -195,7 +229,10 @@ fn a_still_room_stops_drawing_once_its_probes_converge_and_starts_again_as_the_l
     };
     world.add_probes(volume().per_frame(216)).unwrap();
     let frames = settle(&mut window, &world, 500);
-    if !world.probes_traced() {
+    if !traced(
+        &world,
+        "a_still_room_stops_drawing_once_its_probes_converge_and_starts_again_as_the_lamp_moves",
+    ) {
         return;
     }
     // Every probe once a frame: a round a frame.
@@ -235,7 +272,10 @@ fn a_room_reached_through_changes_draws_as_a_fresh_one() {
         return;
     };
     settle(&mut fresh, &fresh_world, 2000);
-    if !fresh_world.probes_traced() {
+    if !traced(
+        &fresh_world,
+        "a_room_reached_through_changes_draws_as_a_fresh_one",
+    ) {
         return;
     }
     let expected = fresh.pixels();
@@ -328,7 +368,7 @@ fn the_probe_lit_room_matches_its_golden() {
         return;
     };
     settle(&mut window, &world, 2000);
-    if !world.probes_traced() {
+    if !traced(&world, "the_probe_lit_room_matches_its_golden") {
         return;
     }
     let actual = window.pixels();
@@ -400,7 +440,10 @@ fn turning_the_camera_between_lamps_doesnt_converge_the_probes_again() {
     };
     world.add_probes(volume().per_frame(216)).unwrap();
     settle(&mut window, &world, 500);
-    if !world.probes_traced() {
+    if !traced(
+        &world,
+        "turning_the_camera_between_lamps_doesnt_converge_the_probes_again",
+    ) {
         return;
     }
     let aim = |x: f32| {
@@ -433,7 +476,10 @@ fn a_mesh_rays_dont_see_moving_doesnt_converge_the_probes_again() {
     };
     world.add_probes(volume().per_frame(216)).unwrap();
     settle(&mut window, &world, 500);
-    if !world.probes_traced() {
+    if !traced(
+        &world,
+        "a_mesh_rays_dont_see_moving_doesnt_converge_the_probes_again",
+    ) {
         return;
     }
     world.set_transform(pane, Transform::at([-0.4, 1., 0.5]));
@@ -460,6 +506,7 @@ fn a_world_says_what_its_probes_did() {
         matches!(status, ProbesStatus::Traced | ProbesStatus::NoRayQueries),
         "{status:?}"
     );
+    traced(&world, "a_world_says_what_its_probes_did");
     assert_eq!(world.probes_traced(), status == ProbesStatus::Traced);
     // The device says why it traces or not.
     assert_eq!(
@@ -490,7 +537,11 @@ fn probes_light_a_world_shading_through_clusters_and_cascades() {
         world.add_probes(volume().per_frame(216)).unwrap();
         let mut window = Window::new(&world)?;
         settle(&mut window, &world, 500);
-        (world.probes_status() == ProbesStatus::Traced).then(|| window.pixels())
+        traced(
+            &world,
+            "probes_light_a_world_shading_through_clusters_and_cascades",
+        )
+        .then(|| window.pixels())
     };
     let Some(plain) = shade(false) else {
         return;
@@ -529,7 +580,11 @@ fn a_ray_bringing_no_finite_light_leaves_the_probes_finite() {
         world.add_probes(volume().per_frame(216)).unwrap();
         let mut window = Window::new(&world)?;
         settle(&mut window, &world, 500);
-        world.probes_traced().then(|| window.pixels())
+        traced(
+            &world,
+            "a_ray_bringing_no_finite_light_leaves_the_probes_finite",
+        )
+        .then(|| window.pixels())
     };
     let (Some(clean), Some(hot)) = (shade(false), shade(true)) else {
         return;
