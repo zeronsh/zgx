@@ -29,9 +29,21 @@ name: Rust
 # are served first come, first served, across both repositories: the admit
 # job's name carries the run's reservation (`admit [linux=3 windows=1
 # macos=1] #123`), which every waiting run, here and in zeron, reads.
-# zeron's runs list this workflow as a peer by its file name (ci.yml): keep
-# it. admit.py is zeron's scripts/ci/admit.py, vendored unchanged: change it
-# there first (see its header). zeron's docs/reference/ci.md has the details.
+#
+# Releases go first. release.yml's dry run has an admit job too, named
+# `admit [linux=1 windows=1 macos=1] release`, as do zeron's release.yml and
+# zgx-beta.yml. A run claiming `release` goes ahead of every CI run, locked
+# and ci:priority ones included, but only when it's a run of its repository's
+# release workflow (admit.py RELEASE_WORKFLOWS, or CI_RELEASE_WORKFLOWS)
+# started by a tag or by hand: a pull request's run is never a release,
+# whatever its admit job says. Workflows that aren't admitted (the site,
+# changelog, perf-base, the cache janitor) are only seen: what their jobs
+# run or queue for counts as held.
+#
+# zeron's runs list this workflow and release.yml as a peer's by their file
+# names: keep them. admit.py is zeron's scripts/ci/admit.py, vendored
+# unchanged: change it there first (see its header). zeron's
+# docs/reference/ci.md has the details.
 #
 # Labels on a pull request (adding one needs the triage role):
 #   ci:perf      run perf even though the change doesn't touch what it measures
@@ -47,8 +59,11 @@ name: Rust
 #   CI_ADMISSION         off: start every run at once (the kill switch)
 #   CI_DEBOUNCE_SECONDS  a pull request run waits this long for further pushes first (60)
 #   CI_LOCK_HOURS        how long a ci:lock label holds runners (6)
-#   CI_PEERS             the other repositories in the queue (zeronsh/zeron:ci.yml)
-#   CI_SEE_OUTSIDE       off: ignore runs of other workflows (releases, the site)
+#   CI_PEERS             the other repositories in the queue, their CI's workflow
+#                        first (zeronsh/zeron:ci.yml,release.yml,zgx-beta.yml)
+#   CI_RELEASE_WORKFLOWS the release workflows, first in the queue (release.yml;
+#                        `owner/repo:a.yml` for another repository's)
+#   CI_SEE_OUTSIDE       off: ignore runs of workflows that aren't admitted (the site)
 # Admission never blocks CI: after 2 hours, or when the API fails, a run starts.
 on:
   push:
@@ -122,10 +137,12 @@ jobs:
           CI_ADMISSION: ${{ vars.CI_ADMISSION }}
           CI_DEBOUNCE_SECONDS: ${{ vars.CI_DEBOUNCE_SECONDS }}
           CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
-          # The other repository with admitted CI on the same runners: one queue, one budget.
+          # The other repository with admitted CI on the same runners: one queue, one budget,
+          # its release workflows ahead of everyone, as this repository's release.yml.
           # (Read with this token: it's public. Its other workflows, and this repository's,
           # count as holding what they run; CI_SEE_OUTSIDE=off ignores them.)
-          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zeron:ci.yml' }}
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zeron:ci.yml,release.yml,zgx-beta.yml' }}
+          CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
           CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
           # The pull request's head as this run tests it: a newer push supersedes the run.
           CI_PR: ${{ needs.plan.outputs.pr }}

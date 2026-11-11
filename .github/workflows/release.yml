@@ -16,7 +16,41 @@ permissions:
   contents: read
 
 jobs:
+  # Waits until the three platforms' runners are free (.github/ci/admit.py, as
+  # ci.yml's admit job). A tag's or a by-hand run is a release in the queue
+  # shared with CI and zeron: it goes first. Its name carries the reservation,
+  # the three dry-run jobs. Admission fails open: CI_ADMISSION=off, or API
+  # trouble, starts it at once.
+  admit:
+    name: "admit [linux=1 windows=1 macos=1] release"
+    runs-on: ubuntu-latest
+    # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read  # ci:priority / ci:lock labels and pull request heads
+      issues: read  # when ci:lock was added
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/ci
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_RESERVATION: linux=1 windows=1 macos=1
+          CI_BUDGET_TOTAL: ${{ vars.CI_BUDGET_TOTAL }}
+          CI_BUDGET_MACOS: ${{ vars.CI_BUDGET_MACOS }}
+          CI_BUDGET_WINDOWS: ${{ vars.CI_BUDGET_WINDOWS }}
+          CI_ADMISSION: ${{ vars.CI_ADMISSION }}
+          CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zeron:ci.yml,release.yml,zgx-beta.yml' }}
+          CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
+          CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
+          MAX_WAIT_MINUTES: 120
+        run: python3 -I .github/ci/admit.py
+
   dry-run:
+    needs: admit
     strategy:
       fail-fast: false
       matrix:

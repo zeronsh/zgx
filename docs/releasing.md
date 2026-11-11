@@ -62,7 +62,7 @@ Where a patch adds an API zgx calls (winit's `xdg_surface`, `text_drop` and `Sel
 
 ## What a release checks
 
-`.github/workflows/release.yml` runs on a `v*` tag, or by hand (Actions → Release dry run), on Linux, macOS and Windows (each has fallbacks of its own to build). It checks that the tag is the workspace's version, then runs `scripts/release_check.sh`:
+`.github/workflows/release.yml` runs on a `v*` tag, or by hand (Actions → Release dry run), on Linux, macOS and Windows (each has fallbacks of its own to build). Its `admit` job first waits for those three runners, as a release: ahead of every CI run in the queue shared with zeron (see `.github/workflows/ci.yml`'s header). Each platform's job then checks that the tag is the workspace's version, then runs `scripts/release_check.sh`:
 
 1. Each fork is packaged and built from its package, against crates.io.
 2. Every published workspace crate is packaged and built from its package, in dependency order (`cargo publish --workspace --dry-run`). That build leaves the workspace's `[patch.crates-io]` out: winit, wgpu-hal and AccessKit come from crates.io, as an app depending on zgx gets them, so what only builds with a vendored patch fails it. The forks, which crates.io has only once the release publishes them, are given from `vendor/` (`--config 'patch.crates-io.zgx-cosmic-text.path="vendor/cosmic-text"'`) for that run alone.
