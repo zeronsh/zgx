@@ -52,6 +52,11 @@ struct Frames {
     target: wgpu::Texture,
     painter: Box<dyn Viewport>,
     start: Instant,
+    /// Times its painter draws each frame (a view shown in that many boxes).
+    boxes: usize,
+    /// A second painter of the world (`World::viewport`) and its target,
+    /// drawing each frame after the first.
+    second: Option<(Box<dyn Viewport>, wgpu::Texture)>,
 }
 impl Frames {
     fn new(world: &World) -> Option<Self> {
@@ -60,50 +65,54 @@ impl Frames {
     /// On a device asked for `limits`.
     fn with_limits(world: &World, limits: wgpu::Limits) -> Option<Self> {
         let (device, queue) = device(limits)?;
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: None,
-            size: wgpu::Extent3d {
-                width: SIDE,
-                height: SIDE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[FORMAT.add_srgb_suffix()],
-        });
         Some(Self {
+            target: target(&device),
             device,
             queue,
-            target,
             painter: Box::new(world.viewport()),
             start: Instant::now(),
+            boxes: 1,
+            second: None,
         })
+    }
+    /// With a second painter of `world` beside the first, on its device.
+    fn with_second(mut self, world: &World) -> Self {
+        self.second = Some((Box::new(world.viewport()), target(&self.device)));
+        self
     }
     /// A frame at `seconds` of frame time.
     fn draw(&mut self, seconds: f64) {
-        let view = self.target.create_view(&Default::default());
-        let srgb = self.target.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(FORMAT.add_srgb_suffix()),
-            ..Default::default()
-        });
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let mut frame = ViewportFrame::new(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            &view,
-            FORMAT,
-            (SIDE, SIDE),
-            1.,
-        );
-        frame.target_srgb = Some(&srgb);
-        frame.time = self.start + Duration::from_secs_f64(seconds);
-        self.painter.render(&mut frame);
+        let time = self.start + Duration::from_secs_f64(seconds);
+        for _ in 0..self.boxes {
+            paint(
+                &mut *self.painter,
+                (&self.device, &self.queue, &mut encoder),
+                &self.target,
+                time,
+            );
+        }
+        if let Some((painter, target)) = &mut self.second {
+            paint(
+                &mut **painter,
+                (&self.device, &self.queue, &mut encoder),
+                target,
+                time,
+            );
+        }
         self.queue.submit([encoder.finish()]);
     }
+    /// The second painter's target's pixels, BGRA.
+    fn second_pixels(&self) -> Vec<u8> {
+        pixels_of(&self.device, &self.queue, &self.second.as_ref().unwrap().1)
+    }
+    /// The target's pixels, BGRA.
+    fn pixels(&self) -> Vec<u8> {
+        pixels_of(&self.device, &self.queue, &self.target)
+    }
+}
+
+impl Frames {
     /// Frames at `from` until the world's particles' pipelines are made
     /// (on their thread): its particles step from the next.
     fn ready(&mut self, world: &World, from: f64) {
@@ -128,38 +137,73 @@ impl Frames {
         }
         at
     }
-    /// The target's pixels, BGRA.
-    fn pixels(&self) -> Vec<u8> {
-        let row = (SIDE * 4).next_multiple_of(256);
-        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: None,
-            size: u64::from(row * SIDE),
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = self.device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            self.target.as_image_copy(),
-            wgpu::TexelCopyBufferInfo {
-                buffer: &buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row),
-                    rows_per_image: None,
-                },
+}
+
+/// A target of the frames' size and format.
+fn target(device: &wgpu::Device) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: SIDE,
+            height: SIDE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[FORMAT.add_srgb_suffix()],
+    })
+}
+
+/// `painter`'s frame at `time` into `target`.
+fn paint(
+    painter: &mut dyn Viewport,
+    (device, queue, encoder): (&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder),
+    target: &wgpu::Texture,
+    time: Instant,
+) {
+    let view = target.create_view(&Default::default());
+    let srgb = target.create_view(&wgpu::TextureViewDescriptor {
+        format: Some(FORMAT.add_srgb_suffix()),
+        ..Default::default()
+    });
+    let mut frame = ViewportFrame::new(device, queue, encoder, &view, FORMAT, (SIDE, SIDE), 1.);
+    frame.target_srgb = Some(&srgb);
+    frame.time = time;
+    painter.render(&mut frame);
+}
+
+/// `target`'s pixels, BGRA.
+fn pixels_of(device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::Texture) -> Vec<u8> {
+    let row = (SIDE * 4).next_multiple_of(256);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: u64::from(row * SIDE),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        target.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: None,
             },
-            self.target.size(),
-        );
-        self.queue.submit([encoder.finish()]);
-        buffer.map_async(wgpu::MapMode::Read, .., |_| {});
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .unwrap();
-        let mapped = buffer.slice(..).get_mapped_range();
-        (0..SIDE as usize)
-            .flat_map(|y| mapped[y * row as usize..][..SIDE as usize * 4].to_vec())
-            .collect()
-    }
+        },
+        target.size(),
+    );
+    queue.submit([encoder.finish()]);
+    buffer.map_async(wgpu::MapMode::Read, .., |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let mapped = buffer.slice(..).get_mapped_range();
+    (0..SIDE as usize)
+        .flat_map(|y| mapped[y * row as usize..][..SIDE as usize * 4].to_vec())
+        .collect()
 }
 
 fn pixel(pixels: &[u8], x: usize, y: usize) -> [u8; 4] {
@@ -688,4 +732,223 @@ fn values_past_reason_set_on_an_emitter_are_held_to_it() {
     world.set_emitter_lifetime(id, 1.0..f32::INFINITY);
     world.burst(id, 1);
     assert!(world.view().animating());
+}
+
+/// How a frame is made after its meshes are drawn.
+#[derive(Clone, Copy, Debug)]
+enum Look {
+    Plain,
+    /// The post chain on, as nothing: a bloom of none.
+    #[cfg(feature = "post")]
+    Post,
+    /// Temporal antialiasing: each frame a fraction of a pixel aside (the
+    /// meshes' jittered matrices, which the particles get too), blended
+    /// with those before.
+    #[cfg(feature = "post")]
+    Taa,
+}
+const LOOKS: &[Look] = &[
+    Look::Plain,
+    #[cfg(feature = "post")]
+    Look::Post,
+    #[cfg(feature = "post")]
+    Look::Taa,
+];
+
+/// The middle pixel of a world with an unlit blue cube at the origin and a
+/// red `blend` burst at `z` (the camera at 4: past 0.5 in front of the
+/// cube, past -0.5 behind it), made with `look`.
+fn middle_with_a_cube(blend: Blend, z: f32, look: Look) -> Option<[u8; 4]> {
+    let world = world();
+    let mut blue = Material::rgb(0x0000ff);
+    blue.unlit = true;
+    world.add(Object::mesh(Geometry::cuboid(1., 1., 1.), blue));
+    match look {
+        Look::Plain => {}
+        #[cfg(feature = "post")]
+        Look::Post => world.set_post(Post {
+            bloom: Some(Bloom { intensity: 0. }),
+            ..Default::default()
+        }),
+        #[cfg(feature = "post")]
+        Look::Taa => world.set_antialiasing(Antialiasing::Taa),
+    }
+    world
+        .add_emitter(
+            Emitter::new(16)
+                .spawn(Spawn::point([0., 0., z]))
+                .burst(16)
+                .lifetime(10.0..10.0)
+                .size(0.5..0.5)
+                .color([1., 0., 0., 1.])
+                .draw(Shape::Billboard, blend),
+        )
+        .unwrap();
+    let mut frames = Frames::new(&world)?;
+    frames.ready(&world, 0.);
+    // Temporal antialiasing settles over its 8 frames: a quarter second.
+    frames.run(0., 0.25);
+    Some(pixel(&frames.pixels(), 32, 32))
+}
+
+#[test]
+fn an_emitter_behind_a_cube_is_hidden_and_one_in_front_shows_however_the_frame_is_made() {
+    for &look in LOOKS {
+        for blend in [Blend::Alpha, Blend::Additive] {
+            let Some(behind) = middle_with_a_cube(blend, -1.5, look) else {
+                return;
+            };
+            assert_eq!(behind, [0, 0, 255, 255], "{blend:?} behind, {look:?}");
+            let front = middle_with_a_cube(blend, 1.5, look).unwrap();
+            // Alpha: red over the blue; additive: red added to it.
+            let expected = match blend {
+                Blend::Alpha => [255, 0, 0, 255],
+                Blend::Additive => [255, 0, 255, 255],
+            };
+            assert_eq!(front, expected, "{blend:?} in front, {look:?}");
+        }
+    }
+}
+
+#[cfg(feature = "post")]
+#[test]
+fn a_bright_spark_blooms_with_the_scene() {
+    // A small additive spark, eight times white, before a black wall.
+    let lit = |bloom: Option<Bloom>| {
+        let world = world();
+        let mut black = Material::rgb(0x000000);
+        black.unlit = true;
+        world.add(Object::mesh(Geometry::cuboid(20., 20., 0.1), black).at([0., 0., -3.]));
+        world.set_post(Post {
+            bloom,
+            ..Default::default()
+        });
+        world
+            .add_emitter(
+                Emitter::new(1)
+                    .burst(1)
+                    .lifetime(10.0..10.0)
+                    .size(0.2..0.2)
+                    .color([8., 8., 8., 1.])
+                    .draw(Shape::Billboard, Blend::Additive),
+            )
+            .unwrap();
+        let mut frames = Frames::new(&world)?;
+        frames.ready(&world, 0.);
+        frames.draw(1. / 60.);
+        let pixels = frames.pixels();
+        // Pixels any light reaches.
+        Some(
+            (0..SIDE as usize * SIDE as usize)
+                .filter(|i| pixel(&pixels, i % SIDE as usize, i / SIDE as usize)[0] > 4)
+                .count(),
+        )
+    };
+    let Some(alone) = lit(None) else {
+        return;
+    };
+    let bloomed = lit(Some(Bloom { intensity: 0.3 })).unwrap();
+    assert!(alone > 0, "the spark shows");
+    // Its glare spreads well past it.
+    assert!(bloomed > alone * 3, "{alone} lit alone, {bloomed} bloomed");
+}
+
+/// `world` (a burst of discs living a second at its middle) drawn by
+/// `frames` to 0.6 s of frame time: whether they still show in each
+/// painter's target (at double the world's rate they'd have died).
+fn alive_at_six_tenths(world: &World, frames: &mut Frames) -> (bool, Option<bool>) {
+    frames.ready(world, 0.);
+    frames.run(0., 0.6);
+    let lit = |pixels: Vec<u8>| pixel(&pixels, 32, 32)[0] > 200;
+    let second = frames.second.is_some().then(|| lit(frames.second_pixels()));
+    (lit(frames.pixels()), second)
+}
+
+fn a_seconds_burst(world: &World) {
+    world
+        .add_emitter(
+            Emitter::new(16)
+                .burst(16)
+                .lifetime(1.0..1.0)
+                .size(1.0..1.0)
+                .color([1., 0., 0., 1.]),
+        )
+        .unwrap();
+}
+
+#[test]
+fn a_world_shown_in_two_boxes_steps_its_particles_once_a_frame() {
+    let world = world();
+    a_seconds_burst(&world);
+    let Some(mut frames) = Frames::new(&world) else {
+        return;
+    };
+    frames.boxes = 2;
+    assert_eq!(alive_at_six_tenths(&world, &mut frames), (true, None));
+}
+
+#[test]
+fn two_painters_of_one_world_step_its_particles_once_a_frame_and_both_draw_them() {
+    let world = world();
+    a_seconds_burst(&world);
+    let Some(frames) = Frames::new(&world) else {
+        return;
+    };
+    let mut frames = frames.with_second(&world);
+    assert_eq!(
+        alive_at_six_tenths(&world, &mut frames),
+        (true, Some(true)),
+        "alive at the world's rate, and drawn by both"
+    );
+}
+
+/// Through a real renderer, which reads the interface's clock once a window
+/// frame (here a virtual one, moved by the test): a world's view in two
+/// boxes of a window steps its particles once a frame, and both boxes show
+/// them.
+#[test]
+fn a_world_shown_in_two_boxes_of_a_window_steps_its_particles_once_a_frame() {
+    use zgx::{compose::prelude::*, widgets::Ui};
+    let clock = zgx::clock::VirtualClock::new();
+    let world = world();
+    a_seconds_burst(&world);
+    let mut gpu = match zgx_gpu::GpuRenderer::new(2 * SIDE, SIDE) {
+        Ok(gpu) => gpu,
+        Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+            panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
+        }
+        Err(_) => return,
+    };
+    let side = SIDE as f32;
+    let mut ui = Ui::new(2. * side, side);
+    ui.mount(
+        div()
+            .size(2. * side, side)
+            .flex_row()
+            .child(gpu_view("World", world.view()).size(side, side))
+            .child(gpu_view("World", world.view()).size(side, side)),
+    );
+    let mut draw = || {
+        world.view().invalidate();
+        ui.prepare_frame();
+        let report = ui.scene.borrow_mut().flush();
+        gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+    };
+    // Frames at the clock's start until the pipelines are made (up to 10 s
+    // of wall time: compiling isn't what's tested).
+    let started = Instant::now();
+    while !world.particles_ready() {
+        assert!(started.elapsed() < Duration::from_secs(10), "not made");
+        draw();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // To 0.6 s at 60 frames a second, each frame drawing the view twice:
+    // stepped twice a frame, the second-long burst would have died.
+    for frame in 1..=36u64 {
+        clock.advance(Duration::from_millis(frame * 50 / 3), || {});
+        draw();
+    }
+    let pixels = gpu.readback().unwrap();
+    let lit = |x: u32| pixels[((SIDE / 2 * 2 * SIDE + x) * 4) as usize] > 200;
+    assert!(lit(SIDE / 2) && lit(SIDE + SIDE / 2), "alive in both boxes");
 }

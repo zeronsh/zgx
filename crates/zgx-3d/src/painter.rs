@@ -3,7 +3,8 @@
 //! `compute` feature, it runs the app's compute passes marked before and
 //! after the frame, in the frame's encoder on either side of the renderer's,
 //! and moves the app's readbacks along; with `particles`, it steps the
-//! world's emitters before the frame and draws them after. A world with
+//! world's emitters before the frame (the renderer draws them with the
+//! meshes). A world with
 //! none of these costs one flag and one test a frame.
 //!
 //! What its frame holds unsettled is its own (`world::Settle`): a world drawn
@@ -93,7 +94,7 @@ impl<V: Viewport> Viewport for Painter<V> {
         }
         #[cfg(feature = "particles")]
         if particles {
-            self.particles.after(&self.world, frame);
+            self.particles.after(&self.world);
         }
         #[cfg(feature = "compute")]
         if data {
@@ -106,7 +107,7 @@ impl<V: Viewport> Viewport for Painter<V> {
         #[cfg(feature = "compute")]
         self.data.device_changed(&self.world);
         #[cfg(feature = "particles")]
-        self.particles.device_changed();
+        self.particles.device_changed(&self.world);
         self.painter.device_changed();
     }
     fn rest(&mut self) {
@@ -117,7 +118,10 @@ impl<V: Viewport> Viewport for Painter<V> {
 }
 impl<V> Drop for Painter<V> {
     fn drop(&mut self) {
-        // Gone: what it held goes with it.
+        // Gone: what it held goes with it, and the world's particles'
+        // drawer keeps nothing of its renderer's.
         self.release();
+        #[cfg(feature = "particles")]
+        self.particles.dropped(&self.world);
     }
 }

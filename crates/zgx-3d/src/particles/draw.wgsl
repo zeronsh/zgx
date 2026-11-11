@@ -1,22 +1,25 @@
-// An emitter's particles drawn (particles/mod.rs): each a quad facing the
-// camera, or stretched along its motion, coloured and sized by its age,
-// soft at its edges. Read from the particles' buffer as instances, so no
-// vertex shader reads a storage buffer (tier B draws these too).
+// An emitter's particles drawn (particles/mod.rs) with the meshes, in their
+// pass (particles/draw.rs): each a quad facing the camera, or stretched
+// along its motion, coloured and sized by its age, soft at its edges. Read
+// from the particles' buffer as instances, so no vertex shader reads a
+// storage buffer (tier B draws these too).
+//
+// The frame's own uniforms (`frame`, binding 0, put before this text) give
+// the camera as the meshes are drawn and their look: exposed, mapped and
+// encoded as they are, or left in linear light where the post chain follows.
 
 // `DrawUniforms` in particles/gpu.rs.
 struct Draw {
-    view: mat4x4<f32>,
-    projection: mat4x4<f32>,
-    // Tone mapping (0 neutral, 1 ACES, 2 none), exposure as a factor,
-    // whether to encode sRGB here, pixels' height in clip space.
-    look: vec4<f32>,
+    // The camera's right and up, in the world.
+    right: vec4<f32>,
+    up: vec4<f32>,
     // 0 a billboard, 1 a streak; a streak's length in seconds of motion.
     shape: vec4<f32>,
     // Colour and size over life: at its start, a third, two thirds, end.
     colors: array<vec4<f32>, 4>,
     sizes: vec4<f32>,
 }
-@group(0) @binding(0) var<uniform> draw: Draw;
+@group(0) @binding(1) var<uniform> draw: Draw;
 
 struct Instance {
     @location(0) position: vec3<f32>,
@@ -64,23 +67,28 @@ fn vs(@builtin(vertex_index) vertex: u32, p: Instance) -> Out {
     let t = clamp(p.age / p.life, 0.0, 1.0);
     let corner = vec2(f32(vertex & 1u) * 2.0 - 1.0, f32(vertex >> 1u) * 2.0 - 1.0);
     let size = p.size * over_life(draw.sizes, t);
-    var at = draw.view * vec4(p.position, 1.0);
+    let right = draw.right.xyz;
+    let up = draw.up.xyz;
+    // Its offset from its middle along the camera's right and up.
+    var offset: vec2<f32>;
     if draw.shape.x > 0.5 {
-        let moving = (draw.view * vec4(p.velocity, 0.0)).xyz;
-        let across = length(moving.xy);
-        let along = select(vec2(0.0, 1.0), moving.xy / across, across > 1e-5);
+        let moving = vec2(dot(p.velocity, right), dot(p.velocity, up));
+        let across = length(moving);
+        let along = select(vec2(0.0, 1.0), moving / across, across > 1e-5);
         let side = vec2(-along.y, along.x);
         let stretch = across * draw.shape.y;
-        at = vec4(at.xy + along * corner.y * (stretch + size) * 0.5 + side * corner.x * size * 0.5, at.zw);
+        offset = along * corner.y * (stretch + size) * 0.5 + side * corner.x * size * 0.5;
     } else {
-        at = vec4(at.xy + corner * size * 0.5, at.zw);
+        offset = corner * size * 0.5;
     }
-    out.position = draw.projection * at;
+    let at = p.position + right * offset.x + up * offset.y;
+    out.position = frame.view_projection * vec4(at, 1.0);
     out.corner = corner;
     out.color = p.color * color_over_life(t);
     return out;
 }
 
+// As the meshes' (render/shader/display.wgsl).
 fn neutral(color: vec3<f32>) -> vec3<f32> {
     let start = 0.76;
     let desaturation = 0.15;
@@ -120,16 +128,18 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         edge = 1.0 - smoothstep(0.5, 1.0, length(in.corner));
     }
     let alpha = clamp(in.color.a * edge, 0.0, 1.0);
-    var rgb = max(in.color.rgb * draw.look.y, vec3(0.0));
-    if draw.look.x > 1.5 {
-        rgb = clamp(rgb, vec3(0.0), vec3(1.0));
-    } else if draw.look.x > 0.5 {
+    // Exposed and mapped as the meshes are (with the post chain: neither,
+    // and none encoded, its last pass doing all three).
+    var rgb = max(in.color.rgb * frame.params.z, vec3(0.0));
+    if frame.look.x > 1.5 {
+        // None.
+    } else if frame.look.x > 0.5 {
         rgb = aces(rgb);
     } else {
-        rgb = clamp(neutral(rgb), vec3(0.0), vec3(1.0));
+        rgb = neutral(rgb);
     }
-    if draw.look.z > 0.5 {
-        rgb = encode(rgb);
+    if frame.params.y > 0.5 {
+        rgb = encode(clamp(rgb, vec3(0.0), vec3(1.0)));
     }
     return vec4(rgb * alpha, alpha);
 }

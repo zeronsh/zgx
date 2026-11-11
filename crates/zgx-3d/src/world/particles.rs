@@ -9,11 +9,12 @@ impl World {
     /// Its emitters, made with the first call needing them; the world
     /// unsettled while one keeps it drawing.
     fn particles<T>(&self, f: impl FnOnce(&mut Particles) -> T) -> T {
+        self.make_particles();
         let on_gpu = self.caps().is_none_or(|caps| caps.compute);
         let view = self.view.clone();
         let mut inner = self.inner.borrow_mut();
         let inner = &mut *inner;
-        let particles = inner.particles.get_or_insert_with(Default::default);
+        let particles = particles_of(inner);
         let out = f(particles);
         let unsettled = particles.unsettled();
         // Its pools count with the app's data, under its cap.
@@ -89,10 +90,11 @@ impl World {
                 });
             }
         }
+        self.make_particles();
         let view = self.view.clone();
         let mut inner = self.inner.borrow_mut();
         let inner = &mut *inner;
-        let particles = inner.particles.get_or_insert_with(Default::default);
+        let particles = particles_of(inner);
         let bytes = particles.pool_bytes(max, on_gpu);
         let freed = replaced.map_or(0, |m| particles.pool_bytes(m, on_gpu));
         let data = inner
@@ -274,5 +276,25 @@ impl World {
     pub fn set_particles_on_cpu(&self, on: bool) {
         self.particles(|p| p.on_cpu = on);
         self.view.invalidate();
+    }
+}
+
+/// `inner`'s particles (`World::make_particles` made them).
+fn particles_of(inner: &mut super::Inner) -> &mut Particles {
+    inner.particles.get_or_insert_with(Default::default)
+}
+
+impl World {
+    /// Its particles made with its first emitter, their drawer registered:
+    /// drawn with the meshes from then on (a world with none has no
+    /// drawer).
+    fn make_particles(&self) {
+        if self.inner.borrow().particles.is_some() {
+            return;
+        }
+        let particles = Box::<Particles>::default();
+        let draw = particles.draw.clone();
+        self.inner.borrow_mut().particles = Some(particles);
+        self.add_scene_draw(draw);
     }
 }

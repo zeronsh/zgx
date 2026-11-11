@@ -1,10 +1,8 @@
 //! A painter's side of its world's particles: each emitter's pool on the
-//! device, the update pass recorded before the frame, and the draw after
-//! the meshes.
-//!
-//! Until the renderer's pass list draws particles inside its main pass
-//! (with its depth), they're drawn in a pass of their own over the frame:
-//! in front of every mesh.
+//! device and the update pass recorded before the frame; the pools then
+//! handed to the world's drawer (`draw::ParticleDraw`), which the renderer
+//! calls in its pass with the meshes.
+use super::draw::ParticleDraw;
 use super::{
     Blend, CPU_PARTICLES, Collide, Force, Live, MAX_STEP, Particles, Region, Response, Shape,
     UNSETTLED,
@@ -15,7 +13,10 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     rc::Weak,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 use zgx_gpu::{viewport::ViewportFrame, wgpu};
 
@@ -41,9 +42,8 @@ pub(crate) struct Uniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct DrawUniforms {
-    view: [[f32; 4]; 4],
-    projection: [[f32; 4]; 4],
-    look: [f32; 4],
+    right: [f32; 4],
+    up: [f32; 4],
     shape: [f32; 4],
     colors: [[f32; 4]; 4],
     sizes: [f32; 4],
@@ -134,7 +134,9 @@ struct Pool {
     update: wgpu::Buffer,
     draw: wgpu::Buffer,
     update_bind: Option<wgpu::BindGroup>,
-    draw_bind: wgpu::BindGroup,
+    /// Its group 0 for each renderer drawing it, by the drawer's prepare
+    /// each was made for, the newest first.
+    draw_binds: Vec<(u64, wgpu::BindGroup)>,
     /// Its particles, where the CPU updates them.
     cpu: Option<Vec<Particle>>,
     /// Particles its parents gave birth to (the next goes in this, modulo
@@ -152,85 +154,45 @@ struct Pool {
     used: u64,
 }
 
-/// Pipelines made on a thread of their own with the first frame.
+/// Pipelines made on a thread of their own with the first frame (none
+/// where the device runs no compute).
 struct Pipelines {
     update: Option<wgpu::ComputePipeline>,
     /// `update` giving birth into a sub-emitter's pool.
     update_events: Option<wgpu::ComputePipeline>,
-    /// Alpha's and additive's, for the frame's format.
-    draw: [wgpu::RenderPipeline; 2],
 }
 type Compiling = Arc<Mutex<Option<Pipelines>>>;
 
-#[derive(Default)]
-pub(crate) struct Device {
-    made: bool,
+/// A world's particles on one device (`Particles::devices`): its pools and
+/// update pipelines, shared by every painter drawing it there.
+pub(crate) struct Shared {
     compute: bool,
     update_layout: Option<wgpu::BindGroupLayout>,
     events_layout: Option<wgpu::BindGroupLayout>,
-    draw_layout: Option<wgpu::BindGroupLayout>,
-    format: Option<wgpu::TextureFormat>,
     compiling: Option<Compiling>,
     pipelines: Option<Pipelines>,
     pools: HashMap<u64, Pool>,
-    last: Option<std::time::Instant>,
+    /// Steps taken on this device.
     index: u64,
 }
 
-impl Device {
-    pub(crate) fn device_changed(&mut self) {
-        *self = Self {
-            last: self.last,
-            index: self.index,
-            ..Self::default()
+impl Shared {
+    fn new(device: &wgpu::Device) -> Self {
+        let mut shared = Self {
+            compute: crate::Caps::of(device).compute,
+            update_layout: None,
+            events_layout: None,
+            compiling: None,
+            pipelines: None,
+            pools: HashMap::new(),
+            index: 0,
         };
+        shared.compiling = Some(shared.compile(device));
+        shared
     }
 
-    /// Before the frame: each emitter's step recorded (or taken on the
-    /// CPU). Whether the world has emitters (`after` is called only if so).
-    #[inline]
-    pub(crate) fn before(
-        &mut self,
-        world: &Weak<RefCell<Inner>>,
-        frame: &mut ViewportFrame<'_>,
-    ) -> bool {
-        let Some(world) = world.upgrade() else {
-            return false;
-        };
-        let mut inner = world.borrow_mut();
-        let Some(mut particles) = inner.particles.take() else {
-            return false;
-        };
-        self.step(&mut particles, &inner, frame);
-        inner.particles = Some(particles);
-        true
-    }
-
-    #[cold]
-    #[inline(never)]
-    fn step(&mut self, particles: &mut Particles, inner: &Inner, frame: &mut ViewportFrame<'_>) {
-        let device = frame.device;
-        let step = self.last.map_or(0., |last| {
-            frame
-                .time
-                .saturating_duration_since(last)
-                .as_secs_f32()
-                .min(MAX_STEP)
-        });
-        self.last = Some(frame.time);
-        self.index += 1;
-        let format = frame
-            .target_srgb
-            .map_or(frame.format, |_| frame.format.add_srgb_suffix());
-        if !self.made {
-            self.made = true;
-            self.compute = crate::Caps::of(device).compute;
-        }
-        if self.format != Some(format) {
-            self.format = Some(format);
-            self.pipelines = None;
-            self.compiling = Some(self.compile(device, format));
-        }
+    /// Whether its update pipelines are made (taking them if just done).
+    fn ready(&mut self) -> bool {
         if let Some(compiling) = &self.compiling {
             let done = compiling.lock().unwrap_or_else(|p| p.into_inner()).take();
             if let Some(done) = done {
@@ -238,35 +200,34 @@ impl Device {
                 self.compiling = None;
             }
         }
-        let Some(pipelines) = &self.pipelines else {
-            return;
-        };
-        // Frames step it once it's drawn: its clock starts then.
-        particles.ready = true;
+        self.pipelines.is_some()
+    }
+
+    /// The world's emitters stepped `step` seconds on: spawned, updated (on
+    /// the GPU, recorded in `frame`'s encoder, or on the CPU).
+    fn step(
+        &mut self,
+        particles: &mut Particles,
+        inner: &Inner,
+        frame: &mut ViewportFrame<'_>,
+        step: f32,
+    ) {
+        let device = frame.device;
         particles.time += f64::from(step);
         particles.steps = particles.steps.wrapping_add(1);
         let time = particles.time;
-        let on_gpu = self.compute && !particles.on_cpu && pipelines.update.is_some();
-        let (Some(update_layout), Some(draw_layout)) = (&self.update_layout, &self.draw_layout)
-        else {
+        let Some(pipelines) = &self.pipelines else {
             return;
         };
-        let aspect = frame.size.0 as f32 / frame.size.1.max(1) as f32;
-        let look = [
-            match inner.tone_mapping {
-                crate::ToneMapping::Neutral => 0.,
-                crate::ToneMapping::Aces => 1.,
-                crate::ToneMapping::Linear => 2.,
-            },
-            inner.exposure.exp2(),
-            if frame.target_srgb.is_none() && !frame.format.is_srgb() {
-                1.
-            } else {
-                0.
-            },
-            2. / frame.size.1.max(1) as f32,
-        ];
-        let (view, projection) = (inner.camera.view(), inner.camera.projection(aspect));
+        let on_gpu = self.compute && !particles.on_cpu && pipelines.update.is_some();
+        let Some(update_layout) = &self.update_layout else {
+            return;
+        };
+        // The camera's right and up in the world: its view's first rows.
+        let view = inner.camera.view().columns;
+        let right = [view[0][0], view[1][0], view[2][0], 0.];
+        let up = [view[0][1], view[1][1], view[2][1], 0.];
+        self.index += 1;
         let index = self.index;
         let seed_base = particles.steps.wrapping_mul(0x9e37_79b9);
         let slots_of = |live: &Live| {
@@ -318,10 +279,10 @@ impl Device {
             let pool = self
                 .pools
                 .entry(live.id)
-                .or_insert_with(|| make_pool(device, (update_layout, draw_layout), slots, on_gpu));
+                .or_insert_with(|| make_pool(device, update_layout, slots, on_gpu));
             // Made for the other way of updating: made again, from this frame.
             if pool.cpu.is_some() == on_gpu || pool.slots != slots {
-                *pool = make_pool(device, (update_layout, draw_layout), slots, on_gpu);
+                *pool = make_pool(device, update_layout, slots, on_gpu);
             }
             particles.pools.push((pool.slots, pool.cpu.is_some()));
             pool.used = index;
@@ -370,9 +331,8 @@ impl Device {
             }
             let e = &live.emitter;
             let draw = DrawUniforms {
-                view: view.columns,
-                projection: projection.columns,
-                look,
+                right,
+                up,
                 shape: match e.shape {
                     Shape::Billboard => [0.; 4],
                     Shape::Streak { length } => [1., length.max(0.), 0., 0.],
@@ -438,51 +398,50 @@ impl Device {
             .retain(|_, pool| pool.used == index && pool.cpu.is_none() == on_gpu);
     }
 
-    /// After the meshes: the particles drawn over the frame, and whether
-    /// any keeps the world drawing.
-    #[cold]
-    #[inline(never)]
-    pub(crate) fn after(&mut self, world: &Weak<RefCell<Inner>>, frame: &mut ViewportFrame<'_>) {
-        let Some(world) = world.upgrade() else {
+    /// `drawer`'s list for its current painter: each shown pool with its
+    /// binding for that painter's renderer (made on `device`, where the
+    /// pools are).
+    fn hand_to(&mut self, particles: &Particles, drawer: &mut ParticleDraw, device: &wgpu::Device) {
+        let Some((made, layout, uniforms)) = drawer.binding_on(device) else {
             return;
         };
-        if let Some(pipelines) = &self.pipelines
-            && self.pools.values().any(|pool| pool.shown)
-        {
-            let target = frame.target_srgb.unwrap_or(frame.target);
-            let mut pass = frame
-                .encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("3D particles"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                });
-            // Additive after alpha: light added over what alpha covers.
-            for blend in [Blend::Alpha, Blend::Additive] {
-                for pool in self.pools.values().filter(|p| p.shown && p.blend == blend) {
-                    pass.set_pipeline(&pipelines.draw[blend as usize]);
-                    pass.set_bind_group(0, &pool.draw_bind, &[]);
-                    pass.set_vertex_buffer(0, pool.particles.slice(..));
-                    pass.draw(0..4, 0..pool.slots);
-                }
+        for at in particles.order() {
+            let Some(pool) = particles.emitters[at]
+                .1
+                .as_ref()
+                .and_then(|live| self.pools.get_mut(&live.id))
+            else {
+                continue;
+            };
+            if !pool.shown || pool.failed {
+                continue;
             }
+            let bind = match pool.draw_binds.iter().find(|(m, _)| *m == made) {
+                Some((_, bind)) => bind.clone(),
+                None => {
+                    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("3D particles draw"),
+                        layout: &layout,
+                        entries: &[entry(0, &uniforms), entry(1, &pool.draw)],
+                    });
+                    // One a renderer drawing it: the newest few kept.
+                    pool.draw_binds.insert(0, (made, bind.clone()));
+                    pool.draw_binds.truncate(MOST_RENDERERS);
+                    bind
+                }
+            };
+            drawer.drawn.push(super::draw::Drawn {
+                particles: pool.particles.clone(),
+                slots: pool.slots,
+                bind,
+                made,
+                blend: pool.blend,
+            });
         }
-        let inner = world.borrow();
-        let unsettled = inner.particles.as_ref().is_some_and(|p| p.unsettled());
-        inner.unsettle(UNSETTLED, unsettled);
     }
 
-    /// The update and draw pipelines for `format`, made on a thread of
-    /// their own.
-    fn compile(&mut self, device: &wgpu::Device, format: wgpu::TextureFormat) -> Compiling {
+    /// The update pipelines, made on a thread of their own.
+    fn compile(&mut self, device: &wgpu::Device) -> Compiling {
         let update_layout = self
             .update_layout
             .get_or_insert_with(|| {
@@ -520,19 +479,6 @@ impl Device {
                 })
             })
             .clone();
-        let draw_layout = self
-            .draw_layout
-            .get_or_insert_with(|| {
-                device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("3D particles draw"),
-                    entries: &[layout_entry(
-                        0,
-                        wgpu::ShaderStages::VERTEX_FRAGMENT,
-                        wgpu::BufferBindingType::Uniform,
-                    )],
-                })
-            })
-            .clone();
         let slot: Compiling = Arc::default();
         let done = slot.clone();
         let (device, compute) = (device.clone(), self.compute);
@@ -563,27 +509,131 @@ impl Device {
             };
             let update = update_pipeline(&update_layout, "update");
             let update_events = update_pipeline(&events_layout, "update_events");
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("3D particles draw"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("draw.wgsl").into()),
-            });
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("3D particles draw"),
-                bind_group_layouts: &[Some(&draw_layout)],
-                immediate_size: 0,
-            });
-            let draw = [Blend::Alpha, Blend::Additive]
-                .map(|blend| draw_pipeline(&device, &layout, &module, format, blend));
             *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(Pipelines {
                 update,
                 update_events,
-                draw,
             });
         };
         if let Err(error) = crate::compute::compile_off_the_frame(make) {
-            eprintln!("zgx-3d: particles' pipelines can't be made ({error}): none drawn");
+            eprintln!("zgx-3d: particles' pipelines can't be made ({error}): none updated");
         }
         slot
+    }
+}
+
+/// The renderers a pool keeps a binding for, at most (`World::view` and
+/// a few `World::viewport`s).
+const MOST_RENDERERS: usize = 4;
+
+/// A painter's side of its world's particles: who it is to the world's
+/// drawer.
+pub(crate) struct Device {
+    id: u64,
+}
+impl Default for Device {
+    fn default() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            id: NEXT.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+}
+
+impl Device {
+    /// Its device gone: what the world made on it is let go (by every
+    /// painter: wgpu tells devices apart by id, and a new device's can be
+    /// the gone one's).
+    pub(crate) fn device_changed(&mut self, world: &Weak<RefCell<Inner>>) {
+        self.forget(world, true);
+    }
+    /// Gone: the drawer keeps nothing of its renderer's.
+    pub(crate) fn dropped(&mut self, world: &Weak<RefCell<Inner>>) {
+        self.forget(world, false);
+    }
+    fn forget(&mut self, world: &Weak<RefCell<Inner>>, devices: bool) {
+        let Some(world) = world.upgrade() else {
+            return;
+        };
+        let Ok(mut inner) = world.try_borrow_mut() else {
+            return;
+        };
+        if let Some(particles) = &mut inner.particles {
+            particles.draw.borrow_mut().forget(self.id);
+            if devices {
+                particles.devices.clear();
+            }
+        }
+    }
+
+    /// Before the frame: the world's emitters stepped, if no painter has
+    /// at this frame time (on the GPU, recorded in the frame's encoder, or
+    /// on the CPU), and handed to the drawer for this painter's renderer.
+    /// Whether the world has emitters (`after` is called only if so).
+    #[inline]
+    pub(crate) fn before(
+        &mut self,
+        world: &Weak<RefCell<Inner>>,
+        frame: &mut ViewportFrame<'_>,
+    ) -> bool {
+        let Some(world) = world.upgrade() else {
+            return false;
+        };
+        let mut inner = world.borrow_mut();
+        let Some(mut particles) = inner.particles.take() else {
+            return false;
+        };
+        self.step(&mut particles, &inner, frame);
+        inner.particles = Some(particles);
+        true
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn step(&mut self, particles: &mut Particles, inner: &Inner, frame: &mut ViewportFrame<'_>) {
+        let device = frame.device;
+        let mut shared = match particles.devices.iter().position(|(d, _)| d == device) {
+            Some(at) => particles.devices.remove(at).1,
+            None => Shared::new(device),
+        };
+        // The world steps once a frame time: whichever painter draws it
+        // first; at the same time again, it's only drawn.
+        let fresh = particles.clock != Some(frame.time);
+        let step = match particles.clock {
+            Some(last) if fresh => frame
+                .time
+                .saturating_duration_since(last)
+                .as_secs_f32()
+                .min(MAX_STEP),
+            _ => 0.,
+        };
+        particles.clock = Some(frame.time);
+        let drawer = particles.draw.clone();
+        let mut drawer = drawer.borrow_mut();
+        drawer.current = self.id;
+        drawer.drawn.clear();
+        // Stepped once it can be drawn (the drawer made for this painter's
+        // renderer, a frame after its first): its clock starts then.
+        if shared.ready() && drawer.ready() {
+            particles.ready = true;
+            if fresh {
+                shared.step(particles, inner, frame, step);
+            }
+            shared.hand_to(particles, &mut drawer, device);
+        }
+        particles.devices.insert(0, (device.clone(), shared));
+        particles.devices.truncate(2);
+    }
+
+    /// After the frame: whether any particle keeps the world drawing.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn after(&mut self, world: &Weak<RefCell<Inner>>) {
+        let Some(world) = world.upgrade() else {
+            return;
+        };
+        let inner = world.borrow();
+        let unsettled = inner.particles.as_ref().is_some_and(|p| p.unsettled());
+        inner.unsettle(UNSETTLED, unsettled);
     }
 }
 
@@ -611,75 +661,16 @@ fn layout_entry(
     }
 }
 
-fn draw_pipeline(
-    device: &wgpu::Device,
-    layout: &wgpu::PipelineLayout,
-    module: &wgpu::ShaderModule,
-    format: wgpu::TextureFormat,
-    blend: Blend,
-) -> wgpu::RenderPipeline {
-    const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
-        0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Float32, 4 => Float32x4, 5 => Float32
-    ];
-    let component = match blend {
-        Blend::Alpha => wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-            operation: wgpu::BlendOperation::Add,
-        },
-        Blend::Additive => wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Add,
-        },
-    };
-    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("3D particles draw"),
-        layout: Some(layout),
-        vertex: wgpu::VertexState {
-            module,
-            entry_point: Some("vs"),
-            compilation_options: Default::default(),
-            buffers: &[wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<Particle>() as u64,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &ATTRIBUTES,
-            }],
-        },
-        primitive: wgpu::PrimitiveState {
-            topology: wgpu::PrimitiveTopology::TriangleStrip,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: Default::default(),
-        fragment: Some(wgpu::FragmentState {
-            module,
-            entry_point: Some("fs"),
-            compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend: Some(wgpu::BlendState {
-                    color: component,
-                    alpha: component,
-                }),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-        }),
-        multiview_mask: None,
-        cache: None,
-    })
-}
-
 fn make_pool(
     device: &wgpu::Device,
-    (update_layout, draw_layout): (&wgpu::BindGroupLayout, &wgpu::BindGroupLayout),
+    update_layout: &wgpu::BindGroupLayout,
     slots: u32,
     on_gpu: bool,
 ) -> Pool {
     // Checked against the device's limits when the emitter was added; a
     // refusal still left here, not to the device's handler.
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    let mut pool = make_pool_in_scope(device, (update_layout, draw_layout), slots, on_gpu);
+    let mut pool = make_pool_in_scope(device, update_layout, slots, on_gpu);
     if let Some(error) = crate::compute::now(scope.pop()) {
         eprintln!("zgx-3d: a particle pool of {slots} couldn't be made: {error}");
         pool.failed = true;
@@ -689,7 +680,7 @@ fn make_pool(
 
 fn make_pool_in_scope(
     device: &wgpu::Device,
-    (update_layout, draw_layout): (&wgpu::BindGroupLayout, &wgpu::BindGroupLayout),
+    update_layout: &wgpu::BindGroupLayout,
     slots: u32,
     on_gpu: bool,
 ) -> Pool {
@@ -737,21 +728,13 @@ fn make_pool_in_scope(
             ],
         })
     });
-    let draw_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("3D particles draw"),
-        layout: draw_layout,
-        entries: &[wgpu::BindGroupEntry {
-            binding: 0,
-            resource: draw.as_entire_binding(),
-        }],
-    });
     Pool {
         slots,
         particles,
         update,
         draw,
         update_bind,
-        draw_bind,
+        draw_binds: Vec::new(),
         cpu: (!on_gpu).then(|| vec![Particle::default(); slots as usize]),
         born: on_gpu.then(|| {
             device.create_buffer(&wgpu::BufferDescriptor {

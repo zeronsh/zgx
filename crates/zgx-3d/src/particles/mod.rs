@@ -13,6 +13,7 @@
 //! particles may live: until its last spawn is older than its longest life.
 //! A world whose emitters are spent draws nothing.
 mod cpu;
+mod draw;
 mod gpu;
 
 pub(crate) use gpu::Device;
@@ -474,6 +475,18 @@ pub(crate) struct Particles {
     /// The last frame's pools, each emitter's in order: its slots and
     /// whether the CPU updated it (`World::particle_pools`, for tests).
     pub(crate) pools: Vec<(u32, bool)>,
+    /// What draws them with the meshes (registered on the world with its
+    /// first emitter).
+    pub(crate) draw: std::rc::Rc<std::cell::RefCell<draw::ParticleDraw>>,
+    /// The last frame time a painter drew it at: it steps once a frame
+    /// time, whichever painter draws it first (and however many boxes show
+    /// its view).
+    pub(crate) clock: Option<std::time::Instant>,
+    /// Its pools and update pipelines on the devices drawing it, the one
+    /// last drawn on first: at most two (a world's particles belong to one
+    /// device; a painter on another keeps its own, stepped only where it
+    /// draws first).
+    pub(crate) devices: Vec<(zgx_gpu::wgpu::Device, gpu::Shared)>,
 }
 impl Particles {
     /// `emitter`'s sub-emitter checked: one here and older than `added` (so
