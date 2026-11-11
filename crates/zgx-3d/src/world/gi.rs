@@ -129,6 +129,9 @@ pub(crate) struct Gi {
     /// seventh, kept out of the probes as any such ray is; 2 let in
     /// (`World::poison_probe_rays`).
     pub(crate) poison: u32,
+    /// The most triangles a frame's probe faces draw, in place of the
+    /// renderer's (`World::set_probe_face_budget`).
+    pub(crate) face_budget: Option<u64>,
 }
 impl Gi {
     /// Whether it has any volume.
@@ -228,6 +231,18 @@ impl World {
             inner.gi.poison = poison;
             // Laid out again: converging from nothing.
             inner.gi.layout += u64::from(changed);
+            changed
+        });
+    }
+    /// The most triangles a frame's probes may draw into their faces (on
+    /// a device without ray queries, or `set_probes_rasterised`) as it
+    /// picks how many to update, in place of the renderer's; `None`, the
+    /// renderer's. A frame updates one probe at least.
+    #[doc(hidden)]
+    pub fn set_probe_face_budget(&self, triangles: Option<u64>) {
+        self.change(|inner| {
+            let changed = inner.gi.face_budget != triangles;
+            inner.gi.face_budget = triangles;
             changed
         });
     }

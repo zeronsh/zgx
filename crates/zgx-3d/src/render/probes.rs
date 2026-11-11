@@ -176,6 +176,9 @@ struct Layout {
     light: Atlas,
     depth: Atlas,
     set: wgpu::Buffer,
+    /// Every probe's place, in order (as `probe_place` finds it): where
+    /// faces are culled from.
+    places: Vec<[f32; 3]>,
     /// Written once by a pass clearing them (a blit into a texture opens
     /// driver blocks on Metal; a render pass doesn't).
     cleared: bool,
@@ -184,6 +187,7 @@ struct Layout {
 fn layout(device: &wgpu::Device, world: &Inner) -> Layout {
     let gi = &world.gi;
     let mut set = SetUniform::default();
+    let mut places = Vec::new();
     let (mut total, mut rays, mut per_frame, mut far, mut nearest) = (0, 32, 0, 1f32, f32::MAX);
     for (slot, (_, volume)) in gi.each().enumerate() {
         let span = volume.max - volume.min;
@@ -225,6 +229,13 @@ fn layout(device: &wgpu::Device, world: &Inner) -> Layout {
             hi: [hi[0], hi[1], hi[2], 0.],
             fade: [fade[0], fade[1], fade[2], 0.],
         };
+        let c = volume.counts;
+        for local in 0..volume.probes() {
+            let at = [local % c[0], (local / c[0]) % c[1], local / (c[0] * c[1])];
+            places.push(std::array::from_fn(|i| {
+                [first.x, first.y, first.z][i] + at[i] as f32 * step[i]
+            }));
+        }
         total += volume.probes();
         rays = rays.max(volume.rays);
         per_frame += volume.per_frame;
@@ -257,6 +268,7 @@ fn layout(device: &wgpu::Device, world: &Inner) -> Layout {
         light,
         depth,
         set,
+        places,
         cleared: false,
     }
 }
@@ -490,8 +502,9 @@ pub(super) struct Probes {
     /// frame's (`trace_lights`).
     lights: Vec<TraceLight>,
     seen: Vec<TraceLight>,
-    /// The world's `Gi::poison`, as of this frame.
+    /// The world's `Gi::poison` and `Gi::face_budget`, as of this frame.
     poison: u32,
+    face_budget: u64,
 }
 
 /// Whether `world`'s meshes take their diffuse light from probes on this
@@ -608,8 +621,10 @@ pub(super) fn frame(
         lights: Vec::new(),
         seen: Vec::new(),
         poison: 0,
+        face_budget: super::probes_raster::BUDGET,
     });
     probes.poison = world.gi.poison;
+    probes.face_budget = world.gi.face_budget.unwrap_or(super::probes_raster::BUDGET);
     if probes
         .layout
         .as_ref()
@@ -1058,7 +1073,15 @@ fn update(
     } else {
         u32::MAX
     };
-    let count = layout.per_frame.min(layout.total - probes.done).min(most);
+    let mut count = layout.per_frame.min(layout.total - probes.done).min(most);
+    // Drawing faces: as many of those as fit the budget, each face culled.
+    if let Some(raster) = &mut tracer.raster {
+        let places: Vec<[f32; 3]> = (0..count)
+            .map(|k| layout.places[((probes.next + k) % layout.total) as usize])
+            .collect();
+        let cut = super::probes_raster::cut(layout.far);
+        count = raster.plan((device, queue), &places, cut, probes.face_budget);
+    }
     let size = u64::from(layout.per_frame * layout.rays) * 16;
     if tracer.rays.as_ref().is_none_or(|(_, have)| *have < size) {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -1670,21 +1693,42 @@ mod tests {
                 .raster
                 .as_ref()
                 .expect("faces");
-            (raster.buffers_made, raster.instance_bytes)
+            (
+                raster.buffers_made,
+                raster.instance_bytes,
+                raster.cluster_bytes,
+                raster.plans,
+            )
         };
         draw(&mut renderer);
-        let (made, written) = counts(&renderer);
-        // Three geometries' vertices and indices, and the instances'.
-        assert_eq!(made, 7);
+        let (made, written, clustered, _) = counts(&renderer);
+        // The geometries' indices, reordered, and cluster tables: the
+        // sphere's 4,096 triangles at least.
+        assert!(clustered > 4_096 * 12, "{clustered} bytes");
+        // Three geometries' vertices and indices, the instances', and the
+        // list of meshes each face's draws take.
+        assert_eq!(made, 8);
         world.set_transform(cube, Transform::at([2.2, 0.5, 0.]));
         draw(&mut renderer);
-        let (made_after, written_after) = counts(&renderer);
+        let (made_after, written_after, clustered_after, _) = counts(&renderer);
         assert_eq!(made_after, made, "a move made a buffer");
+        assert_eq!(clustered_after, clustered, "a move clustered again");
         assert_eq!(
             written_after - written,
             3 * std::mem::size_of::<super::super::probes_raster::Instance>() as u64,
             "a move wrote more than the three meshes' instances"
         );
+        // Converged (16 rounds, a round a frame), a world at rest culls
+        // and draws no faces.
+        for _ in 0..40 {
+            draw(&mut renderer);
+        }
+        let (.., plans) = counts(&renderer);
+        assert!(plans >= 16, "{plans} frames culled");
+        for _ in 0..5 {
+            draw(&mut renderer);
+        }
+        assert_eq!(counts(&renderer).3, plans, "a world at rest culled faces");
     }
 
     #[test]
