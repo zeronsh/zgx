@@ -177,9 +177,9 @@ CI runs on every push to main and every pull request (`.github/workflows/ci.yml`
 
 ## 3D probes (`gi`) on Windows
 
-zgx-3d's irradiance probes are traced by ray queries, which Direct3D 12 compiles only through DXC. With FXC, zgx's default when an app ships no `dxcompiler.dll`, the adapter offers none (`zgx_gpu::ray_queries_status()` is `CompilerIsFxc`). There, `cargo test -p zgx-3d --features gi --test gi` fails every test under `ZGX_REQUIRE_GPU`, naming that reason. `ZGX_GI_ALLOW_SKIP=1` passes them as skipped.
+zgx-3d's irradiance probes are traced by ray queries, which Direct3D 12 compiles only through DXC. With FXC, zgx's default when an app ships no `dxcompiler.dll`, the adapter offers none (`zgx_gpu::ray_queries_status()` is `CompilerIsFxc`), and the probes draw the scene into cube faces instead (`ProbesStatus::Rasterised`). There, `cargo test -p zgx-3d --features gi --test gi` runs every test on faces; none skips. The test that sets faces beside rays compares them with the adapter's committed traced golden (`gi_room.png`) instead, and fails under `ZGX_REQUIRE_GPU` or `ZGX_REQUIRE_GOLDENS` where there is none. A test skips (a `GI-SKIPPED` line) only where the device has neither rays nor faces, and that fails under `ZGX_REQUIRE_GPU` unless `ZGX_GI_ALLOW_SKIP=1`.
 
-To check them on Windows, run with DXC: `WGPU_DX12_COMPILER=dxc` and Microsoft's `dxcompiler.dll` beside the test binary (or on the path), plus `ZGX_REQUIRE_GPU=1 ZGX_REQUIRE_RAY_QUERIES=1`. The `warp` and `rtx-4090` goldens of `gi_room` are blessed that way.
+To check the rays on Windows, run with DXC: `WGPU_DX12_COMPILER=dxc` and Microsoft's `dxcompiler.dll` beside the test binary (or on the path), plus `ZGX_REQUIRE_GPU=1 ZGX_REQUIRE_RAY_QUERIES=1`. The `warp` and `dx12-nvidia-geforce-rtx-4090` goldens of `gi_room` are blessed that way, and their `gi_room_raster` under FXC.
 
 DXC 1.9 at `-Od` crashes (`cast<X>() argument of incompatible type!`) on a struct copied whole out of a uniform array inside a loop that returns. wgpu passes `-Zi -Od` in debug builds. The probes' shaders read their volumes through a pointer instead, and `probes_hold_no_volume_by_value` keeps it so on every platform. Reproduced on macOS with DXC 1.9.0.5512 and on Windows with 1.9.2602.17.
 
