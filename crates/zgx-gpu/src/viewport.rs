@@ -60,8 +60,11 @@ pub struct ViewportFrame<'a> {
     pub size: (u32, u32),
     /// Device pixels a point.
     pub scale: f32,
-    /// When it is drawn, on the interface's time (`zgx::clock::now`): a
-    /// virtual clock's while one runs, so a video's frames repeat.
+    /// When it is drawn. With the `view-features` feature, on the
+    /// interface's time (`zgx::clock::now`: a virtual clock's while one
+    /// runs, so a video's frames repeat), one instant for every view and box
+    /// of a window's frame; without it, the wall clock's as each view is
+    /// drawn.
     pub time: std::time::Instant,
 }
 

@@ -115,6 +115,10 @@ step "clippy 1.99 zgx-script no default features" \
 # shows only with them all on (93cc82512's world_bench) reached every lane.
 step "clippy 1.99 zgx-3d every feature" \
   cargo +1.99 clippy -p zgx-3d --all-features --all-targets --locked -- -D warnings
+# The workspace's clippy unifies zgx-gpu's `view-features` on (zgx-3d asks
+# for it): what a UI app builds, without it, is linted here.
+step "clippy 1.99 zgx-gpu, zgx-desktop without view-features" \
+  cargo +1.99 clippy -p zgx-gpu -p zgx-desktop --all-targets --locked -- -D warnings
 # And with each feature alone, its library and tests: a cfg gate that holds
 # only beside another feature (`post` without `compute`) passes both with
 # every feature and with none. The features are read from the manifest, so

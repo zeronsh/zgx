@@ -18200,6 +18200,8 @@ pub enum RayQueries {
     /// so none are asked of it: WARP (Microsoft's Basic Render Driver)
     /// sometimes loses the first triangle of an acceleration structure it
     /// builds on its threads (docs/validation.md). Probes draw faces there.
+    /// WARP reports this under FXC too, rather than `CompilerIsFxc`: DXC
+    /// wouldn't make it trace.
     DeclinedOnAdapter = 5,
 }
 #[cfg(feature = "view-features")]
