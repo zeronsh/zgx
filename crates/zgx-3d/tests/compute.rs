@@ -344,6 +344,9 @@ fn a_rated_pass_runs_at_its_rate_of_frame_time() {
     let start = std::time::Instant::now();
     let mut frames = 0;
     while start.elapsed().as_secs_f32() < 0.5 {
+        // Frames for other reasons every 4 ms (between its due times the
+        // world itself asks for none).
+        world.view().invalidate();
         window.draw();
         frames += 1;
         std::thread::sleep(std::time::Duration::from_millis(4));
@@ -980,4 +983,78 @@ fn a_sandboxed_pass_that_never_ends_ends() {
         "{:?}",
         &looped[..4]
     );
+}
+
+#[test]
+fn a_world_holds_at_most_1024_passes_and_a_sandboxed_shader_1_mib() {
+    let world = World::new();
+    let passes: Vec<ComputeId> = (0..1024)
+        .map(|_| {
+            world
+                .add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}"))
+                .unwrap()
+        })
+        .collect();
+    assert!(matches!(
+        world.add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}")),
+        Err(ComputeError::Limits(_))
+    ));
+    world.remove_compute(passes[0]);
+    assert!(
+        world
+            .add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}"))
+            .is_ok()
+    );
+    // A sandboxed shader past 1 MiB is refused before it's parsed.
+    let world = World::new();
+    let long = format!(
+        "{}@compute @workgroup_size(1) fn main() {{}}",
+        "//\n".repeat(400_000)
+    );
+    assert!(matches!(
+        world.add_compute(Compute::new(long.as_str()).sandboxed()),
+        Err(ComputeError::Limits(_))
+    ));
+}
+
+#[test]
+fn a_rated_pass_lets_its_world_rest_between_its_runs() {
+    let world = World::new();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let count = world.add_buffer(BufferDesc::storage::<u32>(1)).unwrap();
+    let pass = world
+        .add_compute(
+            Compute::new(
+                "@group(0) @binding(0) var<storage, read_write> count: array<u32>;
+                 @compute @workgroup_size(1) fn main() { count[0] += 1u; }",
+            )
+            .buffer("count", &count, Access::ReadWrite)
+            .at_rate(1.),
+        )
+        .unwrap();
+    assert!(world.view().animating(), "due at once");
+    window.compiled(&world, pass);
+    window.draw();
+    // Run once; its next run a second away: the world draws nothing
+    // between.
+    assert!(!world.view().animating(), "at rest until it's due");
+    let before = world.frames_drawn();
+    for _ in 0..30 {
+        window.draw();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(world.frames_drawn(), before, "no frames between runs");
+    // A pass at 120 a second is due every frame: it keeps drawing.
+    let fast = world
+        .add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}").at_rate(120.))
+        .unwrap();
+    window.compiled(&world, fast);
+    world.view().invalidate();
+    for _ in 0..5 {
+        window.draw();
+        std::thread::sleep(std::time::Duration::from_millis(8));
+    }
+    assert!(world.view().animating());
 }

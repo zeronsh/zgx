@@ -221,7 +221,10 @@ impl Compute {
         self
     }
     /// Runs `per_second` times a second of frame time while enabled, at most
-    /// once a frame: the world keeps drawing.
+    /// once a frame. The world draws while it's due within two frames and
+    /// rests between: until zgx can wake a view at a time, a pass slower
+    /// than the display runs with the first frame drawn (for any reason) at
+    /// or after its due time.
     pub fn at_rate(mut self, per_second: f32) -> Self {
         self.run = Run::AtRate(per_second);
         self
@@ -713,11 +716,15 @@ struct Pass {
     over_budget: Option<f32>,
 }
 impl Pass {
-    fn wants_frames(&self) -> bool {
+    /// Whether it keeps the world drawing at `(time, frame)`: a rated pass
+    /// only while it's due within the next two frames, `frame` seconds each
+    /// (one, frames' jitter puts a pass at the display's rate just past).
+    fn wants_frames(&self, (time, frame): (f64, f64)) -> bool {
         self.enabled
             && self.failed.is_none()
             && match self.run {
-                Run::EveryFrame | Run::AtRate(_) => true,
+                Run::EveryFrame => true,
+                Run::AtRate(_) => self.due - time <= 2. * frame,
                 Run::OnDemand => self.demanded,
             }
     }
@@ -737,6 +744,8 @@ pub(crate) struct Data {
     pub(crate) budget: u64,
     /// What passes may give the device (`World::set_compute_budget`).
     pub(crate) limits: ComputeBudget,
+    /// The last frame's time and step, in seconds: when the next frame is.
+    clock: (f64, f64),
     passes: Vec<(u32, Option<Pass>)>,
     /// Each point's passes in the order they run.
     order: [Vec<u32>; 3],
@@ -754,6 +763,7 @@ impl Data {
             cap: DEFAULT_MEMORY_CAP,
             budget: DEFAULT_READBACK_BUDGET,
             limits: ComputeBudget::default(),
+            clock: (0., 0.),
             passes: Vec::new(),
             order: Default::default(),
             added: 0,
@@ -811,6 +821,17 @@ impl Data {
         }
         if compute.sandboxed && timed == Some(false) {
             return Err(ComputeError::Untimed);
+        }
+        if compute.sandboxed && compute.source.len() > MOST_SANDBOXED_SOURCE {
+            return Err(ComputeError::Limits(format!(
+                "a sandboxed shader of {} bytes: at most {MOST_SANDBOXED_SOURCE}",
+                compute.source.len()
+            )));
+        }
+        if self.passes.iter().filter(|(_, p)| p.is_some()).count() >= MOST_PASSES {
+            return Err(ComputeError::Limits(format!(
+                "a world holds at most {MOST_PASSES} compute passes"
+            )));
         }
         let mut checked = check(&compute)?;
         let mut source = compute.source.clone();
@@ -939,11 +960,12 @@ impl Data {
             _ => ComputeStatus::Compiling,
         })
     }
-    /// Whether it keeps the world drawing: a pass due, or a read on its way.
+    /// Whether it keeps the world drawing: a pass due by the next frame, or
+    /// a read on its way.
     pub(crate) fn wants_frames(&self) -> bool {
         self.passes
             .iter()
-            .any(|(_, p)| p.as_ref().is_some_and(Pass::wants_frames))
+            .any(|(_, p)| p.as_ref().is_some_and(|p| p.wants_frames(self.clock)))
             || !self.link.reads.borrow().is_empty()
     }
 }
@@ -951,6 +973,12 @@ impl Data {
 /// Device generations: each painter's device gets a number of its own, so
 /// a resource made on another is made again.
 static GENERATIONS: AtomicU64 = AtomicU64::new(1);
+
+/// The most bytes of WGSL a sandboxed pass's shader may have: parsed on the
+/// app's thread when added, so bounded.
+const MOST_SANDBOXED_SOURCE: usize = 1 << 20;
+/// The most compute passes a world holds: each holds a pipeline.
+const MOST_PASSES: usize = 1024;
 
 /// A sandboxed pass's loop iterations, all its invocations' together: each
 /// invocation may loop this over its invocations (at least 64). 2^22 of an
@@ -1208,6 +1236,8 @@ impl Frames {
         });
         self.last = Some(frame.time);
         self.time = frame.time.saturating_duration_since(start).as_secs_f64();
+        // A display's step, if frames come at one.
+        data.clock = (self.time, f64::from(delta).clamp(1. / 120., 1. / 30.));
         self.index += 1;
 
         data.sweep();
