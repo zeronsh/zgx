@@ -21,6 +21,7 @@ on_pinch: (((e: PinchEvent) -> boolean?) | Action)?
 on_mount: ((element: Element) -> ())?
 on_resize: ((size: Size, element: Element) -> ())?
 on_visible: ((visible: boolean, element: Element) -> ())?
+visible_margin: number?
 on_drag: (() -> any)?
 drag_preview: ((payload: any) -> Node)?
 drag_preview_anchor: { number }?
@@ -59,6 +60,7 @@ on_drag_spring: ((payload: any) -> boolean?)?
 | `on_mount` | its [element](#elements) | once, when it is mounted: start animations here |
 | `on_resize` | `{ w, h }`, its element | layout gives it a new size, and at its first layout (as a ResizeObserver reports) |
 | `on_visible` | whether any of it shows, its element | it comes into view or all of it leaves (inside every clip and scroll viewport above it), and at its first layout (as an IntersectionObserver reports): build what only matters on screen |
+| `visible_margin` | | with `on_visible`, points: it counts as in view once any of it comes within that many of showing, its box grown by them on every side inside the same clips and viewports (an IntersectionObserver's `rootMargin`). Build what is about to scroll in before it does, as a long reply's paragraphs within a screen of the view: a steady scroll then runs no script until one crosses |
 | `on_drag` | nothing; returns the payload | the pointer moves past the system's drag threshold from a press on it (4 points until the desktop gives its own, GTK's 8 on Linux): a drag starts, carrying what it returns (any plain value). A button or other clickable inside it covering at least three quarters of the node doesn't stop this: moved, the press drags and doesn't click, and let go without moving, it clicks. A smaller one keeps its press, as a tab's close button does |
 | `drag_preview` | the payload; returns a node | what follows the pointer while it drags |
 | `drag_preview_anchor`, `drag_preview_offset` | (values) `{ x, y }` | where the preview goes: its point `anchor` (fractions of its size; `{ 0.5, 0 }` its top middle) `offset` points from the pointer. `{ 0.5, 0 }` with `{ 0, 16 }` hangs it below the pointer, centred, so what the drag is over stays in view; without either, the grab point stays under the pointer |

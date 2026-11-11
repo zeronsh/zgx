@@ -875,6 +875,10 @@ pub(crate) struct Events {
     /// `fn(visible, element)` when any of the node comes into view or all
     /// of it leaves, and once at first layout.
     pub visible: Option<Function>,
+    /// `visible_margin = 600`: `on_visible` counts the node as in view once
+    /// it comes within that many points of it (an IntersectionObserver's
+    /// `rootMargin`): for building what is about to scroll in.
+    pub visible_margin: Option<f32>,
     /// Drag and drop within the window (payloads are script values):
     /// `on_drag() -> payload` starts a drag after a 4-point move;
     /// `drag_preview(payload) -> node` follows the pointer;
@@ -979,6 +983,7 @@ impl Events {
         mount: None,
         resize: None,
         visible: None,
+        visible_margin: None,
         drag: None,
         drag_preview: None,
         drag_preview_anchor: None,
@@ -3785,6 +3790,7 @@ fn set_handler(
                 | "drop_when"
                 | "drag_export"
                 | "drag_moves_window"
+                | "visible_margin"
         ))
     {
         return Ok(Some(value));
@@ -3849,6 +3855,19 @@ fn set_handler(
                 return Err(mlua::Error::runtime("on_visible takes a function"));
             };
             events.visible = Some(f);
+            return Ok(None);
+        }
+        "visible_margin" => {
+            let margin = match value {
+                mlua::Value::Number(n) => n,
+                mlua::Value::Integer(n) => n as f64,
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "visible_margin takes a number of points",
+                    ));
+                }
+            };
+            events.visible_margin = margin.is_finite().then_some(margin.max(0.) as f32);
             return Ok(None);
         }
         "context_menu" => {

@@ -8737,6 +8737,19 @@ impl NodeHandle {
             .contains(self.node)
             .then(|| ui.observe_visibility(self.node))
     }
+    /// As [`NodeHandle::observe_visibility`], but true once any of the node
+    /// comes within `margin` points of showing (its box grown by `margin` on
+    /// every side, inside the same clips and viewports: an
+    /// IntersectionObserver's `rootMargin`): for building what is about to
+    /// scroll into view before it does. A node observed both ways takes the
+    /// margin.
+    pub fn observe_visibility_within(&self, margin: f32) -> Option<Signal<bool>> {
+        let ui = self.ui.upgrade()?;
+        ui.scene
+            .borrow()
+            .contains(self.node)
+            .then(|| ui.observe_visibility_within(self.node, margin))
+    }
     /// Whether its window shows (not hidden, minimized or covered), as it
     /// changes (`Ui::observe_shown`).
     pub fn observe_shown(&self) -> Option<Signal<bool>> {
