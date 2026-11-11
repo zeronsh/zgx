@@ -535,9 +535,11 @@ pub(super) fn frame(
     (probed, drawn): (bool, Option<&[Drawn]>),
 ) -> bool {
     if !probed {
-        if gpu.probes.take().is_some() {
-            world.unsettle(SETTLE, false);
-        }
+        // The hold goes whether or not these probes held it: a renderer
+        // made again (samples, format) has none, while the world may
+        // still be held by the last one's.
+        gpu.probes = None;
+        world.unsettle(SETTLE, false);
         return false;
     }
     // The renderer's frame uniforms and environment, beside its probes.

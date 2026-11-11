@@ -597,3 +597,32 @@ fn a_ray_bringing_no_finite_light_leaves_the_probes_finite() {
         );
     }
 }
+
+#[test]
+fn a_world_whose_probes_go_with_its_renderer_comes_to_rest() {
+    // Probes converging hold the world drawing. Removed in the same frame
+    // as the samples change (the renderer's device state is made again,
+    // with no probes), the hold must go too, or the world draws for good.
+    let world = World::new();
+    room(&world);
+    let probes = world.add_probes(volume()).unwrap();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    if !traced(
+        &world,
+        "a_world_whose_probes_go_with_its_renderer_comes_to_rest",
+    ) {
+        return;
+    }
+    assert!(world.view().animating(), "converging probes hold the world");
+    world.remove_probes(probes);
+    world.set_samples(1);
+    window.draw();
+    let frames = settle(&mut window, &world, 50);
+    assert!(
+        !world.view().animating(),
+        "still drawing after {frames} frames: the probes' hold outlived them"
+    );
+}
