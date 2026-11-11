@@ -617,7 +617,10 @@ impl GpuRenderer {
         }
     }
     /// The slot `id` composites from for `purpose`, if drawn (or drawn this
-    /// frame).
+    /// frame). Out of the frame loop's body: its search inlined there was
+    /// one more probe for LLVM to fold with the loop's own, re-rolled by any
+    /// edit around it.
+    #[inline(never)]
     pub(crate) fn effect_slot(&self, id: NodeId, purpose: Purpose) -> Option<&Slot> {
         self.effects
             .as_ref()?
