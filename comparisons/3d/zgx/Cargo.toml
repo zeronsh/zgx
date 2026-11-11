@@ -29,6 +29,10 @@ lighting = ["zgx-3d/lighting"]
 # The post chain (run.py's zgx-post and zgx-post-off).
 post = ["zgx-3d/post"]
 mimalloc = ["dep:mimalloc"]
+# The scene's textures as KTX2 files (Basis Universal), read and
+# transcoded: zgx-3d's `ktx2-basis` (a Bistro of them is made by hand for
+# now, not by fetch.py).
+ktx2 = ["zgx-3d/ktx2-basis"]
 
 # The Metal device's allocated bytes, beside the footprint (as zgx-gpu reads it).
 [target.'cfg(target_os = "macos")'.dependencies]
