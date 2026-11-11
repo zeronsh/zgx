@@ -1737,3 +1737,114 @@ fn reading_whether_the_scene_is_light_needs_reads_scene() {
         "{error}"
     );
 }
+
+/// A pane over the left half of a glowing backdrop, giving back what is
+/// behind it by `call` (`scene_light` or `scene_color`): the pane's pixel
+/// and the backdrop's beside it, under `tone` and `stops` of exposure.
+fn given_back(call: &str, tone: ToneMapping, stops: f32) -> Option<([u8; 4], [u8; 4])> {
+    given_back_in(World::new(), call, tone, stops)
+}
+fn given_back_in(
+    world: World,
+    call: &str,
+    tone: ToneMapping,
+    stops: f32,
+) -> Option<([u8; 4], [u8; 4])> {
+    world.set_tone_mapping(tone);
+    world.set_exposure(stops);
+    world.set_camera(Camera::looking_at([0., 0., 3.], [0., 0., 0.]));
+    // Black and rough, glowing a colour bright enough to roll off.
+    let mut glow = Material::rgb(0x000000).with(0., 1.);
+    glow.emissive = [0.9, 0.45, 0.15];
+    world.add(Object::mesh(Geometry::cuboid(8., 8., 0.1), glow).at([0., 0., -1.]));
+    let pane = world.add(
+        Object::mesh(
+            Geometry::cuboid(2., 4., 0.05),
+            Material::rgb(0x000000).with(0., 1.),
+        )
+        .at([-1., 0., 0.5]),
+    );
+    let shader = world
+        .add_shader(
+            MaterialShader::new(format!(
+                "#zgx material 1
+                 fn surface(s: SurfaceIn) -> Surface {{
+                     var m = surface_default(s);
+                     m.emissive = {call}(s.screen_uv, 0.0);
+                     return m;
+                 }}"
+            ))
+            .reads_scene(),
+        )
+        .unwrap();
+    world.set_shader(pane, Some(shader));
+    let mut window = Window::new(&world)?;
+    window.draw();
+    Some((window.pixel(30, 50), window.pixel(80, 50)))
+}
+
+#[test]
+fn scene_light_gives_back_the_light_behind_under_each_tone_map() {
+    // The post chain off: `scene_color` is the scene as displayed, and a
+    // pane giving it back is mapped twice (brighter, flatter);
+    // `scene_light` takes the mapping back, so the pane shows what is
+    // behind it as the backdrop beside it does.
+    for tone in [ToneMapping::Neutral, ToneMapping::Aces, ToneMapping::Linear] {
+        for stops in [0., 1.] {
+            let Some((pane, beside)) = given_back("scene_light", tone, stops) else {
+                return;
+            };
+            let off = pane[..3]
+                .iter()
+                .zip(&beside[..3])
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            eprintln!("{tone:?} {stops}: light {pane:?} beside {beside:?}");
+            assert!(
+                off <= 3,
+                "{tone:?}, {stops} stops: {pane:?} beside {beside:?}"
+            );
+            if tone != ToneMapping::Linear {
+                let (pane, beside) = given_back("scene_color", tone, stops).unwrap();
+                eprintln!("{tone:?} {stops}: color {pane:?} beside {beside:?}");
+                let off = pane[..3]
+                    .iter()
+                    .zip(&beside[..3])
+                    .map(|(a, b)| a.abs_diff(*b))
+                    .max()
+                    .unwrap();
+                assert!(
+                    off > 6,
+                    "the control, mapped twice: {pane:?} beside {beside:?}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(feature = "post")]
+#[test]
+fn scene_light_is_scene_color_with_the_post_chain_on() {
+    // The chain on: what is behind is light already, and given back it is
+    // exposed and mapped once, with the rest.
+    for tone in [ToneMapping::Neutral, ToneMapping::Aces] {
+        for call in ["scene_light", "scene_color"] {
+            let world = World::new();
+            world.set_post(Post {
+                bloom: Some(Bloom { intensity: 0. }),
+                ..Default::default()
+            });
+            let Some((pane, beside)) = given_back_in(world, call, tone, 0.) else {
+                return;
+            };
+            let off = pane[..3]
+                .iter()
+                .zip(&beside[..3])
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(off <= 3, "{tone:?} {call}: {pane:?} beside {beside:?}");
+        }
+    }
+}

@@ -400,7 +400,9 @@ impl Shader {
         for (at, name, next) in uses(&code) {
             let (line, column) = at;
             match name {
-                "scene_color" | "scene_is_light" if !shader.reads_scene || layer => {
+                "scene_color" | "scene_is_light" | "scene_light"
+                    if !shader.reads_scene || layer =>
+                {
                     return Err(error(
                         line,
                         column,
@@ -860,6 +862,7 @@ impl Custom {
                      fn scene_is_light() -> bool {{\n    return frame.look.y > 0.5;\n}}",
                     SCENE_BINDING + 1
                 );
+                code.push_str(SCENE_LIGHT);
             }
             put(&mut code, shader, "_zgxm", "params_zgxm", &textures);
         }
@@ -1170,6 +1173,50 @@ fn line_of_fn(code: &str, name: &str) -> u32 {
         .find(|w| w[0].0.text == "fn" && w[1].0.text == name)
         .map_or(0, |w| w[1].0.line)
 }
+/// `scene_light(uv, lod)`: the scene behind as light, before exposure and
+/// tone mapping, whether the post chain is on (`scene_color` is that) or
+/// off (`scene_color` as displayed, taken back through the inverse of the
+/// world's tone map and exposure: exact below white, clipped above, where a
+/// displayed 1 could have been any light).
+const SCENE_LIGHT: &str = "fn zgx_untone_neutral(o: vec3<f32>) -> vec3<f32> {
+    let start = 0.76;
+    let d = 1.0 - start;
+    var c = o;
+    let shown = max(c.r, max(c.g, c.b));
+    if shown >= start {
+        let n = min(shown, 0.9999);
+        let peak = d * d / (1.0 - n) + start - d;
+        let g = 1.0 - 1.0 / (0.15 * (peak - n) + 1.0);
+        c = (c - g * n) / (1.0 - g) * (peak / n);
+    }
+    let m = min(c.r, min(c.g, c.b));
+    let x = select(sqrt(max(m, 0.0) / 6.25), m + 0.04, m >= 0.04);
+    return c + select(0.04, x - 6.25 * x * x, x < 0.08);
+}
+fn zgx_untone_aces(o: vec3<f32>) -> vec3<f32> {
+    let back_inverse = mat3x3(vec3(0.643038, 0.059269, 0.005962), vec3(0.311187, 0.931436, 0.063929), vec3(0.045775, 0.009295, 0.930118));
+    let into_inverse = mat3x3(vec3(1.764741, -0.147028, -0.036337), vec3(-0.675778, 1.160252, -0.162436), vec3(-0.088963, -0.013224, 1.198773));
+    let y = min(back_inverse * o, vec3(0.999));
+    let a = 1.0 - 0.983729 * y;
+    let b = 0.0245786 - 0.432951 * y;
+    let c = -(0.000090537 + 0.238081 * y);
+    let v = (-b + sqrt(max(b * b - 4.0 * a * c, vec3(0.0)))) / (2.0 * a);
+    return 0.6 * (into_inverse * v);
+}
+fn scene_light(uv: vec2<f32>, lod: f32) -> vec3<f32> {
+    let c = scene_color(uv, lod);
+    if scene_is_light() {
+        return c;
+    }
+    var light = zgx_untone_neutral(c);
+    if frame.look.x > 1.5 {
+        light = c;
+    } else if frame.look.x > 0.5 {
+        light = zgx_untone_aces(c);
+    }
+    return light / max(frame.params.z, 1e-6);
+}
+";
 /// Each use of a name the engine gives (`scene_color`, `scene_is_light`,
 /// `scene_depth`, `frame`), with the member read after it, if any.
 fn uses(code: &str) -> Vec<((u32, u32), &str, Option<&str>)> {
@@ -1181,7 +1228,7 @@ fn uses(code: &str) -> Vec<((u32, u32), &str, Option<&str>)> {
         }
         if matches!(
             token.text,
-            "scene_color" | "scene_is_light" | "scene_depth" | "frame"
+            "scene_color" | "scene_is_light" | "scene_light" | "scene_depth" | "frame"
         ) {
             let next = tokens
                 .get(i + 1)
