@@ -1456,6 +1456,7 @@ impl Frames {
             for (offset, bytes) in buffer.writes.borrow_mut().drain(..) {
                 queue.write_buffer(gpu, offset, &bytes);
             }
+            buffer.written.set(buffer.written.get() + 1);
         }
         self.finish_reads(data, device);
         // A world holding data and no passes (or only particle pools under
@@ -1792,6 +1793,19 @@ impl Frames {
             let [x, y, z] = pass.checked.workgroups;
             if x > 0 && y > 0 && z > 0 {
                 compute.dispatch_workgroups(x, y, z);
+                // What it writes has changed (`GpuBuffer::writes`).
+                let writes = |key| {
+                    let uses = &pass.checked.uses;
+                    uses.iter().any(|&(k, access)| k == key && access.writes())
+                };
+                for (_, slot) in pass.checked.groups.iter().flatten() {
+                    let written = match slot {
+                        Slot::Buffer(b) if writes(Key::Buffer(b.0.id)) => &b.0.written,
+                        Slot::Texture(t) if writes(Key::Texture(t.0.id)) => &t.0.written,
+                        _ => continue,
+                    };
+                    written.set(written.get() + 1);
+                }
             }
             match pass.run {
                 Run::OnDemand => pass.demanded = false,

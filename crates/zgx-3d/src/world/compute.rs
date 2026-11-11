@@ -40,6 +40,7 @@ impl World {
                 writes: RefCell::default(),
                 gpu: RefCell::default(),
                 refused: Default::default(),
+                written: Default::default(),
                 link: data.link.clone(),
             });
             data.add_buffer(&shared);
@@ -68,6 +69,7 @@ impl World {
                 desc,
                 gpu: RefCell::default(),
                 refused: Default::default(),
+                written: Default::default(),
                 link: data.link.clone(),
             });
             data.add_texture(&shared);

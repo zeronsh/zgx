@@ -244,6 +244,88 @@ fn a_buffer_updated_in_place_reads_back_its_values() {
 }
 
 #[test]
+fn a_resource_counts_the_runs_and_writes_that_changed_it() {
+    // What a material casting from GPU data needs to know: that a frame
+    // changed it (GB1).
+    let world = World::new();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let buffer = world
+        .add_buffer(BufferDesc::from_slice(&[0u32; 64]))
+        .unwrap();
+    let texture = world
+        .add_texture(TextureDesc::storage(8, 8, Format::R32Uint))
+        .unwrap();
+    let writer = world
+        .add_compute(
+            Compute::new(
+                "@group(0) @binding(0) var<storage, read_write> values: array<u32>;
+                 @compute @workgroup_size(64)
+                 fn bump(@builtin(global_invocation_id) id: vec3u) {
+                     values[id.x] = values[id.x] + 1u;
+                 }",
+            )
+            .buffer("values", &buffer, Access::ReadWrite)
+            .threads([64, 1, 1]),
+        )
+        .unwrap();
+    let filler = world
+        .add_compute(
+            Compute::new(FILL)
+                .texture("out", &texture, Access::Write)
+                .threads([8, 8, 1]),
+        )
+        .unwrap();
+    // Reads the buffer, writes nothing it counts.
+    let reader = world
+        .add_compute(
+            Compute::new(
+                "@group(0) @binding(0) var<storage, read> values: array<u32>;
+                 @group(0) @binding(1) var<storage, read_write> sum: array<u32>;
+                 @compute @workgroup_size(1)
+                 fn total() { sum[0] = values[0]; }",
+            )
+            .buffer("values", &buffer, Access::Read)
+            .buffer(
+                "sum",
+                &world.add_buffer(BufferDesc::from_slice(&[0u32])).unwrap(),
+                Access::Write,
+            )
+            .threads([1, 1, 1]),
+        )
+        .unwrap();
+    for pass in [writer, filler, reader] {
+        window.compiled(&world, pass);
+    }
+    // Each ran once when ready (on demand), and then no more.
+    window.draw();
+    let (before, filled) = (buffer.writes(), texture.writes());
+    assert!(before >= 1 && filled >= 1, "{before} {filled}");
+    for _ in 0..3 {
+        world.view().invalidate();
+        window.draw();
+    }
+    assert_eq!((buffer.writes(), texture.writes()), (before, filled));
+    // A run of the pass reading it alone changes nothing.
+    world.run_compute(reader);
+    window.draw();
+    assert_eq!(buffer.writes(), before);
+    // A run of one writing it does; so do the app's writes, once a frame
+    // however many.
+    world.run_compute(writer);
+    window.draw();
+    assert_eq!(buffer.writes(), before + 1);
+    buffer.write(0, &[7u32]).unwrap();
+    buffer.write(8, &[7u32]).unwrap();
+    window.draw();
+    assert_eq!(buffer.writes(), before + 2);
+    world.run_compute(filler);
+    window.draw();
+    assert_eq!(texture.writes(), filled + 1);
+}
+
+#[test]
 fn a_pass_writing_a_resource_whole_runs_before_an_earlier_one_reading_it() {
     let world = World::new();
     let Some(mut window) = Window::new(&world) else {

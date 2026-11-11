@@ -270,6 +270,9 @@ pub(crate) struct BufferShared {
     pub(crate) gpu: RefCell<Option<(u64, wgpu::Buffer)>>,
     /// The device generation that refused to make it, if one did.
     pub(crate) refused: Cell<u64>,
+    /// How many times its device copy has changed: a pass that writes it
+    /// run, or the app's writes put on the device (`GpuBuffer::writes`).
+    pub(crate) written: Cell<u64>,
     pub(crate) link: Rc<Link>,
 }
 
@@ -295,6 +298,13 @@ impl GpuBuffer {
     /// Its bytes.
     pub fn size(&self) -> u64 {
         self.0.size
+    }
+    /// How many times its device copy has changed (a pass writing it ran,
+    /// or the app's writes reached the device): what draws from it, a
+    /// shadow a material casts by it, is drawn anew when this moves.
+    #[doc(hidden)]
+    pub fn writes(&self) -> u64 {
+        self.0.written.get()
     }
     /// Its buffer on the device the frame being drawn uses, and that
     /// device's generation: made before the renderer draws (the painter
@@ -382,6 +392,8 @@ pub(crate) struct TextureShared {
     pub(crate) gpu: RefCell<Option<(u64, wgpu::Texture, wgpu::TextureView)>>,
     /// The device generation that refused to make it, if one did.
     pub(crate) refused: Cell<u64>,
+    /// How many times a pass that writes it has run (`GpuTexture::writes`).
+    pub(crate) written: Cell<u64>,
     pub(crate) link: Rc<Link>,
 }
 
@@ -405,6 +417,11 @@ impl PartialEq for GpuTexture {
     }
 }
 impl GpuTexture {
+    /// How many times a pass writing it has run: as `GpuBuffer::writes`.
+    #[doc(hidden)]
+    pub fn writes(&self) -> u64 {
+        self.0.written.get()
+    }
     /// Its view on the device the frame being drawn uses, and that device's
     /// generation: as `GpuBuffer::device_buffer`.
     #[cfg_attr(not(test), allow(dead_code))] // The materials lane's `Param`s bind it.
