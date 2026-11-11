@@ -565,6 +565,10 @@ pub struct CanvasText {
     pub anchor: TextAnchor,
     /// Where `y` falls down it.
     pub baseline: TextBaseline,
+    /// Its size, when its maker knows one at least as large (a terminal's
+    /// run: its cells): laid out and placed by it, never measured. `None`
+    /// measures it.
+    pub extent: Option<(f32, f32)>,
 }
 impl CanvasText {
     /// Its top left, given its size.

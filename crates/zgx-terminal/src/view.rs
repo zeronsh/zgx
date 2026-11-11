@@ -2085,7 +2085,7 @@ fn row_view(engine: &Rc<Engine>, slot: usize) -> View {
     let mut font = engine.font.borrow().clone();
     font.letter_spacing = zgx::text_layout::LetterSpacing::cells(metrics.cell_width);
     let label = paint.clone();
-    canvas(move |_| paint::draw(&paint.get(), metrics, &font))
+    canvas(move |(width, _)| paint::draw(&paint.get(), metrics, &font, width))
         .absolute()
         .left(PAD_X)
         .top(PAD_Y)

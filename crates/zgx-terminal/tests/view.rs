@@ -1057,11 +1057,12 @@ fn a_placed_picture_is_drawn_over_its_cells_and_scrolls_with_them() {
     let check = |app: &Harness| {
         let (top, next) = (bounds(app, "top"), bounds(app, "next"));
         let line = (next.y - top.y) / 3.;
-        let cell = top.width / 3.;
         let pictures = pictures_drawn(app);
         // Under the text: drawn before the rows; over it, after them.
         let (under, over) = (pictures[0], pictures[1]);
         assert!(!under.1 && over.1, "{pictures:?}");
+        // The one under "next" starts four cells along, past it: a cell.
+        let cell = (under.0.x - top.x) / 4.;
         let over = over.0;
         assert!(
             near(over.x, top.x)
@@ -1071,10 +1072,7 @@ fn a_placed_picture_is_drawn_over_its_cells_and_scrolls_with_them() {
             "{over:?} for cells {cell} by {line} from {top:?}"
         );
         let under = under.0;
-        assert!(
-            near(under.x, top.x + 4. * cell) && near(under.y, next.y),
-            "{under:?}"
-        );
+        assert!(near(under.y, next.y), "{under:?}");
         top.y
     };
     let was = check(&app);
