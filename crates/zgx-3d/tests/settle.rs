@@ -245,6 +245,28 @@ fn automatic_exposure_turned_off_while_it_adapts() {
     });
 }
 
+#[cfg(feature = "post")]
+#[test]
+#[ignore = "TA1: graph lane (the painter's hold on gathering frames is never let go)"]
+fn temporal_antialiasing_turned_to_multisampling_while_it_gathers() {
+    rests("taa to msaa", |world, _, window| {
+        world.set_antialiasing(Antialiasing::Taa);
+        window.draw(world);
+        Some(Box::new(|world| world.set_antialiasing(Antialiasing::Msaa)))
+    });
+}
+
+#[cfg(feature = "post")]
+#[test]
+#[ignore = "TA1: graph lane (the painter's hold on gathering frames is never let go)"]
+fn temporal_antialiasing_turned_off_while_it_gathers() {
+    rests("taa to none", |world, _, window| {
+        world.set_antialiasing(Antialiasing::Taa);
+        window.draw(world);
+        Some(Box::new(|world| world.set_antialiasing(Antialiasing::None)))
+    });
+}
+
 #[cfg(feature = "gi")]
 #[test]
 fn probes_removed_while_they_converge() {
