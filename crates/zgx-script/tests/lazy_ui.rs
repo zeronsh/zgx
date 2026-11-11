@@ -18,7 +18,7 @@ fn every_module_sets_exactly_the_names_it_is_registered_under() {
 fn a_name_read_first_makes_its_module() {
     let mut h = Harness::inline(
         "local missing = {}\n\
-         for _, name in { \"theme\", \"call\", \"json\", \"window\", \"t\", \"path\", \"filter\" } do\n\
+         for _, name in { \"theme\", \"call\", \"json\", \"window\", \"t\", \"path\", \"filter\", \"page_control\" } do\n\
              if ui[name] == nil then table.insert(missing, name) end\n\
          end\n\
          if anime == nil or anime.animate == nil then table.insert(missing, \"anime\") end\n\
@@ -32,7 +32,7 @@ fn a_name_read_first_makes_its_module() {
 fn a_script_naming_no_module_makes_none() {
     let mut h = Harness::inline(
         "local made = {}\n\
-         for _, name in { \"theme\", \"call\", \"json\", \"window\", \"i18n\", \"path\" } do\n\
+         for _, name in { \"theme\", \"call\", \"json\", \"window\", \"i18n\", \"path\", \"page_control\" } do\n\
              if rawget(ui, name) ~= nil then table.insert(made, name) end\n\
          end\n\
          return ui.text { table.concat(made, \" \"), id = \"made\" }\n",

@@ -421,16 +421,24 @@ pub(crate) fn install(
     theme.set_readonly(true);
     ui.set("theme", theme)?;
     install_tokens(lua, ui)?;
+    Ok(())
+}
+
+/// `ui.prefers`, made the first time a script names it: apart from `ui.theme`
+/// and `ui.tokens`, as each setting is a state and an effect.
+pub(crate) fn install_prefers(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     // `ui.prefers`: the system's display settings as CSS's media queries
     // read them, each state that follows the system (`:get()` tracked).
     let prefers = lua.create_table()?;
     let runtime = env(lua)?.runtime.clone();
     let shared = Themes::of(&runtime);
     type Setting = fn(zgx::theme::SystemPreferences) -> bool;
-    let settings: [(&str, Setting); 3] = [
+    let settings: [(&str, Setting); 5] = [
         ("reduced_motion", |p| p.reduced_motion),
         ("more_contrast", |p| p.increased_contrast),
         ("reduced_transparency", |p| p.reduced_transparency),
+        ("without_color", |p| p.differentiate_without_color),
+        ("inverted_colors", |p| p.inverted_colors),
     ];
     for (name, read) in settings {
         let initial = runtime.untracked(|| read(shared.system_preferences()));

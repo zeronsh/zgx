@@ -8,13 +8,19 @@ showcase's and the mail example's `soak` modes), so nothing is posted to it.
     python3 scripts/ios/soak.py dev.zgx.ios.soak-showcase --minutes 60
     python3 scripts/ios/soak.py dev.zgx.ios.soak-showcase --minutes 5 --only push
 
+The mail example's copy with its soak in comes from `mail_soak.py`.
+
 It samples `footprint` (phys_footprint, exact bytes) and CPU every minute,
-counts objects by class with `heap` after the first minute and at the end,
-and fails when one of `--watch` grew by more than `--slack` (each class is a
-UIKit or Metal object a cycle must give back: `_UIUpdateLinkViewInteraction`
-piled up by one per un-hidden native view until `native_host/ios.rs` hid
-them by their layers), or when the app died. Every simulator call has a time
-limit: one that hangs stops the run, and nothing answers a dialog.
+reads how many of each `--watch` class are alive after the first minute and at
+the end, and fails when one grew by more than `--slack` (each class is a UIKit
+or Metal object a cycle must give back: `_UIUpdateLinkViewInteraction` piled up
+by one per un-hidden native view until `native_host/ios.rs` hid them by their
+layers), or when the app died. The app counts them itself (`ZGX_IOS_COUNT`: its
+allocations and deallocations of each, a `COUNT` line every 10 seconds): nothing
+looks into it from outside but `footprint` and `ps`, since `heap` can raise a
+Developer Tools prompt nobody may click. A block (`__NSMallocBlock__`) is made
+without an allocation it can see, so it isn't watched. Every simulator call has
+a time limit: one that hangs stops the run, and nothing answers a dialog.
 """
 
 import argparse
@@ -26,7 +32,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "target" / "ios-soak"
-WATCH = ["_UIUpdateLinkViewInteraction", "UIVisualEffectView", "UISwitch", "__NSMallocBlock__"]
+WATCH = ["_UIUpdateLinkViewInteraction", "UIVisualEffectView", "UISwitch", "UIStepper", "UITabBar", "UITabBarController"]
 
 
 def call(args, timeout, **kwargs):
@@ -36,21 +42,24 @@ def call(args, timeout, **kwargs):
         sys.exit(f"{' '.join(args[:3])} took over {timeout} s: stopped (a hung simulator or a dialog).")
 
 
-def device():
+def device(name):
     listing = call(["xcrun", "simctl", "list", "devices", "available"], 30).stdout
     for line in listing.splitlines():
-        if "zgx-ios-lab (" in line:
+        if f"{name} (" in line:
             return line.split("(")[1].split(")")[0]
-    sys.exit("No zgx-ios-lab simulator.")
+    sys.exit(f"No {name} simulator.")
 
 
-def counts(pid, classes):
-    out = call(["heap", str(pid)], 180).stdout
+def counts(log, classes):
+    """What the app last said is alive of each (its `COUNT` lines)."""
+    lines = [l for l in log.read_text(errors="replace").splitlines() if l.startswith("COUNT ")] if log.exists() else []
+    if not lines:
+        sys.exit("the app printed no COUNT line: built without ZGX_IOS_COUNT's support?")
     found = dict.fromkeys(classes, 0)
-    for line in out.splitlines():
-        m = re.match(r"\s*(\d+)\s+\d+\s+[\d.]+\s+(\S+)", line)
-        if m and m.group(2) in found:
-            found[m.group(2)] += int(m.group(1))
+    for pair in lines[-1].split()[1:]:
+        name, _, alive = pair.partition("=")
+        if name in found and alive.lstrip("-").isdigit():
+            found[name] = int(alive)
     return found
 
 
@@ -61,13 +70,18 @@ def main():
     parser.add_argument("--only", help="the soak's one group of steps (the showcase's push, sheet, tabs…)")
     parser.add_argument("--watch", action="append", help="a class that must not pile up (default: %s)" % ", ".join(WATCH))
     parser.add_argument("--slack", type=int, default=8, help="growth a watched class may show")
+    parser.add_argument("--device", default="zgx-ios-lab", help="the simulator's name")
     args = parser.parse_args()
     watch = args.watch or WATCH
-    udid = device()
+    udid = device(args.device)
     OUT.mkdir(parents=True, exist_ok=True)
     log = OUT / f"{args.bundle}.log"
     call(["xcrun", "simctl", "terminate", udid, args.bundle], 30)
-    env = dict(__import__("os").environ, SIMCTL_CHILD_ZGX_APP_ARGS="soak" + (f" {args.only}" if args.only else ""))
+    env = dict(
+        __import__("os").environ,
+        SIMCTL_CHILD_ZGX_APP_ARGS="soak" + (f" {args.only}" if args.only else ""),
+        SIMCTL_CHILD_ZGX_IOS_COUNT=",".join(watch),
+    )
     launched = call(["xcrun", "simctl", "launch", f"--stdout={log}", f"--stderr={log}", udid, args.bundle], 30, env=env)
     if launched.returncode != 0:
         sys.exit(f"launch failed: {launched.stderr.strip()}")
@@ -84,8 +98,8 @@ def main():
         cycles = log.read_text(errors="replace").count("SOAK cycle") if log.exists() else 0
         print(f"{minute}\t{cycles}\t{found.group(1) if found else '?'}\t{cpu}", flush=True)
         if minute == 1:
-            first = counts(pid, watch)
-    last = counts(pid, watch)
+            first = counts(log, watch)
+    last = counts(log, watch)
     call(["xcrun", "simctl", "terminate", udid, args.bundle], 30)
     grew = {name: last[name] - first[name] for name in watch if last[name] - first[name] > args.slack}
     for name in watch:

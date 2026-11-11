@@ -618,6 +618,8 @@ fn static_role(node: &Node) -> Option<&'static str> {
     }
     Some(match node.kind {
         Kind::Button => "button",
+        #[cfg(target_os = "ios")]
+        Kind::NativeButton(_) => "button",
         Kind::Text(_) | Kind::Rich(_) => "text",
         Kind::Checkbox { .. } => "checkbox",
         Kind::Input { .. } => "textbox",
@@ -1530,6 +1532,7 @@ fn token_field(prop: Prop) -> Option<zgx::theme::Field> {
         TextSize => Field::TextSize,
         LineHeight => Field::LineHeight,
         LetterSpacing => Field::LetterSpacing,
+        Leading => Field::Leading,
         Weight => Field::FontWeight,
         Font => Field::FontFamily,
         Shadow => Field::Shadow,
@@ -2679,12 +2682,54 @@ fn build_scoped_seeing(
 
 /// A web view: its page from `src` (followed) or `html`, its handlers
 /// subscribed for as long as the view is mounted.
+/// A `ui.symbol`, its look read again when state it reads changes.
+fn symbol_of(spec: &crate::node::SymbolSpec, vm: &Rc<Vm>) -> View {
+    let spec = spec.clone();
+    let vm = vm.clone();
+    zgx::compose::component(move |cx| symbol_view(&spec, &vm, cx.theme()))
+}
+fn symbol_view(
+    spec: &crate::node::SymbolSpec,
+    vm: &Rc<Vm>,
+    theme: Rc<zgx::theme::ThemeScope>,
+) -> View {
+    use zgx::symbol::{SymbolStyle, symbol};
+    let own = |source: &Option<Source>| source.as_ref().map(resolve_owned);
+    let (size, weight, color) = (own(&spec.size), own(&spec.weight), own(&spec.color));
+    let vm = vm.clone();
+    symbol(spec.name.clone(), move || {
+        let read = |source: &Option<Owned>, ty| {
+            source
+                .as_ref()
+                .and_then(|source| resolve(source, ty, None, &vm))
+        };
+        let mut style = SymbolStyle::default();
+        if let Some(Lit::Num(size)) = read(&size, Ty::Num) {
+            style.size = size;
+        }
+        if let Some(Lit::Num(weight)) = read(&weight, Ty::Num) {
+            style.weight = weight as u16;
+        }
+        style.color = match read(&color, Ty::Color) {
+            Some(Lit::Color(color)) => color,
+            Some(Lit::Token(color)) => theme.get(color).color().unwrap_or(style.color),
+            _ => theme.color(zgx::theme::tok::TEXT_PRIMARY),
+        };
+        style
+    })
+}
 /// A `ui.glass`, its look read again when state it reads changes.
 fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
     use zgx::glass::{GlassStyle, GlassVariant, glass};
     let own = |source: &Option<Source>| source.as_ref().map(resolve_owned);
-    let (clear, tint, radius) = (own(&spec.clear), own(&spec.tint), own(&spec.radius));
     let corners = own(&spec.corners);
+    let (clear, variant, tint, interactive, radius) = (
+        own(&spec.clear),
+        own(&spec.variant),
+        own(&spec.tint),
+        own(&spec.interactive),
+        own(&spec.radius),
+    );
     let vm = vm.clone();
     glass(move || {
         let read = |source: &Option<Owned>, ty| {
@@ -2693,11 +2738,25 @@ fn glass_of(spec: &crate::node::GlassSpec, vm: &Rc<Vm>) -> View {
                 .and_then(|source| resolve(source, ty, None, &vm))
         };
         let mut style = GlassStyle::default();
-        if read(&clear, Ty::Bool) == Some(Lit::Bool(true)) {
+        if read(&clear, Ty::Bool) == Some(Lit::Bool(true))
+            || matches!(read(&variant, Ty::Str), Some(Lit::Str(variant)) if &*variant == "clear")
+        {
             style.variant = GlassVariant::Clear;
         }
-        if let Some(Lit::Color(tint)) = read(&tint, Ty::Color) {
-            style.tint = Some(tint);
+        match read(&tint, Ty::Color) {
+            Some(Lit::Color(tint)) => style.tint = Some(tint),
+            // The window's tokens: a pane is not a theme scope's.
+            Some(Lit::Token(tint)) => {
+                let runtime = crate::node::env(&vm.lua)
+                    .ok()
+                    .map(|env| env.runtime.clone());
+                style.tint = runtime
+                    .and_then(|runtime| zgx::theme::Themes::of(&runtime).root().get(tint).color());
+            }
+            _ => {}
+        }
+        if let Some(Lit::Bool(interactive)) = read(&interactive, Ty::Bool) {
+            style.interactive = interactive;
         }
         if let Some(Lit::Num(radius)) = read(&radius, Ty::Num) {
             style.radius = radius;
@@ -2917,6 +2976,53 @@ fn built(vm: &Rc<Vm>, result: mlua::Result<mlua::Value>, low: &Rc<Lowering>) -> 
     }
 }
 
+/// What the system draws where it can: out of `kind_view`, which every node
+/// goes through, so its frame and its callers pay for none of this.
+#[inline(never)]
+fn native_kind_view(kind: &Kind, vm: &Rc<Vm>) -> View {
+    match kind {
+        Kind::Glass(spec) => glass_of(spec, vm),
+        Kind::Symbol(spec) => symbol_of(spec, vm),
+        Kind::Tabs(items, value, minimize) => {
+            let (read, write) = (value.clone(), value.clone());
+            let tabs = zgx::native_control::native_tabs_minimizing(
+                items.clone(),
+                // Luau's tabs count from 1.
+                move || read.with(Value::as_f64).unwrap_or(1.).max(1.) as usize - 1,
+                move |index| {
+                    write.set(Value::Num(index as f64 + 1.));
+                },
+                *minimize,
+            );
+            // `ui.window.tab_bar`, which an `ios.page` ends clear of.
+            match crate::node::env(&vm.lua) {
+                Ok(env) => {
+                    let bar = env.shared.state(crate::windows::TAB_BAR, Value::Num(0.));
+                    zgx::compose::provide(
+                        zgx::native_control::TabBarHeight::new(move |height| {
+                            bar.set(Value::Num(f64::from(height)));
+                        }),
+                        tabs,
+                    )
+                }
+                Err(_) => tabs,
+            }
+        }
+        Kind::Toggle(label, value) => {
+            let (read, write) = (value.clone(), value.clone());
+            zgx::native_control::native_toggle(
+                label.clone(),
+                move || read.with(Value::truthy),
+                move |on| {
+                    write.set(Value::Bool(on));
+                },
+            )
+        }
+        Kind::GlassGroup(spacing) => zgx::glass::glass_group(*spacing),
+        _ => unreachable!("not a native kind"),
+    }
+}
+
 /// The view a node's kind makes, before its styles, handlers and
 /// children. Apart from `build`, whose frame stays live while its children
 /// lower: in a debug build each arm's views take stack of their own.
@@ -2934,6 +3040,26 @@ fn kind_view(
         Kind::Div => div(),
         Kind::Overlay => overlay(),
         Kind::Button => button(),
+        #[cfg(target_os = "ios")]
+        Kind::NativeButton(spec) => {
+            let (title, title_vm) = (copy_text(&spec.title), vm.clone());
+            let disabled = node.disabled.as_ref().map(resolve_owned);
+            let enabled_vm = vm.clone();
+            zgx::native_control::native_button(
+                move || render_text(&title, &title_vm),
+                spec.symbol.clone(),
+                spec.style,
+                move || {
+                    disabled.as_ref().is_none_or(|disabled| {
+                        resolve(disabled, Ty::Bool, None, &enabled_vm) != Some(Lit::Bool(true))
+                    })
+                },
+                spec.sized,
+                // Taken: held here it would close a cycle, the menu node holding its
+                // anchor and the anchor a closure holding the menu node.
+                spec.menu.borrow_mut().take(),
+            )
+        }
         Kind::Scroll {
             offset,
             horizontal,
@@ -2942,7 +3068,9 @@ fn kind_view(
             contain,
             wheel_across,
             paging,
-            padding,
+            ride,
+            insets,
+            dismiss,
         } => {
             let offset = match offset {
                 Some(offset) => bridge(need(&mut cx), offset, number, |x| Value::Num(x as f64)),
@@ -2968,8 +3096,24 @@ fn kind_view(
                 view
             };
             let view = if *paging { view.paging(true) } else { view };
-            let view = match padding {
-                Some(padding) => with_scroll_padding(view, padding, vm),
+            // Kept only on iOS, where a software keyboard covers a view.
+            #[cfg(target_os = "ios")]
+            let view = match ride {
+                Some(ride) => view.keyboard_ride(*ride),
+                None => view,
+            };
+            #[cfg(not(target_os = "ios"))]
+            let _ = ride;
+            // Kept only on iOS too.
+            #[cfg(target_os = "ios")]
+            let view = match dismiss {
+                Some(dismiss) => view.keyboard_dismiss(*dismiss),
+                None => view,
+            };
+            #[cfg(not(target_os = "ios"))]
+            let _ = dismiss;
+            let view = match insets {
+                Some(insets) => with_scroll_insets(view, insets, vm),
                 None => view,
             };
             if *scrollbar {
@@ -3036,9 +3180,13 @@ fn kind_view(
         }
         Kind::WebView(spec) => web_view_of(spec, vm, low),
         Kind::Terminal(term) => zgx::terminal::terminal(term),
+        Kind::Glass(_)
+        | Kind::Symbol(_)
+        | Kind::Tabs(..)
+        | Kind::Toggle(..)
+        | Kind::GlassGroup(_) => native_kind_view(&node.kind, vm),
         #[cfg(feature = "scene3d")]
         Kind::Scene3d(spec) => crate::scene3d::lower(spec, vm, &low.assets, need(&mut cx)),
-        Kind::Glass(spec) => glass_of(spec, vm),
         Kind::Canvas(draw, options) => {
             let (draw, vm) = (draw.clone(), vm.clone());
             let theme = match cx.as_deref().map(Context::theme) {
@@ -3322,7 +3470,18 @@ fn kind_view(
             min,
             max,
             step,
+            #[cfg(target_os = "ios")]
+            native,
         } => {
+            #[cfg(target_os = "ios")]
+            if *native {
+                return zgx::native_control::native_slider(
+                    label.clone(),
+                    bridge(need(&mut cx), value, number, |x| Value::Num(x as f64)),
+                    *min..=*max,
+                    *step,
+                );
+            }
             let view = slider(
                 label.clone(),
                 bridge(need(&mut cx), value, number, |x| Value::Num(x as f64)),
@@ -3665,6 +3824,14 @@ fn kind_view(
             over,
             match_anchor,
         } => {
+            #[cfg(target_os = "ios")]
+            if system_menu_on(node)
+                && let Kind::NativeButton(spec) = &anchor.kind
+            {
+                let open = bridge(need(&mut cx), open, Value::truthy, Value::Bool);
+                *spec.menu.borrow_mut() = Some((menu_items(node, vm, low), open));
+                return lower(anchor, low);
+            }
             let mut view = menu(
                 label.clone(),
                 bridge(need(&mut cx), open, Value::truthy, Value::Bool),
@@ -3819,7 +3986,12 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
     }
     // A split, a disclosure and an accordion lower their children
     // themselves.
+    #[cfg(target_os = "ios")]
+    let shown_by_the_system = system_menu_on(node);
+    #[cfg(not(target_os = "ios"))]
+    let shown_by_the_system = false;
     if !node.children.is_empty()
+        && !shown_by_the_system
         && !matches!(node.kind, Kind::Split { .. })
         && !node.kind.library_takes_children()
     {
@@ -4263,6 +4435,11 @@ fn styled(
         if let Some(rare) = &events.rare {
             view = with_rare(view, rare, vm, low, handle_for());
         }
+    }
+    // Not input of its own: a row's click alone doesn't come by `with_rare`.
+    #[cfg(target_os = "ios")]
+    if events.rare.as_ref().is_some_and(|rare| rare.table_row) {
+        view = view.table_row();
     }
     if events.any_drag() || events.drag_preview.is_some() {
         view = with_drag(view, node, vm, low, handle_for());
@@ -6892,6 +7069,85 @@ impl FromLua for ComputedText {
     }
 }
 
+/// Whether a `ui.menu` is the system's: anchored on a system button, saying
+/// nothing about where it goes, and holding only plain items (a label, perhaps a
+/// symbol). `Kind::Menu`'s other cases, and any other child, stay drawn.
+#[cfg(target_os = "ios")]
+fn system_menu_on(node: &Node) -> bool {
+    let Kind::Menu {
+        anchor,
+        placement,
+        over,
+        match_anchor,
+        ..
+    } = &node.kind
+    else {
+        return false;
+    };
+    matches!(anchor.kind, Kind::NativeButton(_))
+        && placement.is_none()
+        && over.is_none()
+        && !*match_anchor
+        && node.props.is_empty()
+        && !node.children.is_empty()
+        && node.children.iter().all(|item| {
+            matches!(item.kind, Kind::MenuItem(..))
+                && item.props.iter().all(|(prop, _)| *prop == Prop::TextColor)
+                && match item.children.as_slice() {
+                    [] => true,
+                    // As `symbol = …` makes it: the symbol, and what it says.
+                    [symbol, text] => {
+                        matches!(symbol.kind, Kind::Symbol(_)) && matches!(text.kind, Kind::Text(_))
+                    }
+                    _ => false,
+                }
+        })
+}
+
+/// What a system menu's items are now, asked as it opens.
+#[cfg(target_os = "ios")]
+fn menu_items(
+    node: &Rc<Node>,
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+) -> zgx::native_control::MenuBuilder {
+    let (node, vm, actions) = (node.clone(), vm.clone(), low.actions.clone());
+    Rc::new(move || {
+        let is = |source: &Option<Source>| {
+            source.as_ref().is_some_and(|source| {
+                resolve(&resolve_owned(source), Ty::Bool, None, &vm) == Some(Lit::Bool(true))
+            })
+        };
+        node.children
+            .iter()
+            .filter_map(|item| {
+                let Kind::MenuItem(label, options) = &item.kind else {
+                    return None;
+                };
+                let symbol = item.children.first().and_then(|child| match &child.kind {
+                    Kind::Symbol(spec) => Some(spec.name.clone()),
+                    _ => None,
+                });
+                let (click, vm, actions) =
+                    (item.events().click.clone(), vm.clone(), actions.clone());
+                Some(zgx::native_control::MenuAction {
+                    title: label.clone(),
+                    symbol,
+                    destructive: options.destructive,
+                    checked: is(&options.checked),
+                    disabled: is(&item.disabled),
+                    keep_open: options.keep_open,
+                    run: Rc::new(move || {
+                        if let Some(click) = &click {
+                            run(click, &vm, &actions, ());
+                        }
+                    }),
+                })
+            })
+            .collect()
+    })
+}
+
 fn render_text(text: &Text, vm: &Vm) -> String {
     match text {
         Text::Literal(s) => s.clone(),
@@ -7562,12 +7818,39 @@ fn with_scroll_padding(view: View, padding: &crate::node::ScrollPadding, vm: &Rc
         crate::node::ScrollPadding::Live(source) => {
             let (source, vm) = (source.clone(), vm.clone());
             view.scroll_padding_with(move || {
-                crate::node::scroll_padding_now(&vm, &source).unwrap_or_else(|error| {
-                    vm.report(error);
-                    zgx::scene::Insets::default()
-                })
+                crate::node::scroll_padding_now(&vm, &source, "scroll_padding").unwrap_or_else(
+                    |error| {
+                        vm.report(error);
+                        zgx::scene::Insets::default()
+                    },
+                )
             })
         }
+    }
+}
+/// A scroll view's `scroll_padding` and `indicator_insets`.
+#[inline(never)]
+fn with_scroll_insets(view: View, insets: &crate::node::ScrollInsets, vm: &Rc<Vm>) -> View {
+    let view = match &insets.padding {
+        Some(padding) => with_scroll_padding(view, padding, vm),
+        None => view,
+    };
+    match insets.indicator.clone() {
+        Some(crate::node::ScrollPadding::Fixed(given)) => {
+            view.scroll_indicator_insets(move || given)
+        }
+        Some(crate::node::ScrollPadding::Live(source)) => {
+            let vm = vm.clone();
+            view.scroll_indicator_insets(move || {
+                crate::node::scroll_padding_now(&vm, &source, "indicator_insets").unwrap_or_else(
+                    |error| {
+                        vm.report(error);
+                        zgx::scene::Insets::default()
+                    },
+                )
+            })
+        }
+        None => view,
     }
 }
 /// A list's scrollbar and what happens at its edges.
@@ -9219,6 +9502,7 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         (Lines, Lit::Num(v)) => s.line_clamp(*v as u32),
         (LineHeight, Lit::Num(v)) => s.line_height(*v),
         (LetterSpacing, Lit::Num(v)) => s.letter_spacing(*v),
+        (Leading, Lit::Num(v)) => s.leading(*v),
         (Underline, Lit::Bool(v)) => s.text_underline(*v),
         (UnderlineOffset, Lit::Num(v)) => s.underline_offset(*v),
         // Every digit one width, so changing numbers hold still.
