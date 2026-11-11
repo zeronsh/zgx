@@ -1,6 +1,7 @@
 //! Devtools for agents (`zgx_script::inspect`, which zgx-run builds with):
 //! what a running app answers `zgx inspect`, through a session and over
 //! its socket.
+#![cfg(feature = "inspect")]
 use std::time::{Duration, Instant};
 use zgx_script::{
     ScriptHost, Value,
