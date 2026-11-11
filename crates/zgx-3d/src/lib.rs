@@ -68,7 +68,7 @@ mod worker;
 mod world;
 
 #[cfg(feature = "gltf")]
-pub use animation::{Clip, Placed};
+pub use animation::{Clip, ClipBuilder, ClipError, Keys, MAX_CLIP_KEYS, Placed};
 #[cfg(feature = "gltf")]
 pub use animator::{
     AnimatorError, AnimatorId, AnimatorUpdate, Fired, Layer, MAX_LAYERS, Mask, Play, RootMotion,

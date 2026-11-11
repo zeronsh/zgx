@@ -212,3 +212,65 @@ fn a_node_is_found_by_its_name() {
     let hips = placed.node(model.node("joint0").unwrap()).unwrap();
     assert_eq!(world.object(hips).unwrap().parent, Some(placed.root));
 }
+
+#[test]
+fn a_clip_built_in_code_plays_on_objects_made_in_code() {
+    let world = World::new();
+    let root = world.add(Object::group());
+    let arm = world.add(Object::group().child_of(root));
+    let shape = Geometry::cuboid(1., 1., 1.);
+    let up = vec![[0., 0.5, 0.]; shape.vertices().len()];
+    let morphing = shape
+        .with_morph_targets(vec![MorphTarget::new(up)])
+        .unwrap();
+    let mesh = world.add(Object::mesh(morphing, Material::default()).child_of(arm));
+    let placed = Placed::new(root, vec![arm]).with_meshes(0, vec![mesh]);
+    let quarter = Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_2);
+    let zero = [0.; 3];
+    let clip = Clip::builder("Reach")
+        .translation(
+            0,
+            Keys::cubic(
+                vec![0., 1.],
+                vec![[zero, zero, zero], [zero, [2., 0., 0.], zero]],
+            ),
+        )
+        .rotation(0, Keys::linear(vec![0., 1.], vec![Quat::IDENTITY, quarter]))
+        .scale(0, Keys::step(vec![0., 0.5], vec![[1.; 3], [2.; 3]]))
+        .weight(0, 0, Keys::linear(vec![0., 1.], vec![0., 1.]))
+        .build()
+        .unwrap();
+    assert_eq!((clip.name(), clip.duration()), (Some("Reach"), 1.));
+    let animator = world.add_animator(&placed);
+    world.play(animator, &clip, Play::new().once()).unwrap();
+    let mut painter = Painter::new(&world);
+    painter.frame(0.);
+    painter.frame(0.25);
+    painter.frame(0.5);
+    let t = world.object(arm).unwrap().transform;
+    // Halfway on a cubic of no tangents: halfway; a quarter turn half
+    // done; the step's second key reached.
+    assert!((t.position.x - 1.).abs() < 1e-5, "{t:?}");
+    let eighth = Quat::from_axis_angle(Vec3::Y, std::f32::consts::FRAC_PI_4);
+    assert!((t.rotation.y - eighth.y).abs() < 1e-5 && (t.rotation.w - eighth.w).abs() < 1e-5);
+    assert_eq!(t.scale, Vec3::ONE * 2.);
+    // The same clip posed by hand agrees (but for rounding: posing by
+    // hand turns its node once a channel).
+    let other = World::new();
+    let r = other.add(Object::group());
+    let a = other.add(Object::group().child_of(r));
+    let m = other.add(
+        Object::mesh(
+            world.object(mesh).unwrap().geometry.unwrap(),
+            Material::default(),
+        )
+        .child_of(a),
+    );
+    Placed::new(r, vec![a])
+        .with_meshes(0, vec![m])
+        .pose(&other, &clip, 0.5);
+    let theirs = other.object(a).unwrap().transform;
+    assert!((theirs.position - t.position).length() < 1e-6 && theirs.scale == t.scale);
+    let r = theirs.rotation;
+    assert!((r.y - t.rotation.y).abs() < 1e-6 && (r.w - t.rotation.w).abs() < 1e-6);
+}

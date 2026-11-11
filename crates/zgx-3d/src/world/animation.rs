@@ -1879,4 +1879,21 @@ mod tests {
             assert_eq!(at(&world, c).position.x, 0.75, "small first: {small_first}");
         }
     }
+
+    #[test]
+    fn objects_made_in_code_take_a_built_clips_morph_weights() {
+        let world = World::new();
+        let (made, mesh) = morphing(&world);
+        let placed = Placed::new(made.root, vec![made.node(0).unwrap()]).with_meshes(0, vec![mesh]);
+        let clip = Clip::builder("Swell")
+            .weight(0, 0, crate::Keys::linear(vec![0., 1.], vec![0., 1.]))
+            .build()
+            .unwrap();
+        let animator = world.add_animator(&placed);
+        world.play(animator, &clip, Play::new()).unwrap();
+        let clock = Clock(Instant::now());
+        clock.frame(&world, 0.);
+        clock.frame(&world, 0.25);
+        assert_eq!(weights(&world, mesh), [0.25, 0.7]);
+    }
 }

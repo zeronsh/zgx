@@ -60,6 +60,14 @@ impl Clip {
             events: Vec::new(),
         }))
     }
+    /// A clip to make in code, named `name`: add channels, then
+    /// `build`.
+    pub fn builder(name: &str) -> ClipBuilder {
+        ClipBuilder {
+            name: Some(name.to_owned()),
+            channels: Vec::new(),
+        }
+    }
     /// Its name in the file, if it has one.
     pub fn name(&self) -> Option<&str> {
         self.0.name.as_deref()
@@ -84,6 +92,198 @@ impl Clip {
     /// Whether `self` and `other` are the same clip (clones of one).
     pub(crate) fn same(&self, other: &Clip) -> bool {
         std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// The most keys a clip built in code holds, its channels' together (and
+/// a cubic key's tangents each a key): past it, `ClipBuilder::build` fails.
+pub const MAX_CLIP_KEYS: usize = 1 << 22;
+
+/// A channel's keys for a clip built in code (`Clip::builder`): its times
+/// in seconds, rising, and a value each, of `T`: `[f32; 3]` for a place or
+/// a scale, a `Quat` for a turn, an `f32` for a morph weight.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Keys<T> {
+    interpolation: Interpolation,
+    times: Vec<f32>,
+    /// A value a key (three for cubic: in-tangent, value, out-tangent).
+    values: Vec<T>,
+}
+impl<T> Keys<T> {
+    /// Each key's value held until the next.
+    pub fn step(times: Vec<f32>, values: Vec<T>) -> Self {
+        Self {
+            interpolation: Interpolation::Step,
+            times,
+            values,
+        }
+    }
+    /// Straight between keys (turns along the shorter arc).
+    pub fn linear(times: Vec<f32>, values: Vec<T>) -> Self {
+        Self {
+            interpolation: Interpolation::Linear,
+            times,
+            values,
+        }
+    }
+    /// Hermite curves through the keys: for each, its in-tangent, its value
+    /// and its out-tangent (glTF's `CUBICSPLINE`).
+    pub fn cubic(times: Vec<f32>, values: Vec<[T; 3]>) -> Self {
+        Self {
+            interpolation: Interpolation::Cubic,
+            times,
+            values: values.into_iter().flatten().collect(),
+        }
+    }
+}
+
+/// Why a clip built in code was refused (`ClipBuilder::build`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipError {
+    /// A channel with no keys.
+    NoKeys,
+    /// A channel's times or values not all numbers.
+    NotANumber,
+    /// A channel's times falling somewhere.
+    NotRising,
+    /// A channel with a different number of values from its keys (three
+    /// a key, cubic).
+    Values,
+    /// More keys than `MAX_CLIP_KEYS`.
+    TooMany,
+}
+impl std::fmt::Display for ClipError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::NoKeys => "a clip's channel has no keys",
+            Self::NotANumber => "a clip's channel has a time or a value that isn't a number",
+            Self::NotRising => "a clip's channel's times fall",
+            Self::Values => "a clip's channel has a value a key (three a key, cubic)",
+            Self::TooMany => "a clip has more keys than MAX_CLIP_KEYS",
+        })
+    }
+}
+impl std::error::Error for ClipError {}
+
+/// A clip made in code (`Clip::builder`): channels moving nodes, by their
+/// index in what it'll play on (`Placed::new`, or a model's file order).
+#[derive(Clone, Debug, Default)]
+pub struct ClipBuilder {
+    name: Option<String>,
+    channels: Vec<Built>,
+}
+/// A channel as built: its node, what it moves, and its keys.
+#[derive(Clone, Debug)]
+struct Built {
+    node: usize,
+    path: Path,
+    keys: Keys<[f32; 4]>,
+}
+impl ClipBuilder {
+    fn channel(mut self, node: usize, path: Path, keys: Keys<[f32; 4]>) -> Self {
+        self.channels.push(Built { node, path, keys });
+        self
+    }
+    /// Node `node`'s place in its parent's frame.
+    pub fn translation(self, node: usize, keys: Keys<[f32; 3]>) -> Self {
+        let keys = Keys {
+            interpolation: keys.interpolation,
+            times: keys.times,
+            values: keys
+                .values
+                .into_iter()
+                .map(|[x, y, z]| [x, y, z, 0.])
+                .collect(),
+        };
+        self.channel(node, Path::Translation, keys)
+    }
+    /// Node `node`'s turn.
+    pub fn rotation(self, node: usize, keys: Keys<Quat>) -> Self {
+        let keys = Keys {
+            interpolation: keys.interpolation,
+            times: keys.times,
+            values: keys
+                .values
+                .into_iter()
+                .map(|q| [q.x, q.y, q.z, q.w])
+                .collect(),
+        };
+        self.channel(node, Path::Rotation, keys)
+    }
+    /// Node `node`'s scale.
+    pub fn scale(self, node: usize, keys: Keys<[f32; 3]>) -> Self {
+        let keys = Keys {
+            interpolation: keys.interpolation,
+            times: keys.times,
+            values: keys
+                .values
+                .into_iter()
+                .map(|[x, y, z]| [x, y, z, 0.])
+                .collect(),
+        };
+        self.channel(node, Path::Scale, keys)
+    }
+    /// Morph target `target`'s weight of node `node`'s meshes.
+    pub fn weight(self, node: usize, target: usize, keys: Keys<f32>) -> Self {
+        let keys = Keys {
+            interpolation: keys.interpolation,
+            times: keys.times,
+            values: keys.values.into_iter().map(|w| [w, 0., 0., 0.]).collect(),
+        };
+        self.channel(node, Path::Weight(target), keys)
+    }
+    /// The clip, if every channel has keys, its times numbers and rising
+    /// and a value a key (three for cubic), all numbers, at most
+    /// `MAX_CLIP_KEYS` in all.
+    pub fn build(self) -> Result<Clip, ClipError> {
+        self.build_within(MAX_CLIP_KEYS)
+    }
+    /// As `build`, at most `limit` keys.
+    pub(crate) fn build_within(self, limit: usize) -> Result<Clip, ClipError> {
+        let mut total = 0usize;
+        let mut channels = Vec::with_capacity(self.channels.len());
+        for Built { node, path, keys } in self.channels {
+            let Keys {
+                interpolation,
+                times,
+                values,
+            } = keys;
+            let per = if interpolation == Interpolation::Cubic {
+                3
+            } else {
+                1
+            };
+            total = total
+                .saturating_add(values.len())
+                .saturating_add(times.len());
+            if total > limit {
+                return Err(ClipError::TooMany);
+            }
+            if times.is_empty() {
+                return Err(ClipError::NoKeys);
+            }
+            if !times.iter().all(|t| t.is_finite())
+                || !values.iter().flatten().all(|v| v.is_finite())
+            {
+                return Err(ClipError::NotANumber);
+            }
+            if !times.windows(2).all(|t| t[0] <= t[1]) {
+                return Err(ClipError::NotRising);
+            }
+            if values.len() != times.len() * per {
+                return Err(ClipError::Values);
+            }
+            let channel = Channel {
+                node,
+                path,
+                interpolation,
+                track: 0,
+                values,
+            };
+            channels.push((times, channel));
+        }
+        Ok(Clip::new(self.name, channels))
     }
 }
 
@@ -272,6 +472,26 @@ pub struct Placed {
     pub(crate) cameras: Vec<(ObjectId, crate::gltf::ModelCamera)>,
 }
 impl Placed {
+    /// Objects made in code, to animate as a model's nodes: `root` the
+    /// group holding them, `nodes` by index (a clip built for them names
+    /// these indices: `Clip::builder`).
+    pub fn new(root: ObjectId, nodes: Vec<ObjectId>) -> Self {
+        Self {
+            root,
+            meshes: vec![Vec::new(); nodes.len()],
+            nodes: nodes.into_iter().map(Some).collect(),
+            lights: Vec::new(),
+            cameras: Vec::new(),
+        }
+    }
+    /// It with `meshes` taking node `node`'s morph weights (a clip's
+    /// `Keys` for its weights). Nothing for a node it hasn't.
+    pub fn with_meshes(mut self, node: usize, meshes: Vec<ObjectId>) -> Self {
+        if let Some(slot) = self.meshes.get_mut(node) {
+            *slot = meshes;
+        }
+        self
+    }
     /// Its lights, each following its node: set, turn off or remove them as
     /// any (`World::set_light`, `World::remove_light`).
     pub fn lights(&self) -> &[crate::LightId] {
@@ -324,6 +544,49 @@ impl Placed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_clip_built_in_code_refuses_what_it_cannot_play() {
+        let linear = |times: Vec<f32>, values: Vec<[f32; 3]>| {
+            Clip::builder("c")
+                .translation(0, Keys::linear(times, values))
+                .build()
+        };
+        assert_eq!(linear(vec![], vec![]).err(), Some(ClipError::NoKeys));
+        assert_eq!(
+            linear(vec![f32::NAN], vec![[0.; 3]]).err(),
+            Some(ClipError::NotANumber)
+        );
+        assert_eq!(
+            linear(vec![0.], vec![[f32::INFINITY, 0., 0.]]).err(),
+            Some(ClipError::NotANumber)
+        );
+        assert_eq!(
+            linear(vec![1., 0.], vec![[0.; 3]; 2]).err(),
+            Some(ClipError::NotRising)
+        );
+        assert_eq!(
+            linear(vec![0., 1.], vec![[0.; 3]]).err(),
+            Some(ClipError::Values)
+        );
+        let cubic = Clip::builder("c")
+            .scale(0, Keys::cubic(vec![0., 1.], vec![[[1.; 3]; 3]]))
+            .build();
+        assert_eq!(
+            cubic.err(),
+            Some(ClipError::Values),
+            "three a key, two keys"
+        );
+        let many = Clip::builder("c")
+            .weight(0, 0, Keys::step(vec![0.; 4], vec![0.; 4]))
+            .weight(0, 1, Keys::step(vec![0.; 4], vec![0.; 4]))
+            .build_within(12);
+        assert_eq!(many.err(), Some(ClipError::TooMany));
+        assert!(
+            linear(vec![0., 0., 1.], vec![[0.; 3]; 3]).is_ok(),
+            "times may stay"
+        );
+    }
 
     /// Keys at 1 and 3 s.
     struct Keyed(Channel);
