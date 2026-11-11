@@ -20,6 +20,10 @@ struct Controls {
     pause: Arc<AtomicBool>,
     /// Whether the thread that last started it has ended.
     host_ended: Arc<AtomicBool>,
+    /// Times its blocks as WASAPI does: after each start and resume, a
+    /// block stamped with a time left from before, then three that say
+    /// 2 ms of output latency, then 42 ms, as it is.
+    wasapi: Arc<AtomicBool>,
 }
 
 /// Set on the thread that starts the fake: says when that thread ends.
@@ -143,18 +147,33 @@ impl Fake {
     fn run(&mut self, mut renderer: Box<Renderer>, format: Format) {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
+        let wasapi = self.controls.wasapi.load(Ordering::Relaxed);
         let thread = std::thread::spawn(move || {
             let mut out = vec![0f32; 256 * 2];
             let began = Instant::now();
+            let mut block = 0;
             while !stopping.load(Ordering::Relaxed) {
-                let at = began.elapsed().as_nanos() as u64;
-                renderer.render(
-                    &mut out,
-                    Some(Timing {
+                // A second on, so no time is 0.
+                let at = 1_000_000_000 + began.elapsed().as_nanos() as u64;
+                let timing = if !wasapi {
+                    Timing {
                         asked: at,
                         heard: at + 5_000_000,
-                    }),
-                );
+                    }
+                } else if block == 0 {
+                    Timing {
+                        asked: 7,
+                        heard: 7 + 2_000_000,
+                    }
+                } else {
+                    let latency = if block <= 3 { 2_000_000 } else { 42_000_000 };
+                    Timing {
+                        asked: at,
+                        heard: at + latency,
+                    }
+                };
+                block += 1;
+                renderer.render(&mut out, Some(timing));
                 // At the pace of a real device: 256 frames at the rate.
                 std::thread::sleep(Duration::from_micros(
                     256 * 1_000_000 / u64::from(format.rate),
@@ -297,6 +316,40 @@ fn a_device_that_fails_to_start_says_why_and_is_tried_again_with_the_next_sound(
         controls.log(),
         ["format", "failed", "format", "start 48000", "stop"]
     );
+}
+
+#[test]
+fn a_play_that_starts_or_resumes_a_stream_is_placed_once_its_clock_settles() {
+    // WASAPI's way: after a start and after a resume, a block with a time
+    // left from before, then three saying 2 ms of output latency, then 42.
+    // A play that starts the stream, or resumes it, is heard 42 ms after
+    // its block is asked for, as every block after.
+    let (fake, controls) = Fake::new();
+    controls.wasapi.store(true, Ordering::Relaxed);
+    controls.pause.store(true, Ordering::Relaxed);
+    let audio = Audio::with_device(
+        Config {
+            hold: Duration::from_millis(50),
+            limiter: None,
+            gain: 0.,
+            ..Config::default()
+        },
+        fake,
+    )
+    .unwrap();
+    let latency = |audio: &Audio| {
+        let stats = audio.stats();
+        stats.play_heard as i64 - stats.play_asked as i64
+    };
+    audio.play(&blip(), Play::new()).unwrap();
+    until("the play placed", || audio.stats().play_heard != 0);
+    assert_eq!(latency(&audio), 42_000_000, "started");
+    until("a pause", || controls.count("pause") == 1);
+    let before = audio.stats().play_heard;
+    audio.play(&blip(), Play::new()).unwrap();
+    until("the play placed", || audio.stats().play_heard != before);
+    assert_eq!(controls.count("resume"), 1);
+    assert_eq!(latency(&audio), 42_000_000, "resumed");
 }
 
 #[test]
@@ -495,7 +548,8 @@ fn a_device_that_reports_a_format_the_mixer_can_t_run_at_is_a_failure_not_a_pani
 }
 
 /// A device whose first block comes untimed (asked at 0), as WASAPI's
-/// does: it renders two blocks at once as it starts, the second timed.
+/// does: it renders seven blocks at once as it starts, all but the first
+/// timed.
 struct ColdClock {
     held: Option<Box<Renderer>>,
     first: Option<Timing>,
@@ -520,13 +574,17 @@ impl Device for ColdClock {
     ) -> Result<(), (String, Box<Renderer>)> {
         let mut out = vec![0f32; 256 * 2];
         renderer.render(&mut out, self.first);
-        renderer.render(
-            &mut out,
-            Some(Timing {
-                asked: COLD_SECOND,
-                heard: COLD_SECOND + 10_000_000,
-            }),
-        );
+        // Then timed blocks on a steady clock, past the settling ones.
+        for k in 0..6 {
+            let asked = COLD_SECOND + k * COLD_BLOCK;
+            renderer.render(
+                &mut out,
+                Some(Timing {
+                    asked,
+                    heard: asked + 10_000_000,
+                }),
+            );
+        }
         self.held = Some(renderer);
         Ok(())
     }

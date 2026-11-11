@@ -82,11 +82,18 @@ impl Renderer {
     /// device's clock, which is how the time a sound is heard is known. A
     /// block asked for at 0 is untimed: WASAPI fills its first block before
     /// its clock runs, and ALSA's clock may read 0 before its first
-    /// interrupt. A play in an untimed block is placed by the first timed
-    /// one after it.
+    /// interrupt. So is the first block after every start and resume
+    /// (WASAPI's resume fills one before its clock runs, as its start does,
+    /// with a time left from before). A play in a stream's first blocks is
+    /// placed once its clock has settled (from its fourth timed block).
     /// Never locks, allocates, frees or calls the system.
     pub fn render(&mut self, out: &mut [f32], timing: Option<Timing>) {
-        let timing = timing.filter(|t| t.asked != 0);
+        let timing = if self.meter.restarted.swap(false, Ordering::Acquire) {
+            self.mixer.restarted();
+            None
+        } else {
+            timing.filter(|t| t.asked != 0)
+        };
         let plays = self.meter.play_heard.load(Ordering::Relaxed);
         let began = clock::now();
         self.mixer.render(out, self.channels, timing);
@@ -310,6 +317,9 @@ pub(crate) fn host(
         }
         'start: loop {
             let began = Instant::now();
+            // The first block after a start or a resume is untimed: WASAPI
+            // fills it before its clock runs, on a resume as on a start.
+            meter.restarted.store(true, Ordering::Release);
             let resumed = renderer.is_none() && device.resume();
             if !resumed {
                 let mut held = match renderer.take().or_else(|| device.close()) {

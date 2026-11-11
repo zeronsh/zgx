@@ -21,6 +21,11 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 pub(crate) const MAX_BLOCK: usize = 128;
 /// Buses at most, master included.
 pub(crate) const MAX_BUSES: usize = 64;
+/// The timed block after a stream starts or resumes from which a play is
+/// placed on its clock: WASAPI's first few say too little of the output
+/// latency (a few ms where it's 42), so a play then is placed from this
+/// one, counted back.
+pub(crate) const SETTLED: u32 = 4;
 /// How long a bus's metered level takes to move most of the way: an
 /// average over about this long, as a VU meter's.
 pub(crate) const METER_SECONDS: f32 = 0.3;
@@ -164,6 +169,9 @@ pub(crate) struct Meter {
     pub voices: AtomicU64,
     pub stolen: AtomicU64,
     pub dropped: AtomicU64,
+    /// Set by the host as it starts or resumes a stream: the block after is
+    /// untimed, and the clock settles again.
+    pub restarted: AtomicBool,
     /// Sends refused: to a third bus while a voice sends to two (counted
     /// here by the mixer for `set_send`, by the engine for `Play::send`).
     pub sends_refused: AtomicU64,
@@ -240,6 +248,7 @@ impl Meter {
             voices: zero(),
             stolen: zero(),
             dropped: zero(),
+            restarted: AtomicBool::new(false),
             sends_refused: zero(),
             late: zero(),
             blocks: zero(),
@@ -1222,6 +1231,9 @@ pub(crate) struct Mixer {
     /// device's clock places it there: a device's first blocks may come
     /// untimed.
     started: Option<u64>,
+    /// Blocks timed since the stream last started or resumed: a play in
+    /// its first is placed from the [`SETTLED`]th.
+    timed: u32,
     /// Work the tests count, not time: plays tried, and commands looked
     /// through for a waiting play.
     #[cfg(test)]
@@ -1312,6 +1324,7 @@ impl Mixer {
             ended: 0,
             underruns: 0,
             started: None,
+            timed: 0,
             #[cfg(test)]
             work: Default::default(),
             waited: 0,
@@ -1500,7 +1513,13 @@ impl Mixer {
             };
             meter.block_asked.store(timing.asked, Ordering::Relaxed);
             meter.block_heard.store(timing.heard, Ordering::Relaxed);
-            if let Some(started) = self.started.take() {
+            self.timed = self.timed.saturating_add(1);
+            // A stream's first timed blocks may say too little of its
+            // output latency (WASAPI's do): a play in them waits for the
+            // clock to settle, and is placed from there, back.
+            if self.timed >= SETTLED
+                && let Some(started) = self.started.take()
+            {
                 // Placed from this block's first frame, which a play in an
                 // untimed block came before.
                 let latency = self.limiter.as_ref().map_or(0, Limiter::latency) as u64;
@@ -1964,6 +1983,11 @@ impl Mixer {
         voice.sound = Some(sound);
         self.started = Some(self.now);
         Ok(())
+    }
+
+    /// The stream started or resumed: its clock settles again.
+    pub fn restarted(&mut self) {
+        self.timed = 0;
     }
 
     /// Opens or closes each bus's gate for the mutes and solos now set: a
