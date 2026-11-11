@@ -972,12 +972,14 @@ export type Promise<T = unknown> = {
 -- nil while it is fine; `values.other` reads another field), and what
 -- submitting does (in a task: it may await, and raises what went wrong).
 -- `ui.router`'s spec: each route's name and path (`"/thread/:id"`), the
--- path it starts at ("/" by default), and the scheme of the deep links it
--- follows (`"mail"` for `mail://thread/42`).
+-- path it starts at ("/" by default), the scheme of the deep links it
+-- follows (`"mail"` for `mail://thread/42`), and how many places behind its
+-- history keeps (100 by default, the oldest let go; `math.huge` for all).
 export type RouterSpec = {
 	routes: { [string]: string },
 	initial: string?,
 	scheme: string?,
+	history: number?,
 }
 -- Where the router is: the route's name, its path and its params.
 export type Route = { name: string, path: string, params: { [string]: string } }

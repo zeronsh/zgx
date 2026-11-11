@@ -606,7 +606,7 @@ A text template's `{name}` (in `ui.text`, a child string, a span) looks for the 
 
 ## Routing
 
-`ui.router { routes, initial?, scheme? }` keeps where an app is, as React Router does: named routes with `:params`, the history behind and ahead, the platform's back and forward input, and deep links.
+`ui.router { routes, initial?, scheme?, history? }` keeps where an app is, as React Router does: named routes with `:params`, the history behind and ahead, the platform's back and forward input, and deep links. The history keeps the last 100 places behind, as a browser keeps a tab's, so back stops after 100 steps: `history` sets how many (`math.huge` keeps every one, and an app that moves all day then holds every place it has been).
 
 ```lua
 local router = ui.router {
@@ -635,7 +635,7 @@ return ui.column {
 | `navigate(name, params?)` | to a route by its name and params (`navigate("thread", { id = 7 })`): an app's route names and params are typed, so a misspelling is a type error; a name with no such route, or a missing param, is an error as it runs |
 | `replace(name, params?)` | the same, in place of the route now |
 | `open(path, { replace? }?)` | to the route a path matches (`open("/thread/7")`), as a deep link goes; a path no route matches is an error |
-| `back()`, `forward()`, `can_back`, `can_forward` | the history, and whether there is any behind or ahead |
+| `back()`, `forward()`, `can_back`, `can_forward` | the history, and whether there is any behind or ahead (the last `history` places behind, 100 unless set) |
 | `is(name)` | whether the route is `name` now, tracked |
 | `view(cases, props?)` | what each route shows: a node, or a function of its params made again as they change. It takes the mouse's back and forward buttons and a trackpad's swipe between pages (`grow = 1` unless sized) |
 
