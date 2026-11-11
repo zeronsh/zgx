@@ -1,10 +1,8 @@
 //! What Direct3D 11 (`ZGX_D3D11=1`, the `d3d11` feature) leaves out of a
 //! frame rather than fail it, and what still fails it
-//! (`GpuRenderer::d3d11_leave_out`): a drop shadow draws; a backdrop
-//! blur draws its box opaque in its own colour, as the system's Reduce
-//! transparency draws glass; a layer shader reading the backdrop, a content
-//! blur and a blend mode draw. Each
-//! kind left out is named once. `ZGX_D3D11` is read once a process, so this
+//! (`GpuRenderer::d3d11_leave_out`): a drop shadow, a backdrop blur (not
+//! its box opaque), a layer shader reading the backdrop, a content blur and
+//! a blend mode all draw, and none of them is left out. `ZGX_D3D11` is read once a process, so this
 //! test is one of its own, setting it first.
 #[cfg(windows)]
 use zgx::scene::*;
@@ -86,20 +84,17 @@ fn at(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
     pixels[i..i + 4].try_into().unwrap()
 }
 
-/// Every pixel inside the box, clear of its corners, is its fill opaque.
+/// Whether every pixel inside the box, clear of its corners, is its fill
+/// opaque (as Direct3D 11 once drew a backdrop blur).
 #[cfg(windows)]
-fn opaque_box(pixels: &[u8], what: &str) {
-    for y in 90..150 {
-        for x in 70..170 {
+fn opaque_box(pixels: &[u8]) -> bool {
+    (90..150).all(|y| {
+        (70..170).all(|x| {
             let [r, g, b, a] = at(pixels, x, y);
             let near = |value: u8, want: u8| value.abs_diff(want) <= 1;
-            assert!(
-                near(r, FILL.0) && near(g, FILL.1) && near(b, FILL.2) && a == 255,
-                "{what}: ({x}, {y}) is {:?}, not the box's colour opaque",
-                [r, g, b, a]
-            );
-        }
-    }
+            near(r, FILL.0) && near(g, FILL.1) && near(b, FILL.2) && a == 255
+        })
+    })
 }
 
 #[cfg(windows)]
@@ -124,7 +119,8 @@ fn main() {
     let layered = draw(|scene, id| scene.set_isolated(id, true)).expect("a layer draws");
     assert!(shadowed != layered, "the drop shadow drew nothing");
 
-    // A backdrop blur: the box opaque in its own colour.
+    // A backdrop blur draws (d3d11_parity compares it with Direct3D 12's):
+    // translucent over the stripes it blurs, not the box opaque.
     let blurred = draw(|scene, id| {
         scene.set_effects(
             id,
@@ -135,7 +131,11 @@ fn main() {
         )
     })
     .expect("a frame with a backdrop blur draws");
-    opaque_box(&blurred, "a backdrop blur");
+    assert!(
+        !opaque_box(&blurred),
+        "the backdrop blur drew as the opaque box"
+    );
+    assert_ne!(blurred, plain, "the backdrop blur drew nothing");
     // Outside it, the stripes as they were.
     assert_eq!(at(&blurred, 20, 30), at(&plain, 20, 30));
 
@@ -238,12 +238,9 @@ fn main() {
         !left_out.contains(&"images a GPU view draws"),
         "a GPU view was left out: {left_out:?}"
     );
-    let kind = "backdrop blurs (drawn opaque)";
-    assert!(left_out.contains(&kind), "{kind} not named: {left_out:?}");
-    assert_eq!(
-        left_out.len(),
-        1,
-        "only backdrop blurs are left out: {left_out:?}"
+    assert!(
+        left_out.is_empty(),
+        "nothing here is left out: {left_out:?}"
     );
     println!("d3d11_left_out: {left_out:?}");
 }

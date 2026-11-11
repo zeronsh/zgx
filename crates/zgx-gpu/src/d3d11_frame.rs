@@ -43,13 +43,13 @@ use windows::{
         Graphics::{
             Direct3D::{
                 D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
-                D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
+                D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
             },
             Direct3D11::*,
             Dxgi::{
                 Common::{
-                    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R32_TYPELESS,
-                    DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC,
+                    DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                    DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_SAMPLE_DESC,
                 },
                 CreateDXGIFactory2, DXGI_CREATE_FACTORY_FLAGS, DXGI_GPU_PREFERENCE_MINIMUM_POWER,
                 IDXGIAdapter, IDXGIFactory6,
@@ -89,6 +89,13 @@ const IMAGE_EFFECT_FS: &[u8] = include_bytes!("dxbc/image_effects_zgx_image_effe
 /// `crate::blend_source`): its backdrop in `POINTS`'s register, which no
 /// blended draw reads points from.
 const BLEND_FS: &[u8] = include_bytes!("dxbc/blend_zgx_blended.dxbc");
+/// blur.wgsl's stages, with `crate::BLUR_MIX` (the backdrop blur, `Frame::blur`).
+const BLUR_VS: &[u8] = include_bytes!("dxbc/blur_vs.dxbc");
+const BLUR_REDUCE: &[u8] = include_bytes!("dxbc/blur_fs_reduce.dxbc");
+const BLUR_ACROSS: &[u8] = include_bytes!("dxbc/blur_fs_across.dxbc");
+const BLUR_DOWN: &[u8] = include_bytes!("dxbc/blur_fs_down.dxbc");
+const BLUR_FS: &[u8] = include_bytes!("dxbc/blur_fs.dxbc");
+const BLUR_MIX_FS: &[u8] = include_bytes!("dxbc/blur_fs_mix.dxbc");
 
 /// Registers the HLSL is written with (`translate`): the sampled texture
 /// (the atlas, or the shown buffer for copies) in t0, the clip regions in
@@ -211,6 +218,80 @@ struct Pipeline {
     blend: ID3D11BlendState,
 }
 
+/// The backdrop blur's stages (blur.wgsl, `crate::BlurPipelines`): one
+/// vertex stage, three passes into its atlas replacing, and its draw back
+/// over the target, replacing or mixed by dual-source blending.
+struct BlurPipelines {
+    vertex: ID3D11VertexShader,
+    reduce: ID3D11PixelShader,
+    across: ID3D11PixelShader,
+    down: ID3D11PixelShader,
+    vertical: ID3D11PixelShader,
+    mix: ID3D11PixelShader,
+    replace: ID3D11BlendState,
+    /// out = blur * amount + target * (1 - amount), as Direct3D 12's mix.
+    mixed: ID3D11BlendState,
+    /// naga's special constants (b0): the draw's first instance, written
+    /// before each draw (`Frame::blur_draw`).
+    index: ID3D11Buffer,
+}
+
+impl BlurPipelines {
+    fn new(device: &ID3D11Device) -> Option<Self> {
+        let pixel = |code: &[u8]| {
+            let mut shader = None;
+            // SAFETY: DXBC compiled by FXC (`translated_hlsl_matches`).
+            unsafe { device.CreatePixelShader(code, None, Some(&mut shader)) }.ok()?;
+            shader
+        };
+        let mut vertex = None;
+        // SAFETY: As above.
+        unsafe { device.CreateVertexShader(BLUR_VS, None, Some(&mut vertex)) }.ok()?;
+        let blend = |on: bool| {
+            let mut targets = [D3D11_RENDER_TARGET_BLEND_DESC::default(); 8];
+            targets[0] = D3D11_RENDER_TARGET_BLEND_DESC {
+                BlendEnable: on.into(),
+                SrcBlend: D3D11_BLEND_ONE,
+                DestBlend: D3D11_BLEND_INV_SRC1_COLOR,
+                BlendOp: D3D11_BLEND_OP_ADD,
+                SrcBlendAlpha: D3D11_BLEND_ONE,
+                DestBlendAlpha: D3D11_BLEND_INV_SRC1_ALPHA,
+                BlendOpAlpha: D3D11_BLEND_OP_ADD,
+                RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
+            };
+            let desc = D3D11_BLEND_DESC {
+                AlphaToCoverageEnable: false.into(),
+                IndependentBlendEnable: false.into(),
+                RenderTarget: targets,
+            };
+            let mut state = None;
+            // SAFETY: A plain blend description.
+            unsafe { device.CreateBlendState(&desc, Some(&mut state)) }.ok()?;
+            state
+        };
+        let desc = D3D11_BUFFER_DESC {
+            ByteWidth: 16,
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+            ..Default::default()
+        };
+        let mut index = None;
+        // SAFETY: A plain 16-byte constant buffer.
+        unsafe { device.CreateBuffer(&desc, None, Some(&mut index)) }.ok()?;
+        Some(Self {
+            index: index?,
+            vertex: vertex?,
+            reduce: pixel(BLUR_REDUCE)?,
+            across: pixel(BLUR_ACROSS)?,
+            down: pixel(BLUR_DOWN)?,
+            vertical: pixel(BLUR_FS)?,
+            mix: pixel(BLUR_MIX_FS)?,
+            replace: blend(false)?,
+            mixed: blend(true)?,
+        })
+    }
+}
+
 /// A clamped sampler of `filter`, or none if Direct3D makes none.
 fn sampler_state(device: &ID3D11Device, filter: D3D11_FILTER) -> Option<ID3D11SamplerState> {
     let desc = D3D11_SAMPLER_DESC {
@@ -242,6 +323,9 @@ pub(crate) struct Device {
     /// Image effects' pixel stage (`Shading::ImageEffect`), made when an
     /// image first draws with one (`None`: Direct3D made none).
     image_effect: std::cell::OnceCell<Option<ID3D11PixelShader>>,
+    /// The backdrop blur's stages (`Frame::blur`), made when a frame first
+    /// blurs (`None`: Direct3D made none).
+    blur: std::cell::OnceCell<Option<BlurPipelines>>,
     /// Blended layers' pixel stage (`Shading::Blend`), made when one first
     /// draws (`None`: Direct3D made none).
     blend: std::cell::OnceCell<Option<ID3D11PixelShader>>,
@@ -433,6 +517,7 @@ impl Device {
             pipelines,
             effect_pipelines,
             image_effect: std::cell::OnceCell::new(),
+            blur: std::cell::OnceCell::new(),
             blend: std::cell::OnceCell::new(),
             rasterizer,
             sampler,
@@ -515,12 +600,38 @@ impl Device {
         height: u32,
         target: bool,
     ) -> Result<Surface, GpuError> {
+        self.surface_as(width, height, target, DXGI_FORMAT_B8G8R8A8_UNORM)
+    }
+    /// A backdrop blur batch's records (`crate::BlurRecord`s or
+    /// `crate::SlotRecord`s as bytes), as the raw buffer blur.wgsl reads.
+    pub(crate) fn records(&self, bytes: &[u8]) -> Result<ID3D11ShaderResourceView, GpuError> {
+        // `raw_buffer` copies all it makes from what it is given: padded.
+        let mut padded = bytes.to_vec();
+        padded.resize(bytes.len().max(16).next_multiple_of(16), 0);
+        Ok(raw_buffer(&self.device, padded.len(), Some(&padded))?.1)
+    }
+    /// The backdrop blur's atlas pair, `width` by `height` texels.
+    pub(crate) fn blur_atlas(&self, width: u32, height: u32) -> Result<[Surface; 2], GpuError> {
+        Ok([
+            self.surface_as(width, height, true, DXGI_FORMAT_R16G16B16A16_FLOAT)?,
+            self.surface_as(width, height, true, DXGI_FORMAT_R16G16B16A16_FLOAT)?,
+        ])
+    }
+    /// As `surface`, in `format` (the backdrop blur's atlas: RGBA16F, as
+    /// Direct3D 12's `BLUR_FORMAT`).
+    pub(crate) fn surface_as(
+        &self,
+        width: u32,
+        height: u32,
+        target: bool,
+        format: DXGI_FORMAT,
+    ) -> Result<Surface, GpuError> {
         let desc = D3D11_TEXTURE2D_DESC {
             Width: width,
             Height: height,
             MipLevels: 1,
             ArraySize: 1,
-            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Format: format,
             SampleDesc: DXGI_SAMPLE_DESC {
                 Count: 1,
                 Quality: 0,
@@ -814,6 +925,7 @@ impl Device {
             scissor: None,
             nearest: false,
             points: state.points.as_ref().map(|(_, points, _)| points.clone()),
+            regions: regions.clone(),
         }
     }
 }
@@ -1037,6 +1149,9 @@ pub(crate) struct State {
     /// A copy of the target under blended layers (`Frame::blended`), of the
     /// last target's size that had one.
     pub(crate) backdrop: Option<Surface>,
+    /// The backdrop blur's atlas pair (`Frame::blur`), RGBA16F at the size
+    /// the batches' plans want, as Direct3D 12's `BlurScratch`.
+    pub(crate) blur_atlas: Option<[Surface; 2]>,
     /// The effect atlas's scratch twin and blank mask (`crate::effects`),
     /// under the shell's scratch texture they stand with; the atlas itself
     /// is among `textures`, which its composites sample.
@@ -1072,6 +1187,7 @@ impl State {
             layers: Default::default(),
             textures: Default::default(),
             backdrop: None,
+            blur_atlas: None,
             effects: None,
         })
     }
@@ -1392,9 +1508,224 @@ pub(crate) struct Frame<'a> {
     /// The frame's polyline points, bound again after a blended draw takes
     /// their register for its backdrop.
     points: Option<ID3D11ShaderResourceView>,
+    /// The frame's clip regions, bound again after a backdrop blur takes
+    /// their register (`blur_draw`).
+    regions: ID3D11ShaderResourceView,
+}
+
+/// A slot of the backdrop blur's atlas (`Frame::blur`): its texels, and
+/// whether it is blurred (else a copy of an area, drawn only reducing).
+pub(crate) struct BlurSlot {
+    pub(crate) texels: Scissor,
+    pub(crate) blurred: bool,
 }
 
 impl Frame<'_> {
+    /// A batch of backdrop filters blurred into `atlas`, as Direct3D 12's
+    /// `GpuRenderer::blur` draws them: reduced from `target` into the first
+    /// atlas, across into the second, then down into the first again (over
+    /// the copies it holds where `copies`), each slot under its texels'
+    /// scissor; `blurs` and `slots` the batch's records. Whether it could
+    /// (its stages made).
+    pub(crate) fn blur(
+        &mut self,
+        target: &Surface,
+        atlas: &[Surface; 2],
+        records: [&ID3D11ShaderResourceView; 2],
+        slots: &[BlurSlot],
+        copies: bool,
+    ) -> bool {
+        let device = self.device;
+        let Some(blur) = device
+            .blur
+            .get_or_init(|| BlurPipelines::new(&device.device))
+            .as_ref()
+        else {
+            return false;
+        };
+        let srv = |surface: &Surface| surface.srv.clone().expect("sampled");
+        let passes = [
+            (
+                &blur.reduce,
+                srv(target),
+                srv(&atlas[1]),
+                &atlas[0],
+                false,
+                false,
+            ),
+            (
+                &blur.across,
+                srv(&atlas[0]),
+                srv(&atlas[0]),
+                &atlas[1],
+                true,
+                false,
+            ),
+            (
+                &blur.down,
+                srv(&atlas[1]),
+                srv(&atlas[1]),
+                &atlas[0],
+                true,
+                copies,
+            ),
+        ];
+        for (pixel, source, other, into, blurred_only, keep) in passes {
+            let draws = slots
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.texels.2 > 0 && slot.texels.3 > 0)
+                .filter(|(_, slot)| !blurred_only || slot.blurred)
+                .map(|(k, slot)| (k as u32, slot.texels));
+            self.blur_draw(
+                blur,
+                into,
+                keep,
+                pixel,
+                &blur.replace,
+                [&source, &other],
+                records,
+                draws,
+            );
+        }
+        true
+    }
+    /// A batch blurred into `atlas` (`blur`) drawn back over `target` under
+    /// each draw's scissor (its filter's index and output): replacing what
+    /// is there, or mixed over it (`mixed`, dual-source blending).
+    pub(crate) fn blur_back(
+        &mut self,
+        target: &Surface,
+        atlas: &Surface,
+        records: [&ID3D11ShaderResourceView; 2],
+        draws: &[(u32, Scissor)],
+        mixed: bool,
+    ) -> bool {
+        let device = self.device;
+        let Some(blur) = device.blur.get().and_then(Option::as_ref) else {
+            return false;
+        };
+        let source = atlas.srv.clone().expect("sampled");
+        let (pixel, blend) = match mixed {
+            true => (&blur.mix, &blur.mixed),
+            false => (&blur.vertical, &blur.replace),
+        };
+        self.blur_draw(
+            blur,
+            target,
+            true,
+            pixel,
+            blend,
+            [&source, &source],
+            records,
+            draws.iter().copied(),
+        );
+        true
+    }
+    /// Draws of a backdrop blur's stage into `into` (cleared first unless
+    /// `keep`): each its instance index (b0) and scissor, a triangle over
+    /// the whole target. The frame's own bindings come back after (`rebind`).
+    #[allow(clippy::too_many_arguments)]
+    fn blur_draw(
+        &mut self,
+        blur: &BlurPipelines,
+        into: &Surface,
+        keep: bool,
+        pixel: &ID3D11PixelShader,
+        blend: &ID3D11BlendState,
+        textures: [&ID3D11ShaderResourceView; 2],
+        records: [&ID3D11ShaderResourceView; 2],
+        draws: impl Iterator<Item = (u32, Scissor)>,
+    ) {
+        let context = &self.device.context;
+        let rtv = into.rtv.clone().expect("a render target");
+        // SAFETY: Live objects of this device, bound to its context; what
+        // is drawn into is never one of the textures it samples.
+        unsafe {
+            context.PSSetShaderResources(0, Some(&[None, None, None, None]));
+            context.OMSetRenderTargets(Some(&[Some(rtv.clone())]), None);
+            context.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.,
+                TopLeftY: 0.,
+                Width: into.width as f32,
+                Height: into.height as f32,
+                MinDepth: 0.,
+                MaxDepth: 1.,
+            }]));
+            if !keep {
+                context.ClearRenderTargetView(&rtv, &[0.; 4]);
+            }
+            context.IASetInputLayout(None);
+            context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            context.VSSetShader(&blur.vertex, None);
+            context.PSSetShader(pixel, None);
+            context.OMSetBlendState(blend, None, u32::MAX);
+            context.VSSetConstantBuffers(0, Some(&[Some(blur.index.clone())]));
+            context.PSSetConstantBuffers(0, Some(&[Some(blur.index.clone())]));
+            context.PSSetShaderResources(
+                0,
+                Some(&[
+                    Some(textures[0].clone()),
+                    Some(textures[1].clone()),
+                    Some(records[0].clone()),
+                    Some(records[1].clone()),
+                ]),
+            );
+            for (index, (x, y, width, height)) in draws {
+                // naga's special constants: first vertex, first instance.
+                let constants = [0_i32, index as i32, 0, 0];
+                context.UpdateSubresource(&blur.index, 0, None, constants.as_ptr().cast(), 0, 0);
+                context.RSSetScissorRects(Some(&[RECT {
+                    left: x as i32,
+                    top: y as i32,
+                    right: (x + width) as i32,
+                    bottom: (y + height) as i32,
+                }]));
+                context.DrawInstanced(3, 1, 0, 0);
+            }
+            context.PSSetShaderResources(0, Some(&[None, None, None, None]));
+        }
+        self.scissor = None;
+        self.current = None;
+    }
+    /// The frame's own bindings again after a backdrop blur took them
+    /// (`blur`, `blur_back`): its target and viewport, its quads, the
+    /// viewport's constants, its regions and points, its sampler. The
+    /// caller binds its texture again (the glyph atlas, `texture`).
+    pub(crate) fn rebind(&mut self, state: &State, target: &Surface, vertices: &ID3D11Buffer) {
+        let context = &self.device.context;
+        let rtv = target.rtv.clone().expect("a render target");
+        // SAFETY: As `Device::begin` binds them.
+        unsafe {
+            context.OMSetRenderTargets(Some(&[Some(rtv)]), None);
+            context.RSSetViewports(Some(&[D3D11_VIEWPORT {
+                TopLeftX: 0.,
+                TopLeftY: 0.,
+                Width: target.width as f32,
+                Height: target.height as f32,
+                MinDepth: 0.,
+                MaxDepth: 1.,
+            }]));
+            context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            context.IASetVertexBuffers(
+                0,
+                1,
+                Some(&Some(vertices.clone())),
+                Some(&(size_of::<crate::Quad>() as u32)),
+                Some(&0),
+            );
+            context.VSSetConstantBuffers(0, Some(&[Some(state.viewport.clone())]));
+            context.PSSetConstantBuffers(0, Some(&[Some(state.viewport.clone())]));
+            context.PSSetShaderResources(REGIONS, Some(&[Some(self.regions.clone())]));
+            if let Some(points) = &self.points {
+                context.PSSetShaderResources(POINTS, Some(&[Some(points.clone())]));
+            }
+            context.PSSetSamplers(0, Some(&[Some(self.device.sampler.clone())]));
+        }
+        self.nearest = false;
+        self.scissor = None;
+        self.current = None;
+    }
     /// What the target holds within `rect` copied to `backdrop` (of the
     /// target's size), for the blended draws after it (`blended`) to read.
     pub(crate) fn copy_backdrop(&mut self, target: &Surface, backdrop: &Surface, rect: Scissor) {
@@ -1672,18 +2003,24 @@ enum Module {
     Copy,
     /// effects.wgsl: its source in `TEXTURE`, its mask in `MASK`.
     Effects,
+    /// blur.wgsl (with `crate::BLUR_MIX`): its source and original textures
+    /// in t0 and t1, its filters' and slots' records in t2 and t3.
+    Blur,
 }
 
 fn translate(source: &str, module_kind: Module) -> Result<(String, Vec<(String, String)>), String> {
     use naga::back::hlsl;
     use wgpu::naga;
     let module = naga::front::wgsl::parse_str(source).map_err(|e| e.to_string())?;
-    let info = naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::default(),
-    )
-    .validate(&module)
-    .map_err(|e| e.to_string())?;
+    // blur.wgsl's mix blends by its second source (`crate::BLUR_MIX`), which
+    // Direct3D 11 has at feature level 11_0.
+    let capabilities = match module_kind {
+        Module::Blur => naga::valid::Capabilities::DUAL_SOURCE_BLENDING,
+        _ => naga::valid::Capabilities::default(),
+    };
+    let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), capabilities)
+        .validate(&module)
+        .map_err(|e| e.to_string())?;
     let target = |register| hlsl::BindTarget {
         space: 0,
         register,
@@ -1694,6 +2031,12 @@ fn translate(source: &str, module_kind: Module) -> Result<(String, Vec<(String, 
     let copies = module_kind == Module::Copy;
     if copies {
         binding_map.insert(binding(0, 0), target(TEXTURE));
+    } else if module_kind == Module::Blur {
+        for slot in 0..4 {
+            binding_map.insert(binding(0, slot), target(slot));
+        }
+        // The sampler's index in the heap's table (replaced below).
+        binding_map.insert(binding(0, 4), target(0));
     } else {
         binding_map.insert(binding(0, 1), target(TEXTURE));
         // The sampler's index in the heap's table (replaced below).
@@ -1715,6 +2058,10 @@ fn translate(source: &str, module_kind: Module) -> Result<(String, Vec<(String, 
         sampler_buffer_binding_map,
         restrict_indexing: true,
         force_loop_bounding: true,
+        // blur.wgsl's draws pick their slot or filter by instance index,
+        // which Direct3D's SV_InstanceID counts from 0 whatever the draw's
+        // first instance: naga adds that from b0 (`BlurPipelines::index`).
+        special_constants_binding: (module_kind == Module::Blur).then(|| target(0)),
         ..Default::default()
     };
     let mut hlsl = String::new();
@@ -1727,6 +2074,13 @@ fn translate(source: &str, module_kind: Module) -> Result<(String, Vec<(String, 
         .zip(reflection.entry_point_names)
         .map(|(entry, name)| Ok((entry.name.clone(), name.map_err(|e| e.to_string())?)))
         .collect::<Result<Vec<_>, String>>()?;
+    // naga writes its special constants (the blur's first instance, b0) as
+    // shader model 5.1's `ConstantBuffer<T>`, which FXC's 5.0 doesn't know:
+    // the same constants as a `cbuffer` holding them, read alike.
+    let hlsl = hlsl.replace(
+        "ConstantBuffer<NagaConstants> _NagaConstants: register(b0);",
+        "cbuffer NagaConstantsBuffer : register(b0) { NagaConstants _NagaConstants; }",
+    );
     if copies {
         return Ok((hlsl, names));
     }
@@ -1873,6 +2227,24 @@ mod tests {
                  `ZGX_BLESS=1 cargo test -p zgx-gpu --features d3d11 --lib translated_hlsl`"
             )
         };
+        // With `ZGX_SHADER_OUT`, each stale file is written there as well
+        // (CI's Windows job keeps them, for a machine without FXC to take),
+        // and the test fails once, naming them all.
+        let out = std::env::var_os("ZGX_SHADER_OUT").map(std::path::PathBuf::from);
+        let mut stale_files: Vec<String> = Vec::new();
+        let mut keep = |file: &str, bytes: &[u8]| {
+            if let Some(out) = &out {
+                let path = out.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, bytes).unwrap();
+            }
+            stale_files.push(stale(file));
+        };
+        let blur = format!(
+            "enable dual_source_blending;\n{}\n{}",
+            include_str!("blur.wgsl"),
+            crate::BLUR_MIX
+        );
         for (wgsl, module, name, entries) in [
             (
                 include_str!("draw.wgsl"),
@@ -1922,6 +2294,19 @@ mod tests {
                     ("fs_polyline", "ps_5_0", POLYLINE_FS),
                 ][..],
             ),
+            (
+                blur.as_str(),
+                Module::Blur,
+                "blur",
+                &[
+                    ("vs", "vs_5_0", BLUR_VS),
+                    ("fs_reduce", "ps_5_0", BLUR_REDUCE),
+                    ("fs_across", "ps_5_0", BLUR_ACROSS),
+                    ("fs_down", "ps_5_0", BLUR_DOWN),
+                    ("fs", "ps_5_0", BLUR_FS),
+                    ("fs_mix", "ps_5_0", BLUR_MIX_FS),
+                ][..],
+            ),
         ] {
             let (hlsl, names) = translate(wgsl, module).unwrap();
             let file = format!("{name}.hlsl");
@@ -1929,7 +2314,9 @@ mod tests {
                 std::fs::write(dir.join(&file), &hlsl).unwrap();
             } else {
                 let kept = std::fs::read_to_string(dir.join(&file)).unwrap_or_default();
-                assert!(kept == hlsl, "{}", stale(&file));
+                if kept != hlsl {
+                    keep(&file, hlsl.as_bytes());
+                }
             }
             for &(entry, target, kept) in entries {
                 let (_, hlsl_name) = names
@@ -1941,10 +2328,11 @@ mod tests {
                 let file = format!("dxbc/{name}_{entry}.dxbc");
                 if bless {
                     std::fs::write(dir.join(&file), &code).unwrap();
-                } else {
-                    assert!(kept == &code[..], "{}", stale(&file));
+                } else if kept != &code[..] {
+                    keep(&file, &code);
                 }
             }
         }
+        assert!(stale_files.is_empty(), "{}", stale_files.join("\n"));
     }
 }
