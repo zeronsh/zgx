@@ -769,11 +769,12 @@ pub(crate) struct Data {
     owners: Vec<(Arc<str>, u8)>,
     /// The last frame's time and step, in seconds: when the next frame is.
     clock: (f64, f64),
-    /// The device its resources' copies are made on, and its generation:
-    /// every painter of the world on that device shares them (`World::view`
-    /// and any `World::viewport`), and one on another device takes them
-    /// over, made anew.
-    device: Option<(wgpu::Device, u64)>,
+    /// The device its resources' copies are made on (its identity,
+    /// `ViewportFrame::device_id`: never its equality, which holds across
+    /// wgpu instances), and its generation: every painter of the world on
+    /// that device shares them (`World::view` and any `World::viewport`),
+    /// and one on another device takes them over, made anew.
+    device: Option<(u64, u64)>,
     /// The frame time it last stepped at (its passes run, its reads moved
     /// along) and its clock's start: a frame time steps it once however
     /// many painters, or boxes showing its view, draw it.
@@ -1212,6 +1213,10 @@ impl Frames {
         // Within an owner's, the least recently run first (one left
         // waiting ran longest ago): its passes take turns, none run every
         // frame while the others alternate.
+        // `ran` counts a painter's frames (`Frames::index`), and a new
+        // painter's count starts again: passes that ran under the old one
+        // then sort last for one turn, until each has run under the new
+        // one. It rights itself; nothing starves meanwhile.
         let mut owners: Vec<Arc<str>> = Vec::new();
         let mut candidates: Vec<(usize, u64, u64, u32)> = Vec::new();
         let mut by_turn: Vec<u32> = due
@@ -1343,10 +1348,10 @@ impl Frames {
         }
         // The world's copies are its device's, whichever painter made them.
         self.generation = match &data.device {
-            Some((made_on, generation)) if made_on == device => *generation,
+            Some((made_on, generation)) if *made_on == frame.device_id() => *generation,
             _ => {
                 let generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
-                data.device = Some((device.clone(), generation));
+                data.device = Some((frame.device_id(), generation));
                 generation
             }
         };

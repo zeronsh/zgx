@@ -64,6 +64,25 @@ pub struct ViewportFrame<'a> {
     /// virtual clock's while one runs, so a video's frames repeat), one
     /// instant for every view and box of a window's frame.
     pub time: std::time::Instant,
+    /// Its device's identity (`device_id`).
+    #[cfg(feature = "view-features")]
+    device_id: u64,
+}
+
+/// A number no other device in this process has had or will have: what
+/// tells a device apart (wgpu's devices compare equal across instances, and
+/// a device's address can be another's once it's gone). A renderer's
+/// frames carry their context's; a painter's own device, made outside a
+/// renderer (a test's, a harness's), takes one where it's made and hands it
+/// with each frame (`ViewportFrame::set_device_id`).
+///
+/// With the `view-features` feature (zgx-3d turns it on): a UI app's
+/// painters, one device each, need none of it.
+#[cfg(feature = "view-features")]
+#[cold]
+pub fn new_device_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl<'a> ViewportFrame<'a> {
@@ -88,7 +107,25 @@ impl<'a> ViewportFrame<'a> {
             size,
             scale,
             time: zgx::clock::now(),
+            #[cfg(feature = "view-features")]
+            device_id: 0,
         }
+    }
+    /// Its device's identity: a number no other device in the process has
+    /// (`new_device_id`), the same for every frame drawn with it. Painters
+    /// key what they keep for a device by it, never by the device's
+    /// equality. 0 for a frame made with `new` and given none: a painter
+    /// takes every such frame as drawn with one device.
+    #[cfg(feature = "view-features")]
+    pub fn device_id(&self) -> u64 {
+        self.device_id
+    }
+    /// The frame drawn with the device `new_device_id` gave `id`: a
+    /// painter's own device (a test's, a harness's), drawn beside a
+    /// renderer's or another of its own.
+    #[cfg(feature = "view-features")]
+    pub fn set_device_id(&mut self, id: u64) {
+        self.device_id = id;
     }
 }
 
@@ -851,6 +888,8 @@ impl GpuRenderer {
             // The interface's time (a video's virtual clock's while one
             // runs), read once a frame: the same for every view and box.
             time: self.view_time(),
+            #[cfg(feature = "view-features")]
+            device_id: *context.device_id.get_or_init(new_device_id),
         });
         // Ahead of the frame sampling it (or its drawable's present), which
         // is recorded after this and submitted later on the same queue.

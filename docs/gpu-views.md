@@ -74,7 +74,7 @@ A frame that switches a view between its layer and the window's frame costs abou
 
 ## Devices
 
-`frame.device` and `frame.queue` are the ones the view is drawn with. They are the renderer's own where it draws with wgpu (Metal, Direct3D 12, Vulkan, GL). They may be another where it draws otherwise, so a painter makes its resources from the frame it is given and drops them in `device_changed` (a lost device made anew, the view shown in a window on another adapter).
+`frame.device` and `frame.queue` are the ones the view is drawn with. They are the renderer's own where it draws with wgpu (Metal, Direct3D 12, Vulkan, GL). They may be another where it draws otherwise, so a painter makes its resources from the frame it is given and drops them in `device_changed` (a lost device made anew, the view shown in a window on another adapter). A painter keeping resources for more than one device tells them apart by `frame.device_id()` (with zgx-gpu's `view-features` feature, which zgx-3d turns on), a number no other device in the process has, never by comparing `wgpu::Device`s: devices of two wgpu instances compare equal. A frame a painter's own code makes with `ViewportFrame::new`, on a device of its own, carries 0 unless given one: take one with `zgx_gpu::viewport::new_device_id()` where the device is made, and hand it with each frame (`frame.set_device_id(id)`).
 
 Use the wgpu the renderer draws with, re-exported as `zgx_gpu::wgpu` (and `zgx_desktop::wgpu`): another major version is another crate whose types are not these. A new major version of wgpu is a new major version of zgx-gpu.
 

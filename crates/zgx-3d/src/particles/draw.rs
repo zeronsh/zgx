@@ -40,7 +40,8 @@ struct Prepared {
     /// Which prepare (each a number of its own): pools' bindings are made
     /// for one.
     made: u64,
-    device: wgpu::Device,
+    /// The device it prepared on: its identity (`ViewportFrame::device_id`).
+    device: u64,
     /// Its group 0's layout, and the renderer's frame uniforms in it.
     layout: wgpu::BindGroupLayout,
     uniforms: wgpu::Buffer,
@@ -62,14 +63,15 @@ pub(crate) struct ParticleDraw {
     made: u64,
     prepared: Vec<Prepared>,
     /// The painter drawing this frame.
-    pub(crate) current: u64,
+    /// The painter drawing this frame, and its device's identity.
+    pub(crate) current: (u64, u64),
     /// Its pools this frame.
     pub(crate) drawn: Vec<Drawn>,
 }
 
 impl ParticleDraw {
     fn prepared(&self) -> Option<&Prepared> {
-        self.prepared.iter().find(|p| p.painter == self.current)
+        self.prepared.iter().find(|p| p.painter == self.current.0)
     }
     /// Whether the current painter's pipelines are made.
     pub(crate) fn ready(&self) -> bool {
@@ -85,15 +87,15 @@ impl ParticleDraw {
     /// prepare, the layout and the frame's uniforms.
     pub(crate) fn binding_on(
         &self,
-        device: &wgpu::Device,
+        device: u64,
     ) -> Option<(u64, wgpu::BindGroupLayout, wgpu::Buffer)> {
-        let p = self.prepared().filter(|p| p.device == *device)?;
+        let p = self.prepared().filter(|p| p.device == device)?;
         Some((p.made, p.layout.clone(), p.uniforms.clone()))
     }
     /// `painter`'s renderer gone, or its device: nothing of it kept.
     pub(crate) fn forget(&mut self, painter: u64) {
         self.prepared.retain(|p| p.painter != painter);
-        if self.current == painter {
+        if self.current.0 == painter {
             self.drawn.clear();
         }
     }
@@ -117,7 +119,7 @@ impl SceneDraw for ParticleDraw {
         frame: FrameResources<'_>,
     ) {
         // For the painter whose step came before this renderer's frame.
-        let painter = self.current;
+        let (painter, device_id) = self.current;
         self.forget(painter);
         self.made += 1;
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -131,7 +133,7 @@ impl SceneDraw for ParticleDraw {
         self.prepared.push(Prepared {
             painter,
             made: self.made,
-            device: device.clone(),
+            device: device_id,
             layout: layout.clone(),
             uniforms: frame.uniforms.clone(),
             pipelines: pipelines.clone(),

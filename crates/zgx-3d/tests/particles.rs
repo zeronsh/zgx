@@ -1027,3 +1027,112 @@ fn a_fast_particle_under_temporal_antialiasing_keeps_its_light() {
         "TAA {taa}, multisampling {msaa}"
     );
 }
+
+/// Devices of two wgpu instances compare equal (their ids are the same
+/// numbers), so a world drawn on both must tell them apart by identity
+/// (`ViewportFrame::device_id`): each keeps its own pools, pipelines and
+/// buffers, the world still steps once a frame time, and a device made
+/// after one is gone takes nothing of it.
+#[test]
+fn a_world_drawn_on_devices_of_two_instances_keeps_each_its_own() {
+    use zgx::{compose::prelude::*, gpu_view::GpuView, widgets::Ui};
+    let clock = zgx::clock::VirtualClock::new();
+    let world = world();
+    // Spawning on: a device made later has new pools, nothing of what
+    // came before, and fills them.
+    world
+        .add_emitter(
+            Emitter::new(64)
+                .rate(60.)
+                .lifetime(1.0..1.0)
+                .size(1.0..1.0)
+                .color([1., 0., 0., 1.]),
+        )
+        .unwrap();
+    // And the app's GPU data, with a pass using it each frame.
+    let count = world.add_buffer(BufferDesc::storage::<u32>(1)).unwrap();
+    world
+        .add_compute(
+            Compute::new(
+                "@group(0) @binding(0) var<storage, read_write> count: array<u32>;
+                 @compute @workgroup_size(1) fn main() { count[0] += 1u; }",
+            )
+            .buffer("count", &count, Access::ReadWrite)
+            .every_frame(),
+        )
+        .unwrap();
+    // A renderer (a context, a wgpu instance and a device of its own)
+    // showing `view`.
+    let window = |view: &GpuView| {
+        let gpu = match zgx_gpu::GpuRenderer::new(SIDE, SIDE) {
+            Ok(gpu) => gpu,
+            Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+                panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
+            }
+            Err(_) => return None,
+        };
+        let side = SIDE as f32;
+        let mut ui = Ui::new(side, side);
+        ui.mount(gpu_view("World", view).size(side, side));
+        Some((ui, gpu))
+    };
+    // The world's own view and a second painter of it, each in a window.
+    let second_view = zgx_gpu::viewport::view(world.viewport());
+    let draw = |(ui, gpu): &mut (Ui, zgx_gpu::GpuRenderer)| {
+        world.view().invalidate();
+        second_view.invalidate();
+        ui.prepare_frame();
+        let report = ui.scene.borrow_mut().flush();
+        gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+    };
+    let lit = |(_, gpu): &mut (Ui, zgx_gpu::GpuRenderer)| {
+        let pixels = gpu.readback().unwrap();
+        pixels[((SIDE / 2 * SIDE + SIDE / 2) * 4) as usize] > 200
+    };
+    let Some(mut first) = window(world.view()) else {
+        return;
+    };
+    let mut second = window(&second_view).unwrap();
+    let started = Instant::now();
+    let mut frame = 0u64;
+    let both = |first: &mut _, second: &mut _, frame: &mut u64| {
+        *frame += 1;
+        clock.advance(Duration::from_micros(*frame * 16_667), || {});
+        draw(first);
+        draw(second);
+    };
+    while !(world.particles_ready() && lit(&mut first) && lit(&mut second)) {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "not drawn: ready {}, first {}, second {}, pools {:?}",
+            world.particles_ready(),
+            lit(&mut first),
+            lit(&mut second),
+            world.particle_pools()
+        );
+        both(&mut first, &mut second, &mut frame);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    // Once a frame time, whichever device draws first.
+    let before = world.particle_time();
+    for _ in 0..30 {
+        both(&mut first, &mut second, &mut frame);
+    }
+    let stepped = world.particle_time() - before;
+    assert!((stepped - 0.5).abs() < 1e-3, "{stepped} s in 30 frames");
+    assert!(
+        lit(&mut first) && lit(&mut second),
+        "each device draws them"
+    );
+    // One gone, a third made: it takes nothing of the gone one's.
+    drop(first);
+    let Some(mut third) = window(world.view()) else {
+        return;
+    };
+    let started = Instant::now();
+    while !(lit(&mut third) && lit(&mut second)) {
+        assert!(started.elapsed() < Duration::from_secs(10), "not drawn");
+        both(&mut third, &mut second, &mut frame);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}

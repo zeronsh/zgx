@@ -486,7 +486,11 @@ pub(crate) struct Particles {
     /// last drawn on first: at most two (a world's particles belong to one
     /// device; a painter on another keeps its own, stepped only where it
     /// draws first).
-    pub(crate) devices: Vec<(zgx_gpu::wgpu::Device, gpu::Shared)>,
+    /// Keyed by the device's identity (`ViewportFrame::device_id`).
+    pub(crate) devices: Vec<(u64, gpu::Shared)>,
+    /// The last frame time's step, as planned once for every device's
+    /// pools.
+    pub(crate) plan: gpu::Plan,
 }
 impl Particles {
     /// `emitter`'s sub-emitter checked: one here and older than `added` (so
@@ -581,6 +585,13 @@ impl Particles {
         };
         self.refeed();
         id
+    }
+    /// The live emitter whose pool is `id` (`Live::id`).
+    pub(crate) fn get_mut_by_id(&mut self, id: u64) -> Option<&mut Live> {
+        self.emitters
+            .iter_mut()
+            .filter_map(|(_, live)| live.as_mut())
+            .find(|live| live.id == id)
     }
     pub(crate) fn get_mut(&mut self, id: EmitterId) -> Option<&mut Live> {
         match self.emitters.get_mut(id.index as usize) {

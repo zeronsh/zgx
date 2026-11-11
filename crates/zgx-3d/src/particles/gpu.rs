@@ -17,6 +17,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Instant,
 };
 use zgx_gpu::{viewport::ViewportFrame, wgpu};
 
@@ -174,6 +175,35 @@ pub(crate) struct Shared {
     pools: HashMap<u64, Pool>,
     /// Steps taken on this device.
     index: u64,
+    /// The frame time it was last stepped at (`Particles::plan`'s).
+    stepped: Option<Instant>,
+}
+
+/// What a frame's step does to each emitter's pool, planned once a frame
+/// time (`Shared::plan`) and done by every device drawing the world
+/// (`Shared::apply`), so each device's pools see the same spawns and steps.
+#[derive(Default)]
+pub(crate) struct Plan {
+    /// The frame time it's for.
+    at: Option<Instant>,
+    /// Whether it was planned for pools the GPU updates (their slots are).
+    on_gpu: bool,
+    planned: Vec<Planned>,
+}
+/// One emitter's part of a `Plan`.
+struct Planned {
+    id: u64,
+    slots: u32,
+    blend: Blend,
+    /// Whether any of its particles may live this frame (else neither
+    /// updated nor drawn).
+    shown: bool,
+    /// Whether a parent gives birth into it (its births start again).
+    fed: bool,
+    /// Its sub-emitter, which its births go into.
+    child: Option<u64>,
+    update: Uniforms,
+    draw: DrawUniforms,
 }
 
 impl Shared {
@@ -186,6 +216,7 @@ impl Shared {
             pipelines: None,
             pools: HashMap::new(),
             index: 0,
+            stepped: None,
         };
         shared.compiling = Some(shared.compile(device));
         shared
@@ -203,32 +234,19 @@ impl Shared {
         self.pipelines.is_some()
     }
 
-    /// The world's emitters stepped `step` seconds on: spawned, updated (on
-    /// the GPU, recorded in `frame`'s encoder, or on the CPU).
-    fn step(
-        &mut self,
-        particles: &mut Particles,
-        inner: &Inner,
-        frame: &mut ViewportFrame<'_>,
-        step: f32,
-    ) {
-        let device = frame.device;
+    /// The world's emitters stepped `step` seconds on, once a frame time:
+    /// spawned, aged, fed, held to the CPU's cap where it updates them.
+    /// What each emitter's pool does this frame, for every device's
+    /// (`apply`).
+    fn plan(&self, particles: &mut Particles, inner: &Inner, at: Instant, step: f32) -> Plan {
         particles.time += f64::from(step);
         particles.steps = particles.steps.wrapping_add(1);
         let time = particles.time;
-        let Some(pipelines) = &self.pipelines else {
-            return;
-        };
-        let on_gpu = self.compute && !particles.on_cpu && pipelines.update.is_some();
-        let Some(update_layout) = &self.update_layout else {
-            return;
-        };
+        let on_gpu = self.on_gpu(particles);
         // The camera's right and up in the world: its view's first rows.
         let view = inner.camera.view().columns;
         let right = [view[0][0], view[1][0], view[2][0], 0.];
         let up = [view[0][1], view[1][1], view[2][1], 0.];
-        self.index += 1;
-        let index = self.index;
         let seed_base = particles.steps.wrapping_mul(0x9e37_79b9);
         let slots_of = |live: &Live| {
             if on_gpu {
@@ -238,9 +256,7 @@ impl Shared {
             }
         };
         particles.feed();
-        particles.pools.clear();
-        let mut pass: Option<wgpu::ComputePass<'static>> = None;
-        let mut events: Vec<(u32, [f32; 3], u32)> = Vec::new();
+        let mut planned = Vec::new();
         // Sub-emitters before their parents: a parent's births land in
         // their pools after their own step.
         // Where the CPU steps them, the world's emitters in the order added
@@ -254,8 +270,7 @@ impl Shared {
                 .and_then(|(child, death, hit)| {
                     let live = particles.child(child)?;
                     Some((live.id, slots_of(live), death, hit))
-                })
-                .filter(|&(id, ..)| self.pools.contains_key(&id));
+                });
             let Some(live) = particles.emitters[at].1.as_mut() else {
                 continue;
             };
@@ -276,27 +291,8 @@ impl Shared {
             } else {
                 live.over_cpu = false;
             }
-            let pool = self
-                .pools
-                .entry(live.id)
-                .or_insert_with(|| make_pool(device, update_layout, slots, on_gpu));
-            // Made for the other way of updating: made again, from this frame.
-            if pool.cpu.is_some() == on_gpu || pool.slots != slots {
-                *pool = make_pool(device, update_layout, slots, on_gpu);
-            }
-            particles.pools.push((pool.slots, pool.cpu.is_some()));
-            pool.used = index;
-            pool.blend = live.emitter.blend;
-            if pool.failed {
-                live.failed = true;
-                pool.shown = false;
-                continue;
-            }
             let (base, count) = live.window(time, step, slots);
-            pool.shown = live.unsettled(time) || count > 0;
-            if !pool.shown {
-                continue;
-            }
+            let shown = !live.failed && (live.unsettled(time) || count > 0);
             let mut u = uniforms(
                 live,
                 (base, count, slots),
@@ -307,6 +303,88 @@ impl Shared {
             if let Some((_, child_slots, death, hit)) = child {
                 u.events = [child_slots, death, hit, 0];
             }
+            let e = &live.emitter;
+            let draw = DrawUniforms {
+                right,
+                up,
+                shape: match e.shape {
+                    Shape::Billboard => [0.; 4],
+                    Shape::Streak { length } => [1., length.max(0.), 0., 0.],
+                },
+                colors: e.colors,
+                sizes: e.sizes,
+            };
+            planned.push(Planned {
+                id: live.id,
+                slots,
+                blend: e.blend,
+                shown,
+                fed: live.fed,
+                child: child.map(|c| c.0),
+                update: u,
+                draw,
+            });
+        }
+        Plan {
+            at: Some(at),
+            on_gpu,
+            planned,
+        }
+    }
+
+    /// Whether this device updates `particles` on the GPU.
+    fn on_gpu(&self, particles: &Particles) -> bool {
+        self.compute
+            && !particles.on_cpu
+            && self.pipelines.as_ref().is_some_and(|p| p.update.is_some())
+    }
+
+    /// The frame's `plan` done to this device's pools (made as the plan
+    /// needs them), recorded in `frame`'s encoder or done on the CPU.
+    /// The emitters whose pools the device refused.
+    fn apply(
+        &mut self,
+        plan: &Plan,
+        particles: &Particles,
+        frame: &mut ViewportFrame<'_>,
+    ) -> Vec<u64> {
+        let device = frame.device;
+        let mut refused = Vec::new();
+        let (Some(pipelines), Some(update_layout)) = (&self.pipelines, &self.update_layout) else {
+            return refused;
+        };
+        // A device updating them the other way (the plan's slots are its
+        // way's): this one's left as it was.
+        let on_gpu = self.on_gpu(particles);
+        if on_gpu != plan.on_gpu {
+            return refused;
+        }
+        self.index += 1;
+        let index = self.index;
+        let mut pass: Option<wgpu::ComputePass<'static>> = None;
+        let mut events: Vec<(u32, [f32; 3], u32)> = Vec::new();
+        for planned in &plan.planned {
+            let slots = planned.slots;
+            let pool = self
+                .pools
+                .entry(planned.id)
+                .or_insert_with(|| make_pool(device, update_layout, slots, on_gpu));
+            // Made for the other way of updating: made again, from this frame.
+            if pool.cpu.is_some() == on_gpu || pool.slots != slots {
+                *pool = make_pool(device, update_layout, slots, on_gpu);
+            }
+            pool.used = index;
+            pool.blend = planned.blend;
+            if pool.failed {
+                refused.push(planned.id);
+                pool.shown = false;
+                continue;
+            }
+            pool.shown = planned.shown;
+            if !pool.shown {
+                continue;
+            }
+            let u = planned.update;
             pool.last = u;
             events.clear();
             match &mut pool.cpu {
@@ -322,29 +400,18 @@ impl Shared {
                         .queue
                         .write_buffer(&pool.update, 0, bytemuck::bytes_of(&u));
                     // A frame's births into it start again from none.
-                    if live.fed
+                    if planned.fed
                         && let Some(born) = &pool.born
                     {
                         frame.queue.write_buffer(born, 4, &[0; 4]);
                     }
                 }
             }
-            let e = &live.emitter;
-            let draw = DrawUniforms {
-                right,
-                up,
-                shape: match e.shape {
-                    Shape::Billboard => [0.; 4],
-                    Shape::Streak { length } => [1., length.max(0.), 0., 0.],
-                },
-                colors: e.colors,
-                sizes: e.sizes,
-            };
             frame
                 .queue
-                .write_buffer(&pool.draw, 0, bytemuck::bytes_of(&draw));
-            let id = live.id;
-            let pool = &self.pools[&id];
+                .write_buffer(&pool.draw, 0, bytemuck::bytes_of(&planned.draw));
+            let child = planned.child.filter(|id| self.pools.contains_key(id));
+            let pool = &self.pools[&planned.id];
             if pool.cpu.is_none() {
                 let compute = pass.get_or_insert_with(|| {
                     frame
@@ -360,7 +427,7 @@ impl Shared {
                     .zip(self.events_layout.as_ref());
                 match feeding {
                     Some(((child, pipeline), layout)) => {
-                        let into = &self.pools[&child.0];
+                        let into = &self.pools[&child];
                         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("3D particles giving birth"),
                             layout,
@@ -381,7 +448,7 @@ impl Shared {
                     }
                 }
                 compute.dispatch_workgroups(slots.div_ceil(256), 1, 1);
-            } else if let Some((child, ..)) = child
+            } else if let Some(child) = child
                 && !events.is_empty()
                 && let Some(into) = self.pools.get_mut(&child)
                 && let Some(children) = &mut into.cpu
@@ -396,13 +463,20 @@ impl Shared {
         // Pools of emitters removed, or made for another way of updating.
         self.pools
             .retain(|_, pool| pool.used == index && pool.cpu.is_none() == on_gpu);
+        refused
     }
 
     /// `drawer`'s list for its current painter: each shown pool with its
     /// binding for that painter's renderer (made on `device`, where the
     /// pools are).
-    fn hand_to(&mut self, particles: &Particles, drawer: &mut ParticleDraw, device: &wgpu::Device) {
-        let Some((made, layout, uniforms)) = drawer.binding_on(device) else {
+    fn hand_to(
+        &mut self,
+        particles: &Particles,
+        drawer: &mut ParticleDraw,
+        device: &wgpu::Device,
+        id: u64,
+    ) {
+        let Some((made, layout, uniforms)) = drawer.binding_on(id) else {
             return;
         };
         for at in particles.order() {
@@ -540,9 +614,11 @@ impl Default for Device {
 }
 
 impl Device {
-    /// Its device gone: what the world made on it is let go (by every
-    /// painter: wgpu tells devices apart by id, and a new device's can be
-    /// the gone one's).
+    /// Its device gone: its renderer's prepare let go, and what the world
+    /// made for frames that carry no device identity (0: such a device's
+    /// next could be taken for it). Another device's, identified, stay:
+    /// none is ever the gone one's, and a gone one's falls off as others
+    /// come (`Particles::devices`).
     pub(crate) fn device_changed(&mut self, world: &Weak<RefCell<Inner>>) {
         self.forget(world, true);
     }
@@ -560,7 +636,7 @@ impl Device {
         if let Some(particles) = &mut inner.particles {
             particles.draw.borrow_mut().forget(self.id);
             if devices {
-                particles.devices.clear();
+                particles.devices.retain(|(id, _)| *id != 0);
             }
         }
     }
@@ -591,13 +667,16 @@ impl Device {
     #[inline(never)]
     fn step(&mut self, particles: &mut Particles, inner: &Inner, frame: &mut ViewportFrame<'_>) {
         let device = frame.device;
-        let mut shared = match particles.devices.iter().position(|(d, _)| d == device) {
+        // By the device's identity, never its equality (which holds across
+        // wgpu instances).
+        let id = frame.device_id();
+        let mut shared = match particles.devices.iter().position(|(d, _)| *d == id) {
             Some(at) => particles.devices.remove(at).1,
             None => Shared::new(device),
         };
         let drawer = particles.draw.clone();
         let mut drawer = drawer.borrow_mut();
-        drawer.current = self.id;
+        drawer.current = (self.id, id);
         drawer.drawn.clear();
         // Stepped once it can be drawn (the drawer made for this painter's
         // renderer, a frame after its first): its clock starts then. The
@@ -606,7 +685,8 @@ impl Device {
         // leaves the time to the next.
         if shared.ready() && drawer.ready() {
             particles.ready = true;
-            if particles.clock != Some(frame.time) {
+            let planned = particles.clock != Some(frame.time);
+            if planned {
                 let step = particles.clock.map_or(0., |last| {
                     frame
                         .time
@@ -615,11 +695,32 @@ impl Device {
                         .min(MAX_STEP)
                 });
                 particles.clock = Some(frame.time);
-                shared.step(particles, inner, frame, step);
+                particles.plan = shared.plan(particles, inner, frame.time, step);
             }
-            shared.hand_to(particles, &mut drawer, device);
+            // Each device's pools step once a frame time too: by the plan
+            // the first made, so every device's see the same.
+            if shared.stepped != Some(frame.time) && particles.plan.at == Some(frame.time) {
+                shared.stepped = Some(frame.time);
+                let plan = std::mem::take(&mut particles.plan);
+                let refused = shared.apply(&plan, particles, frame);
+                particles.plan = plan;
+                for id in refused {
+                    if let Some(live) = particles.get_mut_by_id(id) {
+                        live.failed = true;
+                    }
+                }
+                if planned {
+                    particles.pools = particles
+                        .order()
+                        .into_iter()
+                        .filter_map(|at| shared.pools.get(&particles.emitters[at].1.as_ref()?.id))
+                        .map(|pool| (pool.slots, pool.cpu.is_some()))
+                        .collect();
+                }
+            }
+            shared.hand_to(particles, &mut drawer, device, id);
         }
-        particles.devices.insert(0, (device.clone(), shared));
+        particles.devices.insert(0, (id, shared));
         particles.devices.truncate(2);
     }
 

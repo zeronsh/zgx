@@ -3936,6 +3936,10 @@ pub struct GpuContext {
     inner: Rc<GpuContextInner>,
 }
 struct GpuContextInner {
+    /// Its device's identity for views' painters (`ViewportFrame::device_id`),
+    /// minted the first time one asks.
+    #[cfg(feature = "view-features")]
+    device_id: std::cell::OnceCell<u64>,
     /// Why the device was lost (driver reset, removal, `debug_lose_device`):
     /// set from wgpu's callback, from any thread.
     lost: Arc<std::sync::Mutex<Option<String>>>,
@@ -4351,6 +4355,8 @@ impl GpuContext {
         };
         Self {
             inner: Rc::new(GpuContextInner {
+                #[cfg(feature = "view-features")]
+                device_id: std::cell::OnceCell::new(),
                 lost,
                 instance,
                 adapter,
