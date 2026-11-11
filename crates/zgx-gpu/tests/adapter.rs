@@ -79,6 +79,36 @@ fn a_forced_fallback_takes_warp() {
     assert_eq!(info.vendor, 0x1414, "{info:?}");
 }
 
+/// WARP's ray queries are declined though asked for (it sometimes loses an
+/// acceleration structure's first triangle): its device says so, and
+/// traces nothing. In a process of its own (the software adapter forced,
+/// ray queries asked for before the device is made).
+#[cfg(feature = "view-features")]
+#[test]
+fn warp_declines_ray_queries() {
+    if !forced() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "warp_declines_ray_queries"])
+            .env("WGPU_FORCE_FALLBACK_ADAPTER", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    // SAFETY: the test takes on wgpu's experimental contract; WARP's
+    // device is made without them.
+    unsafe { zgx_gpu::request_ray_queries() };
+    let info = zgx_gpu::GpuRenderer::new(8, 8).unwrap().adapter_info();
+    if info.backend != wgpu::Backend::Dx12 {
+        return;
+    }
+    assert_eq!(
+        zgx_gpu::ray_queries_status(),
+        Some(zgx_gpu::RayQueries::DeclinedOnAdapter),
+        "{info:?}"
+    );
+}
+
 #[test]
 fn high_performance_takes_dxgis_first_gpu_for_performance() {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();

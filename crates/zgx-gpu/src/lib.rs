@@ -4163,12 +4163,14 @@ impl GpuContext {
         #[cfg(feature = "view-features")]
         let ray_queries = {
             let requested = RAY_QUERIES.load(std::sync::atomic::Ordering::Relaxed);
+            let declined = RayQueries::declined(&info);
             let ray_queries = requested
+                && !declined
                 && adapter
                     .features()
                     .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
             RAY_QUERY_STATUS.store(
-                RayQueries::of(requested, ray_queries, fxc) as u8,
+                RayQueries::of(requested, ray_queries, declined, fxc) as u8,
                 std::sync::atomic::Ordering::Relaxed,
             );
             ray_queries
@@ -18201,18 +18203,32 @@ pub enum RayQueries {
     /// queries: ship `dxcompiler.dll` beside the app, or set
     /// `WGPU_DX12_COMPILER=dxc`.
     CompilerIsFxc = 4,
+    /// Asked for on an adapter whose ray queries miss what they should hit,
+    /// so none are asked of it: WARP (Microsoft's Basic Render Driver)
+    /// sometimes loses the first triangle of an acceleration structure it
+    /// builds on its threads (docs/validation.md). Probes draw faces there.
+    DeclinedOnAdapter = 5,
 }
 #[cfg(feature = "view-features")]
 impl RayQueries {
     /// What a device asked for them (`requested`) and made with them
-    /// (`on`, or not), compiling through FXC or not, says.
-    fn of(requested: bool, on: bool, fxc: bool) -> Self {
-        match (requested, on, fxc) {
+    /// (`on`, or not), on an adapter that `declined` them or not, compiling
+    /// through FXC or not, says.
+    fn of(requested: bool, on: bool, declined: bool, fxc: bool) -> Self {
+        match (requested, on, declined, fxc) {
             (false, ..) => Self::NotRequested,
-            (true, true, _) => Self::Available,
-            (true, false, true) => Self::CompilerIsFxc,
-            (true, false, false) => Self::AdapterLacks,
+            (true, true, ..) => Self::Available,
+            (true, false, true, _) => Self::DeclinedOnAdapter,
+            (true, false, false, true) => Self::CompilerIsFxc,
+            (true, false, false, false) => Self::AdapterLacks,
         }
+    }
+    /// Whether an adapter's ray queries are declined though it offers them:
+    /// WARP, by its vendor (Microsoft's 0x1414) and its device (0x8c, the
+    /// Basic Render Driver) or name. Another adapter of Microsoft's (a
+    /// virtualised GPU, real hardware behind it) isn't.
+    fn declined(info: &wgpu::AdapterInfo) -> bool {
+        info.vendor == 0x1414 && (info.device == 0x8c || info.name.contains("Basic Render Driver"))
     }
 }
 #[cfg(feature = "view-features")]
@@ -18224,6 +18240,7 @@ pub fn ray_queries_status() -> Option<RayQueries> {
         2 => Some(RayQueries::NotRequested),
         3 => Some(RayQueries::AdapterLacks),
         4 => Some(RayQueries::CompilerIsFxc),
+        5 => Some(RayQueries::DeclinedOnAdapter),
         _ => None,
     }
 }
@@ -18287,11 +18304,53 @@ mod ray_query_tests {
     #[test]
     fn a_device_says_why_it_traces_no_rays() {
         use RayQueries::*;
-        assert_eq!(RayQueries::of(false, false, false), NotRequested);
-        assert_eq!(RayQueries::of(false, false, true), NotRequested);
-        assert_eq!(RayQueries::of(true, true, false), Available);
-        assert_eq!(RayQueries::of(true, false, true), CompilerIsFxc);
-        assert_eq!(RayQueries::of(true, false, false), AdapterLacks);
+        assert_eq!(RayQueries::of(false, false, false, false), NotRequested);
+        assert_eq!(RayQueries::of(false, false, true, true), NotRequested);
+        assert_eq!(RayQueries::of(true, true, false, false), Available);
+        assert_eq!(RayQueries::of(true, false, true, true), DeclinedOnAdapter);
+        assert_eq!(RayQueries::of(true, false, false, true), CompilerIsFxc);
+        assert_eq!(RayQueries::of(true, false, false, false), AdapterLacks);
+    }
+
+    /// WARP's ray queries are declined, by its vendor and its device or
+    /// name; no other adapter's, a virtualised one of Microsoft's among
+    /// them.
+    #[test]
+    fn warp_alone_has_its_ray_queries_declined() {
+        let adapter = |vendor, device, name: &str| wgpu::AdapterInfo {
+            name: name.into(),
+            vendor,
+            device,
+            device_type: wgpu::DeviceType::Cpu,
+            device_pci_bus_id: String::new(),
+            driver: String::new(),
+            driver_info: String::new(),
+            backend: wgpu::Backend::Dx12,
+            subgroup_min_size: 4,
+            subgroup_max_size: 128,
+            transient_saves_memory: false,
+        };
+        let warp = "Microsoft Basic Render Driver";
+        assert!(RayQueries::declined(&adapter(0x1414, 0x8c, warp)));
+        assert!(RayQueries::declined(&adapter(0x1414, 0x8c, "")));
+        assert!(RayQueries::declined(&adapter(0x1414, 0, warp)));
+        // A virtualised GPU reporting Microsoft's vendor id.
+        assert!(!RayQueries::declined(&adapter(
+            0x1414,
+            0x1234,
+            "Virtual GPU"
+        )));
+        assert!(!RayQueries::declined(&adapter(
+            0x10de,
+            0x2684,
+            "NVIDIA GeForce RTX 4090"
+        )));
+        // A software Vulkan driver is another case (not by type).
+        assert!(!RayQueries::declined(&adapter(
+            0x10005,
+            0,
+            "llvmpipe (LLVM 20.1.2, 256 bits)"
+        )));
     }
 }
 #[cfg(feature = "view-features")]

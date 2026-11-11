@@ -139,6 +139,14 @@ fn around(rgba: &[u8], (x, y): (u32, u32), side: u32) -> [f32; 3] {
 /// `ZGX_GI_ALLOW_SKIP=1` lets it pass as skipped (a `GI-SKIPPED` line,
 /// shown with `--nocapture`), for a run on a device known to have none.
 fn traced(world: &World, test: &str) -> bool {
+    // An adapter whose ray queries are declined (WARP) draws faces: always.
+    if zgx_gpu::ray_queries_status() == Some(zgx_gpu::RayQueries::DeclinedOnAdapter) {
+        assert_eq!(
+            world.probes_status(),
+            ProbesStatus::Rasterised,
+            "{test}: rays declined, faces drawn"
+        );
+    }
     if matches!(
         world.probes_status(),
         ProbesStatus::Traced | ProbesStatus::Rasterised
