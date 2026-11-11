@@ -618,6 +618,10 @@ pub(crate) struct Inner {
     /// what they draw but moves, poses and cutoffs (`World::change_object`).
     /// Translucent meshes' order follows the camera besides.
     pub(crate) ordering: u64,
+    /// Counts changes to its hierarchy: an object added, removed or put
+    /// under another. What's kept from it (the places' order, `Flat`; an
+    /// animator's parents and masks) is found again only as it moves.
+    pub(crate) hierarchy: u64,
     /// What keeps it drawing by itself (`Settle`), and its view, which
     /// animates while anything does.
     pub(crate) settle: Settle,
@@ -830,8 +834,131 @@ type ByIndex<V> = std::collections::HashMap<u32, V, std::hash::BuildHasherDefaul
 pub(crate) struct Poses {
     joints: Vec<Mat4>,
     weights: Vec<[f32; 2]>,
-    matrices: Vec<Option<Option<(Mat4, u64)>>>,
+    /// Objects' places in the world, kept between frames.
+    pub(crate) flat: Flat,
     posed: Vec<Posed>,
+}
+/// Objects' places in the world (their ancestors' applied), kept from frame
+/// to frame and made again only for objects stamped since the last frame
+/// made them, or under one (`Inner::stamps`): walked parents first, so each
+/// is its parent's times its own, no recursion and no lookup of a memo.
+#[derive(Default)]
+pub(crate) struct Flat {
+    /// Live objects by index, each after its parent: found again only as
+    /// the hierarchy changed (`Inner::hierarchy`), when every place is made
+    /// again.
+    order: Vec<u32>,
+    ordered: Option<u64>,
+    /// By object index: its place (`None`: hidden, gone, or under such),
+    /// and its stamp or its ancestors' latest.
+    worlds: Vec<Option<Mat4>>,
+    stamps: Vec<u64>,
+    /// `Inner::meshes` when they were last made (`None`: never, or the
+    /// order found again).
+    filled: Option<u64>,
+    /// Places the last fill made (for the tests of this).
+    pub(crate) made: usize,
+}
+impl Flat {
+    /// Each object's place as `inner` holds it now: only those stamped
+    /// since the last fill, or under one, made again.
+    fn fill(&mut self, inner: &Inner) {
+        let count = inner.objects.len();
+        if self.ordered != Some(inner.hierarchy) || self.worlds.len() != count {
+            self.reorder(inner);
+        }
+        let since = self.filled;
+        let mut made = 0;
+        for &at in &self.order {
+            let at = at as usize;
+            let Some(object) = inner.objects[at].value.as_ref() else {
+                continue;
+            };
+            let own = inner.stamps.get(at).copied().unwrap_or(0);
+            // `Some(None)`: under an object gone, drawn nowhere, as `placed`
+            // has it.
+            let parent = object.parent.map(|p| inner.live(p.index, p.generation));
+            let stamp = match parent {
+                Some(Some(p)) => own.max(self.stamps[p]),
+                _ => own,
+            };
+            self.stamps[at] = stamp;
+            if since.is_some_and(|filled| stamp <= filled) {
+                continue;
+            }
+            made += 1;
+            let local = inner.locals.get(at).copied().flatten();
+            self.worlds[at] = match (local, parent) {
+                (None, _) | (_, Some(None)) => None,
+                (Some(local), None) => Some(local),
+                (Some(local), Some(Some(p))) => self.worlds[p].map(|parent| parent * local),
+            };
+        }
+        self.made = made;
+        self.filled = Some(inner.meshes);
+    }
+    /// The order found again, parents first, by depth (an object in a
+    /// cycle, or deeper than 64, is placed nowhere), and every place to be
+    /// made.
+    #[cold]
+    #[inline(never)]
+    fn reorder(&mut self, inner: &Inner) {
+        let count = inner.objects.len();
+        const UNKNOWN: u32 = u32::MAX;
+        const NOWHERE: u32 = u32::MAX - 1;
+        const VISITING: u32 = u32::MAX - 2;
+        let mut depth = vec![UNKNOWN; count];
+        let mut chain = Vec::new();
+        for start in 0..count {
+            if depth[start] != UNKNOWN || inner.objects[start].value.is_none() {
+                continue;
+            }
+            // Up to a root, a depth known, or round a cycle.
+            chain.clear();
+            let mut at = Some(start);
+            let mut base = 0;
+            while let Some(i) = at {
+                match depth[i] {
+                    UNKNOWN => {}
+                    VISITING | NOWHERE => {
+                        base = NOWHERE;
+                        break;
+                    }
+                    known => {
+                        base = known + 1;
+                        break;
+                    }
+                }
+                depth[i] = VISITING;
+                chain.push(i);
+                at = inner.objects[i]
+                    .value
+                    .as_ref()
+                    .and_then(|o| o.parent)
+                    .and_then(|p| inner.live(p.index, p.generation));
+            }
+            // Deeper than 64 under its root is placed nowhere, as `placed`
+            // has it.
+            for (k, &i) in chain.iter().rev().enumerate() {
+                let d = base.saturating_add(k as u32);
+                depth[i] = if base == NOWHERE || d > 64 {
+                    NOWHERE
+                } else {
+                    d
+                };
+            }
+        }
+        self.order.clear();
+        self.order
+            .extend((0..count as u32).filter(|&i| depth[i as usize] < NOWHERE));
+        self.order.sort_by_key(|&i| depth[i as usize]);
+        self.worlds.clear();
+        self.worlds.resize(count, None);
+        self.stamps.clear();
+        self.stamps.resize(count, 0);
+        self.ordered = Some(inner.hierarchy);
+        self.filled = None;
+    }
 }
 /// A posed mesh: its place in a frame's list, and where its joints and
 /// weights are.
@@ -1077,22 +1204,24 @@ impl Inner {
         let Poses {
             joints,
             weights,
-            matrices,
+            flat,
             posed,
         } = poses;
         joints.clear();
         weights.clear();
         posed.clear();
-        matrices.clear();
-        matrices.resize(self.objects.len(), None);
+        flat.fill(self);
+        let flat = &*flat;
         for index in 0..self.objects.len() {
             if let Some(object) = &self.objects[index].value
                 && let Some(geometry) = &object.geometry
-                && let Some((matrix, stamp)) = placed(self, index, matrices, 0)
+                && let Some(matrix) = flat.worlds[index]
             {
+                let stamp = flat.stamps[index];
                 let generation = self.objects[index].generation;
                 let (from_joint, from_weight) = (joints.len(), weights.len());
-                let skinned = self.palette_into(index, generation, geometry, matrices, joints);
+                let world = |at: usize| flat.worlds[at];
+                let skinned = self.palette_into(index, generation, geometry, world, joints);
                 let morphing = self.morphing_into(index, generation, geometry, weights);
                 if skinned || morphing {
                     posed.push(Posed {
@@ -1273,7 +1402,8 @@ impl Inner {
         matrices: &mut [Option<Option<(Mat4, u64)>>],
     ) -> Option<Vec<Mat4>> {
         let mut palette = Vec::new();
-        self.palette_into(index, generation, geometry, matrices, &mut palette)
+        let world = |at: usize| world_matrix(self, at, matrices, 0);
+        self.palette_into(index, generation, geometry, world, &mut palette)
             .then_some(palette)
     }
     /// As `palette`, onto the end of `out`: whether it is skinned.
@@ -1282,7 +1412,7 @@ impl Inner {
         index: usize,
         generation: u32,
         geometry: &Geometry,
-        matrices: &mut [Option<Option<(Mat4, u64)>>],
+        mut world: impl FnMut(usize) -> Option<Mat4>,
         out: &mut Vec<Mat4>,
     ) -> bool {
         if geometry.skin().is_none() {
@@ -1298,7 +1428,7 @@ impl Inner {
         let joints = skin.joints.iter().zip(&skin.inverse_binds);
         out.extend(joints.map(|(joint, inverse_bind)| {
             self.live(joint.index, joint.generation)
-                .and_then(|at| world_matrix(self, at, matrices, 0))
+                .and_then(&mut world)
                 .map_or(Mat4::IDENTITY, |placed| placed * *inverse_bind)
         }));
         true
@@ -1498,6 +1628,7 @@ impl World {
             revision: 0,
             meshes: 0,
             ordering: 0,
+            hierarchy: 0,
             settle: Settle::default(),
             view: None,
             frames: std::cell::Cell::new(0),
@@ -1632,6 +1763,7 @@ impl World {
             let (index, generation) = claim(&mut inner.objects, &mut inner.free_object, object);
             inner.place(index as usize, local);
             inner.stamp(index as usize);
+            inner.hierarchy = inner.hierarchy.wrapping_add(1);
             id = Some(ObjectId { index, generation });
             true
         });
@@ -1646,6 +1778,7 @@ impl World {
                     &mut inner.free_object,
                     id.index as usize,
                 );
+                inner.hierarchy = inner.hierarchy.wrapping_add(1);
                 inner.textures.remove(&id.index);
                 inner.skins.remove(&id.index);
                 inner.morph_weights.remove(&id.index);
@@ -1746,6 +1879,9 @@ impl World {
                 || object.parent != before.parent;
             if reordered {
                 inner.ordering = inner.ordering.wrapping_add(1);
+            }
+            if object.parent != before.parent {
+                inner.hierarchy = inner.hierarchy.wrapping_add(1);
             }
             if placed {
                 let local = object.visible.then(|| object.transform.matrix());
@@ -2242,6 +2378,202 @@ mod tests {
         assert!(world.view().animating(), "one more still is");
         inner().unsettle(animation, false);
         assert!(inner().settle.settled() && !world.view().animating());
+    }
+
+    /// A frame's fill of `world`'s places, and how many it made.
+    fn fill(world: &World, poses: &mut Poses) -> usize {
+        let inner = world.inner.borrow();
+        let mut out = Vec::new();
+        inner.drawn_into(poses, &mut out);
+        poses.flat.made
+    }
+
+    #[test]
+    fn places_still_since_the_last_frame_are_not_made_again() {
+        let world = World::new();
+        let cube = crate::Geometry::cuboid(1., 1., 1.);
+        let root = world.add(Object::group());
+        let mut tops = Vec::new();
+        let mut leaves = Vec::new();
+        for t in 0..4 {
+            let top = world.add(Object::group().at([t as f32, 0., 0.]).child_of(root));
+            tops.push(top);
+            for l in 0..10 {
+                let mesh = Object::mesh(cube.clone(), Material::default()).at([0., l as f32, 0.]);
+                leaves.push(world.add(mesh.child_of(top)));
+            }
+        }
+        let mut poses = Poses::default();
+        assert_eq!(fill(&world, &mut poses), 45, "all, the first time");
+        assert_eq!(fill(&world, &mut poses), 0, "still: none");
+        world.update(leaves[3], |o| o.transform.position.x = 2.);
+        assert_eq!(fill(&world, &mut poses), 1, "a leaf: itself");
+        world.update(tops[2], |o| {
+            o.transform.rotation = crate::Quat::from_euler(0., 1., 0.)
+        });
+        assert_eq!(fill(&world, &mut poses), 11, "a top: it and its ten");
+        world.set_camera(Camera::looking_at([0., 5., 9.], [0., 0., 0.]));
+        assert_eq!(fill(&world, &mut poses), 0, "how it's seen: none");
+    }
+
+    #[test]
+    fn a_material_or_a_hide_changing_each_frame_finds_no_order_again() {
+        let world = World::new();
+        let cube = crate::Geometry::cuboid(1., 1., 1.);
+        let root = world.add(Object::group());
+        let leaves: Vec<ObjectId> = (0..20)
+            .map(|i| {
+                let mesh = Object::mesh(cube.clone(), Material::default()).at([i as f32, 0., 0.]);
+                world.add(mesh.child_of(root))
+            })
+            .collect();
+        let mut poses = Poses::default();
+        fill(&world, &mut poses);
+        for frame in 0..4 {
+            let shade = frame as f32 / 4.;
+            world.update(leaves[3], |o| o.material.color[0] = shade);
+            assert_eq!(fill(&world, &mut poses), 1, "a material: its own place");
+            world.update(leaves[5], |o| o.visible = frame % 2 == 1);
+            assert_eq!(fill(&world, &mut poses), 1, "shown or hidden: its own");
+        }
+    }
+
+    /// Joints a playing animator moves skin a mesh: each frame's palette
+    /// from the kept places is the one worked out from the start.
+    #[cfg(feature = "gltf")]
+    #[test]
+    fn an_animators_joints_skin_by_the_kept_places() {
+        use crate::{Clip, Keys, Placed, Play, Quat, vec3};
+        let world = World::new();
+        let root = world.add(Object::group().at([1., 0., -2.]));
+        let mut joints = Vec::new();
+        let mut parent = root;
+        for _ in 0..4 {
+            parent = world.add(Object::group().at([0., 0.5, 0.]).child_of(parent));
+            joints.push(parent);
+        }
+        let shape = crate::Geometry::cuboid(0.4, 2., 0.4);
+        let count = shape.vertices().len();
+        let skinned = shape
+            .with_skin(
+                (0..count).map(|v| [(v % 4) as u16, 0, 0, 0]).collect(),
+                vec![[1., 0., 0., 0.]; count],
+            )
+            .unwrap();
+        let mesh = world.add(Object::mesh(skinned, Material::default()).child_of(root));
+        let inverse: Vec<Mat4> = (0..4)
+            .map(|j| {
+                Mat4::from_transform(
+                    vec3(0., -0.5 * (j + 1) as f32, 0.),
+                    Quat::IDENTITY,
+                    Vec3::ONE,
+                )
+            })
+            .collect();
+        world.set_skin(mesh, Some(Skin::new(joints.clone(), inverse).unwrap()));
+        let mut clip = Clip::builder("Bend");
+        for j in 0..4 {
+            let turn = |a: f32| Quat::from_axis_angle(vec3(0., 0., 1.), a * (j + 1) as f32);
+            clip = clip.rotation(j, Keys::linear(vec![0., 1.], vec![turn(0.), turn(0.8)]));
+        }
+        let animator = world.add_animator(&Placed::new(root, joints));
+        world
+            .play(animator, &clip.build().unwrap(), Play::new())
+            .unwrap();
+        let start = std::time::Instant::now();
+        let mut poses = Poses::default();
+        for frame in 0..12 {
+            world.animate(start + std::time::Duration::from_secs_f32(frame as f32 / 15.));
+            if frame == 6 {
+                // The whole rig moved by hand besides.
+                world.update(root, |o| o.transform.position.y = 3.);
+            }
+            let inner = world.inner.borrow();
+            let mut out = Vec::new();
+            inner.drawn_into(&mut poses, &mut out);
+            let kept: Vec<Mat4> = out
+                .iter()
+                .find_map(|d| d.palette)
+                .expect("the skinned mesh")
+                .to_vec();
+            let index = mesh.index as usize;
+            let geometry = inner.objects[index]
+                .value
+                .as_ref()
+                .unwrap()
+                .geometry
+                .clone()
+                .unwrap();
+            let mut memo = vec![None; inner.objects.len()];
+            let fresh = inner
+                .palette(index, mesh.generation, &geometry, &mut memo)
+                .unwrap();
+            assert_eq!(kept, fresh, "frame {frame}");
+        }
+    }
+
+    #[test]
+    fn kept_places_are_the_places_whatever_changed_between() {
+        let world = World::new();
+        let cube = crate::Geometry::cuboid(1., 1., 1.);
+        let mut ids: Vec<ObjectId> = Vec::new();
+        let mut seed = 0x1234_5678_u32;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as usize % n.max(1)
+        };
+        let mut poses = Poses::default();
+        for step in 0..300 {
+            match next(6) {
+                // Add, under one of those there are (or none).
+                0 | 1 => {
+                    let parent = (!ids.is_empty() && next(4) > 0).then(|| ids[next(ids.len())]);
+                    let mut object = Object::mesh(cube.clone(), Material::default()).at([
+                        next(5) as f32,
+                        next(5) as f32,
+                        0.,
+                    ]);
+                    object.parent = parent;
+                    ids.push(world.add(object));
+                }
+                2 if !ids.is_empty() => {
+                    let id = ids[next(ids.len())];
+                    let turn = next(7) as f32;
+                    world.update(id, |o| {
+                        o.transform.rotation = crate::Quat::from_euler(turn, 0., 0.)
+                    });
+                }
+                3 if !ids.is_empty() => {
+                    let id = ids[next(ids.len())];
+                    world.update(id, |o| o.visible = !o.visible);
+                }
+                // Moved under another (a cycle, sometimes), or to the top.
+                4 if ids.len() > 1 => {
+                    let (id, to) = (ids[next(ids.len())], ids[next(ids.len())]);
+                    let top = next(3) == 0;
+                    world.update(id, |o| o.parent = if top { None } else { Some(to) });
+                }
+                5 if ids.len() > 1 => {
+                    let at = next(ids.len());
+                    world.remove(ids.swap_remove(at));
+                }
+                _ => {}
+            }
+            fill(&world, &mut poses);
+            let inner = world.inner.borrow();
+            for index in 0..inner.objects.len() {
+                if inner.objects[index].value.is_none() {
+                    continue;
+                }
+                let fresh = inner.world_of(index);
+                assert_eq!(
+                    poses.flat.worlds[index], fresh,
+                    "step {step}, object {index}"
+                );
+            }
+        }
     }
 
     #[test]

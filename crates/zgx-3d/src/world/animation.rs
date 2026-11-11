@@ -113,7 +113,7 @@ pub(crate) fn advance(inner: &mut Inner, time: Instant) -> bool {
             let dt = animator.parked.take().map_or(dt, |parked| {
                 time.saturating_duration_since(parked).as_secs_f32()
             });
-            if animator.bound != inner.ordering && animator.binds() {
+            if animator.bound != inner.hierarchy && animator.binds() {
                 rebind(inner, animator);
             }
             animator.step(dt);
@@ -278,7 +278,7 @@ fn rebind(inner: &Inner, animator: &mut Animator) {
     }
     let nodes = animator.nodes.clone();
     animator.rebind_masks(|mask| resolve(inner, &nodes, mask));
-    animator.bound = inner.ordering;
+    animator.bound = inner.hierarchy;
 }
 
 /// `animator`'s pose bent by its IK hook (`World::set_ik`), the world
@@ -503,7 +503,7 @@ impl World {
                 .mask
                 .as_ref()
                 .map(|mask| resolve(&inner, &animator.nodes, mask));
-            (mask, inner.ordering)
+            (mask, inner.hierarchy)
         };
         self.change_animator(id, |animator| {
             animator.bound = bound;
@@ -557,7 +557,7 @@ impl World {
             let Some(animator) = Self::animator_ref(&inner, id) else {
                 return;
             };
-            (hierarchy(&inner, &animator.nodes), inner.ordering)
+            (hierarchy(&inner, &animator.nodes), inner.hierarchy)
         };
         self.change_animator(id, |animator| {
             (animator.parents, animator.above) = found;

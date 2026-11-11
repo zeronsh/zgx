@@ -545,7 +545,7 @@ pub(crate) struct Animator {
     pub(crate) outer: Vec<Option<crate::Mat4>>,
     /// Its IK hook (`World::set_ik`).
     pub(crate) ik: Option<Ik>,
-    /// The world's `ordering` when its IK's parents and its layers' masks
+    /// The world's `hierarchy` when its IK's parents and its layers' masks
     /// were found from its hierarchy: found again once it moves.
     pub(crate) bound: u64,
     /// Each node's meshes (sharing its morph weights), by node index.
