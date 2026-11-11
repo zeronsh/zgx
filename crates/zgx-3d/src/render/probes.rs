@@ -1162,6 +1162,56 @@ mod tests {
     }
 
     #[test]
+    fn probes_hold_no_volume_by_value() {
+        // DXC 1.9 at -Od (wgpu's debug builds on Direct3D 12) crashes
+        // compiling a struct copied whole out of a uniform array inside a
+        // loop that returns: the probes' volumes are read through a
+        // pointer instead. Here, no shader of theirs loads a `ProbeVolume`
+        // whole (naga's IR: a load whose value is that struct).
+        use zgx_gpu::wgpu::naga;
+        let whole_loads = |source: &str| {
+            let module = naga::front::wgsl::parse_str(source).unwrap();
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+            let mut found = 0;
+            let mut look = |function: &naga::Function, fun_info: &naga::valid::FunctionInfo| {
+                for (handle, expression) in function.expressions.iter() {
+                    if let naga::Expression::Load { .. } = expression
+                        && let naga::TypeInner::Struct { .. } =
+                            fun_info[handle].ty.inner_with(&module.types)
+                        && let naga::proc::TypeResolution::Handle(ty) = &fun_info[handle].ty
+                        && module.types[*ty].name.as_deref() == Some("ProbeVolume")
+                    {
+                        found += 1;
+                    }
+                }
+            };
+            for (handle, function) in module.functions.iter() {
+                look(function, &info[handle]);
+            }
+            for (i, entry) in module.entry_points.iter().enumerate() {
+                look(&entry.function, info.get_entry_point(i));
+            }
+            found
+        };
+        for lit in [false, true] {
+            assert_eq!(whole_loads(&trace_source(lit)), 0, "the tracer");
+            let variant = Variant(Variant::PROBES).with(Variant::LIT, lit);
+            assert_eq!(whole_loads(&wgsl(variant, 4)), 0, "a probe-lit mesh");
+        }
+        // (It finds one where there is one.)
+        let copy = trace_source(false).replace(
+            "let volume = &probe_set.volumes[i];",
+            "let volume = probe_set.volumes[i];",
+        );
+        assert!(whole_loads(&copy) > 0);
+    }
+
+    #[test]
     fn a_volume_lights_half_a_spacing_past_its_outer_probes() {
         // Probes 0.4 apart from -1 to 1 across, one probe up: the walls at
         // ±1.2 are lit fully, light fades out by ±1.4; up, the box alone.

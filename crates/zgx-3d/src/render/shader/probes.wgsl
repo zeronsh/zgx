@@ -51,7 +51,10 @@
 //probed // light from the far side of a wall doesn't come through it.
 //probed fn probe_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
 //probed     for (var i = 0u; i < probe_set.count.x; i++) {
-//probed         let volume = probe_set.volumes[i];
+//probed         // A pointer, not a copy: DXC 1.9 at -Od (wgpu's debug builds)
+//probed         // crashes on a struct copied from a uniform array in a loop
+//probed         // that returns (`probes_hold_no_volume_by_value`).
+//probed         let volume = &probe_set.volumes[i];
 //probed         let outside = max(max(volume.lo.xyz - p, p - volume.hi.xyz), vec3(0.0)) / volume.fade.xyz;
 //probed         let fade = saturate(1.0 - max(outside.x, max(outside.y, outside.z)));
 //probed         if fade <= 0.0 {

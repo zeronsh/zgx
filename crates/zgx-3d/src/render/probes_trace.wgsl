@@ -59,7 +59,10 @@ fn ray_direction(i: u32) -> vec3<f32> {
 // Probe `index`'s place (of all volumes', in order).
 fn probe_place(index: u32) -> vec3<f32> {
     for (var i = 0u; i < probe_set.count.x; i++) {
-        let volume = probe_set.volumes[i];
+        // A pointer, not a copy: DXC 1.9 at -Od (wgpu's debug builds)
+        // crashes on a struct copied from a uniform array in a loop that
+        // returns (`probes_hold_no_volume_by_value`).
+        let volume = &probe_set.volumes[i];
         let first = u32(volume.origin.w);
         let n = volume.counts.x * volume.counts.y * volume.counts.z;
         if index >= first && index < first + n {

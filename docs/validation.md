@@ -158,6 +158,14 @@ CI builds only the examples the probes run (`linux_smokes.py --fixtures` prints 
 
 CI runs on every push to main and every pull request (`.github/workflows/ci.yml`): a Linux job (fmt, stylua, clippy, `zgx lint` and `zgx check` over every example script, unit and doc tests (zgx-script's included), Vulkan rendering tests on llvmpipe, zgx-3d's on llvmpipe too (`ZGX_REQUIRE_GPU`, or they'd pass without drawing where there's no GPU), then every native probe above, four at a time), a macOS job (clippy, tests, Metal rendering and readback, component window lifecycle) and a Windows job (check, core and bundle tests, Direct3D 12 border and transform pixel tests on WARP). Probes wait for what they drive (the window manager, IBus's XIM server and engine, a mapped window) rather than sleeping, so a loaded runner slows them without failing them.
 
+## 3D probes (`gi`) on Windows
+
+zgx-3d's irradiance probes are traced by ray queries, which Direct3D 12 compiles only through DXC. With FXC, zgx's default when an app ships no `dxcompiler.dll`, the adapter offers none (`zgx_gpu::ray_queries_status()` is `CompilerIsFxc`). There, `cargo test -p zgx-3d --features gi --test gi` fails every test under `ZGX_REQUIRE_GPU`, naming that reason. `ZGX_GI_ALLOW_SKIP=1` passes them as skipped.
+
+To check them on Windows, run with DXC: `WGPU_DX12_COMPILER=dxc` and Microsoft's `dxcompiler.dll` beside the test binary (or on the path), plus `ZGX_REQUIRE_GPU=1 ZGX_REQUIRE_RAY_QUERIES=1`. The `warp` and `rtx-4090` goldens of `gi_room` are blessed that way.
+
+DXC 1.9 at `-Od` crashes (`cast<X>() argument of incompatible type!`) on a struct copied whole out of a uniform array inside a loop that returns. wgpu passes `-Zi -Od` in debug builds. The probes' shaders read their volumes through a pointer instead, and `probes_hold_no_volume_by_value` keeps it so on every platform. Reproduced on macOS with DXC 1.9.0.5512 and on Windows with 1.9.2602.17.
+
 ## Linux desktops, headless
 
 `scripts/linux_desktops_smoke.py` (`--only linux-desktops`) runs a window and a popup on each desktop a machine has, in software, with no GPU or screen. A desktop not installed is skipped and named, so CI covers only what its packages include. Everything is drawn by llvmpipe, so it says nothing about GPU speed.
