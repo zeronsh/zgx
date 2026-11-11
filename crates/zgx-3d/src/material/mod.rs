@@ -300,6 +300,11 @@ pub(crate) struct Shader {
     pub(crate) animated: bool,
     /// How far its `displace` moves a vertex, if it says (`displaces_by`).
     pub(crate) reach: Option<f32>,
+    /// Whether its `displace` or `opacity` reads its GPU data: its shadow
+    /// is then cast anew on a frame that changed that data
+    /// (`data_writes`, `custom::prepare`).
+    #[cfg(feature = "compute")]
+    pub(crate) casts_data: bool,
     pub(crate) values: RefCell<Values>,
     /// What the device refused of it, if anything (`World::shader_error`):
     /// its meshes then draw without it.
@@ -507,6 +512,8 @@ impl Shader {
             reads_scene: shader.reads_scene,
             animated: shader.animated,
             reach: shader.reach,
+            #[cfg(feature = "compute")]
+            casts_data: false,
             values: RefCell::new(Values {
                 bytes: vec![0; uniform_size as usize],
                 textures: vec![None; textures as usize],
@@ -519,13 +526,18 @@ impl Shader {
             compiling: Default::default(),
             compiled: Default::default(),
         };
-        made.check(layer)?;
+        #[cfg_attr(not(feature = "compute"), allow(unused_variables))]
+        let casts_data = made.check(layer)?;
+        #[cfg(feature = "compute")]
+        let made = Self { casts_data, ..made };
         Ok(made)
     }
 
     /// It compiled as a mesh's shader in a textured, multisampled pipeline,
-    /// or as a layer in the plain one: its errors at its own lines.
-    fn check(&self, layer: bool) -> Result<(), ShaderError> {
+    /// or as a layer in the plain one: its errors at its own lines. And
+    /// whether its `displace` or `opacity` reads its GPU data (the
+    /// functions it calls included).
+    fn check(&self, layer: bool) -> Result<bool, ShaderError> {
         let (mesh, layers) = if layer {
             (None, std::slice::from_ref(self))
         } else {
@@ -537,6 +549,7 @@ impl Shader {
         // The assembled text's line (from 1) its own first is at.
         let engine_lines = engine.matches('\n').count() as u32;
         let start = engine_lines + custom.user_line + 1;
+        let mut casts_data = false;
         let found = match naga::front::wgsl::parse_str(&text) {
             Err(e) => Some((e.location(&text), e.message().to_owned())),
             Ok(module) => {
@@ -544,7 +557,11 @@ impl Shader {
                     naga::valid::ValidationFlags::all(),
                     naga::valid::Capabilities::empty(),
                 );
-                validator.validate(&module).err().map(|e| {
+                let validated = validator.validate(&module);
+                if let Ok(info) = &validated {
+                    casts_data = reads_data_to_cast(&module, info);
+                }
+                validated.err().map(|e| {
                     // Its innermost place: the last span said.
                     let at = e.spans().last().map(|(span, _)| span.location(&text));
                     let mut message = e.as_inner().to_string();
@@ -558,7 +575,7 @@ impl Shader {
             }
         };
         let Some((at, message)) = found else {
-            return Ok(());
+            return Ok(casts_data);
         };
         let mut message = message.replace(if layer { "_zgxl0" } else { "_zgxm" }, "");
         // Time reached another way than `frame.time` (its fields aren't
@@ -607,6 +624,19 @@ impl Shader {
     /// A number for the device copies of its GPU data a binding of it
     /// holds (each one's generation): another means its bindings are made
     /// again (`custom::prepare`).
+    /// How many times its GPU data has changed, together
+    /// (`GpuBuffer::writes`): its shadow is cast anew when this moves, if
+    /// it casts by that data (`casts_data`).
+    #[cfg(feature = "compute")]
+    pub(crate) fn data_writes(&self) -> u64 {
+        let values = self.values.borrow();
+        values.data.iter().flatten().fold(0, |sum, d| {
+            sum.wrapping_add(match d {
+                Data::Buffer(b) => b.writes(),
+                Data::Texture(t) => t.writes(),
+            })
+        })
+    }
     #[cfg(feature = "compute")]
     pub(crate) fn data_key(&self) -> u64 {
         let values = self.values.borrow();
@@ -1106,6 +1136,25 @@ fn declared(code: &str) -> Vec<(String, bool)> {
         }
     }
     names
+}
+/// Whether `module`'s `zgx_displace` or `zgx_opacity` (a mesh shader's
+/// `displace` and `opacity`, and what they call) reads a GPU data
+/// parameter (group 1, from `DATA_BINDING`).
+fn reads_data_to_cast(module: &naga::Module, info: &naga::valid::ModuleInfo) -> bool {
+    let data: Vec<_> = module
+        .global_variables
+        .iter()
+        .filter(|(_, g)| {
+            g.binding.as_ref().is_some_and(|b| {
+                b.group == 1 && (DATA_BINDING..DATA_BINDING + MAX_DATA).contains(&b.binding)
+            })
+        })
+        .map(|(handle, _)| handle)
+        .collect();
+    module.functions.iter().any(|(handle, f)| {
+        matches!(f.name.as_deref(), Some("zgx_displace" | "zgx_opacity"))
+            && data.iter().any(|&g| !info[handle][g].is_empty())
+    })
 }
 /// The line function `name` is declared at in `code` (0 if it isn't).
 fn line_of_fn(code: &str, name: &str) -> u32 {

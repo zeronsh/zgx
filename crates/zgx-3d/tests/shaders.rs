@@ -759,28 +759,31 @@ fn what_the_device_refuses_draws_the_mesh_without_its_shader_and_says_why() {
 /// What a world draws when it reached its state the long way (drawn, then
 /// changed by `after`, drawn, the camera moved away and back, drawn) and
 /// when it was made in it: equal, within a level a channel.
+/// A world `retained_matches_fresh` draws in: a sun casting shadows over
+/// a floor.
+fn shadowed(world: &World) {
+    world.set_shadows(true);
+    world.add_light(Light::Directional {
+        direction: vec3(0.3, -1., 0.2),
+        color: [1.; 3],
+        intensity: 3.,
+    });
+    world.add_light(Light::Hemisphere {
+        sky: [1.; 3],
+        ground: [1.; 3],
+        intensity: 0.2,
+    });
+    world.add(
+        Object::mesh(Geometry::cuboid(8., 0.2, 8.), Material::rgb(0xc0c0c0)).at([0., -0.6, 0.]),
+    );
+    world.set_camera(Camera::looking_at([0., 4., 4.], [0., 0., 0.]));
+}
 fn retained_matches_fresh(
     name: &str,
     setup: impl Fn(&World) -> (Vec<ShaderId>, ObjectId),
     after: impl Fn(&World, &[ShaderId], ObjectId),
 ) {
-    let lit = |world: &World| {
-        world.set_shadows(true);
-        world.add_light(Light::Directional {
-            direction: vec3(0.3, -1., 0.2),
-            color: [1.; 3],
-            intensity: 3.,
-        });
-        world.add_light(Light::Hemisphere {
-            sky: [1.; 3],
-            ground: [1.; 3],
-            intensity: 0.2,
-        });
-        world.add(
-            Object::mesh(Geometry::cuboid(8., 0.2, 8.), Material::rgb(0xc0c0c0)).at([0., -0.6, 0.]),
-        );
-        world.set_camera(Camera::looking_at([0., 4., 4.], [0., 0., 0.]));
-    };
+    let lit = shadowed;
     let fresh = World::new();
     lit(&fresh);
     let (ids, mesh) = setup(&fresh);
@@ -1305,6 +1308,131 @@ fn surface(s: SurfaceIn) -> Surface {
                 world.set_param(ids[0], "colors", &other).unwrap();
             },
         );
+    }
+
+    /// A cube moved sideways by `params.lift[0].x`, a buffer's, casting a
+    /// shadow: the buffer, its first number `lift`.
+    fn lifted_by_data(world: &World, lift: f32) -> (ShaderId, GpuBuffer, ObjectId) {
+        let shader = world
+            .add_shader(
+                MaterialShader::new(
+                    "#zgx material 1
+                     fn displace(v: VertexIn) -> Displaced {
+                         var d: Displaced;
+                         d.position = v.position + vec3(params.lift[0].x, 0.0, 0.0);
+                         d.normal = v.normal;
+                         return d;
+                     }",
+                )
+                .buffer("lift", "array<vec4<f32>>")
+                .displaces_by(2.),
+            )
+            .unwrap();
+        let buffer = world
+            .add_buffer(BufferDesc::from_slice(&[[lift, 0., 0., 0.]]))
+            .unwrap();
+        world.set_param(shader, "lift", &buffer).unwrap();
+        let cube = world.add(
+            Object::mesh(Geometry::cuboid(1., 1., 1.), Material::rgb(0xffffff)).at([0., 0.5, 0.]),
+        );
+        world.set_shader(cube, Some(shader));
+        (shader, buffer, cube)
+    }
+
+    #[test]
+    fn a_shadow_cast_by_gpu_data_follows_the_apps_writes_to_it() {
+        // GB1: a shadow cast by a material's GPU data was drawn once and
+        // kept, however the data changed.
+        let buffer = std::cell::RefCell::new(None);
+        retained_matches_fresh(
+            "a buffer written",
+            |world| {
+                let (shader, made, cube) = lifted_by_data(world, 0.);
+                buffer.replace(Some(made));
+                (vec![shader], cube)
+            },
+            |_, _, _| {
+                let buffer = buffer.borrow();
+                buffer
+                    .as_ref()
+                    .unwrap()
+                    .write(0, &[[1.2f32, 0., 0., 0.]])
+                    .unwrap();
+            },
+        );
+    }
+
+    #[cfg(feature = "lighting")]
+    #[test]
+    fn a_cascaded_shadow_cast_by_gpu_data_follows_the_apps_writes_to_it() {
+        // (This one can't fail for GB1's cause: cascades follow the camera,
+        // and `retained_matches_fresh` turns it, which casts them anew
+        // whatever the data. It holds cascades to the same result.)
+        let buffer = std::cell::RefCell::new(None);
+        retained_matches_fresh(
+            "a buffer written, cascades",
+            |world| {
+                world.set_cascades(Some(Cascades::new(2)));
+                let (shader, made, cube) = lifted_by_data(world, 0.);
+                buffer.replace(Some(made));
+                (vec![shader], cube)
+            },
+            |_, _, _| {
+                let buffer = buffer.borrow();
+                buffer
+                    .as_ref()
+                    .unwrap()
+                    .write(0, &[[1.2f32, 0., 0., 0.]])
+                    .unwrap();
+            },
+        );
+    }
+
+    #[test]
+    fn a_shadow_cast_by_gpu_data_follows_a_pass_writing_it() {
+        // As the harbor's water is: a compute pass writes what `displace`
+        // reads. Against a fresh world whose buffer holds what it wrote.
+        let fresh = World::new();
+        shadowed(&fresh);
+        lifted_by_data(&fresh, 1.2);
+        let Some(mut window) = Window::new(&fresh) else {
+            return;
+        };
+        window.draw();
+        let expected = window.gpu.readback().unwrap();
+
+        let world = World::new();
+        shadowed(&world);
+        let (_, buffer, _) = lifted_by_data(&world, 0.);
+        let mut window = Window::new(&world).unwrap();
+        window.draw();
+        let pass = world
+            .add_compute(
+                Compute::new(
+                    "@group(0) @binding(0) var<storage, read_write> lift: array<vec4<f32>>;
+                     @compute @workgroup_size(1)
+                     fn write_lift() { lift[0] = vec4(1.2, 0.0, 0.0, 0.0); }",
+                )
+                .buffer("lift", &buffer, Access::ReadWrite)
+                .threads([1, 1, 1]),
+            )
+            .unwrap();
+        // Frames until it has compiled and run (once: on demand).
+        let start = std::time::Instant::now();
+        while buffer.writes() == 0 && start.elapsed() < std::time::Duration::from_secs(10) {
+            world.view().invalidate();
+            window.draw();
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(world.compute_status(pass), Some(ComputeStatus::Ready));
+        window.draw();
+        let actual = window.gpu.readback().unwrap();
+        let differ = actual
+            .iter()
+            .zip(&expected)
+            .filter(|(a, b)| a.abs_diff(**b) > 1)
+            .count();
+        assert_eq!(differ, 0, "{differ} channels differ from a fresh world's");
     }
 
     #[test]

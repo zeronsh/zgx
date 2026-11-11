@@ -856,6 +856,16 @@ impl Viewport for Renderer {
         // Where only how it's seen changed, the meshes draw as the last frame
         // drew them: its runs, instances and shadow map. Not with
         // translucent ones, whose order follows the camera.
+        // A shadow cast by GPU data that a pass or the app changed: not kept.
+        #[cfg(all(feature = "shaders", feature = "compute"))]
+        if custom::data_cast_changed(gpu) {
+            gpu.kept = None;
+            gpu.shadow_drawn = None;
+            #[cfg(feature = "lighting")]
+            if let Some(sun) = &mut gpu.lights.sun {
+                sun.held = Default::default();
+            }
+        }
         let kept = gpu
             .kept
             .filter(|k| k.meshes == world.meshes && k.sun == sun && !k.translucent);

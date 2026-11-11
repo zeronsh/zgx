@@ -45,6 +45,10 @@ pub(super) struct State {
     /// (`Shader::data_key`).
     #[cfg(feature = "compute")]
     data_seen: HashMap<u32, u64>,
+    /// The changes to the GPU data shaders cast by, together, as the
+    /// shadow map was last drawn with them (`data_cast_changed`).
+    #[cfg(feature = "compute")]
+    data_cast: u64,
     /// Pipelines by shader and variant, made with the layers as they are
     /// (`layers`).
     pipelines: HashMap<(u32, Variant), [wgpu::RenderPipeline; 2]>,
@@ -723,6 +727,24 @@ pub(super) fn prepare(
         .by_binding
         .retain(|key, _| bindings.contains_key(key));
     gpu.custom.reads = reads;
+}
+/// Whether a frame's passes or the app's writes changed GPU data a drawn
+/// shader's `displace` or `opacity` reads (GB1): its shadow is then cast
+/// anew, this frame. Asked before the frame keeps the last one's casters
+/// (which a world whose meshes stand still does), so it never keeps them
+/// past such a change.
+#[cfg(feature = "compute")]
+pub(super) fn data_cast_changed(gpu: &mut Gpu) -> bool {
+    let state = &mut gpu.custom;
+    if state.by_binding.is_empty() {
+        return false;
+    }
+    let mut key = 0xcbf2_9ce4_8422_2325_u64;
+    for shader in state.by_binding.values().filter(|s| s.casts_data) {
+        let n = u64::from(shader.id) ^ shader.data_writes().rotate_left(17);
+        key = key.wrapping_add(n.wrapping_mul(0x0100_0000_01b3));
+    }
+    std::mem::replace(&mut state.data_cast, key) != key
 }
 fn same(a: &[Rc<Shader>], b: &[Rc<Shader>]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| Rc::ptr_eq(a, b))
