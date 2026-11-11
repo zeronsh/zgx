@@ -17,6 +17,14 @@ use zgx_gpu::GpuRenderer;
 #[path = "../examples/common/rig.rs"]
 mod rig;
 
+/// Whether the world draws by itself after a frame: where what holds it
+/// finishes off the frame (a compile, a load), it may be done before a row
+/// can catch it, and the row then says so and skips.
+fn caught(world: &World, window: &mut Window) -> bool {
+    window.draw(world);
+    world.view().animating()
+}
+
 struct Window {
     ui: Ui,
     gpu: GpuRenderer,
@@ -110,9 +118,11 @@ fn rests(name: &str, hold: Hold) {
         eprintln!("SETTLE-SKIPPED {name}: this device can't hold it");
         return;
     };
-    let held = window.until(&world, 2, Duration::from_secs(10), || {
-        world.view().animating()
-    });
+    // Held already (a row that caught it), or once a frame or two follows.
+    let held = world.view().animating()
+        || window.until(&world, 2, Duration::from_secs(10), || {
+            world.view().animating()
+        });
     assert!(held, "{name}: the control, its world never drew by itself");
     off(&world);
     let rested = window.until(&world, 8, Duration::from_secs(10), || {
@@ -247,7 +257,6 @@ fn automatic_exposure_turned_off_while_it_adapts() {
 
 #[cfg(feature = "post")]
 #[test]
-#[ignore = "TA1: graph lane (the painter's hold on gathering frames is never let go)"]
 fn temporal_antialiasing_turned_to_multisampling_while_it_gathers() {
     rests("taa to msaa", |world, _, window| {
         world.set_antialiasing(Antialiasing::Taa);
@@ -258,7 +267,6 @@ fn temporal_antialiasing_turned_to_multisampling_while_it_gathers() {
 
 #[cfg(feature = "post")]
 #[test]
-#[ignore = "TA1: graph lane (the painter's hold on gathering frames is never let go)"]
 fn temporal_antialiasing_turned_off_while_it_gathers() {
     rests("taa to none", |world, _, window| {
         world.set_antialiasing(Antialiasing::Taa);
@@ -286,6 +294,82 @@ fn probes_removed_while_they_converge() {
 // Removing the last animator lets its world's own hold go outside a frame,
 // and the frame then skips the step that would let its painter's go
 // (src/world/animation.rs:452-457, `animation::frame` with no slots).
+#[cfg(feature = "post")]
+#[test]
+fn a_post_pass_removed_while_it_compiles() {
+    rests("post compiling", |world, _, window| {
+        let pass = world
+            .add_post(
+                PostPass::new(
+                    "#zgx post 1
+fn post(p: PostIn) -> vec4<f32> {
+    return color(p.uv) * params.k;
+}
+",
+                )
+                .param("k", PostParam::Float),
+            )
+            .unwrap();
+        if !caught(world, window) {
+            return None;
+        }
+        Some(Box::new(move |world| world.remove_post(pass)))
+    });
+}
+
+#[cfg(feature = "shaders")]
+#[test]
+fn a_surface_layer_removed_while_it_compiles() {
+    rests("shader compiling", |world, _, window| {
+        let layer = world
+            .add_surface_layer(MaterialShader::new(
+                "#zgx material 1
+                 fn surface(s: SurfaceIn) -> Surface {
+                     var m = surface_default(s);
+                     m.base_color *= 0.5;
+                     return m;
+                 }",
+            ))
+            .unwrap();
+        if !caught(world, window) {
+            return None;
+        }
+        Some(Box::new(move |world| world.remove_surface_layer(layer)))
+    });
+}
+
+#[cfg(feature = "gltf")]
+#[test]
+fn a_mesh_removed_while_its_map_loads() {
+    rests("loading", |world, mesh, window| {
+        // A 512-square map, made here.
+        let side = 512u32;
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, side, side);
+            encoder.set_color(png::ColorType::Rgba);
+            let pixels: Vec<u8> = (0..side * side)
+                .flat_map(|i| [(i % 251) as u8, (i % 241) as u8, 128, 255])
+                .collect();
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&pixels)
+                .unwrap();
+        }
+        world.set_texture(mesh, Some(Texture::decode(&bytes).unwrap()));
+        if !caught(world, window) {
+            return None;
+        }
+        Some(Box::new(move |world| world.remove(mesh)))
+    });
+}
+
+// Audio has no row: no World call detaches a world's engine or its bus
+// (`set_audio` sets them for good), and its hold, an emitter or listener
+// moving, needs a move every frame, which a row turning a feature off and
+// drawing on can't give.
+
 #[cfg(feature = "gltf")]
 #[test]
 #[ignore = "SETTLE-ANIM: the animation lane (removing the last animator never rests)"]
