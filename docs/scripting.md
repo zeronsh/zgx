@@ -113,6 +113,7 @@ zgx lint --rules            # what it looks for
 | `audio-play-timer` | `audio.play` from a `ui.every` under 50 ms or a per-frame callback (`onUpdate`): it lands on the timer's tick | schedule on the mixer's clock: `audio.play(s, { at = audio.now() + 0.25 })` |
 | `audio-sound-too-long` | `audio.sound("file")` of a file beside the script lasting over 10 s (its header read): decoded whole into memory | `audio.music("file")`, which streams it |
 | `audio-param-in-loop` | `:gain`, `:pan` or `:pitch` given a number from a `ui.every` or a per-frame callback: script per tick to move a sound | bind a state once (`:gain(level)`) and set the state, or a binding (`:gain(ui.tween(level))`) |
+| `audio-effect-in-builder` | `bus:add_effect` or `bus:duck` in a component, `each` row or `list` row: one more effect on the bus for every instance, each running every block | add it once at the top of the script; give the instances a state its parameters follow |
 
 `-- zgx-lint: allow(rule)` on the finding's line or the line above accepts a deliberate exception (`allow(rule-a, rule-b)` for several).
 

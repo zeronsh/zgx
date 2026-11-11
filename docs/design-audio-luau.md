@@ -179,3 +179,14 @@ Where the build departs from sections 1 to 7, and why:
 - **`sound3d-no-max`** waits for `ui.sound3d` (A2).
 - **Bindings step in zgx-script's audio module**, with the tween and spring of `anim::drive` written again there: a voice's or bus's binding outlives any component, which `anim::drive` needs, and changing `anim::drive` would change builds without the feature.
 - zgx-audio's `Stats` gained `commands` (commands sent), which shows a bus's drive sends none.
+
+## 10. Effects in Luau (Nov 10 2026)
+
+The mixer's stock effects (zgx-audio's `effects`) on buses, built in `crates/zgx-script/src/audio/effects.rs`:
+
+- `audio.low_pass`, `high_pass`, `peaking`, `delay`, `reverb` and `compressor` each take a table of parameters by name and answer an `EffectSpec`; `bus:add_effect(spec)` makes the engine's effect (`Bus::add_effect`) with the values each parameter has now, through the type's builders (no command per parameter), and answers an `AudioEffect`. `bus:duck(side, opts)` is `Bus::duck(&side, Duck)`.
+- A parameter given a state or function is followed as a voice's gain is (one `EffectHandle::set` a change, a 10 ms glide); a binding steps on the display's frames (one `set` a frame while it moves, over the frame's interval). Literals ride in the constructor. `effect:set(name, value)` replaces what followed; `effect:fade` takes over from it; `effect:remove` takes it off.
+- Effects are kept per load as voices are: a reload removes those the replaced script added (`EffectHandle::remove`), and the host's going removes all.
+- Plugins reach their own bus as `audio.bus()` (nil for any name), with `PLUGIN_EFFECTS` (4) effects at most and no `duck`. What an effect holds is charged to the plugin's meter (`hold_native`) while it's on: a delay its line (`longest` seconds of stereo), a reverb its eight lines at their largest and 250 ms of pre-delay.
+- `voice:crossfade(to, seconds, gain?)`: this voice's `stop_after` and `to`'s `set_gain` along `Curve::EqualPower`, both over `seconds`, taking the gains over from what followed them.
+- Lint: `audio-effect-in-builder`.

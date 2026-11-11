@@ -12,7 +12,7 @@ Sounds, music and the buses they play through, mixed by [zgx-audio](../../crates
 audio.sound(src: string, opts: SoundOptions?) -> Sound
 audio.music(src: string, opts: PlayOptions?) -> Voice
 audio.play(sound: Sound, opts: PlayOptions?) -> Voice
-audio.bus(name: string) -> Bus?
+audio.bus(name: string?) -> Bus?
 audio.add_bus(name: string, opts: { parent: string? }?) -> Bus
 audio.now() -> number
 audio.prewarm() -> ()
@@ -103,6 +103,48 @@ Every voice plays into a bus, and every bus into `master`. `ui`, `music` and `wo
 
 **The `ui` bus follows the user's setting.** With the system's interface sounds off (macOS: *Play user interface sound effects*), the `ui` bus is silent. Every other bus plays on: a game's sound isn't an interface sound. zgx-desktop reads the setting as the engine is made and each time the app comes forward (it's changed in System Settings, another app). On Linux and Windows it isn't read yet: interface sounds count as on. `audio.ui_sounds_enabled` is that setting as a read-only state. It's separate from `ui:mute()`: neither undoes the other.
 
+## Effects
+
+A bus runs its effects in order on its sum, before its gain: 8 at most. `audio.<effect> { … }` describes one, and `bus:add_effect` puts it on:
+
+```luau
+local music = audio.bus("music")
+local muffled = ui.state("muffled", false)
+local cutoff = ui.computed(function() return if muffled:get() then 400 else 20000 end)
+local filter = music:add_effect(audio.low_pass { cutoff = ui.tween(cutoff, { duration = 600 }), slope = 24 })
+audio.bus("world"):add_effect(audio.reverb { size = 1.2, decay = 2.5, wet = 0.25 })
+music:duck(audio.add_bus("dialogue"), { depth = -9 })   -- music under dialogue
+```
+
+| | parameters | |
+| --- | --- | --- |
+| `audio.low_pass`, `audio.high_pass` | `cutoff` (Hz, 10 to 24000), `resonance` (Q, 0.1 to 20; 0.707 flat) | `slope = 12` or `24` dB an octave, set once |
+| `audio.peaking` | `frequency`, `q`, `gain` (dB, -36 to 36) | a band of EQ |
+| `audio.delay` | `time` (seconds), `feedback` (0 to 0.98), `wet`, `dry` | `longest`: the longest `time` (1 s, or `time` if longer; 10 at most), what its line holds |
+| `audio.reverb` | `size` (0.25 to 2), `decay` (seconds to fall 60 dB), `damping` (0 to 1), `pre_delay` (up to 0.25 s), `wet`, `dry` | |
+| `audio.compressor` | `threshold` (dB), `ratio`, `attack`, `release` (seconds), `knee`, `makeup` (dB) | |
+| `bus:duck(side, opts)` | `depth` (dB, -60 to 0), `threshold` (dB `side` must pass), `attack`, `release` | this bus goes down while `side` sounds |
+
+Every parameter takes a number, a state, a function or a binding, followed as a voice's gain is: one message to the mixer a change, one a frame while a binding eases and none at rest, never script per frame. A value outside its range is kept to it.
+
+`bus:add_effect` and `bus:duck` return the effect:
+
+| | |
+| --- | --- |
+| `effect:set(name, value)` | a parameter, by name: a number, or a state, function or binding it follows from now on |
+| `effect:fade(name, value, seconds, curve?)` | moves it along a curve, taking it over from what it followed (a decibel parameter in straight steps whatever the curve) |
+| `effect:remove()` | takes it off its bus, its tail cut |
+| `effect:at(time)` | the same effect, for the next call to land on that frame |
+
+A reload takes off the effects the replaced script added. Add effects once, at the top of a script: one added in a component or row is one more for every instance (`audio-effect-in-builder`). Custom DSP is Rust's (`zgx_audio::Effect`): no script runs on the audio thread.
+
+`voice:crossfade(to, seconds, gain?)` fades a voice out (and stops it) while `to`, started silent (`gain = 0`), comes up to `gain` (1), along equal-power curves:
+
+```luau
+local next_track = audio.music("assets/night.ogg", { loop = true, gain = 0 })
+score:crossfade(next_track, 3)
+```
+
 ## Clock
 
 `audio.now()` is the mixer's clock in seconds: the frame it will mix next, over its rate. Times passed to `at` are on it. It stands still while no sound plays (the device is stopped). Schedule from it, not from `ui.every`: a play from a timer lands on the timer's tick, a play `at` a time lands on its frame. Plays from a timer faster than 50 ms are flagged (`audio-play-timer`).
@@ -119,7 +161,7 @@ Every voice plays into a bus, and every bus into `master`. `ui`, `music` and `wo
 
 ## Plugins
 
-A sandboxed plugin's `audio` plays only into a bus of its own (`plugin:<name>`, under `ui`, so the user's setting silences it), with 8 voices at most, its streams (`audio.music`) among them: a ninth's voice never plays. Its sounds and music come from its directory or below, as its images and modules do (a path out of it, by `..`, an absolute path or a link, is an error that says nothing of what's there), or a file its grants let it pick. A sound's decoded samples count against its memory (`Limits::plugin_memory`): one past it fails to load, with `sound.error` saying so, and its sounds go with it. It has no `bus`, `add_bus`, `prewarm` or `ui_sounds_enabled`, and naming a `bus` in its options is an error.
+A sandboxed plugin's `audio` plays only into a bus of its own (`plugin:<name>`, under `ui`, so the user's setting silences it), `audio.bus()` with no name, with 8 voices at most, its streams (`audio.music`) among them: a ninth's voice never plays. It may put 4 effects on its bus (no `duck`), their buffers (a delay's line, a reverb's) counted against its memory. Its sounds and music come from its directory or below, as its images and modules do (a path out of it, by `..`, an absolute path or a link, is an error that says nothing of what's there), or a file its grants let it pick. A sound's decoded samples count against its memory (`Limits::plugin_memory`): one past it fails to load, with `sound.error` saying so, and its sounds go with it. `audio.bus(name)` is nil to it; it has no `add_bus`, `prewarm` or `ui_sounds_enabled`, and naming a `bus` in its options is an error.
 
 ## Lint
 
@@ -129,5 +171,6 @@ A sandboxed plugin's `audio` plays only into a bus of its own (`plugin:<name>`, 
 | `audio-play-timer` | `audio.play` from `ui.every` under 50 ms, or from a per-frame callback: schedule with `at` |
 | `audio-sound-too-long` | a literal path given to `audio.sound` whose file lasts over 10 s (its header read, nothing decoded): it's decoded whole, so stream it with `audio.music` |
 | `audio-param-in-loop` | `:gain`, `:pan` or `:pitch` called with a number from `ui.every` or a per-frame callback: bind a state or a tween instead |
+| `audio-effect-in-builder` | `bus:add_effect` or `bus:duck` in a component or row body: an effect for every instance |
 
 `ui.sound3d`'s `sound3d-no-max` comes with 3D sound.

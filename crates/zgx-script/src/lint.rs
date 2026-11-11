@@ -92,6 +92,9 @@
 //! - `audio-param-in-loop`: a voice's or bus's `:gain`, `:pan` or `:pitch`
 //!   given a number from a `ui.every` or a per-frame callback: a state or a
 //!   binding moves it with no script.
+//! - `audio-effect-in-builder`: `:add_effect` or `:duck` in a component or
+//!   row: an effect on the bus for every instance, each running on every
+//!   block.
 
 use crate::check::{CheckError, Diagnostic, Report, Severity, scripts};
 use std::path::{Path, PathBuf};
@@ -255,6 +258,10 @@ pub const RULES: &[(&str, &str)] = &[
     (
         "audio-param-in-loop",
         "a sound's gain, pan or pitch set to a number from a timer or a frame callback",
+    ),
+    (
+        "audio-effect-in-builder",
+        "bus:add_effect or bus:duck in a component or row adds one for every instance",
     ),
 ];
 
@@ -1951,6 +1958,24 @@ impl Linter<'_> {
                 ),
             );
         }
+        // `bus:add_effect(…)` or `bus:duck(…)` in a component or row.
+        if self.is(at, ":")
+            && (self.is(at + 1, "add_effect") || self.is(at + 1, "duck"))
+            && self.is(at + 2, "(")
+            && let Some(builder) = builder(stack)
+        {
+            let what = &self.tokens[at + 1].text;
+            self.report(
+                at + 1,
+                "audio-effect-in-builder",
+                format!(
+                    "`:{what}` in a `{builder}` builder puts another effect on the bus for every \
+                     instance it builds, each running on every block (a bus holds 8). Add it once, \
+                     at the top of the script, and give the instances a state its parameters \
+                     follow."
+                ),
+            );
+        }
         if play && let Some(ticking) = &ticking {
             self.report(
                 at,
@@ -2570,6 +2595,27 @@ anime.animate("#dot", { x = 1, onUpdate = function() bus:gain(0.5) end })
         let mut found = one(4, "audio-param-in-loop");
         found.extend(one(6, "audio-param-in-loop"));
         found.extend(one(10, "audio-param-in-loop"));
+        assert_eq!(rules(source), found);
+    }
+
+    #[test]
+    fn an_effect_added_in_a_builder_is_reported() {
+        let source = r#"
+local music = audio.bus("music")
+music:add_effect(audio.reverb { size = 1.2 })
+local Card = ui.component(function(props)
+    music:add_effect(audio.low_pass { cutoff = 800 })
+    return ui.text { "Card" }
+end)
+ui.each(items, function(item)
+    music:duck(audio.bus("ui"), {})
+    -- zgx-lint: allow(audio-effect-in-builder)
+    music:add_effect(audio.delay { time = 0.2 })
+    return ui.text { item }
+end)
+"#;
+        let mut found = one(5, "audio-effect-in-builder");
+        found.extend(one(9, "audio-effect-in-builder"));
         assert_eq!(rules(source), found);
     }
 

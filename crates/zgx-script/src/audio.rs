@@ -7,6 +7,8 @@
 //!
 //! The engine is the host's (`ScriptHost::set_audio`), made the first time
 //! a script calls `audio`: a script that never does makes none.
+mod effects;
+
 use crate::Vm;
 use crate::node::{Anim, AnimUd, Curve};
 use crate::timers::Timers;
@@ -71,6 +73,9 @@ pub(crate) struct AudioHost {
     /// The threads that decode sounds: made with the first, parked while
     /// nothing loads.
     loader: RefCell<Option<zgx::background::BackgroundPool>>,
+    /// Effects scripts put on buses, by their own count.
+    effects: RefCell<HashMap<u64, effects::LiveEffect>>,
+    next_effect: Cell<u64>,
 }
 
 /// A bus's name and what of it is followed (`"gain"`, `"mute"`, `"solo"`).
@@ -104,6 +109,8 @@ impl AudioHost {
             sounds: RefCell::default(),
             slots: RefCell::default(),
             loader: RefCell::default(),
+            effects: RefCell::default(),
+            next_effect: Cell::new(0),
         })
     }
 
@@ -199,6 +206,7 @@ impl AudioHost {
         });
         drop(stopped);
         self.buses.borrow_mut().retain(|_, (of, _)| !replaced(*of));
+        self.remove_effects(replaced);
         let slots: Vec<Rc<SoundSlot>> = {
             let mut slots = self.slots.borrow_mut();
             slots.retain(|slot| slot.strong_count() > 0);
@@ -524,6 +532,8 @@ impl Drop for AudioHost {
         for live in self.voices.get_mut().values() {
             let _ = live.voice.stop();
         }
+        // And its effects come off their buses.
+        self.remove_effects(|_| true);
     }
 }
 
@@ -1071,6 +1081,41 @@ impl UserData for VoiceUd {
                     .map_err(|e| fail("voice:fade", e))
             },
         );
+        // An equal-power crossfade: this voice out and stopped, `to` (started
+        // silent) up to `gain`, over the same seconds.
+        methods.add_method(
+            "crossfade",
+            |_, v, (to, seconds, gain): (mlua::AnyUserData, f64, Option<f32>)| {
+                let to = to.borrow::<VoiceUd>().map_err(|_| {
+                    mlua::Error::runtime("voice:crossfade takes the voice to fade to")
+                })?;
+                let ramp = Ramp::seconds(seconds).curve(zgx_audio::Curve::EqualPower);
+                let mut voices = v.host.voices.borrow_mut();
+                match v.voice() {
+                    Some(voice) => {
+                        if let Some(live) = voices.get_mut(&voice.id()) {
+                            live.follows[0] = None;
+                        }
+                        voice
+                            .stop_after(ramp)
+                            .map_err(|e| fail("voice:crossfade", e))?;
+                    }
+                    None => {
+                        v.cell.cancelled.set(true);
+                        v.cell.playing.set(Value::Bool(false));
+                    }
+                }
+                if let Some(voice) = to.voice() {
+                    if let Some(live) = voices.get_mut(&voice.id()) {
+                        live.follows[0] = None;
+                    }
+                    voice
+                        .set_gain(gain.unwrap_or(1.), ramp)
+                        .map_err(|e| fail("voice:crossfade", e))?;
+                }
+                Ok(())
+            },
+        );
         for (name, at) in [("gain", 0), ("pan", 1), ("pitch", 2)] {
             methods.add_method(name, move |lua, v, value: mlua::Value| {
                 v.set(lua, at, value, &format!("voice:{name}"))
@@ -1092,6 +1137,8 @@ pub(crate) struct BusUd {
     host: Rc<AudioHost>,
     bus: zgx_audio::Bus,
     name: String,
+    /// A plugin's own bus: its effects count against its limits.
+    plugin: Option<Rc<str>>,
 }
 impl BusUd {
     /// Follows `value` into the bus with `on`, replacing what followed it
@@ -1188,8 +1235,10 @@ impl UserData for BusUd {
                 host: b.host.clone(),
                 bus: b.bus.at(time(&audio, seconds)),
                 name: b.name.clone(),
+                plugin: b.plugin.clone(),
             })
         });
+        effects::bus_methods(methods);
     }
 }
 
@@ -1403,21 +1452,38 @@ pub(crate) fn install(
             })?,
         )?;
     }
-    if plugin.is_none() {
-        {
-            let host = host.clone();
-            audio.set(
-                "bus",
-                lua.create_function(move |_, name: String| {
-                    let audio = host.engine()?;
-                    Ok(audio.bus(&name).map(|bus| BusUd {
+    {
+        // `audio.bus(name)`; a plugin's `audio.bus()` is its own, and the
+        // only one it reaches.
+        let (host, plugin) = (host.clone(), plugin.clone());
+        audio.set(
+            "bus",
+            lua.create_function(move |_, name: Option<String>| {
+                let audio = host.engine()?;
+                match (&plugin, name) {
+                    (Some(plugin), None) => Ok(Some(BusUd {
+                        host: host.clone(),
+                        bus: host.plugin_bus(&audio, plugin)?,
+                        name: format!("plugin:{plugin}"),
+                        plugin: Some(plugin.clone()),
+                    })),
+                    (Some(_), Some(_)) => Ok(None),
+                    (None, Some(name)) => Ok(audio.bus(&name).map(|bus| BusUd {
                         host: host.clone(),
                         bus,
                         name,
-                    }))
-                })?,
-            )?;
-        }
+                        plugin: None,
+                    })),
+                    (None, None) => Err(mlua::Error::runtime(
+                        "audio.bus names a bus: \"master\", \"ui\", \"music\", \"world\" or one \
+                         added",
+                    )),
+                }
+            })?,
+        )?;
+    }
+    effects::install(lua, &audio)?;
+    if plugin.is_none() {
         {
             let host = host.clone();
             audio.set(
@@ -1443,6 +1509,7 @@ pub(crate) fn install(
                         host: host.clone(),
                         bus,
                         name,
+                        plugin: None,
                     })
                 })?,
             )?;

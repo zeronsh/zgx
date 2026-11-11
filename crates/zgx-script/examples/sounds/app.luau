@@ -1,5 +1,6 @@
 -- Sound: clicks on controls, a metronome on the mixer's clock, and a pad
--- whose volume a slider eases with no script per frame. Run it with
+-- whose volume a slider eases, and whose filter a checkbox sweeps, with no
+-- script per frame. Run it with
 -- `cargo run -p zgx-run --features audio -- crates/zgx-script/examples/sounds`.
 -- Its sounds are synthesized for it (assets/).
 
@@ -10,6 +11,7 @@ local tick = audio.sound("assets/tick.wav")
 local volume = ui.state("volume", 0.6)
 local muted = ui.state("muted", false)
 local tempo = ui.state("tempo", 120)
+local muffled = ui.state("muffled", false)
 
 -- The slider moves the music bus's gain through a tween: the mixer reads
 -- it each block, so neither the slider nor the tween sends a message.
@@ -17,6 +19,17 @@ local music = audio.bus("music")
 if music then
 	music:gain(ui.tween(volume, { duration = 120 }))
 	music:mute(muted)
+	-- A low-pass the checkbox sweeps down to 400 Hz and back: the tween
+	-- eases the cutoff in Rust, a message a frame while it moves.
+	local cutoff = ui.computed(function()
+		return if muffled:get() then 400 else 20000
+	end)
+	music:add_effect(audio.low_pass { cutoff = ui.tween(cutoff, { duration = 600 }), slope = 24 })
+end
+-- The ticks ring in a small room.
+local world = audio.bus("world")
+if world then
+	world:add_effect(audio.reverb { size = 0.6, decay = 0.8, wet = 0.2 })
 end
 
 local pad: Voice? = nil
@@ -72,6 +85,7 @@ return ui.column {
 			end,
 		},
 		ui.slider { id = "volume", label = "Music volume", value = volume, step = 0.05, w = 200 },
+		ui.checkbox { id = "muffle", sound = click, label = "Muffle", value = muffled },
 	},
 	ui.row {
 		gap = 8,

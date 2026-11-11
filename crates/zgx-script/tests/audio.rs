@@ -503,7 +503,7 @@ fn a_plugin_plays_into_its_own_bus_under_ui_at_most_eight_voices() {
             local tone = audio.sound(\"plugin.wav\")
             ui.contribute(\"bar\", ui.column {{
                 ui.text {{ id = \"ready\", count_ready(tone) }},
-                ui.text {{ id = \"reach\", tostring(audio.bus == nil and audio.prewarm == nil and audio.ui_sounds_enabled == nil) }},
+                ui.text {{ id = \"reach\", tostring(audio.bus(\"music\") == nil and audio.prewarm == nil and audio.ui_sounds_enabled == nil) }},
                 ui.button {{
                     id = \"nine\",
                     on_click = function()
@@ -564,6 +564,11 @@ fn the_sounds_example_runs_and_plays() {
     s.app.click("bar");
     assert_eq!(s.audio.voices_playing(), 6);
     s.app.frames(10);
+    s.render(0.2);
+    assert_eq!(s.app.error(), None);
+    // The checkbox sweeps the pad's low-pass down, eased in Rust.
+    s.app.click("muffle");
+    s.app.frames(40);
     s.render(0.2);
     assert_eq!(s.app.error(), None);
     s.app.click("pad");
@@ -812,4 +817,312 @@ fn sounds_no_script_holds_are_let_go_after_a_reload() {
         1,
         "the first, no longer held, is let go"
     );
+}
+
+/// A WAV file of `seconds` of a sine at `hz`, at half scale.
+fn sine(name: &str, hz: f64, seconds: f64) -> PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("zgx-audio-script-{}-{}", std::process::id(), name));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.wav"));
+    let samples: Vec<f32> = (0..(48_000. * seconds) as usize)
+        .map(|i| (0.5 * (std::f64::consts::TAU * hz * i as f64 / 48_000.).sin()) as f32)
+        .collect();
+    std::fs::write(
+        &path,
+        wav::write(&samples, 1, 48_000, Encoding::Float32).unwrap(),
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_low_pass_bound_to_a_tween_moves_with_no_script_per_frame() {
+    let tone = sine("lowpass", 5_000., 2.);
+    let code = script(
+        &format!(
+            "{READY}
+            local tone = audio.sound(\"{{tone}}\")
+            local cutoff = ui.state(\"cutoff\", 20000)
+            local music = audio.bus(\"music\")
+            if music then
+                music:add_effect(audio.low_pass {{ cutoff = ui.tween(cutoff, {{ duration = 200 }}), slope = 24 }})
+            end
+            return ui.column {{
+                ui.text {{ id = \"ready\", count_ready(tone) }},
+                ui.button {{ id = \"play\", on_click = function() audio.play(tone, {{ bus = \"music\", loop = true }}) end, \"Play\" }},
+                ui.button {{ id = \"muffle\", on_click = function() cutoff:set(100) end, \"Muffle\" }},
+            }}"
+        ),
+        &[("tone", &tone)],
+    );
+    let mut s = Sounding::new(&code);
+    s.ready(1);
+    s.app.click("play");
+    let open = s.render(0.1);
+    assert!(*open.last().unwrap() > 0.45, "open: {open:?}");
+    s.app.frames(5);
+    let at_rest = s.audio.stats().commands;
+    s.app.frames(10);
+    assert_eq!(s.audio.stats().commands, at_rest, "none at rest");
+    s.app.click("muffle");
+    let (calls, sent) = (s.app.calls(), s.audio.stats().commands);
+    let mut levels = Vec::new();
+    for _ in 0..20 {
+        s.app.frame();
+        levels.push(*s.render(1. / 60.).last().unwrap());
+    }
+    let eased = s.audio.stats().commands - sent;
+    assert!(
+        (8..=16).contains(&eased),
+        "a command a frame while it eases: {eased}"
+    );
+    assert_eq!(s.app.calls(), calls, "no script per frame");
+    let muffled = *s.render(0.1).last().unwrap();
+    assert!(
+        muffled < 0.01,
+        "5 kHz under a 100 Hz low-pass: {muffled} ({levels:?})"
+    );
+}
+
+#[test]
+fn an_effect_parameter_following_state_is_a_command_a_change() {
+    let tone = sine("peaking", 1_000., 2.);
+    let code = script(
+        &format!(
+            "{READY}
+            local tone = audio.sound(\"{{tone}}\")
+            local boost = ui.state(\"boost\", 0)
+            local eq
+            local world = audio.bus(\"world\")
+            if world then
+                eq = world:add_effect(audio.peaking {{ frequency = 1000, q = 1, gain = boost }})
+            end
+            return ui.column {{
+                ui.text {{ id = \"ready\", count_ready(tone) }},
+                ui.button {{ id = \"play\", on_click = function() audio.play(tone, {{ loop = true, gain = 0.25 }}) end, \"Play\" }},
+                ui.button {{ id = \"boost\", on_click = function() boost:set(12) end, \"Boost\" }},
+                ui.button {{ id = \"flat\", on_click = function() if eq then eq:fade(\"gain\", 0, 0.05) end end, \"Flat\" }},
+                ui.button {{ id = \"off\", on_click = function() if eq then eq:remove() end end, \"Off\" }},
+            }}"
+        ),
+        &[("tone", &tone)],
+    );
+    let mut s = Sounding::new(&code);
+    s.ready(1);
+    s.app.click("play");
+    let flat = *s.render(0.1).last().unwrap();
+    assert!((flat - 0.125).abs() < 0.01, "{flat}");
+    let sent = s.audio.stats().commands;
+    s.app.click("boost");
+    assert_eq!(
+        s.audio.stats().commands,
+        sent + 1,
+        "one command for the change"
+    );
+    let boosted = *s.render(0.1).last().unwrap();
+    // +12 dB is four times.
+    assert!(
+        (boosted / flat - 3.98).abs() < 0.2,
+        "{boosted} against {flat}"
+    );
+    s.app.click("flat");
+    let back = *s.render(0.15).last().unwrap();
+    assert!((back - flat).abs() < 0.01, "faded back: {back}");
+    s.app.click("boost");
+    s.render(0.05);
+    s.app.click("off");
+    let off = *s.render(0.1).last().unwrap();
+    assert!((off - flat).abs() < 0.01, "taken off: {off}");
+}
+
+#[test]
+fn a_reload_takes_off_the_effects_the_old_script_added() {
+    let tone = sine("reload-effects", 5_000., 2.);
+    let dir = tone.parent().unwrap().join("effects-app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.luau");
+    let code = |effect: &str| {
+        script(
+            &format!(
+                "{READY}
+                local tone = audio.sound(\"{{tone}}\")
+                local world = audio.bus(\"world\")
+                {effect}
+                audio.play(tone, {{ loop = true }})
+                return ui.text {{ id = \"ready\", count_ready(tone) }}"
+            ),
+            &[("tone", &tone)],
+        )
+    };
+    std::fs::write(
+        &app,
+        code("if world then world:add_effect(audio.low_pass { cutoff = 20 }) end"),
+    )
+    .unwrap();
+    let path = app.clone();
+    let mut s = Sounding::with(move |runtime| ScriptHost::new(runtime, path));
+    s.ready(1);
+    let muffled = *s.render(0.2).last().unwrap();
+    assert!(muffled < 0.01, "{muffled}");
+    std::fs::write(&app, code("")).unwrap();
+    s.app.host.reload().unwrap();
+    s.ready(1);
+    let open = *s.render(0.2).last().unwrap();
+    assert!(open > 0.45, "the old script's filter is off: {open}");
+}
+
+#[test]
+fn a_bus_ducks_under_another() {
+    let tone = wav("duck", 2.);
+    let code = script(
+        &format!(
+            "{READY}
+            local tone = audio.sound(\"{{tone}}\")
+            local music, ui_bus = audio.bus(\"music\"), audio.bus(\"ui\")
+            if music and ui_bus then
+                music:duck(ui_bus, {{ depth = -12, attack = 0.01, release = 0.1 }})
+            end
+            return ui.column {{
+                ui.text {{ id = \"ready\", count_ready(tone) }},
+                ui.button {{ id = \"music\", on_click = function() audio.play(tone, {{ bus = \"music\", loop = true }}) end, \"Music\" }},
+                ui.button {{ id = \"speak\", on_click = function() audio.play(tone, {{ bus = \"ui\", loop = true, gain = 0.05 }}) end, \"Speak\" }},
+            }}"
+        ),
+        &[("tone", &tone)],
+    );
+    let mut s = Sounding::new(&code);
+    s.ready(1);
+    s.app.click("music");
+    let alone = *s.render(0.2).last().unwrap();
+    assert!((alone - 0.5).abs() < 0.01, "{alone}");
+    s.app.click("speak");
+    let ducked = *s.render(0.3).last().unwrap();
+    // Music down 12 dB (0.126) under the voice's 0.025.
+    assert!(
+        (ducked - (0.5 * 0.251 + 0.025)).abs() < 0.02,
+        "ducked to {ducked}"
+    );
+}
+
+#[test]
+fn a_voice_crossfades_to_another() {
+    let tone = wav("crossfade", 2.);
+    let code = script(
+        &format!(
+            "{READY}{HOLDS_A_VOICE}
+            local tone = audio.sound(\"{{tone}}\")
+            local a, b
+            return ui.column {{
+                ui.text {{ id = \"ready\", count_ready(tone) }},
+                ui.button {{ id = \"start\", on_click = function()
+                    a = audio.play(tone, {{ loop = true }})
+                    b = audio.play(tone, {{ loop = true, gain = 0 }})
+                end, \"Start\" }},
+                ui.button {{ id = \"cross\", on_click = function() if a and b then a:crossfade(b, 0.1, 0.4) end end, \"Cross\" }},
+            }}"
+        ),
+        &[("tone", &tone)],
+    );
+    let mut s = Sounding::new(&code);
+    s.ready(1);
+    s.app.click("start");
+    let before = *s.render(0.05).last().unwrap();
+    assert!((before - 0.5).abs() < 0.01, "{before}");
+    s.app.click("cross");
+    let mut levels = s.render(0.3);
+    let after = levels.pop().unwrap();
+    assert!((after - 0.2).abs() < 0.01, "the second at 0.4: {after}");
+    assert_eq!(s.audio.voices_playing(), 1, "the first stopped");
+    // Equal power: halfway (50 ms), cos and sin of 45°, 0.35 + 0.14,
+    // where a straight fade would be at 0.25 + 0.1.
+    let middle = levels[(0.05 * 48_000. / BLOCK as f64) as usize];
+    assert!(middle > 0.45, "{middle}: {levels:?}");
+}
+
+#[test]
+fn a_plugin_puts_effects_on_its_own_bus_within_its_limits() {
+    let dir = std::env::temp_dir().join(format!("zgx-audio-plugin-fx-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut s = with_plugin(
+        &dir,
+        "local said = {}
+        local own = audio.bus()
+        table.insert(said, tostring(audio.bus(\"music\") == nil))
+        local function try(f)
+            local ok, why = pcall(f)
+            table.insert(said, if ok then \"ok\" else tostring(why))
+        end
+        for _ = 1, 5 do
+            try(function() own:add_effect(audio.low_pass { cutoff = 8000 }) end)
+        end
+        try(function() own:duck(own, {}) end)
+        ui.contribute(\"bar\", ui.text { id = \"said\", table.concat(said, \"|\") })",
+    );
+    let said = s.app.text("said");
+    let said: Vec<&str> = said.split('|').collect();
+    assert_eq!(said[0], "true", "no other bus");
+    assert_eq!(&said[1..5], ["ok"; 4], "{said:?}");
+    assert!(said[5].contains("at most 4 effects"), "{said:?}");
+    assert!(said[6].contains("ducks under no other"), "{said:?}");
+    s.render(0.01);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_plugins_effects_count_against_its_memory() {
+    let dir = std::env::temp_dir().join(format!("zgx-audio-plugin-fx-mem-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let entry = dir.join("init.luau");
+    std::fs::write(
+        &entry,
+        "local ok, why = pcall(function()
+            audio.bus():add_effect(audio.delay { time = 0.5, longest = 10 })
+        end)
+        ui.contribute(\"bar\", ui.text { id = \"said\", if ok then \"ok\" else tostring(why) })",
+    )
+    .unwrap();
+    let mut s = Sounding::with(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })")
+            .limits(zgx_script::Limits {
+                plugin_memory: 2 << 20,
+                ..Default::default()
+            });
+        host.set_plugins(vec![zgx_script::Plugin {
+            name: "sfx".into(),
+            entry,
+            grants: vec![],
+        }]);
+        host
+    });
+    // 10 s of stereo line is 3.8 MB.
+    assert!(
+        s.app.text("said").contains("plugin's memory"),
+        "{}",
+        s.app.text("said")
+    );
+    s.render(0.01);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn an_effect_says_which_parameters_it_has() {
+    let mut app = TestApp::inline(
+        "local said = ui.state(\"said\", \"\")
+        return ui.column {
+            ui.text { id = \"said\", said },
+            ui.button { id = \"ask\", on_click = function()
+                local ok, why = pcall(audio.low_pass, { cutof = 800 })
+                local ok2, why2 = pcall(audio.low_pass, { slope = 18 })
+                said:set(tostring(why) .. \"|\" .. tostring(why2))
+            end, \"Ask\" },
+        }",
+    );
+    app.click("ask");
+    let said = app.text("said");
+    assert!(
+        said.contains("no parameter \"cutof\": it has cutoff, resonance"),
+        "{said}"
+    );
+    assert!(said.contains("slope is 12 or 24"), "{said}");
 }
