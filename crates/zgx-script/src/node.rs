@@ -3588,6 +3588,17 @@ const LATE_FIELDS: &[&str] = &[
     "container",
     "queries",
 ];
+/// A property no node takes: or `spans` beside a `ui.rich`'s listed runs.
+#[cold]
+#[inline(never)]
+fn unknown_property(name: &str, kind: &Kind) -> mlua::Error {
+    match (name, kind) {
+        ("spans", Kind::Rich(_)) => {
+            mlua::Error::runtime("ui.rich takes its runs listed or from `spans`, not both")
+        }
+        _ => mlua::Error::runtime(format!("unknown property `{name}`")),
+    }
+}
 
 /// A key no style property names, taken where it lies once the walk finds
 /// it, so no style key compares against it: an input's caret (few set it,
@@ -3783,7 +3794,7 @@ fn late_field(lua: &Lua, node: &mut Node, name: &str, value: mlua::Value) -> mlu
                 )));
             }
         },
-        _ => return Err(mlua::Error::runtime(format!("unknown property `{name}`"))),
+        _ => return Err(unknown_property(name, &node.kind)),
     }
     Ok(())
 }
@@ -4972,6 +4983,24 @@ pub(crate) fn spans_of(lua: &Lua, list: &Table, literal: bool) -> mlua::Result<V
     Ok(spans)
 }
 
+/// `ui.rich`'s runs where none are listed: made by its `spans` function,
+/// or none.
+#[cold]
+#[inline(never)]
+fn made_rich(table: &Table, literal: bool) -> mlua::Result<RichSpans> {
+    match table.get::<mlua::Value>("spans")? {
+        mlua::Value::Nil => Ok(RichSpans::Listed(Vec::new())),
+        mlua::Value::Function(build) => {
+            table.raw_set("spans", mlua::Value::Nil)?;
+            Ok(RichSpans::Made { build, literal })
+        }
+        other => Err(mlua::Error::runtime(format!(
+            "ui.rich's `spans` is a function returning its runs, not {}",
+            other.type_name()
+        ))),
+    }
+}
+
 /// Installs the read-only `ui` global.
 /// `ui.override`, `ui.contribute` and `ui.filter`: what plugins (and an
 /// app's own extensions) hand the app, made once a script names one.
@@ -5256,23 +5285,24 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             // `literal` (a span may say otherwise).
             let literal = table.get::<Option<bool>>("literal")?.unwrap_or(false);
             table.raw_set("literal", mlua::Value::Nil)?;
-            let spans = match table.get::<mlua::Value>("spans")? {
-                mlua::Value::Nil => RichSpans::Listed(spans_of(lua, &table, literal)?),
-                mlua::Value::Function(build) => {
-                    if table.raw_len() > 0 {
-                        return Err(mlua::Error::runtime(
-                            "ui.rich takes its runs listed or from `spans`, not both",
-                        ));
-                    }
-                    table.raw_set("spans", mlua::Value::Nil)?;
-                    RichSpans::Made { build, literal }
+            let mut spans = Vec::new();
+            for item in table.sequence_values::<mlua::Value>() {
+                match item? {
+                    mlua::Value::UserData(ud) if ud.is::<SpanUd>() => spans.push(
+                        ud.borrow::<SpanUd>()?
+                            .0
+                            .borrow_mut()
+                            .take()
+                            .ok_or_else(|| mlua::Error::runtime("a span can be used once"))?,
+                    ),
+                    other => spans.push(span(lua, other, literal)?),
                 }
-                other => {
-                    return Err(mlua::Error::runtime(format!(
-                        "ui.rich's `spans` is a function returning its runs, not {}",
-                        other.type_name()
-                    )));
-                }
+            }
+            // None listed: made by its `spans` function, if it has one (one
+            // beside listed runs is left to `fill`, which turns it away).
+            let spans = match spans.is_empty() {
+                true => made_rich(&table, literal)?,
+                false => RichSpans::Listed(spans),
             };
             for i in (1..=table.raw_len()).rev() {
                 table.raw_remove(i)?;
