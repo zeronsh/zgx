@@ -74,6 +74,9 @@ pub(crate) struct AudioHost {
     /// The threads that decode sounds: made with the first, parked while
     /// nothing loads.
     loader: RefCell<Option<zgx::background::BackgroundPool>>,
+    /// Stops and removals a full queue refused (`Error::QueueFull`), sent
+    /// again until it takes them: each answers whether it went.
+    unsent: RefCell<Vec<Box<dyn FnMut() -> bool>>>,
     /// Effects scripts put on buses, by their own count.
     #[cfg(feature = "audio-effects")]
     effects: RefCell<HashMap<u64, effects::LiveEffect>>,
@@ -112,6 +115,7 @@ impl AudioHost {
             sounds: RefCell::default(),
             slots: RefCell::default(),
             loader: RefCell::default(),
+            unsent: RefCell::default(),
             #[cfg(feature = "audio-effects")]
             effects: RefCell::default(),
             #[cfg(feature = "audio-effects")]
@@ -131,6 +135,7 @@ impl AudioHost {
     }
 
     fn engine(&self) -> mlua::Result<Audio> {
+        self.resend();
         if let Some(audio) = &*self.engine.borrow() {
             return Ok(audio.clone());
         }
@@ -167,7 +172,26 @@ impl AudioHost {
 
     /// Voices the engine says have ended: their `playing` turns false, and
     /// what followed state into them stops.
+    /// Sends again what a full queue refused, keeping what it refuses
+    /// still: a reload's stop or an effect's removal is never dropped.
+    pub(crate) fn resend(&self) {
+        if self.unsent.borrow().is_empty() {
+            return;
+        }
+        let mut unsent = std::mem::take(&mut *self.unsent.borrow_mut());
+        unsent.retain_mut(|send| !send());
+        self.unsent.borrow_mut().append(&mut unsent);
+    }
+
+    /// `send` now, or again later until it goes.
+    fn send_until(&self, mut send: impl FnMut() -> bool + 'static) {
+        if !send() {
+            self.unsent.borrow_mut().push(Box::new(send));
+        }
+    }
+
     pub(crate) fn voices_ended(&self, ids: &[u64]) {
+        self.resend();
         let ended: Vec<Live> = {
             let mut voices = self.voices.borrow_mut();
             ids.iter().filter_map(|id| voices.remove(id)).collect()
@@ -201,8 +225,9 @@ impl AudioHost {
             ids.iter().filter_map(|id| voices.remove(id)).collect()
         };
         for live in &stopped {
-            // A fade, never a cut.
-            let _ = live.voice.stop();
+            // A fade, never a cut; a full queue's refusal, sent again.
+            let voice = live.voice.clone();
+            self.send_until(move || voice.stop() != Err(zgx_audio::Error::QueueFull));
         }
         self.runtime.batch(|| {
             for live in &stopped {

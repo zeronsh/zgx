@@ -45,7 +45,13 @@ impl Sounding {
         Sounding::with(|runtime| ScriptHost::inline(runtime, "app", code))
     }
     fn with(make: impl FnOnce(&zgx::reactive::Runtime) -> ScriptHost) -> Sounding {
-        let (audio, mixer) = Audio::offline(Config::default()).unwrap();
+        Sounding::configured(Config::default(), make)
+    }
+    fn configured(
+        config: Config,
+        make: impl FnOnce(&zgx::reactive::Runtime) -> ScriptHost,
+    ) -> Sounding {
+        let (audio, mixer) = Audio::offline(config).unwrap();
         let engine = audio.clone();
         let app = TestApp::new(move |runtime| {
             let host = make(runtime);
@@ -1142,4 +1148,104 @@ fn an_effect_says_which_parameters_it_has() {
         "{said}"
     );
     assert!(said.contains("slope is 12 or 24"), "{said}");
+}
+
+/// Fills `audio`'s command queue until it refuses a command.
+fn fill_queue(audio: &Audio) {
+    let master = audio.master();
+    while master
+        .set_gain(1., zgx_script::zgx_audio::Ramp::NONE)
+        .is_ok()
+    {}
+}
+
+#[test]
+fn a_reload_stops_the_old_voices_even_past_a_full_queue() {
+    let tone = wav("full-stop", 2.);
+    let dir = tone.parent().unwrap().join("full-stop-app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.luau");
+    std::fs::write(
+        &app,
+        script(
+            &format!(
+                "{READY}
+                local tone = audio.sound(\"{{tone}}\")
+                local played = false
+                return ui.column {{
+                    ui.text {{ id = \"ready\", count_ready(tone) }},
+                    ui.button {{ id = \"play\", on_click = function() audio.play(tone, {{ loop = true }}) end, \"Play\" }},
+                }}"
+            ),
+            &[("tone", &tone)],
+        ),
+    )
+    .unwrap();
+    let path = app.clone();
+    let config = Config {
+        commands: 16,
+        ..Config::default()
+    };
+    let mut s = Sounding::configured(config, move |runtime| ScriptHost::new(runtime, path));
+    s.ready(1);
+    s.app.click("play");
+    assert!(*s.render(0.05).last().unwrap() > 0.4);
+    fill_queue(&s.audio);
+    std::fs::write(&app, "return ui.text { id = \"ready\", \"1\" }").unwrap();
+    s.app.host.reload().unwrap();
+    // The queue drains as the mixer runs, and the stop goes then.
+    let after = s.render(0.1);
+    assert_eq!(
+        *after.last().unwrap(),
+        0.,
+        "the old voice stopped: {after:?}"
+    );
+    assert_eq!(s.audio.voices_playing(), 0);
+}
+
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
+#[test]
+fn a_reload_takes_an_effect_off_even_past_a_full_queue() {
+    let tone = sine("full-remove", 5_000., 2.);
+    let dir = tone.parent().unwrap().join("full-remove-app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.luau");
+    std::fs::write(
+        &app,
+        "local world = audio.bus(\"world\")
+        if world then
+            world:add_effect(audio.low_pass { cutoff = 20 })
+        end
+        return ui.text { \"filtered\" }",
+    )
+    .unwrap();
+    let path = app.clone();
+    let config = Config {
+        commands: 16,
+        ..Config::default()
+    };
+    let mut s = Sounding::configured(config, move |runtime| ScriptHost::new(runtime, path));
+    // A voice of the host's own, which no reload stops.
+    let samples: Vec<f32> = (0..96_000)
+        .map(|i| (0.5 * (std::f64::consts::TAU * 5_000. * i as f64 / 48_000.).sin()) as f32)
+        .collect();
+    let sound = zgx_script::zgx_audio::Sound::from_samples(&samples, 1, 48_000).unwrap();
+    let world = s.audio.bus("world").unwrap();
+    s.audio
+        .play(
+            &sound,
+            zgx_script::zgx_audio::Play::new().bus(&world).looping(true),
+        )
+        .unwrap();
+    let muffled = *s.render(0.1).last().unwrap();
+    assert!(muffled < 0.01, "{muffled}");
+    fill_queue(&s.audio);
+    std::fs::write(&app, "return ui.text { \"plain\" }").unwrap();
+    s.app.host.reload().unwrap();
+    let open = *s.render(0.2).last().unwrap();
+    assert!(
+        open > 0.45,
+        "the filter came off once the queue had room: {open}"
+    );
 }

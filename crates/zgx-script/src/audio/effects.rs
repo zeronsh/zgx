@@ -302,8 +302,12 @@ impl AudioHost {
                 .collect();
             ids.iter().filter_map(|id| effects.remove(id)).collect()
         };
-        for effect in gone {
-            let _ = effect.handle.remove();
+        for mut effect in gone {
+            // It stops following now; it stays on the books (and counted
+            // against a plugin's memory) until a full queue takes its
+            // removal.
+            effect.follows.clear();
+            self.send_until(move || effect.handle.remove() != Err(zgx_audio::Error::QueueFull));
         }
     }
 }
@@ -385,16 +389,15 @@ impl UserData for EffectUd {
             },
         );
         methods.add_method("remove", |_, e, ()| {
-            let removed = e.host.effects.borrow_mut().remove(&e.id);
-            if let Some(effect) = removed {
-                let handle = match e.at {
-                    Some(at) => effect.handle.at(at),
-                    None => effect.handle.clone(),
-                };
-                handle
-                    .remove()
-                    .map_err(|error| fail("effect:remove", error))?;
-            }
+            let Some((handle, _)) = e.live() else {
+                return Ok(());
+            };
+            // Off the books once the engine has the removal: refused (a
+            // full queue), it's still on, and the script may try again.
+            handle
+                .remove()
+                .map_err(|error| fail("effect:remove", error))?;
+            e.host.effects.borrow_mut().remove(&e.id);
             Ok(())
         });
         methods.add_method("at", |_, e, seconds: f64| {
