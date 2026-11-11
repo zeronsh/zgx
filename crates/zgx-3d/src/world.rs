@@ -649,9 +649,21 @@ pub(crate) struct Inner {
 /// any is, and stops as the last settles: an animator playing
 /// (`ANIMATION`), maps on their way (`LOADING`); design 4.4's other
 /// features add theirs.
+///
+/// A reason is held by whoever set it: the world itself, or a painter
+/// drawing it (`drawing`, `crate::painter`), each converging on its own
+/// (two views of one world: one's probes done, the other's not). The world
+/// is unsettled for a reason while anyone holds it; one the world set is
+/// answered by any painter settling it; a painter's go as it rests or goes.
 #[derive(Default)]
 pub(crate) struct Settle {
+    /// Every holder's reasons together.
     unsettled: std::cell::Cell<u32>,
+    /// Each holder's reasons: the world's own (0) and each painter's (its
+    /// id), those holding any.
+    held: RefCell<Vec<(u64, u32)>>,
+    /// The painter drawing the world now (0 while none is): who sets what.
+    pub(crate) drawing: std::cell::Cell<u64>,
 }
 /// Every reason a world keeps drawing, a bit each (`Settle`), declared here
 /// alone: two features can't take one bit, as two equal discriminants don't
@@ -707,16 +719,46 @@ impl Settle {
     pub(crate) fn holds(&self, reason: u32) -> bool {
         self.unsettled.get() & reason != 0
     }
-    /// `reason` unsettled (`on`) or settled: whether that changed whether
-    /// anything is.
+    /// `reason` unsettled (`on`) or settled by the holder drawing now:
+    /// whether that changed whether anything is.
     fn set(&self, reason: u32, on: bool) -> bool {
-        let before = self.unsettled.get();
-        let after = if on {
-            before | reason
-        } else {
-            before & !reason
-        };
-        self.unsettled.set(after);
+        let by = self.drawing.get();
+        let mut held = self.held.borrow_mut();
+        let mine = held.iter().position(|&(holder, _)| holder == by);
+        match (mine, on) {
+            (Some(at), _) => {
+                held[at].1 = if on {
+                    held[at].1 | reason
+                } else {
+                    held[at].1 & !reason
+                }
+            }
+            (None, true) => held.push((by, reason)),
+            (None, false) => {}
+        }
+        // A painter settling a reason answers the world's own asking for it
+        // (set outside a frame: draw until a painter decides).
+        if by != 0
+            && !on
+            && let Some(world) = held.iter().position(|&(holder, _)| holder == 0)
+        {
+            held[world].1 &= !reason;
+        }
+        held.retain(|&(_, reasons)| reasons != 0);
+        self.gathered(&held)
+    }
+    /// Whatever painter `by` held let go: whether that changed whether
+    /// anything is unsettled.
+    fn release(&self, by: u64) -> bool {
+        let mut held = self.held.borrow_mut();
+        held.retain(|&(holder, _)| holder != by);
+        self.gathered(&held)
+    }
+    /// The holders' reasons together, kept: whether that changed whether
+    /// any is.
+    fn gathered(&self, held: &[(u64, u32)]) -> bool {
+        let after = held.iter().fold(0, |all, &(_, reasons)| all | reasons);
+        let before = self.unsettled.replace(after);
         (before == 0) != (after == 0)
     }
 }
@@ -970,6 +1012,14 @@ impl Inner {
     /// while any is. A frame may call it as it draws.
     pub(crate) fn unsettle(&self, reason: u32, on: bool) {
         if self.settle.set(reason, on)
+            && let Some(view) = &self.view
+        {
+            view.animate(!self.settle.settled());
+        }
+    }
+    /// What painter `by` held unsettled let go (it rests, or is gone).
+    pub(crate) fn release(&self, by: u64) {
+        if self.settle.release(by)
             && let Some(view) = &self.view
         {
             view.animate(!self.settle.settled());
@@ -2094,6 +2144,45 @@ mod tests {
             assert_eq!(all & r, 0, "{r:#x} taken twice");
             all |= r;
         }
+    }
+
+    #[test]
+    fn a_reason_holds_while_any_painter_holds_it_and_goes_with_it() {
+        use crate::painter::Painter;
+        use zgx_gpu::viewport::Viewport;
+        // Two painters of one world (as its view's and `World::viewport`'s):
+        // each converges on its own.
+        let world = World::new();
+        let painter = || Painter::new(world.renderer(), Rc::downgrade(&world.inner));
+        let (one, mut two) = (painter(), painter());
+        let probes = Reason::Probes as u32;
+        let drawn = |by: u64, on: bool| {
+            let inner = world.inner.borrow();
+            inner.settle.drawing.set(by);
+            inner.unsettle(probes, on);
+            inner.settle.drawing.set(0);
+        };
+        // One still converging, the other done, whichever draws last.
+        drawn(one.id(), true);
+        drawn(two.id(), false);
+        assert!(world.view().animating(), "the first still holds it");
+        drawn(two.id(), true);
+        drawn(one.id(), true);
+        drawn(two.id(), false);
+        assert!(world.view().animating());
+        // Gone, and what it held with it.
+        drop(one);
+        assert!(!world.view().animating(), "let go as it went");
+        // Resting, the same.
+        drawn(two.id(), true);
+        assert!(world.view().animating());
+        two.rest();
+        assert!(!world.view().animating(), "let go as it rested");
+        // Asked by the world (outside a frame), answered by a painter.
+        world.inner.borrow().unsettle(probes, true);
+        assert!(world.view().animating());
+        drawn(two.id(), false);
+        assert!(!world.view().animating(), "answered");
     }
 
     #[test]
