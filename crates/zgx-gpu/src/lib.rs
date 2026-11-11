@@ -3799,8 +3799,9 @@ const POWER: wgpu::PowerPreference = wgpu::PowerPreference::LowPower;
 /// `WGPU_FORCE_FALLBACK_ADAPTER=1` (wgpu's own name): the software adapter
 /// even where there is a GPU (WARP on Windows, for both Direct3D 12 and
 /// 11), as a machine without one draws: to run CI's software lines, or
-/// bless a software family of goldens, on a machine with a GPU. Read when a
-/// device is made, never per frame.
+/// bless a software family of goldens, on a machine with a GPU. Linux takes
+/// a software Vulkan driver; macOS has none for Metal, so there the renderer
+/// fails to start. Read when a device is made, never per frame.
 pub(crate) fn fallback_adapter_forced() -> bool {
     std::env::var_os("WGPU_FORCE_FALLBACK_ADAPTER").is_some_and(|value| value == "1")
 }
