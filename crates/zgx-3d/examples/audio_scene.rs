@@ -8,7 +8,10 @@
 //! main thread (`World::update_audio`), then its 800 frames mixed, offline.
 //! All its sounds are made here.
 //!
-//! `cargo run --release -p zgx-3d --features audio --example audio_scene`
+//! `cargo run --release -p zgx-3d --features audio --example audio_scene [ground]`
+//!
+//! `ground` adds a terrain that blocks: 320,000 triangles in low hills
+//! under all of it, the size of the harbor's near water grid.
 use std::time::{Duration, Instant};
 use zgx_3d::{
     Camera, Emitter3d, Geometry, Material, Object, ReverbPreset, ReverbZone, Transform, World,
@@ -52,6 +55,35 @@ fn main() {
         let (row, stack) = (i / 4, i % 4);
         let (x, z) = ((row % 50) as f32 * 7. - 175., (row / 50) as f32 * 9. - 60.);
         world.set_transform(id, Transform::at([x, 1.3 + stack as f32 * 2.6, z]));
+    }
+    // `ground`: the harbor's near water grid's size (1,600 m by 1,600 m at
+    // 4 m, 320,000 triangles) as a terrain that blocks, in hills of
+    // 1.2 m: rays to the low sounds enter its box and some meet it.
+    if std::env::args().nth(1).as_deref() == Some("ground") {
+        let (x0, z0, step, n) = (-800f32, -1560f32, 4f32, 401usize);
+        let height = |x: f32, z: f32| 1.2 * (x / 23.).sin() * (z / 31.).cos();
+        let mut vertices = Vec::with_capacity(n * n);
+        for r in 0..n {
+            for c in 0..n {
+                let (x, z) = (x0 + c as f32 * step, z0 + r as f32 * step);
+                vertices.push(zgx_3d::Vertex {
+                    position: [x, height(x, z), z],
+                    normal: [0., 1., 0.],
+                    uv: [0., 0.],
+                });
+            }
+        }
+        let mut indices = Vec::with_capacity((n - 1) * (n - 1) * 6);
+        for r in 0..n - 1 {
+            for c in 0..n - 1 {
+                let i = (r * n + c) as u32;
+                let (j, k, l) = (i + 1, i + n as u32, i + n as u32 + 1);
+                indices.extend_from_slice(&[i, k, j, j, k, l]);
+            }
+        }
+        let ground = Geometry::new(vertices, indices).unwrap();
+        println!("ground: {} triangles", ground.indices().len() / 3);
+        world.add(Object::mesh(ground, Material::rgb(0x55603a)));
     }
     // The sounds, made here.
     let tau = std::f32::consts::TAU;
@@ -134,6 +166,7 @@ fn main() {
     // A minute's walk through the gantry and into the cabin and out.
     let start = Instant::now();
     let (mut world_time, mut mix_time) = (Vec::new(), Vec::new());
+    let mut first_frame = Duration::ZERO;
     for k in 0..3_600u32 {
         let t = k as f32 / 60.;
         let x = -50. + t * 1.2;
@@ -168,6 +201,9 @@ fn main() {
         let began = Instant::now();
         world.update_audio(start + Duration::from_secs_f32(t));
         world_time.push(began.elapsed());
+        if k == 0 {
+            first_frame = began.elapsed();
+        }
         let began = Instant::now();
         mixer.frames(FRAME);
         mix_time.push(began.elapsed());
@@ -182,6 +218,7 @@ fn main() {
             times[times.len() - 1]
         );
     };
+    println!("first frame: {first_frame:?}");
     println!("a frame (60 a second, 800 frames of sound each):");
     report("world's sound (main)", &mut world_time);
     report("mixing its 800 frames", &mut mix_time);

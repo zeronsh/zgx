@@ -422,6 +422,229 @@ struct Blocker {
     /// Whether it's placed under another object: one an ancestor's move
     /// moves.
     parented: bool,
+    /// Its geometry's id, when that's met through a tree of its triangles
+    /// (`Sound3d::trees`).
+    tree: Option<u64>,
+}
+
+/// Meshes of more triangles than this are met through a tree over their
+/// triangles, made once a geometry, not one triangle after another.
+const TREE_TRIANGLES: usize = 256;
+
+/// Triangles a leaf of a [`Triangles`] tree holds at most.
+const TRIANGLE_LEAF: usize = 8;
+
+/// A tree over one geometry's triangles, in its own space: boxes halving
+/// them by their centres along the longest side, down to leaves of a few.
+/// A ray's segment looks only in the boxes it passes through, and stops
+/// at the first triangle it meets (occlusion asks whether, not where).
+struct Triangles {
+    nodes: Vec<TriangleNode>,
+    /// The triangles' numbers, each leaf's together.
+    order: Vec<u32>,
+}
+
+/// A large mesh's tree: being made on a thread of its own (its mesh is
+/// met triangle by triangle meanwhile), or made.
+enum MeshTree {
+    Building(std::sync::mpsc::Receiver<Triangles>),
+    Ready(Triangles),
+}
+
+/// The geometry of object `index`, which has one.
+fn geometry_of(inner: &Inner, index: usize) -> crate::Geometry {
+    inner.objects[index]
+        .value
+        .as_ref()
+        .and_then(|o| o.geometry.clone())
+        .expect("a blocker has a geometry")
+}
+
+/// A box of a [`Triangles`] tree: a leaf's `count` triangles from `first`
+/// in its order; an inner one's (`count` 0) children follow it and at
+/// `first`.
+#[derive(Clone, Copy)]
+struct TriangleNode {
+    min: Vec3,
+    max: Vec3,
+    first: u32,
+    count: u32,
+}
+
+/// Whether the segment from `start` along `along` meets the box `low` to
+/// `high` (slabs): picking's test, the same arithmetic.
+fn through_box(start: Vec3, along: Vec3, low: Vec3, high: Vec3) -> bool {
+    let (mut enter, mut leave) = (0_f32, 1_f32);
+    for (s, d, lo, hi) in [
+        (start.x, along.x, low.x, high.x),
+        (start.y, along.y, low.y, high.y),
+        (start.z, along.z, low.z, high.z),
+    ] {
+        if d.abs() < 1e-12 {
+            if s < lo || s > hi {
+                return false;
+            }
+            continue;
+        }
+        let (a, b) = ((lo - s) / d, (hi - s) / d);
+        enter = enter.max(a.min(b));
+        leave = leave.min(a.max(b));
+        if enter > leave {
+            return false;
+        }
+    }
+    true
+}
+
+/// Where the segment meets triangle `a`, `b`, `c` (Möller–Trumbore), t in
+/// 0 to 1: picking's test, the same arithmetic, so a tree's answer is the
+/// one testing every triangle gives.
+fn triangle_t(start: Vec3, along: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f32> {
+    let (ab, ac) = (b - a, c - a);
+    let p = along.cross(ac);
+    let det = ab.dot(p);
+    if det.abs() < 1e-12 {
+        return None;
+    }
+    let to = start - a;
+    let u = to.dot(p) / det;
+    if !(0. ..=1.).contains(&u) {
+        return None;
+    }
+    let q = to.cross(ab);
+    let v = along.dot(q) / det;
+    if v < 0. || u + v > 1. {
+        return None;
+    }
+    let t = ac.dot(q) / det;
+    (0. ..=1.).contains(&t).then_some(t)
+}
+
+fn axis(v: Vec3, k: usize) -> f32 {
+    match k {
+        0 => v.x,
+        1 => v.y,
+        _ => v.z,
+    }
+}
+
+impl Triangles {
+    fn new(geometry: &crate::Geometry) -> Triangles {
+        let (vertices, indices) = (geometry.vertices(), geometry.indices());
+        let count = indices.len() / 3;
+        let corners = |t: u32| -> [Vec3; 3] {
+            let at = t as usize * 3;
+            [0, 1, 2].map(|k| Vec3::from(vertices[indices[at + k] as usize].position))
+        };
+        let centres: Vec<Vec3> = (0..count as u32)
+            .map(|t| {
+                let [a, b, c] = corners(t);
+                (a + b + c) * (1. / 3.)
+            })
+            .collect();
+        let mut order: Vec<u32> = (0..count as u32).collect();
+        let mut nodes = Vec::with_capacity(2 * count.div_ceil(TRIANGLE_LEAF));
+        Self::build(&mut nodes, &mut order, 0, &corners, &centres);
+        Triangles { nodes, order }
+    }
+
+    fn build(
+        nodes: &mut Vec<TriangleNode>,
+        order: &mut [u32],
+        first: u32,
+        corners: &dyn Fn(u32) -> [Vec3; 3],
+        centres: &[Vec3],
+    ) {
+        let (mut min, mut max) = (
+            vec3(f32::INFINITY, f32::INFINITY, f32::INFINITY),
+            vec3(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY),
+        );
+        let (mut low, mut high) = (min, max);
+        for &t in order.iter() {
+            for corner in corners(t) {
+                min = min.min(corner);
+                max = max.max(corner);
+            }
+            low = low.min(centres[t as usize]);
+            high = high.max(centres[t as usize]);
+        }
+        let at = nodes.len();
+        nodes.push(TriangleNode {
+            min,
+            max,
+            first,
+            count: order.len() as u32,
+        });
+        let side = high - low;
+        let longest = if side.x >= side.y && side.x >= side.z {
+            0
+        } else if side.y >= side.z {
+            1
+        } else {
+            2
+        };
+        if order.len() <= TRIANGLE_LEAF || axis(side, longest) <= 0. {
+            return;
+        }
+        let half = order.len() / 2;
+        order.select_nth_unstable_by(half, |a, b| {
+            axis(centres[*a as usize], longest).total_cmp(&axis(centres[*b as usize], longest))
+        });
+        nodes[at].count = 0;
+        let (left, right) = order.split_at_mut(half);
+        Self::build(nodes, left, first, corners, centres);
+        nodes[at].first = nodes.len() as u32;
+        Self::build(nodes, right, first + half as u32, corners, centres);
+    }
+
+    /// Whether the segment from `start` along `along` (in the geometry's
+    /// space) meets any of its triangles; the boxes and triangles it looked
+    /// at, added to `looked`.
+    fn meets(
+        &self,
+        geometry: &crate::Geometry,
+        start: Vec3,
+        along: Vec3,
+        looked: &mut usize,
+    ) -> bool {
+        let (vertices, indices) = (geometry.vertices(), geometry.indices());
+        let corner = |i: u32| Vec3::from(vertices[i as usize].position);
+        // Deep enough for any tree of halves: 2^64 triangles.
+        let mut stack = [0u32; 64];
+        let mut top = 1;
+        while top > 0 {
+            top -= 1;
+            let index = stack[top];
+            let node = self.nodes[index as usize];
+            *looked += 1;
+            if !through_box(start, along, node.min, node.max) {
+                continue;
+            }
+            if node.count > 0 {
+                let leaf = &self.order[node.first as usize..(node.first + node.count) as usize];
+                for &t in leaf {
+                    *looked += 1;
+                    let at = t as usize * 3;
+                    if triangle_t(
+                        start,
+                        along,
+                        corner(indices[at]),
+                        corner(indices[at + 1]),
+                        corner(indices[at + 2]),
+                    )
+                    .is_some()
+                    {
+                        return true;
+                    }
+                }
+            } else {
+                stack[top] = index + 1;
+                stack[top + 1] = node.first;
+                top += 2;
+            }
+        }
+        false
+    }
 }
 
 /// The box round a box of `centre` and `half` sizes placed by `matrix`:
@@ -662,6 +885,11 @@ pub(crate) struct Sound3d {
     /// The meshes that can block, and the world's meshes count and the
     /// transmissions' when they were found (`Sound3d::blockers`).
     blocking: (Option<(u64, u64)>, Vec<Blocker>),
+    /// Trees over large meshes' triangles, by geometry id: made as such a
+    /// mesh first blocks, on a thread of their own, and kept while any
+    /// blocker has it; and how many are still being made.
+    trees: std::collections::HashMap<u64, MeshTree>,
+    building: usize,
     /// Their tree, and the counts it was made for: made once they've held
     /// still for a frame, so meshes that move every frame aren't sorted
     /// every frame (their rays look at every box instead).
@@ -823,6 +1051,29 @@ impl Sound3d {
             let (centre, half) = ((low + high) * 0.5, (high - low) * 0.5);
             let (min, max) = placed_box(&matrix, centre, half);
             let parented = slot.value.as_ref().is_some_and(|o| o.parent.is_some());
+            let triangles = geometry.indices().len() / 3;
+            let tree = (triangles > TREE_TRIANGLES).then(|| {
+                let building = &mut self.building;
+                self.trees.entry(geometry.id()).or_insert_with(|| {
+                    // 320,000 triangles take about 50 ms: not in a frame.
+                    let (made, tree) = std::sync::mpsc::channel();
+                    let geometry = geometry.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name("zgx-3d-sound-tree".into())
+                        .spawn(move || {
+                            let _ = made.send(Triangles::new(&geometry));
+                        });
+                    *building += 1;
+                    match spawned {
+                        Ok(_) => MeshTree::Building(tree),
+                        Err(_) => {
+                            *building -= 1;
+                            MeshTree::Ready(Triangles::new(&geometry_of(inner, index)))
+                        }
+                    }
+                });
+                geometry.id()
+            });
             blocking.push(Blocker {
                 index,
                 matrix,
@@ -832,7 +1083,20 @@ impl Sound3d {
                 min,
                 max,
                 through,
-                triangles: geometry.indices().len() / 3,
+                triangles,
+                tree,
+            });
+        }
+        // Trees no blocker has any more, let go (one still being made
+        // finishes on its own thread, unheard).
+        if !self.trees.is_empty() {
+            let building = &mut self.building;
+            self.trees.retain(|id, tree| {
+                let kept = blocking.iter().any(|b| b.tree == Some(*id));
+                if !kept && matches!(tree, MeshTree::Building(_)) {
+                    *building -= 1;
+                }
+                kept
             });
         }
         // Where each object's blocker is, and which are under another.
@@ -895,8 +1159,21 @@ impl Sound3d {
             };
             #[cfg(test)]
             self.count(1);
-            *triangles += blocker.triangles;
-            if crate::pick::meet(geometry, blocker.matrix, from, to).is_some() {
+            let tree = blocker.tree.and_then(|id| self.trees.get(&id));
+            let met = match tree {
+                // In the geometry's space, as picking meets it.
+                Some(MeshTree::Ready(tree)) => blocker.matrix.inverse().is_some_and(|inverse| {
+                    let start = inverse.project(from);
+                    let along = inverse.project(to) - start;
+                    tree.meets(geometry, start, along, triangles)
+                }),
+                // Its tree not made yet, or a small mesh: every triangle.
+                _ => {
+                    *triangles += blocker.triangles;
+                    crate::pick::meet(geometry, blocker.matrix, from, to).is_some()
+                }
+            };
+            if met {
                 gain *= blocker.through;
                 cutoff *= blocker.through * blocker.through.sqrt();
             }
@@ -1110,6 +1387,17 @@ impl Sound3d {
             }
         }
         self.blockers(inner);
+        // Trees made since, taken.
+        if self.building > 0 {
+            for tree in self.trees.values_mut() {
+                if let MeshTree::Building(made) = tree
+                    && let Ok(made) = made.try_recv()
+                {
+                    *tree = MeshTree::Ready(made);
+                    self.building -= 1;
+                }
+            }
+        }
         self.cast = 0;
         let count = self.emitters.len();
         let start = self.cursor;
@@ -1344,6 +1632,8 @@ impl World {
             transmission: Default::default(),
             transmissions: 0,
             blocking: (None, Vec::new()),
+            trees: std::collections::HashMap::new(),
+            building: 0,
             tree: (None, Tree::default()),
             ordering: 0,
             position: Vec::new(),
@@ -1652,5 +1942,112 @@ mod tests {
         add();
         assert!(heads(&world).contains(&Some(3)));
         assert_eq!(world.inner.borrow().audio.as_ref().unwrap().heads.len(), 8);
+    }
+
+    /// Hills of `n` by `n` squares, 4 m each, 1.2 m high: `2n²` triangles.
+    fn hills(n: usize) -> crate::Geometry {
+        let height = |x: f32, z: f32| 1.2 * (x / 23.).sin() * (z / 31.).cos();
+        let half = n as f32 * 2.;
+        let mut vertices = Vec::new();
+        for r in 0..=n {
+            for c in 0..=n {
+                let (x, z) = (c as f32 * 4. - half, r as f32 * 4. - half);
+                vertices.push(crate::Vertex {
+                    position: [x, height(x, z), z],
+                    normal: [0., 1., 0.],
+                    uv: [0., 0.],
+                });
+            }
+        }
+        let mut indices = Vec::new();
+        let w = (n + 1) as u32;
+        for r in 0..n as u32 {
+            for c in 0..n as u32 {
+                let i = r * w + c;
+                indices.extend_from_slice(&[i, i + w, i + 1, i + 1, i + w, i + w + 1]);
+            }
+        }
+        crate::Geometry::new(vertices, indices).unwrap()
+    }
+
+    #[test]
+    fn a_mesh_s_tree_meets_what_every_triangle_does() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut random = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32
+        };
+        for geometry in [hills(30), Geometry::sphere(5., 32)] {
+            let tree = Triangles::new(&geometry);
+            let (low, high) = geometry.bounds();
+            let size = high - low;
+            let mut point = |spread: f32| {
+                low - size * (spread * 0.5)
+                    + vec3(
+                        size.x * random() * (1. + spread),
+                        (size.y + 4.) * random() * (1. + spread) - 2.,
+                        size.z * random() * (1. + spread),
+                    )
+            };
+            let (mut met, mut looked) = (0, 0);
+            for _ in 0..2_000 {
+                let (from, to) = (point(0.2), point(0.2));
+                let every = crate::pick::meet(&geometry, crate::Mat4::IDENTITY, from, to).is_some();
+                let tree_met = tree.meets(&geometry, from, to - from, &mut looked);
+                assert_eq!(tree_met, every, "{from:?} to {to:?}");
+                met += usize::from(every);
+            }
+            // Both answers come up, and a segment looks at few of them.
+            let triangles = geometry.indices().len() / 3;
+            assert!(met > 200 && met < 1_800, "{met} met");
+            assert!(
+                looked / 2_000 < triangles / 10,
+                "{} looked at a segment",
+                looked / 2_000
+            );
+        }
+    }
+
+    #[test]
+    fn a_large_mesh_is_met_through_its_tree_once_made() {
+        // 28,800 triangles of hills between a listener and a sound: every
+        // one tested until its tree is made, a few after, the same answer.
+        let (audio, _mixer) = zgx_audio::Audio::offline(zgx_audio::Config::default()).unwrap();
+        let world = World::new();
+        world
+            .set_audio(&audio, &audio.bus("world").unwrap())
+            .unwrap();
+        let ground = hills(120);
+        world.add(Object::mesh(ground, Material::default()));
+        let own = world.add(Object::group());
+        world.update_audio(Instant::now());
+        let ray = |world: &World| {
+            let inner = world.inner.borrow();
+            let sound = inner.audio.as_ref().unwrap();
+            let mut looked = 0;
+            // From above one hill, under the next, to above the third.
+            let answer = sound.occlusion(
+                &inner,
+                vec3(-60., 1.5, 10.),
+                vec3(60., -1.5, 10.),
+                own,
+                &mut looked,
+            );
+            (answer, looked)
+        };
+        let (before, every) = ray(&world);
+        let start = Instant::now();
+        while world.inner.borrow().audio.as_ref().unwrap().building > 0 {
+            assert!(start.elapsed().as_secs() < 10, "no tree made");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            world.update_audio(Instant::now());
+        }
+        let (after, looked) = ray(&world);
+        assert_eq!(every, 28_800, "every triangle before its tree");
+        assert!(looked < 400, "{looked} looked at through its tree");
+        assert_eq!(after, before);
+        assert!(after.0 < 1., "the hills between block it");
     }
 }
