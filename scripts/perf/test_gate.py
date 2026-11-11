@@ -133,6 +133,7 @@ class FairTests(unittest.TestCase):
 
     def test_the_span_scenes_alone_are_counted_under_fair_scheduling(self):
         self.assertEqual(self.fair_counts('spans-follow', 'zgx-script'), [True, True])
+        self.assertEqual(self.fair_counts('script-update', 'zgx-script'), [True, True])
         self.assertEqual(self.fair_counts('list-estimate', 'zgx-script'), [False, False])
         self.assertEqual(self.fair_counts('heavy-both', 'zgx-desktop'), [False, False])
 

@@ -244,12 +244,14 @@ SCENES = [
 # call after idle (a Luau lane's), after which this entry goes.
 SPREAD = {'app-chat': 0.2, '3d-textured': 0.06, '3d-mixed': 0.08, 'spans-md': 0.08, 'spans-follow': 0.06}
 # Counted under valgrind's `--fair-sched=yes` (`count`), which hands its lock
-# to threads in the order they asked: the span scenes, where the main thread
-# and the script watchdog took turns by where the watchdog had got to
-# (spans-plain and spans-md then count the same each run, spans-follow
-# mostly). Not every Luau scene: under it list-estimate's runs spread 15,227
-# instructions (1,319 without) and app-mail's 6,421 (828).
-FAIR = ('spans-plain', 'spans-md', 'spans-follow')
+# to threads in the order they asked: the Luau scenes where the main thread
+# and the script watchdog took turns by where the watchdog had got to, and
+# which then count the same each run (spans-follow, micro-state-luau,
+# startup and app-dashboard all but one run in ten). Not every Luau scene:
+# under it list-estimate's runs spread 15,227 instructions (1,319 without)
+# and app-mail's 6,421 (828).
+FAIR = ('spans-plain', 'spans-md', 'spans-follow', 'micro-state-luau', 'script-update', 'md-stream', 'startup',
+        'app-dashboard', 'app-dashboard-sort')
 # Built apart from the rest, each: see `build`.
 ALONE = ('zgx-3d', 'zgx-video', 'zgx-terminal')
 
