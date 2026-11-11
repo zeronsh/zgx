@@ -131,43 +131,115 @@ fn around(rgba: &[u8], (x, y): (u32, u32), side: u32) -> [f32; 3] {
     sum.map(|v| v / (side * side) as f32)
 }
 
-/// Whether `world`'s last frame traced its probes. Where not (a device
-/// without ray queries: `zgx_gpu::ray_queries_status` says why), the test
-/// fails where a GPU is required (`ZGX_REQUIRE_GPU`, or
-/// `ZGX_REQUIRE_RAY_QUERIES=1`) or a golden is being blessed, naming the
-/// reason: a probe test that checked nothing never passes as one that did.
-/// `ZGX_GI_ALLOW_SKIP=1` lets it pass as skipped (a `GI-SKIPPED` line,
-/// shown with `--nocapture`), for a run on a device known to have none.
+/// Whether `world`'s last frame lit its probes, by rays or by faces. Where
+/// it lit none, the test fails where a GPU is required (`ZGX_REQUIRE_GPU`)
+/// or a golden is being blessed, naming the reason
+/// (`zgx_gpu::ray_queries_status`): a probe test that checked nothing never
+/// passes as one that did. `ZGX_GI_ALLOW_SKIP=1` lets it pass as skipped (a
+/// `GI-SKIPPED` line, shown with `--nocapture`), for a run on a device known
+/// to have none. `ZGX_REQUIRE_RAY_QUERIES=1` requires rays: faces fail it.
 fn traced(world: &World, test: &str) -> bool {
-    // An adapter whose ray queries are declined (WARP) draws faces: always.
-    if zgx_gpu::ray_queries_status() == Some(zgx_gpu::RayQueries::DeclinedOnAdapter) {
-        assert_eq!(
-            world.probes_status(),
-            ProbesStatus::Rasterised,
-            "{test}: rays declined, faces drawn"
-        );
-    }
-    if matches!(
-        world.probes_status(),
-        ProbesStatus::Traced | ProbesStatus::Rasterised
-    ) {
-        return true;
-    }
-    let why = zgx_gpu::ray_queries_status();
     let set = |name: &str| std::env::var_os(name).is_some_and(|v| v == "1");
-    let required = (std::env::var_os("ZGX_REQUIRE_GPU").is_some() && !set("ZGX_GI_ALLOW_SKIP"))
-        || set("ZGX_REQUIRE_RAY_QUERIES")
-        || set("ZGX_BLESS");
-    assert!(
-        !required,
-        "{test} traced no probes ({:?}; ray queries {why:?}): set ZGX_GI_ALLOW_SKIP=1 to skip",
-        world.probes_status()
-    );
-    eprintln!(
-        "GI-SKIPPED {test}: probes not traced ({:?}; ray queries {why:?})",
-        world.probes_status()
-    );
-    false
+    let wanted = Wanted {
+        gpu: std::env::var_os("ZGX_REQUIRE_GPU").is_some(),
+        skip_allowed: set("ZGX_GI_ALLOW_SKIP"),
+        rays: set("ZGX_REQUIRE_RAY_QUERIES"),
+        bless: set("ZGX_BLESS"),
+    };
+    let status = world.probes_status();
+    match lit(status, zgx_gpu::ray_queries_status(), wanted) {
+        Ok(true) => true,
+        Ok(false) => {
+            eprintln!(
+                "GI-SKIPPED {test}: probes not traced ({status:?}; ray queries {:?})",
+                zgx_gpu::ray_queries_status()
+            );
+            false
+        }
+        Err(why) => panic!("{test}: {why}"),
+    }
+}
+
+/// What a run asks of the probes (`traced`'s variables).
+#[derive(Clone, Copy, Default)]
+struct Wanted {
+    gpu: bool,
+    skip_allowed: bool,
+    rays: bool,
+    bless: bool,
+}
+
+/// `traced`'s decision, from the probes' status, why the device has no ray
+/// queries if it hasn't, and what the run asks: lit (`Ok(true)`), skipped
+/// (`Ok(false)`), or a failure saying why.
+fn lit(
+    status: ProbesStatus,
+    rays: Option<zgx_gpu::RayQueries>,
+    wanted: Wanted,
+) -> Result<bool, String> {
+    // An adapter whose ray queries are declined (WARP) draws faces: always.
+    if rays == Some(zgx_gpu::RayQueries::DeclinedOnAdapter) && status != ProbesStatus::Rasterised {
+        return Err(format!(
+            "rays declined, but the probes are {status:?}, not faces"
+        ));
+    }
+    if wanted.rays && status != ProbesStatus::Traced {
+        return Err(format!(
+            "ZGX_REQUIRE_RAY_QUERIES=1, but the probes are {status:?}, not traced: ray queries {rays:?}"
+        ));
+    }
+    if matches!(status, ProbesStatus::Traced | ProbesStatus::Rasterised) {
+        return Ok(true);
+    }
+    if (wanted.gpu && !wanted.skip_allowed) || wanted.bless {
+        return Err(format!(
+            "traced no probes ({status:?}; ray queries {rays:?}): set ZGX_GI_ALLOW_SKIP=1 to skip"
+        ));
+    }
+    Ok(false)
+}
+
+#[test]
+fn rays_required_fail_where_faces_were_drawn_and_say_why() {
+    use zgx_gpu::RayQueries;
+    let rays = Wanted {
+        gpu: true,
+        rays: true,
+        ..Default::default()
+    };
+    // Faces under FXC, and on WARP: failures naming why.
+    for why in [RayQueries::CompilerIsFxc, RayQueries::DeclinedOnAdapter] {
+        let failed = lit(ProbesStatus::Rasterised, Some(why), rays).unwrap_err();
+        assert!(failed.contains(&format!("{why:?}")), "{failed}");
+        assert!(failed.contains("Rasterised"), "{failed}");
+    }
+    // Rays: lit.
+    assert_eq!(lit(ProbesStatus::Traced, None, rays), Ok(true));
+    // Rays not required: faces light the probes as well.
+    let gpu = Wanted {
+        gpu: true,
+        ..Default::default()
+    };
+    let fxc = Some(RayQueries::CompilerIsFxc);
+    assert_eq!(lit(ProbesStatus::Rasterised, fxc, gpu), Ok(true));
+    // Neither: a failure where a GPU is required or a golden blessed, else
+    // a skip, and a skip where allowed.
+    let none = ProbesStatus::Unsupported;
+    assert!(lit(none, fxc, gpu).is_err());
+    let bless = Wanted {
+        bless: true,
+        ..Default::default()
+    };
+    assert!(lit(none, fxc, bless).is_err());
+    assert_eq!(lit(none, fxc, Wanted::default()), Ok(false));
+    let allowed = Wanted {
+        skip_allowed: true,
+        ..gpu
+    };
+    assert_eq!(lit(none, fxc, allowed), Ok(false));
+    // WARP declines rays: its probes are faces, or the test fails.
+    let warp = Some(RayQueries::DeclinedOnAdapter);
+    assert!(lit(ProbesStatus::Traced, warp, gpu).is_err());
 }
 
 /// Draws as a window's frame clock would while the world's view animates
