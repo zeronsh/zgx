@@ -1518,8 +1518,15 @@ impl Frames {
                 let done = slot.clone();
                 let began: Began = Arc::default();
                 let starting = began.clone();
+                let sandboxed = pass.owner.is_some();
                 let job = move || {
                     *starting.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
+                    if sandboxed {
+                        let stall = STALL_NEXT_MS.swap(0, Ordering::Relaxed);
+                        if stall > 0 {
+                            std::thread::sleep(std::time::Duration::from_millis(stall));
+                        }
+                    }
                     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
                     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some("3D compute"),
@@ -2206,13 +2213,16 @@ fn replace_sandboxed_worker(stuck: u64, owner: &Arc<str>) {
 /// milliseconds: past it, the pass fails and its worker is let go.
 static SANDBOXED_COMPILE_MS: AtomicU64 = AtomicU64::new(10_000);
 
-/// For tests: the sandboxed compile deadline, and a job holding the
-/// sandboxed worker for `stall`, as a driver stuck on a shader would.
+/// For tests: the sandboxed compile deadline, and the next sandboxed
+/// pass's compile held for `stall` once begun, as a driver stuck on its
+/// shader would hold it.
 #[doc(hidden)]
 pub fn stall_sandboxed_compiles(deadline: std::time::Duration, stall: std::time::Duration) {
     SANDBOXED_COMPILE_MS.store(deadline.as_millis() as u64, Ordering::Relaxed);
-    let _ = compile_sandboxed(move || std::thread::sleep(stall), None);
+    STALL_NEXT_MS.store(stall.as_millis() as u64, Ordering::Relaxed);
 }
+/// What `stall_sandboxed_compiles` holds the next sandboxed compile for.
+static STALL_NEXT_MS: AtomicU64 = AtomicU64::new(0);
 
 /// `future`, which resolves at once (wgpu's error scopes on native).
 pub(crate) fn now<T>(future: impl std::future::Future<Output = T>) -> T {
