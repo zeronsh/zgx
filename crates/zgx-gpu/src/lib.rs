@@ -11094,7 +11094,14 @@ impl GpuRenderer {
             let mut draws = draws;
             self.d3d11_app_shaders(&mut draws);
             self.d3d11_leave_out(&mut draws);
-            if let Some(lacks) = self.d3d11_lacks(&draws) {
+            for band in &mut bands {
+                self.d3d11_app_shaders(&mut band.draws);
+                self.d3d11_leave_out(&mut band.draws);
+            }
+            let lacks = (bands.iter().map(|band| band.draws.as_slice()))
+                .chain(std::iter::once(draws.as_slice()))
+                .find_map(|draws| self.d3d11_lacks(draws));
+            if let Some(lacks) = lacks {
                 let message = format!(
                     "ZGX_D3D11 draws no {lacks} yet, and leaving it out could mislead \
                      (docs/windows.md, Direct3D 11)"
@@ -11118,6 +11125,7 @@ impl GpuRenderer {
                 (&effect_jobs, effect_first),
                 &reads,
                 &batches,
+                &bands,
                 stats,
             )?;
             self.frame_points = points;
@@ -12028,6 +12036,58 @@ impl GpuRenderer {
         stats.draw_calls += 1;
         stats.instances += (batch.end - batch.start) as usize;
     }
+    /// Fade bands' passes with Direct3D 11 (`render_d3d11`): each band's
+    /// texture (one of Direct3D 11's standing for its wgpu texture, as a
+    /// layer's does) cleared, then its draws in its regions at its viewport.
+    #[cfg(d3d11)]
+    fn d3d11_bands(
+        &mut self,
+        bands: &[bands::BandPhase<'_>],
+        clips: &[Region],
+        vertices: &windows::Win32::Graphics::Direct3D11::ID3D11Buffer,
+        stats: &mut GpuStats,
+    ) -> Result<(), GpuError> {
+        let kept = self.kept_now();
+        let mut unpainted = false;
+        for band in bands {
+            let state = self.d3d11.as_mut().expect("checked by the caller");
+            let device = state.device.clone();
+            let size = (band.texture.width(), band.texture.height());
+            if state
+                .layers
+                .get(&band.texture)
+                .is_none_or(|t| (t.width, t.height) != size)
+            {
+                let surface = device.surface(size.0, size.1, true)?;
+                state.layers.insert(band.texture.clone(), surface);
+            }
+            let viewport = [band.viewport.width, band.viewport.height, self.scale, 0.];
+            state.set_frame(viewport, bytemuck::cast_slice(clips))?;
+            let state = self.d3d11.as_ref().expect("checked by the caller");
+            let target = &state.layers[&band.texture];
+            device.clear(target);
+            let mut frame = device.begin(state, target, vertices);
+            let atlas = state.atlas.as_ref().and_then(|atlas| atlas.srv.as_ref());
+            frame.texture(atlas.expect("made by the caller"));
+            let mut sampled = TextureSource::Atlas;
+            for (region, _) in &band.regions {
+                self.batches(*region, &band.draws, 0, kept, |batch| {
+                    self.d3d11_batch(&mut frame, &mut sampled, &mut unpainted, stats, batch)
+                });
+            }
+            frame.end();
+            stats.render_passes += 1;
+        }
+        // The frame's viewport again.
+        let state = self.d3d11.as_mut().expect("checked by the caller");
+        state.set_frame(self.viewport_values, bytemuck::cast_slice(clips))?;
+        match unpainted {
+            true => Err(GpuError(
+                "Direct3D 11 has no texels for a layer or image a fade band draws".into(),
+            )),
+            false => Ok(()),
+        }
+    }
     /// Layer effects' passes with Direct3D 11 (`d3d11_frame::Device::effects`):
     /// `jobs`' quads at instance `first` on, as `effect_quads` lays them out,
     /// across into the scratch atlas, then down into the effect atlas, which
@@ -12138,6 +12198,7 @@ impl GpuRenderer {
         (effect_jobs, effect_first): (&[effects::Job], u32),
         reads: &[(usize, Rect)],
         batches: &[(usize, Vec<usize>)],
+        bands: &[bands::BandPhase<'_>],
         mut stats: GpuStats,
     ) -> Result<GpuStats, GpuError> {
         let _span = zgx::profile::span(zgx::profile::Phase::Encode);
@@ -12206,6 +12267,13 @@ impl GpuRenderer {
         if state.atlas.is_none() {
             state.atlas = Some(device.surface(1, 1, false)?);
         }
+        // Fade bands (bands.rs): what reaches each run's bands drawn unfaded
+        // into a texture of its own before the frame composites it through
+        // the mask, as `encode_band` draws it.
+        if !bands.is_empty() {
+            self.d3d11_bands(bands, clips, &vertices, &mut stats)?;
+        }
+        let state = self.d3d11.as_mut().expect("checked by the caller");
         // Blended layers read a copy of the target under them, of its size.
         let blended: Vec<usize> = draws
             .iter()
