@@ -61,3 +61,9 @@ a long request beside it. Version 0.15.1.
 `CSI > q` (or `CSI > 0 q`, XTVERSION) calls `Handler::report_version`, by
 default nothing; `version_requests_reach_the_handler` checks another
 parameter asks nothing and DECSCUSR still sets the cursor. Version 0.15.2.
+
+## A cell's size asked
+
+`CSI 16 t` calls `Handler::cell_size_pixels`, by default nothing;
+`cell_size_requests_reach_the_handler` checks it beside `14 t` and `18 t`.
+Version 0.15.3.
