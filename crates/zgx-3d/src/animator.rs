@@ -520,7 +520,17 @@ pub(crate) struct Animator {
     /// showing (a layer at no weight): it rests, and the next frame posing
     /// it steps it on from there, so it comes back in step.
     pub(crate) parked: Option<std::time::Instant>,
+    /// Each node's parent among the model's nodes (by index), and for one
+    /// whose parent isn't, that parent: where IK finds the world.
+    pub(crate) parents: Vec<Option<usize>>,
+    pub(crate) above: Vec<Option<ObjectId>>,
+    /// The world's matrix above each such node this frame (IK's).
+    pub(crate) outer: Vec<Option<crate::Mat4>>,
+    /// Its IK hook (`World::set_ik`).
+    pub(crate) ik: Option<Ik>,
 }
+/// An IK hook: called with the blended pose each frame that poses it.
+pub(crate) type Ik = Box<dyn FnMut(&mut crate::ik::Pose<'_>)>;
 impl Animator {
     pub(crate) fn new(nodes: Vec<Option<ObjectId>>, rest: Vec<Transform>) -> Self {
         Self {
@@ -537,6 +547,10 @@ impl Animator {
             model: None,
             listening: false,
             parked: None,
+            parents: Vec::new(),
+            above: Vec::new(),
+            outer: Vec::new(),
+            ik: None,
         }
     }
     /// Layer `index`, made (as `Layer::new`) with those under it if it's
@@ -674,6 +688,7 @@ impl Animator {
         self.dirty || self.playing()
     }
     /// `dt` seconds on: its clips' times and fades, its events noted.
+    #[inline(never)]
     pub(crate) fn step(&mut self, dt: f32) {
         let speed = self.speed;
         let listening = self.listening;
@@ -694,6 +709,7 @@ impl Animator {
     }
     /// Its pose as its layers make it now, into `pose` (its nodes', by
     /// index; those in `posed` alone are written).
+    #[inline(never)]
     pub(crate) fn evaluate(&mut self) {
         let pose = &mut self.pose;
         for &node in &self.posed {

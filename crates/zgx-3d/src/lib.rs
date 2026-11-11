@@ -47,6 +47,8 @@ mod environment;
 mod geometry;
 #[cfg(feature = "gltf")]
 mod gltf;
+#[cfg(feature = "gltf")]
+pub mod ik;
 #[cfg(feature = "shaders")]
 mod material;
 mod math;

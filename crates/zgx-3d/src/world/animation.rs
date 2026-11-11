@@ -60,6 +60,9 @@ pub(crate) fn advance(inner: &mut Inner, time: Instant) -> bool {
             if root {
                 animator.take_root_motion();
             }
+            if animator.ik.is_some() {
+                bend(inner, animator);
+            }
             changed |= write(inner, animator);
             if root {
                 changed |= carry(inner, animator);
@@ -83,6 +86,9 @@ pub(crate) fn advance(inner: &mut Inner, time: Instant) -> bool {
 
 /// `animator`'s pose into its nodes: only those whose places changed are
 /// written (and stamped). Whether any was.
+// Apart from `advance`: inlined there, what else its loop holds moved
+// the code of this one (and its count).
+#[inline(never)]
 fn write(inner: &mut Inner, animator: &Animator) -> bool {
     let mut changed = false;
     for &node in &animator.posed {
@@ -105,6 +111,47 @@ fn write(inner: &mut Inner, animator: &Animator) -> bool {
         changed = true;
     }
     changed
+}
+
+/// `animator`'s pose bent by its IK hook (`World::set_ik`), the world
+/// above its model as it is now.
+#[inline(never)]
+fn bend(inner: &Inner, animator: &mut Animator) {
+    let Some(mut hook) = animator.ik.take() else {
+        return;
+    };
+    let outer = &mut animator.outer;
+    outer.clear();
+    outer.extend(
+        animator
+            .above
+            .iter()
+            .map(|above| above.and_then(|id| placed_at(inner, id))),
+    );
+    let mut pose = crate::ik::Pose {
+        nodes: &animator.nodes,
+        parents: &animator.parents,
+        outer: &animator.outer,
+        locals: &mut animator.pose,
+        posed: &mut animator.posed,
+    };
+    hook(&mut pose);
+    animator.ik = Some(hook);
+}
+/// Object `id`'s matrix in the world from its kept local matrices: `None`
+/// where it or one above is hidden or gone.
+fn placed_at(inner: &Inner, id: crate::ObjectId) -> Option<Mat4> {
+    let mut matrix = Mat4::IDENTITY;
+    let mut at = Some(id);
+    for _ in 0..64 {
+        let Some(id) = at else {
+            return Some(matrix);
+        };
+        let index = inner.live(id.index, id.generation)?;
+        matrix = inner.locals.get(index).copied().flatten()? * matrix;
+        at = inner.objects[index].value.as_ref()?.parent;
+    }
+    None
 }
 
 /// `animator`'s root motion this frame applied to the object it says
@@ -313,6 +360,57 @@ impl World {
             })
         };
         self.change_animator(id, |animator| animator.root = root);
+    }
+    /// Animator `id`'s IK hook: `hook` is called with its pose each frame
+    /// it's posed, after its layers blend it and root motion is taken out,
+    /// before it's drawn (and its skins follow). It reads and sets nodes'
+    /// places (`Pose::local`, `set_local`, `world`), or runs the solvers
+    /// in `ik`. It's called inside the frame: it must not call the world
+    /// (it would find it borrowed), and holding a `World` makes a cycle:
+    /// share what it reads (a target) by an `Rc<Cell<_>>`. While nothing
+    /// plays, `repose` asks for a frame to call it again (a target moved).
+    pub fn set_ik(&self, id: AnimatorId, hook: impl FnMut(&mut crate::ik::Pose<'_>) + 'static) {
+        // Each node's parent, among the model's nodes or the object above:
+        // found for IK alone, so an animator without it pays nothing.
+        let found = {
+            let inner = self.inner.borrow();
+            let Some(animator) = Self::animator_ref(&inner, id) else {
+                return;
+            };
+            let nodes = &animator.nodes;
+            let at: std::collections::HashMap<_, _> = nodes
+                .iter()
+                .enumerate()
+                .filter_map(|(i, node)| Some(((*node)?, i)))
+                .collect();
+            let parent = |node: &Option<crate::ObjectId>| {
+                let id = (*node)?;
+                let index = inner.live(id.index, id.generation)?;
+                inner.objects[index].value.as_ref()?.parent
+            };
+            let parents: Vec<_> = nodes
+                .iter()
+                .map(|node| parent(node).and_then(|p| at.get(&p).copied()))
+                .collect();
+            let above: Vec<_> = nodes
+                .iter()
+                .map(|node| parent(node).filter(|p| !at.contains_key(p)))
+                .collect();
+            (parents, above)
+        };
+        self.change_animator(id, |animator| {
+            (animator.parents, animator.above) = found;
+            animator.ik = Some(Box::new(hook));
+        });
+    }
+    /// Animator `id` without its IK hook.
+    pub fn clear_ik(&self, id: AnimatorId) {
+        self.change_animator(id, |animator| animator.ik = None);
+    }
+    /// Pose animator `id` again with the next frame, its IK hook called:
+    /// for a target moved while nothing it plays moves.
+    pub fn repose(&self, id: AnimatorId) {
+        self.change_animator(id, |animator| animator.dirty = true);
     }
     /// Animator `id`'s speed, on its clips' own: 1 by default, 0 pauses it
     /// (and the world settles), negative plays them backwards.
@@ -1045,5 +1143,245 @@ mod tests {
             .unwrap();
         Clock(Instant::now()).frame(&world, 0.);
         assert_eq!(at(&world, a).position.x, 1., "the layer under it");
+    }
+
+    /// A chain straight up from the origin: `a` there, `b` 1 above, `c` 1
+    /// above that, placed as a model's.
+    fn arm(world: &World) -> (Placed, [ObjectId; 3]) {
+        let root = world.add(Object::group());
+        let a = world.add(Object::group().child_of(root));
+        let b = world.add(Object::group().at([0., 1., 0.]).child_of(a));
+        let c = world.add(Object::group().at([0., 1., 0.]).child_of(b));
+        let placed = Placed {
+            root,
+            nodes: vec![Some(a), Some(b), Some(c)],
+            meshes: vec![Vec::new(); 3],
+            lights: Vec::new(),
+            cameras: Vec::new(),
+        };
+        (placed, [a, b, c])
+    }
+    fn place(world: &World, id: ObjectId) -> Vec3 {
+        let [x, y, z, _] = world.world_matrix(id).unwrap().columns[3];
+        vec3(x, y, z)
+    }
+    fn near(a: Vec3, b: Vec3) -> bool {
+        (a - b).length() < 1e-3
+    }
+    /// The arm with an IK hook made from its chain, posed once.
+    fn bent(
+        hook: impl FnOnce([ObjectId; 3]) -> Box<dyn FnMut(&mut crate::ik::Pose<'_>)>,
+    ) -> (World, crate::AnimatorId, [ObjectId; 3], Clock) {
+        let world = World::new();
+        let (placed, chain) = arm(&world);
+        let animator = world.add_animator(&placed);
+        world.set_ik(animator, hook(chain));
+        world.repose(animator);
+        let clock = Clock(Instant::now());
+        clock.frame(&world, 0.);
+        (world, animator, chain, clock)
+    }
+
+    #[test]
+    fn two_bone_reaches_its_target_bending_toward_its_pole() {
+        let poles = [
+            (vec3(5., 0., 0.), vec3(1., 0., 0.)),
+            (vec3(0., 5., 0.), vec3(0., 1., 0.)),
+        ];
+        for (pole, middle) in poles {
+            let (world, _, [_, b, c], _) = bent(|chain| {
+                Box::new(move |pose| {
+                    let target = vec3(1., 1., 0.);
+                    assert!(crate::ik::two_bone(pose, chain, target, Some(pole), 1.));
+                })
+            });
+            assert!(
+                near(place(&world, c), vec3(1., 1., 0.)),
+                "{:?}",
+                place(&world, c)
+            );
+            assert!(
+                near(place(&world, b), middle),
+                "pole {pole:?}: {:?}",
+                place(&world, b)
+            );
+        }
+    }
+
+    #[test]
+    fn two_bone_stretches_toward_a_target_out_of_reach_and_minds_its_inputs() {
+        let target = std::rc::Rc::new(std::cell::Cell::new(vec3(3., 0., 0.)));
+        let weight = std::rc::Rc::new(std::cell::Cell::new(1.));
+        let (t, w) = (target.clone(), weight.clone());
+        let (world, animator, [_, b, c], clock) = bent(move |chain| {
+            Box::new(move |pose| {
+                crate::ik::two_bone(pose, chain, t.get(), None, w.get());
+            })
+        });
+        assert!(
+            near(place(&world, c), vec3(2., 0., 0.)),
+            "{:?}",
+            place(&world, c)
+        );
+        // Not quite straight (it reaches all but a ten-thousandth).
+        assert!((place(&world, b) - vec3(1., 0., 0.)).length() < 0.02);
+        // No weight, or an input not a number: the pose as the layers made
+        // it (the chain straight up, at rest).
+        let inputs = [
+            (vec3(1., 1., 0.), 0.),
+            (vec3(f32::NAN, 0., 0.), 1.),
+            (vec3(1., 1., 0.), f32::NAN),
+        ];
+        for (to, by) in inputs {
+            target.set(to);
+            weight.set(by);
+            world.repose(animator);
+            clock.frame(&world, 0.1);
+            let end = place(&world, c);
+            assert!(near(end, vec3(0., 2., 0.)), "{to:?} {by}: {end:?}");
+        }
+    }
+
+    #[test]
+    fn look_at_turns_a_node_toward_its_target_as_far_as_allowed() {
+        for (limit, turned) in [(3., std::f32::consts::FRAC_PI_2), (0.5, 0.5)] {
+            let world = World::new();
+            let (placed, [a, _, _]) = arm(&world);
+            let animator = world.add_animator(&placed);
+            world.set_ik(animator, move |pose| {
+                let forward = vec3(0., 0., 1.);
+                assert!(crate::ik::look_at(
+                    pose,
+                    a,
+                    forward,
+                    vec3(5., 0., 0.),
+                    1.,
+                    limit
+                ));
+            });
+            world.repose(animator);
+            Clock(Instant::now()).frame(&world, 0.);
+            assert!(
+                close(angle(at(&world, a).rotation), turned),
+                "{:?}",
+                at(&world, a)
+            );
+        }
+    }
+
+    #[test]
+    fn an_ik_hook_bends_the_blended_pose_each_frame() {
+        let world = World::new();
+        let (placed, joints) = arm(&world);
+        let [a, _, c] = joints;
+        let animator = world.add_animator(&placed);
+        // A clip swaying the upper joint; IK keeps the end on its target.
+        let sway = clip(vec![(
+            0,
+            Path::Rotation,
+            vec![0., 1.],
+            vec![turn(0.), turn(1.)],
+        )]);
+        world.play(animator, &sway, Play::new()).unwrap();
+        let target = std::rc::Rc::new(std::cell::Cell::new(vec3(1., 1., 0.)));
+        let t = target.clone();
+        world.set_ik(animator, move |pose| {
+            crate::ik::two_bone(pose, joints, t.get(), Some(vec3(0., 5., 0.)), 1.);
+        });
+        let clock = Clock(Instant::now());
+        frames(&clock, &world, 0., 1.);
+        assert!(near(place(&world, c), vec3(1., 1., 0.)));
+        assert!(
+            !close(angle(at(&world, a).rotation), 0.),
+            "the clip still turns it"
+        );
+        // Nothing playing: a moved target waits for `repose`.
+        world.stop(animator, 0, 0.);
+        clock.frame(&world, 1.25);
+        target.set(vec3(0., 1., 1.));
+        clock.frame(&world, 1.5);
+        assert!(near(place(&world, c), vec3(1., 1., 0.)), "not posed again");
+        world.repose(animator);
+        clock.frame(&world, 1.75);
+        assert!(
+            near(place(&world, c), vec3(0., 1., 1.)),
+            "{:?}",
+            place(&world, c)
+        );
+        assert!(!world.view().animating());
+    }
+
+    #[test]
+    fn two_bone_reaches_any_target_within_reach_from_any_pose() {
+        // A fixed sequence, the same every run.
+        let mut seed = 0x2545_f491_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32 * 2. - 1.
+        };
+        for case in 0..200 {
+            let world = World::new();
+            let (placed, chain) = arm(&world);
+            let [a, b, c] = chain;
+            let mut rotation = || Quat::from_euler(next() * 3., next() * 3., next() * 3.);
+            let (turned, bent_a, bent_b) = (rotation(), rotation(), rotation());
+            world.update(placed.root, |o| o.transform.rotation = turned);
+            world.update(a, |o| o.transform.rotation = bent_a);
+            world.update(b, |o| o.transform.rotation = bent_b);
+            let direction = vec3(next(), next(), next()).normalized();
+            let target = direction * (0.2 + (next() + 1.) * 0.85);
+            let pole = vec3(next(), next(), next()) * 4.;
+            let animator = world.add_animator(&placed);
+            world.set_ik(animator, move |pose| {
+                crate::ik::two_bone(pose, chain, target, Some(pole), 1.);
+            });
+            world.repose(animator);
+            Clock(Instant::now()).frame(&world, 0.);
+            let (end, middle) = (place(&world, c), place(&world, b));
+            assert!(near(end, target), "case {case}: {end:?} for {target:?}");
+            // The middle joint on the pole's side of the line to the target.
+            let axis = target.normalized();
+            let flat = |p: Vec3| p - axis * p.dot(axis);
+            let side = flat(middle).dot(flat(pole));
+            assert!(
+                side >= -1e-4,
+                "case {case}: middle {middle:?} pole {pole:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn look_at_faces_any_target_from_any_pose() {
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32 * 2. - 1.
+        };
+        for case in 0..200 {
+            let world = World::new();
+            let (placed, [a, b, _]) = arm(&world);
+            let mut rotation = || Quat::from_euler(next() * 3., next() * 3., next() * 3.);
+            let (turned, bent) = (rotation(), rotation());
+            world.update(a, |o| o.transform.rotation = turned);
+            world.update(b, |o| o.transform.rotation = bent);
+            let target = vec3(next(), next(), next()) * 5.;
+            let animator = world.add_animator(&placed);
+            world.set_ik(animator, move |pose| {
+                crate::ik::look_at(pose, b, vec3(0., 0., 1.), target, 1., std::f32::consts::PI);
+            });
+            world.repose(animator);
+            Clock(Instant::now()).frame(&world, 0.);
+            let m = world.world_matrix(b).unwrap();
+            let facing = vec3(m.columns[2][0], m.columns[2][1], m.columns[2][2]).normalized();
+            let wanted = (target - place(&world, b)).normalized();
+            assert!(
+                facing.dot(wanted) > 0.9999,
+                "case {case}: {facing:?} {wanted:?}"
+            );
+        }
     }
 }
