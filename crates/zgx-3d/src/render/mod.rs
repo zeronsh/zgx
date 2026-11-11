@@ -68,7 +68,7 @@ use materials::{make_binding, map_set, placed, upload_missing};
 use pipelines::make_main_pipelines;
 #[allow(unused_imports)] // Emitters, decals and debug draws will name them.
 pub(crate) use scene_draw::{
-    DrawPoint, FrameResources, SceneDraw, SceneDraws, SceneFrame, SceneTarget,
+    DrawPoint, FrameResources, SceneDraw, SceneDraws, SceneFrame, SceneTarget, frame_wgsl,
 };
 #[cfg(feature = "lighting")]
 use shadows::sun_bounds;

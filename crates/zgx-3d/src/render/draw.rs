@@ -129,6 +129,22 @@ pub(super) fn draw_run(
 /// The meshes' pass: each run's spans the camera may see (`shown`) drawn
 /// into the frame's targets, resolved
 /// into `target` (multisampled) or straight into it, cleared to `clear`.
+/// The scene's frame as the main pass gives it to what draws beside the
+/// meshes.
+fn scene_frame(
+    gpu: &Gpu,
+    camera: &super::scene_draw::CameraParts,
+) -> super::scene_draw::SceneFrame {
+    let (view, projection, view_projection) = *camera;
+    super::scene_draw::SceneFrame {
+        view,
+        projection,
+        view_projection,
+        size: gpu.graph.size(),
+        behind: false,
+    }
+}
+
 pub(super) fn draw_main(
     encoder: &mut wgpu::CommandEncoder,
     gpu: &Gpu,
@@ -187,6 +203,13 @@ pub(super) fn draw_main(
         ..Default::default()
     });
     let Some((instances_buffer, _)) = &gpu.instances else {
+        // No meshes: what draws beside them draws alone (an emitters-only
+        // world). With none either, the pass only clears to the
+        // background, as it always has.
+        if !draws.is_empty() {
+            let frame = scene_frame(gpu, camera);
+            super::scene_draw::draw_alone(&mut pass, &frame, draws);
+        }
         return;
     };
     pass.set_bind_group(0, frame_bind, &[]);
@@ -194,14 +217,7 @@ pub(super) fn draw_main(
     // With what draws beside the meshes, out of this loop.
     if !draws.is_empty() {
         let meshes = (runs, shown);
-        let (view, projection, view_projection) = *camera;
-        let frame = super::scene_draw::SceneFrame {
-            view,
-            projection,
-            view_projection,
-            size: gpu.graph.size(),
-            behind: false,
-        };
+        let frame = scene_frame(gpu, camera);
         let frame = (&frame, frame_bind);
         super::scene_draw::draw_with(&mut pass, gpu, meshes, frame, draws, instances_buffer);
         return;

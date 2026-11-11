@@ -138,6 +138,15 @@ pub(super) fn draw_with(
     at(pass, DrawPoint::AfterTranslucent);
 }
 
+/// `draws` at each point in a world with no meshes: nothing between them.
+#[cold]
+#[inline(never)]
+pub(super) fn draw_alone(pass: &mut wgpu::RenderPass<'_>, frame: &SceneFrame, draws: &SceneDraws) {
+    for point in [DrawPoint::AfterOpaque, DrawPoint::AfterTranslucent] {
+        draw_at(pass, frame, draws, point);
+    }
+}
+
 /// `draws`' draws at `point`, and whether any drew.
 #[cold]
 #[inline(never)]
@@ -461,5 +470,31 @@ mod tests {
             centre[0] > 128 && centre[1] < 64,
             "red through the pane: {centre:?}"
         );
+    }
+
+    #[test]
+    fn a_world_without_meshes_draws_its_scene_draws_and_an_empty_one_only_its_background() {
+        // Emitters alone (no meshes): what's registered draws.
+        let world = World::new();
+        world.set_camera(Camera::looking_at([0., 0., 2.], [0., 0., 0.]));
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        world.add_scene_draw(sheet(DrawPoint::AfterOpaque, [1., 0., 0., 1.]).0);
+        let red = [255, 0, 0, 255];
+        assert_eq!(
+            window.draw(),
+            (red, red),
+            "drawn after the (no) opaque meshes"
+        );
+        // And after the (no) translucent ones, after it.
+        world.add_scene_draw(sheet(DrawPoint::AfterTranslucent, [0., 1., 0., 1.]).0);
+        let green = [0, 255, 0, 255];
+        assert_eq!(window.draw(), (green, green), "then after the translucent");
+        // Nothing at all: its background, as before.
+        let empty = World::new();
+        empty.set_background(Some(0x0000ff));
+        let mut window = Window::new(&empty).unwrap();
+        assert_eq!(window.draw(), ([0, 0, 255, 255], [0, 0, 255, 255]));
     }
 }
