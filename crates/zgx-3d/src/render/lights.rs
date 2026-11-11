@@ -79,6 +79,7 @@ fn gather(world: &Inner, out: &mut Vec<Packed>) {
             intensity,
             range,
         } = light
+            && shines(&light)
         {
             let cone = spot.map_or([0., 0., 0., 1.], |spot| {
                 let (inner, outer) = (spot.inner.cos(), spot.outer.cos());
@@ -101,6 +102,17 @@ fn gather(world: &Inner, out: &mut Vec<Packed>) {
     });
 }
 
+/// Whether `light` gives any light: one off (no lumens, or black) is left
+/// out of what's gathered and binned, and of the uniform path's eight.
+pub(super) fn shines(light: &Light) -> bool {
+    match light {
+        Light::Point {
+            color, intensity, ..
+        } => *intensity > 0. && color.iter().any(|c| *c > 0.),
+        _ => true,
+    }
+}
+
 /// Whether `world` shades through clusters, on a device that can.
 fn wanted(gpu: &Gpu, world: &Inner) -> bool {
     if !gpu.skinning {
@@ -111,7 +123,9 @@ fn wanted(gpu: &Gpu, world: &Inner) -> bool {
         return true;
     }
     let mut points = 0;
-    world.for_each_light(|light, _| points += usize::from(matches!(light, Light::Point { .. })));
+    world.for_each_light(|light, _| {
+        points += usize::from(matches!(light, Light::Point { .. }) && shines(&light))
+    });
     points > POINT_LIGHTS
 }
 
@@ -807,5 +821,33 @@ mod tests {
         draw(&mut renderer, &device, &queue);
         let gpu = renderer.gpu.as_ref().unwrap();
         assert!(gpu.lights.sun.is_none() && gpu.shadow_map.is_some());
+    }
+
+    #[test]
+    fn lights_that_shine_nothing_are_neither_gathered_nor_binned() {
+        let (device, queue) = device_and_queue();
+        let world = World::new();
+        world.add(Object::mesh(Geometry::plane(20., 20.), Material::default()));
+        // 300 lamps off (no lumens, or black) and one on.
+        for i in 0..300 {
+            let at = vec3((i % 20) as f32 - 10., 1., (i / 20) as f32 - 7.);
+            let lamp = crate::Light::point(at).range(3.);
+            world.add_point_light(if i % 2 == 0 {
+                lamp.lumens(0.)
+            } else {
+                lamp.color([0.; 3])
+            });
+        }
+        world.add_light(bulb(0.));
+        let mut renderer = world.renderer();
+        draw(&mut renderer, &device, &queue);
+        let lights = &renderer.gpu.as_ref().unwrap().lights;
+        assert!(!lights.on, "one light shining: the uniform path");
+        assert_eq!(lights.binnings, 0);
+        // Clustered whatever, only the one shining is binned.
+        world.set_clustered_lights(true);
+        draw(&mut renderer, &device, &queue);
+        let lights = &renderer.gpu.as_ref().unwrap().lights;
+        assert_eq!(lights.binned.lights.len(), 1);
     }
 }

@@ -119,6 +119,10 @@ pub(super) fn frame_uniforms(world: &Inner, view_projection: Mat4, encode: bool)
                 intensity,
                 range,
             } => {
+                // One off (no lumens, or black) takes no lit one's place.
+                if intensity <= 0. || color.iter().all(|c| *c <= 0.) {
+                    return;
+                }
                 let distance = (position - target).length();
                 let at = points[..shaded]
                     .iter()

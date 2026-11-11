@@ -448,3 +448,39 @@ fn a_light_of_infinite_or_nan_values_shines_nothing() {
         }
     }
 }
+
+#[test]
+fn lights_that_shine_nothing_take_no_lit_lights_place() {
+    // Eight lit lights round the target, two off at it: the eight shade.
+    let add = |world: &World, dark: bool| {
+        if dark {
+            for x in [-0.1f32, 0.1] {
+                world.add_light(Light::Point {
+                    position: vec3(x, 0.3, 0.),
+                    color: [1.; 3],
+                    intensity: 0.,
+                    range: 3.,
+                });
+            }
+        }
+        for i in 0..8 {
+            let a = i as f32 * 0.785;
+            world.add_light(Light::Point {
+                position: vec3(a.cos() * 2., 0.4, a.sin() * 2.),
+                color: [1., 0.7, 0.4],
+                intensity: 0.6,
+                range: 1.5,
+            });
+        }
+    };
+    let Some((expected, ..)) = one_light_over_a_floor(|world| add(world, false)) else {
+        return;
+    };
+    let (actual, ..) = one_light_over_a_floor(|world| add(world, true)).unwrap();
+    let differing = actual
+        .iter()
+        .zip(&expected)
+        .filter(|(a, b)| a.abs_diff(**b) > 1)
+        .count();
+    assert_eq!(differing, 0, "dark lights took lit ones' places");
+}
