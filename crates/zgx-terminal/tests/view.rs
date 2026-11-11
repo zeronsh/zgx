@@ -1385,6 +1385,11 @@ fn lines_trickling_in_show_on_their_rows() {
     assert!(in_screen_order(&app), "{:?}", shown(&app));
     feed(&app, b"line after\r\n");
     assert!(in_screen_order(&app), "{:?}", shown(&app));
+    // What the scroll brought in is what the reader hears: the rows built
+    // for it, each against the row whose line it now shows.
+    assert_eq!(news(&app), "line after");
+    feed(&app, b"two\r\nthree\r\n");
+    assert_eq!(news(&app), "two\nthree");
     term.close();
 }
 

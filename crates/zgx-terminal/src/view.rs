@@ -659,10 +659,12 @@ impl Engine {
     /// lines and what lines gained, less the shell's echo of what was typed.
     /// `shown`, every row's paint, when every row changed (output may have
     /// scrolled them); otherwise empty. `scrolled`: the lines shown moved up
-    /// that many rows first, the changed rows built after. Rows that neither
-    /// all changed nor scrolled are compared alone; otherwise every row,
-    /// read here if not given. Out of line: worked out only while a reader
-    /// listens, it leaves the paint of every other frame as it was.
+    /// that many rows first, the changed rows built after (before the slots
+    /// move with them, which the batch does). Rows that didn't all change
+    /// are compared alone, each with the row whose line it now shows (none
+    /// for a line brought in); otherwise every row. Out of line: worked out
+    /// only while a reader listens, it leaves the paint of every other frame
+    /// as it was.
     #[cold]
     #[inline(never)]
     fn news_of(
@@ -674,37 +676,31 @@ impl Engine {
         if changed.is_empty() {
             return String::new();
         }
-        let rows = self.rows.borrow();
-        let slots = self.slots.borrow();
-        let news = if shown.is_empty() && scrolled == 0 {
-            // Rows that didn't all change didn't scroll: what each changed
-            // row showed is all there is to compare.
+        let news = if shown.is_empty() {
+            // What each changed row showed before, moved up by the scroll:
+            // the row below by as many, or nothing for a line brought in.
+            let rows = self.rows.borrow();
+            let slots = self.slots.borrow();
             // Top first, as a reader hears the screen.
-            let mut was: Vec<(usize, Rc<RowPaint>, &RowPaint)> = changed
+            let mut was: Vec<(usize, Option<Rc<RowPaint>>, &RowPaint)> = changed
                 .iter()
-                .filter_map(|(row, now)| {
-                    let slot = slots.get(*row)?;
-                    Some((*row, rows[*slot].with_untracked(Rc::clone), now))
+                .map(|(row, now)| {
+                    let slot = slots.get(row + scrolled);
+                    (
+                        *row,
+                        slot.map(|slot| rows[*slot].with_untracked(Rc::clone)),
+                        now,
+                    )
                 })
                 .collect();
             was.sort_unstable_by_key(|(row, ..)| *row);
-            crate::news::changed_news(
-                was.iter()
-                    .map(|(_, was, now)| (was.text.as_str(), now.text.as_str())),
-            )
+            crate::news::changed_news(was.iter().map(|(_, was, now)| {
+                (
+                    was.as_deref().map_or("", |was| was.text.as_str()),
+                    now.text.as_str(),
+                )
+            }))
         } else {
-            // A scroll building only the lines it brings in: every row's
-            // paint, from the slots.
-            let all: Vec<Rc<RowPaint>>;
-            let shown = match shown.is_empty() {
-                true => {
-                    all = (slots.iter())
-                        .map(|slot| rows[*slot].with_untracked(Rc::clone))
-                        .collect();
-                    &all[..]
-                }
-                false => shown,
-            };
             let before: Vec<&str> = shown.iter().map(|paint| paint.text.as_str()).collect();
             let mut after: Vec<&str> = before.iter().skip(scrolled).copied().collect();
             after.resize(before.len(), "");
