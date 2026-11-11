@@ -2746,6 +2746,11 @@ export type Sound3DProps = Object3DProps & {
 	sound: Sound,
 	loop: boolean?,
 	gain: number?,
+	-- Its own pitch (2 an octave up), times Doppler's: a crowd of one
+	-- sound, each a little apart.
+	pitch: number?,
+	-- Seconds into the sound it starts (round a loop, however far).
+	start: number?,
 	-- Full within `ref` metres (1), falling to `max` (100), where it holds:
 	-- "inverse" (the default), "linear" or "exponential", by `rolloff`.
 	falloff: { kind: ("inverse" | "linear" | "exponential")?, ref: number?, max: number?, rolloff: number? }?,

@@ -176,6 +176,8 @@ return ui.scene3d {
 | `sound` | `audio.sound`'s: loaded once, at the top | needed |
 | `loop` | plays round until the scene goes | false |
 | `gain` | its own level, before the rest | 1 |
+| `pitch` | its own pitch (2 an octave up), times Doppler's: a crowd of one sound, each a little apart | 1 |
+| `start` | seconds into the sound it starts, round a loop however far: a crowd of one loop, each somewhere else in it | 0 |
 | `falloff` | `{ kind, ref, max, rolloff }`: full within `ref` metres, falling to `max` (where it holds) by `"inverse"`, `"linear"` or `"exponential"` | inverse, 1 to 100 m |
 | `cone` | `{ inner, outer, outer_gain }`, degrees about its -z: whole within `inner`, at `outer_gain` past `outer` | none |
 | `doppler` | how much movement moves its pitch: 1 as the air would, 0 none | 1 |

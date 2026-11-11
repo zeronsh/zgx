@@ -13,11 +13,16 @@ use std::rc::Rc;
 use zgx_3d::{Emitter3d, ObjectId, ReverbPreset, ReverbZone, Vec3, World, vec3};
 use zgx_audio::spatial::Falloff;
 
-/// `ui.sound3d { sound, loop, gain, falloff, cone, doppler, occlusion, air }`.
+/// `ui.sound3d { sound, loop, gain, pitch, start, falloff, cone, doppler,
+/// occlusion, air }`.
 pub(crate) struct Sound3d {
     slot: Rc<SoundSlot>,
     looping: bool,
     gain: f32,
+    /// Its own, times Doppler's.
+    pitch: f32,
+    /// Seconds into its sound it starts.
+    start: f32,
     falloff: Falloff,
     /// Degrees within and past which it's at its full and its outer gain.
     cone: Option<(f32, f32, f32)>,
@@ -119,6 +124,8 @@ pub(crate) fn sound3d(lua: &Lua, table: &Table) -> mlua::Result<Sound3d> {
         slot,
         looping: flag(table, "loop", false)?,
         gain: number(table, "gain", 1., "ui.sound3d")?.max(0.),
+        pitch: number(table, "pitch", 1., "ui.sound3d")?,
+        start: number(table, "start", 0., "ui.sound3d")?.max(0.),
         falloff,
         cone,
         doppler: number(table, "doppler", 1., "ui.sound3d")?.max(0.),
@@ -220,6 +227,8 @@ pub(crate) fn attach(world: &World, object: ObjectId, sound: Rc<Sound3d>) -> Box
         let mut emitter = Emitter3d::new(&decoded)
             .looping(sound.looping)
             .gain(sound.gain)
+            .pitch(sound.pitch)
+            .start(sound.start)
             .falloff(sound.falloff.clone())
             .doppler(sound.doppler)
             .occlusion(sound.occlusion)

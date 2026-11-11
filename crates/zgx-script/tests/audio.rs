@@ -1471,6 +1471,40 @@ fn gpu() -> Option<zgx_gpu::GpuRenderer> {
     }
 }
 
+/// Seconds a one-shot `ui.sound3d` of a 1 s sound is heard for, given
+/// `options` besides.
+#[cfg(feature = "audio-spatial")]
+fn sound3d_heard_for(name: &str, options: &str) -> f64 {
+    let tone = wav(name, 1.);
+    let code = scene_with_sound(&tone, 4., false)
+        .replace("loop = true,", &format!("loop = false, {options}"));
+    assert!(code.contains("loop = false"), "{code}");
+    let mut s = Sounding::new(&code);
+    s.ready(1);
+    s.app.frames(3);
+    assert_eq!(s.app.error(), None);
+    // 10 ms at a time: the last that's heard.
+    let mut heard = 0.;
+    for step in 1..=150 {
+        let out = s.mixer.frames(480);
+        if out.iter().any(|sample| sample.abs() > 0.01) {
+            heard = step as f64 * 0.01;
+        }
+    }
+    heard
+}
+
+#[cfg(feature = "audio-spatial")]
+#[test]
+fn a_sound3d_has_its_own_pitch_and_start() {
+    let whole = sound3d_heard_for("sound3d-whole", "");
+    assert!((whole - 1.).abs() < 0.03, "the whole second: {whole}");
+    let started = sound3d_heard_for("sound3d-start", "start = 0.8,");
+    assert!((started - 0.2).abs() < 0.03, "its last 0.2 s: {started}");
+    let pitched = sound3d_heard_for("sound3d-pitch", "pitch = 2,");
+    assert!((pitched - 0.5).abs() < 0.03, "twice as fast: {pitched}");
+}
+
 #[cfg(feature = "audio-spatial")]
 #[test]
 fn a_sound3d_moves_with_its_object() {
