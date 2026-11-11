@@ -191,3 +191,11 @@ nvim asks for `Tc`, `RGB`, `setrgbf` and `setrgbb`, where `COLORTERM` isn't
 set, to turn on its own colours. `termcap_tests` check a value,
 a flag, an unknown name and one not hex, and every capability found by its
 name. Version 0.26.5, with `zgx-vte` 0.15.1.
+
+## XTVERSION answered
+
+`Config::version`, empty by default, is the name and version
+`Term::report_version` answers XTVERSION with, as `DCS > | name(version)
+ST`, the way kitty, foot and xterm write theirs; empty, it answers nothing.
+zgx-terminal sets it from the `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` a
+session's command is given. Version 0.26.6, with `zgx-vte` 0.15.2.

@@ -13,7 +13,7 @@
 edition = "2021"
 rust-version = "1.62.1"
 name = "zgx-vte"
-version = "0.15.1"
+version = "0.15.2"
 authors = [
     "Joe Wilm <joe@jwilm.com>",
     "Christian Duerr <contact@christianduerr.com>",
@@ -25,7 +25,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "vte 0.15.0 printing a run of plain text in one call and answering XTGETTCAP, for zgx (see ZGX_PATCH.md): parser for implementing terminal emulators"
+description = "vte 0.15.0 printing a run of plain text in one call and answering XTGETTCAP and XTVERSION, for zgx (see ZGX_PATCH.md): parser for implementing terminal emulators"
 readme = "README.md"
 keywords = [
     "ansi",

@@ -725,6 +725,10 @@ pub trait Handler {
     /// Report text area size in characters.
     fn text_area_size_chars(&mut self) {}
 
+    /// zgx: XTVERSION, the terminal's name and version (should write back to
+    /// the pty stream).
+    fn report_version(&mut self) {}
+
     /// zgx: XTGETTCAP, the terminfo capabilities a program asks for: their
     /// names, each hex encoded, split by `;` (should write back to the pty
     /// stream).
@@ -1763,6 +1767,8 @@ where
                 let mode = next_param_or(0);
                 handler.report_private_mode(PrivateMode::new(mode));
             },
+            // zgx: XTVERSION (CSI > q, CSI > 0 q), the terminal's name and version.
+            ('q', [b'>']) if next_param_or(0) == 0 => handler.report_version(),
             ('q', [b' ']) => {
                 // DECSCUSR (CSI Ps SP q) -- Set Cursor Style.
                 let cursor_style_id = next_param_or(0);
@@ -2182,6 +2188,33 @@ mod tests {
         parser.advance(&mut handler, &long);
         parser.advance(&mut handler, b"\x1b\\");
         assert_eq!(handler.0, [&b"544e;5463"[..], b"524742", b""]);
+    }
+
+    /// zgx: XTVERSION asked with no parameter or 0, not with another, and
+    /// DECSCUSR (`q` after a space) left as it was.
+    #[test]
+    fn version_requests_reach_the_handler() {
+        #[derive(Default)]
+        struct Requests(usize, Option<Option<CursorStyle>>);
+        impl Handler for Requests {
+            fn report_version(&mut self) {
+                self.0 += 1;
+            }
+
+            fn set_cursor_style(&mut self, style: Option<CursorStyle>) {
+                self.1 = Some(style);
+            }
+        }
+
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = Requests::default();
+        parser.advance(&mut handler, b"\x1b[>q\x1b[>0q\x1b[>1q");
+        assert_eq!(handler.0, 2);
+        parser.advance(&mut handler, b"\x1b[6 q");
+        assert_eq!(
+            handler.1,
+            Some(Some(CursorStyle { shape: CursorShape::Beam, blinking: false }))
+        );
     }
 
     #[test]
