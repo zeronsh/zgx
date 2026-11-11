@@ -112,6 +112,8 @@ gles = [
 internal_error_panic = []
 metal = [
     "naga/msl-out",
+    # zgx patch: a spent single-use module parsed again (src/metal/mod.rs).
+    "naga/wgsl-in",
     "dep:arrayvec",
     "dep:block2",
     "dep:bytemuck",

@@ -304,10 +304,7 @@ impl Chain {
                         .then(|| {
                             crate::shader_pipeline(&device, || {
                                 let module =
-                                    device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                                        label: Some("shader pass"),
-                                        source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
-                                    });
+                                    crate::single_use_module(&device, "shader pass", &source);
                                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                                     label: Some("shader pass"),
                                     layout: Some(&layout),

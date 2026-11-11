@@ -671,7 +671,10 @@ impl crate::Queue for Queue {
                 });
 
                 // zgx patch: empty command buffers are never committed.
-                let last = command_buffers.iter().rev().find_map(|cmd_buf| cmd_buf.raw.clone());
+                let last = command_buffers
+                    .iter()
+                    .rev()
+                    .find_map(|cmd_buf| cmd_buf.raw.clone());
                 let has_last = last.is_some();
                 let raw = match last {
                     Some(raw) => raw,
@@ -697,7 +700,11 @@ impl crate::Queue for Queue {
                     raw.encodeSignalEvent_value(shared_event.as_ref(), signal_value);
                 }
                 // only return an extra one if it's extra
-                if has_last { None } else { Some(raw) }
+                if has_last {
+                    None
+                } else {
+                    Some(raw)
+                }
             };
 
             // zgx patch: hand presentation off to the last buffer's
@@ -739,8 +746,7 @@ impl crate::Queue for Queue {
             if let Some(raw) = extra_command_buffer {
                 raw.commit();
             }
-            *self.shared.last_committed.lock() =
-                (!_surface_textures.is_empty()).then_some(handoff);
+            *self.shared.last_committed.lock() = (!_surface_textures.is_empty()).then_some(handoff);
         });
         Ok(())
     }
@@ -1037,6 +1043,46 @@ unsafe impl Sync for BindGroup {}
 pub enum ShaderModuleSource {
     Naga(crate::NagaShader),
     Passthrough(PassthroughShader),
+    /// zgx patch: a single-use module once a render pipeline was made from
+    /// it (`zgx_single_use_next_module`): its IR let go. Another pipeline
+    /// made from it parses its WGSL again (`ShaderModule::wgsl`).
+    Spent,
+}
+
+/// zgx patch: `wgsl` as a module's IR again, validated.
+fn naga_from_wgsl(wgsl: &str) -> Option<crate::NagaShader> {
+    let module = naga::front::wgsl::parse_str(wgsl).ok()?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .ok()?;
+    Some(crate::NagaShader {
+        module: std::borrow::Cow::Owned(module),
+        info,
+        debug_source: None,
+    })
+}
+
+std::thread_local! {
+    static NEXT_SINGLE_USE: core::cell::RefCell<Option<String>> =
+        const { core::cell::RefCell::new(None) };
+}
+
+/// zgx patch: the next shader module this thread makes from WGSL is for one
+/// render pipeline, and `wgsl` is the source wgpu parses for it (`None`
+/// takes that back). Such a module's naga IR (its module and validation
+/// info, about 250 KB for zgx's quad shader) goes once its pipeline is made;
+/// wgpu-core holds the module as long as the pipeline lives, so the IR
+/// would otherwise stay with every pipeline. The module keeps `wgsl`, and a
+/// second pipeline made from it parses that again.
+pub fn zgx_single_use_next_module(wgsl: Option<String>) {
+    NEXT_SINGLE_USE.with(|next| *next.borrow_mut() = wgsl);
+}
+
+fn take_single_use() -> Option<String> {
+    NEXT_SINGLE_USE.with(|next| next.borrow_mut().take())
 }
 
 #[derive(Debug)]
@@ -1050,8 +1096,35 @@ unsafe impl Sync for PassthroughShader {}
 
 #[derive(Debug)]
 pub struct ShaderModule {
-    source: ShaderModuleSource,
+    // zgx patch: behind a lock, so a single-use module's IR can go.
+    source: std::sync::RwLock<ShaderModuleSource>,
     bounds_checks: wgt::ShaderRuntimeChecks,
+    /// zgx patch: a single-use module's WGSL (`zgx_single_use_next_module`).
+    wgsl: Option<String>,
+}
+
+impl ShaderModule {
+    /// zgx patch: the source, read.
+    fn source(&self) -> std::sync::RwLockReadGuard<'_, ShaderModuleSource> {
+        self.source
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// zgx patch: a single-use module's IR let go, its pipeline made.
+    fn spend(&self) {
+        if self.wgsl.is_some() {
+            *self
+                .source
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = ShaderModuleSource::Spent;
+        }
+    }
+
+    /// zgx patch: a spent module's IR, made again from its WGSL.
+    fn rebuilt(&self) -> Option<ShaderModuleSource> {
+        naga_from_wgsl(self.wgsl.as_deref()?).map(ShaderModuleSource::Naga)
+    }
 }
 
 impl crate::DynShaderModule for ShaderModule {}
