@@ -597,6 +597,17 @@ fn a_world_whose_probes_go_with_its_renderer_comes_to_rest() {
 /// `actual` against its golden at `path` (`ZGX_BLESS=1` writes it): three
 /// levels in 1% of pixels, as shading by rays or faces differs a little
 /// from GPU to GPU of a family.
+/// A PNG's RGBA, where there's one at `path`.
+fn read_png(path: &std::path::Path) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+        .read_info()
+        .unwrap();
+    let mut rgba = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut rgba).unwrap();
+    Some(rgba)
+}
+
 fn golden(path: &std::path::Path, actual: &[u8]) {
     if std::env::var_os("ZGX_BLESS").is_some_and(|v| v == "1") {
         let file = std::fs::File::create(path).unwrap();
@@ -621,11 +632,7 @@ fn golden(path: &std::path::Path, actual: &[u8]) {
         eprintln!("no golden {}; bless with ZGX_BLESS=1", path.display());
         return;
     }
-    let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()))
-        .read_info()
-        .unwrap();
-    let mut expected = vec![0; reader.output_buffer_size().unwrap()];
-    reader.next_frame(&mut expected).unwrap();
+    let expected = read_png(path).unwrap();
     let differing = actual
         .chunks(4)
         .zip(expected.chunks(4))
@@ -644,7 +651,9 @@ fn faces_drawn_in_place_of_rays_light_the_room_alike() {
     // Where the device has no ray queries, each probe draws the scene into
     // cube faces about it instead. Forced here beside rays on one device,
     // the room's bounced light comes out alike (rays shadow the lamp at
-    // what they hit; faces, as the meshes drawn directly, don't).
+    // what they hit; faces, as the meshes drawn directly, don't). Where the
+    // device has none (D3D12 under FXC, say), beside the rays this adapter
+    // traced where it had them: its committed golden of the same room.
     let shade = |faces: bool| {
         let world = World::new();
         room(&world);
@@ -652,21 +661,44 @@ fn faces_drawn_in_place_of_rays_light_the_room_alike() {
         world.add_probes(volume().per_frame(216)).unwrap();
         let mut window = Window::new(&world)?;
         let frames = settle(&mut window, &world, 500);
-        Some((world.probes_status(), frames, window.pixels()))
+        Some((
+            world.probes_status(),
+            frames,
+            window.pixels(),
+            family(&window.gpu),
+        ))
     };
-    let Some((status, frames, faces)) = shade(true) else {
+    let Some((status, frames, faces, family)) = shade(true) else {
         return;
     };
     assert_eq!(status, ProbesStatus::Rasterised);
     assert!(frames <= 20, "{frames} frames to converge");
     save("room-faces", &faces);
-    // (The faces are checked; without ray queries there are no rays to
-    // set them beside.)
-    let Some((ProbesStatus::Traced, _, rays)) = shade(false) else {
-        eprintln!(
-            "GI-SKIPPED faces_drawn_in_place_of_rays_light_the_room_alike: no rays to compare with"
-        );
-        return;
+    let rays = match shade(false) {
+        Some((ProbesStatus::Traced, _, rays, _)) => rays,
+        _ => {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/reference")
+                .join(&family)
+                .join("gi_room.png");
+            let Some(rays) = read_png(&path) else {
+                let set = |name: &str| std::env::var_os(name).is_some_and(|v| v == "1");
+                let required = (std::env::var_os("ZGX_REQUIRE_GPU").is_some()
+                    && !set("ZGX_GI_ALLOW_SKIP"))
+                    || std::env::var_os("ZGX_REQUIRE_GOLDENS").is_some();
+                assert!(
+                    !required,
+                    "no rays here and no traced golden {} to set the faces beside",
+                    path.display()
+                );
+                eprintln!(
+                    "GI-SKIPPED faces_drawn_in_place_of_rays_light_the_room_alike: no rays and no {}",
+                    path.display()
+                );
+                return;
+            };
+            rays
+        }
     };
     for at in [(102, 110), (80, 60), (40, 128), (12, 80), (150, 80)] {
         let (a, b) = (around(&rays, at, 6), around(&faces, at, 6));
