@@ -1622,6 +1622,15 @@ pub(crate) struct UiStorage {
     content_revision: RefCell<Option<Signal<u64>>>,
     /// Nodes' laid-out sizes (`observe_size`): read only when layout runs.
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
+    /// Where the scene's queued nodes stood when those sizes were last
+    /// read (`Scene::dirty_mark`): from there, only the nodes layout touched
+    /// are read again (`observed_sizes_now`). `None`: every one, as after a
+    /// registration.
+    sizes_mark: Cell<Option<(u64, u64)>>,
+    /// Content sizes observed on nodes whose padding is a percentage, read
+    /// after every layout: their content box follows their containing
+    /// block's width while their own box may stay.
+    sizes_always: RefCell<Vec<NodeId>>,
     observed_bounds: RefCell<crate::scene::NodeMap<Signal<Rect>>>,
     observed_visibility: RefCell<crate::scene::NodeMap<Signal<bool>>>,
     /// Of those, the ones that count as shown within a margin of the view
@@ -2002,6 +2011,8 @@ impl Ui {
             content_sizes: RefCell::default(),
             content_revision: RefCell::default(),
             observed_sizes: RefCell::default(),
+            sizes_mark: Cell::new(None),
+            sizes_always: RefCell::default(),
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
             visibility_margins: RefCell::default(),
@@ -2739,6 +2750,7 @@ impl Ui {
             .borrow_mut()
             .insert(node, signal.clone());
         self.storage.editor_layout_revision.set(None);
+        self.storage.sizes_mark.set(None);
         signal
     }
     /// How many views are mounting now, each inside the last (see
@@ -2779,7 +2791,73 @@ impl Ui {
             .borrow_mut()
             .insert(node, signal.clone());
         self.storage.editor_layout_revision.set(None);
+        self.storage.sizes_mark.set(None);
         signal
+    }
+    /// Observed nodes' sizes as layout left them, to compare with what each
+    /// was last told: those layout touched since they were last read (the
+    /// scene's queued nodes, `Scene::dirty_since`), and those whose padding
+    /// is a percentage (`sizes_always`); every one after a registration,
+    /// where the scene can't say what layout touched, or where it touched
+    /// more than there are.
+    // Out of line: `prepare_frame_once` stays as small as it was.
+    #[inline(never)]
+    fn observed_sizes_now(&self, scene: &Scene) -> Vec<ObservedSize> {
+        let content = self.storage.content_sizes.borrow();
+        let own = self.storage.observed_sizes.borrow();
+        let content_size = |node: NodeId, signal: &Signal<(f32, f32)>| {
+            (node, signal.clone(), allocated_content_size(scene, node))
+        };
+        let own_size = |node: NodeId, signal: &Signal<(f32, f32)>| {
+            let b = scene.layout_box(node);
+            (node, signal.clone(), (b.width, b.height))
+        };
+        let mark = self.storage.sizes_mark.replace(Some(scene.dirty_mark()));
+        let mut always = self.storage.sizes_always.borrow_mut();
+        let touched = mark
+            .and_then(|mark| scene.dirty_since(mark))
+            .filter(|touched| touched.len() <= content.len() + own.len());
+        let Some(touched) = touched else {
+            always.clear();
+            let mut sizes = Vec::with_capacity(content.len() + own.len());
+            for (&node, signal) in content.iter() {
+                if scene.contains(node) {
+                    if scene.padding_has_percent(node) {
+                        always.push(node);
+                    }
+                    sizes.push(content_size(node, signal));
+                }
+            }
+            for (&node, signal) in own.iter() {
+                if scene.contains(node) {
+                    sizes.push(own_size(node, signal));
+                }
+            }
+            return sizes;
+        };
+        let mut sizes = Vec::new();
+        for &node in touched {
+            if !scene.contains(node) {
+                continue;
+            }
+            if let Some(signal) = content.get(&node) {
+                // Given a percentage since it was last read.
+                if scene.padding_has_percent(node) && !always.contains(&node) {
+                    always.push(node);
+                }
+                sizes.push(content_size(node, signal));
+            }
+            if let Some(signal) = own.get(&node) {
+                sizes.push(own_size(node, signal));
+            }
+        }
+        always.retain(|&node| {
+            scene.contains(node) && content.contains_key(&node) && scene.padding_has_percent(node)
+        });
+        for &node in always.iter() {
+            sizes.push(content_size(node, &content[&node]));
+        }
+        sizes
     }
     /// `content_size_revision` bumped, if a measured list asked for it: out of
     /// line, as most apps have none.
@@ -2836,6 +2914,7 @@ impl Ui {
             .borrow_mut()
             .insert(node, signal.clone());
         self.storage.editor_layout_revision.set(None);
+        self.storage.sizes_mark.set(None);
         signal
     }
     /// Observe world bounds, including ancestor translations without layout work.
@@ -4171,22 +4250,10 @@ impl Ui {
                 .set(Some(geometry_revision));
             let (sizes, bounds): (Vec<_>, Vec<_>) = {
                 let scene = self.scene.borrow();
-                let sizes = if layout_changed {
-                    let content = self.storage.content_sizes.borrow();
-                    let own = self.storage.observed_sizes.borrow();
-                    content
-                        .iter()
-                        .filter(|(node, _)| scene.contains(**node))
-                        .map(|(node, signal)| {
-                            (*node, signal.clone(), allocated_content_size(&scene, *node))
-                        })
-                        .chain(own.iter().filter(|(node, _)| scene.contains(**node)).map(
-                            |(node, signal)| {
-                                let b = scene.layout_box(*node);
-                                (*node, signal.clone(), (b.width, b.height))
-                            },
-                        ))
-                        .collect()
+                let observed = !self.storage.content_sizes.borrow().is_empty()
+                    || !self.storage.observed_sizes.borrow().is_empty();
+                let sizes = if layout_changed && observed {
+                    self.observed_sizes_now(&scene)
                 } else {
                     Vec::new()
                 };
@@ -8148,6 +8215,10 @@ fn same_length(told: f32, now: f32) -> bool {
     (told - now).abs() < SIZE_NOISE || told == now
 }
 
+/// An observed node, its signal, and its size as layout left it
+/// (`Ui::observed_sizes_now`).
+type ObservedSize = (NodeId, Signal<(f32, f32)>, (f32, f32));
+
 fn allocated_content_size(scene: &Scene, node: NodeId) -> (f32, f32) {
     // Its own box: a size, whatever moved it.
     let bounds = scene.layout_bounds(node);
@@ -8221,6 +8292,147 @@ mod content_size_observer_tests {
         assert!(!ui.scene.borrow().contains(child));
         assert!(ui.storage.content_sizes.borrow().is_empty());
         ui.prepare_frame();
+    }
+
+    fn padded(width: f32, height: f32, padding: crate::layout::EdgeLengths) -> Style {
+        Style {
+            layout_options: Some(std::sync::Arc::new(crate::layout::LayoutOptions {
+                padding,
+                ..Default::default()
+            })),
+            ..fixed(width, height)
+        }
+    }
+
+    /// What layout touched is read again, and only that (the scene's queued
+    /// nodes): a size changed by its own layout, its padding, a percentage
+    /// padding's containing block or a sibling's move is published; a node
+    /// nothing touched is not read.
+    #[test]
+    fn observed_sizes_follow_what_layout_touched() {
+        let mut ui = Ui::new(400., 200.);
+        let row = ui.container(ui.root(), Layout::Row, fixed(300., 40.));
+        let sibling = ui.container(row, Layout::Overlay, fixed(100., 40.));
+        // Filling what its sibling leaves of the row.
+        let filling = ui.container(
+            row,
+            Layout::Overlay,
+            Style {
+                flex_grow: 1.,
+                height: Some(40.),
+                ..Default::default()
+            },
+        );
+        let padded_node = ui.container(ui.root(), Layout::Overlay, fixed(100., 40.));
+        // 10% of its containing block's width: a box of its own size whose
+        // content box follows its parent's.
+        let holder = ui.container(ui.root(), Layout::Overlay, fixed(200., 40.));
+        let percent = crate::layout::EdgeLengths {
+            left: Some(crate::layout::Length::Percent(0.1)),
+            ..Default::default()
+        };
+        let percented = ui.container(holder, Layout::Overlay, padded(100., 40., percent));
+        let still = ui.container(ui.root(), Layout::Overlay, fixed(50., 20.));
+        // More observed than a change touches: what it touched is read,
+        // not every one (`observed_sizes_now`).
+        let others = ui.container(ui.root(), Layout::Column, Style::default());
+        for _ in 0..20 {
+            let other = ui.container(others, Layout::Overlay, fixed(10., 2.));
+            ui.observe_content_size(other);
+        }
+        let filling_size = ui.observe_content_size(filling);
+        let padded_size = ui.observe_content_size(padded_node);
+        let percented_size = ui.observe_content_size(percented);
+        let still_size = ui.observe_content_size(still);
+        let sibling_box = ui.observe_size(sibling);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        assert_eq!(filling_size.get(), (200., 40.));
+        assert_eq!(percented_size.get(), (80., 40.));
+        // Its own box, by its own layout.
+        ui.scene.borrow_mut().set_style(sibling, fixed(140., 40.));
+        // Its padding, its box the same.
+        let px = crate::layout::EdgeLengths {
+            left: Some(crate::layout::Length::Px(30.)),
+            ..Default::default()
+        };
+        ui.scene
+            .borrow_mut()
+            .set_style(padded_node, padded(100., 40., px));
+        // Its containing block's width alone.
+        ui.scene.borrow_mut().set_style(holder, fixed(300., 40.));
+        ui.scene.borrow_mut().prepare_layout();
+        let touched = {
+            let scene = ui.scene.borrow();
+            let mark = ui.storage.sizes_mark.get().expect("read since registering");
+            scene.dirty_since(mark).map(<[NodeId]>::len)
+        };
+        assert!(touched.is_some_and(|touched| touched < 20), "{touched:?}");
+        ui.prepare_frame();
+        assert_eq!(sibling_box.get(), (140., 40.));
+        assert_eq!(filling_size.get(), (160., 40.), "a sibling's move");
+        assert_eq!(padded_size.get(), (70., 40.), "its padding");
+        assert_eq!(percented_size.get(), (70., 40.), "its parent's width");
+        assert_eq!(still_size.get(), (50., 20.));
+        ui.scene.borrow_mut().flush();
+        // One more change, and what is read for it: the node it touched,
+        // and the one whose padding is a percentage, not the others.
+        ui.scene.borrow_mut().set_style(sibling, fixed(120., 40.));
+        ui.scene.borrow_mut().prepare_layout();
+        let read: Vec<NodeId> = {
+            let scene = ui.scene.borrow();
+            let read = ui.observed_sizes_now(&scene);
+            read.into_iter().map(|(node, ..)| node).collect()
+        };
+        assert!(
+            read.contains(&sibling) && read.contains(&filling),
+            "{read:?}"
+        );
+        assert!(read.contains(&percented), "{read:?}");
+        assert!(
+            !read.contains(&still) && !read.contains(&padded_node),
+            "{read:?}"
+        );
+    }
+
+    /// Laid out by a flush with no frame prepared before it (what the queued
+    /// nodes held then is gone), a size is still published: every one is
+    /// read.
+    #[test]
+    fn a_size_laid_out_by_a_flush_alone_is_published() {
+        let mut ui = Ui::new(400., 200.);
+        let node = ui.container(ui.root(), Layout::Overlay, fixed(100., 40.));
+        let size = ui.observe_content_size(node);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        ui.scene.borrow_mut().set_style(node, fixed(130., 40.));
+        ui.scene.borrow_mut().flush();
+        ui.prepare_frame();
+        assert_eq!(size.get(), (130., 40.));
+    }
+
+    /// An observed node removed, its slot taken by a new node observed in
+    /// turn: the new one is told its own size, the old one's signal nothing
+    /// more.
+    #[test]
+    fn an_observed_node_removed_and_its_slot_reused() {
+        let mut ui = Ui::new(400., 200.);
+        let old = ui.container(ui.root(), Layout::Overlay, fixed(100., 40.));
+        let old_size = ui.observe_content_size(old);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        ui.remove(old);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        let new = ui.container(ui.root(), Layout::Overlay, fixed(60., 30.));
+        assert_eq!(new.slot(), old.slot(), "the slot reused");
+        let new_size = ui.observe_content_size(new);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+        ui.scene.borrow_mut().set_style(new, fixed(70., 30.));
+        ui.prepare_frame();
+        assert_eq!(new_size.get(), (70., 30.));
+        assert_eq!(old_size.get(), (100., 40.));
     }
 }
 

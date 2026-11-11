@@ -3317,6 +3317,9 @@ pub struct Scene {
     text_shaper_revision: u32,
     pending_layout_nodes: usize,
     layout_revision: u64,
+    /// The layout revision when a flush last took the nodes queued to
+    /// repaint (`dirty`, `dirty_since`).
+    dirty_taken_at: u64,
     layout_pass: u64,
     /// How deep the measure running now is (`crate::deep`).
     measure_depth: u32,
@@ -3620,6 +3623,7 @@ impl Scene {
             text_shaper_revision: 0,
             pending_layout_nodes: 0,
             layout_revision: 0,
+            dirty_taken_at: 0,
             layout_pass: 0,
             measure_depth: 0,
             scratch: Vec::new(),
@@ -13699,6 +13703,35 @@ impl Scene {
     pub(crate) fn layout_revision(&self) -> u64 {
         self.layout_revision
     }
+    /// Where the nodes queued to repaint stand now, for `dirty_since`.
+    pub(crate) fn dirty_mark(&self) -> (u64, u64) {
+        (self.repaint_flushes, self.layout_revision)
+    }
+    /// The nodes queued to repaint, holding every node laid out anew since
+    /// `mark` (`dirty_mark`): no flush has taken them since, or one did with
+    /// nothing laid out after the mark. `None` where one may be missing.
+    /// Nodes since removed may be among them.
+    // A flush since that took none (nothing was queued) left the revision
+    // of an earlier take: one equal to the mark's means nothing was laid out
+    // after that take either.
+    pub(crate) fn dirty_since(&self, (flushes, revision): (u64, u64)) -> Option<&[NodeId]> {
+        let since = self.repaint_flushes.wrapping_sub(flushes);
+        (since == 0 || (since == 1 && self.dirty_taken_at == revision)).then_some(&self.dirty)
+    }
+    /// Whether `id`'s padding has a percentage, which its containing block's
+    /// width resolves: its content box can change while its own box stays.
+    pub(crate) fn padding_has_percent(&self, id: NodeId) -> bool {
+        self.node(id)
+            .style
+            .layout_options
+            .as_deref()
+            .is_some_and(|options| {
+                let padding = &options.padding;
+                [padding.left, padding.right, padding.top, padding.bottom]
+                    .into_iter()
+                    .any(|value| matches!(value, Some(crate::layout::Length::Percent(_))))
+            })
+    }
     /// How many layout passes it has run: a test's count of them.
     #[cfg(test)]
     pub(crate) fn layout_passes(&self) -> u64 {
@@ -13862,6 +13895,7 @@ impl Scene {
         let _span = crate::profile::span(crate::profile::Phase::Damage);
         report.layout_nodes = std::mem::take(&mut self.pending_layout_nodes);
         let dirty = std::mem::take(&mut self.dirty);
+        self.dirty_taken_at = self.layout_revision;
         for id in &dirty {
             if !self.contains(*id) {
                 continue;
