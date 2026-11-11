@@ -1124,3 +1124,125 @@ fn a_shader_is_ready_only_while_a_renderer_holds_its_pipelines() {
     drop(painter);
     assert!(!world.shader_ready(tint), "no renderer holds them");
 }
+
+#[cfg(feature = "compute")]
+mod gpu_data {
+    //! An app's GPU buffers and textures as material parameters (H3).
+    use super::*;
+
+    const FROM_BUFFER: &str = "#zgx material 1
+fn surface(s: SurfaceIn) -> Surface {
+    var m = surface_default(s);
+    m.base_color = params.colors[0].rgb;
+    return m;
+}";
+    fn coloured(world: &World) -> (ShaderId, GpuBuffer) {
+        let shader = world
+            .add_shader(MaterialShader::new(FROM_BUFFER).buffer("colors", "array<vec4<f32>>"))
+            .unwrap();
+        let buffer = world
+            .add_buffer(BufferDesc::from_slice(&[[1f32, 0., 0., 1.]]))
+            .unwrap();
+        world.set_param(shader, "colors", &buffer).unwrap();
+        (shader, buffer)
+    }
+
+    #[test]
+    fn a_buffer_parameter_colours_its_mesh_as_its_contents_change() {
+        let (world, mesh) = cube(unlit(0xffffff));
+        let (shader, buffer) = coloured(&world);
+        world.set_shader(mesh, Some(shader));
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        window.draw();
+        assert!(
+            near(window.pixel(50, 50), [255, 0, 0, 255]),
+            "{:?}",
+            window.pixel(50, 50)
+        );
+        buffer.write(0, &[[0f32, 0., 1., 1.]]).unwrap();
+        window.draw();
+        assert!(
+            near(window.pixel(50, 50), [0, 0, 255, 255]),
+            "{:?}",
+            window.pixel(50, 50)
+        );
+        // A buffer the shader can't bind (a texture's format of ints) is an
+        // error, not a frame's.
+        let ints = world
+            .add_texture(TextureDesc::storage(4, 4, Format::R32Uint))
+            .unwrap();
+        let reads = world
+            .add_shader(
+                MaterialShader::new(
+                    "#zgx material 1
+                     fn surface(s: SurfaceIn) -> Surface {
+                         var m = surface_default(s);
+                         m.base_color = textureLoad(params.field, vec2(0, 0), 0).rgb;
+                         return m;
+                     }",
+                )
+                .param("field", Param::GpuTexture),
+            )
+            .unwrap();
+        assert!(world.set_param(reads, "field", &ints).is_err());
+        // A float texture of 32 bits a channel (unfilterable) binds.
+        let field = world
+            .add_texture(TextureDesc::storage(4, 4, Format::Rgba32Float))
+            .unwrap();
+        world.set_param(reads, "field", &field).unwrap();
+        world.set_shader(mesh, Some(reads));
+        window.draw();
+        assert_eq!(world.shader_error(reads), None);
+    }
+
+    #[test]
+    fn another_buffer_draws_as_a_fresh_world_with_it_does() {
+        retained_matches_fresh(
+            "a buffer swapped",
+            |world| {
+                let (shader, _) = coloured(world);
+                let cube = world.add(
+                    Object::mesh(Geometry::cuboid(1., 1., 1.), Material::rgb(0xffffff))
+                        .at([0., 0.5, 0.]),
+                );
+                world.set_shader(cube, Some(shader));
+                (vec![shader], cube)
+            },
+            |world, ids, _| {
+                let other = world
+                    .add_buffer(BufferDesc::from_slice(&[[0.2f32, 0.9, 0.3, 1.]]))
+                    .unwrap();
+                world.set_param(ids[0], "colors", &other).unwrap();
+            },
+        );
+    }
+
+    #[test]
+    fn a_buffer_parameter_follows_its_buffer_to_a_new_device() {
+        // One painter, its device changed (another window's renderer): the
+        // buffer's copy is made again there, a new generation, and the
+        // binding with it (the old device's copy would be a validation
+        // error). The app writes its buffer each frame, as a compute pass's
+        // output is: what a device change drops comes again.
+        let (world, mesh) = cube(unlit(0xffffff));
+        let (shader, buffer) = coloured(&world);
+        world.set_shader(mesh, Some(shader));
+        let Some(mut first) = Window::new(&world) else {
+            return;
+        };
+        first.draw();
+        assert!(near(first.pixel(50, 50), [255, 0, 0, 255]));
+        drop(first);
+        let mut second = Window::new(&world).unwrap();
+        buffer.write(0, &[[0f32, 1., 0., 1.]]).unwrap();
+        second.draw();
+        second.draw();
+        assert!(
+            near(second.pixel(50, 50), [0, 255, 0, 255]),
+            "{:?}",
+            second.pixel(50, 50)
+        );
+    }
+}

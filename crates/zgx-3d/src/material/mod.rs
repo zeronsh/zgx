@@ -38,6 +38,16 @@ pub enum Param {
     /// A `texture_2d<f32>` of data (heights, normals, masks), read as
     /// stored, white until set. A mesh's shader only.
     DataTexture,
+    /// An app's GPU buffer (`World::add_buffer`: a compute pass's output,
+    /// say), a `var<storage, read>` of the WGSL type
+    /// `MaterialShader::buffer` gives it. A mesh's shader only.
+    #[cfg(feature = "compute")]
+    Buffer,
+    /// An app's GPU texture (`World::add_texture`), a `texture_2d<f32>`
+    /// read unfiltered (`textureLoad`), black until set. A mesh's shader
+    /// only.
+    #[cfg(feature = "compute")]
+    GpuTexture,
 }
 impl Param {
     /// Its WGSL type, its alignment and its size in a uniform (none for a
@@ -48,8 +58,15 @@ impl Param {
             Param::Vec2 => Some(("vec2<f32>", 8, 8)),
             Param::Vec3 => Some(("vec3<f32>", 16, 12)),
             Param::Vec4 | Param::Color => Some(("vec4<f32>", 16, 16)),
-            Param::Texture | Param::DataTexture => None,
+            _ => None,
         }
+    }
+    /// Whether it's an app's GPU data (`Buffer`, `GpuTexture`).
+    pub(crate) fn is_data(self) -> bool {
+        #[cfg(feature = "compute")]
+        return matches!(self, Param::Buffer | Param::GpuTexture);
+        #[cfg(not(feature = "compute"))]
+        false
     }
 }
 
@@ -68,6 +85,24 @@ pub enum ParamValue {
     Vec4([f32; 4]),
     /// For a `Param::Texture`.
     Texture(crate::Texture),
+    /// For a `Param::Buffer`.
+    #[cfg(feature = "compute")]
+    Buffer(crate::GpuBuffer),
+    /// For a `Param::GpuTexture`.
+    #[cfg(feature = "compute")]
+    GpuTexture(crate::GpuTexture),
+}
+#[cfg(feature = "compute")]
+impl From<&crate::GpuBuffer> for ParamValue {
+    fn from(v: &crate::GpuBuffer) -> Self {
+        Self::Buffer(v.clone())
+    }
+}
+#[cfg(feature = "compute")]
+impl From<&crate::GpuTexture> for ParamValue {
+    fn from(v: &crate::GpuTexture) -> Self {
+        Self::GpuTexture(v.clone())
+    }
 }
 impl From<f32> for ParamValue {
     fn from(v: f32) -> Self {
@@ -127,6 +162,8 @@ impl From<&crate::Texture> for ParamValue {
 pub struct MaterialShader {
     source: String,
     params: Vec<(String, Param)>,
+    /// Each buffer parameter's WGSL type (`buffer`).
+    buffer_types: Vec<(String, String)>,
     reads_scene: bool,
     animated: bool,
     reach: Option<f32>,
@@ -137,6 +174,7 @@ impl MaterialShader {
         Self {
             source: source.into(),
             params: Vec::new(),
+            buffer_types: Vec::new(),
             reads_scene: false,
             animated: false,
             reach: None,
@@ -146,6 +184,16 @@ impl MaterialShader {
     /// (zero, or a white texture, until then).
     pub fn param(mut self, name: &str, kind: Param) -> Self {
         self.params.push((name.to_owned(), kind));
+        self
+    }
+    /// A buffer parameter it reads as `params.<name>`, a `var<storage,
+    /// read>` of WGSL type `ty` (an array of a struct of its own, say):
+    /// `World::set_param` gives it an app's `GpuBuffer`, which a compute
+    /// pass may write each frame.
+    #[cfg(feature = "compute")]
+    pub fn buffer(mut self, name: &str, ty: &str) -> Self {
+        self.params.push((name.to_owned(), Param::Buffer));
+        self.buffer_types.push((name.to_owned(), ty.to_owned()));
         self
     }
     /// It reads the scene behind it (`scene_color`): the world draws the
@@ -207,6 +255,15 @@ pub(crate) struct Slot {
     pub(crate) name: String,
     pub(crate) kind: Param,
     pub(crate) at: u32,
+    /// A buffer's WGSL type.
+    pub(crate) ty: Option<String>,
+}
+/// An app's GPU data a shader binds (`Param::Buffer`, `GpuTexture`).
+#[cfg(feature = "compute")]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Data {
+    Buffer(crate::GpuBuffer),
+    Texture(crate::GpuTexture),
 }
 /// Its parameters' values as they are now.
 #[derive(Debug, Default)]
@@ -214,7 +271,10 @@ pub(crate) struct Values {
     /// Its uniform's bytes.
     pub(crate) bytes: Vec<u8>,
     pub(crate) textures: Vec<Option<crate::Texture>>,
-    /// Counts changes to `bytes`, and to `textures`.
+    /// Its GPU data, by data slot.
+    #[cfg(feature = "compute")]
+    pub(crate) data: Vec<Option<Data>>,
+    /// Counts changes to `bytes`, and to `textures` and `data`.
     pub(crate) numbers: u64,
     pub(crate) pictures: u64,
 }
@@ -266,6 +326,10 @@ pub(crate) const MAX_REACH: f32 = 1e4;
 /// Textures a mesh's shader may read: with a mesh's own maps, the shadow
 /// map, an environment and what is behind, within the 16 a stage may.
 pub(crate) const MAX_TEXTURES: u32 = 4;
+/// GPU data (buffers and textures an app made) a mesh's shader may read.
+pub(crate) const MAX_DATA: u32 = 4;
+/// Group 1's bindings for a shader's GPU data, from here.
+pub(crate) const DATA_BINDING: u32 = 24;
 /// Bytes of the frame for surface layers' parameters (`FRAME_TAIL`).
 pub(crate) const LAYER_BYTES: u32 = 1024;
 /// Bytes of the frame past the engine's own for custom materials: the view,
@@ -361,7 +425,7 @@ impl Shader {
         }
         // Its parameters' places, as WGSL lays a uniform out.
         let mut slots = Vec::new();
-        let (mut offset, mut align, mut textures) = (0u32, 4u32, 0u32);
+        let (mut offset, mut align, mut textures, mut data) = (0u32, 4u32, 0u32, 0u32);
         for (name, kind) in &shader.params {
             if !is_identifier(name)
                 || name.len() > MAX_NAME
@@ -383,16 +447,41 @@ impl Shader {
                         format!("parameter `{name}`: a surface layer's are numbers, not textures"),
                     ));
                 }
+                None if kind.is_data() => {
+                    data += 1;
+                    data - 1
+                }
                 None => {
                     textures += 1;
                     textures - 1
                 }
             };
+            let ty = shader
+                .buffer_types
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, ty)| ty.clone());
+            // A buffer's type is spliced in as WGSL: a type's words alone.
+            let allowed = |c: char| c.is_ascii_alphanumeric() || "_<>, ".contains(c);
+            if ty
+                .as_ref()
+                .is_some_and(|ty| ty.is_empty() || !ty.chars().all(allowed))
+            {
+                return Err(error(0, 0, format!("parameter `{name}`: not a WGSL type")));
+            }
             slots.push(Slot {
                 name: name.clone(),
                 kind: *kind,
                 at,
+                ty,
             });
+        }
+        if data > MAX_DATA {
+            return Err(error(
+                0,
+                0,
+                format!("{data} GPU data parameters: a shader reads {MAX_DATA} at most"),
+            ));
         }
         if textures > MAX_TEXTURES {
             return Err(error(
@@ -418,6 +507,8 @@ impl Shader {
             values: RefCell::new(Values {
                 bytes: vec![0; uniform_size as usize],
                 textures: vec![None; textures as usize],
+                #[cfg(feature = "compute")]
+                data: vec![None; data as usize],
                 numbers: 0,
                 pictures: 0,
             }),
@@ -510,6 +601,21 @@ impl Shader {
         }
     }
 
+    /// A number for the device copies of its GPU data a binding of it
+    /// holds (each one's generation): another means its bindings are made
+    /// again (`custom::prepare`).
+    #[cfg(feature = "compute")]
+    pub(crate) fn data_key(&self) -> u64 {
+        let values = self.values.borrow();
+        values.data.iter().fold(0x9e37_79b9_7f4a_7c15, |key, d| {
+            let generation = match d {
+                Some(Data::Buffer(b)) => b.device_buffer().map_or(0, |(g, _)| g + 1),
+                Some(Data::Texture(t)) => t.device_view().map_or(0, |(g, _)| g + 1),
+                None => 0,
+            };
+            (key ^ generation).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
     /// Its value of parameter `name` set: whether it changed, or why not.
     pub(crate) fn set(&self, name: &str, value: ParamValue) -> Result<bool, String> {
         let slot = self
@@ -523,6 +629,36 @@ impl Shader {
             (ParamValue::Vec2(v), Param::Vec2) => v,
             (ParamValue::Vec3(v), Param::Vec3) => v,
             (ParamValue::Vec4(v), Param::Vec4 | Param::Color) => v,
+            // A texture of ints can't be read as floats: an error here, not
+            // the device's.
+            #[cfg(feature = "compute")]
+            (ParamValue::GpuTexture(t), Param::GpuTexture)
+                if matches!(
+                    t.format(),
+                    crate::Format::R32Uint | crate::Format::R32Sint | crate::Format::Rgba32Uint
+                ) =>
+            {
+                return Err(format!(
+                    "`{name}` reads floats: a texture of {:?} can't be bound to it",
+                    t.format()
+                ));
+            }
+            #[cfg(feature = "compute")]
+            (ParamValue::Buffer(_), Param::Buffer)
+            | (ParamValue::GpuTexture(_), Param::GpuTexture) => {
+                let data = match value {
+                    ParamValue::Buffer(b) => Data::Buffer(b),
+                    ParamValue::GpuTexture(t) => Data::Texture(t),
+                    _ => unreachable!(),
+                };
+                let held = &mut values.data[slot.at as usize];
+                if held.as_ref() == Some(&data) {
+                    return Ok(false);
+                }
+                *held = Some(data);
+                values.pictures += 1;
+                return Ok(true);
+            }
             (ParamValue::Texture(t), Param::Texture | Param::DataTexture) => {
                 let held = &mut values.textures[slot.at as usize];
                 if held.as_ref() == Some(t) {
@@ -631,6 +767,8 @@ impl Custom {
                     "@group(1) @binding({UNIFORM_BINDING}) var<uniform> params_zgxm: ZgxParams_zgxm;"
                 );
             }
+            // Textures and GPU data are variables of their own:
+            // `params.<name>` is renamed to them.
             let textures: Vec<(String, String)> = shader
                 .slots
                 .iter()
@@ -643,11 +781,23 @@ impl Custom {
                 .filter(|s| s.kind.layout().is_none())
                 .zip(&textures)
             {
-                let _ = writeln!(
-                    code,
-                    "@group(1) @binding({}) var {var}: texture_2d<f32>;",
-                    TEXTURE_BINDING + slot.at
-                );
+                let _ = match &slot.ty {
+                    Some(ty) => writeln!(
+                        code,
+                        "@group(1) @binding({}) var<storage, read> {var}: {ty};",
+                        DATA_BINDING + slot.at
+                    ),
+                    None if slot.kind.is_data() => writeln!(
+                        code,
+                        "@group(1) @binding({}) var {var}: texture_2d<f32>;",
+                        DATA_BINDING + slot.at
+                    ),
+                    None => writeln!(
+                        code,
+                        "@group(1) @binding({}) var {var}: texture_2d<f32>;",
+                        TEXTURE_BINDING + slot.at
+                    ),
+                };
             }
             if shader.reads_scene {
                 let _ = writeln!(

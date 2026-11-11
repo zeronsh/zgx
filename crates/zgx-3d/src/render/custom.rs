@@ -13,8 +13,8 @@ use super::{
 };
 use crate::{
     material::{
-        Custom, FRAME_TAIL, Param, SAMPLER_BINDING, SCENE_BINDING, Shader, TEXTURE_BINDING,
-        UNIFORM_BINDING, layer_offsets,
+        Custom, DATA_BINDING, FRAME_TAIL, Param, SAMPLER_BINDING, SCENE_BINDING, Shader,
+        TEXTURE_BINDING, UNIFORM_BINDING, layer_offsets,
     },
     texture::MAPS,
     world::Inner,
@@ -31,6 +31,13 @@ pub(crate) const COMPILING: u32 = crate::world::Reason::ShaderCompiling as u32;
 /// What a renderer keeps of custom materials.
 #[derive(Default)]
 pub(super) struct State {
+    /// What a buffer parameter binds before its data is on the device.
+    #[cfg(feature = "compute")]
+    zeros: Option<wgpu::Buffer>,
+    /// Each shader's GPU data's copies as its bindings were made with them
+    /// (`Shader::data_key`).
+    #[cfg(feature = "compute")]
+    data_seen: HashMap<u32, u64>,
     /// Pipelines by shader and variant, made with the layers as they are
     /// (`layers`).
     pipelines: HashMap<(u32, Variant), [wgpu::RenderPipeline; 2]>,
@@ -187,7 +194,56 @@ pub(super) fn binding_of(
         resources.push((SCENE_BINDING, Resource::View(view.clone())));
         resources.push((SCENE_BINDING + 1, Resource::Sampler(sampler.clone())));
     }
+    // An app's GPU data as this device holds it (its generation is in the
+    // binding's key: `Shader::data_key`), or zeros until it does.
+    #[cfg(feature = "compute")]
+    for slot in shader.slots.iter().filter(|s| s.kind.is_data()) {
+        use crate::material::Data;
+        let resource = match &values.data[slot.at as usize] {
+            Some(Data::Buffer(b)) => b.device_buffer().map(|(_, b)| Resource::Buffer(b)),
+            Some(Data::Texture(t)) => t.device_view().map(|(_, v)| Resource::View(v)),
+            None => None,
+        };
+        let resource = resource.unwrap_or_else(|| match slot.kind {
+            Param::GpuTexture => Resource::View(own.white[1].clone()),
+            _ => Resource::Buffer(zeros(state, device).clone()),
+        });
+        resources.push((DATA_BINDING + slot.at, resource));
+    }
     Binding { layout, resources }
+}
+/// `shader`'s bindings dropped to be made again, and the frame kept and
+/// the shadow drawn with them: its GPU data is another copy now.
+#[cfg(feature = "compute")]
+#[cold]
+#[inline(never)]
+fn rebind(gpu: &mut Gpu, shader: &Rc<Shader>) {
+    let state = &mut gpu.custom;
+    let gone: Vec<[u64; MAPS]> = state
+        .by_binding
+        .iter()
+        .filter(|(_, s)| Rc::ptr_eq(s, shader))
+        .map(|(key, _)| *key)
+        .collect();
+    for key in gone {
+        state.by_binding.remove(&key);
+        gpu.bindings.remove(&key);
+    }
+    gpu.kept = None;
+    gpu.shadow_drawn = None;
+}
+/// A buffer of zeros a buffer parameter binds until its data is on the
+/// device: as large as any element a shader may index first.
+#[cfg(feature = "compute")]
+fn zeros<'a>(state: &'a mut State, device: &wgpu::Device) -> &'a wgpu::Buffer {
+    state.zeros.get_or_insert_with(|| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("3D material zeros"),
+            size: 4096,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
+    })
 }
 /// `shader`'s textures, on the GPU, as drawn by this frame (kept while
 /// drawn, as a mesh's maps are).
@@ -313,6 +369,28 @@ fn layout_of(device: &wgpu::Device, shader: &Shader, extent: Extent) -> wgpu::Bi
         });
     }
     entries.extend((0..shader.textures).map(|i| texture(TEXTURE_BINDING + i)));
+    for slot in shader.slots.iter().filter(|s| s.kind.is_data()) {
+        let ty = match slot.ty {
+            // A buffer, read in either stage.
+            Some(_) => wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            // A texture of any float format, read unfiltered.
+            None => wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+        };
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: DATA_BINDING + slot.at,
+            visibility: both,
+            ty,
+            count: None,
+        });
+    }
     if shader.reads_scene {
         entries.extend([texture(SCENE_BINDING), sampler(SCENE_BINDING + 1)]);
     }
@@ -459,7 +537,8 @@ pub(super) fn prepare(
     if !same(&gpu.custom.layers, &shaders.layers) {
         relayer(gpu, device, &shaders.layers, runs);
     }
-    let landed = collect(gpu);
+    #[cfg_attr(not(feature = "compute"), allow(unused_mut))]
+    let mut landed = collect(gpu);
     write_tail(gpu, world, frame);
     let mut reads = false;
     let mut casting = 0xcbf2_9ce4_8422_2325_u64;
@@ -468,6 +547,21 @@ pub(super) fn prepare(
             continue;
         };
         reads |= shader.reads_scene;
+        // Its GPU data copied anew (another device's generation): its
+        // bindings, and frames and shadows kept with them, made again.
+        #[cfg(feature = "compute")]
+        if shader.slots.iter().any(|s| s.kind.is_data()) {
+            let key = shader.data_key();
+            if gpu
+                .custom
+                .data_seen
+                .insert(shader.id, key)
+                .is_some_and(|seen| seen != key)
+            {
+                rebind(gpu, &shader);
+                landed = true;
+            }
+        }
         // Its textures drawn this frame: kept on the GPU as maps are.
         if shader.textures > 0 {
             mark_used(gpu, &shader);

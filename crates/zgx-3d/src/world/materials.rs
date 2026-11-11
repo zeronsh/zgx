@@ -65,6 +65,13 @@ impl World {
         value: impl Into<ParamValue>,
     ) -> Result<(), ShaderError> {
         let value = value.into();
+        // (A texture or GPU data is in its meshes' bindings.)
+        #[cfg(feature = "compute")]
+        let texture = matches!(
+            value,
+            ParamValue::Texture(_) | ParamValue::Buffer(_) | ParamValue::GpuTexture(_)
+        );
+        #[cfg(not(feature = "compute"))]
         let texture = matches!(value, ParamValue::Texture(_));
         let found = self.inner.borrow().shader_of(shader).cloned();
         let message = |message| ShaderError {
