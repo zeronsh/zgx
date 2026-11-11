@@ -13925,7 +13925,12 @@ impl Scene {
                 }
             }
         }
-        self.resolve_moves();
+        // Every pending scroll move queued its own composite. Anything else
+        // changed pixels or geometry the old tree may no longer describe.
+        let changed = report.paint_nodes != 0
+            || report.layout_nodes != 0
+            || report.composite_nodes > self.pending_moves.len();
+        self.resolve_moves(changed);
         report.damage = match self.damage_grid.take() {
             Some(grid) if grid.full() => vec![self.viewport],
             Some(grid) => grid.rects(self.viewport),
@@ -14311,8 +14316,9 @@ impl Scene {
     /// Turn this frame's scroll translations into moves: damage what a copy
     /// cannot supply, or everything the content painted where a copy is
     /// unsafe (isolated ancestors, backdrop filters over the clip, nested or
-    /// overlapping moves, jumps past the viewport).
-    fn resolve_moves(&mut self) {
+    /// overlapping moves, jumps past the viewport). `changed` means the frame
+    /// also laid out, painted or composited something besides these moves.
+    fn resolve_moves(&mut self, changed: bool) {
         self.moves.clear();
         let pending = std::mem::take(&mut self.pending_moves);
         let mut moves = Vec::new();
@@ -14378,6 +14384,13 @@ impl Scene {
                     serial: 0,
                 }),
                 None => {
+                    if changed {
+                        // Removed content was damaged after translation, possibly
+                        // outside its clip. The current subtree cannot recover
+                        // those old pixels, nor a clip changed since the move.
+                        self.add_damage(self.viewport);
+                        continue;
+                    }
                     // What was damaged in it since it moved (a node gone, a
                     // box laid out again) was taken where the content is
                     // now, but painted where it was: there too.
