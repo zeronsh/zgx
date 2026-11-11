@@ -55,6 +55,9 @@ impl Parts {
     pub(super) const ABERRATION: u8 = 8;
     pub(super) const GRADE: u8 = 16;
     pub(super) const TABLE: u8 = 32;
+    /// It resolves the meshes' samples itself (`last_samples`): nothing
+    /// before it reads the scene.
+    pub(super) const RESOLVES: u8 = 64;
     fn constants(self) -> [(&'static str, f64); 6] {
         let on = |bit: u8| f64::from(u8::from(self.0 & bit != 0));
         [
@@ -73,8 +76,9 @@ struct Binds {
     compiled: u64,
     /// The bytes of the targets they hold.
     bytes: u64,
-    /// The scene, read by bloom's first step.
-    scene: wgpu::BindGroup,
+    /// The scene, read by bloom's first step (none where the last pass
+    /// resolves the samples itself).
+    scene: Option<wgpu::BindGroup>,
     /// Each of bloom's steps, read by the next step down and the one up.
     steps: Vec<wgpu::BindGroup>,
     /// The scene and bloom's first step, read by the last pass.
@@ -88,6 +92,9 @@ pub(super) struct Chain {
     shader: wgpu::ShaderModule,
     step_layout: wgpu::BindGroupLayout,
     last_layout: wgpu::BindGroupLayout,
+    /// The last pass's, reading the meshes' samples in place of the scene.
+    last_samples_layout: wgpu::BindGroupLayout,
+    last_samples_pipeline_layout: wgpu::PipelineLayout,
     samples_layout: wgpu::BindGroupLayout,
     /// The meshes' samples resolved into the scene.
     resolve: wgpu::RenderPipeline,
@@ -176,6 +183,42 @@ impl Chain {
                 },
             ],
         });
+        // As the last pass's, the meshes' samples at 0.
+        let last_samples_layout = {
+            let mut entries = vec![wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: true,
+                },
+                count: None,
+            }];
+            entries.extend([texture(1), texture(4), texture(5), sampler_entry(2)]);
+            for binding in [3, 6] {
+                entries.push(wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                });
+            }
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("3D post, last of the samples"),
+                entries: &entries,
+            })
+        };
+        let last_samples_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("3D post, last of the samples"),
+                bind_group_layouts: &[Some(&last_samples_layout)],
+                immediate_size: 0,
+            });
         let uniform = |binding| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -288,6 +331,8 @@ impl Chain {
             shader,
             step_layout,
             last_layout,
+            last_samples_layout,
+            last_samples_pipeline_layout,
             samples_layout,
             resolve,
             last_pipeline_layout,
@@ -453,7 +498,16 @@ impl Chain {
             .as_ref()
             .is_none_or(|b| b.compiled != graph.compiled)
         {
-            let scene = targets.scene.as_ref()?;
+            // The scene, or where the last pass resolves the samples
+            // itself, the samples.
+            let scene = targets.scene.as_ref();
+            let drawn = match scene {
+                Some(scene) => (scene, &self.last_layout),
+                None => (
+                    targets.colour.as_ref().filter(|_| targets.stored)?,
+                    &self.last_samples_layout,
+                ),
+            };
             let step = |view: &wgpu::TextureView| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("3D bloom step"),
@@ -476,11 +530,11 @@ impl Chain {
             let wider = targets.bloom.get(1).unwrap_or(&self.stand_in);
             let last = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("3D post, last"),
-                layout: &self.last_layout,
+                layout: drawn.1,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(scene),
+                        resource: wgpu::BindingResource::TextureView(drawn.0),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -510,7 +564,8 @@ impl Chain {
                     },
                 ],
             });
-            let samples = targets.colour.as_ref().filter(|_| targets.stored);
+            let samples = targets.colour.as_ref();
+            let samples = samples.filter(|_| targets.stored && scene.is_some());
             let samples = samples.map(|colour| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("3D post, samples"),
@@ -535,7 +590,7 @@ impl Chain {
                 compiled: graph.compiled,
                 samples,
                 bytes: graph.bytes(),
-                scene: step(scene),
+                scene: scene.map(step),
                 steps: targets.bloom.iter().map(step).collect(),
                 last,
             });
@@ -622,7 +677,12 @@ impl Chain {
         let clear = wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT);
         for (at, target) in steps.iter().enumerate() {
             match at {
-                0 => draw(encoder, &self.first, &binds.scene, target, clear),
+                0 => {
+                    let Some(scene) = &binds.scene else {
+                        return;
+                    };
+                    draw(encoder, &self.first, scene, target, clear);
+                }
                 _ => draw(encoder, &self.down, &binds.steps[at - 1], target, clear),
             }
         }
@@ -661,12 +721,19 @@ impl Chain {
             self.table = Some((lut.id(), texture.create_view(&Default::default())));
             self.binds = None;
         }
+        // Resolving the samples itself where nothing before needs the scene.
+        let resolves = graph.targets.as_ref().is_some_and(|t| t.scene.is_none());
+        let parts = Parts(parts.0 | if resolves { Parts::RESOLVES } else { 0 });
         let key = (format, parts);
         if !self.lasts.iter().any(|(k, _)| *k == key) {
+            let (entry, layout) = match resolves {
+                true => ("last_samples", &self.last_samples_pipeline_layout),
+                false => ("last", &self.last_pipeline_layout),
+            };
             let made = pipeline(
                 device,
-                (&self.shader, "last", &parts.constants()),
-                &self.last_pipeline_layout,
+                (&self.shader, entry, &parts.constants()),
+                layout,
                 format.into(),
             );
             self.lasts.push((key, made));

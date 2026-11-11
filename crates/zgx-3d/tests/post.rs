@@ -875,12 +875,18 @@ fn the_frames_index_counts_on_as_the_gpu_state_is_made_anew() {
     for _ in 0..20 {
         red();
     }
-    let before = red();
+    // The index the pass showed (to a step: past the middle tones an 8-bit
+    // level is more than one).
+    let index = |v: u8| (decode(v) * 255.).round() as i32;
+    let before = index(red());
     world.set_samples(1);
-    let after = red();
+    let after = index(red());
+    assert!(after + 1 >= before && after > 8, "{after} after {before}");
     // And on from there (the passes' bindings of the new targets).
-    assert!(red() > after);
-    assert!(after > before, "{after} after {before}");
+    for _ in 0..3 {
+        red();
+    }
+    assert!(index(red()) >= after + 2, "frozen at {after}");
 }
 
 /// A white square turned on black, unlit, as `antialiasing` says.
@@ -1386,5 +1392,155 @@ fn a_view_in_more_boxes_than_it_keeps_histories_for_rests() {
             first,
             "{count} boxes: nothing made after the first"
         );
+    }
+}
+
+/// An HDR pass that leaves the scene as it is: the chain then has a scene,
+/// resolved by a pass of its own.
+const SAME: &str = "#zgx post 1\nfn post(p: PostIn) -> vec4<f32> { return color(p.uv); }\n";
+
+#[test]
+fn the_last_pass_resolves_the_samples_itself_as_the_resolve_pass_does() {
+    // Where nothing before the last pass needs the scene it resolves the
+    // samples itself (no scene, no pass of the resolve's own): the frame as
+    // with them, within a level (the scene's half floats aside).
+    // A gentle warm table (a steep one would magnify the scene's rounding).
+    let strip: Vec<u8> = (0..64u32)
+        .flat_map(|i| {
+            let (r, g, b) = (i % 4, i / 16, (i / 4) % 4);
+            [r * 85, g * 85, b * 85 * 9 / 10, 255].map(|v| v as u8)
+        })
+        .collect();
+    let lut = Lut::from_strip(4 * 4, 4, &strip).unwrap();
+    let posts = [
+        Post {
+            vignette: Some(Vignette { intensity: 0. }),
+            ..Default::default()
+        },
+        Post {
+            // (Grain is the frame's index's: the frames drawn differ here.)
+            vignette: Some(Vignette::default()),
+            grade: Some(Grade {
+                temperature: 0.3,
+                lut: Some(lut),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ];
+    for tone in [ToneMapping::Neutral, ToneMapping::Aces, ToneMapping::Linear] {
+        for post in &posts {
+            let drawn = |scene_kept: bool| {
+                let world = scene();
+                world.set_tone_mapping(tone);
+                world.set_post(post.clone());
+                if scene_kept {
+                    world.add_post(PostPass::new(SAME)).unwrap();
+                }
+                let mut window = Window::new(&world)?;
+                Some((window.compiled(&world), world.temporary_bytes()))
+            };
+            let Some((folded, folded_bytes)) = drawn(false) else {
+                return;
+            };
+            let (resolved, resolved_bytes) = drawn(true).unwrap();
+            let (most, count) = differ(&folded, &resolved, 1);
+            if most > 1 {
+                let at = folded
+                    .chunks(4)
+                    .zip(resolved.chunks(4))
+                    .position(|(p, q)| p.iter().zip(q).any(|(x, y)| x.abs_diff(*y) > 1))
+                    .unwrap();
+                eprintln!(
+                    "{tone:?} post {}: {count} px, first at ({}, {}): {:?} vs {:?}",
+                    posts.iter().position(|p| std::ptr::eq(p, post)).unwrap(),
+                    at as u32 % SIZE,
+                    at as u32 / SIZE,
+                    &folded[at * 4..at * 4 + 4],
+                    &resolved[at * 4..at * 4 + 4]
+                );
+            }
+            assert!(most <= 1, "{tone:?}: {most} levels apart");
+            // No scene (nor its other half for the app's pass).
+            let scene = u64::from(SIZE * SIZE) * 8;
+            assert!(
+                folded_bytes + scene <= resolved_bytes,
+                "{folded_bytes} and {resolved_bytes}"
+            );
+        }
+    }
+}
+
+#[test]
+fn what_needs_the_scene_brings_it_back_and_its_going_lets_it_go() {
+    // The last pass resolving the samples itself; then in turn an app's HDR
+    // pass, automatic exposure, temporal antialiasing and bloom, each
+    // needing the scene, on and off again: the bytes as before and the
+    // world at rest.
+    let world = scene();
+    world.set_post(Post {
+        vignette: Some(Vignette { intensity: 0. }),
+        ..Default::default()
+    });
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let folded = window.compiled(&world);
+    let bytes = world.temporary_bytes();
+    let scene = u64::from(SIZE * SIZE) * 8;
+    let rests = |window: &mut Window, what: &str| {
+        let pixels = window.compiled(&world);
+        assert!(!world.view().animating(), "{what}: at rest");
+        pixels
+    };
+    let pass = world.add_post(PostPass::new(SAME)).unwrap();
+    rests(&mut window, "an HDR pass");
+    assert!(
+        world.temporary_bytes() >= bytes + scene,
+        "an HDR pass: a scene"
+    );
+    world.remove_post(pass);
+    type Turn<'a> = Box<dyn Fn(bool) + 'a>;
+    let mut steps: Vec<(&str, Turn)> = vec![
+        (
+            "automatic exposure",
+            Box::new(|on| {
+                world.set_post(Post {
+                    vignette: Some(Vignette { intensity: 0. }),
+                    auto_exposure: on.then(AutoExposure::default),
+                    ..Default::default()
+                })
+            }),
+        ),
+        (
+            "bloom",
+            Box::new(|on| {
+                world.set_post(Post {
+                    vignette: Some(Vignette { intensity: 0. }),
+                    bloom: on.then(Bloom::default),
+                    ..Default::default()
+                })
+            }),
+        ),
+        (
+            "temporal antialiasing",
+            Box::new(|on| {
+                world.set_antialiasing(if on {
+                    Antialiasing::Taa
+                } else {
+                    Antialiasing::Msaa
+                })
+            }),
+        ),
+    ];
+    assert_eq!(rests(&mut window, "the pass gone"), folded);
+    assert_eq!(world.temporary_bytes(), bytes, "the pass gone: no scene");
+    for (what, turn) in steps.drain(..) {
+        turn(true);
+        rests(&mut window, what);
+        assert_ne!(world.temporary_bytes(), bytes, "{what}: held otherwise");
+        turn(false);
+        assert_eq!(rests(&mut window, what), folded, "{what} off");
+        assert_eq!(world.temporary_bytes(), bytes, "{what} off: no scene");
     }
 }

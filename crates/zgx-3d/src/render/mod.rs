@@ -730,6 +730,7 @@ impl Viewport for Renderer {
                 display,
                 adapts,
                 taa: world.taa,
+                aberration: world.post.chromatic_aberration.is_some(),
             }
         };
         #[cfg(not(feature = "post"))]
@@ -1087,6 +1088,9 @@ impl Viewport for Renderer {
                     });
                     let (into, clear) = match scene {
                         Some(scene) => (scene, wgpu::Color::TRANSPARENT),
+                        // Samples the last pass resolves: clear as well,
+                        // the background mapped in after.
+                        None if chain.on => (target, wgpu::Color::TRANSPARENT),
                         None => (target, clear),
                     };
                     let draws = &world.scene_draws;

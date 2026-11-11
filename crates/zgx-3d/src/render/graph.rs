@@ -214,6 +214,23 @@ pub(super) struct Chain {
     pub(super) adapts: bool,
     /// Temporal antialiasing (one sample a pixel).
     pub(super) taa: bool,
+    /// Chromatic aberration (the last pass reads the scene around a pixel).
+    pub(super) aberration: bool,
+}
+impl Chain {
+    /// Whether the last pass resolves the meshes' samples itself: nothing
+    /// before it reads the scene (no bloom, app HDR pass, automatic
+    /// exposure or temporal antialiasing) nor it around a pixel. No scene
+    /// is made, and no pass of the resolve's own.
+    pub(super) fn folds(&self, samples: u32) -> bool {
+        self.on
+            && samples > 1
+            && !self.bloom
+            && self.hdr == 0
+            && !self.adapts
+            && !self.taa
+            && !self.aberration
+    }
 }
 
 /// The scene's format where the post chain follows: linear light, past 1.
@@ -358,8 +375,10 @@ impl Graph {
     #[cold]
     #[inline(never)]
     fn compile(&mut self, device: &wgpu::Device, config: Config) -> bool {
-        // The chain resolves the samples itself (`Pass::Resolve`).
-        let resolves = config.post.on && self.samples > 1;
+        // The chain resolves the samples itself: in a pass of its own
+        // (`Pass::Resolve`), or in the last.
+        let folds = config.post.folds(self.samples);
+        let resolves = config.post.on && self.samples > 1 && !folds;
         let wanted = [
             config.shadows.then_some(Pass::Shadows),
             config.transmits.then_some(Pass::Behind),
@@ -400,7 +419,7 @@ impl Graph {
         for (at, pass) in self.passes.iter().enumerate() {
             for &resource in pass.reads().iter().chain(pass.writes()) {
                 let desc = match resource {
-                    Resource::Colour if resolves => Desc {
+                    Resource::Colour if resolves || folds => Desc {
                         usage: read,
                         ..target(config.size, self.format)
                     },
@@ -411,7 +430,7 @@ impl Graph {
                     },
                     Resource::Depth => target(config.size, DEPTH),
                     Resource::Fresh if config.post.taa => scene,
-                    Resource::Scene if config.post.on => scene,
+                    Resource::Scene if config.post.on && !folds => scene,
                     Resource::Scene2 if config.post.hdr > 0 => scene,
                     Resource::Shown if config.post.display > 0 => Desc {
                         format: SCENE,
@@ -492,7 +511,7 @@ impl Graph {
             depth: depth.expect("the meshes' pass tests depth"),
             scene,
             bloom,
-            stored: resolves,
+            stored: resolves || folds,
             others,
             depth_read: config.post.taa,
             size: config.size,

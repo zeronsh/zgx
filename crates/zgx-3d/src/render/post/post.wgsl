@@ -217,9 +217,6 @@ fn tent(uv: vec2<f32>) -> vec3<f32> {
 
 @fragment fn last(in: Out) -> @location(0) vec4<f32> {
     var drawn = sane(textureLoad(scene, vec2<i32>(in.position.xy), 0));
-    let size = vec2<f32>(textureDimensions(scene));
-    // From the centre, the longer side's half 1.
-    let off = (in.uv - 0.5) * 2.0 * size / max(size.x, size.y);
     if ABERRATION {
         // Red spread outward and blue inward, the more toward the edges, as
         // a lens refracts them apart: a hundredth of the frame's width at
@@ -229,6 +226,22 @@ fn tent(uv: vec2<f32>) -> vec3<f32> {
         let blue = sane(textureSampleLevel(scene, bloom_sampler, in.uv + shift, 0.0));
         drawn = vec4(red.r, drawn.g, blue.b, max(drawn.a, max(red.a, blue.a)));
     }
+    return finished(drawn, in, vec2<f32>(textureDimensions(scene)));
+}
+
+// The last pass where nothing before it needs the scene: the meshes' samples
+// resolved here, as `resolve` resolves them, and finished (no aberration:
+// it reads the scene around the pixel).
+@fragment fn last_samples(in: Out) -> @location(0) vec4<f32> {
+    let drawn = resolved(vec2<i32>(in.position.xy));
+    return finished(drawn, in, vec2<f32>(textureDimensions(samples)));
+}
+
+// `drawn` (a pixel of the scene, premultiplied) exposed, bloom mixed in,
+// graded, mapped and encoded, over the background, in a frame of `size`.
+fn finished(drawn: vec4<f32>, in: Out, size: vec2<f32>) -> vec4<f32> {
+    // From the centre, the longer side's half 1.
+    let off = (in.uv - 0.5) * 2.0 * size / max(size.x, size.y);
     var light = drawn.rgb;
     if BLOOM {
         // The first step, with the second's tent added (bloom's last step
@@ -330,7 +343,9 @@ fn uncurve(y: f32) -> f32 {
 // 1 / (1 + luma), with the curve itself).
 @group(0) @binding(0) var samples: texture_multisampled_2d<f32>;
 @fragment fn resolve(in: Out) -> @location(0) vec4<f32> {
-    let at = vec2<i32>(in.position.xy);
+    return resolved(vec2<i32>(in.position.xy));
+}
+fn resolved(at: vec2<i32>) -> vec4<f32> {
     let n = textureNumSamples(samples);
     let exposed_by = exposure();
     var sum = vec4(0.0);
