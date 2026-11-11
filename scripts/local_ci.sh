@@ -181,6 +181,8 @@ if [ $linux = 1 ]; then
     "cargo test -p zgx-terminal --locked && cargo test -p zgx-fx --locked && cargo test -p zgx-audio --locked"
   step "linux: software Vulkan adapter" in_linux "vulkaninfo --summary | grep -E 'deviceName|driverName|driverInfo'"
   step "linux: zgx-gpu (Vulkan)" in_linux "cargo test -p zgx-gpu --locked"
+  step "linux: zgx-gpu view-features (Vulkan)" in_linux \
+    "cargo test -p zgx-gpu --features view-features --locked --lib --test gpu_views"
   step "linux: zgx-3d GPU tests, every feature (llvmpipe)" in_linux "ZGX_REQUIRE_GPU=1 cargo test -p zgx-3d --all-features --locked"
   skip "linux: native probes (real X11/Wayland windows), the patched Vulkan loader"
   if [ $gate = 1 ]; then
