@@ -191,13 +191,14 @@ pub(super) fn draw_main(
         let meshes = (runs, shown);
         let (view, projection, view_projection) = *camera;
         let frame = super::scene_draw::SceneFrame {
-            bind: frame_bind,
             view,
             projection,
             view_projection,
             size: gpu.graph.size(),
+            behind: false,
         };
-        super::scene_draw::draw_with(&mut pass, gpu, meshes, &frame, draws, instances_buffer);
+        let frame = (&frame, frame_bind);
+        super::scene_draw::draw_with(&mut pass, gpu, meshes, frame, draws, instances_buffer);
         return;
     }
     // Each run sets only what differs from the run before: wgpu records

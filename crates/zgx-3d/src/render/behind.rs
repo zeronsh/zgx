@@ -18,6 +18,7 @@ pub(super) fn draw_behind(
     (runs, shown): (&[Run], &[(u32, std::ops::Range<u32>)]),
     frame_bind: &wgpu::BindGroup,
     clear: wgpu::Color,
+    (draws, camera): (&super::SceneDraws, &super::scene_draw::CameraParts),
 ) {
     let (Some(behind), Some((instances_buffer, _)), Some(targets)) =
         (&gpu.graph.behind, &gpu.instances, &gpu.graph.targets)
@@ -64,6 +65,19 @@ pub(super) fn draw_behind(
         if !run.glass && !run.variant.transmitting() {
             draw_run(&mut pass, gpu, (run, spans), &mut bound);
         }
+    }
+    // What draws among the opaque meshes shows through what is in front.
+    if !draws.is_empty() {
+        let (view, projection, view_projection) = *camera;
+        let frame = super::scene_draw::SceneFrame {
+            view,
+            projection,
+            view_projection,
+            size: gpu.graph.size(),
+            behind: true,
+        };
+        let point = super::DrawPoint::AfterOpaque;
+        super::scene_draw::draw_at(&mut pass, &frame, draws, point);
     }
     drop(pass);
     behind.shrink(encoder);

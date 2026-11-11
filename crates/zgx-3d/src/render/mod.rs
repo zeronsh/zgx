@@ -916,7 +916,6 @@ impl Viewport for Renderer {
             let made = (gpu.format, gpu.samples);
             let device = (frame.device, frame.queue);
             let resources = FrameResources {
-                layout: &gpu.layout,
                 uniforms: &gpu.uniforms,
             };
             prepare_draws(&mut gpu.draws_prepared, made, &world, (device, resources));
@@ -941,7 +940,8 @@ impl Viewport for Renderer {
                 // smaller for rough surfaces to read blurred.
                 Pass::Behind => {
                     if runs.iter().any(|run| run.variant.transmitting()) || custom::reads(gpu) {
-                        draw_behind(frame.encoder, gpu, (runs, shown), frame_bind, clear);
+                        let draws = (&world.scene_draws, &camera_parts);
+                        draw_behind(frame.encoder, gpu, (runs, shown), frame_bind, clear, draws);
                     }
                 }
                 #[cfg(not(feature = "post"))]
@@ -1103,7 +1103,7 @@ impl Viewport for Renderer {
 #[cold]
 #[inline(never)]
 fn prepare_draws(
-    (prepared_for, prepared): &mut (Option<SceneTarget>, Vec<usize>),
+    (prepared_for, prepared): &mut (Option<SceneTarget>, Vec<u64>),
     (format, samples): (wgpu::TextureFormat, u32),
     world: &Inner,
     ((device, queue), resources): ((&wgpu::Device, &wgpu::Queue), FrameResources<'_>),
@@ -1117,19 +1117,13 @@ fn prepare_draws(
         *prepared_for = Some(target);
         prepared.clear();
     }
-    // Draws gone stay noted by address until the targets change: an
-    // address reused by a new draw is prepared again (`retain` below).
-    prepared.retain(|&p| {
-        world
-            .scene_draws
-            .iter()
-            .any(|d| std::rc::Rc::as_ptr(d) as *const () as usize == p)
-    });
-    for draw in &world.scene_draws {
-        let at = std::rc::Rc::as_ptr(draw) as *const () as usize;
-        if !prepared.contains(&at) {
+    // By the id each was registered by: a draw added where a removed one's
+    // address was is a draw of its own.
+    prepared.retain(|p| world.scene_draws.iter().any(|(id, _)| id == p));
+    for (id, draw) in &world.scene_draws {
+        if !prepared.contains(id) {
             draw.borrow_mut().prepare(device, queue, target, resources);
-            prepared.push(at);
+            prepared.push(*id);
         }
     }
 }

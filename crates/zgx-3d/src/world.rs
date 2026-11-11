@@ -2095,10 +2095,11 @@ mod tests {
         assert!(inner().settle.settled() && !world.view().animating());
         inner().unsettle(Settle::TEST, true);
         assert!(world.view().animating());
-        inner().unsettle(Settle::TEST | 1, true);
+        let animation = Reason::Animation as u32;
+        inner().unsettle(Settle::TEST | animation, true);
         inner().unsettle(Settle::TEST, false);
         assert!(world.view().animating(), "one more still is");
-        inner().unsettle(1, false);
+        inner().unsettle(animation, false);
         assert!(inner().settle.settled() && !world.view().animating());
     }
 

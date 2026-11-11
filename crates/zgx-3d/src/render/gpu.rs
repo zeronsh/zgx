@@ -132,7 +132,7 @@ pub(super) struct Gpu {
     pub(super) probes: Option<super::probes::Probes>,
     /// The scene's targets the world's scene draws were prepared for, and
     /// which (by address).
-    pub(super) draws_prepared: (Option<super::SceneTarget>, Vec<usize>),
+    pub(super) draws_prepared: (Option<super::SceneTarget>, Vec<u64>),
     /// The post chain's passes, made with the first frame with one on.
     #[cfg(feature = "post")]
     pub(super) post: Option<super::post::Chain>,
