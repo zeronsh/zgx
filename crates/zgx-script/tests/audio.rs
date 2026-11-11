@@ -1250,10 +1250,16 @@ fn a_reload_takes_an_effect_off_even_past_a_full_queue() {
     );
 }
 
-/// A scene with a looping sound at `x` metres to the camera's right, and a
-/// zone around the camera, its sounds' readiness as text `ready`.
+/// A scene with a looping sound at `x` metres to the camera's right, and
+/// (with `zone`) a hall around the camera, its sounds' readiness as text
+/// `ready`.
 #[cfg(feature = "audio-spatial")]
-fn scene_with_sound(tone: &std::path::Path, x: f32) -> String {
+fn scene_with_sound(tone: &std::path::Path, x: f32, zone: bool) -> String {
+    let zone = if zone {
+        "ui.reverb_zone { position = { 0, 0, 0 }, size = { 10, 4, 10 }, preset = \"hall\" },"
+    } else {
+        ""
+    };
     format!(
         "{READY}
         local hum = audio.sound(\"{}\")
@@ -1267,7 +1273,7 @@ fn scene_with_sound(tone: &std::path::Path, x: f32) -> String {
                 ui.group {{
                     ui.sound3d {{ sound = hum, loop = true, position = {{ {x}, 0, 0 }}, falloff = {{ ref = 1, max = 50 }} }},
                 }},
-                ui.reverb_zone {{ position = {{ 0, 0, 0 }}, size = {{ 10, 4, 10 }}, preset = \"hall\" }},
+                {zone}
             }},
         }}",
         tone.display()
@@ -1279,7 +1285,7 @@ fn scene_with_sound(tone: &std::path::Path, x: f32) -> String {
 #[test]
 fn a_sound3d_plays_from_its_object_once_its_sound_is_ready() {
     let tone = wav("sound3d", 2.);
-    let mut s = Sounding::new(&scene_with_sound(&tone, 4.));
+    let mut s = Sounding::new(&scene_with_sound(&tone, 4., false));
     s.ready(1);
     s.app.frames(3);
     assert_eq!(s.app.error(), None);
@@ -1295,12 +1301,27 @@ fn a_sound3d_plays_from_its_object_once_its_sound_is_ready() {
 
 #[cfg(feature = "audio-spatial")]
 #[test]
+fn a_reverb_zone_around_the_camera_is_heard() {
+    let tone = wav("sound3d-zone", 2.);
+    let mut s = Sounding::new(&scene_with_sound(&tone, 4., true));
+    s.ready(1);
+    s.app.frames(3);
+    assert_eq!(s.app.error(), None);
+    let out = s.mixer.frames(9600);
+    let left = out.chunks(2).fold(0f32, |l, f| l.max(f[0].abs()));
+    // The sound is all on the right; the hall around the camera rings on
+    // both sides.
+    assert!(left > 0.001, "the hall's reverb on the left: {left}");
+}
+
+#[cfg(feature = "audio-spatial")]
+#[test]
 fn a_reload_stops_a_scenes_sounds() {
     let tone = wav("sound3d-reload", 2.);
     let dir = tone.parent().unwrap().join("sound3d-app");
     std::fs::create_dir_all(&dir).unwrap();
     let app = dir.join("app.luau");
-    std::fs::write(&app, scene_with_sound(&tone, 2.)).unwrap();
+    std::fs::write(&app, scene_with_sound(&tone, 2., true)).unwrap();
     let path = app.clone();
     let mut s = Sounding::with(move |runtime| ScriptHost::new(runtime, path));
     s.ready(1);
