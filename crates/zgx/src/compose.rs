@@ -2348,14 +2348,7 @@ impl CanvasLabels {
             };
             let node = match self.nodes.get_mut(index) {
                 Some((node, shown)) => {
-                    // Its text alone changed (a terminal row as output scrolls
-                    // it): a content change, which stops at the group, a box
-                    // of the canvas's size it places, laid out alone rather
-                    // than the canvas's ancestors (`Scene::set_text`).
-                    match shown.color == text.color && shown.size == text.size {
-                        true => scene.set_text(*node, text.text.clone()),
-                        false => scene.set_kind(*node, kind),
-                    }
+                    scene.set_kind(*node, kind);
                     *shown = text.clone();
                     *node
                 }
