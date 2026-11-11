@@ -112,10 +112,14 @@ fn buffer_attributes(width: u32, height: u32) -> CFRetained<CFDictionary<CFStrin
 
 impl SurfaceReadback {
     /// Gives back the buffers no one holds (at rest, all but the one shown).
+    /// The pool first, then CoreVideo's texture cache: the cache keeps a
+    /// texture of each buffer the pool still has, and the buffer with it,
+    /// so flushed only before the pool (after each frame) it kept them.
     pub fn release_unused(&self) {
         if let Some((_, pool)) = &self.pool {
             pool.flush(CVPixelBufferPoolFlushFlags::ExcessBuffers);
         }
+        self.flush();
     }
     /// How many buffers it made outside its pool, all of the pool's held.
     #[doc(hidden)]

@@ -802,6 +802,74 @@ fn a_views_player_keeps_scrubbed_frames_as_pixel_buffers_until_rest() {
     }
 }
 
+/// A view's player paused gives back the pixel buffers no one holds once it
+/// has rested a while, once a pause and never while it plays: CoreVideo
+/// holds the last ones about a second past the last frame, so giving back at
+/// the pause itself freed little, and a paused player held two (7 MB at 1280
+/// by 720) for as long as it was paused.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_paused_views_player_gives_back_its_buffers_once_at_rest() {
+    let dir = temp_dir("player-paused-release");
+    std::fs::write(dir.join("video.luau"), SCRIPT).unwrap();
+    let mut held = None;
+    let path = dir.to_path_buf();
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            player.open("Bar", json!({ "color": "#00ff00" }), 40);
+            let view = div().w(100.).h(50.).child(player.view().w(100.).h(50.));
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    player.keep_frames_for(Duration::from_millis(300));
+    drawn_at(&mut stage, &player, 40);
+    // At rest after the frame it opened at: given back once.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while player.surface_releases() == 0 {
+        stage.step().unwrap();
+        assert!(Instant::now() < deadline, "never gave back at rest");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let rested = player.surface_releases();
+    // Playing: drawing on, none given back however long it plays.
+    player.play(true);
+    let until = Instant::now() + Duration::from_millis(900);
+    while Instant::now() < until {
+        stage.step().unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let played = player.frame.with_untracked(|f| *f);
+    assert_ne!(played, 40, "it never played");
+    assert_eq!(player.surface_releases(), rested, "gave back while playing");
+    // Paused: once, a while on, and not again.
+    player.play(false);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while player.surface_releases() == rested {
+        stage.step().unwrap();
+        assert!(Instant::now() < deadline, "never gave back paused");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(1000));
+    stage.step().unwrap();
+    assert_eq!(
+        player.surface_releases(),
+        rested + 1,
+        "gave back more than once a pause"
+    );
+}
+
 /// Asks that show the frame it's at again (a reload, a view asking for
 /// pixel buffers, seen again) keep a frame asked for just before them: an
 /// open at 40 and a reload asked together show 40, not the frame it was at.
