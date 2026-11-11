@@ -461,22 +461,48 @@ pub(super) struct Probes {
 }
 
 /// Whether `world`'s meshes take their diffuse light from probes on this
-/// device this frame: it has volumes, the device traces rays, and it
-/// shades through no clusters or cascades (`beside`). Where it has
-/// volumes and not, says why (`World::probes_status`).
-pub(super) fn probed(world: &Inner, device: &wgpu::Device, beside: bool) -> bool {
+/// device this frame: it has volumes and the device traces rays. Where it
+/// has volumes and not, says why (`World::probes_status`).
+pub(super) fn probed(world: &Inner, device: &wgpu::Device) -> bool {
     if !world.gi.any() {
         return false;
     }
-    let off = if !super::raytrace::ray_queries(device) {
-        crate::ProbesStatus::NoRayQueries
-    } else if beside {
-        crate::ProbesStatus::BesideClustersOrCascades
-    } else {
-        return true;
-    };
-    world.gi.status.set(off);
-    false
+    if !super::raytrace::ray_queries(device) {
+        world.gi.status.set(crate::ProbesStatus::NoRayQueries);
+        return false;
+    }
+    true
+}
+
+/// The probes' part of a frame layout shading through clusters or
+/// cascades as well (`lights::make_layouts`).
+#[cfg(feature = "lighting")]
+pub(super) fn layout_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
+    probe_entries(wgpu::ShaderStages::FRAGMENT)
+}
+/// And of its binding (`lights::make_bind`): none before the probes are.
+#[cfg(feature = "lighting")]
+pub(super) fn bind_entries(gpu: &Gpu) -> Option<[wgpu::BindGroupEntry<'_>; 4]> {
+    let probes = gpu.probes.as_ref()?;
+    let layout = probes.layout.as_ref()?;
+    Some([
+        wgpu::BindGroupEntry {
+            binding: 9,
+            resource: wgpu::BindingResource::TextureView(&layout.light.view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 10,
+            resource: wgpu::BindingResource::TextureView(&layout.depth.view),
+        },
+        wgpu::BindGroupEntry {
+            binding: 11,
+            resource: layout.set.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 12,
+            resource: wgpu::BindingResource::Sampler(&probes.sampler),
+        },
+    ])
 }
 
 /// Group 0's layout for a probe-lit pipeline (`lit`: with the environment
@@ -520,6 +546,8 @@ pub(super) fn frame(
         uniforms: frame_buffer,
         environment: cube,
         environment_layout,
+        #[cfg(feature = "lighting")]
+        lights,
         ..
     } = gpu;
     let probes = slot.get_or_insert_with(|| Probes {
@@ -547,6 +575,9 @@ pub(super) fn frame(
     {
         probes.layout = Some(layout(device, world));
         probes.bind = None;
+        // Clusters' and cascades' bindings hold the atlases too.
+        #[cfg(feature = "lighting")]
+        lights.remade();
         probes.next = 0;
         probes.rounds = 0;
         probes.done = 0;

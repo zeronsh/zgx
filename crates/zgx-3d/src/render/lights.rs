@@ -55,12 +55,12 @@ pub(super) struct Lights {
     pub(super) sun: Option<super::shadows::cascades::Sun>,
     refused: Option<crate::Cascades>,
     /// The frame's layouts with the lists or the cascades, by `key`.
-    layouts: [Option<wgpu::BindGroupLayout>; 8],
+    layouts: [Option<wgpu::BindGroupLayout>; 16],
     /// Their bindings, the renderer's frame binding each was made beside
     /// and the count of this one's own remakes (`made`) then: a shadow
     /// map, an environment, a list's buffer or cascades made again make
     /// them again.
-    binds: [Option<(wgpu::BindGroup, Option<wgpu::BindGroup>, u64)>; 8],
+    binds: [Option<(wgpu::BindGroup, Option<wgpu::BindGroup>, u64)>; 16],
     made: u64,
     /// Times the lights were binned, for tests.
     pub(super) binnings: u64,
@@ -452,10 +452,12 @@ fn make_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
 }
 
 /// A frame's layout and binding: lit by an environment (1), shading
-/// through clusters (2), shadowed by cascades (4). 0 is today's own.
+/// through clusters (2), shadowed by cascades (4), lit by irradiance
+/// probes as well (8, the `gi` feature's `probes`). 0 is today's own.
 pub(super) const LIT: usize = 1;
 pub(super) const CLUSTERED: usize = 2;
 pub(super) const CASCADED: usize = 4;
+pub(super) const PROBED: usize = 8;
 /// `on`'s bit of a key.
 fn bit(on: bool, bit: usize) -> usize {
     if on { bit } else { 0 }
@@ -465,6 +467,7 @@ pub(super) fn key_of(variant: super::Variant) -> usize {
     bit(variant.lit(), LIT)
         | bit(variant.clustered(), CLUSTERED)
         | bit(variant.cascaded(), CASCADED)
+        | bit(variant.probed(), PROBED)
 }
 
 impl Lights {
@@ -473,14 +476,20 @@ impl Lights {
         bit(self.on, CLUSTERED) | bit(self.sun.is_some(), CASCADED)
     }
     /// The frame's binding where it shades through clusters or cascades.
-    pub(super) fn frame_bind(&self, lit: bool) -> Option<&wgpu::BindGroup> {
+    pub(super) fn frame_bind(&self, lit: bool, probed: bool) -> Option<&wgpu::BindGroup> {
         let key = self.key();
         if key == 0 {
             return None;
         }
-        self.binds[key | bit(lit, LIT)]
+        self.binds[key | bit(lit, LIT) | bit(probed, PROBED)]
             .as_ref()
             .map(|(bind, ..)| bind)
+    }
+    /// What its bindings hold besides its own was made again (the probes'
+    /// atlases): they're made again with the next frame.
+    #[cfg_attr(not(feature = "gi"), allow(dead_code))]
+    pub(super) fn remade(&mut self) {
+        self.made += 1;
     }
 }
 
@@ -489,12 +498,12 @@ impl Lights {
 /// environment), the lists' buffer or the cascades were. After the
 /// frame's shadow map and environment are made.
 #[inline(never)]
-pub(super) fn bind(gpu: &mut Gpu, device: &wgpu::Device, lit: bool) {
+pub(super) fn bind(gpu: &mut Gpu, device: &wgpu::Device, lit: bool, probed: bool) {
     let key = gpu.lights.key();
     if key == 0 {
         return;
     }
-    let key = key | bit(lit, LIT);
+    let key = key | bit(lit, LIT) | bit(probed, PROBED);
     let from = if lit {
         gpu.environment_bind.as_ref()
     } else {
@@ -566,8 +575,12 @@ fn make_bind(gpu: &mut Gpu, device: &wgpu::Device, key: usize) -> Option<wgpu::B
             resource: wgpu::BindingResource::TextureView(&sun.array),
         });
     }
+    #[cfg(feature = "gi")]
+    if key & PROBED != 0 {
+        entries.extend(super::probes::bind_entries(gpu)?);
+    }
     Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("3D frame, clustered lights or cascades"),
+        label: Some("3D frame, clustered lights, cascades or probes"),
         layout,
         entries: &entries,
     }))
@@ -653,9 +666,13 @@ pub(super) fn make_layouts(gpu: &mut Gpu, device: &wgpu::Device, key: usize) {
             depth(wgpu::TextureViewDimension::D2Array),
         ));
     }
+    #[cfg(feature = "gi")]
+    if key & PROBED != 0 {
+        entries.extend(super::probes::layout_entries());
+    }
     gpu.lights.layouts[key] = Some(device.create_bind_group_layout(
         &wgpu::BindGroupLayoutDescriptor {
-            label: Some("3D frame, clustered lights or cascades"),
+            label: Some("3D frame, clustered lights, cascades or probes"),
             entries: &entries,
         },
     ));

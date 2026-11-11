@@ -470,23 +470,39 @@ fn a_world_says_what_its_probes_did() {
 
 #[cfg(feature = "lighting")]
 #[test]
-fn a_world_shading_through_clusters_says_its_probes_are_off() {
-    let world = World::new();
-    room(&world);
-    world.set_clustered_lights(true);
-    world.add_probes(volume()).unwrap();
-    let Some(mut window) = Window::new(&world) else {
+fn probes_light_a_world_shading_through_clusters_and_cascades() {
+    // The room as before, its lamp shaded through clusters and a sun (its
+    // light nothing, its shadow in cascades): the block's face the lamp
+    // misses is lit by the probes as without them.
+    let shade = |lighting: bool| {
+        let world = World::new();
+        room(&world);
+        if lighting {
+            world.set_clustered_lights(true);
+            world.set_shadows(true);
+            world.set_cascades(Some(Cascades::new(2)));
+            world.add_light(Light::Directional {
+                direction: vec3(0.3, -1., 0.2),
+                color: [1.; 3],
+                intensity: 0.,
+            });
+        }
+        world.add_probes(volume().per_frame(216)).unwrap();
+        let mut window = Window::new(&world)?;
+        settle(&mut window, &world, 500);
+        (world.probes_status() == ProbesStatus::Traced).then(|| window.pixels())
+    };
+    let Some(plain) = shade(false) else {
         return;
     };
-    window.draw();
-    if world.probes_status() == ProbesStatus::NoRayQueries {
-        return;
-    }
-    assert_eq!(
-        world.probes_status(),
-        ProbesStatus::BesideClustersOrCascades
+    let lit = shade(true).expect("probes traced beside clusters and cascades");
+    let face = (102, 110);
+    let (a, b) = (around(&plain, face, 6), around(&lit, face, 6));
+    assert!(b[1] > 0.15, "the block's face: {b:?}");
+    assert!(
+        a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.04),
+        "{a:?} without clusters, {b:?} with"
     );
-    assert!(!world.probes_traced());
 }
 
 #[test]

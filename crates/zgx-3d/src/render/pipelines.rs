@@ -49,7 +49,7 @@ pub(super) fn make_layouts(
 ) {
     make_layout(gpu, device, extent);
     #[cfg(feature = "lighting")]
-    let key = super::lights::key_of(variant) & !super::lights::LIT;
+    let key = super::lights::key_of(variant) & !(super::lights::LIT | super::lights::PROBED);
     #[cfg(feature = "lighting")]
     if key != 0 {
         super::lights::make_layouts(gpu, device, super::lights::key_of(variant));
@@ -65,7 +65,7 @@ pub(super) fn make_layouts(
 /// environment, shading through clusters or cascades, or neither.
 pub(super) fn group0_of(gpu: &Gpu, variant: Variant) -> &wgpu::BindGroupLayout {
     #[cfg(feature = "lighting")]
-    let key = super::lights::key_of(variant) & !super::lights::LIT;
+    let key = super::lights::key_of(variant) & !(super::lights::LIT | super::lights::PROBED);
     match &gpu.environment_layout {
         #[cfg(feature = "lighting")]
         _ if key != 0 => super::lights::layout_of(gpu, super::lights::key_of(variant)),

@@ -100,10 +100,6 @@ pub enum ProbesStatus {
     /// compiles with FXC: `zgx_gpu::ray_queries_status` says which): its
     /// volumes light nothing.
     NoRayQueries,
-    /// It shades through clustered lights or the sun's cascades (the
-    /// `lighting` feature), beside which probes don't yet light meshes:
-    /// its volumes light nothing.
-    BesideClustersOrCascades,
 }
 
 /// A volume in a world (`World::add_probes`).

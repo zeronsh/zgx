@@ -713,10 +713,9 @@ impl Viewport for Renderer {
         );
         #[cfg(not(feature = "lighting"))]
         let (clustered, cascaded) = (false, false);
-        // Diffuse light from probes (`probes.rs`). Not yet beside clusters
-        // or cascades: those take group 0's other bindings.
+        // Diffuse light from probes (`probes.rs`).
         #[cfg(feature = "gi")]
-        let probed = probes::probed(&world, frame.device, clustered || cascaded);
+        let probed = probes::probed(&world, frame.device);
         #[cfg(not(feature = "gi"))]
         let probed = false;
         let lighting = if clustered { Variant::CLUSTERED } else { 0 }
@@ -818,8 +817,6 @@ impl Viewport for Renderer {
         if let Some(environment) = world.environment.as_ref() {
             gpu.environment(frame.device, frame.queue, environment);
         }
-        #[cfg(feature = "lighting")]
-        lights::bind(gpu, frame.device, lit);
         #[cfg(feature = "gi")]
         probes::frame(
             gpu,
@@ -829,6 +826,9 @@ impl Viewport for Renderer {
             &uniforms,
             (probed, kept.is_none().then_some(&all[..])),
         );
+        // (After the probes', which its binding may hold.)
+        #[cfg(feature = "lighting")]
+        lights::bind(gpu, frame.device, lit, probed);
         frame
             .queue
             .write_buffer(&gpu.uniforms, 0, bytemuck::bytes_of(&uniforms));
@@ -902,7 +902,7 @@ impl Viewport for Renderer {
             _ => &gpu.bind,
         };
         #[cfg(feature = "lighting")]
-        let frame_bind = gpu.lights.frame_bind(lit).unwrap_or(frame_bind);
+        let frame_bind = gpu.lights.frame_bind(lit, probed).unwrap_or(frame_bind);
         let clear = world
             .background
             .map_or(wgpu::Color::TRANSPARENT, |[r, g, b, a]| wgpu::Color {
