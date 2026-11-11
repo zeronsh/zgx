@@ -1129,3 +1129,125 @@ fn a_table_in_acescct_maps_the_light_itself_in_place_of_the_tone_curve() {
     world.set_tone_mapping(ToneMapping::Aces);
     assert_eq!(shown(&mut window)[0], up);
 }
+
+/// A world's one view in boxes of `sides`, one under the other, in one
+/// window: drawn twice a frame (at the frame's one instant).
+struct Boxes {
+    ui: Ui,
+    gpu: GpuRenderer,
+    sides: Vec<u32>,
+    width: u32,
+}
+impl Boxes {
+    fn new(world: &World, sides: &[u32]) -> Option<Self> {
+        let width = *sides.iter().max().unwrap();
+        let height: u32 = sides.iter().sum();
+        let gpu = match GpuRenderer::new(width, height) {
+            Ok(gpu) => gpu,
+            Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+                panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
+            }
+            Err(_) => return None,
+        };
+        let mut ui = Ui::new(width as f32, height as f32);
+        let mut column = div().size(width as f32, height as f32);
+        for &side in sides {
+            column = column.child(gpu_view("World", world.view()).size(side as f32, side as f32));
+        }
+        ui.mount(column);
+        Some(Self {
+            ui,
+            gpu,
+            sides: sides.to_vec(),
+            width,
+        })
+    }
+    /// A frame: each box's pixels.
+    fn draw(&mut self) -> Vec<Vec<u8>> {
+        self.ui.prepare_frame();
+        let report = self.ui.scene.borrow_mut().flush();
+        self.gpu
+            .render(&self.ui.scene.borrow(), &report.damage)
+            .unwrap();
+        let pixels = self.gpu.readback().unwrap();
+        let mut top = 0;
+        let mut boxes = Vec::new();
+        for &side in &self.sides {
+            let mut own = Vec::new();
+            for y in top..top + side {
+                let row = (y * self.width * 4) as usize;
+                own.extend_from_slice(&pixels[row..row + side as usize * 4]);
+            }
+            boxes.push(own);
+            top += side;
+        }
+        boxes
+    }
+    /// Frames until `world` rests (each asked for, as a window would while
+    /// it animates): how many, and the last's boxes.
+    fn settled(&mut self, world: &World) -> (u32, Vec<Vec<u8>>) {
+        for frames in 1..=40 {
+            world.view().invalidate();
+            let boxes = self.draw();
+            if !world.view().animating() {
+                return (frames, boxes);
+            }
+        }
+        panic!("still drawing after 40 frames");
+    }
+}
+
+#[test]
+fn a_view_in_two_boxes_gathers_its_frames_once_a_frame() {
+    // Temporal antialiasing shown once, and in two boxes of its size: as
+    // many frames before it rests, each box as the one.
+    let once = slanted(Antialiasing::Taa);
+    let Some(mut one) = Boxes::new(&once, &[SIZE]) else {
+        return;
+    };
+    let (frames, single) = one.settled(&once);
+    let twice = slanted(Antialiasing::Taa);
+    let (count, boxes) = Boxes::new(&twice, &[SIZE, SIZE]).unwrap().settled(&twice);
+    assert_eq!(count, frames, "as many frames");
+    assert!(
+        boxes[0] == single[0] && boxes[1] == single[0],
+        "each box as the one"
+    );
+}
+
+#[test]
+fn a_view_in_boxes_of_two_sizes_keeps_a_history_for_each() {
+    // Each box gathers its own frames: as smooth as the view shown alone
+    // at its size, and the world rests.
+    let (small, large) = (SIZE / 2, SIZE);
+    let alone = |side| {
+        let world = slanted(Antialiasing::Taa);
+        Some(Boxes::new(&world, &[side])?.settled(&world).1.remove(0))
+    };
+    let Some(large_alone) = alone(large) else {
+        return;
+    };
+    let small_alone = alone(small).unwrap();
+    let world = slanted(Antialiasing::Taa);
+    let (_, boxes) = Boxes::new(&world, &[large, small]).unwrap().settled(&world);
+    assert!(boxes[0] == large_alone, "the large box");
+    assert!(boxes[1] == small_alone, "the small box");
+}
+
+#[test]
+fn automatic_exposure_in_two_boxes_adapts_once_a_frame() {
+    let shown = |sides: &[u32]| {
+        let world = flat([0.01, 0.01, 0.01, 1.]);
+        world.set_post(Post {
+            auto_exposure: Some(AutoExposure::default()),
+            vignette: Some(Vignette { intensity: 0. }),
+            ..Default::default()
+        });
+        let (frames, boxes) = Boxes::new(&world, sides)?.settled(&world);
+        Some((frames, at(&boxes[0], SIZE / 2, SIZE / 2)))
+    };
+    let Some(once) = shown(&[SIZE]) else {
+        return;
+    };
+    assert_eq!(shown(&[SIZE, SIZE]), Some(once));
+}

@@ -1089,17 +1089,24 @@ impl Viewport for Renderer {
                         .post
                         .get_or_insert_with(|| post::Chain::new(frame.device));
                     let device = (frame.device, frame.queue);
-                    let at = (view_projection, frame.time, world.cuts, world.meshes);
+                    let at = post::At {
+                        view_projection,
+                        time: frame.time,
+                        cuts: world.cuts,
+                        meshes: world.meshes,
+                        revision: world.revision,
+                        tick: gpu.tick.index,
+                    };
                     // The display's curve, as the last pass maps (the stops alone).
                     let tone = match world.tone_mapping {
                         crate::ToneMapping::Neutral => 0.,
                         crate::ToneMapping::Aces => 1.,
                         crate::ToneMapping::Linear => 2.,
                     };
-                    let look = (world.revision, (world.exposure.exp2(), tone));
-                    let since = post.taa(device, frame.encoder, &gpu.graph, at, look);
+                    let look = (world.exposure.exp2(), tone);
+                    let gathering = post.taa(device, frame.encoder, &gpu.graph, &at, look);
                     // Drawing until its frames since the last change are in.
-                    world.unsettle(crate::world::Settle::TAA, since + 1 < post::FRAMES);
+                    world.unsettle(crate::world::Settle::TAA, gathering);
                 }
                 #[cfg(feature = "post")]
                 Pass::Resolve => {

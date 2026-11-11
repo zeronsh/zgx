@@ -16,7 +16,7 @@ pub(super) fn without_compute() -> bool {
 }
 mod exposure;
 mod taa;
-pub(super) use taa::{FRAMES, jitter, jittered};
+pub(super) use taa::{At, jitter, jittered};
 
 use super::graph::{Graph, SCENE, bloom_format};
 use zgx_gpu::wgpu;
@@ -322,25 +322,18 @@ impl Chain {
         }
     }
 
-    /// Temporal antialiasing's blend (`taa::Taa::run`), the world at
-    /// `revision`: frames drawn since it last changed.
+    /// Temporal antialiasing's blend (`taa::Taa::run`): whether it has
+    /// frames still to gather since the world last changed.
     pub(super) fn taa(
         &mut self,
         device: (&wgpu::Device, &wgpu::Queue),
         encoder: &mut wgpu::CommandEncoder,
         graph: &Graph,
-        at: (crate::math::Mat4, std::time::Instant, u64, u64),
-        (revision, look): (u64, (f32, f32)),
-    ) -> u32 {
+        at: &taa::At,
+        look: (f32, f32),
+    ) -> bool {
         let taa = self.taa.get_or_insert_with(|| taa::Taa::new(device.0));
-        if taa.revision == revision {
-            taa.since += 1;
-        } else {
-            taa.revision = revision;
-            taa.since = 0;
-        }
-        taa.run(device, encoder, graph, at, look);
-        taa.since
+        taa.run(device, encoder, graph, at, look)
     }
     /// Temporal antialiasing's history let go of (it's off).
     pub(super) fn drop_taa(&mut self) {

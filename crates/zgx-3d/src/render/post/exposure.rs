@@ -39,8 +39,10 @@ pub(super) struct Exposure {
     bind: Option<(u64, wgpu::BindGroup)>,
     read: wgpu::Buffer,
     copy: Arc<AtomicU8>,
-    /// The last frame's time, for its step.
+    /// The last frame's time, for its step, and whether it had settled as
+    /// it said then.
     last: Option<Instant>,
+    answer: Option<bool>,
 }
 
 impl Exposure {
@@ -128,6 +130,7 @@ impl Exposure {
             ),
             copy: Arc::new(AtomicU8::new(IDLE)),
             last: None,
+            answer: None,
         }
     }
 
@@ -149,7 +152,13 @@ impl Exposure {
         settings: &AutoExposure,
         time: Instant,
     ) -> Option<bool> {
+        // The same instant again (one view drawn twice a frame): adapted
+        // already, its histogram the same, its answer the frame's.
+        if self.last == Some(time) {
+            return self.answer;
+        }
         let settled = self.settled();
+        self.answer = settled;
         let scene = graph.targets.as_ref()?.scene.as_ref()?;
         // A step of frame time; after a long gap, the frame's own light.
         let step = self

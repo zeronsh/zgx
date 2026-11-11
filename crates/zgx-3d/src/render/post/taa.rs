@@ -65,30 +65,61 @@ struct History {
 /// The kept depth's format.
 const DEPTH_KEPT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 
+/// What temporal antialiasing keeps of the frames before, for the frames of
+/// one size (one view, or each box of a view drawn in two): its history,
+/// and where the blend is.
+struct Track {
+    uniforms: wgpu::Buffer,
+    history: Option<History>,
+    /// The bindings reading each history, for the compile they were made for.
+    binds: [Option<wgpu::BindGroup>; 2],
+    compiled: u64,
+    step: Step,
+    /// The renderer's tick (`render::Tick::index`) it last ran at, and how
+    /// it was before: a view drawn again in the same frame runs as it did,
+    /// adding no frame.
+    began: Option<(u32, Step)>,
+}
+
+/// Where a track's blend is: which history holds the last frame, whether
+/// it holds one to blend and of how many frames; last frame's view and
+/// projection (unjittered), time and the world's cuts then; the world's
+/// meshes and changes as of the last frame, and frames drawn since.
+#[derive(Clone, Copy)]
+struct Step {
+    at: usize,
+    valid: bool,
+    frames: u32,
+    before: Option<Mat4>,
+    last: Option<Instant>,
+    cuts: u64,
+    meshes: u64,
+    revision: u64,
+    since: u32,
+}
+
+/// What a frame's blend follows: this frame drawn with `view_projection`
+/// (unjittered) at `time`, the world cut `cuts` times so far, its meshes
+/// and changes as counted (`Inner::meshes`, `revision`), the renderer's
+/// tick.
+pub(in crate::render) struct At {
+    pub(in crate::render) view_projection: Mat4,
+    pub(in crate::render) time: Instant,
+    pub(in crate::render) cuts: u64,
+    pub(in crate::render) meshes: u64,
+    pub(in crate::render) revision: u64,
+    pub(in crate::render) tick: u32,
+}
+
+/// The most sizes kept at once (boxes of one view drawn at sizes of their
+/// own).
+const TRACKS: usize = 4;
+
 pub(super) struct Taa {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
-    uniforms: wgpu::Buffer,
-    history: Option<History>,
-    /// Which history holds the last frame; whether it holds one to blend,
-    /// and of how many frames.
-    at: usize,
-    valid: bool,
-    frames: u32,
-    /// The bindings reading each history, for the compile they were made for.
-    binds: [Option<wgpu::BindGroup>; 2],
-    compiled: u64,
-    /// Last frame's view and projection (unjittered), time and the world's
-    /// cuts then.
-    before: Option<Mat4>,
-    last: Option<Instant>,
-    cuts: u64,
-    /// The world's meshes as of the last frame (`Inner::meshes`).
-    meshes: u64,
-    /// The world's changes as of the last frame, and frames drawn since.
-    pub(in crate::render) revision: u64,
-    pub(in crate::render) since: u32,
+    tracks: Vec<Track>,
 }
 
 impl Taa {
@@ -175,6 +206,77 @@ impl Taa {
                 min_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             }),
+            tracks: Vec::new(),
+        }
+    }
+
+    /// Lets go of its histories (the next frame starts one).
+    pub(super) fn rest(&mut self) {
+        self.tracks.clear();
+    }
+
+    /// The bytes its histories hold: two frames' colour (8 bytes a pixel)
+    /// and depth (4) each.
+    pub(super) fn bytes(&self) -> u64 {
+        let track = |t: &Track| {
+            t.history.as_ref().map_or(0, |h| {
+                2 * u64::from(h.size.0) * u64::from(h.size.1) * (8 + 4)
+            })
+        };
+        self.tracks.iter().map(track).sum()
+    }
+
+    /// The blend into the scene and the next history of the track of the
+    /// frame's size, `at` (see `At`): whether any track has frames still to
+    /// gather since the world last changed.
+    pub(super) fn run(
+        &mut self,
+        (device, queue): (&wgpu::Device, &wgpu::Queue),
+        encoder: &mut wgpu::CommandEncoder,
+        graph: &Graph,
+        at: &At,
+        look: (f32, f32),
+    ) -> bool {
+        let Some(size) = graph.targets.as_ref().map(|t| t.size) else {
+            return false;
+        };
+        // Tracks of sizes not drawn for a second go (a box gone).
+        self.tracks.retain(|t| {
+            t.history.as_ref().is_some_and(|h| h.size == size)
+                || t.step
+                    .last
+                    .is_some_and(|last| at.time.saturating_duration_since(last).as_secs_f32() < 1.)
+        });
+        let found = self
+            .tracks
+            .iter()
+            .position(|t| t.history.as_ref().is_some_and(|h| h.size == size));
+        let index = match found {
+            Some(index) => index,
+            None => {
+                if self.tracks.len() == TRACKS {
+                    self.tracks.remove(0);
+                }
+                self.tracks.push(Track::new(device));
+                self.tracks.len() - 1
+            }
+        };
+        let (pipeline, layout, sampler) = (&self.pipeline, &self.layout, &self.sampler);
+        self.tracks[index].run(
+            (device, queue),
+            encoder,
+            graph,
+            at,
+            look,
+            (pipeline, layout, sampler),
+        );
+        self.tracks.iter().any(|t| t.step.since + 1 < FRAMES)
+    }
+}
+
+impl Track {
+    fn new(device: &wgpu::Device) -> Self {
+        Self {
             uniforms: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("3D TAA"),
                 size: std::mem::size_of::<Uniforms>() as u64,
@@ -182,46 +284,50 @@ impl Taa {
                 mapped_at_creation: false,
             }),
             history: None,
-            at: 0,
-            valid: false,
-            frames: 0,
             binds: [None, None],
             compiled: 0,
-            before: None,
-            last: None,
-            cuts: 0,
-            meshes: u64::MAX,
-            revision: u64::MAX,
-            since: 0,
+            step: Step {
+                at: 0,
+                valid: false,
+                frames: 0,
+                before: None,
+                last: None,
+                cuts: 0,
+                meshes: u64::MAX,
+                revision: u64::MAX,
+                since: 0,
+            },
+            began: None,
         }
     }
 
-    /// Lets go of its history (the next frame starts one).
-    pub(super) fn rest(&mut self) {
-        self.history = None;
-        self.binds = [None, None];
-        self.valid = false;
-    }
-
-    /// The bytes its history holds: two frames' colour (8 bytes a pixel)
-    /// and depth (4).
-    pub(super) fn bytes(&self) -> u64 {
-        self.history.as_ref().map_or(0, |h| {
-            2 * u64::from(h.size.0) * u64::from(h.size.1) * (8 + 4)
-        })
-    }
-
-    /// The blend into the scene and the next history: this frame drawn
-    /// with `view_projection` (unjittered) at `time`, the world cut `cuts`
-    /// times so far.
-    pub(super) fn run(
+    fn run(
         &mut self,
         (device, queue): (&wgpu::Device, &wgpu::Queue),
         encoder: &mut wgpu::CommandEncoder,
         graph: &Graph,
-        (view_projection, time, cuts, meshes): (Mat4, Instant, u64, u64),
+        at: &At,
         (exposure, tone): (f32, f32),
+        (pipeline, layout, sampler): (
+            &wgpu::RenderPipeline,
+            &wgpu::BindGroupLayout,
+            &wgpu::Sampler,
+        ),
     ) {
+        // Drawn again at the same tick: as it ran then.
+        match self.began {
+            Some((tick, before)) if tick == at.tick => self.step = before,
+            _ => self.began = Some((at.tick, self.step)),
+        }
+        let step = &mut self.step;
+        if step.revision == at.revision {
+            step.since += 1;
+        } else {
+            step.revision = at.revision;
+            step.since = 0;
+        }
+        let (view_projection, time, cuts, meshes) =
+            (at.view_projection, at.time, at.cuts, at.meshes);
         let Some(targets) = graph.targets.as_ref() else {
             return;
         };
@@ -258,7 +364,7 @@ impl Taa {
                 _textures: textures,
             });
             self.binds = [None, None];
-            self.valid = false;
+            self.step.valid = false;
         }
         if self.compiled != graph.compiled {
             self.binds = [None, None];
@@ -266,37 +372,38 @@ impl Taa {
         }
         // A cut, or a gap past a quarter of a second: no history.
         let gap = self
+            .step
             .last
             .is_none_or(|last| time.saturating_duration_since(last).as_secs_f32() > 0.25);
-        if gap || cuts != self.cuts {
-            self.valid = false;
+        if gap || cuts != self.step.cuts {
+            self.step.valid = false;
         }
-        self.last = Some(time);
-        self.cuts = cuts;
+        self.step.last = Some(time);
+        self.step.cuts = cuts;
         let Some(history) = &self.history else {
             return;
         };
         let back = view_projection.inverse().unwrap_or(Mat4::IDENTITY);
-        let before = self.before.unwrap_or(view_projection);
-        if !self.valid {
-            self.frames = 0;
+        let before = self.step.before.unwrap_or(view_projection);
+        if !self.step.valid {
+            self.step.frames = 0;
         }
-        let mut share = (1. / (self.frames + 1) as f32).max(SHARE);
-        if meshes != self.meshes {
+        let mut share = (1. / (self.step.frames + 1) as f32).max(SHARE);
+        if meshes != self.step.meshes {
             share = share.max(MOVING);
         }
-        self.meshes = meshes;
+        self.step.meshes = meshes;
         let uniforms = Uniforms {
             back: back.columns,
             before: before.columns,
-            params: [share, f32::from(u8::from(self.valid)), exposure, tone],
+            params: [share, f32::from(u8::from(self.step.valid)), exposure, tone],
         };
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&uniforms));
-        let (read, write) = (self.at, 1 - self.at);
+        let (read, write) = (self.step.at, 1 - self.step.at);
         let bind = self.binds[read].get_or_insert_with(|| {
             device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("3D TAA"),
-                layout: &self.layout,
+                layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -312,7 +419,7 @@ impl Taa {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        resource: wgpu::BindingResource::Sampler(sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -345,14 +452,14 @@ impl Taa {
             ],
             ..Default::default()
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &*bind, &[]);
         pass.draw(0..3, 0..1);
         drop(pass);
-        self.at = write;
-        self.valid = true;
-        self.frames += 1;
-        self.before = Some(view_projection);
+        self.step.at = write;
+        self.step.valid = true;
+        self.step.frames += 1;
+        self.step.before = Some(view_projection);
     }
 }
 
