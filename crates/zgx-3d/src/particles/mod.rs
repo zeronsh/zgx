@@ -27,7 +27,7 @@ pub const CPU_PARTICLES: u32 = 16_384;
 pub const CPU_WORLD_PARTICLES: u32 = 4 * CPU_PARTICLES;
 
 /// The `Settle` reason of a world's particles.
-pub(crate) const UNSETTLED: u32 = 1 << 9;
+pub(crate) const UNSETTLED: u32 = crate::world::Reason::Particles as u32;
 
 /// The longest step a frame takes, in seconds: a world drawing again after
 /// a pause doesn't spawn the pause's worth at once.

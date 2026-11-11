@@ -21,7 +21,7 @@ use zgx_audio::{Audio, Bus, EffectHandle, Error, PanLaw, Play, Ramp, Sound, Voic
 
 /// Its reason to keep drawing (`Settle`): something moved last frame, so
 /// the next must come, if only to say it stopped (Doppler back to 1).
-pub(crate) const UNSETTLED: u32 = 1 << 12;
+pub(crate) const UNSETTLED: u32 = super::Reason::Audio as u32;
 
 /// Rays a frame, unless set (`World::set_occlusion_rays`).
 const RAYS: usize = 8;

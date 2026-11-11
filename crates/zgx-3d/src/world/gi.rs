@@ -6,7 +6,7 @@ use crate::math::Vec3;
 
 impl Settle {
     /// Its probes are converging (`render/probes.rs`).
-    pub(crate) const PROBES: u32 = 1 << 10;
+    pub(crate) const PROBES: u32 = super::Reason::Probes as u32;
 }
 
 /// The most volumes a world holds at once (`World::add_probes`).

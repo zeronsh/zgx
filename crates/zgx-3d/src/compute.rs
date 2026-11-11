@@ -37,7 +37,7 @@ use zgx_gpu::{
 };
 
 /// The `Settle` reason of a world's compute: passes due, reads on their way.
-pub(crate) const UNSETTLED: u32 = 1 << 8;
+pub(crate) const UNSETTLED: u32 = crate::world::Reason::Compute as u32;
 
 /// How a pass uses a resource it binds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
