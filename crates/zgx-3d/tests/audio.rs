@@ -227,9 +227,9 @@ fn walking_from_one_reverb_zone_into_another_fades_one_into_the_other() {
     // heard after each grows from nothing as it walks right.
     let (audio, mut mixer) = engine();
     let world = world(&audio);
-    // The same reverb either side, only the left's unheard: halfway, it's
-    // heard at half its wet (each zone half heard), so a sixteenth of the
-    // energy.
+    // The same reverb either side, only the left's unheard: halfway, the
+    // listener hears the right zone half, and the emitter, half in it,
+    // sends three quarters: 0.375 of the level, a seventh of the energy.
     let dry = ReverbPreset {
         wet: 0.,
         ..ReverbPreset::WAREHOUSE
@@ -251,6 +251,9 @@ fn walking_from_one_reverb_zone_into_another_fades_one_into_the_other() {
     let mut click = vec![0f32; RATE as usize / 2];
     click[1] = 0.5;
     let click = Sound::from_samples(&click, 1, RATE).unwrap();
+    // Heard from the dry room from the start: added where it's heard, it
+    // starts with that place's sends.
+    world.set_camera(Camera::looking_at([-6., 0., 0.], [-6., 0., -1.]));
     let beside = spot(&world, [-6., 0., -1.]);
     world
         .add_emitter3d(
@@ -281,8 +284,50 @@ fn walking_from_one_reverb_zone_into_another_fades_one_into_the_other() {
     assert!(tails[0] < 1e-9, "the dry room rang: {tails:?}");
     let ratio = tails[2] / tails[1];
     assert!(
-        (ratio - 16.).abs() < 1.6,
+        (ratio - 1. / 0.375f64.powi(2)).abs() < 0.7,
         "{ratio:.2} times the energy inside: {tails:?}"
+    );
+}
+
+#[test]
+fn a_zone_left_rings_out() {
+    // A click in a warehouse, then the listener steps out into no zone:
+    // the warehouse's tail still rings, not cut, as loud as had it stayed.
+    let tail = |leave: bool| -> f64 {
+        let (audio, mut mixer) = engine();
+        let world = world(&audio);
+        world
+            .add_reverb_zone(
+                ReverbZone::box_([-10., -5., -10.], [10., 5., 10.])
+                    .preset(ReverbPreset::WAREHOUSE)
+                    .fade(1.),
+            )
+            .unwrap();
+        let mut click = vec![0f32; RATE as usize];
+        click[1] = 0.5;
+        let click = Sound::from_samples(&click, 1, RATE).unwrap();
+        let beside = spot(&world, [0., 0., -1.]);
+        world
+            .add_emitter3d(beside, Emitter3d::new(&click).occlusion(false))
+            .unwrap();
+        let clock = Clock(Instant::now());
+        world.set_camera(Camera::looking_at([0., 0., 0.], [0., 0., -1.]));
+        world.update_audio(clock.at(0));
+        mixer.frames(RATE as usize / 10);
+        if leave {
+            world.set_camera(Camera::looking_at([40., 0., 0.], [40., 0., -1.]));
+        }
+        world.update_audio(clock.at(1));
+        channel(&mixer.frames(RATE as usize / 2), 0)
+            .iter()
+            .map(|&s| f64::from(s).powi(2))
+            .sum()
+    };
+    let (stayed, left) = (tail(false), tail(true));
+    assert!(stayed > 1e-6, "no tail: {stayed}");
+    assert!(
+        left > 0.8 * stayed,
+        "leaving cut the tail: {left:e} against {stayed:e}"
     );
 }
 

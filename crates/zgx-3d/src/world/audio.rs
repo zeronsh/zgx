@@ -290,7 +290,46 @@ struct Placed {
     rayed: Option<(Vec3, Vec3)>,
     /// Whether something changed since what was last sent.
     stale: bool,
+    /// What it last sent each room.
+    rooms: [f32; ROOMS],
 }
+
+/// Reverbs a world plays its zones through at once: the listener's zone
+/// and the one it's fading from.
+const ROOMS: usize = 2;
+
+/// One of a world's reverbs: a bus of its own under the world's, a reverb
+/// on it heard all wet, the zone it's given to, and since when it's been
+/// silent (free once its decay has passed).
+struct Room {
+    bus: Bus,
+    reverb: EffectHandle,
+    zone: Option<ReverbZoneId>,
+    quiet_since: Option<Instant>,
+    decay: f32,
+}
+
+/// What an emitter at `position` sends `room`, the listener at
+/// `listener`: its zone's wet, times how much the listener hears of it,
+/// times a half more for an emitter in it (one outside sends half).
+/// Nothing to a room no zone has, or whose zone's gone quiet.
+fn send_level(
+    zones: &[(u32, Option<ReverbZone>)],
+    room: &Room,
+    listener: Vec3,
+    position: Vec3,
+) -> f32 {
+    if room.quiet_since.is_some() {
+        return 0.;
+    }
+    let Some(zone) = room.zone.and_then(|id| zones[id.index as usize].1) else {
+        return 0.;
+    };
+    zone.preset.wet * zone.weight(listener) * (0.5 + 0.5 * zone.weight(position))
+}
+
+/// Rooms made so far, for each one's bus's name.
+static ROOMS_MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// A mesh that can block sound, as a frame's rays see it.
 struct Blocker {
@@ -529,7 +568,8 @@ struct Heard {
 pub(crate) struct Sound3d {
     audio: Audio,
     bus: Bus,
-    reverb: Option<EffectHandle>,
+    /// Its reverbs, made with its first zone.
+    rooms: Vec<Room>,
     emitters: Vec<(u32, Option<Placed>)>,
     zones: Vec<(u32, Option<ReverbZone>)>,
     listener: Listener,
@@ -559,8 +599,9 @@ pub(crate) struct Sound3d {
     cursor: usize,
     /// Rays cast last frame (`World::audio_rays`).
     cast: usize,
-    /// The reverb's settings last sent.
-    mixed: Option<ReverbPreset>,
+    /// Whether the zones changed since the rooms' sends were last worked
+    /// out.
+    zoned: bool,
     /// The world's count of changes to its meshes when last rayed: a wall
     /// put up or moved between two ends that are still is rayed again.
     meshes: u64,
@@ -802,36 +843,80 @@ impl Sound3d {
         self.work.set(work);
     }
 
-    /// The zones' reverb for a listener at `point`: their settings weighted
-    /// by how much it hears of each; its wet is the most it hears of any,
-    /// times their weighted wet.
-    fn zone_mix(&self, point: Vec3) -> ReverbPreset {
-        let mut total = 0f32;
-        let mut sum = [0f32; 4];
-        let mut most = 0f32;
-        for zone in self.zones.iter().filter_map(|(_, z)| z.as_ref()) {
-            let w = zone.weight(point);
-            if w > 0. {
-                let p = zone.preset;
-                for (s, v) in sum.iter_mut().zip([p.size, p.decay, p.damping, p.wet]) {
-                    *s += w * v;
+    /// Each emitter's sends to the rooms ([`send_level`]), once they're
+    /// given out ([`Self::assign`]): sent only where they changed.
+    fn rooms(&mut self, listener: Vec3, time: Instant, ramp: Ramp) {
+        self.assign(listener, time);
+        // Each emitter's send to each room.
+        for placed in self.emitters.iter_mut().filter_map(|(_, p)| p.as_mut()) {
+            let Some((position, _)) = placed.last else {
+                continue;
+            };
+            for (k, room) in self.rooms.iter().enumerate() {
+                let level = send_level(&self.zones, room, listener, position);
+                if (level - placed.rooms[k]).abs() > 1e-4
+                    && placed.voice.set_send(&room.bus, level, ramp).is_ok()
+                {
+                    placed.rooms[k] = level;
                 }
-                total += w;
-                most = most.max(w);
             }
         }
-        if total == 0. {
-            return ReverbPreset {
-                wet: 0.,
-                ..ReverbPreset::ROOM
-            };
+    }
+
+    /// The rooms given to the zones the listener hears (at most two), a
+    /// zone keeping its room; a room no longer heard freed once its decay
+    /// has passed.
+    fn assign(&mut self, listener: Vec3, time: Instant) {
+        if self.rooms.is_empty() {
+            return;
         }
-        let [size, decay, damping, wet] = sum.map(|s| s / total);
-        ReverbPreset {
-            size,
-            decay,
-            damping,
-            wet: wet * most,
+        let mut heard: Vec<(ReverbZoneId, f32)> = self
+            .zones
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (generation, zone))| {
+                let id = ReverbZoneId {
+                    index: index as u32,
+                    generation: *generation,
+                };
+                zone.as_ref().map(|z| (id, z.weight(listener)))
+            })
+            .filter(|(_, w)| *w > 0.)
+            .collect();
+        heard.sort_by(|a, b| b.1.total_cmp(&a.1));
+        heard.truncate(ROOMS);
+        // Rooms whose zone is no longer heard go quiet, and free after their
+        // decay.
+        for room in &mut self.rooms {
+            let held = room
+                .zone
+                .is_some_and(|z| heard.iter().any(|(id, _)| *id == z));
+            if held {
+                room.quiet_since = None;
+            } else if room.zone.is_some() {
+                let since = *room.quiet_since.get_or_insert(time);
+                if time.saturating_duration_since(since).as_secs_f32() > room.decay + 0.25 {
+                    room.zone = None;
+                    room.quiet_since = None;
+                }
+            }
+        }
+        // Zones heard without a room take a free one, made for them.
+        for (id, _) in &heard {
+            if self.rooms.iter().any(|r| r.zone == Some(*id)) {
+                continue;
+            }
+            let Some(zone) = self.zones[id.index as usize].1 else {
+                continue;
+            };
+            if let Some(room) = self.rooms.iter_mut().find(|r| r.zone.is_none()) {
+                let p = zone.preset;
+                let _ = room.reverb.set(Reverb::SIZE, p.size, Ramp::NONE);
+                let _ = room.reverb.set(Reverb::DECAY, p.decay, Ramp::NONE);
+                let _ = room.reverb.set(Reverb::DAMPING, p.damping, Ramp::NONE);
+                room.zone = Some(*id);
+                room.decay = p.decay;
+            }
         }
     }
 
@@ -863,6 +948,8 @@ impl Sound3d {
         };
         let ramp = Ramp::seconds(step.max(0.));
         let mut moving = heard.velocity != Vec3::ZERO;
+        // Whether any emitter moved, for the zones' sends.
+        let mut shifted = false;
         // Those whose sound has ended, let go: a one-shot is sent nothing
         // after it's done.
         for (_, slot) in self.emitters.iter_mut() {
@@ -893,6 +980,7 @@ impl Sound3d {
             };
             if placed.last != Some((position, ahead)) || placed.velocity != velocity {
                 placed.stale = true;
+                shifted = true;
             }
             moving |= velocity != Vec3::ZERO;
             placed.last = Some((position, ahead));
@@ -964,17 +1052,13 @@ impl Sound3d {
             // frame.
             placed.stale = !sent;
         }
-        // The zones' reverb, where the listener is.
-        if let Some(reverb) = &self.reverb {
-            let mix = self.zone_mix(heard.position);
-            if self.mixed != Some(mix) {
-                let slow = Ramp::seconds(step.max(SETTLE));
-                let sent = reverb.set(Reverb::SIZE, mix.size, slow).is_ok()
-                    && reverb.set(Reverb::DECAY, mix.decay, slow).is_ok()
-                    && reverb.set(Reverb::DAMPING, mix.damping, slow).is_ok()
-                    && reverb.set(Reverb::WET, mix.wet, slow).is_ok();
-                self.mixed = sent.then_some(mix);
-            }
+        // The zones' reverbs, where the listener is and each emitter is:
+        // worked out when either moved, the zones changed, or a room is
+        // waiting to be freed.
+        let waiting = self.rooms.iter().any(|r| r.quiet_since.is_some());
+        if listener_moved || shifted || self.zoned || waiting {
+            self.zoned = false;
+            self.rooms(heard.position, time, Ramp::seconds(step.max(SETTLE)));
         }
         self.moving = moving;
         moving
@@ -989,6 +1073,11 @@ impl Sound3d {
         emitter: Emitter3d,
     ) -> Result<Emitter3dId, Error> {
         let heard = self.hear(inner, 0.);
+        // The zones' rooms given out, for its sends.
+        if self.zoned {
+            let now = self.last_frame.unwrap_or_else(Instant::now);
+            self.assign(heard.position, now);
+        }
         let listener = spatial::Listener {
             position: array(heard.position),
             forward: array(heard.forward),
@@ -1008,10 +1097,19 @@ impl Sound3d {
             .law(PanLaw::EqualPower);
         // Placed where it is now, so it starts there.
         let at = Self::place_of(inner, object);
+        let mut rooms = [0.; ROOMS];
         play = match at {
             Some((position, ahead)) => {
                 let [gain, pan, pitch, cutoff] =
                     place(&shape, position, ahead, Vec3::ZERO, &listener);
+                // Its sends to the zones' reverbs from the start too: a sound
+                // that starts with a click is heard in its room.
+                for (k, room) in self.rooms.iter().enumerate() {
+                    rooms[k] = send_level(&self.zones, room, heard.position, position);
+                    if rooms[k] > 0. {
+                        play = play.send(&room.bus, rooms[k]);
+                    }
+                }
                 play.gain(gain).pan(pan).pitch(pitch).cutoff(cutoff)
             }
             None => play.gain(0.),
@@ -1027,6 +1125,7 @@ impl Sound3d {
             occluded: (1., OPEN),
             rayed: None,
             stale: false,
+            rooms,
         };
         let (index, generation) = claim(&mut self.emitters, placed);
         Ok(Emitter3dId { index, generation })
@@ -1040,8 +1139,8 @@ impl Drop for Sound3d {
         for placed in self.emitters.drain(..).filter_map(|(_, p)| p) {
             let _ = placed.voice.stop();
         }
-        if let Some(reverb) = self.reverb.take() {
-            let _ = reverb.remove();
+        for room in self.rooms.drain(..) {
+            let _ = room.reverb.remove();
         }
     }
 }
@@ -1072,7 +1171,7 @@ impl World {
         inner.audio = Some(Box::new(Sound3d {
             audio: audio.clone(),
             bus,
-            reverb: None,
+            rooms: Vec::new(),
             emitters: Vec::new(),
             zones: Vec::new(),
             listener: Listener::Camera,
@@ -1089,7 +1188,7 @@ impl World {
             rays: RAYS,
             cursor: 0,
             cast: 0,
-            mixed: None,
+            zoned: true,
             meshes: 0,
             #[cfg(test)]
             work: Default::default(),
@@ -1142,21 +1241,35 @@ impl World {
     }
 
     /// Adds a reverb zone: the listener in it, or coming toward it, hears
-    /// its reverb on every emitter. The first one puts the reverb on the
-    /// world's bus.
+    /// its reverb, each emitter sending to it (one outside it at half).
+    /// Two zones are heard at once at most: the listener's and the one
+    /// it's fading from, each through a reverb of its own, given to it
+    /// while it's heard and to another zone once its decay has passed.
+    /// The first zone makes those two reverbs, each on a bus of its own
+    /// under the world's: two of the engine's buses, for the world's life.
     pub fn add_reverb_zone(&self, zone: ReverbZone) -> Result<ReverbZoneId, Error> {
         let mut inner = self.inner.borrow_mut();
         let Some(sound) = inner.audio.as_mut() else {
             return Err(Error::Effect("no engine: World::set_audio first".into()));
         };
-        if sound.reverb.is_none() {
-            let p = zone.preset;
-            let reverb = Reverb::new(p.size, p.decay).damping(p.damping).mix(0., 1.);
-            sound.reverb = Some(sound.bus.add_effect(reverb)?);
-            sound.mixed = None;
+        if sound.rooms.is_empty() {
+            for _ in 0..ROOMS {
+                let n = ROOMS_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let bus = sound.audio.add_bus(&format!("3d reverb {n}"), &sound.bus)?;
+                let p = zone.preset;
+                let reverb =
+                    bus.add_effect(Reverb::new(p.size, p.decay).damping(p.damping).mix(1., 0.))?;
+                sound.rooms.push(Room {
+                    bus,
+                    reverb,
+                    zone: None,
+                    quiet_since: None,
+                    decay: p.decay,
+                });
+            }
         }
         let (index, generation) = claim(&mut sound.zones, zone);
-        sound.mixed = None;
+        sound.zoned = true;
         drop(inner);
         self.view.invalidate();
         Ok(ReverbZoneId { index, generation })
@@ -1170,7 +1283,7 @@ impl World {
             && *generation == id.generation
         {
             *slot = None;
-            sound.mixed = None;
+            sound.zoned = true;
         }
         drop(inner);
         self.view.invalidate();
@@ -1283,5 +1396,59 @@ mod tests {
             assert!(walked <= 64, "frame {k}: {walked} matrices walked");
             assert_eq!(met, 0, "frame {k}: {met} meshes' triangles tested");
         }
+    }
+
+    #[test]
+    fn a_left_zone_keeps_its_reverb_until_its_decay_has_passed() {
+        // Three zones far apart; the listener steps from the room to the
+        // hall to the warehouse. Both reverbs are still ringing when it
+        // reaches the warehouse, which waits; once the room's 0.6 s decay
+        // has passed, the warehouse takes the room's reverb, the hall's
+        // still held.
+        let (audio, _mixer) = zgx_audio::Audio::offline(zgx_audio::Config::default()).unwrap();
+        let world = World::new();
+        world
+            .set_audio(&audio, &audio.bus("world").unwrap())
+            .unwrap();
+        let zone = |x: f32, preset| {
+            world
+                .add_reverb_zone(
+                    ReverbZone::box_([x - 5., -5., -5.], [x + 5., 5., 5.])
+                        .preset(preset)
+                        .fade(1.),
+                )
+                .unwrap()
+        };
+        let room = zone(-30., ReverbPreset::ROOM);
+        let hall = zone(0., ReverbPreset::HALL);
+        let warehouse = zone(30., ReverbPreset::WAREHOUSE);
+        let held = |world: &World| -> Vec<Option<ReverbZoneId>> {
+            let inner = world.inner.borrow();
+            inner
+                .audio
+                .as_ref()
+                .unwrap()
+                .rooms
+                .iter()
+                .map(|r| r.zone)
+                .collect()
+        };
+        let start = Instant::now();
+        let at = |ms: u64, x: f32| {
+            world.set_camera(Camera::looking_at([x, 0., 0.], [x, 0., -1.]));
+            world.update_audio(start + std::time::Duration::from_millis(ms));
+        };
+        at(0, -30.);
+        at(100, 0.);
+        at(200, 30.);
+        assert_eq!(held(&world), [Some(room), Some(hall)]);
+        at(800, 30.);
+        assert_eq!(
+            held(&world),
+            [Some(room), Some(hall)],
+            "freed before its decay"
+        );
+        at(1_200, 30.);
+        assert_eq!(held(&world), [Some(warehouse), Some(hall)]);
     }
 }
