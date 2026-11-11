@@ -24,9 +24,9 @@ gif = ["dep:gif"]
 # beyond drawing (zgx-3d turns it on): ray queries
 # (`request_ray_queries`), the optional features they use where the GPU has
 # them (`request_view_features`: timestamps, compressed textures...), 3D
-# bloom's packed-float targets, a painter resting as its window idles or its
-# last box goes (`Viewport::rest`), and one instant a frame for every view
-# and box. Off, a UI app builds exactly as it did before them.
+# bloom's packed-float targets, and a painter resting as its window idles or
+# its last box goes (`Viewport::rest`). Off, a UI app builds exactly as it
+# did before them.
 view-features = []
 # Words break at their hyphenation points where text asks (zgx's `hyphens`):
 # typst's `hypher`, all its 48 languages' patterns, about 1.2 MB of a release

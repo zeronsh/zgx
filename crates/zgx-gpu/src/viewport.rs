@@ -60,11 +60,9 @@ pub struct ViewportFrame<'a> {
     pub size: (u32, u32),
     /// Device pixels a point.
     pub scale: f32,
-    /// When it is drawn. With the `view-features` feature, on the
-    /// interface's time (`zgx::clock::now`: a virtual clock's while one
-    /// runs, so a video's frames repeat), one instant for every view and box
-    /// of a window's frame; without it, the wall clock's as each view is
-    /// drawn.
+    /// When it is drawn, on the interface's time (`zgx::clock::now`: a
+    /// virtual clock's while one runs, so a video's frames repeat), one
+    /// instant for every view and box of a window's frame.
     pub time: std::time::Instant,
 }
 
@@ -89,10 +87,7 @@ impl<'a> ViewportFrame<'a> {
             format,
             size,
             scale,
-            #[cfg(feature = "view-features")]
             time: zgx::clock::now(),
-            #[cfg(not(feature = "view-features"))]
-            time: std::time::Instant::now(),
         }
     }
 }
@@ -621,7 +616,6 @@ pub(crate) struct Views {
     /// view and every box of one in a frame is drawn at the same instant,
     /// so what steps once a frame time steps once. A window with no view
     /// never reads it.
-    #[cfg(feature = "view-features")]
     time: std::cell::Cell<Option<(u64, std::time::Instant)>>,
 }
 /// A box on a plane: its node, the frame it last drew, its box, and the
@@ -801,7 +795,6 @@ impl GpuRenderer {
     }
     /// This frame's time for its views: read from the interface's clock by
     /// the first to draw, the same for the rest.
-    #[cfg(feature = "view-features")]
     fn view_time(&self) -> std::time::Instant {
         let frame = self.image_frame;
         let Some(views) = self.views.as_ref() else {
@@ -857,10 +850,7 @@ impl GpuRenderer {
             scale: self.scale,
             // The interface's time (a video's virtual clock's while one
             // runs), read once a frame: the same for every view and box.
-            #[cfg(feature = "view-features")]
             time: self.view_time(),
-            #[cfg(not(feature = "view-features"))]
-            time: std::time::Instant::now(),
         });
         // Ahead of the frame sampling it (or its drawable's present), which
         // is recorded after this and submitted later on the same queue.
@@ -1199,7 +1189,6 @@ impl GpuRenderer {
         };
         views.owed = false;
         // A frame of its own: its views' time read again.
-        #[cfg(feature = "view-features")]
         views.time.set(None);
         let due: Vec<_> = views
             .planes
