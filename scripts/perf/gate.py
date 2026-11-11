@@ -145,6 +145,12 @@ SCENES = [
     # A 400-section Markdown reply streaming in a chunk at a time, parsed
     # by a keyed `ui.markdown` in a computed and drawn by `ui.each`.
     ('md-stream', 'zgx-script', 'md_stream_bench', {}),
+    # The same reply measured as a window measures it: its paragraphs
+    # shaped by zgx-gpu's text cache (`TextServices`, on the CPU, in the
+    # bundled font), each section's paragraph growing over 40 chunks. What a
+    # growing paragraph's chunks cost the text cache; the bench asserts the
+    # cache shaped them.
+    ('md-stream-text', 'zgx-script', 'md_stream_text_bench', {}),
     ('style', 'zgx', 'style_bench', {}),
     # A terminal streaming a build log (16, 256 and true colours, styles,
     # wrapping, a progress line rewritten), its output replayed on the
@@ -250,8 +256,8 @@ SPREAD = {'app-chat': 0.2, '3d-textured': 0.06, '3d-mixed': 0.08, 'spans-md': 0.
 # startup and app-dashboard all but one run in ten). Not every Luau scene:
 # under it list-estimate's runs spread 15,227 instructions (1,319 without)
 # and app-mail's 6,421 (828).
-FAIR = ('spans-plain', 'spans-md', 'spans-follow', 'micro-state-luau', 'script-update', 'md-stream', 'startup',
-        'app-dashboard', 'app-dashboard-sort')
+FAIR = ('spans-plain', 'spans-md', 'spans-follow', 'micro-state-luau', 'script-update', 'md-stream', 'md-stream-text',
+        'startup', 'app-dashboard', 'app-dashboard-sort')
 # Built apart from the rest, each: see `build`.
 ALONE = ('zgx-3d', 'zgx-video', 'zgx-terminal')
 

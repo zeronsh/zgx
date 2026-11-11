@@ -263,6 +263,15 @@ scene that moves more than 0.01% again under two other placements
 (`GLIBC_TUNABLES`), each side, gates on the median, and marks it `layout`
 where the three disagree in sign.
 
+**Text as a window measures it, headless.** Most gate scenes measure text with
+zgx's estimate. `md-stream-text` (`md_stream_text_bench`) streams a Markdown
+reply as `md-stream` does, but each section's paragraph grows over 40 chunks
+and is shaped by zgx-gpu's text cache through `TextServices`: the renderer's
+shaping and measuring on the CPU, with no GPU device, in the headless benches'
+bundled font. It guards what a growing paragraph's chunks cost the text cache
+(about 290 M instructions, 1.4% of the gate), and asserts the cache shaped
+them, so it can't pass by measuring nothing.
+
 **The floor under a frame with the GPU encode.** Most of zgx's `RENDER=1`
 frame is what any Metal frame costs. `crates/zgx-gpu/examples/mtl_floor.rs`
 times a bare one (a command buffer, one empty render pass into a 2048 × 1536
