@@ -90,6 +90,10 @@ pub(crate) trait SceneDraw {
     /// Whether it draws at `point` this frame (before the pass: the meshes'
     /// bindings are restored after it only where it did).
     fn draws_at(&self, point: DrawPoint) -> bool;
+    /// Its data for the frame at `time` written, before the frame's passes:
+    /// called once a frame time (a view drawn in two places renders twice
+    /// at one, and is told once). Nothing by default.
+    fn update(&mut self, _queue: &wgpu::Queue, _time: std::time::Instant) {}
     /// Its draws at `point`, into the meshes' pass: it sets its pipeline
     /// and every group it reads, group 0 its own (see the module). At
     /// `AfterOpaque`, twice a frame where something light passes through

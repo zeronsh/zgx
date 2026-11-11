@@ -417,7 +417,45 @@ fn scenes() -> Vec<Scene> {
     scenes.push(cascaded_shadow());
     #[cfg(feature = "shaders")]
     scenes.push(materials());
+    #[cfg(feature = "media")]
+    scenes.push(atmosphere());
     scenes
+}
+
+/// The sun low ahead through a sky with still clouds over a floor and a
+/// ball, lit by the light the sky gives (the `media` feature).
+#[cfg(feature = "media")]
+fn atmosphere() -> Scene {
+    fn sky() -> (Sky, Vec3) {
+        let sky = Sky::new()
+            .turbidity(3.)
+            .clouds(Some(Clouds::new(0.45).height(1800.).size(3000.)));
+        (sky, -vec3(0.3, 0.35, -1.).normalized())
+    }
+    Scene {
+        name: "atmosphere",
+        tolerance: CLOSE,
+        build: |world| {
+            let (sky, sun) = sky();
+            world.add_light(sky.sun_light(sun, 4.));
+            world.set_sky(Some(sky));
+            let ball = world.add(
+                Object::mesh(
+                    Geometry::sphere(0.5, 48),
+                    Material::rgb(0xe8e8e8).with(0., 0.4),
+                )
+                .at([0., 0.5, 0.]),
+            );
+            vec![ball, floor(world)]
+        },
+        shadows: true,
+        tone: ToneMapping::Aces,
+        environment: || {
+            let (sky, sun) = sky();
+            Some(sky.environment(sun, 4.))
+        },
+        camera: camera([0., 0.9, 3.], [0., 1.2, -4.]),
+    }
 }
 
 /// A row of posts receding from the camera, their shadows in three

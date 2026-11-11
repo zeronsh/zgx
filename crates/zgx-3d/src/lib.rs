@@ -62,6 +62,8 @@ mod pick;
 mod render;
 #[cfg(feature = "compute")]
 mod shader_sandbox;
+#[cfg(feature = "media")]
+mod sky;
 mod texture;
 #[cfg(any(feature = "compute", feature = "shaders", feature = "post"))]
 mod worker;
@@ -99,6 +101,8 @@ pub use particles::{
     EmitterStatus, Force, MOST_LIFE, Response, Shape, Spawn,
 };
 pub use pick::Hit;
+#[cfg(feature = "media")]
+pub use sky::{Clouds, Sky};
 pub use texture::{Map, MapPlacement, Texture, Wrap};
 #[cfg(any(feature = "compute", feature = "shaders", feature = "post"))]
 #[doc(hidden)]

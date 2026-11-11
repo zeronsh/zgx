@@ -243,3 +243,42 @@ fn the_last_animator_removed_while_it_plays() {
         Some(Box::new(move |world| world.remove_animator(animator)))
     });
 }
+
+#[cfg(feature = "media")]
+#[test]
+fn drifting_clouds_turned_off() {
+    rests("sky off", |world, _, _| {
+        world.set_sky(Some(
+            Sky::new().clouds(Some(Clouds::new(0.5).drifting(20., [1., 0.]))),
+        ));
+        Some(Box::new(|world| world.set_sky(None)))
+    });
+}
+
+#[cfg(feature = "media")]
+#[test]
+fn drifting_clouds_stilled() {
+    rests("clouds stilled", |world, _, _| {
+        world.set_sky(Some(
+            Sky::new().clouds(Some(Clouds::new(0.5).drifting(20., [1., 0.]))),
+        ));
+        Some(Box::new(|world| {
+            world.set_sky(Some(Sky::new().clouds(Some(Clouds::new(0.5)))))
+        }))
+    });
+}
+
+/// Not a row: a still sky never holds the world.
+#[cfg(feature = "media")]
+#[test]
+fn a_still_sky_lets_its_world_rest() {
+    let (world, _) = harness::world();
+    let Some(mut window) = harness::Window::new(&world) else {
+        return;
+    };
+    world.set_sky(Some(Sky::new().clouds(Some(Clouds::new(0.5)))));
+    let rested = window.until(&world, 3, std::time::Duration::from_secs(10), || {
+        !world.view().animating()
+    });
+    assert!(rested, "a still sky kept its world drawing");
+}

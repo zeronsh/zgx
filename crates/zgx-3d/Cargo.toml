@@ -70,6 +70,10 @@ hrtf = ["audio", "zgx-audio/hrtf"]
 shaders = []
 # The post chain (`World::set_post`): a scene target in linear light, bloom.
 post = []
+# The air (`World::set_sky`): a scattering sky with its sun and clouds
+# behind the meshes, the light it gives (`Sky::sun_light`, `environment`).
+# A world without one draws as without the feature.
+media = []
 
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop", default-features = false }
@@ -78,6 +82,10 @@ zgx-desktop = { path = "../zgx-desktop", default-features = false }
 wgpu = { version = "29.0.4", default-features = false, features = ["noop"] }
 # The reference images (tests/reference.rs): already in the tree, by `image`.
 png = "0.18"
+
+[[example]]
+name = "atmosphere"
+required-features = ["media"]
 
 [[example]]
 name = "model"

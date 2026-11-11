@@ -1,1 +1,1 @@
-Blessed on an Apple M5 Max (macOS 26.4) with `ZGX_BLESS=1`.
+Blessed on an Apple M5 Max (macOS 26.4) with `ZGX_BLESS=1`, except `atmosphere.png`: blessed on an Apple M1 Max (macOS 26.0.1) with `ZGX_BLESS=missing`, to be confirmed on the M5 Max within its tolerance.

@@ -659,6 +659,12 @@ pub(crate) struct Inner {
     pub(crate) audio: Option<Box<audio::Sound3d>>,
     /// What draws into the scene with the meshes (`World::add_scene_draw`).
     pub(crate) scene_draws: crate::render::SceneDraws,
+    /// The frame time they were last told (`SceneDraw::update`): once a
+    /// frame time, however many painters render it.
+    pub(crate) draws_updated: std::cell::Cell<Option<std::time::Instant>>,
+    /// Its sky (`World::set_sky`) and the draw drawing it.
+    #[cfg(feature = "media")]
+    pub(crate) sky: Option<(crate::Sky, Rc<RefCell<crate::render::SkyDraw>>)>,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -718,6 +724,8 @@ pub(crate) enum Reason {
     /// An app's post pass is being compiled off the frame
     /// (`render::post::Apps`).
     PostCompiling = 1 << 16,
+    /// Its sky's clouds drift (`world::sky`).
+    Sky = 1 << 17,
     /// For the tests of `Settle`: a reason no feature uses.
     Test = 1 << 31,
 }
@@ -1545,6 +1553,8 @@ mod compute;
 #[cfg(feature = "particles")]
 mod particles;
 mod scene_draw;
+#[cfg(feature = "media")]
+mod sky;
 
 /// A 3D scene shown by a GPU view (`view`): change it and the view draws a
 /// frame, before the window's next; leave it and it draws nothing. Clones
@@ -1651,6 +1661,9 @@ impl World {
             #[cfg(feature = "audio")]
             audio: None,
             scene_draws: Vec::new(),
+            draws_updated: std::cell::Cell::new(None),
+            #[cfg(feature = "media")]
+            sky: None,
         }));
         let view = zgx_gpu::viewport::view(crate::painter::Painter::new(
             crate::render::Renderer::new(Rc::downgrade(&inner)),
@@ -2315,6 +2328,7 @@ mod tests {
             Reason::Exposure,
             Reason::Taa,
             Reason::PostCompiling,
+            Reason::Sky,
             Reason::Test,
         ]
         .map(|r| r as u32);

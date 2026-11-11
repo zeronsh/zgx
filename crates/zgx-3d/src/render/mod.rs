@@ -38,6 +38,8 @@ mod raytrace;
 mod scene_draw;
 mod shader;
 mod shadows;
+#[cfg(feature = "media")]
+mod sky;
 mod targets;
 mod variant;
 
@@ -77,6 +79,8 @@ use shadows::sun_bounds;
 use shadows::{
     Casting, SHADOW_SIZE, draw_shadows, make_shadow_pipeline, shadow_key, sun_view, sun_view_within,
 };
+#[cfg(feature = "media")]
+pub(crate) use sky::{SkyDraw, SkyUniform};
 use std::{cell::RefCell, rc::Weak};
 use variant::Variant;
 use zgx_gpu::{
@@ -1057,6 +1061,12 @@ impl Viewport for Renderer {
                 uniforms: &gpu.uniforms,
             };
             prepare_draws(&mut gpu.draws_prepared, made, &world, (device, resources));
+            // Once a frame time (as particles and compute step).
+            if world.draws_updated.replace(Some(frame.time)) != Some(frame.time) {
+                for (_, draw) in &world.scene_draws {
+                    draw.borrow_mut().update(frame.queue, frame.time);
+                }
+            }
         }
         for pass in gpu.graph.passes().iter() {
             match pass {
