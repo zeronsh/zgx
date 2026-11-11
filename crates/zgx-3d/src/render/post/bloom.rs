@@ -262,4 +262,157 @@ mod tests {
             "{most} levels apart: {differing} values differ, the first at (x, y, channel) {at:?}"
         );
     }
+
+    fn block<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+                return value;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The up chain's first step (what the last pass reads as bloom's
+    /// second), its texels as floats, after bloom's dispatches from a scene
+    /// of `size` with every texel `texel` (half floats' bits).
+    fn up_from(size: u32, texel: [u16; 4]) -> Option<Vec<[f32; 4]>> {
+        use super::super::super::graph::{Chain, Config, Graph, SCENE};
+        use wgpu::util::DeviceExt;
+        use zgx_gpu::wgpu;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let found = block(instance.request_adapter(&Default::default()))
+            .ok()
+            .and_then(|adapter| block(adapter.request_device(&Default::default())).ok());
+        if found.is_none() && std::env::var_os("ZGX_REQUIRE_GPU").is_some() {
+            panic!("ZGX_REQUIRE_GPU, but no device");
+        }
+        let (device, queue) = found?;
+        let mut graph = Graph::new(SCENE, 1);
+        let post = Chain {
+            on: true,
+            bloom: true,
+            bloom_compute: true,
+            ..Default::default()
+        };
+        graph.prepare(
+            &device,
+            Config {
+                size: (size, size),
+                shadows: false,
+                transmits: false,
+                post,
+            },
+        );
+        let texels: Vec<[u16; 4]> = vec![texel; (size * size) as usize];
+        let scene = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: SCENE,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            bytemuck::cast_slice(&texels),
+        );
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let view = scene.create_view(&Default::default());
+        super::Compute::new(&device).run(&device, &mut encoder, &graph, (&view, &sampler));
+        // The step's texels copied out by a dispatch (bloom's steps are
+        // stored to and sampled, never copied).
+        let up = &graph.targets.as_ref()?.bloom_up[0];
+        let side = (size / 4).max(1);
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(
+                "@group(0) @binding(0) var step: texture_2d<f32>;
+                @group(0) @binding(1) var<storage, read_write> out: array<vec4<f32>>;
+                @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+                    out[id.y * textureDimensions(step).x + id.x] = textureLoad(step, id.xy, 0);
+                }"
+                .into(),
+            ),
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let bytes = u64::from(side * side) * 16;
+        let buffer = |usage| {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: bytes,
+                usage,
+                mapped_at_creation: false,
+            })
+        };
+        let out = buffer(wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+        let staging = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(up),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: out.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(side, side, 1);
+        }
+        encoder.copy_buffer_to_buffer(&out, 0, &staging, 0, bytes);
+        queue.submit([encoder.finish()]);
+        staging.map_async(wgpu::MapMode::Read, .., |_| {});
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("the device");
+        let texels = bytemuck::pod_collect_to_vec(&staging.slice(..).get_mapped_range());
+        Some(texels)
+    }
+
+    #[test]
+    fn a_step_up_past_half_floats_keeps_the_brightest_light() {
+        // A scene at the most half floats hold: each step down holds it
+        // too, and each step up adds two of them. Unclamped, a step's sum
+        // rounds to infinity, and the next step reads it as nothing
+        // (`sane`): the brightest light's glow, dark at its centre.
+        const MOST: u16 = 0x7bff;
+        let Some(up) = up_from(64, [MOST, MOST, MOST, 0x3c00]) else {
+            return;
+        };
+        assert_eq!(up.len(), 16 * 16);
+        for (at, texel) in up.iter().enumerate() {
+            assert!(
+                texel[..3].iter().all(|c| c.is_finite() && *c > 60000.),
+                "texel {at} of the step up is {texel:?}, not the brightest light"
+            );
+        }
+    }
 }

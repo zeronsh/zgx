@@ -53,8 +53,11 @@ fn centre(at: vec2<f32>, size: vec2<u32>) -> vec2<f32> {
 }
 // A step's texel as written: rounded to half floats here, so a render
 // target's conversion and a storage write's have nothing left to round.
+// Held to the most they hold first: a step up adds two steps, each up to
+// the scene's most, and a sum past it would round to infinity, which the
+// next step's taps read as nothing (`sane`), dark at a glow's centre.
 fn step_out(c: vec3<f32>) -> vec4<f32> {
-    return vec4(quantizeToF16(c), 1.0);
+    return vec4(quantizeToF16(min(c, vec3(65504.0))), 1.0);
 }
 // `t` blurred by a 3 by 3 tent at `uv`.
 fn tent(t: texture_2d<f32>, s: sampler, uv: vec2<f32>) -> vec3<f32> {

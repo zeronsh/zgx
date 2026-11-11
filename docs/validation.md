@@ -186,6 +186,10 @@ To check the rays on Windows, run with DXC: `WGPU_DX12_COMPILER=dxc` and Microso
 
 DXC 1.9 at `-Od` crashes (`cast<X>() argument of incompatible type!`) on a struct copied whole out of a uniform array inside a loop that returns. wgpu passes `-Zi -Od` in debug builds. The probes' shaders read their volumes through a pointer instead, and `probes_hold_no_volume_by_value` keeps it so on every platform. Reproduced on macOS with DXC 1.9.0.5512 and on Windows with 1.9.2602.17.
 
+## 3D bloom's two paths
+
+zgx-3d draws bloom as dispatches of one compute pass where the device runs compute, and as a render pass a step where it doesn't (`post` feature). Every family with goldens (Metal, llvmpipe, WARP, the RTX 4090) runs compute, so every golden is of the dispatches. The render passes' picture is checked only by `bloom_as_dispatches_draws_as_bloom_by_passes`, which draws one frame both ways on the device at hand and requires them byte-equal. No golden family draws bloom by passes for real. A GL family (no compute) would be the first, and its goldens the first of that path. `a_step_up_past_half_floats_keeps_the_brightest_light` checks the dispatches against a scene at half floats' most: no step up holds an infinity, which the next step would read as nothing.
+
 ## Linux desktops, headless
 
 `scripts/linux_desktops_smoke.py` (`--only linux-desktops`) runs a window and a popup on each desktop a machine has, in software, with no GPU or screen. A desktop not installed is skipped and named, so CI covers only what its packages include. Everything is drawn by llvmpipe, so it says nothing about GPU speed.
