@@ -231,11 +231,12 @@ impl Model {
     }
     /// The light reaching the eye from along `d`: the air's, the ground's
     /// or the clouds' (as `sky.wgsl`'s, without the sun's disc).
-    fn radiance(&self, sky: &Sky, d: Vec3, sun: Vec3, e: [f32; 3]) -> [f32; 3] {
-        let o = vec3(0., EARTH + sky.altitude.max(1.), 0.);
+    /// As `sky.wgsl`'s `scattered`: the air's and the haze's light toward
+    /// `o` from along `d` before their phases and the sun's irradiance, and
+    /// the transmittance along it.
+    fn scattered(&self, o: Vec3, d: Vec3, sun: Vec3) -> ([f32; 3], [f32; 3], [f32; 3]) {
         let hit = ground_at(o, d);
         let end = if hit > 0. { hit } else { leave(o, d, TOP) };
-        // As `sky.wgsl`'s `scattered`.
         let steps = 16;
         let (mut air, mut haze) = (0., 0.);
         let (mut light_air, mut light_haze) = ([0.; 3], [0.; 3]);
@@ -266,25 +267,34 @@ impl Model {
                 } else {
                     (1. - (-within[c]).exp()) / within[c]
                 };
-                light_air[c] += t[c] * kept * a;
-                light_haze[c] += t[c] * kept * z;
+                light_air[c] += t[c] * kept * a * self.air[c];
+                light_haze[c] += t[c] * kept * z * self.haze;
             }
         }
+        (light_air, light_haze, self.extinction(air, haze))
+    }
+    /// The light reaching the eye from along `d`: the air's, the ground's
+    /// or the clouds' (as `sky.wgsl`'s, without the sun's disc).
+    fn radiance(&self, sky: &Sky, d: Vec3, sun: Vec3, e: [f32; 3]) -> [f32; 3] {
+        let o = vec3(0., EARTH + sky.altitude.max(1.), 0.);
+        let hit = ground_at(o, d);
+        let (light_air, light_haze, view) = self.scattered(o, d, sun);
+        let skylight = {
+            let (a, h, _) = self.scattered(o, vec3(0., 1., 0.), sun);
+            std::array::from_fn::<f32, 3, _>(|i| (a[i] + h[i]) * 0.5)
+        };
         let c = d.dot(sun);
         let rayleigh = 3. / (16. * std::f32::consts::PI) * (1. + c * c);
         let mie = henyey_greenstein(c, self.g);
-        let view = self.extinction(air, haze);
-        let mut light: [f32; 3] = std::array::from_fn(|i| {
-            e[i] * (light_air[i] * self.air[i] * rayleigh + light_haze[i] * self.haze * mie)
-        });
+        let mut light: [f32; 3] =
+            std::array::from_fn(|i| e[i] * (light_air[i] * rayleigh + light_haze[i] * mie));
         if hit > 0. {
             let p = o + d * hit;
             let up = p.normalized();
             let lit = self.transmittance_to_top(p, sun);
             let facing = up.dot(sun).max(0.);
-            let ambient = 0.08 * (sun.y + 0.1).max(0.);
             for i in 0..3 {
-                light[i] += (lit[i] * e[i] * facing + e[i] * ambient) * sky.ground
+                light[i] += (lit[i] * e[i] * facing + e[i] * skylight[i]) * sky.ground
                     / std::f32::consts::PI
                     * view[i];
             }
@@ -307,17 +317,22 @@ impl Model {
                 let along = look(0.08) + look(0.2);
                 let through = (-along * 1.6).exp();
                 let silver = henyey_greenstein(c, 0.65) * 4. * std::f32::consts::PI;
+                let rim = henyey_greenstein(c, 0.85)
+                    * 4.
+                    * std::f32::consts::PI
+                    * (1. - density).powi(2)
+                    * 0.3;
                 let deck = vec3(0., EARTH + clouds.height, 0.);
                 let sunlit = self.transmittance_to_top(deck, sun);
-                let base = 0.35 + (1. - 0.35) * through;
+                let base = 0.15 + (1. - 0.15) * through;
                 let rise = (clouds.height - sky.altitude).max(0.);
                 let air_below = AIR_HEIGHT * (1. - (-rise / AIR_HEIGHT).exp()) / d.y;
                 let haze_below = HAZE_HEIGHT * (1. - (-rise / HAZE_HEIGHT).exp()) / d.y;
                 let seen = self.extinction(air_below, haze_below);
                 let alpha = density * smoothstep(0.01, 0.15, d.y);
                 for i in 0..3 {
-                    let cloud =
-                        sunlit[i] * e[i] * (0.22 * base + 0.12 * through * silver) + light[i] * 0.6;
+                    let cloud = sunlit[i] * e[i] * (0.22 * base + through * (0.12 * silver + rim))
+                        + e[i] * skylight[i] / std::f32::consts::PI * (0.5 + 0.4 * through);
                     let front =
                         light[i] * ((1. - seen[i]) / (1. - view[i]).max(1e-3)).clamp(0., 1.);
                     light[i] += (cloud * seen[i] + front - light[i]) * alpha;
@@ -394,7 +409,11 @@ fn fbm(mut x: f32, mut y: f32, octaves: u32) -> f32 {
 fn cloud_density(c: &Clouds, x: f32, z: f32, octaves: u32) -> f32 {
     let u = x / c.size + c.seed;
     let v = z / c.size + c.seed;
-    smoothstep(1. - c.cover, 1. - c.cover + 0.35, fbm(u, v, octaves))
+    let mut n = fbm(u, v, octaves);
+    if octaves >= 5 {
+        n += 0.16 * (fbm(u * 9.7 + 3.7, v * 9.7 + 1.3, 2) - 0.375);
+    }
+    smoothstep(1. - c.cover, 1. - c.cover + 0.3, n)
 }
 
 #[cfg(test)]

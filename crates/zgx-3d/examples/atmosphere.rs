@@ -1,9 +1,9 @@
-//! A world under a sky (feature `media`): the air's light from the sun,
+//! A world under a sky (features `media` and `post`): the air's light from the sun,
 //! the sun's disc, clouds drifting overhead, and the light the same sky
 //! gives the meshes (`Sky::sun_light`, `Sky::environment`). While the
 //! clouds drift the world draws; `--still` holds them, and a still sky
 //! lets the window rest.
-//! Run: cargo run --release -p zgx-3d --features media --example atmosphere
+//! Run: cargo run --release -p zgx-3d --features media,post --example atmosphere
 //!
 //! `--sun DEGREES` sets the sun's height (default 25), `--png PATH` draws
 //! one frame offscreen into a PNG and quits, `--smoke-test` quits after a
@@ -30,6 +30,12 @@ fn world(elevation: f32, still: bool) -> World {
     world.set_sky(Some(sky));
     world.set_shadows(true);
     world.set_tone_mapping(ToneMapping::Aces);
+    // Seen through the post chain, as a sky is meant to be: the sun's disc
+    // is thousands of times brighter than the sky, and blooms.
+    world.set_post(Post {
+        bloom: Some(Bloom::default()),
+        ..Default::default()
+    });
     world.add(Object::mesh(
         Geometry::plane(60., 60.),
         Material::rgb(0x6f6a60).with(0., 0.9),

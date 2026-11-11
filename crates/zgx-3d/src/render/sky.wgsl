@@ -35,6 +35,9 @@ struct Out {
     @location(1) air: vec3<f32>,
     @location(2) haze: vec3<f32>,
     @location(3) through: vec3<f32>,
+    // The sky's light falling on a level surface, over the sun's irradiance
+    // (from the zenith's, the same at every corner).
+    @location(4) skylight: vec3<f32>,
 }
 
 // The grid of the frame the air is worked out on, columns by rows (rows
@@ -89,6 +92,9 @@ fn vs(@builtin(vertex_index) i: u32) -> Out {
     out.air = air[0];
     out.haze = air[1];
     out.through = air[2];
+    // About twice the zenith's light, all round the sky, times π.
+    let zenith = scattered(origin(eye), vec3(0.0, 1.0, 0.0), sun);
+    out.skylight = (zenith[0] + zenith[1]) * 0.5;
     return out;
 }
 
@@ -241,17 +247,24 @@ fn fbm(p0: vec2<f32>, octaves: i32) -> f32 {
 }
 // How thick the deck is at `xz` (0 clear), as cover says, its detail to
 // `octaves` (the looks toward the sun, shading it, need less).
+// The full look (`octaves` 5) adds two finer ones, ten times smaller,
+// which eat into its edges most (wisps, not blobs).
 fn cloud_density(xz: vec2<f32>, octaves: i32) -> f32 {
     let uv = (xz + sky.drift.xy * sky.clouds.w) / sky.clouds.z + sky.drift.z;
-    let n = fbm(uv, octaves);
+    var n = fbm(uv, octaves);
+    if octaves >= 5 {
+        n += 0.16 * (fbm(uv * 9.7 + vec2(3.7, 1.3), 2) - 0.375);
+    }
     let cover = sky.clouds.x;
-    return smoothstep(1.0 - cover, 1.0 - cover + 0.35, n);
+    return smoothstep(1.0 - cover, 1.0 - cover + 0.3, n);
 }
 
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
     let eye = frame.camera.xyz;
     let d = normalize(in.far.xyz / in.far.w - eye);
+    // A pixel's angle across (here, where control flow is uniform).
+    let pixel = max(length(fwidth(d)), 1e-6);
     let sun = -normalize(frame.sun_direction.xyz);
     let e = frame.sun_color.rgb;
     let o = origin(eye);
@@ -267,18 +280,28 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         let p = o + d * hit;
         let up = normalize(p);
         let sunlit = extinction(depth_to_top(p, sun)) * e * max(dot(up, sun), 0.0);
-        let ambient = e * 0.08 * max(sun.y + 0.1, 0.0);
+        let ambient = e * in.skylight;
         light += (sunlit + ambient) * sky.shape.w / PI * air[1];
     } else {
-        // The sun's disc: its irradiance over its solid angle, through the
-        // air, limb darkened.
+        // The sun's disc: its irradiance over its solid angle, limb
+        // darkened (more so in blue), flattened near the horizon (as the
+        // air's refraction lifts its lower edge), its edge smoothed over a
+        // pixel, and seen through the air along each pixel's own ray (its
+        // lower edge redder).
         let r = sky.shape.y;
-        let cos_r = cos(r);
-        if c > cos_r {
-            let solid = 2.0 * PI * (1.0 - cos_r);
-            let mu = sqrt(max(1.0 - pow(acos(min(c, 1.0)) / r, 2.0), 0.0));
-            let limb = 1.0 - 0.6 * (1.0 - mu);
-            light += e / solid * limb * air[1];
+        let level = vec3(-sun.z, 0.0, sun.x);
+        let east = select(vec3(1.0, 0.0, 0.0), normalize(level), dot(level, level) > 1e-8);
+        let north = cross(east, sun);
+        let elevation = asin(clamp(sun.y, -1.0, 1.0));
+        let squash = mix(1.3, 1.0, smoothstep(0.0, 0.17, elevation));
+        let off = d - sun * c;
+        let angle = length(vec2(dot(off, east), dot(off, north) * squash));
+        if c > 0.0 && angle < r + pixel {
+            let solid = 2.0 * PI * (1.0 - cos(r));
+            let covered = 1.0 - smoothstep(r - 0.5 * pixel, r + 0.5 * pixel, angle);
+            let mu = sqrt(max(1.0 - pow(min(angle / r, 1.0), 2.0), 0.0));
+            let limb = 1.0 - vec3(0.5, 0.6, 0.75) * (1.0 - mu);
+            light += e / solid * limb * covered * extinction(depth_to_top(o, d));
         }
         // The cloud deck, where the ray meets its height, faded toward the
         // horizon.
@@ -295,10 +318,14 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
                     + cloud_density(xz + toward * sky.clouds.z * 0.2, 3);
                 let through = exp(-along * 1.6);
                 let silver = henyey_greenstein(c, 0.65) * 4.0 * PI;
+                // Thin edges toward the sun light up most (a narrower
+                // lobe); bases with much cloud toward the sun go dark.
+                let rim = henyey_greenstein(c, 0.85) * 4.0 * PI * pow(1.0 - density, 2.0) * 0.3;
                 let deck = vec3(0.0, EARTH + sky.clouds.y, 0.0);
                 let sunlit = extinction(depth_to_top(deck, sun)) * e;
-                let base = mix(0.35, 1.0, through);
-                let cloud = sunlit * (0.22 * base + 0.12 * through * silver) + air[0] * 0.6;
+                let base = mix(0.15, 1.0, through);
+                let cloud = sunlit * (0.22 * base + through * (0.12 * silver + rim))
+                    + e * in.skylight / PI * mix(0.5, 0.9, through);
                 // Seen through the air below the deck (an exponential
                 // atmosphere, flat), and the air's light in front of it: the
                 // share of the whole ray's that lies before it.

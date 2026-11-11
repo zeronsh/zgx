@@ -85,7 +85,7 @@ png = "0.18"
 
 [[example]]
 name = "atmosphere"
-required-features = ["media"]
+required-features = ["media", "post"]
 
 [[example]]
 name = "model"
