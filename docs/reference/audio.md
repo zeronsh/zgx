@@ -182,7 +182,7 @@ return ui.scene3d {
 | `occlusion` | whether the meshes between dull it (by a quarter, through each) | true |
 | `air` | whether the air dulls its highs with distance | true |
 
-`ui.reverb_zone` is a box (`position` its centre, `size` its `{ x, y, z }` in metres, in the scene's coordinates) whose reverb the camera hears inside it, fading in over `fade` metres outside (2). `preset` is `"room"` (the default), `"hall"`, `"warehouse"` or `{ size, decay, damping, wet }`. Zones work in a scene that has a `ui.sound3d`: the scene plays through its sounds' engine, on the `world` bus.
+`ui.reverb_zone` is a box (`position` its centre, `size` its `{ x, y, z }` in metres, in the scene's coordinates) whose reverb the camera hears inside it, fading in over `fade` metres outside (2). `preset` is `"room"` (the default), `"hall"`, `"warehouse"` or `{ size, decay, damping, wet }`. Zones work in a scene that has a `ui.sound3d`: the scene plays through its sounds' engine, on the `world` bus. The first zone makes the world's two reverbs, each on a bus of its own under `world`: two of the engine's 32 buses, for as long as the scene lasts. The camera hears at most two zones at once (the one it's in and the one it's leaving, which rings out), and each sound sends to a zone as much as the camera hears it, half that from outside it.
 
 The scene's sound goes with the scene: a reload, or the scene leaving, stops it. A scene where nothing moves sends nothing to the mixer. A plugin can't place sound in a scene (its sound plays on its own bus). A looping `ui.sound3d` without `falloff.max` is flagged (`sound3d-no-max`): heard to 100 m by default, a far one costs as a near one does.
 
