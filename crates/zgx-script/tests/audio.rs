@@ -611,3 +611,205 @@ fn sound_plays_from_a_menu_item_and_a_checkbox() {
         "the checkbox's, at its gain: {level}"
     );
 }
+
+/// A plugin `sfx` in a directory of its own (with `init.luau` from
+/// `code`), loaded beside an app with a `bar` slot.
+fn with_plugin(dir: &std::path::Path, code: &str) -> Sounding {
+    let entry = dir.join("init.luau");
+    std::fs::write(&entry, code).unwrap();
+    Sounding::with(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })");
+        host.set_plugins(vec![zgx_script::Plugin {
+            name: "sfx".into(),
+            entry,
+            grants: vec![],
+        }]);
+        host
+    })
+}
+
+#[test]
+fn a_plugin_loads_sounds_from_its_own_directory_alone() {
+    // A sound outside the plugin's directory, and a link to it inside.
+    let outside = wav("secret", 0.05);
+    let dir = std::env::temp_dir().join(format!("zgx-audio-confined-{}", std::process::id()));
+    let plugin = dir.join("plugin");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::copy(&outside, dir.join("beside.wav")).unwrap();
+    std::fs::copy(&outside, plugin.join("own.wav")).unwrap();
+    let link = plugin.join("link.wav");
+    let _ = std::fs::remove_file(&link);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let mut s = with_plugin(
+        &plugin,
+        &format!(
+            "local said = {{}}
+            local function try(call, src)
+                local ok, why = pcall(call, src)
+                table.insert(said, if ok then \"loaded\" else tostring(why))
+            end
+            try(audio.sound, \"{outside}\")
+            try(audio.sound, \"../beside.wav\")
+            try(audio.sound, \"link.wav\")
+            try(audio.sound, \"{missing}\")
+            try(audio.music, \"../beside.wav\")
+            try(audio.sound, \"own.wav\")
+            ui.contribute(\"bar\", ui.text {{ id = \"said\", table.concat(said, \"|\") }})",
+            outside = outside.display(),
+            missing = dir.join("nothing-here.wav").display(),
+        ),
+    );
+    let said = s.app.text("said");
+    let said: Vec<&str> = said.split('|').collect();
+    assert_eq!(said.len(), 6, "{said:?}");
+    assert_eq!(said[5], "loaded", "its own sound");
+    for refused in &said[..5] {
+        assert!(
+            refused.contains("a plugin's sounds come from its directory or below"),
+            "{said:?}"
+        );
+    }
+    // A refusal says nothing of what's there: a file and no file read alike.
+    let tail = |s: &str| s.rsplit(':').next().unwrap_or_default().to_string();
+    assert_eq!(tail(said[0]), tail(said[3]), "{said:?}");
+    s.render(0.01);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_binding_given_nan_lets_the_window_go_idle() {
+    let tone = wav("nan", 1.);
+    let code = script(
+        &format!(
+            "{READY}
+            local tone = audio.sound(\"{{tone}}\")
+            local level = ui.state(\"level\", 1)
+            audio.bus(\"music\"):gain(ui.tween(level, {{ duration = 100 }}))
+            return ui.column {{
+                ui.text {{ id = \"ready\", count_ready(tone) }},
+                ui.button {{
+                    id = \"play\",
+                    on_click = function()
+                        audio.play(tone, {{ bus = \"music\", loop = true, gain = ui.spring(level) }})
+                        audio.play(tone, {{ loop = true, gain = ui.tween(level, {{ duration = 100 }}) }})
+                        audio.play(tone, {{ loop = true, gain = level }})
+                    end,
+                    \"Play\",
+                }},
+                ui.button {{ id = \"nan\", on_click = function() level:set(0 / 0) end, \"NaN\" }},
+            }}"
+        ),
+        &[("tone", &tone)],
+    );
+    let mut s = Sounding::new(&code);
+    s.ready(1);
+    s.app.click("play");
+    s.app.frames(5);
+    s.render(0.05);
+    let before = s.audio.stats().commands;
+    s.app.click("nan");
+    s.app.frames(30);
+    assert!(!s.app.clock.wants_frame(), "the window goes idle");
+    let sent = s.audio.stats().commands;
+    s.app.frames(30);
+    assert_eq!(s.audio.stats().commands, sent, "and sends nothing more");
+    assert!(sent - before <= 3, "{} commands for a NaN", sent - before);
+    let level = s.render(0.05);
+    assert!(level.iter().all(|l| l.is_finite() && *l > 0.), "{level:?}");
+}
+
+#[test]
+fn a_plugins_streams_count_among_its_voices() {
+    let dir = std::env::temp_dir().join(format!("zgx-audio-streams-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(wav("stream", 1.), dir.join("loop.wav")).unwrap();
+    let mut s = with_plugin(
+        &dir,
+        "local played = {}
+        ui.contribute(\"bar\", ui.button {
+            id = \"many\",
+            on_click = function()
+                for _ = 1, 12 do
+                    table.insert(played, audio.music(\"loop.wav\", { loop = true, gain = 0.01 }))
+                end
+            end,
+            \"Many\",
+        })",
+    );
+    s.app.click("many");
+    assert_eq!(s.audio.voices_playing(), 8, "streams count against the 8");
+    s.render(0.01);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_plugins_sounds_count_against_its_memory() {
+    let dir = std::env::temp_dir().join(format!("zgx-audio-memory-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // 16 s of mono at 48 kHz decodes to 3 MB of floats, past the 2 MiB.
+    std::fs::copy(wav("big", 16.), dir.join("big.wav")).unwrap();
+    let entry = dir.join("init.luau");
+    std::fs::write(
+        &entry,
+        "local big = audio.sound(\"big.wav\")
+        ui.contribute(\"bar\", ui.text { id = \"error\", function() return tostring(big.error:get()) end })",
+    )
+    .unwrap();
+    let mut s = Sounding::with(move |runtime| {
+        let host = ScriptHost::inline(runtime, "app", "return ui.slot(\"bar\", { id = \"bar\" })")
+            .limits(zgx_script::Limits {
+                plugin_memory: 2 << 20,
+                ..Default::default()
+            });
+        host.set_plugins(vec![zgx_script::Plugin {
+            name: "sfx".into(),
+            entry,
+            grants: vec![],
+        }]);
+        host
+    });
+    assert!(
+        s.app.wait_until(|app| app.text("error") != "nil"),
+        "the decode is refused"
+    );
+    assert!(
+        s.app.text("error").contains("plugin's memory"),
+        "{}",
+        s.app.text("error")
+    );
+    s.render(0.01);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn sounds_no_script_holds_are_let_go_after_a_reload() {
+    let one = wav("held-one", 0.05);
+    let two = wav("held-two", 0.05);
+    let dir = one.parent().unwrap().join("held-app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.luau");
+    let code = |path: &PathBuf| {
+        format!(
+            "{READY}
+            local s = audio.sound(\"{}\")
+            return ui.text {{ id = \"ready\", count_ready(s) }}",
+            path.display()
+        )
+    };
+    std::fs::write(&app, code(&one)).unwrap();
+    let path = app.clone();
+    let mut s = Sounding::with(move |runtime| ScriptHost::new(runtime, path));
+    s.ready(1);
+    assert_eq!(s.app.host.sounds_held(), 1);
+    std::fs::write(&app, code(&two)).unwrap();
+    s.app.host.reload().unwrap();
+    s.ready(1);
+    s.app.host.collect_garbage();
+    s.app.frames(2);
+    assert_eq!(
+        s.app.host.sounds_held(),
+        1,
+        "the first, no longer held, is let go"
+    );
+}

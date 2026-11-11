@@ -45,7 +45,7 @@ return ui.column {
 
 ## Sounds
 
-`audio.sound(src, opts)` loads a sound whole: WAV (PCM 8, 16, 24 or 32 bits, float), and Ogg Vorbis where the app was built with zgx-audio's `vorbis` (zgx-run's `audio` has it). It returns at once with a handle. The file is read and decoded on a thread of its own, and `sound.ready` (a read-only state) turns true when it's done. Paths are relative to the script, like images. A sound is kept by its path and file time: a reload loads it again only if the file changed.
+`audio.sound(src, opts)` loads a sound whole: WAV (PCM 8, 16, 24 or 32 bits, float), and Ogg Vorbis where the app was built with zgx-audio's `vorbis` (zgx-run's `audio` has it). It returns at once with a handle. The file is read and decoded on a thread of its own, and `sound.ready` (a read-only state) turns true when it's done. Paths are relative to the script, like images. A sound is kept by its path and file time: a reload loads it again only if the file changed. One no script holds any more is let go after a reload (and as the app goes idle), but for the most recent 64 MB of them. Sounds decode on two threads that sleep while nothing loads.
 
 - A play asked for before the sound is ready starts when it is, if that's within 250 ms of the ask. Later than that it's dropped and counted in `audio.stats().late`, so a click never plays long after its button.
 - `sound.error` (a read-only state) holds why a sound couldn't be loaded, or nil. A sound that failed plays nothing.
@@ -70,7 +70,7 @@ Load sounds once, at the top of a script or a module. Loading in a component or 
 | `priority` | kept over lower priorities when 64 voices are playing (-128 to 127) | 0 |
 | `fade_in` | seconds, or `{ seconds, curve = "linear" \| "equal_power" \| "exponential" }` | none (1 ms if the sound starts away from zero) |
 
-`gain`, `pan` and `pitch` may be states, functions or bindings: they follow for as long as the voice plays.
+`gain`, `pan` and `pitch` may be states, functions or bindings: they follow for as long as the voice plays. A value that isn't a finite number (`0 / 0`) is passed over: the sound keeps the last one it had.
 
 `audio.music(src, opts)` streams a file as it decodes (half a second ahead, on one thread for every stream): for music, ambience and anything long. Its options are `play`'s, on the `music` bus by default (`loop_start` and `loop_end` aside: a stream loops whole). A stream loops without a seam. If its decoding falls behind it fades out and back in over 5 ms rather than clicking (`audio.stats().dry`).
 
@@ -119,7 +119,7 @@ Every voice plays into a bus, and every bus into `master`. `ui`, `music` and `wo
 
 ## Plugins
 
-A sandboxed plugin's `audio` plays only into a bus of its own (`plugin:<name>`, under `ui`, so the user's setting silences it), with 8 voices at most: a ninth play's voice never plays. It has no `bus`, `add_bus`, `prewarm` or `ui_sounds_enabled`, and naming a `bus` in its options is an error.
+A sandboxed plugin's `audio` plays only into a bus of its own (`plugin:<name>`, under `ui`, so the user's setting silences it), with 8 voices at most, its streams (`audio.music`) among them: a ninth's voice never plays. Its sounds and music come from its directory or below, as its images and modules do (a path out of it, by `..`, an absolute path or a link, is an error that says nothing of what's there), or a file its grants let it pick. A sound's decoded samples count against its memory (`Limits::plugin_memory`): one past it fails to load, with `sound.error` saying so, and its sounds go with it. It has no `bus`, `add_bus`, `prewarm` or `ui_sounds_enabled`, and naming a `bus` in its options is an error.
 
 ## Lint
 

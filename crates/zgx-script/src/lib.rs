@@ -2935,6 +2935,12 @@ impl ScriptHost {
     pub fn voices_ended(&self, ids: &[u64]) {
         self.0.audio.voices_ended(ids);
     }
+    /// How many sounds the host keeps decoded for its app's scripts
+    /// (`audio.sound`): what a test reads to see a sound let go.
+    #[cfg(feature = "audio")]
+    pub fn sounds_held(&self) -> usize {
+        self.0.audio.sounds_held()
+    }
     /// The user's interface-sound setting, as the host passes it to the
     /// engine (`Audio::set_ui_sounds`): what `audio.ui_sounds_enabled`
     /// reads.
@@ -4622,6 +4628,9 @@ fn collect_garbage(inner: &Inner) {
         collect_fully(&vm.lua);
         vm.interrupt.heap_settled(vm.lua.used_memory());
     }
+    // Sounds only the scripts' collected garbage held.
+    #[cfg(feature = "audio")]
+    inner.audio.trim(0);
 }
 /// Full collections until one frees nothing more: a collection finalizes
 /// the garbage's userdata, and what only they held goes in the next.

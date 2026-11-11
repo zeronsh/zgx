@@ -17,7 +17,6 @@ use std::collections::HashMap;
 use std::future::poll_fn;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
-use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
 use std::time::{Duration, Instant, SystemTime};
 use zgx::frame::FrameClock;
@@ -31,6 +30,12 @@ const LATE: Duration = Duration::from_millis(250);
 const PLUGIN_VOICES: usize = 8;
 /// A followed value's glide to each new value: long enough not to click.
 const GLIDE: f64 = 0.010;
+/// Decoded bytes of sounds no script holds that the app's cache keeps
+/// (for the next reload to find) before it lets them go.
+const UNHELD_BYTES: usize = 64 << 20;
+/// Threads that decode sounds, and loads that may wait for one.
+const LOADERS: usize = 2;
+const LOADS_WAITING: usize = 256;
 
 /// The scripts' side of the host's engine: what plays, what follows state,
 /// and what each load started (stopped when a reload replaces it).
@@ -47,6 +52,8 @@ pub(crate) struct AudioHost {
     ui_sounds: Signal<Value>,
     /// Plays dropped for waiting on their sound past `LATE`.
     late: Cell<u64>,
+    /// Sounds asked for, counted: when each was last (`SoundSlot::used`).
+    uses: Cell<u64>,
     /// The load that runs now, or ran last: what it starts is its.
     epoch: Cell<u64>,
     /// Voices playing, by id.
@@ -54,8 +61,16 @@ pub(crate) struct AudioHost {
     /// What follows state into a bus (its gain, mute or solo), by bus and
     /// what: the load that set it, and the follower.
     buses: RefCell<HashMap<BusParam, (u64, Follow)>>,
-    /// Sounds by path, with the file's time when read: kept across reloads.
+    /// The app's sounds by path, with the file's time when read: kept
+    /// across reloads while a script holds them (`trim`). A plugin's are
+    /// its own, counted against its memory, and go with it.
     sounds: RefCell<HashMap<PathBuf, Rc<SoundSlot>>>,
+    /// Every sound made, the app's and plugins', for the plays waiting on
+    /// them a reload stops.
+    slots: RefCell<Vec<Weak<SoundSlot>>>,
+    /// The threads that decode sounds: made with the first, parked while
+    /// nothing loads.
+    loader: RefCell<Option<zgx::background::BackgroundPool>>,
 }
 
 /// A bus's name and what of it is followed (`"gain"`, `"mute"`, `"solo"`).
@@ -82,10 +97,13 @@ impl AudioHost {
             frames: Rc::default(),
             ui_sounds: runtime.signal(Value::Bool(true)),
             late: Cell::new(0),
+            uses: Cell::new(0),
             epoch: Cell::new(0),
             voices: RefCell::default(),
             buses: RefCell::default(),
             sounds: RefCell::default(),
+            slots: RefCell::default(),
+            loader: RefCell::default(),
         })
     }
 
@@ -181,7 +199,12 @@ impl AudioHost {
         });
         drop(stopped);
         self.buses.borrow_mut().retain(|_, (of, _)| !replaced(*of));
-        for slot in self.sounds.borrow().values() {
+        let slots: Vec<Rc<SoundSlot>> = {
+            let mut slots = self.slots.borrow_mut();
+            slots.retain(|slot| slot.strong_count() > 0);
+            slots.iter().filter_map(Weak::upgrade).collect()
+        };
+        for slot in slots {
             slot.waiting.borrow_mut().retain(|waiting| {
                 let keep = !replaced(waiting.epoch);
                 if !keep {
@@ -190,6 +213,54 @@ impl AudioHost {
                 keep
             });
         }
+        if ok {
+            self.trim(0);
+        }
+    }
+
+    /// Lets go of the app's sounds no script holds, but for the most recent
+    /// `keep` bytes of them: a reload that names one again finds it.
+    pub(crate) fn trim(&self, keep: usize) {
+        let mut sounds = self.sounds.borrow_mut();
+        let mut unheld: Vec<(u64, usize, PathBuf)> = sounds
+            .iter()
+            // The cache's own reference alone: no script, node or load holds it.
+            .filter(|(_, slot)| Rc::strong_count(slot) == 1)
+            .map(|(path, slot)| (slot.used.get(), slot.bytes(), path.clone()))
+            .collect();
+        unheld.sort_unstable_by_key(|(used, ..)| std::cmp::Reverse(*used));
+        let mut kept = 0;
+        for (_, bytes, path) in unheld {
+            kept += bytes;
+            if kept > keep {
+                sounds.remove(&path);
+            }
+        }
+    }
+
+    /// Decodes `path` on the loader's threads.
+    fn decode(
+        &self,
+        audio: &Audio,
+        path: PathBuf,
+    ) -> Result<zgx::background::BackgroundTask<Result<Sound, String>>, String> {
+        let mut loader = self.loader.borrow_mut();
+        if loader.is_none() {
+            *loader = Some(
+                zgx::background::BackgroundPool::new(LOADERS, LOADS_WAITING)
+                    .map_err(|error| format!("no thread to decode it on: {error}"))?,
+            );
+        }
+        let audio = audio.clone();
+        loader
+            .as_ref()
+            .expect("made above")
+            .spawn(move || audio.load(Source::file(path)).map_err(|e| e.to_string()))
+            .map_err(|error| format!("too many sounds loading at once: {error}"))
+    }
+
+    pub(crate) fn sounds_held(&self) -> usize {
+        self.sounds.borrow().len()
     }
 
     fn plugin_voices(&self, plugin: &str) -> usize {
@@ -280,7 +351,9 @@ impl AudioHost {
             followed => {
                 let last = Cell::new(now);
                 self.follow(followed, move |value| {
-                    let value = number(value);
+                    let Some(value) = finite(value) else {
+                        return;
+                    };
                     if value != last.replace(value) {
                         set(value, GLIDE);
                     }
@@ -360,7 +433,11 @@ impl AudioHost {
         let effect = {
             let (target, wake) = (target.clone(), wake.clone());
             self.runtime.effect(move || {
-                let next = source.with(number);
+                // Not finite, it keeps its goal: a NaN would never be
+                // reached, and the binding would step every frame for good.
+                let Some(next) = source.with(finite) else {
+                    return;
+                };
                 if next != target.replace(next) {
                     wake.notify();
                 }
@@ -461,11 +538,20 @@ fn map(anim: &Anim, value: f32) -> f32 {
     }
 }
 
+/// `value` as a number, 0 for none (and for one not finite).
 fn number(value: &Value) -> f32 {
-    match value {
+    finite(value).unwrap_or(0.)
+}
+
+/// `value` as a finite number, if it is one: a NaN or an infinity (a
+/// script's `0 / 0`) is no value to move a sound to, and a follower keeps
+/// the last one it had.
+fn finite(value: &Value) -> Option<f32> {
+    let n = match value {
         Value::Bool(b) => f32::from(u8::from(*b)),
-        other => other.as_f64().unwrap_or(0.) as f32,
-    }
+        other => other.as_f64()? as f32,
+    };
+    n.is_finite().then_some(n)
 }
 
 /// Sets a number: the value, and over how many seconds.
@@ -750,6 +836,11 @@ pub(crate) struct SoundSlot {
     loading: Cell<bool>,
     /// Plays asked for before it was ready.
     waiting: RefCell<Vec<Waiting>>,
+    /// A plugin's: what its decoded samples are counted against.
+    meter: Option<Rc<crate::meter::Meter>>,
+    /// When a script last asked for it, on the host's count: what `trim`
+    /// keeps the most recent of.
+    used: Cell<u64>,
 }
 struct Waiting {
     asked: Instant,
@@ -767,45 +858,53 @@ impl SoundSlot {
         let Some(host) = self.host.upgrade() else {
             return;
         };
-        type Shared = Arc<Mutex<(Option<Result<Sound, String>>, Option<Waker>)>>;
-        let shared: Shared = Arc::default();
-        let (into, audio, path) = (shared.clone(), audio.clone(), self.path.clone());
-        let spawned = std::thread::Builder::new()
-            .name("zgx-audio-load".into())
-            .spawn(move || {
-                let loaded = audio.load(Source::file(path)).map_err(|e| e.to_string());
-                let mut shared = into.lock().unwrap_or_else(|p| p.into_inner());
-                shared.0 = Some(loaded);
-                if let Some(waker) = shared.1.take() {
-                    waker.wake();
-                }
-            });
-        if let Err(error) = spawned {
-            self.loaded(Err(format!("no thread to decode it on: {error}")));
-            return;
-        }
+        let task = match host.decode(audio, self.path.clone()) {
+            Ok(task) => task,
+            Err(error) => {
+                // Asked again later, it tries again.
+                self.loading.set(false);
+                self.loaded(Err(error));
+                return;
+            }
+        };
         let slot = self.clone();
         host.spawn(async move {
-            let loaded = poll_fn(|cx| {
-                let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
-                match shared.0.take() {
-                    Some(loaded) => Poll::Ready(loaded),
-                    None => {
-                        shared.1 = Some(cx.waker().clone());
-                        Poll::Pending
-                    }
-                }
-            })
-            .await;
+            let loaded = match task.await {
+                Ok(loaded) => loaded,
+                Err(error) => Err(error.to_string()),
+            };
             slot.loaded(loaded);
         });
     }
 
+    /// What its samples hold, decoded.
+    fn bytes(&self) -> usize {
+        self.sound.borrow().as_ref().map_or(0, |s| {
+            s.frames() * s.channels() * std::mem::size_of::<f32>()
+        })
+    }
+
     /// The decoder answered: plays that waited start, if they're not late.
-    fn loaded(&self, loaded: Result<Sound, String>) {
+    fn loaded(self: &Rc<Self>, loaded: Result<Sound, String>) {
         let waiting = std::mem::take(&mut *self.waiting.borrow_mut());
         let Some(host) = self.host.upgrade() else {
             return;
+        };
+        // A plugin's samples count against its memory, for as long as it
+        // holds the sound.
+        let loaded = match (loaded, &self.meter) {
+            (Ok(sound), Some(meter)) => {
+                let bytes = sound.frames() * sound.channels() * std::mem::size_of::<f32>();
+                match meter.room(bytes) {
+                    Ok(()) => {
+                        let slot = Rc::downgrade(self);
+                        meter.hold_native(move || slot.strong_count() > 0, bytes);
+                        Ok(sound)
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            (loaded, _) => loaded,
         };
         match loaded {
             Ok(sound) => {
@@ -1045,7 +1144,11 @@ impl UserData for BusUd {
             // A store the mixer reads each block: no command, whatever the
             // rate it changes at.
             let drive = b.bus.drive();
-            b.follow(lua, "gain", value, move |value| drive.set(number(value)))
+            b.follow(lua, "gain", value, move |value| {
+                if let Some(gain) = finite(value) {
+                    drive.set(gain);
+                }
+            })
         });
         methods.add_method(
             "fade",
@@ -1101,22 +1204,31 @@ pub(crate) fn install(
 ) -> mlua::Result<()> {
     let audio = lua.create_table()?;
     {
-        let host = host.clone();
+        let (host, plugin) = (host.clone(), plugin.clone());
         audio.set(
             "sound",
             lua.create_function(move |lua, (src, opts): (String, Option<Table>)| {
                 let engine = host.engine()?;
-                let path = resolve(lua, &src)?;
+                let path = resolve(lua, &src, plugin.is_some(), "audio.sound")?;
                 let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                let cached = host
-                    .sounds
-                    .borrow()
-                    .get(&path)
-                    .filter(|slot| slot.stamp == stamp)
-                    .cloned();
+                // The app's are shared and kept; a plugin's are its own.
+                let cached = match plugin {
+                    Some(_) => None,
+                    None => host
+                        .sounds
+                        .borrow()
+                        .get(&path)
+                        .filter(|slot| slot.stamp == stamp)
+                        .cloned(),
+                };
+                host.uses.set(host.uses.get() + 1);
                 let slot = match cached {
                     Some(slot) => slot,
                     None => {
+                        let meter = match plugin {
+                            Some(_) => crate::node::env(lua)?.meter.clone(),
+                            None => None,
+                        };
                         let slot = Rc::new(SoundSlot {
                             host: Rc::downgrade(&host),
                             path: path.clone(),
@@ -1126,11 +1238,18 @@ pub(crate) fn install(
                             error: host.runtime.signal(Value::Nil),
                             loading: Cell::new(false),
                             waiting: RefCell::default(),
+                            meter,
+                            used: Cell::new(0),
                         });
-                        host.sounds.borrow_mut().insert(path, slot.clone());
+                        host.slots.borrow_mut().push(Rc::downgrade(&slot));
+                        if plugin.is_none() {
+                            host.sounds.borrow_mut().insert(path, slot.clone());
+                            host.trim(UNHELD_BYTES);
+                        }
                         slot
                     }
                 };
+                slot.used.set(host.uses.get());
                 let preload = match &opts {
                     Some(opts) => opts.get::<Option<bool>>("preload")?.unwrap_or(true),
                     None => true,
@@ -1196,7 +1315,22 @@ pub(crate) fn install(
             "music",
             lua.create_function(move |lua, (src, opts): (String, Option<Table>)| {
                 let audio = host.engine()?;
-                let path = resolve(lua, &src)?;
+                let path = resolve(lua, &src, plugin.is_some(), "audio.music")?;
+                // A stream is a voice too (and a window, a ring and decoding):
+                // a plugin's count among its voices.
+                if let Some(plugin) = &plugin
+                    && host.plugin_voices(plugin) >= PLUGIN_VOICES
+                {
+                    return Ok(VoiceUd {
+                        cell: Rc::new(VoiceCell {
+                            voice: RefCell::default(),
+                            playing: host.runtime.signal(Value::Bool(false)),
+                            cancelled: Cell::new(true),
+                        }),
+                        host: host.clone(),
+                        at: None,
+                    });
+                }
                 let spec = spec(
                     lua,
                     &host,
@@ -1335,20 +1469,32 @@ pub(crate) fn install(
     globals.raw_set("audio", audio)
 }
 
-/// `src` as a path: relative to the script, as images are.
-fn resolve(lua: &Lua, src: &str) -> mlua::Result<PathBuf> {
+/// `src` as a path: relative to the script, as images are. A plugin's
+/// stays in its directory, as its images and modules do (`within`: by name
+/// and by where a link leads), or a file its host's grant let it pick; a
+/// refusal says nothing of what is there.
+fn resolve(lua: &Lua, src: &str, plugin: bool, call: &str) -> mlua::Result<PathBuf> {
+    let env = crate::node::env(lua)?;
+    let base = env.vm.upgrade().and_then(|vm| vm.base.clone());
     let path = PathBuf::from(src);
-    if path.is_absolute() {
+    if !plugin {
+        return Ok(match base {
+            Some(base) if !path.is_absolute() => base.join(path),
+            _ => path,
+        });
+    }
+    if path.is_absolute() && env.picked.borrow().contains(&path) {
         return Ok(path);
     }
-    let base = crate::node::env(lua)?
-        .vm
-        .upgrade()
-        .and_then(|vm| vm.base.clone());
-    Ok(match base {
-        Some(base) => base.join(path),
-        None => path,
-    })
+    let root = base.map(|base| base.canonicalize().unwrap_or(base));
+    match root {
+        Some(root) if crate::within(&root, &crate::normalize(&root.join(&path))) => {
+            Ok(crate::normalize(&root.join(path)))
+        }
+        _ => Err(mlua::Error::runtime(format!(
+            "{call}: a plugin's sounds come from its directory or below"
+        ))),
+    }
 }
 
 /// `sound =` on a control: what plays as it's activated.
