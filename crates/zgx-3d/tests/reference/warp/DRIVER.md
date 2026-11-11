@@ -7,8 +7,12 @@ this WARP crashes in `ExecuteCommandLists`, or draws nothing, when several
 wgpu devices submit at once in one process. Another WARP version (CI's
 Windows Server image, an older or newer Windows) may move these pixels.
 
-`gi_room` is DXC's alone (`WGPU_DX12_COMPILER=dxc`, dxcompiler.dll
-1.9.2602.17): its probes trace by ray queries, which FXC never compiles,
-so under FXC the room is drawn by faces and compared with
-`gi_room_raster`, blessed under FXC. Each matches the other compiler's
-run too where both draw it.
+The room is drawn by faces on WARP under either compiler since WARP's ray
+queries were declined (docs/validation.md, "WARP's ray queries are
+declined"), and `gi_room_raster` is what the room test compares.
+`gi_room` is kept only so the faces have a traced picture to stand beside
+(`faces_drawn_in_place_of_rays_light_the_room_alike`): traced under DXC
+(dxcompiler.dll 1.9.2602.17) before the decline, from a run whose rays
+matched the CPU reference, within 1 level of Metal's. It can't be blessed
+again on WARP, where rays are declined: if the room changes, trace it again
+on the RTX 4090 or Metal and compare across families.
