@@ -844,7 +844,6 @@ struct Chunk {
 const CHUNK: usize = 16 * 1024;
 impl Slab {
     /// `compact`'s words and glyph advances.
-    #[inline(always)]
     fn of(&self, compact: &Compact) -> (&[Packed], &[u32]) {
         let chunk = self.chunks[compact.chunk as usize]
             .as_ref()
@@ -2174,7 +2173,7 @@ impl TextCache {
         let (Some(hash), Some(at)) = (grew, at) else {
             let (words, taken) =
                 self.words
-                    .words(fonts, text, &runs, base, size, &mut self.spare_words, None)?;
+                    .fresh(fonts, text, &runs, base, size, &mut self.spare_words)?;
             return Some((words, base, taken, None));
         };
         // A text it supersedes, which goes as it is prepared

@@ -173,6 +173,123 @@ impl WordCache {
         self.fonts.push(((run.font.clone(), bits, span), attrs));
         self.fonts.len() as u32 - 1
     }
+    /// `words` for a text that grew from none (most text): read whole and
+    /// shaped word by word as before streams were, in one of `spare`'s. A
+    /// word across runs or in a padded run is shaped in parts by `words`
+    /// (`composed`), the whole text made there.
+    #[allow(clippy::vec_box)]
+    #[inline(always)]
+    pub fn fresh(
+        &mut self,
+        fonts: &mut FontSystem,
+        text: &str,
+        runs: &[Run<'_>],
+        base: &FontStyle,
+        font_size: f32,
+        spare: &mut Vec<Box<Words>>,
+    ) -> Option<(Box<Words>, usize)> {
+        if runs.iter().any(|run| !qualifies(run.font)) {
+            return None;
+        }
+        let size = font_size.max(1.);
+        let ids: smallvec::SmallVec<[u32; 4]> = runs.iter().map(|run| self.font(run)).collect();
+        let mut ranges: smallvec::SmallVec<[(usize, usize, bool); 16]> = smallvec::SmallVec::new();
+        // (`plain_line` was asked first: `TextCache::words_of`.)
+        if !cosmic_text::line_words(text, |range, blank| {
+            ranges.push((range.start, range.end, blank));
+        }) {
+            return None;
+        }
+        let mut kept = spare.pop().unwrap_or_else(|| {
+            Box::new(Words {
+                words: Vec::new(),
+                glyphs: 0,
+                font_size: size,
+                align: None,
+                laid: None,
+                lines: Vec::new(),
+                breaks: Vec::new(),
+                resume: None,
+                grew: None,
+            })
+        });
+        let words = &mut kept.words;
+        words.clear();
+        // Room for all of it at once: it would grow by doubling, and keep
+        // what it does not use.
+        words.reserve(ranges.len());
+        let mut glyphs = 0;
+        let mut run = 0;
+        for (start, end, blank) in ranges {
+            while runs[run].end <= start {
+                run += 1;
+            }
+            // A word across runs, or padded: shaped in parts (`words`).
+            if end > runs[run].end || runs[run].padding != 0. {
+                words.clear();
+                spare.push(kept);
+                return self.composed_words(fonts, text, runs, base, font_size, spare);
+            }
+            let id = ids[run];
+            let word = &text[start..end];
+            let mut hasher = FxHasher::default();
+            id.hash(&mut hasher);
+            blank.hash(&mut hasher);
+            word.hash(&mut hasher);
+            let hash = hasher.finish();
+            let shape = match self.shapes.get(&hash) {
+                Some((font, text, shape)) if *font == id && **text == *word => shape.clone(),
+                _ => {
+                    let shaped = ShapeWord::plain(fonts, word, &self.fonts[id as usize].1, blank);
+                    // A word whose glyphs set different line heights is
+                    // measured from shaped lines (`Compact::of`).
+                    let height = |glyph: &ShapeGlyph| glyph.metrics_opt.map(|m| m.line_height);
+                    let first = shaped.glyphs.first().and_then(height);
+                    if shaped.glyphs.iter().any(|glyph| height(glyph) != first) {
+                        words.clear();
+                        spare.push(kept);
+                        return None;
+                    }
+                    let shape = Arc::new(Shape {
+                        width: shaped.width(size),
+                        blank: shaped.blank,
+                        glyphs: shaped.glyphs.into_boxed_slice(),
+                    });
+                    let bytes = shape.glyphs.len() * size_of::<ShapeGlyph>() + word.len() + 64;
+                    if self.bytes + bytes > BUDGET {
+                        self.shapes.clear();
+                        self.bytes = 0;
+                    }
+                    self.bytes += bytes;
+                    self.shapes.insert(hash, (id, word.into(), shape.clone()));
+                    shape
+                }
+            };
+            glyphs += shape.glyphs.len();
+            words.push((start, shape));
+        }
+        kept.glyphs = glyphs;
+        kept.font_size = size;
+        kept.align = crate::text::alignment(base);
+        kept.laid = None;
+        Some((kept, 0))
+    }
+    /// `words` for a text that grew from none with a word across runs or in
+    /// a padded run (`fresh`): out of line, as few texts have one.
+    #[allow(clippy::vec_box)]
+    #[cold]
+    #[inline(never)]
+    fn composed_words(
+        &mut self,
+        fonts: &mut FontSystem,
+        text: &str,
+        runs: &[Run<'_>],
+        base: &FontStyle,
+        font_size: f32,
+        spare: &mut Vec<Box<Words>>,
+    ) -> Option<(Box<Words>, usize)> {
+        self.words(fonts, text, runs, base, font_size, spare, None)
+    }
     /// `text`'s words in its `runs` (in order, the last ending at its end),
     /// shaped, where it is a paragraph laid out from them (`qualifies`,
     /// `plain_words`, each word inside one run), at `font_size` and aligned
@@ -187,9 +304,11 @@ impl WordCache {
     /// from there go, and its lines are laid out again only from where they
     /// may change (`lay_out`). With the words, how many were taken so.
     // Boxed: an entry holds its words boxed (it stays small), and a spare
-    // goes back into one without being boxed again.
+    // goes back into one without being boxed again. Out of line: a
+    // stream's (and `composed_words`'), once a paragraph; text that grew
+    // from none takes `fresh`.
     #[allow(clippy::vec_box, clippy::too_many_arguments)]
-    #[inline(always)]
+    #[inline(never)]
     pub fn words(
         &mut self,
         fonts: &mut FontSystem,
@@ -317,10 +436,8 @@ impl WordCache {
         }
         self.shaped(fonts, (id, hash), word, blank, size)
     }
-    /// `shape` of a word not shaped before: shaped and kept. Inlined, as
-    /// it was in `words` before streams were: a text's words are mostly
-    /// shaped once (`entry_hashed`'s cost on new text).
-    #[inline(always)]
+    /// `shape` of a word not shaped before: shaped and kept.
+    #[inline(never)]
     fn shaped(
         &mut self,
         fonts: &mut FontSystem,

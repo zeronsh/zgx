@@ -360,8 +360,7 @@ needs of this crate, all additions:
   hint, a break between two ASCII punctuation marks (the ligature probe).
   It is `plain_line` (the bytes alone, one pass stopping at the first that
   disqualifies, as most text that doesn't qualify is turned away: a line
-  break) then `line_words`. `line_words` is `#[inline(always)]`: inlined
-  into zgx-gpu's word cache with its closure, as it was before that grew.
+  break) then `line_words`.
 - `ShapeWord::plain(font_system, word, attrs_list, blank)`: a word shaped
   alone, as the shape-run cache already shapes runs. It resets
   `shape_buffer.run_key_line` first, as `build_spans` does: the run key keeps

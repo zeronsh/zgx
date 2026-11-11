@@ -908,10 +908,12 @@ fn shape_run_cached(
             key.set_defaults(defaults.clone(), &mut font_system.shape_run_cache);
         }
         font_system.shape_buffer.run_key_line = list;
-        font_system.shape_buffer.line_padded = attrs_list.has_padding();
+        // Whether it sets padding (`has_padding`), found in the same walk.
+        let mut padded = attrs_list.defaults_owned().padding_opt.is_some();
         let line_spans = &mut font_system.shape_buffer.line_spans;
         line_spans.clear();
         for (attrs_range, attrs) in attrs_list.spans.iter() {
+            padded |= attrs.padding_opt.is_some();
             if attrs != &*key.default_attrs {
                 line_spans.push((
                     attrs_range.clone(),
@@ -919,6 +921,7 @@ fn shape_run_cached(
                 ));
             }
         }
+        font_system.shape_buffer.line_padded = padded;
     }
     key.rtl = span_rtl;
     // As the attribute list's spans overlapping the run, in order, those
@@ -1719,9 +1722,7 @@ pub fn plain_line(line: &str) -> bool {
 }
 
 /// zgx patch: `plain_words` for a line `plain_line` accepted: its words,
-/// or false at a break between two ASCII punctuation marks. Inlined into
-/// its caller with its closure (zgx's `WordCache::words`).
-#[inline(always)]
+/// or false at a break between two ASCII punctuation marks.
 pub fn line_words(line: &str, mut word: impl FnMut(Range<usize>, bool)) -> bool {
     let mut start_word = 0;
     for (end_lb, _) in unicode_linebreak::linebreaks(line) {
