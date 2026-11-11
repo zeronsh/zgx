@@ -334,8 +334,14 @@ pub(crate) mod aac {
             ext: ExtAudioFileRef,
             channels: usize,
             rate: u32,
-            piece: Vec<f32>,
+            /// What each read decodes into: aligned to 64 bytes, always,
+            /// so the decoder takes the same path for every buffer, and two
+            /// decodes of one file come out the same to the last bit.
+            piece: Box<Piece>,
         }
+
+        #[repr(C, align(64))]
+        struct Piece([f32; PIECE * 2]);
 
         // SAFETY: the file and its converter are used from one thread at a
         // time (the decode thread's, or the caller's), never two at once;
@@ -385,7 +391,7 @@ pub(crate) mod aac {
                     ext,
                     channels: 0,
                     rate: 0,
-                    piece: Vec::new(),
+                    piece: Box::new(Piece([0.; PIECE * 2])),
                 };
                 let mut source = StreamDescription::default();
                 let mut size = size_of::<StreamDescription>() as u32;
@@ -433,7 +439,6 @@ pub(crate) mod aac {
                 }
                 aac.channels = channels as usize;
                 aac.rate = rate;
-                aac.piece = vec![0.; PIECE * aac.channels];
                 Ok(aac)
             }
         }
@@ -451,8 +456,8 @@ pub(crate) mod aac {
                     count: 1,
                     buffers: [Buffer {
                         channels: self.channels as u32,
-                        bytes: (self.piece.len() * 4) as u32,
-                        data: self.piece.as_mut_ptr() as *mut c_void,
+                        bytes: (PIECE * self.channels * 4) as u32,
+                        data: self.piece.0.as_mut_ptr() as *mut c_void,
                     }],
                 };
                 // SAFETY: the buffer is `piece`, room for `PIECE` frames.
@@ -463,7 +468,7 @@ pub(crate) mod aac {
                 if frames == 0 {
                     return Ok(false);
                 }
-                out.extend_from_slice(&self.piece[..frames as usize * self.channels]);
+                out.extend_from_slice(&self.piece.0[..frames as usize * self.channels]);
                 Ok(true)
             }
             fn rewind(&mut self) -> Result<(), Error> {
