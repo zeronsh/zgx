@@ -200,3 +200,15 @@ fn a_layer_turned_off_draws_no_frames() {
     }
     assert_eq!(world.frames_drawn() - drawn, 0, "10 s, no frame");
 }
+
+#[test]
+fn a_node_is_found_by_its_name() {
+    let model = Model::from_bytes(&rig::rig(4)).unwrap();
+    // Node 0 holds the mesh; joint i is node i + 1.
+    assert_eq!(model.node("joint2"), Some(3));
+    assert_eq!(model.node("nothing"), None);
+    let world = World::new();
+    let placed = world.place_model(&model);
+    let hips = placed.node(model.node("joint0").unwrap()).unwrap();
+    assert_eq!(world.object(hips).unwrap().parent, Some(placed.root));
+}

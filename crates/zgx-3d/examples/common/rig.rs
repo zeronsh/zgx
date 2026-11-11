@@ -112,7 +112,9 @@ pub fn rig(joints: usize) -> Vec<u8> {
         } else {
             format!(r#","children":[{}]"#, children.join(","))
         };
-        nodes.push(format!(r#"{{"translation":[{x},{y},{z}]{children}}}"#));
+        nodes.push(format!(
+            r#"{{"name":"joint{i}","translation":[{x},{y},{z}]{children}}}"#
+        ));
     }
     let joint_nodes: Vec<String> = (1..=joints).map(|j| j.to_string()).collect();
     let doc = format!(

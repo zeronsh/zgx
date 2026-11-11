@@ -91,6 +91,8 @@ struct Node {
     light: Option<usize>,
     /// The camera it holds, by index.
     camera: Option<usize>,
+    /// Its name in the file, if it has one (`Model::node`).
+    name: Option<String>,
 }
 /// A skin: its joints (nodes) and each one's inverse bind matrix.
 #[derive(Clone, Debug)]
@@ -212,6 +214,7 @@ impl Model {
                     list(&doc, "meshes").get(mesh as usize)?.get("weights")
                 });
                 Ok(Node {
+                    name: node.get("name").and_then(Value::as_str).map(str::to_owned),
                     transform: transform(node),
                     children,
                     meshes,
@@ -312,6 +315,13 @@ impl Model {
     /// Its animation named `name`, if it has one.
     pub fn clip(&self, name: &str) -> Option<&crate::Clip> {
         self.clips.iter().find(|clip| clip.name() == Some(name))
+    }
+    /// Its node named `name` (the first, in its file's order), by index:
+    /// the object it became is `Placed::node(index)`.
+    pub fn node(&self, name: &str) -> Option<usize> {
+        self.nodes
+            .iter()
+            .position(|n| n.name.as_deref() == Some(name))
     }
     /// The box holding its meshes, in its own frame: least and greatest
     /// corners. `None` if it has no meshes.

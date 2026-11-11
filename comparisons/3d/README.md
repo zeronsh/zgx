@@ -70,6 +70,21 @@ Every arm reads the same converted files.
 
 Sponza is not here: the Khronos copy's files are under the CRYENGINE Limited License Agreement, which grants use for games made with CRYENGINE alone.
 
+## Animation
+
+The CPU cost of playing a skinned clip (design section 6.8), outside `run.py`: each arm is one binary printing its own count, and `play` less `still` is what playing costs.
+
+```sh
+# CesiumMan.glb from KhronosGroup/glTF-Sample-Assets at 8f492390 (Models/CesiumMan/glTF-Binary): 19 joints, one clip of 57 linear channels.
+cd comparisons/3d/bevy-anim && cargo build --release && for arm in play still; do ARM=$arm MODEL=/path/CesiumMan.glb INSTANCES=100 FRAMES=300 target/release/bevy-compare-anim; done
+cd comparisons/3d/zgx && cargo build --release --bin anim && for arm in play still; do ARM=$arm MODEL=/path/CesiumMan.glb INSTANCES=100 FRAMES=300 target/release/anim; done
+```
+
+- **Both:** 100 copies of the model in rows, a 256² offscreen target on a Metal device drawn every frame, frame time a fixed 1/60 s (Bevy's `TimeUpdateStrategy::ManualDuration`, zgx's `ViewportFrame.time`), 60 frames to warm up, then the process's instructions and CPU time over `FRAMES`, every thread counted (`common/rusage.rs`). Interleave the arms and repeat them.
+- **Bevy** (`bevy-anim`): its default app, multi-threaded, each instance a glTF scene whose `AnimationPlayer` plays clip 0 through an `AnimationGraph`, repeating. What playing adds there: evaluating the curves, transform propagation of the moved joints, the skins' joint matrices, their extraction and upload.
+- **zgx** (`zgx/src/bin/anim.rs`): each instance an animator (`World::add_animator`) playing the clip. What playing adds: sampling, writing the joints that moved, their world matrices, the palettes and their upload, and drawing the frame (a still world draws none).
+- **Numbers so far** (M1 Max, Nov 10 2026, a loaded machine; 3 interleaved rounds): Bevy 0.19.1 22.80 M instructions a frame playing, 14.27 M still: 8.53 M, about 4,490 a joint a frame. zgx, by an in-process split of the same frames on wgpu's no-op device: sampling and pose writes 561 a joint a frame (`Placed::pose` before animators: 1,819), joint matrices 213, palettes 163, their copy and upload 56: about 990, the rest of the frame (instances, passes) apart. The zgx arm here, on Metal: 2.55 M playing, 0.61 M still (every frame drawn in both; a still world's frame is its last kept): 1.94 M, about 1,020 a joint a frame, within 1% over 3 rounds. A later run of the Bevy arms at load 37 spread 14 to 24 M between rounds: its threads move with the machine's load, so run it on a quiet one.
+
 ## What each arm does
 
 | | zgx (`zgx/`) | Bevy (`bevy/`) | Filament (`filament/`) |

@@ -226,7 +226,11 @@ impl World {
         self.change_animator(id, |animator| animator.stop(layer, fade));
     }
     /// Animator `id`'s layer `index` (counted from 0, the lowest) as
-    /// `layer` says: its weight, mask and blend. Layers up to it that
+    /// `layer` says: its weight, mask and blend. While no layer shows
+    /// anything (weight 0, a mask taking nothing) the world rests and its
+    /// clips' times stand; shown again, they go on by the whole time
+    /// between, in step, and a looping clip's events and root motion for
+    /// that stretch come out as at most one loop's worth. Layers up to it that
     /// weren't set override wholly.
     /// Fails for a layer past the last (`MAX_LAYERS`).
     pub fn set_layer(
