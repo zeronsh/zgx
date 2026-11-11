@@ -6,7 +6,8 @@
 //!
 //! Run: cargo run --release -p zgx-3d --features particles --example particles_bench
 //! (`ROUNDS`, `FRAMES`; `ALIVE`: the rain's particles alive at once;
-//! `SPLASH=1`: its drops give birth to splashes where they land.)
+//! `SPLASH=1`: its drops give birth to splashes where they land; `LIT=1`:
+//! the rain lit (`Emitter::lit`) by a sun and eight lamps along it.)
 use std::time::{Duration, Instant};
 use zgx_3d::*;
 use zgx_gpu::{
@@ -81,6 +82,22 @@ fn world(alive: Option<u32>) -> World {
             .color([0.7, 0.75, 0.8, 0.5]);
         if let Some(splashes) = splashes {
             rain = rain.on_hit(splashes, 2);
+        }
+        if setting("LIT", 0) == 1 {
+            rain = rain.lit(Lit { phase: 0.7 });
+            world.add_light(Light::Directional {
+                direction: vec3(-0.3, -1., -0.2),
+                color: [1., 0.95, 0.9],
+                intensity: 3.,
+            });
+            for i in 0..8 {
+                world.add_light(Light::Point {
+                    position: vec3(-14. + 4. * i as f32, 6., -10.),
+                    color: [1., 0.7, 0.4],
+                    intensity: 400.,
+                    range: 25.,
+                });
+            }
         }
         world.add_emitter(rain).expect("an emitter");
     }

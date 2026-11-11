@@ -1283,3 +1283,105 @@ fn a_particle_at_the_camera_isnt_drawn_over_the_view() {
     };
     assert_eq!(brightest(&pixels), 0);
 }
+
+/// The middle's red of a grey burst at the origin, `lit` or not, under
+/// `lights` (the world otherwise black: no sun, no sky).
+fn red_lit_by(lit: Option<Lit>, lights: &[Light]) -> Option<u8> {
+    let world = world();
+    for light in lights {
+        world.add_light(*light);
+    }
+    let mut emitter = Emitter::new(16)
+        .burst(16)
+        .lifetime(10.0..10.0)
+        .size(0.5..0.5)
+        .color([0.8, 0.8, 0.8, 1.]);
+    if let Some(lit) = lit {
+        emitter = emitter.lit(lit);
+    }
+    world.add_emitter(emitter).unwrap();
+    let mut frames = Frames::new(&world)?;
+    frames.ready(&world, 0.);
+    frames.draw(1. / 60.);
+    Some(pixel(&frames.pixels(), 32, 32)[0])
+}
+
+/// A lamp `at`, white, of `intensity`.
+fn lamp(at: [f32; 3], intensity: f32) -> Light {
+    Light::Point {
+        position: at.into(),
+        color: [1., 1., 1.],
+        intensity,
+        range: 20.,
+    }
+}
+
+#[test]
+fn a_lit_particle_takes_the_light_reaching_it_and_none_where_none_does() {
+    let Some(unlit) = red_lit_by(None, &[]) else {
+        return;
+    };
+    let isotropic = Lit { phase: 0. };
+    let dark = red_lit_by(Some(isotropic), &[]).unwrap();
+    let beside = red_lit_by(Some(isotropic), &[lamp([1., 0., 0.], 8.)]).unwrap();
+    let stronger = red_lit_by(Some(isotropic), &[lamp([1., 0., 0.], 32.)]).unwrap();
+    // Unlit: its colour is its light, whatever lights the world.
+    assert!(unlit > 200, "unlit {unlit}");
+    // Lit: dark with nothing lighting it, and as lit as its lamp.
+    assert_eq!(dark, 0, "nothing reaching it");
+    assert!(
+        beside > 60 && stronger > beside + 30,
+        "{beside}, {stronger}"
+    );
+}
+
+#[test]
+fn drops_glow_toward_a_lamp_behind_them() {
+    // The camera at 4 on z. A lamp a metre behind the particle sends its
+    // light on toward the camera; one a metre in front sends it away.
+    // At a phase of 0.7 the one behind gives some 180 times the other's
+    // light (linear 0.12 and 0.0007 here: 97 and 2 encoded).
+    let rain = Lit { phase: 0.7 };
+    let Some(behind) = red_lit_by(Some(rain), &[lamp([0., 0., -1.], 0.1)]) else {
+        return;
+    };
+    let in_front = red_lit_by(Some(rain), &[lamp([0., 0., 1.], 0.1)]).unwrap();
+    assert!(behind > 80, "toward the camera: {behind}");
+    assert!(in_front < 10, "away: {in_front}");
+}
+
+#[test]
+fn a_lit_particle_takes_the_skys_light_all_round() {
+    // A sky of 1 above and 0 below: a mean of a half, by its albedo of 0.8.
+    let Some(red) = red_lit_by(
+        Some(Lit { phase: 0. }),
+        &[Light::Hemisphere {
+            sky: [1., 1., 1.],
+            ground: [0., 0., 0.],
+            intensity: 1.,
+        }],
+    ) else {
+        return;
+    };
+    // Linear 0.4 is 170 in sRGB.
+    assert!((160..=180).contains(&red), "{red}");
+}
+
+#[test]
+fn a_phase_past_reason_is_held_to_it() {
+    let world = world();
+    let id = world
+        .add_emitter(Emitter::new(4).lit(Lit { phase: f32::NAN }))
+        .unwrap();
+    assert_eq!(
+        world.emitter(id).unwrap(),
+        Emitter::new(4).lit(Lit { phase: 0. })
+    );
+    world.set_emitter_lit(id, Some(Lit { phase: 7. }));
+    assert_eq!(
+        world.emitter(id).unwrap(),
+        Emitter::new(4).lit(Lit { phase: 0.95 })
+    );
+    world.set_emitter_lit(id, None);
+    assert_eq!(world.emitter(id).unwrap(), Emitter::new(4));
+}

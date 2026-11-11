@@ -21,6 +21,8 @@ struct Draw {
     // A pixel's width and height in clip space, and the view depths it
     // fades in between from the camera.
     viewport: vec4<f32>,
+    // Lit (`vs_lit`): its phase's asymmetry.
+    light: vec4<f32>,
 }
 @group(0) @binding(1) var<uniform> draw: Draw;
 
@@ -61,6 +63,56 @@ fn color_over_life(t: f32) -> vec4<f32> {
 
 @vertex
 fn vs(@builtin(vertex_index) vertex: u32, p: Instance) -> Out {
+    return quad(vertex, p);
+}
+
+// As `vs`, its colour an albedo lit by the scene at the particle's middle
+// (so its corners agree): its share of each light scattered toward the
+// camera, and the sky's all round.
+@vertex
+fn vs_lit(@builtin(vertex_index) vertex: u32, p: Instance) -> Out {
+    var out = quad(vertex, p);
+    out.color = vec4(out.color.rgb * light_at(p.position), out.color.a);
+    return out;
+}
+
+const PI: f32 = 3.14159265;
+
+// Henyey–Greenstein: the share of light turned through an angle whose
+// cosine is `cos_t`, per steradian (over the sphere, 1).
+fn phase(cos_t: f32) -> f32 {
+    let g = draw.light.x;
+    let d = max(1.0 + g * g - 2.0 * g * cos_t, 1e-4);
+    return (1.0 - g * g) / (4.0 * PI * d * sqrt(d));
+}
+
+// The light a particle at `at` scatters toward the camera, per unit of its
+// albedo: each light's illuminance there by its phase, and the sky's mean
+// radiance all round (an isotropic particle under a light gives a quarter
+// of what a surface facing it does).
+fn light_at(at: vec3<f32>) -> vec3<f32> {
+    let to_eye = normalize(frame.camera.xyz - at);
+    // The sun's light travels along `sun_direction`.
+    var light = frame.sun_color.rgb * phase(dot(frame.sun_direction.xyz, to_eye));
+    // The lamps nearest the camera's target, as the meshes take them.
+    for (var i = 0u; i < u32(frame.params.x); i++) {
+        let lamp = frame.points[i];
+        let to = lamp[0].xyz - at;
+        let distance = max(length(to), 1e-4);
+        let falloff = pow(clamp(1.0 - pow(distance / lamp[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);
+        let cone = clamp(dot(lamp[2].xyz, -to / distance) + lamp[2].w, 0.0, 1.0);
+        light += lamp[1].rgb * lamp[1].w * falloff * cone * cone * phase(dot(-to / distance, to_eye));
+    }
+    // The sky: its hemisphere's mean, or an environment's (its first
+    // harmonic, the mean of its diffuse light).
+    var sky = (frame.sky.rgb + frame.ground.rgb) * 0.5;
+    if frame.environment.w > 0.0 {
+        sky = frame.irradiance[0].rgb * frame.environment.x;
+    }
+    return light + sky;
+}
+
+fn quad(vertex: u32, p: Instance) -> Out {
     var out: Out;
     if !(p.age < p.life) {
         // Dead: behind the near plane, nothing drawn.

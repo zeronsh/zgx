@@ -96,7 +96,7 @@ pub use orbit::{Answer, Orbit, OrbitControls};
 #[cfg(feature = "particles")]
 pub use particles::{
     Blend, CPU_PARTICLES, CPU_WORLD_PARTICLES, Collide, Emitter, EmitterError, EmitterId,
-    EmitterStatus, Force, MOST_LIFE, Response, Shape, Spawn,
+    EmitterStatus, Force, Lit, MOST_LIFE, Response, Shape, Spawn,
 };
 pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};

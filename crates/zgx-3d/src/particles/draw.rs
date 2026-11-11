@@ -28,11 +28,14 @@ pub(crate) struct Drawn {
     pub(crate) bind: wgpu::BindGroup,
     pub(crate) made: u64,
     pub(crate) blend: Blend,
+    /// Lit by the scene: drawn by the lit pipelines.
+    pub(crate) lit: bool,
 }
 
 /// Alpha's and additive's pipelines for one target, made on the compile
 /// worker.
-type Pipelines = Arc<Mutex<Option<[wgpu::RenderPipeline; 2]>>>;
+/// Unlit's and lit's (`Emitter::lit`), each alpha's and additive's.
+type Pipelines = Arc<Mutex<Option<[[wgpu::RenderPipeline; 2]; 2]>>>;
 
 /// What a painter's renderer prepared the drawer with.
 struct Prepared {
@@ -150,8 +153,10 @@ impl SceneDraw for ParticleDraw {
                 bind_group_layouts: &[Some(&layout)],
                 immediate_size: 0,
             });
-            let made = [Blend::Alpha, Blend::Additive]
-                .map(|blend| pipeline(&device, &layout, &module, target, blend));
+            let made = [false, true].map(|lit| {
+                [Blend::Alpha, Blend::Additive]
+                    .map(|blend| pipeline(&device, &layout, &module, target, blend, lit))
+            });
             *pipelines.lock().unwrap_or_else(|p| p.into_inner()) = Some(made);
         };
         if let Err(error) = crate::compute::compile_off_the_frame(job) {
@@ -172,11 +177,19 @@ impl SceneDraw for ParticleDraw {
         let Some(pipelines) = pipelines.as_ref() else {
             return;
         };
-        pass.set_pipeline(&pipelines[blend_at(point) as usize]);
-        for drawn in self.at(point) {
-            pass.set_bind_group(0, &drawn.bind, &[]);
-            pass.set_vertex_buffer(0, drawn.particles.slice(..));
-            pass.draw(0..4, 0..drawn.slots);
+        // Unlit emitters by the unlit pipeline, lit ones by the lit: one
+        // set for those that are, none for those that aren't there.
+        for lit in [false, true] {
+            let mut set = false;
+            for drawn in self.at(point).filter(|d| d.lit == lit) {
+                if !set {
+                    pass.set_pipeline(&pipelines[usize::from(lit)][blend_at(point) as usize]);
+                    set = true;
+                }
+                pass.set_bind_group(0, &drawn.bind, &[]);
+                pass.set_vertex_buffer(0, drawn.particles.slice(..));
+                pass.draw(0..4, 0..drawn.slots);
+            }
         }
     }
 }
@@ -208,6 +221,7 @@ fn pipeline(
     module: &wgpu::ShaderModule,
     target: SceneTarget,
     blend: Blend,
+    lit: bool,
 ) -> wgpu::RenderPipeline {
     const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
         0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Float32, 4 => Float32x4, 5 => Float32
@@ -229,7 +243,7 @@ fn pipeline(
         layout: Some(layout),
         vertex: wgpu::VertexState {
             module,
-            entry_point: Some("vs"),
+            entry_point: Some(if lit { "vs_lit" } else { "vs" }),
             compilation_options: Default::default(),
             buffers: &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Particle>() as u64,

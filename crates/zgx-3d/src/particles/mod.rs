@@ -156,6 +156,31 @@ pub enum Shape {
     },
 }
 
+/// Particles lit by the scene (`Emitter::lit`): their colour is then how
+/// much of the light reaching them they scatter (an albedo), not light of
+/// their own. Each light is scattered by a Henyey–Greenstein phase toward
+/// the camera; the sky's light all round.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Lit {
+    /// How much they scatter forward, along the light, -1 to 1 (held to
+    /// ±0.95): 0 as much every way (smoke, dust: about 0.2), toward 1
+    /// mostly onward, so drops glow toward a lamp behind them (rain:
+    /// about 0.7).
+    pub phase: f32,
+}
+impl Lit {
+    /// The same, its phase a number within reason (a NaN as 0).
+    pub(crate) fn sanitized(self) -> Self {
+        Self {
+            phase: if self.phase.is_finite() {
+                self.phase.clamp(-0.95, 0.95)
+            } else {
+                0.
+            },
+        }
+    }
+}
+
 /// How particles cover what's behind them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Blend {
@@ -186,6 +211,8 @@ pub struct Emitter {
     /// Its sub-emitter, and how many each of its particles' deaths and hits
     /// give birth to there.
     pub(crate) sub: Option<(EmitterId, u32, u32)>,
+    /// Lit by the scene, or (none) light of their own.
+    pub(crate) lit: Option<Lit>,
 }
 impl Emitter {
     /// An emitter holding up to `max` particles at once, born at the
@@ -206,6 +233,7 @@ impl Emitter {
             size: 0.05..0.05,
             sizes: [1.; 4],
             sub: None,
+            lit: None,
         }
     }
     /// Where they're born, and how many a second.
@@ -252,6 +280,14 @@ impl Emitter {
     pub fn draw(mut self, shape: Shape, blend: Blend) -> Self {
         self.shape = shape;
         self.blend = blend;
+        self
+    }
+    /// Lit by the scene's sun, lamps and sky, `lit.phase` scattering them
+    /// toward the camera: its colour (and colour over life) is then an
+    /// albedo. Without it, its colour is light of its own, in the scene's
+    /// units. Unlit emitters cost nothing of it.
+    pub fn lit(mut self, lit: Lit) -> Self {
+        self.lit = Some(lit.sanitized());
         self
     }
     /// Their colour when born: linear RGB and opacity.

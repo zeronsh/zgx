@@ -2,7 +2,7 @@
 //! `crate::particles`.
 use super::World;
 use crate::particles::{
-    Emitter, EmitterError, EmitterId, EmitterStatus, Force, Particles, Spawn, UNSETTLED,
+    Emitter, EmitterError, EmitterId, EmitterStatus, Force, Lit, Particles, Spawn, UNSETTLED,
 };
 
 impl World {
@@ -193,6 +193,14 @@ impl World {
     /// Emitter `id`'s size over life, its living particles' too.
     pub fn set_emitter_size_over_life(&self, id: EmitterId, keys: [f32; 4]) {
         self.change_emitter(id, |e| e.size_over_life(keys));
+    }
+    /// Emitter `id` lit by the scene (`Emitter::lit`), or (`None`) light
+    /// of its own, its living particles too.
+    pub fn set_emitter_lit(&self, id: EmitterId, lit: Option<Lit>) {
+        self.change_emitter(id, |mut e| {
+            e.lit = lit.map(Lit::sanitized);
+            e
+        });
     }
 
     /// How an emitter is doing; `None` if it was removed.

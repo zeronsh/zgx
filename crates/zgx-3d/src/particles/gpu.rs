@@ -51,6 +51,8 @@ struct DrawUniforms {
     /// A pixel's width and height in clip space (2 / the frame's size),
     /// and the view depths a particle fades in between (`NEAR_FADE`).
     viewport: [f32; 4],
+    /// Lit (`Emitter::lit`): its phase's asymmetry.
+    light: [f32; 4],
 }
 
 /// View depths (m) over which a particle fades in from the camera: none
@@ -162,6 +164,8 @@ struct Pool {
     /// Whether any may live this frame (else neither updated nor drawn).
     shown: bool,
     blend: Blend,
+    /// Lit by the scene.
+    lit: bool,
     /// The frame it was last stepped in.
     used: u64,
 }
@@ -208,6 +212,8 @@ struct Planned {
     id: u64,
     slots: u32,
     blend: Blend,
+    /// Lit by the scene (its draw's pipeline the lit one).
+    lit: bool,
     /// Whether any of its particles may live this frame (else neither
     /// updated nor drawn).
     shown: bool,
@@ -327,11 +333,13 @@ impl Shared {
                 colors: e.colors,
                 sizes: e.sizes,
                 viewport: [0.; 4],
+                light: [e.lit.map_or(0., |l| l.phase), 0., 0., 0.],
             };
             planned.push(Planned {
                 id: live.id,
                 slots,
                 blend: e.blend,
+                lit: e.lit.is_some(),
                 shown,
                 fed: live.fed,
                 child: child.map(|c| c.0),
@@ -389,6 +397,7 @@ impl Shared {
             }
             pool.used = index;
             pool.blend = planned.blend;
+            pool.lit = planned.lit;
             if pool.failed {
                 refused.push(planned.id);
                 pool.shown = false;
@@ -560,6 +569,7 @@ impl Shared {
                 bind,
                 made,
                 blend: pool.blend,
+                lit: pool.lit,
             });
         }
     }
@@ -915,6 +925,7 @@ fn make_pool_in_scope(
         events: None,
         shown: false,
         blend: Blend::Alpha,
+        lit: false,
         used: 0,
     }
 }
