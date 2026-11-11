@@ -459,6 +459,7 @@ impl World {
             meshes,
             lights,
             cameras,
+            names: model.nodes.iter().map(|node| node.name.clone()).collect(),
         }
     }
 }

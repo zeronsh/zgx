@@ -470,6 +470,9 @@ pub struct Placed {
     pub(crate) lights: Vec<crate::LightId>,
     /// Its cameras, with the nodes holding them, in the order placed.
     pub(crate) cameras: Vec<(ObjectId, crate::gltf::ModelCamera)>,
+    /// Its nodes' names in the file, by node index (none for objects made
+    /// in code).
+    pub(crate) names: Vec<Option<String>>,
 }
 impl Placed {
     /// Objects made in code, to animate as a model's nodes: `root` the
@@ -482,7 +485,15 @@ impl Placed {
             nodes: nodes.into_iter().map(Some).collect(),
             lights: Vec::new(),
             cameras: Vec::new(),
+            names: Vec::new(),
         }
+    }
+    /// The object its node named `name` in the file became (the first so
+    /// named, in the file's order): `None` if none is, or its scene doesn't
+    /// show it.
+    pub fn node_named(&self, name: &str) -> Option<ObjectId> {
+        let index = self.names.iter().position(|n| n.as_deref() == Some(name))?;
+        self.node(index)
     }
     /// It with `meshes` taking node `node`'s morph weights (a clip's
     /// `Keys` for its weights). Nothing for a node it hasn't.

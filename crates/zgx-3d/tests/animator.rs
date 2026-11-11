@@ -210,6 +210,14 @@ fn a_node_is_found_by_its_name() {
     let world = World::new();
     let placed = world.place_model(&model);
     let hips = placed.node(model.node("joint0").unwrap()).unwrap();
+    assert_eq!(placed.node_named("joint0"), Some(hips));
+    assert_eq!(placed.node_named("nothing"), None);
+    let made = Placed::new(placed.root, vec![hips]);
+    assert_eq!(
+        made.node_named("joint0"),
+        None,
+        "objects made in code have no names"
+    );
     assert_eq!(world.object(hips).unwrap().parent, Some(placed.root));
 }
 

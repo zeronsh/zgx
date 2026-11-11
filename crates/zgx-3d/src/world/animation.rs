@@ -658,6 +658,7 @@ mod tests {
             meshes: vec![Vec::new(), Vec::new()],
             lights: Vec::new(),
             cameras: Vec::new(),
+            names: Vec::new(),
         };
         (placed, a, b)
     }
@@ -1325,6 +1326,7 @@ mod tests {
             meshes: vec![Vec::new(); 3],
             lights: Vec::new(),
             cameras: Vec::new(),
+            names: Vec::new(),
         };
         (placed, [a, b, c])
     }
@@ -1701,6 +1703,7 @@ mod tests {
             meshes: vec![vec![mesh]],
             lights: Vec::new(),
             cameras: Vec::new(),
+            names: Vec::new(),
         };
         (placed, mesh)
     }
