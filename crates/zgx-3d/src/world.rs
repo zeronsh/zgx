@@ -566,6 +566,10 @@ pub(crate) struct Inner {
     /// What its frame goes through after its meshes (`World::set_post`).
     #[cfg(feature = "post")]
     pub(crate) post: Post,
+    /// The mean luminance automatic exposure adapted to, log2, as a painter
+    /// last read it back (`World::adapted_exposure`).
+    #[cfg(feature = "post")]
+    pub(crate) adapted: std::cell::Cell<Option<f32>>,
     /// The app's own post passes (`World::add_post`), in the order added,
     /// and the last id given.
     #[cfg(feature = "post")]
@@ -1473,6 +1477,8 @@ impl World {
             exposure: 0.,
             #[cfg(feature = "post")]
             post: Post::default(),
+            #[cfg(feature = "post")]
+            adapted: std::cell::Cell::new(None),
             #[cfg(feature = "post")]
             post_passes: Vec::new(),
             #[cfg(feature = "post")]

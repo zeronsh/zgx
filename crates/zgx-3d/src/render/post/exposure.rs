@@ -43,6 +43,9 @@ pub(super) struct Exposure {
     /// it said then.
     last: Option<Instant>,
     answer: Option<bool>,
+    /// The mean luminance adapted to, log2, as last read back (`None`
+    /// before a frame adapted).
+    adapted: Option<f32>,
 }
 
 impl Exposure {
@@ -131,7 +134,13 @@ impl Exposure {
             copy: Arc::new(AtomicU8::new(IDLE)),
             last: None,
             answer: None,
+            adapted: None,
         }
+    }
+
+    /// The mean luminance adapted to, log2, as last read back.
+    pub(super) fn adapted(&self) -> Option<f32> {
+        self.adapted
     }
 
     /// Lets go of its binding of the scene.
@@ -251,6 +260,7 @@ impl Exposure {
                 };
                 self.read.unmap();
                 self.copy.store(IDLE, Ordering::Release);
+                self.adapted = (made > 0.5 && adapted.is_finite()).then_some(adapted);
                 Some(made > 0.5 && (adapted - target).abs() <= 1. / 64.)
             }
             _ => None,

@@ -782,6 +782,44 @@ fn automatic_exposure_brings_a_dim_and_a_bright_scene_to_middle_grey_and_settles
 }
 
 #[test]
+fn the_exposure_automatic_exposure_adapted_to_reads_back_in_stops() {
+    let world = flat([4., 4., 4., 1.]);
+    world.set_exposure(1.);
+    world.set_post(Post {
+        auto_exposure: Some(AutoExposure::default()),
+        ..Default::default()
+    });
+    assert_eq!(world.adapted_exposure(), None, "before a frame");
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let mut frames = 0;
+    while world.adapted_exposure().is_none() && frames < 12 {
+        frames += 1;
+        world.set_camera(Camera::looking_at(
+            [0., 0., 4. + frames as f32 * 1e-4],
+            [0., 0., 0.],
+        ));
+        window.draw();
+    }
+    let stops = world
+        .adapted_exposure()
+        .expect("read back within 12 frames");
+    // A scene whose mean is 4 brought to middle grey: log2(0.18 / 4), -4.47
+    // stops, and the one set on top (the histogram's bins are 1/16 stop).
+    let expected = (0.18f32 / 4.).log2() + 1.;
+    assert!(
+        (stops - expected).abs() < 0.1,
+        "{stops} stops, not {expected}"
+    );
+    world.set_exposure(2.);
+    let more = world.adapted_exposure().unwrap();
+    assert!((more - stops - 1.).abs() < 1e-5, "the stops set count");
+    world.set_post(Post::default());
+    assert_eq!(world.adapted_exposure(), None, "automatic exposure off");
+}
+
+#[test]
 fn a_pixel_not_finite_spreads_through_neither_bloom_nor_the_exposure() {
     // One pixel of the scene made NaN by an HDR pass (as an infinite light
     // would), against the same pixel made black: the frames alike.

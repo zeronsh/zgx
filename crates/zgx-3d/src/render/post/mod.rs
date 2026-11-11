@@ -476,6 +476,11 @@ impl Chain {
             .get_or_insert_with(|| exposure::Exposure::new(device.0));
         exposure.run(device, encoder, graph, &self.state, settings, time)
     }
+    /// The mean luminance automatic exposure adapted to, log2, as last read
+    /// back.
+    pub(super) fn adapted(&self) -> Option<f32> {
+        self.exposure.as_ref()?.adapted()
+    }
 
     /// The app's passes of `stage` (`apps::Apps::run`).
     #[allow(clippy::too_many_arguments)]

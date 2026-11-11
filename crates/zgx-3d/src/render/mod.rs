@@ -727,6 +727,7 @@ impl Viewport for Renderer {
             // the world to keep drawing for.
             if !adapts {
                 world.unsettle(crate::world::Settle::EXPOSURE, false);
+                world.adapted.set(None);
             }
             graph::Chain {
                 on: world.post.any() || hdr + display > 0 || world.taa,
@@ -1199,6 +1200,9 @@ impl Viewport for Renderer {
                             post.expose(device, frame.encoder, &gpu.graph, settings, frame.time);
                         // Drawing until a frame reads back it got there.
                         world.unsettle(crate::world::Settle::EXPOSURE, settled != Some(true));
+                        if let Some(adapted) = post.adapted() {
+                            world.adapted.set(Some(adapted));
+                        }
                     }
                 }
                 #[cfg(feature = "post")]

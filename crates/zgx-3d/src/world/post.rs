@@ -203,4 +203,18 @@ impl World {
             .borrow()
             .unsettle(super::Settle::EXPOSURE, adapts);
     }
+    /// The exposure automatic exposure has brought it to
+    /// (`Post::auto_exposure`), in stops as `set_exposure` takes them: what
+    /// the scene's light is exposed by before tone mapping, `set_exposure`'s
+    /// stops included (log2 0.18, less log2 of the scene's mean luminance
+    /// adapted to, plus them). As a painter last read it back from the
+    /// device, a frame or two after drawing it; `None` before then, with
+    /// automatic exposure off, or where the device runs no compute shaders
+    /// (`World::caps`; `set_exposure`'s stops alone apply there).
+    pub fn adapted_exposure(&self) -> Option<f32> {
+        let inner = self.inner.borrow();
+        inner.post.auto_exposure?;
+        let adapted = inner.adapted.get()?;
+        Some(0.18f32.log2() - adapted + inner.exposure)
+    }
 }
