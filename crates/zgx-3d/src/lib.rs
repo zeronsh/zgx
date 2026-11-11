@@ -38,6 +38,7 @@ mod guide {}
 mod animation;
 #[cfg(feature = "gltf")]
 mod animator;
+mod assets;
 #[cfg(feature = "compute")]
 mod buffer;
 mod caps;

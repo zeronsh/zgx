@@ -191,6 +191,11 @@ impl Texture {
     pub(crate) fn failed(&self) -> bool {
         self.0.failed.load(Ordering::Relaxed)
     }
+    /// Its file's decoder failed out of `pixels` (it panicked): it draws
+    /// none, and isn't tried again.
+    pub(crate) fn failed_to_decode(&self) {
+        self.0.failed.store(true, Ordering::Relaxed);
+    }
     /// A renderer has it: its pixels go if its file can bring them back.
     pub(crate) fn uploaded(&self) {
         if self.0.encoded.is_some() {
@@ -208,8 +213,7 @@ impl Texture {
 }
 
 /// Each half-size level below `pixels` (`width` by `height`, RGBA8), down
-/// to 1 by 1: each texel the mean of the up to 2 by 2 above it. `pixels`
-/// itself is the first level, not copied.
+/// to 1 by 1 (`halve`). `pixels` itself is the first level, not copied.
 pub(crate) fn mipmaps(width: u32, height: u32, pixels: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
     let mut levels: Vec<(u32, u32, Vec<u8>)> = Vec::new();
     loop {
@@ -222,27 +226,32 @@ pub(crate) fn mipmaps(width: u32, height: u32, pixels: &[u8]) -> Vec<(u32, u32, 
         }
         let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
         let mut next = vec![0_u8; nw as usize * nh as usize * 4];
-        for y in 0..nh {
-            for x in 0..nw {
-                let mut sum = [0_u32; 4];
-                let mut count = 0;
-                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                    let (sx, sy) = ((x * 2 + dx).min(w - 1), (y * 2 + dy).min(h - 1));
-                    let at = (sy * w + sx) as usize * 4;
-                    for (total, &byte) in sum.iter_mut().zip(&above[at..at + 4]) {
-                        *total += u32::from(byte);
-                    }
-                    count += 1;
-                }
-                let at = (y * nw + x) as usize * 4;
-                for (out, total) in next[at..at + 4].iter_mut().zip(sum) {
-                    *out = ((total + count / 2) / count) as u8;
-                }
-            }
-        }
+        halve((w, h), above, &mut next);
         levels.push((nw, nh, next));
     }
     levels
+}
+/// The level below `above` (`w` by `h`, RGBA8) into `next`, half as large
+/// (at least 1): each texel the mean of the up to 2 by 2 above it, its
+/// edges' repeated where `above` is odd.
+pub(crate) fn halve((w, h): (u32, u32), above: &[u8], next: &mut [u8]) {
+    let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+    for y in 0..nh {
+        for x in 0..nw {
+            let mut sum = [0_u32; 4];
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                let (sx, sy) = ((x * 2 + dx).min(w - 1), (y * 2 + dy).min(h - 1));
+                let at = (sy * w + sx) as usize * 4;
+                for (total, &byte) in sum.iter_mut().zip(&above[at..at + 4]) {
+                    *total += u32::from(byte);
+                }
+            }
+            let at = (y * nw + x) as usize * 4;
+            for (out, total) in next[at..at + 4].iter_mut().zip(sum) {
+                *out = ((total + 2) / 4) as u8;
+            }
+        }
+    }
 }
 
 #[cfg(test)]

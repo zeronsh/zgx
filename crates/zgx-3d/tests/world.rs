@@ -576,9 +576,9 @@ fn stored_png(side: u32, pixels: &[u8]) -> Vec<u8> {
 #[test]
 fn textures_read_from_files_draw_as_textures_given_their_pixels() {
     // Nine meshes, nine textures: read from files, they decode together as
-    // the first frame uploads them, on threads of their own (each more than
-    // 128², so worth a thread). Given their pixels, the meshes come one a
-    // frame: each frame uploads one, here.
+    // the first frame asks for them, on threads of their own (each more than
+    // 128², so worth a thread), arriving in later frames. Given their
+    // pixels, the meshes come one a frame: each frame uploads one, here.
     let world = World::new();
     world.set_camera(Camera::looking_at([0., 0., 5.], [0., 0., 0.]));
     let (read, given) = (world, World::new());
@@ -619,6 +619,15 @@ fn textures_read_from_files_draw_as_textures_given_their_pixels() {
         b.draw();
     }
     a.draw();
+    // They arrive in later frames, one each refresh while the world waits
+    // for them (this window has no display to tick it).
+    let started = std::time::Instant::now();
+    while read.loading() {
+        assert!(started.elapsed().as_secs() < 10, "still loading");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        read.view().invalidate();
+        a.draw();
+    }
     assert_ne!(a.pixel(50, 50), [0, 128, 0, 255], "it drew");
     assert!(a.gpu.readback().unwrap() == b.gpu.readback().unwrap());
 }

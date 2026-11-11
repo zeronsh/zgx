@@ -94,6 +94,8 @@ pub(super) struct Gpu {
     /// Textures by id, with the frame that last drew each.
     pub(super) texture_layout: wgpu::BindGroupLayout,
     pub(super) texture_sampler: wgpu::Sampler,
+    /// Maps on their way from the loading threads (`crate::assets`).
+    pub(super) loads: crate::assets::Loads,
     /// Uploaded textures by id and whether read as sRGB (a texture may be
     /// a colour map in one place, data in another).
     pub(super) views: HashMap<(u64, bool), (wgpu::TextureView, u64)>,
@@ -360,6 +362,7 @@ impl Gpu {
             layered_layout: None,
             glass_layout: None,
             wrapped_samplers: HashMap::new(),
+            loads: Default::default(),
             views: HashMap::new(),
             bindings: HashMap::new(),
             stand_ins: None,

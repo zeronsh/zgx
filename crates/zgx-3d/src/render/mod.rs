@@ -391,7 +391,9 @@ fn prepare<'a>(
                 let key = (texture.id(), map.srgb());
                 match gpu.views.get_mut(&key) {
                     Some(entry) => entry.1 = gpu.frame,
-                    None if !texture.failed() => missing.push((texture, map.srgb())),
+                    None if !texture.failed() && !gpu.loads.coming(key) => {
+                        missing.push((texture, map.srgb()));
+                    }
                     None => {}
                 }
             }
@@ -590,6 +592,19 @@ impl Viewport for Renderer {
         }
         let gpu = self.gpu.as_mut().unwrap();
         gpu.frame += 1;
+        // Maps loaded since the last frame (`crate::assets`): bound in place
+        // of the stand-ins their meshes drew with, and shadows drawn again
+        // (a cut-out cast its shadow whole without its base colour).
+        if gpu.loads.receive(&mut gpu.views) {
+            gpu.bindings.clear();
+            gpu.behind_held = 0;
+            gpu.kept = None;
+            gpu.shadow_drawn = None;
+            #[cfg(feature = "lighting")]
+            if let Some(sun) = &mut gpu.lights.sun {
+                sun.held = Default::default();
+            }
+        }
         let size = frame.size;
         // The frame's passes, compiled again only as what they follow
         // changes.
@@ -828,6 +843,8 @@ impl Viewport for Renderer {
         }
         scratch.all = recycle(all);
         world.temporaries.set(gpu.temporary_bytes());
+        // Frames keep coming while maps are on their way.
+        world.unsettle(crate::world::Settle::LOADING, gpu.loads.pending());
     }
     fn device_changed(&mut self) {
         self.gpu = None;

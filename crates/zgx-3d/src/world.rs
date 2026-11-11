@@ -567,9 +567,7 @@ pub(crate) struct Inner {
     pub(crate) ordering: u64,
     /// What keeps it drawing by itself (`Settle`), and its view, which
     /// animates while anything does.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) settle: Settle,
-    #[cfg_attr(not(test), allow(dead_code))]
     view: Option<zgx::gpu_view::GpuView>,
     /// Frames drawn (`World::frames_drawn`).
     pub(crate) frames: std::cell::Cell<u64>,
@@ -601,18 +599,20 @@ pub(crate) struct Inner {
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
 /// clip playing, particles alive, temporal accumulation short of its frames.
 /// Each is a bit, set while it's unsettled; the world's view animates while
-/// any is, and stops as the last settles. Nothing sets one yet: a world
-/// draws only as it changes.
+/// any is, and stops as the last settles: an animator playing
+/// (`ANIMATION`), maps on their way (`LOADING`); design 4.4's other
+/// features add theirs.
 #[derive(Default)]
-#[cfg_attr(not(test), allow(dead_code))] // Design 4.4's features set its reasons; none does yet.
 pub(crate) struct Settle {
     unsettled: std::cell::Cell<u32>,
 }
-#[cfg_attr(not(test), allow(dead_code))]
 impl Settle {
     /// An animator plays (`World::add_animator`).
     #[cfg(feature = "gltf")]
     pub(crate) const ANIMATION: u32 = 1;
+    /// Maps are on their way to a renderer (`crate::assets`). (Bit 1 is a
+    /// custom shader's reading time, `render::custom::ANIMATED`.)
+    pub(crate) const LOADING: u32 = 1 << 2;
     /// For the tests of this: a reason no feature uses.
     #[cfg(test)]
     pub(crate) const TEST: u32 = 1 << 31;
@@ -878,7 +878,6 @@ impl Inner {
     }
     /// `reason` (a `Settle` bit) unsettled or settled: its view animates
     /// while any is. A frame may call it as it draws.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn unsettle(&self, reason: u32, on: bool) {
         if self.settle.set(reason, on)
             && let Some(view) = &self.view
@@ -1241,6 +1240,7 @@ impl Skin {
     }
 }
 
+mod assets;
 mod caps;
 #[cfg(feature = "compute")]
 mod compute;

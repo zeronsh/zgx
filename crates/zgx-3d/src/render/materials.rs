@@ -486,6 +486,14 @@ pub(super) fn upload_missing(
 ) {
     let mut seen = std::collections::HashSet::new();
     missing.retain(|(texture, srgb)| seen.insert((texture.id(), *srgb)));
+    // Those worth waiting for load on the pool's threads, arriving in a
+    // later frame (`crate::assets`); the rest load here.
+    missing.retain(|&(texture, srgb)| {
+        matches!(
+            gpu.loads.request((device, queue), texture, srgb),
+            crate::assets::Wanted::Now
+        )
+    });
     let wanted = missing;
     let now = gpu.frame;
     // Pixels in hand, or few of them: here, in turn. A thread costs more
