@@ -275,6 +275,181 @@ fn a_view_resized_and_back_draws_its_shadows_as_a_fresh_one() {
     );
 }
 
+/// Channels of `actual` more than 1 off `expected`, and the most.
+fn differ(actual: &[u8], expected: &[u8]) -> (usize, u8) {
+    actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| a.abs_diff(*b))
+        .fold((0, 0), |(n, most), d| (n + usize::from(d > 1), most.max(d)))
+}
+
+/// `posts` and boxes among them, two at `x` and `z`.
+fn posts_and_boxes(x: f32, z: f32) -> (World, ObjectId, ObjectId) {
+    let world = posts();
+    // One shape: one run, its instances side by side.
+    let shape = Geometry::cuboid(0.5, 0.5, 0.5);
+    let block =
+        |at: [f32; 3]| world.add(Object::mesh(shape.clone(), Material::rgb(0xd0c0b0)).at(at));
+    // One still ahead of the first: it moves between two still ones of
+    // its run, which its still ones are drawn around exactly.
+    block([-0.9, 0.25, -2.4]);
+    let (first, second) = (block([x, 0.25, -1.2]), block([0.9, 0.25, z]));
+    (world, first, second)
+}
+
+/// Frames after its last move a box counts as still (120) and a few.
+const STILL: usize = 125;
+
+/// `world` shadowed by one cascade: what it holds is what's seen (with
+/// more, the nearest would hide what the farther ones hold of the boxes).
+fn in_one_cascade<T>((world, a, b): (World, T, T)) -> (World, T, T) {
+    world.set_cascades(Some(Cascades::new(1).distance(12.).size(512)));
+    (world, a, b)
+}
+
+#[test]
+fn boxes_moving_among_still_ones_shadow_as_in_a_fresh_world() {
+    let place = |frame: usize| (frame as f32 * 0.37).sin() * 1.4;
+    let check = |what: &str, actual: Vec<u8>, (x, z): (f32, f32)| {
+        let (world, ..) = in_one_cascade(posts_and_boxes(x, z));
+        let expected = Window::new(&world).unwrap().draw();
+        let (count, largest) = differ(&actual, &expected);
+        assert_eq!(
+            count, 0,
+            "{what}: {count} channels differ past 1, by up to {largest}"
+        );
+    };
+    let (world, first, second) = in_one_cascade(posts_and_boxes(place(0), -3.));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    // Where each box is: the first's frame along its path, the second's z.
+    let (mut at, mut along, mut z) = (0, 0, -3.);
+    let mut frame = |window: &mut Window, moves: (bool, bool), what: Option<&str>| {
+        if moves.0 {
+            at += 1;
+            world.set_transform(first, Transform::at([place(at), 0.25, -1.2]));
+        }
+        if moves.1 {
+            // To and fro, in the cascade's view throughout.
+            along += 1;
+            z = -3. + (along as f32 * 0.3).sin() * 0.8;
+            world.set_transform(second, Transform::at([0.9, 0.25, z]));
+        }
+        if !moves.0 && !moves.1 {
+            world.view().invalidate();
+        }
+        let actual = window.draw();
+        if let Some(what) = what {
+            check(what, actual, (place(at), z));
+        }
+    };
+    // The first moving every frame: each cascade holding it drawn from its
+    // layer of still casters and the box, past the frames the others take
+    // to count as still and on.
+    for f in 1..=45 {
+        let what = format!("first moving, frame {f}");
+        frame(
+            &mut window,
+            (true, false),
+            [1, 2, 20, 45].contains(&f).then_some(&what),
+        );
+    }
+    // The second, in those layers, moving too: they're drawn again.
+    for f in 1..=3 {
+        frame(
+            &mut window,
+            (true, true),
+            Some(&format!("both moving, frame {f}")),
+        );
+    }
+    // The first stops, and the second moves on past the frames it takes the
+    // first to count as still: it's drawn with the movers (it isn't in the
+    // layers), and when it moves again they aren't drawn again.
+    for f in 1..=STILL {
+        frame(
+            &mut window,
+            (false, true),
+            (f == STILL).then_some("first stopped"),
+        );
+    }
+    for f in 1..=3 {
+        frame(
+            &mut window,
+            (true, true),
+            Some(&format!("first again, frame {f}")),
+        );
+    }
+    // The camera turning while the second moves: the far cascades it
+    // touches drawn from their layers at the fit they hold, each taking the
+    // camera's in its turn. Back where it was, they catch up.
+    let camera = world.camera();
+    for f in 1..=6 {
+        let turned = Camera::looking_at([1.2 + f as f32 * 0.4, 1.6, 3.5], [-0.3, 0.4, -4.]);
+        world.set_camera(turned);
+        frame(&mut window, (false, true), None);
+    }
+    world.set_camera(camera);
+    for f in 1..=4 {
+        frame(
+            &mut window,
+            (false, true),
+            (f == 4).then_some("camera back"),
+        );
+    }
+    // Both stopped, drawn on until they count as still (the layers go).
+    for _ in 0..STILL {
+        frame(&mut window, (false, false), None);
+    }
+    frame(&mut window, (false, false), Some("all still"));
+    // Moving again, the window resting between: drawn whole, then from the
+    // layers made again.
+    frame(&mut window, (false, true), Some("second again"));
+    window.gpu.trim();
+    for f in 1..=3 {
+        frame(
+            &mut window,
+            (false, true),
+            Some(&format!("rested, frame {f}")),
+        );
+    }
+}
+
+#[test]
+fn a_box_moving_as_the_camera_turns_shadows_as_one_placed_there() {
+    // The far cascades the box is in keep the fit they hold as the camera
+    // turns (each takes the camera's in its turn): one moving with it is
+    // drawn there, as one already there would be.
+    let turned = Camera::looking_at([2.4, 1.9, 3.], [-0.3, 0.4, -4.]);
+    let (end, z) = (0.9, -3.);
+    let (fresh, ..) = posts_and_boxes(end, z);
+    let Some(mut window) = Window::new(&fresh) else {
+        return;
+    };
+    window.draw();
+    fresh.set_camera(turned);
+    let expected = window.draw();
+    drop(window);
+    let (world, first, _) = posts_and_boxes(-0.9, z);
+    let mut window = Window::new(&world).unwrap();
+    window.draw();
+    // Moving long enough that each cascade holding it draws from its layer.
+    for f in 1..=4 {
+        let x = -0.9 + f as f32 * 0.3;
+        world.set_transform(first, Transform::at([x, 0.25, -1.2]));
+        window.draw();
+    }
+    world.set_transform(first, Transform::at([end, 0.25, -1.2]));
+    world.set_camera(turned);
+    let (count, largest) = differ(&window.draw(), &expected);
+    assert_eq!(
+        count, 0,
+        "{count} channels differ past 1, by up to {largest}"
+    );
+}
+
 #[test]
 fn turning_cascades_or_shadows_off_while_a_cascade_is_owed_lets_the_world_rest() {
     type Switch = (&'static str, fn(&World));

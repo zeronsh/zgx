@@ -427,12 +427,6 @@ pub(super) fn cascades(
         };
         fits[..count].copy_from_slice(&held);
     }
-    if let Some(boxes) = boxes {
-        for (i, fit) in fits.iter().enumerate().take(count) {
-            let frustum = super::cull::Frustum::new(&fit.matrix);
-            super::cull::visible(&frustum, boxes, &mut sun.masks[i]);
-        }
-    }
     // The lens the fits follow besides the camera's place: a change to it
     // fits every cascade again at once (it isn't the camera moving).
     let lens = Some([
@@ -444,25 +438,64 @@ pub(super) fn cascades(
     ]);
     let lens_changed = sun.lens.is_some() && sun.lens != lens;
     sun.lens = lens;
-    let left = sun.decide(&c::Frame {
+    sun.track(device, changed, instances);
+    let frame = c::Frame {
         fits: &fits[..count],
         sun: direction,
         changed,
         instances,
         masked: boxes.is_some(),
         lens: lens_changed,
-    });
+    };
+    // Which take the fit wanted now; each one's casters culled against the
+    // fit it's drawn with.
+    sun.adopt(&frame);
+    if let Some(boxes) = boxes {
+        for i in 0..count {
+            let frustum = super::cull::Frustum::new(&sun.fit(i, &fits[..count]).matrix);
+            super::cull::visible(&frustum, boxes, &mut sun.masks[i]);
+        }
+    }
+    let left = sun.decide(&frame);
     world.unsettle(crate::world::Settle::CASCADES, left);
     let mut drawn = 0;
-    for (i, fit) in fits.iter().enumerate().take(count) {
+    for i in 0..count {
         if !sun.redraw[i] {
             continue;
         }
+        let Some(fit) = sun.held[i].as_ref().map(|held| held.fit) else {
+            continue;
+        };
         drawn += 1;
-        let mask = boxes.map(|_| &sun.masks[i][..]);
         let geometries = &gpu.geometries;
         let indices = |run: &super::Run| geometries[&run.geometry].count;
-        super::cull::shown(runs, mask, &mut sun.spans[i], indices);
+        let masked = boxes.is_some();
+        let mut spans = std::mem::take(&mut sun.spans[i]);
+        let mut movers = std::mem::take(&mut sun.mover_spans[i]);
+        spans.clear();
+        movers.clear();
+        match sun.how[i] {
+            c::Draw::Whole => {
+                let mask = masked.then(|| &sun.masks[i][..]);
+                super::cull::shown(runs, mask, &mut spans, indices);
+            }
+            how => {
+                // The still casters exactly (a mover in a gap drawn into
+                // their layer would stay where it was); the movers' gaps
+                // only draw still ones again.
+                if how == c::Draw::Both {
+                    let still = sun.still_casters(i, masked);
+                    super::cull::shown(runs, Some(still), &mut spans, |_| u32::MAX);
+                }
+                listed_spans(runs, sun.out_of_layer(i, masked), &mut movers);
+            }
+        }
+        let count = |spans: &[(u32, std::ops::Range<u32>)]| {
+            spans.iter().map(|(_, s)| s.len() as u64).sum::<u64>()
+        };
+        sun.drawn += count(&spans) + count(&movers);
+        sun.spans[i] = spans;
+        sun.mover_spans[i] = movers;
         // Its caster pass's frame: today's map's, its view the cascade's.
         let mut frame: super::frame::FrameUniforms = bytemuck::Zeroable::zeroed();
         frame.shadow = fit.matrix.columns;
@@ -475,6 +508,24 @@ pub(super) fn cascades(
     }
 }
 
+/// Spans `(run, instances)` of the instances `listed` (in order), as
+/// `cull::shown` gives them: each run's found by its instances' range.
+fn listed_spans(runs: &[super::Run], listed: &[u32], out: &mut Vec<(u32, std::ops::Range<u32>)>) {
+    let mut r = 0;
+    for &i in listed {
+        if !runs.get(r).is_some_and(|run| run.instances.contains(&i)) {
+            r = runs.partition_point(|run| run.instances.end <= i);
+            if r >= runs.len() || !runs[r].instances.contains(&i) {
+                continue;
+            }
+        }
+        match out.last_mut() {
+            Some((at, span)) if *at == r as u32 && span.end == i => span.end = i + 1,
+            _ => out.push((r as u32, i..i + 1)),
+        }
+    }
+}
+
 /// The cascades this frame draws again, each its casters' depth into its
 /// layer. Out of the frame's code: inlined there, a frame of a world
 /// without cascades cost 27 K instructions more (`mixed`).
@@ -483,27 +534,55 @@ pub(super) fn draw_cascades(encoder: &mut wgpu::CommandEncoder, gpu: &Gpu, runs:
     let (Some(sun), Some((instances, _))) = (&gpu.lights.sun, &gpu.instances) else {
         return;
     };
+    use super::shadows::cascades::Draw;
     for c in 0..sun.count() {
         if !sun.redraw[c] {
             continue;
         }
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("3D sun cascade"),
-            color_attachments: &[],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &sun.layers[c],
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            ..Default::default()
-        });
+        let how = sun.how[c];
+        let still = sun.still.as_ref().filter(|_| how != Draw::Whole);
+        // Its still casters into their layer.
+        if let Some(still) = still.filter(|_| how == Draw::Both) {
+            let mut pass = depth_pass(encoder, &still.layers[c]);
+            pass.set_bind_group(0, &sun.casters[c].1, &[]);
+            pass.set_vertex_buffer(1, instances.slice(..));
+            super::shadows::draw_casters(&mut pass, gpu, runs, &sun.spans[c], &sun.pipelines);
+        }
+        let mut pass = depth_pass(encoder, &sun.layers[c]);
+        let spans = match still {
+            // That layer, then its movers.
+            Some(still) => {
+                pass.set_pipeline(&still.pipeline);
+                pass.set_bind_group(0, &still.binds[c], &[]);
+                pass.draw(0..3, 0..1);
+                &sun.mover_spans[c]
+            }
+            None => &sun.spans[c],
+        };
         pass.set_bind_group(0, &sun.casters[c].1, &[]);
         pass.set_vertex_buffer(1, instances.slice(..));
-        super::shadows::draw_casters(&mut pass, gpu, runs, &sun.spans[c], &sun.pipelines);
+        super::shadows::draw_casters(&mut pass, gpu, runs, spans, &sun.pipelines);
     }
+}
+
+/// A pass drawing depth alone into `view`, cleared.
+fn depth_pass<'a>(
+    encoder: &'a mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+) -> wgpu::RenderPass<'a> {
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("3D sun cascade"),
+        color_attachments: &[],
+        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+            view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        }),
+        ..Default::default()
+    })
 }
 
 #[cold]
@@ -550,6 +629,17 @@ impl Lights {
         self.binds[key | bit(lit, LIT) | bit(probed, PROBED)]
             .as_ref()
             .map(|(bind, ..)| bind)
+    }
+    /// The window rests: what only a moving caster needs goes (the
+    /// cascades' layers of still casters).
+    pub(super) fn rest(&mut self) {
+        if let Some(sun) = &mut self.sun {
+            sun.rest();
+        }
+    }
+    /// The bytes held for a moving caster alone (`rest` lets them go).
+    pub(super) fn temporary_bytes(&self) -> u64 {
+        self.sun.as_ref().map_or(0, |sun| sun.still_bytes())
     }
     /// What its bindings hold besides its own was made again (the probes'
     /// atlases): they're made again with the next frame.
@@ -904,6 +994,168 @@ mod tests {
         draw(&mut renderer, &device, &queue);
         let gpu = renderer.gpu.as_ref().unwrap();
         assert!(gpu.lights.sun.is_none() && gpu.shadow_map.is_some());
+    }
+
+    #[test]
+    fn a_caster_moving_among_still_ones_redraws_only_itself_into_the_cascades() {
+        let (device, queue) = device_and_queue();
+        let world = World::new();
+        world.add(Object::mesh(Geometry::plane(40., 40.), Material::default()));
+        // 48 still cubes about the view, and one moving among them.
+        for i in 0..48 {
+            let at = [(i % 8) as f32 * 2. - 7., 0.5, (i / 8) as f32 * -3. + 4.];
+            world.add(
+                Object::mesh(Geometry::cuboid(1., 1., 1.), Material::default())
+                    .transformed(crate::Transform::at(at)),
+            );
+        }
+        let mover = world.add(Object::mesh(
+            Geometry::cuboid(1., 1., 1.),
+            Material::default(),
+        ));
+        world.add_light(Light::Directional {
+            direction: vec3(-0.4, -1., -0.3),
+            color: [1.; 3],
+            intensity: 2.,
+        });
+        world.set_shadows(true);
+        world.set_cascades(Some(crate::Cascades::new(4).distance(40.).size(256)));
+        world.set_camera(Camera::looking_at([0., 4., 9.], [0., 0., -4.]));
+        let mut renderer = world.renderer();
+        let drawn = |r: &super::super::Renderer| {
+            let sun = r.gpu.as_ref().unwrap().lights.sun.as_ref().unwrap();
+            sun.drawn
+        };
+        let step = |renderer: &mut super::super::Renderer, frame: usize| {
+            let x = (frame as f32 * 0.1).sin() * 3.;
+            world.set_transform(mover, crate::Transform::at([x, 1.5, 0.]));
+            draw(renderer, &device, &queue);
+        };
+        // Long enough that the still ones count as still.
+        for frame in 0..40 {
+            step(&mut renderer, frame);
+        }
+        let before = drawn(&renderer);
+        for frame in 40..50 {
+            step(&mut renderer, frame);
+        }
+        // The mover alone, into each cascade holding it: the still cubes
+        // and the plane stay in each's layer of still casters.
+        let per_frame = (drawn(&renderer) - before) as f64 / 10.;
+        assert!(per_frame <= 4., "{per_frame} instances a frame");
+        // The camera moving too: the nearest cascade, fit again each frame,
+        // is drawn whole, its still casters' layer not drawn for nothing.
+        for frame in 50..55 {
+            let x = (frame - 49) as f32 * 0.3;
+            // Close to the mover: the nearest cascade holds it.
+            world.set_camera(Camera::looking_at([x, 3., 2.5], [0., 1.5, 0.]));
+            step(&mut renderer, frame);
+            let sun = renderer.gpu.as_ref().unwrap().lights.sun.as_ref().unwrap();
+            assert!(sun.redraw[0], "frame {frame}");
+            assert_eq!(sun.how[0], super::super::shadows::cascades::Draw::Whole);
+        }
+        // The camera turned sharply away: of the far cascades holding the
+        // mover, those not taking the camera's fit this frame keep theirs,
+        // and draw the mover there, culled against it.
+        world.set_camera(Camera::looking_at([0., 4., 9.], [0., 0., -4.]));
+        for frame in 55..60 {
+            step(&mut renderer, frame);
+        }
+        let sun = |r: &super::super::Renderer| {
+            let sun = r.gpu.as_ref().unwrap().lights.sun.as_ref().unwrap();
+            let fits: Vec<_> = sun.held.iter().map(|h| h.as_ref().map(|h| h.fit)).collect();
+            (fits, sun.mover_spans.clone())
+        };
+        let (fits, movers) = sun(&renderer);
+        let holding: Vec<usize> = (2..4).filter(|&c| !movers[c].is_empty()).collect();
+        assert!(!holding.is_empty(), "a far cascade holds the mover");
+        world.set_camera(Camera::looking_at([0., 4., 9.], [30., 0., 9.]));
+        step(&mut renderer, 60);
+        let (after, movers) = sun(&renderer);
+        assert_ne!(fits[0], after[0], "the nearest follows the camera");
+        for c in holding {
+            assert_eq!(fits[c], after[c], "cascade {c} keeps its fit");
+            assert!(!movers[c].is_empty(), "cascade {c} draws the mover");
+        }
+    }
+
+    #[test]
+    fn listed_instances_are_spans_of_their_runs() {
+        use super::super::Run;
+        let run = |geometry, instances| Run {
+            geometry,
+            glass: false,
+            maps: [0; crate::texture::MAPS],
+            variant: Default::default(),
+            instances,
+            casts: true,
+        };
+        let runs = [run(0, 0..4), run(1, 4..12), run(2, 12..14)];
+        let mut out = Vec::new();
+        // Side by side within a run: one span; across runs' edge: one each.
+        super::listed_spans(&runs, &[2, 3, 4, 5, 9, 13], &mut out);
+        assert_eq!(out, [(0, 2..4), (1, 4..6), (1, 9..10), (2, 13..14)]);
+        // Past the last run: left out.
+        out.clear();
+        super::listed_spans(&runs, &[0, 14], &mut out);
+        assert_eq!(out, [(0, 0..1)]);
+    }
+
+    #[test]
+    fn the_still_casters_layers_go_once_nothing_moves_or_the_window_rests() {
+        use zgx_gpu::viewport::Viewport;
+        let (device, queue) = device_and_queue();
+        let world = World::new();
+        world.add(Object::mesh(Geometry::plane(40., 40.), Material::default()));
+        let mover = world.add(Object::mesh(
+            Geometry::cuboid(1., 1., 1.),
+            Material::default(),
+        ));
+        world.add_light(Light::Directional {
+            direction: vec3(-0.4, -1., -0.3),
+            color: [1.; 3],
+            intensity: 2.,
+        });
+        world.set_shadows(true);
+        world.set_cascades(Some(crate::Cascades::new(4).distance(40.).size(256)));
+        world.set_camera(Camera::looking_at([0., 4., 9.], [0., 0., -4.]));
+        let mut renderer = world.renderer();
+        let held = |r: &super::super::Renderer| {
+            let sun = r.gpu.as_ref().unwrap().lights.sun.as_ref().unwrap();
+            sun.still_bytes()
+        };
+        let step = |renderer: &mut super::super::Renderer, x: f32| {
+            world.set_transform(mover, crate::Transform::at([x, 0.5, 0.]));
+            draw(renderer, &device, &queue);
+        };
+        draw(&mut renderer, &device, &queue);
+        assert_eq!(held(&renderer), 0, "nothing moved: none made");
+        for frame in 1..=5 {
+            step(&mut renderer, frame as f32 * 0.1);
+        }
+        // Four of 256 square, 2 bytes a texel, counted with the frame's.
+        let layers = 4 * 256 * 256 * 2;
+        assert_eq!(held(&renderer), layers);
+        let before = world.temporary_bytes();
+        // Stopped: drawn on (a camera turning, say), they go as it turns
+        // still, `MOVING` frames after its last change.
+        for frame in 1..super::super::shadows::cascades::MOVING {
+            world.set_background(Some(frame as u32));
+            draw(&mut renderer, &device, &queue);
+            assert_eq!(held(&renderer), layers, "frame {frame}: still moving");
+        }
+        world.set_background(None);
+        draw(&mut renderer, &device, &queue);
+        assert_eq!(held(&renderer), 0, "none moves");
+        assert_eq!(world.temporary_bytes(), before - layers);
+        // Moving again, then the window rests: they go with its other
+        // temporaries, whatever moves.
+        step(&mut renderer, 2.);
+        step(&mut renderer, 2.1);
+        assert_eq!(held(&renderer), layers);
+        renderer.rest();
+        assert_eq!(held(&renderer), 0, "rested");
+        assert_eq!(world.temporary_bytes(), 0);
     }
 
     #[test]

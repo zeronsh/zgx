@@ -1282,6 +1282,8 @@ impl Viewport for Renderer {
         if let Some(apps) = &mut self.apps {
             apps.rest();
         }
+        #[cfg(feature = "lighting")]
+        gpu.lights.rest();
         gpu.bindings.clear();
         gpu.behind_held = 0;
         // The last frame's runs drew with those bindings: the next frame
