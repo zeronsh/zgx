@@ -45,6 +45,39 @@ class SymbolTests(unittest.TestCase):
         self.assertEqual(got['data_b'], 0x20)
         self.assertNotIn('DATA_END', got)
 
+    def test_names_numbered_by_emission_order_are_left_out(self):
+        nm = """\
+0000000100001000 T main
+0000000100001040 s _anon.8180f6d836fdfbc2d50caef93d99bffd.3733
+0000000100001100 s GCC_except_table1192
+0000000100001140 s ltmp12
+0000000100001180 t zgx::walk
+00000001000011c0 T _end_of_text
+"""
+        got = sizes.symbol_sizes(nm)
+        self.assertEqual(set(got), {'main', 'zgx::walk'})
+
+    def test_sections_are_read_by_segment_from_mach_o_and_by_name_from_elf(self):
+        mach_o = """Segment __PAGEZERO: 4294967296
+Segment __TEXT: 5472256
+\tSection __text: 2746344
+\tSection __const: 2329544
+\ttotal 5461110
+Segment __DATA_CONST: 81920
+\tSection __const: 68072
+"""
+        self.assertEqual(sizes.section_sizes(mach_o, ''),
+                         {'__TEXT,__text': 2746344, '__TEXT,__const': 2329544, '__DATA_CONST,__const': 68072})
+        sysv = """app  :
+section          size      addr
+.text         1048576     65536
+.rodata        262144   1114112
+.data.rel.ro    4096    1376256
+Total         1314816
+"""
+        self.assertEqual(sizes.section_sizes('', sysv),
+                         {'.text': 1048576, '.rodata': 262144, '.data.rel.ro': 4096})
+
     def test_moved_lists_changes_additions_and_removals_largest_first(self):
         before = {'same': 10, 'grew': 10, 'gone': 5}
         after = {'same': 10, 'grew': 30, 'new': 100}
@@ -96,10 +129,11 @@ class VerdictTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as work, \
                 patch.object(sizes, 'WORK', pathlib.Path(work)), \
                 patch.object(sizes, 'llvm_nm', return_value='llvm-nm'), \
+                patch.object(sizes, 'llvm_tool', return_value='llvm-size'), \
                 patch.object(sizes, 'base_dir', return_value=pathlib.Path(work) / 'base'), \
                 patch.object(sizes.subprocess, 'run'), \
                 patch.object(sizes, 'build', side_effect=fake_build), \
-                patch.object(sizes, 'measure', side_effect=lambda binary, scratch, nm: measured[str(binary)]), \
+                patch.object(sizes, 'measure', side_effect=lambda binary, scratch, nm, size: measured[str(binary)]), \
                 patch.object(sys, 'argv', ['sizes.py', 'main']), \
                 patch('builtins.print'):
             with self.assertRaises(SystemExit) as ended:
@@ -107,16 +141,23 @@ class VerdictTests(unittest.TestCase):
         return ended.exception.code
 
     def test_nothing_moved_passes(self):
-        same = {'heavy_headless': (1000, {'f': 10}), 'zgx-run': (2000, {'g': 20})}
+        same = {'heavy_headless': (1000, {'f': 10}, {'.text': 64}), 'zgx-run': (2000, {'g': 20}, {'.text': 64})}
         self.assertEqual(self.run_main(same, dict(same)), 0)
 
     def test_a_symbol_that_moved_fails_though_the_size_did_not(self):
-        base = {'zgx-run': (2000, {'g': 20, 'h': 8})}
-        head = {'zgx-run': (2000, {'g': 24, 'h': 4})}
+        base = {'zgx-run': (2000, {'g': 20, 'h': 8}, {'.text': 64})}
+        head = {'zgx-run': (2000, {'g': 24, 'h': 4}, {'.text': 64})}
         self.assertEqual(self.run_main(base, head), 1)
 
     def test_a_stripped_size_that_moved_fails(self):
-        self.assertEqual(self.run_main({'zgx-run': (2000, {})}, {'zgx-run': (2016, {})}), 1)
+        self.assertEqual(self.run_main({'zgx-run': (2000, {}, {})}, {'zgx-run': (2016, {}, {})}), 1)
+
+    def test_a_section_that_moved_fails_though_nothing_else_did(self):
+        # A page-aligned binary under a step: anonymous constants grew, no
+        # named symbol and no stripped size moved.
+        base = {'zgx-run': (2000, {'g': 20}, {'__TEXT,__const': 4096})}
+        head = {'zgx-run': (2000, {'g': 20}, {'__TEXT,__const': 4160})}
+        self.assertEqual(self.run_main(base, head), 1)
 
 
 if __name__ == '__main__':
