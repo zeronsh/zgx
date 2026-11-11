@@ -160,3 +160,20 @@ fn a_word_the_monospace_face_covers_parses_that_face_alone() {
         "{glyphs:?}"
     );
 }
+
+/// What shaping keeps between runs, its buffers and its searches' caches,
+/// is counted for a memory report (`FontSystem::cache_bytes`): shaping
+/// fills it.
+#[test]
+fn shaping_counts_the_buffers_and_caches_it_keeps() {
+    let mut fonts = fonts();
+    let before = fonts.cache_bytes();
+    for run in RUNS {
+        shape(&mut fonts, run);
+    }
+    assert!(
+        fonts.cache_bytes() > before,
+        "{before} then {}",
+        fonts.cache_bytes()
+    );
+}

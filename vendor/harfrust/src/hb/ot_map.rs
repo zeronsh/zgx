@@ -72,6 +72,20 @@ pub struct StageMap {
 pub type pause_func_t = fn(&hb_ot_shape_plan_t, &hb_font_t, &mut hb_buffer_t) -> bool;
 
 impl hb_ot_map_t {
+    /// zgx: the bytes its feature, lookup and stage lists hold on the heap.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        self.features.capacity() * size_of::<feature_map_t>()
+            + self
+                .lookups
+                .iter()
+                .map(|l| l.capacity() * size_of::<lookup_map_t>())
+                .sum::<usize>()
+            + self
+                .stages
+                .iter()
+                .map(|s| s.capacity() * size_of::<StageMap>())
+                .sum::<usize>()
+    }
     pub const MAX_BITS: u32 = 8;
     pub const MAX_VALUE: u32 = (1 << Self::MAX_BITS) - 1;
 

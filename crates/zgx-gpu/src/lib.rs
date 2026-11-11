@@ -5647,6 +5647,12 @@ impl GpuRenderer {
         report.add("text", "prepared lines", None, Some(lines));
         report.add("text", "measures", None, Some(measures));
         report.add("text", "shaped runs", Some(runs.len()), Some(runs.bytes()));
+        report.add(
+            "text",
+            "shaping buffers and caches",
+            None,
+            Some(self.fonts.borrow().cache_bytes()),
+        );
         let images: usize = (self.swash.image_cache.values().flatten())
             .map(|image| image.data.capacity())
             .sum();
