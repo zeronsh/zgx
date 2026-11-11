@@ -922,6 +922,22 @@ const SEQUENCES: &[Sequence] = &[
     },
 ];
 
+/// Apple7 GPUs (the M1 family): an exception to fresh-against-retained,
+/// cause under investigation. There, a fresh window's image is one of two,
+/// run to run and within a process, at silhouette edges of scenes drawn
+/// without shadows, and stays so for the window's life (later frames and
+/// `finish` don't change it); Metal's validation reports nothing. Measured
+/// on an M1 Max (lane/aaa-perf-fresh-variation): fresh against fresh up to
+/// 44 pixels by 11 levels, fresh against retained up to 24 pixels by 18.
+/// The M5 Max and llvmpipe draw both exactly. So there, up to `APPLE7`
+/// (pixels, levels) may differ from the fresh window, and the retained
+/// sequence, which is stable there, must draw the same image twice.
+const APPLE7: (usize, u8) = (64, 20);
+fn apple7(window: &Window) -> bool {
+    let info = window.gpu.adapter_info();
+    info.backend == zgx_gpu::wgpu::Backend::Metal && info.name.starts_with("Apple M1")
+}
+
 #[test]
 fn a_retained_window_draws_what_a_fresh_one_does() {
     let mut failures = Vec::new();
@@ -939,27 +955,34 @@ fn a_retained_window_draws_what_a_fresh_one_does() {
             }
             let expected = fresh.pixels();
             let software = fresh.software();
+            let apple7 = apple7(&fresh);
 
             // Another world, reaching the same state the long way round.
-            let (world, objects) = scene.world();
-            let mut window = Window::new(&world, (SIDE, SIDE)).unwrap();
-            window.draw();
-            (sequence.run)(&world, &mut window, &scene, &objects);
-            if sequence.then.is_none() {
-                scene.settle(&world);
-            }
-            for _ in 0..=sequence.settle {
+            let retained = || {
+                let (world, objects) = scene.world();
+                let mut window = Window::new(&world, (SIDE, SIDE)).unwrap();
                 window.draw();
-            }
-            let actual = window.pixels();
+                (sequence.run)(&world, &mut window, &scene, &objects);
+                if sequence.then.is_none() {
+                    scene.settle(&world);
+                }
+                for _ in 0..=sequence.settle {
+                    window.draw();
+                }
+                let pixels = window.pixels();
+                (world, window, pixels)
+            };
+            let (world, mut window, actual) = retained();
 
             let level = if software { 0 } else { 1 };
             let (count, largest) = differ(&actual, &expected, level);
-            if count > 0 {
+            let excepted = apple7 && count <= APPLE7.0 && largest <= APPLE7.1;
+            if count > 0 && !excepted {
                 failures.push(format!(
-                    "{} after {}: {count} pixels differ past {level} from a fresh window's, by up to {largest}:\n  {}",
+                    "{} after {}: {count} pixels differ past {level} from a fresh window's, by up to {largest}{}:\n  {}",
                     scene.name,
                     sequence.name,
+                    if apple7 { " (past Apple7's exception)" } else { "" },
                     keep_failure(
                         &format!("{}-{}", scene.name, sequence.name.replace(' ', "-")),
                         (SIDE, SIDE),
@@ -967,6 +990,18 @@ fn a_retained_window_draws_what_a_fresh_one_does() {
                         &expected
                     )
                 ));
+            }
+            // Where a fresh image may vary, the retained one may not: the
+            // same sequence again draws it exactly.
+            if apple7 {
+                let (_, _, again) = retained();
+                let (count, largest) = differ(&again, &actual, 0);
+                if count > 0 {
+                    failures.push(format!(
+                        "{} after {}: the same sequence again drew {count} pixels differently, by up to {largest}",
+                        scene.name, sequence.name
+                    ));
+                }
             }
             if let Some(check) = sequence.check
                 && let Err(why) = check(&world, &mut window, &fresh_world, &mut fresh)
