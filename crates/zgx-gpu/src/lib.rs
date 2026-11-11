@@ -4187,8 +4187,8 @@ impl GpuContext {
                 }
             },
             memory_hints: wgpu::MemoryHints::MemoryUsage,
-            // SAFETY: asked for by the app (`request_ray_queries`), whose
-            // documentation says what wgpu's experimental flag means.
+            // SAFETY: the app took on wgpu's experimental contract in its
+            // own `unsafe` call of `request_ray_queries`.
             experimental_features: if ray_queries {
                 unsafe { wgpu::ExperimentalFeatures::enabled() }
             } else {
@@ -18107,12 +18107,6 @@ static RAY_QUERIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 /// Call it before the first window or renderer is made: windows share one
 /// device, and a device already made keeps the features it was made with.
 ///
-/// *Experimental*, in wgpu's terms: wgpu enables the feature only with its
-/// unsafe `ExperimentalFeatures::enabled()` token, whose contract is that
-/// the API may change in any release and may have bugs, undefined
-/// behaviour reachable from safe code among them. Calling this takes that
-/// on for the app.
-///
 /// Where it works: Metal on macOS 15 and later (Apple GPUs that trace from
 /// render passes); Vulkan with `VK_KHR_ray_query`; Direct3D 12 with DXR
 /// 1.1 and shader model 6.5, which only DXC compiles. On Windows the app
@@ -18122,7 +18116,21 @@ static RAY_QUERIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 ///
 /// Not called, the device is asked for exactly what it was before; the
 /// only work this adds is one relaxed atomic load when a device is made.
-pub fn request_ray_queries() {
+///
+/// # Safety
+///
+/// The caller takes on wgpu's contract for experimental features
+/// (`wgpu::ExperimentalFeatures::enabled`), for the whole process:
+/// experimental APIs may change in any release and may have bugs,
+/// undefined behaviour reachable from otherwise safe code among them. The
+/// caller accepts that such bugs may occur when ray queries are used,
+/// and is asked to report them to wgpu.
+///
+/// ```compile_fail
+/// // Not without an `unsafe` block of the app's own:
+/// zgx_gpu::request_ray_queries();
+/// ```
+pub unsafe fn request_ray_queries() {
     RAY_QUERIES.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 /// Tests: an app's shaders built in the process (wgpu's naga and FXC) when

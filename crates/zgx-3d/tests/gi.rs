@@ -16,7 +16,9 @@ struct Window {
 }
 impl Window {
     fn new(world: &World) -> Option<Self> {
-        zgx_gpu::request_ray_queries();
+        // SAFETY: a test of ray-traced probes takes on wgpu's experimental
+        // contract (`request_ray_queries`).
+        unsafe { zgx_gpu::request_ray_queries() };
         let gpu = match GpuRenderer::new(SIZE.0, SIZE.1) {
             Ok(gpu) => gpu,
             Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
