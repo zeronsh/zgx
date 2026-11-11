@@ -66,6 +66,9 @@ pub struct Caps {
     pub storage_in_vertex: bool,
     /// Storage textures a shader stage may bind.
     pub storage_textures: u32,
+    /// Compute shaders store to half-float textures (`Rgba16Float`), as
+    /// bloom's steps do where it runs as dispatches (else by render passes).
+    pub stores_half_floats: bool,
     /// Draws and dispatches take their counts from a buffer.
     pub indirect: bool,
     /// Indirect draws may start at an instance other than the first.
@@ -99,11 +102,16 @@ pub struct Caps {
 impl Caps {
     /// What `device` can do.
     pub(crate) fn of(device: &wgpu::Device) -> Self {
-        Self::from_parts(
+        let caps = Self::from_parts(
             device.adapter_info().backend,
             device.features(),
             &device.limits(),
-        )
+        );
+        Self {
+            stores_half_floats: caps.stores_half_floats
+                && stores(device, wgpu::TextureFormat::Rgba16Float),
+            ..caps
+        }
     }
 
     /// What a device of `backend` with `features` and `limits` can do.
@@ -157,6 +165,8 @@ impl Caps {
             storage_buffers,
             storage_in_vertex,
             storage_textures,
+            // WebGPU's baseline (`Caps::of` asks the device).
+            stores_half_floats: compute && storage_textures > 0,
             indirect,
             indirect_first_instance: indirect && has(wgpu::Features::INDIRECT_FIRST_INSTANCE),
             timestamps: has(wgpu::Features::TIMESTAMP_QUERY),
@@ -197,6 +207,35 @@ impl Caps {
                 0
             },
         }
+    }
+}
+
+/// Whether `device` takes a texture of `format` that compute stores to and
+/// shaders sample. WebGPU guarantees it for `Rgba16Float`, but a device
+/// below its baseline is held to its adapter's own formats, which a view's
+/// frame doesn't give: so the device is asked, by making one (a texel) in
+/// a scope that catches its refusal.
+fn stores(device: &wgpu::Device, format: wgpu::TextureFormat) -> bool {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    drop(device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("3D caps: storage"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    }));
+    // A native device answers at once.
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    match std::pin::pin!(scope.pop()).poll(&mut context) {
+        std::task::Poll::Ready(error) => error.is_none(),
+        std::task::Poll::Pending => false,
     }
 }
 
@@ -260,6 +299,16 @@ mod tests {
     }
 
     #[test]
+    fn a_device_is_asked_which_formats_compute_stores_to() {
+        // What it takes, and what it refuses (no sRGB format is stored to)
+        // without failing.
+        let (device, _queue) = noop();
+        assert!(stores(&device, wgpu::TextureFormat::Rgba16Float));
+        assert!(!stores(&device, wgpu::TextureFormat::Rgba8UnormSrgb));
+        assert!(Caps::of(&device).stores_half_floats);
+    }
+
+    #[test]
     fn webgpus_baseline_is_tier_a_and_gl_is_tier_b() {
         let a = Caps::from_parts(
             wgpu::Backend::Metal,
@@ -281,8 +330,10 @@ mod tests {
             wgpu::Features::INDIRECT_FIRST_INSTANCE,
             &limits,
         );
+        assert!(a.stores_half_floats, "WebGPU's baseline");
         assert_eq!(b.tier, Tier::B);
         assert!(!b.compute && !b.storage_in_vertex && !b.indirect && !b.indirect_first_instance);
+        assert!(!b.stores_half_floats);
         assert_eq!((b.max_workgroups, b.max_invocations), (0, 0));
         // WebGL's limits: no compute at all.
         let webgl = wgpu::Limits::downlevel_webgl2_defaults();

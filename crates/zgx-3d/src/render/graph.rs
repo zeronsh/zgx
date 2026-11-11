@@ -225,9 +225,10 @@ pub(super) struct Chain {
     pub(super) taa: bool,
     /// Chromatic aberration (the last pass reads the scene around a pixel).
     pub(super) aberration: bool,
-    /// Bloom's steps as dispatches of one compute pass (the device runs
-    /// compute), not a render pass each: on Metal each render pass a frame
-    /// holds a driver block of its own.
+    /// Bloom's steps as dispatches of one compute pass (the device's compute
+    /// stores to half floats: `Caps::stores_half_floats`), not a render pass
+    /// each: on Metal each render pass a frame holds a driver block of its
+    /// own.
     pub(super) bloom_compute: bool,
 }
 impl Chain {
