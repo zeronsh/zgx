@@ -55,8 +55,9 @@ struct Frames {
     /// Times its painter draws each frame (a view shown in that many boxes).
     boxes: usize,
     /// A second painter of the world (`World::viewport`) and its target,
-    /// drawing each frame after the first.
+    /// drawing each frame after the first (or before: `second_first`).
     second: Option<(Box<dyn Viewport>, wgpu::Texture)>,
+    second_first: bool,
 }
 impl Frames {
     fn new(world: &World) -> Option<Self> {
@@ -73,6 +74,7 @@ impl Frames {
             start: Instant::now(),
             boxes: 1,
             second: None,
+            second_first: false,
         })
     }
     /// With a second painter of `world` beside the first, on its device.
@@ -84,6 +86,12 @@ impl Frames {
     fn draw(&mut self, seconds: f64) {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         let time = self.start + Duration::from_secs_f64(seconds);
+        if self.second_first
+            && let Some((painter, target)) = &mut self.second
+        {
+            let gpu = (&self.device, &self.queue, &mut encoder);
+            paint(&mut **painter, gpu, target, time);
+        }
         for _ in 0..self.boxes {
             paint(
                 &mut *self.painter,
@@ -92,7 +100,9 @@ impl Frames {
                 time,
             );
         }
-        if let Some((painter, target)) = &mut self.second {
+        if !self.second_first
+            && let Some((painter, target)) = &mut self.second
+        {
             paint(
                 &mut **painter,
                 (&self.device, &self.queue, &mut encoder),
@@ -951,4 +961,27 @@ fn a_world_shown_in_two_boxes_of_a_window_steps_its_particles_once_a_frame() {
     let pixels = gpu.readback().unwrap();
     let lit = |x: u32| pixels[((SIDE / 2 * 2 * SIDE + x) * 4) as usize] > 200;
     assert!(lit(SIDE / 2) && lit(SIDE + SIDE / 2), "alive in both boxes");
+}
+
+#[test]
+fn a_painter_still_compiling_that_draws_first_costs_the_world_no_time() {
+    let world = world();
+    a_seconds_burst(&world);
+    let Some(mut frames) = Frames::new(&world) else {
+        return;
+    };
+    frames.ready(&world, 0.);
+    let at = frames.run(0., 0.25);
+    let before = world.particle_time();
+    // A second painter, drawing first each frame: its renderer prepares
+    // the drawer only as it draws, so on its first frame it can't step the
+    // world; the painter after it at that frame time does.
+    frames = frames.with_second(&world);
+    frames.second_first = true;
+    frames.draw(at + 1. / 60.);
+    let stepped = world.particle_time() - before;
+    assert!(
+        (stepped - 1. / 60.).abs() < 1e-6,
+        "{stepped} s stepped in a frame of 1/60"
+    );
 }

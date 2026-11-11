@@ -259,6 +259,16 @@ impl World {
             .is_some_and(|p| p.ready)
     }
 
+    /// Seconds its particles have been stepped: for tests.
+    #[doc(hidden)]
+    pub fn particle_time(&self) -> f64 {
+        self.inner
+            .borrow()
+            .particles
+            .as_ref()
+            .map_or(0., |p| p.time)
+    }
+
     /// The last frame's pools, each emitter's in the order they're updated:
     /// its slots and whether the CPU updated it. For tests.
     #[doc(hidden)]

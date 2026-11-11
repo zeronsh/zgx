@@ -595,27 +595,26 @@ impl Device {
             Some(at) => particles.devices.remove(at).1,
             None => Shared::new(device),
         };
-        // The world steps once a frame time: whichever painter draws it
-        // first; at the same time again, it's only drawn.
-        let fresh = particles.clock != Some(frame.time);
-        let step = match particles.clock {
-            Some(last) if fresh => frame
-                .time
-                .saturating_duration_since(last)
-                .as_secs_f32()
-                .min(MAX_STEP),
-            _ => 0.,
-        };
-        particles.clock = Some(frame.time);
         let drawer = particles.draw.clone();
         let mut drawer = drawer.borrow_mut();
         drawer.current = self.id;
         drawer.drawn.clear();
         // Stepped once it can be drawn (the drawer made for this painter's
-        // renderer, a frame after its first): its clock starts then.
+        // renderer, a frame after its first): its clock starts then. The
+        // world steps once a frame time, by the first painter ready to; at
+        // the same time again, it's only drawn. A painter not ready yet
+        // leaves the time to the next.
         if shared.ready() && drawer.ready() {
             particles.ready = true;
-            if fresh {
+            if particles.clock != Some(frame.time) {
+                let step = particles.clock.map_or(0., |last| {
+                    frame
+                        .time
+                        .saturating_duration_since(last)
+                        .as_secs_f32()
+                        .min(MAX_STEP)
+                });
+                particles.clock = Some(frame.time);
                 shared.step(particles, inner, frame, step);
             }
             shared.hand_to(particles, &mut drawer, device);
