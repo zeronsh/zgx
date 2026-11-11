@@ -336,8 +336,10 @@ pub(crate) mod aac {
             channels: usize,
             rate: u32,
             /// What each read decodes into: aligned to 64 bytes, always,
-            /// so the decoder takes the same path for every buffer, and two
-            /// decodes of one file come out the same to the last bit.
+            /// so the decoder takes the same path for every buffer. Two
+            /// decoders of one file still differ in the last bit where
+            /// AudioToolbox's own buffers fall elsewhere in the heap (up to
+            /// about 5e-8): that we can't align.
             piece: Box<Piece>,
         }
 

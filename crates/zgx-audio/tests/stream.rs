@@ -402,7 +402,19 @@ mod aac {
         let (audio, mut mixer) = engine();
         audio.stream(Source::bytes(M4A), Play::new()).unwrap();
         let streamed = blocks(&mut mixer, 30_000);
-        assert_eq!(whole, streamed);
+        // AudioToolbox decodes, and its last bit or two depend on where its
+        // own buffers fall in the heap: two decoders of one file, made at
+        // different moments, can differ by up to about 5e-8 (seen: from
+        // frame 389, with only a struct's size changed elsewhere). Those
+        // buffers can't be aligned from here; the formats decoded in Rust
+        // match exactly.
+        assert_eq!(whole.len(), streamed.len());
+        let most = whole
+            .iter()
+            .zip(&streamed)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(most <= 1e-6, "the stream differs by {most:e}");
         // Played at 48 kHz: each side its tone at 1/16 of full scale, within
         // a decibel, and the other side's barely.
         let side = |c: usize| -> Vec<f32> {
