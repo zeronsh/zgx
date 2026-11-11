@@ -29,6 +29,9 @@ pub const CPU_WORLD_PARTICLES: u32 = 4 * CPU_PARTICLES;
 /// The `Settle` reason of a world's particles.
 pub(crate) const UNSETTLED: u32 = crate::world::Reason::Particles as u32;
 
+/// The longest a particle lives, in seconds: an hour.
+pub const MOST_LIFE: f32 = 3600.;
+
 /// The longest step a frame takes, in seconds: a world drawing again after
 /// a pause doesn't spawn the pause's worth at once.
 const MAX_STEP: f32 = 0.1;
@@ -221,9 +224,11 @@ impl Emitter {
         self
     }
     /// Each lives a random time in `seconds`.
+    /// (At most `MOST_LIFE`: a world settles once its particles can't
+    /// live, and one that may live for ever never would.)
     pub fn lifetime(mut self, seconds: Range<f32>) -> Self {
-        let start = seconds.start.max(1e-3);
-        self.life = start..seconds.end.max(start);
+        let start = seconds.start.clamp(1e-3, MOST_LIFE);
+        self.life = start..seconds.end.clamp(start, MOST_LIFE);
         self
     }
     /// Each starts at `base` velocity (m/s), plus a random part up to
@@ -260,9 +265,11 @@ impl Emitter {
         self
     }
     /// Each is born a random size in `metres` across.
+    /// (Sizes that aren't a finite number are none.)
     pub fn size(mut self, metres: Range<f32>) -> Self {
-        let start = metres.start.max(0.);
-        self.size = start..metres.end.max(start);
+        let finite = |m: f32| if m.is_finite() { m.max(0.) } else { 0. };
+        let start = finite(metres.start);
+        self.size = start..finite(metres.end).max(start);
         self
     }
     /// Their size over their life, as a factor of the size they're born:
@@ -389,6 +396,9 @@ pub(crate) struct Live {
     last_spawn: Option<f64>,
     /// Ids for the device's buffers: a new one when its pool changes.
     pub(crate) id: u64,
+    /// When it was added, in the world's count: sub-emitters are older than
+    /// their parents, and update first.
+    pub(crate) added: u64,
     /// Whether a parent gives birth into it (`Emitter::on_death`,
     /// `on_hit`), and the last time one's particles might have.
     pub(crate) fed: bool,
@@ -466,23 +476,67 @@ pub(crate) struct Particles {
     pub(crate) pools: Vec<(u32, bool)>,
 }
 impl Particles {
-    pub(crate) fn add(&mut self, mut emitter: Emitter) -> EmitterId {
-        self.next_id += 1;
-        // A sub-emitter is one already here, and an event gives birth to at
-        // most its pool.
+    /// `emitter`'s sub-emitter checked: one here and older than `added` (so
+    /// children update first and no emitter feeds itself), an event's births
+    /// at most its pool; else none.
+    fn link(&mut self, emitter: &mut Emitter, added: u64) {
         if let Some((child, death, hit)) = emitter.sub {
-            match self.get_mut(child) {
-                Some(child) => {
-                    child.fed = true;
-                    let most = child.emitter.max;
-                    emitter.sub = Some((emitter.sub.unwrap().0, death.min(most), hit.min(most)));
+            match self.child(child).filter(|c| c.added < added) {
+                Some(live) => {
+                    let most = live.emitter.max;
+                    emitter.sub = Some((child, death.min(most), hit.min(most)));
                 }
                 None => {
-                    eprintln!("zgx-3d: an emitter's sub-emitter isn't in the world: none");
+                    eprintln!(
+                        "zgx-3d: an emitter's sub-emitter isn't an older emitter of the world: none"
+                    );
                     emitter.sub = None;
                 }
             }
         }
+    }
+    /// Each emitter marked fed where another names it its sub-emitter.
+    fn refeed(&mut self) {
+        let fed: Vec<EmitterId> = self
+            .live()
+            .filter_map(|l| l.emitter.sub.map(|s| s.0))
+            .collect();
+        let ids: Vec<EmitterId> = self.ids().collect();
+        for id in ids {
+            let feeds = fed.contains(&id);
+            if let Some(live) = self.get_mut(id) {
+                live.fed = feeds;
+            }
+        }
+    }
+    /// Emitter `id` made `emitter`, from its next update: its particles kept
+    /// where its `max` is the same (rates, forces, looks and the rest change
+    /// as they live); a pool made anew where it isn't. Its `burst` isn't
+    /// spawned (`World::burst` spawns more). Whether it was here.
+    pub(crate) fn set(&mut self, id: EmitterId, mut emitter: Emitter) -> bool {
+        let Some(added) = self.get_mut(id).map(|l| l.added) else {
+            return false;
+        };
+        self.link(&mut emitter, added);
+        self.next_id += 1;
+        let next = self.next_id;
+        let live = self.get_mut(id).unwrap();
+        if live.emitter.max != emitter.max {
+            // Another pool: made by the next frame, the old one let go.
+            live.id = next;
+            live.head = 0;
+            live.failed = false;
+        }
+        live.emitter = emitter;
+        self.refeed();
+        true
+    }
+    pub(crate) fn add(&mut self, mut emitter: Emitter) -> EmitterId {
+        self.next_id += 1;
+        // A sub-emitter is one already here, and an event gives birth to at
+        // most its pool.
+        let added = self.next_id;
+        self.link(&mut emitter, added);
         let live = Live {
             bursts: emitter.burst,
             emitter,
@@ -492,6 +546,7 @@ impl Particles {
             head: 0,
             last_spawn: None,
             id: self.next_id,
+            added,
             fed: false,
             fed_until: None,
             failed: false,
@@ -507,10 +562,12 @@ impl Particles {
         let slot = &mut self.emitters[index];
         slot.0 = slot.0.wrapping_add(1);
         slot.1 = Some(live);
-        EmitterId {
+        let id = EmitterId {
             index: index as u32,
             generation: slot.0,
-        }
+        };
+        self.refeed();
+        id
     }
     pub(crate) fn get_mut(&mut self, id: EmitterId) -> Option<&mut Live> {
         match self.emitters.get_mut(id.index as usize) {
@@ -536,17 +593,7 @@ impl Particles {
                     live.emitter.sub = None;
                 }
             }
-            let fed: Vec<EmitterId> = self
-                .live()
-                .filter_map(|l| l.emitter.sub.map(|s| s.0))
-                .collect();
-            let ids: Vec<EmitterId> = self.ids().collect();
-            for id in ids {
-                let feeds = fed.contains(&id);
-                if let Some(live) = self.get_mut(id) {
-                    live.fed = feeds;
-                }
-            }
+            self.refeed();
         }
         removed
     }
@@ -567,7 +614,7 @@ impl Particles {
         let mut order: Vec<usize> = (0..self.emitters.len())
             .filter(|&i| self.emitters[i].1.is_some())
             .collect();
-        order.sort_by_key(|&i| self.emitters[i].1.as_ref().map(|l| l.id));
+        order.sort_by_key(|&i| self.emitters[i].1.as_ref().map(|l| l.added));
         order
     }
     /// The pool id and slots of `child`, if it's here.

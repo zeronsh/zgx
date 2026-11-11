@@ -1,7 +1,9 @@
 //! A world's particle emitters (design-3d-aaa.md, 5.4): the `World` calls of
 //! `crate::particles`.
 use super::World;
-use crate::particles::{Emitter, EmitterError, EmitterId, EmitterStatus, Particles, UNSETTLED};
+use crate::particles::{
+    Emitter, EmitterError, EmitterId, EmitterStatus, Force, Particles, Spawn, UNSETTLED,
+};
 
 impl World {
     /// Its emitters, made with the first call needing them; the world
@@ -34,15 +36,33 @@ impl World {
     /// a frame tells the device), and where its pool would take the app's GPU
     /// data past the world's cap (`set_memory_cap`).
     pub fn add_emitter(&self, emitter: Emitter) -> Result<EmitterId, EmitterError> {
+        self.pool_room(emitter.max, None)?;
+        let id = self.particles(|p| p.add(emitter));
+        self.view.invalidate();
+        Ok(id)
+    }
+
+    /// Whether a pool of `max` particles may be held, in place of
+    /// `replacing`'s if it's given: one binding and dispatch on the device,
+    /// the world's CPU particles where the CPU updates them, the memory cap.
+    fn pool_room(&self, max: u32, replacing: Option<EmitterId>) -> Result<(), EmitterError> {
         let caps = self.caps();
         let on_gpu = caps.is_none_or(|caps| caps.compute);
         let most = crate::particles::most(caps);
-        if on_gpu && emitter.max > most {
-            return Err(EmitterError::TooMany {
-                asked: emitter.max,
-                most,
-            });
+        if on_gpu && max > most {
+            return Err(EmitterError::TooMany { asked: max, most });
         }
+        let replaced = replacing.and_then(|id| {
+            Some(
+                self.inner
+                    .borrow()
+                    .particles
+                    .as_ref()?
+                    .child(id)?
+                    .emitter
+                    .max,
+            )
+        });
         // On the CPU, the world's emitters together hold at most
         // `CPU_WORLD_PARTICLES`: its frames' work on the main thread is
         // bounded however many there are.
@@ -59,41 +79,118 @@ impl World {
                 .borrow()
                 .particles
                 .as_ref()
-                .map_or(0, |p| p.cpu_particles());
+                .map_or(0, |p| p.cpu_particles())
+                .saturating_sub(replaced.map_or(0, |m| m.min(crate::particles::CPU_PARTICLES)));
             let left = crate::particles::CPU_WORLD_PARTICLES.saturating_sub(held);
-            if emitter.max.min(crate::particles::CPU_PARTICLES) > left {
+            if max.min(crate::particles::CPU_PARTICLES) > left {
                 return Err(EmitterError::TooMany {
-                    asked: emitter.max,
+                    asked: max,
                     most: left,
                 });
             }
         }
-        let room = {
-            let view = self.view.clone();
-            let mut inner = self.inner.borrow_mut();
-            let inner = &mut *inner;
-            let bytes = inner
-                .particles
-                .get_or_insert_with(Default::default)
-                .pool_bytes(emitter.max, on_gpu);
-            let data = inner
-                .data
-                .get_or_insert_with(|| Box::new(crate::compute::Data::new(view)));
-            data.room(bytes).map_err(|error| match error {
+        let view = self.view.clone();
+        let mut inner = self.inner.borrow_mut();
+        let inner = &mut *inner;
+        let particles = inner.particles.get_or_insert_with(Default::default);
+        let bytes = particles.pool_bytes(max, on_gpu);
+        let freed = replaced.map_or(0, |m| particles.pool_bytes(m, on_gpu));
+        let data = inner
+            .data
+            .get_or_insert_with(|| Box::new(crate::compute::Data::new(view)));
+        let cap = data.cap;
+        data.room(bytes.saturating_sub(freed))
+            .map_err(|error| match error {
                 crate::GpuDataError::OverBudget { asked, used, cap } => {
                     EmitterError::OverBudget { asked, used, cap }
                 }
                 _ => EmitterError::OverBudget {
                     asked: bytes,
                     used: 0,
-                    cap: data.cap,
+                    cap,
                 },
             })
+    }
+
+    /// Emitter `id` as it is now; `None` if it was removed.
+    pub fn emitter(&self, id: EmitterId) -> Option<Emitter> {
+        Some(
+            self.inner
+                .borrow()
+                .particles
+                .as_ref()?
+                .child(id)?
+                .emitter
+                .clone(),
+        )
+    }
+
+    /// Change emitter `id` to `emitter` from its next update: rate, spawn,
+    /// lifetime, velocity, forces, collision, looks and its sub-emitter, its
+    /// particles living on in its pool. A different `max` makes its pool
+    /// anew (its particles gone), checked as `add_emitter` checks one.
+    /// `emitter`'s `burst` isn't spawned: `burst` spawns more.
+    pub fn set_emitter(&self, id: EmitterId, emitter: Emitter) -> Result<(), EmitterError> {
+        let Some(max) = self.emitter(id).map(|e| e.max) else {
+            return Ok(());
         };
-        room?;
-        let id = self.particles(|p| p.add(emitter));
-        self.view.invalidate();
-        Ok(id)
+        if emitter.max != max {
+            self.pool_room(emitter.max, Some(id))?;
+        }
+        if self.particles(|p| p.set(id, emitter)) {
+            self.view.invalidate();
+        }
+        Ok(())
+    }
+
+    /// `change` made to emitter `id`'s description, from its next update
+    /// (its pool kept).
+    fn change_emitter(&self, id: EmitterId, change: impl FnOnce(Emitter) -> Emitter) {
+        if let Some(emitter) = self.emitter(id) {
+            let max = emitter.max;
+            let changed = change(emitter);
+            debug_assert_eq!(changed.max, max);
+            let _ = self.set_emitter(id, changed);
+        }
+    }
+    /// How many particles emitter `id` spawns a second, from its next update.
+    pub fn set_emitter_rate(&self, id: EmitterId, per_second: f32) {
+        self.change_emitter(id, |e| e.rate(per_second));
+    }
+    /// Where emitter `id` spawns, and how fast.
+    pub fn set_emitter_spawn(&self, id: EmitterId, spawn: Spawn) {
+        self.change_emitter(id, |e| e.spawn(spawn));
+    }
+    /// How long emitter `id`'s particles born from now live.
+    pub fn set_emitter_lifetime(&self, id: EmitterId, seconds: std::ops::Range<f32>) {
+        self.change_emitter(id, |e| e.lifetime(seconds));
+    }
+    /// Emitter `id`'s particles' velocity at birth, from its next update.
+    pub fn set_emitter_velocity(&self, id: EmitterId, base: [f32; 3], spread: f32) {
+        self.change_emitter(id, |e| e.velocity(base, spread));
+    }
+    /// The forces moving emitter `id`'s particles, those living too.
+    pub fn set_emitter_forces(&self, id: EmitterId, forces: &[Force]) {
+        self.change_emitter(id, |mut e| {
+            e.forces.clear();
+            forces.iter().fold(e, |e, &force| e.force(force))
+        });
+    }
+    /// The colour emitter `id`'s particles are born with.
+    pub fn set_emitter_color(&self, id: EmitterId, rgba: [f32; 4]) {
+        self.change_emitter(id, |e| e.color(rgba));
+    }
+    /// Emitter `id`'s colour over life, its living particles' too.
+    pub fn set_emitter_color_over_life(&self, id: EmitterId, keys: [[f32; 4]; 4]) {
+        self.change_emitter(id, |e| e.color_over_life(keys));
+    }
+    /// The size emitter `id`'s particles are born.
+    pub fn set_emitter_size(&self, id: EmitterId, metres: std::ops::Range<f32>) {
+        self.change_emitter(id, |e| e.size(metres));
+    }
+    /// Emitter `id`'s size over life, its living particles' too.
+    pub fn set_emitter_size_over_life(&self, id: EmitterId, keys: [f32; 4]) {
+        self.change_emitter(id, |e| e.size_over_life(keys));
     }
 
     /// How an emitter is doing; `None` if it was removed.

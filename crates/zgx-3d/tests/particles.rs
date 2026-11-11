@@ -107,7 +107,9 @@ impl Frames {
     /// Frames at `from` until the world's particles' pipelines are made
     /// (on their thread): its particles step from the next.
     fn ready(&mut self, world: &World, from: f64) {
-        for _ in 0..1000 {
+        // (Up to 10 s of wall time: compiling isn't what's tested.)
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
             self.draw(from);
             if world.particles_ready() {
                 return;
@@ -599,4 +601,91 @@ fn a_scene_built_before_its_first_frame_steps_at_most_the_worlds_cpu_particles()
     let statuses: Vec<_> = emitters.iter().map(|&e| world.emitter_status(e)).collect();
     assert_eq!(statuses[..4], [Some(EmitterStatus::Running); 4]);
     assert_eq!(statuses[4..], [Some(EmitterStatus::OverCpuParticles); 6]);
+}
+
+#[test]
+fn an_emitter_changes_from_its_next_update_its_particles_kept() {
+    let world = world();
+    // A burst of long-lived white discs at the middle.
+    let id = world
+        .add_emitter(
+            Emitter::new(16)
+                .burst(16)
+                .lifetime(10.0..10.0)
+                .size(1.0..1.0)
+                .color([1., 1., 1., 1.]),
+        )
+        .unwrap();
+    let Some(mut frames) = Frames::new(&world) else {
+        return;
+    };
+    frames.ready(&world, 0.);
+    frames.draw(1. / 60.);
+    assert!(pixel(&frames.pixels(), 32, 32)[1] > 200, "white");
+    // Red over their life: the same particles turn red the next frame (a
+    // pool made again would show none).
+    world.set_emitter_color_over_life(id, [[1., 0., 0., 1.]; 4]);
+    frames.draw(2. / 60.);
+    let [r, g, b, _] = pixel(&frames.pixels(), 32, 32);
+    assert!(r > 200 && g < 40 && b < 40, "{:?}", [r, g, b]);
+    // A rate from none keeps the world drawing; none again, it settles once
+    // they've lived out.
+    world.set_emitter_rate(id, 100.);
+    assert!(world.view().animating());
+    assert_eq!(world.memory().particles, 16 * 80, "the same pool");
+}
+
+#[test]
+fn a_new_max_makes_the_pool_again_held_to_the_limits() {
+    let world = world();
+    let id = world.add_emitter(Emitter::new(1000)).unwrap();
+    assert_eq!(world.memory().particles, 1000 * 80);
+    let mut emitter = world.emitter(id).unwrap();
+    // Past the device's binding: refused, the emitter as it was.
+    assert_eq!(
+        world.set_emitter(id, Emitter::new(2_000_000)),
+        Err(EmitterError::TooMany {
+            asked: 2_000_000,
+            most: 1_677_721
+        })
+    );
+    assert_eq!(world.memory().particles, 1000 * 80);
+    // Within: counted in place of the old pool, against the cap.
+    world.set_memory_cap(200_000);
+    emitter = emitter.rate(5.);
+    let bigger = Emitter::new(2000).rate(5.);
+    assert!(
+        world.set_emitter(id, bigger).is_ok(),
+        "160 KB in place of 80 KB"
+    );
+    assert_eq!(world.memory().particles, 2000 * 80);
+    assert!(matches!(
+        world.set_emitter(id, Emitter::new(3000)),
+        Err(EmitterError::OverBudget { .. })
+    ));
+    drop(emitter);
+}
+
+#[test]
+fn values_past_reason_set_on_an_emitter_are_held_to_it() {
+    let world = world();
+    let id = world.add_emitter(Emitter::new(100).rate(10.)).unwrap();
+    world.set_emitter_rate(id, f32::NAN);
+    world.set_emitter_lifetime(id, -5.0..-1.0);
+    world.set_emitter_size(id, -1.0..f32::INFINITY);
+    let emitter = world.emitter(id).unwrap();
+    // No rate, so it settles; a lifetime and size it can draw.
+    assert!(!world.view().animating());
+    assert_eq!(
+        world.emitter(id).unwrap(),
+        Emitter::new(100)
+            .rate(0.)
+            .lifetime(-5.0..-1.0)
+            .size(-1.0..f32::INFINITY)
+    );
+    drop(emitter);
+    // A life past all reason is an hour's: the world settles after it.
+    world.set_emitter_lifetime(id, 1.0..f32::INFINITY);
+    world.burst(id, 1);
+    assert!(world.view().animating());
 }
