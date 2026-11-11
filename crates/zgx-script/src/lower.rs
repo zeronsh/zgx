@@ -3000,7 +3000,10 @@ fn kind_view(
                 )
             }
         }
-        Kind::Rich(RichSpans::Listed(spans)) => lower_rich(spans, vm, low),
+        Kind::Rich(RichSpans::Listed(spans)) => match spans.iter().any(continues) {
+            false => lower_rich(spans, vm, low),
+            true => lower_pieced_rich(spans, vm, low),
+        },
         Kind::Rich(RichSpans::Made { build, literal }) => lower_made_rich(build, *literal, vm, low),
         Kind::Image { .. } => lower_image(node, vm, low),
         Kind::Svg { label, src } => {
@@ -8637,6 +8640,27 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 out
             })
             .collect();
+        if fades {
+            fade_spans(spans, &owned)
+        } else {
+            spans
+        }
+    })
+}
+/// Whether `span` is the next piece of the span before (`continues`).
+fn continues(span: &Span) -> bool {
+    span.rare.as_ref().is_some_and(|rare| rare.continues)
+}
+/// `ui.rich` with listed runs, a span among them cut in pieces
+/// (`continues`): built as a `spans` function's are (`text_spans_of`).
+#[cold]
+#[inline(never)]
+fn lower_pieced_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
+    let owned: Vec<OwnedSpan> = spans.iter().map(own_span).collect();
+    let fades = owned.iter().any(fades_in);
+    let (vm, actions, low) = (vm.clone(), low.actions.clone(), low.clone());
+    rich_text_signal(move || {
+        let spans = text_spans_of(&owned, &vm, &actions, &low);
         if fades {
             fade_spans(spans, &owned)
         } else {

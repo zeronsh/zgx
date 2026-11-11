@@ -4757,6 +4757,16 @@ pub(crate) fn label(table: &Table) -> mlua::Result<String> {
         _ => Ok(table.get::<Option<String>>("label")?.unwrap_or_default()),
     }
 }
+/// A span's `continues`: out of line, as few spans are pieces, so the
+/// walk over a span's options stays as it was.
+#[cold]
+#[inline(never)]
+fn span_continues(lua: &Lua, given: mlua::Value, span: &mut Span) -> mlua::Result<()> {
+    if lua.unpack::<Value>(given)?.truthy() {
+        rare_mut(span).continues = true;
+    }
+    Ok(())
+}
 
 /// A span's options that follow a state or function, and their types.
 const SPAN_FOLLOWS: &[(&str, Ty)] = &[
@@ -4900,11 +4910,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 b"underline_color" => span.underline_color = themed_color(&lua.unpack(given)?),
                 b"underline_thickness" => span.underline_thickness = number(given)?,
                 // The next piece of the span before: one span cut in pieces.
-                b"continues" => {
-                    if lua.unpack::<Value>(given)?.truthy() {
-                        rare_mut(&mut span).continues = true;
-                    }
-                }
+                b"continues" => span_continues(lua, given, &mut span)?,
                 // `hover = { underline = true, color = … }`: a link's look
                 // under the pointer (CSS's `a:hover`).
                 b"hover" => {
