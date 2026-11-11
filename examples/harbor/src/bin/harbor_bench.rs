@@ -148,6 +148,11 @@ fn main() {
     )));
     let mut gpu = GpuRenderer::new(width, height).expect("a GPU");
     gpu.set_scale_factor(scale);
+    // The renderer's text services on the scene: layout measures text as
+    // the renderer draws it. Without them it measures by an estimate, and
+    // text sized by its own width is clipped (GAPS.md, B1).
+    gpu.install_text(&mut ui.scene.borrow_mut());
+    ui.refresh_text_geometry();
 
     let step = path::LOOP / frames as f32;
     let base = world.camera();

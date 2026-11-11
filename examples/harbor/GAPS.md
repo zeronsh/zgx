@@ -17,7 +17,7 @@ Each entry is a primitive any game would need, in general form, with the smalles
 | L1 | Spot lights are binned by their sphere, not their cone | lighting lane | open (performance) |
 | L2 | A light at zero intensity is still binned and shaded | lighting lane | open (performance) |
 | L3 | Frames aren't reproducible run to run with cascades or with clustered lights | lighting lane | open (bug) |
-| B1 | Short checkbox and radio labels lose their last glyph | zgx core (another coordinator) | open (bug); repro on `lane/aaa-demo-repro-b1` |
+| B1 | Short checkbox and radio labels lost their last glyph in the bench | the bench's setup | resolved by setup; engine default landing on main |
 
 ## G1. A world's frame statistics are hidden
 
@@ -165,11 +165,24 @@ The same `harbor_bench` binary, run three or four times, gives frames that diffe
 
 Something in the cascades' or the clusters' path depends on timing, not only on the frame. **Repro:** `for i in 1 2 3; do HASHES=h$i.txt harbor_bench; done; diff h1.txt h2.txt`. Add `PNGS=dir PNG_AT=frames` to save the frames that differ.
 
-## B1. Short checkbox and radio labels lose their last glyph (zgx core)
+## B1. Short labels lost their last glyph in the bench: resolved by setup
 
-"Lamps" draws as "Lamp", "HUD" as "HU", "ACES" as "ACE"; "Sun shadows" and "Neutral" draw whole. A `text` beside a growing sibling does it too ("100%" as "100").
+"Lamps" drew as "Lamp", "HUD" as "HU", "ACES" as "ACE" and "100%" as "100", in `harbor_bench`'s frames and in the repro on `lane/aaa-demo-repro-b1`.
 
-It reproduces on main `d7d9fec52`: `examples/repro-b1` on branch `lane/aaa-demo-repro-b1` (`9a65078e9`) measures a checkbox label's ink against a plain `text`'s and exits 1. The harbor's HUD shows the bug as it is.
+**The cause, found by the engine's text lane, was the bench's setup.** Both made a `GpuRenderer` and mounted a `Ui` without `gpu.install_text(&mut ui.scene.borrow_mut())`. Without it, layout measures text by zgx's estimate (0.5 em a character) while the renderer draws real glyphs, so text sized by its own width was laid out too narrow and clipped. The window (`harbor`) installs it through zgx-desktop and was never affected.
+
+**Now:** `harbor_bench` calls `install_text`, then `Ui::refresh_text_geometry`, right after making its renderer. Every label draws whole, and the repro exits 0 (`INSTALL_TEXT=0` shows the old clipping).
+
+The text lane is also landing a fix on main that makes a renderer's text services the default for a scene with none installed. The harbor keeps the explicit call either way.
+
+**Every bench number before this measured the estimate's text layout, not real text.** Old against new, same tip, same session (1080p @2x, 600 frames):
+
+| | Minstr/frame, estimated text | Minstr/frame, real text |
+| --- | --- | --- |
+| with rain | 11.99 | 12.27 |
+| no rain (`RAIN=0`) | 10.90 | 10.83 |
+
+The frames' hashes changed with the HUD's text. The figures in the stage 0 and stage 1 reports stand as measured, with that difference in their text.
 
 ## Waiting on planned primitives (not gaps)
 
