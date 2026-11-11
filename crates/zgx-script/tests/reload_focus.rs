@@ -216,3 +216,34 @@ fn a_reload_while_a_palette_is_open_still_closes_back_to_where_focus_was() {
     h.frames(10);
     assert!(focused_is(&mut h, "field"), "after Escape");
 }
+
+/// A load that moves the state the interface shows before the reload
+/// builds it again (here and back: the focused button, keyed by it, leaves
+/// the old tree) doesn't move what keeps focus: where focus was is taken
+/// before the scripts run.
+#[test]
+fn a_load_that_moves_state_keeps_focus_where_it_was_before_the_load() {
+    const APP: &str = r#"
+local mode = ui.state("mode", "a")
+mode:set("b")
+mode:set("a")
+return ui.column {
+    ui.presence(function() return mode:get() end, function()
+        return ui.button { id = "keep", "Keep" }
+    end, { exit = { opacity = 0, duration = 100 } }),
+    ui.button { id = "other", "Other" },
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("zgx-reload-focus-{}-moved", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("app.luau");
+    std::fs::write(&path, APP).unwrap();
+    let mut h = Harness::new(move |runtime| ScriptHost::new(runtime, path.clone()));
+    h.frames(10);
+    h.click("keep");
+    h.frames(5);
+    assert!(focused_is(&mut h, "keep"), "before");
+    h.host.reload().expect("it reloads");
+    h.frames(30);
+    assert!(focused_is(&mut h, "keep"), "after: {}", h.tree());
+}

@@ -1694,6 +1694,8 @@ struct Inner {
     functions: Functions,
     current: RefCell<Option<Rc<Loaded>>>,
     generation: Signal<u64>,
+    /// Where focus was as a reload began, before its scripts ran.
+    focus: zgx::compose::FocusHold,
     error: Signal<Option<String>>,
     stamps: RefCell<Vec<(PathBuf, Option<SystemTime>)>>,
     /// Files scripts `require`d in the last load: watched with the scripts.
@@ -1895,6 +1897,7 @@ impl ScriptHost {
             functions: Functions::default(),
             current: RefCell::default(),
             generation: runtime.signal(0),
+            focus: zgx::compose::FocusHold::default(),
             error: runtime.signal(None),
             stamps: RefCell::default(),
             required: RefCell::default(),
@@ -3296,6 +3299,10 @@ impl ScriptHost {
         self.0.commands.begin();
         self.0.windows.begin();
         let reports = self.0.error.version();
+        // Before the scripts run: what they set can move focus in the
+        // interface shown (a `ui.presence` keyed by it ending), and what is
+        // built again keeps focus where it was before.
+        self.0.focus.take();
         let loaded = match ran {
             Some(ran) => self.load_kept(&ran),
             None => self.load(),
@@ -3358,6 +3365,7 @@ impl ScriptHost {
                 Ok(())
             }
             Err(error) => {
+                self.0.focus.release();
                 eprintln!("{error}");
                 report(&self.0.error, error.clone());
                 self.start_check();
@@ -3618,7 +3626,8 @@ impl ScriptHost {
         let generation = self.0.generation.clone();
         // Built again each load: what had the keyboard keeps it (a list's
         // row included, found by its role and name).
-        let app = zgx::compose::switch_keeping_focus(
+        let app = zgx::compose::switch_keeping_focus_held(
+            self.0.focus.clone(),
             move || generation.get(),
             move |_, _| {
                 let current = host.current.borrow().clone();
