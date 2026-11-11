@@ -117,7 +117,9 @@ impl World {
     /// mesh whose frame binds otherwise than the plain pipeline's (lit by an
     /// environment, clusters, cascades or probes) isn't drawn. Show such a
     /// mesh once this says so, after a frame with it out of view, to avoid
-    /// its popping in.
+    /// its popping in. A surface layer is ready once a frame has made the
+    /// stock pipelines with it and none of a mesh's shader's (each made
+    /// with every layer) is still compiling.
     pub fn shader_ready(&self, shader: ShaderId) -> bool {
         let inner = self.inner.borrow();
         inner

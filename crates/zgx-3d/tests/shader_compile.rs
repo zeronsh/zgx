@@ -40,6 +40,16 @@ fn a_frame_with_a_shader_compiling_returns_without_waiting_for_it() {
         ))
         .unwrap();
     world.set_shader(mesh, Some(red));
+    // A surface layer, changing nothing: its mesh's shader compiles with
+    // it, so it waits for that too.
+    let layer = world
+        .add_surface_layer(MaterialShader::new(
+            "#zgx material 1
+             fn surface(s: SurfaceIn) -> Surface {
+                 return surface_default(s);
+             }",
+        ))
+        .unwrap();
     let mut ui = Ui::new(SIZE, SIZE);
     ui.mount(
         div().size(SIZE, SIZE).bg(Color(0, 0, 0, 255)).child(
@@ -67,6 +77,10 @@ fn a_frame_with_a_shader_compiling_returns_without_waiting_for_it() {
     );
     assert!(world.compiling(), "its pipeline is compiling");
     assert!(!world.shader_ready(red), "not ready while compiling");
+    assert!(
+        !world.shader_ready(layer),
+        "a layer not ready while a shader made with it compiles"
+    );
     assert_eq!(
         first,
         [0x33, 0x66, 0x99, 255],
@@ -83,6 +97,7 @@ fn a_frame_with_a_shader_compiling_returns_without_waiting_for_it() {
     }
     assert!(!world.compiling());
     assert!(world.shader_ready(red), "ready once compiled");
+    assert!(world.shader_ready(layer), "the layer with it");
     assert_eq!(last, [255, 0, 0, 255], "drawn by its shader once compiled");
     assert!(compile_threads() >= 1);
 }

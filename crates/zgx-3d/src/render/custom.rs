@@ -58,10 +58,14 @@ pub(super) struct State {
     /// Each shader's numbers, and the count of their changes they hold.
     uniforms: HashMap<u32, (wgpu::Buffer, u64)>,
     /// Shaders whose pipelines this renderer holds, counted once each in
-    /// their `compiled`, and given back when they go (`let_go`).
+    /// their `compiled`, and given back when they go (`let_go`): a mesh's
+    /// once its pipelines land, a surface layer's once the stock
+    /// pipelines are made with it (`relayer`).
     holding: HashMap<u32, Rc<Shader>>,
     /// Pipelines being compiled on the worker, by shader, variant and
-    /// whether its shadows' (`begin`, `collect`).
+    /// whether its shadows' (`begin`, `collect`): each counted in its
+    /// shader's `compiling`, and in every surface layer's (each compiles
+    /// with them all).
     pending: HashMap<(u32, Variant, bool), (Rc<Shader>, Slot)>,
     /// Pipelines the device refused, by shader, variant and whether its
     /// shadows': not made again.
@@ -81,9 +85,9 @@ impl State {
     /// its device changed, it dropped): their shaders' counts given back.
     fn let_go(&mut self) {
         for (_, (shader, _)) in self.pending.drain() {
-            shader
-                .compiling
-                .set(shader.compiling.get().saturating_sub(1));
+            for s in std::iter::once(&shader).chain(&self.layers) {
+                s.compiling.set(s.compiling.get().saturating_sub(1));
+            }
         }
         for (_, shader) in self.holding.drain() {
             shader.compiled.set(shader.compiled.get().saturating_sub(1));
@@ -729,12 +733,19 @@ fn same(a: &[Rc<Shader>], b: &[Rc<Shader>]) -> bool {
 #[inline(never)]
 fn relayer(gpu: &mut Gpu, device: &wgpu::Device, layers: &[Rc<Shader>], runs: &[Run]) {
     let state = &mut gpu.custom;
+    // (Compiles under the old layers land nowhere: given back, theirs
+    // with them, before the layers change.)
+    state.let_go();
     state.layers = layers.to_vec();
     state.layer_code = (!layers.is_empty()).then(|| Custom::new(None, layers.iter().map(|l| &**l)));
     state.pipelines.clear();
     state.shadows.clear();
-    // (Compiles under the old layers land nowhere.)
-    state.let_go();
+    // The stock pipelines are made with them below, this frame: held.
+    for layer in layers {
+        if state.holding.insert(layer.id, layer.clone()).is_none() {
+            layer.compiled.set(layer.compiled.get() + 1);
+        }
+    }
     gpu.variants.clear();
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("3D"),
@@ -882,7 +893,9 @@ fn begin(
     };
     match crate::worker::compile_off_the_frame(job) {
         Ok(()) => {
-            shader.compiling.set(shader.compiling.get() + 1);
+            for s in std::iter::once(shader).chain(&gpu.custom.layers) {
+                s.compiling.set(s.compiling.get() + 1);
+            }
             gpu.custom
                 .pending
                 .insert((shader.id, which.0, which.1), (shader.clone(), slot));
@@ -911,9 +924,9 @@ fn collect(gpu: &mut Gpu) -> bool {
     let landed = !done.is_empty();
     for ((id, variant, shadow), shader, made) in done {
         gpu.custom.pending.remove(&(id, variant, shadow));
-        shader
-            .compiling
-            .set(shader.compiling.get().saturating_sub(1));
+        for s in std::iter::once(&shader).chain(&gpu.custom.layers) {
+            s.compiling.set(s.compiling.get().saturating_sub(1));
+        }
         match made {
             Ok(Made::Main(pipelines)) => {
                 if gpu.custom.holding.insert(id, shader.clone()).is_none() {

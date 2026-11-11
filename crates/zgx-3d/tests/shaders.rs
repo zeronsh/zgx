@@ -1125,6 +1125,94 @@ fn a_shader_is_ready_only_while_a_renderer_holds_its_pipelines() {
     assert!(!world.shader_ready(tint), "no renderer holds them");
 }
 
+#[test]
+fn a_surface_layer_is_ready_once_a_renderer_draws_with_it() {
+    // `shader_ready` stayed false for a surface layer that was drawing
+    // (G11). A layer is ready as a shader is: while a renderer holds the
+    // pipelines it runs in, the stock ones and its meshes' shaders' alike.
+    use zgx_gpu::{
+        viewport::{Viewport, ViewportFrame},
+        wgpu,
+    };
+    let (world, mesh) = cube(unlit(0xffffff));
+    let tint = world
+        .add_shader(MaterialShader::new(TINT).param("tint", Param::Color))
+        .unwrap();
+    world.set_shader(mesh, Some(tint));
+    world.add(Object::mesh(Geometry::cuboid(1., 1., 1.), Material::default()).at([1., 0., 0.]));
+    let wet = world
+        .add_surface_layer(MaterialShader::new(
+            "#zgx material 1\nfn surface(s: SurfaceIn) -> Surface {\n    var m = surface_default(s);\n    m.roughness *= 0.5;\n    return m;\n}\n",
+        ))
+        .unwrap();
+    let (device, queue) = noop_device();
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 64,
+            height: 64,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let mut painter = world.viewport();
+    let frame = |painter: &mut dyn Viewport| {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut frame =
+            ViewportFrame::new(&device, &queue, &mut encoder, &view, format, (64, 64), 1.);
+        painter.render(&mut frame);
+        queue.submit([encoder.finish()]);
+    };
+    let frames_until_ready = |painter: &mut dyn Viewport| {
+        let start = std::time::Instant::now();
+        loop {
+            frame(painter);
+            if world.shader_ready(wet) || start.elapsed() > std::time::Duration::from_secs(20) {
+                return world.shader_ready(wet);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    assert!(!world.shader_ready(wet), "nothing made before a frame");
+    assert!(frames_until_ready(&mut painter), "made by frames");
+    assert!(
+        world.shader_ready(tint),
+        "ready once its meshes' shaders are, made with it"
+    );
+    painter.device_changed();
+    assert!(
+        !world.shader_ready(wet),
+        "its device gone, its pipelines with it"
+    );
+    assert!(
+        frames_until_ready(&mut painter),
+        "made again on the new one"
+    );
+    // Another layer added makes every pipeline again: still ready, both.
+    let dry = world
+        .add_surface_layer(MaterialShader::new(
+            "#zgx material 1\nfn surface(s: SurfaceIn) -> Surface {\n    return surface_default(s);\n}\n",
+        ))
+        .unwrap();
+    assert!(frames_until_ready(&mut painter));
+    assert!(world.shader_ready(dry));
+    // Taken off, it is held no more; the other is again once its meshes'
+    // shaders are made anew without it.
+    world.remove_surface_layer(dry);
+    frame(&mut painter);
+    assert!(!world.shader_ready(dry), "removed");
+    assert!(frames_until_ready(&mut painter));
+    drop(painter);
+    assert!(!world.shader_ready(wet), "no renderer holds it");
+}
+
 #[cfg(feature = "compute")]
 mod gpu_data {
     //! An app's GPU buffers and textures as material parameters (H3).
