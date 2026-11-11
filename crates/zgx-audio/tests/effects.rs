@@ -521,3 +521,23 @@ fn an_effect_s_place_is_kept_until_its_removal_is_due() {
     assert_eq!(left(&mixer.frames(512))[511], 0.5, "the new one runs");
     doubled.remove().unwrap();
 }
+
+#[test]
+fn a_removal_dated_before_its_effect_s_add_takes_it_off_as_it_arrives() {
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let ui = audio.bus("ui").unwrap();
+    audio
+        .play(&flat(0.25), Play::new().bus(&ui).loop_frames(1..2))
+        .unwrap();
+    // Added at frame 500, taken off "at 0": the removal can't come first
+    // and find nothing, leaving it to run for ever.
+    let late = ui.at(Time(500)).add_effect(Scale(2.)).unwrap();
+    late.at(Time(0)).remove().unwrap();
+    let out = left(&mixer.frames(1000));
+    assert!(out[1..].iter().all(|&s| s == 0.25), "it ran");
+    // And its place on the bus comes back.
+    audio.update();
+    for _ in 0..8 {
+        ui.add_effect(Scale(1.)).unwrap();
+    }
+}

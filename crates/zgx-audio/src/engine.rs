@@ -1224,6 +1224,7 @@ impl Bus {
             audio: self.audio.clone(),
             id,
             time: self.time,
+            added: self.time,
         })
     }
 }
@@ -1235,13 +1236,17 @@ pub struct EffectHandle {
     id: u64,
     /// The frame its commands happen on (0: as soon as they can).
     time: u64,
+    /// The frame it was added on: its commands come no earlier, or they'd
+    /// find nothing, and a removal would leave it to run for ever.
+    added: u64,
 }
 
 impl EffectHandle {
-    /// The same effect, for commands that happen on exactly this frame.
+    /// The same effect, for commands that happen on exactly this frame:
+    /// one before the frame it was added on is the frame it was added on.
     pub fn at(&self, time: Time) -> EffectHandle {
         EffectHandle {
-            time: time.0,
+            time: time.0.max(self.added),
             ..self.clone()
         }
     }
