@@ -1719,7 +1719,9 @@ pub fn plain_line(line: &str) -> bool {
 }
 
 /// zgx patch: `plain_words` for a line `plain_line` accepted: its words,
-/// or false at a break between two ASCII punctuation marks.
+/// or false at a break between two ASCII punctuation marks. Inlined into
+/// its caller with its closure (zgx's `WordCache::words`).
+#[inline(always)]
 pub fn line_words(line: &str, mut word: impl FnMut(Range<usize>, bool)) -> bool {
     let mut start_word = 0;
     for (end_lb, _) in unicode_linebreak::linebreaks(line) {

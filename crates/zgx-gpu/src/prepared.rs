@@ -844,6 +844,7 @@ struct Chunk {
 const CHUNK: usize = 16 * 1024;
 impl Slab {
     /// `compact`'s words and glyph advances.
+    #[inline(always)]
     fn of(&self, compact: &Compact) -> (&[Packed], &[u32]) {
         let chunk = self.chunks[compact.chunk as usize]
             .as_ref()

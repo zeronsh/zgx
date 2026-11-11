@@ -323,8 +323,10 @@ impl WordCache {
         }
         self.shaped(fonts, (id, hash), word, blank, size)
     }
-    /// `shape` of a word not shaped before: shaped and kept.
-    #[inline(never)]
+    /// `shape` of a word not shaped before: shaped and kept. Inlined, as
+    /// it was in `words` before streams were: a text's words are mostly
+    /// shaped once (`entry_hashed`'s cost on new text).
+    #[inline(always)]
     fn shaped(
         &mut self,
         fonts: &mut FontSystem,
