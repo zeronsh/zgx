@@ -397,6 +397,33 @@ mod tests {
         Some(texels)
     }
 
+    /// The largest finite value of an unsigned float of `mantissa` bits and
+    /// 5 of exponent (bias 15), as packed floats' channels are.
+    fn largest(mantissa: u32) -> f32 {
+        // Exponent 30 (31 is infinity), every mantissa bit set.
+        let fraction = 1. + ((1u32 << mantissa) - 1) as f32 / (1u32 << mantissa) as f32;
+        fraction * 2f32.powi(30 - 15)
+    }
+
+    #[test]
+    fn a_step_is_held_to_the_most_its_formats_hold() {
+        // Rg11b10Ufloat: 6-bit mantissas in red and green, 5 in blue; half
+        // floats (the scene's and the dispatches' steps) hold more.
+        let most = [largest(6), largest(6), largest(5)];
+        assert_eq!(most, [65024., 65024., 64512.]);
+        assert!(most.iter().all(|&m| m <= 65504.));
+        let maths = include_str!("bloom_maths.wgsl");
+        let line = maths
+            .lines()
+            .find(|l| l.starts_with("const STEP_MOST"))
+            .expect("the steps' limits");
+        let held: Vec<f32> = line
+            .split(['(', ')', ','])
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        assert_eq!(held, most, "{line}");
+    }
+
     #[test]
     fn a_step_up_past_half_floats_keeps_the_brightest_light() {
         // A scene at the most half floats hold: each step down holds it
