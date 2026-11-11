@@ -37,6 +37,10 @@ pub(crate) struct Loads {
     arrived: mpsc::Receiver<Arrived>,
     /// Asked for, not yet arrived, by texture and whether it's read as sRGB.
     pending: HashSet<(u64, bool)>,
+    /// Asked for and refused on this renderer's device (it couldn't hold
+    /// them, or their files didn't decode): not asked for again while the
+    /// device lasts. Another device asks again (a new renderer, new loads).
+    refused: HashSet<(u64, bool)>,
     /// Cleared as the renderer goes: what it asked for and hasn't taken is
     /// left undone.
     wanted: Arc<AtomicBool>,
@@ -52,6 +56,7 @@ impl Default for Loads {
             sent,
             arrived,
             pending: HashSet::new(),
+            refused: HashSet::new(),
             wanted: Arc::new(AtomicBool::new(true)),
             owner: {
                 static NEXT: AtomicU64 = AtomicU64::new(1);
@@ -70,9 +75,16 @@ impl Loads {
     pub(crate) fn pending(&self) -> bool {
         !self.pending.is_empty()
     }
-    /// Whether texture `key.0`, read as sRGB or not (`key.1`), is on its way.
+    /// Whether texture `key.0`, read as sRGB or not (`key.1`), is on its way,
+    /// or was refused on this device (`refuse`): either way, not to ask for.
     pub(crate) fn coming(&self, key: (u64, bool)) -> bool {
-        !self.pending.is_empty() && self.pending.contains(&key)
+        (!self.pending.is_empty() && self.pending.contains(&key))
+            || (!self.refused.is_empty() && self.refused.contains(&key))
+    }
+    /// Texture `key.0`, read as sRGB or not, wasn't put on this device: not
+    /// asked for again on it.
+    pub(crate) fn refuse(&mut self, key: (u64, bool)) {
+        self.refused.insert(key);
     }
     /// `texture` read as sRGB or not, wanted on `device`: asked for of the
     /// pool if it's worth waiting for (`Coming`), else for the frame to put
@@ -136,8 +148,13 @@ impl Loads {
         while let Ok((key, made)) = self.arrived.try_recv() {
             self.pending.remove(&key);
             any = true;
-            if let Some(texture) = made {
-                views.insert(key, (texture.create_view(&Default::default()), 0));
+            match made {
+                Some(texture) => {
+                    views.insert(key, (texture.create_view(&Default::default()), 0));
+                }
+                None => {
+                    self.refused.insert(key);
+                }
             }
         }
         any
@@ -147,8 +164,10 @@ impl Loads {
 /// `levels` of `texture` on the GPU, read as sRGB colours or as data: RGBA8
 /// texels written in place (`texture_with_levels`), or a file's blocks as
 /// they are (`texture_with_block_levels`) where `device` has their format.
-/// `None` where it hasn't: the map draws as if it had none (no decoder of
-/// blocks to RGBA8 here yet).
+/// Where the device hasn't the blocks' format (a world made after its
+/// device asks for none: `zgx_gpu::request_view_features`), they're decoded
+/// to RGBA8 first, so the picture is the same everywhere. `None` if they
+/// don't decode.
 pub(crate) fn upload_levels(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -164,11 +183,23 @@ pub(crate) fn upload_levels(
         } else {
             format.remove_srgb_suffix()
         };
-        if !device.features().contains(format.required_features()) {
-            texture.failed_to_decode();
-            return None;
+        if device.features().contains(format.required_features()) {
+            return Some(zgx_gpu::viewport::texture_with_block_levels(
+                device, queue, size, format, &bytes, "3D map",
+            ));
         }
-        return Some(zgx_gpu::viewport::texture_with_block_levels(
+        let Some(decoded) = decoded_blocks(format, size, &bytes) else {
+            #[cfg(debug_assertions)]
+            undecoded(format);
+            return None;
+        };
+        let bytes: Vec<&[u8]> = decoded.iter().map(Vec::as_slice).collect();
+        let format = if srgb {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        };
+        return Some(zgx_gpu::viewport::texture_with_levels(
             device, queue, size, format, &bytes, "3D map",
         ));
     }
@@ -180,6 +211,89 @@ pub(crate) fn upload_levels(
     Some(zgx_gpu::viewport::texture_with_levels(
         device, queue, size, format, &bytes, "3D map",
     ))
+}
+
+/// `levels` of `format`'s blocks (`size` its first's), each decoded to RGBA8
+/// texels, as stored (an sRGB file's still sRGB): for a device without the
+/// format. `None` where a level doesn't decode.
+#[cfg(feature = "ktx2")]
+fn decoded_blocks(
+    format: wgpu::TextureFormat,
+    size: (u32, u32),
+    levels: &[&[u8]],
+) -> Option<Vec<Vec<u8>>> {
+    use texture2ddecoder as d;
+    use wgpu::{AstcChannel, TextureFormat as F};
+    type Decode = fn(&[u8], usize, usize, &mut [u32]) -> Result<(), &'static str>;
+    let (bw, bh) = format.block_dimensions();
+    let decode: Option<Decode> = match format.remove_srgb_suffix() {
+        F::Bc1RgbaUnorm => Some(d::decode_bc1a),
+        F::Bc2RgbaUnorm => Some(d::decode_bc2),
+        F::Bc3RgbaUnorm => Some(d::decode_bc3),
+        F::Bc4RUnorm | F::Bc4RSnorm => Some(d::decode_bc4),
+        F::Bc5RgUnorm | F::Bc5RgSnorm => Some(d::decode_bc5),
+        F::Bc6hRgbUfloat => Some(d::decode_bc6_unsigned),
+        F::Bc6hRgbFloat => Some(d::decode_bc6_signed),
+        F::Bc7RgbaUnorm => Some(d::decode_bc7),
+        F::Etc2Rgb8Unorm => Some(d::decode_etc2_rgb),
+        F::Etc2Rgb8A1Unorm => Some(d::decode_etc2_rgba1),
+        F::Etc2Rgba8Unorm => Some(d::decode_etc2_rgba8),
+        F::EacR11Unorm => Some(d::decode_eacr),
+        F::EacR11Snorm => Some(d::decode_eacr_signed),
+        F::EacRg11Unorm => Some(d::decode_eacrg),
+        F::EacRg11Snorm => Some(d::decode_eacrg_signed),
+        F::Astc { channel, .. } if channel != AstcChannel::Hdr => None,
+        _ => return None,
+    };
+    let mut out = Vec::with_capacity(levels.len());
+    for (level, blocks) in levels.iter().enumerate() {
+        let (w, h) = ((size.0 >> level).max(1), (size.1 >> level).max(1));
+        // Whole blocks decoded, then the level's own texels kept.
+        let (pw, ph) = (w.div_ceil(bw) * bw, h.div_ceil(bh) * bh);
+        let mut texels = vec![0u32; (pw * ph) as usize];
+        let decoded = match decode {
+            Some(decode) => decode(blocks, pw as usize, ph as usize, &mut texels),
+            None => d::decode_astc(
+                blocks,
+                pw as usize,
+                ph as usize,
+                bw as usize,
+                bh as usize,
+                &mut texels,
+            ),
+        };
+        decoded.ok()?;
+        let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                // BGRA in a word, as the decoder packs it.
+                let [b, g, r, a] = texels[(y * pw + x) as usize].to_le_bytes();
+                rgba.extend([r, g, b, a]);
+            }
+        }
+        out.push(rgba);
+    }
+    Some(out)
+}
+#[cfg(not(feature = "ktx2"))]
+fn decoded_blocks(_: wgpu::TextureFormat, _: (u32, u32), _: &[&[u8]]) -> Option<Vec<Vec<u8>>> {
+    None
+}
+/// Said once a format, in debug builds: a map of `format`'s blocks didn't
+/// decode for a device without the format, and draws as if it had none.
+#[cfg(debug_assertions)]
+#[cold]
+fn undecoded(format: wgpu::TextureFormat) {
+    static SAID: Mutex<Vec<wgpu::TextureFormat>> = Mutex::new(Vec::new());
+    let mut said = SAID.lock().unwrap_or_else(|e| e.into_inner());
+    if !said.contains(&format) {
+        said.push(format);
+        eprintln!(
+            "zgx-3d: a map of {format:?} blocks draws as if it had none: its device can't \
+             hold them and they didn't decode. Call zgx_3d::request_view_features() before \
+             Application::run (Luau: \"gpu\": {{ \"view_features\": true }} in zgx.json)."
+        );
+    }
 }
 
 /// `texture` and its smaller levels on the GPU, made in `scratch` (kept by
@@ -344,9 +458,10 @@ mod tests {
 
     #[cfg(feature = "ktx2")]
     #[test]
-    fn a_map_of_blocks_the_device_cant_hold_draws_as_if_it_had_none() {
+    fn a_map_of_blocks_the_device_cant_hold_is_decoded_for_it() {
         // wgpu's no-op device asks for no compressed textures: a BC7 KTX2
-        // map isn't made (no blit, no panic), and draws as if it had none.
+        // map is decoded to RGBA8 for it (no blit, no panic), and the
+        // texture isn't marked failed (another device may hold its blocks).
         let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         descriptor.backends = wgpu::Backends::NOOP;
         descriptor.backend_options.noop.enable = true;
@@ -362,8 +477,22 @@ mod tests {
         let texture = crate::Texture::decode(&file).unwrap();
         let levels = texture.levels().expect("its blocks");
         assert!(matches!(levels, crate::texture::Levels::Blocks(..)));
-        assert!(upload_levels(&device, &queue, &texture, true, &levels).is_none());
-        assert!(texture.failed(), "not tried again");
+        let made = upload_levels(&device, &queue, &texture, true, &levels).expect("decoded");
+        assert_eq!(made.format(), wgpu::TextureFormat::Rgba8UnormSrgb);
+        assert_eq!(made.mip_level_count(), 3);
+        assert!(!texture.failed());
+    }
+
+    #[test]
+    fn a_map_refused_on_one_device_is_asked_for_on_the_next() {
+        // Refused on a renderer's device: not asked for again there. A new
+        // device (its renderer's loads made anew) asks again.
+        let mut loads = Loads::default();
+        let key = (7, true);
+        assert!(!loads.coming(key));
+        loads.refuse(key);
+        assert!(loads.coming(key), "not asked for again on this device");
+        assert!(!Loads::default().coming(key), "asked for on the next");
     }
 
     /// `future`, of wgpu's no-op backend, which never waits.

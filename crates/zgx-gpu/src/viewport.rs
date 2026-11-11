@@ -555,7 +555,8 @@ fn shared_block_levels(
                 0,
                 std::ptr::NonNull::from(*bytes).cast(),
                 across * block,
-                bytes.len(),
+                // A 2D texture's: 0, as Metal asks.
+                0,
             )
         };
     }

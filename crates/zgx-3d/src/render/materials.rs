@@ -493,8 +493,11 @@ pub(super) fn upload_missing(
         .into_iter()
         .chain(wanted.iter().copied().filter(|_| workers <= 1))
     {
-        if let Some(view) = upload(device, queue, texture, srgb) {
-            gpu.views.insert((texture.id(), srgb), (view, now));
+        match upload(device, queue, texture, srgb) {
+            Some(view) => {
+                gpu.views.insert((texture.id(), srgb), (view, now));
+            }
+            None => gpu.loads.refuse((texture.id(), srgb)),
         }
     }
     if workers <= 1 {
@@ -520,10 +523,11 @@ pub(super) fn upload_missing(
         drop(sent);
         for (at, decoded) in received {
             let (texture, srgb) = wanted[at];
-            if let Some(view) =
-                decoded.and_then(|d| upload_decoded(device, queue, texture, srgb, d))
-            {
-                gpu.views.insert((texture.id(), srgb), (view, now));
+            match decoded.and_then(|d| upload_decoded(device, queue, texture, srgb, d)) {
+                Some(view) => {
+                    gpu.views.insert((texture.id(), srgb), (view, now));
+                }
+                None => gpu.loads.refuse((texture.id(), srgb)),
             }
         }
     });

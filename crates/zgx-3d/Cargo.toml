@@ -21,6 +21,9 @@ naga = { version = "29.0.4", default-features = false, features = ["wgsl-out"], 
 serde_json = { version = "1", optional = true }
 # Zstandard-supercompressed KTX2 levels (the `ktx2` feature). MIT.
 ruzstd = { version = "0.9", optional = true, default-features = false, features = ["std"] }
+# Block-compressed KTX2 maps decoded to RGBA8 on a device without their
+# format (the `ktx2` feature). MIT OR Apache-2.0, taken as MIT.
+texture2ddecoder = { version = "0.1", optional = true }
 # Sound in the world (`World::add_emitter3d`): the audio engine, its
 # spatial maths and offline renderer. Nothing of zgx's below it.
 zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true, default-features = false }
@@ -32,7 +35,7 @@ gltf = ["dep:serde_json", "zgx-gpu/png", "zgx-gpu/jpeg"]
 # KTX2 textures (`Texture::decode`, and glTF images that are KTX2 files):
 # RGBA8 and block-compressed (BC, ETC2, EAC, ASTC) ones, their levels read
 # as stored, Zstandard-supercompressed or not.
-ktx2 = ["dep:ruzstd"]
+ktx2 = ["dep:ruzstd", "dep:texture2ddecoder"]
 # The app's GPU data and compute passes (`World::add_buffer`,
 # `add_texture`, `add_compute`): WGSL checked by the naga wgpu brings.
 compute = ["dep:naga"]
@@ -75,6 +78,12 @@ required-features = ["particles"]
 
 [[test]]
 name = "ktx2"
+required-features = ["ktx2", "gltf"]
+
+# Its renderer's device made before any world asks for compressed
+# textures: a process of its own (the request is the process's).
+[[test]]
+name = "ktx2_plain"
 required-features = ["ktx2", "gltf"]
 
 [[test]]
