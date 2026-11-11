@@ -1018,6 +1018,9 @@ fn on_a_device_that_times_them_passes_over_their_budgets_are_turned_off() {
         (pass, count)
     };
     window.compiled(&world, sandboxed);
+    // Its own compiled too before it's asked about: under load the
+    // sandboxed pass can be turned off before the app's has compiled.
+    window.compiled(&world, own);
     let off = |world: &World, window: &mut Window, pass| {
         for _ in 0..100 {
             window.draw();
@@ -1406,10 +1409,14 @@ fn a_world_holds_at_most_1024_passes_and_a_sandboxed_shader_1_mib() {
 
 #[test]
 fn a_rated_pass_lets_its_world_rest_between_its_runs() {
-    let world = World::new();
-    let Some(mut window) = Window::new(&world) else {
+    // Frames at times of the test's own: a second's rate is a second of
+    // frame time, however loaded this machine.
+    let Some(device) = TimedFrames::device() else {
         return;
     };
+    let mut frames = TimedFrames::new(device);
+    let world = World::new();
+    let mut painter = world.viewport();
     let count = world.add_buffer(BufferDesc::storage::<u32>(1)).unwrap();
     let pass = world
         .add_compute(
@@ -1422,28 +1429,46 @@ fn a_rated_pass_lets_its_world_rest_between_its_runs() {
         )
         .unwrap();
     assert!(world.view().animating(), "due at once");
-    window.compiled(&world, pass);
-    window.draw();
-    // Run once; its next run a second away: the world draws nothing
-    // between.
-    assert!(!world.view().animating(), "at rest until it's due");
-    let before = world.frames_drawn();
-    for _ in 0..30 {
-        window.draw();
-        std::thread::sleep(std::time::Duration::from_millis(5));
+    let started = std::time::Instant::now();
+    while world.compute_status(pass) != Some(ComputeStatus::Ready) {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "not compiled"
+        );
+        frames.draw(&mut [&mut painter], 0);
+        std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    assert_eq!(world.frames_drawn(), before, "no frames between runs");
+    // It runs at the next frame time; its next run a second away: the
+    // world draws nothing between, until it's due within two frames.
+    frames.draw(&mut [&mut painter], 16);
+    for ms in (32..=940).step_by(16) {
+        assert!(
+            !world.view().animating(),
+            "at rest until it's due ({ms} ms)"
+        );
+        frames.draw(&mut [&mut painter], ms);
+    }
+    frames.draw(&mut [&mut painter], 990);
+    assert!(world.view().animating(), "due within two frames");
     // A pass at 120 a second is due every frame: it keeps drawing.
     let fast = world
         .add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}").at_rate(120.))
         .unwrap();
-    window.compiled(&world, fast);
-    world.view().invalidate();
-    for _ in 0..5 {
-        window.draw();
-        std::thread::sleep(std::time::Duration::from_millis(8));
+    let started = std::time::Instant::now();
+    let mut ms = 1000;
+    while world.compute_status(fast) != Some(ComputeStatus::Ready) {
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "not compiled"
+        );
+        ms += 16;
+        frames.draw(&mut [&mut painter], ms);
     }
-    assert!(world.view().animating());
+    for _ in 0..5 {
+        ms += 16;
+        frames.draw(&mut [&mut painter], ms);
+        assert!(world.view().animating());
+    }
 }
 
 #[test]
@@ -1736,6 +1761,10 @@ fn counting(
             frames.draw(painters, 0);
         }
         if world.compute_status(pass) == Some(ComputeStatus::Ready) {
+            // From 1000 again, whether it became ready in time to run at
+            // time 0 or not (how soon it compiles is the machine's load):
+            // the write lands before the next frame's passes.
+            count.write(0, &[1000u32]).unwrap();
             return count;
         }
         std::thread::sleep(std::time::Duration::from_millis(2));
