@@ -1523,6 +1523,63 @@ impl<T: EventListener> Handler for Term<T> {
         self.input_rest(c);
     }
 
+    /// zgx: a run of printable ASCII (`Perform::print_str`), as `input` each
+    /// would write it: the cells to the line's end at a time, the cursor's
+    /// template and charset read once for them, each cell written where it
+    /// holds no wide character (otherwise as `write_at_cursor` writes it).
+    #[inline]
+    fn input_str(&mut self, text: &str) {
+        let mut bytes = text.as_bytes();
+        let columns = self.columns();
+        while let Some(&first) = bytes.first() {
+            if self.grid.cursor.input_needs_wrap || self.mode.contains(TermMode::INSERT) {
+                self.input_rest(first as char);
+                bytes = &bytes[1..];
+                continue;
+            }
+            let point = self.grid.cursor.point;
+            let count = (columns - point.column.0).min(bytes.len());
+            let charset = self.grid.cursor.charsets[self.active_charset];
+            let template = &self.grid.cursor.template;
+            let (fg, bg, flags) = (template.fg, template.bg, template.flags);
+            let extra = template.extra.clone();
+            let mut at = 0;
+            while at < count {
+                let (start, end) = (point.column + at, point.column + count);
+                let cells = &mut self.grid[point.line][start..end];
+                // Up to a cell holding a wide character, written straight.
+                let plain = cells
+                    .iter()
+                    .position(|cell| {
+                        cell.flags
+                            .intersects(Flags::WIDE_CHAR | Flags::WIDE_CHAR_SPACER)
+                    })
+                    .unwrap_or(cells.len());
+                for (cell, &byte) in cells[..plain].iter_mut().zip(&bytes[at..]) {
+                    cell.c = charset.map(byte as char);
+                    cell.fg = fg;
+                    cell.bg = bg;
+                    cell.flags = flags;
+                    cell.extra = extra.clone();
+                }
+                at += plain;
+                if at < count {
+                    self.grid.cursor.point.column = point.column + at;
+                    self.write_at_cursor(bytes[at] as char);
+                    at += 1;
+                }
+            }
+            bytes = &bytes[count..];
+            let last = point.column.0 + count;
+            if last < columns {
+                self.grid.cursor.point.column = Column(last);
+            } else {
+                self.grid.cursor.point.column = Column(columns - 1);
+                self.grid.cursor.input_needs_wrap = true;
+            }
+        }
+    }
+
     #[inline]
     fn decaln(&mut self) {
         trace!("Decalnning");
@@ -3303,6 +3360,102 @@ mod tests {
         term.input('a');
 
         assert_eq!(term.grid()[cursor].c, '▒');
+    }
+
+    /// zgx: a run of printable ASCII (`input_str`) writes what `input` writes
+    /// for each of its characters, wherever it lands: over wide characters
+    /// and their spacers, with a wrap due, in insert mode, in the line
+    /// drawing charset, in colour, to the line's end and past it.
+    #[test]
+    fn a_run_writes_as_its_characters_do() {
+        let setups: [fn(&mut Term<VoidListener>); 7] = [
+            |_| {},
+            |term| {
+                term.goto(1, 0);
+                for c in "日本語のテキスト".chars() {
+                    term.input(c);
+                }
+                term.goto(1, 3);
+            },
+            |term| {
+                term.goto(2, 19);
+                term.input('x');
+            },
+            |term| {
+                term.input('a');
+                term.input('b');
+                term.set_mode(ansi::Mode::Named(ansi::NamedMode::Insert));
+                term.goto(0, 0);
+            },
+            |term| {
+                term.configure_charset(
+                    CharsetIndex::G0,
+                    StandardCharset::SpecialCharacterAndLineDrawing,
+                );
+            },
+            |term| {
+                term.goto(3, 12);
+                term.terminal_attribute(ansi::Attr::Bold);
+                term.terminal_attribute(ansi::Attr::Foreground(ansi::Color::Named(
+                    ansi::NamedColor::Red,
+                )));
+            },
+            |term| {
+                term.goto(4, 18);
+                term.input('界');
+                term.goto(4, 17);
+            },
+        ];
+        let texts = [
+            "a".to_string(),
+            "hello".into(),
+            "a run longer than the line is, across".into(),
+            "qwerty~ !{}".into(),
+            "x".repeat(45),
+        ];
+        for (at, setup) in setups.iter().enumerate() {
+            for text in &texts {
+                let size = TermSize::new(20, 6);
+                let mut runs = Term::new(Config::default(), &size, VoidListener);
+                let mut one = Term::new(Config::default(), &size, VoidListener);
+                setup(&mut runs);
+                setup(&mut one);
+                runs.input_str(text);
+                for c in text.chars() {
+                    one.input(c);
+                }
+                let state = |term: &Term<VoidListener>| {
+                    (term.grid.cursor.point, term.grid.cursor.input_needs_wrap)
+                };
+                // Every cell, the history's too (a grid scrolled compares
+                // only by its cells).
+                let cells = |term: &Term<VoidListener>| {
+                    let grid = term.grid();
+                    let lines = grid.topmost_line().0..=grid.bottommost_line().0;
+                    lines
+                        .flat_map(|line| {
+                            (0..grid.columns())
+                                .map(move |column| grid[Line(line)][Column(column)].clone())
+                        })
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(state(&runs), state(&one), "setup {at}, {text:?}");
+                assert!(cells(&runs) == cells(&one), "setup {at}, {text:?}");
+            }
+        }
+    }
+
+    /// zgx: REP repeats a run's last character, as it repeats a character's.
+    #[test]
+    fn a_run_is_repeated_by_its_last_character() {
+        let size = TermSize::new(20, 2);
+        let mut term = Term::new(Config::default(), &size, VoidListener);
+        let mut parser = ansi::Processor::<ansi::StdSyncHandler>::new();
+        parser.advance(&mut term, b"abc\x1b[3b");
+        let line: String = (0..7)
+            .map(|column| term.grid()[Line(0)][Column(column)].c)
+            .collect();
+        assert_eq!(line, "abcccc ");
     }
 
     #[test]

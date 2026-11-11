@@ -13,7 +13,7 @@
 edition = "2024"
 rust-version = "1.85.0"
 name = "zgx-alacritty-terminal"
-version = "0.26.3"
+version = "0.26.4"
 authors = [
     "Christian Duerr <contact@christianduerr.com>",
     "Joe Wilm <joe@jwilm.com>",
@@ -95,6 +95,8 @@ version = "0.2.0"
 
 [dependencies.vte]
 version = "0.15.0"
+path = "../vte"
+package = "zgx-vte"
 features = [
     "std",
     "ansi",

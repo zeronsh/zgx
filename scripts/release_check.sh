@@ -5,11 +5,12 @@
 #     scripts/release_check.sh [--allow-dirty]
 #
 # 1. The forks zgx publishes as its own crates (vendor/harfrust,
-#    cosmic-text, taffy, mlua, alacritty-terminal, zune-jpeg as zgx-harfrust,
-#    zgx-cosmic-text, zgx-taffy, zgx-mlua, zgx-alacritty-terminal,
-#    zgx-zune-jpeg) are each packaged and built from their package, against
-#    crates.io and the forks they depend on (zgx-cosmic-text shapes with
-#    zgx-harfrust), given from vendor/.
+#    cosmic-text, taffy, mlua, vte, alacritty-terminal, zune-jpeg as
+#    zgx-harfrust, zgx-cosmic-text, zgx-taffy, zgx-mlua, zgx-vte,
+#    zgx-alacritty-terminal, zgx-zune-jpeg) are each packaged and built from
+#    their package, against crates.io and the forks they depend on
+#    (zgx-cosmic-text shapes with zgx-harfrust, zgx-alacritty-terminal
+#    parses with zgx-vte), given from vendor/.
 # 2. Every published workspace crate is packaged and built from its package
 #    (`cargo publish --workspace --dry-run`), in dependency order. That
 #    build leaves out the workspace's `[patch.crates-io]`: winit, wgpu-hal
@@ -54,7 +55,7 @@ cd "$(git rev-parse --show-toplevel)"
 # `--allow-dirty`: check uncommitted changes too (a release itself is clean).
 dirty=""
 if [ "${1:-}" = --allow-dirty ]; then dirty=--allow-dirty; fi
-forks="harfrust cosmic-text taffy mlua alacritty-terminal zune-jpeg"
+forks="harfrust cosmic-text taffy mlua vte alacritty-terminal zune-jpeg"
 # Where packages are unpacked, the forks' beside the workspace's (3 reads
 # them there).
 target="${CARGO_TARGET_DIR:-target}"
@@ -73,6 +74,9 @@ for fork in $forks; do
     deps=""
     if [ "$fork" = cosmic-text ]; then
         deps='patch.crates-io.zgx-harfrust.path="vendor/harfrust"'
+    fi
+    if [ "$fork" = alacritty-terminal ]; then
+        deps='patch.crates-io.zgx-vte.path="vendor/vte"'
     fi
     cargo package --manifest-path "vendor/$fork/Cargo.toml" $features $dirty \
         --target-dir "$target" ${deps:+--config "$deps"}
