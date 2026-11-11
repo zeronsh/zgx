@@ -59,30 +59,74 @@ impl Window {
 /// every smaller one `rest` (a full chain), in Vulkan `format` (37 RGBA8,
 /// 43 its sRGB).
 fn ktx2(side: u32, first: [u8; 4], rest: [u8; 4], format: u32) -> Vec<u8> {
+    blocks(format, side, (1, 1), &first, &rest, false)
+}
+
+/// A KTX2 file in Vulkan `format` of `bw` by `bh` blocks (1 by 1: texels),
+/// `side` square, a full chain: its first level all `first`, every smaller
+/// one all `rest`; each level a Zstandard frame with `zstd`.
+fn blocks(
+    format: u32,
+    side: u32,
+    (bw, bh): (u32, u32),
+    first: &[u8],
+    rest: &[u8],
+    zstd: bool,
+) -> Vec<u8> {
     let count = 32 - side.leading_zeros();
     let levels: Vec<Vec<u8>> = (0..count)
         .map(|level| {
-            let s = (side >> level).max(1) as usize;
-            let texel = if level == 0 { first } else { rest };
-            texel.repeat(s * s)
+            let s = (side >> level).max(1);
+            let unit = if level == 0 { first } else { rest };
+            unit.repeat((s.div_ceil(bw) * s.div_ceil(bh)) as usize)
         })
         .collect();
+    let stored: Vec<Vec<u8>> = if zstd {
+        levels.iter().map(|level| zstd_frame(level)).collect()
+    } else {
+        levels.clone()
+    };
     let mut file = b"\xabKTX 20\xbb\r\n\x1a\n".to_vec();
-    for v in [format, 1, side, side, 0, 0, 1, count, 0] {
+    let scheme = if zstd { 2 } else { 0 };
+    for v in [format, 1, side, side, 0, 0, 1, count, scheme] {
         file.extend(v.to_le_bytes());
     }
     file.extend([0u8; 32]);
     let mut at = (80 + 24 * levels.len()) as u64;
-    for level in &levels {
-        let length = level.len() as u64;
-        [at, length, length]
+    for (level, stored) in levels.iter().zip(&stored) {
+        [at, stored.len() as u64, level.len() as u64]
             .iter()
             .for_each(|v| file.extend(v.to_le_bytes()));
-        at += length;
+        at += stored.len() as u64;
     }
-    levels.iter().for_each(|level| file.extend(level));
+    stored.iter().for_each(|level| file.extend(level));
     file
 }
+
+/// `bytes` as a Zstandard frame of raw (stored) blocks.
+fn zstd_frame(bytes: &[u8]) -> Vec<u8> {
+    // Magic; one segment, an 8-byte content size.
+    let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd, 0xe0];
+    frame.extend((bytes.len() as u64).to_le_bytes());
+    let chunks: Vec<&[u8]> = bytes.chunks(128 << 10).collect();
+    for (i, chunk) in chunks.iter().enumerate() {
+        let last = u32::from(i + 1 == chunks.len());
+        frame.extend(&(((chunk.len() as u32) << 3) | last).to_le_bytes()[..3]);
+        frame.extend(*chunk);
+    }
+    frame
+}
+
+/// BC1 blocks of one colour (RGB565 at both ends).
+const BC1_RED: [u8; 8] = [0x00, 0xf8, 0x00, 0xf8, 0, 0, 0, 0];
+const BC1_GREEN: [u8; 8] = [0xe0, 0x07, 0xe0, 0x07, 0, 0, 0, 0];
+/// ASTC 4x4 blocks of one colour (void-extent blocks).
+const ASTC_RED: [u8; 16] = [
+    0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0xff, 0xff,
+];
+const ASTC_GREEN: [u8; 16] = [
+    0xfc, 0xfd, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0, 0, 0xff, 0xff, 0, 0, 0xff, 0xff,
+];
 
 const RED: [u8; 4] = [255, 0, 0, 255];
 const GREEN: [u8; 4] = [0, 255, 0, 255];
@@ -109,9 +153,16 @@ fn red(p: [u8; 4]) -> bool {
 /// Near, its first level shows (red); far, a smaller one, the file's own
 /// (green: one made from the first would be red).
 fn levels_are_the_files_own(side: u32) {
+    file_levels_show(&ktx2(side, RED, GREEN, 43), side, |_| true);
+}
+
+/// `file` (`side` square, its first level red, the rest green) drawn near
+/// and far, where `has` says the world's device holds its format; else it
+/// draws as if it had no map, white, saying it skipped.
+fn file_levels_show(file: &[u8], side: u32, has: impl Fn(&Caps) -> bool) {
     // Near: far wider than the view, its texels larger than pixels.
     for (width, near) in [(40., true), (0.12, false)] {
-        let texture = Texture::decode(&ktx2(side, RED, GREEN, 43)).unwrap();
+        let texture = Texture::decode(file).unwrap();
         assert_eq!((texture.width(), texture.height()), (side, side));
         let world = square(width, texture);
         let Some(mut window) = Window::new(&world) else {
@@ -119,8 +170,38 @@ fn levels_are_the_files_own(side: u32) {
         };
         window.draw_loaded(&world);
         let p = window.middle();
+        if !has(&world.caps().expect("a frame drawn")) {
+            eprintln!("SKIPPED: this device can't hold the file's blocks");
+            assert!(p[..3].iter().all(|&c| c > 200), "white: {p:?}");
+            continue;
+        }
         assert!(if near { red(p) } else { green(p) }, "near {near}: {p:?}");
     }
+}
+
+#[test]
+fn a_bc_ktx2_maps_blocks_go_to_the_gpu_as_they_are() {
+    // BC1 (Vulkan 134, sRGB): 64² in its first frame, 256² by the texture
+    // threads.
+    for side in [64, 256] {
+        let file = blocks(134, side, (4, 4), &BC1_RED, &BC1_GREEN, false);
+        file_levels_show(&file, side, |caps| caps.compressed.bc);
+    }
+}
+
+#[test]
+fn an_astc_ktx2_maps_blocks_go_to_the_gpu_as_they_are() {
+    // ASTC 4x4 (Vulkan 158, sRGB).
+    let file = blocks(158, 256, (4, 4), &ASTC_RED, &ASTC_GREEN, false);
+    file_levels_show(&file, 256, |caps| caps.compressed.astc);
+}
+
+#[test]
+fn a_zstd_supercompressed_ktx2_maps_levels_are_decompressed() {
+    // RGBA8 and BC1, each level a Zstandard frame.
+    file_levels_show(&blocks(43, 256, (1, 1), &RED, &GREEN, true), 256, |_| true);
+    let file = blocks(134, 64, (4, 4), &BC1_RED, &BC1_GREEN, true);
+    file_levels_show(&file, 64, |caps| caps.compressed.bc);
 }
 
 #[test]
@@ -137,9 +218,12 @@ fn a_ktx2_map_loaded_off_the_frame_keeps_the_files_levels() {
 
 #[test]
 fn a_ktx2_file_that_isnt_read_says_why() {
-    let bc7 = ktx2(4, RED, GREEN, 145);
-    let error = Texture::decode(&bc7).unwrap_err();
-    assert!(error.contains("145"), "{error}");
+    let basis = ktx2(4, RED, GREEN, 0);
+    let error = Texture::decode(&basis).unwrap_err();
+    assert!(error.contains("Basis Universal"), "{error}");
+    // BC1 of a size that isn't whole blocks.
+    let error = Texture::decode(&blocks(134, 6, (4, 4), &BC1_RED, &BC1_GREEN, false)).unwrap_err();
+    assert!(error.contains("whole blocks"), "{error}");
     let mut cut = ktx2(4, RED, GREEN, 43);
     cut.truncate(cut.len() - 1);
     assert!(Texture::decode(&cut).is_err());

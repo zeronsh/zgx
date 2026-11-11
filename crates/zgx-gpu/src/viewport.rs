@@ -364,6 +364,220 @@ fn shared_levels(
     })
 }
 
+/// A texture for a painter to sample of block-compressed `levels`: BC1 to
+/// BC7, ETC2 and EAC, or ASTC, as `format` says (the device must have its
+/// feature), each level its rows of blocks top to bottom, the first `size`
+/// and each next half the one before (at least 1), as many as given.
+/// `size` must be whole blocks (as WebGPU asks of a compressed texture);
+/// a smaller level's last blocks run past its edge.
+///
+/// Written in place by the CPU on a Mac with unified memory, as
+/// `texture_with_levels` is (no blit: a blit encoder opens the driver's
+/// memory), for BC, ETC2, EAC and 4 by 4 ASTC; elsewhere, and for ASTC of
+/// other block sizes there, with `write_texture`. Out of the code of apps
+/// that don't call it.
+///
+/// Panics if `format` isn't block-compressed, `size` isn't whole blocks, or
+/// a level holds other than its blocks' bytes.
+#[cold]
+#[inline(never)]
+pub fn texture_with_block_levels(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+    levels: &[&[u8]],
+    label: &str,
+) -> wgpu::Texture {
+    assert!(format.is_compressed(), "{format:?} isn't block-compressed");
+    let (bw, bh) = format.block_dimensions();
+    let block = u64::from(format.block_copy_size(None).expect("a block's bytes"));
+    assert!(
+        size.0.is_multiple_of(bw) && size.1.is_multiple_of(bh),
+        "a {format:?} texture is whole {bw} by {bh} blocks, not {} by {}",
+        size.0,
+        size.1
+    );
+    // Each level's blocks across and down.
+    let blocks = |level: usize| {
+        let (w, h) = ((size.0 >> level).max(1), (size.1 >> level).max(1));
+        (w.div_ceil(bw), h.div_ceil(bh))
+    };
+    for (level, bytes) in levels.iter().enumerate() {
+        let (across, down) = blocks(level);
+        assert_eq!(
+            bytes.len() as u64,
+            u64::from(across) * u64::from(down) * block,
+            "level {level} of {format:?}: {across} by {down} blocks of {block} bytes"
+        );
+    }
+    let descriptor = wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size.0,
+            height: size.1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: levels.len().max(1) as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    };
+    #[cfg(target_os = "macos")]
+    if let Some(texture) = shared_block_levels(device, &descriptor, levels, block as usize) {
+        return texture;
+    }
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        usage: descriptor.usage | wgpu::TextureUsages::COPY_DST,
+        ..descriptor
+    });
+    for (level, bytes) in levels.iter().enumerate() {
+        let (across, down) = blocks(level);
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(across * block as u32),
+                rows_per_image: Some(down),
+            },
+            // A level's whole blocks: its physical size.
+            wgpu::Extent3d {
+                width: across * bw,
+                height: down * bh,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    texture
+}
+/// `texture_with_block_levels` on a Metal device with unified memory, for
+/// the formats it maps: a shared texture `descriptor` says, its `levels`
+/// (of `block`-byte blocks) written in place. `None` on another device or
+/// format.
+#[cfg(target_os = "macos")]
+fn shared_block_levels(
+    device: &wgpu::Device,
+    descriptor: &wgpu::TextureDescriptor,
+    levels: &[&[u8]],
+    block: usize,
+) -> Option<wgpu::Texture> {
+    use objc2_metal::{
+        MTLDevice, MTLOrigin, MTLPixelFormat as P, MTLRegion, MTLSize, MTLStorageMode, MTLTexture,
+        MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
+    };
+    use wgpu::{AstcBlock, AstcChannel, TextureFormat as F};
+    let pixel_format = match descriptor.format {
+        F::Bc1RgbaUnorm => P::BC1_RGBA,
+        F::Bc1RgbaUnormSrgb => P::BC1_RGBA_sRGB,
+        F::Bc2RgbaUnorm => P::BC2_RGBA,
+        F::Bc2RgbaUnormSrgb => P::BC2_RGBA_sRGB,
+        F::Bc3RgbaUnorm => P::BC3_RGBA,
+        F::Bc3RgbaUnormSrgb => P::BC3_RGBA_sRGB,
+        F::Bc4RUnorm => P::BC4_RUnorm,
+        F::Bc4RSnorm => P::BC4_RSnorm,
+        F::Bc5RgUnorm => P::BC5_RGUnorm,
+        F::Bc5RgSnorm => P::BC5_RGSnorm,
+        F::Bc6hRgbUfloat => P::BC6H_RGBUfloat,
+        F::Bc6hRgbFloat => P::BC6H_RGBFloat,
+        F::Bc7RgbaUnorm => P::BC7_RGBAUnorm,
+        F::Bc7RgbaUnormSrgb => P::BC7_RGBAUnorm_sRGB,
+        F::Etc2Rgb8Unorm => P::ETC2_RGB8,
+        F::Etc2Rgb8UnormSrgb => P::ETC2_RGB8_sRGB,
+        F::Etc2Rgb8A1Unorm => P::ETC2_RGB8A1,
+        F::Etc2Rgb8A1UnormSrgb => P::ETC2_RGB8A1_sRGB,
+        F::Etc2Rgba8Unorm => P::EAC_RGBA8,
+        F::Etc2Rgba8UnormSrgb => P::EAC_RGBA8_sRGB,
+        F::EacR11Unorm => P::EAC_R11Unorm,
+        F::EacR11Snorm => P::EAC_R11Snorm,
+        F::EacRg11Unorm => P::EAC_RG11Unorm,
+        F::EacRg11Snorm => P::EAC_RG11Snorm,
+        F::Astc {
+            block: AstcBlock::B4x4,
+            channel: AstcChannel::Unorm,
+        } => P::ASTC_4x4_LDR,
+        F::Astc {
+            block: AstcBlock::B4x4,
+            channel: AstcChannel::UnormSrgb,
+        } => P::ASTC_4x4_sRGB,
+        _ => return None,
+    };
+    let (width, height) = (descriptor.size.width, descriptor.size.height);
+    let (bw, _) = descriptor.format.block_dimensions();
+    // SAFETY: The raw device only makes a texture; nothing destroys it, and
+    // the guard is dropped before wgpu is called again.
+    let hal = unsafe { device.as_hal::<wgpu::hal::api::Metal>() }?;
+    if !hal.raw_device().hasUnifiedMemory() {
+        return None;
+    }
+    // SAFETY: A plain 2D texture descriptor of this size.
+    let metal_descriptor = unsafe {
+        MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
+            pixel_format,
+            width as usize,
+            height as usize,
+            false,
+        )
+    };
+    // SAFETY: No more levels than the full chain (each level's size halves
+    // the one before, as the caller's sizes checked).
+    unsafe { metal_descriptor.setMipmapLevelCount(descriptor.mip_level_count as usize) };
+    metal_descriptor.setUsage(MTLTextureUsage::ShaderRead);
+    metal_descriptor.setStorageMode(MTLStorageMode::Shared);
+    let metal = hal
+        .raw_device()
+        .newTextureWithDescriptor(&metal_descriptor)?;
+    drop(hal);
+    for (level, bytes) in levels.iter().enumerate() {
+        let (w, h) = ((width >> level).max(1), (height >> level).max(1));
+        let across = w.div_ceil(bw) as usize;
+        // SAFETY: Level `level` whole, of a new texture no submission reads,
+        // from `bytes` holding its rows of `across` blocks of `block` bytes
+        // (asserted by the caller).
+        unsafe {
+            metal.replaceRegion_mipmapLevel_slice_withBytes_bytesPerRow_bytesPerImage(
+                MTLRegion {
+                    origin: MTLOrigin { x: 0, y: 0, z: 0 },
+                    size: MTLSize {
+                        width: w as usize,
+                        height: h as usize,
+                        depth: 1,
+                    },
+                },
+                level,
+                0,
+                std::ptr::NonNull::from(*bytes).cast(),
+                across * block,
+                bytes.len(),
+            )
+        };
+    }
+    // SAFETY: Metal made this texture on this device as `descriptor` says,
+    // readable by shaders, written whole; wgpu takes ownership of it.
+    Some(unsafe {
+        let raw = wgpu::hal::metal::Device::texture_from_raw(
+            metal,
+            descriptor.format,
+            MTLTextureType::Type2D,
+            1,
+            descriptor.mip_level_count,
+            wgpu::hal::CopyExtent {
+                width,
+                height,
+                depth: 1,
+            },
+        );
+        device.create_texture_from_hal::<wgpu::hal::api::Metal>(raw, descriptor)
+    })
+}
+
 /// A renderer's views: the frame each one's texture is cached under.
 #[derive(Default)]
 pub(crate) struct Views {

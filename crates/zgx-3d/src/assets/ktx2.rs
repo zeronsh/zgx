@@ -1,38 +1,134 @@
-//! KTX2 files (`Texture::decode`, the `ktx2` feature): read where they hold
-//! RGBA8 texels, sRGB or not, with no supercompression, their levels taken
-//! as they are (no decoding, and their smaller levels the file's own, not
-//! made again). Block-compressed and Basis Universal payloads are refused,
-//! saying so.
+//! KTX2 files (`Texture::decode`, the `ktx2` feature): RGBA8 texels, sRGB
+//! or not, and block-compressed ones (BC1 to BC7, ETC2 and EAC, ASTC),
+//! Zstandard-supercompressed or not, their levels taken as they are (no
+//! decoding, and their smaller levels the file's own, not made again).
+//! Basis Universal payloads, and files of more than one 2D image, are
+//! refused, saying so.
+use std::borrow::Cow;
+use zgx_gpu::wgpu;
 
 /// A KTX2 file's identifier, its first 12 bytes.
 pub(crate) const IDENTIFIER: [u8; 12] = *b"\xabKTX 20\xbb\r\n\x1a\n";
+
+/// The most bytes a level may hold, decompressed (as a PNG's pixels may).
+const MAX_LEVEL: usize = 64 << 20;
 
 /// Vulkan's `VK_FORMAT_R8G8B8A8_UNORM` and `_SRGB`.
 const RGBA8: u32 = 37;
 const RGBA8_SRGB: u32 = 43;
 
-/// What a KTX2 file holds that a texture reads: its size and where each of
-/// its levels is in it, the first the largest.
+/// What a KTX2 file's texels are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Texels {
+    /// Four bytes each.
+    Rgba8,
+    /// Blocks of this format (its sRGB-ness as the file says: a map reads
+    /// it as its use needs).
+    Blocks(wgpu::TextureFormat),
+}
+
+/// What a KTX2 file holds that a texture reads: its size, its texels, and
+/// where each of its levels is in it, the first the largest.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Ktx2 {
     pub(crate) width: u32,
     pub(crate) height: u32,
-    pub(crate) levels: Vec<std::ops::Range<usize>>,
+    pub(crate) texels: Texels,
+    zstd: bool,
+    /// Each level's bytes in the file, and how many they are decompressed.
+    levels: Vec<(std::ops::Range<usize>, usize)>,
+}
+
+impl Ktx2 {
+    /// How many levels it has.
+    pub(crate) fn level_count(&self) -> usize {
+        self.levels.len()
+    }
+    /// Level `level`'s texels from `file` (the bytes it was read from): as
+    /// they're stored, or decompressed. `None` if they don't decompress to
+    /// what the file says.
+    pub(crate) fn level<'a>(&self, file: &'a [u8], level: usize) -> Option<Cow<'a, [u8]>> {
+        let (range, length) = self.levels.get(level)?;
+        let stored = file.get(range.clone())?;
+        if !self.zstd {
+            return Some(Cow::Borrowed(stored));
+        }
+        let mut out = vec![0; *length];
+        let written = ruzstd::decoding::FrameDecoder::new()
+            .decode_all(stored, &mut out)
+            .ok()?;
+        (written == *length).then_some(Cow::Owned(out))
+    }
+}
+
+/// Vulkan format `format` as a block-compressed texture format.
+fn blocks(format: u32) -> Option<wgpu::TextureFormat> {
+    use wgpu::{AstcBlock as B, AstcChannel, TextureFormat as F};
+    let srgb = |unorm, srgb_: bool| if srgb_ { AstcChannel::UnormSrgb } else { unorm };
+    Some(match format {
+        // BC1's RGB and RGBA blocks are the same blocks.
+        131 | 133 => F::Bc1RgbaUnorm,
+        132 | 134 => F::Bc1RgbaUnormSrgb,
+        135 => F::Bc2RgbaUnorm,
+        136 => F::Bc2RgbaUnormSrgb,
+        137 => F::Bc3RgbaUnorm,
+        138 => F::Bc3RgbaUnormSrgb,
+        139 => F::Bc4RUnorm,
+        140 => F::Bc4RSnorm,
+        141 => F::Bc5RgUnorm,
+        142 => F::Bc5RgSnorm,
+        143 => F::Bc6hRgbUfloat,
+        144 => F::Bc6hRgbFloat,
+        145 => F::Bc7RgbaUnorm,
+        146 => F::Bc7RgbaUnormSrgb,
+        147 => F::Etc2Rgb8Unorm,
+        148 => F::Etc2Rgb8UnormSrgb,
+        149 => F::Etc2Rgb8A1Unorm,
+        150 => F::Etc2Rgb8A1UnormSrgb,
+        151 => F::Etc2Rgba8Unorm,
+        152 => F::Etc2Rgba8UnormSrgb,
+        153 => F::EacR11Unorm,
+        154 => F::EacR11Snorm,
+        155 => F::EacRg11Unorm,
+        156 => F::EacRg11Snorm,
+        157..=184 => {
+            let block = [
+                B::B4x4,
+                B::B5x4,
+                B::B5x5,
+                B::B6x5,
+                B::B6x6,
+                B::B8x5,
+                B::B8x6,
+                B::B8x8,
+                B::B10x5,
+                B::B10x6,
+                B::B10x8,
+                B::B10x10,
+                B::B12x10,
+                B::B12x12,
+            ][((format - 157) / 2) as usize];
+            F::Astc {
+                block,
+                channel: srgb(AstcChannel::Unorm, (format - 157) % 2 == 1),
+            }
+        }
+        _ => return None,
+    })
 }
 
 /// `bytes` read as a KTX2 file, or why they can't be.
 pub(crate) fn read(bytes: &[u8]) -> Result<Ktx2, String> {
+    let short = || "a KTX2 file cut short".to_owned();
     let u32_at = |at: usize| -> Result<u32, String> {
-        bytes
-            .get(at..at + 4)
-            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
-            .ok_or_else(|| "a KTX2 file cut short".to_owned())
+        Ok(u32::from_le_bytes(
+            bytes.get(at..at + 4).ok_or_else(short)?.try_into().unwrap(),
+        ))
     };
     let u64_at = |at: usize| -> Result<u64, String> {
-        bytes
-            .get(at..at + 8)
-            .map(|b| u64::from_le_bytes(b.try_into().unwrap()))
-            .ok_or_else(|| "a KTX2 file cut short".to_owned())
+        Ok(u64::from_le_bytes(
+            bytes.get(at..at + 8).ok_or_else(short)?.try_into().unwrap(),
+        ))
     };
     if !bytes.starts_with(&IDENTIFIER) {
         return Err("not a KTX2 file".into());
@@ -41,29 +137,50 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Ktx2, String> {
     let (width, height, depth) = (u32_at(20)?, u32_at(24)?, u32_at(28)?);
     let (layers, faces, count, supercompression) =
         (u32_at(32)?, u32_at(36)?, u32_at(40)?, u32_at(44)?);
-    match format {
-        RGBA8 | RGBA8_SRGB => {}
-        0 => return Err("a Basis Universal KTX2 texture: not read yet".into()),
+    let texels = match format {
+        RGBA8 | RGBA8_SRGB => Texels::Rgba8,
+        0 => {
+            return Err(
+                "a Basis Universal KTX2 texture (ETC1S or UASTC): it needs a transcoder, \
+                 not read yet"
+                    .into(),
+            );
+        }
+        other => Texels::Blocks(blocks(other).ok_or_else(|| {
+            format!("a KTX2 texture of Vulkan format {other}: not RGBA8, BC, ETC2, EAC or ASTC")
+        })?),
+    };
+    // None, or Zstandard (2): BasisLZ (1) is Basis Universal's.
+    let zstd = match supercompression {
+        0 => false,
+        2 => true,
         other => {
             return Err(format!(
-                "a KTX2 texture of Vulkan format {other}: only RGBA8 ones are read yet"
+                "a KTX2 texture of supercompression {other}: not read"
             ));
         }
-    }
-    if supercompression != 0 {
-        return Err("a supercompressed KTX2 texture: not read yet".into());
-    }
+    };
     if depth > 1 || layers > 1 || faces != 1 {
         return Err("a KTX2 texture of more than one 2D image: not read".into());
     }
-    if width == 0
-        || height == 0
-        || width > crate::texture::MAX_SIDE
-        || height > crate::texture::MAX_SIDE
-    {
+    let max = crate::texture::MAX_SIDE;
+    if width == 0 || height == 0 || width > max || height > max {
         return Err("a texture is 1 to 8192 pixels on a side".into());
     }
-    // No levels given: the first alone, the rest made as for any image.
+    let (bw, bh) = match texels {
+        Texels::Rgba8 => (1, 1),
+        Texels::Blocks(format) => format.block_dimensions(),
+    };
+    if !width.is_multiple_of(bw) || !height.is_multiple_of(bh) {
+        return Err(format!(
+            "a KTX2 texture of {bw} by {bh} blocks {width} by {height}: not whole blocks"
+        ));
+    }
+    let block = match texels {
+        Texels::Rgba8 => 4,
+        Texels::Blocks(format) => format.block_copy_size(None).unwrap_or(16) as usize,
+    };
+    // No levels given: the first alone.
     let count = count.max(1);
     if count > 32 - width.max(height).leading_zeros() {
         return Err("a KTX2 texture with more levels than its size has".into());
@@ -73,43 +190,42 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Ktx2, String> {
     let mut levels = Vec::with_capacity(count as usize);
     for level in 0..count {
         let at = 80 + 24 * level as usize;
-        let (offset, length) = (u64_at(at)?, u64_at(at + 8)?);
+        let (offset, stored, length) = (u64_at(at)?, u64_at(at + 8)?, u64_at(at + 16)?);
         let (w, h) = ((width >> level).max(1), (height >> level).max(1));
-        if length != u64::from(w) * u64::from(h) * 4 {
+        let expected = (w.div_ceil(bw) * h.div_ceil(bh)) as usize * block;
+        // As much as a PNG's pixels may be: no file asks for more memory.
+        if expected > MAX_LEVEL {
+            return Err("a KTX2 level of more than 64 MiB".into());
+        }
+        let length = if zstd { length } else { stored };
+        if length != expected as u64 {
             return Err(format!(
-                "a KTX2 texture's level {level} isn't {w} by {h} RGBA8 texels"
+                "a KTX2 texture's level {level} isn't {w} by {h}'s {expected} bytes"
             ));
         }
         let start = usize::try_from(offset).map_err(|_| "a KTX2 level past the file")?;
-        let end = start
-            .checked_add(length as usize)
+        let end = usize::try_from(stored)
+            .ok()
+            .and_then(|stored| start.checked_add(stored))
             .filter(|&end| end <= bytes.len())
             .ok_or("a KTX2 level past the file")?;
-        levels.push(start..end);
+        levels.push((start..end, expected));
     }
     Ok(Ktx2 {
         width,
         height,
+        texels,
+        zstd,
         levels,
     })
 }
 
-/// A KTX2 file of RGBA8 `levels` (each half the one before, the first
-/// `width` by `height`), sRGB or not: for tests, and for tools writing one.
+/// A KTX2 file of `levels` (each half the one before, the first `width` by
+/// `height`) in Vulkan `format`, stored as they are: for tests.
 #[cfg(test)]
-pub(crate) fn write(width: u32, height: u32, srgb: bool, levels: &[Vec<u8>]) -> Vec<u8> {
+pub(crate) fn write(width: u32, height: u32, format: u32, levels: &[Vec<u8>]) -> Vec<u8> {
     let mut file = IDENTIFIER.to_vec();
-    let header = [
-        if srgb { RGBA8_SRGB } else { RGBA8 },
-        1,
-        width,
-        height,
-        0,
-        0,
-        1,
-        levels.len() as u32,
-        0,
-    ];
+    let header = [format, 1, width, height, 0, 0, 1, levels.len() as u32, 0];
     header.iter().for_each(|v| file.extend(v.to_le_bytes()));
     // No data format descriptor, key/value data or supercompression data.
     file.extend([0u8; 32]);
@@ -131,29 +247,132 @@ mod tests {
     #[test]
     fn an_rgba8_files_levels_are_read_where_they_are() {
         let levels = vec![vec![1; 4 * 4 * 4], vec![2; 2 * 2 * 4], vec![3; 4]];
-        let file = write(4, 4, true, &levels);
+        let file = write(4, 4, RGBA8_SRGB, &levels);
         let read = read(&file).unwrap();
-        assert_eq!((read.width, read.height), (4, 4));
-        let found: Vec<&[u8]> = read.levels.iter().map(|r| &file[r.clone()]).collect();
-        assert_eq!(found, [&levels[0][..], &levels[1][..], &levels[2][..]]);
+        assert_eq!(
+            (read.width, read.height, read.texels),
+            (4, 4, Texels::Rgba8)
+        );
+        let found: Vec<Vec<u8>> = (0..read.level_count())
+            .map(|l| read.level(&file, l).unwrap().into_owned())
+            .collect();
+        assert_eq!(found, levels);
+    }
+
+    #[test]
+    fn a_block_files_levels_are_whole_blocks() {
+        // BC7, 8 by 4: levels of 2x1, 1x1, 1x1, 1x1 blocks of 16 bytes.
+        let levels = vec![vec![7; 32], vec![7; 16], vec![7; 16], vec![7; 16]];
+        let file = write(8, 4, 146, &levels);
+        let read = read(&file).unwrap();
+        assert_eq!(
+            read.texels,
+            Texels::Blocks(wgpu::TextureFormat::Bc7RgbaUnormSrgb)
+        );
+        assert_eq!(read.level_count(), 4);
+        // ASTC 6x6, sRGB: its format from Vulkan's numbering.
+        let astc = write(12, 6, 166, &[vec![0; 32]]);
+        assert_eq!(
+            read_texels(&astc),
+            Texels::Blocks(wgpu::TextureFormat::Astc {
+                block: wgpu::AstcBlock::B6x6,
+                channel: wgpu::AstcChannel::UnormSrgb
+            })
+        );
+        // Not whole blocks: refused.
+        assert!(
+            super::read(&write(6, 4, 146, &[vec![7; 32]]))
+                .unwrap_err()
+                .contains("whole blocks")
+        );
+    }
+
+    fn read_texels(file: &[u8]) -> Texels {
+        read(file).unwrap().texels
+    }
+
+    #[test]
+    fn a_zstd_level_is_decompressed() {
+        // A Zstandard frame of one raw block holding the level's 64 bytes.
+        let level: Vec<u8> = (0..64).collect();
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd];
+        // Frame header: single segment, a 1-byte content size.
+        frame.extend([0x20, 64]);
+        // A last raw block of 64 bytes: (64 << 3) | (0 << 1) | 1.
+        let header = (64u32 << 3) | 1;
+        frame.extend(&header.to_le_bytes()[..3]);
+        frame.extend(&level);
+        let mut file = write(4, 4, RGBA8, &[frame.clone()]);
+        // Supercompression 2, and the level's uncompressed length.
+        file[44..48].copy_from_slice(&2u32.to_le_bytes());
+        file[96..104].copy_from_slice(&64u64.to_le_bytes());
+        let read = read(&file).unwrap();
+        assert_eq!(read.level(&file, 0).unwrap().as_ref(), &level[..]);
+        // A frame that doesn't decompress to its length: none.
+        let mut cut = file.clone();
+        let end = cut.len() - 1;
+        cut[end] ^= 0xff;
+        cut.truncate(end - 8);
+        assert!(super::read(&cut).is_err() || super::read(&cut).unwrap().level(&cut, 0).is_none());
+    }
+
+    #[test]
+    fn a_hostile_file_is_refused_not_read_past() {
+        // Every length of a good file cut short, and its level index's
+        // offsets and lengths made wrong in many ways: refused, or a level
+        // that doesn't decompress, and never a panic or a read past it.
+        let good = write(
+            8,
+            8,
+            RGBA8,
+            &[vec![1; 256], vec![2; 64], vec![3; 16], vec![4; 4]],
+        );
+        let zstd = {
+            let mut file = good.clone();
+            file[44..48].copy_from_slice(&2u32.to_le_bytes());
+            file
+        };
+        for file in [&good, &zstd] {
+            for end in 0..file.len() {
+                if let Ok(read) = read(&file[..end]) {
+                    (0..read.level_count()).for_each(|l| drop(read.level(&file[..end], l)));
+                }
+            }
+            for level in 0..4 {
+                for field in 0..3 {
+                    for value in [0, 1, 15, 255, 1 << 31, u64::MAX >> 1, u64::MAX] {
+                        let mut bad = file.clone();
+                        let at = 80 + 24 * level + 8 * field;
+                        bad[at..at + 8].copy_from_slice(&value.to_le_bytes());
+                        if let Ok(read) = read(&bad) {
+                            (0..read.level_count()).for_each(|l| drop(read.level(&bad, l)));
+                        }
+                    }
+                }
+            }
+        }
+        // Sizes past what any level may hold: refused before anything is
+        // made for them.
+        let mut huge = good.clone();
+        huge[20..28].copy_from_slice(&[0, 32, 0, 0, 0, 32, 0, 0]);
+        assert!(read(&huge).is_err());
     }
 
     #[test]
     fn what_isnt_read_says_why() {
-        let file = write(4, 4, false, &[vec![1; 64]]);
-        let mut bc7 = file.clone();
-        bc7[12..16].copy_from_slice(&145u32.to_le_bytes());
-        assert!(read(&bc7).unwrap_err().contains("format 145"));
+        let file = write(4, 4, RGBA8, &[vec![1; 64]]);
+        let mut unknown = file.clone();
+        unknown[12..16].copy_from_slice(&1000u32.to_le_bytes());
+        assert!(read(&unknown).unwrap_err().contains("format 1000"));
         let mut basis = file.clone();
         basis[12..16].copy_from_slice(&0u32.to_le_bytes());
         assert!(read(&basis).unwrap_err().contains("Basis"));
-        let mut zstd = file.clone();
-        zstd[44..48].copy_from_slice(&2u32.to_le_bytes());
-        assert!(read(&zstd).unwrap_err().contains("supercompressed"));
+        let mut basislz = file.clone();
+        basislz[44..48].copy_from_slice(&1u32.to_le_bytes());
+        assert!(read(&basislz).unwrap_err().contains("supercompression 1"));
         assert!(read(&file[..file.len() - 1]).is_err(), "cut short");
         assert!(read(b"not a ktx2").is_err());
         // A level of the wrong size.
-        let wrong = write(4, 4, false, &[vec![1; 60]]);
-        assert!(read(&wrong).is_err());
+        assert!(read(&write(4, 4, RGBA8, &[vec![1; 60]])).is_err());
     }
 }

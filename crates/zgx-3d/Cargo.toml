@@ -19,6 +19,8 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # crate added.
 naga = { version = "29.0.4", default-features = false, features = ["wgsl-out"], optional = true }
 serde_json = { version = "1", optional = true }
+# Zstandard-supercompressed KTX2 levels (the `ktx2` feature). MIT.
+ruzstd = { version = "0.9", optional = true, default-features = false, features = ["std"] }
 # Sound in the world (`World::add_emitter3d`): the audio engine, its
 # spatial maths and offline renderer. Nothing of zgx's below it.
 zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true, default-features = false }
@@ -28,8 +30,9 @@ zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true, defaul
 # their textures PNG or JPEG.
 gltf = ["dep:serde_json", "zgx-gpu/png", "zgx-gpu/jpeg"]
 # KTX2 textures (`Texture::decode`, and glTF images that are KTX2 files):
-# RGBA8 ones, their levels read as stored. No dependency.
-ktx2 = []
+# RGBA8 and block-compressed (BC, ETC2, EAC, ASTC) ones, their levels read
+# as stored, Zstandard-supercompressed or not.
+ktx2 = ["dep:ruzstd"]
 # The app's GPU data and compute passes (`World::add_buffer`,
 # `add_texture`, `add_compute`): WGSL checked by the naga wgpu brings.
 compute = ["dep:naga"]

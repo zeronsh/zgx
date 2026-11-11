@@ -144,6 +144,44 @@ impl Loads {
     }
 }
 
+/// `levels` of `texture` on the GPU, read as sRGB colours or as data: RGBA8
+/// texels written in place (`texture_with_levels`), or a file's blocks as
+/// they are (`texture_with_block_levels`) where `device` has their format.
+/// `None` where it hasn't: the map draws as if it had none (no decoder of
+/// blocks to RGBA8 here yet).
+pub(crate) fn upload_levels(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &crate::Texture,
+    srgb: bool,
+    levels: &crate::texture::Levels,
+) -> Option<wgpu::Texture> {
+    let size = (texture.width(), texture.height());
+    let bytes = levels.bytes();
+    if let crate::texture::Levels::Blocks(format, _) = levels {
+        let format = if srgb {
+            format.add_srgb_suffix()
+        } else {
+            format.remove_srgb_suffix()
+        };
+        if !device.features().contains(format.required_features()) {
+            texture.failed_to_decode();
+            return None;
+        }
+        return Some(zgx_gpu::viewport::texture_with_block_levels(
+            device, queue, size, format, &bytes, "3D map",
+        ));
+    }
+    let format = if srgb {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    };
+    Some(zgx_gpu::viewport::texture_with_levels(
+        device, queue, size, format, &bytes, "3D map",
+    ))
+}
+
 /// `texture` and its smaller levels on the GPU, made in `scratch` (kept by
 /// the thread from texture to texture: one block reused, not one a texture
 /// left in the footprint). `None` if its file doesn't decode.
@@ -162,15 +200,7 @@ fn put_on_gpu(
     };
     // A file's own levels (a KTX2's): put on the GPU as they are.
     if let Some(levels) = texture.kept_levels() {
-        let made = zgx_gpu::viewport::texture_with_levels(
-            device,
-            queue,
-            (width, height),
-            format,
-            &levels,
-            "3D map",
-        );
-        return Some(made);
+        return upload_levels(device, queue, texture, srgb, &levels);
     }
     let image = texture.pixels()?;
     let mut sizes = vec![(width, height)];
@@ -310,6 +340,40 @@ mod tests {
     fn noting(log: &Arc<Mutex<Vec<u32>>>, tag: u32) -> Job {
         let log = log.clone();
         Box::new(move |_| log.lock().unwrap().push(tag))
+    }
+
+    #[cfg(feature = "ktx2")]
+    #[test]
+    fn a_map_of_blocks_the_device_cant_hold_draws_as_if_it_had_none() {
+        // wgpu's no-op device asks for no compressed textures: a BC7 KTX2
+        // map isn't made (no blit, no panic), and draws as if it had none.
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::NOOP;
+        descriptor.backend_options.noop.enable = true;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = pollster_free(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) = pollster_free(adapter.request_device(&Default::default())).unwrap();
+        assert!(
+            !device
+                .features()
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+        );
+        let file = ktx2::write(4, 4, 146, &[vec![0; 16], vec![0; 16], vec![0; 16]]);
+        let texture = crate::Texture::decode(&file).unwrap();
+        let levels = texture.levels().expect("its blocks");
+        assert!(matches!(levels, crate::texture::Levels::Blocks(..)));
+        assert!(upload_levels(&device, &queue, &texture, true, &levels).is_none());
+        assert!(texture.failed(), "not tried again");
+    }
+
+    /// `future`, of wgpu's no-op backend, which never waits.
+    #[cfg(feature = "ktx2")]
+    fn pollster_free<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::pin::pin!(future).poll(&mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("the no-op backend waited"),
+        }
     }
 
     #[test]

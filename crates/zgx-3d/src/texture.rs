@@ -249,12 +249,15 @@ impl Texture {
             return None;
         }
         let encoded = self.0.encoded.as_ref()?;
-        // A KTX2 file's first level, as it is.
+        // A KTX2 file's first level, as it is, where it's RGBA8 (blocks
+        // have no pixels here: they go to the GPU as blocks, `levels`).
         #[cfg(feature = "ktx2")]
         if encoded.starts_with(&crate::assets::ktx2::IDENTIFIER) {
-            let first = crate::assets::ktx2::read(encoded)
+            use crate::assets::ktx2;
+            let first = ktx2::read(encoded)
                 .ok()
-                .map(|file| encoded[file.levels[0].clone()].to_vec());
+                .filter(|file| file.texels == ktx2::Texels::Rgba8)
+                .and_then(|file| Some(file.level(encoded, 0)?.into_owned()));
             let image = first.and_then(|pixels| {
                 zgx::image::ImageData::new(self.0.width, self.0.height, pixels).ok()
             });
@@ -270,33 +273,45 @@ impl Texture {
         }
         image
     }
-    /// Its levels, ready to upload: a file's own where it has more than one
-    /// (a KTX2's, as they're stored: no copy, and its smaller levels as the
-    /// file made them), else its pixels and the levels below them made here
-    /// (`mipmaps`). `None` if they don't decode.
+    /// Its levels, ready to upload: a file's own where it has them (a
+    /// KTX2's, as they're stored, or decompressed: no decoding, and its
+    /// smaller levels as the file made them), else its pixels and the levels
+    /// below them made here (`mipmaps`). `None` if they don't decode.
     pub(crate) fn levels(&self) -> Option<Levels<'_>> {
         if let Some(kept) = self.kept_levels() {
-            return Some(Levels::Kept(kept));
+            return Some(kept);
         }
         let image = self.pixels()?;
         let smaller = mipmaps(self.0.width, self.0.height, image.pixels());
         Some(Levels::Made(image, smaller))
     }
-    /// Its file's own levels, as stored, where it has more than one (a KTX2
-    /// file's: the `ktx2` feature).
-    pub(crate) fn kept_levels(&self) -> Option<Vec<&[u8]>> {
+    /// Its file's own levels (a KTX2 file's, the `ktx2` feature): its
+    /// blocks, or its RGBA8 texels where it has more than one level (one
+    /// level of texels has the rest made, `levels`). `None` where it has
+    /// none, or they don't decompress.
+    pub(crate) fn kept_levels(&self) -> Option<Levels<'_>> {
         #[cfg(feature = "ktx2")]
         if let Some(encoded) = self.0.encoded.as_ref()
             && encoded.starts_with(&crate::assets::ktx2::IDENTIFIER)
             && let Ok(file) = crate::assets::ktx2::read(encoded)
-            && file.levels.len() > 1
         {
-            return Some(
-                file.levels
-                    .into_iter()
-                    .map(|range| &encoded[range])
-                    .collect(),
-            );
+            use crate::assets::ktx2::Texels;
+            let levels = || -> Option<Vec<_>> {
+                (0..file.level_count())
+                    .map(|level| file.level(encoded, level))
+                    .collect()
+            };
+            return match file.texels {
+                Texels::Blocks(format) => match levels() {
+                    Some(levels) => Some(Levels::Blocks(format, levels)),
+                    None => {
+                        self.failed_to_decode();
+                        None
+                    }
+                },
+                Texels::Rgba8 if file.level_count() > 1 => levels().map(Levels::Kept),
+                Texels::Rgba8 => None,
+            };
         }
         None
     }
@@ -327,17 +342,25 @@ impl Texture {
 
 /// A texture's levels, the first the largest (`Texture::levels`).
 pub(crate) enum Levels<'a> {
-    /// A file's own, as stored in it.
+    /// A file's own RGBA8 texels, as stored in it (or decompressed).
     #[cfg_attr(not(feature = "ktx2"), allow(dead_code))]
-    Kept(Vec<&'a [u8]>),
+    Kept(Vec<std::borrow::Cow<'a, [u8]>>),
+    /// A file's own blocks of this format (its sRGB-ness as the file says).
+    #[cfg_attr(not(feature = "ktx2"), allow(dead_code))]
+    Blocks(
+        zgx_gpu::wgpu::TextureFormat,
+        Vec<std::borrow::Cow<'a, [u8]>>,
+    ),
     /// Its pixels, and the levels below made from them.
     Made(Arc<zgx::image::ImageData>, Vec<(u32, u32, Vec<u8>)>),
 }
 impl Levels<'_> {
-    /// Each level's texels, the first the largest.
-    pub(crate) fn texels(&self) -> Vec<&[u8]> {
+    /// Each level's bytes, the first the largest.
+    pub(crate) fn bytes(&self) -> Vec<&[u8]> {
         match self {
-            Levels::Kept(levels) => levels.clone(),
+            Levels::Kept(levels) | Levels::Blocks(_, levels) => {
+                levels.iter().map(AsRef::as_ref).collect()
+            }
             Levels::Made(image, smaller) => std::iter::once(image.pixels())
                 .chain(smaller.iter().map(|(_, _, pixels)| pixels.as_slice()))
                 .collect(),

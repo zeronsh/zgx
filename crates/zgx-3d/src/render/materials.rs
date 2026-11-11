@@ -427,7 +427,7 @@ pub(super) fn upload(
     srgb: bool,
 ) -> Option<wgpu::TextureView> {
     let decoded = decoded(texture)?;
-    Some(upload_decoded(device, queue, texture, srgb, decoded))
+    upload_decoded(device, queue, texture, srgb, decoded)
 }
 /// A texture's levels, ready to upload: decoding them is most of an
 /// upload's time, and needs no device.
@@ -436,29 +436,18 @@ type Decoded<'a> = crate::texture::Levels<'a>;
 fn decoded(texture: &crate::Texture) -> Option<Decoded<'_>> {
     texture.levels()
 }
-/// `texture`, `decoded`, on the GPU (`upload`).
+/// `texture`, `decoded`, on the GPU (`upload`); `None` where the device
+/// can't hold its levels (`assets::upload_levels`).
 fn upload_decoded(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &crate::Texture,
     srgb: bool,
     decoded: Decoded,
-) -> wgpu::TextureView {
-    let levels = decoded.texels();
-    let made = zgx_gpu::viewport::texture_with_levels(
-        device,
-        queue,
-        (texture.width(), texture.height()),
-        if srgb {
-            wgpu::TextureFormat::Rgba8UnormSrgb
-        } else {
-            wgpu::TextureFormat::Rgba8Unorm
-        },
-        &levels,
-        "3D map",
-    );
+) -> Option<wgpu::TextureView> {
+    let made = crate::assets::upload_levels(device, queue, texture, srgb, &decoded)?;
     texture.uploaded();
-    made.create_view(&Default::default())
+    Some(made.create_view(&Default::default()))
 }
 /// Threads decoding a frame's textures (`upload_missing`), the machine's
 /// cores up to 4. Each holds one decoded texture and the channel as many
@@ -531,8 +520,9 @@ pub(super) fn upload_missing(
         drop(sent);
         for (at, decoded) in received {
             let (texture, srgb) = wanted[at];
-            if let Some(decoded) = decoded {
-                let view = upload_decoded(device, queue, texture, srgb, decoded);
+            if let Some(view) =
+                decoded.and_then(|d| upload_decoded(device, queue, texture, srgb, d))
+            {
                 gpu.views.insert((texture.id(), srgb), (view, now));
             }
         }
