@@ -9,7 +9,9 @@
 //! instruction gate counts it, so what a terminal's output costs is
 //! guarded.
 //! Run: cargo run -p zgx-terminal --release --example terminal_bench
-//! (`LINES` sets the lines, 10,000 by default.)
+//! (`LINES` sets the lines, 10,000 by default; `HEIGHT` the window's
+//! height in points, 600 by default: 30 rows, and 1240 64, to see what
+//! grows with the rows on screen.)
 use std::fmt::Write;
 use zgx::{
     compose::prelude::*,
@@ -89,7 +91,11 @@ fn main() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10_000);
-    let mut ui = Ui::new(800., 600.);
+    let height: f32 = std::env::var("HEIGHT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600.);
+    let mut ui = Ui::new(800., height);
     let text = zgx_gpu::TextServices::new();
     let font = zgx_gpu::text::FontData::new(std::sync::Arc::<[u8]>::from(zgx_workload::FONT_BYTES))
         .expect("the bundled font");
@@ -103,7 +109,7 @@ fn main() {
         TerminalRenderer::new(zgx_terminal::terminal_view),
         theme_scope_with(
             || ThemeOverride::new().with(tok::FONT_MONO, FontFamily::from(zgx_workload::FONT)),
-            terminal(&term).w(800.).h(600.),
+            terminal(&term).w(800.).h(height),
         ),
     ));
     ui.prepare_frame();
