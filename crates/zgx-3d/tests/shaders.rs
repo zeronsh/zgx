@@ -1467,3 +1467,102 @@ fn a_meshs_numbers_changed_draw_as_a_fresh_world_with_them_does() {
         |world, _, cube| world.set_instance_floats(cube, Some([0.1, 0.3, 0.9, 0.])),
     );
 }
+
+/// An emissive wall seen at an exposure of a stop, Neutral tone mapping,
+/// the post chain on or off; with a pane in front whose surface gives back
+/// what is behind where it is light, and magenta where it isn't: the
+/// pane's middle pixel.
+#[cfg(feature = "post")]
+fn through_a_pane(chain: bool, pane: bool) -> Option<[u8; 4]> {
+    let world = World::new();
+    world.set_camera(Camera::looking_at([0., 0., 4.], [0., 0., 0.]));
+    world.set_background_linear(Some([0., 0., 0., 1.]));
+    let wall = Material {
+        color: [0., 0., 0., 1.],
+        emissive: [0.6, 0.3, 0.1],
+        roughness: 1.,
+        ..Default::default()
+    };
+    world.add(Object::mesh(Geometry::cuboid(3., 3., 0.2), wall).at([0., 0., -1.]));
+    world.set_exposure(1.);
+    world.set_tone_mapping(ToneMapping::Neutral);
+    if chain {
+        world.set_post(Post {
+            vignette: Some(Vignette { intensity: 0. }),
+            ..Default::default()
+        });
+    }
+    if pane {
+        let black = Material {
+            color: [0., 0., 0., 1.],
+            roughness: 1.,
+            ..Default::default()
+        };
+        let pane = world.add(Object::mesh(Geometry::cuboid(1., 1., 0.2), black));
+        let see = world
+            .add_shader(
+                MaterialShader::new(
+                    "#zgx material 1
+                     fn surface(s: SurfaceIn) -> Surface {
+                         var m = surface_default(s);
+                         m.base_color = vec3(0.0);
+                         m.emissive = vec3(1.0, 0.0, 1.0);
+                         if scene_is_light() {
+                             m.emissive = scene_color(s.screen_uv, 0.0);
+                         }
+                         return m;
+                     }",
+                )
+                .reads_scene(),
+            )
+            .unwrap();
+        world.set_shader(pane, Some(see));
+    }
+    let mut window = Window::new(&world)?;
+    window.draw();
+    Some(window.pixel(50, 50))
+}
+
+#[cfg(feature = "post")]
+#[test]
+fn what_is_behind_is_light_where_the_post_chain_is_on() {
+    // On: the scene's light, before exposure and tone mapping, so a pane
+    // giving it back is as if it weren't there. Off: as displayed, and the
+    // material's branch for that is taken.
+    let Some(wall) = through_a_pane(true, false) else {
+        return;
+    };
+    let seen = through_a_pane(true, true).unwrap();
+    assert!(
+        wall.iter().zip(seen).all(|(a, b)| a.abs_diff(b) <= 1),
+        "through the pane {seen:?}, the wall {wall:?}"
+    );
+    let off = through_a_pane(false, true).unwrap();
+    assert!(
+        // (Magenta, desaturated toward white by the tone curve: the wall
+        // is orange.)
+        off[0].abs_diff(off[2]) <= 2 && off[1] + 100 < off[0],
+        "chain off: the branch for what is displayed, {off:?}"
+    );
+}
+
+#[test]
+fn reading_whether_the_scene_is_light_needs_reads_scene() {
+    let world = World::new();
+    let error = world
+        .add_shader(MaterialShader::new(
+            "#zgx material 1
+             fn surface(s: SurfaceIn) -> Surface {
+                 var m = surface_default(s);
+                 if scene_is_light() { m.roughness = 0.5; }
+                 return m;
+             }",
+        ))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("`scene_is_light` reads the scene behind"),
+        "{error}"
+    );
+}

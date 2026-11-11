@@ -196,8 +196,9 @@ impl MaterialShader {
         self.buffer_types.push((name.to_owned(), ty.to_owned()));
         self
     }
-    /// It reads the scene behind it (`scene_color`): the world draws the
-    /// opaque meshes into a picture first, as for glass.
+    /// It reads the scene behind it (`scene_color`, and `scene_is_light`
+    /// for what that is): the world draws the opaque meshes into a picture
+    /// first, as for glass.
     pub fn reads_scene(mut self) -> Self {
         self.reads_scene = true;
         self
@@ -394,14 +395,14 @@ impl Shader {
         for (at, name, next) in uses(&code) {
             let (line, column) = at;
             match name {
-                "scene_color" if !shader.reads_scene || layer => {
+                "scene_color" | "scene_is_light" if !shader.reads_scene || layer => {
                     return Err(error(
                         line,
                         column,
                         if layer {
                             "a surface layer can't read the scene behind".to_owned()
                         } else {
-                            "`scene_color` reads the scene behind: say `.reads_scene()`".to_owned()
+                            format!("`{name}` reads the scene behind: say `.reads_scene()`")
                         },
                     ));
                 }
@@ -819,7 +820,8 @@ impl Custom {
                      @group(1) @binding({}) var zgx_scene_sampler: sampler;\n\
                      fn scene_color(uv: vec2<f32>, lod: f32) -> vec3<f32> {{\n    \
                      let c = textureSampleLevel(zgx_scene, zgx_scene_sampler, uv, lod).rgb;\n    \
-                     return select(c, zgx_decode(c), frame.params.y > 0.5);\n}}",
+                     return select(c, zgx_decode(c), frame.params.y > 0.5);\n}}\n\
+                     fn scene_is_light() -> bool {{\n    return frame.look.y > 0.5;\n}}",
                     SCENE_BINDING + 1
                 );
             }
@@ -1113,8 +1115,8 @@ fn line_of_fn(code: &str, name: &str) -> u32 {
         .find(|w| w[0].0.text == "fn" && w[1].0.text == name)
         .map_or(0, |w| w[1].0.line)
 }
-/// Each use of a name the engine gives (`scene_color`, `scene_depth`,
-/// `frame`), with the member read after it, if any.
+/// Each use of a name the engine gives (`scene_color`, `scene_is_light`,
+/// `scene_depth`, `frame`), with the member read after it, if any.
 fn uses(code: &str) -> Vec<((u32, u32), &str, Option<&str>)> {
     let tokens = identifiers(code);
     let mut out = Vec::new();
@@ -1122,7 +1124,10 @@ fn uses(code: &str) -> Vec<((u32, u32), &str, Option<&str>)> {
         if token.after_dot || token.after_at || *member {
             continue;
         }
-        if matches!(token.text, "scene_color" | "scene_depth" | "frame") {
+        if matches!(
+            token.text,
+            "scene_color" | "scene_is_light" | "scene_depth" | "frame"
+        ) {
             let next = tokens
                 .get(i + 1)
                 .filter(|(t, _, _)| t.after_dot)

@@ -818,9 +818,11 @@ impl Viewport for Renderer {
         let camera_parts = (view, drawn, drawn * view);
         let mut uniforms = frame_uniforms(&world, camera_parts.2, encode && !chain.on);
         if chain.on {
-            // Exposed and mapped by the chain's last pass.
+            // Exposed and mapped by the chain's last pass: what is behind
+            // is the scene's light (a material's `scene_is_light`).
             uniforms.params[2] = 1.;
             uniforms.look[0] = 2.;
+            uniforms.look[1] = 1.;
         }
         #[cfg(feature = "lighting")]
         let (clustered, cascaded) = lights::prepare(
