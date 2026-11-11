@@ -2330,8 +2330,10 @@ impl CanvasLabels {
                 },
             );
         }
+        // In and out of the group, a box of the canvas's size: the walk
+        // stops there (`Scene::append_held`).
         for (gone, _) in self.nodes.drain(texts.len().min(self.nodes.len())..) {
-            scene.remove(gone);
+            scene.remove_held(gone);
         }
         for (index, text) in texts.iter().enumerate() {
             if self
@@ -2353,7 +2355,7 @@ impl CanvasLabels {
                     *node
                 }
                 None => {
-                    let node = scene.append(
+                    let node = scene.append_held(
                         group,
                         kind,
                         crate::scene::Style {
@@ -9254,6 +9256,122 @@ mod button_label_tests {
             ui.semantics.borrow().get(button).unwrap().label,
             "Save deep"
         );
+    }
+}
+#[cfg(test)]
+mod canvas_label_tests {
+    use super::*;
+    use crate::canvas::{Canvas, CanvasText, TextAnchor, TextBaseline};
+    use crate::scene::Color;
+
+    type Runs = Vec<(&'static str, Color)>;
+    /// A screen of `rows` canvases, each absolute in a box a line high (a
+    /// terminal's rows), drawing their runs as text; the middle one's runs
+    /// come from the signal returned.
+    fn screen(rows: usize) -> (Ui, Signal<Runs>, NodeId) {
+        let mut ui = Ui::new(800., 1300.);
+        let runs = ui.signal(vec![
+            ("start", Color(1, 2, 3, 255)),
+            ("end", Color(3, 2, 1, 255)),
+        ]);
+        let lines = (0..rows).map(|row| {
+            let runs = runs.clone();
+            canvas(move |_| {
+                let mut canvas = Canvas::new();
+                let shown = match row == rows / 2 {
+                    true => runs.get(),
+                    false => vec![
+                        ("a line", Color(9, 9, 9, 255)),
+                        ("its end", Color(1, 1, 1, 255)),
+                    ],
+                };
+                for (at, (text, color)) in shown.into_iter().enumerate() {
+                    canvas.text(CanvasText {
+                        text: text.into(),
+                        x: at as f32 * 120.,
+                        y: 0.,
+                        size: 14.,
+                        color,
+                        font: Default::default(),
+                        anchor: TextAnchor::Start,
+                        baseline: TextBaseline::Top,
+                    });
+                }
+                canvas
+            })
+            .id(if row == rows / 2 { "middle" } else { "row" })
+            .absolute()
+            .left(10.)
+            .top(6. + row as f32 * 19.)
+            .w(780.)
+            .h(19.)
+        });
+        let handle = ui.mount(div().w(800.).h(1300.).child(column().children(lines)));
+        frame(&mut ui);
+        let middle = handle.find("middle").unwrap();
+        std::mem::forget(handle);
+        (ui, runs, middle)
+    }
+    fn frame(ui: &mut Ui) {
+        ui.prepare_frame();
+        ui.scene.borrow_mut().flush();
+    }
+    /// What a canvas's labels show, in order, and where.
+    fn shown(ui: &Ui, root: NodeId) -> Vec<(String, crate::scene::Rect)> {
+        let scene = ui.scene.borrow();
+        let mut texts = Vec::new();
+        let mut stack = vec![root];
+        while let Some(at) = stack.pop() {
+            if let NodeKind::Text { text, .. } = scene.kind(at) {
+                texts.push((text.to_string(), scene.bounds(at)));
+            }
+            stack.extend(scene.children(at).iter().rev().copied());
+        }
+        texts
+    }
+    /// A row's runs coming and going, in other colours, as output scrolls
+    /// it: the frame lays out the row's labels alone, as many measures with
+    /// 30 rows as with 62, each where a row drawn so from the start has it.
+    #[test]
+    fn a_rows_runs_coming_and_going_lay_out_its_labels_alone() {
+        let (red, green, blue) = (
+            Color(200, 0, 0, 255),
+            Color(0, 200, 0, 255),
+            Color(0, 0, 200, 255),
+        );
+        let frames: [Runs; 5] = [
+            vec![("one", red), ("two", green), ("three", blue)],
+            vec![("four", blue)],
+            vec![("five", green), ("six", red)],
+            vec![
+                ("seven", red),
+                ("eight", red),
+                ("nine", green),
+                ("ten", blue),
+            ],
+            vec![("eleven", blue), ("twelve", green)],
+        ];
+        let mut costs = Vec::new();
+        for rows in [30, 62] {
+            let (mut ui, runs, middle) = screen(rows);
+            let mut cost = Vec::new();
+            for now in &frames {
+                let before = ui.scene.borrow().measure_calls;
+                runs.set(now.clone());
+                frame(&mut ui);
+                cost.push(ui.scene.borrow().measure_calls - before);
+                let (mut fresh, fresh_runs, fresh_middle) = screen(rows);
+                fresh_runs.set(now.clone());
+                frame(&mut fresh);
+                assert_eq!(
+                    shown(&ui, middle),
+                    shown(&fresh, fresh_middle),
+                    "{rows} rows"
+                );
+            }
+            costs.push(cost);
+        }
+        assert_eq!(costs[0], costs[1], "flat as the screen grows: {costs:?}");
     }
 }
 #[cfg(test)]

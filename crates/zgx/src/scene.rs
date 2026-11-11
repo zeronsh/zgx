@@ -6693,13 +6693,27 @@ impl Scene {
         // Paint order changes only for the children that moved past others
         // (a keyed list's new row, appended and put in its place): they
         // repaint where they are, the rest stay as they were.
+        let mut flow_kept = true;
         for (child, moved) in children.iter().zip(moved) {
             if moved {
+                flow_kept &= self.tree_node(*child).style.absolute;
                 self.damage_subtree(*child);
             }
         }
         self.node_mut(parent).children.get_mut()[from..].copy_from_slice(children);
-        self.invalidate_layout(parent);
+        // Only absolute children moved (a terminal's rows as its slots take
+        // other lines): those in the flow keep their order, and an absolute
+        // child's place is its own, wherever it is among its siblings, so the
+        // parent's layout stands (its next one takes the new order). Not under
+        // a layer, whose contents a layout's walk marks.
+        let parent_node = self.tree_node(parent);
+        let stands = flow_kept
+            && parent_node.measurement.is_some()
+            && !parent_node.special.any()
+            && self.isolation_count + self.promoted_count == 0;
+        if !stands {
+            self.invalidate_layout(parent);
+        }
         // Children removed or moved: its kept ink union goes unless only
         // its tail changed (`KeptInk`).
         if self.kept_any.get() {
@@ -7490,7 +7504,22 @@ impl Scene {
         crate::gpu_view::count_plane_frame();
     }
     /// Append a node of `kind` with `style` as `parent`'s last child.
-    pub fn append(&mut self, parent: NodeId, kind: NodeKind, mut style: Style) -> NodeId {
+    pub fn append(&mut self, parent: NodeId, kind: NodeKind, style: Style) -> NodeId {
+        self.append_as::<false>(parent, kind, style)
+    }
+    /// `append` into `parent`, a box of a fixed size (a canvas's labels'
+    /// group): what it holds changes neither its size nor its place, so the
+    /// walk stops at it (`invalidate_children_layout`).
+    pub(crate) fn append_held(&mut self, parent: NodeId, kind: NodeKind, style: Style) -> NodeId {
+        self.append_as::<true>(parent, kind, style)
+    }
+    #[inline(always)]
+    fn append_as<const HELD: bool>(
+        &mut self,
+        parent: NodeId,
+        kind: NodeKind,
+        mut style: Style,
+    ) -> NodeId {
         self.content_revision = self.content_revision.wrapping_add(1);
         if let Some(options) = &style.layout_options {
             let normalized = (**options).normalized();
@@ -7594,14 +7623,21 @@ impl Scene {
             self.overflow_fades.push((id, [0.; 4]));
         }
         self.dirty.push(id);
-        self.invalidate_layout(parent);
+        match HELD {
+            true => self.invalidate_children_layout(parent),
+            false => self.invalidate_layout(parent),
+        }
         self.children_changed(parent);
         id
     }
     /// Remove `id` and its subtree, damaging where they painted. Panics for
     /// the root.
     pub fn remove(&mut self, id: NodeId) {
-        self.remove_as::<false>(id, 0);
+        self.remove_as::<false, false>(id, 0);
+    }
+    /// `remove` from a box of a fixed size (`append_held`).
+    pub(crate) fn remove_held(&mut self, id: NodeId) {
+        self.remove_as::<false, true>(id, 0);
     }
     #[cfg(target_os = "macos")]
     /// `id`'s looping animation, sampled for the renderer to bake and play
@@ -7635,10 +7671,10 @@ impl Scene {
         self.plays_loops.set(plays);
     }
     pub(crate) fn remove_indexed(&mut self, id: NodeId, index: usize) {
-        self.remove_as::<true>(id, index);
+        self.remove_as::<true, false>(id, index);
     }
     #[inline(always)]
-    fn remove_as<const INDEXED: bool>(&mut self, id: NodeId, index: usize) {
+    fn remove_as<const INDEXED: bool, const HELD: bool>(&mut self, id: NodeId, index: usize) {
         if !INDEXED {
             self.settle_children();
         }
@@ -7674,7 +7710,10 @@ impl Scene {
             inert.retain(|n| self.contains(*n));
             self.inert = inert;
         }
-        self.invalidate_layout(parent);
+        match HELD {
+            true => self.invalidate_children_layout(parent),
+            false => self.invalidate_layout(parent),
+        }
         // Children removed or moved: its kept ink union goes unless only
         // its tail changed (`KeptInk`).
         if self.kept_any.get() {
@@ -9505,6 +9544,30 @@ impl Scene {
     /// its parent keeps its layout and only the boundary's subtree is redone.
     fn invalidate_layout(&mut self, id: NodeId) {
         self.invalidate_layout_with::<false>(id, false, true, id);
+    }
+    /// `invalidate_layout` for `id` whose children changed, its own style
+    /// not (`append_held`): of a fixed size, laid out before, it stops the
+    /// walk at itself, laid out alone (`relayout_alone`; its size is its
+    /// style's, so it stands, and if not, its ancestors are marked then).
+    /// Otherwise the walk goes up as ever.
+    #[cold]
+    #[inline(never)]
+    fn invalidate_children_layout(&mut self, id: NodeId) {
+        let node = self.node(id);
+        let fixed = node.style.width.is_some()
+            && node.style.height.is_some()
+            && !node.style.intrinsic_width
+            && !node.style.intrinsic_height
+            && node.style.width_percent.is_none()
+            && node.style.height_percent.is_none()
+            && node.measurement.is_some()
+            && node
+                .parent
+                .is_some_and(|parent| self.node(parent).measurement.is_some());
+        match fixed {
+            true => self.invalidate_layout_with::<true>(id, false, true, id),
+            false => self.invalidate_layout(id),
+        }
     }
     /// Whether absolute node `id`'s parent may be where its change's walk
     /// stops (`absolute_stop`), by its own fields alone: laid out once, under
@@ -20968,6 +21031,94 @@ mod set_box_tests {
             costs[0].0 <= 6 && costs[0].1 <= 2,
             "the rail alone: {costs:?}"
         );
+    }
+    /// A terminal's rows reordered as its slots take other lines: absolute
+    /// children moved among a column's children measure nothing (their
+    /// places are their own) and stay where a column built in the new order
+    /// puts them. A child in the flow moved lays the column out as before.
+    #[test]
+    fn absolute_children_reordered_measure_nothing() {
+        use crate::layout::{EdgeLengths, LayoutOptions, Length::Px};
+        let column = |order: &[usize]| {
+            let mut scene = Scene::new(800., 600.);
+            scene.set_text_measurer(|text: &str, size: f32, _: Option<f32>| {
+                (text.len() as f32 * size * 0.5, size)
+            });
+            let column = scene.append(
+                scene.root(),
+                NodeKind::Container(Layout::Column),
+                Style {
+                    gap: 3.,
+                    ..Default::default()
+                },
+            );
+            let mut ids = Vec::new();
+            for &at in order {
+                let style = match at {
+                    // In the flow: a line of text, then a box.
+                    0 | 1 => Style {
+                        height: Some(10. + at as f32),
+                        ..Default::default()
+                    },
+                    _ => Style {
+                        absolute: true,
+                        width_percent: Some(1.),
+                        height: Some(19.),
+                        layout_options: Some(Arc::new(LayoutOptions {
+                            inset: EdgeLengths {
+                                left: Some(Px(10.)),
+                                top: Some(Px(at as f32 * 19.)),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    },
+                };
+                let row = scene.append(column, NodeKind::Container(Layout::Overlay), style);
+                scene.append(row, label(&format!("row {at}")), Default::default());
+                ids.push((at, row));
+            }
+            scene.flush();
+            (scene, column, ids)
+        };
+        let first: Vec<usize> = (0..12).collect();
+        let (mut scene, parent, ids) = column(&first);
+        let id_of = |at: usize| ids.iter().find(|(a, _)| *a == at).unwrap().1;
+        // The absolute rows rotated by one (the flow's two where they are).
+        let rotated: Vec<usize> = [0, 1].into_iter().chain(3..12).chain([2]).collect();
+        let before = scene.measure_calls;
+        let reordered: Vec<NodeId> = rotated.iter().map(|at| id_of(*at)).collect();
+        assert!(scene.reorder_children(parent, &reordered));
+        scene.flush();
+        assert_eq!(scene.measure_calls, before, "nothing measured");
+        same_bounds_by(&scene, &column(&rotated).0, &rotated);
+        // A child in the flow moved: laid out, as a column built so.
+        let swapped: Vec<usize> = [1, 0].into_iter().chain(3..12).chain([2]).collect();
+        let reordered: Vec<NodeId> = swapped.iter().map(|at| id_of(*at)).collect();
+        assert!(scene.reorder_children(parent, &reordered));
+        scene.flush();
+        assert!(scene.measure_calls > before, "the column laid out");
+        same_bounds_by(&scene, &column(&swapped).0, &swapped);
+    }
+    /// `same_bounds` for scenes whose nodes were made in other orders: the
+    /// rows' (and their labels') boxes, matched by what they are.
+    fn same_bounds_by(live: &Scene, fresh: &Scene, _order: &[usize]) {
+        let boxes = |scene: &Scene| {
+            let mut all: Vec<(String, Rect)> = scene
+                .ids()
+                .filter_map(|id| match scene.kind(id) {
+                    NodeKind::Text { text, .. } => {
+                        let row = scene.node(id).parent.unwrap();
+                        Some((text.to_string(), scene.bounds(row)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            all.sort_by(|a, b| a.0.cmp(&b.0));
+            all
+        };
+        assert_eq!(boxes(live), boxes(fresh));
     }
     /// A terminal's screen: an absolute rows box holding one absolute row
     /// per line (its whole width, a cell high), each with an absolute group
