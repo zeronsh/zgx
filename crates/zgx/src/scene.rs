@@ -3259,6 +3259,10 @@ pub struct Scene {
     #[cfg(test)]
     cells_off: bool,
     viewport: Rect,
+    /// `viewport` by its edges, as damage covering it all holds them
+    /// (`damage_is_full`, asked for each node damaged: compared, not
+    /// worked out, each time).
+    viewport_edges: DamageEdges,
     /// Roots of subtrees shown in popup windows of their own (`set_popup`),
     /// and those of them promoted for it (their layer revision counts
     /// changes inside them, `Node::promoted`).
@@ -3576,6 +3580,7 @@ impl Scene {
             #[cfg(test)]
             cells_off: false,
             viewport: Rect::new(0.0, 0.0, width, height),
+            viewport_edges: DamageEdges::from(Rect::new(0.0, 0.0, width, height)),
             popups: Vec::new(),
             popup_roles: Vec::new(),
             popups_held: false,
@@ -9026,6 +9031,7 @@ impl Scene {
             return;
         }
         self.viewport = Rect::new(0.0, 0.0, width, height);
+        self.viewport_edges = DamageEdges::from(self.viewport);
         let mut style = self.node(self.root).style.clone();
         style.width = Some(width);
         style.height = Some(height);
@@ -9783,13 +9789,10 @@ impl Scene {
     /// Whether this frame already repaints the whole viewport: more damage
     /// changes nothing, so callers skip working out where it would be.
     fn damage_is_full(&self) -> bool {
-        let viewport = self.viewport;
-        self.damage.first().is_some_and(|edges| {
-            edges.0[0] == viewport.x
-                && edges.0[1] == viewport.y
-                && -edges.0[2] == viewport.x + viewport.width
-                && -edges.0[3] == viewport.y + viewport.height
-        }) || self.damage_grid.as_ref().is_some_and(DamageGrid::full)
+        self.damage
+            .first()
+            .is_some_and(|edges| edges.0 == self.viewport_edges.0)
+            || self.damage_grid.as_ref().is_some_and(DamageGrid::full)
     }
     /// What `damage_subtree_with` would add for leaf `id` (no children)
     /// where nothing is transformed or filtered, at its box `was` and at
@@ -16033,6 +16036,25 @@ mod tests {
         let (walked, before) = (run(false), run(true));
         assert!(walked.iter().filter(|f| !f.is_empty()).count() > 20);
         assert_eq!(walked, before);
+    }
+    /// Damage covering the viewport reads as full, and a part of it doesn't,
+    /// at each size the viewport takes (its edges are kept for the check).
+    #[test]
+    fn damage_covering_the_viewport_is_full_at_each_size() {
+        let mut scene = Scene::new(800., 600.);
+        for (w, h) in [(800., 600.), (400.5, 300.25), (1200., 900.)] {
+            scene.resize(w, h);
+            scene.flush();
+            assert!(!scene.damage_is_full(), "{w}x{h}: nothing damaged");
+            scene.add_damage(Rect::new(0., 0., w / 2., h));
+            assert!(!scene.damage_is_full(), "{w}x{h}: half damaged");
+            scene.add_damage(Rect::new(0., 0., w, h));
+            assert!(scene.damage_is_full(), "{w}x{h}: all damaged");
+            scene.flush();
+            // Past its edges, cut to them.
+            scene.add_damage(Rect::new(-10., -10., w + 20., h + 20.));
+            assert!(scene.damage_is_full(), "{w}x{h}: more than all damaged");
+        }
     }
     /// Damage kept as edges is, to the bit, what rectangles gave
     /// (`assert_damage_rects`, on every add in every test here): rectangles
