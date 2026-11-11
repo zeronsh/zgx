@@ -32,9 +32,8 @@ pub(super) enum Resource {
     Scene,
     /// Bloom's steps, each half the size of the one before.
     Bloom,
-    /// Bloom's steps up where it runs as dispatches (`Chain::bloom_compute`):
-    /// from its second step's size, each one's own down and the next's
-    /// tent.
+    /// Bloom's steps up: from its second step's size, each one's own down
+    /// and the next's tent.
     BloomUp,
     /// The scene's other half while the app's HDR passes trade it back and
     /// forth with the scene.
@@ -282,14 +281,20 @@ pub(super) fn bloom_desc(size: (u32, u32), format: wgpu::TextureFormat) -> Desc 
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
     }
 }
-/// Bloom's steps written by dispatches (`Chain::bloom_compute`): in the
-/// scene's format (stored to), and the chain of its steps up from its
-/// second's size (none with fewer than three steps).
-pub(super) fn bloom_compute_descs(size: (u32, u32)) -> (Desc, Option<Desc>) {
-    let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
-    let down = Desc {
-        usage,
-        ..bloom_desc(size, SCENE)
+/// Bloom's steps down for a frame of `size`, and the chain of its steps up
+/// from its second's size (none with fewer than three steps): written by
+/// dispatches (`Chain::bloom_compute`) in the scene's format, stored to, or
+/// drawn by passes in `format`.
+pub(super) fn bloom_descs(
+    size: (u32, u32),
+    (compute, format): (bool, wgpu::TextureFormat),
+) -> (Desc, Option<Desc>) {
+    let down = match compute {
+        true => Desc {
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            ..bloom_desc(size, SCENE)
+        },
+        false => bloom_desc(size, format),
     };
     let up = (down.levels > 2).then(|| Desc {
         size: ((down.size.0 / 2).max(1), (down.size.1 / 2).max(1)),
@@ -324,8 +329,7 @@ pub(super) struct Targets {
     /// Each of bloom's steps, with it on.
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     pub(super) bloom: Vec<wgpu::TextureView>,
-    /// Its steps up, where they're dispatches: each level's view, from the
-    /// second step's size.
+    /// Its steps up: each level's view, from the second step's size.
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     pub(super) bloom_up: Vec<wgpu::TextureView>,
     textures: Vec<Temporary>,
@@ -484,14 +488,13 @@ impl Graph {
                         format: SCENE,
                         ..scene
                     },
-                    Resource::Bloom if config.post.bloom && config.post.bloom_compute => {
-                        bloom_compute_descs(config.size).0
-                    }
                     Resource::Bloom if config.post.bloom => {
-                        bloom_desc(config.size, bloom_format(device))
+                        let made = (config.post.bloom_compute, bloom_format(device));
+                        bloom_descs(config.size, made).0
                     }
-                    Resource::BloomUp if config.post.bloom && config.post.bloom_compute => {
-                        match bloom_compute_descs(config.size).1 {
+                    Resource::BloomUp if config.post.bloom => {
+                        let made = (config.post.bloom_compute, bloom_format(device));
+                        match bloom_descs(config.size, made).1 {
                             Some(up) => up,
                             None => continue,
                         }
@@ -701,10 +704,14 @@ mod tests {
         );
         let targets = graph.targets.as_ref().unwrap();
         assert!(targets.scene.is_some() && targets.colour.is_none());
-        // Bloom from 32 by 16 down to 2 by 1 (16 is 2 to the 4th: 4 steps).
-        assert_eq!(targets.bloom.len(), 4);
+        // Bloom from 32 by 16 down to 2 by 1 (16 is 2 to the 4th: 4 steps),
+        // and its steps up from 16 by 8 to 8 by 4.
+        assert_eq!((targets.bloom.len(), targets.bloom_up.len()), (4, 2));
         let texel = u64::from(bloom_format(&device).block_copy_size(None).unwrap());
-        let steps: u64 = (0..4).map(|l| (32u64 >> l) * (16u64 >> l) * texel).sum();
+        let steps: u64 = (0..4)
+            .chain(1..3)
+            .map(|l| (32u64 >> l) * (16u64 >> l) * texel)
+            .sum();
         assert_eq!(graph.bytes(), 64 * 32 * (8 + 4) + steps);
         graph.prepare(&device, config(false));
         assert_eq!(

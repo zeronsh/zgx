@@ -248,6 +248,18 @@ mod tests {
             .map(|(a, b)| a.abs_diff(*b))
             .max()
             .unwrap_or(0);
-        assert_eq!(most, 0, "{most} levels apart");
+        // Where they part, for a device that rounds otherwise: how many
+        // values, and the first's pixel.
+        let differing = passes
+            .iter()
+            .zip(&dispatched)
+            .filter(|(a, b)| a != b)
+            .count();
+        let first = passes.iter().zip(&dispatched).position(|(a, b)| a != b);
+        let at = first.map(|i| (i / 4 % SIZE as usize, i / 4 / SIZE as usize, i % 4));
+        assert_eq!(
+            most, 0,
+            "{most} levels apart: {differing} values differ, the first at (x, y, channel) {at:?}"
+        );
     }
 }

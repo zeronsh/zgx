@@ -237,9 +237,9 @@ fn the_chains_targets_go_as_the_world_rests() {
     let held = window.draw();
     // Without: four samples of colour and of depth, 4 bytes each. With, the
     // samples' colour in 8 bytes, the scene one sample of 8, and bloom's
-    // steps from half its size: by passes, 4 bytes a texel where the device
-    // draws into three floats packed so, else 8; as dispatches, 8, and its
-    // steps up from its second's size to its last but one apart.
+    // steps from half its size, and its steps up apart from its second's
+    // size to its last but one: by passes, 4 bytes a texel where the device
+    // draws into three floats packed so, else 8; as dispatches, 8.
     let pixels = u64::from(SIZE * SIZE);
     assert_eq!(plain, pixels * 4 * (4 + 4));
     let level = |l: u32| u64::from((SIZE / 2) >> l).pow(2);
@@ -248,7 +248,7 @@ fn the_chains_targets_go_as_the_world_rests() {
     let chain = world.temporary_bytes();
     let bloom = chain - pixels * (4 * (8 + 4) + 8);
     assert!(
-        [4 * steps, 8 * steps, 8 * (steps + up)].contains(&bloom),
+        [4 * (steps + up), 8 * (steps + up)].contains(&bloom),
         "{chain}: bloom {bloom}"
     );
     window.gpu.trim();

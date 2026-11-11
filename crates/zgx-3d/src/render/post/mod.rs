@@ -86,8 +86,11 @@ struct Binds {
     /// The scene, read by bloom's first step (none where the last pass
     /// resolves the samples itself).
     scene: Option<wgpu::BindGroup>,
-    /// Each of bloom's steps, read by the next step down and the one up.
+    /// Each of bloom's steps, read by the next step down.
     steps: Vec<wgpu::BindGroup>,
+    /// Each step up's, from the last but one up to the second: the next
+    /// step (its up, or the last's down) and its own down.
+    ups: Vec<wgpu::BindGroup>,
     /// The scene and bloom's first step, read by the last pass.
     last: wgpu::BindGroup,
     /// The meshes' samples, where the chain resolves them.
@@ -98,6 +101,8 @@ struct Binds {
 pub(super) struct Chain {
     shader: wgpu::ShaderModule,
     step_layout: wgpu::BindGroupLayout,
+    /// A step up's: the next step, the sampler, its own step down.
+    up_layout: wgpu::BindGroupLayout,
     last_layout: wgpu::BindGroupLayout,
     /// The last pass's, reading the meshes' samples in place of the scene.
     last_samples_layout: wgpu::BindGroupLayout,
@@ -164,6 +169,10 @@ impl Chain {
         let step_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("3D bloom step"),
             entries: &[texture(0), sampler_entry(1)],
+        });
+        let up_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("3D bloom step up"),
+            entries: &[texture(0), sampler_entry(1), texture(2)],
         });
         let last_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("3D post, last"),
@@ -281,37 +290,30 @@ impl Chain {
             bind_group_layouts: &[Some(&step_layout)],
             immediate_size: 0,
         });
-        let step = |entry: &str, blend: Option<wgpu::BlendState>| {
+        let up_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("3D bloom step up"),
+            bind_group_layouts: &[Some(&up_layout)],
+            immediate_size: 0,
+        });
+        let step = |entry: &str, layout| {
             pipeline(
                 device,
                 (&shader, entry, &[]),
-                &step_pipeline_layout,
-                wgpu::ColorTargetState {
-                    format: bloom_format(device),
-                    blend,
-                    write_mask: wgpu::ColorWrites::ALL,
-                },
+                layout,
+                bloom_format(device).into(),
             )
         };
-        let add = wgpu::BlendComponent {
-            src_factor: wgpu::BlendFactor::One,
-            dst_factor: wgpu::BlendFactor::One,
-            operation: wgpu::BlendOperation::Add,
-        };
-        let (first, down) = (step("first", None), step("down", None));
+        let (first, down) = (
+            step("first", &step_pipeline_layout),
+            step("down", &step_pipeline_layout),
+        );
         let copy = pipeline(
             device,
             (&shader, "copy", &[]),
             &step_pipeline_layout,
             SCENE.into(),
         );
-        let up = step(
-            "up",
-            Some(wgpu::BlendState {
-                color: add,
-                alpha: add,
-            }),
-        );
+        let up = step("up", &up_pipeline_layout);
         let last_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("3D post, last"),
             bind_group_layouts: &[Some(&last_layout)],
@@ -342,6 +344,7 @@ impl Chain {
         Self {
             shader,
             step_layout,
+            up_layout,
             last_layout,
             last_samples_layout,
             last_samples_pipeline_layout,
@@ -543,12 +546,8 @@ impl Chain {
             // Bloom's first step, and the second (its tent up to the first
             // is the last pass's own).
             let glow = targets.bloom.first().unwrap_or(&self.stand_in);
-            // Its steps up added (in the up chain where they're dispatches).
-            let wider = match graph.bloom_compute() {
-                true => bloom::Compute::wider(graph),
-                false => targets.bloom.get(1),
-            };
-            let wider = wider.unwrap_or(&self.stand_in);
+            // Its steps up added (the up chain's first).
+            let wider = bloom::Compute::wider(graph).unwrap_or(&self.stand_in);
             let last = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("3D post, last"),
                 layout: drawn.1,
@@ -613,6 +612,7 @@ impl Chain {
                 bytes: graph.bytes(),
                 scene: scene.map(step),
                 steps: targets.bloom.iter().map(step).collect(),
+                ups: self.ups(device, graph),
                 last,
             });
         }
@@ -718,12 +718,48 @@ impl Chain {
                 _ => draw(encoder, &self.down, &binds.steps[at - 1], target, clear),
             }
         }
-        // Up to the second: the last pass adds the second's tent to the
-        // first as it reads them.
-        for at in (1..steps.len().saturating_sub(1)).rev() {
-            let load = wgpu::LoadOp::Load;
-            draw(encoder, &self.up, &binds.steps[at + 1], &steps[at], load);
+        // Up to the second, into the up chain: the last pass adds the
+        // second's tent to the first as it reads them.
+        let up = graph.targets.as_ref().map_or(&[][..], |t| &t.bloom_up[..]);
+        let ups = (1..steps.len().saturating_sub(1)).rev();
+        for (bind, at) in binds.ups.iter().zip(ups) {
+            draw(encoder, &self.up, bind, &up[at - 1], clear);
         }
+    }
+    /// Each step up's binding (`Binds::ups`), as `bloom::Compute` binds its
+    /// dispatches.
+    fn ups(&self, device: &wgpu::Device, graph: &Graph) -> Vec<wgpu::BindGroup> {
+        let Some(targets) = graph.targets.as_ref() else {
+            return Vec::new();
+        };
+        let (down, up) = (&targets.bloom, &targets.bloom_up);
+        (1..down.len().saturating_sub(1))
+            .rev()
+            .map(|at| {
+                let next = match at + 1 == down.len() - 1 {
+                    true => &down[at + 1],
+                    false => &up[at],
+                };
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("3D bloom step up"),
+                    layout: &self.up_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(next),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(&down[at]),
+                        },
+                    ],
+                })
+            })
+            .collect()
     }
 
     /// The last pass: the scene with `parts`, exposed and mapped as `look`

@@ -10,26 +10,26 @@
 // A step up's own step down.
 @group(0) @binding(3) var base: texture_2d<f32>;
 
-// The texel `id` of what's written, if it's one; its centre's place.
+// The texel `id` of what's written: its centre's place.
 fn uv_of(id: vec2<u32>) -> vec2<f32> {
-    return (vec2<f32>(id) + 0.5) / vec2<f32>(textureDimensions(out));
+    return centre(vec2<f32>(id) + 0.5, textureDimensions(out));
 }
 @compute @workgroup_size(8, 8) fn first(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= textureDimensions(out)) {
         return;
     }
-    textureStore(out, id.xy, vec4(boxes(source, linear, uv_of(id.xy), true), 1.0));
+    textureStore(out, id.xy, step_out(boxes(source, linear, uv_of(id.xy), true)));
 }
 @compute @workgroup_size(8, 8) fn down(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= textureDimensions(out)) {
         return;
     }
-    textureStore(out, id.xy, vec4(boxes(source, linear, uv_of(id.xy), false), 1.0));
+    textureStore(out, id.xy, step_out(boxes(source, linear, uv_of(id.xy), false)));
 }
 @compute @workgroup_size(8, 8) fn up(@builtin(global_invocation_id) id: vec3<u32>) {
     if any(id.xy >= textureDimensions(out)) {
         return;
     }
     let own = textureLoad(base, vec2<i32>(id.xy), 0).rgb;
-    textureStore(out, id.xy, vec4(own + tent(source, linear, uv_of(id.xy)), 1.0));
+    textureStore(out, id.xy, step_out(own + tent(source, linear, uv_of(id.xy))));
 }

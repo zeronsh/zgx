@@ -13,16 +13,25 @@ struct Out {
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var linear: sampler;
 
+// A step up's own step down.
+@group(0) @binding(2) var base: texture_2d<f32>;
+// Each step's texel centre, and what it writes, as `bloom.wgsl`'s dispatches
+// have them (`centre`, `step_out`): a pixel's position is its texel's
+// index and a half exactly, and a step down is half the one before.
 @fragment fn first(in: Out) -> @location(0) vec4<f32> {
-    return vec4(boxes(source, linear, in.uv, true), 1.0);
+    let size = max(textureDimensions(source) / 2u, vec2(1u));
+    return step_out(boxes(source, linear, centre(in.position.xy, size), true));
 }
 @fragment fn down(in: Out) -> @location(0) vec4<f32> {
-    return vec4(boxes(source, linear, in.uv, false), 1.0);
+    let size = max(textureDimensions(source) / 2u, vec2(1u));
+    return step_out(boxes(source, linear, centre(in.position.xy, size), false));
 }
-// The step after, blurred by a 3 by 3 tent, added to this one (by the
-// pipeline's blending).
+// The step after, blurred by a 3 by 3 tent, added to this one's own down,
+// into a chain of its own (no blending: the dispatches' sums, to the bit).
 @fragment fn up(in: Out) -> @location(0) vec4<f32> {
-    return vec4(tent(source, linear, in.uv), 1.0);
+    let own = textureLoad(base, vec2<i32>(in.position.xy), 0).rgb;
+    let size = textureDimensions(base);
+    return step_out(own + tent(source, linear, centre(in.position.xy, size)));
 }
 
 // The last pass.

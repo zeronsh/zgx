@@ -46,6 +46,16 @@ fn boxes(t: texture_2d<f32>, s: sampler, uv: vec2<f32>, karis: bool) -> vec3<f32
     let sum = centre * middle + corners[0] * weights.x + corners[1] * weights.y + corners[2] * weights.z + corners[3] * weights.w;
     return sum / (middle + weights.x + weights.y + weights.z + weights.w);
 }
+// The centre of the texel at `at` (its index and a half) of a step `size`
+// large, as a place in it.
+fn centre(at: vec2<f32>, size: vec2<u32>) -> vec2<f32> {
+    return at / vec2<f32>(size);
+}
+// A step's texel as written: rounded to half floats here, so a render
+// target's conversion and a storage write's have nothing left to round.
+fn step_out(c: vec3<f32>) -> vec4<f32> {
+    return vec4(quantizeToF16(c), 1.0);
+}
 // `t` blurred by a 3 by 3 tent at `uv`.
 fn tent(t: texture_2d<f32>, s: sampler, uv: vec2<f32>) -> vec3<f32> {
     let edges = tap(t, s, uv, -1.0, 0.0) + tap(t, s, uv, 1.0, 0.0) + tap(t, s, uv, 0.0, -1.0) + tap(t, s, uv, 0.0, 1.0);
