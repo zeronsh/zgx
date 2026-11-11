@@ -215,6 +215,28 @@ fn response(fft: &Fft, rate: u32, incidence: f64) -> Vec<f32> {
     spectrum.iter().map(|z| z[0] / n as f32).collect()
 }
 
+/// The spherical head at each rate something hears through it, made once
+/// and shared: held weakly, so the last one dropped frees it. Locked only
+/// off the audio thread, making or preparing an effect.
+static SPHERICAL: std::sync::Mutex<Vec<(u32, std::sync::Weak<HrtfSet>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The spherical head at `rate`, shared.
+fn spherical_head(rate: u32) -> Arc<HrtfSet> {
+    let mut made = SPHERICAL.lock().unwrap_or_else(|e| e.into_inner());
+    made.retain(|(_, set)| set.strong_count() > 0);
+    if let Some(set) = made
+        .iter()
+        .find(|(r, _)| *r == rate)
+        .and_then(|(_, s)| s.upgrade())
+    {
+        return set;
+    }
+    let set = Arc::new(HrtfSet::spherical_head(rate));
+    made.push((rate, Arc::downgrade(&set)));
+    set
+}
+
 /// A direction from azimuth (degrees, 0 ahead, positive to the right) and
 /// elevation (degrees up).
 fn toward(azimuth: f32, elevation: f32) -> Vec3 {
@@ -246,10 +268,11 @@ pub struct Binaural {
     params: [Parameter; 2],
     fft: Option<Fft>,
     partitions: usize,
-    /// The output's rate, and the set's responses at it (resampled in
-    /// `prepare`).
+    /// The output's rate, and the set's responses at it when they had to
+    /// be resampled (`prepare`); at the set's own rate, they're read where
+    /// they lie.
     rate: u32,
-    responses: Vec<f32>,
+    resampled: Option<Vec<f32>>,
     taps: usize,
     /// The direction now and before, and their filters; and the azimuth
     /// and elevation it was found for, so a still one isn't sought again.
@@ -287,7 +310,7 @@ impl Binaural {
             ],
             fft: None,
             partitions: 0,
-            responses: Vec::new(),
+            resampled: None,
             taps: 0,
             direction: None,
             facing: [f32::NAN; 2],
@@ -309,7 +332,7 @@ impl Binaural {
     /// head's size and shadow give, without outer ears, so elevation is
     /// weak. From straight ahead.
     pub fn spherical() -> Binaural {
-        let mut binaural = Binaural::new(Arc::new(HrtfSet::spherical_head(48_000)));
+        let mut binaural = Binaural::new(spherical_head(48_000));
         binaural.model = true;
         binaural
     }
@@ -326,7 +349,11 @@ impl Binaural {
         let (n, taps) = (BLOCK * 2, self.taps);
         let fft = self.fft.as_ref().expect("prepared");
         let pair = direction * taps * 2;
-        let (left, right) = self.responses[pair..pair + taps * 2].split_at(taps);
+        let responses: &[f32] = match &self.resampled {
+            Some(resampled) => resampled,
+            None => &self.set.responses,
+        };
+        let (left, right) = responses[pair..pair + taps * 2].split_at(taps);
         for p in 0..self.partitions {
             let spectrum = &mut self.filter.spectra[p * n..(p + 1) * n];
             spectrum.fill([0.; 2]);
@@ -423,7 +450,7 @@ impl Effect for Binaural {
         // transpose, a triangle wide enough to take what would alias).
         self.rate = format.rate.max(1);
         if self.model && self.set.rate != self.rate {
-            self.set = Arc::new(HrtfSet::spherical_head(self.rate));
+            self.set = spherical_head(self.rate);
         }
         let ratio = f64::from(self.set.rate) / f64::from(self.rate);
         let taps = if self.set.rate == self.rate {
@@ -432,13 +459,16 @@ impl Effect for Binaural {
             ((self.set.taps - 1) as f64 / ratio).floor() as usize + 2
         };
         self.taps = taps;
-        self.responses = vec![0.; self.set.directions.len() * taps * 2];
-        for (d, out) in self.responses.chunks_exact_mut(taps * 2).enumerate() {
+        self.resampled = (ratio != 1.).then(|| vec![0.; self.set.directions.len() * taps * 2]);
+        for (d, out) in self
+            .resampled
+            .iter_mut()
+            .flat_map(|r| r.chunks_exact_mut(taps * 2))
+            .enumerate()
+        {
             let (l, r) = self.set.pair(d);
             for (response, out) in [l, r].into_iter().zip(out.chunks_exact_mut(taps)) {
-                if ratio == 1. {
-                    out.copy_from_slice(response);
-                } else if ratio < 1. {
+                if ratio < 1. {
                     for (i, o) in out.iter_mut().enumerate() {
                         let at = i as f64 * ratio;
                         let (j, t) = (at as usize, (at - at.floor()) as f32);
