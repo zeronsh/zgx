@@ -92,6 +92,10 @@ pub(super) struct Binned {
     /// The lights the camera may see: index, view-space centre, radius,
     /// and how far from the camera, squared (their order).
     visible: Vec<(u32, Vec3, f32, f32)>,
+    /// A visible spot's cone in view space, by its index in `visible`
+    /// (`None` for a point light): apex, aim, its edge's cosine and sine,
+    /// its reach.
+    cones: Vec<Option<Cone>>,
     /// Each cluster's room in `indices`, while filling it.
     room: Vec<u32>,
 }
@@ -132,6 +136,114 @@ fn tiles(grid: &Grid, centre: Vec3, radius: f32, (z0, z1): (f32, f32)) -> Option
     ])
 }
 
+/// The cosine of the widest a spot's cone is tested cluster by cluster
+/// (`Cone::of`): 30°.
+const NARROW: f32 = 0.866_025_4;
+
+/// A spot's cone in view space (`Binned::cones`).
+#[derive(Clone, Copy)]
+struct Cone {
+    apex: Vec3,
+    aim: Vec3,
+    cos: f32,
+    sin: f32,
+    range: f32,
+}
+impl Cone {
+    /// Of light `l`, seen through `view`, if it's a spot of 30° or less each
+    /// way: for those the cone's bounding sphere (`bounds`) holds far more
+    /// than the cone, and testing each cluster against the cone pays; for
+    /// wider ones it hardly does (256 floods 40° each way: 6,121 listings
+    /// by the sphere, 5,118 by the cone, for 2.8 times the binning).
+    fn of(view: &Mat4, l: &Packed) -> Option<Self> {
+        let at = Vec3::from([l[0][0], l[0][1], l[0][2]]);
+        let aim = Vec3::from([l[2][0], l[2][1], l[2][2]]);
+        let scale = aim.length();
+        if scale <= 0. || !scale.is_finite() {
+            return None;
+        }
+        let cos = -l[2][3] / scale;
+        if cos.is_nan() || cos < NARROW {
+            return None;
+        }
+        let apex = view.project(at);
+        Some(Self {
+            apex,
+            aim: (view.project(at + aim * (1. / scale)) - apex).normalized(),
+            cos,
+            sin: (1. - cos * cos).max(0.).sqrt(),
+            range: l[0][3],
+        })
+    }
+    /// Whether it may reach into the sphere `(centre, radius)` (Wronski,
+    /// "Cull that cone": past its edge, before its apex or past its reach,
+    /// it can't).
+    fn meets(&self, centre: Vec3, radius: f32) -> bool {
+        let v = centre - self.apex;
+        let along = v.dot(self.aim);
+        let across = (v.dot(v) - along * along).max(0.).sqrt();
+        let off = self.cos * across - along * self.sin;
+        !(off > radius || along > radius + self.range || along < -radius)
+    }
+}
+
+/// The sphere holding what light `l` reaches, in the world: a point's
+/// reach all round; a spot's, the sector of it its cone takes, whose
+/// bounding sphere is smaller and lies along its aim (through its apex and
+/// its rim up to 45° each way; about its base's circle past that; all
+/// round past 90°).
+pub(super) fn bounds(l: &Packed) -> (Vec3, f32) {
+    let ([x, y, z, range], [ax, ay, az, w]) = (l[0], l[2]);
+    let at = Vec3::from([x, y, z]);
+    let aim = Vec3::from([ax, ay, az]);
+    let scale = aim.length();
+    if scale <= 0. || !scale.is_finite() {
+        return (at, range);
+    }
+    // The packed cone holds its aim times a scale, and minus its outer
+    // edge's cosine times the same.
+    let (dir, cos) = (aim * (1. / scale), -w / scale);
+    if cos.is_nan() || cos <= 0. {
+        return (at, range);
+    }
+    let sin = (1. - cos * cos).max(0.).sqrt();
+    if cos >= std::f32::consts::FRAC_1_SQRT_2 {
+        let r = range / (2. * cos);
+        (at + dir * r, r.min(range))
+    } else {
+        (at + dir * (range * cos), range * sin)
+    }
+}
+
+/// The sphere about cluster `(x, y)` of the slab `(z0, z1)`, in view space:
+/// its eight corners' middle and the farthest of them.
+fn cluster_sphere(grid: &Grid, (z0, z1): (f32, f32), x: u32, y: u32) -> (Vec3, f32) {
+    let ndc = |t: u32, n: u32| t as f32 / n as f32 * 2. - 1.;
+    let (nx0, nx1) = (ndc(x, TILES_X), ndc(x + 1, TILES_X));
+    let (ny0, ny1) = (-ndc(y + 1, TILES_Y), -ndc(y, TILES_Y));
+    let [sx, sy] = grid.scale;
+    let corner = |nx: f32, ny: f32, d: f32| {
+        let k = if grid.orthographic { 1. } else { d };
+        Vec3::from([nx * k / sx, ny * k / sy, -d])
+    };
+    let corners = [
+        corner(nx0, ny0, z0),
+        corner(nx1, ny0, z0),
+        corner(nx0, ny1, z0),
+        corner(nx1, ny1, z0),
+        corner(nx0, ny0, z1),
+        corner(nx1, ny0, z1),
+        corner(nx0, ny1, z1),
+        corner(nx1, ny1, z1),
+    ];
+    let centre = corners.iter().fold(Vec3::ZERO, |sum, c| sum + *c) * (1. / 8.);
+    let radius = corners
+        .iter()
+        .map(|c| (*c - centre).length())
+        .fold(0., f32::max);
+    (centre, radius)
+}
+
 impl Binned {
     /// Bins `lights` (in the world's frame) for the camera `view` with
     /// projection scales and slicing as `grid` says, its `near` and `far`
@@ -145,9 +257,10 @@ impl Binned {
         // first, `MAX_LIGHTS` at most.
         let visible = &mut self.visible;
         visible.clear();
-        for (light, [at, ..]) in lights.iter().enumerate() {
-            let centre = view.project(Vec3::from([at[0], at[1], at[2]]));
-            let (radius, depth) = (at[3], -centre.z);
+        for (light, l) in lights.iter().enumerate() {
+            let (centre, radius) = bounds(l);
+            let centre = view.project(centre);
+            let depth = -centre.z;
             let reach = (
                 (depth - radius).max(grid.near),
                 (depth + radius).min(grid.far),
@@ -171,6 +284,9 @@ impl Binned {
         self.shown.clear();
         self.shown
             .extend(visible.iter().map(|&(light, ..)| lights[light as usize]));
+        self.cones.clear();
+        self.cones
+            .extend(self.shown.iter().map(|l| Cone::of(view, l)));
         // The depths they reach: the grid's slices span those alone.
         let (mut near, mut far) = (f32::MAX, f32::MIN);
         for &(_, centre, radius, _) in visible.iter() {
@@ -210,12 +326,37 @@ impl Binned {
                     continue;
                 };
                 let [x0, x1, y0, y1] = rect;
+                let Some(cone) = self.cones[light as usize] else {
+                    for y in y0..=y1 {
+                        for cluster in &mut counts[at(x0, y, z)..=at(x1, y, z)] {
+                            cluster[1] += 1;
+                        }
+                    }
+                    self.spans.push((light, z, rect));
+                    continue;
+                };
+                // A spot: each cluster of the rectangle its cone may reach
+                // (by the cluster's bounding sphere), in runs along rows.
                 for y in y0..=y1 {
-                    for cluster in &mut counts[at(x0, y, z)..=at(x1, y, z)] {
-                        cluster[1] += 1;
+                    let mut run: Option<u32> = None;
+                    for x in x0..=x1 + 1 {
+                        let meets = x <= x1 && {
+                            let (centre, r) = cluster_sphere(&grid, slab, x, y);
+                            cone.meets(centre, r)
+                        };
+                        match (meets, run) {
+                            (true, None) => run = Some(x),
+                            (false, Some(from)) => {
+                                for cluster in &mut counts[at(from, y, z)..=at(x - 1, y, z)] {
+                                    cluster[1] += 1;
+                                }
+                                self.spans.push((light, z, [from, x - 1, y, y]));
+                                run = None;
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                self.spans.push((light, z, rect));
             }
         }
         // Each cluster's first index and its room (its count, at most
@@ -285,8 +426,39 @@ mod tests {
         [[p.x, p.y, p.z, range], [1.; 4], [0., 0., 0., 1.]]
     }
 
+    /// A spot at `p` reaching `range` along `dir`, fading to nothing at
+    /// `outer` radians, packed as `gather` packs one.
+    fn spot(p: Vec3, range: f32, dir: Vec3, outer: f32) -> Packed {
+        let (inner, outer) = ((outer * 0.7).cos(), outer.cos());
+        let scale = 1. / (inner - outer).max(1e-3);
+        let d = dir.normalized() * scale;
+        [
+            [p.x, p.y, p.z, range],
+            [1.; 4],
+            [d.x, d.y, d.z, -outer * scale],
+        ]
+    }
+
+    /// Whether a point `q` in view space is lit by `l`: within its reach
+    /// and, a spot, within its cone.
+    fn lit_by(view: &Mat4, l: &Packed, q: Vec3) -> bool {
+        let apex = view.project(vec3(l[0][0], l[0][1], l[0][2]));
+        let to = q - apex;
+        if to.length() >= l[0][3] * 0.999 {
+            return false;
+        }
+        let aim = vec3(l[2][0], l[2][1], l[2][2]);
+        let scale = aim.length();
+        if scale == 0. {
+            return true;
+        }
+        let world = vec3(l[0][0], l[0][1], l[0][2]);
+        let dir = (view.project(world + aim * (1. / scale)) - apex).normalized();
+        to.normalized().dot(dir) > -l[2][3] / scale + 1e-3
+    }
+
     /// Lights scattered about, some behind the camera and some past the
-    /// screen's sides.
+    /// screen's sides: points, and as many spots each way, wide and narrow.
     fn scattered(n: usize) -> Vec<Packed> {
         let mut state = 12345u32;
         let mut next = || {
@@ -298,15 +470,21 @@ mod tests {
         (0..n)
             .map(|_| {
                 let p = vec3(-30. + 60. * next(), -5. + 10. * next(), -50. + 60. * next());
-                light(p, 0.5 + 6. * next())
+                let range = 0.5 + 6. * next();
+                if next() < 0.5 {
+                    light(p, range)
+                } else {
+                    let dir = vec3(next() - 0.5, next() - 0.5, next() - 0.5);
+                    spot(p, range, dir, 0.15 + 1.6 * next())
+                }
             })
             .collect()
     }
 
-    /// Whether the sphere `(centre, radius)` (view space) meets the part of
-    /// the view cluster `(x, y, z)` holds, sampled: points through the
-    /// cluster's volume, by its tiles' pixels and its slice's depths.
-    fn touches(grid: &Grid, (centre, radius): (Vec3, f32), (x, y, z): (u32, u32, u32)) -> bool {
+    /// Whether a point of the view cluster `(x, y, z)` is `inside`, sampled:
+    /// points through the cluster's volume, by its tiles' pixels and its
+    /// slice's depths.
+    fn touches(grid: &Grid, inside: impl Fn(Vec3) -> bool, (x, y, z): (u32, u32, u32)) -> bool {
         let steps = 6;
         let (z0, z1) = (grid.depth_of(z), grid.depth_of(z + 1));
         for i in 0..=steps {
@@ -323,7 +501,7 @@ mod tests {
                         (nx * depth / grid.scale[0], ny * depth / grid.scale[1])
                     };
                     let p = vec3(px, py, -depth);
-                    if (p - centre).length() < radius * 0.999 {
+                    if inside(p) {
                         return true;
                     }
                 }
@@ -360,8 +538,7 @@ mod tests {
                             .collect();
                         listed += list.len();
                         for (i, l) in lights.iter().enumerate() {
-                            let centre = view.project(vec3(l[0][0], l[0][1], l[0][2]));
-                            if touches(&grid, (centre, l[0][3]), (x, y, z)) {
+                            if touches(&grid, |q| lit_by(&view, l, q), (x, y, z)) {
                                 assert!(
                                     list.contains(&(i as u32)),
                                     "light {i} reaches cluster {x} {y} {z} (orthographic: {orthographic})"
@@ -400,6 +577,32 @@ mod tests {
         }
         // The 40 farthest, left out of every cluster.
         assert_eq!(binned.dropped as usize, 40 * CLUSTERS);
+    }
+
+    #[test]
+    fn a_narrow_spot_is_listed_where_its_cone_reaches_not_all_round() {
+        let camera = Camera::looking_at([0., 6., 12.], [0., 0., 0.]);
+        // Its listings, the grid's depths held by two small lights near and
+        // far (one light alone would have the slices fit it).
+        let count = |l: Packed| {
+            let anchors = [light(vec3(0., 5., 9.), 0.5), light(vec3(0., 0., -30.), 0.5)];
+            let mut binned = Binned::default();
+            binned.bin(
+                &camera.view(),
+                grid(&camera, 16. / 9.),
+                &[l, anchors[0], anchors[1]],
+            );
+            let at = binned.shown.iter().position(|s| *s == l).unwrap() as u32;
+            binned.indices.iter().filter(|i| **i == at).count()
+        };
+        let at = vec3(0., 8., 0.);
+        let point = count(light(at, 10.));
+        // Straight down, 20° each way: its light falls on a disc under it.
+        let narrow = count(spot(at, 10., vec3(0., -1., 0.), 0.35));
+        assert!(
+            narrow * 3 < point,
+            "the spot in {narrow} clusters, the point in {point}"
+        );
     }
 
     #[test]
@@ -442,7 +645,16 @@ mod tests {
                     (state % 10_000) as f32 / 10_000.
                 };
                 let p = vec3(-40. + 130. * next(), 1. + 5. * next(), -60. + 130. * next());
-                light(p, 8.)
+                // `BIN_SPOTS=1`: as many floods shining down, 40° each way.
+                if std::env::var("BIN_SPOTS").is_ok_and(|v| v == "1") {
+                    let outer = std::env::var("BIN_OUTER")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0.7);
+                    spot(p + vec3(0., 6., 0.), 12., vec3(0., -1., 0.), outer)
+                } else {
+                    light(p, 8.)
+                }
             })
             .collect();
         let mut binned = Binned::default();

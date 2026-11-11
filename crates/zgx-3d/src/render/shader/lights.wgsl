@@ -48,12 +48,15 @@
 //X     if d2 >= r2 {
 //X         return Lamp(vec3(0.0), vec3(0.0), 0.0, 0.0);
 //X     }
-//X     let shine = bitcast<vec4<f32>>(clusters[at + 1u]);
 //X     let aim = bitcast<vec4<f32>>(clusters[at + 2u]);
 //X     let distance = max(sqrt(d2), 1e-4);
 //X     let l = to / distance;
-//X     // Within a spot's cone (all round: 1).
+//X     // Within a spot's cone (all round: 1); outside it, nothing more read.
 //X     let cone = clamp(dot(aim.xyz, -l) + aim.w, 0.0, 1.0);
+//X     if cone <= 0.0 {
+//X         return Lamp(vec3(0.0), vec3(0.0), 0.0, 0.0);
+//X     }
+//X     let shine = bitcast<vec4<f32>>(clusters[at + 1u]);
 //X     let radius = shine.w;
 //X     // Falling as the square of the distance, from a sphere of its radius
 //X     // (bounded where it nearly touches), smoothly to nothing at its reach:
