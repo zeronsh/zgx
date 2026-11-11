@@ -645,7 +645,7 @@ impl Parse {
                     let size = *shared.size.lock().unwrap();
                     let cell = (size.cell_width, size.cell_height);
                     if let Some(answer) = graphics.command(&command, term, cell, &shared.images) {
-                        shared.asked(Answer::Bytes(answer.into()));
+                        shared.asked(Answer::Bytes(answer));
                     }
                     return;
                 }
