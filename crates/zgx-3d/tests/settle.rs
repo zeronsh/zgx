@@ -163,19 +163,13 @@ fn temporal_antialiasing_turned_off_while_it_gathers() {
 #[test]
 fn probes_removed_while_they_converge() {
     rests("probes", |world, _, window| {
+        // Drawn as faces (no ray queries needed), so every device holds it:
+        // the row never skips.
+        world.set_probes_rasterised(true);
         let probes = world
             .add_probes(ProbeVolume::new([-2., 0.05, -2.], [2., 2., 2.], [6, 6, 6]).per_frame(8))
             .unwrap();
         window.draw(world);
-        window.draw(world);
-        // Traced, or drawn as faces where the device has no ray queries
-        // (this file asks for none).
-        if !matches!(
-            world.probes_status(),
-            ProbesStatus::Traced | ProbesStatus::Rasterised
-        ) {
-            return None;
-        }
         Some(Box::new(move |world| world.remove_probes(probes)))
     });
 }
