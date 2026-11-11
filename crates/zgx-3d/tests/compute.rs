@@ -15,20 +15,24 @@ struct Window {
 }
 impl Window {
     fn new(world: &World) -> Option<Self> {
-        let gpu = match GpuRenderer::new(32, 32) {
+        Self::with_boxes(world, 1)
+    }
+    /// With the world's view shown in `boxes` boxes side by side.
+    fn with_boxes(world: &World, boxes: usize) -> Option<Self> {
+        let gpu = match GpuRenderer::new(32 * boxes as u32, 32) {
             Ok(gpu) => gpu,
             Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
                 panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
             }
             Err(_) => return None,
         };
-        let mut ui = Ui::new(32., 32.);
-        ui.mount(
-            div()
-                .size(32., 32.)
-                .bg(Color(0, 0, 0, 255))
-                .child(gpu_view("World", world.view()).size(32., 32.)),
-        );
+        let width = 32. * boxes as f32;
+        let mut ui = Ui::new(width, 32.);
+        let mut row = div().size(width, 32.).bg(Color(0, 0, 0, 255)).flex_row();
+        for _ in 0..boxes {
+            row = row.child(gpu_view("World", world.view()).size(32., 32.));
+        }
+        ui.mount(row);
         Some(Self {
             ui,
             gpu,
@@ -1564,4 +1568,42 @@ fn two_viewports_of_one_world_share_its_gpu_data_and_step_it_once_a_frame() {
     let count = counting(&world, &mut frames, &mut [&mut first, &mut second], 1);
     let shared = count_after(&count, &mut frames, &mut [&mut first, &mut second], 1);
     assert_eq!(shared, once, "two painters, as one");
+}
+
+/// Through a real renderer, which stamps each window frame's time itself:
+/// a world's view in two boxes runs its every-frame pass once a frame.
+#[test]
+fn a_world_shown_in_two_boxes_of_a_window_runs_its_passes_once_a_window_frame() {
+    let world = World::new();
+    let Some(mut window) = Window::with_boxes(&world, 2) else {
+        return;
+    };
+    let count = world.add_buffer(BufferDesc::storage::<u32>(1)).unwrap();
+    let pass = world
+        .add_compute(
+            Compute::new(
+                "@group(0) @binding(0) var<storage, read_write> count: array<u32>;
+                 @compute @workgroup_size(1) fn main() { count[0] += 1u; }",
+            )
+            .buffer("count", &count, Access::ReadWrite)
+            .every_frame(),
+        )
+        .unwrap();
+    window.compiled(&world, pass);
+    count.write(0, &[0u32]).unwrap();
+    let rendered = world.frames_drawn();
+    for _ in 0..20 {
+        window.draw();
+    }
+    // Each window frame rendered the view twice.
+    assert_eq!(world.frames_drawn() - rendered, 40, "two boxes");
+    let read = count.read(0..4);
+    let more = window.until(&read, 100) as u32;
+    let runs = words(&read.try_take().unwrap().unwrap())[0];
+    // A run a window frame (the read copied within the frames after).
+    assert!(
+        (20..=20 + more).contains(&runs),
+        "{runs} runs in {} window frames",
+        20 + more
+    );
 }
