@@ -10,7 +10,7 @@
 //! rebuilt into a structure a frame) and meshes light passes through.
 //! Textures aren't read at a hit: a mesh's colour is its material's.
 use crate::world::Drawn;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use zgx_gpu::wgpu::{self, util::DeviceExt};
 
 /// A mesh as a ray finds it (`RayInstance` in `probes_trace.wgsl`).
@@ -40,7 +40,8 @@ struct Entry {
 pub(super) struct Scene {
     /// The world's meshes it holds (`Inner::meshes`); `None` before any.
     pub(super) meshes: Option<u64>,
-    geometries: HashMap<u64, Entry>,
+    /// By geometry id, so structures build in the same order every run.
+    geometries: BTreeMap<u64, Entry>,
     /// Every geometry's `Vertex`es and indices, one after another.
     pub(super) vertices: wgpu::Buffer,
     pub(super) indices: wgpu::Buffer,
@@ -147,7 +148,7 @@ impl Scene {
         let capacity = 64;
         Self {
             meshes: None,
-            geometries: HashMap::new(),
+            geometries: BTreeMap::new(),
             vertices: storage(device, "3D ray vertices", &[]),
             indices: storage(device, "3D ray indices", &[]),
             tlas: tlas(device, capacity),
