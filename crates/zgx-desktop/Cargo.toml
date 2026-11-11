@@ -51,6 +51,9 @@ webview2 = ["dep:webview2-com", "zgx-gpu/composition", "windows/Win32_Graphics_D
 # (libwebkit2gtk-4.1-0) is opened at run time: building needs none of it,
 # and where it is missing pages are placeholders.
 webkitgtk = []
+# What GPU views' painters may ask of the device (zgx-gpu's `view-features`:
+# `request_view_features` re-exported). zgx-3d turns zgx-gpu's on itself.
+view-features = ["zgx-gpu/view-features"]
 # Sound (zgx-audio on the system's output): one engine for the app, made
 # when first asked for (`WindowFactory::audio`), voices ending waking the
 # event loop, and the `ui` bus following the user's interface-sound setting.

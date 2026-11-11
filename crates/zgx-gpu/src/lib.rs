@@ -3800,10 +3800,17 @@ const POWER: wgpu::PowerPreference = wgpu::PowerPreference::LowPower;
 /// even where there is a GPU (WARP on Windows, for both Direct3D 12 and
 /// 11), as a machine without one draws: to run CI's software lines, or
 /// bless a software family of goldens, on a machine with a GPU. Linux takes
-/// a software Vulkan driver; macOS has none for Metal, so there the renderer
-/// fails to start. Read when a device is made, never per frame.
+/// a software Vulkan driver. Read when a device is made, never per frame.
+/// macOS has no software adapter for Metal: there it isn't read (the GPU
+/// draws), and UI apps carry none of it.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn fallback_adapter_forced() -> bool {
     std::env::var_os("WGPU_FORCE_FALLBACK_ADAPTER").is_some_and(|value| value == "1")
+}
+#[cfg(target_os = "macos")]
+#[inline(always)]
+pub(crate) fn fallback_adapter_forced() -> bool {
+    false
 }
 /// The adapter DXGI ranks first for `POWER`, a GPU before software, with a
 /// device opened on it alone (none when Direct3D 12 isn't the instance's
@@ -4040,6 +4047,10 @@ impl GpuContext {
             })
             .collect();
         let fallback = fallback_adapter_forced();
+        // Direct3D 12 through FXC, which compiles no ray queries
+        // (`ray_queries_status`).
+        #[cfg(feature = "view-features")]
+        let mut fxc = false;
         let mut found = Err(GpuError("no graphics backend".into()));
         for (backends, compiler) in attempts {
             let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
@@ -4117,16 +4128,17 @@ impl GpuContext {
                     _ => Ok(adapter),
                 });
             let areas = areas_on_gpu(backends, &compiler);
-            // Direct3D 12 through FXC, which compiles no ray queries
-            // (`ray_queries_status`).
-            let fxc =
-                backends == wgpu::Backends::DX12 && matches!(compiler, wgpu::Dx12Compiler::Fxc);
-            found = adapter.map(|adapter| (instance, adapter, areas, fxc));
+            #[cfg(feature = "view-features")]
+            {
+                fxc =
+                    backends == wgpu::Backends::DX12 && matches!(compiler, wgpu::Dx12Compiler::Fxc);
+            }
+            found = adapter.map(|adapter| (instance, adapter, areas));
             if found.is_ok() {
                 break;
             }
         }
-        let (instance, adapter, areas, fxc) = found?;
+        let (instance, adapter, areas) = found?;
         let info = adapter.get_info();
         // CPU-written vertex buffers avoid a GPU copy per frame; only worth it
         // where CPU and GPU share memory.
@@ -4148,17 +4160,22 @@ impl GpuContext {
         zgx::profile::mark("GPU adapter");
         // Ray queries, where asked for (`request_ray_queries`) and the
         // adapter has them: wgpu marks them experimental.
-        let requested = RAY_QUERIES.load(std::sync::atomic::Ordering::Relaxed);
-        let ray_queries = requested
-            && adapter
-                .features()
-                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-        RAY_QUERY_STATUS.store(
-            RayQueries::of(requested, ray_queries, fxc) as u8,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        #[cfg(feature = "view-features")]
+        let ray_queries = {
+            let requested = RAY_QUERIES.load(std::sync::atomic::Ordering::Relaxed);
+            let ray_queries = requested
+                && adapter
+                    .features()
+                    .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+            RAY_QUERY_STATUS.store(
+                RayQueries::of(requested, ray_queries, fxc) as u8,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            ray_queries
+        };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("zgx shared device"),
+            #[cfg(feature = "view-features")]
             required_features: if ray_queries {
                 wgpu::Features::EXPERIMENTAL_RAY_QUERY
             } else {
@@ -4169,11 +4186,10 @@ impl GpuContext {
                 wgpu::Features::empty()
             } | (adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING)
                 // What GPU views' painters use where they can, where asked
-                // for (`request_view_features`): none, if not.
+                // for (`request_view_features`): none, if not; and half the
+                // bytes of a float target where alpha isn't needed (3D
+                // bloom's steps), where the GPU draws into it.
                 | view_features(&adapter.features())
-                // Half the bytes of a float target where alpha isn't needed
-                // (3D bloom's steps), where the GPU draws into it.
-                | (adapter.features() & wgpu::Features::RG11B10UFLOAT_RENDERABLE)
                 // An app's shaders' bytecode, compiled by FXC elsewhere
                 // (`app_fragment`).
                 | if info.backend == wgpu::Backend::Dx12 {
@@ -4181,6 +4197,7 @@ impl GpuContext {
                 } else {
                     wgpu::Features::empty()
                 },
+            #[cfg(feature = "view-features")]
             required_limits: wgpu::Limits {
                 // Direct3D 12 makes its shader-visible view heap this large, in
                 // write-combined memory: 30 MiB at the default million, 2 MiB
@@ -4202,9 +4219,35 @@ impl GpuContext {
                     Default::default()
                 }
             },
+            // Without GPU views' extras (`view-features` off), as it was.
+            #[cfg(not(feature = "view-features"))]
+            required_features: if vertex_ring {
+                wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
+            } else {
+                wgpu::Features::empty()
+            } | (adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING)
+                | if info.backend == wgpu::Backend::Dx12 {
+                    adapter.features() & wgpu::Features::PASSTHROUGH_SHADERS
+                } else {
+                    wgpu::Features::empty()
+                },
+            #[cfg(not(feature = "view-features"))]
+            required_limits: wgpu::Limits {
+                max_non_sampler_bindings: if cfg!(windows) {
+                    1 << 16
+                } else {
+                    wgpu::Limits::default().max_non_sampler_bindings
+                },
+                ..if info.backend == wgpu::Backend::Gl {
+                    wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits())
+                } else {
+                    Default::default()
+                }
+            },
             memory_hints: wgpu::MemoryHints::MemoryUsage,
             // SAFETY: the app took on wgpu's experimental contract in its
             // own `unsafe` call of `request_ray_queries`.
+            #[cfg(feature = "view-features")]
             experimental_features: if ray_queries {
                 unsafe { wgpu::ExperimentalFeatures::enabled() }
             } else {
@@ -6685,9 +6728,13 @@ impl GpuRenderer {
     fn retain_views(&mut self) {
         if let Some(views) = &mut self.views {
             let images = &self.images;
+            #[cfg(feature = "view-features")]
+            let boxes = views.boxes();
+            views.retain_cached(|image| images.contains_key(&image));
             // Boxes gone: views no box shows any more rest.
-            if views.retain_cached(|image| images.contains_key(&image)) {
-                self.rest_boxless();
+            #[cfg(feature = "view-features")]
+            if views.boxes() != boxes {
+                self.rest_painted(false);
             }
         }
     }
@@ -15712,7 +15759,8 @@ impl GpuRenderer {
         }
         self.retain_views();
         // Views let go of what only their frames need.
-        self.rest_views();
+        #[cfg(feature = "view-features")]
+        self.rest_painted(true);
         // Idle: only the shown surface is needed; the next frame makes another.
         #[cfg(target_os = "macos")]
         if let Some(present) = &mut self.layer_present
@@ -18129,11 +18177,14 @@ fn quad_pipeline(
 /// instance's `DEBUG`): an app's shaders then compile in a child.
 #[cfg(windows)]
 static APP_SHADER_FXC: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+#[cfg(feature = "view-features")]
 /// Devices made from now on ask for ray queries (`request_ray_queries`).
 static RAY_QUERIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "view-features")]
 /// What the last device made said of ray queries (`RayQueries`, 0 before
 /// one is made).
 static RAY_QUERY_STATUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+#[cfg(feature = "view-features")]
 /// Whether the shared device traces rays, and why not
 /// (`ray_queries_status`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18151,6 +18202,7 @@ pub enum RayQueries {
     /// `WGPU_DX12_COMPILER=dxc`.
     CompilerIsFxc = 4,
 }
+#[cfg(feature = "view-features")]
 impl RayQueries {
     /// What a device asked for them (`requested`) and made with them
     /// (`on`, or not), compiling through FXC or not, says.
@@ -18163,6 +18215,7 @@ impl RayQueries {
         }
     }
 }
+#[cfg(feature = "view-features")]
 /// Whether the last device made traces rays, and why not (`None` before
 /// one is made). Read once a window or renderer exists; cold.
 pub fn ray_queries_status() -> Option<RayQueries> {
@@ -18174,7 +18227,7 @@ pub fn ray_queries_status() -> Option<RayQueries> {
         _ => None,
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "view-features"))]
 mod view_feature_tests {
     use super::{GpuContext, VIEW_FEATURE_LIST, VIEW_FEATURES, ViewFeatures, view_features};
     use std::sync::atomic::Ordering;
@@ -18208,7 +18261,7 @@ mod view_feature_tests {
     fn a_device_asks_for_no_view_features_unless_they_are_requested() {
         assert!(!VIEW_FEATURES.requested.load(Ordering::Relaxed));
         assert_eq!(
-            view_features(&wgpu::Features::all()),
+            view_features(&wgpu::Features::all()) & VIEW_FEATURE_LIST,
             wgpu::Features::empty()
         );
         let context = match GpuContext::new() {
@@ -18227,7 +18280,7 @@ mod view_feature_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "view-features"))]
 mod ray_query_tests {
     use super::RayQueries;
 
@@ -18241,6 +18294,7 @@ mod ray_query_tests {
         assert_eq!(RayQueries::of(true, false, false), AdapterLacks);
     }
 }
+#[cfg(feature = "view-features")]
 /// Devices made after this call ask for ray queries where the adapter has
 /// them (wgpu's `Features::EXPERIMENTAL_RAY_QUERY`, with the adapter's
 /// acceleration-structure limits): a `GpuView`'s painter can then build
@@ -18276,6 +18330,7 @@ mod ray_query_tests {
 pub unsafe fn request_ray_queries() {
     RAY_QUERIES.store(true, std::sync::atomic::Ordering::Relaxed);
 }
+#[cfg(feature = "view-features")]
 /// Whether devices ask for the optional features GPU views use: asked for
 /// (`request_view_features`), and decided once by an app's
 /// `Application::run` (`decide_view_features`).
@@ -18285,6 +18340,7 @@ struct ViewFeatures {
     /// `requested` as it's made), 1 decided without them, 2 with.
     decided: std::sync::atomic::AtomicU8,
 }
+#[cfg(feature = "view-features")]
 impl ViewFeatures {
     const fn new() -> Self {
         Self {
@@ -18320,7 +18376,9 @@ impl ViewFeatures {
             .unwrap_or_else(|| self.requested.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
+#[cfg(feature = "view-features")]
 static VIEW_FEATURES: ViewFeatures = ViewFeatures::new();
+#[cfg(feature = "view-features")]
 /// Those features (`request_view_features` says what each is for).
 // When this branch meets main, this list and the other team's
 // `viewport::view_device_features()` (its Direct3D 11 views' device) become
@@ -18332,6 +18390,7 @@ const VIEW_FEATURE_LIST: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY
     .union(wgpu::Features::TEXTURE_COMPRESSION_ASTC)
     .union(wgpu::Features::TEXTURE_COMPRESSION_ETC2)
     .union(wgpu::Features::FLOAT32_FILTERABLE);
+#[cfg(feature = "view-features")]
 /// Devices made after this call ask for the optional features a
 /// `GpuView`'s painter uses where it can, each where the adapter has it
 /// (none is required: one the adapter lacks is left out):
@@ -18362,11 +18421,21 @@ pub fn request_view_features() {
 /// (`request_view_features`), from what was asked before now: called by
 /// `Application::run` on its thread before it starts the device. Later
 /// requests change nothing. Whether they're asked for.
+#[cfg(feature = "view-features")]
 #[doc(hidden)]
 #[cold]
 pub fn decide_view_features() -> bool {
     VIEW_FEATURES.decide()
 }
+/// Nothing to decide: GPU views ask nothing of the device (`view-features`
+/// off). An app's `run` calls it either way.
+#[cfg(not(feature = "view-features"))]
+#[doc(hidden)]
+#[inline(always)]
+pub fn decide_view_features() -> bool {
+    false
+}
+#[cfg(feature = "view-features")]
 /// Whether devices ask for the view features, if `Application::run` has
 /// decided (`None` before: a device made then reads
 /// `request_view_features` as it's made).
@@ -18375,13 +18444,16 @@ pub fn view_features_decided() -> Option<bool> {
     VIEW_FEATURES.decided()
 }
 /// What of `adapter`'s features a device asks for its views
-/// (`request_view_features`): none unless asked.
+/// (`request_view_features`): none unless asked; and packed-float targets
+/// where the GPU draws into them (3D bloom's steps).
+#[cfg(feature = "view-features")]
 #[cold]
 fn view_features(adapter: &wgpu::Features) -> wgpu::Features {
+    let packed = *adapter & wgpu::Features::RG11B10UFLOAT_RENDERABLE;
     if VIEW_FEATURES.wanted() {
-        *adapter & VIEW_FEATURE_LIST
+        packed | (*adapter & VIEW_FEATURE_LIST)
     } else {
-        wgpu::Features::empty()
+        packed
     }
 }
 /// Tests: an app's shaders built in the process (wgpu's naga and FXC) when

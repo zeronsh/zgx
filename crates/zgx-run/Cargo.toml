@@ -33,7 +33,7 @@ fetch = ["dep:ureq"]
 # connector of its own.
 socket = ["dep:tungstenite", "dep:rustls", "dep:webpki-roots", "dep:polling"]
 # `ui.scene3d` (zgx-script's `scene3d`): 3D scenes, drawn with zgx-3d.
-scene3d = ["zgx-script/scene3d"]
+scene3d = ["zgx-script/scene3d", "zgx-desktop/view-features"]
 # Localized messages' plural rules and numbers for every locale
 # (zgx-script's `i18n`, about 90 KB).
 i18n = ["zgx-script/i18n"]

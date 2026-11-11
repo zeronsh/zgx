@@ -522,14 +522,17 @@ fn a_view_over_its_own_budget_fails_and_says_so() {
     assert_eq!(w.showing(), [true; 4]);
 }
 
+#[cfg(feature = "view-features")]
 /// Notes each frame's time.
 struct Timed(Rc<RefCell<Vec<std::time::Instant>>>);
+#[cfg(feature = "view-features")]
 impl Viewport for Timed {
     fn render(&mut self, frame: &mut ViewportFrame<'_>) {
         self.0.borrow_mut().push(frame.time);
     }
 }
 
+#[cfg(feature = "view-features")]
 #[test]
 fn a_view_s_frames_are_on_the_interface_s_time() {
     // Frames 1/60 s apart on a virtual clock, however long each takes to
@@ -568,6 +571,7 @@ fn a_view_s_frames_are_on_the_interface_s_time() {
     assert_eq!(second, first);
 }
 
+#[cfg(feature = "view-features")]
 #[test]
 fn a_view_in_two_boxes_is_drawn_at_one_time_a_frame() {
     // Shown twice in a window, a view is drawn twice a frame: both at the

@@ -152,7 +152,9 @@ struct WindowConfig {
     /// Whether its device asks for what GPU views can use (`"gpu": {
     /// "view_features": true }`: `zgx_gpu::request_view_features`, asked
     /// before `Application::run`). Absent, false: the device is asked for
-    /// what it always was.
+    /// what it always was. (A runner without 3D accepts the key and asks
+    /// nothing.)
+    #[cfg(feature = "scene3d")]
     view_features: bool,
 }
 impl AppConfig {
@@ -199,6 +201,7 @@ impl AppConfig {
                     visible: true,
                     max_size: None,
                     caption_height: None,
+                    #[cfg(feature = "scene3d")]
                     view_features: false,
                 },
             ));
@@ -306,6 +309,7 @@ impl AppConfig {
                 return Err(fail("`frame_autosave` is not true, false or a name".into()));
             }
         };
+        #[cfg(feature = "scene3d")]
         let view_features = match object.get("gpu") {
             None => false,
             Some(serde_json::Value::Object(gpu)) => {
@@ -321,6 +325,13 @@ impl AppConfig {
             }
             Some(_) => return Err(fail("`gpu` is not an object".into())),
         };
+        // A runner without 3D draws no GPU views that would use them: the
+        // key is accepted (a project file opens in either runner) and
+        // ignored.
+        #[cfg(all(not(feature = "scene3d"), debug_assertions))]
+        if object.contains_key("gpu") {
+            eprintln!("zgx-run: `gpu` in zgx.json is ignored: this runner draws no 3D");
+        }
         let app = zgx_script::app_config::from_object(dir, object).map_err(fail)?;
         Ok((
             config,
@@ -330,6 +341,7 @@ impl AppConfig {
                 visible,
                 max_size,
                 caption_height,
+                #[cfg(feature = "scene3d")]
                 view_features,
             },
         ))
@@ -408,11 +420,13 @@ pub fn run_hosting(
         visible,
         max_size,
         caption_height,
+        #[cfg(feature = "scene3d")]
         view_features,
     } = window_config;
     // Asked before `run`, which decides before it starts the device: GPU
     // timestamps and compressed textures where the GPU has them (a 3D
     // scene's `caps`). Not asked, the device is what it always was.
+    #[cfg(feature = "scene3d")]
     if view_features {
         zgx_desktop::request_view_features();
     }
@@ -869,6 +883,23 @@ mod tests {
         std::fs::remove_dir_all(dir).ok();
     }
 
+    #[cfg(not(feature = "scene3d"))]
+    #[test]
+    fn a_runner_without_3d_opens_a_zgx_json_that_asks_for_view_features() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-gpu-2d-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        std::fs::write(
+            dir.join("zgx.json"),
+            r#"{ "gpu": { "view_features": true } }"#,
+        )
+        .unwrap();
+        assert!(AppConfig::read(&script).is_ok());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[cfg(feature = "scene3d")]
     #[test]
     fn a_zgx_json_asks_for_view_features_only_where_it_says_so() {
         let dir = std::env::temp_dir().join(format!("zgx-run-gpu-{}", std::process::id()));

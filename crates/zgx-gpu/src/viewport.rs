@@ -34,6 +34,8 @@ pub trait Viewport: 'static {
     /// makes them again. A view whose window keeps drawing other things
     /// isn't asked; one shown in two windows is asked by the one going idle
     /// while the other may still draw it (its next frame makes them again).
+    /// (The `view-features` feature.)
+    #[cfg(feature = "view-features")]
     fn rest(&mut self) {}
 }
 
@@ -84,7 +86,10 @@ impl<'a> ViewportFrame<'a> {
             format,
             size,
             scale,
+            #[cfg(feature = "view-features")]
             time: zgx::clock::now(),
+            #[cfg(not(feature = "view-features"))]
+            time: std::time::Instant::now(),
         }
     }
 }
@@ -99,6 +104,7 @@ struct Painter {
 
 /// View `view`'s painter rests, if it lives and isn't drawing: whether it's
 /// done with (rested, or gone), not busy.
+#[cfg(feature = "view-features")]
 fn rest(view: u64) -> bool {
     let Some(painter) = zgx::gpu_view::painter(view) else {
         return true;
@@ -605,12 +611,14 @@ pub(crate) struct Views {
     /// Views painted since they last rested (`Viewport::rest`), shown in a
     /// box or on a plane or no longer: their painters rest at the idle trim,
     /// or as their last box goes.
+    #[cfg(feature = "view-features")]
     painted: rustc_hash::FxHashSet<u64>,
     /// This frame's time (`zgx::clock::now`), read by its first view's
     /// render, with the frame it's for (`GpuRenderer::image_frame`): every
     /// view and every box of one in a frame is drawn at the same instant,
     /// so what steps once a frame time steps once. A window with no view
     /// never reads it.
+    #[cfg(feature = "view-features")]
     time: std::cell::Cell<Option<(u64, std::time::Instant)>>,
 }
 /// A box on a plane: its node, the frame it last drew, its box, and the
@@ -637,13 +645,16 @@ struct Shown {
 impl Views {
     /// Forget views whose frames' textures are gone (pruned with their
     /// boxes): their texture views go too.
-    /// Whether any went.
-    pub(crate) fn retain_cached(&mut self, cached: impl Fn(u64) -> bool) -> bool {
-        let before = self.shown.len();
+    pub(crate) fn retain_cached(&mut self, cached: impl Fn(u64) -> bool) {
         self.shown.retain(|_, shown| cached(shown.image));
-        self.shown.len() != before
+    }
+    /// How many boxes show views (whether a prune took any).
+    #[cfg(feature = "view-features")]
+    pub(crate) fn boxes(&self) -> usize {
+        self.shown.len()
     }
     /// Whether a box shows `view`, in the window or on a plane.
+    #[cfg(feature = "view-features")]
     fn boxed(&self, view: u64) -> bool {
         #[cfg(target_os = "macos")]
         if self.planes.keys().any(|&(v, _)| v == view) {
@@ -691,6 +702,7 @@ impl GpuRenderer {
             ((frame.height * self.scale).ceil() as u32).clamp(1, max),
         );
         let views = self.views.get_or_insert_with(Default::default);
+        #[cfg(feature = "view-features")]
         views.painted.insert(frame.view);
         // Its last frame's texture, if the same size: drawn over in place.
         let mut kept = None;
@@ -786,6 +798,7 @@ impl GpuRenderer {
     }
     /// This frame's time for its views: read from the interface's clock by
     /// the first to draw, the same for the rest.
+    #[cfg(feature = "view-features")]
     fn view_time(&self) -> std::time::Instant {
         let frame = self.image_frame;
         let Some(views) = self.views.as_ref() else {
@@ -841,7 +854,10 @@ impl GpuRenderer {
             scale: self.scale,
             // The interface's time (a video's virtual clock's while one
             // runs), read once a frame: the same for every view and box.
+            #[cfg(feature = "view-features")]
             time: self.view_time(),
+            #[cfg(not(feature = "view-features"))]
+            time: std::time::Instant::now(),
         });
         // Ahead of the frame sampling it (or its drawable's present), which
         // is recorded after this and submitted later on the same queue.
@@ -849,37 +865,20 @@ impl GpuRenderer {
         self.after_view_submit(key);
         Ok(())
     }
-    /// Each view this renderer painted rests (`Viewport::rest`), whether a
-    /// box still shows it or not: called by `trim`, as the window goes idle.
-    /// Apart from its code: views are few.
+    /// The views this renderer painted rest (`Viewport::rest`): every one
+    /// (`all`: `trim`, as the window goes idle, shown or not), or those no
+    /// box shows any more (as boxes or planes go). One whose painter is busy
+    /// is kept, to rest with the next.
+    #[cfg(feature = "view-features")]
     #[cold]
     #[inline(never)]
-    pub(crate) fn rest_views(&mut self) {
+    pub(crate) fn rest_painted(&mut self, all: bool) {
         let Some(views) = self.views.as_mut() else {
             return;
         };
-        // One whose painter was busy is kept, to rest with the next trim.
-        views.painted.retain(|&view| !rest(view));
-    }
-    /// The painted views no box shows any more rest (their last box went).
-    /// Called only as boxes or planes go.
-    #[cold]
-    #[inline(never)]
-    pub(crate) fn rest_boxless(&mut self) {
-        let Some(views) = self.views.as_mut() else {
-            return;
-        };
-        let boxless: Vec<u64> = views
-            .painted
-            .iter()
-            .copied()
-            .filter(|&v| !views.boxed(v))
-            .collect();
-        for view in boxless {
-            if rest(view) {
-                views.painted.remove(&view);
-            }
-        }
+        let mut painted = std::mem::take(&mut views.painted);
+        painted.retain(|&view| (!all && views.boxed(view)) || !rest(view));
+        views.painted = painted;
     }
     /// The device and queue views draw with: the renderer's own, as it
     /// draws with wgpu.
@@ -1072,6 +1071,7 @@ impl GpuRenderer {
         let texture = plane.drawable.texture();
         let address = &*texture as *const _ as *const u8 as usize;
         let views = self.views.get_or_insert_with(Default::default);
+        #[cfg(feature = "view-features")]
         views.painted.insert(key.0);
         let planed = views.planes.entry(key).or_insert_with(|| Planed {
             node,
@@ -1196,6 +1196,7 @@ impl GpuRenderer {
         };
         views.owed = false;
         // A frame of its own: its views' time read again.
+        #[cfg(feature = "view-features")]
         views.time.set(None);
         let due: Vec<_> = views
             .planes
@@ -1247,13 +1248,15 @@ impl GpuRenderer {
             }
             alive
         });
+        #[cfg(feature = "view-features")]
         let rest = !gone.is_empty();
         for key in gone {
             zgx::gpu_view::set_planed(key.0, key.1, false);
             views.gone.push(key);
         }
+        #[cfg(feature = "view-features")]
         if rest {
-            self.rest_boxless();
+            self.rest_painted(false);
         }
     }
     /// In the frame's transaction: show the planes that moved with their
@@ -1426,7 +1429,9 @@ mod tests {
     }
 
     /// Counts its frames and rests.
+    #[cfg(feature = "view-features")]
     struct Counted(std::rc::Rc<std::cell::Cell<(u32, u32)>>);
+    #[cfg(feature = "view-features")]
     impl Viewport for Counted {
         fn render(&mut self, frame: &mut ViewportFrame<'_>) {
             Clear.render(frame);
@@ -1439,6 +1444,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "view-features")]
     #[test]
     fn a_shown_view_rests_as_its_renderer_trims_and_draws_again_after() {
         let Ok(mut gpu) = GpuRenderer::new(64, 64) else {
@@ -1465,6 +1471,7 @@ mod tests {
         assert_eq!(counts.get().1, 2, "and rests again");
     }
 
+    #[cfg(feature = "view-features")]
     #[test]
     fn a_view_whose_box_goes_rests_then_though_it_lives_on() {
         // A world on a tab left: its view kept, no box showing it.
@@ -1485,6 +1492,7 @@ mod tests {
         assert!(zgx::gpu_view::painter(view.id()).is_some(), "it lives on");
     }
 
+    #[cfg(feature = "view-features")]
     #[test]
     fn a_view_whose_painter_is_busy_as_it_trims_rests_with_the_next_trim() {
         let Ok(mut gpu) = GpuRenderer::new(64, 64) else {

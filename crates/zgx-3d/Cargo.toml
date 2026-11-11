@@ -12,7 +12,7 @@ categories = ["gui", "rendering"]
 
 [dependencies]
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
-zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
+zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false, features = ["view-features"] }
 bytemuck = { version = "1.25", features = ["derive"] }
 # Compute: a sandboxed shader's loops bounded and written back as WGSL
 # (`shader_sandbox`). The naga wgpu already builds, with its writer: no

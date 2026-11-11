@@ -224,11 +224,14 @@ mod presentation_retry;
 #[doc = include_str!("../../../docs/window-controls.md")]
 mod window_control_examples {}
 
+/// What GPU views' devices may ask for (`request_view_features`, before
+/// `Application::run`; the `view-features` feature).
+#[cfg(feature = "view-features")]
+pub use zgx_gpu::request_view_features;
 pub use zgx_gpu::text::FontData;
 /// GPU views: an app's own wgpu drawing in a box (`zgx::compose::gpu_view`),
-/// with the wgpu the renderer draws with, and what their devices may ask
-/// for (`request_view_features`, before `Application::run`).
-pub use zgx_gpu::{request_view_features, viewport, wgpu};
+/// with the wgpu the renderer draws with.
+pub use zgx_gpu::{viewport, wgpu};
 
 mod file_drop;
 mod gpu_stats;
