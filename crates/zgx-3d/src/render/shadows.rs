@@ -49,7 +49,10 @@ pub(super) fn shadow_key(variant: Variant) -> u8 {
         | bit(variant.morphing(), 2)
         | bit(masked, CUT_OUT)
         | bit(masked && variant.placed(), PLACED)
-        | bit(masked && (variant.coated() || variant.specular()), 16);
+        | bit(
+            masked && (variant.coated() || variant.specular() || variant.finished()),
+            16,
+        );
     // A custom material's: none of these (`custom::draw_shadow`).
     #[cfg(feature = "shaders")]
     let key = key | bit(variant.custom(), CUSTOM);
@@ -89,7 +92,7 @@ pub(super) fn caster_pipeline(
     #[cfg(feature = "shaders")]
     let masked = masked && !variant.custom();
     let placed = masked && variant.placed();
-    let layered = masked && (variant.coated() || variant.specular());
+    let layered = masked && (variant.coated() || variant.specular() || variant.finished());
     let variant = Variant::default()
         .with(Variant::TEXTURED, masked)
         .with(Variant::SKINNED, skinned)

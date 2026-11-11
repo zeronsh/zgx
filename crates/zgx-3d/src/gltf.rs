@@ -19,7 +19,9 @@
 //! (`COLOR_0`). Its lights (`KHR_lights_punctual`) come with it, and its
 //! cameras (`Placed::cameras`), and its glass: `KHR_materials_transmission`,
 //! `KHR_materials_ior` and `KHR_materials_volume`, their factors (not yet
-//! their textures). Not yet: points and lines (skipped); geometry compressed with Draco
+//! their textures), and its finishes: `KHR_materials_sheen`,
+//! `KHR_materials_anisotropy` and `KHR_materials_iridescence`, their factors
+//! (not yet their textures). Not yet: points and lines (skipped); geometry compressed with Draco
 //! or meshopt, an error where the file requires it.
 use crate::{
     Geometry, MapPlacement, Material, MorphTarget, Object, ObjectId, Quat, Texture, Transform,
@@ -105,11 +107,19 @@ struct ModelSkin {
 type Maps = [Option<Texture>; MODEL_MAPS.len()];
 /// Where they sit on it, in the same order.
 type Placements = [MapPlacement; crate::texture::MAPS];
-/// How light passes through a material, its clear coat and its specular.
+/// How light passes through a material, its clear coat, its specular and
+/// its finishes.
 type Layers = (
     Option<crate::Transmission>,
     Option<crate::Clearcoat>,
     Option<crate::Specular>,
+    Finishes,
+);
+/// A material's sheen, anisotropy and iridescence.
+type Finishes = (
+    Option<crate::Sheen>,
+    Option<crate::Anisotropy>,
+    Option<crate::Iridescence>,
 );
 /// A material, read.
 type Look = (Material, Maps, Surface, Placements, Layers);
@@ -190,7 +200,12 @@ impl Model {
                 });
                 let placements: Placements =
                     std::array::from_fn(|i| map_placement(&doc, value, MAP_TEXTURES[i]));
-                let layers = (transmission(value), clearcoat(value), specular(value));
+                let layers = (
+                    transmission(value),
+                    clearcoat(value),
+                    specular(value),
+                    finishes(value),
+                );
                 (material(value), maps, surface(value), placements, layers)
             })
             .collect::<Vec<_>>();
@@ -405,9 +420,8 @@ impl World {
             if let Some(&camera) = node.camera.and_then(|c| model.cameras.get(c)) {
                 cameras.push((id, camera));
             }
-            for (geometry, material, maps, surface, placements, (through, coat, specular)) in
-                &node.meshes
-            {
+            for (geometry, material, maps, surface, placements, layers) in &node.meshes {
+                let (through, coat, specular, (sheen, anisotropy, iridescence)) = layers;
                 let mesh = self.add(Object::mesh(geometry.clone(), *material).child_of(id));
                 if surface.double_sided {
                     self.set_double_sided(mesh, true);
@@ -423,6 +437,15 @@ impl World {
                 }
                 if specular.is_some() {
                     self.set_specular(mesh, *specular);
+                }
+                if sheen.is_some() {
+                    self.set_sheen(mesh, *sheen);
+                }
+                if anisotropy.is_some() {
+                    self.set_anisotropy(mesh, *anisotropy);
+                }
+                if iridescence.is_some() {
+                    self.set_iridescence(mesh, *iridescence);
                 }
                 for (map, texture) in MODEL_MAPS.into_iter().zip(maps) {
                     if texture.is_some() {
@@ -819,6 +842,41 @@ fn specular(value: &Value) -> Option<crate::Specular> {
     }
     Some(read)
 }
+/// A material's finishes: `KHR_materials_sheen`'s colour and roughness,
+/// `KHR_materials_anisotropy`'s strength and rotation, and
+/// `KHR_materials_iridescence`'s factor, index of refraction and thickness
+/// (its maximum: what it is without its thickness texture). Not yet their
+/// textures. Each `None` without its extension or at its default (none).
+fn finishes(value: &Value) -> Finishes {
+    let Some(extensions) = value.get("extensions") else {
+        return (None, None, None);
+    };
+    let number = |name: &str, key: &str| {
+        let v = extensions.get(name)?.get(key)?.as_f64()?;
+        v.is_finite().then_some(v as f32)
+    };
+    let sheen = extensions.get("KHR_materials_sheen").and_then(|sheen| {
+        let color = floats::<3>(sheen.get("sheenColorFactor"))?;
+        let roughness = number("KHR_materials_sheen", "sheenRoughnessFactor").unwrap_or(0.);
+        let read = crate::Sheen::new(color).roughness(roughness);
+        read.shows().then_some(read)
+    });
+    let anisotropy = number("KHR_materials_anisotropy", "anisotropyStrength")
+        .filter(|strength| *strength > 0.)
+        .map(|strength| {
+            let rotation = number("KHR_materials_anisotropy", "anisotropyRotation").unwrap_or(0.);
+            crate::Anisotropy::new(strength).rotation(rotation)
+        });
+    const FILM: &str = "KHR_materials_iridescence";
+    let iridescence = number(FILM, "iridescenceFactor")
+        .filter(|factor| *factor > 0.)
+        .map(|factor| {
+            crate::Iridescence::new(factor)
+                .ior(number(FILM, "iridescenceIor").unwrap_or(1.3))
+                .thickness(number(FILM, "iridescenceThicknessMaximum").unwrap_or(400.))
+        });
+    (sheen, anisotropy, iridescence)
+}
 fn surface(value: &Value) -> Surface {
     let masked = value.get("alphaMode").and_then(Value::as_str) == Some("MASK");
     let cutoff = value
@@ -1136,7 +1194,7 @@ impl Reader<'_> {
                         Maps::default(),
                         Surface::default(),
                         Placements::default(),
-                        (None, None, None),
+                        (None, None, None, (None, None, None)),
                     )
                 });
             let mut geometry =
@@ -2294,6 +2352,64 @@ mod tests {
         // Its factor defaults to no coat at all.
         assert_eq!(coat(json!({ "KHR_materials_clearcoat": {} })), None);
         assert_eq!(coat(json!({})), None);
+    }
+
+    #[test]
+    fn finishes_are_read_by_their_factors() {
+        let read = |extensions: Value| {
+            let (doc, bin) = square(json!([{ "mesh": 0 }]), |doc| {
+                doc["materials"][0]["extensions"] = extensions;
+            });
+            let model = Model::from_bytes(&glb_of(&doc, &bin)).unwrap();
+            let world = World::new();
+            let mesh = world.place_model(&model).meshes[0][0];
+            (
+                world.sheen(mesh),
+                world.anisotropy(mesh),
+                world.iridescence(mesh),
+            )
+        };
+        let all = read(json!({
+            "KHR_materials_sheen": {
+                "sheenColorFactor": [1.0, 0.5, 0.25],
+                "sheenRoughnessFactor": 0.75,
+            },
+            "KHR_materials_anisotropy": {
+                "anisotropyStrength": 0.5,
+                "anisotropyRotation": 1.25,
+            },
+            "KHR_materials_iridescence": {
+                "iridescenceFactor": 0.8,
+                "iridescenceIor": 1.6,
+                "iridescenceThicknessMinimum": 200.0,
+                "iridescenceThicknessMaximum": 650.0,
+            },
+        }));
+        assert_eq!(
+            all,
+            (
+                Some(crate::Sheen::new([1., 0.5, 0.25]).roughness(0.75)),
+                Some(crate::Anisotropy::new(0.5).rotation(1.25)),
+                Some(crate::Iridescence::new(0.8).ior(1.6).thickness(650.)),
+            )
+        );
+        // Without a thickness texture, a film is its maximum thick: 400 nm
+        // by default, its index 1.3.
+        let (_, _, film) = read(json!({
+            "KHR_materials_iridescence": { "iridescenceFactor": 1.0 },
+        }));
+        assert_eq!(
+            film,
+            Some(crate::Iridescence::new(1.).ior(1.3).thickness(400.))
+        );
+        // Their defaults are none.
+        let defaults = read(json!({
+            "KHR_materials_sheen": {},
+            "KHR_materials_anisotropy": {},
+            "KHR_materials_iridescence": {},
+        }));
+        assert_eq!(defaults, (None, None, None));
+        assert_eq!(read(json!({})), (None, None, None));
     }
 
     #[test]

@@ -36,17 +36,21 @@ impl Variant {
     pub(super) const CUSTOM: u16 = 1 << 13;
     /// Its diffuse light from irradiance probes (`World::add_probes`).
     pub(super) const PROBES: u16 = 1 << 14;
+    /// A finish over it: sheen, anisotropy or iridescence
+    /// (`World::set_sheen` …), its numbers in its layers'.
+    pub(super) const FINISH: u16 = 1 << 15;
     // `Extras::kinds`' bits, shifted, are these (see `variant_of`).
     pub(super) const _KINDS: () = assert!(
         Self::TRANSMITTING == crate::world::GLASS as u16 * Self::TRANSMITTING
             && Self::COATED == crate::world::COAT as u16 * Self::TRANSMITTING
             && Self::SPECULAR == crate::world::SPECULAR as u16 * Self::TRANSMITTING
             && Self::CUSTOM == crate::world::SHADER as u16 * Self::TRANSMITTING
+            && Self::FINISH == crate::world::FINISH as u16 * Self::TRANSMITTING
     );
     /// Every bit there is (`shader`'s tests cover each, and fail on one
     /// left out of this).
     #[cfg(test)]
-    pub(super) const ALL: u16 = (Self::PROBES << 1) - 1;
+    pub(super) const ALL: u16 = Self::FINISH | (Self::FINISH - 1);
     /// It with `bit` on or off.
     pub(super) fn with(self, bit: u16, on: bool) -> Self {
         Self(if on { self.0 | bit } else { self.0 & !bit })
@@ -95,6 +99,9 @@ impl Variant {
     }
     pub(super) fn probed(self) -> bool {
         self.0 & Self::PROBES != 0
+    }
+    pub(super) fn finished(self) -> bool {
+        self.0 & Self::FINISH != 0
     }
 }
 /// Hashes a `Variant` by its own bits: they're few and its, and the

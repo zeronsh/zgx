@@ -2783,3 +2783,131 @@ fn a_materials_emission_is_kept_finite() {
     window.draw();
     assert_eq!(window.pixel(50, 50), drawn, "as with none");
 }
+
+#[test]
+fn a_sheen_shines_at_a_curves_grazing_edge() {
+    // A black chalk ball, the sun behind the camera: dark all over.
+    let (world, ball) = one(
+        Geometry::sphere(1., 48),
+        Material::rgb(0x000000).with(0., 1.),
+    );
+    world.add_light(Light::Directional {
+        direction: vec3(0., 0., -1.),
+        color: [1., 1., 1.],
+        intensity: 3.,
+    });
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    // Its centre, and near its edge (it spans 86 pixels), where it turns
+    // from the camera.
+    let ends = |window: &mut Window| {
+        window.draw();
+        (window.pixel(50, 50), window.pixel(50 - 40, 50))
+    };
+    let (centre, edge) = ends(&mut window);
+    // A red sheen: red at the edge, and no more red facing the camera than
+    // it was (where a sheen's fibres show their ends alone).
+    let sheen = Sheen::new([1., 0., 0.]).roughness(0.3);
+    world.set_sheen(ball, Some(sheen));
+    assert_eq!(world.sheen(ball), Some(sheen));
+    let (sheen_centre, sheen_edge) = ends(&mut window);
+    assert!(
+        i32::from(sheen_edge[0]) > i32::from(edge[0]) + 40 && sheen_edge[1] <= edge[1] + 2,
+        "red at the edge: {edge:?} {sheen_edge:?}"
+    );
+    assert!(
+        sheen_centre[0] <= centre[0] + 12,
+        "little facing: {centre:?} {sheen_centre:?}"
+    );
+    // A black sheen is none.
+    world.set_sheen(ball, Some(Sheen::new([0.; 3])));
+    assert_eq!(world.sheen(ball), None);
+    assert_eq!(ends(&mut window), (centre, edge));
+}
+
+#[test]
+fn anisotropy_stretches_a_highlight_along_its_direction() {
+    // Smooth white metal, a bulb before it: a round highlight.
+    let (world, square) = one(facing_square(), Material::rgb(0xffffff).with(1., 0.35));
+    world.add_light(bulb());
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    // Across and down from the highlight's centre, alike.
+    let spread = |window: &mut Window| {
+        window.draw();
+        let across = (window.pixel(50 - 12, 50)[0], window.pixel(50 + 12, 50)[0]);
+        let down = (window.pixel(50, 50 - 12)[0], window.pixel(50, 50 + 12)[0]);
+        (across, down)
+    };
+    let round = spread(&mut window);
+    let (across, down) = round;
+    assert!(across.0.abs_diff(down.0) < 6, "round: {round:?}");
+    // Stretched along the texture's u axis (across): wider across.
+    let stretched = Anisotropy::new(0.9);
+    world.set_anisotropy(square, Some(stretched));
+    assert_eq!(world.anisotropy(square), Some(stretched));
+    let (across, down) = spread(&mut window);
+    assert!(
+        i32::from(across.0) > i32::from(down.0) + 20
+            && i32::from(across.1) > i32::from(down.1) + 20,
+        "wider across: {across:?} {down:?}"
+    );
+    // Turned a quarter: wider down.
+    world.set_anisotropy(square, Some(Anisotropy::new(0.9).rotation(PI / 2.)));
+    let (across, down) = spread(&mut window);
+    assert!(
+        i32::from(down.0) > i32::from(across.0) + 20,
+        "wider down: {across:?} {down:?}"
+    );
+    world.set_anisotropy(square, Some(Anisotropy::new(0.)));
+    assert_eq!(world.anisotropy(square), None);
+    assert_eq!(spread(&mut window), round);
+}
+
+#[test]
+fn iridescence_colours_a_reflection_by_its_films_thickness() {
+    // Black, fairly smooth, the sun behind the camera: a grey highlight.
+    let (world, square) = one(facing_square(), Material::rgb(0x000000).with(0., 0.3));
+    world.add_light(Light::Directional {
+        direction: vec3(0., 0., -1.),
+        color: [1., 1., 1.],
+        intensity: 0.5,
+    });
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    let centre = |window: &mut Window| {
+        window.draw();
+        window.pixel(50, 50)
+    };
+    let plain = centre(&mut window);
+    assert!(plain[0] > 60 && plain[0] == plain[2], "grey: {plain:?}");
+    // A film: coloured, and differently as it's thicker.
+    let film = Iridescence::new(1.);
+    world.set_iridescence(square, Some(film));
+    assert_eq!(world.iridescence(square), Some(film));
+    let thin = centre(&mut window);
+    world.set_iridescence(square, Some(Iridescence::new(1.).thickness(700.)));
+    let thick = centre(&mut window);
+    let spread = |p: [u8; 4]| p[..3].iter().max().unwrap() - p[..3].iter().min().unwrap();
+    assert!(
+        spread(thin) > 30 && spread(thick) > 30,
+        "coloured: {thin:?} {thick:?}"
+    );
+    assert!(
+        thin[..3]
+            .iter()
+            .zip(&thick[..3])
+            .any(|(a, b)| a.abs_diff(*b) > 30),
+        "a colour of its thickness: {thin:?} {thick:?}"
+    );
+    // No film thick is none at all.
+    world.set_iridescence(square, Some(Iridescence::new(1.).thickness(0.)));
+    let none = centre(&mut window);
+    assert!(spread(none) < 4, "{none:?}");
+    world.set_iridescence(square, Some(Iridescence::new(0.)));
+    assert_eq!(world.iridescence(square), None);
+    assert_eq!(centre(&mut window), plain);
+}

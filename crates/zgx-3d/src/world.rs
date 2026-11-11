@@ -203,6 +203,7 @@ impl Light {
         }
     }
 }
+mod finish;
 #[cfg(feature = "shaders")]
 mod materials;
 #[cfg(feature = "shaders")]
@@ -865,11 +866,16 @@ pub(crate) const SPECULAR: u8 = 4;
 /// A custom material (`World::set_shader`).
 #[cfg_attr(not(feature = "shaders"), allow(dead_code))]
 pub(crate) const SHADER: u8 = 32;
+/// A finish: sheen, anisotropy or iridescence (`World::set_sheen` …).
+pub(crate) const FINISH: u8 = 128;
 /// A mesh's rarer layers (`Extras::layers`).
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Layers {
     clearcoat: Option<Clearcoat>,
     specular: Option<Specular>,
+    sheen: Option<crate::Sheen>,
+    anisotropy: Option<crate::Anisotropy>,
+    iridescence: Option<crate::Iridescence>,
     /// Its layers' maps, light passing through's included.
     maps: LayerMaps,
 }
@@ -881,6 +887,19 @@ impl Extras {
     /// Its clear coat, if it has one.
     pub(crate) fn clearcoat(&self) -> Option<&Clearcoat> {
         self.layers.as_ref()?.clearcoat.as_ref()
+    }
+    /// Its finishes' numbers (sheen, anisotropy, iridescence), none of
+    /// those it hasn't (a strength or amount of 0, about the texture's u
+    /// axis: a direction to normalise), if it has any.
+    pub(crate) fn finish(&self) -> Option<[[f32; 4]; 3]> {
+        let layers = self.layers.as_ref()?;
+        (self.kinds & FINISH != 0).then(|| {
+            [
+                layers.sheen.map_or([0.; 4], |s| s.words()),
+                layers.anisotropy.map_or([0., 1., 0., 0.], |a| a.words()),
+                layers.iridescence.map_or([0.; 4], |i| i.words()),
+            ]
+        })
     }
     /// How it reflects, if not as any mesh does.
     pub(crate) fn specular(&self) -> Option<&Specular> {
@@ -901,7 +920,13 @@ impl Extras {
         let bit = |on: bool, bit: u8| if on { bit } else { 0 };
         self.kinds = bit(self.transmission.is_some(), GLASS)
             | bit(layers.is_some_and(|l| l.clearcoat.is_some()), COAT)
-            | bit(layers.is_some_and(|l| l.specular.is_some()), SPECULAR);
+            | bit(layers.is_some_and(|l| l.specular.is_some()), SPECULAR)
+            | bit(
+                layers.is_some_and(|l| {
+                    l.sheen.is_some() || l.anisotropy.is_some() || l.iridescence.is_some()
+                }),
+                FINISH,
+            );
         #[cfg(feature = "shaders")]
         if self.shader.is_some() {
             self.kinds |= SHADER;
