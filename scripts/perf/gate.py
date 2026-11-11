@@ -279,11 +279,19 @@ def has_example(checkout, package, example):
     return (crate / 'examples' / f'{example}.rs').exists() or f'name = "{example}"' in manifest
 
 
-def runs_scene(checkout, env):
+def runs_scene(checkout, env, example=None):
     """Whether `checkout`'s binary runs the scene `env` asks for: the app
     scenes (`APP`) are `support/apps.rs`'s, which an older base lacks (its
     binary would count its own bench under their name), and an interaction
-    measured alone that its `apps.rs` lacks."""
+    measured alone that its `apps.rs` lacks. A world_bench `SCENE` its
+    bench never names: an older one ran `textured` for any (3d-cull read
+    -99% and 3d-anim +213% against a base with neither); world_bench now
+    fails on a scene it doesn't know."""
+    scene = env.get('SCENE', 'textured')
+    bench = checkout / 'crates' / package_in(checkout, 'zgx-3d') / 'examples/world_bench.rs'
+    if example == 'world_bench' and scene != 'textured' and bench.exists() \
+            and f'"{scene}"' not in bench.read_text():
+        return False
     apps = checkout / 'crates' / package_in(checkout, 'zgx-script') / 'examples/support/apps.rs'
     if 'APP' not in env:
         return True
@@ -622,7 +630,7 @@ def main():
         base_binary = WORK / 'gate-bin-base' / example
         head_binary = WORK / 'gate-bin-head' / example
         try:
-            runs = base_binary.exists() and runs_scene(base, env)
+            runs = base_binary.exists() and runs_scene(base, env, example)
             before, after, delta, deltas = compared(name, package, env, (base_binary, base) if runs else None,
                                                     (head_binary, ROOT))
         except Infra as error:

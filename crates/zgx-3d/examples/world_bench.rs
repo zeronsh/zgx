@@ -192,7 +192,24 @@ mod models;
 #[path = "world_bench/particles.rs"]
 mod particles;
 
+/// Whether this build runs `SCENE=scene`: one it doesn't, unknown or its
+/// feature off, would count `textured` under another's name.
+fn known(scene: &str) -> bool {
+    match scene {
+        "" | "textured" | "mixed" | "still" | "lights" | "anim" => true,
+        "shader" => cfg!(feature = "shaders"),
+        "compute" => cfg!(feature = "compute"),
+        "particles" => cfg!(feature = "particles"),
+        _ => false,
+    }
+}
+
 fn main() {
+    let named = std::env::var("SCENE").unwrap_or_default();
+    assert!(
+        known(&named),
+        "SCENE={named} isn't a scene of this build (unknown, or its feature off)"
+    );
     #[cfg(feature = "compute")]
     if std::env::var("SCENE").is_ok_and(|scene| scene == "compute") {
         return compute::main();

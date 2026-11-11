@@ -139,5 +139,27 @@ class SelectTests(unittest.TestCase):
         self.assertEqual(self.names(only='*', except_='heavy-*'), ['mount', '3d-textured', 'fx-none', 'video'])
 
 
+class RunsSceneTests(unittest.TestCase):
+    def runs(self, bench, env, example='world_bench'):
+        with tempfile.TemporaryDirectory() as work:
+            checkout = pathlib.Path(work)
+            examples = checkout / 'crates' / 'zgx-3d' / 'examples'
+            examples.mkdir(parents=True)
+            (examples / 'world_bench.rs').write_text(bench)
+            with patch.object(gate, 'package_in', side_effect=lambda _, package: package):
+                return gate.runs_scene(checkout, env, example)
+
+    def test_a_world_bench_scene_its_bench_never_names_is_new(self):
+        old = 'let mixed = std::env::var("SCENE").is_ok_and(|scene| scene == "mixed");'
+        self.assertTrue(self.runs(old, {'SCENE': 'mixed'}))
+        self.assertFalse(self.runs(old, {'SCENE': 'anim'}))
+        # The default scene, unnamed in older benches, always runs.
+        self.assertTrue(self.runs(old, {'SCENE': 'textured'}))
+        self.assertTrue(self.runs(old, {}))
+
+    def test_other_benches_scenes_are_not_read_so(self):
+        self.assertTrue(self.runs('', {'SCENE': 'layer'}, example='fx_bench'))
+
+
 if __name__ == '__main__':
     unittest.main()
