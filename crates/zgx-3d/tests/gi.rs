@@ -139,12 +139,23 @@ fn around(rgba: &[u8], (x, y): (u32, u32), side: u32) -> [f32; 3] {
 /// `GI-SKIPPED` line, shown with `--nocapture`), for a run on a device known
 /// to have none. `ZGX_REQUIRE_RAY_QUERIES=1` requires rays: faces fail it.
 fn traced(world: &World, test: &str) -> bool {
+    probes_lit(world, test, false)
+}
+/// As `traced`, for a world whose probes are drawn by faces on purpose
+/// (`World::set_probes_rasterised`): faces are what it asks for, required
+/// rays or not, and rays fail it.
+#[cfg_attr(not(feature = "lighting"), allow(dead_code))]
+fn faced(world: &World, test: &str) -> bool {
+    probes_lit(world, test, true)
+}
+fn probes_lit(world: &World, test: &str, faces: bool) -> bool {
     let set = |name: &str| std::env::var_os(name).is_some_and(|v| v == "1");
     let wanted = Wanted {
         gpu: std::env::var_os("ZGX_REQUIRE_GPU").is_some(),
         skip_allowed: set("ZGX_GI_ALLOW_SKIP"),
         rays: set("ZGX_REQUIRE_RAY_QUERIES"),
         bless: set("ZGX_BLESS"),
+        faces,
     };
     let status = world.probes_status();
     match lit(status, zgx_gpu::ray_queries_status(), wanted) {
@@ -167,6 +178,8 @@ struct Wanted {
     skip_allowed: bool,
     rays: bool,
     bless: bool,
+    /// The test forces faces (`World::set_probes_rasterised`).
+    faces: bool,
 }
 
 /// `traced`'s decision, from the probes' status, why the device has no ray
@@ -183,7 +196,12 @@ fn lit(
             "rays declined, but the probes are {status:?}, not faces"
         ));
     }
-    if wanted.rays && status != ProbesStatus::Traced {
+    // Forced faces: rays drawn in their place are wrong, and rays required
+    // ask nothing of it.
+    if wanted.faces && status == ProbesStatus::Traced {
+        return Err("faces forced, but the probes were traced".to_owned());
+    }
+    if wanted.rays && !wanted.faces && status != ProbesStatus::Traced {
         return Err(format!(
             "ZGX_REQUIRE_RAY_QUERIES=1, but the probes are {status:?}, not traced: ray queries {rays:?}"
         ));
@@ -240,6 +258,14 @@ fn rays_required_fail_where_faces_were_drawn_and_say_why() {
     // WARP declines rays: its probes are faces, or the test fails.
     let warp = Some(RayQueries::DeclinedOnAdapter);
     assert!(lit(ProbesStatus::Traced, warp, gpu).is_err());
+    // Faces forced, rays required and available: faces pass; rays fail.
+    let forced = Wanted {
+        faces: true,
+        ..rays
+    };
+    let available = Some(RayQueries::Available);
+    assert_eq!(lit(ProbesStatus::Rasterised, available, forced), Ok(true));
+    assert!(lit(ProbesStatus::Traced, available, forced).is_err());
 }
 
 /// Draws as a window's frame clock would while the world's view animates
@@ -624,7 +650,8 @@ fn a_ray_bringing_no_finite_light_leaves_the_probes_finite() {
         world.add_probes(volume().per_frame(216)).unwrap();
         let mut window = Window::new(&world)?;
         settle(&mut window, &world, 500);
-        traced(&world, test).then(|| window.pixels())
+        // (Faces forced: `faced`.)
+        probes_lit(&world, test, faces).then(|| window.pixels())
     };
     for faces in [false, true] {
         let (Some(clean), Some(kept_out), Some(let_in)) = (
@@ -932,7 +959,7 @@ fn a_closed_box_under_the_sun_stays_dark_inside_on_the_face_path() {
         return;
     };
     settle(&mut window, &world, 500);
-    if !traced(
+    if !faced(
         &world,
         "a_closed_box_under_the_sun_stays_dark_inside_on_the_face_path",
     ) {
