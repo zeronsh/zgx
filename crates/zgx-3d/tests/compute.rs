@@ -672,3 +672,199 @@ fn passes_compile_on_one_thread_however_many_there_are() {
     }
     assert_eq!(zgx_3d::compile_threads(), 1, "one worker for every pass");
 }
+
+#[test]
+fn a_pass_past_the_frames_invocations_is_refused_when_added() {
+    let world = World::new();
+    // 65,535 cubed workgroups of one: far past 2^26 a frame.
+    let huge = world.add_compute(
+        Compute::new("@compute @workgroup_size(1) fn main() {}").dispatch([65_535, 65_535, 65_535]),
+    );
+    assert!(matches!(huge, Err(ComputeError::Limits(_))), "{huge:?}");
+    world.set_compute_budget(ComputeBudget {
+        invocations: 1 << 10,
+        ..ComputeBudget::default()
+    });
+    let over = world.add_compute(
+        Compute::new("@compute @workgroup_size(64) fn main() {}").dispatch([17, 1, 1]),
+    );
+    assert!(matches!(over, Err(ComputeError::Limits(_))), "{over:?}");
+    assert!(
+        world
+            .add_compute(
+                Compute::new("@compute @workgroup_size(64) fn main() {}").dispatch([16, 1, 1])
+            )
+            .is_ok()
+    );
+}
+
+#[test]
+fn a_sandboxed_pass_needs_a_device_that_times_it() {
+    let world = World::new();
+    // The shared device asks for no timestamps: once it's known, a pass a
+    // plugin adds is refused rather than run unbounded.
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    if world.caps().unwrap().timestamps {
+        return;
+    }
+    let pass =
+        world.add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}").sandboxed());
+    assert_eq!(pass, Err(ComputeError::Untimed));
+    assert!(
+        world
+            .add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}"))
+            .is_ok()
+    );
+}
+
+/// A device of this machine's with timestamps, if it has them.
+fn timed_device() -> Option<(zgx_gpu::wgpu::Device, zgx_gpu::wgpu::Queue)> {
+    use zgx_gpu::wgpu;
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = block(instance.request_adapter(&Default::default())).ok()?;
+    if !adapter.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        eprintln!("no timestamps on {}: not checked", adapter.get_info().name);
+        return None;
+    }
+    block(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: wgpu::Features::TIMESTAMP_QUERY,
+        ..Default::default()
+    }))
+    .ok()
+}
+
+fn block<T>(future: impl std::future::Future<Output = T>) -> T {
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return value;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn a_pass_over_its_gpu_budget_frames_running_is_turned_off() {
+    use zgx_gpu::{
+        viewport::{Viewport, ViewportFrame},
+        wgpu,
+    };
+    let Some((device, queue)) = timed_device() else {
+        return;
+    };
+    let world = World::new();
+    world.set_compute_budget(ComputeBudget {
+        gpu_ms: 0.5,
+        frames: 3,
+        ..ComputeBudget::default()
+    });
+    let sink = world
+        .add_buffer(BufferDesc::storage::<f32>(65_536))
+        .unwrap();
+    // About 1.3 billion multiply-adds: milliseconds on any GPU.
+    let heavy = world
+        .add_compute(
+            Compute::new(
+                "@group(0) @binding(0) var<storage, read_write> sink: array<f32>;
+                 @compute @workgroup_size(64)
+                 fn main(@builtin(global_invocation_id) id: vec3u) {
+                     var x = f32(id.x);
+                     for (var i = 0u; i < 20000u; i++) { x = x * 1.0001 + 0.5; }
+                     sink[id.x] = x;
+                 }",
+            )
+            .buffer("sink", &sink, Access::Write)
+            .threads([65_536, 1, 1])
+            .every_frame(),
+        )
+        .unwrap();
+    let light = world
+        .add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}").every_frame())
+        .unwrap();
+    let mut painter = world.viewport();
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    for _ in 0..200 {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut frame =
+            ViewportFrame::new(&device, &queue, &mut encoder, &view, format, (8, 8), 1.);
+        painter.render(&mut frame);
+        queue.submit([encoder.finish()]);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        if matches!(
+            world.compute_status(heavy),
+            Some(ComputeStatus::OverBudget { .. })
+        ) {
+            break;
+        }
+    }
+    let Some(ComputeStatus::OverBudget { gpu_ms }) = world.compute_status(heavy) else {
+        panic!("still {:?}", world.compute_status(heavy));
+    };
+    assert!(gpu_ms > 0.5, "{gpu_ms} ms");
+    assert_eq!(world.compute_status(light), Some(ComputeStatus::Ready));
+    assert!(world.view().animating(), "the light pass still runs");
+}
+
+#[test]
+fn passes_past_a_frames_invocations_take_turns() {
+    let world = World::new();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    // Room for one of the two 64-invocation passes a frame: neither starves.
+    world.set_compute_budget(ComputeBudget {
+        invocations: 100,
+        ..ComputeBudget::default()
+    });
+    let counts = world.add_buffer(BufferDesc::storage::<u32>(2)).unwrap();
+    let passes: Vec<ComputeId> = (0..2)
+        .map(|i| {
+            world
+                .add_compute(
+                    Compute::new(format!(
+                        "@group(0) @binding(0) var<storage, read_write> counts: array<atomic<u32>>;
+                         @compute @workgroup_size(64)
+                         fn main(@builtin(local_invocation_index) i: u32) {{
+                             if i == 0u {{ atomicAdd(&counts[{i}], 1u); }}
+                         }}"
+                    ))
+                    .buffer("counts", &counts, Access::ReadWrite)
+                    .every_frame(),
+                )
+                .unwrap()
+        })
+        .collect();
+    for pass in &passes {
+        window.compiled(&world, *pass);
+    }
+    for _ in 0..20 {
+        window.draw();
+    }
+    let read = counts.read(0..8);
+    window.until(&read, 100);
+    let ran = words(&read.try_take().unwrap().unwrap());
+    assert!(
+        ran[0] >= 8 && ran[1] >= 8,
+        "each ran about half the frames: {ran:?}"
+    );
+    assert!(ran[0] + ran[1] <= 30, "one a frame: {ran:?}");
+}

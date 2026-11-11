@@ -72,7 +72,7 @@ pub use caps::{Backend, Caps, Compressed, Tier};
 #[doc(hidden)]
 pub use compute::compile_threads;
 #[cfg(feature = "compute")]
-pub use compute::{Access, Compute, ComputeError, ComputeId, ComputeStatus, Point};
+pub use compute::{Access, Compute, ComputeBudget, ComputeError, ComputeId, ComputeStatus, Point};
 pub use environment::Environment;
 pub use geometry::{Geometry, MorphTarget, Vertex};
 #[cfg(feature = "gltf")]

@@ -2,8 +2,8 @@
 //! `World` calls of `crate::buffer` and `crate::compute`.
 use super::World;
 use crate::{
-    BufferDesc, Compute, ComputeError, ComputeId, ComputeStatus, GpuBuffer, GpuDataError,
-    GpuTexture, TextureDesc,
+    BufferDesc, Compute, ComputeBudget, ComputeError, ComputeId, ComputeStatus, GpuBuffer,
+    GpuDataError, GpuTexture, TextureDesc,
     buffer::{BufferShared, TextureShared},
     compute::{Data, UNSETTLED},
 };
@@ -135,9 +135,18 @@ impl World {
         if self.caps().is_some_and(|caps| !caps.compute) {
             return Err(ComputeError::Unsupported);
         }
-        let id = self.data(|data| data.add_compute(compute))?;
+        let timed = self.caps().map(|caps| caps.timestamps);
+        let id = self.data(|data| data.add_compute(compute, timed))?;
         self.view.invalidate();
         Ok(id)
+    }
+
+    /// How much work its compute passes may give the device: invocations a
+    /// frame, and GPU milliseconds a pass where the device has timestamps
+    /// (`ComputeBudget`). A pass already over the invocations stays, and
+    /// waits for frames with room.
+    pub fn set_compute_budget(&self, budget: ComputeBudget) {
+        self.data(|data| data.limits = budget);
     }
 
     /// Take a compute pass out: what it bound is let go with it, unless the

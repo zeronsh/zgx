@@ -96,6 +96,37 @@ enum Bound {
     Texture(GpuTexture),
 }
 
+/// How much work compute passes may give the device
+/// (`World::set_compute_budget`). The device is shared with every window's
+/// interface, and WGSL's loops can't be bounded by reading the shader: a
+/// pass is held to these where it runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ComputeBudget {
+    /// Invocations a frame's passes may run, all told (2^26 to begin with).
+    /// A pass with more alone is refused when added; passes past it in a
+    /// frame wait for the next.
+    pub invocations: u64,
+    /// GPU milliseconds a pass may take, measured where the device has
+    /// timestamps (8 to begin with).
+    pub gpu_ms: f32,
+    /// The same for a sandboxed pass (`Compute::sandboxed`; 1 to begin
+    /// with).
+    pub sandboxed_gpu_ms: f32,
+    /// Frames running a pass may take longer before it's turned off
+    /// (`ComputeStatus::OverBudget`; 3 to begin with).
+    pub frames: u32,
+}
+impl Default for ComputeBudget {
+    fn default() -> Self {
+        Self {
+            invocations: 1 << 26,
+            gpu_ms: 8.,
+            sandboxed_gpu_ms: 1.,
+            frames: 3,
+        }
+    }
+}
+
 /// A compute pass to add (`World::add_compute`): WGSL, the resources it
 /// binds by the names its shader gives them, how many workgroups it runs,
 /// when and where in the frame.
@@ -122,6 +153,7 @@ pub struct Compute {
     dispatch: Dispatch,
     run: Run,
     point: Point,
+    sandboxed: bool,
 }
 impl std::fmt::Debug for Compute {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -144,6 +176,7 @@ impl Compute {
             dispatch: Dispatch::Workgroups([1, 1, 1]),
             run: Run::OnDemand,
             point: Point::BeforeFrame,
+            sandboxed: false,
         }
     }
     /// Its entry point, where the shader has more than one.
@@ -195,6 +228,13 @@ impl Compute {
         self.point = point;
         self
     }
+    /// Code the app doesn't vouch for (a plugin's): held to the stricter GPU
+    /// time budget (`ComputeBudget::sandboxed_gpu_ms`), and refused
+    /// (`ComputeError::Untimed`) on a device that can't time it.
+    pub fn sandboxed(mut self) -> Self {
+        self.sandboxed = true;
+        self
+    }
 }
 
 /// A compute pass in a world (`World::add_compute`).
@@ -228,6 +268,9 @@ pub enum ComputeError {
     Point(Point),
     /// Its resources' order can't hold with the passes before it.
     Cycle,
+    /// Sandboxed, on a device without timestamps: nothing could stop a
+    /// shader that runs too long.
+    Untimed,
 }
 impl std::fmt::Display for ComputeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -238,6 +281,9 @@ impl std::fmt::Display for ComputeError {
             Self::Binding { name, why } => write!(f, "`{name}`: {why}"),
             Self::Limits(why) => f.write_str(why),
             Self::Point(point) => write!(f, "compute passes can't run at {point:?} yet"),
+            Self::Untimed => {
+                f.write_str("a sandboxed pass needs a device that can time it (`Caps::timestamps`)")
+            }
             Self::Cycle => f.write_str(
                 "the pass writes what an earlier pass reads, which writes what it reads",
             ),
@@ -248,7 +294,7 @@ impl std::error::Error for ComputeError {}
 
 /// Where a pass is on the device (`World::compute_status`).
 #[non_exhaustive]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum ComputeStatus {
     /// Waiting for a frame, or compiling.
     Compiling,
@@ -256,6 +302,12 @@ pub enum ComputeStatus {
     Ready,
     /// The device refused it, or runs no compute: why.
     Failed(String),
+    /// Turned off: it took longer than its budget (`ComputeBudget`) frames
+    /// running, the last this many milliseconds.
+    OverBudget {
+        /// Its last frame's GPU time.
+        gpu_ms: f32,
+    },
 }
 
 /// What a pass binds at a slot of its shader's.
@@ -278,6 +330,8 @@ enum Key {
 struct Checked {
     entry: String,
     workgroups: [u32; 3],
+    /// Invocations a run: its workgroups times their size.
+    invocations: u64,
     groups: Vec<Vec<(u32, Slot)>>,
     uses: Vec<(Key, Access)>,
 }
@@ -570,6 +624,11 @@ fn check(compute: &Compute) -> Result<Checked, ComputeError> {
     Ok(Checked {
         entry: entry.name.clone(),
         workgroups,
+        invocations: workgroups
+            .iter()
+            .chain(&size)
+            .map(|&n| u64::from(n))
+            .product(),
         groups,
         uses,
     })
@@ -635,6 +694,15 @@ struct Pass {
     gpu: Option<(u64, Gpu)>,
     /// Why it can't run, if it can't.
     failed: Option<String>,
+    sandboxed: bool,
+    /// Due last frame and left waiting by the frame's invocations: it's
+    /// given room first this frame. And whether this frame runs it.
+    waited: bool,
+    chosen: bool,
+    /// Frames running it took longer than its budget, and the last's time
+    /// once that turned it off.
+    over: u32,
+    over_budget: Option<f32>,
 }
 impl Pass {
     fn wants_frames(&self) -> bool {
@@ -659,6 +727,8 @@ pub(crate) struct Data {
     pub(crate) particle_bytes: u64,
     pub(crate) cap: u64,
     pub(crate) budget: u64,
+    /// What passes may give the device (`World::set_compute_budget`).
+    pub(crate) limits: ComputeBudget,
     passes: Vec<(u32, Option<Pass>)>,
     /// Each point's passes in the order they run.
     order: [Vec<u32>; 3],
@@ -675,6 +745,7 @@ impl Data {
             particle_bytes: 0,
             cap: DEFAULT_MEMORY_CAP,
             budget: DEFAULT_READBACK_BUDGET,
+            limits: ComputeBudget::default(),
             passes: Vec::new(),
             order: Default::default(),
             added: 0,
@@ -720,11 +791,26 @@ impl Data {
     }
 
     /// `compute` checked and placed in its point's order.
-    pub(crate) fn add_compute(&mut self, compute: Compute) -> Result<ComputeId, ComputeError> {
+    /// `compute` checked and placed in its point's order; `timed`, whether
+    /// the device is known to have timestamps (`None`: not yet known).
+    pub(crate) fn add_compute(
+        &mut self,
+        compute: Compute,
+        timed: Option<bool>,
+    ) -> Result<ComputeId, ComputeError> {
         if compute.point == Point::BeforeTransparents {
             return Err(ComputeError::Point(compute.point));
         }
+        if compute.sandboxed && timed == Some(false) {
+            return Err(ComputeError::Untimed);
+        }
         let checked = check(&compute)?;
+        if checked.invocations > self.limits.invocations {
+            return Err(ComputeError::Limits(format!(
+                "{} invocations a run: a frame's passes may run {} (`World::set_compute_budget`)",
+                checked.invocations, self.limits.invocations
+            )));
+        }
         self.added += 1;
         let pass = Pass {
             added: self.added,
@@ -737,6 +823,11 @@ impl Data {
             due: 0.,
             gpu: None,
             failed: None,
+            sandboxed: compute.sandboxed,
+            waited: false,
+            chosen: false,
+            over: 0,
+            over_budget: None,
         };
         let index = match self.passes.iter().position(|(_, p)| p.is_none()) {
             Some(index) => index,
@@ -817,6 +908,9 @@ impl Data {
             Some((generation, Some(pass))) if *generation == id.generation => pass,
             _ => return None,
         };
+        if let Some(gpu_ms) = pass.over_budget {
+            return Some(ComputeStatus::OverBudget { gpu_ms });
+        }
         Some(match (&pass.failed, &pass.gpu) {
             (Some(why), _) => ComputeStatus::Failed(why.clone()),
             (None, Some((_, Gpu::Ready(..)))) => ComputeStatus::Ready,
@@ -860,13 +954,188 @@ pub(crate) struct Frames {
     time: f64,
     /// Staging buffers of reads done, mapped no more, for the next to take.
     spare: Vec<wgpu::Buffer>,
+    /// Passes' GPU time, where the device has timestamps.
+    timing: Option<Timing>,
+    /// Invocations this frame's passes have run.
+    spent: u64,
 }
+
+/// Each pass's GPU time, measured between timestamps written as its own
+/// compute pass begins and ends, and read back as reads are.
+struct Timing {
+    set: wgpu::QuerySet,
+    /// Timestamps the set holds: two a pass.
+    capacity: u32,
+    resolve: wgpu::Buffer,
+    /// Nanoseconds a tick.
+    period: f32,
+    /// This frame's timed passes: their index and when they were added.
+    timed: Vec<(u32, u64)>,
+    /// Frames' timestamps on their way back.
+    jobs: Vec<TimingJob>,
+}
+/// A frame's timestamps on their way back: its timed passes (index, when
+/// added), the staging buffer, where it is.
+type TimingJob = (Vec<(u32, u64)>, wgpu::Buffer, Stage);
+impl Timing {
+    /// Frames' timestamps on their way at once, at most: past it, a frame
+    /// isn't timed.
+    const IN_FLIGHT: usize = 4;
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue, capacity: u32) -> Self {
+        Self {
+            set: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("3D compute timing"),
+                ty: wgpu::QueryType::Timestamp,
+                count: capacity,
+            }),
+            capacity,
+            resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("3D compute timing"),
+                size: u64::from(capacity) * 8,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            period: queue.get_timestamp_period(),
+            timed: Vec::new(),
+            jobs: Vec::new(),
+        }
+    }
+}
+
 impl Frames {
     pub(crate) fn device_changed(&mut self) {
         self.generation = 0;
         self.uniforms = None;
         self.sampler = None;
         self.spare.clear();
+        self.timing = None;
+    }
+
+    /// Which of the frame's due passes run, within its invocations: those
+    /// left waiting last frame given room first, the rest in their order;
+    /// those left out wait for the next. They run in their order either
+    /// way.
+    fn choose(&mut self, data: &mut Data) {
+        let (time, generation) = (self.time, self.generation);
+        let limit = data.limits.invocations;
+        let order: Vec<u32> = [Point::BeforeFrame, Point::AfterFrame]
+            .iter()
+            .flat_map(|point| data.order[point.index()].iter().copied())
+            .collect();
+        let mut due = Vec::new();
+        for &at in &order {
+            let Some(pass) = data.passes[at as usize].1.as_mut() else {
+                continue;
+            };
+            pass.chosen = false;
+            let ready = matches!(&pass.gpu, Some((g, Gpu::Ready(..))) if *g == generation);
+            let is_due = pass.enabled
+                && pass.failed.is_none()
+                && ready
+                && match pass.run {
+                    Run::EveryFrame => true,
+                    Run::OnDemand => pass.demanded,
+                    Run::AtRate(_) => time >= pass.due,
+                };
+            if is_due {
+                due.push(at);
+            }
+        }
+        self.spent = 0;
+        for waited in [true, false] {
+            for &at in &due {
+                let pass = data.passes[at as usize].1.as_mut().unwrap();
+                if pass.waited != waited {
+                    continue;
+                }
+                let invocations = pass.checked.invocations;
+                if self.spent.saturating_add(invocations) <= limit {
+                    self.spent += invocations;
+                    pass.chosen = true;
+                }
+            }
+        }
+        for &at in &due {
+            let pass = data.passes[at as usize].1.as_mut().unwrap();
+            pass.waited = !pass.chosen;
+        }
+    }
+
+    /// Timestamps that came back read into their passes' times: a pass over
+    /// its budget so many frames running is turned off.
+    fn read_timing(&mut self, data: &mut Data, device: &wgpu::Device) {
+        let Some(timing) = &mut self.timing else {
+            return;
+        };
+        let index = self.index;
+        let mut mapping = false;
+        for (_, staging, stage) in timing.jobs.iter_mut() {
+            if let Stage::Copied(at) = *stage
+                && at < index
+            {
+                let flag = Arc::new(AtomicU8::new(0));
+                let set = flag.clone();
+                staging.map_async(wgpu::MapMode::Read, .., move |result| {
+                    set.store(if result.is_ok() { 1 } else { 2 }, Ordering::Release)
+                });
+                *stage = Stage::Mapping(flag);
+            }
+            mapping |= matches!(stage, Stage::Mapping(_));
+        }
+        if mapping {
+            let _ = device.poll(wgpu::PollType::Poll);
+        }
+        let (period, limits) = (timing.period, data.limits);
+        let passes = &mut data.passes;
+        timing.jobs.retain(|(timed, staging, stage)| {
+            let Stage::Mapping(flag) = stage else {
+                return true;
+            };
+            match flag.load(Ordering::Acquire) {
+                0 => return true,
+                1 => {
+                    {
+                        let mapped = staging.slice(..).get_mapped_range();
+                        let ticks: &[u64] = bytemuck::cast_slice(&mapped[..timed.len() * 16]);
+                        // A pass is charged the time past the ends of those
+                        // before it: a GPU runs passes that share nothing at
+                        // once, and one's span then holds another's work.
+                        let mut ended = 0u64;
+                        for (k, &(at, added)) in timed.iter().enumerate() {
+                            let (began, end) = (ticks[2 * k], ticks[2 * k + 1]);
+                            let own = end.saturating_sub(began.max(ended));
+                            ended = ended.max(end);
+                            let Some((_, Some(pass))) = passes.get_mut(at as usize) else {
+                                continue;
+                            };
+                            if pass.added != added || pass.failed.is_some() {
+                                continue;
+                            }
+                            let ms = own as f32 * period / 1e6;
+                            let budget = if pass.sandboxed {
+                                limits.sandboxed_gpu_ms
+                            } else {
+                                limits.gpu_ms
+                            };
+                            pass.over = if ms > budget { pass.over + 1 } else { 0 };
+                            if pass.over >= limits.frames.max(1) {
+                                pass.over_budget = Some(ms);
+                                fail(
+                                    pass,
+                                    format!(
+                                        "it took {ms:.2} ms of the GPU, over its {budget} ms, {} frames running",
+                                        pass.over
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    staging.unmap();
+                }
+                _ => {}
+            }
+            false
+        });
     }
 
     /// Before the renderer draws: the app's resources made and written,
@@ -896,7 +1165,12 @@ impl Frames {
         if self.generation == 0 {
             self.generation = GENERATIONS.fetch_add(1, Ordering::Relaxed);
             self.compute = crate::Caps::of(device).compute;
+            self.timing = device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY)
+                .then(|| Timing::new(device, queue, 64));
         }
+        self.spent = 0;
         let generation = self.generation;
         let start = *self.start.get_or_insert(frame.time);
         let delta = self.last.map_or(0., |last| {
@@ -1027,7 +1301,16 @@ impl Frames {
             0,
             bytemuck::bytes_of(&uniforms),
         );
+        self.read_timing(data, device);
+        if let Some(timing) = &mut self.timing {
+            timing.timed.clear();
+            let passes = data.passes.iter().filter(|(_, p)| p.is_some()).count() as u32;
+            if passes * 2 > timing.capacity {
+                *timing = Timing::new(device, queue, (passes * 2).next_power_of_two());
+            }
+        }
         self.compile(data, device);
+        self.choose(data);
         self.run(data, Point::BeforeFrame, frame.encoder);
     }
 
@@ -1043,6 +1326,27 @@ impl Frames {
             return;
         };
         self.run(&mut data, Point::AfterFrame, frame.encoder);
+        if let Some(timing) = &mut self.timing
+            && !timing.timed.is_empty()
+        {
+            let n = timing.timed.len() as u32;
+            frame
+                .encoder
+                .resolve_query_set(&timing.set, 0..n * 2, &timing.resolve, 0);
+            let staging = frame.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("3D compute timing"),
+                size: u64::from(n) * 16,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            frame
+                .encoder
+                .copy_buffer_to_buffer(&timing.resolve, 0, &staging, 0, u64::from(n) * 16);
+            let timed = std::mem::take(&mut timing.timed);
+            timing
+                .jobs
+                .push((timed, staging, Stage::Copied(self.index)));
+        }
         self.copy_reads(&mut data, frame);
         let wants = data.wants_frames();
         let mut inner = world.borrow_mut();
@@ -1060,6 +1364,10 @@ impl Frames {
             }
             if !self.compute {
                 fail(pass, "the device runs no compute shaders".into());
+                continue;
+            }
+            if pass.sandboxed && self.timing.is_none() {
+                fail(pass, ComputeError::Untimed.to_string());
                 continue;
             }
             if pass.gpu.as_ref().is_none_or(|(g, _)| *g != generation) {
@@ -1199,7 +1507,34 @@ impl Frames {
             if !due {
                 continue;
             }
-            if pass_encoder.is_none() {
+            // Past the frame's invocations, it waits for the next frame,
+            // still due (`choose`).
+            if !pass.chosen {
+                continue;
+            }
+            // Timed, a pass is a compute pass of its own between two
+            // timestamps; untimed, the point's passes share one.
+            let timed = self.timing.as_mut().filter(|t| {
+                t.jobs.len() < Timing::IN_FLIGHT && (t.timed.len() as u32) * 2 < t.capacity
+            });
+            if let Some(timing) = timed {
+                let k = timing.timed.len() as u32;
+                timing.timed.push((index, pass.added));
+                // The last pass ended before this one begins.
+                drop(pass_encoder.take());
+                pass_encoder = Some(
+                    encoder
+                        .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("3D app compute"),
+                            timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
+                                query_set: &timing.set,
+                                beginning_of_pass_write_index: Some(2 * k),
+                                end_of_pass_write_index: Some(2 * k + 1),
+                            }),
+                        })
+                        .forget_lifetime(),
+                );
+            } else if pass_encoder.is_none() {
                 // One compute pass for the point's passes; ended (dropped)
                 // before the encoder records anything else.
                 pass_encoder = Some(
