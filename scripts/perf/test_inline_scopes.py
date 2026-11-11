@@ -3,9 +3,13 @@ and sizes it finds, and which changes fail (the counts of #1740 and #1824).
 
     python3 scripts/perf/test_inline_scopes.py -v
 """
+import os
 import pathlib
+import subprocess
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 import inline_scopes  # noqa: E402
@@ -68,6 +72,29 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(inline_scopes.verdict(300, 3000, 300, 3600), "")
         # Gaining scopes is no failure.
         self.assertEqual(inline_scopes.verdict(506, 5366, 520, 5400), "")
+
+
+class BuildTests(unittest.TestCase):
+    def test_the_tree_measured_is_newer_than_what_the_gate_built(self):
+        # The gate's target built the base last: each file of the tree
+        # measured is touched first, or cargo builds on the base's crates.
+        with tempfile.TemporaryDirectory() as root:
+            subprocess.run(["git", "init", "-q", root], check=True)
+            tracked = pathlib.Path(root, "crates", "zgx", "src", "lib.rs")
+            tracked.parent.mkdir(parents=True)
+            tracked.write_text("pub fn f() {}\n")
+            untracked = pathlib.Path(root, "scratch.rs")
+            untracked.write_text("")
+            subprocess.run(["git", "-C", root, "add", str(tracked)], check=True)
+            for file in (tracked, untracked):
+                os.utime(file, (1_000_000, 1_000_000))
+            seen = []
+            with mock.patch.object(inline_scopes, "mir",
+                                   lambda *_: seen.append(tracked.stat().st_mtime) or ""):
+                inline_scopes.measure(root, pathlib.Path(root, "target"), {("zgx", "f")}, ("zgx",))
+            self.assertEqual(len(seen), 1)
+            self.assertGreater(seen[0], 1_000_000)
+            self.assertEqual(untracked.stat().st_mtime, 1_000_000)
 
 
 if __name__ == "__main__":
