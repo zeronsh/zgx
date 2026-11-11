@@ -1424,7 +1424,13 @@ impl std::fmt::Debug for World {
 impl World {
     /// An empty world: a camera 5 back and 1.5 up looking at the origin, no
     /// lights, a transparent background.
+    ///
+    /// Devices made after it ask for what a world uses where it can (GPU
+    /// timestamps, compressed textures: `zgx_gpu::request_view_features`).
+    /// A world made after its window's device draws without them, as
+    /// `World::caps` then says.
     pub fn new() -> Self {
+        zgx_gpu::request_view_features();
         let inner = Rc::new(RefCell::new(Inner {
             objects: Vec::new(),
             lights: Vec::new(),

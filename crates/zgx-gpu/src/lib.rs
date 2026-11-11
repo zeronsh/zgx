@@ -4168,6 +4168,9 @@ impl GpuContext {
             } else {
                 wgpu::Features::empty()
             } | (adapter.features() & wgpu::Features::DUAL_SOURCE_BLENDING)
+                // What GPU views' painters use where they can, where asked
+                // for (`request_view_features`): none, if not.
+                | view_features(&adapter.features())
                 // Half the bytes of a float target where alpha isn't needed
                 // (3D bloom's steps), where the GPU draws into it.
                 | (adapter.features() & wgpu::Features::RG11B10UFLOAT_RENDERABLE)
@@ -18155,6 +18158,36 @@ pub fn ray_queries_status() -> Option<RayQueries> {
     }
 }
 #[cfg(test)]
+mod view_feature_tests {
+    use super::{GpuContext, VIEW_FEATURE_LIST, VIEW_FEATURES, view_features};
+    use std::sync::atomic::Ordering;
+
+    /// Nothing in this crate's tests asks for them (zgx-3d's `World::new`
+    /// does): a device here is asked for what it was before they were.
+    #[test]
+    fn a_device_asks_for_no_view_features_unless_they_are_requested() {
+        assert!(!VIEW_FEATURES.load(Ordering::Relaxed));
+        assert_eq!(
+            view_features(&wgpu::Features::all()),
+            wgpu::Features::empty()
+        );
+        let context = match GpuContext::new() {
+            Ok(context) => context,
+            Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+                panic!("ZGX_REQUIRE_GPU, but no device: {error}")
+            }
+            Err(_) => return,
+        };
+        let asked = context.inner.device.features();
+        assert_eq!(
+            asked & VIEW_FEATURE_LIST,
+            wgpu::Features::empty(),
+            "{asked:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod ray_query_tests {
     use super::RayQueries;
 
@@ -18202,6 +18235,54 @@ mod ray_query_tests {
 /// ```
 pub unsafe fn request_ray_queries() {
     RAY_QUERIES.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+/// Devices made from now on ask for the optional features GPU views use
+/// (`request_view_features`).
+static VIEW_FEATURES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Those features (`request_view_features` says what each is for).
+// When this branch meets main, this list and the other team's
+// `viewport::view_device_features()` (its Direct3D 11 views' device) become
+// one list, asked for by this one opt-in.
+const VIEW_FEATURE_LIST: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY
+    .union(wgpu::Features::TIMESTAMP_QUERY_INSIDE_PASSES)
+    .union(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+    .union(wgpu::Features::TEXTURE_COMPRESSION_BC)
+    .union(wgpu::Features::TEXTURE_COMPRESSION_ASTC)
+    .union(wgpu::Features::TEXTURE_COMPRESSION_ETC2)
+    .union(wgpu::Features::FLOAT32_FILTERABLE);
+/// Devices made after this call ask for the optional features a
+/// `GpuView`'s painter uses where it can, each where the adapter has it
+/// (none is required: one the adapter lacks is left out):
+/// - `TIMESTAMP_QUERY`, `TIMESTAMP_QUERY_INSIDE_PASSES`: GPU time by pass
+///   (zgx-3d times compute passes with them, and runs sandboxed ones only
+///   where it can).
+/// - `INDIRECT_FIRST_INSTANCE`: indirect draws starting past the first
+///   instance (GPU-driven instance buffers).
+/// - `TEXTURE_COMPRESSION_BC`, `_ASTC`, `_ETC2`: block-compressed textures
+///   uploaded as they are, not decoded to RGBA8 (a quarter to an eighth of
+///   the memory).
+/// - `FLOAT32_FILTERABLE`: 32-bit float textures sampled with filtering.
+///
+/// Call it before the first window or renderer is made: windows share one
+/// device, and a device already made keeps the features it was made with.
+/// zgx-3d's `World::new` calls it, so an app that makes its world before
+/// its first window needs nothing more.
+///
+/// Not called, the device is asked for exactly what it was before; the
+/// only work this adds is one relaxed atomic load when a device is made.
+#[cold]
+pub fn request_view_features() {
+    VIEW_FEATURES.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+/// What of `adapter`'s features a device asks for its views
+/// (`request_view_features`): none unless asked.
+#[cold]
+fn view_features(adapter: &wgpu::Features) -> wgpu::Features {
+    if VIEW_FEATURES.load(std::sync::atomic::Ordering::Relaxed) {
+        *adapter & VIEW_FEATURE_LIST
+    } else {
+        wgpu::Features::empty()
+    }
 }
 /// Tests: an app's shaders built in the process (wgpu's naga and FXC) when
 /// set, through a child (`app_fragment`) when not.
