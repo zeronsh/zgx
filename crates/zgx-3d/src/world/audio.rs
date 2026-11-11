@@ -57,6 +57,7 @@ pub struct Emitter3d {
     doppler: f32,
     occlusion: bool,
     air: bool,
+    binaural: bool,
 }
 
 impl Emitter3d {
@@ -72,6 +73,7 @@ impl Emitter3d {
             doppler: 1.,
             occlusion: true,
             air: true,
+            binaural: false,
         }
     }
     /// Whether it plays round and round.
@@ -108,6 +110,18 @@ impl Emitter3d {
     /// Whether the air dulls it with distance (`zgx_audio::spatial::air_cutoff`).
     pub fn air(mut self, air: bool) -> Emitter3d {
         self.air = air;
+        self
+    }
+    /// Heard through a head (HRTF: the spherical head,
+    /// `zgx_audio::effects::Binaural`) rather than panned: where it is
+    /// round the listener, above and behind too, for headphones. Each such
+    /// emitter takes one of the world's heads, each a bus of the engine's
+    /// with a binaural on it, made as needed, eight at most and kept for
+    /// the world's life; one let go is given to the next. With all eight
+    /// taken, it's panned.
+    #[cfg(feature = "hrtf")]
+    pub fn binaural(mut self, binaural: bool) -> Emitter3d {
+        self.binaural = binaural;
         self
     }
 }
@@ -292,6 +306,49 @@ struct Placed {
     stale: bool,
     /// What it last sent each room.
     rooms: [f32; ROOMS],
+    /// The head it's heard through, if binaural.
+    head: Option<usize>,
+}
+
+/// Heads a world makes at most: each a bus of the engine's.
+#[cfg(feature = "hrtf")]
+const HEADS: usize = 8;
+
+/// A bus with a binaural on it, heard from where its emitter is, given to
+/// one emitter at a time.
+struct Head {
+    bus: Bus,
+    binaural: EffectHandle,
+    busy: bool,
+    /// The azimuth and elevation last sent.
+    facing: [f32; 2],
+}
+
+/// A head's parameters, as the binaural numbers them.
+const AZIMUTH: usize = 0;
+const ELEVATION: usize = 1;
+#[cfg(feature = "hrtf")]
+const _: () = assert!(
+    AZIMUTH == zgx_audio::effects::Binaural::AZIMUTH
+        && ELEVATION == zgx_audio::effects::Binaural::ELEVATION
+);
+
+/// Heads made so far, for each one's bus's name.
+#[cfg(feature = "hrtf")]
+static HEADS_MADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Where `point` is round the listener's head, in degrees: its azimuth (0
+/// ahead, positive right) and elevation (positive up).
+fn direction(heard: &Heard, point: Vec3) -> [f32; 2] {
+    let to = point - heard.position;
+    let forward = heard.forward.normalized();
+    let right = forward.cross(heard.up).normalized();
+    let up = right.cross(forward);
+    let (x, y, z) = (to.dot(right), to.dot(up), to.dot(forward));
+    [
+        x.atan2(z).to_degrees(),
+        y.atan2((x * x + z * z).sqrt()).to_degrees(),
+    ]
 }
 
 /// Reverbs a world plays its zones through at once: the listener's zone
@@ -570,6 +627,8 @@ pub(crate) struct Sound3d {
     bus: Bus,
     /// Its reverbs, made with its first zone.
     rooms: Vec<Room>,
+    /// Its binaural heads, made as binaural emitters need them.
+    heads: Vec<Head>,
     emitters: Vec<(u32, Option<Placed>)>,
     zones: Vec<(u32, Option<ReverbZone>)>,
     listener: Listener,
@@ -843,6 +902,35 @@ impl Sound3d {
         self.work.set(work);
     }
 
+    /// A free head for a binaural emitter: one let go, or one made, eight at
+    /// most. None when all are taken (or the engine has no bus to spare):
+    /// it's panned.
+    fn head(&mut self) -> Option<usize> {
+        if let Some(free) = self.heads.iter().position(|h| !h.busy) {
+            self.heads[free].busy = true;
+            return Some(free);
+        }
+        #[cfg(feature = "hrtf")]
+        if self.heads.len() < HEADS {
+            let n = HEADS_MADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let bus = self
+                .audio
+                .add_bus(&format!("3d head {n}"), &self.bus)
+                .ok()?;
+            let binaural = bus
+                .add_effect(zgx_audio::effects::Binaural::spherical())
+                .ok()?;
+            self.heads.push(Head {
+                bus,
+                binaural,
+                busy: true,
+                facing: [f32::NAN; 2],
+            });
+            return Some(self.heads.len() - 1);
+        }
+        None
+    }
+
     /// Each emitter's sends to the rooms ([`send_level`]), once they're
     /// given out ([`Self::assign`]): sent only where they changed.
     fn rooms(&mut self, listener: Vec3, time: Instant, ramp: Ramp) {
@@ -953,7 +1041,12 @@ impl Sound3d {
         // Those whose sound has ended, let go: a one-shot is sent nothing
         // after it's done.
         for (_, slot) in self.emitters.iter_mut() {
-            if slot.as_ref().is_some_and(|p| !p.voice.playing()) {
+            if let Some(placed) = slot.as_ref()
+                && !placed.voice.playing()
+            {
+                if let Some(head) = placed.head {
+                    self.heads[head].busy = false;
+                }
                 *slot = None;
             }
         }
@@ -967,6 +1060,9 @@ impl Sound3d {
                 {
                     // Its object is gone: so is it.
                     let _ = placed.voice.stop();
+                    if let Some(head) = placed.head {
+                        self.heads[head].busy = false;
+                    }
                     *slot = None;
                 } else if placed.last.take().is_some() {
                     // Hidden: silent until it shows again.
@@ -1039,15 +1135,32 @@ impl Sound3d {
             if !placed.stale && !listener_moved {
                 continue;
             }
-            let [level, pan, pitch, air] =
+            let [mut level, mut pan, pitch, air] =
                 place(&placed.shape, position, ahead, placed.velocity, &listening);
             let (gain, cutoff) = placed.occluded;
+            let mut faced = true;
+            if let Some(head) = placed.head {
+                // Centred into its head, which hears its left and right
+                // averaged: at the equal-power centre's 1/√2, made up.
+                level *= std::f32::consts::SQRT_2;
+                pan = 0.;
+                let head = &mut self.heads[head];
+                let facing = direction(&heard, position);
+                if head.facing != facing {
+                    faced = head.binaural.set(AZIMUTH, facing[0], ramp).is_ok()
+                        && head.binaural.set(ELEVATION, facing[1], ramp).is_ok();
+                    if faced {
+                        head.facing = facing;
+                    }
+                }
+            }
             // Occlusion moves no faster than `SETTLE`: a wall slides in.
             let slow = Ramp::seconds(step.max(SETTLE));
             let sent = placed.voice.set_gain(level * gain, slow).is_ok()
                 && placed.voice.set_pan(pan, ramp).is_ok()
                 && placed.voice.set_pitch(pitch, ramp).is_ok()
-                && placed.voice.set_cutoff(air.min(cutoff), slow).is_ok();
+                && placed.voice.set_cutoff(air.min(cutoff), slow).is_ok()
+                && faced;
             // Not all of it got through (the queue was full): again next
             // frame.
             placed.stale = !sent;
@@ -1091,8 +1204,10 @@ impl Sound3d {
             doppler: emitter.doppler,
             air: emitter.air,
         };
+        let head = if emitter.binaural { self.head() } else { None };
+        let bus = head.map_or(&self.bus, |h| &self.heads[h].bus);
         let mut play = Play::new()
-            .bus(&self.bus)
+            .bus(bus)
             .looping(emitter.looping)
             .law(PanLaw::EqualPower);
         // Placed where it is now, so it starts there.
@@ -1100,8 +1215,20 @@ impl Sound3d {
         let mut rooms = [0.; ROOMS];
         play = match at {
             Some((position, ahead)) => {
-                let [gain, pan, pitch, cutoff] =
+                let [mut gain, mut pan, pitch, cutoff] =
                     place(&shape, position, ahead, Vec3::ZERO, &listener);
+                if let Some(h) = head {
+                    // Its head faces it before its first frame.
+                    gain *= std::f32::consts::SQRT_2;
+                    pan = 0.;
+                    let head = &mut self.heads[h];
+                    let facing = direction(&heard, position);
+                    if head.binaural.set(AZIMUTH, facing[0], Ramp::NONE).is_ok()
+                        && head.binaural.set(ELEVATION, facing[1], Ramp::NONE).is_ok()
+                    {
+                        head.facing = facing;
+                    }
+                }
                 // Its sends to the zones' reverbs from the start too: a sound
                 // that starts with a click is heard in its room.
                 for (k, room) in self.rooms.iter().enumerate() {
@@ -1114,7 +1241,15 @@ impl Sound3d {
             }
             None => play.gain(0.),
         };
-        let voice = self.audio.play(&emitter.sound, play)?;
+        let voice = match self.audio.play(&emitter.sound, play) {
+            Ok(voice) => voice,
+            Err(error) => {
+                if let Some(h) = head {
+                    self.heads[h].busy = false;
+                }
+                return Err(error);
+            }
+        };
         let placed = Placed {
             object,
             voice,
@@ -1126,6 +1261,7 @@ impl Sound3d {
             rayed: None,
             stale: false,
             rooms,
+            head,
         };
         let (index, generation) = claim(&mut self.emitters, placed);
         Ok(Emitter3dId { index, generation })
@@ -1141,6 +1277,9 @@ impl Drop for Sound3d {
         }
         for room in self.rooms.drain(..) {
             let _ = room.reverb.remove();
+        }
+        for head in self.heads.drain(..) {
+            let _ = head.binaural.remove();
         }
     }
 }
@@ -1172,6 +1311,7 @@ impl World {
             audio: audio.clone(),
             bus,
             rooms: Vec::new(),
+            heads: Vec::new(),
             emitters: Vec::new(),
             zones: Vec::new(),
             listener: Listener::Camera,
@@ -1227,6 +1367,9 @@ impl World {
             && let Some(placed) = slot.take()
         {
             let _ = placed.voice.stop();
+            if let Some(head) = placed.head {
+                sound.heads[head].busy = false;
+            }
         }
     }
 
@@ -1450,5 +1593,41 @@ mod tests {
         );
         at(1_200, 30.);
         assert_eq!(held(&world), [Some(warehouse), Some(hall)]);
+    }
+
+    #[cfg(feature = "hrtf")]
+    #[test]
+    fn binaural_emitters_share_eight_heads_and_pan_past_them() {
+        let (audio, _mixer) = zgx_audio::Audio::offline(zgx_audio::Config::default()).unwrap();
+        let world = World::new();
+        world
+            .set_audio(&audio, &audio.bus("world").unwrap())
+            .unwrap();
+        let tone = zgx_audio::Sound::from_samples(&[0., 0.5], 1, 48_000).unwrap();
+        let at = world.add(Object::group());
+        let add = || {
+            world
+                .add_emitter3d(at, Emitter3d::new(&tone).looping(true).binaural(true))
+                .unwrap()
+        };
+        let heads = |world: &World| -> Vec<Option<usize>> {
+            let inner = world.inner.borrow();
+            let sound = inner.audio.as_ref().unwrap();
+            assert!(sound.heads.len() <= HEADS);
+            sound
+                .emitters
+                .iter()
+                .filter_map(|(_, p)| p.as_ref().map(|p| p.head))
+                .collect()
+        };
+        let ids: Vec<_> = (0..9).map(|_| add()).collect();
+        let given = heads(&world);
+        assert_eq!(&given[..8], (0..8).map(Some).collect::<Vec<_>>());
+        assert_eq!(given[8], None, "the ninth is panned");
+        // One let go: the next binaural emitter takes its head, no new one.
+        world.remove_emitter3d(ids[3]);
+        add();
+        assert!(heads(&world).contains(&Some(3)));
+        assert_eq!(world.inner.borrow().audio.as_ref().unwrap().heads.len(), 8);
     }
 }

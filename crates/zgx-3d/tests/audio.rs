@@ -666,3 +666,83 @@ fn a_world_s_view_shown_in_two_boxes_steps_its_sound_once_a_frame() {
     assert!(once > 0, "nothing was sent: the view never drew");
     assert_eq!(once, twice, "commands sent, one box against two");
 }
+
+#[cfg(feature = "hrtf")]
+#[test]
+fn a_binaural_emitter_beside_the_listener_is_heard_through_a_head() {
+    // Noise 3 m to the right, then to the left. Panned, the far ear would
+    // hear nothing; through the head it hears it quieter (the head's
+    // shadow) and later (the way round it).
+    // Added at `from`, then moved to `x`: the head follows it.
+    let heard = |from: f32, x: f32, binaural: bool| -> (Vec<f32>, Vec<f32>) {
+        let (audio, mut mixer) = engine();
+        let world = world(&audio);
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let noise: Vec<f32> = (0..RATE as usize)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+            })
+            .collect();
+        let noise = Sound::from_samples(&noise, 1, RATE).unwrap();
+        let at = spot(&world, [from, 0., 0.]);
+        let emitter = Emitter3d::new(&noise)
+            .looping(true)
+            .occlusion(false)
+            .air(false)
+            .binaural(binaural);
+        world.add_emitter3d(at, emitter).unwrap();
+        let clock = Clock(Instant::now());
+        world.update_audio(clock.at(0));
+        world.set_transform(at, Transform::at([x, 0., 0.]));
+        world.update_audio(clock.at(1));
+        mixer.frames(RATE as usize / 10);
+        let out = mixer.frames(RATE as usize / 2);
+        (channel(&out, 0), channel(&out, 1))
+    };
+    let energy = |s: &[f32]| s.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>();
+    // The lag (in frames) at which `late` best matches `early`.
+    let lag = |early: &[f32], late: &[f32]| -> i32 {
+        (-60i32..=60)
+            .max_by(|&a, &b| {
+                let at = |k: i32| -> f64 {
+                    (100..early.len() - 100)
+                        .map(|i| f64::from(early[i]) * f64::from(late[(i as i32 + k) as usize]))
+                        .sum()
+                };
+                at(a).total_cmp(&at(b))
+            })
+            .unwrap()
+    };
+    let (left, right) = heard(3., 3., false);
+    assert!(
+        energy(&left) < 1e-9 * energy(&right),
+        "panned, the left hears it"
+    );
+    let panned = energy(&right);
+    for (x, near, far) in [(3f32, 1, 0), (-3., 0, 1)] {
+        let (left, right) = heard(-x, x, true);
+        let ears = [left, right];
+        let db = 10. * (energy(&ears[far]) / energy(&ears[near])).log10();
+        assert!(
+            (-25.0..-2.0).contains(&db),
+            "at {x} m the far ear is {db:.1} dB"
+        );
+        // A head 8.75 cm across: about 0.65 ms round, 31 frames.
+        let behind = lag(&ears[near], &ears[far]);
+        // Centred into the head at unity: the spherical head lifts the
+        // near ear's highs, so white noise comes out 5.3 dB over the
+        // panned (its near ear alone).
+        let over = 10. * ((energy(&ears[near]) + energy(&ears[far])) / panned).log10();
+        assert!(
+            (3.3..7.3).contains(&over),
+            "at {x} m it's {over:.1} dB over the panned"
+        );
+        assert!(
+            (15..=45).contains(&behind),
+            "at {x} m the far ear is {behind} frames late"
+        );
+    }
+}

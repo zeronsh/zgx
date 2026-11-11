@@ -47,6 +47,8 @@ gi = []
 # Sound in the world (design-audio.md, 7): emitters on objects, the
 # listener on the camera, occlusion by the meshes, reverb zones.
 audio = ["dep:zgx-audio"]
+# Binaural emitters (`Emitter3d::binaural`): heard through a head (HRTF).
+hrtf = ["audio", "zgx-audio/hrtf"]
 
 # Custom materials (`MaterialShader`, `World::add_shader`, surface layers):
 # WGSL functions plugged into the lit pipeline. Off, a world draws as
