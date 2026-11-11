@@ -483,3 +483,41 @@ fn a_world_shading_through_clusters_says_its_probes_are_off() {
     );
     assert!(!world.probes_traced());
 }
+
+#[test]
+fn a_ray_bringing_no_finite_light_leaves_the_probes_finite() {
+    // A speck glowing without bound in a corner: rays that hit it bring
+    // back infinite light. Kept out of the probes' running averages, the
+    // room shades as it does without it; let in, every probe reading it
+    // is ruined for good (a blend never sheds what isn't finite).
+    let shade = |speck: bool| {
+        let world = World::new();
+        room(&world);
+        if speck {
+            world.add(
+                Object::mesh(
+                    Geometry::cuboid(0.05, 0.05, 0.05),
+                    Material {
+                        emissive: [f32::INFINITY; 3],
+                        ..Material::default()
+                    },
+                )
+                .at([-0.9, 0.05, -0.9]),
+            );
+        }
+        world.add_probes(volume().per_frame(216)).unwrap();
+        let mut window = Window::new(&world)?;
+        settle(&mut window, &world, 500);
+        world.probes_traced().then(|| window.pixels())
+    };
+    let (Some(clean), Some(hot)) = (shade(false), shade(true)) else {
+        return;
+    };
+    for at in [(102, 110), (80, 60), (128, 140), (40, 128)] {
+        let (a, b) = (around(&clean, at, 6), around(&hot, at, 6));
+        assert!(
+            a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.03),
+            "at {at:?}: {a:?} without the speck, {b:?} with it"
+        );
+    }
+}

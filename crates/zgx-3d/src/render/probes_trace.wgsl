@@ -101,19 +101,23 @@ fn around(n: vec3<f32>) -> vec3<f32> {
     return light;
 }
 // Light `i`'s light reaching a surface at `at` facing `n`, unshadowed, and
-// the way to it.
+// how far (a light at the surface itself: none).
 fn lamp(i: u32, at: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
     let point = lights[i];
     let to = point[0].xyz - at;
-    let distance = length(to);
-    let l = to / max(distance, 1e-6);
+    let distance = max(length(to), 1e-4);
+    let l = to / distance;
     let n_l = dot(n, l);
     if n_l <= 0.0 || distance >= point[0].w {
         return vec4(0.0);
     }
-    let falloff = pow(clamp(1.0 - pow(distance / point[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);
+    let falloff = pow(clamp(1.0 - pow(distance / point[0].w, 4.0), 0.0, 1.0), 2.0) / (distance * distance);
     let cone = clamp(dot(point[2].xyz, -l) + point[2].w, 0.0, 1.0);
     return vec4(point[1].rgb * point[1].w * falloff * cone * cone * n_l, distance);
+}
+// The way from `at` to light `i`, `distance` away (`lamp`'s, never 0).
+fn toward(i: u32, at: vec3<f32>, distance: f32) -> vec3<f32> {
+    return (lights[i][0].xyz - at) / distance;
 }
 fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3(0.2126, 0.7152, 0.0722));
@@ -128,8 +132,7 @@ fn lamps(at: vec3<f32>, n: vec3<f32>, lifted: vec3<f32>, ray: u32) -> vec3<f32> 
         for (var i = 0u; i < trace.lights; i++) {
             let reaching = lamp(i, at, n);
             if any(reaching.rgb > vec3(0.0)) {
-                let l = normalize(lights[i][0].xyz - at);
-                if !blocked(lifted, l, reaching.w - trace.lift) {
+                if !blocked(lifted, toward(i, at, reaching.w), reaching.w - trace.lift) {
                     light += reaching.rgb;
                 }
             }
@@ -152,8 +155,7 @@ fn lamps(at: vec3<f32>, n: vec3<f32>, lifted: vec3<f32>, ray: u32) -> vec3<f32> 
         }
         pick -= weight;
         if pick <= 0.0 || i + 1u == trace.lights {
-            let l = normalize(lights[i][0].xyz - at);
-            if blocked(lifted, l, reaching.w - trace.lift) {
+            if blocked(lifted, toward(i, at, reaching.w), reaching.w - trace.lift) {
                 return vec3(0.0);
             }
             return reaching.rgb * (total / weight) / PI;
@@ -206,7 +208,10 @@ fn trace_rays(@builtin(global_invocation_id) id: vec3<u32>) {
     let local = normal_at(i0) * b.x + normal_at(i1) * b.y + normal_at(i2) * b.z;
     // Normals turn by the inverse transpose: rows of world-to-object.
     let w = hit.world_to_object;
-    var n = normalize(vec3(dot(w[0], local), dot(w[1], local), dot(w[2], local)));
+    let turned = vec3(dot(w[0], local), dot(w[1], local), dot(w[2], local));
+    // A geometry's normals may be nothing there (degenerate): facing the
+    // ray, then.
+    var n = select(-d, turned / max(length(turned), 1e-12), dot(turned, turned) > 1e-24);
     if dot(n, d) > 0.0 {
         n = -n;
     }

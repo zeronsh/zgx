@@ -31,7 +31,7 @@
 //probed @group(0) @binding(12) var probe_sampler: sampler;
 //probed // `d` (a unit vector) on the octahedron unfolded to a square, -1 to 1.
 //probed fn octahedral(d: vec3<f32>) -> vec2<f32> {
-//probed     let p = d.xy / (abs(d.x) + abs(d.y) + abs(d.z));
+//probed     let p = d.xy / max(abs(d.x) + abs(d.y) + abs(d.z), 1e-12);
 //probed     if d.z >= 0.0 {
 //probed         return p;
 //probed     }
@@ -71,7 +71,8 @@
 //probed             let probe = volume.origin.xyz + at * volume.spacing.xyz;
 //probed             let trilinear = mix(1.0 - t, t, step);
 //probed             // In front of the surface: more; behind it, a little.
-//probed             let toward = normalize(probe - p + vec3(1e-6));
+//probed             let apart = probe - p;
+//probed             let toward = apart / max(length(apart), 1e-6);
 //probed             let facing = (dot(toward, n) + 1.0) * 0.5;
 //probed             var weight = facing * facing + 0.2;
 //probed             // Seen from the probe: the surfaces' distances that way.

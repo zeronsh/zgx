@@ -36,6 +36,12 @@ fn fibonacci(i: u32, n: u32) -> vec3<f32> {
     let r = sqrt(max(1.0 - z * z, 0.0));
     return vec3(r * cos(phi), r * sin(phi), z);
 }
+// Whether every part of `v` is a finite number, by its bits (a compiler's
+// fast math may take `v != v` to be false).
+fn finite(v: vec4<f32>) -> bool {
+    let exponent = bitcast<vec4<u32>>(v) & vec4(0x7f800000u);
+    return all(exponent != vec4(0x7f800000u));
+}
 // `octahedral`'s inverse (`shader/probes.wgsl`).
 fn unfolded(o: vec2<f32>) -> vec3<f32> {
     var v = vec3(o, 1.0 - abs(o.x) - abs(o.y));
@@ -86,6 +92,11 @@ struct Tile {
     var weights = 0.0;
     for (var i = 0u; i < trace.rays; i++) {
         let ray = rays[start + i];
+        // A ray that brought back no finite light (a glow without bound)
+        // stays out of the average: one would ruin the texel for good.
+        if !finite(ray) {
+            continue;
+        }
         let along = normalize((trace.turn * vec4(fibonacci(i, trace.rays), 0.0)).xyz);
         let cosine = max(dot(d, along), 0.0);
         if atlas.depth > 0.5 {
