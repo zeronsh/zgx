@@ -3483,6 +3483,12 @@ pub struct Scene {
     selectable: select::Selectable,
     /// Canvas views and grid fills (`scene_view`).
     views: view::Views,
+    /// The nodes whose resources a renderer keeps may have changed
+    /// (`resource_changes`), made as one first reads them; noted while one
+    /// does (`recording`): a scene none reads notes none. Last: the fields
+    /// before keep the places they had, which the hot paths address.
+    changes: std::cell::OnceCell<Box<ResourceChanges>>,
+    recording: std::cell::Cell<bool>,
 }
 /// A visual line of text, for assistive technology (`Scene::text_lines`).
 #[derive(Clone, Debug, PartialEq)]
@@ -3611,6 +3617,8 @@ impl Scene {
             moves: Vec::new(),
             flush_serial: 0,
             repaints: Vec::new(),
+            changes: std::cell::OnceCell::new(),
+            recording: std::cell::Cell::new(false),
             repaints_from: 1,
             repaint_flushes: 0,
             repaints_read: std::cell::Cell::new(false),
@@ -7748,6 +7756,9 @@ impl Scene {
                 .get_mut()
                 .retain(|child| *child != id);
         }
+        if self.recording.get() {
+            self.removing_subtree(id);
+        }
         self.free_subtree(id);
         if !self.inert.is_empty() {
             let mut inert = std::mem::take(&mut self.inert);
@@ -7808,6 +7819,9 @@ impl Scene {
             ids.extend_from_slice(unsafe { &*slot.node.as_ref().unwrap().children.get() });
         }
         self.dead += ids.len();
+        if self.recording.get() {
+            self.removed(&ids);
+        }
         let slots = &self.slots;
         let live = |id: &NodeId| slots[id.index as usize].generation == id.generation;
         self.blur_nodes.retain(live);
@@ -14549,6 +14563,73 @@ impl Scene {
         self.repaints_read.set(true);
         (self.repaints_from..=self.repaint_flushes, &self.repaints)
     }
+    /// The nodes removed in the flushes given (every flush counted, as
+    /// [`Scene::repaints`]), and since: each node of a subtree removed, so a
+    /// renderer keeping something by node lets go of those rather than look
+    /// over all it keeps; a node may be named more than once. Nodes appended
+    /// or given another kind aren't named: what a renderer keeps for those
+    /// it learns of as it draws them, and checks as `content_revision`
+    /// moves. One that read up to the flush before the range starts has all
+    /// since; past a gap, it looks over all it keeps. Noted once a renderer
+    /// has read them, and within a bound; a flush costs nothing for them.
+    pub fn resource_changes(&self) -> (std::ops::RangeInclusive<u64>, &[NodeId]) {
+        let flushes = self.repaint_flushes;
+        let changes = self.changes.get_or_init(|| {
+            Box::new(ResourceChanges {
+                since: std::cell::Cell::new(flushes + 1),
+                ..Default::default()
+            })
+        });
+        self.recording.set(true);
+        changes.read.set(true);
+        let from = changes.since.replace(flushes + 1);
+        let given = changes.read_len.replace(changes.noted.len());
+        (from..=flushes, &changes.noted[given..])
+    }
+    /// Note each node of `id`'s subtree, about to go (`free_subtree`), in
+    /// [`Scene::resource_changes`]. Out of line, called only while a
+    /// renderer reads them: the removal runs as it did.
+    #[cold]
+    #[inline(never)]
+    fn removing_subtree(&mut self, id: NodeId) {
+        let mut ids = vec![id];
+        let mut at = 0;
+        while let Some(&id) = ids.get(at) {
+            at += 1;
+            let children = self.children_raw(self.node(id)).clone();
+            ids.extend(children);
+        }
+        self.removed(&ids);
+    }
+    /// Note `ids`, a subtree's nodes removed at once, in
+    /// [`Scene::resource_changes`]. Those a renderer has read go first. Past the bound, all go, and none are
+    /// noted until it reads again: the range it then reads starts past the
+    /// gap.
+    #[cold]
+    #[inline(never)]
+    fn removed(&mut self, ids: &[NodeId]) {
+        let flushes = self.repaint_flushes;
+        let Some(changes) = self.changes.get_mut() else {
+            return;
+        };
+        // Read since the last: all noted were given.
+        if changes.read.replace(false) {
+            changes.noted.clear();
+            changes.read_len.set(0);
+            changes.dropping = false;
+        }
+        if changes.dropping {
+            return;
+        }
+        changes.noted.extend_from_slice(ids);
+        if changes.noted.len() > REPAINTS_KEPT {
+            changes.noted = Vec::new();
+            changes.read_len.set(0);
+            // These were the next flush's: what is read next starts after.
+            changes.since.set(flushes + 2);
+            changes.dropping = true;
+        }
+    }
     /// Whether a paint walk since the last call passed a node fading its
     /// edges (`Style::fade_edges`): what it painted then carries a fade
     /// mask of that node's own. For a renderer, which fades only what
@@ -14933,8 +15014,8 @@ impl Scene {
     }
     /// Paints a single compositor layer, replacing nested isolation boundaries with
     /// one item. A layer root excludes its own opacity/filter from its cached pixels.
-    /// Changes whenever nodes are added, removed or change kind. Renderers can
-    /// prune per-node caches only when it moves.
+    /// Changes whenever nodes are added, removed or change kind. Which nodes,
+    /// for a renderer letting go of what it keeps by node: `resource_changes`.
     pub fn content_revision(&self) -> u64 {
         self.content_revision
     }
@@ -15575,6 +15656,19 @@ impl Scene {
             stack: vec![(self.root, Transform::default(), 1.0, self.viewport, None)],
         }
     }
+}
+/// What [`Scene::resource_changes`] keeps: the nodes noted (`noted`), how
+/// many of them a renderer was given (`read_len`), the flush the next read
+/// starts at (`since`), whether one read since the last was noted (`read`),
+/// and whether past the bound they are given up until it reads again
+/// (`dropping`). A flush does nothing here.
+#[derive(Default)]
+struct ResourceChanges {
+    noted: Vec<NodeId>,
+    read_len: std::cell::Cell<usize>,
+    since: std::cell::Cell<u64>,
+    read: std::cell::Cell<bool>,
+    dropping: bool,
 }
 /// Whether `style` fades any edge (`fade_mask` makes a mask of its own).
 fn fades(style: &Style) -> bool {
@@ -22853,6 +22947,136 @@ mod local_transform_tests {
         // Without a mask, moving one does nothing.
         scene.set_mask_offset(id, (1., 1.));
         assert!(scene.flush().is_idle());
+    }
+
+    /// `resource_changes` names, flush by flush, the nodes removed, each of
+    /// a subtree, and no other: nodes appended or given another kind (an
+    /// image replaced, a canvas or text redrawn, a box recoloured, as a
+    /// terminal's rows and an animation's characters are every frame) a
+    /// renderer learns of as it draws and checks them. Kept until read,
+    /// however many flushes; past its bound, given up, and its range starts
+    /// past the gap.
+    #[test]
+    fn resource_changes_name_the_nodes_whose_resources_changed() {
+        let image = |n: u8| Arc::new(crate::image::ImageData::new(1, 1, vec![n; 4]).unwrap());
+        let mut scene = Scene::new(100., 100.);
+        let root = scene.root();
+        scene.resource_changes();
+        // Read every flush: the range reaches back to the last read, and on
+        // to this flush.
+        let changed = |scene: &mut Scene| {
+            scene.flush();
+            let (covered, changed) = scene.resource_changes();
+            assert!(*covered.start() <= scene.repaint_flushes);
+            assert_eq!(*covered.end(), scene.repaint_flushes);
+            changed.to_vec()
+        };
+        let text = scene.append(
+            root,
+            NodeKind::Text {
+                text: "a".into(),
+                color: Color(0, 0, 0, 255),
+                font_size: 13.,
+            },
+            Style::default(),
+        );
+        assert_eq!(changed(&mut scene), [], "text added");
+        scene.set_kind(
+            text,
+            NodeKind::Text {
+                text: "b".into(),
+                color: Color(0, 0, 0, 255),
+                font_size: 13.,
+            },
+        );
+        assert_eq!(changed(&mut scene), [], "text changed");
+        let picture = scene.append(root, NodeKind::Image(image(1)), Style::default());
+        assert_eq!(changed(&mut scene), [], "image added");
+        scene.set_kind(picture, NodeKind::Image(image(2)));
+        assert_eq!(changed(&mut scene), [], "image replaced");
+        let backed = |n| {
+            NodeKind::Quad(QuadStyle {
+                decoration: Some(Arc::new(crate::decoration::Decoration {
+                    background: Some(crate::decoration::Background::Image {
+                        image: image(n),
+                        fit: Default::default(),
+                    }),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+        };
+        let quad = scene.append(root, NodeKind::Quad(QuadStyle::default()), Style::default());
+        assert_eq!(changed(&mut scene), [], "a plain box added");
+        scene.set_kind(
+            quad,
+            NodeKind::Quad(QuadStyle {
+                fill: Color(1, 2, 3, 255),
+                ..Default::default()
+            }),
+        );
+        assert_eq!(changed(&mut scene), [], "a box recoloured");
+        scene.set_kind(quad, backed(3));
+        assert_eq!(changed(&mut scene), [], "a background image given");
+        scene.set_kind(quad, NodeKind::Quad(QuadStyle::default()));
+        assert_eq!(changed(&mut scene), [], "a background image taken");
+        scene.set_mask(
+            quad,
+            Some(ImageMask {
+                image: image(4),
+                offset: (0., 0.),
+                size: (1., 1.),
+            }),
+        );
+        assert_eq!(changed(&mut scene), [], "a mask given");
+        scene.remove(text);
+        assert_eq!(changed(&mut scene), [text], "a node removed");
+        let canvas = scene.append(root, NodeKind::Canvas(Default::default()), Style::default());
+        assert_eq!(changed(&mut scene), [], "a canvas added");
+        scene.set_kind(canvas, NodeKind::Canvas(Default::default()));
+        assert_eq!(changed(&mut scene), [], "a canvas redrawn");
+        let column = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        let inner = scene.append(
+            column,
+            NodeKind::Container(Layout::Column),
+            Style::default(),
+        );
+        let leaf = scene.append(inner, NodeKind::Container(Layout::Column), Style::default());
+        changed(&mut scene);
+        scene.remove(column);
+        let mut gone = changed(&mut scene);
+        gone.sort_by_key(|id| id.index);
+        let mut subtree = vec![column, inner, leaf];
+        subtree.sort_by_key(|id| id.index);
+        assert_eq!(gone, subtree, "each node of a subtree removed");
+        // Read again some flushes on: all since.
+        let read = scene.repaint_flushes;
+        scene.remove(picture);
+        for _ in 0..=REPAINTS_UNREAD {
+            scene.flush();
+        }
+        let (covered, noted) = scene.resource_changes();
+        let flushes = u64::from(REPAINTS_UNREAD) + 1;
+        assert_eq!(
+            (covered, noted),
+            (read + 1..=read + flushes, &[picture][..])
+        );
+        // Past the bound: those noted are given up, and the range says so.
+        let many = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        for _ in 0..REPAINTS_KEPT {
+            scene.append(many, NodeKind::Container(Layout::Column), Style::default());
+        }
+        changed(&mut scene);
+        let read = scene.repaint_flushes;
+        scene.remove(many);
+        scene.remove(quad);
+        scene.flush();
+        let (covered, noted) = scene.resource_changes();
+        assert!(noted.is_empty(), "given up past the bound");
+        assert!(*covered.start() > read + 1, "past the gap");
+        // And noted again once read.
+        scene.remove(canvas);
+        assert_eq!(changed(&mut scene), [canvas]);
     }
 }
 

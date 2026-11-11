@@ -463,3 +463,82 @@ fn pixelated_images_draw_in_as_many_draws() {
     let (smooth, mixed) = (draws(false), draws(true));
     assert_eq!(mixed, smooth, "draws: {smooth} smooth, {mixed} mixed");
 }
+
+/// The textures nodes show are counted as nodes go or change what they
+/// show (`Scene::resource_changes`), and as they are drawn, not found by
+/// walking the scene each frame something changed: one shared by two nodes
+/// stays while either shows it; one replaced, taken off a box or off a node
+/// made a box goes; one appended, or given to a box that showed none,
+/// stays while shown and goes with its node, as before.
+#[test]
+fn textures_follow_the_nodes_showing_them() {
+    let _decoded = decoded_kept();
+    let whole = [Rect::new(0., 0., 200., 200.)];
+    let small = |n: u8| Arc::new(ImageData::new(4, 4, vec![n; 64]).unwrap());
+    let style = || Style {
+        width: Some(20.),
+        height: Some(20.),
+        ..Default::default()
+    };
+    let backed = |image| {
+        NodeKind::Quad(QuadStyle {
+            decoration: Some(Arc::new(zgx::decoration::Decoration {
+                background: Some(zgx::decoration::Background::Image {
+                    image,
+                    fit: Default::default(),
+                }),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    };
+    let mut scene = Scene::new(200., 200.);
+    let root = scene.root();
+    let mut gpu = GpuRenderer::new(200, 200).unwrap();
+    let shared = small(1);
+    let a = scene.append(root, NodeKind::Image(small(2)), style());
+    let b = scene.append(root, NodeKind::Image(shared.clone()), style());
+    scene.append(root, NodeKind::Image(shared), style());
+    let c = scene.append(root, NodeKind::Image(small(3)), style());
+    let boxed = scene.append(root, backed(small(4)), style());
+    let mut textures = |scene: &mut Scene| {
+        scene.flush();
+        gpu.render(scene, &whole).unwrap();
+        // What no node shows goes (`trim`); the rest stay.
+        gpu.trim();
+        gpu.debug_cache_stats().image_textures
+    };
+    assert_eq!(textures(&mut scene), 4);
+    scene.remove(b);
+    assert_eq!(textures(&mut scene), 4, "a shared one shown still");
+    scene.set_kind(a, NodeKind::Image(small(5)));
+    assert_eq!(textures(&mut scene), 4, "one replaced");
+    scene.set_kind(boxed, NodeKind::Quad(QuadStyle::default()));
+    assert_eq!(textures(&mut scene), 3, "a background image taken");
+    let column = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+    scene.append(column, NodeKind::Image(small(6)), style());
+    assert_eq!(textures(&mut scene), 4, "one appended");
+    scene.remove(column);
+    assert_eq!(textures(&mut scene), 3, "a subtree removed");
+    // Frames the renderer never draws: what changed then is kept for it.
+    scene.remove(c);
+    for _ in 0..8 {
+        scene.flush();
+    }
+    assert_eq!(textures(&mut scene), 2, "after frames undrawn");
+    // A node showing an image made a box: its texture goes.
+    scene.set_kind(a, NodeKind::Quad(QuadStyle::default()));
+    assert_eq!(textures(&mut scene), 1, "an image node made a box");
+    // A box that showed none given one: counted once drawn, it stays, and
+    // goes with the box.
+    scene.set_kind(boxed, backed(small(7)));
+    assert_eq!(textures(&mut scene), 2, "a background image given");
+    assert_eq!(textures(&mut scene), 2, "and kept");
+    scene.remove(boxed);
+    assert_eq!(textures(&mut scene), 1, "and gone with its box");
+    // Appended, then shown another, a frame later: the first goes.
+    let late = scene.append(root, NodeKind::Image(small(8)), style());
+    assert_eq!(textures(&mut scene), 2, "one appended alone");
+    scene.set_kind(late, NodeKind::Image(small(9)));
+    assert_eq!(textures(&mut scene), 2, "then replaced");
+}
