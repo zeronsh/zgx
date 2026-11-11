@@ -4126,9 +4126,19 @@ impl GpuContext {
         let vertex_ring =
             !noop && mappable && (mapped_uploads || info.backend == wgpu::Backend::Dx12);
         zgx::profile::mark("GPU adapter");
+        // Ray queries, where asked for (`request_ray_queries`) and the
+        // adapter has them: wgpu marks them experimental.
+        let ray_queries = RAY_QUERIES.load(std::sync::atomic::Ordering::Relaxed)
+            && adapter
+                .features()
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("zgx shared device"),
-            required_features: if vertex_ring {
+            required_features: if ray_queries {
+                wgpu::Features::EXPERIMENTAL_RAY_QUERY
+            } else {
+                wgpu::Features::empty()
+            } | if vertex_ring {
                 wgpu::Features::MAPPABLE_PRIMARY_BUFFERS
             } else {
                 wgpu::Features::empty()
@@ -4155,11 +4165,20 @@ impl GpuContext {
                 // with the textures as large as this one makes.
                 ..if info.backend == wgpu::Backend::Gl {
                     wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits())
+                } else if ray_queries {
+                    wgpu::Limits::default().using_acceleration_structure_values(adapter.limits())
                 } else {
                     Default::default()
                 }
             },
             memory_hints: wgpu::MemoryHints::MemoryUsage,
+            // SAFETY: asked for by the app (`request_ray_queries`), whose
+            // documentation says what wgpu's experimental flag means.
+            experimental_features: if ray_queries {
+                unsafe { wgpu::ExperimentalFeatures::enabled() }
+            } else {
+                wgpu::ExperimentalFeatures::disabled()
+            },
             ..Default::default()
         }))
         .map_err(|e| GpuError(e.to_string()))?;
@@ -18062,6 +18081,35 @@ fn quad_pipeline(
 /// instance's `DEBUG`): an app's shaders then compile in a child.
 #[cfg(windows)]
 static APP_SHADER_FXC: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+/// Devices made from now on ask for ray queries (`request_ray_queries`).
+static RAY_QUERIES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Devices made after this call ask for ray queries where the adapter has
+/// them (wgpu's `Features::EXPERIMENTAL_RAY_QUERY`, with the adapter's
+/// acceleration-structure limits): a `GpuView`'s painter can then build
+/// acceleration structures and trace rays from compute and fragment
+/// shaders. Where the adapter has none, the device is made as without it.
+///
+/// Call it before the first window or renderer is made: windows share one
+/// device, and a device already made keeps the features it was made with.
+///
+/// *Experimental*, in wgpu's terms: wgpu enables the feature only with its
+/// unsafe `ExperimentalFeatures::enabled()` token, whose contract is that
+/// the API may change in any release and may have bugs, undefined
+/// behaviour reachable from safe code among them. Calling this takes that
+/// on for the app.
+///
+/// Where it works: Metal on macOS 15 and later (Apple GPUs that trace from
+/// render passes); Vulkan with `VK_KHR_ray_query`; Direct3D 12 with DXR
+/// 1.1 and shader model 6.5, which only DXC compiles. On Windows the app
+/// must ship Microsoft's `dxcompiler.dll` beside its executable (or set
+/// `WGPU_DX12_COMPILER=dxc`): with FXC, zgx's default, the adapter offers
+/// no ray queries and none are asked for.
+///
+/// Not called, the device is asked for exactly what it was before; the
+/// only work this adds is one relaxed atomic load when a device is made.
+pub fn request_ray_queries() {
+    RAY_QUERIES.store(true, std::sync::atomic::Ordering::Relaxed);
+}
 /// Tests: an app's shaders built in the process (wgpu's naga and FXC) when
 /// set, through a child (`app_fragment`) when not.
 static APP_SHADERS_IN_PROCESS: std::sync::atomic::AtomicBool =
