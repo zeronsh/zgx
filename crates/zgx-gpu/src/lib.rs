@@ -3800,17 +3800,10 @@ const POWER: wgpu::PowerPreference = wgpu::PowerPreference::LowPower;
 /// even where there is a GPU (WARP on Windows, for both Direct3D 12 and
 /// 11), as a machine without one draws: to run CI's software lines, or
 /// bless a software family of goldens, on a machine with a GPU. Linux takes
-/// a software Vulkan driver. Read when a device is made, never per frame.
-/// macOS has no software adapter for Metal: there it isn't read (the GPU
-/// draws), and UI apps carry none of it.
-#[cfg(not(target_os = "macos"))]
+/// a software Vulkan driver; macOS has none for Metal, so there the renderer
+/// fails to start. Read when a device is made, never per frame.
 pub(crate) fn fallback_adapter_forced() -> bool {
     std::env::var_os("WGPU_FORCE_FALLBACK_ADAPTER").is_some_and(|value| value == "1")
-}
-#[cfg(target_os = "macos")]
-#[inline(always)]
-pub(crate) fn fallback_adapter_forced() -> bool {
-    false
 }
 /// The adapter DXGI ranks first for `POWER`, a GPU before software, with a
 /// device opened on it alone (none when Direct3D 12 isn't the instance's
