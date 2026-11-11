@@ -1,0 +1,3 @@
+error: llvm::cast<X>() argument of incompatible type!
+
+

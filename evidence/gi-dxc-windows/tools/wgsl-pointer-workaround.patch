@@ -1,0 +1,26 @@
+﻿diff --git a/crates/zgx-3d/src/render/probes_trace.wgsl b/crates/zgx-3d/src/render/probes_trace.wgsl
+index c68945fc8..c7b568d1c 100644
+--- a/crates/zgx-3d/src/render/probes_trace.wgsl
++++ b/crates/zgx-3d/src/render/probes_trace.wgsl
+@@ -59,7 +59,7 @@ fn ray_direction(i: u32) -> vec3<f32> {
+ // Probe `index`'s place (of all volumes', in order).
+ fn probe_place(index: u32) -> vec3<f32> {
+     for (var i = 0u; i < probe_set.count.x; i++) {
+-        let volume = probe_set.volumes[i];
++        let volume = &probe_set.volumes[i];
+         let first = u32(volume.origin.w);
+         let n = volume.counts.x * volume.counts.y * volume.counts.z;
+         if index >= first && index < first + n {
+diff --git a/crates/zgx-3d/src/render/shader/probes.wgsl b/crates/zgx-3d/src/render/shader/probes.wgsl
+index b93ed1eb9..cec22e8c2 100644
+--- a/crates/zgx-3d/src/render/shader/probes.wgsl
++++ b/crates/zgx-3d/src/render/shader/probes.wgsl
+@@ -51,7 +51,7 @@
+ //probed // light from the far side of a wall doesn't come through it.
+ //probed fn probe_light(p: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
+ //probed     for (var i = 0u; i < probe_set.count.x; i++) {
+-//probed         let volume = probe_set.volumes[i];
++//probed         let volume = &probe_set.volumes[i];
+ //probed         let outside = max(max(volume.lo.xyz - p, p - volume.hi.xyz), vec3(0.0)) / volume.fade.xyz;
+ //probed         let fade = saturate(1.0 - max(outside.x, max(outside.y, outside.z)));
+ //probed         if fade <= 0.0 {

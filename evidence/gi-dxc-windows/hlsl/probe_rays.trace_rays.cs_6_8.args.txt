@@ -1,0 +1,4 @@
+source_name=Some("3D probe rays")
+entry=trace_rays
+target=cs_6_8
+args: -E trace_rays -T cs_6_8 -HV 2018 -no-warnings -Ges -Zi -Od

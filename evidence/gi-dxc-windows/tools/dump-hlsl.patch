@@ -1,0 +1,43 @@
+﻿diff --git a/vendor/wgpu-hal/src/dx12/shader_compilation.rs b/vendor/wgpu-hal/src/dx12/shader_compilation.rs
+index 165c54360..a2a314026 100644
+--- a/vendor/wgpu-hal/src/dx12/shader_compilation.rs
++++ b/vendor/wgpu-hal/src/dx12/shader_compilation.rs
+@@ -436,6 +436,28 @@ fn compile_dxc(
+ 
+     let source_name = source_name.and_then(|cstr| cstr.to_str().ok());
+ 
++    // SCRATCH (uncommitted): dump what DXC is handed.
++    let dump = std::env::var_os("ZGX_DUMP_HLSL").map(|dir| {
++        static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
++        let n = N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
++        let base = std::path::PathBuf::from(dir).join(format!(
++            "{}-{n:03}-{}-{raw_ep}-{full_stage}",
++            std::process::id(),
++            source_name.unwrap_or("unnamed").replace(|c: char| !c.is_ascii_alphanumeric(), "_")
++        ));
++        let _ = std::fs::write(base.with_extension("hlsl"), source);
++        let debug_args = debug && !device.shared.private_caps.workarounds.avoid_shader_debug_info;
++        let _ = std::fs::write(
++            base.with_extension("args.txt"),
++            format!(
++                "source_name={source_name:?}\nentry={raw_ep}\ntarget={full_stage}\nargs: -E {raw_ep} -T {full_stage} -HV 2018 -no-warnings -Ges{}{}\n",
++                if debug_args { " -Zi -Od" } else { "" },
++                if f16 { " -enable-16bit-types" } else { "" }
++            ),
++        );
++        base
++    });
++
+     let source_name = source_name.map(OPCWSTR::new);
+     let raw_ep = OPCWSTR::new(raw_ep);
+     let full_stage = OPCWSTR::new(full_stage);
+@@ -496,6 +518,9 @@ fn compile_dxc(
+     let len = unsafe { err_blob.GetStringLength() };
+     if len != 0 {
+         let err = as_err_str(&err_blob)?;
++        if let Some(base) = &dump {
++            let _ = std::fs::write(base.with_extension("error.txt"), err);
++        }
+         return Err(crate::PipelineError::Linkage(
+             stage_bit,
+             format!("DXC compile error: {err}"),

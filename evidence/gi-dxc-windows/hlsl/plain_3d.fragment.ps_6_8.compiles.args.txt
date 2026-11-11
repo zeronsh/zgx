@@ -1,0 +1,4 @@
+source_name=Some("3D")
+entry=fragment
+target=ps_6_8
+args: -E fragment -T ps_6_8 -HV 2018 -no-warnings -Ges -Zi -Od
