@@ -3880,15 +3880,20 @@ fn build(node: &Rc<Node>, vm: &Rc<Vm>, low: &Rc<Lowering>, mut cx: Option<&mut C
             .then(|| flow(node));
         match &low.hooks {
             None => {
-                view = view.children(node.children.iter().map(|child| {
-                    let mut view = lower(child, low);
+                // Each pushed as `lower` returns it and the vector kept as the
+                // view's (`children_vec`): a view is hundreds of bytes, moved
+                // once more for each through a local, and again by `children`.
+                let mut children: Vec<View> = Vec::with_capacity(node.children.len());
+                for child in &node.children {
+                    children.push(lower(child, low));
                     if let Some(flow) = &flow
                         && child.kind.flows()
+                        && let Some(view) = children.last_mut()
                     {
                         apply_in(view.styles_mut(), flow);
                     }
-                    view
-                }));
+                }
+                view = view.children_vec(children);
             }
             // What plugins add at an element is its sibling, or in its place.
             Some(hooks) => view = hooked_children(view, node, low, hooks, flow.as_deref()),
