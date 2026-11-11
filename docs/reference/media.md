@@ -299,4 +299,6 @@ fn fluid() -> View {
 return ui.glass { w = 300, h = 200, radius = 24, ui.text { "Over the glass" } }
 ```
 
+`ui.symbol { name = "wifi", size = 22, weight = 600, color = "$text.secondary" }` is a system symbol, drawn by the host where it can (iOS's SF Symbols, through `zgx::symbol::set_renderer`) at the screen's pixels. Where nothing draws it, it's an empty box of its size, so layouts hold. It's decorative: what holds it speaks for it.
+
 In Rust, `zgx::glass::glass(GlassStyle::default)`. For the window itself, `WindowOptions::glass` with `Glass::new(GlassMaterial::Liquid)` puts the system's glass behind the whole window on macOS 26, and on older macOS and elsewhere its heads-up glass.
