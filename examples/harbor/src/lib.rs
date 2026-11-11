@@ -15,6 +15,7 @@
 //! - [`perf`] reads the process's counters, for `harbor_bench`.
 pub mod crane;
 pub mod glb;
+pub mod ground;
 pub mod hud;
 pub mod path;
 pub mod perf;

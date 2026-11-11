@@ -15,6 +15,10 @@ fn surface(s: SurfaceIn) -> Surface {
         return m;
     }
     let up = clamp(s.geometric_normal.y, 0.0, 1.0);
+    // The ground's own material does its wet (`ground.wgsl`).
+    if up > 0.97 && abs(s.world_position.y - params.ground) < 0.05 {
+        return m;
+    }
     let w = params.wet * (0.25 + 0.75 * smoothstep(0.3, 0.9, up));
     // Paint and concrete darken as their pores fill; metal less so. A
     // film of water smooths them, but rough ground stays fairly rough:

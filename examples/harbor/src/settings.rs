@@ -123,12 +123,21 @@ impl Settings {
             effects.push(runtime.effect(move || sea.set_moving(&w, s.get())));
         }
         if let Some(rain) = harbor.rain {
-            let (s, w, sea) = (self.rain.clone(), world.clone(), harbor.sea.clone());
+            let (s, w, sea, ground) = (
+                self.rain.clone(),
+                world.clone(),
+                harbor.sea.clone(),
+                harbor.ground,
+            );
             effects.push(runtime.effect(move || {
                 let on = s.get();
                 rain.set(&w, on);
                 if let Some(sea) = &sea {
                     sea.set_rain(&w, if on { 1. } else { 0. });
+                }
+                // Raining, soaked and ringing; stopped, still wet from it.
+                if let Some(ground) = ground {
+                    ground.set_wet(&w, if on { 1. } else { 0.55 }, if on { 1. } else { 0. });
                 }
             }));
         }

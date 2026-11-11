@@ -160,6 +160,8 @@ pub struct Harbor {
     pub buoy: ObjectId,
     /// Probe volumes added.
     pub probes: usize,
+    /// The ground's plane and material (`ground.rs`), if made.
+    pub ground: Option<crate::ground::Ground>,
     /// The sea's and the wet's materials, if made (`Config::water`).
     pub sea: Option<crate::water::Water>,
     /// The rain, if it was made (`Config::rain`, and a device for it).
@@ -374,7 +376,19 @@ impl Harbor {
         } else {
             0
         };
+        let ground = match crate::ground::Ground::new(world, config.seed) {
+            Ok(ground) => {
+                b.objects += 1;
+                b.triangles += 2;
+                Some(ground)
+            }
+            Err(error) => {
+                eprintln!("harbor: the ground as the stock material: {error}");
+                None
+            }
+        };
         Self {
+            ground,
             probes,
             sea,
             funnel,
@@ -405,7 +419,9 @@ fn quay(b: &mut Build) -> ObjectId {
     let apron = b.add(
         Object::mesh(b.kit.unit.clone(), Material::rgb(0xffffff).with(0., 0.85))
             .transformed(block(
-                vec3(0., -12., apron_depth * 0.5),
+                // Just under the ground's plane (`ground.rs`), which draws
+                // the apron's and the yard's surface over it.
+                vec3(0., -12.03, apron_depth * 0.5),
                 vec3(QUAY_LENGTH, 12., apron_depth),
             ))
             .child_of(root),
@@ -420,7 +436,7 @@ fn quay(b: &mut Build) -> ObjectId {
     let ground = b.add(
         Object::mesh(b.kit.unit.clone(), Material::rgb(0xffffff).with(0., 0.9))
             .transformed(block(
-                vec3(0., -12., apron_depth + yard_depth * 0.5),
+                vec3(0., -12.03, apron_depth + yard_depth * 0.5),
                 vec3(QUAY_LENGTH, 12., yard_depth),
             ))
             .child_of(root),
@@ -467,19 +483,6 @@ fn quay(b: &mut Build) -> ObjectId {
             steel,
             root,
         );
-    }
-    let paint = Material::rgb(0xd8c25a).with(0., 0.6);
-    let white = Material::rgb(0xd6d6d0).with(0., 0.6);
-    for z in [1.8, 38., 58.] {
-        b.part(
-            block(vec3(0., 0., z), vec3(QUAY_LENGTH, 0.02, 0.2)),
-            paint,
-            root,
-        );
-    }
-    for k in 0..40 {
-        let x = -QUAY_LENGTH * 0.5 + 8. + k as f32 * 16.;
-        b.part(block(vec3(x, 0., 48.), vec3(6., 0.02, 0.15)), white, root);
     }
     // The water: a flat, glossy placeholder (the water material comes with
     // custom materials: GAPS.md).
