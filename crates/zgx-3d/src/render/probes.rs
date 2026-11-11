@@ -660,7 +660,7 @@ pub(super) fn frame(
         if let Some(raster) = &mut tracer.raster
             && raster.meshes != Some(world.meshes)
         {
-            raster.rebuild(device, drawn, world.meshes);
+            raster.rebuild((device, queue), drawn, world.meshes);
         }
     }
     // A change to what rays see or what lights it: converge again. (Not
@@ -1539,6 +1539,74 @@ mod tests {
             "let volume = probe_set.volumes[i];",
         );
         assert!(whole_loads(&copy) > 0);
+    }
+
+    #[test]
+    fn a_move_on_the_face_path_writes_its_instances_alone() {
+        // Drawing faces (a device without ray queries: wgpu's no-op one
+        // here), a mesh moving rewrites the meshes' instances and makes no
+        // buffer: each geometry's vertices stay as they were uploaded.
+        use crate::{Geometry, Material, Object, ProbeVolume, Transform, World};
+        use zgx_gpu::viewport::{Viewport, ViewportFrame};
+        let (device, queue) = super::super::testing::device_and_queue();
+        let world = World::new();
+        world.add(Object::mesh(Geometry::sphere(1., 64), Material::default()));
+        world.add(Object::mesh(Geometry::plane(10., 10.), Material::default()));
+        let cube = world.add(
+            Object::mesh(Geometry::cuboid(0.3, 0.3, 0.3), Material::default()).at([2., 0.5, 0.]),
+        );
+        world.set_probes_rasterised(true);
+        world
+            .add_probes(ProbeVolume::new([-3., 0., -3.], [3., 2., 3.], [4, 3, 4]))
+            .unwrap();
+        let mut renderer = world.renderer();
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let draw = |renderer: &mut super::super::Renderer| {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let mut frame =
+                ViewportFrame::new(&device, &queue, &mut encoder, &view, format, (64, 64), 1.);
+            renderer.render(&mut frame);
+            queue.submit([encoder.finish()]);
+        };
+        let counts = |renderer: &super::super::Renderer| {
+            let probes = renderer.gpu.as_ref().unwrap().probes.as_ref().unwrap();
+            let raster = probes
+                .tracer
+                .as_ref()
+                .unwrap()
+                .raster
+                .as_ref()
+                .expect("faces");
+            (raster.buffers_made, raster.instance_bytes)
+        };
+        draw(&mut renderer);
+        let (made, written) = counts(&renderer);
+        // Three geometries' vertices and indices, and the instances'.
+        assert_eq!(made, 7);
+        world.set_transform(cube, Transform::at([2.2, 0.5, 0.]));
+        draw(&mut renderer);
+        let (made_after, written_after) = counts(&renderer);
+        assert_eq!(made_after, made, "a move made a buffer");
+        assert_eq!(
+            written_after - written,
+            3 * std::mem::size_of::<super::super::probes_raster::Instance>() as u64,
+            "a move wrote more than the three meshes' instances"
+        );
     }
 
     #[test]

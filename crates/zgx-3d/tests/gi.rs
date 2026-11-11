@@ -695,3 +695,66 @@ fn the_room_lit_by_faces_matches_its_golden() {
         .join("gi_room_raster.png");
     golden(&path, &actual);
 }
+
+#[test]
+#[ignore = "a measurement: cargo test --release -p zgx-3d --features gi --test gi -- --ignored --nocapture moving"]
+fn moving_a_cube_costs_a_frame() {
+    // The reviewer's scene: a 67,600-triangle sphere, a floor and a 0.3 m
+    // cube, probes 4 by 3 by 4 at 64 a frame. A frame's wall time drawn and
+    // waited for (a readback), the cube still and moving, by rays and by
+    // faces: medians of 60 frames after 30.
+    for faces in [false, true] {
+        let world = World::new();
+        let sphere = Geometry::sphere(1., 260);
+        let triangles = sphere.indices().len() / 3;
+        world.add(Object::mesh(sphere, Material::default()).at([0., 1., 0.]));
+        world.add(Object::mesh(Geometry::plane(10., 10.), Material::default()));
+        let cube = world.add(
+            Object::mesh(Geometry::cuboid(0.3, 0.3, 0.3), Material::default()).at([2., 0.5, 0.]),
+        );
+        world.add_light(Light::Directional {
+            direction: vec3(-0.4, -1., -0.3),
+            color: [1.; 3],
+            intensity: 3.,
+        });
+        world.set_probes_rasterised(faces);
+        world
+            .add_probes(ProbeVolume::new([-3., 0.2, -3.], [3., 2.5, 3.], [4, 3, 4]).per_frame(64))
+            .unwrap();
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        // A frame's wall time drawn and waited for (a readback), and its
+        // CPU's alone (recorded and submitted): medians.
+        let mut time = |moving: bool| {
+            let (mut wall, mut cpu) = (Vec::new(), Vec::new());
+            for frame in 0..90 {
+                if moving {
+                    world.set_transform(
+                        cube,
+                        Transform::at([2. + (frame as f32 * 0.1).sin(), 0.5, 0.]),
+                    );
+                }
+                world.view().invalidate();
+                let start = std::time::Instant::now();
+                window.draw();
+                let drawn = start.elapsed();
+                let _ = window.pixels();
+                if frame >= 30 {
+                    wall.push(start.elapsed().as_secs_f64() * 1e3);
+                    cpu.push(drawn.as_secs_f64() * 1e3);
+                }
+            }
+            wall.sort_by(f64::total_cmp);
+            cpu.sort_by(f64::total_cmp);
+            (wall[wall.len() / 2], cpu[cpu.len() / 2])
+        };
+        let still = time(false);
+        let moving = time(true);
+        eprintln!(
+            "{} ({triangles} triangles + floor + cube; {:?}): (wall, cpu) still {still:.2?} ms, moving {moving:.2?} ms",
+            if faces { "faces" } else { "rays" },
+            world.probes_status()
+        );
+    }
+}

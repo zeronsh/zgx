@@ -1,7 +1,7 @@
 // Probes updated without ray queries (`probes_raster.rs`). Each of this
-// frame's probes draws the scene (its traced meshes as one list of
-// triangles in the world, `Soup`) into six faces of `FACE` by `FACE`
-// texels about it, a draw a face. Each fragment is lit as a ray's hit is
+// frame's probes draws the scene (its traced meshes, a draw a geometry,
+// its meshes as instances) into six faces of `FACE` by `FACE` texels
+// about it. Each fragment is lit as a ray's hit is
 // in `probes_trace.wgsl`: the sun (shadowed by the frame's shadow map),
 // every point and spot light (unshadowed, as the meshes drawn directly
 // are), the probes' light from before, and its glow. It keeps its
@@ -41,19 +41,31 @@ fn on_face(face: u32, rel: vec3<f32>) -> vec3<f32> {
     }
 }
 
-// `face` is the draw's instance: this frame's probe `face / 6`, its face
-// `face % 6`.
+// A draw's face: this frame's probe `face / 6`, its face `face % 6`.
+@group(1) @binding(0) var<uniform> drawing: vec4<u32>;
+
+// A geometry's vertex, in its own space, and its mesh's instance: its
+// place (a 3 by 4 matrix's rows), its normals' turn, colour and glow.
 @vertex fn capture_vertex(
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) albedo: vec3<f32>,
-    @location(3) glow: vec3<f32>,
-    @builtin(instance_index) face: u32,
+    @location(2) p0: vec4<f32>,
+    @location(3) p1: vec4<f32>,
+    @location(4) p2: vec4<f32>,
+    @location(5) t0: vec4<f32>,
+    @location(6) t1: vec4<f32>,
+    @location(7) t2: vec4<f32>,
+    @location(8) albedo: vec4<f32>,
+    @location(9) glow: vec4<f32>,
 ) -> Captured {
+    let face = drawing.x;
+    let at = vec4(position, 1.0);
+    let world = vec3(dot(p0, at), dot(p1, at), dot(p2, at));
+    let turned = vec3(dot(t0.xyz, normal), dot(t1.xyz, normal), dot(t2.xyz, normal));
     let origin = probe_place((trace.first + face / 6u) % trace.total);
-    let f = on_face(face % 6u, position - origin);
+    let f = on_face(face % 6u, world - origin);
     let clip = vec4(f.x, -f.y, (f.z - NEAR) * FAR / (FAR - NEAR), f.z);
-    return Captured(clip, position, normal, albedo, glow, origin);
+    return Captured(clip, world, turned, albedo.rgb, glow.rgb, origin);
 }
 
 // How much of the sun reaches `at` (facing `n`): the frame's shadow map,
