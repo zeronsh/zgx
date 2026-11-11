@@ -161,6 +161,10 @@ pub(super) fn prepare(
     let cascades = cascades.filter(|_| gpu.lights.sun.is_some());
     if cascades.is_some() {
         uniforms.params[3] = 1.;
+    } else {
+        // No cascades (off, or shadows off): none is owed a redraw, whatever
+        // was when they went.
+        world.unsettle(crate::world::Settle::CASCADES, false);
     }
     let clustered = clusters(
         gpu,

@@ -270,3 +270,37 @@ fn a_view_resized_and_back_draws_its_shadows_as_a_fresh_one() {
         "{count} channels differ past 1, by up to {largest}"
     );
 }
+
+#[test]
+fn turning_cascades_or_shadows_off_while_a_cascade_is_owed_lets_the_world_rest() {
+    type Switch = (&'static str, fn(&World));
+    let off: [Switch; 2] = [
+        ("cascades off", |w| w.set_cascades(None)),
+        ("shadows off", |w| w.set_shadows(false)),
+    ];
+    for (name, turn_off) in off {
+        let world = scene();
+        world.set_cascades(Some(Cascades::new(4).distance(40.)));
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        window.draw();
+        // The camera turns: the nearest cascade follows at once, the
+        // others are owed a frame each.
+        world.set_camera(Camera::looking_at([4., 5., 8.], [-2., 0., 1.]));
+        window.draw();
+        assert!(
+            world.view().animating(),
+            "{name}: the control, a cascade owed"
+        );
+        turn_off(&world);
+        for _ in 0..4 {
+            world.view().invalidate();
+            window.draw();
+        }
+        assert!(
+            !world.view().animating(),
+            "{name}: still drawing for cascades it no longer has"
+        );
+    }
+}
