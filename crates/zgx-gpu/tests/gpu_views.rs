@@ -521,3 +521,80 @@ fn a_view_over_its_own_budget_fails_and_says_so() {
     assert_eq!(w.frame(), Ok(0), "a picture lost its texture");
     assert_eq!(w.showing(), [true; 4]);
 }
+
+/// Notes each frame's time.
+struct Timed(Rc<RefCell<Vec<std::time::Instant>>>);
+impl Viewport for Timed {
+    fn render(&mut self, frame: &mut ViewportFrame<'_>) {
+        self.0.borrow_mut().push(frame.time);
+    }
+}
+
+#[test]
+fn a_view_s_frames_are_on_the_interface_s_time() {
+    // Frames 1/60 s apart on a virtual clock, however long each takes to
+    // draw: the view's frames say the same times each run.
+    let run = || -> Option<Vec<std::time::Duration>> {
+        let clock = zgx::clock::VirtualClock::new();
+        let mut gpu = GpuRenderer::new(100, 100).ok()?;
+        let times = Rc::new(RefCell::new(Vec::new()));
+        let view = zgx_gpu::viewport::view(Timed(Rc::clone(&times)));
+        let mut ui = Ui::new(100., 100.);
+        ui.mount(
+            div()
+                .size(100., 100.)
+                .child(gpu_view("Timed", &view).size(50., 50.)),
+        );
+        for frame in 0..5u32 {
+            clock.advance(std::time::Duration::from_secs(1) * frame / 60, || {});
+            view.invalidate();
+            ui.prepare_frame();
+            let report = ui.scene.borrow_mut().flush();
+            gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+            // Drawing takes time on the wall clock, none on the interface's.
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+        let start = clock.start();
+        let times = times.borrow().iter().map(|t| *t - start).collect();
+        Some(times)
+    };
+    let (Some(first), Some(second)) = (run(), run()) else {
+        return;
+    };
+    let expected: Vec<_> = (0..5u32)
+        .map(|frame| std::time::Duration::from_secs(1) * frame / 60)
+        .collect();
+    assert_eq!(first, expected);
+    assert_eq!(second, first);
+}
+
+#[test]
+fn a_view_in_two_boxes_is_drawn_at_one_time_a_frame() {
+    // Shown twice in a window, a view is drawn twice a frame: both at the
+    // frame's one instant (on the wall clock, which moves between them), so
+    // what steps once a frame time steps once.
+    let Ok(mut gpu) = GpuRenderer::new(100, 100) else {
+        return;
+    };
+    let times = Rc::new(RefCell::new(Vec::new()));
+    let view = zgx_gpu::viewport::view(Timed(Rc::clone(&times)));
+    let mut ui = Ui::new(100., 100.);
+    ui.mount(
+        div()
+            .size(100., 100.)
+            .child(gpu_view("One", &view).size(40., 40.))
+            .child(gpu_view("Two", &view).size(30., 30.)),
+    );
+    for _ in 0..2 {
+        view.invalidate();
+        ui.prepare_frame();
+        let report = ui.scene.borrow_mut().flush();
+        gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let times = times.borrow();
+    assert_eq!(times.len(), 4, "two boxes, two frames");
+    assert_eq!(times[0], times[1], "one frame, one time");
+    assert_eq!(times[2], times[3]);
+    assert!(times[2] > times[1], "a later frame, a later time");
+}
