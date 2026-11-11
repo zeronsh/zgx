@@ -6,7 +6,8 @@
 //!
 //! - `none <s>`: the process's wakeups over `s` seconds, no audio at all
 //! - `idle <s>`: the same with an engine made and a sound loaded, nothing played
-//! - `after <s>`: one click played, its stream stopped after the hold, then `s` seconds
+//! - `after <s> [pause]`: one click played, its stream stopped after the hold, then `s` seconds
+//!   (paused: then again once the grace, `Config::close_after`, has closed it)
 //! - `latency <n> <pause|close>`: `n` cold starts and `3n` plays with the stream running, play to heard
 //! - `threads <n>`: after one click, `n` windows of 30 s: wakeups and each thread's CPU time
 //!   (`queried`: only the default output's format asked; `streamed`: a stream played to its end)
@@ -385,6 +386,18 @@ mod probe {
                 );
                 println!("one click, then stopped ({stopping:?}): {wakes} wakeups; {stats:?}");
                 assert!(stats.sounding > 0, "the click was mixed");
+                if stopping == Stopping::Pause {
+                    // Paused, it's closed after its grace: then measured again.
+                    let grace = Config::default().close_after;
+                    std::thread::sleep(
+                        (grace + Duration::from_secs(1))
+                            .saturating_sub(Duration::from_secs(number(1, 60))),
+                    );
+                    let (wakes, threads) = measure(number(1, 60));
+                    println!(
+                        "after its grace ({grace:?}), closed: {wakes} wakeups, {threads} threads"
+                    );
+                }
                 silent(&audio);
             }
             "latency" => {
