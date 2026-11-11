@@ -745,12 +745,16 @@ impl Viewport for Renderer {
                 sun.held = Default::default();
             }
         }
-        // Temporal antialiasing off: its history goes.
+        // Temporal antialiasing off: its history goes, and its frames
+        // still to gather with it (held by this painter, in the frame).
         #[cfg(feature = "post")]
-        if !chain.taa
-            && let Some(post) = &mut gpu.post
-        {
-            post.drop_taa();
+        if !chain.taa {
+            if let Some(post) = &mut gpu.post {
+                post.drop_taa();
+            }
+            if world.settle.holds(crate::world::Settle::TAA) {
+                world.unsettle(crate::world::Settle::TAA, false);
+            }
         }
         let size = frame.size;
         // The frame's passes, compiled again only as what they follow
@@ -1096,6 +1100,12 @@ impl Viewport for Renderer {
                         meshes: world.meshes,
                         revision: world.revision,
                         tick: gpu.tick.index,
+                        // A material moving by the time (until the prepass
+                        // follows it).
+                        #[cfg(feature = "shaders")]
+                        animated: world.settle.holds(custom::ANIMATED),
+                        #[cfg(not(feature = "shaders"))]
+                        animated: false,
                     };
                     // The display's curve, as the last pass maps (the stops alone).
                     let tone = match world.tone_mapping {

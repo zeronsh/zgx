@@ -21,6 +21,14 @@ const SHARE: f32 = 0.1;
 /// leans on itself, so a moving mesh trails two frames at most.
 const MOVING: f32 = 0.5;
 
+/// A frame's share of the blend, after `frames` in the history: equal to
+/// theirs while it's young, then `SHARE`; at least `MOVING` where something
+/// `moved` (a mesh, or a material by the time).
+fn share(frames: u32, moved: bool) -> f32 {
+    let share = (1. / (frames + 1) as f32).max(SHARE);
+    if moved { share.max(MOVING) } else { share }
+}
+
 /// The pass's uniforms (the shader's `Taa`).
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -69,6 +77,10 @@ const DEPTH_KEPT: wgpu::TextureFormat = wgpu::TextureFormat::R32Float;
 /// one size (one view, or each box of a view drawn in two): its history,
 /// and where the blend is.
 struct Track {
+    /// The size it is for.
+    size: (u32, u32),
+    /// The renderer's tick it last ran at.
+    ran: Option<u32>,
     uniforms: wgpu::Buffer,
     history: Option<History>,
     /// The bindings reading each history, for the compile they were made for.
@@ -87,6 +99,9 @@ struct Track {
 /// meshes and changes as of the last frame, and frames drawn since.
 #[derive(Clone, Copy)]
 struct Step {
+    /// Frames drawn at its size: its history is made once a size has stood
+    /// a frame (`STEADY`), not each frame of a resize drag.
+    stood: u32,
     at: usize,
     valid: bool,
     frames: u32,
@@ -109,11 +124,18 @@ pub(in crate::render) struct At {
     pub(in crate::render) meshes: u64,
     pub(in crate::render) revision: u64,
     pub(in crate::render) tick: u32,
+    /// Something on screen moves by itself (a material animated by
+    /// `frame.time`): blended as a frame in which a mesh moved.
+    pub(in crate::render) animated: bool,
 }
 
 /// The most sizes kept at once (boxes of one view drawn at sizes of their
-/// own).
+/// own, in one frame).
 const TRACKS: usize = 4;
+
+/// Frames a size has stood before its history is made: a resize drag
+/// draws without one (and allocates nothing) until it stops.
+const STEADY: u32 = 2;
 
 pub(super) struct Taa {
     pipeline: wgpu::RenderPipeline,
@@ -227,8 +249,9 @@ impl Taa {
     }
 
     /// The blend into the scene and the next history of the track of the
-    /// frame's size, `at` (see `At`): whether any track has frames still to
-    /// gather since the world last changed.
+    /// frame's size, `at` (see `At`): whether the tracks drawn this tick
+    /// have frames still to gather, and whether it blended (else the scene
+    /// is to be what the meshes drew: a size that hasn't stood yet).
     pub(super) fn run(
         &mut self,
         (device, queue): (&wgpu::Device, &wgpu::Queue),
@@ -236,33 +259,41 @@ impl Taa {
         graph: &Graph,
         at: &At,
         look: (f32, f32),
-    ) -> bool {
+    ) -> (bool, bool) {
         let Some(size) = graph.targets.as_ref().map(|t| t.size) else {
-            return false;
+            return (false, false);
         };
-        // Tracks of sizes not drawn for a second go (a box gone).
+        // Tracks not drawn for a second go (a box gone).
         self.tracks.retain(|t| {
-            t.history.as_ref().is_some_and(|h| h.size == size)
+            t.size == size
                 || t.step
                     .last
                     .is_some_and(|last| at.time.saturating_duration_since(last).as_secs_f32() < 1.)
         });
-        let found = self
-            .tracks
-            .iter()
-            .position(|t| t.history.as_ref().is_some_and(|h| h.size == size));
-        let index = match found {
+        let index = match self.tracks.iter().position(|t| t.size == size) {
             Some(index) => index,
-            None => {
-                if self.tracks.len() == TRACKS {
-                    self.tracks.remove(0);
+            // Another box drew at this tick: one of its own. Else the view
+            // was resized: its track made again at the new size.
+            None => match self.tracks.iter().any(|t| t.ran == Some(at.tick)) {
+                false if !self.tracks.is_empty() => {
+                    let last = (0..self.tracks.len())
+                        .max_by_key(|&i| self.tracks[i].ran)
+                        .unwrap_or(0);
+                    self.tracks[last] = Track::new(device, size, false);
+                    last
                 }
-                self.tracks.push(Track::new(device));
-                self.tracks.len() - 1
-            }
+                _ => {
+                    if self.tracks.len() == TRACKS {
+                        self.tracks.remove(0);
+                    }
+                    self.tracks.push(Track::new(device, size, true));
+                    self.tracks.len() - 1
+                }
+            },
         };
         let (pipeline, layout, sampler) = (&self.pipeline, &self.layout, &self.sampler);
-        self.tracks[index].run(
+        let track = &mut self.tracks[index];
+        let blended = track.run(
             (device, queue),
             encoder,
             graph,
@@ -270,13 +301,22 @@ impl Taa {
             look,
             (pipeline, layout, sampler),
         );
-        self.tracks.iter().any(|t| t.step.since + 1 < FRAMES)
+        track.ran = Some(at.tick);
+        let gathering = (self.tracks.iter())
+            .filter(|t| t.ran == Some(at.tick))
+            .any(Track::gathering);
+        (gathering, blended)
     }
 }
 
 impl Track {
-    fn new(device: &wgpu::Device) -> Self {
+    /// A track for frames of `size`; `ready` to blend from its first (a
+    /// view's first frames, a second box), else once the size has stood (a
+    /// resize).
+    fn new(device: &wgpu::Device, size: (u32, u32), ready: bool) -> Self {
         Self {
+            size,
+            ran: None,
             uniforms: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("3D TAA"),
                 size: std::mem::size_of::<Uniforms>() as u64,
@@ -287,6 +327,7 @@ impl Track {
             binds: [None, None],
             compiled: 0,
             step: Step {
+                stood: if ready { STEADY } else { 0 },
                 at: 0,
                 valid: false,
                 frames: 0,
@@ -313,7 +354,7 @@ impl Track {
             &wgpu::BindGroupLayout,
             &wgpu::Sampler,
         ),
-    ) {
+    ) -> bool {
         // Drawn again at the same tick: as it ran then.
         match self.began {
             Some((tick, before)) if tick == at.tick => self.step = before,
@@ -326,16 +367,23 @@ impl Track {
             step.revision = at.revision;
             step.since = 0;
         }
+        step.stood = step.stood.saturating_add(1);
         let (view_projection, time, cuts, meshes) =
             (at.view_projection, at.time, at.cuts, at.meshes);
         let Some(targets) = graph.targets.as_ref() else {
-            return;
+            return false;
         };
         let (Some(scene), Some(fresh)) = (targets.scene.as_ref(), targets.others[3].as_ref())
         else {
-            return;
+            return false;
         };
         let size = targets.size;
+        // A size not yet stood (a resize drag): the frame as drawn, nothing
+        // made for it.
+        if self.step.stood < STEADY {
+            self.step.last = Some(time);
+            return false;
+        }
         if self.history.as_ref().is_none_or(|h| h.size != size) {
             let make = |format| {
                 device.create_texture(&wgpu::TextureDescriptor {
@@ -381,17 +429,14 @@ impl Track {
         self.step.last = Some(time);
         self.step.cuts = cuts;
         let Some(history) = &self.history else {
-            return;
+            return false;
         };
         let back = view_projection.inverse().unwrap_or(Mat4::IDENTITY);
         let before = self.step.before.unwrap_or(view_projection);
         if !self.step.valid {
             self.step.frames = 0;
         }
-        let mut share = (1. / (self.step.frames + 1) as f32).max(SHARE);
-        if meshes != self.step.meshes {
-            share = share.max(MOVING);
-        }
+        let share = share(self.step.frames, meshes != self.step.meshes || at.animated);
         self.step.meshes = meshes;
         let uniforms = Uniforms {
             back: back.columns,
@@ -460,12 +505,26 @@ impl Track {
         self.step.valid = true;
         self.step.frames += 1;
         self.step.before = Some(view_projection);
+        true
+    }
+
+    /// Whether it has frames still to gather: since the world last changed,
+    /// or into a history young (just made, cut, after a gap), or none yet.
+    fn gathering(&self) -> bool {
+        self.history.is_none() || self.step.since + 1 < FRAMES || self.step.frames < FRAMES
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_frame_in_which_something_moved_weighs_at_least_half() {
+        assert_eq!(share(0, false), 1.);
+        assert_eq!(share(20, false), SHARE);
+        assert_eq!(share(20, true), MOVING);
+    }
 
     #[test]
     fn jitter_covers_the_pixel_in_eight_frames_and_repeats() {

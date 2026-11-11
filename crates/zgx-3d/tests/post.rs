@@ -968,29 +968,114 @@ fn under_camera_motion_temporal_antialiasing_leaves_no_trail_on_still_meshes() {
     let Some(_) = supersampled(&slanted(Antialiasing::None)) else {
         return;
     };
-    let world = slanted(Antialiasing::Taa);
+    // The truth and multisampling's error at each step of a pan.
     let (msaa, reference) = (slanted(Antialiasing::Msaa), slanted(Antialiasing::None));
-    let mut window = Window::new(&world).unwrap();
-    for step in 0..12 {
+    let pose = |step: u32| {
         let x = step as f32 * 0.05;
-        let camera = Camera::looking_at([x, 0., 4.], [x, 0., 0.]);
-        for w in [&world, &msaa, &reference] {
-            w.set_camera(camera);
+        Camera::looking_at([x, 0., 4.], [x, 0., 0.])
+    };
+    let steps: Vec<(Vec<u8>, f32)> = (0..12)
+        .map(|step| {
+            msaa.set_camera(pose(step));
+            reference.set_camera(pose(step));
+            let truth = supersampled(&reference).unwrap();
+            let error = edge_error(&drawn_at(&msaa, SIZE).unwrap(), &truth);
+            (truth, error)
+        })
+        .collect();
+    let mean = |errors: &[f32]| errors.iter().sum::<f32>() / errors.len() as f32;
+    let multisampled = mean(&steps[3..].iter().map(|s| s.1).collect::<Vec<_>>());
+    // From each of the jitter's phases (frames drawn before the pan, its
+    // history then cut): from its third frame on, as smooth as
+    // multisampling on average while the camera pans (the history follows
+    // it by the depth).
+    for phase in 0..8 {
+        let world = slanted(Antialiasing::Taa);
+        let mut window = Window::new(&world).unwrap();
+        for _ in 0..phase {
+            world.view().invalidate();
+            window.draw();
         }
-        let taa = window.draw();
-        let truth = supersampled(&reference).unwrap();
-        let (taa, msaa) = (
-            edge_error(&taa, &truth),
-            edge_error(&drawn_at(&msaa, SIZE).unwrap(), &truth),
+        world.cut();
+        let mut errors = Vec::new();
+        for (step, (truth, _)) in steps.iter().enumerate() {
+            world.set_camera(pose(step as u32));
+            let taa = edge_error(&window.draw(), truth);
+            if step >= 3 {
+                errors.push(taa);
+            }
+        }
+        let taa = mean(&errors);
+        assert!(
+            taa < multisampled * 1.15,
+            "phase {phase}: TAA {taa}, MSAA {multisampled}"
         );
-        // From its third frame on, as smooth as multisampling while the
-        // camera pans (the history follows it by the depth).
-        if step >= 3 {
-            assert!(taa < msaa * 1.3, "step {step}: TAA {taa}, MSAA {msaa}");
-        }
     }
 }
 
+#[test]
+fn temporal_antialiasing_turned_off_while_gathering_lets_its_world_rest() {
+    let world = slanted(Antialiasing::Taa);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    assert!(world.view().animating(), "gathering its frames");
+    world.set_antialiasing(Antialiasing::Msaa);
+    window.draw();
+    assert!(!world.view().animating(), "off: nothing to gather");
+}
+
+#[test]
+fn a_resize_drag_under_temporal_antialiasing_makes_no_history_until_it_stops() {
+    // A box growing a pixel a frame: no history made each frame (nor four
+    // kept), and the world at rest soon after the drag stops.
+    let world = slanted(Antialiasing::Taa);
+    let mut gpu = match GpuRenderer::new(SIZE, SIZE) {
+        Ok(gpu) => gpu,
+        Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+            panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
+        }
+        Err(_) => return,
+    };
+    let mut ui = Ui::new(SIZE as f32, SIZE as f32);
+    let size = ui.signal(0.);
+    let side_of = size.clone();
+    ui.mount(div().size(SIZE as f32, SIZE as f32).child(
+        gpu_view("World", world.view()).reactive_style(move || {
+            let side = side_of.get();
+            Styles::new().w(side).h(side)
+        }),
+    ));
+    let mut draw = |side: u32| {
+        size.set(side as f32);
+        world.view().invalidate();
+        ui.prepare_frame();
+        let report = ui.scene.borrow_mut().flush();
+        gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+    };
+    let (first, last) = (SIZE - 30, SIZE);
+    let mut most = 0;
+    for side in first..last {
+        draw(side);
+        most = most.max(world.temporary_bytes());
+    }
+    let mut frames = 0;
+    while world.view().animating() {
+        frames += 1;
+        // A frame at the new size as drawn, then its history's 8.
+        assert!(frames <= 9, "still drawing {frames} frames after");
+        draw(last);
+    }
+    // At rest at the last size: its targets and one history, more than any
+    // frame of the drag held.
+    let settled = world.temporary_bytes();
+    let history = u64::from(last * last) * 2 * (8 + 4);
+    assert!(
+        most + history <= settled + u64::from(last * last) * 4,
+        "{most} in the drag, {settled} after"
+    );
+}
 #[test]
 fn a_moving_mesh_under_temporal_antialiasing_leans_on_its_frame_until_the_prepass() {
     // The limit until the depth prepass follows each mesh: a frame in which

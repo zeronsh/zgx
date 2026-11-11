@@ -107,6 +107,9 @@ pub(super) struct Chain {
     /// A copy back into the scene after an odd count of the app's HDR
     /// passes (`Apps`, kept by the renderer).
     copy: wgpu::RenderPipeline,
+    /// The binding of what the meshes drew under temporal antialiasing, for
+    /// a frame it doesn't blend, by the compile it was made for.
+    fresh: Option<(u64, wgpu::BindGroup)>,
     /// Automatic exposure's state (kept between frames, zero until it runs:
     /// unused), and its passes, made with the first frame adapting.
     state: wgpu::Buffer,
@@ -297,6 +300,7 @@ impl Chain {
             stand_in,
             table: None,
             copy,
+            fresh: None,
             state: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("3D exposure state"),
                 size: exposure::STATE,
@@ -314,6 +318,7 @@ impl Chain {
     /// Lets go of the bindings of the graph's targets (they hold them).
     pub(super) fn rest(&mut self) {
         self.binds = None;
+        self.fresh = None;
         if let Some(exposure) = &mut self.exposure {
             exposure.rest();
         }
@@ -333,11 +338,59 @@ impl Chain {
         look: (f32, f32),
     ) -> bool {
         let taa = self.taa.get_or_insert_with(|| taa::Taa::new(device.0));
-        taa.run(device, encoder, graph, at, look)
+        let (gathering, blended) = taa.run(device, encoder, graph, at, look);
+        // Not blended (a size not yet stood): the scene is what the meshes
+        // drew.
+        if !blended
+            && let Some(targets) = graph.targets.as_ref()
+            && let (Some(fresh), Some(scene)) = (targets.others[3].as_ref(), targets.scene.as_ref())
+        {
+            if self
+                .fresh
+                .as_ref()
+                .is_none_or(|(c, _)| *c != graph.compiled)
+            {
+                let bind = device.0.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("3D TAA, as drawn"),
+                    layout: &self.step_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(fresh),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                    ],
+                });
+                self.fresh = Some((graph.compiled, bind));
+            }
+            if let Some((_, bind)) = &self.fresh {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("3D TAA, as drawn"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: scene,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&self.copy);
+                pass.set_bind_group(0, bind, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+        gathering
     }
     /// Temporal antialiasing's history let go of (it's off).
     pub(super) fn drop_taa(&mut self) {
         self.taa = None;
+        self.fresh = None;
     }
     /// The bytes temporal antialiasing's history holds.
     pub(super) fn history_bytes(&self) -> u64 {
