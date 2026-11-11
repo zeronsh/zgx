@@ -177,7 +177,8 @@ pub(crate) mod aac {
     impl Aac {
         pub(crate) fn new(_: std::sync::Arc<[u8]>) -> Result<Aac, Error> {
             Err(Error::Format(
-                "AAC, which zgx-audio reads with the platform's decoder: macOS's only, so far"
+                "AAC, which isn't supported on this platform: zgx-audio reads it with the \
+                 platform's own decoder, so far only macOS's"
                     .into(),
             ))
         }
