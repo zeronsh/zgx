@@ -862,6 +862,37 @@ fn faces_drawn_in_place_of_rays_light_the_room_alike() {
 }
 
 #[test]
+fn a_tight_face_budget_converges_over_more_frames_to_the_same_light() {
+    // Drawing faces, a frame updates as many probes as its budget of
+    // triangles holds: held to a few, the room takes many more frames to
+    // converge, each drawing no more, and comes to the same light.
+    let test = "a_tight_face_budget_converges_over_more_frames_to_the_same_light";
+    let shade = |budget: Option<u64>| {
+        let world = World::new();
+        room(&world);
+        world.set_probes_rasterised(true);
+        world.set_probe_face_budget(budget);
+        world.add_probes(volume().per_frame(216)).unwrap();
+        let mut window = Window::new(&world)?;
+        let frames = settle(&mut window, &world, 5000);
+        traced(&world, test).then(|| (frames, window.pixels()))
+    };
+    let (Some((free, a)), Some((tight, b))) = (shade(None), shade(Some(2_000))) else {
+        return;
+    };
+    eprintln!("converged in {free} frames free, {tight} held to 2,000 triangles");
+    assert!(free <= 20, "{free} frames");
+    assert!(tight > free * 4, "{tight} frames held, {free} free");
+    for at in [(102, 110), (80, 60), (40, 128), (12, 80), (150, 80)] {
+        let (a, b) = (around(&a, at, 6), around(&b, at, 6));
+        assert!(
+            a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.03),
+            "at {at:?}: {a:?} free, {b:?} held"
+        );
+    }
+}
+
+#[test]
 fn the_room_lit_by_faces_matches_its_golden() {
     let world = World::new();
     room(&world);

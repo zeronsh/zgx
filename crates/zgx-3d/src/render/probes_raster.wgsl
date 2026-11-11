@@ -1,6 +1,6 @@
 // Probes updated without ray queries (`probes_raster.rs`). Each of this
-// frame's probes draws the scene (its traced meshes, a draw a geometry,
-// its meshes as instances) into six faces of `FACE` by `FACE` texels
+// frame's probes draws the scene (its traced meshes, a draw a cluster of a
+// geometry, its meshes as instances, as culled for the face) into six faces of `FACE` by `FACE` texels
 // about it. Each fragment is lit as a ray's hit is
 // in `probes_trace.wgsl`: the sun (shadowed by the frame's shadow map),
 // every point and spot light (unshadowed, as the meshes drawn directly
@@ -43,21 +43,37 @@ fn on_face(face: u32, rel: vec3<f32>) -> vec3<f32> {
 
 // A draw's face: this frame's probe `face / 6`, its face `face % 6`.
 @group(1) @binding(0) var<uniform> drawing: vec4<u32>;
-
-// A geometry's vertex, in its own space, and its mesh's instance: its
+// A mesh as the faces draw it (`Instance` in `probes_raster.rs`): its
 // place (a 3 by 4 matrix's rows), its normals' turn, colour and glow.
+struct Mesh {
+    p0: vec4<f32>,
+    p1: vec4<f32>,
+    p2: vec4<f32>,
+    t0: vec4<f32>,
+    t1: vec4<f32>,
+    t2: vec4<f32>,
+    albedo: vec4<f32>,
+    glow: vec4<f32>,
+}
+@group(1) @binding(1) var<storage, read> meshes: array<Mesh>;
+// Each draw's meshes, from its first instance on: the faces' culling.
+@group(1) @binding(2) var<storage, read> kept: array<u32>;
+
+// A geometry's vertex, in its own space, of the draw's `instance`th mesh.
 @vertex fn capture_vertex(
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) p0: vec4<f32>,
-    @location(3) p1: vec4<f32>,
-    @location(4) p2: vec4<f32>,
-    @location(5) t0: vec4<f32>,
-    @location(6) t1: vec4<f32>,
-    @location(7) t2: vec4<f32>,
-    @location(8) albedo: vec4<f32>,
-    @location(9) glow: vec4<f32>,
+    @builtin(instance_index) instance: u32,
 ) -> Captured {
+    let mesh = &meshes[kept[instance]];
+    let p0 = (*mesh).p0;
+    let p1 = (*mesh).p1;
+    let p2 = (*mesh).p2;
+    let t0 = (*mesh).t0;
+    let t1 = (*mesh).t1;
+    let t2 = (*mesh).t2;
+    let albedo = (*mesh).albedo;
+    let glow = (*mesh).glow;
     let face = drawing.x;
     let at = vec4(position, 1.0);
     let world = vec3(dot(p0, at), dot(p1, at), dot(p2, at));

@@ -13,8 +13,22 @@
 //!
 //! What differs from rays: point and spot lights don't cast shadows on
 //! what the faces see (the meshes drawn directly don't either), and the
-//! sun's shadow is the frame's map as last drawn (none under cascades).
+//! sun's shadow is the frame's map or cascades as last drawn: past the
+//! last cascade nothing is in shadow, so a face seeing an interior farther
+//! off than the cascades reach lights it through its roof, as the meshes
+//! drawn directly are.
 //! A face is 16 by 16 texels: a ray reads the texel its direction falls in.
+//!
+//! A face draws only what can show in it: each geometry over `SPLIT`
+//! triangles is cut into clusters of about `CLUSTER` (its indices
+//! reordered once, as uploaded), and each frame every (mesh, cluster)
+//! whose sphere reaches into a face's frustum, within `cut` of its probe,
+//! is drawn there; beyond, a face sees the sky as a ray that missed
+//! does. A frame updates as many of its probes as fit `BUDGET` triangles
+//! drawn (one at least): a big scene converges over more frames, not
+//! slower ones. The spheres bound the geometry as uploaded, which is what
+//! the faces (and rays) see: neither runs a custom material's `displace`.
+//! Should they, a cluster's sphere grows by its `displaces_by`.
 use super::raytrace::{Held, held, traced};
 use crate::world::Drawn;
 use std::collections::HashMap;
@@ -28,6 +42,21 @@ const FACE: u32 = 16;
 pub(super) const MOST: u32 = 256;
 /// A face texel nothing was drawn into (`EMPTY`).
 const EMPTY: f64 = 1e30;
+/// Geometries of more triangles than this are cut into clusters of about
+/// `CLUSTER` each.
+const SPLIT: usize = 4096;
+const CLUSTER: usize = 1024;
+/// The most triangles a frame's faces draw, as its probes are chosen (one
+/// probe at least): what bounds a frame's cost on the face path.
+pub(super) const BUDGET: u64 = 16_000_000;
+/// How far a face draws: this many times the probes' farthest distance
+/// counted (`Layout::far`), and no nearer than `CUT_LEAST` metres.
+const CUT: f32 = 2.;
+const CUT_LEAST: f32 = 64.;
+/// How far a face draws for probes whose distances count to `far`.
+pub(super) fn cut(far: f32) -> f32 {
+    (far * CUT).max(CUT_LEAST)
+}
 
 /// A mesh as the faces draw it: its place (a 3 by 4 matrix's rows), its
 /// normals' turn (the inverse transpose's rows), its colour (less what's
@@ -44,13 +73,209 @@ pub(super) struct Instance {
 /// offset's alignment.
 const FACE_STRIDE: u64 = 256;
 
-/// A geometry's vertices (`Vertex`) and indices, uploaded once.
+/// A run of a geometry's triangles a face culls on its own: where they
+/// start and how many, in its reordered indices, and a sphere about them
+/// in its own space.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Cluster {
+    first: u32,
+    triangles: u32,
+    center: [f32; 3],
+    radius: f32,
+}
+
+/// `indices` (triangles of `vertices`) as clusters: one where there are
+/// `SPLIT` triangles or fewer; else halved at the median of their centres
+/// along the widest axis until each holds `CLUSTER` or fewer. The indices
+/// reordered so each cluster's triangles run together, and the clusters.
+fn clustered(vertices: &[crate::Vertex], indices: &[u32]) -> (Vec<u32>, Vec<Cluster>) {
+    let triangles = indices.len() / 3;
+    let corner = |t: u32, k: usize| vertices[indices[t as usize * 3 + k] as usize].position;
+    let centre = |t: u32| -> [f32; 3] {
+        let (a, b, c) = (corner(t, 0), corner(t, 1), corner(t, 2));
+        std::array::from_fn(|i| (a[i] + b[i] + c[i]) / 3.)
+    };
+    let mut order: Vec<u32> = (0..triangles as u32).collect();
+    let mut runs = Vec::new();
+    let mut stack = Vec::new();
+    stack.push(0..triangles);
+    while let Some(run) = stack.pop() {
+        let limit = if run.len() == triangles {
+            SPLIT
+        } else {
+            CLUSTER
+        };
+        if run.len() <= limit {
+            runs.push(run);
+            continue;
+        }
+        let part = &mut order[run.clone()];
+        let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+        for &t in part.iter() {
+            let c = centre(t);
+            for i in 0..3 {
+                lo[i] = lo[i].min(c[i]);
+                hi[i] = hi[i].max(c[i]);
+            }
+        }
+        let axis = (0..3)
+            .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
+            .unwrap();
+        let mid = part.len() / 2;
+        part.select_nth_unstable_by(mid, |&a, &b| {
+            centre(a)[axis].total_cmp(&centre(b)[axis]).then(a.cmp(&b))
+        });
+        // The second half first off the stack after the first: in order.
+        stack.push(run.start + mid..run.end);
+        stack.push(run.start..run.start + mid);
+    }
+    let mut reordered = Vec::with_capacity(indices.len());
+    let clusters = runs
+        .into_iter()
+        .map(|run| {
+            let first = (reordered.len() / 3) as u32;
+            let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+            for &t in &order[run.clone()] {
+                for k in 0..3 {
+                    reordered.push(indices[t as usize * 3 + k]);
+                    let p = corner(t, k);
+                    for i in 0..3 {
+                        lo[i] = lo[i].min(p[i]);
+                        hi[i] = hi[i].max(p[i]);
+                    }
+                }
+            }
+            if run.is_empty() {
+                (lo, hi) = ([0.; 3], [0.; 3]);
+            }
+            let half: [f32; 3] = std::array::from_fn(|i| (hi[i] - lo[i]) * 0.5);
+            Cluster {
+                first,
+                triangles: run.len() as u32,
+                center: std::array::from_fn(|i| (lo[i] + hi[i]) * 0.5),
+                radius: (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt(),
+            }
+        })
+        .collect();
+    (reordered, clusters)
+}
+
+/// A geometry's vertices (`Vertex`) and its indices in clusters, uploaded
+/// once.
 struct Shape {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
-    count: u32,
+    clusters: Vec<Cluster>,
     /// The last rebuild that used it.
     used: u64,
+}
+
+/// What faces may draw: each mesh's clusters, as spheres in the world, in
+/// the order draws take them (by geometry, cluster, then mesh), so what a
+/// face keeps falls into runs a draw each.
+#[derive(Default)]
+struct Items {
+    /// Centre and radius.
+    spheres: Vec<[f32; 4]>,
+    /// The mesh (its instance) and its geometry's cluster.
+    instance: Vec<u32>,
+    geometry: Vec<u64>,
+    cluster: Vec<u32>,
+    triangles: Vec<u32>,
+}
+
+/// One draw of a face: a geometry's cluster, for the meshes `kept[range]`.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Draw {
+    face: u32,
+    geometry: u64,
+    cluster: u32,
+    kept: std::ops::Range<u32>,
+}
+
+/// A frame's faces as culled (`plan`): the meshes each draw takes, the
+/// draws, how many probes they're for and the triangles they draw.
+#[derive(Default, Debug)]
+pub(super) struct Plan {
+    kept: Vec<u32>,
+    draws: Vec<Draw>,
+    pub(super) probes: u32,
+    pub(super) triangles: u64,
+}
+
+/// `place`'s relation to a sphere (`rel`: its centre less `place`; radius
+/// `r`): whether any of it may show in cube face `face` (as `on_face` in
+/// `probes_raster.wgsl` turns it), conservatively.
+fn in_face(face: u32, rel: [f32; 3], r: f32) -> bool {
+    let (u, v, w) = match face {
+        0 => (-rel[2], -rel[1], rel[0]),
+        1 => (rel[2], -rel[1], -rel[0]),
+        2 => (rel[0], rel[2], rel[1]),
+        3 => (rel[0], -rel[2], -rel[1]),
+        4 => (rel[0], -rel[1], rel[2]),
+        _ => (-rel[0], -rel[1], -rel[2]),
+    };
+    // The face's four side planes run through its edges at 45 degrees; a
+    // sphere is past one where its centre is more than r beyond it.
+    let r = r * std::f32::consts::SQRT_2;
+    w + r > 0. && u.abs() - w <= r && v.abs() - w <= r
+}
+
+/// The faces of the probes at `places` (this frame's, in turn) culled
+/// against `items` within `cut` of each, as many probes as fit `budget`
+/// triangles (one at least).
+fn plan(items: &Items, places: &[[f32; 3]], cut: f32, budget: u64, out: &mut Plan) {
+    out.kept.clear();
+    out.draws.clear();
+    out.probes = 0;
+    out.triangles = 0;
+    let mut near = Vec::new();
+    for (probe, place) in places.iter().enumerate() {
+        let (kept, draws, triangles) = (out.kept.len(), out.draws.len(), out.triangles);
+        near.clear();
+        for (i, s) in items.spheres.iter().enumerate() {
+            let rel = [s[0] - place[0], s[1] - place[1], s[2] - place[2]];
+            let reach = cut + s[3];
+            if rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2] <= reach * reach {
+                near.push((i, rel, s[3]));
+            }
+        }
+        for side in 0..6 {
+            let face = probe as u32 * 6 + side;
+            for &(i, rel, r) in &near {
+                if !in_face(side, rel, r) {
+                    continue;
+                }
+                let (geometry, cluster) = (items.geometry[i], items.cluster[i]);
+                let at = out.kept.len() as u32;
+                match out.draws.last_mut() {
+                    Some(d)
+                        if d.face == face
+                            && d.geometry == geometry
+                            && d.cluster == cluster
+                            && d.kept.end == at =>
+                    {
+                        d.kept.end += 1;
+                    }
+                    _ => out.draws.push(Draw {
+                        face,
+                        geometry,
+                        cluster,
+                        kept: at..at + 1,
+                    }),
+                }
+                out.kept.push(items.instance[i]);
+                out.triangles += u64::from(items.triangles[i]);
+            }
+        }
+        if out.triangles > budget && probe > 0 {
+            out.kept.truncate(kept);
+            out.draws.truncate(draws);
+            out.triangles = triangles;
+            break;
+        }
+        out.probes += 1;
+    }
 }
 
 pub(super) struct Raster {
@@ -66,13 +291,24 @@ pub(super) struct Raster {
     /// The meshes as instances, grouped by geometry: the buffer and how
     /// many it holds; and each geometry's run of them.
     instances: Option<(wgpu::Buffer, u32)>,
-    runs: Vec<(u64, std::ops::Range<u32>)>,
-    /// Each face's index at its own offset (`FACE_STRIDE`), its layout and
-    /// binding: a draw's face (its instance is its mesh).
-    face: Option<(wgpu::BindGroupLayout, wgpu::BindGroup)>,
-    /// Buffers made and instance bytes written, counted (for tests).
+    /// Each mesh's clusters as faces cull them, and this frame's faces as
+    /// culled; the meshes each draw takes, uploaded (its size in entries).
+    items: Items,
+    plan: Plan,
+    kept: Option<(wgpu::Buffer, u32)>,
+    /// Each face's index at its own offset (`FACE_STRIDE`); the group's
+    /// layout, and its binding with the instances and the kept list, for
+    /// the buffers they were made with.
+    face_buffer: Option<wgpu::Buffer>,
+    face_layout: Option<wgpu::BindGroupLayout>,
+    face: Option<wgpu::BindGroup>,
+    /// Buffers made and instance bytes written, counted (for tests); and
+    /// the bytes of the geometries' reordered indices and cluster tables.
     pub(super) buffers_made: u64,
     pub(super) instance_bytes: u64,
+    pub(super) cluster_bytes: u64,
+    /// Frames whose faces were culled (for tests: none at rest).
+    pub(super) plans: u64,
     /// The faces' atlas (a row of six faces a probe drawn a frame), its
     /// depth and rows, made with the first frame; and how many times it
     /// was made (what binds it is made again with it).
@@ -89,11 +325,13 @@ pub(super) struct Raster {
 }
 
 /// Whether the device can update probes by drawing faces: it runs
-/// compute and reads storage buffers where the faces are lit.
+/// compute and reads storage buffers where the faces are lit and where
+/// their vertices are placed (each draw's meshes are read from a list).
 pub(super) fn rasterises(device: &wgpu::Device) -> bool {
     let limits = device.limits();
     limits.max_compute_invocations_per_workgroup >= 64
         && limits.max_storage_buffers_per_shader_stage >= 2
+        && crate::caps::Caps::of(device).storage_in_vertex
 }
 
 fn texture(
@@ -131,10 +369,16 @@ impl Raster {
             rebuilds: 0,
             shapes: HashMap::new(),
             instances: None,
-            runs: Vec::new(),
+            items: Items::default(),
+            plan: Plan::default(),
+            kept: None,
+            face_buffer: None,
+            face_layout: None,
             face: None,
             buffers_made: 0,
             instance_bytes: 0,
+            cluster_bytes: 0,
+            plans: 0,
             faces: None,
             made: 0,
             capture_layouts: layouts.0,
@@ -214,6 +458,9 @@ impl Raster {
                     )
                 };
                 self.buffers_made += 2;
+                let (indices, clusters) = clustered(d.geometry.vertices(), d.geometry.indices());
+                self.cluster_bytes +=
+                    (indices.len() * 4 + clusters.len() * std::mem::size_of::<Cluster>()) as u64;
                 Shape {
                     vertices: buffer(
                         bytemuck::cast_slice(d.geometry.vertices()),
@@ -221,11 +468,11 @@ impl Raster {
                         "3D probe faces' vertices",
                     ),
                     indices: buffer(
-                        bytemuck::cast_slice(d.geometry.indices()),
+                        bytemuck::cast_slice(&indices),
                         wgpu::BufferUsages::INDEX,
                         "3D probe faces' indices",
                     ),
-                    count: d.geometry.indices().len() as u32,
+                    clusters,
                     used: now,
                 }
             });
@@ -256,15 +503,56 @@ impl Raster {
                 },
             ));
         }
+        let shapes = &self.shapes;
+        self.cluster_bytes -= shapes
+            .values()
+            .filter(|shape| shape.used != now)
+            .map(|shape| {
+                let triangles: u32 = shape.clusters.iter().map(|c| c.triangles).sum();
+                u64::from(triangles) * 12
+                    + (shape.clusters.len() * std::mem::size_of::<Cluster>()) as u64
+            })
+            .sum::<u64>();
         self.shapes.retain(|_, shape| shape.used == now);
-        // By geometry, a run of instances each.
-        instances.sort_by_key(|(geometry, _)| *geometry);
-        self.runs.clear();
+        // Each mesh's clusters as spheres in the world, by geometry,
+        // cluster and mesh.
+        let mut order: Vec<(u64, u32, u32)> = Vec::new();
         for (i, (geometry, _)) in instances.iter().enumerate() {
-            match self.runs.last_mut() {
-                Some((g, range)) if g == geometry => range.end = i as u32 + 1,
-                _ => self.runs.push((*geometry, i as u32..i as u32 + 1)),
+            for c in 0..self.shapes[geometry].clusters.len() as u32 {
+                order.push((*geometry, c, i as u32));
             }
+        }
+        order.sort_unstable();
+        let items = &mut self.items;
+        items.spheres.clear();
+        items.instance.clear();
+        items.geometry.clear();
+        items.cluster.clear();
+        items.triangles.clear();
+        for (geometry, c, i) in order {
+            let cluster = &self.shapes[&geometry].clusters[c as usize];
+            let place = &instances[i as usize].1.place;
+            let at = |row: &[f32; 4]| {
+                row[0] * cluster.center[0]
+                    + row[1] * cluster.center[1]
+                    + row[2] * cluster.center[2]
+                    + row[3]
+            };
+            let scale = (0..3)
+                .map(|col| {
+                    (place[0][col].powi(2) + place[1][col].powi(2) + place[2][col].powi(2)).sqrt()
+                })
+                .fold(0f32, f32::max);
+            items.spheres.push([
+                at(&place[0]),
+                at(&place[1]),
+                at(&place[2]),
+                cluster.radius * scale,
+            ]);
+            items.instance.push(i);
+            items.geometry.push(geometry);
+            items.cluster.push(c);
+            items.triangles.push(cluster.triangles);
         }
         let count = instances.len() as u32;
         if self
@@ -277,12 +565,13 @@ impl Raster {
                 device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("3D probe faces' instances"),
                     size: u64::from(capacity) * std::mem::size_of::<Instance>() as u64,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }),
                 capacity,
             ));
             self.buffers_made += 1;
+            self.face = None;
         }
         if count > 0 {
             let bytes: Vec<Instance> = instances.into_iter().map(|(_, i)| i).collect();
@@ -292,8 +581,47 @@ impl Raster {
         }
     }
 
-    /// This frame's `count` probes' faces drawn (`capture` binding), then
-    /// read along their rays into the rays buffer (`read` binding).
+    /// This frame's probes at `places` (in turn) culled within `cut` of
+    /// each, as many as fit `budget` triangles (one at least): how many
+    /// it draws faces for (`update` then draws them). The meshes each
+    /// face's draws take are uploaded.
+    pub(super) fn plan(
+        &mut self,
+        (device, queue): (&wgpu::Device, &wgpu::Queue),
+        places: &[[f32; 3]],
+        cut: f32,
+        budget: u64,
+    ) -> u32 {
+        plan(&self.items, places, cut, budget, &mut self.plan);
+        self.plans += 1;
+        let entries = self.plan.kept.len() as u32;
+        if self.kept.as_ref().is_none_or(|(_, have)| *have < entries) {
+            let capacity = entries.max(256).next_power_of_two();
+            self.kept = Some((
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("3D probe faces' meshes"),
+                    size: u64::from(capacity) * 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                capacity,
+            ));
+            self.buffers_made += 1;
+            self.face = None;
+        }
+        if entries > 0 {
+            queue.write_buffer(
+                &self.kept.as_ref().unwrap().0,
+                0,
+                bytemuck::cast_slice(&self.plan.kept),
+            );
+        }
+        self.plan.probes
+    }
+
+    /// This frame's `count` probes' faces drawn as `plan` culled them
+    /// (`capture` binding), then read along their rays into the rays
+    /// buffer (`read` binding).
     pub(super) fn update(
         &mut self,
         device: &wgpu::Device,
@@ -302,48 +630,79 @@ impl Raster {
         (lit, cascaded, count, rays): (bool, bool, u32, u32),
     ) {
         let source = |lit, cascaded| super::probes::raster_source(lit, cascaded);
-        // Each face's index, at its own dynamic offset: made once.
-        let (face_layout, face_bind) = self.face.get_or_insert_with(|| {
-            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let storage = |binding| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        // Each face's index at its own dynamic offset, the meshes and the
+        // list a draw's meshes are read from.
+        let face_layout = self.face_layout.get_or_insert_with(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("3D probe face"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: true,
-                        min_binding_size: wgpu::BufferSize::new(16),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: true,
+                            min_binding_size: wgpu::BufferSize::new(16),
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
-            });
+                    storage(1),
+                    storage(2),
+                ],
+            })
+        });
+        let face_buffer = self.face_buffer.get_or_insert_with(|| {
             let mut contents = vec![0u8; (u64::from(MOST) * 6 * FACE_STRIDE) as usize];
             for face in 0..MOST * 6 {
                 let at = (u64::from(face) * FACE_STRIDE) as usize;
                 contents[at..at + 4].copy_from_slice(&face.to_le_bytes());
             }
-            let buffer = wgpu::util::DeviceExt::create_buffer_init(
+            wgpu::util::DeviceExt::create_buffer_init(
                 device,
                 &wgpu::util::BufferInitDescriptor {
                     label: Some("3D probe face"),
                     contents: &contents,
                     usage: wgpu::BufferUsages::UNIFORM,
                 },
-            );
-            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("3D probe face"),
-                layout: &layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &buffer,
-                        offset: 0,
-                        size: wgpu::BufferSize::new(16),
-                    }),
-                }],
-            });
-            (layout, bind)
+            )
         });
+        let face_bind = match (&self.instances, &self.kept) {
+            (Some((instances, _)), Some((kept, _))) => Some(&*self.face.get_or_insert_with(|| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("3D probe face"),
+                    layout: face_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: face_buffer,
+                                offset: 0,
+                                size: wgpu::BufferSize::new(16),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: instances.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: kept.as_entire_binding(),
+                        },
+                    ],
+                })
+            })),
+            _ => None,
+        };
         let capture_layout = &self.capture_layouts[usize::from(cascaded)];
         let capture_pipeline = self.capture[usize::from(cascaded)][usize::from(lit)]
             .get_or_insert_with(|| {
@@ -353,7 +712,7 @@ impl Raster {
                 });
                 let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("3D probe faces"),
-                    bind_group_layouts: &[Some(capture_layout), Some(face_layout)],
+                    bind_group_layouts: &[Some(capture_layout), Some(&*face_layout)],
                     immediate_size: 0,
                 });
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -363,23 +722,11 @@ impl Raster {
                         module: &module,
                         entry_point: Some("capture_vertex"),
                         compilation_options: Default::default(),
-                        buffers: &[
-                            wgpu::VertexBufferLayout {
-                                array_stride: std::mem::size_of::<crate::Vertex>() as u64,
-                                step_mode: wgpu::VertexStepMode::Vertex,
-                                attributes: &wgpu::vertex_attr_array![
-                                    0 => Float32x3, 1 => Float32x3
-                                ],
-                            },
-                            wgpu::VertexBufferLayout {
-                                array_stride: std::mem::size_of::<Instance>() as u64,
-                                step_mode: wgpu::VertexStepMode::Instance,
-                                attributes: &wgpu::vertex_attr_array![
-                                    2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
-                                    6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4
-                                ],
-                            },
-                        ],
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<crate::Vertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+                        }],
                     },
                     fragment: Some(wgpu::FragmentState {
                         module: &module,
@@ -428,23 +775,39 @@ impl Raster {
                 }),
                 ..Default::default()
             });
-            if let Some((instances, _)) = &self.instances
-                && !self.runs.is_empty()
+            if let Some(face_bind) = face_bind
+                && !self.plan.draws.is_empty()
             {
                 pass.set_pipeline(capture_pipeline);
                 pass.set_bind_group(0, capture, &[]);
-                pass.set_vertex_buffer(1, instances.slice(..));
-                for face in 0..count * 6 {
-                    let (x, y) = ((face % 6) * FACE, (face / 6) * FACE);
-                    pass.set_viewport(x as f32, y as f32, FACE as f32, FACE as f32, 0., 1.);
-                    pass.set_scissor_rect(x, y, FACE, FACE);
-                    pass.set_bind_group(1, &*face_bind, &[(u64::from(face) * FACE_STRIDE) as u32]);
-                    for (geometry, run) in &self.runs {
-                        let shape = &self.shapes[geometry];
+                let (mut face, mut geometry) = (u32::MAX, None);
+                for draw in &self.plan.draws {
+                    if draw.face >= count * 6 {
+                        break;
+                    }
+                    if draw.face != face {
+                        face = draw.face;
+                        let (x, y) = ((face % 6) * FACE, (face / 6) * FACE);
+                        pass.set_viewport(x as f32, y as f32, FACE as f32, FACE as f32, 0., 1.);
+                        pass.set_scissor_rect(x, y, FACE, FACE);
+                        pass.set_bind_group(
+                            1,
+                            face_bind,
+                            &[(u64::from(face) * FACE_STRIDE) as u32],
+                        );
+                    }
+                    let shape = &self.shapes[&draw.geometry];
+                    if geometry != Some(draw.geometry) {
+                        geometry = Some(draw.geometry);
                         pass.set_vertex_buffer(0, shape.vertices.slice(..));
                         pass.set_index_buffer(shape.indices.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(0..shape.count, 0, run.clone());
                     }
+                    let cluster = &shape.clusters[draw.cluster as usize];
+                    pass.draw_indexed(
+                        cluster.first * 3..(cluster.first + cluster.triangles) * 3,
+                        0,
+                        draw.kept.clone(),
+                    );
                 }
             }
         }
@@ -475,5 +838,153 @@ impl Raster {
         pass.set_pipeline(read_pipeline);
         pass.set_bind_group(0, read, &[]);
         pass.dispatch_workgroups((count * rays).div_ceil(64), 1, 1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A flat grid of `n` by `n` quads, 1 apart: `2 n²` triangles.
+    fn grid(n: u32) -> (Vec<crate::Vertex>, Vec<u32>) {
+        let mut vertices = Vec::new();
+        for z in 0..=n {
+            for x in 0..=n {
+                vertices.push(crate::Vertex {
+                    position: [x as f32, 0., z as f32],
+                    normal: [0., 1., 0.],
+                    uv: [0., 0.],
+                });
+            }
+        }
+        let mut indices = Vec::new();
+        for z in 0..n {
+            for x in 0..n {
+                let a = z * (n + 1) + x;
+                let b = a + n + 1;
+                indices.extend_from_slice(&[a, b, a + 1, a + 1, b, b + 1]);
+            }
+        }
+        (vertices, indices)
+    }
+
+    #[test]
+    fn a_big_geometry_is_cut_into_clusters_holding_each_triangle_once() {
+        // 20,000 triangles: clusters of CLUSTER or fewer, in order, each
+        // sphere holding its triangles, every triangle in one.
+        let (vertices, indices) = grid(100);
+        let (reordered, clusters) = clustered(&vertices, &indices);
+        assert!(
+            clusters.len() >= 20_000 / CLUSTER,
+            "{} clusters",
+            clusters.len()
+        );
+        let mut next = 0;
+        for c in &clusters {
+            assert!(c.triangles as usize <= CLUSTER && c.triangles > 0, "{c:?}");
+            assert_eq!(c.first, next);
+            next += c.triangles;
+            for &i in &reordered[c.first as usize * 3..(c.first + c.triangles) as usize * 3] {
+                let p = vertices[i as usize].position;
+                let d = (0..3)
+                    .map(|k| (p[k] - c.center[k]).powi(2))
+                    .sum::<f32>()
+                    .sqrt();
+                assert!(d <= c.radius * 1.0001 + 1e-5, "{p:?} outside {c:?}");
+            }
+        }
+        assert_eq!(next as usize, indices.len() / 3);
+        let sorted = |t: &[u32]| {
+            let mut v: Vec<[u32; 3]> = t.chunks(3).map(|t| [t[0], t[1], t[2]]).collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(sorted(&reordered), sorted(&indices));
+        // The same every time.
+        assert_eq!(clustered(&vertices, &indices), (reordered, clusters));
+        // A small one is one cluster, as it was.
+        let (vertices, indices) = grid(10);
+        let (reordered, clusters) = clustered(&vertices, &indices);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(reordered, indices);
+    }
+
+    /// Items: unit spheres at `centres`, mesh `i` each, its own geometry,
+    /// `triangles` each.
+    fn items(centres: &[[f32; 3]], triangles: u32) -> Items {
+        let mut items = Items::default();
+        for (i, c) in centres.iter().enumerate() {
+            items.spheres.push([c[0], c[1], c[2], 1.]);
+            items.instance.push(i as u32);
+            items.geometry.push(i as u64);
+            items.cluster.push(0);
+            items.triangles.push(triangles);
+        }
+        items
+    }
+
+    #[test]
+    fn a_face_draws_what_lies_in_its_frustum_within_the_cut() {
+        // Ahead along +x (face 0) at 5, behind it at -5 (face 1), up at
+        // 5 (face 2), and far along +x at 50.
+        let items = items(
+            &[[5., 0., 0.], [-5., 0., 0.], [0., 5., 0.], [50., 0., 0.]],
+            10,
+        );
+        let mut out = Plan::default();
+        plan(&items, &[[0.; 3]], 20., u64::MAX, &mut out);
+        fn faces(out: &Plan, mesh: u32) -> Vec<u32> {
+            out.draws
+                .iter()
+                .filter(|d| d.kept.clone().any(|k| out.kept[k as usize] == mesh))
+                .map(|d| d.face)
+                .collect()
+        }
+        assert_eq!(faces(&out, 0), [0]);
+        assert_eq!(faces(&out, 1), [1]);
+        assert_eq!(faces(&out, 2), [2]);
+        assert!(
+            faces(&out, 3).is_empty(),
+            "past the cut: {:?}",
+            faces(&out, 3)
+        );
+        assert_eq!(out.probes, 1);
+        assert_eq!(out.triangles, 30);
+        // Within the cut, it's drawn.
+        plan(&items, &[[0.; 3]], 60., u64::MAX, &mut out);
+        assert_eq!(faces(&out, 3), [0]);
+        // A sphere the probe stands in shows in every face.
+        let inside = super::tests::items(&[[0.2, 0., 0.]], 10);
+        plan(&inside, &[[0.; 3]], 20., u64::MAX, &mut out);
+        let mut seen: Vec<u32> = out.draws.iter().map(|d| d.face).collect();
+        seen.dedup();
+        assert_eq!(seen, [0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn a_frame_updates_as_many_probes_as_its_budget_holds_and_one_at_least() {
+        // Each probe sees one mesh of 100 triangles in one face.
+        let items = items(&[[5., 0., 0.]], 100);
+        let places = [[0.; 3]; 10];
+        let mut out = Plan::default();
+        plan(&items, &places, 20., 350, &mut out);
+        assert_eq!((out.probes, out.triangles), (3, 300));
+        assert!(out.draws.iter().all(|d| d.face < 3 * 6));
+        plan(&items, &places, 20., 0, &mut out);
+        assert_eq!((out.probes, out.triangles), (1, 100));
+        plan(&items, &places, 20., u64::MAX, &mut out);
+        assert_eq!((out.probes, out.triangles), (10, 1000));
+    }
+
+    #[test]
+    fn meshes_sharing_a_geometry_draw_together() {
+        // Two meshes of one geometry ahead: one draw for both.
+        let mut items = items(&[[5., 0., 0.], [6., 0., 0.]], 10);
+        items.geometry = vec![7, 7];
+        let mut out = Plan::default();
+        plan(&items, &[[0.; 3]], 20., u64::MAX, &mut out);
+        assert_eq!(out.draws.len(), 1, "{:?}", out.draws);
+        assert_eq!(out.draws[0].kept, 0..2);
+        assert_eq!(out.kept, [0, 1]);
     }
 }
