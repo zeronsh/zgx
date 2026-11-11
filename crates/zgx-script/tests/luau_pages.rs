@@ -1,6 +1,9 @@
 //! With the pool on, Luau's pages live apart from the program's heap, and
 //! going idle gives the free ones back. A process of its own: the pool is
 //! the process's.
+// The pool is macOS's and Linux's (vendor/mlua's `pages`): elsewhere a VM's
+// pages are the program's heap, and these would find none.
+#![cfg(any(target_os = "macos", target_os = "linux"))]
 use mlua::{Lua, ffi};
 use std::os::raw::c_void;
 use std::sync::Mutex;

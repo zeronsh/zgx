@@ -9,7 +9,7 @@ mod common;
 
 use common::Harness;
 use std::path::{Path, PathBuf};
-use zgx_script::ScriptHost;
+use zgx_script::{Capability, ScriptHost};
 
 const DOCS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/reference");
 
@@ -28,6 +28,37 @@ struct Example {
     /// `page.md:line`, for messages.
     at: String,
     files: Vec<(String, String)>,
+    /// What its plugins are granted: `-- file: plugins/shout.luau (granted
+    /// Capability::OverrideElement("#title"))`, each plugin by its name.
+    grants: Vec<(String, Capability)>,
+}
+
+/// A file line's path, and the grant it declares for its plugin: the
+/// `(granted Capability::…("…"))` after the path is no part of its name.
+fn file_line(line: &str) -> (String, Option<(String, Capability)>) {
+    let Some((path, grant)) = line.split_once(" (granted ") else {
+        return (line.trim().to_owned(), None);
+    };
+    let path = path.trim().to_owned();
+    let grant = grant.trim().strip_suffix(')').unwrap_or(grant);
+    let (kind, value) = grant
+        .strip_prefix("Capability::")
+        .and_then(|grant| grant.split_once("(\""))
+        .and_then(|(kind, rest)| Some((kind, rest.strip_suffix("\")")?)))
+        .unwrap_or_else(|| panic!("a grant this test can't read: {grant}"));
+    let capability = match kind {
+        "OverrideElement" => Capability::OverrideElement(value.into()),
+        "OverrideModule" => Capability::OverrideModule(value.into()),
+        "Override" => Capability::Override(value.into()),
+        "Package" => Capability::Package(value.into()),
+        other => panic!("a grant this test can't read: {other}"),
+    };
+    // A plugin is its file below `plugins/`, or the directory it is in.
+    let plugin = path
+        .strip_prefix("plugins/")
+        .map(|rest| rest.split('/').next().unwrap_or(rest).to_owned())
+        .unwrap_or_else(|| panic!("a grant on {path}, which is no plugin's"));
+    (path, Some((plugin, capability)))
 }
 
 fn examples() -> Vec<Example> {
@@ -78,6 +109,7 @@ fn examples() -> Vec<Example> {
                     .get_or_insert_with(|| Example {
                         at: at.clone(),
                         files: Vec::new(),
+                        grants: Vec::new(),
                     })
                     .files
                     .push((path, code));
@@ -85,18 +117,24 @@ fn examples() -> Vec<Example> {
             }
             match code.strip_prefix("-- file: ") {
                 Some(rest) => {
-                    let (path, body) = rest.split_once('\n').unwrap();
-                    project
-                        .get_or_insert_with(|| Example {
-                            at: at.clone(),
-                            files: Vec::new(),
-                        })
-                        .files
-                        .push((path.trim().to_owned(), body.to_owned()));
+                    let example = project.get_or_insert_with(|| Example {
+                        at: at.clone(),
+                        files: Vec::new(),
+                        grants: Vec::new(),
+                    });
+                    // A block may hold several files, each from its own
+                    // `-- file:` line.
+                    for file in rest.split("\n-- file: ") {
+                        let (line, body) = file.split_once('\n').unwrap_or((file, ""));
+                        let (path, grant) = file_line(line);
+                        example.files.push((path, body.to_owned()));
+                        example.grants.extend(grant);
+                    }
                 }
                 None => out.push(Example {
                     at,
                     files: vec![("app.luau".into(), code)],
+                    grants: Vec::new(),
                 }),
             }
         }
@@ -134,8 +172,22 @@ fn reference_examples_run_and_type_check() {
         let dir = write(example, &root);
         let (app, plugins) = (dir.join("app.luau"), dir.join("plugins"));
         assert!(app.is_file(), "{}: no app.luau", example.at);
+        // Each granted plugin is one the host loads (a file or directory
+        // below `plugins/`): one that fails to load is the host's error.
+        for (plugin, _) in &example.grants {
+            assert!(
+                plugins.join(plugin).exists(),
+                "{}: no plugin {plugin}",
+                example.at
+            );
+        }
+        let grants = example.grants.clone();
         let h = Harness::new(move |runtime| {
-            let host = ScriptHost::new(runtime, app);
+            let mut host = ScriptHost::new(runtime, app);
+            // What its plugins are granted, as the page says.
+            for (plugin, capability) in grants {
+                host = host.grant(plugin, capability);
+            }
             // What the examples ask of their host.
             host.action("save", |_| {});
             host.shared("user", "Ada");
