@@ -712,6 +712,11 @@ impl Viewport for Renderer {
             world.unsettle(crate::world::Settle::POST_COMPILING, compiling);
             #[cfg(test)]
             post::counted(hdr);
+            // Bloom as dispatches where the device runs compute (its
+            // render passes elsewhere).
+            let bloom_compute = world.caps.get().is_some_and(|caps| caps.compute);
+            #[cfg(test)]
+            let bloom_compute = bloom_compute && !post::bloom_by_passes();
             // Automatic exposure where the device runs compute (else the
             // stops alone: `AutoExposure`).
             let adapts = world.post.auto_exposure.is_some()
@@ -731,6 +736,7 @@ impl Viewport for Renderer {
                 adapts,
                 taa: world.taa,
                 aberration: world.post.chromatic_aberration.is_some(),
+                bloom_compute,
             }
         };
         #[cfg(not(feature = "post"))]

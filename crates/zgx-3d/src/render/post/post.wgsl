@@ -13,61 +13,16 @@ struct Out {
 @group(0) @binding(0) var source: texture_2d<f32>;
 @group(0) @binding(1) var linear: sampler;
 
-// A pixel with a part not finite (an infinite light's NaN) as nothing, so
-// it can't spread through bloom or the exposure: by its bits, which fast
-// maths can't fold away as it may `c != c`.
-fn sane(c: vec4<f32>) -> vec4<f32> {
-    let bad = (bitcast<vec4<u32>>(c) & vec4(0x7f800000u)) == vec4(0x7f800000u);
-    return select(c, vec4(0.0), any(bad));
-}
-fn at(uv: vec2<f32>, x: f32, y: f32) -> vec3<f32> {
-    let texel = 1.0 / vec2<f32>(textureDimensions(source));
-    return sane(textureSampleLevel(source, linear, uv + vec2(x, y) * texel, 0.0)).rgb;
-}
-fn luma(c: vec3<f32>) -> f32 {
-    return dot(c, vec3(0.2126, 0.7152, 0.0722));
-}
-// 13 taps (Jimenez, "Next generation post processing in Call of Duty:
-// Advanced Warfare"): five boxes of four, overlapping, the centre's weighted
-// half. The first step weighs each box by 1 / (1 + its luma) (Karis's
-// average), so a lone bright texel can't flicker into a large glow.
-fn boxes(uv: vec2<f32>, karis: bool) -> vec3<f32> {
-    let a = at(uv, -2.0, 2.0);
-    let b = at(uv, 0.0, 2.0);
-    let c = at(uv, 2.0, 2.0);
-    let d = at(uv, -2.0, 0.0);
-    let e = at(uv, 0.0, 0.0);
-    let f = at(uv, 2.0, 0.0);
-    let g = at(uv, -2.0, -2.0);
-    let h = at(uv, 0.0, -2.0);
-    let i = at(uv, 2.0, -2.0);
-    let j = at(uv, -1.0, 1.0);
-    let k = at(uv, 1.0, 1.0);
-    let l = at(uv, -1.0, -1.0);
-    let m = at(uv, 1.0, -1.0);
-    let centre = (j + k + l + m) * 0.25;
-    let corners = array((a + b + d + e) * 0.25, (b + c + e + f) * 0.25, (d + e + g + h) * 0.25, (e + f + h + i) * 0.25);
-    var weights = vec4(0.125);
-    var middle = 0.5;
-    if karis {
-        middle *= 1.0 / (1.0 + luma(centre));
-        weights *= 1.0 / (1.0 + vec4(luma(corners[0]), luma(corners[1]), luma(corners[2]), luma(corners[3])));
-    }
-    let sum = centre * middle + corners[0] * weights.x + corners[1] * weights.y + corners[2] * weights.z + corners[3] * weights.w;
-    return sum / (middle + weights.x + weights.y + weights.z + weights.w);
-}
 @fragment fn first(in: Out) -> @location(0) vec4<f32> {
-    return vec4(boxes(in.uv, true), 1.0);
+    return vec4(boxes(source, linear, in.uv, true), 1.0);
 }
 @fragment fn down(in: Out) -> @location(0) vec4<f32> {
-    return vec4(boxes(in.uv, false), 1.0);
+    return vec4(boxes(source, linear, in.uv, false), 1.0);
 }
 // The step after, blurred by a 3 by 3 tent, added to this one (by the
 // pipeline's blending).
 @fragment fn up(in: Out) -> @location(0) vec4<f32> {
-    let edges = at(in.uv, -1.0, 0.0) + at(in.uv, 1.0, 0.0) + at(in.uv, 0.0, -1.0) + at(in.uv, 0.0, 1.0);
-    let corners = at(in.uv, -1.0, -1.0) + at(in.uv, 1.0, -1.0) + at(in.uv, -1.0, 1.0) + at(in.uv, 1.0, 1.0);
-    return vec4((at(in.uv, 0.0, 0.0) * 4.0 + edges * 2.0 + corners) / 16.0, 1.0);
+    return vec4(tent(source, linear, in.uv), 1.0);
 }
 
 // The last pass.
@@ -204,16 +159,6 @@ fn hash(x: u32, y: u32, frame: u32) -> f32 {
     return f32(v) / 4294967295.0;
 }
 
-// Bloom's second step, blurred by a 3 by 3 tent at the first's place.
-fn wide(uv: vec2<f32>, x: f32, y: f32) -> vec3<f32> {
-    let texel = 1.0 / vec2<f32>(textureDimensions(bloom_wider));
-    return textureSampleLevel(bloom_wider, bloom_sampler, uv + vec2(x, y) * texel, 0.0).rgb;
-}
-fn tent(uv: vec2<f32>) -> vec3<f32> {
-    let edges = wide(uv, -1.0, 0.0) + wide(uv, 1.0, 0.0) + wide(uv, 0.0, -1.0) + wide(uv, 0.0, 1.0);
-    let corners = wide(uv, -1.0, -1.0) + wide(uv, 1.0, -1.0) + wide(uv, -1.0, 1.0) + wide(uv, 1.0, 1.0);
-    return (wide(uv, 0.0, 0.0) * 4.0 + edges * 2.0 + corners) / 16.0;
-}
 
 @fragment fn last(in: Out) -> @location(0) vec4<f32> {
     var drawn = sane(textureLoad(scene, vec2<i32>(in.position.xy), 0));
@@ -248,7 +193,7 @@ fn finished(drawn: vec4<f32>, in: Out, size: vec2<f32>) -> vec4<f32> {
         // up, here rather than a pass of its own); a 1 by 1 stand-in where
         // there's one step adds nothing (bloom_mix.z 0).
         var glow = textureSampleLevel(bloom, bloom_sampler, in.uv, 0.0).rgb;
-        glow += tent(in.uv) * look.bloom_mix.z;
+        glow += tent(bloom_wider, bloom_sampler, in.uv) * look.bloom_mix.z;
         glow *= look.bloom_mix.y;
         light = mix(light, glow, look.bloom_mix.x);
     }

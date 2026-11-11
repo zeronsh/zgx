@@ -32,6 +32,10 @@ pub(super) enum Resource {
     Scene,
     /// Bloom's steps, each half the size of the one before.
     Bloom,
+    /// Bloom's steps up where it runs as dispatches (`Chain::bloom_compute`):
+    /// from its second step's size, each one's own down and the next's
+    /// tent.
+    BloomUp,
     /// The scene's other half while the app's HDR passes trade it back and
     /// forth with the scene.
     Scene2,
@@ -60,6 +64,7 @@ impl Resource {
                 | Self::Depth
                 | Self::Scene
                 | Self::Bloom
+                | Self::BloomUp
                 | Self::Scene2
                 | Self::Shown
                 | Self::Shown2
@@ -122,7 +127,12 @@ impl Pass {
             #[cfg(feature = "post")]
             Self::Exposure => &[Resource::Scene],
             #[cfg(feature = "post")]
-            Self::Final => &[Resource::Scene, Resource::Bloom, Resource::Exposure],
+            Self::Final => &[
+                Resource::Scene,
+                Resource::Bloom,
+                Resource::BloomUp,
+                Resource::Exposure,
+            ],
         }
     }
     pub(super) fn writes(self) -> &'static [Resource] {
@@ -146,7 +156,7 @@ impl Pass {
             #[cfg(feature = "post")]
             Self::Exposure => &[Resource::Exposure],
             #[cfg(feature = "post")]
-            Self::Bloom => &[Resource::Bloom],
+            Self::Bloom => &[Resource::Bloom, Resource::BloomUp],
             #[cfg(feature = "post")]
             Self::Final => &[Resource::Target, Resource::Shown],
         }
@@ -216,6 +226,10 @@ pub(super) struct Chain {
     pub(super) taa: bool,
     /// Chromatic aberration (the last pass reads the scene around a pixel).
     pub(super) aberration: bool,
+    /// Bloom's steps as dispatches of one compute pass (the device runs
+    /// compute), not a render pass each: on Metal each render pass a frame
+    /// holds a driver block of its own.
+    pub(super) bloom_compute: bool,
 }
 impl Chain {
     /// Whether the last pass resolves the meshes' samples itself: nothing
@@ -239,6 +253,11 @@ pub(super) const SCENE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 /// What bloom's steps are drawn in on `device`: three floats in 4 bytes
 /// where it can draw into them, else the scene's format.
 pub(super) fn bloom_format(device: &wgpu::Device) -> wgpu::TextureFormat {
+    #[cfg(all(test, feature = "post"))]
+    if super::post::bloom_by_passes() {
+        // (The dispatches' format, for the tests comparing the two.)
+        return SCENE;
+    }
     if device
         .features()
         .contains(wgpu::Features::RG11B10UFLOAT_RENDERABLE)
@@ -262,6 +281,22 @@ pub(super) fn bloom_desc(size: (u32, u32), format: wgpu::TextureFormat) -> Desc 
         levels,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
     }
+}
+/// Bloom's steps written by dispatches (`Chain::bloom_compute`): in the
+/// scene's format (stored to), and the chain of its steps up from its
+/// second's size (none with fewer than three steps).
+pub(super) fn bloom_compute_descs(size: (u32, u32)) -> (Desc, Option<Desc>) {
+    let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+    let down = Desc {
+        usage,
+        ..bloom_desc(size, SCENE)
+    };
+    let up = (down.levels > 2).then(|| Desc {
+        size: ((down.size.0 / 2).max(1), (down.size.1 / 2).max(1)),
+        levels: down.levels - 2,
+        ..down
+    });
+    (down, up)
 }
 
 /// The multisampled colour and the depth meshes draw into, and the post
@@ -289,6 +324,10 @@ pub(super) struct Targets {
     /// Each of bloom's steps, with it on.
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     pub(super) bloom: Vec<wgpu::TextureView>,
+    /// Its steps up, where they're dispatches: each level's view, from the
+    /// second step's size.
+    #[cfg_attr(not(feature = "post"), allow(dead_code))]
+    pub(super) bloom_up: Vec<wgpu::TextureView>,
     textures: Vec<Temporary>,
 }
 
@@ -354,6 +393,11 @@ impl Graph {
     /// The frame's size it was compiled for, in pixels.
     pub(super) fn size(&self) -> (u32, u32) {
         self.config.map_or((0, 0), |c| c.size)
+    }
+    /// Whether bloom's steps are dispatches (`Chain::bloom_compute`).
+    #[cfg(feature = "post")]
+    pub(super) fn bloom_compute(&self) -> bool {
+        self.config.is_some_and(|c| c.post.bloom_compute)
     }
     /// Whether the list adapts its exposure (`Pass::Exposure`).
     #[cfg(feature = "post")]
@@ -440,8 +484,17 @@ impl Graph {
                         format: SCENE,
                         ..scene
                     },
+                    Resource::Bloom if config.post.bloom && config.post.bloom_compute => {
+                        bloom_compute_descs(config.size).0
+                    }
                     Resource::Bloom if config.post.bloom => {
                         bloom_desc(config.size, bloom_format(device))
+                    }
+                    Resource::BloomUp if config.post.bloom && config.post.bloom_compute => {
+                        match bloom_compute_descs(config.size).1 {
+                            Some(up) => up,
+                            None => continue,
+                        }
                     }
                     _ => continue,
                 };
@@ -465,7 +518,7 @@ impl Graph {
             let label = match resource {
                 Resource::Colour => "3D colour",
                 Resource::Scene => "3D scene",
-                Resource::Bloom => "3D bloom",
+                Resource::Bloom | Resource::BloomUp => "3D bloom",
                 Resource::Scene2 | Resource::Shown | Resource::Shown2 | Resource::Fresh => {
                     "3D post"
                 }
@@ -491,7 +544,8 @@ impl Graph {
             Resource::Fresh,
         ]
         .map(view);
-        let bloom = match used.iter().position(|(r, ..)| *r == Resource::Bloom) {
+        // A view of each level of a resource of levels.
+        let levels = |resource| match used.iter().position(|(r, ..)| *r == resource) {
             Some(at) => {
                 let texture = &textures[slots[at]].as_ref().expect("taken").texture;
                 (0..used[at].1.levels)
@@ -506,11 +560,13 @@ impl Graph {
             }
             None => Vec::new(),
         };
+        let (bloom, bloom_up) = (levels(Resource::Bloom), levels(Resource::BloomUp));
         self.targets = Some(Targets {
             colour,
             depth: depth.expect("the meshes' pass tests depth"),
             scene,
             bloom,
+            bloom_up,
             stored: resolves || folds,
             others,
             depth_read: config.post.taa,

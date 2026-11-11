@@ -507,6 +507,8 @@ pub(super) mod tests {
         static TRIED: Cell<u32> = const { Cell::new(0) };
         /// The HDR passes the last frame's chain counted.
         pub(in crate::render) static COUNTED: RefCell<Option<u8>> = const { RefCell::new(None) };
+        /// Whether the chain draws bloom by passes where it could dispatch.
+        pub(in crate::render) static BLOOM_BY_PASSES: Cell<bool> = const { Cell::new(false) };
         /// Whether the chain takes the device to run no compute.
         pub(in crate::render) static WITHOUT_COMPUTE: Cell<bool> = const { Cell::new(false) };
     }

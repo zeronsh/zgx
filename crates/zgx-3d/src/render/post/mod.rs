@@ -8,12 +8,19 @@ pub(in crate::render) use apps::Apps;
 pub(super) fn counted(hdr: u8) {
     apps::tests::COUNTED.with(|c| *c.borrow_mut() = Some(hdr));
 }
+/// For the tests: whether the frame's chain draws bloom by passes on a
+/// device that runs compute.
+#[cfg(test)]
+pub(super) fn bloom_by_passes() -> bool {
+    apps::tests::BLOOM_BY_PASSES.with(std::cell::Cell::get)
+}
 /// For the tests: whether the frame's chain takes the device to run no
 /// compute.
 #[cfg(test)]
 pub(super) fn without_compute() -> bool {
     apps::tests::WITHOUT_COMPUTE.with(std::cell::Cell::get)
 }
+mod bloom;
 mod exposure;
 mod taa;
 pub(super) use taa::{At, jitter, jittered};
@@ -114,6 +121,9 @@ pub(super) struct Chain {
     /// A copy back into the scene after an odd count of the app's HDR
     /// passes (`Apps`, kept by the renderer).
     copy: wgpu::RenderPipeline,
+    /// Bloom as dispatches (`bloom::Compute`), made with the first frame
+    /// that has it.
+    dispatched: Option<bloom::Compute>,
     /// The binding of what the meshes drew under temporal antialiasing, for
     /// a frame it doesn't blend, by the compile it was made for.
     fresh: Option<(u64, wgpu::BindGroup)>,
@@ -131,7 +141,9 @@ impl Chain {
     pub(super) fn new(device: &wgpu::Device) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("3D post"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("post.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                concat!(include_str!("bloom_maths.wgsl"), include_str!("post.wgsl")).into(),
+            ),
         });
         let texture = |binding| wgpu::BindGroupLayoutEntry {
             binding,
@@ -345,6 +357,7 @@ impl Chain {
             stand_in,
             table: None,
             copy,
+            dispatched: None,
             fresh: None,
             state: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("3D exposure state"),
@@ -364,6 +377,9 @@ impl Chain {
     pub(super) fn rest(&mut self) {
         self.binds = None;
         self.fresh = None;
+        if let Some(dispatched) = &mut self.dispatched {
+            dispatched.rest();
+        }
         if let Some(exposure) = &mut self.exposure {
             exposure.rest();
         }
@@ -527,7 +543,12 @@ impl Chain {
             // Bloom's first step, and the second (its tent up to the first
             // is the last pass's own).
             let glow = targets.bloom.first().unwrap_or(&self.stand_in);
-            let wider = targets.bloom.get(1).unwrap_or(&self.stand_in);
+            // Its steps up added (in the up chain where they're dispatches).
+            let wider = match graph.bloom_compute() {
+                true => bloom::Compute::wider(graph),
+                false => targets.bloom.get(1),
+            };
+            let wider = wider.unwrap_or(&self.stand_in);
             let last = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("3D post, last"),
                 layout: drawn.1,
@@ -647,6 +668,17 @@ impl Chain {
             return;
         };
         if self.made(device, graph).is_none() {
+            return;
+        }
+        // As dispatches of one compute pass, where the device runs them.
+        if graph.bloom_compute() {
+            let Some(scene) = graph.targets.as_ref().and_then(|t| t.scene.as_ref()) else {
+                return;
+            };
+            let dispatched = self
+                .dispatched
+                .get_or_insert_with(|| bloom::Compute::new(device));
+            dispatched.run(device, encoder, graph, (scene, &self.sampler));
             return;
         }
         let Some(binds) = &self.binds else {
