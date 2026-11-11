@@ -118,5 +118,35 @@ class ExplainTests(unittest.TestCase):
         self.assertTrue(any('(out of time)' in line and 'c' in line for line in table), table)
 
 
+
+class FairTests(unittest.TestCase):
+    def fair_counts(self, name, package):
+        asked = []
+
+        def count(binary, env, checkout=None, placement=None, out='/dev/null', fair=False):
+            asked.append(fair)
+            return 100
+
+        with patch.object(gate, 'count', side_effect=count):
+            gate.compared(name, package, {}, ('base', None), ('head', None))
+        return asked
+
+    def test_the_span_scenes_alone_are_counted_under_fair_scheduling(self):
+        self.assertEqual(self.fair_counts('spans-follow', 'zgx-script'), [True, True])
+        self.assertEqual(self.fair_counts('script-update', 'zgx-script'), [True, True])
+        self.assertEqual(self.fair_counts('list-estimate', 'zgx-script'), [False, False])
+        self.assertEqual(self.fair_counts('heavy-both', 'zgx-desktop'), [False, False])
+
+    def test_valgrind_is_asked_for_it(self):
+        with patch.object(gate, 'warm'), patch.object(gate, 'environment', return_value={}), \
+                patch.object(gate.subprocess, 'run') as run:
+            run.return_value = SimpleNamespace(returncode=0, stdout='', stderr='I   refs: 1,000\nsame_run: ok')
+            gate.count(pathlib.Path('bench'), {}, fair=True)
+            gate.count(pathlib.Path('bench'), {})
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertIn('--fair-sched=yes', commands[0])
+        self.assertNotIn('--fair-sched=yes', commands[1])
+
+
 if __name__ == '__main__':
     unittest.main()
