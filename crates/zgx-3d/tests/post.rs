@@ -16,11 +16,12 @@ thread_local! {
 }
 /// The clock moved on a frame.
 fn tick() {
+    pause(std::time::Duration::from_micros(16_667));
+}
+/// The clock moved on `by` (a frame, or a pause between frames).
+fn pause(by: std::time::Duration) {
     CLOCK.with(|clock| {
-        clock.advance(
-            clock.elapsed() + std::time::Duration::from_micros(16_667),
-            || {},
-        );
+        clock.advance(clock.elapsed() + by, || {});
     });
 }
 
@@ -1079,6 +1080,50 @@ fn under_camera_motion_temporal_antialiasing_leaves_no_trail_on_still_meshes() {
 }
 
 #[test]
+fn temporal_antialiasing_after_a_pause_gathers_its_frames_anew_and_rests() {
+    // Frames drawn until it rests: how many, and the last.
+    let settled = |world: &World, window: &mut Window| {
+        for frames in 1..=40 {
+            world.view().invalidate();
+            let pixels = window.draw();
+            if !world.view().animating() {
+                return (frames, pixels);
+            }
+        }
+        panic!("still gathering after 40 frames");
+    };
+    let Some(reference) = supersampled(&slanted(Antialiasing::None)) else {
+        return;
+    };
+    let world = slanted(Antialiasing::Taa);
+    let mut window = Window::new(&world).unwrap();
+    let (frames, gathered) = settled(&world, &mut window);
+    let smooth = edge_error(&gathered, &reference);
+    // A frame on: its history kept, nothing to gather.
+    world.view().invalidate();
+    let kept = window.draw();
+    assert!(!world.view().animating(), "a frame on, at rest");
+    // A pause past a quarter of a second: its history dropped (the next
+    // frame's edges as they're drawn), its frames gathered again from the
+    // first, as smooth, and at rest.
+    pause(std::time::Duration::from_millis(300));
+    world.view().invalidate();
+    let first = window.draw();
+    assert!(world.view().animating(), "gathering again after the pause");
+    let (again, last) = settled(&world, &mut window);
+    let [kept, first, last] = [&kept, &first, &last].map(|p| edge_error(p, &reference));
+    assert!(
+        first > smooth * 2. && kept < smooth * 1.2,
+        "edges: {smooth} gathered, {kept} a frame on, {first} after the pause"
+    );
+    assert_eq!(again + 1, frames, "as many frames as the first time");
+    assert!(
+        last < smooth * 1.2,
+        "gathered again: {last} against {smooth}"
+    );
+}
+
+#[test]
 fn temporal_antialiasing_turned_off_while_gathering_lets_its_world_rest() {
     let world = slanted(Antialiasing::Taa);
     let Some(mut window) = Window::new(&world) else {
@@ -1427,6 +1472,63 @@ fn automatic_exposure_in_two_boxes_adapts_once_a_frame() {
         return;
     };
     assert_eq!(shown(&[SIZE, SIZE]), Some(once));
+}
+
+#[test]
+fn automatic_exposure_after_a_pause_starts_from_the_frame_s_own_light() {
+    // Adapted to a dim scene, then one 8.6 stops brighter in front of it
+    // (a mean of 4 against 0.01): eased at 3 stops a second, frames 1/60 s
+    // apart barely move it; after a pause past a quarter of a second, the
+    // exposure starts from the frame's own light, and the world rests.
+    let bright = (0.18f32 / 4.).log2();
+    let run = |paused: bool| {
+        let world = flat([0.01, 0.01, 0.01, 1.]);
+        world.set_post(Post {
+            auto_exposure: Some(AutoExposure::default()),
+            ..Default::default()
+        });
+        let mut window = Window::new(&world)?;
+        let frame = |window: &mut Window| {
+            world.view().invalidate();
+            window.draw();
+        };
+        // Frames until one reads back it got there (each frame forced after
+        // that would read again).
+        let rests = |window: &mut Window| {
+            (0..12).any(|_| {
+                frame(window);
+                !world.view().animating()
+            })
+        };
+        assert!(rests(&mut window), "adapted to the dim scene");
+        let lit = Material {
+            color: [4., 4., 4., 1.],
+            unlit: true,
+            ..Default::default()
+        };
+        world.add(Object::mesh(Geometry::cuboid(20., 20., 0.1), lit).at([0., 0., 1.]));
+        if paused {
+            pause(std::time::Duration::from_millis(300));
+        }
+        for _ in 0..6 {
+            frame(&mut window);
+        }
+        let stops = world.adapted_exposure().unwrap();
+        Some((stops, rests(&mut window)))
+    };
+    let Some((eased, _)) = run(false) else {
+        return;
+    };
+    assert!(
+        eased - bright > 4.,
+        "eased: {eased} stops, far from {bright}"
+    );
+    let (started, rested) = run(true).unwrap();
+    assert!(
+        (started - bright).abs() < 0.1,
+        "after the pause: {started} stops, not {bright}"
+    );
+    assert!(rested, "at rest after the pause");
 }
 
 #[test]
