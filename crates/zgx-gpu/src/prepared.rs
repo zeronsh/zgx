@@ -59,6 +59,10 @@ const TAB_WIDTH: u16 = 8;
 /// Texts at least this long (bytes) that a new text extends are dropped as a
 /// stream's previous states.
 const SUPERSEDED: usize = 32;
+/// Bytes from which a plain text's hash is kept while it is looked up
+/// (`TextCache::hashed`): hashing a long one (a stream's paragraph) again for
+/// each read reads it all; a short one costs less hashed again than kept.
+const HASHED: usize = 512;
 /// Lines of dropped texts kept for new texts to shape into, and the longest
 /// kept: values that change every frame replace as many texts as they shape.
 /// Only short lines: a reused line keeps the capacity it grew to.
@@ -1410,6 +1414,22 @@ impl TextCache {
         let hash = self.plain_entry(fonts, text, font_size, font, Need::Layout);
         self.laid_out(fonts, hash, width)
     }
+    /// `Key::plain_hash` of a long `text`, hashed once while it is the one
+    /// looked up (`hashed`).
+    #[cold]
+    #[inline(never)]
+    fn long_plain_hash(&mut self, text: &Arc<str>, font_size: f32, font: &FontStyle) -> u64 {
+        let hasher = match &self.hashed {
+            Some((last, hasher)) if Arc::ptr_eq(last, text) => hasher.clone(),
+            _ => {
+                let mut hasher = FxHasher::default();
+                text.hash(&mut hasher);
+                self.hashed = Some((text.clone(), hasher.clone()));
+                hasher
+            }
+        };
+        Key::plain_hash_from(hasher, text, font_size, font)
+    }
     /// The entry for plain text. Found, as most lookups are (a layout
     /// measures a text at a few widths, each frame draws it again), it costs
     /// no rich text or key built to look it up.
@@ -1421,16 +1441,16 @@ impl TextCache {
         font: &FontStyle,
         need: Need,
     ) -> u64 {
-        let hasher = match &self.hashed {
-            Some((last, hasher)) if Arc::ptr_eq(last, text) => hasher.clone(),
-            _ => {
+        // A long text's hash kept for it (`hashed`); a short one hashed
+        // again, which costs less than keeping it.
+        let hash = match text.len() >= HASHED {
+            true => self.long_plain_hash(text, font_size, font),
+            false => {
                 let mut hasher = FxHasher::default();
                 text.hash(&mut hasher);
-                self.hashed = Some((text.clone(), hasher.clone()));
-                hasher
+                Key::plain_hash_from(hasher, text, font_size, font)
             }
         };
-        let hash = Key::plain_hash_from(hasher, text, font_size, font);
         if let Some(entry) = self.entries.get_mut(&hash)
             && entry.key.is_plain(text, font_size, font)
             && (entry.shaped() || (need != Need::Layout && entry.compact.is_some()))
