@@ -710,13 +710,16 @@ impl Clip {
         if let Some(site) = &*self.site.borrow() {
             site.restarts.set(0);
         }
-        // Its properties are no longer its to write: owned by nothing, as a
-        // cancel leaves them (a restart claims them again). Kept, an animated
-        // state's or table's owner stayed in the engine's map for good, one a
-        // target, and with it the clip's allocation (`Owner::playing`).
+        // Its states' and tables' properties are no longer its to write:
+        // owned by nothing, as a cancel leaves them (a restart claims them
+        // again). Kept, their owners stayed in the engine's map for good, one
+        // a target, and with each the clip's allocation (`Owner::playing`).
+        // An element's go with the element, and its next clip takes them over.
         if let Some(engine) = self.engine() {
             for track in self.tracks.borrow().iter() {
-                engine.release(&track.target, &track.key, self.id);
+                if !matches!(track.target, Target::Element(_)) {
+                    engine.release_finished(&track.target, &track.key, self.id);
+                }
             }
         }
         self.queue(Event::Complete);
@@ -1701,6 +1704,16 @@ impl Engine {
                     ),
                 );
             }
+        }
+    }
+    /// A finished clip's state or table property let go, if still its: one
+    /// lookup (finishes are many; `release` is a cancel's).
+    fn release_finished(&self, target: &Target, key: &Key, clip: u64) {
+        use std::collections::hash_map::Entry;
+        if let Entry::Occupied(owner) = self.owners.borrow_mut().entry((target.addr(), key.clone()))
+            && owner.get().clip == clip
+        {
+            owner.remove();
         }
     }
     fn release(&self, target: &Target, key: &Key, clip: u64) {
