@@ -154,6 +154,11 @@ def llvm_tool(name):
                              check=True).stdout.strip()
     for candidate in pathlib.Path(sysroot, 'lib', 'rustlib').glob(f'*/bin/{name}'):
         return str(candidate)
+    # Xcode's, on macOS.
+    xcrun = subprocess.run(['xcrun', '--find', name], capture_output=True, text=True) \
+        if shutil.which('xcrun') else None
+    if xcrun and xcrun.returncode == 0 and xcrun.stdout.strip():
+        return xcrun.stdout.strip()
     sys.exit(f'no {name}: `rustup component add llvm-tools`')
 
 
