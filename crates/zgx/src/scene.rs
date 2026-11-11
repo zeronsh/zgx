@@ -13562,14 +13562,13 @@ impl Scene {
         // A leaf, nothing transformed or filtered: what it painted is damaged
         // with what it will paint, once it is placed (see `leaf_damage`).
         let leaf = damage && childless && self.transformed + self.filtered.get() == 0;
-        // A paragraph grown or restyled, damaged once laid out where it was
-        // and is from where it changes (`damage_appended`): not whole here.
-        let damage = damage && !(leaf && !self.appended.is_empty() && self.is_appended(id));
         // A moved leaf's damage where it was and where it lands, worked out
         // and added before its box changes: a leaf has no children, so no
-        // other damage comes between, and nothing it paints changes.
+        // other damage comes between, and nothing it paints changes. A
+        // paragraph grown or restyled is damaged once laid out, where it was
+        // and is from where it changes (`damage_appended`): not whole here.
         match (damage, leaf) {
-            (true, true) => {
+            (true, true) if self.appended.is_empty() || !self.is_appended(id) => {
                 let was = self.tree_node(id).bounds;
                 let (before, after) = self.leaf_damage::<CELLS>(id, context, was, bounds);
                 match (CELLS, &mut self.damage_grid) {

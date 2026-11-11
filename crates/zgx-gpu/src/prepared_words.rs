@@ -186,6 +186,8 @@ impl WordCache {
     /// its own (`Grew::Owned`, with that text's length): only its words
     /// from there go, and its lines are laid out again only from where they
     /// may change (`lay_out`). With the words, how many were taken so.
+    /// `composed`: a word across runs or in a padded run is shaped in parts
+    /// (a stream's, `TextCache::words_of`); else such a text has no words.
     // Boxed: an entry holds its words boxed (it stays small), and a spare
     // goes back into one without being boxed again.
     #[allow(clippy::vec_box, clippy::too_many_arguments)]
@@ -199,6 +201,7 @@ impl WordCache {
         font_size: f32,
         spare: &mut Vec<Box<Words>>,
         grew: Option<(Grew<'_>, usize)>,
+        composed: bool,
     ) -> Option<(Box<Words>, usize)> {
         if runs.iter().any(|run| !qualifies(run.font)) {
             if let Some((Grew::Owned(words, _), _)) = grew {
@@ -271,7 +274,10 @@ impl WordCache {
             let shape = match end <= runs[run].end && runs[run].padding == 0. {
                 true => self.shape(fonts, ids[run], &text[start..end], blank, size),
                 // Across runs, or padded: in parts, as cosmic-text shapes it.
-                false => self.composed(fonts, text, (start, end), blank, size, (runs, &ids, run)),
+                false if composed => {
+                    self.composed(fonts, text, (start, end), blank, size, (runs, &ids, run))
+                }
+                false => None,
             };
             let Some(shape) = shape else {
                 spare.extend(kept.recycle());
