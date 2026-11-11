@@ -96,6 +96,9 @@ pub fn read(bytes: &[u8]) -> Result<Wav, Error> {
 /// How samples are stored when written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Encoding {
+    /// 16-bit integers, clamped to -1..1, rounded (no dither): what every
+    /// player reads.
+    Pcm16,
     /// 24-bit integers, clamped to -1..1: what most tools read.
     Pcm24,
     /// 32-bit floats, exactly as mixed.
@@ -112,7 +115,8 @@ pub fn write(
     encoding: Encoding,
 ) -> Result<Vec<u8>, Error> {
     let (tag, width) = match encoding {
-        Encoding::Pcm24 => (1u16, 3usize),
+        Encoding::Pcm16 => (1u16, 2usize),
+        Encoding::Pcm24 => (1, 3),
         Encoding::Float32 => (3, 4),
     };
     let too_big = |what: &str| Error::Format(format!("a WAV can't hold {what}"));
@@ -147,6 +151,10 @@ pub fn write(
     bytes.extend_from_slice(&size.to_le_bytes());
     for &sample in samples {
         match encoding {
+            Encoding::Pcm16 => {
+                let value = (f64::from(sample.clamp(-1., 1.)) * 32_767.).round() as i16;
+                bytes.extend_from_slice(&value.to_le_bytes());
+            }
             Encoding::Pcm24 => {
                 let value = (f64::from(sample.clamp(-1., 1.)) * 8_388_607.).round() as i32;
                 bytes.extend_from_slice(&value.to_le_bytes()[..3]);
@@ -255,6 +263,14 @@ mod tests {
         let pcm = read(&write(&samples, 2, 48_000, Encoding::Pcm24).unwrap()).unwrap();
         for (a, b) in pcm.samples.iter().zip(samples) {
             assert!((a - b).abs() < 2e-7, "{a} {b}");
+        } // 16 bits: within half a step; and its header says so.
+        let bytes = write(&samples, 2, 48_000, Encoding::Pcm16).unwrap();
+        assert_eq!(bytes.len(), 44 + samples.len() * 2);
+        assert_eq!(u16::from_le_bytes([bytes[34], bytes[35]]), 16);
+        let pcm = read(&bytes).unwrap();
+        assert_eq!((pcm.channels, pcm.rate), (2, 48_000));
+        for (a, b) in pcm.samples.iter().zip(samples) {
+            assert!((a - b).abs() <= 0.5 / 32_767. + 1. / 32_768., "{a} {b}");
         }
     }
 
