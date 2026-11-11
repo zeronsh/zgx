@@ -726,6 +726,10 @@ struct Pass {
     /// given room first this frame. And whether this frame runs it.
     waited: bool,
     chosen: bool,
+    /// The frame it last ran in (`Frames::index`), and how many times it
+    /// has, sandboxed: an owner's passes go least recently run first, and
+    /// of those run as recently, the least run, so they take turns.
+    ran: (u64, u64),
     /// Which of its last 8 timed frames took longer than its budget (a bit
     /// each, the newest lowest), and the last's time once that turned it
     /// off.
@@ -932,6 +936,7 @@ impl Data {
             work,
             waited: false,
             chosen: false,
+            ran: (0, 0),
             over: 0,
             over_budget: None,
         };
@@ -1204,24 +1209,28 @@ impl Frames {
         }
         // Sandboxed passes by owner, in turn (`share`): each owner a pass a
         // round, the round's first owner moving on a frame, so none starves.
+        // Within an owner's, the least recently run first (one left
+        // waiting ran longest ago): its passes take turns, none run every
+        // frame while the others alternate.
         let mut owners: Vec<Arc<str>> = Vec::new();
         let mut candidates: Vec<(usize, u64, u64, u32)> = Vec::new();
-        for waited in [true, false] {
-            for &at in &due {
-                let pass = data.passes[at as usize].1.as_ref().unwrap();
-                let Some(owner) = &pass.owner else { continue };
-                if pass.waited != waited {
-                    continue;
+        let mut by_turn: Vec<u32> = due
+            .iter()
+            .copied()
+            .filter(|&at| data.passes[at as usize].1.as_ref().unwrap().owner.is_some())
+            .collect();
+        by_turn.sort_by_key(|&at| data.passes[at as usize].1.as_ref().unwrap().ran);
+        for at in by_turn {
+            let pass = data.passes[at as usize].1.as_ref().unwrap();
+            let Some(owner) = &pass.owner else { continue };
+            let o = match owners.iter().position(|o| o == owner) {
+                Some(o) => o,
+                None => {
+                    owners.push(owner.clone());
+                    owners.len() - 1
                 }
-                let o = match owners.iter().position(|o| o == owner) {
-                    Some(o) => o,
-                    None => {
-                        owners.push(owner.clone());
-                        owners.len() - 1
-                    }
-                };
-                candidates.push((o, pass.work, pass.checked.invocations, at));
-            }
+            };
+            candidates.push((o, pass.work, pass.checked.invocations, at));
         }
         if !candidates.is_empty() {
             let start = (self.index % owners.len() as u64) as usize;
@@ -1230,7 +1239,9 @@ impl Frames {
             for (&(_, _, invocations, at), chosen) in candidates.iter().zip(chosen) {
                 if chosen {
                     self.spent += invocations;
-                    data.passes[at as usize].1.as_mut().unwrap().chosen = true;
+                    let pass = data.passes[at as usize].1.as_mut().unwrap();
+                    pass.chosen = true;
+                    pass.ran = (self.index, pass.ran.1 + 1);
                 }
             }
         }

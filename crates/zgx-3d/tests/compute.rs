@@ -800,16 +800,17 @@ fn a_pass_past_the_frames_invocations_is_refused_when_added() {
 
 #[test]
 fn a_sandboxed_pass_needs_a_device_that_times_it() {
-    let world = World::new();
-    // The shared device asks for no timestamps: once it's known, a pass a
-    // plugin adds is refused rather than run unbounded.
-    let Some(mut window) = Window::new(&world) else {
+    // A device asked for no timestamps (`World::new` asks only devices made
+    // by `run` or after it; this one is the test's own): once it's known, a
+    // pass a plugin adds is refused rather than run unbounded.
+    let Some(device) = TimedFrames::device() else {
         return;
     };
-    window.draw();
-    if world.caps().unwrap().timestamps {
-        return;
-    }
+    let mut frames = TimedFrames::new(device);
+    let world = World::new();
+    let mut painter = world.viewport();
+    frames.draw(&mut [&mut painter], 0);
+    assert!(!world.caps().unwrap().timestamps);
     let pass = world
         .add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}").sandboxed("plugin"));
     assert_eq!(pass, Err(ComputeError::Untimed));
@@ -817,6 +818,169 @@ fn a_sandboxed_pass_needs_a_device_that_times_it() {
         world
             .add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}"))
             .is_ok()
+    );
+}
+
+/// A window whose device times passes (made after `World::new`, which asks
+/// for timestamps): on Metal it must; elsewhere, without them, nothing is
+/// checked.
+fn timed_window(world: &World) -> Option<Window> {
+    let mut window = Window::new(world)?;
+    window.draw();
+    let caps = world.caps().expect("read with the first frame");
+    if !caps.timestamps {
+        assert!(
+            !(cfg!(target_os = "macos") && std::env::var_os("ZGX_REQUIRE_GPU").is_some()),
+            "Metal times passes: {caps:?}"
+        );
+        eprintln!("no timestamps on this device: not checked");
+        return None;
+    }
+    Some(window)
+}
+
+/// A sandboxed pass of `owner` adding 1 to its own counter each run, with
+/// a loop (so its work is the sandbox's whole: `shader_sandbox::Limits`).
+fn counting_sandboxed(world: &World, owner: &str) -> (ComputeId, GpuBuffer) {
+    let count = world.add_buffer(BufferDesc::storage::<u32>(1)).unwrap();
+    let pass = world
+        .add_compute(
+            Compute::new(
+                "@group(0) @binding(0) var<storage, read_write> count: array<u32>;
+                 @compute @workgroup_size(64)
+                 fn main(@builtin(global_invocation_id) id: vec3u) {
+                     var n = 0u;
+                     loop { if n >= 4u { break; } n += 1u; }
+                     if id.x == 0u { count[0] += n / 4u; }
+                 }",
+            )
+            .buffer("count", &count, Access::ReadWrite)
+            .threads([64, 1, 1])
+            .sandboxed(owner)
+            .every_frame(),
+        )
+        .unwrap();
+    (pass, count)
+}
+
+#[test]
+fn on_a_device_that_times_them_an_owner_runs_two_passes_worth_a_frame() {
+    let world = World::new();
+    let Some(mut window) = timed_window(&world) else {
+        return;
+    };
+    // Time no limit: the work is what's shared.
+    world.set_compute_budget(ComputeBudget {
+        sandboxed_gpu_ms: 1e9,
+        owner_gpu_ms: 1e9,
+        ..ComputeBudget::default()
+    });
+    // Each pass's work is the sandbox's whole: an owner runs two a frame,
+    // the frame four. Three of one owner's and one of another's.
+    let passes: Vec<_> = ["a", "a", "a", "b"]
+        .into_iter()
+        .map(|owner| counting_sandboxed(&world, owner))
+        .collect();
+    for (pass, _) in &passes {
+        window.compiled(&world, *pass);
+    }
+    for (_, count) in &passes {
+        count.write(0, &[0u32]).unwrap();
+    }
+    for _ in 0..12 {
+        window.draw();
+    }
+    let reads: Vec<_> = passes.iter().map(|(_, count)| count.read(0..4)).collect();
+    window.until(reads.last().unwrap(), 100);
+    let runs: Vec<u32> = reads
+        .iter()
+        .map(|read| words(&read.try_take().unwrap().unwrap())[0])
+        .collect();
+    let (a, b) = (runs[0] + runs[1] + runs[2], runs[3]);
+    assert!(b >= 12, "{runs:?}: the other owner ran each frame");
+    assert_eq!(a, 2 * b, "{runs:?}: two of the first owner's a frame");
+    // In turn: none of its three starved.
+    assert!(runs[..3].iter().all(|&n| n + 1 >= a / 3), "{runs:?}");
+    for (pass, _) in &passes {
+        assert_eq!(world.compute_status(*pass), Some(ComputeStatus::Ready));
+    }
+}
+
+#[test]
+fn on_a_device_that_times_them_passes_over_their_budgets_are_turned_off() {
+    // A budget of a nanosecond: no pass that does anything is within it,
+    // however fast the GPU (only that the time is measured is relied on).
+    let world = World::new();
+    let Some(mut window) = timed_window(&world) else {
+        return;
+    };
+    world.set_compute_budget(ComputeBudget {
+        sandboxed_gpu_ms: 1e-6,
+        owner_gpu_ms: 1e9,
+        ..ComputeBudget::default()
+    });
+    let (sandboxed, _) = counting_sandboxed(&world, "plugin");
+    // The app's own pass beside it: its budget is the app's, not this.
+    let (own, _) = {
+        let count = world.add_buffer(BufferDesc::storage::<u32>(1)).unwrap();
+        let pass = world
+            .add_compute(
+                Compute::new(
+                    "@group(0) @binding(0) var<storage, read_write> count: array<u32>;
+                     @compute @workgroup_size(1) fn main() { count[0] += 1u; }",
+                )
+                .buffer("count", &count, Access::ReadWrite)
+                .every_frame(),
+            )
+            .unwrap();
+        (pass, count)
+    };
+    window.compiled(&world, sandboxed);
+    let off = |world: &World, window: &mut Window, pass| {
+        for _ in 0..100 {
+            window.draw();
+            if matches!(
+                world.compute_status(pass),
+                Some(ComputeStatus::OverBudget { .. })
+            ) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        false
+    };
+    assert!(
+        off(&world, &mut window, sandboxed),
+        "{:?}",
+        world.compute_status(sandboxed)
+    );
+    assert_eq!(world.compute_status(own), Some(ComputeStatus::Ready));
+    // An owner over its budget: all its passes turned off.
+    let world = World::new();
+    let Some(mut window) = timed_window(&world) else {
+        return;
+    };
+    world.set_compute_budget(ComputeBudget {
+        sandboxed_gpu_ms: 1e9,
+        owner_gpu_ms: 1e-6,
+        ..ComputeBudget::default()
+    });
+    let (first, _) = counting_sandboxed(&world, "plugin");
+    let (second, _) = counting_sandboxed(&world, "plugin");
+    window.compiled(&world, first);
+    window.compiled(&world, second);
+    assert!(
+        off(&world, &mut window, first),
+        "{:?}",
+        world.compute_status(first)
+    );
+    assert!(
+        matches!(
+            world.compute_status(second),
+            Some(ComputeStatus::OverBudget { .. })
+        ),
+        "{:?}",
+        world.compute_status(second)
     );
 }
 
