@@ -80,7 +80,8 @@ impl Effect for Gain {
 }
 
 /// A set of 64 directions round the head, each ear 256 taps of decaying
-/// noise: SADIE II's length at 48 kHz, two partitions.
+/// noise: about 5 ms at 48 kHz, as long as measured responses commonly
+/// are, and two partitions.
 #[cfg(feature = "hrtf")]
 fn synthetic_set() -> Arc<zgx_audio::effects::HrtfSet> {
     let mut seed = 0x2545_f491_4f6c_dd1du64;

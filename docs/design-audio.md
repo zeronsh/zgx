@@ -109,7 +109,7 @@ world.add_reverb_zone(ReverbZone::box_(min, max).preset(Reverb::WAREHOUSE).fade(
 - **Emitters** follow their object's world transform; the **listener** follows the camera unless set. Positions are read when the world changes, sent as commands, and interpolated over the audio block, so a fast pass-by doesn't step. A still world sends nothing.
 - **Distance:** inverse, linear or exponential roll-off with reference and maximum distances, or the app's own curve; air absorption as a distance-driven low-pass.
 - **Doppler** from the emitter's and listener's velocities along the line between them, as a pitch change in the voice's resampler, smoothed and clamped.
-- **Panning:** equal-power for stereo speakers; vector-based amplitude panning for surround layouts; **HRTF** for headphones (a built-in set of impulse responses, convolved per emitter, behind the `hrtf` feature). The platform's own spatialisers aren't used: they differ per OS and can't be rendered offline or compared in tests. [Decision 6](#12-decisions).
+- **Panning:** equal-power for stereo speakers; vector-based amplitude panning for surround layouts; **HRTF** for headphones (convolved per emitter, behind the `hrtf` feature: by default through a spherical-head model made in code, Woodworth's interaural delay and Brown and Duda's head shadow; an app supplies its own measured set to replace it). The platform's own spatialisers aren't used: they differ per OS and can't be rendered offline or compared in tests. [Decision 6](#12-decisions).
 - **Occlusion and obstruction:** rays from the listener to each audible emitter against the world's meshes (the same triangles picking uses), on the main thread, a budget of rays per frame spread round-robin, only when either end moved. The result is a gain and a low-pass cutoff, smoothed. Apps can mark meshes as not blocking sound, give a mesh a transmission value, or supply the query themselves. Diffraction and propagation paths aren't modelled.
 - **Reverb zones** are volumes the app places, each with reverb settings. The listener's position picks the zones it's in, weighted by a fade distance, and emitters send to that reverb; an emitter in a different zone from the listener sends less. One reverb instance per active zone, two at most by default.
 - **Budget rule:** emitters past the voice limit or below an audibility threshold are virtual and cost a distance check each.
@@ -222,7 +222,7 @@ Settled Nov 10 2026 by the coordinator, the maintainer having said designs need 
 3. **One small decoder per format.** Dependencies under MIT, Apache-2.0, BSD or zlib are added on a size measurement; anything else (MPL-2.0 included) goes to the maintainer first.
 4. **Idle wins:** the stream stops after a 1 s hold, with `prewarm()`. A1 measures the cold start against the platform's own click; if it loses audibly, UI sounds on that platform go through the platform's click service.
 5. **The `ui` bus obeys the user's interface-sound setting; other buses don't.**
-6. **HRTF is our own convolution** with a built-in response set under a permissive licence, named in A2's PR.
+6. **HRTF is our own convolution**, its built-in default an analytic spherical-head model made in code. No measured dataset ships: nothing that requires attribution goes into the repository, so an app supplies its own measured set through `HrtfSet::new`.
 7. **No DSP in Luau.**
 8. **Automated runs on the maintainer's Macs are at zero gain;** anything audible is asked for first.
 9. **iOS** waits for the host in draft to land.
