@@ -5798,10 +5798,6 @@ impl GpuRenderer {
     /// `trim_atlas`'s copy into a smaller atlas: false where it can't copy,
     /// true when done or when no smaller atlas holds what is live.
     fn shrink_atlas(&mut self) -> bool {
-        #[cfg(d3d11)]
-        if self.d3d11.is_some() {
-            return false;
-        }
         if !self.texture_uploads.is_empty() {
             return false;
         }
@@ -5849,6 +5845,23 @@ impl GpuRenderer {
             .map(|(((x, y), (w, h)), (to_x, to_y))| {
                 (x - 1, y - 1, w + 2, h + 2, to_x - 1, to_y - 1)
             });
+        // Direct3D 11: its own atlas's cells copied into one the new size.
+        #[cfg(d3d11)]
+        if let Some(state) = &mut self.d3d11 {
+            let Some(old) = state.atlas.take() else {
+                return false;
+            };
+            let new = match state.device.surface(size, size, false) {
+                Ok(new) => new,
+                Err(_) => {
+                    state.atlas = Some(old);
+                    return false;
+                }
+            };
+            state.device.copy_cells(&old, &new, cells);
+            state.atlas = Some(new);
+            return self.atlas_shrunk(atlas, size, cursor, live, glyphs, icons, origins);
+        }
         #[cfg(target_os = "macos")]
         let copied_on_cpu = self.unified;
         #[cfg(not(target_os = "macos"))]
@@ -5892,6 +5905,21 @@ impl GpuRenderer {
             }
             self.queue.submit([encoder.finish()]);
         }
+        self.atlas_shrunk(atlas, size, cursor, live, glyphs, icons, origins)
+    }
+    /// The atlas `shrink_atlas` copied into, `size` square, taken: the live
+    /// glyphs and icons at their `origins` there.
+    #[allow(clippy::too_many_arguments)]
+    fn atlas_shrunk(
+        &mut self,
+        atlas: wgpu::Texture,
+        size: u32,
+        cursor: (u32, u32, u32),
+        live: FxHashMap<AtlasKey, Option<AtlasEntry>>,
+        glyphs: Vec<(AtlasKey, AtlasEntry)>,
+        icons: Vec<(u64, (u32, u32, u32, u32))>,
+        origins: Vec<(u32, u32)>,
+    ) -> bool {
         let mut entries: FxHashMap<AtlasKey, Option<AtlasEntry>> =
             live.into_iter().filter(|(_, e)| e.is_none()).collect();
         let mut origins = origins.into_iter();
