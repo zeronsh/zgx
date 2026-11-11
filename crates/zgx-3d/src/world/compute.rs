@@ -82,15 +82,15 @@ impl World {
         self.data(|data| data.cap = bytes);
     }
 
-    /// The most readbacks copy a frame, in bytes (64 KiB to begin with):
-    /// larger reads take more frames, smaller ones share one.
+    /// The most readbacks copy a frame, in bytes (64 KiB to begin with, 64
+    /// MiB at most): larger reads take more frames, smaller ones share one.
     ///
     /// Reads queue up to 64 frames of it (4 MiB to begin with): one asked
     /// for past that is refused (`ReadError::Busy`), unless nothing else is
     /// queued. A read whose `Readback` is dropped is let go.
     pub fn set_readback_budget(&self, bytes: u64) {
         self.data(|data| {
-            data.budget = bytes.max(4);
+            data.budget = bytes.clamp(4, MOST_READBACK);
             data.link.queue_cap.set(data.budget.saturating_mul(64));
         });
     }
@@ -145,8 +145,32 @@ impl World {
     /// frame, and GPU milliseconds a pass where the device has timestamps
     /// (`ComputeBudget`). A pass already over the invocations stays, and
     /// waits for frames with room.
+    ///
+    /// Times that aren't a positive number are the default's.
     pub fn set_compute_budget(&self, budget: ComputeBudget) {
+        let default = ComputeBudget::default();
+        let ms = |ms: f32, default: f32| {
+            if ms.is_finite() && ms > 0. {
+                ms
+            } else {
+                default
+            }
+        };
+        let budget = ComputeBudget {
+            gpu_ms: ms(budget.gpu_ms, default.gpu_ms),
+            sandboxed_gpu_ms: ms(budget.sandboxed_gpu_ms, default.sandboxed_gpu_ms),
+            ..budget
+        };
         self.data(|data| data.limits = budget);
+    }
+
+    /// What its compute passes may give the device (`set_compute_budget`).
+    pub fn compute_budget(&self) -> ComputeBudget {
+        self.inner
+            .borrow()
+            .data
+            .as_ref()
+            .map_or_else(ComputeBudget::default, |data| data.limits)
     }
 
     /// Take a compute pass out: what it bound is let go with it, unless the
@@ -180,6 +204,9 @@ impl World {
             .and_then(|data| data.status(id))
     }
 }
+
+/// The most a frame's readbacks copy, whatever budget is asked: 64 MiB.
+const MOST_READBACK: u64 = 64 << 20;
 
 /// The limits GPU data is made within: WebGPU's defaults, which every tier
 /// A device meets.

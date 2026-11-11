@@ -868,3 +868,31 @@ fn passes_past_a_frames_invocations_take_turns() {
     );
     assert!(ran[0] + ran[1] <= 30, "one a frame: {ran:?}");
 }
+
+#[test]
+fn budgets_past_reason_are_held_to_it() {
+    let world = World::new();
+    // A readback budget of everything is 64 MiB a frame; the queue 64
+    // frames of that.
+    world.set_readback_budget(u64::MAX);
+    let buffer = world.add_buffer(BufferDesc::bytes(64 << 20)).unwrap();
+    let held: Vec<Readback> = (0..100).map(|_| buffer.read(0..64 << 20)).collect();
+    let queued = world.readbacks_queued().1;
+    assert!(queued <= 64 * (64 << 20), "{queued} bytes queued");
+    assert!(
+        held.iter()
+            .any(|r| r.try_take() == Some(Err(ReadError::Busy)))
+    );
+    // A budget that isn't a number is the default.
+    world.set_compute_budget(ComputeBudget {
+        gpu_ms: f32::NAN,
+        sandboxed_gpu_ms: -1.,
+        ..ComputeBudget::default()
+    });
+    let budget = world.compute_budget();
+    assert_eq!(budget.gpu_ms, ComputeBudget::default().gpu_ms);
+    assert_eq!(
+        budget.sandboxed_gpu_ms,
+        ComputeBudget::default().sandboxed_gpu_ms
+    );
+}
