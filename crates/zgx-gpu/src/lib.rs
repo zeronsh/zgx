@@ -3938,6 +3938,7 @@ fn request_device(
     adapter: &wgpu::Adapter,
     info: &wgpu::AdapterInfo,
     vertex_ring: bool,
+    contexts: &LostCells,
 ) -> Result<(wgpu::Device, wgpu::Queue, LostCell), GpuError> {
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("zgx shared device"),
@@ -3990,6 +3991,7 @@ fn request_device(
     let lost: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
     {
         let lost = lost.clone();
+        let contexts = contexts.clone();
         device.set_device_lost_callback(move |reason, message| {
             let mut slot = lost.lock().unwrap_or_else(|p| p.into_inner());
             if slot.is_none() {
@@ -4003,6 +4005,12 @@ fn request_device(
                 } else {
                     message
                 });
+            }
+            // Every context on the device (WARP's, each with a cell of its own).
+            let contexts = contexts.lock().unwrap_or_else(|p| p.into_inner());
+            for context in contexts.iter().filter_map(std::sync::Weak::upgrade) {
+                let mut lost = context.lock().unwrap_or_else(|p| p.into_inner());
+                lost.get_or_insert_with(|| slot.clone().unwrap_or_default());
             }
         });
     }
@@ -4022,6 +4030,8 @@ fn request_device(
 }
 /// Why a device was lost, once it is (set from any thread).
 type LostCell = Arc<std::sync::Mutex<Option<String>>>;
+/// The cells of the contexts sharing WARP's device, for its loss to reach.
+type LostCells = Arc<std::sync::Mutex<Vec<std::sync::Weak<std::sync::Mutex<Option<String>>>>>>;
 /// What contexts on one device share: on WARP, every context in the process
 /// (`WARP_DEVICE`), and elsewhere the one context made with it.
 struct SharedDevice {
@@ -4029,7 +4039,12 @@ struct SharedDevice {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    lost: Arc<std::sync::Mutex<Option<String>>>,
+    /// The device's loss.
+    lost: LostCell,
+    /// On WARP, each context's own cell, so a test can lose one context
+    /// alone (`GpuContext::debug_lose_device`); elsewhere the context reads
+    /// `lost`.
+    contexts: LostCells,
 }
 /// WARP's device while a context holds it (`GpuContext::prepare`): held
 /// weakly, so it goes with the last context on it.
@@ -4079,8 +4094,6 @@ pub struct GpuContext {
 struct GpuContextInner {
     /// Keeps WARP's process-wide device for `WARP_DEVICE` to find.
     shared: Arc<SharedDevice>,
-    /// Lost by `debug_lose_device` while other contexts drew on its device.
-    lost_here: RefCell<Option<String>>,
     /// Why the device was lost (driver reset, removal, `debug_lose_device`):
     /// set from wgpu's callback, from any thread.
     lost: Arc<std::sync::Mutex<Option<String>>>,
@@ -4305,13 +4318,16 @@ impl GpuContext {
         let shared = match reusable {
             Some(shared) => shared,
             None => {
-                let (device, queue, lost) = request_device(&adapter, &info, vertex_ring)?;
+                let contexts = LostCells::default();
+                let (device, queue, lost) =
+                    request_device(&adapter, &info, vertex_ring, &contexts)?;
                 let shared = Arc::new(SharedDevice {
                     instance,
                     adapter,
                     device,
                     queue,
                     lost,
+                    contexts,
                 });
                 if let Some(slot) = &mut warp_slot {
                     **slot = Arc::downgrade(&shared);
@@ -4326,7 +4342,18 @@ impl GpuContext {
             device,
             queue,
             lost,
+            contexts,
         } = &*shared;
+        let lost = match warp {
+            false => lost.clone(),
+            true => {
+                let own = LostCell::default();
+                let mut contexts = contexts.lock().unwrap_or_else(|p| p.into_inner());
+                contexts.retain(|context| context.strong_count() > 0);
+                contexts.push(Arc::downgrade(&own));
+                own
+            }
+        };
         let (instance, adapter, device, queue, lost) = (
             instance.clone(),
             adapter.clone(),
@@ -4395,7 +4422,6 @@ impl GpuContext {
         Self {
             inner: Rc::new(GpuContextInner {
                 shared,
-                lost_here: RefCell::new(None),
                 lost,
                 instance,
                 adapter,
@@ -4418,21 +4444,20 @@ impl GpuContext {
     /// Why its device was lost, once it is: every renderer on it then
     /// fails with `GpuError::is_device_lost`, and a new context is needed.
     pub fn lost(&self) -> Option<String> {
-        let lost = self.inner.lost.lock().unwrap_or_else(|p| p.into_inner());
-        lost.clone()
-            .or_else(|| self.inner.lost_here.borrow().clone())
+        self.inner
+            .lost
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
     /// Lose the device, as a driver reset would: for tests of recovery. On
     /// WARP's process-wide device (`WARP_DEVICE`), while other contexts draw
     /// on it, only this context fails from then on.
     pub fn debug_lose_device(&self) {
-        if Arc::strong_count(&self.inner.shared) > 1 {
-            let mut lost = self.inner.lost_here.borrow_mut();
-            lost.get_or_insert_with(|| "destroyed for a test".into());
-            return;
+        if Arc::strong_count(&self.inner.shared) == 1 {
+            self.inner.device.destroy();
+            let _ = self.inner.device.poll(wgpu::PollType::Poll);
         }
-        self.inner.device.destroy();
-        let _ = self.inner.device.poll(wgpu::PollType::Poll);
         let mut lost = self.inner.lost.lock().unwrap_or_else(|p| p.into_inner());
         lost.get_or_insert_with(|| "destroyed for a test".into());
     }
