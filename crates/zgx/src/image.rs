@@ -205,6 +205,16 @@ impl std::fmt::Debug for Kept {
             .finish_non_exhaustive()
     }
 }
+/// Whether an image is still held anywhere ([`ImageData::holders`]): kept
+/// beside its texture by a renderer, which holds no image itself.
+#[derive(Clone, Debug)]
+pub struct Holders(std::sync::Weak<Pixels>);
+impl Holders {
+    /// Whether anything holds it: a node, an app, a cache.
+    pub fn any(&self) -> bool {
+        self.0.strong_count() > 0
+    }
+}
 /// Pixels decoded at a size, premultiplied (`ImageData::pixels_at`).
 #[derive(Clone, Debug)]
 pub struct Held {
@@ -380,6 +390,12 @@ impl ImageData {
     /// uploads by it.
     pub fn id(&self) -> u64 {
         self.id
+    }
+    /// What tells whether anything still holds this image or a copy sharing
+    /// its pixels: once nothing does, nothing can show its identity again,
+    /// and a texture uploaded of it can go.
+    pub fn holders(&self) -> Holders {
+        Holders(Arc::downgrade(&self.pixels))
     }
     /// Its width in pixels.
     pub fn width(&self) -> u32 {

@@ -1326,9 +1326,6 @@ impl FromLua for Value {
 /// As script data: tables are read-only (`frozen`) when they are state's
 /// own, or a mutable copy for `state:update`.
 pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlua::Value> {
-    if matches!(value, Value::List(_) | Value::Map(_)) {
-        CONVERTED.set(CONVERTED.get() + 1);
-    }
     match value {
         Value::Nil => Ok(mlua::Value::Nil),
         Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
@@ -1341,12 +1338,21 @@ pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlu
                 .map(mlua::Value::String)
         },
         Value::List(items) => {
-            count_items(items.len());
             if items.len() >= 64 && items.iter().all(is_plain) {
+                CONVERTED.set(CONVERTED.get() + 1);
+                count_items(items.len());
                 let table = plain_table(lua, items)?;
                 table.set_readonly(frozen);
                 return Ok(mlua::Value::Table(table));
             }
+            // A row of a few values or a tree holding lists and maps: one
+            // C call (a map or long list of plain values has its own, above
+            // and below, without the walk).
+            if let Some(objects) = raw_tree(value, 0) {
+                return raw_to_lua(value, lua, frozen, objects).map(mlua::Value::Table);
+            }
+            CONVERTED.set(CONVERTED.get() + 1);
+            count_items(items.len());
             let table = lua.create_table_with_capacity(items.len(), 0)?;
             for (i, item) in items.iter().enumerate() {
                 table.raw_set(i + 1, to_lua(item, lua, frozen)?)?;
@@ -1355,12 +1361,17 @@ pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlu
             Ok(mlua::Value::Table(table))
         }
         Value::Map(fields) if !fields.is_empty() && fields.iter().all(|(_, v)| is_plain(v)) => {
+            CONVERTED.set(CONVERTED.get() + 1);
             count_items(fields.len());
             let table = plain_map(lua, fields)?;
             table.set_readonly(frozen);
             Ok(mlua::Value::Table(table))
         }
         Value::Map(fields) => {
+            if let Some(objects) = raw_tree(value, 0) {
+                return raw_to_lua(value, lua, frozen, objects).map(mlua::Value::Table);
+            }
+            CONVERTED.set(CONVERTED.get() + 1);
             let table = lua.create_table_with_capacity(0, fields.len())?;
             for (key, value) in fields.iter() {
                 table.raw_set(&**key, to_lua(value, lua, frozen)?)?;
@@ -1383,6 +1394,104 @@ pub(crate) fn to_lua(value: &Value, lua: &Lua, frozen: bool) -> mlua::Result<mlu
             .map(mlua::Value::UserData),
         Value::Folded(folded) => to_lua(&folded.opened(), lua, frozen),
     }
+}
+/// Whether `value`, a list or a map, is a tree of nil, booleans, numbers,
+/// strings, texts, lists and maps at most `DEPTH` deep, which `raw_to_lua`
+/// makes in one C call; and whether it holds an empty map (an object, marked
+/// so). `None` leaves it to `to_lua`'s walk (an element, a picture, a fold).
+fn raw_tree(value: &Value, depth: u32) -> Option<bool> {
+    fn walk(value: &Value, depth: u32, objects: &mut bool) -> bool {
+        match value {
+            Value::Nil | Value::Bool(_) | Value::Num(_) | Value::Str(_) | Value::Text(_) => true,
+            Value::List(items) => {
+                depth < DEPTH && items.iter().all(|v| walk(v, depth + 1, objects))
+            }
+            Value::Map(fields) => {
+                *objects |= fields.is_empty();
+                depth < DEPTH && fields.iter().all(|(_, v)| walk(v, depth + 1, objects))
+            }
+            _ => false,
+        }
+    }
+    if !matches!(value, Value::List(_) | Value::Map(_)) {
+        return None;
+    }
+    let mut objects = false;
+    walk(value, depth, &mut objects).then_some(objects)
+}
+/// `to_lua` of a tree `raw_tree` passed, made through Luau's C API in one
+/// protected call: through mlua each field of a map holding a list (a feed's
+/// message) was set in a call of its own, a closure made and called for each,
+/// most of a decoded feed's conversion. The same tables, counted the same.
+fn raw_to_lua(value: &Value, lua: &Lua, frozen: bool, objects: bool) -> mlua::Result<Table> {
+    use mlua::ffi;
+    use std::ffi::c_int;
+    const MARKER: &std::ffi::CStr = c"zgx.json_object";
+    // Made before the call, if any table is to be marked an object.
+    if objects {
+        object_marker(lua)?;
+    }
+    /// # Safety
+    ///
+    /// `state` is inside `exec_raw`'s C call. Each level asks for the stack
+    /// it uses (`luaL_checkstack`, which raises a Luau error past the limit,
+    /// as an allocation failing does: either unwinds these frames, which
+    /// hold nothing to drop, to `exec_raw`'s protected call), and leaves one
+    /// value pushed. The collector may run as values are made; each is on
+    /// the stack, in the table being filled, and so kept.
+    unsafe fn push(state: *mut ffi::lua_State, value: &Value, frozen: bool) {
+        // SAFETY: as this function's.
+        unsafe {
+            match value {
+                Value::Nil => ffi::lua_pushnil(state),
+                Value::Bool(b) => ffi::lua_pushboolean(state, c_int::from(*b)),
+                Value::Num(n) => ffi::lua_pushnumber(state, *n),
+                Value::Str(s) => {
+                    ffi::lua_pushlstring(state, s.as_ptr().cast(), s.len());
+                }
+                Value::Text(t) => push_text(state, t),
+                Value::List(items) => {
+                    CONVERTED.set(CONVERTED.get() + 1);
+                    count_items(items.len());
+                    ffi::luaL_checkstack(state, 2, c"a list nested too deep".as_ptr());
+                    let n = c_int::try_from(items.len()).unwrap_or(c_int::MAX);
+                    ffi::lua_createtable(state, n, 0);
+                    for (i, item) in items.iter().enumerate() {
+                        push(state, item, frozen);
+                        ffi::lua_rawseti_(state, -2, i as c_int + 1);
+                    }
+                    if frozen {
+                        ffi::lua_setreadonly(state, -1, 1);
+                    }
+                }
+                Value::Map(fields) => {
+                    CONVERTED.set(CONVERTED.get() + 1);
+                    count_items(fields.len());
+                    ffi::luaL_checkstack(state, 3, c"a table nested too deep".as_ptr());
+                    let n = c_int::try_from(fields.len()).unwrap_or(c_int::MAX);
+                    ffi::lua_createtable(state, 0, n);
+                    for (key, field) in fields.iter() {
+                        ffi::lua_pushlstring(state, key.as_ptr().cast(), key.len());
+                        push(state, field, frozen);
+                        ffi::lua_rawset(state, -3);
+                    }
+                    // Empty, it stays an object going back (`ui.object`).
+                    if fields.is_empty() {
+                        ffi::lua_rawgetfield(state, ffi::LUA_REGISTRYINDEX, MARKER.as_ptr());
+                        ffi::lua_setmetatable(state, -2);
+                    }
+                    if frozen {
+                        ffi::lua_setreadonly(state, -1, 1);
+                    }
+                }
+                // `raw_tree` passed only the kinds above.
+                _ => ffi::lua_pushnil(state),
+            }
+        }
+    }
+    // SAFETY: `push` leaves the tree's one value, `exec_raw`'s result: a
+    // table, as `raw_tree` passed only a list or a map.
+    unsafe { lua.exec_raw::<Table>((), |state| push(state, value, frozen)) }
 }
 /// Push `text` as a string, its chunks copied straight in.
 ///
@@ -3521,6 +3630,93 @@ mod tests {
         let back = to_lua(&first, &lua, true).unwrap();
         assert!(*back.as_string().unwrap().as_bytes() == *long.as_bytes());
         assert!(matches!(set("short"), Value::Str(_)));
+    }
+
+    /// A tree of lists and maps, nested deep, made into tables in one C call
+    /// (`raw_to_lua`), is what the walk made: it reads back the same, an
+    /// empty map stays an object, frozen every table at every depth is
+    /// read-only, a long text reads whole, and its tables and their items
+    /// are counted as they were.
+    #[test]
+    fn a_nested_tree_is_made_into_the_tables_the_walk_made() {
+        let lua = Lua::new();
+        let long: String = (0..10_000).map(|i| format!("line {i}\n")).collect();
+        let Value::Text(text) =
+            convert(mlua::Value::String(lua.create_string(&long).unwrap()), None).unwrap()
+        else {
+            panic!("a long string is a text");
+        };
+        let map = |fields: Vec<(&str, Value)>| {
+            Value::Map(fields.into_iter().map(|(k, v)| (Rc::from(k), v)).collect())
+        };
+        let message = |i: usize| {
+            map(vec![
+                ("author", Value::Str(format!("a{i}").into())),
+                ("id", Value::Num(i as f64)),
+                ("meta", map(vec![])),
+                ("ok", Value::Bool(i.is_multiple_of(2))),
+                (
+                    "paragraphs",
+                    Value::List(Rc::from(vec![Value::List(Rc::from(vec![
+                        map(vec![
+                            ("s", Value::Str("bold".into())),
+                            ("t", Value::Str("hi".into())),
+                        ]),
+                        map(vec![("t", Value::Text(text.clone()))]),
+                    ]))])),
+                ),
+            ])
+        };
+        // And a chain 100 lists deep.
+        let mut deep = Value::Num(1.);
+        for _ in 0..100 {
+            deep = Value::List(Rc::from(vec![deep]));
+        }
+        let tree = map(vec![
+            ("deep", deep),
+            ("messages", Value::List((0..300).map(message).collect())),
+        ]);
+        assert!(raw_tree(&tree, 0) == Some(true), "made in one call");
+        // Its tables and items, counted down the tree.
+        fn counts(value: &Value) -> (u64, u64) {
+            match value {
+                Value::List(items) => items
+                    .iter()
+                    .map(counts)
+                    .fold((1, items.len() as u64), |a, b| (a.0 + b.0, a.1 + b.1)),
+                Value::Map(fields) => fields
+                    .iter()
+                    .map(|(_, v)| counts(v))
+                    .fold((1, fields.len() as u64), |a, b| (a.0 + b.0, a.1 + b.1)),
+                _ => (0, 0),
+            }
+        }
+        for frozen in [false, true] {
+            let (tables, items) = (tables_converted(), values_converted());
+            let made = to_lua(&tree, &lua, frozen).unwrap();
+            assert_eq!(
+                (tables_converted() - tables, values_converted() - items),
+                counts(&tree)
+            );
+            assert!(
+                convert(made.clone(), None).unwrap() == tree,
+                "reads back the same"
+            );
+            fn check(value: &mlua::Value, frozen: bool, objects: &mut usize) {
+                if let mlua::Value::Table(t) = value {
+                    assert_eq!(t.is_readonly(), frozen);
+                    if is_object(t) {
+                        *objects += 1;
+                    }
+                    for pair in t.clone().pairs::<mlua::Value, mlua::Value>() {
+                        check(&pair.unwrap().1, frozen, objects);
+                    }
+                }
+            }
+            let mut objects = 0;
+            check(&made, frozen, &mut objects);
+            assert_eq!(objects, 300, "each empty map an object");
+        }
     }
 
     /// A search finds what `string.find` would, one match after another,

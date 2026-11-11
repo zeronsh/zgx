@@ -128,8 +128,24 @@ def listed():
     return rows
 
 
+def touch(root):
+    """Every file `root` tracks made newer than anything built (as gate.py's
+    `build` does). `target` is the gate's, which built the base last: cargo
+    takes a path crate as built when its sources, at their paths in the
+    package, are older than its build, wherever the build's sources lay. So
+    the head's zgx-gpu was built on the base's zgx (#1937: a method the
+    head added to zgx was missing from it, E0599)."""
+    tracked = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True,
+                             check=True).stdout
+    for path in filter(None, tracked.split(b"\0")):
+        file = pathlib.Path(root) / path.decode()
+        if file.is_file():
+            os.utime(file)
+
+
 def measure(root, target, wanted, crates=CRATES):
     """Each wanted function's inlined callees and lines, crate by crate."""
+    touch(root)
     got = {}
     for crate in crates:
         if not any(c == crate for c, _ in wanted):

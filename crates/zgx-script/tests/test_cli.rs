@@ -607,7 +607,7 @@ fn a_failure_names_its_file_and_line() {
              test(\"passes\", function() end)\n",
         )],
     );
-    let file = dir.join("tests/app.test.luau");
+    let file = dir.join("tests").join("app.test.luau");
     let (code, text) = run(&dir, &[]);
     assert_eq!(code, Some(1), "{text}");
     assert!(
@@ -698,7 +698,7 @@ fn check_gives_the_test_globals_to_test_files_alone() {
     std::fs::write(dir.join("helper.luau"), "mount()\nreturn nil\n").unwrap();
     let out = zgx().arg("check").arg(&dir).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let test_file = dir.join("tests/app.test.luau");
+    let test_file = dir.join("tests").join("app.test.luau");
     assert!(
         stdout.contains(&format!("{}:5:", test_file.display())),
         "a misspelled method is a type error: {stdout}"

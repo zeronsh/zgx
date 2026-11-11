@@ -32,15 +32,38 @@
 //   `flt2dec`). Here each read is `STEP` on from the last.
 // - getrandom: std's RandomState seeds every HashMap from it, and a map's
 //   probes and growth move with the seed. Here it gives the same bytes.
+// - pthread_getattr_np on the main thread: glibc finds the main thread's
+//   stack by reading /proc/self/maps a line at a time (a getdelim and an
+//   sscanf each) down to the mapping holding __libc_stack_end, and how
+//   many lines come first changed from run to run: the span cells counted
+//   on one of three levels about 4,100 instructions apart (spans-plain
+//   read +0.018% from one pair of counts to the next). std asks once, for
+//   the main thread's guard page; stacker (zgx's `deep`, whether a level
+//   of a recursion goes on a fresh segment) once a thread, for the
+//   stack's low end. Here the main thread's answer is glibc's own, worked
+//   out as glibc does but without the file: the stack's end is
+//   __libc_stack_end rounded up to a page, the mapping's top is the page
+//   past the program's path (AT_EXECFN), the highest thing the kernel
+//   puts on the stack, and the size is RLIMIT_STACK less what lies between
+//   the two, rounded down to a page. glibc lowers the size only where
+//   another mapping lies within it, and Linux places mappings below the
+//   stack's whole limit and a gap; with no limit (unlimited) glibc's own
+//   is asked. So stack checks see the bounds they always saw. Other
+//   threads are answered by glibc, from their own descriptor (no file).
 //
 // With ZGX_SAME_RUN_REPORT set, the reads and calls are written to stderr
 // as the process exits: gate.py checks this was loaded.
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <linux/futex.h>
+#include <pthread.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/auxv.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
 #include <time.h>
@@ -58,15 +81,17 @@ static long raw(long n, long a, long b, long c, long d, long e, long f) {
 
 static unsigned long long now, cpu;
 static int real_clock;
-static unsigned long clock_reads, random_calls, futex_waits;
+static unsigned long clock_reads, random_calls, futex_waits, stack_answers;
+static pthread_t main_thread;
 
 static void report(void) {
     if (getenv("ZGX_SAME_RUN_REPORT"))
-        fprintf(stderr, "same_run: %lu clock reads, %lu getrandom calls, %lu futex waits\n", clock_reads,
-                random_calls, futex_waits);
+        fprintf(stderr, "same_run: %lu clock reads, %lu getrandom calls, %lu futex waits, %lu main stack answers\n",
+                clock_reads, random_calls, futex_waits, stack_answers);
 }
 
 __attribute__((constructor)) static void init(void) {
+    main_thread = pthread_self();
     struct timespec real;
     raw(SYS_clock_gettime, CLOCK_MONOTONIC, (long)&real, 0, 0, 0, 0);
     now = ((unsigned long long)real.tv_sec + 1) * 1000000000ULL;
@@ -151,4 +176,30 @@ ssize_t getrandom(void *buf, size_t len, unsigned int flags) {
     for (size_t i = 0; i < len; i++)
         out[i] = (unsigned char)(i * 131 + 7);
     return (ssize_t)len;
+}
+
+// The main thread's stack as glibc's pthread_getattr_np finds it (see the
+// top of this file), without reading /proc/self/maps.
+extern void *__libc_stack_end;
+int pthread_getattr_np(pthread_t thread, pthread_attr_t *attr) {
+    static int (*libc_getattr)(pthread_t, pthread_attr_t *);
+    if (!libc_getattr)
+        libc_getattr = (int (*)(pthread_t, pthread_attr_t *))dlsym(RTLD_NEXT, "pthread_getattr_np");
+    struct rlimit limit;
+    const char *path = (const char *)getauxval(AT_EXECFN);
+    if (!pthread_equal(thread, main_thread) || !path || getrlimit(RLIMIT_STACK, &limit) != 0 ||
+        limit.rlim_cur == RLIM_INFINITY)
+        return libc_getattr(thread, attr);
+    uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+    uintptr_t end = ((uintptr_t)__libc_stack_end & -page) + page;
+    uintptr_t top = ((uintptr_t)path + strlen(path) + 1 + page - 1) & -page;
+    size_t size = ((size_t)limit.rlim_cur - (size_t)(top - end)) & -page;
+    int r = pthread_attr_init(attr);
+    if (r == 0)
+        r = pthread_attr_setstack(attr, (void *)(end - size), size);
+    if (r == 0)
+        r = pthread_attr_setguardsize(attr, 0);
+    if (r == 0)
+        __atomic_fetch_add(&stack_answers, 1, __ATOMIC_RELAXED);
+    return r;
 }

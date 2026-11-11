@@ -4315,10 +4315,11 @@ fn styled(
             let depth = if node.sizes_layout() { 2 } else { 0 };
             (node.layout_id.clone(), timing, depth)
         });
-        let (mount, resize, visible, vm) = (
+        let (mount, resize, visible, visible_margin, vm) = (
             node.events().mount.clone(),
             node.events().resize.clone(),
             node.events().visible.clone(),
+            node.events().visible_margin,
             vm.clone(),
         );
         let handle = handle_for();
@@ -4373,7 +4374,10 @@ fn styled(
                 mounted.retain(effect);
             }
             if let Some(f) = visible.clone()
-                && let Some(shown) = mounted.observe_visibility()
+                && let Some(shown) = match visible_margin {
+                    Some(margin) => mounted.observe_visibility_within(margin),
+                    None => mounted.observe_visibility(),
+                }
             {
                 // Changes only, and the first layout's answer, delivered
                 // after the frame as an IntersectionObserver does: what the
@@ -4417,14 +4421,19 @@ fn styled(
                     match timers.as_ref() {
                         Some(timers) => {
                             let deliver = deliver.clone();
-                            let stop = timers.start(
-                                std::time::Duration::from_millis(1),
-                                false,
-                                move || {
-                                    deliver();
-                                    false
-                                },
-                            );
+                            // Its first report is due at once: an element that
+                            // mounts as the view jumps (a list's new rows) hears
+                            // it in the frame that shows it, and what it builds
+                            // lays out before that frame is drawn. A change
+                            // after waits a millisecond, past this frame.
+                            let wait = match told.get() {
+                                None => std::time::Duration::ZERO,
+                                Some(_) => std::time::Duration::from_millis(1),
+                            };
+                            let stop = timers.start(wait, false, move || {
+                                deliver();
+                                false
+                            });
                             *pending.borrow_mut() = Some(stop);
                         }
                         None => deliver(),

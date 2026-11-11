@@ -326,3 +326,78 @@ fn taffy_laid_out_rows_keep_an_icons_size() {
     );
     assert_eq!(rects[1].width, 15., "{rects:?}");
 }
+
+/// Down a column, an item's floor is the lesser of its height and its
+/// content's at its own width (CSS's `min-height: auto`): a card 56 wide
+/// whose text is four lines at that width keeps the 40 it sets, and one of
+/// two lines its 36, past the 30 its column has room for, however the
+/// column aligns it. Measured at the column's width, its text was one line,
+/// and the column shrank it to the room it had.
+#[test]
+fn down_a_column_a_box_needs_its_content_at_its_own_width() {
+    use zgx::scene::{Color, Layout, NodeKind, Scene, Style};
+    // 7 points a character, 18 a line, wrapped at the room it is given.
+    fn measure(text: &str, _: f32, limit: Option<f32>) -> (f32, f32) {
+        let width = text.len() as f32 * 7.;
+        let room = limit.unwrap_or(width).max(7.);
+        (width.min(room), (width / room).ceil().max(1.) * 18.)
+    }
+    // 16 words: 224 wide on one line; at 56, 4 lines (72), or 5 (90) at the
+    // 52 inside a padding of 2. 6 words: 84 wide; at 56, 2 lines (36).
+    for (words, padding, height) in [(16, 0., 40.), (16, 2., 40.), (6, 0., 36.)] {
+        let words = "w ".repeat(words);
+        for align in [Align::Center, Align::Stretch, Align::Start] {
+            let mut scene = Scene::new(300., 600.);
+            scene.set_text_measurer(measure);
+            let root = scene.root();
+            let column = scene.append(
+                root,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    height: Some(60.),
+                    align,
+                    ..Style::default()
+                },
+            );
+            let card = scene.append(
+                column,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    width: Some(56.),
+                    height: Some(40.),
+                    padding,
+                    ..Style::default()
+                },
+            );
+            scene.append(
+                card,
+                NodeKind::Text {
+                    text: words.as_str().into(),
+                    color: Color(0, 0, 0, 255),
+                    font_size: 14.,
+                },
+                Style {
+                    text_wrap: true,
+                    ..Style::default()
+                },
+            );
+            scene.append(
+                column,
+                NodeKind::Container(Layout::Column),
+                Style {
+                    height: Some(30.),
+                    flex_shrink: 0.,
+                    ..Style::default()
+                },
+            );
+            scene.flush();
+            let bounds = scene.bounds(card);
+            assert_eq!(
+                (bounds.width, bounds.height),
+                (56., height),
+                "{align:?}, padding {padding}, {} characters",
+                words.len()
+            );
+        }
+    }
+}

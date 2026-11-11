@@ -380,20 +380,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ca718471876992059f251e33aafc334346ada08042b7661dd1fe313a9bced557"
 
 [[package]]
-name = "vte"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a5924018406ce0063cd67f8e008104968b74b563ee1b85dde3ed1f7cb87d3dbd"
-dependencies = [
- "arrayvec",
- "bitflags",
- "cursor-icon",
- "log",
- "memchr",
- "serde",
-]
-
-[[package]]
 name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -483,7 +469,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 
 [[package]]
 name = "zgx-alacritty-terminal"
-version = "0.26.3"
+version = "0.26.4"
 dependencies = [
  "base64",
  "bitflags",
@@ -503,8 +489,20 @@ dependencies = [
  "smallvec",
  "unicode-segmentation",
  "unicode-width",
- "vte",
  "windows-sys 0.59.0",
+ "zgx-vte",
+]
+
+[[package]]
+name = "zgx-vte"
+version = "0.15.0"
+dependencies = [
+ "arrayvec",
+ "bitflags",
+ "cursor-icon",
+ "log",
+ "memchr",
+ "serde",
 ]
 
 [[package]]

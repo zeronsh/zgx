@@ -2478,6 +2478,10 @@ export type NodeProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: ((visible: boolean, element: Element) -> ...unknown)?,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: number?,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -2906,6 +2910,10 @@ export type Props = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -3191,6 +3199,7 @@ export type Props_zoomable = State<number>?
 export type Props_on_mount = ((element: Element) -> ...unknown)?
 export type Props_on_resize = ((size: Size, element: Element) -> ...unknown)?
 export type Props_on_visible = ((visible: boolean, element: Element) -> ...unknown)?
+export type Props_visible_margin = number?
 export type Props_on_drag = (() -> any)?
 export type Props_drag_preview = ((payload: any) -> Node)?
 export type Props_drag_preview_anchor = { number }?
@@ -3583,6 +3592,10 @@ export type ContainerProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -4025,6 +4038,10 @@ export type GlassProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -4476,6 +4493,10 @@ export type ScrollProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -4943,6 +4964,10 @@ export type TextProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -5370,6 +5395,10 @@ export type MarkdownViewProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -5883,6 +5912,10 @@ export type RichProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -6304,6 +6337,10 @@ export type ImageProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -6742,6 +6779,10 @@ export type SvgProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -7320,6 +7361,10 @@ export type Scene3DProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -7764,6 +7809,10 @@ export type CanvasProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -8217,6 +8266,10 @@ export type CheckboxProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -8648,6 +8701,10 @@ export type InputProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -9180,6 +9237,10 @@ export type ProgressProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -9599,6 +9660,10 @@ export type SliderProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -10039,6 +10104,10 @@ export type SegmentedProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -10472,6 +10541,10 @@ export type StepperProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -10906,6 +10979,10 @@ export type DisclosureProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -11351,6 +11428,10 @@ export type AccordionProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -11770,6 +11851,10 @@ export type SectionProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -12214,6 +12299,10 @@ export type SeparatorProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -12641,6 +12730,10 @@ export type TabsProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -13090,6 +13183,10 @@ export type TreeProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -13535,6 +13632,10 @@ export type DataGridProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -13976,6 +14077,10 @@ export type CalendarProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -14410,6 +14515,10 @@ export type DatePickerProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -14842,6 +14951,10 @@ export type TimeFieldProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -15273,6 +15386,10 @@ export type ComboboxProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -15712,6 +15829,10 @@ export type CommandPaletteProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -16139,6 +16260,10 @@ export type SelectProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -16573,6 +16698,10 @@ export type SplitProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -17063,6 +17192,10 @@ export type ListProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -17583,6 +17716,10 @@ export type LayerProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -18024,6 +18161,10 @@ export type ModalProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -18483,6 +18624,10 @@ export type PopoverProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -18948,6 +19093,10 @@ export type MenuItemProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -19378,6 +19527,10 @@ export type SubmenuProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -19822,6 +19975,10 @@ export type WebViewProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -20272,6 +20429,10 @@ export type TerminalProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -20694,6 +20855,10 @@ export type SlotProps = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -21167,6 +21332,10 @@ export type EachOptions = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4
@@ -21604,6 +21773,10 @@ export type PresenceOptions = {
 	-- clip and scroll viewport above it), and at its first layout: for
 	-- building what only matters on screen.
 	on_visible: Props_on_visible,
+	-- With `on_visible`: in view once any of it comes within this many
+	-- points of showing (an IntersectionObserver's `rootMargin`), to build
+	-- what is about to scroll in before it does.
+	visible_margin: Props_visible_margin,
 	-- Drag and drop within the window. Payloads are what `on_drag`
 	-- returns: the script's own plain values, so they are `any` here.
 	-- A source: `on_drag` returns the payload once the pointer moves 4

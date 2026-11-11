@@ -4712,6 +4712,9 @@ pub struct GpuRenderer {
     image_drawn: FxHashMap<u64, u64>,
     /// Textures kept of images no node shows (`bound_images_gone`).
     images_gone: rustc_hash::FxHashSet<u64>,
+    /// Whether anything still holds each image uploaded: one nothing holds
+    /// can't be shown again, so its texture isn't kept once no node shows it.
+    image_holders: FxHashMap<u64, zgx::image::Holders>,
     /// Frames drawn, for `image_drawn`.
     image_frame: u64,
     /// The scene the frame under way draws, for what an image giving way must
@@ -4870,6 +4873,51 @@ pub struct GpuRenderer {
     backdrops: FxHashMap<(u32, u32), (wgpu::Texture, wgpu::BindGroup)>,
     /// The presentation plane drawn around native views (planes.rs).
     plane: Option<planes::PlaneState>,
+    /// A window with backdrop readers: its walk's damage grown over what
+    /// they can read (`render_once`). Boxed: most renderers have none.
+    backdrop_walk: Option<Box<BackdropWalk>>,
+}
+/// What a window frame's walk grows its damage through (kept for the next),
+/// and that damage grown, for its `render_flat` (readers alone, no blur), with
+/// the frame it is for (`GpuRenderer::frame`): taken in that frame alone.
+#[derive(Default)]
+struct BackdropWalk {
+    filters: Vec<(Rect, f32)>,
+    grown: Option<Vec<Rect>>,
+    frame: u64,
+}
+impl GpuRenderer {
+    /// A window frame's items with backdrop readers in it, out of
+    /// `render_once`'s line: the damage grown first through all each reader
+    /// could read (`backdrop_read`, a pixel past it) as well as the blurs,
+    /// and with readers alone (no blur) that reach kept for `render_flat`,
+    /// which draws it rather than work it out again.
+    #[cold]
+    #[inline(never)]
+    fn walk_over_readers<'s>(
+        &mut self,
+        scene: &'s Scene,
+        damage: &[Rect],
+        viewport: Rect,
+    ) -> Vec<zgx::scene::PaintItem<'s>> {
+        let walk = self.backdrop_walk.get_or_insert_default();
+        let filters = &mut walk.filters;
+        filters.clear();
+        filters.extend(scene.backdrop_filters());
+        let blurs = filters.len();
+        scene.backdrop_reads(filters);
+        let margin = 1. / self.scale;
+        for (read, _) in &mut filters[blurs..] {
+            *read = read.expand(margin);
+        }
+        let reach = blur_damage(damage, filters, viewport, self.scale);
+        let items = scene.layer_items_within(None, Some(&reach));
+        // Damage left, `render_flat` takes it this frame (with none, it
+        // returns before it would).
+        walk.grown = (blurs == 0 && !damage.is_empty()).then_some(reach);
+        walk.frame = self.frame;
+        items
+    }
 }
 impl GpuRenderer {
     /// An offscreen renderer `width` by `height` physical pixels, on a context
@@ -5412,6 +5460,7 @@ impl GpuRenderer {
             images_uploaded: false,
             image_drawn: FxHashMap::default(),
             images_gone: Default::default(),
+            image_holders: Default::default(),
             image_frame: 0,
             frame_scene: None,
             images_decoding: 0,
@@ -5462,6 +5511,7 @@ impl GpuRenderer {
             fill_shaders: FxHashMap::default(),
             filter_shaders: FxHashMap::default(),
             plane: None,
+            backdrop_walk: None,
         })
     }
     /// Bytes the native device reports as allocated (Metal only), including
@@ -6458,9 +6508,20 @@ impl GpuRenderer {
             // and the same pixels are drawn: what lies outside it draws
             // nothing this frame. (The window's own walk alone: a plane's,
             // a popup's and a layer's place their items otherwise.)
+            // Layer shaders reading the backdrop the same: the frame grows its
+            // damage over all each reads that it touches (`backdrop_read`, a
+            // pixel past it), so the walk grows first through all each could.
+            // With readers alone (no blur), what the frame draws is that
+            // reach: `render_flat` takes it rather than work it out again.
             None if !self.fresh && start.is_none() && self.plane.is_none() && !self.in_layer => {
-                let reach = blur_damage(damage, &scene.backdrop_filters(), viewport, self.scale);
-                (scene.layer_items_within(None, Some(&reach)), merged)
+                match scene.has_backdrop_readers() {
+                    false => {
+                        let reach =
+                            blur_damage(damage, &scene.backdrop_filters(), viewport, self.scale);
+                        (scene.layer_items_within(None, Some(&reach)), merged)
+                    }
+                    true => (self.walk_over_readers(scene, damage, viewport), merged),
+                }
             }
             None => (scene.layer_items(start), merged),
         };
@@ -6691,9 +6752,15 @@ impl GpuRenderer {
             // with its pixels long given up, to decode blank again: its
             // texture stays, within a bound, until the window goes idle.
             // Others' are gone with their nodes; they have no `image_drawn`.
-            let drawn = &self.image_drawn;
-            self.images
-                .retain(|id, _| live_images.contains(id) || drawn.contains_key(id));
+            // Nor one nothing holds any more (a video's frame, replaced by
+            // the next): no node can show it again.
+            let (drawn, holders) = (&self.image_drawn, &self.image_holders);
+            self.images.retain(|id, _| {
+                live_images.contains(id)
+                    || drawn.contains_key(id) && holders.get(id).is_none_or(|h| h.any())
+            });
+            let images = &self.images;
+            self.image_holders.retain(|id, _| images.contains_key(id));
             self.images_gone.clear();
             self.images_gone
                 .extend(self.images.keys().filter(|id| !live_images.contains(id)));
@@ -7691,7 +7758,7 @@ impl GpuRenderer {
         // An app's own shader (not the built-in radial one): on Direct3D 12
         // with FXC its fragment stage compiles in a process of its own.
         let apps = shader.source() != zgx::decoration::radial_shader().source();
-        let slot = compile::spawn(move || {
+        let slot = compile::start(self.waits_for_shaders(), move || {
             fill_validates(&source)
                 .then(|| {
                     Self::app_built(
@@ -7712,7 +7779,7 @@ impl GpuRenderer {
         (self.fill_pipelines).insert(shader.id(), compile::Compiled::Pending(slot));
         #[cfg(target_os = "macos")]
         if let Some(Some(frame)) = self.metal_frame.get() {
-            frame.start_fill(shader);
+            frame.start_fill(shader, self.waits_for_shaders());
         }
         #[cfg(d3d11)]
         if let Some(state) = &self.d3d11 {
@@ -7759,7 +7826,7 @@ impl GpuRenderer {
             let (device, layout) = (self.device.clone(), self.context.inner.quad_layout.clone());
             let source = filter_source(shader.source());
             let backend = self.info.backend;
-            let slot = compile::spawn(move || {
+            let slot = compile::start(self.waits_for_shaders(), move || {
                 fill_validates(&source)
                     .then(|| {
                         Self::app_built(
@@ -7842,7 +7909,7 @@ impl GpuRenderer {
             let layout = self.blend_layouts().1.clone();
             let device = self.device.clone();
             let backend = self.info.backend;
-            let slot = compile::spawn(move || {
+            let slot = compile::start(self.waits_for_shaders(), move || {
                 fill_validates(&source)
                     .then(|| {
                         Self::app_built(
@@ -8909,28 +8976,40 @@ impl GpuRenderer {
         let damage = if self.fresh {
             vec![viewport]
         } else if MODE != PATCH && (has_blur || readers) {
-            // (Patching draws nothing: its damage is the window's.)
-            let dependencies: Vec<_> = items
-                .iter()
-                .filter_map(|item| {
-                    if readers
-                        && item.isolated
-                        && item.effects.opacity > 0.
-                        && let Some((area, _)) = self.backdrop_read(scene, item, viewport)
-                    {
-                        return Some((area, 0.));
-                    }
-                    if item.effects.opacity <= 0. || item.effects.blur_radius <= 0. {
-                        return None;
-                    }
-                    let output = item
-                        .bounds
-                        .intersection(item.clip.unwrap_or(viewport))?
-                        .intersection(viewport)?;
-                    Some((output, item.effects.blur_radius))
-                })
-                .collect();
-            blur_damage(damage, &dependencies, viewport, self.scale)
+            // (Patching draws nothing: its damage is the window's.) Readers
+            // alone: grown by the walk already, over all they can read.
+            if readers
+                && !self.in_layer
+                && let Some(grown) = self
+                    .backdrop_walk
+                    .as_mut()
+                    .filter(|walk| walk.frame == self.frame)
+                    .and_then(|walk| walk.grown.take())
+            {
+                grown
+            } else {
+                let dependencies: Vec<_> = items
+                    .iter()
+                    .filter_map(|item| {
+                        if readers
+                            && item.isolated
+                            && item.effects.opacity > 0.
+                            && let Some((area, _)) = self.backdrop_read(scene, item, viewport)
+                        {
+                            return Some((area, 0.));
+                        }
+                        if item.effects.opacity <= 0. || item.effects.blur_radius <= 0. {
+                            return None;
+                        }
+                        let output = item
+                            .bounds
+                            .intersection(item.clip.unwrap_or(viewport))?
+                            .intersection(viewport)?;
+                        Some((output, item.effects.blur_radius))
+                    })
+                    .collect();
+                blur_damage(damage, &dependencies, viewport, self.scale)
+            }
         } else {
             merged.unwrap_or_else(|| merge_damage(damage, viewport, self.scale))
         };
@@ -11544,12 +11623,11 @@ impl GpuRenderer {
                 };
                 let blur = blur_atlas.as_ref().expect("planned");
                 pass.blur(frame, &target, [&blur[0], &blur[1]], &records, rects);
-                pass.resume(&target);
                 pass.texture(&atlas);
                 sampled = TextureSource::Atlas;
-                stats.draw_calls += 3 * rects.iter().filter(|r| r.2 > 0 && r.3 > 0).count();
-                stats.render_passes += 4;
-                stats.blur_passes += 3;
+                stats.draw_calls += 3;
+                stats.render_passes += 2;
+                stats.blur_passes += 1;
                 blurred = Some((plan, slots, rects));
                 from = end;
             }
@@ -13122,7 +13200,9 @@ impl GpuRenderer {
                     SlotRecord {
                         atlas: [0., 0., size.0 as f32, size.1 as f32],
                         region: [x0, y0, factor, level / factor],
-                        owner: [index, 0, 0, 0],
+                        // Blurred (blur.wgsl's compute stages, which Metal
+                        // drawn directly runs).
+                        owner: [index, 1, 0, 0],
                     },
                     size,
                     true,
@@ -13959,6 +14039,7 @@ impl GpuRenderer {
         self.images_outgoing.remove(&image.id());
         self.images
             .insert(image.id(), (bind, bytes, Some(texture), held_size));
+        self.image_holders.insert(image.id(), image.holders());
         self.image_drawn.insert(image.id(), self.image_frame);
         Ok(())
     }
@@ -15513,8 +15594,8 @@ impl GpuRenderer {
         })
     }
     /// Diagnostics: split each frame drawn with Metal directly at its
-    /// backdrop blur's passes (reduce, across, down), each committed on its
-    /// own, for `debug_take_pass_times`. Off by default; it adds a command
+    /// backdrop blur (its stages' one compute pass), each part committed on
+    /// its own, for `debug_take_pass_times`. Off by default; it adds a command
     /// buffer a pass while on. Process-wide.
     #[cfg(target_os = "macos")]
     pub fn debug_time_passes(&self, on: bool) {
@@ -16744,7 +16825,14 @@ fn atlas_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textur
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: BLUR_FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        // Metal drawn directly writes it from compute stages (metal_frame.rs).
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | if cfg!(target_os = "macos") {
+                wgpu::TextureUsages::STORAGE_BINDING
+            } else {
+                wgpu::TextureUsages::empty()
+            },
         view_formats: &[],
     })
 }
@@ -19063,19 +19151,22 @@ fn blur_damage(damage: &[Rect], filters: &[(Rect, f32)], viewport: Rect, scale: 
             Some((dependency, false))
         })
         .collect();
+    // Each pass takes every dependency the regions meet (those it took
+    // among them, so one meeting another just taken joins too), then merges
+    // once: not once a dependency, which made a frame of many readers
+    // quadratic.
     loop {
-        let mut changed = false;
+        let before = regions.len();
         for (dependency, processed) in &mut dependencies {
             if !*processed && regions.iter().any(|region| region.intersects(*dependency)) {
                 regions.push(*dependency);
-                regions = merge_damage(&regions, viewport, scale);
                 *processed = true;
-                changed = true;
             }
         }
-        if !changed {
+        if regions.len() == before {
             break;
         }
+        regions = merge_damage(&regions, viewport, scale);
     }
     regions
 }
@@ -21330,6 +21421,24 @@ mod shader_compile_tests {
         let (pixel, awaited) = frame(&mut gpu, &mut scene);
         assert_eq!(pixel, [0, 255, 0, 255]);
         assert!(!awaited);
+    }
+
+    /// Offscreen, where frames wait for their shaders anyway, a fill
+    /// compiles on the renderer's own thread: compiled as it is started,
+    /// with no second thread allocating beside the frame (which made the
+    /// gate's fx cells count differently run to run).
+    #[test]
+    fn offscreen_a_fill_is_compiled_as_it_starts() {
+        let (mut gpu, _) = renderer();
+        gpu.offscreen_waits = true;
+        let shader = green();
+        gpu.start_fill(&shader);
+        assert!(
+            gpu.fill_pipelines
+                .get(&shader.id())
+                .is_some_and(|c| c.get().is_some()),
+            "compiled when start_fill returned"
+        );
     }
 
     /// Offscreen, nothing wakes a host: a frame waits for the compile.
