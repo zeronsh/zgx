@@ -3008,7 +3008,7 @@ pub fn switch<K: PartialEq + Clone + 'static>(
     select: impl FnMut() -> K + 'static,
     mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
-    switch_with::<K, false>(select, move |key, cx| Some(build(key, cx)))
+    switch_with::<K, false, _>((), select, move |key, cx| Some(build(key, cx)))
 }
 /// A [`switch`] whose cases may show nothing (`None`): the region holds no
 /// child then, not an empty one (a closed `ui.show`: one node, not two).
@@ -3016,7 +3016,7 @@ pub fn switch_or_none<K: PartialEq + Clone + 'static>(
     select: impl FnMut() -> K + 'static,
     build: impl FnMut(K, &mut Context) -> Option<View> + 'static,
 ) -> View {
-    switch_with::<K, false>(select, build)
+    switch_with::<K, false, _>((), select, build)
 }
 /// [`switch`], focus in a branch it replaces found again in the next: a
 /// focusable node of the same role and accessible name (a list's row,
@@ -3025,11 +3025,68 @@ pub fn switch_or_none<K: PartialEq + Clone + 'static>(
 /// what had the keyboard should keep it.
 pub fn switch_keeping_focus<K: PartialEq + Clone + 'static>(
     select: impl FnMut() -> K + 'static,
+    build: impl FnMut(K, &mut Context) -> View + 'static,
+) -> View {
+    switch_keeping_focus_held(FocusHold::default(), select, build)
+}
+/// [`switch_keeping_focus`], where focus was taken when `hold` is
+/// ([`FocusHold::take`]) rather than as it switches: for a host that runs
+/// what may move focus (a script's load, setting state the shown branch
+/// reads) before it switches.
+pub fn switch_keeping_focus_held<K: PartialEq + Clone + 'static>(
+    hold: FocusHold,
+    select: impl FnMut() -> K + 'static,
     mut build: impl FnMut(K, &mut Context) -> View + 'static,
 ) -> View {
-    switch_with::<K, true>(select, move |key, cx| Some(build(key, cx)))
+    switch_with::<K, true, _>(hold, select, move |key, cx| Some(build(key, cx)))
 }
-fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
+/// Where focus is in a [`switch_keeping_focus_held`]'s branch, taken before
+/// it switches.
+#[derive(Clone, Default)]
+pub struct FocusHold(Rc<FocusHeld>);
+#[derive(Default)]
+struct FocusHeld {
+    /// The branch shown.
+    shown: RefCell<Option<(WeakUi, NodeId)>>,
+    /// Taken: where focus was in it (`None`: not in it).
+    taken: RefCell<Option<Option<crate::widgets::Refocus>>>,
+}
+impl FocusHold {
+    /// Where focus is in the branch shown, for the next switch to find
+    /// again in the branch it builds; what moves focus meanwhile doesn't
+    /// count.
+    pub fn take(&self) {
+        let trail = match &*self.0.shown.borrow() {
+            Some((ui, node)) => ui.upgrade().and_then(|ui| ui.focus_trail(*node)),
+            None => None,
+        };
+        *self.0.taken.borrow_mut() = Some(trail);
+    }
+    /// Forget what was taken (the switch it was for doesn't come): the next
+    /// switch takes focus as it switches.
+    pub fn release(&self) {
+        self.0.taken.borrow_mut().take();
+    }
+}
+/// What a switch keeps of focus across its branches: nothing (`()`), or a
+/// [`FocusHold`].
+trait Hold: 'static {
+    fn shows(&self, _ui: &WeakUi, _node: NodeId) {}
+    fn taken(&self) -> Option<Option<crate::widgets::Refocus>> {
+        None
+    }
+}
+impl Hold for () {}
+impl Hold for FocusHold {
+    fn shows(&self, ui: &WeakUi, node: NodeId) {
+        *self.0.shown.borrow_mut() = Some((ui.clone(), node));
+    }
+    fn taken(&self) -> Option<Option<crate::widgets::Refocus>> {
+        self.0.taken.borrow_mut().take()
+    }
+}
+fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool, H: Hold>(
+    hold: H,
     mut select: impl FnMut() -> K + 'static,
     mut build: impl FnMut(K, &mut Context) -> Option<View> + 'static,
 ) -> View {
@@ -3068,12 +3125,16 @@ fn switch_with<K: PartialEq + Clone + 'static, const KEEP_FOCUS: bool>(
                 let node = mount(&mut ui, root, view, environment.clone());
                 cx.finish(&mut ui, node);
                 transaction.commit();
+                // Where focus was: as the host took it, else now.
                 let trail = match (KEEP_FOCUS, mounted) {
-                    (true, Some(old)) => ui.focus_trail(old),
+                    (true, Some(old)) => hold.taken().unwrap_or_else(|| ui.focus_trail(old)),
                     _ => None,
                 };
                 if let Some(old) = mounted.replace(node) {
                     ui.remove(old);
+                }
+                if KEEP_FOCUS {
+                    hold.shows(&weak, node);
                 }
                 if let Some(trail) = trail {
                     ui.refocus_trail(node, trail);
