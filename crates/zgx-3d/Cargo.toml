@@ -73,6 +73,10 @@ required-features = ["gltf"]
 name = "particles_bench"
 required-features = ["particles"]
 
+[[example]]
+name = "sea"
+required-features = ["compute", "shaders"]
+
 [[test]]
 name = "ktx2"
 required-features = ["ktx2", "gltf"]
