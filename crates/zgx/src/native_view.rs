@@ -40,6 +40,18 @@ pub enum NativeContent {
     Platform(Rc<dyn Any>),
     /// The system's glass (see [`crate::glass`]).
     Glass(crate::glass::GlassPane),
+    /// The system's on and off control (see [`crate::native_control`]).
+    #[cfg(target_os = "ios")]
+    Toggle(Rc<crate::native_control::ToggleState>),
+    /// The system's tab bar (see [`crate::native_control`]).
+    #[cfg(target_os = "ios")]
+    Tabs(Rc<crate::native_control::TabsState>),
+    /// The system's scroll edge effect (see [`crate::native_control`]).
+    #[cfg(target_os = "ios")]
+    EdgeEffect(crate::native_control::EdgeEffect),
+    /// What marks a bar that goes with the keyboard: its planes are its own.
+    #[cfg(target_os = "ios")]
+    KeyboardBar,
 }
 impl NativeContent {
     /// A short description for placeholders and diagnostics.
@@ -63,6 +75,14 @@ impl NativeContent {
                 }
             }
             Self::Platform(_) => "Native view".into(),
+            #[cfg(target_os = "ios")]
+            Self::Toggle(_) => "Switch".into(),
+            #[cfg(target_os = "ios")]
+            Self::Tabs(_) => "Tabs".into(),
+            #[cfg(target_os = "ios")]
+            Self::EdgeEffect(_) => "Edge effect".into(),
+            #[cfg(target_os = "ios")]
+            Self::KeyboardBar => "Keyboard bar".into(),
         }
     }
 }
