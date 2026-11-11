@@ -47,6 +47,9 @@ pub enum Error {
     /// An effect whose parameters can't be kept to (a range upside down, or
     /// not a number), and why.
     Effect(String),
+    /// A stream past [`Config::stream_memory`]: the bytes it would take,
+    /// and those free.
+    StreamMemory { asked: usize, free: usize },
 }
 
 impl Error {
@@ -73,6 +76,10 @@ impl std::fmt::Display for Error {
             Error::Config(why) => write!(f, "an audio engine can't be made with {why}"),
             Error::Foreign => f.write_str("a bus from another audio engine"),
             Error::Effect(why) => write!(f, "an effect with {why}"),
+            Error::StreamMemory { asked, free } => write!(
+                f,
+                "a stream needing {asked} bytes, with {free} of the streams' memory free"
+            ),
         }
     }
 }
@@ -122,6 +129,12 @@ pub struct Config {
     /// limiter's tail and sounds due count as sound): then it stops, and
     /// starts again with the next.
     pub hold: Duration,
+    /// Bytes all streams' buffers may take at once (8 MiB): each holds
+    /// half a second in its ring and 32,768 frames to read from, 448 KiB
+    /// for a stereo stream at 48 kHz. Past it, [`Audio::stream`] says
+    /// [`Error::StreamMemory`]; a stream's bytes come back when the mixer
+    /// gives it back.
+    pub stream_memory: usize,
 }
 
 /// Ended voices kept for [`Audio::take_ended`] at most.
@@ -212,6 +225,7 @@ impl Default for Config {
             interpolation: Interpolation::Cubic,
             gain: 1.,
             hold: Duration::from_secs(1),
+            stream_memory: 8 << 20,
         }
     }
 }
@@ -254,6 +268,8 @@ pub struct Stats {
     pub dry: u64,
     /// Streams the decode thread is filling.
     pub streams: u64,
+    /// Bytes streams' buffers hold ([`Config::stream_memory`]).
+    pub stream_memory: u64,
     /// On the device's clock, in nanoseconds (0 until a device says): when
     /// the last block was asked for, when its first frame will be heard,
     /// and when the most recent play's first frame will be.
@@ -316,6 +332,9 @@ struct Inner {
     hosting: Mutex<Hosting>,
     /// The decode thread, made with the first stream.
     decoder: Mutex<Option<Decoder>>,
+    /// The bytes streams hold now, and the most they may.
+    streamed: Arc<std::sync::atomic::AtomicUsize>,
+    stream_memory: usize,
 }
 
 /// The engine, as the main thread holds it. Cloning it is cheap; every
@@ -520,6 +539,8 @@ impl Audio {
             latency,
             hosting: Mutex::new(Hosting::None),
             decoder: Mutex::new(None),
+            streamed: Default::default(),
+            stream_memory: config.stream_memory,
         }));
         if config.gain != 1. {
             audio
@@ -710,8 +731,13 @@ impl Audio {
             Some((engine, bus)) if engine == self.0.id => bus,
             Some(_) => return Err(Error::Foreign),
         };
-        let (writer, reader) = ring(rate as usize / 2 * channels);
-        let streamed = Box::new(Streamed::new(reader, channels, rate));
+        // Its ring and its window, of the streams' budget.
+        let ring_samples = rate as usize / 2 * channels;
+        let bytes = (ring_samples + crate::mixer::WINDOW * channels) * size_of::<f32>();
+        let charge = crate::mixer::Charge::take(&self.0.streamed, bytes, self.0.stream_memory)
+            .map_err(|free| Error::StreamMemory { asked: bytes, free })?;
+        let (writer, reader) = ring(ring_samples);
+        let streamed = Box::new(Streamed::new(reader, channels, rate, charge));
         let mut control = self.control();
         let id = control.next_id;
         let command = Command::Play {
@@ -887,6 +913,7 @@ impl Audio {
             failures: meter.failures.load(Ordering::Relaxed),
             underruns: meter.underruns.load(Ordering::Relaxed),
             dry: meter.dry.load(Ordering::Relaxed),
+            stream_memory: self.0.streamed.load(Ordering::Acquire) as u64,
             streams: self
                 .0
                 .decoder

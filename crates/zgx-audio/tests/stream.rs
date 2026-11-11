@@ -320,3 +320,32 @@ fn an_ogg_vorbis_at_a_rate_the_mixer_can_t_play_is_an_error() {
         );
     }
 }
+
+#[test]
+fn streams_keep_to_the_engine_s_memory_budget_and_give_it_back() {
+    // A stereo stream at 48 kHz holds its ring (half a second) and its
+    // window (32,768 frames): 448 KiB. A megabyte holds two, not three.
+    let (audio, mut mixer) = Audio::offline(Config {
+        limiter: None,
+        stream_memory: 1 << 20,
+        ..Config::default()
+    })
+    .unwrap();
+    let bytes = wav::write(&vec![0.1; 48_000 * 2], 2, 48_000, wav::Encoding::Float32).unwrap();
+    let wav = || Source::bytes(bytes.clone());
+    let first = audio.stream(wav(), Play::new()).unwrap();
+    audio.stream(wav(), Play::new()).unwrap();
+    let held = audio.stats().stream_memory;
+    assert_eq!(held, 2 * (24_000 * 2 + 32_768 * 2) * 4);
+    let refused = audio.stream(wav(), Play::new()).unwrap_err();
+    assert!(
+        matches!(refused, zgx_audio::Error::StreamMemory { .. }),
+        "{refused:?}"
+    );
+    // One stopped and given back: room again.
+    first.stop().unwrap();
+    mixer.frames(4_800);
+    audio.update();
+    assert_eq!(audio.stats().stream_memory, held / 2);
+    audio.stream(wav(), Play::new()).unwrap();
+}

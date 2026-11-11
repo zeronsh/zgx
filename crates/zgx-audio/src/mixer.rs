@@ -652,7 +652,48 @@ impl Feed {
 
 /// Frames a stream's window holds: a block's worth at the highest pitch
 /// and rate, and some.
-const WINDOW: usize = 32_768;
+pub(crate) const WINDOW: usize = 32_768;
+
+/// The bytes a stream holds of its engine's budget
+/// ([`Config::stream_memory`](crate::Config::stream_memory)), given back
+/// when it's dropped: an atomic subtraction, nothing more, wherever that is.
+pub(crate) struct Charge {
+    bytes: usize,
+    held: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl Charge {
+    /// `bytes` more of `held`, if that's no more than `most`; else the
+    /// bytes free.
+    pub fn take(
+        held: &Arc<std::sync::atomic::AtomicUsize>,
+        bytes: usize,
+        most: usize,
+    ) -> Result<Charge, usize> {
+        let mut now = held.load(Ordering::Acquire);
+        loop {
+            let after = now.checked_add(bytes).filter(|&after| after <= most);
+            let Some(after) = after else {
+                return Err(most.saturating_sub(now));
+            };
+            match held.compare_exchange_weak(now, after, Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => {
+                    return Ok(Charge {
+                        bytes,
+                        held: held.clone(),
+                    });
+                }
+                Err(seen) => now = seen,
+            }
+        }
+    }
+}
+
+impl Drop for Charge {
+    fn drop(&mut self) {
+        self.held.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Flow {
@@ -666,6 +707,9 @@ enum Flow {
 /// A stream as a voice holds it: frames from the decode thread's ring,
 /// pulled into a window the resampler reads like a sound of its own.
 pub(crate) struct Streamed {
+    /// Its bytes of the engine's budget, given back with it.
+    #[allow(dead_code)]
+    charge: Charge,
     reader: Reader,
     window: SoundData,
     /// Frames in the window.
@@ -679,8 +723,9 @@ pub(crate) struct Streamed {
 
 impl Streamed {
     /// Allocates: made on the main thread.
-    pub fn new(reader: Reader, channels: usize, rate: u32) -> Streamed {
+    pub fn new(reader: Reader, channels: usize, rate: u32, charge: Charge) -> Streamed {
         Streamed {
+            charge,
             reader,
             window: SoundData {
                 samples: vec![0.; WINDOW * channels].into(),
