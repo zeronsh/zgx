@@ -167,6 +167,9 @@ impl Gpu {
             }
             // Temporal antialiasing's history, with the frame's.
             + self.post.as_ref().map_or(0, |c| c.history_bytes());
+        // The sun's cascades' layers of still casters, while one moves.
+        #[cfg(feature = "lighting")]
+        let behind = behind + self.lights.temporary_bytes();
         self.graph.bytes() + behind
     }
     /// The shadow map made while `on` (dropped while off), and the frame's

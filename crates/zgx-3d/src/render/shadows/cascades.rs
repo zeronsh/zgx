@@ -214,6 +214,8 @@ pub(crate) struct Sun {
     /// its casters, `None`: all).
     pub(crate) held: [Option<Held>; MAX_CASCADES],
     pub(crate) redraw: [bool; MAX_CASCADES],
+    /// Which take the fit wanted now (the rest keep theirs: `Sun::adopt`).
+    adopt: [bool; MAX_CASCADES],
     pub(crate) masks: [Vec<bool>; MAX_CASCADES],
     /// The spans of each run each cascade draws (`cull::shown`).
     pub(crate) spans: [Vec<(u32, std::ops::Range<u32>)>; MAX_CASCADES],
@@ -229,6 +231,189 @@ pub(crate) struct Sun {
     pub(crate) pipelines: std::collections::HashMap<u8, wgpu::RenderPipeline>,
     /// Maps drawn, for tests.
     pub(crate) draws: u64,
+    /// Instances drawn into them, for tests.
+    pub(crate) drawn: u64,
+    /// How each drawn again is drawn; the spans of its movers (`spans`
+    /// then hold its still casters', or all); the frame its layer of still
+    /// casters was drawn, if it's in use (it holds those still since).
+    pub(crate) how: [Draw; MAX_CASCADES],
+    pub(crate) mover_spans: [Vec<(u32, std::ops::Range<u32>)>; MAX_CASCADES],
+    stilled: [Option<u64>; MAX_CASCADES],
+    /// The layers of still casters, made once a caster moves (none if the
+    /// device refused them: every cascade is then drawn whole).
+    pub(crate) still: Option<Still>,
+    still_refused: bool,
+    /// Frames counted, from `MOVING`; each instance's last frame changed
+    /// (`MOVING` frames on, it's still), and the frame it's been still
+    /// since (`u64::MAX` while it moves); which move, as a list; and those
+    /// that started moving this frame, with the frame they'd been still
+    /// since.
+    frames: u64,
+    last: Vec<u64>,
+    since: Vec<u64>,
+    movers: Vec<u32>,
+    started: Vec<(u32, u64)>,
+    /// Those that moved since one of the layers in use was drawn (the rest
+    /// are in every layer: still since 0).
+    moved: Vec<u32>,
+    /// A cascade's casters out of its layer, as a list.
+    listed: Vec<u32>,
+    /// A mask a cascade's still casters or movers are drawn by.
+    scratch: Vec<bool>,
+}
+
+/// Frames after it last changed that a caster counts as moving. A cascade
+/// whose casters move keeps a layer of the others; a frame where only the
+/// movers changed draws the cascade from that layer and the movers alone,
+/// not every caster it holds again. Two seconds at 60 a second: a
+/// harbour's cranes pause 60 to 90 frames between moves, and one in a
+/// layer moving again draws its cascades whole.
+pub(crate) const MOVING: u64 = 120;
+
+/// How a cascade drawn again is drawn: all its casters into its map
+/// (`Whole`); its still casters into its layer of them, then that layer and
+/// its movers into its map (`Both`); or the layer as held and the movers
+/// (`Movers`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub(crate) enum Draw {
+    #[default]
+    Whole,
+    Both,
+    Movers,
+}
+
+/// Each cascade's layer of still casters, and what draws one into its map:
+/// a full-screen pass writing its depths (a render pass, as every cascade
+/// draw is, rather than a copy).
+pub(crate) struct Still {
+    _texture: wgpu::Texture,
+    /// Their bytes on the device.
+    pub(crate) bytes: u64,
+    pub(crate) layers: Vec<wgpu::TextureView>,
+    pub(crate) binds: Vec<wgpu::BindGroup>,
+    pub(crate) pipeline: wgpu::RenderPipeline,
+}
+
+const STILL_SHADER: &str = "
+@group(0) @binding(0) var held: texture_depth_2d;
+@vertex fn vertex(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let at = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(at * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fragment(@builtin(position) at: vec4<f32>) -> @builtin(frag_depth) f32 {
+    return textureLoad(held, vec2<i32>(at.xy), 0);
+}
+";
+
+impl Still {
+    /// `count` layers `side` texels square, in an error scope: refused, the
+    /// cascades are drawn whole as before.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn new(device: &wgpu::Device, side: u32, count: u32) -> Option<Self> {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("3D sun cascades' still casters"),
+            size: wgpu::Extent3d {
+                width: side,
+                height: side,
+                depth_or_array_layers: count,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CASCADE_DEPTH,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let layers: Vec<_> = (0..count)
+            .map(|layer| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("3D sun cascade's still casters"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: layer,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("3D sun cascade's still casters"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        let binds = layers
+            .iter()
+            .map(|view| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("3D sun cascade's still casters"),
+                    layout: &layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    }],
+                })
+            })
+            .collect();
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("3D sun cascade's still casters"),
+            source: wgpu::ShaderSource::Wgsl(STILL_SHADER.into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("3D sun cascade's still casters"),
+            layout: Some(
+                &device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("3D sun cascade's still casters"),
+                    bind_group_layouts: &[Some(&layout)],
+                    immediate_size: 0,
+                }),
+            ),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vertex"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fragment"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: CASCADE_DEPTH,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        if let Some(error) = now(scope.pop()) {
+            eprintln!(
+                "zgx-3d: the sun's cascades can't keep their still casters, so each is drawn whole: {error}"
+            );
+            return None;
+        }
+        Some(Self {
+            _texture: texture,
+            bytes: u64::from(side).pow(2) * u64::from(count) * 2,
+            layers,
+            binds,
+            pipeline,
+        })
+    }
 }
 
 impl Sun {
@@ -324,6 +509,7 @@ impl Sun {
             casters,
             held: Default::default(),
             redraw: [false; MAX_CASCADES],
+            adopt: [false; MAX_CASCADES],
             masks: Default::default(),
             spans: Default::default(),
             lens: None,
@@ -331,10 +517,130 @@ impl Sun {
             scene: None,
             pipelines: Default::default(),
             draws: 0,
+            drawn: 0,
+            how: [Draw::Whole; MAX_CASCADES],
+            mover_spans: Default::default(),
+            stilled: [None; MAX_CASCADES],
+            still: None,
+            still_refused: false,
+            frames: MOVING,
+            last: Vec::new(),
+            since: Vec::new(),
+            movers: Vec::new(),
+            started: Vec::new(),
+            moved: Vec::new(),
+            listed: Vec::new(),
+            scratch: Vec::new(),
         })
     }
     pub(crate) fn count(&self) -> usize {
         self.layers.len()
+    }
+    /// Which instances move this frame: those `changed` this frame or the
+    /// `MOVING` before it, of `instances`. Where their count changed, the
+    /// world was made again and every one is still (each cascade is drawn
+    /// whole). Its layers of still casters made once one moves, unless
+    /// most do (a world turning: each cascade is drawn whole, as the
+    /// layers would save nothing).
+    pub(crate) fn track(
+        &mut self,
+        device: &wgpu::Device,
+        changed: &[std::ops::Range<usize>],
+        instances: usize,
+    ) {
+        self.frames += 1;
+        self.started.clear();
+        if self.last.len() != instances {
+            self.last.clear();
+            self.last.resize(instances, 0);
+            self.since.clear();
+            self.since.resize(instances, 0);
+            self.movers.clear();
+            self.moved.clear();
+        } else {
+            // Those in every layer in use (or, with none, still) are listed
+            // no more: still since 0.
+            let oldest = self.stilled.iter().flatten().min().copied();
+            let (since, oldest) = (&mut self.since, oldest.unwrap_or(self.frames));
+            self.moved.retain(|&i| {
+                let out = since[i as usize] > oldest;
+                if !out {
+                    since[i as usize] = 0;
+                }
+                out
+            });
+            for range in changed {
+                for i in range.start.min(instances)..range.end.min(instances) {
+                    self.last[i] = self.frames;
+                    if self.since[i] == 0 {
+                        self.moved.push(i as u32);
+                    }
+                    if self.since[i] != u64::MAX {
+                        self.started.push((i as u32, self.since[i]));
+                        self.since[i] = u64::MAX;
+                        self.movers.push(i as u32);
+                    }
+                }
+            }
+            let (frames, last, since) = (self.frames, &self.last, &mut self.since);
+            self.movers.retain(|&i| {
+                let still = last[i as usize] + MOVING <= frames;
+                if still {
+                    since[i as usize] = frames;
+                }
+                !still
+            });
+        }
+        if self.movers.is_empty() || self.movers.len() * 2 > instances {
+            // None moves: each map holds every caster as last drawn, so the
+            // layers of the still ones go (and nothing need be drawn again).
+            self.rest();
+        } else if self.still.is_none() && !self.still_refused {
+            self.still = Still::new(device, self.side, self.count() as u32);
+            self.still_refused = self.still.is_none();
+        }
+    }
+    /// The layers of still casters go (as none moves, or the window rests):
+    /// each map holds all it was drawn with, and is drawn whole when a
+    /// caster in it next changes. Made again once one moves.
+    pub(crate) fn rest(&mut self) {
+        self.still = None;
+        self.stilled = [None; MAX_CASCADES];
+    }
+    /// The bytes the layers of still casters hold.
+    pub(crate) fn still_bytes(&self) -> u64 {
+        self.still.as_ref().map_or(0, |still| still.bytes)
+    }
+    /// Cascade `c`'s still casters, of those its mask holds (with none,
+    /// all), as a mask: those its layer of them, drawn now, holds.
+    pub(crate) fn still_casters(&mut self, c: usize, masked: bool) -> &[bool] {
+        let layer = self.stilled[c].unwrap_or(self.frames);
+        self.scratch.clear();
+        let mask = masked.then(|| &self.masks[c][..]);
+        self.scratch.extend(
+            self.since
+                .iter()
+                .enumerate()
+                .map(|(i, since)| *since <= layer && mask.is_none_or(|mask| mask[i])),
+        );
+        &self.scratch
+    }
+    /// Cascade `c`'s casters out of its layer of still casters, of those
+    /// its mask holds, in order: the movers, and those still since after the
+    /// layer was drawn (drawn with the movers until the cascade is next
+    /// drawn whole). From the few that moved, not every instance.
+    pub(crate) fn out_of_layer(&mut self, c: usize, masked: bool) -> &[u32] {
+        let layer = self.stilled[c].unwrap_or(self.frames);
+        let mask = masked.then(|| &self.masks[c][..]);
+        self.listed.clear();
+        self.listed.extend(
+            self.moved
+                .iter()
+                .copied()
+                .filter(|&i| self.since[i as usize] > layer && mask.is_none_or(|m| m[i as usize])),
+        );
+        self.listed.sort_unstable();
+        &self.listed
     }
 }
 
@@ -367,20 +673,54 @@ pub(crate) struct Frame<'a> {
 }
 
 impl Sun {
-    /// Which cascades this frame draws again (`redraw`), and what they then
-    /// hold: one whose casters changed, or the sun, at once; the nearest as
-    /// soon as the camera moves it; of the farther ones the camera moved,
-    /// the one waiting longest. Whether any is left waiting (the world then
-    /// draws again to catch up).
-    pub(crate) fn decide(&mut self, frame: &Frame) -> bool {
+    /// Which cascades take the fit wanted now (`adopt`): each the first
+    /// frame, or as the sun, the casters' count or the view's lens changes;
+    /// the nearest as soon as the camera moves it; of the farther ones the
+    /// camera moved, the one waiting longest. The rest keep the fit they
+    /// hold (`fit`), their casters culled against it.
+    pub(crate) fn adopt(&mut self, frame: &Frame) {
         let mut waiting = None::<(u32, usize)>;
         for c in 0..self.count() {
-            let fit = frame.fits[c];
+            let (fresh, moved) = match &self.held[c] {
+                None => (true, false),
+                Some(held) => (
+                    frame.lens || held.sun != frame.sun || held.instances != frame.instances,
+                    held.fit != frame.fits[c],
+                ),
+            };
+            self.adopt[c] = fresh || (moved && c == 0);
+            if !moved {
+                // Back where it was: nothing to catch up.
+                self.waited[c] = 0;
+            } else if !self.adopt[c] {
+                self.waited[c] += 1;
+                if waiting.is_none_or(|(w, _)| self.waited[c] > w) {
+                    waiting = Some((self.waited[c], c));
+                }
+            }
+        }
+        if let Some((_, c)) = waiting {
+            self.adopt[c] = true;
+        }
+    }
+    /// The fit cascade `c` is drawn with this frame (`adopt` first).
+    pub(crate) fn fit(&self, c: usize, fits: &[Fit]) -> Fit {
+        match &self.held[c] {
+            Some(held) if !self.adopt[c] => held.fit,
+            _ => fits[c],
+        }
+    }
+    /// Which cascades this frame draws again (`redraw`), how, and what they
+    /// then hold: one taking a new fit (`adopt`), or whose casters changed,
+    /// at once, the latter at the fit it holds. Whether any is left waiting
+    /// for its fit (the world then draws again to catch up).
+    pub(crate) fn decide(&mut self, frame: &Frame) -> bool {
+        let mut left = false;
+        for c in 0..self.count() {
             let mask = frame.masked.then(|| &self.masks[c][..]);
-            let now = match &self.held[c] {
-                None => true,
+            let (touched, baked) = match &self.held[c] {
+                None => (false, false),
                 Some(held) => {
-                    let sun = held.sun != frame.sun || held.instances != frame.instances;
                     // A caster written this frame that it held or now holds.
                     let touched = |m: Option<&[bool]>| match m {
                         None => !frame.changed.is_empty(),
@@ -389,33 +729,68 @@ impl Sun {
                             .iter()
                             .any(|r| m[r.start.min(m.len())..r.end.min(m.len())].contains(&true)),
                     };
-                    frame.lens || sun || touched(held.mask.as_deref()) || touched(mask)
+                    // One in its layer of still casters, which it held or
+                    // holds, that started moving.
+                    let baked = |m: Option<&[bool]>, layer: u64| {
+                        self.started.iter().any(|&(i, since)| {
+                            since <= layer && m.is_none_or(|m| m.get(i as usize) != Some(&false))
+                        })
+                    };
+                    let baked = self.stilled[c].is_some_and(|layer| {
+                        baked(held.mask.as_deref(), layer) || baked(mask, layer)
+                    });
+                    (touched(held.mask.as_deref()) || touched(mask), baked)
                 }
             };
-            let moved = self.held[c].as_ref().is_some_and(|held| held.fit != fit);
-            self.redraw[c] = now || (moved && c == 0);
-            if !self.redraw[c] && moved {
-                self.waited[c] += 1;
-                if waiting.is_none_or(|(w, _)| self.waited[c] > w) {
-                    waiting = Some((self.waited[c], c));
-                }
-            }
-        }
-        if let Some((_, c)) = waiting {
-            self.redraw[c] = true;
-        }
-        let mut left = false;
-        for c in 0..self.count() {
-            if self.redraw[c] {
-                self.waited[c] = 0;
-                self.held[c] = Some(Held {
-                    fit: frame.fits[c],
-                    mask: frame.masked.then(|| self.masks[c].clone()),
-                    instances: frame.instances,
-                    sun: frame.sun,
-                });
-            } else {
+            let adopt = self.adopt[c];
+            self.redraw[c] = adopt || touched || baked;
+            if !self.redraw[c] {
                 left |= self.waited[c] > 0;
+                continue;
+            }
+            // Only movers changed: from its still casters' layer. Else whole,
+            // its still casters into their layer first where it holds a
+            // mover, unless it's the nearest following the camera (drawn
+            // whole again as it moves on).
+            let following = c == 0
+                && adopt
+                && self.held[c]
+                    .as_ref()
+                    .is_some_and(|held| held.fit != frame.fits[c]);
+            let holds = || {
+                self.movers
+                    .iter()
+                    .any(|&i| mask.is_none_or(|m| m.get(i as usize) == Some(&true)))
+            };
+            self.how[c] = if self.still.is_none() {
+                Draw::Whole
+            } else if !adopt && !baked && self.stilled[c].is_some() {
+                Draw::Movers
+            } else if !following && holds() {
+                Draw::Both
+            } else {
+                Draw::Whole
+            };
+            match self.how[c] {
+                Draw::Whole => self.stilled[c] = None,
+                Draw::Both => self.stilled[c] = Some(self.frames),
+                Draw::Movers => {}
+            }
+            let mask = frame.masked.then(|| self.masks[c].clone());
+            match &mut self.held[c] {
+                Some(held) if !adopt => {
+                    held.mask = mask;
+                    left |= self.waited[c] > 0;
+                }
+                held => {
+                    self.waited[c] = 0;
+                    *held = Some(Held {
+                        fit: frame.fits[c],
+                        mask,
+                        instances: frame.instances,
+                        sun: frame.sun,
+                    });
+                }
             }
         }
         left
