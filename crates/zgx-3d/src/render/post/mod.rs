@@ -2,6 +2,7 @@
 //! last pass, which mixes bloom in, exposes the scene, maps its tones and
 //! writes the view's target. Made with a world's first frame with one on.
 mod apps;
+pub(in crate::render) use apps::Apps;
 /// For the tests: the HDR passes the frame's chain counted.
 #[cfg(test)]
 pub(super) fn counted(hdr: u8) {
@@ -95,9 +96,8 @@ pub(super) struct Chain {
     stand_in: wgpu::TextureView,
     /// The grading table on the device, by its id.
     table: Option<(u64, wgpu::TextureView)>,
-    /// The app's passes, made with the first; and a copy back into the
-    /// scene after an odd count of HDR ones.
-    apps: Option<apps::Apps>,
+    /// A copy back into the scene after an odd count of the app's HDR
+    /// passes (`Apps`, kept by the renderer).
     copy: wgpu::RenderPipeline,
     /// Automatic exposure's state (kept between frames, zero until it runs:
     /// unused), and its passes, made with the first frame adapting.
@@ -286,7 +286,6 @@ impl Chain {
             look,
             stand_in,
             table: None,
-            apps: None,
             copy,
             state: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("3D exposure state"),
@@ -304,9 +303,6 @@ impl Chain {
     /// Lets go of the bindings of the graph's targets (they hold them).
     pub(super) fn rest(&mut self) {
         self.binds = None;
-        if let Some(apps) = &mut self.apps {
-            apps.rest();
-        }
         if let Some(exposure) = &mut self.exposure {
             exposure.rest();
         }
@@ -328,18 +324,11 @@ impl Chain {
         exposure.run(device, encoder, graph, &self.state, settings, time)
     }
 
-    /// Whether the device refused the app's pass `id` (its shader or
-    /// pipeline): it isn't run.
-    pub(super) fn refused(&self, id: crate::world::PostPassId) -> bool {
-        self.apps
-            .as_ref()
-            .is_some_and(|a| a.failed.contains_key(&id))
-    }
-
     /// The app's passes of `stage` (`apps::Apps::run`).
     #[allow(clippy::too_many_arguments)]
     pub(super) fn apps(
         &mut self,
+        apps: &mut Apps,
         (device, queue): (&wgpu::Device, &wgpu::Queue),
         encoder: &mut wgpu::CommandEncoder,
         graph: &Graph,
@@ -348,8 +337,6 @@ impl Chain {
         into: (&wgpu::TextureView, wgpu::TextureFormat, bool),
         (index, time): (u64, std::time::Instant),
     ) {
-        let apps = self.apps.get_or_insert_with(|| apps::Apps::new(device));
-        apps.retain(passes);
         let copy = (index, time, &self.copy);
         apps.run(
             (device, queue),

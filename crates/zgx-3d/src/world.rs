@@ -682,6 +682,9 @@ pub(crate) enum Reason {
     PostPass = 1 << 13,
     /// Automatic exposure is still adapting (`world::post`).
     Exposure = 1 << 14,
+    /// An app's post pass is being compiled off the frame
+    /// (`render::post::Apps`).
+    PostCompiling = 1 << 16,
     /// For the tests of `Settle`: a reason no feature uses.
     Test = 1 << 31,
 }
@@ -2080,6 +2083,7 @@ mod tests {
             Reason::Audio,
             Reason::PostPass,
             Reason::Exposure,
+            Reason::PostCompiling,
             Reason::Test,
         ]
         .map(|r| r as u32);

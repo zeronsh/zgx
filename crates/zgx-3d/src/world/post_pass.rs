@@ -159,6 +159,8 @@ impl std::error::Error for PostError {}
 impl super::Settle {
     /// An animated post pass is in the chain (`PostPass::animated`).
     pub(crate) const POST: u32 = super::Reason::PostPass as u32;
+    /// An app's post pass is being compiled off the frame.
+    pub(crate) const POST_COMPILING: u32 = super::Reason::PostCompiling as u32;
 }
 
 /// A pass as the world keeps it: its WGSL whole (prelude and all), and its

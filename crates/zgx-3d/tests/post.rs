@@ -38,6 +38,19 @@ impl Window {
             .unwrap();
         self.gpu.readback().unwrap()
     }
+    /// Frames until nothing keeps `world` drawing (its post passes made, on
+    /// the compile worker): the last's pixels.
+    fn compiled(&mut self, world: &World) -> Vec<u8> {
+        for _ in 0..2000 {
+            world.view().invalidate();
+            let pixels = self.draw();
+            if !world.view().animating() {
+                return pixels;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("still compiling");
+    }
 }
 
 /// A lit sphere half in front of a lit wall, over a background.
@@ -620,7 +633,8 @@ fn the_apps_passes_run_in_their_stage_in_turn_with_their_parameters() {
     let Some(mut window) = Window::new(&world) else {
         return;
     };
-    let centre = |window: &mut Window| at(&window.draw(), SIZE / 2, SIZE / 2)[0];
+    // Each frame once the passes added are made.
+    let centre = |window: &mut Window| at(&window.compiled(&world), SIZE / 2, SIZE / 2)[0];
     let plain = centre(&mut window);
     let scale = || PostPass::new(SCALE).param("k", PostParam::Float);
     // One HDR pass doubling the light (before mapping: linear, so its

@@ -63,7 +63,7 @@ mod render;
 #[cfg(feature = "compute")]
 mod shader_sandbox;
 mod texture;
-#[cfg(any(feature = "compute", feature = "shaders"))]
+#[cfg(any(feature = "compute", feature = "shaders", feature = "post"))]
 mod worker;
 mod world;
 
@@ -100,7 +100,7 @@ pub use particles::{
 };
 pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};
-#[cfg(any(feature = "compute", feature = "shaders"))]
+#[cfg(any(feature = "compute", feature = "shaders", feature = "post"))]
 #[doc(hidden)]
 pub use worker::compile_threads;
 #[cfg(feature = "audio")]

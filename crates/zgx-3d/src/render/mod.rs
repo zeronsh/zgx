@@ -93,6 +93,10 @@ pub(crate) struct Renderer {
     /// borrows them, apart from `scratch`).
     poses: crate::world::Poses,
     scratch: Scratch,
+    /// The app's post passes' pipelines (made on the compile worker): kept
+    /// past the scene's format changing as the chain turns on.
+    #[cfg(feature = "post")]
+    apps: Option<post::Apps>,
 }
 impl Renderer {
     pub(crate) fn new(world: Weak<RefCell<Inner>>) -> Self {
@@ -101,6 +105,8 @@ impl Renderer {
             gpu: None,
             poses: Default::default(),
             scratch: Scratch::default(),
+            #[cfg(feature = "post")]
+            apps: None,
         }
     }
 }
@@ -619,20 +625,17 @@ impl Viewport for Renderer {
         // its last pass writes the target.
         #[cfg(feature = "post")]
         let chain = {
-            // The device's refusals left out (`post::Chain::refused`).
-            let refused = self.gpu.as_ref().and_then(|g| g.post.as_ref());
-            let staged = |stage| {
-                let n = world
-                    .post_passes
-                    .iter()
-                    .filter(|p| p.stage == stage && !refused.is_some_and(|c| c.refused(p.id)))
-                    .count();
-                n.min(usize::from(u8::MAX)) as u8
+            // The app's passes whose pipelines are in: those still being
+            // made (off the frame), or refused, are left out.
+            let ((hdr, display), compiling) = match world.post_passes.is_empty() {
+                true => ((0, 0), false),
+                false => self
+                    .apps
+                    .get_or_insert_with(|| post::Apps::new(frame.device))
+                    .ready_counts(frame.device, &world.post_passes, (format, encode)),
             };
-            let (hdr, display) = (
-                staged(crate::PostStage::Hdr),
-                staged(crate::PostStage::Display),
-            );
+            // Frames keep coming until they're in.
+            world.unsettle(crate::world::Settle::POST_COMPILING, compiling);
             #[cfg(test)]
             post::counted(hdr);
             // Automatic exposure where the device runs compute (else the
@@ -722,6 +725,8 @@ impl Viewport for Renderer {
             | if cascaded { Variant::CASCADED } else { 0 }
             | if probed { Variant::PROBES } else { 0 };
         let scratch = &mut self.scratch;
+        #[cfg(feature = "post")]
+        let apps = &mut self.apps;
         // The sun's single map's (none while its shadow is in cascades).
         let sun = (world.shadows && !cascaded)
             .then(|| {
@@ -1057,7 +1062,11 @@ impl Viewport for Renderer {
                     let device = (frame.device, frame.queue);
                     let passes = &world.post_passes;
                     let into = (target, format, encode);
+                    let Some(apps) = apps.as_mut() else {
+                        continue;
+                    };
                     post.apps(
+                        apps,
                         device,
                         frame.encoder,
                         &gpu.graph,
@@ -1079,6 +1088,10 @@ impl Viewport for Renderer {
     }
     fn device_changed(&mut self) {
         self.gpu = None;
+        #[cfg(feature = "post")]
+        {
+            self.apps = None;
+        }
     }
     fn rest(&mut self) {
         // The frame's temporaries go, and the bindings holding what was
@@ -1090,6 +1103,10 @@ impl Viewport for Renderer {
         #[cfg(feature = "post")]
         if let Some(chain) = &mut gpu.post {
             chain.rest();
+        }
+        #[cfg(feature = "post")]
+        if let Some(apps) = &mut self.apps {
+            apps.rest();
         }
         gpu.bindings.clear();
         gpu.behind_held = 0;
