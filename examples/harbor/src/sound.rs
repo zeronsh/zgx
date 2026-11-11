@@ -57,6 +57,12 @@ impl HarborSound {
             .bus("world")
             .ok_or_else(|| Error::Effect("no world bus".into()))?;
         world.set_audio(&audio, &bus)?;
+        // The sea lies under every way from a sound to the listener: it
+        // blocks none of them (and its grid's triangles needn't be tried).
+        world.set_sound_transmission(harbor.water, 1.);
+        if let Some(sea) = harbor.sea {
+            world.set_sound_transmission(sea.near, 1.);
+        }
         let seed = harbor.config.seed;
         let mut emitters = 0;
         let motor = sound(&sounds::crane_motor(seed))?;

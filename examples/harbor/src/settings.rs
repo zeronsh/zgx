@@ -62,8 +62,14 @@ impl Settings {
                 .push(runtime.effect(move || w.set_light(sun, scene::sun_light(s.get(), azimuth))));
         }
         {
-            let (s, w) = (self.exposure.clone(), world.clone());
-            effects.push(runtime.effect(move || w.set_exposure(s.get() - scene::EV)));
+            let (s, w, sea) = (self.exposure.clone(), world.clone(), harbor.sea);
+            effects.push(runtime.effect(move || {
+                let stops = s.get();
+                w.set_exposure(stops - scene::EV);
+                if let Some(sea) = sea {
+                    sea.set_exposure(&w, stops);
+                }
+            }));
         }
         {
             let (s, w) = (self.tone_mapping.clone(), world.clone());
@@ -93,8 +99,14 @@ impl Settings {
             }));
         }
         if let Some(rain) = harbor.rain {
-            let (s, w) = (self.rain.clone(), world.clone());
-            effects.push(runtime.effect(move || rain.set(&w, s.get())));
+            let (s, w, sea) = (self.rain.clone(), world.clone(), harbor.sea);
+            effects.push(runtime.effect(move || {
+                let on = s.get();
+                rain.set(&w, on);
+                if let Some(sea) = sea {
+                    sea.set_rain(&w, if on { 1. } else { 0. });
+                }
+            }));
         }
         {
             let (s, w, yard) = (self.yard.clone(), world.clone(), harbor.yard.clone());

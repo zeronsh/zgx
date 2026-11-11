@@ -15,10 +15,13 @@ Each entry is a primitive any game would need, in general form, with the smalles
 | G7 | A GPU view's frame time is the wall clock's, even under a `VirtualClock` | zgx-gpu (assigned by the coordinator) | open (bug) |
 | G8 | An emitter's rate, velocity and forces can't change once it's added | compute lane | open |
 | G9 | A 3D emitter can't start partway into its sound or take its own pitch | audio lane | open |
+| G10 | `scene_color` is the scene as displayed, not its light: a material can't put it back | graph lane (HDR target) | open |
+| G11 | Nothing says when a surface layer has taken effect | materials lane | open |
 | L1 | Spot lights are binned by their sphere, not their cone | lighting lane | open (performance) |
 | L2 | A light at zero intensity is still binned and shaded | lighting lane | open (performance) |
 | L3 | Frames aren't reproducible run to run with cascades or with clustered lights | this M1 Max's GPU at MSAA edges | M1 Max only, under investigation |
 | L4 | One moving caster redraws every caster in its cascades | lighting lane | open (performance) |
+| L5 | Sound occlusion tests a large mesh's triangles one by one, spending the frame's budget | audio lane | open (performance) |
 | M1 | Anything moving costs about 1.3 M instructions a frame over a camera-only frame | graph lane | measurement |
 | B1 | Short checkbox and radio labels lost their last glyph in the bench | the bench's setup | resolved by setup; engine default landing on main |
 
@@ -147,6 +150,26 @@ The harbor's four cranes play one synthesised drive, so the four loops start tog
 impl Emitter3d { pub fn from(self, seconds: f32) -> Self; pub fn pitch(self, pitch: f32) -> Self; }
 ```
 
+## G10. `scene_color` is the scene as displayed, not its light
+
+**Needed by:** any refracting or transmitting material: water, ice, thick glass, heat haze.
+
+`scene_color(uv, lod)` returns the opaque scene *as displayed*: exposed, tone mapped (ACES here), then decoded back to linear. A material wanting the light coming through it has to undo both. The exposure it can undo if the app hands it in: the harbor's water takes `unexpose`, which the panel's exposure keeps current. The tone curve it can't. So refraction through the harbor's water is the tone-mapped scene scaled back, brighter and flatter than the scene's light.
+
+It's the design's known gap (§1: no HDR target), and closes with R1's HDR target. The interface would then promise scene-linear light, before exposure, as §5.2 promises for HDR post passes.
+
+**Seen with G2:** the water sees mostly the flat background (nothing else is under it, and there's no `scene_depth` to tint by depth). That background is a display colour outside exposure, so un-exposed it comes through far too bright: the harbor's water reads turquoise. That's these gaps showing, not a look chosen.
+
+## G11. Nothing says when a surface layer has taken effect
+
+**Needed by:** any app waiting to show a change without a pop (a weather change, a first frame for a thumbnail).
+
+`World::shader_ready(id)` says when a mesh shader's pipelines are in. For a surface layer it stays false (here after 630 frames) although the layer draws: `WET=0` against wet changes 7–56% of the frame's pixels. A layer compiles into every lit mesh's pipelines, so its readiness is theirs, and nothing reports it.
+
+```rust
+impl World { pub fn layer_ready(&self, layer: ShaderId) -> bool; } // or shader_ready answering for layers too
+```
+
 ## L1. Spot lights are binned by their sphere, not their cone
 
 **Needed by:** any scene of floodlights, street lights or stage lights, aimed down or narrow.
@@ -194,6 +217,27 @@ So about 0.9 M instructions and most of the GPU time are the cascades' redraws.
 
 **What would close it:** keep still casters' depth apart from moving ones' (a static layer redrawn when the cascade or the sun moves, the dynamic casters drawn over a copy of it each frame), as the larger engines do.
 
+## L5. Sound occlusion tests a large mesh's triangles one by one
+
+**Needed by:** any world with sound and a large mesh: terrain, a ground, a heightfield, water.
+
+Occlusion's rays go through a tree of meshes' boxes, then test each candidate mesh's triangles in turn, up to 100,000 a frame (rays past that wait). The harbor's near water grid is one mesh of 320,000 triangles spanning the harbor, so every ray from the listener to an emitter enters its box and spends the frame's budget on it.
+
+Measured, 600 frames, everything on:
+
+| | Minstr/frame |
+| --- | --- |
+| water grid among the blockers | 43.1 |
+| the stock water (no grid) | 22.2 |
+| sound off, with the grid | 16.34 |
+| sound off, stock water | 16.13 |
+
+So about 21 M instructions a frame went to the grid's triangles.
+
+The harbor sets the sea's sound transmission to 1 (`set_sound_transmission`), as the API intends for what blocks nothing: water under every path. The cost then goes (22.6 M). A terrain that *does* occlude has no such way out.
+
+**What would close it:** a tree over each large mesh's triangles (or meshes split into clusters for rays), so a ray tests the few triangles near it.
+
 ## M1. Anything moving costs about 1.3 M instructions a frame over a camera-only frame
 
 **A measurement, for the graph lane.** Shadows off, no rain:
@@ -237,7 +281,8 @@ The frames' hashes changed with the HUD's text. The figures in the stage 0 and s
 | Rain landing on the water, the containers and the cranes | Collision with the depth buffer (`Collide::Depth`, design §5.4); today one plane, so drops over the water stop at the quay's height, 3 m above it | R7 |
 | Rain hidden behind what's in front of it | Particles drawn against the scene's depth: today they draw over every mesh (`docs/3d.md`, Particles) | R7, the pass list |
 | Rain that takes the lamps' and the sky's light | Lit particles: today they're unlit, so the rain's colour is set by hand on the harbor's physical scale | R7 |
-| Water | Custom materials, compute for waves | R4 |
+| Water's depth: shallows clear, deep water dark, the hull fading into it | `scene_depth` (with the depth prepass) | R2 |
+| Waves from a spectrum (FFT) | A compute pass writing a texture the water reads; the water now sums six waves in its own shader | R4's compute feeding materials |
 | Light shafts between the cranes | Froxel fog, density volumes | R6 |
 | Bounce light under the gantries | Probes, GTAO | R8 |
 
@@ -245,6 +290,9 @@ The frames' hashes changed with the HUD's text. The figures in the stage 0 and s
 
 - **Lamps by the hundred:** 221 point and spot lights in lumens through clusters (stage 1). There were 8 nearest at stage 0.
 - **Shadow detail over the quay:** four cascades over 600 m (stage 1).
+- **Water and wet (custom materials):**
+  - the sea is a material of the demo's own (`shaders/water.wgsl`): six wind waves moving a 1.6 km grid on frame time, ripples and rain rings in its normal, the scene behind seen through it;
+  - a surface layer (`shaders/wet.wgsl`) darkens and smooths everything while it rains, with puddles on the ground.
 - **Sound placed on emitters, with reverb zones:**
   - each crane's drive on its trolley, moving with the animator;
   - the ship's generator at its funnel;

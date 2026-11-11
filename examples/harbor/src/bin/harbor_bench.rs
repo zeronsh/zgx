@@ -15,6 +15,9 @@
 //! - `SHADOWS=0` turns the sun's shadows off, `CASCADES=0` its cascades,
 //!   `LAMPS=0` the lamps;
 //!   `SUN=degrees` sets the sun's elevation, its light's and the sky's;
+//!   `WATER=stock` draws the sea by the stock material, no wet; `WET=0`
+//!   keeps the wet layer dry; `WATER=dry` makes none, `WATER=opaque` a sea
+//!   that sees nothing behind it;
 //!   `RAIN=0` makes no rain; `SOUND=0` no sound (offline, gain 0 otherwise); `CRANES=idle` gives the cranes animators
 //!   playing nothing, `CRANES=still` none; `GANTRIES` (4) how many;
 //!   `LAMP_REACH` scales every lamp's range (0: none built); `EXPOSURE`
@@ -108,6 +111,14 @@ fn main() {
             Ok("still") => Cranes::Still,
             _ => Cranes::Working,
         },
+        // `WATER=stock`: the sea and the wet by the stock material.
+        water: std::env::var("WATER").as_deref() != Ok("stock"),
+        // `WATER=dry`: no wet layer; `WATER=opaque`: the sea sees nothing
+        // behind it.
+        water_parts: zgx_harbor::water::Parts {
+            refraction: std::env::var("WATER").as_deref() != Ok("opaque"),
+            wet: std::env::var("WATER").as_deref() != Ok("dry"),
+        },
         // `RAIN=0`: no rain made at all.
         rain: std::env::var("RAIN").as_deref() != Ok("0"),
         ..Config::default()
@@ -145,6 +156,12 @@ fn main() {
         .set(std::env::var("CASCADES").as_deref() != Ok("0"));
     // `EXPOSURE=stops`: the panel's exposure, over the harbor's own.
     settings.exposure.set(env("EXPOSURE", 0.));
+    // `WET=0`: rain, but nothing made wet (the wet layer's own effect).
+    if std::env::var("WET").as_deref() == Ok("0")
+        && let Some(wet) = harbor.sea.and_then(|sea| sea.wet)
+    {
+        let _ = world.set_param(wet, "wet", 0.);
+    }
     // `LAMPS=0`: every lamp dark (an attribution arm: the lights' cost).
     settings
         .lamps
@@ -222,6 +239,17 @@ fn main() {
 
     for k in 0..warm {
         draw(k as f32 * 1e-3, &mut pixels);
+    }
+    // Custom materials compile off the frame, and until then their meshes
+    // aren't drawn in this world (lit by an environment and clusters): warm
+    // on until the sea's are in, so no measured frame lacks it.
+    let mut waited = 0;
+    while let Some(sea) = harbor.sea
+        && !world.shader_ready(sea.shader)
+        && waited < 2000
+    {
+        draw(1e-3 * (warm + waited) as f32, &mut pixels);
+        waited += 1;
     }
     let _ = gpu_intervals();
     let before = perf::sample();
@@ -346,6 +374,15 @@ fn main() {
         "readback alone ms (in each frame above): p50 {:.2}",
         p(&readback, 50.)
     );
+    if let Some(sea) = harbor.sea {
+        println!(
+            "water: ready after {waited} frames past warm-up ({}), error {:?}; wet layer: ready {}, error {:?}",
+            world.shader_ready(sea.shader),
+            world.shader_error(sea.shader),
+            sea.wet.is_some_and(|wet| world.shader_ready(wet)),
+            sea.wet.and_then(|wet| world.shader_error(wet)),
+        );
+    }
     if let Some(rain) = harbor.rain {
         println!(
             "rain: drops {:?}, splashes {:?}",

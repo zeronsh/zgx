@@ -12,6 +12,10 @@ Everything is made by code here, from a seed: the quay, about 5,000 containers, 
 
 The sun's shadow is cut into four cascades over 600 m. It rains (`weather.rs`): particle streaks in a box that follows the camera, splashing where they land. The four gantry cranes work: each is a model the demo writes in code as a `.glb`, placed with an animator playing its cycle. The trolley runs out over the ship and back, and the spreader lowers and hoists.
 
+**The water and the wet** are the demo's own custom materials (`water.rs`, `shaders/`):
+- the sea: six wind waves moving a 1.6 km grid on frame time, ripples (and rain's rings) in its normal, and the scene behind seen through it;
+- a surface layer making everything wet while it rains, with puddles on the ground.
+
 **Sound** (`sound.rs`, `sounds.rs`) is placed on objects through zgx-3d's spatial audio:
 - each crane's drive on its trolley;
 - the ship's generator at its funnel;
@@ -77,6 +81,8 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | `LAMP_REACH` | 1 | Scales every lamp's range (0: none built) |
 | `RAIN=0` | | No rain made |
 | `SOUND=0` | | No sound (otherwise offline, at master gain zero) |
+| `WATER` | | `stock`: the plain material, no wet; `dry`: no wet layer; `opaque`: no refraction |
+| `WET=0` | | Rain, but nothing made wet |
 | `CRANES` | `working` | `idle`: animators playing nothing; `still`: no animators |
 | `GANTRIES` | 4 | Cranes on the quay |
 | `SUN` | 7 | The sun's elevation in degrees, its light and the sky's |
@@ -95,6 +101,7 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | `src/shapes.rs` | Geometry made in code: beams, corrugated containers, the lofted hull, the ridge |
 | `src/crane.rs`, `src/glb.rs` | The gantry crane, written in code as a `.glb` with its work as a clip, placed with an animator each |
 | `src/weather.rs` | The rain, on particle emitters |
+| `src/water.rs`, `src/shaders/` | The sea and the wet, as custom materials |
 | `src/sound.rs`, `src/sounds.rs` | Spatial sound on the harbor's objects; the sounds, synthesised |
 | `src/textures.rs` | Container wear, concrete, asphalt, from noise |
 | `src/sky.rs` | The dawn sky as an equirect `Environment`, and the sun |

@@ -50,6 +50,11 @@ pub struct Config {
     pub wind: [f32; 3],
     /// How the cranes are animated.
     pub cranes: Cranes,
+    /// The sea and the wet are drawn by the demo's materials; off, by the
+    /// stock one (flat and glossy).
+    pub water: bool,
+    /// Which of the water's parts are made.
+    pub water_parts: crate::water::Parts,
 }
 
 impl Default for Config {
@@ -65,6 +70,8 @@ impl Default for Config {
             rain: true,
             wind: [2.5, 0., 1.],
             cranes: Cranes::Working,
+            water: true,
+            water_parts: Default::default(),
         }
     }
 }
@@ -143,6 +150,8 @@ pub struct Harbor {
     pub funnel: ObjectId,
     /// The buoy out in the water (its bell).
     pub buoy: ObjectId,
+    /// The sea's and the wet's materials, if made (`Config::water`).
+    pub sea: Option<crate::water::Water>,
     /// The rain, if it was made (`Config::rain`, and a device for it).
     pub rain: Option<crate::weather::Rain>,
     /// Objects added, of every kind.
@@ -303,7 +312,23 @@ impl Harbor {
             }
             other => other.and_then(Result::ok),
         };
+        let sea = match config
+            .water
+            .then(|| crate::water::Water::new(world, water, config.wind, config.water_parts))
+        {
+            Some(Ok(sea)) => {
+                b.objects += 1;
+                b.triangles += crate::water::Water::triangles();
+                Some(sea)
+            }
+            Some(Err(error)) => {
+                eprintln!("harbor: water as the stock material: {error}");
+                None
+            }
+            None => None,
+        };
         Self {
+            sea,
             funnel,
             buoy,
             rain,
