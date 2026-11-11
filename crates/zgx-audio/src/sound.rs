@@ -130,13 +130,26 @@ impl Source {
                     .map_err(named)?;
             return Sound::from_samples(&samples, channels, rate);
         }
+        #[cfg(feature = "aac")]
+        if crate::decode::aac::is_aac(&bytes) {
+            let (samples, channels, rate) =
+                crate::decode::aac::decode_whole(bytes.into_owned().into()).map_err(named)?;
+            return Sound::from_samples(&samples, channels, rate);
+        }
         Err(named(Error::Format(Self::READS.into())))
     }
 
-    const READS: &'static str = if cfg!(feature = "vorbis") {
-        "not a format zgx-audio reads (WAV, Ogg Vorbis)"
-    } else {
-        "not a format zgx-audio reads (WAV; Ogg Vorbis with the `vorbis` feature)"
+    const READS: &'static str = match (cfg!(feature = "vorbis"), cfg!(feature = "aac")) {
+        (true, true) => "not a format zgx-audio reads (WAV, Ogg Vorbis, AAC)",
+        (true, false) => {
+            "not a format zgx-audio reads (WAV, Ogg Vorbis; AAC with the `aac` feature)"
+        }
+        (false, true) => {
+            "not a format zgx-audio reads (WAV, AAC; Ogg Vorbis with the `vorbis` feature)"
+        }
+        (false, false) => {
+            "not a format zgx-audio reads (WAV; Ogg Vorbis and AAC with the `vorbis` and `aac` features)"
+        }
     };
 
     /// Where a Vorbis decoder reads from: bytes already read, the bytes in
@@ -156,18 +169,34 @@ impl Source {
     /// Vorbis; WAV decoded whole and read out in pieces.
     pub(crate) fn decoder(&self) -> Result<Box<dyn crate::decode::Decode>, Error> {
         let head = match self {
-            Source::Bytes(bytes) => bytes.get(..4).map(|h| h.to_vec()).unwrap_or_default(),
+            Source::Bytes(bytes) => bytes[..bytes.len().min(8)].to_vec(),
             Source::File(path) => {
                 use std::io::Read;
-                let mut head = [0u8; 4];
+                let mut head = [0u8; 8];
                 let mut file = std::fs::File::open(path)
                     .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
                 let got = file.read(&mut head).unwrap_or(0);
                 head[..got].to_vec()
             }
         };
+        #[cfg(feature = "aac")]
+        if crate::decode::aac::is_aac(&head) {
+            // Compressed, read whole and decoded as it plays.
+            let bytes: std::sync::Arc<[u8]> = match self {
+                Source::Bytes(bytes) => bytes[..].into(),
+                Source::File(path) => std::fs::read(path)
+                    .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?
+                    .into(),
+            };
+            let aac = crate::decode::aac::Aac::new(bytes);
+            return match self {
+                Source::File(path) => aac.map_err(|e| e.within(&path.display().to_string())),
+                Source::Bytes(_) => aac,
+            }
+            .map(|a| Box::new(a) as Box<dyn crate::decode::Decode>);
+        }
         #[cfg(feature = "vorbis")]
-        if head == b"OggS" {
+        if head.starts_with(b"OggS") {
             let vorbis = crate::decode::vorbis::Vorbis::new(self.vorbis_bytes(None));
             return match self {
                 Source::File(path) => vorbis.map_err(|e| e.within(&path.display().to_string())),

@@ -349,3 +349,100 @@ fn streams_keep_to_the_engine_s_memory_budget_and_give_it_back() {
     assert_eq!(audio.stats().stream_memory, held / 2);
     audio.stream(wav(), Play::new()).unwrap();
 }
+
+#[cfg(all(feature = "aac", target_os = "macos"))]
+mod aac {
+    use super::*;
+
+    // tone.m4a and tone.aac: 0.5 s at 44.1 kHz, 440 Hz left and 660 Hz
+    // right at 1/16 of full scale, written as 16-bit PCM by a script of
+    // ours, encoded with macOS's afconvert (`-d aac -b 96000`, as m4af and
+    // as adts).
+    const M4A: &[u8] = include_bytes!("assets/tone.m4a");
+    const ADTS: &[u8] = include_bytes!("assets/tone.aac");
+
+    /// How much of `samples` (one channel at `rate`) is a sine of `hz`:
+    /// its amplitude, by least squares over whole windows.
+    fn amplitude(samples: &[f32], hz: f64, rate: f64) -> f64 {
+        let w = hz * std::f64::consts::TAU / rate;
+        let (mut ys, mut yc) = (0f64, 0f64);
+        for (i, &y) in samples.iter().enumerate() {
+            let (sin, cos) = (w * i as f64).sin_cos();
+            ys += f64::from(y) * sin;
+            yc += f64::from(y) * cos;
+        }
+        2. * ys.hypot(yc) / samples.len() as f64
+    }
+
+    #[test]
+    fn aac_loads_whole_gapless_and_sounds_like_its_source() {
+        let (audio, _mixer) = engine();
+        let sound = audio.load(Source::bytes(M4A)).unwrap();
+        assert_eq!((sound.channels(), sound.rate()), (2, 44_100));
+        // The MP4 says its priming and padding: exactly the source's frames.
+        assert_eq!(sound.frames(), 22_050);
+        let file = Source::file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/assets/tone.m4a"
+        ));
+        assert_eq!(audio.load(file).unwrap().frames(), 22_050);
+        // Raw ADTS can't say: the priming stays, a little longer.
+        let adts = audio.load(Source::bytes(ADTS)).unwrap();
+        assert!(adts.frames() >= 22_050 && adts.frames() < 22_050 + 4_096);
+    }
+
+    #[test]
+    fn an_aac_stream_sounds_as_it_does_loaded_whole_and_as_its_tone() {
+        let whole = {
+            let (audio, mut mixer) = engine();
+            let sound = audio.load(Source::bytes(M4A)).unwrap();
+            audio.play(&sound, Play::new()).unwrap();
+            mixer.frames(30_000)
+        };
+        let (audio, mut mixer) = engine();
+        audio.stream(Source::bytes(M4A), Play::new()).unwrap();
+        let streamed = blocks(&mut mixer, 30_000);
+        assert_eq!(whole, streamed);
+        // Played at 48 kHz: each side its tone at 1/16 of full scale, within
+        // a decibel, and the other side's barely.
+        let side = |c: usize| -> Vec<f32> {
+            whole.as_chunks::<2>().0[2_000..20_000]
+                .iter()
+                .map(|f| f[c])
+                .collect()
+        };
+        let (left, right) = (side(0), side(1));
+        let db = |a: f64| 20. * (a / (1. / 16.)).log10();
+        assert!(db(amplitude(&left, 440., 48_000.)).abs() < 1., "left");
+        assert!(db(amplitude(&right, 660., 48_000.)).abs() < 1., "right");
+        assert!(
+            db(amplitude(&left, 660., 48_000.)) < -40.,
+            "right in the left"
+        );
+    }
+
+    #[test]
+    fn a_looping_aac_stream_comes_round_again() {
+        // Half a second of tone, looped: its second and third times round
+        // are as loud as its first.
+        let (audio, mut mixer) = engine();
+        audio
+            .stream(Source::bytes(M4A), Play::new().looping(true))
+            .unwrap();
+        let out = blocks(&mut mixer, 72_000);
+        let left: Vec<f32> = out.as_chunks::<2>().0.iter().map(|f| f[0]).collect();
+        for second in [2_000..20_000, 50_000..68_000] {
+            let a = amplitude(&left[second.clone()], 440., 48_000.);
+            assert!((20. * (a * 16.).log10()).abs() < 1., "{second:?}: {a}");
+        }
+    }
+
+    #[test]
+    fn what_isn_t_aac_isn_t_taken_for_it() {
+        let (audio, _mixer) = engine();
+        let error = audio
+            .load(Source::bytes(&b"not a sound at all"[..]))
+            .unwrap_err();
+        assert!(error.to_string().contains("AAC"), "{error}");
+    }
+}

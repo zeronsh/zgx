@@ -17,6 +17,10 @@ categories = ["multimedia::audio", "game-development"]
 device = ["dep:cpal"]
 # Ogg Vorbis, loaded whole or streamed: lewton, pure Rust (MIT/Apache).
 vorbis = ["dep:lewton"]
+# AAC (MP4/M4A, ADTS), through the platform's own decoder: AudioToolbox
+# on macOS, no crate added. Elsewhere it builds, and AAC is an error that
+# says the platform has none yet.
+aac = []
 # Binaural sound for headphones: effects::Binaural, a partitioned
 # convolution with a spherical head made in code, or the app's own measured
 # head-related impulse responses (HrtfSet). No dependency, no data.
