@@ -129,9 +129,12 @@
 //X         let span = cluster_span(in.position.xy, in.world);
 //X         for (var i = span.x; i < span.y; i++) {
 //X             let lamp = lamp_at(cluster_light(i), in.world);
-//X //Q             lit += shade(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
-//X //R             lit += shade_specular(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
-//X //L             coat_lit += shade(vec3(0.0), 0.0, widened(coat_rough, lamp.widen), coat_n, v, lamp.l, lamp.radiance);
+            // A light listed but not reaching costs no shading.
+//X             if lamp.reach > 0.0 {
+//X //Q                 lit += shade(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
+//X //R                 lit += shade_specular(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
+//X //L                 coat_lit += shade(vec3(0.0), 0.0, widened(coat_rough, lamp.widen), coat_n, v, lamp.l, lamp.radiance);
+//X             }
 //X         }
         // Ambient light: the hemisphere seen by the surface for its diffuse
         // part, and along its reflection, by Fresnel, for its specular one

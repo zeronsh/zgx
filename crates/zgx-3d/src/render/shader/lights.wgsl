@@ -29,33 +29,43 @@
 //X     let bases = clusters[2];
 //X     return bases.x + clusters[bases.z + i / 4u][i % 4u] * 3u;
 //X }
-//X // A light reaching a fragment at `world`: which way, how much, and how
-//X // much wider its highlights are than a point's.
+//X // A light reaching a fragment at `world`: which way, how much, how
+//X // much wider its highlights are than a point's, and whether it reaches
+//X // at all (0: it doesn't, and nothing else of it was read or worked out).
 //X struct Lamp {
 //X     l: vec3<f32>,
 //X     radiance: vec3<f32>,
 //X     widen: f32,
+//X     reach: f32,
 //X }
 //X fn lamp_at(at: u32, world: vec3<f32>) -> Lamp {
-//X     // Read word by word (not as an array, which Metal may keep in memory).
+//X     // Read word by word (not as an array, which Metal may keep in memory),
+//X     // the rest only once it reaches.
 //X     let place = bitcast<vec4<f32>>(clusters[at]);
+//X     let to = place.xyz - world;
+//X     let d2 = dot(to, to);
+//X     let r2 = place.w * place.w;
+//X     if d2 >= r2 {
+//X         return Lamp(vec3(0.0), vec3(0.0), 0.0, 0.0);
+//X     }
 //X     let shine = bitcast<vec4<f32>>(clusters[at + 1u]);
 //X     let aim = bitcast<vec4<f32>>(clusters[at + 2u]);
-//X     let to = place.xyz - world;
-//X     let distance = max(length(to), 1e-4);
+//X     let distance = max(sqrt(d2), 1e-4);
 //X     let l = to / distance;
-//X     let radius = shine.w;
-//X     // Falling as the square of the distance, from a sphere of its radius
-//X     // (bounded where it nearly touches), smoothly to nothing at its reach.
-//X     let window = pow(clamp(1.0 - pow(distance / place.w, 4.0), 0.0, 1.0), 2.0);
-//X     let falloff = window / max(distance * distance + radius * radius, 1e-4);
 //X     // Within a spot's cone (all round: 1).
 //X     let cone = clamp(dot(aim.xyz, -l) + aim.w, 0.0, 1.0);
-//X     // A sphere's highlight: as a rougher surface's, by the angle it spans
-//X     // (Karis 2013, sphere lights' roughness).
+//X     let radius = shine.w;
+//X     // Falling as the square of the distance, from a sphere of its radius
+//X     // (bounded where it nearly touches), smoothly to nothing at its reach:
+//X     // (1 - (d / r)^4)^2, (d / r)^4 as (d² / r²)².
+//X     let x = d2 / r2;
+//X     let window = (1.0 - x * x) * (1.0 - x * x);
+//X     let falloff = window / max(d2 + radius * radius, 1e-4);
 //X     // Nothing where it doesn't reach, whatever it holds (never inf × 0).
 //X     let reach = falloff * cone * cone;
-//X     return Lamp(l, select(vec3(0.0), shine.rgb * reach, reach > 0.0), radius / (2.0 * distance));
+//X     // A sphere's highlight: as a rougher surface's, by the angle it spans
+//X     // (Karis 2013, sphere lights' roughness).
+//X     return Lamp(l, select(vec3(0.0), shine.rgb * reach, reach > 0.0), radius / (2.0 * distance), reach);
 //X }
 //X // `roughness` widened for a light `widen` across (its square, α, grown).
 //X fn widened(roughness: f32, widen: f32) -> f32 {
