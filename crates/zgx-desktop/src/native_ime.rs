@@ -42,11 +42,24 @@ pub(crate) fn discard_native_composition(window: &winit::window::Window) {
 /// password's. A password field takes no input method, as browsers' don't
 /// (Chrome turns it off there on every platform): its keys type their
 /// characters, nothing composes them where a candidate window shows them.
+/// iOS is the exception: this is its only way to the keyboard, which keeps
+/// from composing in a password itself (`isSecureTextEntry`).
 pub(crate) fn editable_editor(ui: &Ui, native_focused: bool) -> Option<zgx::widgets::EditorHandle> {
     native_focused
         .then(|| ui.focused_editor())
         .flatten()
-        .filter(|editor| !editor.is_read_only() && !editor.is_secure())
+        .filter(|editor| {
+            takes_input_method(
+                editor.is_read_only(),
+                editor.is_secure(),
+                cfg!(target_os = "ios"),
+            )
+        })
+}
+
+#[inline]
+fn takes_input_method(read_only: bool, secure: bool, ios: bool) -> bool {
+    !read_only && (!secure || ios)
 }
 
 /// What an input method is told an editor takes (winit's `ImePurpose`, a
@@ -708,5 +721,21 @@ mod tests {
         );
         editor.set_read_only(true);
         assert!(!password_focused(&ui, true));
+    }
+}
+
+#[cfg(test)]
+mod takes_input_method_tests {
+    use super::takes_input_method;
+
+    #[test]
+    fn a_password_takes_the_keyboard_only_on_ios() {
+        assert!(takes_input_method(false, false, false));
+        assert!(!takes_input_method(false, true, false));
+        assert!(!takes_input_method(true, false, false));
+        // On iOS a secure field has no other way to its keyboard.
+        assert!(takes_input_method(false, true, true));
+        assert!(takes_input_method(false, false, true));
+        assert!(!takes_input_method(true, true, true));
     }
 }

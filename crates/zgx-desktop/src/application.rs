@@ -1013,6 +1013,11 @@ impl Application {
     /// return once the application quits.
     pub fn run(self, build: impl FnOnce(&mut WindowContext)) -> Result<(), Box<dyn Error>> {
         zgx::profile::mark("run");
+        #[cfg(target_os = "ios")]
+        {
+            zgx::symbol::set_renderer(crate::ios_system::symbol);
+            zgx::native_control::set_system_ui(std::rc::Rc::new(crate::ios_system::IosSystemUi));
+        }
         // Who the app is to the system's notifications and badge.
         crate::notify::set_identity(crate::notify::Identity {
             application_id: self.application_id.clone(),
@@ -1915,6 +1920,24 @@ struct Host {
     scroll: crate::scroll_resample::ScrollResampler,
     /// Fingers and pens on the screen, as the pointer.
     touch: crate::touch::Touches,
+    /// UIKit's scrolling (`ios_scroll`), made with the window.
+    #[cfg(target_os = "ios")]
+    native_scroll: Option<crate::ios_scroll::NativeScroller>,
+    /// A finger that closed a row's actions: nothing else to the window.
+    #[cfg(target_os = "ios")]
+    touch_swallowed: Option<u64>,
+    /// UIKit's text input (`ios_text`), made with the window.
+    #[cfg(target_os = "ios")]
+    text_input: Option<crate::ios_text::TextInput>,
+    /// What the keyboard last covered, and the editor it was for.
+    #[cfg(target_os = "ios")]
+    keyboard_seen: (f32, Option<zgx::scene::NodeId>),
+    /// Where the caret lies in the focused field, while the keyboard is up.
+    #[cfg(target_os = "ios")]
+    keyboard_caret: Option<(f32, f32)>,
+    /// The page's offset last logged while the keyboard is up.
+    #[cfg(target_os = "ios")]
+    keyboard_logged: f32,
     /// What had focus before a finger pressed, for a pan to give it back.
     touch_focus: Option<zgx::scene::NodeId>,
     /// The last press was a finger's or a pen's, not a mouse's: an editor
@@ -2205,6 +2228,18 @@ impl Host {
                 scroll
             },
             touch: Default::default(),
+            #[cfg(target_os = "ios")]
+            native_scroll: None,
+            #[cfg(target_os = "ios")]
+            touch_swallowed: None,
+            #[cfg(target_os = "ios")]
+            text_input: None,
+            #[cfg(target_os = "ios")]
+            keyboard_seen: (0., None),
+            #[cfg(target_os = "ios")]
+            keyboard_caret: None,
+            #[cfg(target_os = "ios")]
+            keyboard_logged: -1.,
             touch_focus: None,
             #[cfg(windows)]
             touch_last: false,
@@ -2347,7 +2382,26 @@ impl Host {
     ) -> Result<(), zgx::widgets::LayoutFeedbackError> {
         for step in steps {
             match step {
-                crate::touch::Step::Dispatch(event) => self.dispatch(event)?,
+                crate::touch::Step::Dispatch(event) => {
+                    #[cfg(target_os = "ios")]
+                    let press = matches!(event, InputEvent::PointerDown { .. });
+                    self.dispatch(event)?;
+                    // A control takes no first responder from a field, as UIKit's
+                    // don't: Send keeps the keyboard up.
+                    #[cfg(target_os = "ios")]
+                    if press {
+                        let ui = &self.context.ui;
+                        let now = ui.input.focused();
+                        if now != self.touch_focus
+                            && now.is_some_and(|node| ui.editor(node).is_none())
+                            && self
+                                .touch_focus
+                                .is_some_and(|node| ui.editor(node).is_some())
+                        {
+                            ui.input.focus(&ui.scene, self.touch_focus);
+                        }
+                    }
+                }
                 crate::touch::Step::PanLifted => {
                     let ui = &self.context.ui;
                     ui.paging_gesture(zgx::input::ScrollGesture::Ended);
@@ -2359,7 +2413,33 @@ impl Host {
                         ui.input.focus(&ui.scene, self.touch_focus);
                     }
                 }
+                // UIKit gives each view its own touch, and one table's rows one
+                // between them.
+                #[cfg(target_os = "ios")]
+                crate::touch::Step::SecondFinger { first, second } => {
+                    let ui = &self.context.ui;
+                    let keep_first = ui.pressable_at(first.0, first.1);
+                    if ui.pressable_at(second.0, second.1) && !ui.presses_share(first, second) {
+                        let now = std::time::Instant::now();
+                        let next = self.touch.second_takes_press(keep_first, now);
+                        self.touch_steps(next)?;
+                    }
+                }
+                #[cfg(not(target_os = "ios"))]
+                crate::touch::Step::SecondFinger { .. } => {}
                 crate::touch::Step::TryPan { x, y, dx, dy } => {
+                    // UIKit tracks this finger; if it decides on a pan, it
+                    // cancels the touch. Until then it drags what it pressed.
+                    #[cfg(target_os = "ios")]
+                    if self
+                        .native_scroll
+                        .as_ref()
+                        .is_some_and(|s| s.tracked_axes().is_some())
+                    {
+                        let next = self.touch.decided(false);
+                        self.touch_steps(next)?;
+                        continue;
+                    }
                     // A gesture's, not a wheel's: a paged view follows it.
                     self.context
                         .ui
@@ -2384,6 +2464,132 @@ impl Host {
     }
     /// After a scroll: a gesture that became a swipe between pages is
     /// AppKit's to track from its next scroll (`swipes`).
+    /// What of the focused editor must show above the keyboard, in the window's
+    /// points: its box, or the caret in one too tall to show whole.
+    #[cfg(target_os = "ios")]
+    fn keyboard_target(&self) -> Option<zgx::scene::Rect> {
+        /// Taller than this, an editor shows around its caret.
+        const WHOLE: f32 = 200.;
+        let editor = self.context.ui.focused_editor()?;
+        let scene = self.context.ui.scene.borrow();
+        let field = scene.transformed_bounds(editor.node);
+        let caret = scene.transformed_bounds(editor.caret);
+        Some(if field.height <= WHOLE || caret.height <= 0. {
+            field
+        } else {
+            caret
+        })
+    }
+    /// Tell the scroller what must show above the keyboard.
+    #[cfg(target_os = "ios")]
+    fn keyboard_field(&self) {
+        let (Some(scroller), Some(at)) = (&self.native_scroll, self.keyboard_target()) else {
+            return;
+        };
+        let driver = self
+            .context
+            .ui
+            .scroll_driver_at(at.x + at.width / 2., at.y + 1.);
+        // Above the bar, which goes up with the keyboard.
+        let bar = self.native.keyboard_bar().map_or(0., |bar| {
+            self.context.ui.scene.borrow().bounds(bar.node).height + crate::ios_scroll::BAR_GAP
+        });
+        scroller.set_field(driver.map(|driver| (driver, at.y + at.height + bar)));
+    }
+    /// Tell the scroller of the app's keyboard bar. Whether `focused` lies in it:
+    /// the bar goes up by itself, the page stays.
+    #[cfg(target_os = "ios")]
+    fn keyboard_bar_pass(&self, focused: Option<zgx::scene::NodeId>) -> bool {
+        let Some(scroller) = &self.native_scroll else {
+            return false;
+        };
+        let scene = self.context.ui.scene.borrow();
+        let bar = self
+            .native
+            .keyboard_bar()
+            .filter(|bar| scene.contains(bar.node));
+        let Some(bar) = bar else {
+            scroller.set_bar(None);
+            return false;
+        };
+        let bounds = scene.bounds(bar.node);
+        scroller.set_bar(Some((bar.lift.clone(), bounds.y + bounds.height)));
+        let wrapper = scene.parent(bar.node);
+        focused.is_some_and(|focused| {
+            wrapper
+                .is_some_and(|wrapper| scene.ancestors(focused).any(|ancestor| ancestor == wrapper))
+        })
+    }
+    /// Every change of the page's offset while the keyboard is up, with what it
+    /// answers to: what moved a field back under the keyboard is then on record.
+    #[cfg(target_os = "ios")]
+    fn keyboard_log(&mut self, covered: f32) {
+        if covered <= 0. {
+            self.keyboard_logged = -1.;
+            return;
+        }
+        let Some(at) = self.keyboard_target() else {
+            return;
+        };
+        let Some(metrics) = self
+            .context
+            .ui
+            .scroll_driver_at(at.x + at.width / 2., at.y + 1.)
+            .and_then(|driver| driver.metrics())
+        else {
+            return;
+        };
+        let shown = metrics.offset + metrics.stretch;
+        if (shown - self.keyboard_logged).abs() >= 0.5 {
+            self.keyboard_logged = shown;
+            let edge = {
+                let scene = self.context.ui.scene.borrow();
+                let view = scene.bounds(scene.root());
+                view.y + view.height - covered
+            };
+            crate::ios_gestures::log(&format!(
+                "page {:.1} stretch {:.1} content {:.0} of {:.0}, keyboard edge {edge:.0}, field to {:.0}",
+                metrics.offset,
+                metrics.stretch,
+                metrics.extent.1,
+                metrics.size.1,
+                at.y + at.height,
+            ));
+        }
+    }
+    /// With the keyboard at rest, move the page so the field shows above it.
+    #[cfg(target_os = "ios")]
+    fn keyboard_show_field(&self, covered: f32) {
+        const ROOM: f32 = 28.;
+        let (Some(scroller), Some(at)) = (&self.native_scroll, self.keyboard_target()) else {
+            return;
+        };
+        let bottom = {
+            let scene = self.context.ui.scene.borrow();
+            let viewport = scene.bounds(scene.root());
+            viewport.y + viewport.height - covered
+        };
+        let bar = self.native.keyboard_bar().map_or(0., |bar| {
+            self.context.ui.scene.borrow().bounds(bar.node).height + crate::ios_scroll::BAR_GAP
+        });
+        let need = at.y + at.height + bar + ROOM - bottom;
+        crate::ios_gestures::log(&format!("keyboard show field, need {need:.0}"));
+        if need <= 2. {
+            return;
+        }
+        let Some(driver) = self
+            .context
+            .ui
+            .scroll_driver_at(at.x + at.width / 2., at.y + 1.)
+        else {
+            return;
+        };
+        let Some(metrics) = driver.metrics() else {
+            return;
+        };
+        let to = metrics.offset + metrics.stretch + need;
+        scroller.follow_keyboard(driver, to, Some(covered));
+    }
     fn after_scroll(&self) {
         #[cfg(all(target_os = "macos", zgx_winit_patched))]
         crate::swipes::after_scroll(&self.context.ui, self.window.as_deref());
@@ -2699,7 +2905,35 @@ impl Host {
             tsf.after_dispatch();
             return;
         }
-        #[cfg(not(windows))]
+        // UIKit's keyboard, over the same document as Windows' input methods.
+        #[cfg(target_os = "ios")]
+        if let Some(text) = &self.text_input {
+            if target != self.ime_target {
+                // A tap inside the field that gets focus, not focus from
+                // elsewhere, which leaves its caret alone.
+                let tapped = editor.as_ref().is_some_and(|editor| {
+                    let bounds = self
+                        .context
+                        .ui
+                        .scene
+                        .borrow()
+                        .transformed_bounds(editor.node);
+                    let (x, y) = self.cursor;
+                    x >= bounds.x
+                        && x <= bounds.x + bounds.width
+                        && y >= bounds.y
+                        && y <= bounds.y + bounds.height
+                });
+                text.focus(editor);
+                if tapped {
+                    text.first_tap();
+                }
+                self.ime_target = target;
+            }
+            text.after_dispatch();
+            return;
+        }
+        #[cfg(not(any(windows, target_os = "ios")))]
         let _ = editor;
         if let Some(window) = &self.window
             && target != self.ime_target
@@ -2749,7 +2983,12 @@ impl Host {
             self.recover_renderer();
         }
         self.spend_spare_time()?;
-        match self.draw_frame() {
+        #[cfg(target_os = "ios")]
+        let began = std::time::Instant::now();
+        let drawn = self.draw_frame();
+        #[cfg(target_os = "ios")]
+        crate::ios_refresh::note_draw(began);
+        match drawn {
             Err(error)
                 if error
                     .downcast_ref::<zgx_gpu::GpuError>()
@@ -2871,6 +3110,8 @@ impl Host {
             .ui
             .advance_interactions(std::time::Instant::now())?;
         self.context.ui.try_prepare_frame()?;
+        #[cfg(target_os = "ios")]
+        crate::ios_refresh::draw_mark(0);
         // What preparing it held back from the window (`Ui::contain_layout_feedback`).
         for message in crate::contain::take_reported() {
             self.show_error(&message);
@@ -3005,6 +3246,8 @@ impl Host {
                         }
                         let stats = stats?;
                         first_mark(&FIRST_RENDER, "first frame rendered");
+                        #[cfg(target_os = "ios")]
+                        crate::ios_refresh::frame_drawn();
                         self.native.render(&scene, damage)?;
                         if let Some(frame) = &mut self.damage_check {
                             *frame += 1;
@@ -3128,8 +3371,21 @@ impl Host {
                     });
                 // With native views, both planes and the views' geometry
                 // change in one transaction (committed when it drops).
+                #[cfg(target_os = "ios")]
+                crate::ios_refresh::draw_mark(1);
                 let transaction = self.native.begin();
+                // Before the base's on the desktops, whose base waits for its
+                // refresh point. On iOS after it: nothing else changes in a
+                // frame whose base didn't go out, or the page shows torn.
+                #[cfg(not(target_os = "ios"))]
                 self.native.present_overlay()?;
+                // A frame that changes more than the base (a plane shown or
+                // gone, the page landing from its animation) is finished before
+                // it commits: late, a phone shows the rest without it.
+                #[cfg(target_os = "ios")]
+                zgx_gpu::present_waits_for_gpu(
+                    self.native.planes_changing() || crate::ios_scroll::frame_awaited(),
+                );
                 // Checked above; `self` is borrowed in between, so no `if let`.
                 #[allow(clippy::unnecessary_unwrap)]
                 let renderer = self.renderer.as_mut().expect("checked above");
@@ -3192,6 +3448,27 @@ impl Host {
                     &mut self.caret_applied,
                     self.scale_factor,
                 );
+                #[cfg(target_os = "ios")]
+                crate::ios_refresh::draw_mark(2);
+                #[cfg(target_os = "ios")]
+                if status == zgx_gpu::PresentationStatus::Presented {
+                    self.native.present_overlay()?;
+                    crate::ios_refresh::draw_mark(3);
+                    self.native.apply();
+                    crate::ios_refresh::draw_mark(4);
+                    crate::ios_scroll::frame_done();
+                } else {
+                    crate::ios_gestures::log(&format!("base plane not presented: {status:?}"));
+                    window.request_redraw();
+                }
+                #[cfg(target_os = "ios")]
+                {
+                    zgx_gpu::present_waits_for_gpu(false);
+                    if self.native.take_plane_retry() {
+                        window.request_redraw();
+                    }
+                }
+                #[cfg(not(target_os = "ios"))]
                 self.native.apply();
                 FIRST_PRESENT.call_once(|| {
                     let mark = first_present_mark();
@@ -4262,6 +4539,54 @@ impl Host {
                 .and_then(|selector| crate::window_info::select_monitor(event_loop, selector));
             window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(display)));
         }
+        #[cfg(target_os = "ios")]
+        {
+            self.native_scroll = crate::ios_scroll::NativeScroller::new(
+                window.clone(),
+                self.context.ui.main_scroll_driver(),
+                self.context.ui.scroll_driver_finder(),
+                self.context.ui.scroll_driver_frame_finder(),
+                {
+                    let overscroll = self.context.window_info.overscroll.clone();
+                    move |stretch| {
+                        overscroll.set(stretch);
+                    }
+                },
+                {
+                    let scene = std::rc::Rc::downgrade(&self.context.ui.scene);
+                    move |x, y| {
+                        let scene = scene.upgrade()?;
+                        let scene = scene.try_borrow().ok()?;
+                        zgx::native_control::pull_refresh_at(&scene, x, y)
+                    }
+                },
+            );
+            self.text_input = crate::ios_text::TextInput::new(window.clone());
+            crate::ios_menu::install(&window, self.context.ui.scene.clone());
+            crate::ios_gestures::install(
+                &window,
+                self.context.ui.scene.clone(),
+                self.native_scroll.as_ref().map(|s| s.pan()),
+                {
+                    let finder = self.context.ui.scroll_driver_finder();
+                    move |x, y| finder(x, y, Some(true)).is_some()
+                },
+            );
+            // Listening before the first keyboard comes.
+            let _ = crate::ios_system::keyboard_height();
+            crate::ios_system::dump_accessibility_later(&window);
+            crate::ios_system::count_instances();
+            crate::ios_system::rotate_later(&window);
+            crate::ios_system::audio_session_from_bundle();
+            // A tap on a notification that launched the app reaches it.
+            crate::notify::install();
+            crate::ios_metrics::start();
+            // What the bars leave of it, before its first frame.
+            self.context
+                .window_info
+                .safe_area
+                .set(crate::ios_system::safe_area(&window));
+        }
         window.set_visible(self.state.visible);
         if self.state.minimized {
             window.set_minimized(true);
@@ -4721,6 +5046,27 @@ impl Host {
             self.context.windows.file_routes.lock().unwrap().remove(&id);
         }
     }
+    /// The app is no longer in front on iOS, perhaps for a moment. The keyboard
+    /// and the field it serves stay, as UIKit's do.
+    #[cfg(target_os = "ios")]
+    fn resign_active(&mut self) {
+        self.context.ui.cancel_interactions();
+        self.context.ui.set_window_active(false);
+        self.native.pointer_left();
+        self.context
+            .ui
+            .input
+            .dispatch(&self.context.ui.scene, InputEvent::PointerLeave);
+    }
+    #[cfg(target_os = "ios")]
+    fn become_active(&mut self) {
+        self.context.ui.set_window_active(true);
+        self.force = true;
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     fn suspend(&mut self) {
         self.unregister_file_surface();
         self.context.ui.set_presented(false);
@@ -4936,6 +5282,18 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 {
                     self.reported_size = Some(size);
+                }
+                #[cfg(target_os = "ios")]
+                if let Some(window) = &self.window {
+                    let insets = crate::ios_system::safe_area(window);
+                    if self
+                        .context
+                        .window_info
+                        .safe_area
+                        .with_untracked(|now| *now != insets)
+                    {
+                        self.context.window_info.safe_area.set(insets);
+                    }
                 }
                 // AppKit lays the window's buttons out again: zoomed, they go
                 // back where the title bar has them, now and once its layout
@@ -5215,6 +5573,28 @@ impl Host {
                 #[cfg(windows)]
                 {
                     self.touch_last = true;
+                }
+                // A touch that closes a row's actions is nothing else to the window.
+                #[cfg(target_os = "ios")]
+                {
+                    use winit::event::TouchPhase::{Cancelled, Ended, Started};
+                    if touch.phase == Started && zgx::native_control::take_swallowed_touch() {
+                        self.touch_swallowed = Some(touch.id);
+                    }
+                    if self.touch_swallowed == Some(touch.id) {
+                        if matches!(touch.phase, Ended | Cancelled) {
+                            self.touch_swallowed = None;
+                        }
+                        return Ok(());
+                    }
+                }
+                #[cfg(target_os = "ios")]
+                if touch.phase == winit::event::TouchPhase::Started
+                    && self.touch.idle()
+                    && let Some(scroller) = &self.native_scroll
+                {
+                    scroller.finger_down((p.x, p.y));
+                    self.touch.set_press_delay(scroller.tracked_axes());
                 }
                 if touch.phase == winit::event::TouchPhase::Started && self.touch.idle() {
                     self.touch_focus = self.context.ui.input.focused();
@@ -6226,6 +6606,109 @@ impl Host {
                 self.after_scroll();
             }
         }
+        #[cfg(target_os = "ios")]
+        {
+            let due = self.touch.due_press(std::time::Instant::now());
+            if !due.is_empty() {
+                self.touch_steps(due)?;
+            }
+            let covered = crate::ios_system::keyboard_height();
+            if self
+                .context
+                .window_info
+                .keyboard
+                .with_untracked(|now| *now != covered)
+            {
+                self.context.window_info.keyboard.set(covered);
+            }
+            // What must show above the keyboard: the scroller locks the page to the
+            // keyboard's edge itself, as the keyboard moves (`ios_scroll`).
+            let focused = self.context.ui.focused_editor().map(|editor| editor.node);
+            let (was_covered, was_focused) = self.keyboard_seen;
+            let in_bar = self.keyboard_bar_pass(focused);
+            if focused.is_some() && !in_bar {
+                self.keyboard_field();
+            } else if let Some(scroller) = &self.native_scroll {
+                scroller.set_field(None);
+            }
+            if (covered, focused) != self.keyboard_seen {
+                crate::ios_gestures::log(&format!(
+                    "keyboard covers {covered:.0}, focused {}",
+                    focused.is_some()
+                ));
+                self.keyboard_seen = (covered, focused);
+                // The system took the keyboard away (a finger's drag): so with focus.
+                let held = self.text_input.as_ref().is_some_and(|t| t.holds_keyboard());
+                if covered <= 0.
+                    && was_covered > 0.
+                    && focused.is_some()
+                    && focused == was_focused
+                    && !held
+                {
+                    self.touch_focus = None;
+                    self.context.ui.input.focus(&self.context.ui.scene, None);
+                    if let Some(text) = &self.text_input {
+                        text.focus(None);
+                        self.ime_target = None;
+                    }
+                }
+                // Focus moved with the keyboard already up, or came after it did (a
+                // finger on the move can put the keyboard's notice before this
+                // pass): it isn't moving for this field, so the page goes by itself.
+                if covered > 0. && focused != was_focused && !in_bar {
+                    self.keyboard_show_field(covered);
+                }
+            }
+            // Typing in a field a finger has moved under the keyboard brings it back,
+            // as a native text view's does.
+            let caret = focused
+                .filter(|_| covered > 0. && !in_bar)
+                .and_then(|_| self.context.ui.focused_editor())
+                .map(|editor| {
+                    let scene = self.context.ui.scene.borrow();
+                    let (caret, field) = (
+                        scene.transformed_bounds(editor.caret),
+                        scene.transformed_bounds(editor.node),
+                    );
+                    (caret.x - field.x, caret.y - field.y)
+                });
+            if caret != self.keyboard_caret {
+                let moved = caret.is_some() && self.keyboard_caret.is_some();
+                self.keyboard_caret = caret;
+                if moved {
+                    self.keyboard_show_field(covered);
+                }
+            }
+            self.keyboard_log(covered);
+            // UIKit's text gestures lie over the focused editor.
+            if let (Some(text), Some(editor)) = (&self.text_input, self.context.ui.focused_editor())
+            {
+                let bounds = self
+                    .context
+                    .ui
+                    .scene
+                    .borrow()
+                    .transformed_bounds(editor.node);
+                text.place(bounds);
+            }
+            // The keyboard's Return, as the key it is.
+            if self
+                .text_input
+                .as_ref()
+                .is_some_and(|text| text.take_enter())
+            {
+                let modifiers = zgx::input::Modifiers::default();
+                self.dispatch(InputEvent::KeyDown {
+                    key: zgx::input::Key::Enter,
+                    modifiers,
+                    repeat: false,
+                })?;
+                self.dispatch(InputEvent::KeyUp {
+                    key: zgx::input::Key::Enter,
+                    modifiers,
+                })?;
+            }
+        }
         // A finger held on selectable text selects the word there.
         if let Some((x, y)) = self.touch.hold(std::time::Instant::now())
             && self.context.ui.select_word_at(x, y)
@@ -6410,6 +6893,18 @@ impl Host {
                 .is_some_and(|link| link.running());
         #[cfg(not(any(target_os = "macos", windows)))]
         let paced = false;
+        // While UIKit tracks a finger or a scroll view decelerates, the loop runs
+        // at each touch and timer: a frame drawn at every pass comes unpaced
+        // (drawn-frame gaps p50 4.5 ms, p95 22 ms through a drag, not 16.7). It
+        // draws in `drawRect` instead, at Core Animation's commit, once a refresh.
+        #[cfg(target_os = "ios")]
+        if crate::ios_system::run_loop_tracking() {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            self.sync_frames();
+            return Ok(self.tasks.has_ready() || !self.pending.borrow().is_empty());
+        }
         // Scene damage accumulates until the refresh paints it in one frame.
         if !paced || due || self.frame_arrived || self.force {
             #[cfg(target_os = "macos")]
@@ -7508,6 +8003,9 @@ impl WindowManager {
     }
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl std::fmt::Display) {
         if self.error.is_none() {
+            // UIKit never gives `run_app` back, so nobody would read it.
+            #[cfg(target_os = "ios")]
+            eprintln!("zgx: {error}");
             self.error = Some(error.to_string());
         }
         event_loop.exit();
@@ -7578,6 +8076,7 @@ impl Drop for WindowManager {
         // Cloned public factories become inert at shutdown and must not keep
         // the clipboard worker or its owned display connection alive.
         let clipboard = self.factory.clipboard.borrow_mut().take();
+        #[cfg_attr(target_os = "ios", allow(clippy::drop_non_drop))]
         drop(clipboard);
         let mut pending = self.factory.pending.borrow_mut();
         for request in pending.iter() {
@@ -7686,6 +8185,12 @@ impl WindowManager {
             if host.context.window.is_closed() {
                 continue;
             }
+            // Back from `resign_active`, the window as it was.
+            #[cfg(target_os = "ios")]
+            if host.window.is_some() {
+                host.become_active();
+                continue;
+            }
             if let Err(e) = host.create_window(event_loop) {
                 self.fail(event_loop, e);
                 return;
@@ -7698,10 +8203,22 @@ impl WindowManager {
         }
     }
     fn suspended_turn(&mut self) {
-        self.active = false;
-        self.native.clear();
-        for host in self.hosts.values_mut() {
-            host.suspend();
+        // winit says this at `willResignActive`: for a glance at Control Center as
+        // for the app switcher, whose picture of the app is taken after it. The
+        // window stays, what it last showed with it; `Occluded` stops the drawing.
+        #[cfg(target_os = "ios")]
+        {
+            for host in self.hosts.values_mut() {
+                host.resign_active();
+            }
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            self.active = false;
+            self.native.clear();
+            for host in self.hosts.values_mut() {
+                host.suspend();
+            }
         }
     }
     fn user_event_turn(&mut self, event_loop: &ActiveEventLoop, event: Event) {

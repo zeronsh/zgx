@@ -766,6 +766,8 @@ impl ClickTracker {
         count
     }
 }
+#[cfg(any(target_os = "ios", test))]
+type PressKeepsFocus = Rc<dyn Fn(NodeId, Option<NodeId>) -> bool>;
 #[derive(Default)]
 struct State {
     /// Views that take keys while nothing is focused (`take_unfocused_keys`),
@@ -833,6 +835,10 @@ struct State {
     /// The press being dispatched dismissed a popover on blank space
     /// (`keep_focus_for_press`): it leaves focus where dismissing put it.
     keep_focus: bool,
+    /// Whether a press leaves focus on what has it, given what the press would
+    /// focus (`set_press_keeps_focus`).
+    #[cfg(any(target_os = "ios", test))]
+    press_keeps_focus: Option<PressKeepsFocus>,
     clicks: ClickTracker,
     /// The system's drag threshold, once the host gives it.
     drag_threshold: Option<f32>,
@@ -2262,6 +2268,28 @@ impl InputDispatcher {
             s.triggers.push((root, trigger));
         }
     }
+    /// Decide whether a press leaves focus on what has it, given what the
+    /// press would focus (iOS: a text field keeps it, `Ui::with_runtime`).
+    #[cfg(any(target_os = "ios", test))]
+    pub(crate) fn set_press_keeps_focus(
+        &self,
+        rule: impl Fn(NodeId, Option<NodeId>) -> bool + 'static,
+    ) {
+        self.state.borrow_mut().press_keeps_focus = Some(Rc::new(rule));
+    }
+    #[cfg(any(target_os = "ios", test))]
+    fn press_keeps_keyboard(&self, next: Option<NodeId>) -> bool {
+        let rule = self.state.borrow().press_keeps_focus.clone();
+        match (rule, self.focused()) {
+            (Some(rule), Some(focused)) => rule(focused, next),
+            _ => false,
+        }
+    }
+    #[cfg(not(any(target_os = "ios", test)))]
+    #[inline(always)]
+    fn press_keeps_keyboard(&self, _: Option<NodeId>) -> bool {
+        false
+    }
     /// The primary press about to be dispatched leaves focus as it is: a
     /// popover it dismissed on blank space gave focus back to its trigger.
     pub(crate) fn keep_focus_for_press(&self) {
@@ -3481,6 +3509,7 @@ impl InputDispatcher {
                         && (target.is_some() || self.focus_scope().is_none())
                         && (self.state.borrow().keeping_focus.is_empty()
                             || !self.press_keeps_focus(scene, target, *x, *y))
+                        && !self.press_keeps_keyboard(focus)
                     {
                         self.focus(scene, focus);
                     }
@@ -3905,6 +3934,36 @@ mod tests {
             y,
             button: PointerButton::Primary,
         }
+    }
+    #[test]
+    fn a_press_leaves_focus_where_the_rule_says() {
+        let (scene, a, b) = setup();
+        let d = InputDispatcher::new();
+        let input = NodeInput {
+            focusable: true,
+            ..Default::default()
+        };
+        let _a = d.register(a, input, |_| {});
+        // No rule: a press on nothing clears it, as on the desktop.
+        d.focus(&scene, Some(a));
+        d.dispatch(&scene, down(500.0, 500.0));
+        d.dispatch(&scene, up(500.0, 500.0));
+        assert_eq!(d.focused(), None);
+        // As iOS's: focus stays unless the press would give it to `a`.
+        d.set_press_keeps_focus(move |_, next| next != Some(a));
+        let _b = d.register(b, input, |_| {});
+        d.focus(&scene, Some(b));
+        d.dispatch(&scene, down(500.0, 500.0));
+        d.dispatch(&scene, up(500.0, 500.0));
+        assert_eq!(d.focused(), Some(b), "a press on nothing keeps it");
+        d.dispatch(&scene, down(10.0, 10.0));
+        d.dispatch(&scene, up(10.0, 10.0));
+        assert_eq!(d.focused(), Some(a), "what the rule lets take it does");
+        // Nothing asked of the rule with nothing focused: focus as ever.
+        d.focus(&scene, None);
+        d.dispatch(&scene, down(10.0, 10.0));
+        d.dispatch(&scene, up(10.0, 10.0));
+        assert_eq!(d.focused(), Some(a));
     }
     #[test]
     fn removal_during_dispatch_does_not_leave_stale_focus() {

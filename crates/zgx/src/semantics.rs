@@ -202,6 +202,13 @@ pub struct SemanticNode {
     pub hidden: bool,
     /// A checkable menu item that is one of a group: a radio item.
     pub radio: bool,
+    /// A text field for searching: marked so for assistive technology (iOS).
+    #[cfg(target_os = "ios")]
+    pub search: bool,
+    /// One of a table's rows (`View::table_row`): with the others of its
+    /// scroll view it takes one finger at a time (iOS).
+    #[cfg(any(target_os = "ios", test))]
+    pub table_row: bool,
     /// What few nodes have: `None` until one is set.
     rare: RareFields,
 }
@@ -291,6 +298,8 @@ impl SemanticNode {
         Self {
             role,
             label: label.into(),
+            #[cfg(target_os = "ios")]
+            search: false,
             value: None,
             named: false,
             checked: None,
@@ -304,6 +313,8 @@ impl SemanticNode {
             selected: None,
             live: None,
             hidden: false,
+            #[cfg(any(target_os = "ios", test))]
+            table_row: false,
             radio: false,
             rare: RareFields::default(),
         }

@@ -38,14 +38,18 @@ pub(crate) fn mount(
         let old_end = (end as isize - shift) as usize;
         let mut next: Vec<Range<usize>> =
             ranges.iter().filter(|r| r.end <= start).cloned().collect();
-        next.extend(
-            platform
-                .0
-                .misspellings(&text[start..end])
-                .into_iter()
-                .filter(|r| r.start < r.end && r.end <= end - start)
-                .map(|r| r.start + start..r.end + start),
-        );
+        let found = platform
+            .0
+            .misspellings(&text[start..end])
+            .into_iter()
+            .filter(|r| r.start < r.end && r.end <= end - start)
+            .map(|r| r.start + start..r.end + start);
+        // UITextField marks only a word the person just ended: nothing already
+        // there when it first shows, and in an edited paragraph only that word
+        // and what was marked before.
+        #[cfg(target_os = "ios")]
+        let found = only_typed(found.collect(), ranges, old, &text, fresh).into_iter();
+        next.extend(found);
         next.extend(
             ranges
                 .iter()
@@ -59,27 +63,73 @@ pub(crate) fn mount(
     });
 }
 
+/// The bytes `old` and `new` start with alike, on a character's boundary.
+fn common_prefix(old: &str, new: &str) -> usize {
+    old.char_indices()
+        .zip(new.chars())
+        .find(|((_, a), b)| a != b)
+        .map_or(old.len().min(new.len()), |((i, _), _)| i)
+}
+/// The bytes `old` and `new` end with alike.
+fn common_suffix(old: &str, new: &str) -> usize {
+    old.chars()
+        .rev()
+        .zip(new.chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum()
+}
+
 /// Where `old` and `new` differ, widened to whole paragraphs of `new`
 /// (`start..end`), and how much longer `new` is.
 fn changed_paragraphs(old: &str, new: &str) -> (usize, usize, isize) {
-    let prefix = old
-        .char_indices()
-        .zip(new.chars())
-        .find(|((_, a), b)| a != b)
-        .map_or(old.len().min(new.len()), |((i, _), _)| i);
-    let suffix = old[prefix..]
-        .chars()
-        .rev()
-        .zip(new[prefix..].chars().rev())
-        .take_while(|(a, b)| a == b)
-        .map(|(a, _)| a.len_utf8())
-        .sum::<usize>();
+    let prefix = common_prefix(old, new);
+    let suffix = common_suffix(&old[prefix..], &new[prefix..]);
     let changed_end = new.len() - suffix;
     let start = new[..prefix].rfind('\n').map_or(0, |i| i + 1);
     let end = new[changed_end..]
         .find('\n')
         .map_or(new.len(), |i| changed_end + i);
     (start, end, new.len() as isize - old.len() as isize)
+}
+
+/// Of `found` in `new`, what UITextField would mark (read in a reference app):
+/// none on the first look (`fresh`); else a word a typed delimiter just ended
+/// (the caret leaving it marks nothing), or one marked before (`marked`, in
+/// `old`), wherever the edit moved it.
+#[cfg(any(target_os = "ios", test))]
+fn only_typed(
+    found: Vec<Range<usize>>,
+    marked: &[Range<usize>],
+    old: &str,
+    new: &str,
+    fresh: bool,
+) -> Vec<Range<usize>> {
+    if fresh {
+        return Vec::new();
+    }
+    let prefix = common_prefix(old, new);
+    let suffix = common_suffix(&old[prefix..], &new[prefix..]);
+    let ended_at = new[prefix..new.len() - suffix]
+        .chars()
+        .next()
+        .is_some_and(|typed| !typed.is_alphanumeric())
+        .then_some(prefix);
+    let shift = new.len() as isize - old.len() as isize;
+    let was_marked = |range: &Range<usize>| {
+        marked.iter().any(|before| {
+            let moved = if before.start >= old.len() - suffix {
+                (before.start as isize + shift) as usize..(before.end as isize + shift) as usize
+            } else {
+                before.clone()
+            };
+            moved == *range
+        })
+    };
+    found
+        .into_iter()
+        .filter(|range| ended_at == Some(range.end) || was_marked(range))
+        .collect()
 }
 
 /// The context menu's spelling items for the misspelled word the selection
@@ -155,6 +205,54 @@ pub(crate) fn menu_items(
 #[cfg(test)]
 mod tests {
     use super::changed_paragraphs;
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn uikit_marks_only_a_word_just_ended_and_what_it_marked_before() {
+        use super::only_typed;
+        use std::ops::Range;
+        let none = Vec::<Range<usize>>::new();
+        // Already there when the field first shows: nothing marked.
+        assert_eq!(
+            only_typed(vec![0..3, 4..8], &[], "", "teh wrld", true),
+            none
+        );
+        // A space typed after the last word: it alone, not the two before.
+        assert_eq!(
+            only_typed(
+                vec![0..3, 4..8, 9..16],
+                &[],
+                "teh wrld recieve",
+                "teh wrld recieve ",
+                false
+            ),
+            vec![9..16]
+        );
+        // Punctuation ends a word as a space does.
+        assert_eq!(
+            only_typed(vec![0..3], &[], "teh", "teh.", false),
+            vec![0..3]
+        );
+        // A letter doesn't: the word is still being typed.
+        assert_eq!(only_typed(vec![0..3], &[], "te", "teh", false), none);
+        // A word marked before stays while another is typed.
+        assert_eq!(
+            only_typed(
+                vec![0..3, 4..8, 9..12],
+                &[0..3],
+                "teh wrld ab",
+                "teh wrld abc",
+                false
+            ),
+            vec![0..3]
+        );
+        // Text typed in front moves a marked word, which stays marked.
+        assert_eq!(
+            only_typed(vec![1..4, 5..9], &[0..3], "teh wrld", "zteh wrld", false),
+            vec![1..4]
+        );
+        // Corrected, it isn't found, so it isn't kept.
+        assert_eq!(only_typed(vec![], &[0..3], "teh", "the", false), none);
+    }
     #[test]
     fn an_edit_rechecks_only_the_paragraphs_it_touched() {
         assert_eq!(changed_paragraphs("", "ab cd"), (0, 5, 5));

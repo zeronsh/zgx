@@ -3,15 +3,19 @@ pub use cosmic_text::Affinity;
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping};
 
 /// `key`'s glyph image: swash's, or for a face whose shapes swash can't
-/// draw (macOS 26's PingFang, `hvgl` only) Core Text's. Asked only where
-/// swash gave none: a glyph cache miss with nothing to show.
+/// draw (macOS 26's PingFang, `hvgl` only; iOS's emoji) Core Text's. Asked
+/// only on a glyph cache miss.
 pub(crate) fn glyph_image(
     swash: &mut cosmic_text::SwashCache,
     fonts: &mut FontSystem,
     key: cosmic_text::CacheKey,
 ) -> Option<cosmic_text::SwashImage> {
+    #[cfg(target_os = "ios")]
+    if let Some(image) = crate::core_text_glyphs::color_glyph_image(fonts, key) {
+        return Some(image);
+    }
     let image = swash.get_image_uncached(fonts, key);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
     if image
         .as_ref()
         .is_none_or(|image| image.placement.width == 0 || image.placement.height == 0)
@@ -23,6 +27,39 @@ pub(crate) fn glyph_image(
 use std::{ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use zgx::scene::Rect;
+
+/// iOS's Bold Text: all text a step or two heavier, as the system's is. Only
+/// iOS has it: elsewhere a weight is shown as given, with nothing read.
+#[cfg(any(target_os = "ios", test))]
+static BOLD_TEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether text is shown heavier; whether that changed, so text shapes again.
+#[cfg(any(target_os = "ios", test))]
+pub fn set_bold_text(on: bool) -> bool {
+    BOLD_TEXT.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
+/// The weight text of `weight` shows at.
+#[cfg(any(target_os = "ios", test))]
+pub fn shown_weight(weight: u16) -> u16 {
+    if !BOLD_TEXT.load(std::sync::atomic::Ordering::Relaxed) {
+        return weight;
+    }
+    bolder(weight)
+}
+/// The weight text of `weight` shows at: as given, with no Bold Text here.
+#[cfg(not(any(target_os = "ios", test)))]
+#[inline(always)]
+pub fn shown_weight(weight: u16) -> u16 {
+    weight
+}
+#[cfg(any(target_os = "ios", test))]
+fn bolder(weight: u16) -> u16 {
+    match weight {
+        0..=400 => 600,
+        401..=600 => 700,
+        heavier => (heavier + 100).min(900),
+    }
+}
+
 /// The width text wraps at: the box's, and a thousandth of a point more.
 /// A box sized to its text gets that width back through layout arithmetic
 /// (a bubble's padding added, then taken off), where a float's last bit
@@ -115,6 +152,91 @@ fn font_features(settings: &[([u8; 4], u32)]) -> cosmic_text::FontFeatures {
     }
     features
 }
+/// The `wght` iOS's system font is drawn at for CSS's `weight`: the face
+/// UIKit gives for each of its weights (`systemFont(ofSize:weight:)`, read in a
+/// reference app, iOS 26.5: ultraLight 30.925, thin 110.725, light 274.315,
+/// regular 400, medium 510, semibold 590, bold 700, heavy 860, black 1000), in
+/// CSS's order of its nine (100 the lightest, as WebKit's `system-ui`), and
+/// between two of them in proportion. Other families take `weight` as it is.
+#[cfg(target_os = "ios")]
+#[inline]
+fn face_weight(family: &zgx::text_layout::FontFamily, weight: u16) -> u16 {
+    if matches!(family, zgx::text_layout::FontFamily::SansSerif) {
+        system_weight(weight)
+    } else {
+        weight
+    }
+}
+#[cfg(not(target_os = "ios"))]
+#[inline(always)]
+fn face_weight(_: &zgx::text_layout::FontFamily, weight: u16) -> u16 {
+    weight
+}
+#[cfg(any(target_os = "ios", test))]
+fn system_weight(weight: u16) -> u16 {
+    const FACES: [f32; 9] = [
+        30.925, 110.725, 274.315, 400., 510., 590., 700., 860., 1000.,
+    ];
+    let at = (f32::from(weight.clamp(100, 900)) - 100.) / 100.;
+    let (index, part) = (at.floor() as usize, at.fract());
+    let below = FACES[index];
+    let above = FACES[(index + 1).min(8)];
+    (below + (above - below) * part).round() as u16
+}
+/// iOS's system font's tracking at `size` points, in ems: the normal row of
+/// its `trak` table (SFUI.ttf, iOS 26), units of 1/2048 em, between its sizes
+/// as CoreText takes them: in proportion, then to a whole unit toward zero
+/// (read from CTLine widths at 237 sizes, 6 to 140 points: 23.5 units at 34
+/// points is 23, -14.5 at 13.25 is -14).
+#[cfg(any(target_os = "ios", test))]
+fn system_tracking(size: f32) -> f32 {
+    const TABLE: [(f32, f32); 21] = [
+        (6., 82.),
+        (9., 38.),
+        (10., 24.),
+        (11., 12.),
+        (12., 0.),
+        (13., -12.),
+        (14., -22.),
+        (15., -32.),
+        (16., -40.),
+        (17., -52.),
+        (20., -46.),
+        (22., -24.),
+        (24., 6.),
+        (28., 28.),
+        (32., 26.),
+        (36., 21.),
+        (50., 14.),
+        (64., 7.),
+        (80., 0.),
+        (100., 0.),
+        (138., 0.),
+    ];
+    let units = match TABLE.iter().position(|(at, _)| *at >= size) {
+        Some(0) => TABLE[0].1,
+        Some(next) => {
+            let ((a, ua), (b, ub)) = (TABLE[next - 1], TABLE[next]);
+            ua + (ub - ua) * (size - a) / (b - a)
+        }
+        None => 0.,
+    };
+    units.trunc() / 2048.
+}
+/// The most leading of `rich`'s runs (`LineHeight::with_leading`), the part of
+/// its lines' height that is leading: none unless a run sets it.
+#[inline]
+pub(crate) fn runs_leading(rich: &zgx::rich_text::RichText) -> f32 {
+    #[cfg(any(target_os = "ios", feature = "text-leading"))]
+    return (rich.runs().iter())
+        .map(|run| run.font.line_height.leading())
+        .fold(0., f32::max);
+    #[cfg(not(any(target_os = "ios", feature = "text-leading")))]
+    {
+        let _ = rich;
+        0.
+    }
+}
 // Inlined where it is called, as it was before `spaced` took the rare part
 // out of it (LTO had stopped inlining it into the text cache).
 #[inline(always)]
@@ -138,13 +260,25 @@ pub(crate) fn attrs(font: &zgx::text_layout::FontStyle, size: f32) -> Attrs<'_> 
         // titles get their display cut, tighter and narrower.
         .optical(size.round().clamp(1., 1000.) as u16)
         .masked(font.masked)
-        .weight(cosmic_text::Weight(font.weight.clamp(1, 1000)))
+        .weight(cosmic_text::Weight(
+            face_weight(&font.family, shown_weight(font.weight)).clamp(1, 1000),
+        ))
         .style(if font.italic {
             cosmic_text::Style::Italic
         } else {
             cosmic_text::Style::Normal
         });
+    #[cfg(target_os = "ios")]
+    let attrs = attrs.reveal_at(font.reveal_at);
     if font.letter_spacing == zgx::text_layout::LetterSpacing::ZERO {
+        // What UIKit does for its system font, unasked: a face's tracking at
+        // this size. Text with a spacing of its own keeps it.
+        #[cfg(target_os = "ios")]
+        if font.masked || matches!(font.family, FontFamily::SansSerif) {
+            // A secure field's dots are the system font's whatever the
+            // field's font (`uikit_mask` in the fork), so their tracking is.
+            return attrs.letter_spacing(system_tracking(size));
+        }
         attrs
     } else {
         spaced(attrs, font.letter_spacing, size)
@@ -205,14 +339,14 @@ fn fallback_spans<'a>(
         .map(|f| {
             let id = fonts.query_face(
                 family(f),
-                cosmic_text::Weight(font.weight),
+                cosmic_text::Weight(shown_weight(font.weight)),
                 if font.italic {
                     cosmic_text::Style::Italic
                 } else {
                     cosmic_text::Style::Normal
                 },
             );
-            id.and_then(|id| fonts.get_font(id, cosmic_text::Weight(font.weight)))
+            id.and_then(|id| fonts.get_font(id, cosmic_text::Weight(shown_weight(font.weight))))
         })
         .collect();
     let mut ranges: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
@@ -260,6 +394,7 @@ pub fn set_buffer_text(
     font: &zgx::text_layout::FontStyle,
     size: f32,
 ) {
+    buffer.set_leading(font.line_height.leading());
     let base = attrs(font, size);
     if font.fallbacks.is_empty() {
         buffer.set_text(text, &base, Shaping::Advanced, alignment(font));
@@ -312,7 +447,7 @@ impl ShapedText {
     ) -> Self {
         let text = text.into();
         let size = font_size.max(1.);
-        let line_height = font.line_height.resolve(size);
+        let line_height = font.line_height.resolve_in(&font.family, size);
         let mut buffer = Buffer::new_empty(Metrics::new(size, line_height));
         buffer.set_size(wrap_width(width), None);
         set_buffer_text(fonts, &mut buffer, &text, font, size);
@@ -352,10 +487,11 @@ impl ShapedText {
         width: Option<f32>,
     ) -> Self {
         let mut buffer = rich_buffer(fonts, rich, width, None);
-        let line_height = rich
-            .runs()
-            .first()
-            .map_or(1., |run| run.font.line_height.resolve(run.font_size));
+        let line_height = rich.runs().first().map_or(1., |run| {
+            run.font
+                .line_height
+                .resolve_in(&run.font.family, run.font_size)
+        });
         if rich.options() == Default::default()
             && rich.text().ends_with(['\r', '\n'])
             && ends_open(&buffer)
@@ -397,11 +533,14 @@ impl ShapedText {
     }
     /// Its width and height.
     pub fn size(&self) -> (f32, f32) {
-        self.buffer
+        let (width, height) = self
+            .buffer
             .layout_runs()
             .fold((0_f32, 0_f32), |(w, h), run| {
                 (w.max(run.line_w), h.max(run.line_top + run.line_height))
-            })
+            });
+        // No leading after the last line.
+        (width, (height - self.buffer.leading()).max(0.))
     }
     /// The caret position at `x`, `y`, if the text has one there.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<TextCursor> {
@@ -916,7 +1055,10 @@ impl CpuTextRaster {
         font: &zgx::text_layout::FontStyle,
     ) -> Vec<(i32, i32, cosmic_text::SwashImage)> {
         let size = size.max(1.);
-        let mut buffer = Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
+        let mut buffer = Buffer::new_empty(Metrics::new(
+            size,
+            font.line_height.resolve_in(&font.family, size),
+        ));
         buffer.set_size(wrap_width(Some(width)), Some(height));
         set_buffer_text(&mut self.fonts, &mut buffer, text, font, size);
         buffer.shape_until_scroll(&mut self.fonts, false);
@@ -1715,7 +1857,9 @@ pub(crate) fn truncated(
         {
             let mut buffer = Buffer::new_empty(Metrics::new(
                 run.font_size,
-                run.font.line_height.resolve(run.font_size),
+                run.font
+                    .line_height
+                    .resolve_in(&run.font.family, run.font_size),
             ));
             buffer.set_size(wrap_width(width), None);
             set_buffer_text(fonts, &mut buffer, "", &run.font, run.font_size);
@@ -1728,14 +1872,33 @@ pub(crate) fn truncated(
     if options.overflow == TextOverflow::Clip {
         return Some(make(fonts, end, false));
     }
+    // UILabel cuts at the character ("…brown fox jum…"), not at the wrap. A
+    // prefix too long still wraps and so doesn't fit, and the next word is as
+    // far as a cut can reach: it wrapped because it didn't fit whole.
+    #[cfg(test)]
+    let characters = CUT_CHARACTERS.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let characters = cfg!(target_os = "ios");
+    let last = if characters {
+        through_next_word(rich.text(), end)
+    } else {
+        end
+    };
     let mut boundaries: Vec<_> = rich
         .text()
         .grapheme_indices(true)
         .map(|(i, _)| i)
-        .take_while(|i| *i < end)
+        .take_while(|i| *i < last)
         .filter(|i| *i >= start)
+        .filter(|i| !characters || !ends_in_space(rich.text(), *i))
         .collect();
-    boundaries.push(end);
+    boundaries.push(last);
+    // Past the row the original's glyphs say nothing: the guess stays in it.
+    let in_row = if characters {
+        boundaries.partition_point(|i| *i <= end).max(1)
+    } else {
+        boundaries.len()
+    };
     let fits = |probe: &Buffer| {
         probe.layout_runs().count() <= limit
             && width.is_none_or(|w| probe.layout_runs().all(|r| r.line_w <= w + 0.001))
@@ -1765,7 +1928,7 @@ pub(crate) fn truncated(
         reach.sort_unstable_by_key(|&(end, _)| end);
         let (mut at, mut right) = (0, 0_f32);
         Some(
-            boundaries
+            boundaries[..in_row]
                 .iter()
                 .take_while(|&&cut| {
                     let cut = cut - offset;
@@ -1847,6 +2010,28 @@ thread_local! {
     /// Truncation searched by halving the row from its start alone, as it
     /// was before the guess (`rich_buffer`): what the guess must match.
     static HALVING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+#[cfg(test)]
+thread_local! {
+    /// Truncation cutting at the character, as iOS's does.
+    static CUT_CHARACTERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// `end`, on through the word after it: past any white space, to the next.
+fn through_next_word(text: &str, end: usize) -> usize {
+    let rest = &text[end..];
+    let word = rest.len() - rest.trim_start().len();
+    end + word
+        + rest[word..]
+            .find(char::is_whitespace)
+            .unwrap_or(rest.len() - word)
+}
+/// Whether `text` before `at` ends in white space: no cut for an ellipsis,
+/// which UILabel sets against the word before it.
+fn ends_in_space(text: &str, at: usize) -> bool {
+    text[..at]
+        .chars()
+        .next_back()
+        .is_some_and(char::is_whitespace)
 }
 thread_local! {
     /// Ellipses' widths by the font and size they are shaped in
@@ -1940,7 +2125,10 @@ pub(crate) fn plain_buffer_unshaped(
     recycled: Vec<cosmic_text::BufferLine>,
 ) -> Buffer {
     let size = font_size.max(1.);
-    let mut buffer = Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
+    let mut buffer = Buffer::new_empty(Metrics::new(
+        size,
+        font.line_height.resolve_in(&font.family, size),
+    ));
     buffer.lines = recycled;
     set_buffer_text(fonts, &mut buffer, text, font, size);
     buffer
@@ -1953,8 +2141,11 @@ pub(crate) fn rich_buffer_unshaped(
 ) -> Buffer {
     let base = rich.runs().first();
     let size = base.map_or(1., |run| run.font_size.max(1.));
-    let line_height = base.map_or(1., |run| run.font.line_height.resolve(size));
+    let line_height = base.map_or(1., |run| {
+        run.font.line_height.resolve_in(&run.font.family, size)
+    });
     let mut buffer = Buffer::new_empty(Metrics::new(size, line_height));
+    buffer.set_leading(runs_leading(rich));
     buffer.lines = recycled;
     let default_font = zgx::text_layout::FontStyle::default();
     let default_attrs = attrs(base.map_or(&default_font, |run| &run.font), size);
@@ -1997,7 +2188,9 @@ pub(crate) fn rich_buffer_unshaped(
         let attributes = attributes
             .metrics(Metrics::new(
                 run.font_size.max(1.),
-                run.font.line_height.resolve(run.font_size.max(1.)),
+                run.font
+                    .line_height
+                    .resolve_in(&run.font.family, run.font_size.max(1.)),
             ))
             .metadata(if Some(index) == ellipsis_run {
                 usize::MAX
@@ -2123,6 +2316,110 @@ mod rich_tests {
             "the two families differ: {regular} {geist}"
         );
         assert_eq!(medium, regular, "its own Book, not Geist's Medium");
+    }
+    #[test]
+    fn ios_truncation_cuts_at_the_character_and_elsewhere_at_the_row() {
+        use zgx::text_layout::{TextOptions, TextOverflow};
+        assert_eq!(through_next_word("fox jumps over", 3), 9);
+        assert_eq!(through_next_word("fox jumps", 4), 9);
+        assert_eq!(through_next_word("fox", 3), 3);
+        assert!(ends_in_space("fox ", 4) && !ends_in_space("fox ", 3));
+
+        let mut fonts = FontSystem::new();
+        let text = "The quick brown fox jumps over the lazy dog";
+        let rich = |clamp| {
+            RichText::new(
+                text,
+                vec![TextRun {
+                    range: 0..text.len(),
+                    font_size: 20.,
+                    ..Default::default()
+                }],
+            )
+            .unwrap()
+            .with_options(TextOptions {
+                overflow: TextOverflow::Ellipsis,
+                line_clamp: std::num::NonZeroU32::new(clamp),
+            })
+        };
+        let shown = |buffer: &Buffer| {
+            buffer
+                .lines
+                .iter()
+                .map(|line| line.text().to_owned())
+                .collect::<String>()
+        };
+        for clamp in [1, 2] {
+            for width in (60..400).step_by(11) {
+                let width = width as f32 + 0.37;
+                let by_row = shown(&rich_buffer(&mut fonts, &rich(clamp), Some(width), None));
+                CUT_CHARACTERS.with(|c| c.set(true));
+                let buffer = rich_buffer(&mut fonts, &rich(clamp), Some(width), None);
+                CUT_CHARACTERS.with(|c| c.set(false));
+                let by_character = shown(&buffer);
+                assert!(
+                    buffer.layout_runs().count() <= clamp as usize,
+                    "{by_character:?}"
+                );
+                assert!(
+                    buffer.layout_runs().all(|r| r.line_w <= width + 0.001),
+                    "{by_character:?}"
+                );
+                let (Some(by_row), Some(kept)) =
+                    (by_row.strip_suffix('…'), by_character.strip_suffix('…'))
+                else {
+                    assert_eq!(by_row, by_character, "uncut either way at {width}");
+                    continue;
+                };
+                // Never fewer characters than the word cut kept, never a
+                // space before the ellipsis, and only ever more of the text.
+                assert!(
+                    kept.len() >= by_row.trim_end().len(),
+                    "{kept:?} < {by_row:?} at {width}"
+                );
+                assert_eq!(kept, kept.trim_end(), "{kept:?} at {width}");
+                assert!(text.starts_with(kept), "{kept:?} at {width}");
+                // Nothing further would have fitted: one more character is
+                // too wide, or wraps past the clamp.
+                let more = text[kept.len()..].chars().next().map_or(0, char::len_utf8);
+                if more > 0 && kept.len() + more < text.len() {
+                    let longer = format!("{}…", &text[..kept.len() + more]);
+                    if !longer.ends_with(" …") {
+                        let rich = RichText::new(
+                            longer.as_str(),
+                            vec![TextRun {
+                                range: 0..longer.len(),
+                                font_size: 20.,
+                                ..Default::default()
+                            }],
+                        )
+                        .unwrap();
+                        let buffer = rich_buffer(&mut fonts, &rich, Some(width), None);
+                        assert!(
+                            buffer.layout_runs().count() > clamp as usize,
+                            "{longer:?} would have fitted at {width}"
+                        );
+                    }
+                }
+            }
+        }
+        // A mid-word cut does happen.
+        let mut cut_a_word = false;
+        for width in (60..400).step_by(11) {
+            CUT_CHARACTERS.with(|c| c.set(true));
+            let kept = shown(&rich_buffer(
+                &mut fonts,
+                &rich(1),
+                Some(width as f32 + 0.37),
+                None,
+            ));
+            CUT_CHARACTERS.with(|c| c.set(false));
+            if let Some(kept) = kept.strip_suffix('…') {
+                let next = text[kept.len()..].chars().next();
+                cut_a_word |= next.is_some_and(|c| !c.is_whitespace());
+            }
+        }
+        assert!(cut_a_word);
     }
     #[test]
     fn display_line_clamp_shapes_ellipsis_and_excludes_hidden_link_geometry() {
@@ -2836,6 +3133,45 @@ mod monospace_fallback_tests {
 
 #[cfg(test)]
 mod wash_tests {
+    #[test]
+    fn bold_text_makes_every_weight_heavier_and_keeps_their_order() {
+        let shown: Vec<u16> = [100, 400, 500, 600, 700, 800, 900]
+            .map(super::bolder)
+            .to_vec();
+        assert_eq!(shown, [600, 600, 700, 700, 800, 900, 900]);
+        assert!(shown.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+    #[test]
+    fn ios_tracking_is_core_texts_whole_units() {
+        // CoreText's tracking, solved from CTLine widths of a kern-free run
+        // (iOS 26.5), in 1/2048 em.
+        for (size, units) in [
+            (6., 82.),
+            (6.25, 78.),
+            (13.25, -14.),
+            (17., -52.),
+            (17.25, -51.),
+            (28.5, 27.),
+            (33., 24.),
+            (34., 23.),
+            (34.5, 22.),
+            (36., 21.),
+            (150., 0.),
+        ] {
+            assert_eq!(super::system_tracking(size) * 2048., units, "{size}");
+        }
+    }
+    #[test]
+    fn ios_system_weights_are_uikits_faces() {
+        // `systemFont(ofSize:weight:)`'s `wght`, ultraLight to black, read
+        // in a reference app (iOS 26.5), to the axis's whole units.
+        let faces = [100, 200, 300, 400, 500, 600, 700, 800, 900].map(super::system_weight);
+        assert_eq!(faces, [31, 111, 274, 400, 510, 590, 700, 860, 1000]);
+        assert_eq!(super::system_weight(650), 645);
+        assert_eq!(super::system_weight(1), 31);
+        assert_eq!(super::system_weight(1000), 1000);
+    }
+
     use super::*;
     use zgx::{
         rich_text::{RichText, TextRun},

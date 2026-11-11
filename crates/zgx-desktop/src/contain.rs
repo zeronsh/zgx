@@ -128,6 +128,7 @@ thread_local! {
 }
 /// Keep `message` for the window's banner (`run`'s `report` where only the
 /// window host can show it).
+#[cfg_attr(target_os = "ios", allow(dead_code))]
 pub(crate) fn queue(message: &str) {
     REPORTED.with(|reported| reported.borrow_mut().push(message.to_string()));
 }

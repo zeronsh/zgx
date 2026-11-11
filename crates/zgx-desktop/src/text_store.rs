@@ -83,6 +83,7 @@ impl TextStore {
     }
     /// The focused editor's input scope (`input_scope`), the default with
     /// none.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub(crate) fn input_scope(&self) -> i32 {
         input_scope(
             self.editor
@@ -92,6 +93,11 @@ impl TextStore {
     }
     pub(crate) fn is_composing(&self) -> bool {
         self.composition.is_some()
+    }
+    /// The open composition's range in the document (iOS's marked text).
+    #[cfg(target_os = "ios")]
+    pub(crate) fn composition_range(&self) -> Option<Range<usize>> {
+        self.composition.clone()
     }
     /// The document's pieces: the committed text before the selection (its
     /// UTF-16 length and byte end), the preedit if any (in place of the
@@ -188,6 +194,34 @@ impl TextStore {
         let start = start.min(end);
         let (a, b) = (shown_byte(editor, start), shown_byte(editor, end));
         editor.text_area(a..b)
+    }
+    /// The document's offset nearest the window's point `(x, y)`.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn offset_at(&self, x: f32, y: f32) -> Option<usize> {
+        let editor = self.editor.as_ref()?;
+        let byte = editor.offset_at(x, y)?;
+        Some(editor.editor.borrow_mut().byte_to_utf16(byte))
+    }
+    /// Where `start..end` shows, a box for each line it runs on.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn line_areas(&self, start: usize, end: usize) -> Vec<zgx::scene::Rect> {
+        /// Past this it is one box: a phone's selection of a long document.
+        const CHARACTERS: usize = 4096;
+        let mut lines: Vec<zgx::scene::Rect> = Vec::new();
+        if end.saturating_sub(start) > CHARACTERS {
+            lines.extend(self.area(start, end));
+            return lines;
+        }
+        for at in start..end {
+            let Some(area) = self.area(at, at + 1) else {
+                continue;
+            };
+            match lines.last_mut() {
+                Some(line) if (line.y - area.y).abs() < 1. => *line = line.union(area),
+                _ => lines.push(area),
+            }
+        }
+        lines
     }
     /// The selection (`GetSelection`): the caret or selection in the
     /// composition while there is one, else the editor's; its start, its end,
@@ -366,6 +400,7 @@ impl TextStore {
     /// The input method marked its composition's clauses (its display
     /// attributes, read after each of its edits): document ranges and how
     /// each is marked. Ranges outside the composition are left out.
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     pub(crate) fn mark_clauses(&mut self, clauses: &[(Range<usize>, ClauseStyle)]) {
         let (Some(editor), Some(composition)) = (self.editor.clone(), self.composition.clone())
         else {
@@ -419,6 +454,23 @@ impl TextStore {
     /// edits it didn't make (typing, the app writing its value, undo): to
     /// tell it (`OnTextChange`, `OnSelectionChange`). The whole text, once,
     /// for a text change: Windows takes a wider range than changed.
+    /// The text's revision (`clears_on_first_edit`).
+    #[cfg(target_os = "ios")]
+    pub(crate) fn revision(&self) -> u64 {
+        self.editor
+            .as_ref()
+            .map_or(0, |editor| seen(editor).revision)
+    }
+    /// What's there now is what the platform knows, as it set it itself: not
+    /// to be told back as a change at the next dispatch, which an idle field
+    /// has only at the next touch, just as UIKit asks whether that's on the
+    /// caret.
+    #[cfg(target_os = "ios")]
+    pub(crate) fn told(&mut self) {
+        if let Some(editor) = &self.editor {
+            self.seen = Some(seen(editor));
+        }
+    }
     pub(crate) fn changes(&mut self, old_len: usize) -> Vec<Change> {
         let cancelled = self.drop_cancelled();
         let Some(editor) = &self.editor else {
@@ -456,6 +508,7 @@ impl TextStore {
 /// editor's `InputMode`: which touch keyboard Windows shows, what its input
 /// methods offer. `None`'s keyboard isn't shown at all (the host's part);
 /// its scope is the default.
+#[cfg_attr(target_os = "ios", allow(dead_code))]
 pub(crate) fn input_scope(mode: InputMode) -> i32 {
     match mode {
         InputMode::Text | InputMode::None => 0, // IS_DEFAULT
@@ -540,8 +593,153 @@ fn seen(editor: &EditorHandle) -> Seen {
     }
 }
 
+/// A line's box `(y, height)` grown to `line` about its middle: never shrunk,
+/// a line of its own that tall keeping its place (iOS, `field_line`).
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn grown_line(y: f64, height: f64, line: f64) -> (f64, f64) {
+    if height >= line {
+        (y, height)
+    } else {
+        (y - (line - height) / 2., line)
+    }
+}
+/// The word to select at `caret` (UTF-16, as the store counts): the word
+/// holding it, or the one just before it; none where only spaces are around.
+/// `select:`, as a caret's Select in the edit menu takes (iOS).
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn word_at(units: &[u16], caret: usize) -> Option<(usize, usize)> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let text = String::from_utf16_lossy(units);
+    let mut found = None;
+    let mut at = 0;
+    for piece in text.split_word_bounds() {
+        let len = piece.encode_utf16().count();
+        let word = piece.chars().any(char::is_alphanumeric);
+        if word && at <= caret && caret <= at + len {
+            found = Some((at, at + len));
+            // A word starting here is the caret's rather than one ending here.
+            if caret < at + len {
+                break;
+            }
+        }
+        at += len;
+    }
+    found
+}
+/// Whether an edit in a secure field replaces all its text, as UITextField's
+/// does (read in a reference app, by first keystroke and by backspace): when it
+/// holds text the person didn't type, since `typed` is the field and revision
+/// they last left it at and `now` is where it is.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn clears_on_first_edit<N: PartialEq>(
+    typed: Option<(N, u64)>,
+    now: (N, u64),
+    len: usize,
+) -> bool {
+    len > 0 && typed != Some(now)
+}
+/// Where UIKit's caret goes for a text edge at `x` in its view (`scale` pixels
+/// to a point), as UITextField's and UITextView's `caretRectForPosition:` both
+/// answer: a point left of the edge on a whole pixel, inside the view.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn uikit_caret_x(x: f64, scale: f64) -> f64 {
+    (((x - 1.) * scale).round() / scale).max(0.)
+}
+/// Where a tap that focuses a field leaves the caret, from the offset `caret`
+/// nearest it, as UITextField's first tap does (measured in a reference app
+/// across a line; a tap once focused is `UITextInteraction`'s own): a word's
+/// first two offsets go to its start, the rest of it to its end, and its end
+/// past what follows to the next word. Only spaces around: where it fell.
+#[cfg(any(target_os = "ios", test))]
+pub(crate) fn first_tap_caret(units: &[u16], caret: usize) -> usize {
+    let Some((start, end)) = word_at(units, caret) else {
+        return caret;
+    };
+    if caret <= start + 1 && caret < end {
+        return start;
+    }
+    if caret < end {
+        return end;
+    }
+    let after = String::from_utf16_lossy(&units[end..]);
+    end + after
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .map(char::len_utf16)
+        .sum::<usize>()
+}
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_secure_field_clears_text_the_person_did_not_type() {
+        use super::clears_on_first_edit as clears;
+        // Text set by the app: the first edit takes it all.
+        assert!(clears(None, (1, 5), 6));
+        // Their own, even after leaving and coming back: it stays.
+        assert!(!clears(Some((1, 5)), (1, 5), 2));
+        // Set by the app since, or another field's: cleared.
+        assert!(clears(Some((1, 5)), (1, 6), 2));
+        assert!(clears(Some((2, 5)), (1, 5), 2));
+        // Nothing to clear.
+        assert!(!clears(None, (1, 5), 0));
+    }
+    #[test]
+    fn the_caret_goes_where_uitextfield_says() {
+        // Text edges in the field's view and UIKit's caret there (the view at
+        // 16 in the window), as read at 3x.
+        for (edge, caret) in [
+            (0., 0.),
+            (10.343, 9.333),
+            (19.914, 19.),
+            (29.194, 28.333),
+            (33.543, 32.667),
+            (43.471, 42.333),
+            (52.959, 52.),
+            (153.639, 152.667),
+        ] {
+            let got = super::uikit_caret_x(edge, 3.);
+            assert!((got - caret).abs() < 0.001, "{edge}: {got}, not {caret}");
+        }
+        // UITextView's line start, 5 in from its view: a point left of it.
+        assert_eq!(super::uikit_caret_x(5., 3.), 4.);
+    }
+    #[test]
+    fn a_first_tap_goes_to_a_word_edge_as_uitextfields_does() {
+        // Every offset of this line and where UIKit puts the caret for it.
+        let text: Vec<u16> = "The quick brown fox jumps over".encode_utf16().collect();
+        let expected = [
+            0, 0, 3, 4, 4, 4, 9, 9, 9, 10, 10, 10, 15, 15, 15, 16, 16, 16, 19, 20, 20, 20, 25, 25,
+            25, 26, 26, 26, 30, 30, 30,
+        ];
+        for (caret, expected) in expected.into_iter().enumerate() {
+            assert_eq!(super::first_tap_caret(&text, caret), expected, "at {caret}");
+        }
+        // Nothing but spaces: where it fell.
+        let spaces: Vec<u16> = "   ".encode_utf16().collect();
+        assert_eq!(super::first_tap_caret(&spaces, 1), 1);
+    }
+    #[test]
+    fn a_lines_box_grows_about_its_middle_and_never_shrinks() {
+        // A body line in a 44 point field, as a UITextField has it.
+        let (y, height) = super::grown_line(11.8565, 20.287, 22.);
+        assert_eq!(height, 22.);
+        assert!((y - 11.).abs() < 1e-3);
+        // A line that tall already, its leading in it.
+        assert_eq!(super::grown_line(5., 22.5, 22.), (5., 22.5));
+    }
+    #[test]
+    fn select_takes_the_word_at_the_caret() {
+        let units: Vec<u16> = "Hello world 😀 x".encode_utf16().collect();
+        assert_eq!(super::word_at(&units, 2), Some((0, 5)));
+        // At a word's end, that word; at the next's start, the next.
+        assert_eq!(super::word_at(&units, 5), Some((0, 5)));
+        assert_eq!(super::word_at(&units, 6), Some((6, 11)));
+        assert_eq!(super::word_at(&units, 11), Some((6, 11)));
+        // Around no word, nothing; after an emoji, by UTF-16 units.
+        assert_eq!(super::word_at(&units, 12), None);
+        assert_eq!(super::word_at(&units, units.len()), Some((15, 16)));
+        assert_eq!(super::word_at(&[], 0), None);
+    }
     use super::{Change, TextStore};
     use zgx::{
         compose::prelude::*,

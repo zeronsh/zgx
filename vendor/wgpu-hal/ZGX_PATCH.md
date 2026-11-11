@@ -116,3 +116,5 @@ mark carries them (`ZGX_PROFILE=1`: `first frame presented (shaders: 6
 read, 0 compiled, 0 not kept)`), so a start slowed by compiling says so.
 `ZGX_SHADER_LOG=1` prints that line alone, for a probe timing starts
 (`ZGX_PROFILE`'s spans add about 25 ms to a start).
+
+- `metal::PRESENT_WAITS_FOR_GPU`: a present in a transaction waits for its work to finish rather than be scheduled, for a frame other layers change with.

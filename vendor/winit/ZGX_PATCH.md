@@ -359,6 +359,15 @@ zgx's caption glyphs, which read `theme()`, white: unseen. It now sets
 (`platform_impl/windows/window.rs`). `scripts/windows_caption_smoke.py` (zgx)
 checks the window, with its buttons drawn.
 
+## iOS: the view's size, its appearance
+
+`inner_size` and `inner_position` answered the safe area while `Resized`
+reported the whole view, so a renderer reading one after the other drew
+stretched (`platform_impl/ios/window.rs`). They now answer the view, and a new
+safe area lays it out again, reporting its size. `theme()` answers the window's
+interface style and a change is sent as `ThemeChanged`, which iOS never did
+(`view.rs`).
+
 ## Windows: a timed wait arms its timer once per deadline
 
 A turn that waits with `ControlFlow::WaitUntil` set the high-resolution
@@ -419,3 +428,13 @@ on a menu at rest stayed in zgx's queue until something else woke the loop.
 `platform::wayland::wake_for_own_queue` gives the loop a check, asked after a
 read when winit has heard nothing else, whose `true` runs a turn. No check, no
 cost. `scripts/wayland_popups_smoke.py` clicks a menu at rest.
+
+## iOS: the loop runs while a finger tracks
+
+`platform_impl/ios/event_loop.rs` added its run loop observers in the default
+mode alone, so while UIKit tracked a drag or a scroll view decelerated
+(`UITrackingRunLoopMode`) the waker's timer fired with no iteration to run: an
+app's timers and wakes waited for the scroll to end (a live feed's inserts, a
+chat's messages). They're added in the common modes, as macOS's are.
+Frames there are the host's to pace: zgx's draws in `drawRect`, at Core
+Animation's commit, as before (`Host::update`).
