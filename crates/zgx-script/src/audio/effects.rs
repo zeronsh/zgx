@@ -360,7 +360,8 @@ impl EffectUd {
     fn call(&self, lua: &Lua, name: &str, args: MultiValue) -> mlua::Result<MultiValue> {
         match name {
             "set" => {
-                let (param, value): (String, mlua::Value) = lua.unpack_multi(args)?;
+                let (param, value): (String, mlua::Value) =
+                    super::unpack(lua, args, "effect:", name)?;
                 let Some((handle, kind)) = self.live() else {
                     return Ok(MultiValue::new());
                 };
@@ -384,7 +385,7 @@ impl EffectUd {
             }
             "fade" => {
                 let (param, value, seconds, curve_name): (String, f32, f64, Option<String>) =
-                    lua.unpack_multi(args)?;
+                    super::unpack(lua, args, "effect:", name)?;
                 let Some((handle, kind)) = self.live() else {
                     return Ok(MultiValue::new());
                 };
@@ -411,7 +412,7 @@ impl EffectUd {
                 }
             }
             _ => {
-                let seconds: f64 = lua.unpack_multi(args)?;
+                let seconds: f64 = super::unpack(lua, args, "effect:", name)?;
                 let audio = self.host.engine()?;
                 return lua.pack_multi(EffectUd {
                     host: self.host.clone(),
@@ -433,7 +434,7 @@ pub(super) fn bus_call(
     args: MultiValue,
 ) -> mlua::Result<MultiValue> {
     let effect = if name == "add_effect" {
-        let spec: mlua::AnyUserData = lua.unpack_multi(args)?;
+        let spec: mlua::AnyUserData = super::unpack(lua, args, "bus:", name)?;
         let spec = spec
             .borrow::<SpecUd>()
             .map_err(|_| {
@@ -444,7 +445,8 @@ pub(super) fn bus_call(
             .clone();
         b.host.add_effect(lua, b, &spec, None, "bus:add_effect")?
     } else {
-        let (side, opts): (mlua::AnyUserData, Option<Table>) = lua.unpack_multi(args)?;
+        let (side, opts): (mlua::AnyUserData, Option<Table>) =
+            super::unpack(lua, args, "bus:", name)?;
         if b.plugin.is_some() {
             return Err(mlua::Error::runtime(
                 "bus:duck: a plugin's bus ducks under no other",

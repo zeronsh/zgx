@@ -1095,7 +1095,7 @@ impl VoiceUd {
     fn call(&self, lua: &Lua, name: &str, args: MultiValue) -> mlua::Result<MultiValue> {
         match name {
             "stop" => {
-                let seconds: Option<f64> = lua.unpack_multi(args)?;
+                let seconds: Option<f64> = unpack(lua, args, "voice:", name)?;
                 match self.voice() {
                     Some(voice) => match seconds {
                         Some(seconds) => voice.stop_after(Ramp::seconds(seconds)),
@@ -1110,7 +1110,8 @@ impl VoiceUd {
                 }
             }
             "fade" => {
-                let (gain, seconds, name): (f32, f64, Option<String>) = lua.unpack_multi(args)?;
+                let (gain, seconds, name): (f32, f64, Option<String>) =
+                    unpack(lua, args, "voice:", name)?;
                 let mut ramp = Ramp::seconds(seconds);
                 if let Some(name) = name {
                     ramp = ramp.curve(curve(&name)?);
@@ -1129,7 +1130,7 @@ impl VoiceUd {
             // (started silent) up to `gain`, over the same seconds.
             "crossfade" => {
                 let (to, seconds, gain): (mlua::AnyUserData, f64, Option<f32>) =
-                    lua.unpack_multi(args)?;
+                    unpack(lua, args, "voice:", name)?;
                 let to = to.borrow::<VoiceUd>().map_err(|_| {
                     mlua::Error::runtime("voice:crossfade takes the voice to fade to")
                 })?;
@@ -1164,11 +1165,11 @@ impl VoiceUd {
                     "pan" => 1,
                     _ => 2,
                 };
-                let value: mlua::Value = lua.unpack_multi(args)?;
+                let value: mlua::Value = unpack(lua, args, "voice:", name)?;
                 self.set(lua, at, value, &format!("voice:{name}"))?;
             }
             _ => {
-                let seconds: f64 = lua.unpack_multi(args)?;
+                let seconds: f64 = unpack(lua, args, "voice:", name)?;
                 let audio = self.host.engine()?;
                 return lua.pack_multi(VoiceUd {
                     cell: self.cell.clone(),
@@ -1251,7 +1252,7 @@ impl BusUd {
     fn call(&self, lua: &Lua, name: &str, args: MultiValue) -> mlua::Result<MultiValue> {
         match name {
             "gain" => {
-                let value: mlua::Value = lua.unpack_multi(args)?;
+                let value: mlua::Value = unpack(lua, args, "bus:", name)?;
                 if !matches!(
                     value,
                     mlua::Value::Number(_) | mlua::Value::Integer(_) | mlua::Value::Function(_)
@@ -1272,7 +1273,8 @@ impl BusUd {
                 })?;
             }
             "fade" => {
-                let (gain, seconds, name): (f32, f64, Option<String>) = lua.unpack_multi(args)?;
+                let (gain, seconds, name): (f32, f64, Option<String>) =
+                    unpack(lua, args, "bus:", name)?;
                 let curve = match name {
                     Some(name) => curve(&name)?,
                     None => zgx_audio::Curve::Linear,
@@ -1288,7 +1290,7 @@ impl BusUd {
             }
             "mute" | "solo" => {
                 let what = if name == "mute" { "mute" } else { "solo" };
-                let value: mlua::Value = lua.unpack_multi(args)?;
+                let value: mlua::Value = unpack(lua, args, "bus:", name)?;
                 let (bus, last) = (self.bus.clone(), Cell::new(None));
                 self.follow(lua, what, value, move |value| {
                     let on = value.truthy();
@@ -1305,7 +1307,7 @@ impl BusUd {
                 })?;
             }
             "at" => {
-                let seconds: f64 = lua.unpack_multi(args)?;
+                let seconds: f64 = unpack(lua, args, "bus:", name)?;
                 let audio = self.host.engine()?;
                 return lua.pack_multi(BusUd {
                     host: self.host.clone(),
@@ -1365,6 +1367,19 @@ pub(crate) fn install(
     globals.raw_set("audio", audio)
 }
 
+/// `args` as `T`, or an error naming the call (`voice:fade`,
+/// `audio.play`) whose arguments were wrong: mlua's own says only what it
+/// couldn't convert. Formatted only on that error.
+fn unpack<T: mlua::FromLuaMulti>(
+    lua: &Lua,
+    args: MultiValue,
+    kind: &str,
+    name: &str,
+) -> mlua::Result<T> {
+    lua.unpack_multi(args)
+        .map_err(|error| mlua::Error::runtime(format!("{kind}{name}: bad arguments ({error})")))
+}
+
 /// `audio.<name>(args)`.
 fn call(
     lua: &Lua,
@@ -1375,7 +1390,7 @@ fn call(
 ) -> mlua::Result<MultiValue> {
     match name {
         "sound" => {
-            let (src, opts): (String, Option<Table>) = lua.unpack_multi(args)?;
+            let (src, opts): (String, Option<Table>) = unpack(lua, args, "audio.", name)?;
             let engine = host.engine()?;
             let path = resolve(lua, &src, plugin.is_some(), "audio.sound")?;
             let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
@@ -1428,7 +1443,7 @@ fn call(
             lua.pack_multi(SoundUd(slot))
         }
         "play" | "music" => {
-            let (what, opts): (mlua::Value, Option<Table>) = lua.unpack_multi(args)?;
+            let (what, opts): (mlua::Value, Option<Table>) = unpack(lua, args, "audio.", name)?;
             let audio = host.engine()?;
             let call = if name == "play" {
                 "audio.play"
@@ -1543,7 +1558,7 @@ fn call(
         // `audio.bus(name)`; a plugin's `audio.bus()` is its own, and the
         // only one it reaches.
         "bus" => {
-            let name: Option<String> = lua.unpack_multi(args)?;
+            let name: Option<String> = unpack(lua, args, "audio.", name)?;
             let audio = host.engine()?;
             let bus = match (plugin, name) {
                 (Some(plugin), None) => Some(BusUd {
@@ -1569,7 +1584,7 @@ fn call(
             lua.pack_multi(bus)
         }
         "add_bus" => {
-            let (name, opts): (String, Option<Table>) = lua.unpack_multi(args)?;
+            let (name, opts): (String, Option<Table>) = unpack(lua, args, "audio.", name)?;
             let audio = host.engine()?;
             let parent = match &opts {
                 Some(opts) => opts.get::<Option<String>>("parent")?,

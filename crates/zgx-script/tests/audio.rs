@@ -1362,3 +1362,73 @@ fn sound3d_and_reverb_zone_say_what_they_need() {
     assert!(said.contains("\"room\", \"hall\", \"warehouse\""), "{said}");
     assert!(said.contains("ui.reverb_zone needs a `size`"), "{said}");
 }
+
+#[test]
+fn a_wrong_argument_names_the_call_it_was_given_to() {
+    let tone = wav("bad-arguments", 0.5);
+    let code = script(
+        &format!(
+            "{READY}
+            local tone = audio.sound(\"{{tone}}\")
+            local said = ui.state(\"said\", \"\")
+            return ui.column {{
+                ui.text {{ id = \"ready\", count_ready(tone) }},
+                ui.text {{ id = \"said\", said }},
+                ui.button {{ id = \"ask\", on_click = function()
+                    local voice = audio.play(tone, {{ gain = 0 }})
+                    local bus = audio.bus(\"music\")
+                    local errors = {{}}
+                    for _, call in {{
+                        function() voice:fade(nil, 1) end,
+                        function() if bus then bus:fade(\"loud\", 1) end end,
+                        function() audio.play(tone, 5) end,
+                    }} do
+                        local _, why = pcall(call)
+                        table.insert(errors, tostring(why))
+                    end
+                    said:set(table.concat(errors, \"|\"))
+                end, \"Ask\" }},
+            }}"
+        ),
+        &[("tone", &tone)],
+    );
+    let mut s = Sounding::new(&code);
+    s.ready(1);
+    s.app.click("ask");
+    let said = s.app.text("said");
+    let said: Vec<&str> = said.split('|').collect();
+    assert!(said[0].contains("voice:fade: bad arguments ("), "{said:?}");
+    assert!(said[1].contains("bus:fade: bad arguments ("), "{said:?}");
+    assert!(said[2].contains("audio.play: bad arguments ("), "{said:?}");
+}
+
+// The mixer's effects: zgx-script's `audio-effects`.
+#[cfg(feature = "audio-effects")]
+#[test]
+fn a_wrong_argument_to_an_effect_names_its_call() {
+    let mut app = TestApp::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            "local said = ui.state(\"said\", \"\")
+            return ui.column {
+                ui.text { id = \"said\", said },
+                ui.button { id = \"ask\", on_click = function()
+                    local world = audio.bus(\"world\")
+                    if not world then return end
+                    local filter = world:add_effect(audio.low_pass { cutoff = 800 })
+                    local _, a = pcall(function() filter:fade(\"cutoff\", nil, 1) end)
+                    local _, b = pcall(function() world:add_effect(5) end)
+                    said:set(tostring(a) .. \"|\" .. tostring(b))
+                end, \"Ask\" },
+            }",
+        );
+        let (audio, _mixer) = Audio::offline(Config::default()).unwrap();
+        host.set_audio(move || audio.clone());
+        host
+    });
+    app.click("ask");
+    let said = app.text("said");
+    assert!(said.contains("effect:fade: bad arguments ("), "{said}");
+    assert!(said.contains("bus:add_effect: bad arguments ("), "{said}");
+}
