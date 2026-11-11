@@ -85,3 +85,52 @@
 //V fn noise2(p: vec2<f32>) -> f32 {
 //V     return noise3(vec3(p, 0.0));
 //V }
+//V // A texture sampled bicubically (a B-spline, four bilinear taps) at its
+//V // largest level: a mask magnified far shows smooth curves, not
+//V // bilinear's diamonds. (`s`: `material_sampler`, filtering linearly.)
+//V fn sample_bicubic(t: texture_2d<f32>, s: sampler, uv: vec2<f32>) -> vec4<f32> {
+//V     let size = vec2<f32>(textureDimensions(t, 0));
+//V     let p = uv * size - 0.5;
+//V     let f = fract(p);
+//V     let i = p - f;
+//V     let w0 = (1.0 - f) * (1.0 - f) * (1.0 - f) / 6.0;
+//V     let w1 = (3.0 * f * f * f - 6.0 * f * f + 4.0) / 6.0;
+//V     let w2 = (-3.0 * f * f * f + 3.0 * f * f + 3.0 * f + 1.0) / 6.0;
+//V     let w3 = f * f * f / 6.0;
+//V     let g0 = w0 + w1;
+//V     let g1 = w2 + w3;
+//V     let lo = (i + 0.5 + (w1 / g0 - 1.0)) / size;
+//V     let hi = (i + 0.5 + (w3 / g1 + 1.0)) / size;
+//V     let a = textureSampleLevel(t, s, lo, 0.0) * g0.x + textureSampleLevel(t, s, vec2(hi.x, lo.y), 0.0) * g1.x;
+//V     let b = textureSampleLevel(t, s, vec2(lo.x, hi.y), 0.0) * g0.x + textureSampleLevel(t, s, hi, 0.0) * g1.x;
+//V     return a * g0.y + b * g1.y;
+//V }
+//V // How much each axis's plane maps a surface facing `n`: its normal's
+//V // parts raised to `sharpness` (higher, a crisper seam), summing to 1.
+//V fn triplanar_weights(n: vec3<f32>, sharpness: f32) -> vec3<f32> {
+//V     let w = pow(abs(n), vec3(sharpness));
+//V     return w / max(w.x + w.y + w.z, 1e-6);
+//V }
+//V // A texture mapped onto a surface by its world position `p` from the
+//V // three axes' planes, `scale` repeats a metre, blended by its normal
+//V // `n`: no texture coordinates needed, no stretching on steep faces.
+//V fn sample_triplanar(t: texture_2d<f32>, s: sampler, p: vec3<f32>, n: vec3<f32>, scale: f32) -> vec4<f32> {
+//V     let w = triplanar_weights(n, 4.0);
+//V     return textureSample(t, s, p.zy * scale) * w.x
+//V         + textureSample(t, s, p.xz * scale) * w.y
+//V         + textureSample(t, s, p.xy * scale) * w.z;
+//V }
+//V // The normal `n` bent by a height `h` (metres, above the surface) as it
+//V // changes across the screen with the point `p` (Mikkelsen's surface
+//V // gradient): procedural bumps, cracks and joints with no tangents or
+//V // texture. Call it where every fragment of a mesh does (not under a
+//V // branch that differs between neighbours).
+//V fn bump(n: vec3<f32>, p: vec3<f32>, h: f32) -> vec3<f32> {
+//V     let dpx = dpdx(p);
+//V     let dpy = dpdy(p);
+//V     let r1 = cross(dpy, n);
+//V     let r2 = cross(n, dpx);
+//V     let det = dot(dpx, r1);
+//V     let gradient = sign(det) * (dpdx(h) * r1 + dpdy(h) * r2);
+//V     return normalize(abs(det) * n - gradient);
+//V }

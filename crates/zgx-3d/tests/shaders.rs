@@ -1848,3 +1848,102 @@ fn scene_light_is_scene_color_with_the_post_chain_on() {
         }
     }
 }
+
+/// An unlit mesh shown by `surface`'s WGSL body (its colour, linear), and
+/// the window drawn once.
+fn shown_by(geometry: Geometry, body: &str, shader: MaterialShader) -> Option<(World, Window)> {
+    let _ = body;
+    let world = World::new();
+    let mut plain = Material::rgb(0xffffff);
+    plain.unlit = true;
+    let mesh = world.add(Object::mesh(geometry, plain));
+    world.set_camera(Camera::looking_at([0., 0., 3.], [0., 0., 0.]));
+    let id = world.add_shader(shader).unwrap();
+    world.set_shader(mesh, Some(id));
+    let mut window = Window::new(&world)?;
+    window.draw();
+    assert_eq!(world.shader_error(id), None);
+    Some((world, window))
+}
+fn showing(body: &str) -> MaterialShader {
+    MaterialShader::new(format!(
+        "#zgx material 1
+         fn surface(s: SurfaceIn) -> Surface {{
+             var m = surface_default(s);
+             {body}
+             return m;
+         }}"
+    ))
+}
+
+#[test]
+fn triplanar_weights_follow_the_surfaces_facing() {
+    // A ball facing the camera along z: its middle mapped by the xy plane.
+    let body = "m.base_color = triplanar_weights(s.normal, 8.0);";
+    let Some((_, window)) = shown_by(Geometry::sphere(1., 48), body, showing(body)) else {
+        return;
+    };
+    let middle = window.pixel(50, 50);
+    assert!(
+        middle[2] > 240 && middle[0] < 30 && middle[1] < 30,
+        "{middle:?}"
+    );
+    // Its left limb faces x.
+    let limb = window.pixel(23, 50);
+    assert!(limb[0] > limb[2], "{limb:?}");
+}
+
+#[test]
+fn bump_bends_the_normal_by_a_height_across_the_screen() {
+    // A square facing the camera, its normal shown: flat, one colour; with
+    // ridges along x, the colour changes across them.
+    let spread = |body: &str| {
+        let (_, window) = shown_by(Geometry::plane(2., 2.), body, showing(body))?;
+        let reds: Vec<u8> = (30..70).map(|x| window.pixel(x, 50)[0]).collect();
+        Some(reds.iter().max().unwrap() - reds.iter().min().unwrap())
+    };
+    let flat = "m.base_color = s.normal * 0.5 + 0.5;";
+    let ridged = "let h = 0.02 * sin(s.world_position.x * 20.0);
+                  m.base_color = bump(s.normal, s.world_position, h) * 0.5 + 0.5;";
+    let (Some(flat), Some(ridged)) = (spread(flat), spread(ridged)) else {
+        return;
+    };
+    assert!(flat <= 2 && ridged > 40, "flat {flat}, ridged {ridged}");
+}
+
+#[test]
+fn sample_bicubic_smooths_a_magnified_mask() {
+    // Two texels, black and white, over a square: at the black one's centre
+    // bilinear gives black, the B-spline a share of its white neighbour.
+    let mask = Texture::from_rgba8(2, 1, vec![0, 0, 0, 255, 255, 255, 255, 255]).unwrap();
+    let at_black = |call: &str| {
+        let body = format!("m.base_color = {call}.rgb;");
+        let shader = showing(&body).param("mask", Param::Texture);
+        let world = World::new();
+        let mut plain = Material::rgb(0xffffff);
+        plain.unlit = true;
+        let mesh = world.add(Object::mesh(Geometry::plane(2., 2.), plain));
+        world.set_camera(Camera::looking_at([0., 0., 3.], [0., 0., 0.]));
+        let id = world.add_shader(shader).unwrap();
+        world.set_param(id, "mask", &mask).unwrap();
+        world.set_shader(mesh, Some(id));
+        let mut window = Window::new(&world)?;
+        for _ in 0..3 {
+            window.draw();
+        }
+        assert_eq!(world.shader_error(id), None);
+        // The square spans about 30 to 70 across: the black texel's centre
+        // a quarter of the way.
+        Some(window.pixel(40, 50)[0])
+    };
+    let (Some(bilinear), Some(bicubic)) = (
+        at_black("textureSampleLevel(params.mask, material_sampler, s.uv, 0.0)"),
+        at_black("sample_bicubic(params.mask, material_sampler, s.uv)"),
+    ) else {
+        return;
+    };
+    assert!(
+        bilinear < 20 && bicubic > 60,
+        "bilinear {bilinear}, bicubic {bicubic}"
+    );
+}
