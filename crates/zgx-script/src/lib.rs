@@ -2965,6 +2965,7 @@ impl ScriptHost {
             None,
             Some(mlua::pooled_page_bytes()),
         );
+        self.0.engine.memory(report);
         self.0.assets.memory(report);
         self.states_memory(report);
     }

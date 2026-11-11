@@ -710,6 +710,15 @@ impl Clip {
         if let Some(site) = &*self.site.borrow() {
             site.restarts.set(0);
         }
+        // Its properties are no longer its to write: owned by nothing, as a
+        // cancel leaves them (a restart claims them again). Kept, an animated
+        // state's or table's owner stayed in the engine's map for good, one a
+        // target, and with it the clip's allocation (`Owner::playing`).
+        if let Some(engine) = self.engine() {
+            for track in self.tracks.borrow().iter() {
+                engine.release(&track.target, &track.key, self.id);
+            }
+        }
         self.queue(Event::Complete);
     }
 
@@ -1348,6 +1357,22 @@ impl Engine {
             rate = Some(rate.map_or(cap, |r: f64| r.max(cap)));
         }
         rate
+    }
+    /// Its lines of a memory report: the clips playing, and the states' and
+    /// tables' properties a clip owns (an element's own go with it).
+    pub(crate) fn memory(&self, report: &mut zgx::memory::Report) {
+        report.add(
+            "anime",
+            "clips playing",
+            Some(self.clips.borrow().len()),
+            None,
+        );
+        report.add(
+            "anime",
+            "state and table properties owned",
+            Some(self.owners.borrow().len()),
+            None,
+        );
     }
     pub fn is_active(&self) -> bool {
         !self.paused.get()
