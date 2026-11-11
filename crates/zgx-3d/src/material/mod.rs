@@ -233,8 +233,12 @@ pub(crate) struct Shader {
     pub(crate) failed: RefCell<Option<String>>,
 }
 
-/// Bounds on what an app (or a plugin) may hand a world: a shader's text,
-/// its parameters and their names, a world's shaders and surface layers.
+/// Bounds on what an app may hand a world: a shader's text, its parameters
+/// and their names, a world's shaders and surface layers. They keep its
+/// memory and compile times in reason; they don't make a shader safe to
+/// run. Custom materials are trusted code (a `loop {}` holds the device):
+/// a plugin or script reaches them only through a sandboxed mode, not yet
+/// built.
 pub(crate) const MAX_SOURCE: usize = 256 * 1024;
 pub(crate) const MAX_PARAMS: usize = 64;
 pub(crate) const MAX_NAME: usize = 64;
