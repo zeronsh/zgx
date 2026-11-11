@@ -34,10 +34,7 @@ jobs:
       - name: Linux packages
         if: runner.os == 'Linux'
         timeout-minutes: 10
-        run: |
-          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
-          sudo apt-get update -qq $apt
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $apt $(grep -v '^#' .github/linux-packages.txt)
+        run: sh .github/apt-install.sh $(grep -v '^#' .github/linux-packages.txt)
       - uses: Swatinem/rust-cache@v2
       # macOS's terminals build Ghostty with Zig 0.16, as a user's build does
       # (zgx-ghostty-sys), and the check builds every feature its platform has.

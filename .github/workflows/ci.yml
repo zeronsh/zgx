@@ -72,28 +72,12 @@ jobs:
           key: apt-${{ runner.arch }}-${{ steps.apt-key.outputs.month }}-${{ hashFiles('.github/linux-packages.txt') }}
           # A changed package list still starts from the last month's .debs.
           restore-keys: apt-${{ runner.arch }}-
-      # A stalled mirror fails fast and retries rather than holding the job;
-      # the whole install is tried three times before the job gives up.
+      # Three tries, off the Azure mirror when it stops resolving
+      # (.github/apt-install.sh).
       - name: Linux packages
         id: linux-packages
         timeout-minutes: 15
-        run: |
-          sudo rm -f /var/lib/man-db/auto-update
-          if [ -d ~/apt-archives ]; then sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/; fi
-          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
-          for attempt in 1 2 3; do
-            if sudo apt-get update -qq $apt &&
-              sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $apt $(grep -v '^#' .github/linux-packages.txt); then
-              break
-            fi
-            if [ "$attempt" = 3 ]; then
-              echo "::error::apt-get couldn't install .github/linux-packages.txt in three tries"
-              exit 1
-            fi
-            echo "::warning::apt-get failed (try $attempt of 3); trying again"
-            sleep 20
-          done
-          mkdir -p ~/apt-archives && cp /var/cache/apt/archives/*.deb ~/apt-archives/
+        run: sh .github/apt-install.sh $(grep -v '^#' .github/linux-packages.txt)
       - uses: actions/cache/save@v4
         if: steps.apt-cache.outputs.cache-hit != 'true'
         with:
@@ -338,13 +322,7 @@ jobs:
           restore-keys: apt-perf-${{ runner.arch }}-
       - name: Packages
         timeout-minutes: 10
-        run: |
-          sudo rm -f /var/lib/man-db/auto-update
-          if [ -d ~/apt-archives ]; then sudo cp ~/apt-archives/*.deb /var/cache/apt/archives/; fi
-          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30"
-          sudo apt-get update -qq $apt
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends $apt valgrind cmake pkg-config fonts-dejavu-core libdbus-1-dev libfontconfig1-dev libwayland-dev libxcb1-dev libxkbcommon-dev libxrandr-dev
-          mkdir -p ~/apt-archives && cp /var/cache/apt/archives/*.deb ~/apt-archives/
+        run: sh .github/apt-install.sh valgrind cmake pkg-config fonts-dejavu-core libdbus-1-dev libfontconfig1-dev libwayland-dev libxcb1-dev libxkbcommon-dev libxrandr-dev
       - uses: actions/cache/save@v4
         if: steps.apt-cache.outputs.cache-hit != 'true'
         with:
