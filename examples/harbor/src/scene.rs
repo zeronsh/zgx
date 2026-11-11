@@ -788,5 +788,10 @@ mod tests {
             "lamps by the hundred: {}",
             h.lamps.len()
         );
+        // The water's and the wet's WGSL are taken (a refused one would
+        // leave the stock material, quietly).
+        let sea = h.sea.expect("the water's and the wet's shaders are taken");
+        assert!(sea.wet.is_some());
+        assert_eq!(world.shader_error(sea.shader), None);
     }
 }
