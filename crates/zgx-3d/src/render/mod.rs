@@ -18,6 +18,9 @@ mod clusters;
 mod cull;
 #[cfg(feature = "shaders")]
 mod custom;
+// What a world's tests ask of the shadow cast by GPU data.
+#[cfg(all(test, feature = "shaders", feature = "compute"))]
+pub(crate) use custom::data_cast_of;
 mod draw;
 mod frame;
 mod gpu;

@@ -258,4 +258,37 @@ mod tests {
         world.set_param(shader, "lift", &low).unwrap();
         assert_eq!(key(), at_low, "the first again");
     }
+
+    #[test]
+    fn shaders_cast_by_alike_in_any_order() {
+        // Review of GB2: two data-casting shaders drawn in another order
+        // (another mesh's change re-sorting the runs), their data as it
+        // was, cast nothing anew.
+        let world = World::new();
+        let lifted = |lift: f32| {
+            let shader = world
+                .add_shader(
+                    MaterialShader::new(
+                        "#zgx material 1
+                         fn displace(v: VertexIn) -> Displaced {
+                             var d: Displaced;
+                             d.position = v.position + params.lift[0].xyz;
+                             d.normal = v.normal;
+                             return d;
+                         }",
+                    )
+                    .buffer("lift", "array<vec4<f32>>"),
+                )
+                .unwrap();
+            let buffer = world
+                .add_buffer(BufferDesc::from_slice(&[[lift, 0., 0., 0.]]))
+                .unwrap();
+            world.set_param(shader, "lift", &buffer).unwrap();
+            world.inner.borrow().shader_of(shader).unwrap().clone()
+        };
+        let (a, b) = (lifted(0.), lifted(1.));
+        let of = crate::render::data_cast_of;
+        assert_eq!(of(&[a.clone(), b.clone()]), of(&[b.clone(), a.clone()]));
+        assert_ne!(of(&[a.clone()]), of(&[a, b]), "another shader casting");
+    }
 }

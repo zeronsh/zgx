@@ -758,13 +758,21 @@ pub(super) fn data_cast_changed(gpu: &mut Gpu) -> bool {
     if state.casting_data.is_empty() {
         return false;
     }
-    let mut key = 0xcbf2_9ce4_8422_2325_u64;
-    for shader in &state.casting_data {
+    let key = data_cast_of(&state.casting_data);
+    std::mem::replace(&mut state.data_cast, key) != key
+}
+/// A number for what `shaders` cast by: each one's id and data
+/// (`Shader::data_cast_key`), summed, so the order the frame's runs drew
+/// them in (which another mesh's change may shuffle) doesn't move it.
+#[cfg(feature = "compute")]
+pub(crate) fn data_cast_of(shaders: &[Rc<Shader>]) -> u64 {
+    shaders.iter().fold(0, |sum, shader| {
+        let mut key = 0xcbf2_9ce4_8422_2325_u64;
         for n in [u64::from(shader.id), shader.data_cast_key()] {
             key = (key ^ n).wrapping_mul(0x0100_0000_01b3);
         }
-    }
-    std::mem::replace(&mut state.data_cast, key) != key
+        sum.wrapping_add(key)
+    })
 }
 fn same(a: &[Rc<Shader>], b: &[Rc<Shader>]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(a, b)| Rc::ptr_eq(a, b))
