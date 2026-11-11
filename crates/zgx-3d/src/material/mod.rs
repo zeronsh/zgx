@@ -331,7 +331,7 @@ pub(crate) const MAX_LAYERS: usize = 8;
 pub(crate) const MAX_REACH: f32 = 1e4;
 /// Textures a mesh's shader may read: with a mesh's own maps, the shadow
 /// map, an environment and what is behind, within the 16 a stage may.
-pub(crate) const MAX_TEXTURES: u32 = 4;
+pub(crate) const MAX_TEXTURES: u32 = 6;
 /// GPU data (buffers and textures an app made) a mesh's shader may read.
 pub(crate) const MAX_DATA: u32 = 4;
 /// Group 1's binding of the instances' numbers (`zgx_instances`).

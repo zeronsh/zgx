@@ -145,7 +145,7 @@ pub(super) fn make_binding(
     let custom_state = &mut gpu.custom;
     #[cfg(feature = "shaders")]
     let own = super::custom::Own {
-        sampler: &gpu.texture_sampler,
+        sampler: &gpu.material_sampler,
         white: [&stand_ins[0], &stand_ins[1]],
         behind: behind.as_ref().map(|b| (&b.whole, &b.sampler)),
         views,
@@ -413,6 +413,25 @@ pub(super) fn texture_sampler(device: &wgpu::Device, wrap: [crate::Wrap; 2]) -> 
         min_filter: wgpu::FilterMode::Linear,
         mipmap_filter: wgpu::MipmapFilterMode::Linear,
         anisotropy_clamp: 8,
+        ..Default::default()
+    })
+}
+
+/// Custom materials' `material_sampler`: repeating, trilinear and 16
+/// times anisotropic (WebGPU's most; a device may give less), so a
+/// material's maps on ground seen at a grazing angle (joints, markings)
+/// keep their detail along the view rather than smearing. Its cost is the
+/// filtering's, at grazing angles alone.
+#[cfg(feature = "shaders")]
+pub(super) fn material_sampler(device: &wgpu::Device) -> wgpu::Sampler {
+    device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("3D material"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::Repeat,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::MipmapFilterMode::Linear,
+        anisotropy_clamp: 16,
         ..Default::default()
     })
 }

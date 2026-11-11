@@ -1848,3 +1848,100 @@ fn scene_light_is_scene_color_with_the_post_chain_on() {
         }
     }
 }
+
+#[test]
+fn a_material_reads_six_mipmapped_textures_and_no_more() {
+    let textures = |n: usize| {
+        (0..n).fold(
+            MaterialShader::new(
+                "#zgx material 1
+                 fn surface(s: SurfaceIn) -> Surface {
+                     var m = surface_default(s);
+                     let others = textureSample(params.t1, material_sampler, s.uv)
+                         + textureSample(params.t2, material_sampler, s.uv)
+                         + textureSample(params.t3, material_sampler, s.uv)
+                         + textureSample(params.t4, material_sampler, s.uv)
+                         + textureSample(params.t5, material_sampler, s.uv);
+                     // Level 3 of an 8 by 8 checker: its one texel, grey.
+                     m.base_color = textureSampleLevel(params.t0, material_sampler, s.uv, 3.0).rgb
+                         + others.rgb * 0.0;
+                     return m;
+                 }",
+            ),
+            |shader, i| shader.param(&format!("t{i}"), Param::Texture),
+        )
+    };
+    let world = World::new();
+    let e = world.add_shader(textures(7)).unwrap_err();
+    assert!(e.message.contains("6 at most"), "{e}");
+    // Six, in a world binding much else: an environment, the sun's shadow
+    // (and cascades and clustered lights), a mesh with a map of its own.
+    world.set_environment(Some(Environment::studio()));
+    world.set_shadows(true);
+    world.add_light(Light::Directional {
+        direction: vec3(0.2, -1., -0.3),
+        color: [1.; 3],
+        intensity: 1.,
+    });
+    #[cfg(feature = "lighting")]
+    {
+        world.set_cascades(Some(Cascades::new(2)));
+        for i in 0..4 {
+            world.add_light(Light::Point {
+                position: vec3(i as f32 - 1.5, 1., 1.),
+                color: [1.; 3],
+                intensity: 0.1,
+                range: 3.,
+            });
+        }
+    }
+    let mut plain = Material::rgb(0xffffff);
+    plain.unlit = true;
+    let square = world.add(Object::mesh(Geometry::cuboid(2., 2., 0.1), plain));
+    world.set_texture(
+        square,
+        Some(Texture::from_rgba8(1, 1, vec![255; 4]).unwrap()),
+    );
+    world.set_camera(Camera::looking_at([0., 0., 3.], [0., 0., 0.]));
+    let shader = world.add_shader(textures(6)).unwrap();
+    let checker: Vec<u8> = (0..64)
+        .flat_map(|i| {
+            let on = (i % 8 + i / 8) % 2 == 0;
+            [
+                if on { 255 } else { 0 },
+                if on { 255 } else { 0 },
+                if on { 255 } else { 0 },
+                255,
+            ]
+        })
+        .collect();
+    world
+        .set_param(shader, "t0", Texture::from_rgba8(8, 8, checker).unwrap())
+        .unwrap();
+    let white = Texture::from_rgba8(1, 1, vec![255; 4]).unwrap();
+    for i in 1..6 {
+        world.set_param(shader, &format!("t{i}"), &white).unwrap();
+    }
+    world.set_shader(square, Some(shader));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    // Its pipelines compile off the frame; till then it isn't drawn here.
+    let start = std::time::Instant::now();
+    window.draw();
+    while world.compiling() && start.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        window.draw();
+    }
+    window.draw();
+    assert_eq!(world.shader_error(shader), None);
+    // Its level 3: one texel, grey, the same across the square where the
+    // largest level would be a checker. (128: today's levels average the
+    // sRGB bytes, not the light; in linear light it would be 188.)
+    let row: Vec<[u8; 4]> = (36..64).step_by(4).map(|x| window.pixel(x, 50)).collect();
+    let grey = row[0];
+    assert!(
+        row.iter().all(|p| p == &grey) && (110..200).contains(&grey[0]) && grey[0] == grey[2],
+        "{row:?}"
+    );
+}

@@ -94,6 +94,10 @@ pub(super) struct Gpu {
     /// Textures by id, with the frame that last drew each.
     pub(super) texture_layout: wgpu::BindGroupLayout,
     pub(super) texture_sampler: wgpu::Sampler,
+    /// Custom materials' `material_sampler`: as `texture_sampler`, at the
+    /// most anisotropy WebGPU allows (`materials::material_sampler`).
+    #[cfg(feature = "shaders")]
+    pub(super) material_sampler: wgpu::Sampler,
     /// Maps on their way from the loading threads (`crate::assets`).
     pub(super) loads: crate::assets::Loads,
     /// Uploaded textures by id and whether read as sRGB (a texture may be
@@ -297,6 +301,8 @@ impl Gpu {
         let bind = frame_binding(device, &layout, &uniforms, &stand_in, &sampler, None);
         let texture_layout = map_layout(device, Extent::Maps);
         let texture_sampler = texture_sampler(device, [crate::Wrap::Repeat; 2]);
+        #[cfg(feature = "shaders")]
+        let material_sampler = super::materials::material_sampler(device);
         let plain = main_pipelines(
             device,
             (format, samples),
@@ -378,6 +384,8 @@ impl Gpu {
             shadow_drawn: None,
             texture_layout,
             texture_sampler,
+            #[cfg(feature = "shaders")]
+            material_sampler,
             placed_layout: None,
             layered_layout: None,
             glass_layout: None,
