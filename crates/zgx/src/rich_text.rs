@@ -442,6 +442,48 @@ impl RichText {
                         == b.strikethrough.map(|d| (d.thickness(), d.line))
             })
     }
+    /// Whether `other` is this very text: its text and runs the same
+    /// allocations (clones of one), and its options. Asked of a text the
+    /// same frame asks about again (measured, drawn): its runs are not
+    /// compared.
+    pub fn shares(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.text, &other.text)
+            && Arc::ptr_eq(&self.runs, &other.runs)
+            && self.options() == other.options()
+    }
+    /// Where `self`, `old`'s text (as it is, or with text added at its
+    /// end: a streamed paragraph) in `old`'s options, starts to be styled
+    /// otherwise than `old`: the first byte whose run differs in anything,
+    /// its index among the runs too (a run split in two at a chunk, or two
+    /// merged as a fade ends), else `old`'s end. Before it, both style each
+    /// byte alike, by the same run. None where `self` is not such a text.
+    pub fn restyled_from(&self, old: &Self) -> Option<usize> {
+        if self.options() != old.options() || !self.text.starts_with(&*old.text) {
+            return None;
+        }
+        for (now, was) in self.runs.iter().zip(old.runs.iter()) {
+            if now == was {
+                continue;
+            }
+            // The font, a family's name and more, compared last: a
+            // restyle (a fade's colour) differs before it.
+            let alike = now.range.start == was.range.start
+                && now.font_size == was.font_size
+                && now.color == was.color
+                && now.background == was.background
+                && now.underline == was.underline
+                && now.strikethrough == was.strikethrough
+                && now.padding == was.padding
+                && now.radius == was.radius
+                && now.font == was.font;
+            return Some(match alike {
+                // Alike but where it ends (the last run going on).
+                true => now.range.end.min(was.range.end),
+                false => now.range.start.min(was.range.start),
+            });
+        }
+        Some(old.text.len())
+    }
     pub(crate) fn same_metrics(&self, other: &Self) -> bool {
         self.overflow == other.overflow
             && self.line_clamp == other.line_clamp
