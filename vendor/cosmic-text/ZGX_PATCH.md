@@ -513,3 +513,19 @@ looked for takes those faces (in their order) without looking again. It is
 forgotten when the database can change (`db_mut`). `FontSystem::full_scans`
 counts the stage's runs. zgx-gpu's `simplified_han_after_kana_takes_a_chinese_face`
 and `every_face_is_looked_at_once_a_character` check both.
+
+## A padded span's padding outside the shape-run cache (unreleased)
+
+`pad` widened a padded span's first glyph (before it) and its last (after it)
+inside `shape_run`, whose result the shape-run cache keeps by the run's text
+and attributes alone, not where the run is in its span. A run shaped first at
+a span's start (padded before) was found again at its end, and drawn padded
+before rather than after: in an inline code chip `` `a + a` ``, the second
+`a` drew as the first, and which one depended on what was shaped earlier.
+`shape_run_cached` now caches a run unpadded and pads it, cached or not,
+where it is (`pad_cached`, `pad_spans`); a grid of cells is still snapped as
+it is shaped (it depends on the run alone), and masked text is padded
+nowhere, as before. zgx-gpu's
+`a_chips_last_word_is_padded_after_it_as_its_first_before_it` checks it,
+and zgx-gpu's word path pads a chip's words as this does
+(`rich_paragraphs_from_their_words_lay_out_as_their_line`).
