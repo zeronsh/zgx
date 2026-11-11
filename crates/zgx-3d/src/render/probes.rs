@@ -379,7 +379,7 @@ type FrameKey = (bool, Option<u64>, u64);
 
 /// What the faces' bindings hold: the layout, the lights' and rays'
 /// buffers, the environment, whether the sun's shadow is on.
-type RasterKey = (u64, u64, u64, Option<u64>, bool, u64);
+type RasterKey = (u64, u64, u64, Option<u64>, bool, u64, Option<wgpu::Buffer>);
 
 impl Tracer {
     /// Counts the times what the probes see of the meshes changed.
@@ -689,10 +689,15 @@ pub(super) fn frame(
             (Some(id), Some((_, view)), Some((_, sampler))) => Some((id, view, sampler)),
             _ => None,
         };
+        #[cfg(feature = "lighting")]
+        let cascades = lights.sun.as_ref().map(|sun| (&sun.uniforms, &sun.array));
+        #[cfg(not(feature = "lighting"))]
+        let cascades = None;
         let shadow = Shadow {
             map: shadow_map.as_ref().unwrap_or(stand_in),
             sampler,
             on: shadow_map.is_some(),
+            cascades,
         };
         update(
             probes,
@@ -855,10 +860,38 @@ fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
                 count: None,
             },
         ]);
-        let capture = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("3D probe faces"),
-            entries: &entries,
-        });
+        // Under the sun's cascades, their uniforms and maps as well.
+        let capture = |cascaded: bool| {
+            let mut entries = entries.clone();
+            if cascaded {
+                entries.extend([
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                ]);
+            }
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("3D probe faces"),
+                entries: &entries,
+            })
+        };
         let read = |lit: bool| {
             let mut entries = vec![uniform(0, compute)];
             if lit {
@@ -883,7 +916,10 @@ fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
                 entries: &entries,
             })
         };
-        super::probes_raster::Raster::new((capture, [read(false), read(true)]))
+        super::probes_raster::Raster::new((
+            [capture(false), capture(true)],
+            [read(false), read(true)],
+        ))
     });
     Tracer {
         scene: rays.then(|| Scene::new(device)),
@@ -915,7 +951,7 @@ fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
 fn trace_source(lit: bool) -> String {
     updater_source(
         "enable wgpu_ray_query;\n",
-        lit,
+        (lit, false),
         &[
             include_str!("shader/frame.wgsl"),
             include_str!("shader/probes.wgsl"),
@@ -925,24 +961,27 @@ fn trace_source(lit: bool) -> String {
     )
 }
 /// The rasteriser's WGSL (`probes_raster.rs`): as the tracer's, its own
-/// part in place of the tracer's.
+/// part in place of the tracer's, with the sun's cascades
+/// (`shader/shadows.wgsl`) where `cascaded`.
 #[cold]
-pub(super) fn raster_source(lit: bool) -> String {
+pub(super) fn raster_source(lit: bool, cascaded: bool) -> String {
     updater_source(
         "",
-        lit,
+        (lit, cascaded),
         &[
             include_str!("shader/frame.wgsl"),
             include_str!("shader/probes.wgsl"),
+            include_str!("shader/shadows.wgsl"),
             include_str!("probes_common.wgsl"),
             include_str!("probes_raster.wgsl"),
         ],
     )
 }
 /// `parts` after `head`, tags taken off: `//probed ` lines kept, `//E `
-/// lines kept where `lit`, other tagged lines dropped.
+/// lines kept where `lit`, `//H ` where `cascaded` and `//I ` where not,
+/// other tagged lines dropped.
 #[cold]
-fn updater_source(head: &str, lit: bool, parts: &[&str]) -> String {
+fn updater_source(head: &str, (lit, cascaded): (bool, bool), parts: &[&str]) -> String {
     let mut out = String::from(head);
     for text in parts {
         for line in text.lines() {
@@ -961,6 +1000,8 @@ fn updater_source(head: &str, lit: bool, parts: &[&str]) -> String {
             let line = match tag {
                 Some(("probed", rest)) => rest,
                 Some(("E", rest)) if lit => rest,
+                Some(("H", rest)) if cascaded => rest,
+                Some(("I", rest)) if !cascaded => rest,
                 Some(_) => continue,
                 None => line,
             };
@@ -1127,13 +1168,15 @@ struct Atlases<'a> {
     set: &'a wgpu::Buffer,
     sampler: &'a wgpu::Sampler,
 }
-/// The frame's shadow map (or stand-in), its sampler, and whether the sun
-/// casts through it.
+/// The frame's shadow map (or stand-in), its sampler, whether the sun
+/// casts through it, and the sun's cascades' uniforms and maps where it
+/// casts through them instead.
 #[derive(Clone, Copy)]
 pub(super) struct Shadow<'a> {
     map: &'a wgpu::TextureView,
     sampler: &'a wgpu::Sampler,
     on: bool,
+    cascades: Option<(&'a wgpu::Buffer, &'a wgpu::TextureView)>,
 }
 
 /// This frame's probes' faces drawn and read along their rays into the
@@ -1150,6 +1193,7 @@ fn rasterise(
     let (rays, rays_size) = tracer.rays.as_ref().unwrap();
     let raster = tracer.raster.as_mut().unwrap();
     raster.hold(device, count);
+    let cascaded = shadow.cascades.is_some();
     let key = (
         of,
         tracer.lights_made,
@@ -1157,49 +1201,61 @@ fn rasterise(
         environment.map(|e| e.0),
         shadow.on,
         raster.made,
+        shadow.cascades.map(|(uniforms, _)| uniforms.clone()),
     );
     if tracer.raster_binds.as_ref().is_none_or(|(k, _)| *k != key) {
+        let mut entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: frame.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(shadow.map),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(shadow.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(atlases.light),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: wgpu::BindingResource::TextureView(atlases.depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: atlases.set.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: wgpu::BindingResource::Sampler(atlases.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 21,
+                resource: tracer.uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 22,
+                resource: tracer.lights.as_entire_binding(),
+            },
+        ];
+        if let Some((uniforms, maps)) = shadow.cascades {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 6,
+                resource: uniforms.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 7,
+                resource: wgpu::BindingResource::TextureView(maps),
+            });
+        }
         let capture = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("3D probe faces"),
-            layout: raster.capture_layout(),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: frame.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(shadow.map),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(shadow.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 9,
-                    resource: wgpu::BindingResource::TextureView(atlases.light),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 10,
-                    resource: wgpu::BindingResource::TextureView(atlases.depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 11,
-                    resource: atlases.set.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 12,
-                    resource: wgpu::BindingResource::Sampler(atlases.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 21,
-                    resource: tracer.uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 22,
-                    resource: tracer.lights.as_entire_binding(),
-                },
-            ],
+            layout: raster.capture_layout(cascaded),
+            entries: &entries,
         });
         let mut entries = vec![wgpu::BindGroupEntry {
             binding: 0,
@@ -1237,7 +1293,12 @@ fn rasterise(
         tracer.raster_binds = Some((key, [capture, read]));
     }
     let [capture, read] = &tracer.raster_binds.as_ref().unwrap().1;
-    raster.update(device, encoder, (capture, read), (lit, count, rays_per));
+    raster.update(
+        device,
+        encoder,
+        (capture, read),
+        (lit, cascaded, count, rays_per),
+    );
 }
 
 /// This frame's probes' rays traced into the rays buffer.
@@ -1481,7 +1542,8 @@ mod tests {
         };
         for lit in [false, true] {
             module("rays", trace_source(lit));
-            module("faces", raster_source(lit));
+            module("faces", raster_source(lit, false));
+            module("faces under cascades", raster_source(lit, true));
             for other in [0, Variant::TEXTURED, Variant::TEXTURED | Variant::COATED] {
                 let variant = Variant(Variant::PROBES | other).with(Variant::LIT, lit);
                 module("mesh", wgsl(variant, 4));
@@ -1529,7 +1591,12 @@ mod tests {
         };
         for lit in [false, true] {
             assert_eq!(whole_loads(&trace_source(lit)), 0, "the tracer");
-            assert_eq!(whole_loads(&raster_source(lit)), 0, "the faces");
+            assert_eq!(whole_loads(&raster_source(lit, false)), 0, "the faces");
+            assert_eq!(
+                whole_loads(&raster_source(lit, true)),
+                0,
+                "the faces under cascades"
+            );
             let variant = Variant(Variant::PROBES).with(Variant::LIT, lit);
             assert_eq!(whole_loads(&wgsl(variant, 4)), 0, "a probe-lit mesh");
         }

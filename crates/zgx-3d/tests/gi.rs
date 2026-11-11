@@ -758,3 +758,63 @@ fn moving_a_cube_costs_a_frame() {
         );
     }
 }
+
+#[cfg(feature = "lighting")]
+#[test]
+fn a_closed_box_under_the_sun_stays_dark_inside_on_the_face_path() {
+    // A box closed on every side under a strong sun, its shadow in
+    // cascades, its probes drawn as faces: no light gets in, so its inside
+    // (lit by its probes alone) stays dark. Faces seeing the sun unshadowed
+    // would light its floor and bring that in.
+    let world = World::new();
+    let white = Material {
+        color: [0.8, 0.8, 0.8, 1.],
+        roughness: 1.,
+        ..Material::default()
+    };
+    let slab = |size: [f32; 3], at: [f32; 3]| {
+        world.add(Object::mesh(Geometry::cuboid(size[0], size[1], size[2]), white).at(at));
+    };
+    slab([4.4, 0.2, 4.4], [0., -0.1, 0.]); // floor
+    slab([4.4, 0.2, 4.4], [0., 3.1, 0.]); // roof
+    slab([0.2, 3.4, 4.4], [-2.1, 1.5, 0.]);
+    slab([0.2, 3.4, 4.4], [2.1, 1.5, 0.]);
+    slab([4.4, 3.4, 0.2], [0., 1.5, -2.1]);
+    slab([4.4, 3.4, 0.2], [0., 1.5, 2.1]);
+    world.add_light(Light::Directional {
+        direction: vec3(0.2, -1., 0.1),
+        color: [1.; 3],
+        intensity: 6.,
+    });
+    world.set_shadows(true);
+    world.set_cascades(Some(Cascades::new(2).distance(20.)));
+    world.set_camera(Camera {
+        position: vec3(0., 1.5, 1.6),
+        target: vec3(0., 1.2, -2.),
+        fov: 60f32.to_radians(),
+        near: 0.05,
+        ..Camera::default()
+    });
+    world.set_background(Some(0x000000));
+    world.set_probes_rasterised(true);
+    world
+        .add_probes(ProbeVolume::new([-1.8, 0.2, -1.8], [1.8, 2.8, 1.8], [4, 3, 4]).per_frame(48))
+        .unwrap();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    settle(&mut window, &world, 500);
+    if !traced(
+        &world,
+        "a_closed_box_under_the_sun_stays_dark_inside_on_the_face_path",
+    ) {
+        return;
+    }
+    let pixels = window.pixels();
+    save("box-faces", &pixels);
+    let wall = around(&pixels, (SIZE.0 / 2, SIZE.1 / 2), 8);
+    assert!(
+        wall.iter().all(|&c| c < 0.05),
+        "the box's back wall inside: {wall:?}"
+    );
+}

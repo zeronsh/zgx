@@ -80,8 +80,10 @@ pub(super) struct Raster {
     pub(super) made: u64,
     /// Group 0 of the capture and of the faces' reading, and their
     /// pipelines (without an environment and with).
-    capture_layout: wgpu::BindGroupLayout,
-    capture: [Option<wgpu::RenderPipeline>; 2],
+    /// (The capture's without the sun's cascades and with, its pipelines
+    /// by that and by environment.)
+    capture_layouts: [wgpu::BindGroupLayout; 2],
+    capture: [[Option<wgpu::RenderPipeline>; 2]; 2],
     read_layouts: [wgpu::BindGroupLayout; 2],
     read: [Option<wgpu::ComputePipeline>; 2],
 }
@@ -120,7 +122,7 @@ fn texture(
 }
 
 impl Raster {
-    pub(super) fn new(layouts: (wgpu::BindGroupLayout, [wgpu::BindGroupLayout; 2])) -> Self {
+    pub(super) fn new(layouts: ([wgpu::BindGroupLayout; 2], [wgpu::BindGroupLayout; 2])) -> Self {
         Self {
             meshes: None,
             held: Vec::new(),
@@ -135,8 +137,8 @@ impl Raster {
             instance_bytes: 0,
             faces: None,
             made: 0,
-            capture_layout: layouts.0,
-            capture: [None, None],
+            capture_layouts: layouts.0,
+            capture: [[None, None], [None, None]],
             read_layouts: layouts.1,
             read: [None, None],
         }
@@ -170,8 +172,8 @@ impl Raster {
     pub(super) fn faces(&self) -> &wgpu::TextureView {
         &self.faces.as_ref().expect("held").0
     }
-    pub(super) fn capture_layout(&self) -> &wgpu::BindGroupLayout {
-        &self.capture_layout
+    pub(super) fn capture_layout(&self, cascaded: bool) -> &wgpu::BindGroupLayout {
+        &self.capture_layouts[usize::from(cascaded)]
     }
     pub(super) fn read_layout(&self, lit: bool) -> &wgpu::BindGroupLayout {
         &self.read_layouts[usize::from(lit)]
@@ -297,9 +299,9 @@ impl Raster {
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
         (capture, read): (&wgpu::BindGroup, &wgpu::BindGroup),
-        (lit, count, rays): (bool, u32, u32),
+        (lit, cascaded, count, rays): (bool, bool, u32, u32),
     ) {
-        let source = |lit| super::probes::raster_source(lit);
+        let source = |lit, cascaded| super::probes::raster_source(lit, cascaded);
         // Each face's index, at its own dynamic offset: made once.
         let (face_layout, face_bind) = self.face.get_or_insert_with(|| {
             let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -342,60 +344,62 @@ impl Raster {
             });
             (layout, bind)
         });
-        let capture_pipeline = self.capture[usize::from(lit)].get_or_insert_with(|| {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("3D probe faces"),
-                source: wgpu::ShaderSource::Wgsl(source(lit).into()),
+        let capture_layout = &self.capture_layouts[usize::from(cascaded)];
+        let capture_pipeline = self.capture[usize::from(cascaded)][usize::from(lit)]
+            .get_or_insert_with(|| {
+                let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("3D probe faces"),
+                    source: wgpu::ShaderSource::Wgsl(source(lit, cascaded).into()),
+                });
+                let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("3D probe faces"),
+                    bind_group_layouts: &[Some(capture_layout), Some(face_layout)],
+                    immediate_size: 0,
+                });
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("3D probe faces"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("capture_vertex"),
+                        compilation_options: Default::default(),
+                        buffers: &[
+                            wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<crate::Vertex>() as u64,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &wgpu::vertex_attr_array![
+                                    0 => Float32x3, 1 => Float32x3
+                                ],
+                            },
+                            wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<Instance>() as u64,
+                                step_mode: wgpu::VertexStepMode::Instance,
+                                attributes: &wgpu::vertex_attr_array![
+                                    2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
+                                    6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4
+                                ],
+                            },
+                        ],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("capture_fragment"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::TextureFormat::Rgba32Float.into())],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
             });
-            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("3D probe faces"),
-                bind_group_layouts: &[Some(&self.capture_layout), Some(face_layout)],
-                immediate_size: 0,
-            });
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("3D probe faces"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("capture_vertex"),
-                    compilation_options: Default::default(),
-                    buffers: &[
-                        wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<crate::Vertex>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &wgpu::vertex_attr_array![
-                                0 => Float32x3, 1 => Float32x3
-                            ],
-                        },
-                        wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<Instance>() as u64,
-                            step_mode: wgpu::VertexStepMode::Instance,
-                            attributes: &wgpu::vertex_attr_array![
-                                2 => Float32x4, 3 => Float32x4, 4 => Float32x4, 5 => Float32x4,
-                                6 => Float32x4, 7 => Float32x4, 8 => Float32x4, 9 => Float32x4
-                            ],
-                        },
-                    ],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("capture_fragment"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::TextureFormat::Rgba32Float.into())],
-                }),
-                primitive: Default::default(),
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        });
         {
             let (faces, depth, _) = self.faces.as_ref().expect("held");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -448,7 +452,7 @@ impl Raster {
         let read_pipeline = self.read[usize::from(lit)].get_or_insert_with(|| {
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("3D probe faces read"),
-                source: wgpu::ShaderSource::Wgsl(source(lit).into()),
+                source: wgpu::ShaderSource::Wgsl(source(lit, false).into()),
             });
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("3D probe faces read"),

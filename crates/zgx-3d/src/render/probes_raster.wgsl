@@ -68,18 +68,20 @@ fn on_face(face: u32, rel: vec3<f32>) -> vec3<f32> {
     return Captured(clip, world, turned, albedo.rgb, glow.rgb, origin);
 }
 
-// How much of the sun reaches `at` (facing `n`): the frame's shadow map,
-// as last drawn (the whole of it lit outside it, or with no shadows).
+// How much of the sun reaches `at` (facing `n`), as last drawn: under
+// cascades, the first holding it (`shader/shadows.wgsl`); otherwise the
+// frame's map (lit outside it, or with no shadows).
 fn sun_reaching(at: vec3<f32>, n: vec3<f32>) -> f32 {
-    if frame.params.w < 0.5 {
-        return 1.0;
-    }
-    let p = frame.shadow * vec4(at + n * frame.shadow_texel.z, 1.0);
-    let uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
-    if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || p.z > 1.0 {
-        return 1.0;
-    }
-    return textureSampleCompareLevel(shadow_map, shadow_sampler, uv, p.z);
+//H     return sunlit_cascaded(at, n);
+//I     if frame.params.w < 0.5 {
+//I         return 1.0;
+//I     }
+//I     let p = frame.shadow * vec4(at + n * frame.shadow_texel.z, 1.0);
+//I     let uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+//I     if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || p.z > 1.0 {
+//I         return 1.0;
+//I     }
+//I     return textureSampleCompareLevel(shadow_map, shadow_sampler, uv, p.z);
 }
 
 @fragment fn capture_fragment(in: Captured) -> @location(0) vec4<f32> {
