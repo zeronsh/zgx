@@ -450,6 +450,46 @@ pub(crate) struct GlassSpec {
     /// Each corner's own (`{ tl, tr, br, bl }` or four numbers).
     pub corners: Option<Source>,
 }
+/// `ui.map`, made the first time a script names it.
+pub(crate) fn install_map(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    ui.set(
+        "map",
+        lua.create_function(|lua, (state, opts): (mlua::Value, Table)| {
+            let source = expect_readable(&state, "ui.map's source")?;
+            let env = env(lua)?;
+            let end = |value: mlua::Value, what: &str| -> mlua::Result<MapEnd> {
+                if let Some(state) = state_of(&value) {
+                    return Ok(MapEnd::State(state));
+                }
+                match value {
+                    mlua::Value::Integer(n) => Ok(MapEnd::Num(n as f64)),
+                    mlua::Value::Number(n) => Ok(MapEnd::Num(n)),
+                    mlua::Value::Function(f) => Ok(MapEnd::State(computed(lua, &env, f))),
+                    other => Err(mlua::Error::runtime(format!(
+                        "ui.map's {what} ends are numbers, states or functions, not {}",
+                        other.type_name()
+                    ))),
+                }
+            };
+            let range = |what: &str| -> mlua::Result<[MapEnd; 2]> {
+                let Some(range) = opts.get::<Option<Table>>(what)? else {
+                    return Err(mlua::Error::runtime(format!(
+                        "ui.map needs `{what} = {{ start, end }}`"
+                    )));
+                };
+                Ok([end(range.get(1)?, what)?, end(range.get(2)?, what)?])
+            };
+            let spec = MapSpec {
+                source,
+                from: range("from")?,
+                to: range("to")?,
+                clamp: opts.get::<Option<bool>>("clamp")?.unwrap_or(false),
+            };
+            lua.create_userdata(MapUd(Rc::new(spec)))
+        })?,
+    )?;
+    Ok(())
+}
 /// `ui.glass`, made the first time a script names it.
 pub(crate) fn install_glass(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     ui.set(
@@ -6725,42 +6765,6 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         })))
     };
     use crate::anime::ease::{Base, Ease, Mode};
-    ui.set(
-        "map",
-        lua.create_function(|lua, (state, opts): (mlua::Value, Table)| {
-            let source = expect_readable(&state, "ui.map's source")?;
-            let env = env(lua)?;
-            let end = |value: mlua::Value, what: &str| -> mlua::Result<MapEnd> {
-                if let Some(state) = state_of(&value) {
-                    return Ok(MapEnd::State(state));
-                }
-                match value {
-                    mlua::Value::Integer(n) => Ok(MapEnd::Num(n as f64)),
-                    mlua::Value::Number(n) => Ok(MapEnd::Num(n)),
-                    mlua::Value::Function(f) => Ok(MapEnd::State(computed(lua, &env, f))),
-                    other => Err(mlua::Error::runtime(format!(
-                        "ui.map's {what} ends are numbers, states or functions, not {}",
-                        other.type_name()
-                    ))),
-                }
-            };
-            let range = |what: &str| -> mlua::Result<[MapEnd; 2]> {
-                let Some(range) = opts.get::<Option<Table>>(what)? else {
-                    return Err(mlua::Error::runtime(format!(
-                        "ui.map needs `{what} = {{ start, end }}`"
-                    )));
-                };
-                Ok([end(range.get(1)?, what)?, end(range.get(2)?, what)?])
-            };
-            let spec = MapSpec {
-                source,
-                from: range("from")?,
-                to: range("to")?,
-                clamp: opts.get::<Option<bool>>("clamp")?.unwrap_or(false),
-            };
-            lua.create_userdata(MapUd(Rc::new(spec)))
-        })?,
-    )?;
     ui.set(
         "tween",
         lua.create_function(move |lua, (state, opts): (mlua::Value, Option<Table>)| {
