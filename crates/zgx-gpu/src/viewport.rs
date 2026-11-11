@@ -569,9 +569,6 @@ impl GpuRenderer {
         );
         Ok(())
     }
-    /// Have view `key.0`'s painter draw a frame of `size` into `target`, its
-    /// work submitted before the frame showing it. Nothing if the view is
-    /// gone.
     /// This frame's time for its views: read from the interface's clock by
     /// the first to draw, the same for the rest.
     fn view_time(&self) -> std::time::Instant {
@@ -588,6 +585,9 @@ impl GpuRenderer {
             }
         }
     }
+    /// Have view `key.0`'s painter draw a frame of `size` into `target`, its
+    /// work submitted before the frame showing it. Nothing if the view is
+    /// gone.
     pub(crate) fn paint(
         &self,
         key: (u64, u64),
