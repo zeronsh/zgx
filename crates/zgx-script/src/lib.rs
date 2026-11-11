@@ -1482,7 +1482,7 @@ fn tracking(host: &Rc<Inner>) -> Option<Rc<reloads::Tracker>> {
 /// again for another window's script: it joins the same session.
 ///
 /// Only what the script reaches by `require` with a string literal is read
-/// (no tests, type files or unused modules), files of at most 1 MB.
+/// (no tests, type files or unused modules), files of at most 16 MB.
 /// Compiled from the text, in memory, and used only for the very bytes
 /// `require` reads; no bytecode is written or read from a file. A file not
 /// ready in time compiles as it always has, and nothing waits for the

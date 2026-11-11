@@ -955,9 +955,10 @@ pub fn fitted_size(width: u32, height: u32, drawn: Option<(f32, f32)>) -> (u32, 
 /// The one thread decoding kept files, once one has been queued.
 static WORKER: std::sync::OnceLock<std::sync::Mutex<std::sync::mpsc::Sender<Work>>> =
     std::sync::OnceLock::new();
-/// What the decoding thread runs once the copies it made are given back:
-/// the host's allocator collects that thread's heap (`set_decoder_rest`).
-static DECODER_REST: std::sync::RwLock<Option<fn()>> = std::sync::RwLock::new(None);
+/// What a thread runs once what it made is given back by another: the
+/// host's allocator collects the calling thread's heap (`set_decoder_rest`):
+/// the decoding thread's, and the script worker's (`rest_thread`).
+static THREAD_REST: std::sync::RwLock<Option<fn()>> = std::sync::RwLock::new(None);
 /// Rests the decoding thread has had (`decoder_rests`).
 static RESTS: AtomicU64 = AtomicU64::new(0);
 /// What the thread decoding kept files runs after `release_decoded` gives
@@ -966,15 +967,28 @@ static RESTS: AtomicU64 = AtomicU64::new(0);
 /// thread waits for its own) collects that thread's heap here. Decoded
 /// copies are made on that thread and given back by the main one, so
 /// without it the pages of every copy a long scroll made stayed in memory
-/// at rest. Nothing runs as pictures decode or draw.
+/// at rest. Nothing runs as pictures decode or draw. The thread compiling
+/// scripts ahead (zgx-script's `compile_ahead`) rests with it too, once the
+/// main thread has let go of what it compiled: a data module's megabytes
+/// otherwise stayed in its heap through a window's first frames.
 pub fn set_decoder_rest(rest: fn()) {
-    *DECODER_REST.write().unwrap_or_else(|p| p.into_inner()) = Some(rest);
+    *THREAD_REST.write().unwrap_or_else(|p| p.into_inner()) = Some(rest);
 }
 /// How many times the decoding thread has rested (`set_decoder_rest`). For
 /// tests.
 #[doc(hidden)]
 pub fn decoder_rests() -> u64 {
     RESTS.load(Ordering::Relaxed)
+}
+/// Rest the calling thread as the host set (`set_decoder_rest`): for another
+/// crate's worker whose results the main thread let go of (zgx-script's
+/// ahead compile). Nothing without a host.
+#[doc(hidden)]
+pub fn rest_thread() {
+    let rest = *THREAD_REST.read().unwrap_or_else(|p| p.into_inner());
+    if let Some(rest) = rest {
+        rest();
+    }
 }
 fn send(job: Job) {
     send_work(Work::Decode(job));
@@ -1006,7 +1020,7 @@ fn send_work(work: Work) {
                             }
                         }
                         Work::Rest => {
-                            let rest = *DECODER_REST.read().unwrap_or_else(|p| p.into_inner());
+                            let rest = *THREAD_REST.read().unwrap_or_else(|p| p.into_inner());
                             if let Some(rest) = rest {
                                 rest();
                             }
