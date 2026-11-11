@@ -1493,6 +1493,78 @@ fn raw_to_lua(value: &Value, lua: &Lua, frozen: bool, objects: bool) -> mlua::Re
     // table, as `raw_tree` passed only a list or a map.
     unsafe { lua.exec_raw::<Table>((), |state| push(state, value, frozen)) }
 }
+/// The tables of a JSON document read onto a tape (`json::decode_to_lua`),
+/// made through Luau's C API in one protected call, as `raw_to_lua` makes a
+/// value's: counted the same, an empty map an object.
+pub(crate) fn tape_to_lua(
+    lua: &Lua,
+    toks: &[crate::json::TapeTok],
+    bytes: &[u8],
+    objects: bool,
+) -> mlua::Result<mlua::Value> {
+    use crate::json::TapeTok as Tok;
+    use mlua::ffi;
+    use std::ffi::c_int;
+    const MARKER: &std::ffi::CStr = c"zgx.json_object";
+    if objects {
+        object_marker(lua)?;
+    }
+    /// # Safety
+    ///
+    /// As `raw_to_lua`'s `push`: inside `exec_raw`'s C call, each level asks
+    /// for its stack, leaves one value pushed, and holds nothing to drop (the
+    /// tape is borrowed), so a Luau error unwinds it to the protected call.
+    /// `at` is a value's place in `toks`, a well-formed tape's (a list or map
+    /// followed by as many items as its count), and is moved past it.
+    unsafe fn push(state: *mut ffi::lua_State, toks: &[Tok], bytes: &[u8], at: &mut usize) {
+        // SAFETY: as this function's.
+        unsafe {
+            let tok = toks[*at];
+            *at += 1;
+            match tok {
+                Tok::Nil => ffi::lua_pushnil(state),
+                Tok::Bool(b) => ffi::lua_pushboolean(state, c_int::from(b)),
+                Tok::Num(n) => ffi::lua_pushnumber(state, n),
+                Tok::Str(from, len) => {
+                    let s = &bytes[from as usize..][..len as usize];
+                    ffi::lua_pushlstring(state, s.as_ptr().cast(), s.len());
+                }
+                Tok::List(n) => {
+                    CONVERTED.set(CONVERTED.get() + 1);
+                    count_items(n as usize);
+                    ffi::luaL_checkstack(state, 2, c"a list nested too deep".as_ptr());
+                    let size = c_int::try_from(n).unwrap_or(c_int::MAX);
+                    ffi::lua_createtable(state, size, 0);
+                    for i in 0..n {
+                        push(state, toks, bytes, at);
+                        ffi::lua_rawseti_(state, -2, i as c_int + 1);
+                    }
+                }
+                Tok::Map(n) => {
+                    CONVERTED.set(CONVERTED.get() + 1);
+                    count_items(n as usize);
+                    ffi::luaL_checkstack(state, 3, c"a table nested too deep".as_ptr());
+                    let size = c_int::try_from(n).unwrap_or(c_int::MAX);
+                    ffi::lua_createtable(state, 0, size);
+                    for _ in 0..n {
+                        // Its key, a string; then its value.
+                        push(state, toks, bytes, at);
+                        push(state, toks, bytes, at);
+                        ffi::lua_rawset(state, -3);
+                    }
+                    if n == 0 {
+                        ffi::lua_rawgetfield(state, ffi::LUA_REGISTRYINDEX, MARKER.as_ptr());
+                        ffi::lua_setmetatable(state, -2);
+                    }
+                }
+            }
+        }
+    }
+    let mut at = 0;
+    // SAFETY: a tape `json::decode_to_lua` read is well formed; `push` leaves
+    // its one value, `exec_raw`'s result.
+    unsafe { lua.exec_raw::<mlua::Value>((), |state| push(state, toks, bytes, &mut at)) }
+}
 /// Push `text` as a string, its chunks copied straight in.
 ///
 /// # Safety
