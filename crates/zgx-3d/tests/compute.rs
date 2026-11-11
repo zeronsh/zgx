@@ -896,3 +896,88 @@ fn budgets_past_reason_are_held_to_it() {
         ComputeBudget::default().sandboxed_gpu_ms
     );
 }
+
+#[test]
+fn a_sandboxed_pass_that_never_ends_ends() {
+    use zgx_gpu::{
+        viewport::{Viewport, ViewportFrame},
+        wgpu,
+    };
+    let Some((device, queue)) = timed_device() else {
+        return;
+    };
+    let world = World::new();
+    // Time enough that the cap, not the timing, is what's tested.
+    world.set_compute_budget(ComputeBudget {
+        sandboxed_gpu_ms: 100.,
+        ..ComputeBudget::default()
+    });
+    let out = world.add_buffer(BufferDesc::storage::<u32>(256)).unwrap();
+    let spin = world
+        .add_compute(
+            Compute::new(
+                "@group(0) @binding(0) var<storage, read_write> out: array<u32>;
+                 @compute @workgroup_size(64)
+                 fn main(@builtin(global_invocation_id) id: vec3u) {
+                     var n = 0u;
+                     loop { n += 1u; }
+                     out[id.x] = n;
+                 }",
+            )
+            .buffer("out", &out, Access::Write)
+            .threads([256, 1, 1])
+            .sandboxed()
+            .every_frame(),
+        )
+        .unwrap();
+    let mut painter = world.viewport();
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let mut draw = || {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut frame =
+            ViewportFrame::new(&device, &queue, &mut encoder, &view, format, (8, 8), 1.);
+        painter.render(&mut frame);
+        queue.submit([encoder.finish()]);
+        // Waits for the device: a pass that didn't end would hang here.
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    };
+    for _ in 0..200 {
+        draw();
+        if world.compute_status(spin) == Some(ComputeStatus::Ready) {
+            break;
+        }
+    }
+    assert_eq!(world.compute_status(spin), Some(ComputeStatus::Ready));
+    // It has run: read what it wrote.
+    draw();
+    let read = out.read(0..1024);
+    for _ in 0..20 {
+        draw();
+        if read.is_ready() {
+            break;
+        }
+    }
+    assert_eq!(world.compute_status(spin), Some(ComputeStatus::Ready));
+    // Each invocation looped its share of the pass's iterations, 2^22 / 256.
+    let looped = words(&read.try_take().unwrap().unwrap());
+    assert!(
+        looped.iter().all(|&n| n == (1 << 22) / 256),
+        "{:?}",
+        &looped[..4]
+    );
+}

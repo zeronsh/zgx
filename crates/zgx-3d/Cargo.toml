@@ -14,6 +14,10 @@ categories = ["gui", "rendering"]
 zgx = { path = "../zgx", version = "0.1.10", default-features = false }
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
 bytemuck = { version = "1.25", features = ["derive"] }
+# Compute: a sandboxed shader's loops bounded and written back as WGSL
+# (`shader_sandbox`). The naga wgpu already builds, with its writer: no
+# crate added.
+naga = { version = "29.0.4", default-features = false, features = ["wgsl-out"], optional = true }
 serde_json = { version = "1", optional = true }
 
 [features]
@@ -22,7 +26,7 @@ serde_json = { version = "1", optional = true }
 gltf = ["dep:serde_json", "zgx-gpu/png", "zgx-gpu/jpeg"]
 # The app's GPU data and compute passes (`World::add_buffer`,
 # `add_texture`, `add_compute`): WGSL checked by the naga wgpu brings.
-compute = []
+compute = ["dep:naga"]
 # The lighting milestone (design-3d-aaa.md, 6.3): clustered lights.
 lighting = []
 # Particle emitters (`World::add_emitter`): updated by compute where the

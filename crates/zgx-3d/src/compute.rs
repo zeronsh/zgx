@@ -112,8 +112,11 @@ pub struct ComputeBudget {
     /// The same for a sandboxed pass (`Compute::sandboxed`; 1 to begin
     /// with).
     pub sandboxed_gpu_ms: f32,
-    /// Frames running a pass may take longer before it's turned off
-    /// (`ComputeStatus::OverBudget`; 3 to begin with).
+    /// Of a pass's last 8 timed frames, how many may take longer before it's
+    /// turned off (`ComputeStatus::OverBudget`; 3 to begin with): one slow
+    /// on alternate frames trips it as one slow every frame does. Frames
+    /// not timed (more than four frames' timestamps on their way) count
+    /// neither way.
     pub frames: u32,
 }
 impl Default for ComputeBudget {
@@ -332,6 +335,9 @@ struct Checked {
     workgroups: [u32; 3],
     /// Invocations a run: its workgroups times their size.
     invocations: u64,
+    /// A sandboxed pass's loop iterations an invocation, all its loops
+    /// together (`shader_sandbox`).
+    iteration_cap: Option<u32>,
     groups: Vec<Vec<(u32, Slot)>>,
     uses: Vec<(Key, Access)>,
 }
@@ -629,6 +635,7 @@ fn check(compute: &Compute) -> Result<Checked, ComputeError> {
             .chain(&size)
             .map(|&n| u64::from(n))
             .product(),
+        iteration_cap: None,
         groups,
         uses,
     })
@@ -699,9 +706,10 @@ struct Pass {
     /// given room first this frame. And whether this frame runs it.
     waited: bool,
     chosen: bool,
-    /// Frames running it took longer than its budget, and the last's time
-    /// once that turned it off.
-    over: u32,
+    /// Which of its last 8 timed frames took longer than its budget (a bit
+    /// each, the newest lowest), and the last's time once that turned it
+    /// off.
+    over: u8,
     over_budget: Option<f32>,
 }
 impl Pass {
@@ -804,7 +812,21 @@ impl Data {
         if compute.sandboxed && timed == Some(false) {
             return Err(ComputeError::Untimed);
         }
-        let checked = check(&compute)?;
+        let mut checked = check(&compute)?;
+        let mut source = compute.source.clone();
+        if compute.sandboxed {
+            // Its loops bounded: a pass's iterations, all invocations'
+            // together, `SANDBOX_ITERATIONS` (at least 64 each).
+            let cap = (SANDBOX_ITERATIONS / checked.invocations.max(1))
+                .clamp(64, u64::from(u32::MAX)) as u32;
+            let module = naga::front::wgsl::parse_str(&compute.source)
+                .map_err(|e| ComputeError::Shader(e.emit_to_string(&compute.source)))?;
+            let bounded = crate::shader_sandbox::bound_loops(module, cap)
+                .and_then(|module| crate::shader_sandbox::to_wgsl(&module))
+                .map_err(ComputeError::Shader)?;
+            checked.iteration_cap = Some(cap);
+            source = bounded.into();
+        }
         if checked.invocations > self.limits.invocations {
             return Err(ComputeError::Limits(format!(
                 "{} invocations a run: a frame's passes may run {} (`World::set_compute_budget`)",
@@ -817,7 +839,7 @@ impl Data {
             point: compute.point,
             run: compute.run,
             checked,
-            source: compute.source,
+            source,
             enabled: true,
             demanded: compute.run == Run::OnDemand,
             due: 0.,
@@ -929,6 +951,13 @@ impl Data {
 /// Device generations: each painter's device gets a number of its own, so
 /// a resource made on another is made again.
 static GENERATIONS: AtomicU64 = AtomicU64::new(1);
+
+/// A sandboxed pass's loop iterations, all its invocations' together: each
+/// invocation may loop this over its invocations (at least 64). 2^22 of an
+/// empty loop's are about 0.6 ms of an M1 Max (2^26 were 9.7 ms), within
+/// the sandboxed budget; a loop whose body is heavy is what the timestamps
+/// catch.
+const SANDBOX_ITERATIONS: u64 = 1 << 22;
 
 /// What `frame` holds in a pass's shader.
 #[repr(C)]
@@ -1117,14 +1146,15 @@ impl Frames {
                             } else {
                                 limits.gpu_ms
                             };
-                            pass.over = if ms > budget { pass.over + 1 } else { 0 };
-                            if pass.over >= limits.frames.max(1) {
+                            let (history, tripped) = judge(pass.over, ms > budget, limits.frames);
+                            pass.over = history;
+                            if tripped {
                                 pass.over_budget = Some(ms);
                                 fail(
                                     pass,
                                     format!(
-                                        "it took {ms:.2} ms of the GPU, over its {budget} ms, {} frames running",
-                                        pass.over
+                                        "it took {ms:.2} ms of the GPU, over its {budget} ms, in {} of its last 8 timed frames",
+                                        history.count_ones()
                                     ),
                                 );
                             }
@@ -1836,6 +1866,13 @@ fn fail(pass: &mut Pass, why: String) {
     pass.demanded = false;
 }
 
+/// A pass's history of its last 8 timed frames, `slow` the newest, and
+/// whether `frames` of them over budget turn it off.
+fn judge(history: u8, slow: bool, frames: u32) -> (u8, bool) {
+    let history = history << 1 | u8::from(slow);
+    (history, history.count_ones() >= frames.clamp(1, 8))
+}
+
 /// Work for the compile worker: pipelines and shader modules made off the
 /// frame.
 type Job = Box<dyn FnOnce() + Send>;
@@ -1890,6 +1927,32 @@ pub(crate) fn now<T>(future: impl std::future::Future<Output = T>) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pass_slow_on_some_of_its_timed_frames_trips_as_one_slow_on_all() {
+        // `timed` frames only reach `judge`: an untimed frame between them
+        // neither resets nor adds. Slow on alternate timed frames: the third
+        // slow one of the last eight trips it.
+        let run = |slow: &[bool]| {
+            let mut history = 0;
+            slow.iter().position(|&s| {
+                let (h, tripped) = judge(history, s, 3);
+                history = h;
+                tripped
+            })
+        };
+        assert_eq!(run(&[true, true, true]), Some(2));
+        assert_eq!(run(&[true, false, true, false, true]), Some(4));
+        assert_eq!(
+            run(&[true, false, false, true, false, false, true]),
+            Some(6)
+        );
+        // Three slow frames more than eight apart: the window forgets.
+        let spread = [true, false, false, false, false, false, false, false, false];
+        let three = [&spread[..], &spread[..], &[true][..]].concat();
+        assert_eq!(run(&three), None);
+        assert_eq!(run(&[false; 20]), None);
+    }
 
     #[test]
     fn a_whole_write_goes_before_earlier_readers_and_the_rest_keep_their_order() {

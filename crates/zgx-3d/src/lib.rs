@@ -55,6 +55,8 @@ mod painter;
 mod particles;
 mod pick;
 mod render;
+#[cfg(feature = "compute")]
+mod shader_sandbox;
 mod texture;
 mod world;
 
