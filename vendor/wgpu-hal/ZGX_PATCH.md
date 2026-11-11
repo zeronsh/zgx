@@ -125,8 +125,10 @@ a 330 ms start to first text on an RTX 4090 machine, every launch.
 given (its flags, target, entry point and source) and holds that key in
 full, which must match byte for byte before its bytecode (a DXBC container)
 is used: a hash collision, other flags or another version's HLSL compile
-again. Files are written whole and renamed into place, so another process
-never reads half of one. DXC's output is kept the same way, its key also
+again. Files are written whole, each from a file of its writer's own, and
+renamed into place, so no other process or thread reads half of one; a
+container is used only at the size its header gives, so a file cut short
+never reaches the driver. DXC's output is kept the same way, its key also
 naming the DLL's version and its file's size and time (the DLL is the
 app's own, so another one compiles again); a DLL found only by name on the
 search path, with no file to read, isn't kept. zgx-gpu sets `%LOCALAPPDATA%\zgx\shaders`
