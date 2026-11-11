@@ -1432,3 +1432,75 @@ fn a_wrong_argument_to_an_effect_names_its_call() {
     assert!(said.contains("effect:fade: bad arguments ("), "{said}");
     assert!(said.contains("bus:add_effect: bad arguments ("), "{said}");
 }
+
+/// Draws `app`'s GPU views through `gpu`, as a window's renderer does after
+/// a frame: zgx-3d's painter steps a world's sound after each frame it
+/// draws, which a headless `TestApp` never does.
+#[cfg(feature = "audio-spatial")]
+fn draw(app: &TestApp, gpu: &mut zgx_gpu::GpuRenderer) {
+    app.ui.prepare_frame();
+    let report = app.ui.scene.borrow_mut().flush();
+    gpu.render(&app.ui.scene.borrow(), &report.damage).unwrap();
+}
+
+/// An offscreen renderer, or none where there's no GPU (unless
+/// `ZGX_REQUIRE_GPU` says there must be).
+#[cfg(feature = "audio-spatial")]
+fn gpu() -> Option<zgx_gpu::GpuRenderer> {
+    match zgx_gpu::GpuRenderer::new(200, 140) {
+        Ok(gpu) => Some(gpu),
+        Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+            panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
+        }
+        Err(_) => None,
+    }
+}
+
+#[cfg(feature = "audio-spatial")]
+#[test]
+fn a_sound3d_moves_with_its_object() {
+    let Some(mut gpu) = gpu() else {
+        return;
+    };
+    let tone = wav("sound3d-moves", 2.);
+    let code = scene_with_sound(&tone, 4., false)
+        .replace(
+            "local hum = audio.sound(",
+            "local x = ui.state(\"x\", 4)\n        local hum = audio.sound(",
+        )
+        .replace("position = { 4, 0, 0 }", "position = { x, 0, 0 }")
+        .replace(
+            "ui.text { id = \"ready\", count_ready(hum) },",
+            "ui.text { id = \"ready\", count_ready(hum) },\n            ui.button { id = \"left\", on_click = function() x:set(-2) end, \"Left\" },",
+        );
+    assert!(code.contains("position = { x, 0, 0 }"), "{code}");
+    let mut s = Sounding::new(&code);
+    s.ready(1);
+    for _ in 0..3 {
+        s.app.frame();
+        draw(&s.app, &mut gpu);
+        s.mixer.frames(800);
+    }
+    let heard = |out: &[f32]| {
+        out.chunks(2).fold((0f32, 0f32), |(l, r), f| {
+            (l.max(f[0].abs()), r.max(f[1].abs()))
+        })
+    };
+    let (left, right) = heard(&s.mixer.frames(4800));
+    assert!(
+        (right - 0.125).abs() < 0.005 && left < 0.001,
+        "at +4 m: {left} {right}"
+    );
+    // The state moves its object 2 m to the left: the world's next drawn
+    // frame moves its sound.
+    s.app.click("left");
+    for _ in 0..10 {
+        s.app.frame();
+        draw(&s.app, &mut gpu);
+        s.mixer.frames(800);
+    }
+    let (left, right) = heard(&s.mixer.frames(4800));
+    // A half at 2 m, all of it on the left now.
+    assert!((left - 0.25).abs() < 0.01, "left {left}");
+    assert!(right < 0.001, "right {right}");
+}
