@@ -19,7 +19,8 @@ instructions would swamp zgx's, so heavy, lab and animate run with
 RENDER=0 (update, layout and damage, text measured as a renderer would). They
 run as a desktop with no screen reader does (`ZGX_ASSISTIVE=0`: labels and
 names made for assistive technology wait for one), which is what most
-users get; `heavy-stream-at` keeps one listening, to guard that work.
+users get; `heavy-stream-at` and `terminal-reader` keep one listening, to
+guard that work.
 The app scenes count their canvases' CPU work too (`HeadlessCanvases`):
 found as shapes the GPU draws, or rasterized where they cannot be. Each
 run has one environment, addresses not randomized, and a clock and hash
@@ -154,6 +155,11 @@ SCENES = [
     # `malloc_consolidate` run or not, and one binary counted 2.2 M (0.3%)
     # apart (arm64), where the change itself was 0.05%.
     ('terminal', 'zgx-terminal', 'terminal_bench', {'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
+    # The same with a screen reader listening (as `heavy-stream-at`): each
+    # read's output is worked out as news for it, which every other cell
+    # leaves out (`ZGX_ASSISTIVE=0`).
+    ('terminal-reader', 'zgx-terminal', 'terminal_bench', {'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0',
+                                                           'ZGX_ASSISTIVE': '1'}),
     # Pictures in that terminal, drawn by wgpu's no-op backend: placed (RGBA
     # in chunks, a PNG), scrolled, replaced under their ids and deleted;
     # sixel images placed over one another. What `terminal` guards having no
