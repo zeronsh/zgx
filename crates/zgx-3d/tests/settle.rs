@@ -8,131 +8,15 @@
 //! `#[ignore = "<finding>: <owner>"]` until that lane fixes it.
 // (With none of the features, every row is out: what they share goes unused.)
 #![cfg_attr(not(feature = "gltf"), allow(dead_code, unused_imports))]
-use std::time::{Duration, Instant};
-use zgx::{compose::prelude::*, scene::Color, widgets::Ui};
 use zgx_3d::*;
-use zgx_gpu::GpuRenderer;
+
+#[path = "common/settle.rs"]
+mod harness;
+use harness::{caught, rests, rests_caught};
 
 #[cfg(feature = "gltf")]
 #[path = "../examples/common/rig.rs"]
 mod rig;
-
-/// Whether the world draws by itself after a frame: where what holds it
-/// finishes off the frame (a compile, a load), it may be done before a row
-/// can catch it, and the row then says so and skips.
-fn caught(world: &World, window: &mut Window) -> bool {
-    window.draw(world);
-    world.view().animating()
-}
-
-struct Window {
-    ui: Ui,
-    gpu: GpuRenderer,
-}
-impl Window {
-    fn new(world: &World) -> Option<Self> {
-        let gpu = match GpuRenderer::new(64, 64) {
-            Ok(gpu) => gpu,
-            Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
-                panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
-            }
-            Err(_) => return None,
-        };
-        let mut ui = Ui::new(64., 64.);
-        ui.mount(
-            div()
-                .size(64., 64.)
-                .bg(Color(0, 0, 0, 255))
-                .child(gpu_view("World", world.view()).size(64., 64.)),
-        );
-        Some(Self { ui, gpu })
-    }
-    /// A frame, as a window's frame clock draws one while the view
-    /// animates (a headless window has none: it's asked for here).
-    fn draw(&mut self, world: &World) {
-        world.view().invalidate();
-        self.ui.prepare_frame();
-        let report = self.ui.scene.borrow_mut().flush();
-        self.gpu
-            .render(&self.ui.scene.borrow(), &report.damage)
-            .unwrap();
-    }
-    /// Frames until `done`, `frames` at least and `cap` at most in time:
-    /// whether it came.
-    fn until(
-        &mut self,
-        world: &World,
-        frames: u32,
-        cap: Duration,
-        done: impl Fn() -> bool,
-    ) -> bool {
-        let start = Instant::now();
-        let mut drawn = 0;
-        loop {
-            self.draw(world);
-            drawn += 1;
-            if drawn >= frames && done() {
-                return true;
-            }
-            if drawn >= frames && start.elapsed() > cap {
-                return false;
-            }
-            if drawn >= frames {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
-    }
-}
-
-/// A floor, a box on it, a sun and a camera: what every row starts from.
-fn world() -> (World, ObjectId) {
-    let world = World::new();
-    world.add(Object::mesh(
-        Geometry::plane(20., 20.),
-        Material::rgb(0x9a948a).with(0., 0.8),
-    ));
-    let cube = world
-        .add(Object::mesh(Geometry::cuboid(1., 1., 1.), Material::rgb(0xe0e0e0)).at([0., 0.5, 0.]));
-    world.add_light(Light::Directional {
-        direction: vec3(-0.4, -1., -0.3),
-        color: [1.; 3],
-        intensity: 2.,
-    });
-    world.set_camera(Camera::looking_at([0., 4., 9.], [0., 0., 0.]));
-    (world, cube)
-}
-
-/// What a row does: turns its feature on in `world` (its mesh given), and
-/// hands back what turns it off; `None` if this device can't hold it (it
-/// says why).
-type Hold = fn(&World, ObjectId, &mut Window) -> Option<Box<dyn FnOnce(&World)>>;
-
-/// Holds `hold`'s reason, turns it off, and asserts the world rests.
-fn rests(name: &str, hold: Hold) {
-    let (world, mesh) = world();
-    let Some(mut window) = Window::new(&world) else {
-        return;
-    };
-    window.draw(&world);
-    let Some(off) = hold(&world, mesh, &mut window) else {
-        eprintln!("SETTLE-SKIPPED {name}: this device can't hold it");
-        return;
-    };
-    // Held already (a row that caught it), or once a frame or two follows.
-    let held = world.view().animating()
-        || window.until(&world, 2, Duration::from_secs(10), || {
-            world.view().animating()
-        });
-    assert!(held, "{name}: the control, its world never drew by itself");
-    off(&world);
-    let rested = window.until(&world, 8, Duration::from_secs(10), || {
-        !world.view().animating()
-    });
-    assert!(
-        rested,
-        "{name}: turned off, its world still draws by itself"
-    );
-}
 
 #[cfg(feature = "lighting")]
 #[test]
@@ -302,7 +186,7 @@ fn probes_removed_while_they_converge() {
 #[cfg(feature = "post")]
 #[test]
 fn a_post_pass_removed_while_it_compiles() {
-    rests("post compiling", |world, _, window| {
+    rests_caught("post compiling", |world, _, window| {
         let pass = world
             .add_post(
                 PostPass::new(
@@ -322,31 +206,10 @@ fn post(p: PostIn) -> vec4<f32> {
     });
 }
 
-#[cfg(feature = "shaders")]
-#[test]
-fn a_surface_layer_removed_while_it_compiles() {
-    rests("shader compiling", |world, _, window| {
-        let layer = world
-            .add_surface_layer(MaterialShader::new(
-                "#zgx material 1
-                 fn surface(s: SurfaceIn) -> Surface {
-                     var m = surface_default(s);
-                     m.base_color *= 0.5;
-                     return m;
-                 }",
-            ))
-            .unwrap();
-        if !caught(world, window) {
-            return None;
-        }
-        Some(Box::new(move |world| world.remove_surface_layer(layer)))
-    });
-}
-
 #[cfg(feature = "gltf")]
 #[test]
 fn a_mesh_removed_while_its_map_loads() {
-    rests("loading", |world, mesh, window| {
+    rests_caught("loading", |world, mesh, window| {
         // A 512-square map, made here.
         let side = 512u32;
         let mut bytes = Vec::new();

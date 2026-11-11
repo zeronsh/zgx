@@ -90,6 +90,10 @@ name = "audio"
 required-features = ["audio"]
 
 [[test]]
+name = "settle_compile"
+required-features = ["shaders"]
+
+[[test]]
 name = "shader_compile"
 required-features = ["shaders"]
 
