@@ -235,7 +235,21 @@ SCENES = [
 # app-code's drift: main against itself now counts it the same): app-chat's
 # test waits for its fake server's timer thread, a handoff between threads
 # that real time decides.
-SPREAD = {'app-chat': 0.2, '3d-textured': 0.06, '3d-mixed': 0.08, 'spans-md': 0.08}
+#
+# spans-follow: zgx-script's watchdog thread is woken (`Watchdog::wake_by`,
+# an unpark) by an outermost script call that finds it parked, and whether
+# it is parked when a call starts is a race between the two threads: under
+# `--fair-sched=yes` (`FAIR`) most runs count the same, the rest one of a
+# few others up to 0.06% away. The fix is the product's: no unpark per
+# call after idle (a Luau lane's), after which this entry goes.
+SPREAD = {'app-chat': 0.2, '3d-textured': 0.06, '3d-mixed': 0.08, 'spans-md': 0.08, 'spans-follow': 0.06}
+# Counted under valgrind's `--fair-sched=yes` (`count`), which hands its lock
+# to threads in the order they asked: the span scenes, where the main thread
+# and the script watchdog took turns by where the watchdog had got to
+# (spans-plain and spans-md then count the same each run, spans-follow
+# mostly). Not every Luau scene: under it list-estimate's runs spread 15,227
+# instructions (1,319 without) and app-mail's 6,421 (828).
+FAIR = ('spans-plain', 'spans-md', 'spans-follow')
 # Built apart from the rest, each: see `build`.
 ALONE = ('zgx-3d', 'zgx-video', 'zgx-terminal')
 
@@ -432,14 +446,16 @@ def warm(binary, env, checkout):
     WARM.add(binary)
 
 
-def count(binary, env, checkout=None, placement=None, out='/dev/null'):
+def count(binary, env, checkout=None, placement=None, out='/dev/null', fair=False):
     """The run's instructions (and cachegrind's file of them by function in
     `out`), the binary warmed first (`warm`). A run that fails is the gate's
     failure, not the change's: under cachegrind a script's time budget
     (`ZGX_GATE` lifts it in the benches) or a missing GPU would otherwise
-    look like a result."""
+    look like a result. `fair`: valgrind hands its lock to threads in the
+    order they asked (`--fair-sched=yes`, the scenes in `FAIR`)."""
     warm(binary, env, checkout)
-    command = ['valgrind', '--tool=cachegrind', '--cache-sim=no', f'--cachegrind-out-file={out}', str(binary)]
+    command = ['valgrind', '--tool=cachegrind', '--cache-sim=no', *(['--fair-sched=yes'] if fair else []),
+               f'--cachegrind-out-file={out}', str(binary)]
     result = subprocess.run(
         ['setarch', '-R', *command] if shutil.which('setarch') else command,
         env=environment(binary, env, checkout, placement), capture_output=True, text=True)
@@ -457,15 +473,16 @@ def compared(name, package, env, base, head):
     for a scene new in the head) and the head, the change in percent, and
     every change counted: one, or for a Luau scene that moved more than
     `RECOUNT`%, one under each heap placement, the change their median."""
-    after = count(head[0], env, head[1])
+    fair = name in FAIR
+    after = count(head[0], env, head[1], fair=fair)
     if base is None:
         return None, after, None, []
-    before = count(base[0], env, base[1])
+    before = count(base[0], env, base[1], fair=fair)
     deltas = [(after - before) / before * 100]
     if scripted(name, package) and abs(deltas[0]) > RECOUNT:
         for placement in PLACEMENTS:
-            placed = count(base[0], env, base[1], placement)
-            deltas.append((count(head[0], env, head[1], placement) - placed) / placed * 100)
+            placed = count(base[0], env, base[1], placement, fair=fair)
+            deltas.append((count(head[0], env, head[1], placement, fair=fair) - placed) / placed * 100)
     return before, after, statistics.median(deltas), deltas
 
 
@@ -504,7 +521,7 @@ def by_function(rows, scenes, base, budget=None, clock=time.monotonic):
         try:
             for side, binary, checkout in (('base', WORK / 'gate-bin-base' / example, base),
                                            ('head', WORK / 'gate-bin-head' / example, ROOT)):
-                count(binary, env, checkout, out=str(into / f'{name}.{side}.cg'))
+                count(binary, env, checkout, out=str(into / f'{name}.{side}.cg'), fair=name in FAIR)
             report, groups, total = cgdiff.diff(into / f'{name}.base.cg', into / f'{name}.head.cg')
         except (Infra, OSError, ValueError) as error:
             print(f'=== {name}: no functions ({error})', flush=True)
