@@ -1026,27 +1026,31 @@ fn temporal_antialiasing_turned_off_while_gathering_lets_its_world_rest() {
     assert!(!world.view().animating(), "off: nothing to gather");
 }
 
-#[test]
-fn a_resize_drag_under_temporal_antialiasing_makes_no_history_until_it_stops() {
-    // A box growing a pixel a frame: no history made each frame (nor four
-    // kept), and the world at rest soon after the drag stops.
+/// `count` boxes of one TAA view, one under the other, at rest, then
+/// growing a pixel a frame for 29 frames, then still: the most bytes the drag held, the
+/// bytes at rest, the frames drawn after it before the world rests, and the
+/// boxes' last sides.
+fn dragged(count: u32) -> Option<(u64, u64, u32, Vec<u32>)> {
     let world = slanted(Antialiasing::Taa);
-    let mut gpu = match GpuRenderer::new(SIZE, SIZE) {
+    let mut gpu = match GpuRenderer::new(SIZE, SIZE * count) {
         Ok(gpu) => gpu,
         Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
             panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
         }
-        Err(_) => return,
+        Err(_) => return None,
     };
-    let mut ui = Ui::new(SIZE as f32, SIZE as f32);
+    let mut ui = Ui::new(SIZE as f32, (SIZE * count) as f32);
     let size = ui.signal(0.);
-    let side_of = size.clone();
-    ui.mount(div().size(SIZE as f32, SIZE as f32).child(
-        gpu_view("World", world.view()).reactive_style(move || {
-            let side = side_of.get();
+    let mut column = div().size(SIZE as f32, (SIZE * count) as f32);
+    for i in 0..count {
+        let side_of = size.clone();
+        column = column.child(gpu_view("World", world.view()).reactive_style(move || {
+            // Each box a size of its own.
+            let side = side_of.get() - (8 * i) as f32;
             Styles::new().w(side).h(side)
-        }),
-    ));
+        }));
+    }
+    ui.mount(column);
     let mut draw = |side: u32| {
         size.set(side as f32);
         world.view().invalidate();
@@ -1055,27 +1059,47 @@ fn a_resize_drag_under_temporal_antialiasing_makes_no_history_until_it_stops() {
         gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
     };
     let (first, last) = (SIZE - 30, SIZE);
+    // Shown and at rest first (its histories made), then dragged.
+    draw(first);
+    while world.view().animating() {
+        draw(first);
+    }
     let mut most = 0;
-    for side in first..last {
+    for side in first + 1..last {
         draw(side);
         most = most.max(world.temporary_bytes());
     }
     let mut frames = 0;
     while world.view().animating() {
         frames += 1;
-        // A frame at the new size as drawn, then its history's 8.
-        assert!(frames <= 9, "still drawing {frames} frames after");
+        assert!(frames <= 20, "still drawing {frames} frames after");
         draw(last);
     }
-    // At rest at the last size: its targets and one history, more than any
-    // frame of the drag held.
-    let settled = world.temporary_bytes();
-    let history = u64::from(last * last) * 2 * (8 + 4);
-    assert!(
-        most + history <= settled + u64::from(last * last) * 4,
-        "{most} in the drag, {settled} after"
-    );
+    let sides = (0..count).map(|i| last - 8 * i).collect();
+    Some((most, world.temporary_bytes(), frames, sides))
 }
+
+#[test]
+fn a_resize_drag_under_temporal_antialiasing_makes_no_history_until_it_stops() {
+    // One box, then two, growing a pixel a frame: no history made in any
+    // frame of the drag (nor kept), and the world at rest soon after it.
+    for count in [1, 2] {
+        let Some((most, settled, frames, sides)) = dragged(count) else {
+            return;
+        };
+        // A frame at the new size as drawn, then its history's 8.
+        assert!(frames <= 9, "{count} boxes: {frames} frames after");
+        // At rest: one history a box, more than any frame of the drag held
+        // (its targets, at most a box's larger, aside).
+        let histories: u64 = sides.iter().map(|&s| u64::from(s * s) * 2 * (8 + 4)).sum();
+        let slack = u64::from(SIZE * SIZE) * 4;
+        assert!(
+            most + histories <= settled + slack,
+            "{count} boxes: {most} in the drag, {settled} after"
+        );
+    }
+}
+
 #[test]
 fn a_moving_mesh_under_temporal_antialiasing_leans_on_its_frame_until_the_prepass() {
     // The limit until the depth prepass follows each mesh: a frame in which

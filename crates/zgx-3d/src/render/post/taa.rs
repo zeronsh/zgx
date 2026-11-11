@@ -272,6 +272,10 @@ impl Taa {
         });
         let found = self.tracks.iter().position(|t| t.size == size);
         let others = self.tracks.iter().any(|t| t.ran == Some(at.tick));
+        // A view's first frames (no track drew the tick before): a box's
+        // history from its first frame. Else a new size is a box resized
+        // with the others, and waits for it to stand as a resize does.
+        let fresh = !(self.tracks.iter()).any(|t| t.ran == Some(at.tick.wrapping_sub(1)));
         let index = match found {
             Some(index) => index,
             // The view was resized (no box drew at this tick yet): its
@@ -286,7 +290,7 @@ impl Taa {
             // Another box at a size of its own: a track of its own, up to
             // `TRACKS` (none of this tick's given up for it).
             None if self.tracks.len() < TRACKS => {
-                self.tracks.push(Track::new(device, size, true));
+                self.tracks.push(Track::new(device, size, fresh));
                 self.tracks.len() - 1
             }
             // Or in place of one no box drew at this tick (a box gone).
@@ -294,7 +298,7 @@ impl Taa {
                 .filter(|&i| self.tracks[i].ran != Some(at.tick))
                 .min_by_key(|&i| self.tracks[i].ran) =>
             {
-                self.tracks[idle] = Track::new(device, size, true);
+                self.tracks[idle] = Track::new(device, size, fresh);
                 idle
             }
             // Past them: drawn as it is, no history.
