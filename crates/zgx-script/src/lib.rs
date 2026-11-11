@@ -602,7 +602,8 @@ fn describe(name: &str, error: &mlua::Error) -> String {
         message.push_str(
             "\n(state values are read-only: change state with state:set_key(key, value), \
              state:patch({ … }), state:update(function(t) … end), state:insert(i, v) \
-             or state:set(value))",
+             or state:set(value); ui.json.data's parts are read-only too: \
+             ui.json.decode(text) gives tables a script can change)",
         );
     }
     // Luau says only "not enough memory": say which limit and its knob.
@@ -1163,25 +1164,117 @@ fn require_module<const LENDING: bool>(
     lua: &Lua,
     name: String,
 ) -> mlua::Result<mlua::Value> {
+    let fail = |why: String| mlua::Error::runtime(format!("require(\"{name}\"): {why}"));
+    let (path, files) = resolve::<LENDING>(state, lua, &name, false, &fail)?;
     let Require {
         host,
         modules,
+        root,
+        packages,
+        plugin_name,
+        ..
+    } = state;
+    let plugin_name: &Option<String> = if LENDING { plugin_name } else { &None };
+    let Some(root) = &root else {
+        unreachable!("resolved from a root");
+    };
+    // While the host watches its files: who requires what (`reloads`).
+    let tracker = if LENDING || !reloads::recording() {
+        None
+    } else {
+        host.upgrade().and_then(|host| tracking(&host))
+    };
+    if let Some(tracker) = &tracker {
+        tracker.required(&path);
+    }
+    match modules.borrow().get(&path) {
+        Some(Some(value)) => return Ok(value.clone()),
+        Some(None) => return Err(fail("a require cycle".into())),
+        None => {}
+    }
+    let code = files
+        .read(&path)
+        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    if let Some(host) = host.upgrade() {
+        host.required.borrow_mut().push(path.clone());
+        // One more module of a package lent to this plugin.
+        if let Some(plugin) = &plugin_name
+            && let Some((package, _)) = packages.iter().find(|(_, dir)| within(dir, &path))
+            && let Some(entry) = host
+                .lent
+                .borrow_mut()
+                .pending
+                .iter_mut()
+                .find(|(p, k, _)| p == plugin && k == package)
+        {
+            entry.2 += 1;
+        }
+    }
+    modules.borrow_mut().insert(path.clone(), None);
+    run_module::<LENDING>(state, lua, path, code, files, root, tracker)
+}
+
+/// `ui.json.load(name)`: the JSON file `name` names, found as `require`
+/// finds a module (`.json` when it has no extension), with its sandbox, as
+/// `ui.json.data` reads it. Read once per load, and watched as modules are.
+fn load_json<const LENDING: bool>(
+    state: &Require,
+    lua: &Lua,
+    name: String,
+) -> mlua::Result<mlua::Value> {
+    let fail = |why: String| mlua::Error::runtime(format!("ui.json.load(\"{name}\"): {why}"));
+    let (path, files) = resolve::<LENDING>(state, lua, &name, true, &fail)?;
+    let Require { host, modules, .. } = state;
+    if !LENDING
+        && reloads::recording()
+        && let Some(tracker) = host.upgrade().and_then(|host| tracking(&host))
+    {
+        tracker.required(&path);
+    }
+    if let Some(Some(value)) = modules.borrow().get(&path) {
+        return Ok(value.clone());
+    }
+    let text = files
+        .read(&path)
+        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    if let Some(host) = host.upgrade() {
+        host.required.borrow_mut().push(path.clone());
+    }
+    let value = json::parse_bytes(&text).map_err(|e| fail(format!("{}: {e}", path.display())))?;
+    let data = json::data(lua, &value)?;
+    modules.borrow_mut().insert(path, Some(data.clone()));
+    Ok(data)
+}
+
+/// Where `require(name)` (or `ui.json.load(name)`, `json`) finds its file,
+/// and how it reads it: the sandbox's checks passed.
+fn resolve<const LENDING: bool>(
+    state: &Require,
+    lua: &Lua,
+    name: &str,
+    json: bool,
+    fail: &dyn Fn(String) -> mlua::Error,
+) -> mlua::Result<(PathBuf, Files)> {
+    let Require {
+        host,
         root,
         aliases,
         packages,
         files,
         plugin_name,
         all_packages,
+        ..
     } = state;
     let files = *files;
     let plugin = LENDING;
     let plugin_name: &Option<String> = if LENDING { plugin_name } else { &None };
     let Some(root) = &root else {
-        return Err(mlua::Error::runtime(
-            "require needs a script loaded from a file",
-        ));
+        return Err(mlua::Error::runtime(if json {
+            "ui.json.load needs a script loaded from a file"
+        } else {
+            "require needs a script loaded from a file"
+        }));
     };
-    let fail = |why: String| mlua::Error::runtime(format!("require(\"{name}\"): {why}"));
     // The requiring file, from its chunk name (its path in the root).
     let caller = lua
         .inspect_stack(1, |d| d.source().source.map(|s| s.into_owned()))
@@ -1266,12 +1359,19 @@ fn require_module<const LENDING: bool>(
         } else {
             &here
         };
-        base.join(&name)
+        base.join(name)
     } else {
-        root.join(&name)
+        root.join(name)
     };
     let mut path = normalize(&joined);
-    if files.is_dir(&path) {
+    if json {
+        if files.is_dir(&path) {
+            return Err(fail("names a folder, not a JSON file".into()));
+        }
+        if path.extension().is_none() {
+            path.set_extension("json");
+        }
+    } else if files.is_dir(&path) {
         path = path.join("init.luau");
     } else if path.extension().is_none() {
         path.set_extension("luau");
@@ -1315,39 +1415,25 @@ fn require_module<const LENDING: bool>(
     } else {
         files
     };
-    // While the host watches its files: who requires what (`reloads`).
-    let tracker = if LENDING || !reloads::recording() {
-        None
-    } else {
-        host.upgrade().and_then(|host| tracking(&host))
-    };
-    if let Some(tracker) = &tracker {
-        tracker.required(&path);
-    }
-    match modules.borrow().get(&path) {
-        Some(Some(value)) => return Ok(value.clone()),
-        Some(None) => return Err(fail("a require cycle".into())),
-        None => {}
-    }
-    let code = files
-        .read(&path)
-        .map_err(|e| fail(format!("{}: {e}", path.display())))?;
-    if let Some(host) = host.upgrade() {
-        host.required.borrow_mut().push(path.clone());
-        // One more module of a package lent to this plugin.
-        if let Some(plugin) = &plugin_name
-            && let Some((package, _)) = packages.iter().find(|(_, dir)| within(dir, &path))
-            && let Some(entry) = host
-                .lent
-                .borrow_mut()
-                .pending
-                .iter_mut()
-                .find(|(p, k, _)| p == plugin && k == package)
-        {
-            entry.2 += 1;
-        }
-    }
-    modules.borrow_mut().insert(path.clone(), None);
+    Ok((path, files))
+}
+
+/// `require`'s module at `path` (its source `code`), run and kept.
+fn run_module<const LENDING: bool>(
+    state: &Require,
+    lua: &Lua,
+    path: PathBuf,
+    code: Vec<u8>,
+    files: Files,
+    root: &std::path::Path,
+    tracker: Option<Rc<reloads::Tracker>>,
+) -> mlua::Result<mlua::Value> {
+    let Require {
+        host,
+        modules,
+        packages,
+        ..
+    } = state;
     // Named by its path in the root: errors show it, and its own
     // requires resolve from it.
     let chunk = path
@@ -4167,14 +4253,26 @@ impl ScriptHost {
         };
         // Chosen once per VM: the app's resolver has none of lending's
         // checks compiled in.
-        let require = match plugin {
-            false => lua.create_function(move |lua, name: String| {
-                require_module::<false>(&state, lua, name)
-            })?,
-            true => lua.create_function(move |lua, name: String| {
-                require_module::<true>(&state, lua, name)
-            })?,
+        let state = Rc::new(state);
+        let loads = state.clone();
+        let (require, load) = match plugin {
+            false => (
+                lua.create_function(move |lua, name: String| {
+                    require_module::<false>(&state, lua, name)
+                })?,
+                lua.create_function(move |lua, name: String| {
+                    load_json::<false>(&loads, lua, name)
+                })?,
+            ),
+            true => (
+                lua.create_function(move |lua, name: String| {
+                    require_module::<true>(&state, lua, name)
+                })?,
+                lua.create_function(move |lua, name: String| load_json::<true>(&loads, lua, name))?,
+            ),
         };
+        // `ui.json.load`, for `ui.json` when a script first names it.
+        lua.set_app_data(json::Load(load));
         lua.globals().set("require", require)
     }
 

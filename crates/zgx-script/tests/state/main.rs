@@ -19,6 +19,8 @@ mod form_values;
 mod guard_doors;
 #[path = "../io.rs"]
 mod io;
+#[path = "../json_data.rs"]
+mod json_data;
 #[path = "../large_data.rs"]
 mod large_data;
 #[path = "../markdown_incremental.rs"]
