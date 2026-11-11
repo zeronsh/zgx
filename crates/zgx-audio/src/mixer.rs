@@ -428,13 +428,15 @@ struct Voice {
     resampler: Resampler,
     /// How its pan shares it between left and right.
     law: PanLaw,
-    /// Whether its own low-pass (the mixer's `filters`, by its slot)
+    /// Whether its own low-pass (the mixer's `filters`, at `slot`)
     /// filters: only then is it looked at.
     filtered: bool,
+    /// Where it is among the voices: where its low-pass is.
+    slot: u16,
 }
 
 impl Voice {
-    fn free() -> Voice {
+    fn free(slot: u16) -> Voice {
         Voice {
             id: 0,
             sound: None,
@@ -457,6 +459,7 @@ impl Voice {
             resampler: Resampler::new(Interpolation::Linear),
             law: PanLaw::Balance,
             filtered: false,
+            slot,
         }
     }
 
@@ -473,8 +476,10 @@ impl Voice {
     }
 
     /// Mixes the next `n` frames into `left` and `right`. Returns whether
-    /// it still sounds.
-    fn mix(
+    /// it still sounds. Made twice: `FILTERED`, through its own low-pass;
+    /// not, with none of the filter's code, so a voice that doesn't filter
+    /// mixes as it did before there was one.
+    fn mix<const FILTERED: bool>(
         &mut self,
         n: usize,
         scratch: &mut Scratch,
@@ -513,7 +518,7 @@ impl Voice {
                 self.pan.advance(n);
                 self.envelope.advance(n);
                 stream.level.advance(n);
-                if let Some(filter) = &mut filter {
+                if FILTERED && let Some(filter) = &mut filter {
                     filter.cutoff.advance(n);
                 }
                 return !(self.stopping && self.envelope.settled() && self.envelope.value() == 0.);
@@ -552,7 +557,7 @@ impl Voice {
                 &mut scratch.right[..n],
             )
         };
-        if let Some(filter) = filter {
+        if FILTERED && let Some(filter) = filter {
             // Its own low-pass, before its gain and pan: a mono sound's one
             // channel, a stereo sound's two.
             let (l, r) = (&mut scratch.left[..got], &mut scratch.right[..got]);
@@ -1031,7 +1036,7 @@ impl Mixer {
             room: setup.commands,
             seq: 0,
             voices: (0..setup.voices + FADING_SLOTS)
-                .map(|_| Voice::free())
+                .map(|slot| Voice::free(slot as u16))
                 .collect(),
             filters: (0..setup.voices + FADING_SLOTS)
                 .map(|_| VoiceLowPass::new(setup.rate))
@@ -1627,6 +1632,7 @@ impl Mixer {
             resampler: Resampler::new(interpolation),
             law,
             filtered,
+            slot: slot as u16,
         };
         match fade_in {
             Some(ramp) => {
@@ -1697,7 +1703,7 @@ impl Mixer {
         for bus in &mut self.buses[..self.bus_count] {
             bus.touched = false;
         }
-        for (slot, voice) in self.voices.iter_mut().enumerate() {
+        for voice in self.voices.iter_mut() {
             if voice.id == 0 {
                 continue;
             }
@@ -1705,24 +1711,25 @@ impl Mixer {
                 let bus = &mut self.buses[usize::from(voice.bus)];
                 bus.touch(n);
                 let filter = if voice.filtered {
-                    let filter = &mut self.filters[slot];
+                    let filter = &mut self.filters[usize::from(voice.slot)];
                     // Open and still: out of the way from now on.
                     voice.filtered = filter.active();
                     voice.filtered.then_some(filter)
                 } else {
                     None
                 };
-                if !voice.mix(
-                    n,
-                    &mut self.scratch,
-                    &mut bus.left[..n],
-                    &mut bus.right[..n],
-                    Along {
-                        click: self.click,
-                        underruns: &mut self.underruns,
-                        filter,
-                    },
-                ) {
+                let (left, right) = (&mut bus.left[..n], &mut bus.right[..n]);
+                let along = Along {
+                    click: self.click,
+                    underruns: &mut self.underruns,
+                    filter,
+                };
+                let sounding = if along.filter.is_some() {
+                    voice.mix::<true>(n, &mut self.scratch, left, right, along)
+                } else {
+                    voice.mix::<false>(n, &mut self.scratch, left, right, along)
+                };
+                if !sounding {
                     voice.ended = true;
                 }
             }
