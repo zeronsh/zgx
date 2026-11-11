@@ -7,8 +7,11 @@
 //! what it holds after (a counting allocator), the footprint after reading,
 //! after the first frame and after `--rest` seconds idle (macOS gives freed
 //! large blocks back to the system lazily, so the footprint right after a
-//! load still holds what was freed), Metal's allocated bytes, and the time
-//! from the file's bytes to the first frame done. `--pause=S` waits S
+//! load still holds what was freed), Metal's allocated bytes, the time from
+//! the file's bytes to the first frame shown and to the first frame drawn
+//! with every map (maps load off the frame: frames are drawn a 120 Hz
+//! refresh apart until the world has them all), and the process's wakeups
+//! and CPU time while it rests (nothing should wake it). `--pause=S` waits S
 //! seconds after the rest, its pid printed, for `footprint -v` from outside.
 //!
 //! cargo run --release --bin load_memory -- --textures=64
@@ -271,6 +274,27 @@ fn main() {
     drawing.target_srgb = Some(&srgb);
     painter.render(&mut drawing);
     queue.submit([encoder.finish()]);
+    let first_shown_ms = started.elapsed().as_secs_f64() * 1e3;
+    // Maps still on their way: drawn as a display would, a frame each 120 Hz
+    // refresh, until the world has them all.
+    let mut loading_frames = 0;
+    while world.loading() {
+        std::thread::sleep(Duration::from_micros(8_333));
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut drawing = ViewportFrame::new(
+            &device,
+            &queue,
+            &mut encoder,
+            &view,
+            FORMAT,
+            (side, side),
+            1.,
+        );
+        drawing.target_srgb = Some(&srgb);
+        painter.render(&mut drawing);
+        queue.submit([encoder.finish()]);
+        loading_frames += 1;
+    }
     device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let load_ms = started.elapsed().as_secs_f64() * 1e3;
     let first = rusage::sample();
@@ -283,10 +307,11 @@ fn main() {
     let rested = rusage::sample();
     let heap_rested = LIVE.load(Ordering::Relaxed);
     println!(
-        "RESULT {{\"textures\": {textures}, \"file_mb\": {:.1}, \"read_ms\": {read_ms:.1}, \"load_ms\": {load_ms:.1}, \
+        "RESULT {{\"textures\": {textures}, \"file_mb\": {:.1}, \"read_ms\": {read_ms:.1}, \"first_shown_ms\": {first_shown_ms:.1}, \"loading_frames\": {loading_frames}, \"load_ms\": {load_ms:.1}, \
 \"heap_peak_mb\": {:.1}, \"heap_after_read_mb\": {:.1}, \"heap_first_frame_mb\": {:.1}, \"heap_rested_mb\": {:.1}, \
 \"footprint_start_mb\": {:.1}, \"footprint_after_read_mb\": {:.1}, \"footprint_first_frame_mb\": {:.1}, \
-\"footprint_rested_mb\": {:.1}, \"peak_footprint_mb\": {:.1}, \"metal_allocated_mb\": {:.1}, \"rest_s\": {rest}}}",
+\"footprint_rested_mb\": {:.1}, \"peak_footprint_mb\": {:.1}, \"metal_allocated_mb\": {:.1}, \"rest_s\": {rest}, \
+\"rest_wakeups\": {}, \"rest_cpu_ms\": {:.2}}}",
         mb(file_bytes),
         mb((peak - heap_before) as u64),
         mb((heap_after_read - heap_before) as u64),
@@ -298,6 +323,8 @@ fn main() {
         mb(rested.footprint),
         mb(rested.peak_footprint),
         mb(metal),
+        rested.wakeups - first.wakeups,
+        (rested.cpu_ns - first.cpu_ns) / 1e6,
     );
     if let Some(pause) =
         std::env::args().find_map(|a| a.strip_prefix("--pause=").map(str::to_owned))

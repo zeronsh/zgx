@@ -115,6 +115,8 @@ fn main() {
     let device_ms: f64;
     let mut first_record_ms = 0.;
     let mut first_wait_ms = 0.;
+    let mut first_shown_ms = 0.;
+    let mut loading_frames = 0;
     stages.push(("model decoded", rusage::sample().footprint, None, heap()));
 
     let world = World::new();
@@ -364,6 +366,40 @@ fn main() {
         }
         mark(&mut encoder, (frame * 2 + 1) as u32);
         in_flight.push_back(queue.submit([encoder.finish()]));
+        // Maps still on their way: drawn as a display would, a frame each
+        // 120 Hz refresh, until the world has them all. The load ends at the
+        // first frame drawn with every map.
+        if frame == 0 {
+            first_shown_ms = load_started.elapsed().as_secs_f64() * 1e3 - decode_ms;
+            while world.loading() {
+                std::thread::sleep(std::time::Duration::from_micros(8_333));
+                let mut encoder = device.create_command_encoder(&Default::default());
+                {
+                    let mut drawing = ViewportFrame::new(
+                        &device,
+                        &queue,
+                        &mut encoder,
+                        &view,
+                        FORMAT,
+                        (width, height),
+                        1.,
+                    );
+                    drawing.target_srgb = Some(&srgb);
+                    painter.render(&mut drawing);
+                }
+                in_flight.push_back(queue.submit([encoder.finish()]));
+                loading_frames += 1;
+                while in_flight.len() > IN_FLIGHT {
+                    let index = in_flight.pop_front().unwrap();
+                    device
+                        .poll(wgpu::PollType::Wait {
+                            submission_index: Some(index),
+                            timeout: None,
+                        })
+                        .expect("the device");
+                }
+            }
+        }
         let submitted = Instant::now();
         if frame >= setup.warmup {
             submit_ms.push((submitted - start).as_secs_f64() * 1e3);
@@ -589,7 +625,8 @@ fn main() {
             "environment (decode + CPU prefilter) {environment_ms:.0}; files read {read_ms:.0}; \
 model (parse + decode + build) {model_ms:.0}, of which decode alone ~{decode_ms:.0}; \
 add_model {add_ms:.0}; device {device_ms:.0}; first frame recorded (mips, uploads, \
-pipelines, instances) {first_record_ms:.0}; first frame on the GPU (wait) {first_wait_ms:.0}"
+pipelines, instances) {first_record_ms:.0}; first frame on the GPU (wait) {first_wait_ms:.0}; \
+first frame shown at {first_shown_ms:.0}, then {loading_frames} frames till every map was in"
         ),
     )
     .num("load_peak_footprint_mb", load_peak as f64 / 1048576.)
