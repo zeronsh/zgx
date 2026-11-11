@@ -22,6 +22,10 @@ use std::ops::Range;
 /// (`Caps::compute` false): more are capped to it.
 pub const CPU_PARTICLES: u32 = 16_384;
 
+/// The most particles a world's emitters hold all told where they're
+/// updated on the CPU: four full pools. Past it, emitters are refused.
+pub const CPU_WORLD_PARTICLES: u32 = 4 * CPU_PARTICLES;
+
 /// The `Settle` reason of a world's particles.
 pub(crate) const UNSETTLED: u32 = 1 << 9;
 
@@ -578,6 +582,12 @@ impl Particles {
     pub(crate) fn bytes(&self, on_gpu: bool) -> u64 {
         self.live()
             .map(|live| self.pool_bytes(live.emitter.max, on_gpu))
+            .sum()
+    }
+    /// Particles its emitters hold where the CPU updates them.
+    pub(crate) fn cpu_particles(&self) -> u32 {
+        self.live()
+            .map(|live| live.emitter.max.min(CPU_PARTICLES))
             .sum()
     }
     /// Bytes a pool of `max` particles holds.

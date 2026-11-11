@@ -43,6 +43,31 @@ impl World {
                 most,
             });
         }
+        // On the CPU, the world's emitters together hold at most
+        // `CPU_WORLD_PARTICLES`: its frames' work on the main thread is
+        // bounded however many there are.
+        let on_cpu = !on_gpu
+            || self
+                .inner
+                .borrow()
+                .particles
+                .as_ref()
+                .is_some_and(|p| p.on_cpu);
+        if on_cpu {
+            let held = self
+                .inner
+                .borrow()
+                .particles
+                .as_ref()
+                .map_or(0, |p| p.cpu_particles());
+            let left = crate::particles::CPU_WORLD_PARTICLES.saturating_sub(held);
+            if emitter.max.min(crate::particles::CPU_PARTICLES) > left {
+                return Err(EmitterError::TooMany {
+                    asked: emitter.max,
+                    most: left,
+                });
+            }
+        }
         let room = {
             let view = self.view.clone();
             let mut inner = self.inner.borrow_mut();

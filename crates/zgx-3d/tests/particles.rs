@@ -529,3 +529,18 @@ fn an_emitter_whose_pool_the_device_refused_lets_its_world_settle() {
         "a pool that can't be made draws nothing and keeps nothing drawing"
     );
 }
+
+#[test]
+fn a_worlds_particles_on_the_cpu_are_bounded_however_many_emitters() {
+    let world = world();
+    world.set_particles_on_cpu(true);
+    // Four full pools fill the world's CPU particles; a fifth is refused.
+    for _ in 0..4 {
+        world.add_emitter(Emitter::new(CPU_PARTICLES)).unwrap();
+    }
+    assert_eq!(
+        world.add_emitter(Emitter::new(10)),
+        Err(EmitterError::TooMany { asked: 10, most: 0 })
+    );
+    assert_eq!(world.memory().particles, 4 * u64::from(CPU_PARTICLES) * 80);
+}
