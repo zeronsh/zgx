@@ -120,7 +120,8 @@ fn requires_find_their_modules_compiled_ahead_only_for_the_same_bytes() {
 }
 
 /// Only what the script reaches by `require` is compiled ahead: no tests,
-/// type files or unused modules, and no file over the size cap. `.luaurc`
+/// type files or unused modules, and no file over the size cap (16 MB; a
+/// data module of megabytes is under it). `.luaurc`
 /// aliases and lent packages resolve as `require` resolves them, and a
 /// second window's script joins the session.
 #[test]
@@ -145,7 +146,8 @@ fn only_what_the_script_requires_is_compiled_ahead() {
          local button = require(\"@ds/button\")\n\
          -- require(\"./mods/commented\")\n\
          local big = require(\"./mods/big\")\n\
-         return ui.text { a .. util .. button .. big, id = \"t\" }\n",
+         local huge = require(\"./mods/huge\")\n\
+         return ui.text { a .. util .. button .. #big .. \" \" .. #huge, id = \"t\" }\n",
     );
     put(dir.join("mods/a.luau"), "return require(\"./b\")\n");
     put(dir.join("mods/b.luau"), "return \"b\"\n");
@@ -154,6 +156,10 @@ fn only_what_the_script_requires_is_compiled_ahead() {
     put(
         dir.join("mods/big.luau"),
         &format!("return {:?}\n", "x".repeat(2 << 20)),
+    );
+    put(
+        dir.join("mods/huge.luau"),
+        &format!("return {:?}\n", "x".repeat(17 << 20)),
     );
     // What nothing requires.
     for unused in [
@@ -172,17 +178,21 @@ fn only_what_the_script_requires_is_compiled_ahead() {
     compile_ahead(&dir.join("app.luau"), &[("ds", &lent)]);
     // Another window's script joins the session (b again: found once).
     compile_ahead(&dir.join("other.luau"), &[]);
-    // app, a, b, util, button; other, b: big is over the cap.
-    finished(7);
+    // app, a, b, util, button, big; other, b: huge is over the cap.
+    finished(8);
     let mut test =
         TestApp::new(|runtime| ScriptHost::new(runtime, dir.join("app.luau")).package("ds", &lent));
     assert_eq!(test.host.error().get(), None);
-    assert!(test.text("t").starts_with("buk"), "every module loaded");
+    assert_eq!(
+        test.text("t"),
+        format!("buk{} {}", 2 << 20, 17 << 20),
+        "every module loaded"
+    );
     let (_, _, open, now, held) = compile_ahead_counts();
     assert_eq!(
         now - hits,
-        5,
-        "app, a, b, util and button compiled ahead; big at require"
+        6,
+        "app, a, b, util, button and big compiled ahead; huge at require"
     );
     assert!(!open);
     assert_eq!(held, 0);
@@ -191,9 +201,9 @@ fn only_what_the_script_requires_is_compiled_ahead() {
     }
 }
 
-/// What was compiled ahead for a module (a data module of most of a
-/// megabyte, here) is let go as soon as its `require` has loaded it, not
-/// held to the end of the load, through all the app does with its value.
+/// A data module of megabytes (a feed in a string) is compiled ahead, and
+/// what was compiled for it is let go as soon as its `require` has loaded
+/// it, not held to the end of the load, through all the app does with it.
 #[test]
 fn a_module_is_let_go_once_its_require_has_loaded_it() {
     let _one = ONE
@@ -204,7 +214,7 @@ fn a_module_is_let_go_once_its_require_has_loaded_it() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("data.luau"),
-        format!("return [==[{}]==]\n", "{\"m\":1}".repeat(100_000)),
+        format!("return [==[{}]==]\n", "{\"m\":1}".repeat(400_000)),
     )
     .unwrap();
     std::fs::write(dir.join("rest.luau"), "return \"rest\"\n").unwrap();
@@ -231,16 +241,66 @@ fn a_module_is_let_go_once_its_require_has_loaded_it() {
     assert_eq!(test.host.error().get(), None);
     assert_eq!(
         test.text("t"),
-        "700000 1 0 rest",
+        "2800000 1 0 rest",
         "after data's require only rest is held; after rest's, nothing"
     );
     let (_, _, open, now, held) = compile_ahead_counts();
     assert_eq!(
         now - hits,
         3,
-        "the app, its 0.7 MB data and rest, all compiled ahead"
+        "the app, its 2.8 MB data and rest, all compiled ahead"
     );
     assert!(!open);
     assert_eq!(held, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// What the worker compiled comes back to it as the load lets it go, and it
+/// rests its own thread (`zgx::image::rest_thread`): a host whose
+/// allocator keeps a thread's freed pages for that thread gets them back.
+#[test]
+fn the_worker_rests_once_what_it_made_comes_back() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    static ON_WORKER: AtomicUsize = AtomicUsize::new(0);
+    static ELSEWHERE: AtomicUsize = AtomicUsize::new(0);
+    fn rest() {
+        if std::thread::current().name() == Some("zgx-luau-ahead") {
+            ON_WORKER.fetch_add(1, Ordering::Relaxed);
+        } else {
+            ELSEWHERE.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    zgx::image::set_decoder_rest(rest);
+    let dir = std::env::temp_dir().join(format!("zgx-compile-ahead-rest-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    write(&dir, 3, "one");
+    let app = dir.join("app.luau");
+    let (before, elsewhere) = (
+        ON_WORKER.load(Ordering::Relaxed),
+        ELSEWHERE.load(Ordering::Relaxed),
+    );
+    compile_ahead(&app, &[]);
+    finished(4);
+    let test = TestApp::new(|runtime| ScriptHost::new(runtime, &app));
+    assert_eq!(test.host.error().get(), None);
+    drop(test);
+    // Once (at least) after what it made came back.
+    let started = std::time::Instant::now();
+    while ON_WORKER.load(Ordering::Relaxed) < before + 1 {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the worker rested {} times",
+            ON_WORKER.load(Ordering::Relaxed) - before
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        ELSEWHERE.load(Ordering::Relaxed),
+        elsewhere,
+        "only the worker rests: the loading thread holds none of its pages"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }

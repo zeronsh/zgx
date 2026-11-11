@@ -69,6 +69,25 @@ pub(crate) struct Compiled {
     /// None when it doesn't compile: its load reads the text, so the error
     /// shows as it always has.
     bytecode: Option<Box<[u8]>>,
+    /// Compiled ahead: the worker that made it, which frees it ([`Home`]).
+    home: Option<Home>,
+}
+/// Where what [`prefetch`]'s worker made goes back to be freed: on the
+/// thread that allocated it. A data module's source and bytecode are
+/// megabytes each, and an allocator keeps what another thread frees for the
+/// thread that made it until that thread collects: freed on the main
+/// thread as its `require` lets it go and never collected, it stayed out of
+/// reach, and a window's peak footprint was 15 MB higher in a third of the
+/// heavy list's starts. The worker frees what comes back, then rests
+/// (`zgx::image::rest_thread`).
+type Home = std::sync::mpsc::Sender<(Box<[u8]>, Option<Box<[u8]>>)>;
+impl Drop for Compiled {
+    fn drop(&mut self) {
+        if let Some(home) = self.home.take() {
+            // A worker gone frees nothing: what it sends back drops here.
+            let _ = home.send((std::mem::take(&mut self.source), self.bytecode.take()));
+        }
+    }
 }
 impl Compiled {
     pub(crate) fn bytecode(&self) -> Option<&[u8]> {
@@ -106,6 +125,7 @@ pub(crate) fn compiled(code: &[u8]) -> (Rc<Compiled>, bool) {
                 .compile(code)
                 .ok()
                 .map(Into::into),
+            home: None,
         });
         // Compiling is rare (a file changed): drop the entries no one holds.
         shared.retain(|_, entries| {
@@ -150,6 +170,7 @@ pub(crate) fn package_compiled(code: &[u8]) -> (std::sync::Arc<Compiled>, bool) 
             Compiled {
                 source: ahead.source.clone(),
                 bytecode: ahead.bytecode.clone(),
+                home: None,
             },
             false,
         ),
@@ -160,6 +181,7 @@ pub(crate) fn package_compiled(code: &[u8]) -> (std::sync::Arc<Compiled>, bool) 
                     .compile(code)
                     .ok()
                     .map(Into::into),
+                home: None,
             },
             true,
         ),
@@ -253,9 +275,9 @@ impl Sources {
     }
 }
 
-/// A source, its key (made on the worker) and its bytecode (none when it
-/// doesn't compile).
-type Ready = (Key, Box<[u8]>, Option<Box<[u8]>>);
+/// A source, its key (made on the worker), its bytecode (none when it
+/// doesn't compile), and the worker that frees them.
+type Ready = (Key, Box<[u8]>, Option<Box<[u8]>>, Home);
 
 /// What [`prefetch`] compiled ahead and the loading thread hasn't taken
 /// yet: one session at a time, open from the first `prefetch` until a load
@@ -290,11 +312,12 @@ thread_local! {
     /// loaded yet, held until its first load ends.
     static HELD: RefCell<Vec<Rc<Compiled>>> = RefCell::default();
 }
-/// At most this many files, this many bytes in all, and none larger than
-/// `PREFETCH_FILE`.
+/// At most this many files and this many bytes in all; a file may be as
+/// large as all of them (a data module of megabytes, compiled in tens of
+/// milliseconds, is the file worth compiling ahead most).
 const PREFETCH_FILES: usize = 4096;
 const PREFETCH_BYTES: usize = 16 << 20;
-const PREFETCH_FILE: u64 = 1 << 20;
+const PREFETCH_FILE: u64 = PREFETCH_BYTES as u64;
 
 fn ahead() -> std::sync::MutexGuard<'static, Ahead> {
     AHEAD
@@ -443,6 +466,7 @@ pub(crate) fn prefetch(entry: &Path, packages: Vec<(String, std::path::PathBuf)>
     STARTED.store(true, std::sync::atomic::Ordering::Relaxed);
     let entry = crate::normalize(entry);
     let worker = move || {
+        let (home, returned) = std::sync::mpsc::channel();
         let current = || {
             let ahead = ahead();
             ahead.generation == generation && ahead.open
@@ -489,12 +513,31 @@ pub(crate) fn prefetch(entry: &Path, packages: Vec<(String, std::path::PathBuf)>
             if ahead.generation != generation || !ahead.open {
                 break;
             }
-            ahead.ready.push((Key::of(&code), code.into(), bytecode));
+            ahead
+                .ready
+                .push((Key::of(&code), code.into(), bytecode, home.clone()));
             ahead.compiled += 1;
         }
-        let mut ahead = ahead();
-        if ahead.generation == generation {
-            ahead.workers -= 1;
+        {
+            let mut ahead = ahead();
+            if ahead.generation == generation {
+                ahead.workers -= 1;
+            }
+        }
+        // What it made comes back as each entry goes (most as their
+        // `require`s load them, the rest as the load ends), freed here.
+        // Every entry gone, the channel closes; one kept past the bound
+        // frees where it drops.
+        drop(home);
+        // What comes back, freed here and given back to the system
+        // (`zgx::image::rest_thread`): the allocator keeps a thread's freed
+        // pages until that thread collects them.
+        while let Ok(back) = returned.recv_timeout(std::time::Duration::from_secs(30)) {
+            drop(back);
+            while let Ok(more) = returned.try_recv() {
+                drop(more);
+            }
+            zgx::image::rest_thread();
         }
     };
     if std::thread::Builder::new()
@@ -525,8 +568,12 @@ pub(crate) fn prefetched(code: &[u8]) -> Option<Rc<Compiled>> {
         std::mem::take(&mut ahead.ready)
     };
     let found = SHARED.with_borrow_mut(|shared| {
-        for (key, source, bytecode) in arrived {
-            let entry = Rc::new(Compiled { source, bytecode });
+        for (key, source, bytecode, home) in arrived {
+            let entry = Rc::new(Compiled {
+                source,
+                bytecode,
+                home: Some(home),
+            });
             shared.entry(key).or_default().push(Rc::downgrade(&entry));
             HELD.with_borrow_mut(|held| held.push(entry));
         }
