@@ -326,6 +326,33 @@ fn a_resource_counts_the_runs_and_writes_that_changed_it() {
 }
 
 #[test]
+fn a_resource_made_again_on_another_device_counts_as_changed() {
+    // Its copy made anew (another renderer's device) holds the app's bytes
+    // again, not what passes wrote: a change, as a write is.
+    let world = World::new();
+    let buffer = world
+        .add_buffer(BufferDesc::from_slice(&[0u32; 4]))
+        .unwrap();
+    let texture = world
+        .add_texture(TextureDesc::storage(4, 4, Format::R32Uint))
+        .unwrap();
+    let Some(mut first) = Window::new(&world) else {
+        return;
+    };
+    first.draw();
+    let made = (buffer.writes(), texture.writes());
+    assert!(made.0 >= 1 && made.1 >= 1, "made once: {made:?}");
+    drop(first);
+    let mut second = Window::new(&world).unwrap();
+    second.draw();
+    assert!(
+        buffer.writes() > made.0 && texture.writes() > made.1,
+        "made again: {made:?} then {:?}",
+        (buffer.writes(), texture.writes())
+    );
+}
+
+#[test]
 fn a_pass_writing_a_resource_whole_runs_before_an_earlier_one_reading_it() {
     let world = World::new();
     let Some(mut window) = Window::new(&world) else {

@@ -1424,6 +1424,9 @@ impl Frames {
                 made.unmap();
             }
             *buffer.gpu.borrow_mut() = Some((generation, made));
+            // Made again (another device's copy, from the app's bytes): what
+            // a pass wrote is gone, a change as a write is (`writes`).
+            buffer.written.set(buffer.written.get() + 1);
         }
         for texture in data.textures.iter().filter_map(Weak::upgrade) {
             let made = texture
@@ -1461,6 +1464,7 @@ impl Frames {
                 continue;
             }
             *texture.gpu.borrow_mut() = Some((generation, made, view));
+            texture.written.set(texture.written.get() + 1);
         }
         // Writes since the last frame, ahead of this frame's commands.
         let written: Vec<_> = data.link.writes.borrow_mut().drain(..).collect();

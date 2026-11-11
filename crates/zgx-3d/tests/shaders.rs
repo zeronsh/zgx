@@ -1431,6 +1431,48 @@ fn surface(s: SurfaceIn) -> Surface {
         );
     }
 
+    #[cfg(feature = "lighting")]
+    #[test]
+    fn a_cascaded_shadow_follows_its_data_made_again_on_another_device() {
+        // Review of GB2: data taken over by another renderer's device and
+        // back is made again from the app's first bytes; the first
+        // renderer's cascades, kept, were cast from what it held before.
+        // (It passes without the remade copy's count too: the copy's new
+        // generation rebinds the shader, which drops the kept casters, and
+        // the cascades are cast anew with them. The count makes it one
+        // rule: a changed copy is a write.)
+        let cascaded = |lift: f32| {
+            let world = World::new();
+            shadowed(&world);
+            world.set_cascades(Some(Cascades::new(2)));
+            let (_, buffer, _) = lifted_by_data(&world, lift);
+            (world, buffer)
+        };
+        let (fresh, _) = cascaded(0.);
+        let Some(mut window) = Window::new(&fresh) else {
+            return;
+        };
+        window.draw();
+        let expected = window.gpu.readback().unwrap();
+
+        let (world, buffer) = cascaded(0.);
+        buffer.write(0, &[[1.2f32, 0., 0., 0.]]).unwrap();
+        let mut first = Window::new(&world).unwrap();
+        first.draw();
+        let mut second = Window::new(&world).unwrap();
+        second.draw();
+        // Back on the first: made again, holding the first bytes (0).
+        first.draw();
+        first.draw();
+        let actual = first.gpu.readback().unwrap();
+        let differ = actual
+            .iter()
+            .zip(&expected)
+            .filter(|(a, b)| a.abs_diff(**b) > 1)
+            .count();
+        assert_eq!(differ, 0, "{differ} channels differ from a fresh world's");
+    }
+
     #[test]
     fn a_shadow_cast_by_gpu_data_follows_a_pass_writing_it() {
         // As the harbor's water is: a compute pass writes what `displace`
@@ -1460,9 +1502,11 @@ fn surface(s: SurfaceIn) -> Surface {
                 .threads([1, 1, 1]),
             )
             .unwrap();
-        // Frames until it has compiled and run (once: on demand).
+        // Frames until it has compiled and run (once: on demand): past the
+        // count its copy was made with.
+        let made = buffer.writes();
         let start = std::time::Instant::now();
-        while buffer.writes() == 0 && start.elapsed() < std::time::Duration::from_secs(10) {
+        while buffer.writes() == made && start.elapsed() < std::time::Duration::from_secs(10) {
             world.view().invalidate();
             window.draw();
             std::thread::sleep(std::time::Duration::from_millis(2));
