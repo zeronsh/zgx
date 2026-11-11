@@ -18202,11 +18202,12 @@ pub enum RayQueries {
     /// queries: ship `dxcompiler.dll` beside the app, or set
     /// `WGPU_DX12_COMPILER=dxc`.
     CompilerIsFxc = 4,
-    /// Asked for on an adapter whose ray queries miss what they should hit,
-    /// so none are asked of it: WARP (Microsoft's Basic Render Driver)
+    /// Asked for on an adapter whose ray queries fail, so none are asked
+    /// of it (docs/validation.md): WARP (Microsoft's Basic Render Driver)
     /// sometimes loses the first triangle of an acceleration structure it
-    /// builds on its threads (docs/validation.md). Probes draw faces there.
-    /// WARP reports this under FXC too, rather than `CompilerIsFxc`: DXC
+    /// builds on its threads; Mesa's lavapipe (llvmpipe under Vulkan)
+    /// crashes building the first one. Probes draw faces there. WARP
+    /// reports this under FXC too, rather than `CompilerIsFxc`: DXC
     /// wouldn't make it trace.
     DeclinedOnAdapter = 5,
 }
@@ -18226,10 +18227,18 @@ impl RayQueries {
     }
     /// Whether an adapter's ray queries are declined though it offers them:
     /// WARP, by its vendor (Microsoft's 0x1414) and its device (0x8c, the
-    /// Basic Render Driver) or name. Another adapter of Microsoft's (a
-    /// virtualised GPU, real hardware behind it) isn't.
+    /// Basic Render Driver) or name; and lavapipe, Mesa's software Vulkan,
+    /// by its driver (or name) `llvmpipe` on a CPU device under Vulkan.
+    /// Another adapter of Microsoft's (a virtualised GPU, real hardware
+    /// behind it) isn't, nor another software one.
     fn declined(info: &wgpu::AdapterInfo) -> bool {
-        info.vendor == 0x1414 && (info.device == 0x8c || info.name.contains("Basic Render Driver"))
+        let warp = info.vendor == 0x1414
+            && (info.device == 0x8c || info.name.contains("Basic Render Driver"));
+        let lavapipe = info.backend == wgpu::Backend::Vulkan
+            && info.device_type == wgpu::DeviceType::Cpu
+            && (info.driver.eq_ignore_ascii_case("llvmpipe")
+                || info.name.to_ascii_lowercase().starts_with("llvmpipe"));
+        warp || lavapipe
     }
 }
 #[cfg(feature = "view-features")]
@@ -18314,8 +18323,8 @@ mod ray_query_tests {
     }
 
     /// WARP's ray queries are declined, by its vendor and its device or
-    /// name; no other adapter's, a virtualised one of Microsoft's among
-    /// them.
+    /// name; no other Direct3D adapter's, a virtualised one of Microsoft's
+    /// among them.
     #[test]
     fn warp_alone_has_its_ray_queries_declined() {
         let adapter = |vendor, device, name: &str| wgpu::AdapterInfo {
@@ -18346,12 +18355,50 @@ mod ray_query_tests {
             0x2684,
             "NVIDIA GeForce RTX 4090"
         )));
-        // A software Vulkan driver is another case (not by type).
-        assert!(!RayQueries::declined(&adapter(
-            0x10005,
-            0,
-            "llvmpipe (LLVM 20.1.2, 256 bits)"
+    }
+
+    /// lavapipe's are declined (its first acceleration structure build
+    /// crashes, as rtprobe shows): llvmpipe's driver, or its name, on a CPU
+    /// device under Vulkan; not another software Vulkan driver, nor a GPU.
+    #[test]
+    fn lavapipe_has_its_ray_queries_declined() {
+        let adapter = |backend, device_type, name: &str, driver: &str| wgpu::AdapterInfo {
+            name: name.into(),
+            vendor: 0x10005,
+            device: 0,
+            device_type,
+            device_pci_bus_id: String::new(),
+            driver: driver.into(),
+            driver_info: "Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)".into(),
+            backend,
+            subgroup_min_size: 4,
+            subgroup_max_size: 4,
+            transient_saves_memory: false,
+        };
+        use wgpu::{Backend::*, DeviceType::*};
+        let name = "llvmpipe (LLVM 20.1.2, 128 bits)";
+        assert!(RayQueries::declined(&adapter(
+            Vulkan, Cpu, name, "llvmpipe"
         )));
+        assert!(RayQueries::declined(&adapter(Vulkan, Cpu, name, "")));
+        assert!(RayQueries::declined(&adapter(
+            Vulkan, Cpu, "llvmpipe", "llvmpipe"
+        )));
+        // Another software Vulkan driver, and Mesa's GPU drivers.
+        assert!(!RayQueries::declined(&adapter(
+            Vulkan,
+            Cpu,
+            "SwiftShader Device (Subzero)",
+            "SwiftShader driver"
+        )));
+        assert!(!RayQueries::declined(&adapter(
+            Vulkan,
+            DiscreteGpu,
+            "AMD Radeon RX 7900 XTX (RADV NAVI31)",
+            "radv"
+        )));
+        // llvmpipe under GL traces nothing anyway: not declined by name.
+        assert!(!RayQueries::declined(&adapter(Gl, Cpu, name, "")));
     }
 }
 #[cfg(feature = "view-features")]

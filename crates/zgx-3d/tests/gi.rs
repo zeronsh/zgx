@@ -469,6 +469,35 @@ fn family(gpu: &GpuRenderer) -> String {
 }
 
 #[test]
+fn software_adapters_decline_ray_queries_and_draw_faces() {
+    // Asked for, ray queries are declined on lavapipe (Vulkan's llvmpipe:
+    // its first acceleration structure build crashes) and WARP (it loses
+    // a structure's first triangle now and then): the device says so, and
+    // probes draw faces. Elsewhere this asks nothing.
+    let world = World::new();
+    room(&world);
+    world.add_probes(volume()).unwrap();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let info = window.gpu.adapter_info();
+    let family = family(&window.gpu);
+    let declined = (family == "llvmpipe" && info.backend == zgx_gpu::wgpu::Backend::Vulkan)
+        || family == "warp";
+    let asked = std::env::var_os("ZGX_GI_NO_RAY_QUERIES").is_none_or(|v| v != "1");
+    if !declined || !asked {
+        return;
+    }
+    assert_eq!(
+        zgx_gpu::ray_queries_status(),
+        Some(zgx_gpu::RayQueries::DeclinedOnAdapter),
+        "{info:?}"
+    );
+    assert_eq!(world.probes_status(), ProbesStatus::Rasterised, "{info:?}");
+}
+
+#[test]
 fn the_probe_lit_room_matches_its_golden() {
     let world = World::new();
     room(&world);
