@@ -38,6 +38,295 @@ use naga as naga_out;
 /// The counter's name in the module.
 const COUNTER: &str = "zgx_loop_budget";
 
+/// What a sandboxed shader may cost and hold, an invocation and a run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Limits {
+    /// IR nodes (expressions, statements, types, constants) in all: what
+    /// validating and compiling it are proportional to.
+    pub(crate) nodes: usize,
+    /// Its entry point's cost (`cost`), calls expanded, loops once.
+    pub(crate) cost: u64,
+    /// A run's work: cost times invocations times the loop iterations each.
+    pub(crate) work: u64,
+    /// Bytes of private and function-local memory an invocation.
+    pub(crate) memory: u64,
+    /// Bytes of workgroup memory.
+    pub(crate) workgroup: u64,
+    /// The fewest loop iterations an invocation is left: fewer, refused.
+    pub(crate) floor: u32,
+}
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            nodes: 1 << 16,
+            cost: 1 << 14,
+            // About half a millisecond of light work on an M1 Max: 2^22
+            // iterations of a twelve-node loop took 0.6 ms.
+            work: 1 << 25,
+            memory: 16 << 10,
+            workgroup: 16 << 10,
+            floor: 64,
+        }
+    }
+}
+
+/// A shader made safe to run: its module, loops bounded, and the
+/// iterations each invocation may loop.
+#[derive(Debug)]
+pub(crate) struct Sandboxed {
+    pub(crate) module: naga::Module,
+    pub(crate) cap: u32,
+    /// A run's work at most: cost times invocations times (cap + 1).
+    pub(crate) work: u64,
+}
+
+/// `module`, whose `entry` runs `invocations` times a run, checked and
+/// bounded: its size, memory and cost within `limits` (else why not), its
+/// loops capped so a run's work stays within `limits.work`. For any stage:
+/// a compute pass's invocations, or a fragment shader's pixels at most.
+pub(crate) fn sandbox(
+    module: naga::Module,
+    entry: &str,
+    invocations: u64,
+    limits: &Limits,
+) -> Result<Sandboxed, String> {
+    let nodes = module.types.len()
+        + module.constants.len()
+        + module.global_expressions.len()
+        + module
+            .functions
+            .iter()
+            .map(|(_, f)| f)
+            .chain(module.entry_points.iter().map(|e| &e.function))
+            .map(|f| f.expressions.len() + statements(&f.body))
+            .sum::<usize>();
+    if nodes > limits.nodes {
+        return Err(format!(
+            "{nodes} IR nodes: a sandboxed shader has at most {}",
+            limits.nodes
+        ));
+    }
+    let (private, workgroup) = memory(&module)?;
+    if private > limits.memory {
+        return Err(format!(
+            "{private} bytes of private and local memory an invocation: at most {}",
+            limits.memory
+        ));
+    }
+    if workgroup > limits.workgroup {
+        return Err(format!(
+            "{workgroup} bytes of workgroup memory: at most {}",
+            limits.workgroup
+        ));
+    }
+    let at = module
+        .entry_points
+        .iter()
+        .position(|e| e.name == entry)
+        .ok_or_else(|| format!("no entry point `{entry}`"))?;
+    let costs = cost(&module).ok_or("a function calls itself")?;
+    let cost = costs[at];
+    if cost > limits.cost {
+        return Err(format!(
+            "its cost is {cost} (calls expanded): a sandboxed shader's is at most {}",
+            limits.cost
+        ));
+    }
+    let invocations = invocations.max(1);
+    let looping = has_loops(&module);
+    let per_iteration = cost.saturating_mul(invocations);
+    let cap = if looping {
+        // Iterations each, so cost x invocations x (cap + 1) fits the work.
+        let cap = (limits.work / per_iteration.max(1)).saturating_sub(1);
+        if cap < u64::from(limits.floor) {
+            return Err(format!(
+                "its loops would have {cap} iterations an invocation over {invocations} invocations \
+                 at its cost of {cost}: at least {} are needed (fewer invocations, or a lighter shader)",
+                limits.floor
+            ));
+        }
+        cap.min(u64::from(u32::MAX)) as u32
+    } else {
+        if per_iteration > limits.work {
+            return Err(format!(
+                "{invocations} invocations at its cost of {cost} is {per_iteration}: a run's work is at most {}",
+                limits.work
+            ));
+        }
+        0
+    };
+    let work = per_iteration.saturating_mul(u64::from(cap) + 1);
+    let module = bound_loops(module, cap.max(1))?;
+    Ok(Sandboxed { module, cap, work })
+}
+
+/// Statements in `block`, its blocks' too.
+fn statements(block: &naga::Block) -> usize {
+    block
+        .iter()
+        .map(|statement| {
+            1 + match statement {
+                naga::Statement::Block(inner) => statements(inner),
+                naga::Statement::If { accept, reject, .. } => {
+                    statements(accept) + statements(reject)
+                }
+                naga::Statement::Switch { cases, .. } => {
+                    cases.iter().map(|c| statements(&c.body)).sum()
+                }
+                naga::Statement::Loop {
+                    body, continuing, ..
+                } => statements(body) + statements(continuing),
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
+/// Whether any function or entry point loops.
+fn has_loops(module: &naga::Module) -> bool {
+    fn block_loops(block: &naga::Block) -> bool {
+        block.iter().any(|statement| match statement {
+            naga::Statement::Loop { .. } => true,
+            naga::Statement::Block(inner) => block_loops(inner),
+            naga::Statement::If { accept, reject, .. } => {
+                block_loops(accept) || block_loops(reject)
+            }
+            naga::Statement::Switch { cases, .. } => cases.iter().any(|c| block_loops(&c.body)),
+            _ => false,
+        })
+    }
+    module
+        .functions
+        .iter()
+        .map(|(_, f)| f)
+        .chain(module.entry_points.iter().map(|e| &e.function))
+        .any(|f| block_loops(&f.body))
+}
+
+/// An invocation's private and function-local bytes (every function's
+/// locals together, as if all were live at once), and the workgroup's.
+fn memory(module: &naga::Module) -> Result<(u64, u64), String> {
+    let mut layouter = naga::proc::Layouter::default();
+    layouter
+        .update(module.to_ctx())
+        .map_err(|e| format!("its types: {e}"))?;
+    let size = |ty: naga::Handle<naga::Type>| u64::from(layouter[ty].size);
+    let (mut private, mut workgroup) = (0u64, 0u64);
+    for (_, global) in module.global_variables.iter() {
+        match global.space {
+            naga::AddressSpace::Private => private = private.saturating_add(size(global.ty)),
+            naga::AddressSpace::WorkGroup => workgroup = workgroup.saturating_add(size(global.ty)),
+            _ => {}
+        }
+    }
+    for function in module
+        .functions
+        .iter()
+        .map(|(_, f)| f)
+        .chain(module.entry_points.iter().map(|e| &e.function))
+    {
+        for (_, local) in function.local_variables.iter() {
+            private = private.saturating_add(size(local.ty));
+        }
+    }
+    Ok((private, workgroup))
+}
+
+/// What a shader may cost, statically, before its loops repeat: every
+/// statement and expression of an entry point and of every function it
+/// calls (each call site counted with its callee's whole cost, so calls are
+/// expanded, as a driver inlining them would), each loop's body once.
+/// Weighted: a texture sample 16, another image access 4, an atomic 8, a
+/// derivative 4, anything else 1. Saturating. Its loops then repeat at most
+/// `cap` times all told an invocation (`bound_loops`), so an invocation's
+/// work is at most this times `cap + 1`.
+///
+/// `None` where a function calls itself, directly or not (naga's validator
+/// refuses that too).
+pub(crate) fn cost(module: &naga::Module) -> Option<Vec<u64>> {
+    // Each function's once every function it calls has one: a call graph
+    // is a DAG, each function weighed once, however many paths reach it.
+    let count = module.functions.len();
+    let mut costs: Vec<Option<u64>> = vec![None; count];
+    loop {
+        let mut progressed = false;
+        for (handle, function) in module.functions.iter() {
+            let at = handle.index();
+            if costs[at].is_some() {
+                continue;
+            }
+            if let Some(cost) = function_cost(function, &costs) {
+                costs[at] = Some(cost);
+                progressed = true;
+            }
+        }
+        if costs.iter().all(Option::is_some) {
+            break;
+        }
+        if !progressed {
+            return None;
+        }
+    }
+    let costs: Vec<u64> = costs.into_iter().map(Option::unwrap).collect();
+    let known: Vec<Option<u64>> = costs.iter().copied().map(Some).collect();
+    Some(
+        module
+            .entry_points
+            .iter()
+            .map(|entry| function_cost(&entry.function, &known).unwrap_or(u64::MAX))
+            .collect(),
+    )
+}
+
+/// `function`'s cost, if every function it calls has one in `costs`.
+fn function_cost(function: &naga::Function, costs: &[Option<u64>]) -> Option<u64> {
+    let expressions: u64 = function
+        .expressions
+        .iter()
+        .map(|(_, e)| expression_cost(e))
+        .fold(0, u64::saturating_add);
+    Some(expressions.saturating_add(block_cost(&function.body, costs)?))
+}
+
+fn expression_cost(expression: &naga::Expression) -> u64 {
+    match expression {
+        naga::Expression::ImageSample { .. } => 16,
+        naga::Expression::ImageLoad { .. } | naga::Expression::ImageQuery { .. } => 4,
+        naga::Expression::Derivative { .. } => 4,
+        _ => 1,
+    }
+}
+
+fn block_cost(block: &naga::Block, costs: &[Option<u64>]) -> Option<u64> {
+    let mut total = 0u64;
+    for statement in block.iter() {
+        let cost = match statement {
+            naga::Statement::Call { function, .. } => 1u64.saturating_add(costs[function.index()]?),
+            naga::Statement::Atomic { .. } | naga::Statement::ImageAtomic { .. } => 8,
+            naga::Statement::ImageStore { .. } => 4,
+            naga::Statement::Block(inner) => block_cost(inner, costs)?,
+            naga::Statement::If { accept, reject, .. } => 1u64
+                .saturating_add(block_cost(accept, costs)?)
+                .saturating_add(block_cost(reject, costs)?),
+            naga::Statement::Switch { cases, .. } => {
+                let mut sum = 1u64;
+                for case in cases {
+                    sum = sum.saturating_add(block_cost(&case.body, costs)?);
+                }
+                sum
+            }
+            naga::Statement::Loop {
+                body, continuing, ..
+            } => 1u64
+                .saturating_add(block_cost(body, costs)?)
+                .saturating_add(block_cost(continuing, costs)?),
+            _ => 1,
+        };
+        total = total.saturating_add(cost);
+    }
+    Some(total)
+}
+
 /// `module` with every loop's iterations counted against `cap` an
 /// invocation, all loops together: past it, each loop breaks. A shader that
 /// never reaches the cap runs as it did (the counter is its own private
@@ -486,5 +775,97 @@ mod tests {
         assert!(bound_loops(parse(&called), 1000).is_err());
         let kept = bound_loops(parse(&outside), 1000).unwrap();
         assert!(validate(&kept).is_ok());
+    }
+
+    #[test]
+    fn work_through_the_call_graph_is_weighed_without_running_or_inlining_it() {
+        // f0 calls f1 twice, ... f39 calls f40 twice: 2^40 calls an
+        // invocation, no loop, a few kilobytes. Weighed once a function, in
+        // a moment, and refused.
+        let mut source = String::from(HEAD);
+        source.push_str("fn f40(x: u32) -> u32 { return x * 3u + 1u; }\n");
+        for k in (0..40).rev() {
+            source.push_str(&format!(
+                "fn f{k}(x: u32) -> u32 {{ return f{n}(x) + f{n}(x + 1u); }}\n",
+                n = k + 1
+            ));
+        }
+        source.push_str(
+            "@compute @workgroup_size(64) fn main(@builtin(local_invocation_index) i: u32) { output[i] = f0(input[0]); }",
+        );
+        let module = parse(&source);
+        validate(&module).unwrap();
+        assert!(
+            bound_loops(parse(&source), 1000).is_ok(),
+            "no loop to bound"
+        );
+        let started = std::time::Instant::now();
+        let costs = cost(&module).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        assert!(costs[0] > 1 << 40, "{}", costs[0]);
+        let refused = sandbox(module, "main", 64, &Limits::default());
+        assert!(refused.is_err_and(|why| why.contains("cost")));
+    }
+
+    #[test]
+    fn a_heavier_loop_body_gets_fewer_iterations_and_too_heavy_a_run_is_refused() {
+        let looping = shader("", "loop { n += input[n % 4u] * 3u + 1u; }");
+        let light = sandbox(parse(&looping), "main", 64, &Limits::default()).unwrap();
+        // A body ten times as heavy, the same invocations: about a tenth.
+        let heavy_body = (0..10)
+            .map(|_| "n += input[n % 4u] * 3u + 1u;")
+            .collect::<String>();
+        let heavier = shader("", &format!("loop {{ {heavy_body} }}"));
+        let heavy = sandbox(parse(&heavier), "main", 64, &Limits::default()).unwrap();
+        assert!(
+            heavy.cap * 5 < light.cap,
+            "{} against {}",
+            heavy.cap,
+            light.cap
+        );
+        for run in [&light, &heavy] {
+            assert!(run.work <= Limits::default().work);
+        }
+        // So many invocations that each would loop fewer than 64 times.
+        assert!(sandbox(parse(&looping), "main", 1 << 20, &Limits::default()).is_err());
+        // No loop: cost times invocations alone.
+        let straight = shader("", "n = input[0] * 3u;");
+        assert!(sandbox(parse(&straight), "main", 1 << 16, &Limits::default()).is_ok());
+        assert!(sandbox(parse(&straight), "main", 1 << 30, &Limits::default()).is_err());
+    }
+
+    #[test]
+    fn memory_and_size_past_the_limits_are_refused() {
+        let private = format!(
+            "{HEAD} var<private> big: array<f32, 8192>; \
+            @compute @workgroup_size(1) fn main() {{ big[0] = f32(input[0]); output[0] = u32(big[0]); }}"
+        );
+        assert!(
+            sandbox(parse(&private), "main", 1, &Limits::default())
+                .is_err_and(|w| w.contains("memory"))
+        );
+        let local = shader(
+            "",
+            "var big: array<u32, 8192>; big[input[0] % 8192u] = 1u; n = big[0];",
+        );
+        assert!(
+            sandbox(parse(&local), "main", 1, &Limits::default())
+                .is_err_and(|w| w.contains("memory"))
+        );
+        let shared = format!(
+            "{HEAD} var<workgroup> big: array<u32, 8192>; \
+            @compute @workgroup_size(1) fn main() {{ big[0] = input[0]; output[0] = big[0]; }}"
+        );
+        assert!(
+            sandbox(parse(&shared), "main", 1, &Limits::default())
+                .is_err_and(|w| w.contains("workgroup"))
+        );
+        // Many nodes: a long straight run of statements, past a limit of 2,000.
+        let long = shader("", &"n = n * 3u + input[0];".repeat(1000));
+        let few = Limits {
+            nodes: 2000,
+            ..Limits::default()
+        };
+        assert!(sandbox(parse(&long), "main", 1, &few).is_err_and(|w| w.contains("nodes")));
     }
 }

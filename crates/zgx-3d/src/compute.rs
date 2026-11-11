@@ -112,6 +112,10 @@ pub struct ComputeBudget {
     /// The same for a sandboxed pass (`Compute::sandboxed`; 1 to begin
     /// with).
     pub sandboxed_gpu_ms: f32,
+    /// GPU milliseconds an owner's sandboxed passes may take a frame
+    /// together (2 to begin with): over it as often as `frames` says, all
+    /// of them are turned off.
+    pub owner_gpu_ms: f32,
     /// Of a pass's last 8 timed frames, how many may take longer before it's
     /// turned off (`ComputeStatus::OverBudget`; 3 to begin with): one slow
     /// on alternate frames trips it as one slow every frame does. Frames
@@ -125,6 +129,7 @@ impl Default for ComputeBudget {
             invocations: 1 << 26,
             gpu_ms: 8.,
             sandboxed_gpu_ms: 1.,
+            owner_gpu_ms: 2.,
             frames: 3,
         }
     }
@@ -156,7 +161,8 @@ pub struct Compute {
     dispatch: Dispatch,
     run: Run,
     point: Point,
-    sandboxed: bool,
+    /// Who it's run for, where the app doesn't vouch for it (a plugin).
+    sandboxed: Option<Arc<str>>,
 }
 impl std::fmt::Debug for Compute {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -179,7 +185,7 @@ impl Compute {
             dispatch: Dispatch::Workgroups([1, 1, 1]),
             run: Run::OnDemand,
             point: Point::BeforeFrame,
-            sandboxed: false,
+            sandboxed: None,
         }
     }
     /// Its entry point, where the shader has more than one.
@@ -234,11 +240,14 @@ impl Compute {
         self.point = point;
         self
     }
-    /// Code the app doesn't vouch for (a plugin's): held to the stricter GPU
-    /// time budget (`ComputeBudget::sandboxed_gpu_ms`), and refused
-    /// (`ComputeError::Untimed`) on a device that can't time it.
-    pub fn sandboxed(mut self) -> Self {
-        self.sandboxed = true;
+    /// Code the app doesn't vouch for, run for `owner` (a plugin's name):
+    /// checked so it can't hold the device (its size, memory and cost
+    /// bounded, its loops capped: `shader_sandbox`), held to the stricter
+    /// GPU time budgets (`ComputeBudget::sandboxed_gpu_ms`, `owner_gpu_ms`)
+    /// and to its share of a frame's, and refused (`ComputeError::Untimed`)
+    /// on a device that can't time it.
+    pub fn sandboxed(mut self, owner: impl Into<Arc<str>>) -> Self {
+        self.sandboxed = Some(owner.into());
         self
     }
 }
@@ -684,7 +693,8 @@ fn order(passes: &[(u64, &[(Key, Access)])]) -> Option<Vec<usize>> {
 type Compiled = Arc<Mutex<Option<Result<wgpu::ComputePipeline, String>>>>;
 
 enum Gpu {
-    Compiling(Compiled),
+    /// Compiling since then.
+    Compiling(Compiled, Instant),
     Ready(wgpu::ComputePipeline, Vec<wgpu::BindGroup>),
     Failed,
 }
@@ -704,7 +714,10 @@ struct Pass {
     gpu: Option<(u64, Gpu)>,
     /// Why it can't run, if it can't.
     failed: Option<String>,
-    sandboxed: bool,
+    /// Who it's run for, sandboxed; its run's work at most, weighed
+    /// (`shader_sandbox::Sandboxed::work`).
+    owner: Option<Arc<str>>,
+    work: u64,
     /// Due last frame and left waiting by the frame's invocations: it's
     /// given room first this frame. And whether this frame runs it.
     waited: bool,
@@ -744,6 +757,8 @@ pub(crate) struct Data {
     pub(crate) budget: u64,
     /// What passes may give the device (`World::set_compute_budget`).
     pub(crate) limits: ComputeBudget,
+    /// Each owner of sandboxed passes' last 8 timed frames over its budget.
+    owners: Vec<(Arc<str>, u8)>,
     /// The last frame's time and step, in seconds: when the next frame is.
     clock: (f64, f64),
     passes: Vec<(u32, Option<Pass>)>,
@@ -763,6 +778,7 @@ impl Data {
             cap: DEFAULT_MEMORY_CAP,
             budget: DEFAULT_READBACK_BUDGET,
             limits: ComputeBudget::default(),
+            owners: Vec::new(),
             clock: (0., 0.),
             passes: Vec::new(),
             order: Default::default(),
@@ -819,10 +835,27 @@ impl Data {
         if compute.point == Point::BeforeTransparents {
             return Err(ComputeError::Point(compute.point));
         }
-        if compute.sandboxed && timed == Some(false) {
+        if compute.sandboxed.is_some() && timed == Some(false) {
             return Err(ComputeError::Untimed);
         }
-        if compute.sandboxed && compute.source.len() > MOST_SANDBOXED_SOURCE {
+        if let Some(owner) = &compute.sandboxed {
+            let sandboxed = || {
+                self.passes
+                    .iter()
+                    .filter_map(|(_, p)| p.as_ref()?.owner.as_ref())
+            };
+            if sandboxed().count() >= MOST_SANDBOXED {
+                return Err(ComputeError::Limits(format!(
+                    "a world holds at most {MOST_SANDBOXED} sandboxed passes"
+                )));
+            }
+            if sandboxed().filter(|o| *o == owner).count() >= MOST_AN_OWNERS {
+                return Err(ComputeError::Limits(format!(
+                    "`{owner}` holds at most {MOST_AN_OWNERS} sandboxed passes"
+                )));
+            }
+        }
+        if compute.sandboxed.is_some() && compute.source.len() > MOST_SANDBOXED_SOURCE {
             return Err(ComputeError::Limits(format!(
                 "a sandboxed shader of {} bytes: at most {MOST_SANDBOXED_SOURCE}",
                 compute.source.len()
@@ -835,18 +868,30 @@ impl Data {
         }
         let mut checked = check(&compute)?;
         let mut source = compute.source.clone();
-        if compute.sandboxed {
-            // Its loops bounded: a pass's iterations, all invocations'
-            // together, `SANDBOX_ITERATIONS` (at least 64 each).
-            let cap = (SANDBOX_ITERATIONS / checked.invocations.max(1))
-                .clamp(64, u64::from(u32::MAX)) as u32;
+        let mut work = 0;
+        if compute.sandboxed.is_some() {
+            if checked.invocations > MOST_SANDBOXED_INVOCATIONS {
+                return Err(ComputeError::Limits(format!(
+                    "{} invocations: a sandboxed pass runs at most {MOST_SANDBOXED_INVOCATIONS}",
+                    checked.invocations
+                )));
+            }
+            // Its size, memory and cost checked, its loops capped so a run's
+            // work stays within the sandbox's (`shader_sandbox`).
             let module = naga::front::wgsl::parse_str(&compute.source)
                 .map_err(|e| ComputeError::Shader(e.emit_to_string(&compute.source)))?;
-            let bounded = crate::shader_sandbox::bound_loops(module, cap)
-                .and_then(|module| crate::shader_sandbox::to_wgsl(&module))
-                .map_err(ComputeError::Shader)?;
-            checked.iteration_cap = Some(cap);
-            source = bounded.into();
+            let made = crate::shader_sandbox::sandbox(
+                module,
+                &checked.entry,
+                checked.invocations,
+                &crate::shader_sandbox::Limits::default(),
+            )
+            .map_err(ComputeError::Limits)?;
+            let written =
+                crate::shader_sandbox::to_wgsl(&made.module).map_err(ComputeError::Shader)?;
+            checked.iteration_cap = Some(made.cap);
+            work = made.work;
+            source = written.into();
         }
         if checked.invocations > self.limits.invocations {
             return Err(ComputeError::Limits(format!(
@@ -866,7 +911,8 @@ impl Data {
             due: 0.,
             gpu: None,
             failed: None,
-            sandboxed: compute.sandboxed,
+            owner: compute.sandboxed,
+            work,
             waited: false,
             chosen: false,
             over: 0,
@@ -980,12 +1026,20 @@ const MOST_SANDBOXED_SOURCE: usize = 1 << 20;
 /// The most compute passes a world holds: each holds a pipeline.
 const MOST_PASSES: usize = 1024;
 
-/// A sandboxed pass's loop iterations, all its invocations' together: each
-/// invocation may loop this over its invocations (at least 64). 2^22 of an
-/// empty loop's are about 0.6 ms of an M1 Max (2^26 were 9.7 ms), within
-/// the sandboxed budget; a loop whose body is heavy is what the timestamps
-/// catch.
-const SANDBOX_ITERATIONS: u64 = 1 << 22;
+/// How long a sandboxed pass's pipeline may take to compile: past it, the
+/// pass fails (its worker may stay busy; it's sandboxed code's alone).
+const SANDBOXED_COMPILE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Sandboxed passes a world holds, and those of one owner.
+const MOST_SANDBOXED: usize = 64;
+const MOST_AN_OWNERS: usize = 16;
+/// Invocations a sandboxed pass runs at most: with 64 loop iterations each
+/// the least it's left, within its work (`shader_sandbox::Limits`).
+const MOST_SANDBOXED_INVOCATIONS: u64 = 1 << 16;
+/// Sandboxed work a frame runs, all owners', and one owner's: four and two
+/// passes' worth of `shader_sandbox::Limits::work`.
+const SANDBOX_FRAME_WORK: u64 = 1 << 27;
+const SANDBOX_OWNER_WORK: u64 = 1 << 26;
 
 /// What `frame` holds in a pass's shader.
 #[repr(C)]
@@ -1099,6 +1153,9 @@ impl Frames {
             }
         }
         self.spent = 0;
+        // Sandboxed work: a frame's, and each owner's.
+        let mut sandboxed = 0u64;
+        let mut owners: Vec<(Arc<str>, u64)> = Vec::new();
         for waited in [true, false] {
             for &at in &due {
                 let pass = data.passes[at as usize].1.as_mut().unwrap();
@@ -1106,10 +1163,27 @@ impl Frames {
                     continue;
                 }
                 let invocations = pass.checked.invocations;
-                if self.spent.saturating_add(invocations) <= limit {
-                    self.spent += invocations;
-                    pass.chosen = true;
+                if self.spent.saturating_add(invocations) > limit {
+                    continue;
                 }
+                if let Some(owner) = &pass.owner {
+                    let held = owners
+                        .iter()
+                        .find(|(o, _)| o == owner)
+                        .map_or(0, |(_, w)| *w);
+                    if sandboxed.saturating_add(pass.work) > SANDBOX_FRAME_WORK
+                        || held.saturating_add(pass.work) > SANDBOX_OWNER_WORK
+                    {
+                        continue;
+                    }
+                    sandboxed += pass.work;
+                    match owners.iter_mut().find(|(o, _)| o == owner) {
+                        Some((_, w)) => *w += pass.work,
+                        None => owners.push((owner.clone(), pass.work)),
+                    }
+                }
+                self.spent += invocations;
+                pass.chosen = true;
             }
         }
         for &at in &due {
@@ -1144,6 +1218,7 @@ impl Frames {
         }
         let (period, limits) = (timing.period, data.limits);
         let passes = &mut data.passes;
+        let histories = &mut data.owners;
         timing.jobs.retain(|(timed, staging, stage)| {
             let Stage::Mapping(flag) = stage else {
                 return true;
@@ -1158,6 +1233,7 @@ impl Frames {
                         // before it: a GPU runs passes that share nothing at
                         // once, and one's span then holds another's work.
                         let mut ended = 0u64;
+                        let mut owners: Vec<(Arc<str>, f32)> = Vec::new();
                         for (k, &(at, added)) in timed.iter().enumerate() {
                             let (began, end) = (ticks[2 * k], ticks[2 * k + 1]);
                             let own = end.saturating_sub(began.max(ended));
@@ -1169,7 +1245,13 @@ impl Frames {
                                 continue;
                             }
                             let ms = own as f32 * period / 1e6;
-                            let budget = if pass.sandboxed {
+                            if let Some(owner) = &pass.owner {
+                                match owners.iter_mut().find(|(o, _)| o == owner) {
+                                    Some((_, sum)) => *sum += ms,
+                                    None => owners.push((owner.clone(), ms)),
+                                }
+                            }
+                            let budget = if pass.owner.is_some() {
                                 limits.sandboxed_gpu_ms
                             } else {
                                 limits.gpu_ms
@@ -1185,6 +1267,38 @@ impl Frames {
                                         history.count_ones()
                                     ),
                                 );
+                            }
+                        }
+                        // An owner's passes together: over its budget as often,
+                        // all are turned off.
+                        for (owner, ms) in owners {
+                            let at = match histories.iter().position(|(o, _)| *o == owner) {
+                                Some(at) => at,
+                                None => {
+                                    histories.push((owner.clone(), 0));
+                                    histories.len() - 1
+                                }
+                            };
+                            let (history, tripped) =
+                                judge(histories[at].1, ms > limits.owner_gpu_ms, limits.frames);
+                            histories[at].1 = history;
+                            if !tripped {
+                                continue;
+                            }
+                            for (_, pass) in passes.iter_mut() {
+                                if let Some(pass) = pass
+                                    && pass.owner.as_ref() == Some(&owner)
+                                    && pass.failed.is_none()
+                                {
+                                    pass.over_budget = Some(ms);
+                                    fail(
+                                        pass,
+                                        format!(
+                                            "`{owner}`'s passes took {ms:.2} ms of the GPU together, over its {} ms",
+                                            limits.owner_gpu_ms
+                                        ),
+                                    );
+                                }
                             }
                         }
                     }
@@ -1426,7 +1540,7 @@ impl Frames {
                 fail(pass, "the device runs no compute shaders".into());
                 continue;
             }
-            if pass.sandboxed && self.timing.is_none() {
+            if pass.owner.is_some() && self.timing.is_none() {
                 fail(pass, ComputeError::Untimed.to_string());
                 continue;
             }
@@ -1438,7 +1552,7 @@ impl Frames {
                     pass.checked.entry.clone(),
                 );
                 let done = slot.clone();
-                let spawned = compile_off_the_frame(move || {
+                let job = move || {
                     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
                     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some("3D compute"),
@@ -1458,18 +1572,33 @@ impl Frames {
                         Some(error) => Err(error.to_string()),
                     };
                     *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(result);
-                });
+                };
+                // A plugin's on a worker of its own: a driver stuck on its
+                // shader holds up nobody else's.
+                let spawned = if pass.owner.is_some() {
+                    compile_sandboxed(job)
+                } else {
+                    compile_off_the_frame(job)
+                };
                 if let Err(error) = spawned {
                     fail(pass, format!("no thread to compile it on: {error}"));
                     continue;
                 }
-                pass.gpu = Some((generation, Gpu::Compiling(slot)));
+                pass.gpu = Some((generation, Gpu::Compiling(slot, Instant::now())));
             }
-            let Some((_, Gpu::Compiling(slot))) = &pass.gpu else {
+            let Some((_, Gpu::Compiling(slot, since))) = &pass.gpu else {
                 continue;
             };
+            let late = pass.owner.is_some() && since.elapsed() > SANDBOXED_COMPILE;
             let done = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
             match done {
+                None if late => {
+                    pass.gpu = Some((generation, Gpu::Failed));
+                    fail(
+                        pass,
+                        format!("its shader took over {SANDBOXED_COMPILE:?} to compile"),
+                    );
+                }
                 None => {}
                 Some(Err(why)) => {
                     pass.gpu = Some((generation, Gpu::Failed));
@@ -1915,7 +2044,18 @@ static WORKERS: AtomicU64 = AtomicU64::new(0);
 /// devices, one thread. Its error if the worker can't be started.
 pub(crate) fn compile_off_the_frame(job: impl FnOnce() + Send + 'static) -> Result<(), String> {
     static QUEUE: Mutex<Option<std::sync::mpsc::Sender<Job>>> = Mutex::new(None);
-    let mut queue = QUEUE.lock().unwrap_or_else(|p| p.into_inner());
+    on_worker(&QUEUE, Box::new(job))
+}
+
+/// `job` on the worker sandboxed code compiles on: apart from the app's, so
+/// a driver taking too long over a plugin's shader holds up no other.
+pub(crate) fn compile_sandboxed(job: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    static QUEUE: Mutex<Option<std::sync::mpsc::Sender<Job>>> = Mutex::new(None);
+    on_worker(&QUEUE, Box::new(job))
+}
+
+fn on_worker(queue: &Mutex<Option<std::sync::mpsc::Sender<Job>>>, job: Job) -> Result<(), String> {
+    let mut queue = queue.lock().unwrap_or_else(|p| p.into_inner());
     if queue.is_none() {
         let (send, receive) = std::sync::mpsc::channel::<Job>();
         std::thread::Builder::new()
@@ -1932,11 +2072,12 @@ pub(crate) fn compile_off_the_frame(job: impl FnOnce() + Send + 'static) -> Resu
     queue
         .as_ref()
         .unwrap()
-        .send(Box::new(job))
+        .send(job)
         .map_err(|_| "the compile worker stopped".to_owned())
 }
 
-/// Compile workers this process has started: one at most. For tests.
+/// Compile workers this process has started: one for the app's, one for
+/// sandboxed code, at most. For tests.
 #[doc(hidden)]
 pub fn compile_threads() -> u64 {
     WORKERS.load(Ordering::Relaxed)

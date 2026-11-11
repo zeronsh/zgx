@@ -673,7 +673,10 @@ fn passes_compile_on_one_thread_however_many_there_are() {
     for pass in &passes {
         window.compiled(&world, *pass);
     }
-    assert_eq!(zgx_3d::compile_threads(), 1, "one worker for every pass");
+    assert!(
+        zgx_3d::compile_threads() <= 2,
+        "one worker for every pass, and one for sandboxed code"
+    );
 }
 
 #[test]
@@ -713,8 +716,8 @@ fn a_sandboxed_pass_needs_a_device_that_times_it() {
     if world.caps().unwrap().timestamps {
         return;
     }
-    let pass =
-        world.add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}").sandboxed());
+    let pass = world
+        .add_compute(Compute::new("@compute @workgroup_size(1) fn main() {}").sandboxed("plugin"));
     assert_eq!(pass, Err(ComputeError::Untimed));
     assert!(
         world
@@ -929,7 +932,7 @@ fn a_sandboxed_pass_that_never_ends_ends() {
             )
             .buffer("out", &out, Access::Write)
             .threads([256, 1, 1])
-            .sandboxed()
+            .sandboxed("plugin")
             .every_frame(),
         )
         .unwrap();
@@ -976,12 +979,14 @@ fn a_sandboxed_pass_that_never_ends_ends() {
         }
     }
     assert_eq!(world.compute_status(spin), Some(ComputeStatus::Ready));
-    // Each invocation looped its share of the pass's iterations, 2^22 / 256.
+    // Each invocation looped the same capped count: at least 64, and the
+    // pass's work within the sandbox's.
     let looped = words(&read.try_take().unwrap().unwrap());
+    let n = looped[0];
+    assert!(looped.iter().all(|&m| m == n), "{:?}", &looped[..4]);
     assert!(
-        looped.iter().all(|&n| n == (1 << 22) / 256),
-        "{:?}",
-        &looped[..4]
+        n >= 64 && u64::from(n) * 256 <= 1 << 25,
+        "{n} iterations each"
     );
 }
 
@@ -1012,7 +1017,7 @@ fn a_world_holds_at_most_1024_passes_and_a_sandboxed_shader_1_mib() {
         "//\n".repeat(400_000)
     );
     assert!(matches!(
-        world.add_compute(Compute::new(long.as_str()).sandboxed()),
+        world.add_compute(Compute::new(long.as_str()).sandboxed("plugin")),
         Err(ComputeError::Limits(_))
     ));
 }
@@ -1057,4 +1062,217 @@ fn a_rated_pass_lets_its_world_rest_between_its_runs() {
         std::thread::sleep(std::time::Duration::from_millis(8));
     }
     assert!(world.view().animating());
+}
+
+#[test]
+fn sandboxed_passes_are_counted_by_world_and_owner() {
+    let world = World::new();
+    let pass = || Compute::new("@compute @workgroup_size(1) fn main() {}");
+    for _ in 0..16 {
+        world.add_compute(pass().sandboxed("one")).unwrap();
+    }
+    assert!(matches!(
+        world.add_compute(pass().sandboxed("one")),
+        Err(ComputeError::Limits(_))
+    ));
+    for owner in ["two", "three", "four"] {
+        for _ in 0..16 {
+            world.add_compute(pass().sandboxed(owner)).unwrap();
+        }
+    }
+    assert!(
+        matches!(
+            world.add_compute(pass().sandboxed("five")),
+            Err(ComputeError::Limits(_))
+        ),
+        "64 a world"
+    );
+    assert!(
+        world.add_compute(pass()).is_ok(),
+        "the app's own aren't counted"
+    );
+    // More invocations than a sandboxed pass runs.
+    let world = World::new();
+    assert!(matches!(
+        world.add_compute(pass().threads([1 << 17, 1, 1]).sandboxed("one")),
+        Err(ComputeError::Limits(_))
+    ));
+}
+
+#[test]
+fn sandboxed_passes_share_a_frames_work_and_an_owners() {
+    use zgx_gpu::{
+        viewport::{Viewport, ViewportFrame},
+        wgpu,
+    };
+    let Some((device, queue)) = timed_device() else {
+        return;
+    };
+    let world = World::new();
+    world.set_compute_budget(ComputeBudget {
+        sandboxed_gpu_ms: 100.,
+        owner_gpu_ms: 100.,
+        ..ComputeBudget::default()
+    });
+    let counts = world.add_buffer(BufferDesc::storage::<u32>(8)).unwrap();
+    // Eight looping passes, four an owner: each a whole run's work, so an
+    // owner's frame holds two and the frame four.
+    let passes: Vec<ComputeId> = (0..8)
+        .map(|i| {
+            world
+                .add_compute(
+                    Compute::new(format!(
+                        "@group(0) @binding(0) var<storage, read_write> counts: array<atomic<u32>>;
+                         @compute @workgroup_size(64)
+                         fn main(@builtin(local_invocation_index) i: u32) {{
+                             var n = 0u;
+                             loop {{ n += 1u; }}
+                             if i == 0u {{ atomicAdd(&counts[{i}], 1u + (n & 0u)); }}
+                         }}"
+                    ))
+                    .buffer("counts", &counts, Access::ReadWrite)
+                    .threads([1024, 1, 1])
+                    .every_frame()
+                    .sandboxed(if i < 4 { "one" } else { "two" }),
+                )
+                .unwrap()
+        })
+        .collect();
+    let mut painter = world.viewport();
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let mut draw = || {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut frame =
+            ViewportFrame::new(&device, &queue, &mut encoder, &view, format, (8, 8), 1.);
+        painter.render(&mut frame);
+        queue.submit([encoder.finish()]);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    };
+    for _ in 0..500 {
+        draw();
+        if passes
+            .iter()
+            .all(|&p| world.compute_status(p) == Some(ComputeStatus::Ready))
+        {
+            break;
+        }
+    }
+    // From none, 40 frames, and the one the read is copied after.
+    counts.write(0, &[0u32; 8]).unwrap();
+    for _ in 0..40 {
+        draw();
+    }
+    let read = counts.read(0..32);
+    draw();
+    for _ in 0..20 {
+        if read.is_ready() {
+            break;
+        }
+        draw();
+    }
+    // A run counts once a workgroup: 16 of them.
+    let ran: Vec<u32> = words(&read.try_take().unwrap().unwrap())
+        .iter()
+        .map(|n| n / 16)
+        .collect();
+    let (one, two): (u32, u32) = (ran[..4].iter().sum(), ran[4..].iter().sum());
+    // Two an owner a frame, four a frame in all; every pass had turns.
+    assert!(one <= 2 * 41 && two <= 2 * 41, "{ran:?}");
+    assert!(one + two >= 4 * 30, "the budget used: {ran:?}");
+    assert!(ran.iter().all(|&n| n >= 10), "each had turns: {ran:?}");
+}
+
+#[test]
+fn an_owners_passes_over_its_budget_together_are_all_turned_off() {
+    use zgx_gpu::{
+        viewport::{Viewport, ViewportFrame},
+        wgpu,
+    };
+    let Some((device, queue)) = timed_device() else {
+        return;
+    };
+    let world = World::new();
+    // Each pass alone within its own budget; the owner's two together not.
+    world.set_compute_budget(ComputeBudget {
+        sandboxed_gpu_ms: 100.,
+        owner_gpu_ms: 0.01,
+        ..ComputeBudget::default()
+    });
+    let sink = world.add_buffer(BufferDesc::storage::<u32>(1024)).unwrap();
+    let spin = |owner: &str| {
+        world
+            .add_compute(
+                Compute::new(
+                    "@group(0) @binding(0) var<storage, read_write> sink: array<u32>;
+                     @compute @workgroup_size(64)
+                     fn main(@builtin(global_invocation_id) id: vec3u) {
+                         var n = 0u;
+                         loop { n += 1u; }
+                         sink[id.x] = n;
+                     }",
+                )
+                .buffer("sink", &sink, Access::ReadWrite)
+                .threads([1024, 1, 1])
+                .every_frame()
+                .sandboxed(owner),
+            )
+            .unwrap()
+    };
+    let (a, b) = (spin("greedy"), spin("greedy"));
+    let mut painter = world.viewport();
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    for _ in 0..300 {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut frame =
+            ViewportFrame::new(&device, &queue, &mut encoder, &view, format, (8, 8), 1.);
+        painter.render(&mut frame);
+        queue.submit([encoder.finish()]);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        if matches!(
+            world.compute_status(a),
+            Some(ComputeStatus::OverBudget { .. })
+        ) {
+            break;
+        }
+    }
+    for pass in [a, b] {
+        assert!(
+            matches!(
+                world.compute_status(pass),
+                Some(ComputeStatus::OverBudget { .. })
+            ),
+            "{:?}",
+            world.compute_status(pass)
+        );
+    }
 }
