@@ -544,3 +544,59 @@ fn a_worlds_particles_on_the_cpu_are_bounded_however_many_emitters() {
     );
     assert_eq!(world.memory().particles, 4 * u64::from(CPU_PARTICLES) * 80);
 }
+
+#[test]
+fn a_scene_built_before_its_first_frame_steps_at_most_the_worlds_cpu_particles() {
+    // Built before the first frame says the device has no compute: ten
+    // full pools are accepted, then the CPU steps four (65,536 particles)
+    // and the rest say they're over the world's CPU particles.
+    let world = world();
+    let emitters: Vec<EmitterId> = (0..10)
+        .map(|_| {
+            world
+                .add_emitter(Emitter::new(CPU_PARTICLES).rate(1000.))
+                .unwrap()
+        })
+        .collect();
+    let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor {
+        required_limits: wgpu::Limits {
+            max_compute_workgroups_per_dimension: 0,
+            max_compute_invocations_per_workgroup: 0,
+            ..wgpu::Limits::downlevel_defaults()
+        },
+        ..Default::default()
+    });
+    let mut painter = world.viewport();
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 8,
+            height: 8,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    for frame in 0..200 {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let mut drawing =
+            ViewportFrame::new(&device, &queue, &mut encoder, &view, FORMAT, (8, 8), 1.);
+        drawing.time = Instant::now() + Duration::from_millis(frame * 16);
+        painter.render(&mut drawing);
+        queue.submit([encoder.finish()]);
+        if world.particles_ready() && frame > 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!world.caps().unwrap().compute);
+    assert_eq!(world.particle_pools(), vec![(CPU_PARTICLES, true); 4]);
+    let statuses: Vec<_> = emitters.iter().map(|&e| world.emitter_status(e)).collect();
+    assert_eq!(statuses[..4], [Some(EmitterStatus::Running); 4]);
+    assert_eq!(statuses[4..], [Some(EmitterStatus::OverCpuParticles); 6]);
+}

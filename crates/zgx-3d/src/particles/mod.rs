@@ -352,6 +352,20 @@ pub(crate) fn most(caps: Option<crate::Caps>) -> u32 {
         .min(u64::from(u32::MAX)) as u32
 }
 
+/// How an emitter is doing (`World::emitter_status`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmitterStatus {
+    /// Stepped and drawn as frames come.
+    Running,
+    /// Updated on the CPU, past what the world's emitters may hold there
+    /// together (`CPU_WORLD_PARTICLES`, in the order they were added):
+    /// neither stepped nor drawn while it is.
+    OverCpuParticles,
+    /// The device refused its pool: it draws nothing.
+    Failed,
+}
+
 /// An emitter in a world (`World::add_emitter`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct EmitterId {
@@ -382,6 +396,9 @@ pub(crate) struct Live {
     /// Its pool couldn't be made on the device: it draws nothing and keeps
     /// nothing drawing.
     pub(crate) failed: bool,
+    /// Updated on the CPU past the world's CPU particles: neither stepped
+    /// nor drawn, nor keeping anything drawing.
+    pub(crate) over_cpu: bool,
 }
 impl Live {
     /// Particles to spawn in a frame of `step` seconds at `time`: what it
@@ -418,7 +435,7 @@ impl Live {
         (base, count)
     }
     fn unsettled(&self, time: f64) -> bool {
-        if self.failed {
+        if self.failed || self.over_cpu {
             return false;
         }
         let lives = |at: f64| time - at <= f64::from(self.emitter.longest()) + f64::from(MAX_STEP);
@@ -478,6 +495,7 @@ impl Particles {
             fed: false,
             fed_until: None,
             failed: false,
+            over_cpu: false,
         };
         let index = match self.emitters.iter().position(|(_, e)| e.is_none()) {
             Some(index) => index,

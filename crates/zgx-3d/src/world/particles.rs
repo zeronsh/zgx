@@ -1,7 +1,7 @@
 //! A world's particle emitters (design-3d-aaa.md, 5.4): the `World` calls of
 //! `crate::particles`.
 use super::World;
-use crate::particles::{Emitter, EmitterError, EmitterId, Particles, UNSETTLED};
+use crate::particles::{Emitter, EmitterError, EmitterId, EmitterStatus, Particles, UNSETTLED};
 
 impl World {
     /// Its emitters, made with the first call needing them; the world
@@ -94,6 +94,19 @@ impl World {
         let id = self.particles(|p| p.add(emitter));
         self.view.invalidate();
         Ok(id)
+    }
+
+    /// How an emitter is doing; `None` if it was removed.
+    pub fn emitter_status(&self, id: EmitterId) -> Option<EmitterStatus> {
+        let inner = self.inner.borrow();
+        let live = inner.particles.as_ref()?.child(id)?;
+        Some(if live.failed {
+            EmitterStatus::Failed
+        } else if live.over_cpu {
+            EmitterStatus::OverCpuParticles
+        } else {
+            EmitterStatus::Running
+        })
     }
 
     /// Take an emitter out, its particles with it.

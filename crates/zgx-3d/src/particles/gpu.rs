@@ -282,6 +282,9 @@ impl Device {
         let mut events: Vec<(u32, [f32; 3], u32)> = Vec::new();
         // Sub-emitters before their parents: a parent's births land in
         // their pools after their own step.
+        // Where the CPU steps them, the world's emitters in the order added
+        // hold at most `CPU_WORLD_PARTICLES` together: one past it waits.
+        let mut cpu_held = 0u32;
         for at in particles.order() {
             let child = particles.emitters[at]
                 .1
@@ -296,6 +299,22 @@ impl Device {
                 continue;
             };
             let slots = slots_of(live);
+            if !on_gpu {
+                let over = cpu_held.saturating_add(slots) > super::CPU_WORLD_PARTICLES;
+                if over && !live.over_cpu {
+                    eprintln!(
+                        "zgx-3d: an emitter of {slots} particles is past the world's {} on the CPU: not stepped",
+                        super::CPU_WORLD_PARTICLES
+                    );
+                }
+                live.over_cpu = over;
+                if over {
+                    continue;
+                }
+                cpu_held += slots;
+            } else {
+                live.over_cpu = false;
+            }
             let pool = self
                 .pools
                 .entry(live.id)
