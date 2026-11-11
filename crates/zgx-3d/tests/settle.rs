@@ -181,8 +181,7 @@ fn probes_removed_while_they_converge() {
 }
 
 // Removing the last animator lets its world's own hold go outside a frame,
-// and the frame then skips the step that would let its painter's go
-// (src/world/animation.rs:452-457, `animation::frame` with no slots).
+// and each painter's in its next frame (`animation::frame` with no slots).
 #[cfg(feature = "post")]
 #[test]
 fn a_post_pass_removed_while_it_compiles() {
@@ -240,7 +239,6 @@ fn a_mesh_removed_while_its_map_loads() {
 
 #[cfg(feature = "gltf")]
 #[test]
-#[ignore = "SETTLE-ANIM: the animation lane (removing the last animator never rests)"]
 fn the_last_animator_removed_while_it_plays() {
     rests("animation", |world, _, _| {
         let model = Model::from_bytes(&rig::rig(3)).unwrap();

@@ -282,3 +282,23 @@ fn a_clip_built_in_code_plays_on_objects_made_in_code() {
     let r = theirs.rotation;
     assert!((r.y - t.rotation.y).abs() < 1e-6 && (r.w - t.rotation.w).abs() < 1e-6);
 }
+
+#[test]
+fn removing_the_last_animator_while_it_plays_lets_the_world_rest() {
+    // Its painter held it unsettled inside a frame; the removal, outside
+    // one, must not leave that hold behind.
+    let model = Model::from_bytes(&rig::rig(3)).unwrap();
+    let clip = model.clip("Wave").unwrap().clone();
+    let world = World::new();
+    let placed = world.place_model(&model);
+    let animator = world.add_animator(&placed);
+    world.play(animator, &clip, Play::new()).unwrap();
+    let mut painter = Painter::new(&world);
+    painter.frame(0.);
+    painter.frame(0.1);
+    assert!(world.view().animating());
+    world.remove_animator(animator);
+    painter.frame(0.2);
+    painter.frame(0.3);
+    assert!(!world.view().animating(), "removed: the world rests");
+}

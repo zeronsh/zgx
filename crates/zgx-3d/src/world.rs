@@ -727,7 +727,7 @@ impl Settle {
         self.unsettled.get() == 0
     }
     /// Whether `reason` keeps it drawing.
-    #[cfg(any(feature = "shaders", feature = "post"))]
+    #[cfg(any(feature = "shaders", feature = "post", feature = "gltf"))]
     pub(crate) fn holds(&self, reason: u32) -> bool {
         self.unsettled.get() & reason != 0
     }

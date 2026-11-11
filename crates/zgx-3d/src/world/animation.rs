@@ -75,6 +75,11 @@ pub(crate) fn frame(world: &std::cell::RefCell<Inner>, time: Instant) {
     let mut inner = world.borrow_mut();
     if !inner.animators.slots.is_empty() {
         advance(&mut inner, time);
+    } else if inner.settle.holds(Settle::ANIMATION) {
+        // The last animator went outside a frame, which let the world's
+        // own hold go but not this painter's, which a frame of it set:
+        // let go of it in its frame.
+        inner.unsettle(Settle::ANIMATION, false);
     }
 }
 
