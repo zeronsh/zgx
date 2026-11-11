@@ -31,6 +31,10 @@ impl Window {
         );
         Some(Self { ui, gpu })
     }
+    fn resize(&mut self, (w, h): (u32, u32)) {
+        self.gpu.resize(w, h);
+        self.ui.scene.borrow_mut().resize(w as f32, h as f32);
+    }
     fn draw(&mut self) -> Vec<u8> {
         self.ui.prepare_frame();
         let report = self.ui.scene.borrow_mut().flush();
@@ -207,4 +211,62 @@ fn a_camera_at_its_own_target_lets_a_world_with_cascades_rest() {
             "{camera:?}: still drawing after {drawn} frames"
         );
     }
+}
+
+/// A row of posts receding from the camera, their shadows in three
+/// cascades reaching 12 m (as the reference scene `shadow_cascades`).
+fn posts() -> World {
+    let world = World::new();
+    world.add(Object::mesh(
+        Geometry::plane(30., 30.),
+        Material::rgb(0x9a948a).with(0., 0.8),
+    ));
+    for i in 0..8 {
+        let z = 1.5 - i as f32 * 1.6;
+        world.add(
+            Object::mesh(Geometry::cuboid(0.25, 1.4, 0.25), Material::rgb(0xe0e0e0)).at([
+                0.6 * (i % 2) as f32 - 0.3,
+                0.7,
+                z,
+            ]),
+        );
+    }
+    world.add_light(Light::Directional {
+        direction: vec3(-0.7, -1., 0.2),
+        color: [1., 0.97, 0.92],
+        intensity: 3.,
+    });
+    world.set_shadows(true);
+    world.set_cascades(Some(Cascades::new(3).distance(12.).size(512)));
+    world.set_camera(Camera::looking_at([1.2, 1.6, 3.5], [-0.3, 0.4, -4.]));
+    world
+}
+
+#[test]
+fn a_view_resized_and_back_draws_its_shadows_as_a_fresh_one() {
+    let fresh = posts();
+    let Some(mut window) = Window::new(&fresh) else {
+        return;
+    };
+    let expected = window.draw();
+    drop(window);
+    let world = posts();
+    let mut window = Window::new(&world).unwrap();
+    window.draw();
+    // Other shapes, one frame each, then back: the cascades fit the view's
+    // aspect, so each change of it fits them again.
+    for size in [(96, 72), (160, 120), (SIDE, SIDE)] {
+        window.resize(size);
+        window.draw();
+    }
+    let actual = window.draw();
+    let (count, largest) = actual
+        .iter()
+        .zip(&expected)
+        .map(|(a, b)| a.abs_diff(*b))
+        .fold((0, 0), |(n, most), d| (n + usize::from(d > 1), most.max(d)));
+    assert_eq!(
+        count, 0,
+        "{count} channels differ past 1, by up to {largest}"
+    );
 }

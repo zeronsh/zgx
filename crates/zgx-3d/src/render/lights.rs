@@ -353,12 +353,24 @@ pub(super) fn cascades(
             super::cull::visible(&frustum, boxes, &mut sun.masks[i]);
         }
     }
+    // The lens the fits follow besides the camera's place: a change to it
+    // fits every cascade again at once (it isn't the camera moving).
+    let lens = Some([
+        aspect.to_bits(),
+        camera.fov.to_bits(),
+        camera.near.to_bits(),
+        camera.far.to_bits(),
+        u32::from(camera.orthographic),
+    ]);
+    let lens_changed = sun.lens.is_some() && sun.lens != lens;
+    sun.lens = lens;
     let left = sun.decide(&c::Frame {
         fits: &fits[..count],
         sun: direction,
         changed,
         instances,
         masked: boxes.is_some(),
+        lens: lens_changed,
     });
     world.unsettle(crate::world::Settle::CASCADES, left);
     let mut drawn = 0;

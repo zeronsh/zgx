@@ -217,6 +217,9 @@ pub(crate) struct Sun {
     pub(crate) masks: [Vec<bool>; MAX_CASCADES],
     /// The spans of each run each cascade draws (`cull::shown`).
     pub(crate) spans: [Vec<(u32, std::ops::Range<u32>)>; MAX_CASCADES],
+    /// The view's lens the maps were last fit to (its aspect, field of
+    /// view, near, far and whether orthographic, as bits).
+    pub(crate) lens: Option<[u32; 5]>,
     /// Frames each far cascade has waited to follow the camera.
     pub(crate) waited: [u32; MAX_CASCADES],
     /// The casters' box along the sun, as of the last frame that drew the
@@ -323,6 +326,7 @@ impl Sun {
             redraw: [false; MAX_CASCADES],
             masks: Default::default(),
             spans: Default::default(),
+            lens: None,
             waited: [0; MAX_CASCADES],
             scene: None,
             pipelines: Default::default(),
@@ -357,6 +361,9 @@ pub(crate) struct Frame<'a> {
     pub(crate) instances: usize,
     /// Each cascade's casters now, if the meshes' boxes are current.
     pub(crate) masked: bool,
+    /// The view's lens changed (a resize, a zoom): every cascade's fit did,
+    /// not by the camera moving, and none waits for it.
+    pub(crate) lens: bool,
 }
 
 impl Sun {
@@ -382,7 +389,7 @@ impl Sun {
                             .iter()
                             .any(|r| m[r.start.min(m.len())..r.end.min(m.len())].contains(&true)),
                     };
-                    sun || touched(held.mask.as_deref()) || touched(mask)
+                    frame.lens || sun || touched(held.mask.as_deref()) || touched(mask)
                 }
             };
             let moved = self.held[c].as_ref().is_some_and(|held| held.fit != fit);
