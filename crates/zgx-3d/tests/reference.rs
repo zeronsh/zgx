@@ -754,22 +754,32 @@ fn each_scene_matches_its_golden() {
 }
 
 /// A way a world reaches its state the long way round: changes made and
-/// changed back, a frame drawn after each step, so that what it leaves must
-/// draw as a world built that way does. Every scene runs every sequence
+/// changed back (or on to a state `then` gives a fresh world), a frame drawn
+/// after each step, so that what it leaves must draw as a world built that
+/// way does. Every scene runs every sequence
 /// (`a_retained_window_draws_what_a_fresh_one_does`): a kept structure adds
 /// one entry, and is tried against every scene.
 struct Sequence {
     name: &'static str,
     /// From the scene as built and settled, in a `SIDE` window drawn once.
-    /// It must end with the window back at `SIDE` and the scene's settings
-    /// as they were (the test settles them again after).
+    /// It must end with the window back at `SIDE`, and without `then` the
+    /// scene's settings as they were (the test settles them again after).
     run: fn(&World, &mut Window, &Scene, &[ObjectId]),
+    /// Where the sequence ends, if not at the scene as built: applied to the
+    /// fresh world, built and settled, before it's drawn. With it, `run`'s
+    /// end is compared as it left it, unsettled (a camera it turned stays
+    /// turned).
+    then: Option<fn(&World, &Scene, &[ObjectId])>,
     /// Frames drawn at the final state before comparing: what rests before
     /// looking again (culling) catches up within them.
     settle: usize,
     /// Compares what pixels can't show: the retained world and window,
     /// then a fresh world's and window's, each drawn `settle` more frames.
     check: Option<Check>,
+}
+/// "an object added"'s object, in front of every scene's camera target.
+fn added(rgb: u32) -> Object {
+    Object::mesh(Geometry::cuboid(0.4, 0.4, 0.4), Material::rgb(rgb)).at([0.3, 0.5, 0.6])
 }
 /// A sequence's check: the retained world and window, then the fresh ones.
 type Check = fn(&World, &mut Window, &World, &mut Window) -> Result<(), String>;
@@ -782,6 +792,7 @@ const SEQUENCES: &[Sequence] = &[
             window.resize((160, 120));
             window.resize((SIDE, SIDE));
         },
+        then: None,
         settle: 0,
         check: None,
     },
@@ -809,6 +820,7 @@ const SEQUENCES: &[Sequence] = &[
             world.set_samples(1);
             window.draw();
         },
+        then: None,
         settle: 0,
         check: None,
     },
@@ -852,6 +864,7 @@ const SEQUENCES: &[Sequence] = &[
                 world.set_clearcoat(id, clearcoat);
             }
         },
+        then: None,
         settle: 0,
         check: None,
     },
@@ -870,6 +883,24 @@ const SEQUENCES: &[Sequence] = &[
             }
             window.draw();
         },
+        then: None,
+        settle: 0,
+        check: None,
+    },
+    // Ends elsewhere: an object added to a drawn world, then its look
+    // changed, against a world built with it as it ends.
+    Sequence {
+        name: "an object added",
+        run: |world, window, _, _| {
+            let added = world.add(added(0xff00ff));
+            window.draw();
+            world.set_material(added, Material::rgb(0x30c0a0).with(0., 0.4));
+            window.draw();
+        },
+        then: Some(|world, _, _| {
+            let added = world.add(added(0xff00ff));
+            world.set_material(added, Material::rgb(0x30c0a0).with(0., 0.4));
+        }),
         settle: 0,
         check: None,
     },
@@ -885,6 +916,7 @@ const SEQUENCES: &[Sequence] = &[
             world.remove(extra);
             window.draw();
         },
+        then: None,
         settle: 0,
         check: None,
     },
@@ -895,7 +927,10 @@ fn a_retained_window_draws_what_a_fresh_one_does() {
     let mut failures = Vec::new();
     for scene in scenes() {
         for sequence in SEQUENCES {
-            let (fresh_world, _) = scene.world();
+            let (fresh_world, fresh_objects) = scene.world();
+            if let Some(then) = sequence.then {
+                then(&fresh_world, &scene, &fresh_objects);
+            }
             let Some(mut fresh) = Window::new(&fresh_world, (SIDE, SIDE)) else {
                 return;
             };
@@ -910,7 +945,9 @@ fn a_retained_window_draws_what_a_fresh_one_does() {
             let mut window = Window::new(&world, (SIDE, SIDE)).unwrap();
             window.draw();
             (sequence.run)(&world, &mut window, &scene, &objects);
-            scene.settle(&world);
+            if sequence.then.is_none() {
+                scene.settle(&world);
+            }
             for _ in 0..=sequence.settle {
                 window.draw();
             }
