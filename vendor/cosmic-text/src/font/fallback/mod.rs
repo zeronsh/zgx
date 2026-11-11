@@ -434,7 +434,7 @@ impl<'a> FontFallbackIter<'a> {
             macro_rules! mk_mono_fallback_info {
                 ($m_key:expr) => {{
                     let supported_cp_count_opt =
-                        self.font_system.get_font_supported_codepoints_in_word(
+                        self.font_system.family_face_covers_in_word(
                             $m_key.id,
                             self.ideal_weight,
                             self.word,

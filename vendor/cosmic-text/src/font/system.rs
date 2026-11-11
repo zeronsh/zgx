@@ -597,6 +597,30 @@ impl FontSystem {
         ret
     }
 
+    /// zgx patch: how many of `word`'s characters a monospace family's own
+    /// face covers. Without `monospace_fallback` no face lists its
+    /// codepoints, so the family's face seemed to cover none of a word: the
+    /// first word of monospaced text parsed every fixed-width face on the
+    /// system (13 on a Mac) to settle on that face anyway. Its character map
+    /// answers instead. (Only here: what other searches make of a face's
+    /// coverage stays as it was.)
+    pub(crate) fn family_face_covers_in_word(
+        &mut self,
+        id: fontdb::ID,
+        weight: fontdb::Weight,
+        word: &str,
+    ) -> Option<usize> {
+        #[cfg(feature = "swash")]
+        {
+            let font = self.get_font(id, weight)?;
+            if font.unicode_codepoints().is_empty() {
+                let charmap = font.as_swash().charmap();
+                return Some(word.chars().filter(|&ch| charmap.map(ch) != 0).count());
+            }
+        }
+        self.get_font_supported_codepoints_in_word(id, weight, word)
+    }
+
     #[inline(always)]
     pub fn get_font_supported_codepoints_in_word(
         &mut self,
