@@ -1,0 +1,20 @@
+[package]
+name = "rtprobe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: not a member of the zgx workspace (as examples/harbor).
+[workspace]
+
+[dependencies]
+wgpu = "=29.0.4"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+# The wgpu-hal zgx ships, so what this does is what the engine's device does.
+[patch.crates-io]
+wgpu-hal = { path = "../../vendor/wgpu-hal" }
+
+[profile.release]
+debug = 0
