@@ -6553,74 +6553,102 @@ impl Scene {
         from: usize,
         children: &[NodeId],
     ) -> bool {
+        // Turned round by one (a terminal's rows as it scrolls a line): apart,
+        // so that every other order goes as it did, two compares more.
+        if let Some(by) = rotated_by(
+            &self.children_raw(self.tree_node(parent))[from..],
+            &children[from..],
+        ) {
+            return self.reorder_turned(parent, from, children, by);
+        }
         // A column that keeps its first children's places keeps none now.
         if self.tree_node(parent).special == Special::Kept {
             self.forget_column_end(parent);
         }
         let current = &self.children_raw(self.tree_node(parent))[from..];
         let children = &children[from..];
-        let moved = match rotated_by(current, children) {
-            // Turned round (a ring of rows, a terminal's slots taking the
-            // next lines): the longer run stays, as the general path's
-            // longest increasing run would, found in one pass, no map.
-            Some(by) => {
-                let count = children.len();
-                let tail_stays = count - by >= by;
-                (0..count)
-                    .map(|at| (at >= count - by) == tail_stays)
-                    .collect()
-            }
-            None => {
-                let place: NodeMap<usize> =
-                    current.iter().enumerate().map(|(i, id)| (*id, i)).collect();
-                let Some(places) = children
-                    .iter()
-                    .map(|id| place.get(id).copied())
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    return false;
-                };
-                // The same children, each once.
-                let mut seen = vec![false; places.len()];
-                if places
-                    .iter()
-                    .any(|&i| std::mem::replace(&mut seen[i], true))
-                {
-                    return false;
-                }
-                let mut moved = vec![true; places.len()];
-                for index in longest_increasing(&places) {
-                    moved[index] = false;
-                }
-                moved
-            }
+        let place: NodeMap<usize> = current.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let Some(places) = children
+            .iter()
+            .map(|id| place.get(id).copied())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
         };
+        // The same children, each once.
+        let mut seen = vec![false; places.len()];
+        if places
+            .iter()
+            .any(|&i| std::mem::replace(&mut seen[i], true))
+        {
+            return false;
+        }
+        let mut moved = vec![true; places.len()];
+        for index in longest_increasing(&places) {
+            moved[index] = false;
+        }
         // Paint order changes only for the children that moved past others
         // (a keyed list's new row, appended and put in its place): they
         // repaint where they are, the rest stay as they were.
-        let mut flow_kept = true;
         for (child, moved) in children.iter().zip(moved) {
             if moved {
-                flow_kept &= self.tree_node(*child).style.absolute;
                 self.damage_subtree(*child);
             }
         }
         self.node_mut(parent).children.get_mut()[from..].copy_from_slice(children);
-        // Only absolute children moved (a terminal's rows as its slots take
-        // other lines): those in the flow keep their order, and an absolute
-        // child's place is its own, wherever it is among its siblings, so the
-        // parent's layout stands (its next one takes the new order). Not under
-        // a layer, whose contents a layout's walk marks.
-        let parent_node = self.tree_node(parent);
+        self.invalidate_layout(parent);
+        // Children removed or moved: its kept ink union goes unless only
+        // its tail changed (`KeptInk`).
+        if self.kept_any.get() {
+            self.children_moved(parent);
+        }
+        self.children_changed(parent);
+        // In another order, another may be hit on top.
+        self.geometry_revision = self.geometry_revision.wrapping_add(1);
+        true
+    }
+    /// `reorder_changed_children` for children turned round by one
+    /// (`rotated_by`): the one that went round moves past the others, which
+    /// stay. If it is absolute (a terminal's row taking another line), the
+    /// parent's layout stands: those in the flow keep their order, and an
+    /// absolute child's place is its own, wherever it is among its siblings
+    /// (the parent's next layout takes the new order). Not under a layer,
+    /// whose contents a layout's walk marks.
+    #[cold]
+    #[inline(never)]
+    fn reorder_turned(
+        &mut self,
+        parent: NodeId,
+        from: usize,
+        children: &[NodeId],
+        by: usize,
+    ) -> bool {
+        // A column that keeps its first children's places keeps none now.
+        if self.tree_node(parent).special == Special::Kept {
+            self.forget_column_end(parent);
+        }
+        let children = &children[from..];
+        let count = children.len();
+        // The longer run stays, as the longest increasing run would.
+        let tail_stays = count - by >= by;
+        let mut flow_kept = true;
+        for (at, child) in children.iter().enumerate() {
+            if (at >= count - by) == tail_stays {
+                flow_kept = flow_kept && self.tree_node(*child).style.absolute;
+                self.damage_subtree(*child);
+            }
+        }
+        self.node_mut(parent).children.get_mut()[from..].copy_from_slice(children);
+        let held = self.tree_node(parent);
         let stands = flow_kept
-            && parent_node.measurement.is_some()
-            && !parent_node.special.any()
+            && held.measurement.is_some()
+            && !held.special.any()
             && self.isolation_count + self.promoted_count == 0;
         if !stands {
             self.invalidate_layout(parent);
         }
-        // Children removed or moved: its kept ink union goes unless only
-        // its tail changed (`KeptInk`).
+        // Children moved: its kept ink union goes unless only its tail
+        // changed (`KeptInk`).
         if self.kept_any.get() {
             self.children_moved(parent);
         }
@@ -20460,6 +20488,7 @@ fn finite_effects(mut effects: Effects) -> Effects {
 /// two comparisons, as most reorders are no turn at all; a longer turn takes
 /// the general path. `current`'s children are each once in it, so
 /// `children` is then the same children, each once.
+#[inline(never)]
 fn rotated_by(current: &[NodeId], children: &[NodeId]) -> Option<usize> {
     let count = current.len();
     if count < 2 || children.len() != count {
@@ -20876,11 +20905,13 @@ mod set_box_tests {
             scene.flush();
             (scene, column, ids)
         };
-        let first: Vec<usize> = (0..12).collect();
+        // The absolute rows first, then the flow's two.
+        let first: Vec<usize> = (2..12).chain([0, 1]).collect();
         let (mut scene, parent, ids) = column(&first);
         let id_of = |at: usize| ids.iter().find(|(a, _)| *a == at).unwrap().1;
-        // The absolute rows rotated by one (the flow's two where they are).
-        let rotated: Vec<usize> = [0, 1].into_iter().chain(3..12).chain([2]).collect();
+        // Turned by one, the first row to the end (the flow's two keep
+        // their order).
+        let rotated: Vec<usize> = (3..12).chain([0, 1, 2]).collect();
         let before = scene.measure_calls;
         let reordered: Vec<NodeId> = rotated.iter().map(|at| id_of(*at)).collect();
         assert!(scene.reorder_children(parent, &reordered));
@@ -20888,7 +20919,7 @@ mod set_box_tests {
         assert_eq!(scene.measure_calls, before, "nothing measured");
         same_bounds_by(&scene, &column(&rotated).0, &rotated);
         // A child in the flow moved: laid out, as a column built so.
-        let swapped: Vec<usize> = [1, 0].into_iter().chain(3..12).chain([2]).collect();
+        let swapped: Vec<usize> = (3..12).chain([1, 0, 2]).collect();
         let reordered: Vec<NodeId> = swapped.iter().map(|at| id_of(*at)).collect();
         assert!(scene.reorder_children(parent, &reordered));
         scene.flush();
