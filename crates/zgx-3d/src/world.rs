@@ -28,7 +28,8 @@ pub use post::{AutoExposure, Bloom, ChromaticAberration, Grain, Post, Vignette};
 pub(crate) use post_pass::AppPass;
 #[cfg(feature = "post")]
 pub use post_pass::{
-    MAX_POST_PARAMS, PostError, PostParam, PostParamValue, PostPass, PostPassId, PostStage,
+    MAX_POST_PARAMS, MAX_POST_PASSES, MAX_POST_SOURCE, PostError, PostParam, PostParamValue,
+    PostPass, PostPassId, PostStage,
 };
 
 /// How a surface takes light: a metallic-roughness material, as glTF's.

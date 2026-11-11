@@ -811,3 +811,24 @@ fn post(p: PostIn) -> vec4<f32> {{
     );
     assert!(most <= 4, "and near it, by {most}");
 }
+
+#[test]
+fn a_pass_returning_less_than_nothing_is_taken_as_nothing() {
+    // Over a background: a negative alpha would let more of it through
+    // than there is.
+    let shown = |value: &str| {
+        let world = World::new();
+        world.set_camera(Camera::looking_at([0., 0., 4.], [0., 0., 0.]));
+        world.set_tone_mapping(ToneMapping::Linear);
+        world.set_background_linear(Some([0.2, 0.2, 0.2, 1.]));
+        let source =
+            format!("#zgx post 1\nfn post(p: PostIn) -> vec4<f32> {{ return vec4({value}); }}\n");
+        world.add_post(PostPass::new(source)).unwrap();
+        let mut window = Window::new(&world)?;
+        Some(at(&window.compiled(&world), SIZE / 2, SIZE / 2))
+    };
+    let Some(nothing) = shown("0.0") else {
+        return;
+    };
+    assert_eq!(shown("-0.5"), Some(nothing));
+}

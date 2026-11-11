@@ -113,8 +113,9 @@ pub use world::gi::{MAX_PROBE_VOLUMES, MAX_PROBES, ProbeVolume, ProbesId, Probes
 pub use world::lighting::{Cascades, PointLight};
 #[cfg(feature = "post")]
 pub use world::{
-    AutoExposure, Bloom, ChromaticAberration, Grade, Grain, Lut, LutError, MAX_POST_PARAMS, Post,
-    PostError, PostParam, PostParamValue, PostPass, PostPassId, PostStage, Vignette,
+    AutoExposure, Bloom, ChromaticAberration, Grade, Grain, Lut, LutError, MAX_POST_PARAMS,
+    MAX_POST_PASSES, MAX_POST_SOURCE, Post, PostError, PostParam, PostParamValue, PostPass,
+    PostPassId, PostStage, Vignette,
 };
 pub use world::{
     Camera, Clearcoat, Light, LightId, MAX_JOINTS, Material, Object, ObjectId, POINT_LIGHTS, Skin,

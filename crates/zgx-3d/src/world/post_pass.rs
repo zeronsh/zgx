@@ -76,8 +76,15 @@ impl From<[f32; 4]> for PostParamValue {
 ///
 /// given `PostIn` (`uv` from 0 to 1, `size` and `position` in pixels),
 /// `color(uv)` (the frame so far, premultiplied, sampled linearly),
-/// `frame` (`time` and `delta` in seconds, `index`) and `params`, a field
-/// for each `param` it declares. It returns the pixel, premultiplied.
+/// `frame` (`index`, and `time` and `delta` in seconds if it says
+/// `animated()`) and `params`, a field for each `param` it declares. It
+/// returns the pixel, premultiplied (below 0 taken as 0).
+///
+/// **Post passes are trusted code.** A pass runs on every pixel of every
+/// frame with nothing bounding its loops: one that never ends holds the
+/// GPU every window shares. Give `add_post` only what the app itself wrote
+/// or vetted. A pass's text is at most `MAX_POST_SOURCE` bytes, a stage
+/// `MAX_POST_PASSES` passes.
 ///
 /// **Promise** (version 1): `PostIn`, `color`, `frame`, `params`, the two
 /// stages, and that an HDR-stage pass receives the scene's linear light
@@ -123,6 +130,11 @@ impl PostPass {
 /// The most parameters a post pass declares (16 bytes each, in one
 /// uniform buffer).
 pub const MAX_POST_PARAMS: usize = 64;
+/// The most bytes of WGSL a post pass has (as a custom material).
+pub const MAX_POST_SOURCE: usize = 256 * 1024;
+/// The most post passes a world runs in a stage (each a pass over every
+/// pixel a frame).
+pub const MAX_POST_PASSES: usize = 8;
 
 /// A post pass added to a world (`World::add_post`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -143,6 +155,9 @@ pub enum PostError {
     Param(String),
     /// No such pass (removed, or another world's).
     Pass,
+    /// Past a bound: its text longer than `MAX_POST_SOURCE`, or a stage
+    /// with `MAX_POST_PASSES` already.
+    Limit(String),
 }
 impl std::fmt::Display for PostError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -151,6 +166,7 @@ impl std::fmt::Display for PostError {
             Self::Shader(message) => write!(f, "the post pass's shader is invalid:\n{message}"),
             Self::Param(why) => f.write_str(why),
             Self::Pass => f.write_str("no such post pass"),
+            Self::Limit(why) => f.write_str(why),
         }
     }
 }
@@ -178,7 +194,7 @@ pub(crate) struct AppPass {
 
 /// What every pass's WGSL begins with (a pass's lines are counted after
 /// it).
-fn prelude(params: &[(String, PostParam)]) -> String {
+fn prelude(params: &[(String, PostParam)], animated: bool) -> String {
     let mut fields = String::new();
     for (name, ty) in params {
         fields += &format!("    @align(16) {name}: {},\n", ty.wgsl());
@@ -186,9 +202,15 @@ fn prelude(params: &[(String, PostParam)]) -> String {
     if params.is_empty() {
         fields += "    @align(16) zgx_none: f32,\n";
     }
+    // The frame's time named so only for a pass that says it's animated:
+    // read unsaid, it would look frozen between the world's changes.
+    let time = match animated {
+        true => "time: f32, delta: f32",
+        false => "zgx_time: f32, zgx_delta: f32",
+    };
     format!(
         "struct PostIn {{ uv: vec2<f32>, size: vec2<f32>, position: vec2<f32> }}
-struct ZgxFrame {{ time: f32, delta: f32, index: u32, zgx_pad: u32 }}
+struct ZgxFrame {{ {time}, index: u32, zgx_pad: u32 }}
 struct ZgxParams {{
 {fields}}}
 @group(0) @binding(0) var zgx_input: texture_2d<f32>;
@@ -209,7 +231,9 @@ fn zgx_encode(c: vec3<f32>) -> vec3<f32> {{
 }}
 @fragment fn zgx_fragment(o: ZgxOut) -> @location(0) vec4<f32> {{
     let size = vec2<f32>(textureDimensions(zgx_input));
-    var c = post(PostIn(o.uv, size, o.position.xy));
+    // No less than nothing: a negative alpha would brighten what shows
+    // under it, negative light take from bloom.
+    var c = max(post(PostIn(o.uv, size, o.position.xy)), vec4(0.0));
     if ZGX_ENCODE {{
         let a = max(c.a, 1e-4);
         c = vec4(zgx_encode(clamp(c.rgb / a, vec3(0.0), vec3(1.0))) * c.a, c.a);
@@ -227,6 +251,12 @@ fn check(pass: &PostPass) -> Result<Arc<str>, PostError> {
         return Err(PostError::Version);
     }
     let body = lines.next().unwrap_or("");
+    if pass.source.len() > MAX_POST_SOURCE {
+        return Err(PostError::Limit(format!(
+            "{} bytes of text: {MAX_POST_SOURCE} at most",
+            pass.source.len()
+        )));
+    }
     if pass.params.len() > MAX_POST_PARAMS {
         return Err(PostError::Param(format!(
             "{} parameters, more than {MAX_POST_PARAMS}",
@@ -249,7 +279,7 @@ fn check(pass: &PostPass) -> Result<Arc<str>, PostError> {
             return Err(PostError::Param(format!("`{name}` is declared twice")));
         }
     }
-    let prelude = prelude(&pass.params);
+    let prelude = prelude(&pass.params, pass.animated);
     // The directive's line kept as a blank one: the app's lines keep their
     // numbers after the prelude's.
     let whole = format!("{prelude}\n{body}");
@@ -270,6 +300,16 @@ fn check(pass: &PostPass) -> Result<Arc<str>, PostError> {
         }
         out + rest
     };
+    let at_own_lines = |message: String| {
+        let message = at_own_lines(message);
+        // Reading the time unsaid: say how.
+        match !pass.animated && (message.contains("time") || message.contains("delta")) {
+            true => {
+                message + "\n(`frame.time` and `frame.delta` are a pass's that says `.animated()`)"
+            }
+            false => message,
+        }
+    };
     let module = naga::front::wgsl::parse_str(&whole)
         .map_err(|e| PostError::Shader(at_own_lines(e.emit_to_string(&whole))))?;
     naga::valid::Validator::new(
@@ -284,8 +324,20 @@ fn check(pass: &PostPass) -> Result<Arc<str>, PostError> {
 impl World {
     /// Add `pass` to its post chain, after the passes of its stage already
     /// there; the chain is on while it has one. Checked now: an invalid
-    /// shader is refused with naga's message at the pass's own lines.
+    /// shader is refused with naga's message at the pass's own lines, one
+    /// past the bounds with `PostError::Limit`. Its pipelines are made off
+    /// the frame: it runs from a frame soon after, the world drawing on
+    /// until then.
     pub fn add_post(&self, pass: PostPass) -> Result<PostPassId, PostError> {
+        let staged = (self.inner.borrow().post_passes.iter())
+            .filter(|p| p.stage == pass.stage)
+            .count();
+        if staged >= MAX_POST_PASSES {
+            return Err(PostError::Limit(format!(
+                "{MAX_POST_PASSES} passes in the {:?} stage: a world runs no more",
+                pass.stage
+            )));
+        }
         let wgsl = check(&pass)?;
         let mut id = None;
         self.change_view(|inner| {
@@ -391,5 +443,42 @@ mod tests {
             many = many.param(&format!("p{i}"), PostParam::Vec4);
         }
         assert!(matches!(check(&many), Err(PostError::Param(_))));
+    }
+
+    #[test]
+    fn a_pass_past_its_bounds_is_refused() {
+        let body = "#zgx post 1\nfn post(p: PostIn) -> vec4<f32> { return color(p.uv); }\n";
+        let long = format!("{body}{}", " ".repeat(MAX_POST_SOURCE));
+        assert!(matches!(
+            check(&PostPass::new(long)),
+            Err(PostError::Limit(_))
+        ));
+        let world = World::new();
+        for _ in 0..MAX_POST_PASSES {
+            world.add_post(PostPass::new(body)).unwrap();
+        }
+        assert!(matches!(
+            world.add_post(PostPass::new(body)),
+            Err(PostError::Limit(_))
+        ));
+        // Each stage its own.
+        let display = PostPass::new(body).stage(PostStage::Display);
+        assert!(world.add_post(display).is_ok());
+    }
+
+    #[test]
+    fn a_pass_reads_the_time_only_if_it_says_its_animated() {
+        let pulse = "#zgx post 1\nfn post(p: PostIn) -> vec4<f32> {\n    return color(p.uv) * sin(frame.time);\n}\n";
+        let Err(PostError::Shader(message)) = check(&PostPass::new(pulse)) else {
+            panic!("read unsaid");
+        };
+        assert!(
+            message.contains("wgsl:3:") && message.contains(".animated()"),
+            "{message}"
+        );
+        assert!(check(&PostPass::new(pulse).animated()).is_ok());
+        // Its index, every pass's.
+        let index = "#zgx post 1\nfn post(p: PostIn) -> vec4<f32> { return color(p.uv) * f32(frame.index); }\n";
+        assert!(check(&PostPass::new(index)).is_ok());
     }
 }
