@@ -233,7 +233,12 @@ again by `python scripts/d3d11_shaders.py`, on Windows), and zgx
 pins wgpu's Direct3D 12 to FXC too. Left to choose, wgpu takes DXC wherever
 dxcompiler.dll is on PATH (a developer shell with the Windows SDK), and DXC's
 code rounds antialiased edges a level apart from FXC's.
-`WGPU_DX12_COMPILER=dxc` still picks it.
+`WGPU_DX12_COMPILER=dxc` still picks it. An app's shaders reach the two APIs
+as different bytecode (Direct3D 12's through wgpu's sampler heap): WARP draws
+them alike to the byte, while a hardware driver may round a value on a
+half-step one level apart, as an RTX 4090 does for three bytes of fire and
+liquid metal. The test allows that, on hardware alone, in up to four bytes of
+a frame of app shaders, and prints each one.
 
 What it trades, measured with the Windows suite on an RTX 4090
 ([results](results/d3d11-proof-windows-2026-10-27/)):
