@@ -551,7 +551,11 @@ fn a_ray_bringing_no_finite_light_leaves_the_probes_finite() {
             &world,
             "a_ray_bringing_no_finite_light_leaves_the_probes_finite",
         )
-        .then(|| window.pixels())
+        .then(|| {
+            let pixels = window.pixels();
+            save(if speck { "speck-hot" } else { "speck-clean" }, &pixels);
+            pixels
+        })
     };
     let (Some(clean), Some(hot)) = (shade(false), shade(true)) else {
         return;
@@ -817,4 +821,114 @@ fn a_closed_box_under_the_sun_stays_dark_inside_on_the_face_path() {
         wall.iter().all(|&c| c < 0.05),
         "the box's back wall inside: {wall:?}"
     );
+}
+
+/// Where two runs' probe records (`ZGX_GI_DUMP`, `render/probes_dump.rs`)
+/// first part, and how: `ZGX_GI_DIFF_A` and `ZGX_GI_DIFF_B` name their
+/// folders. For each world, the first line of `hashes.txt` that differs;
+/// where it's a probe's, its rays that differ (RGB and distance, which is
+/// negative behind a face and not finite where the light isn't) or, its
+/// rays alike, its tiles' texels that do.
+#[test]
+#[ignore = "compares two records: ZGX_GI_DIFF_A, ZGX_GI_DIFF_B"]
+fn probe_dumps_part() {
+    use std::path::{Path, PathBuf};
+    let folder = |name: &str| PathBuf::from(std::env::var_os(name).expect(name));
+    let (a, b) = (folder("ZGX_GI_DIFF_A"), folder("ZGX_GI_DIFF_B"));
+    let read = |p: &Path| std::fs::read_to_string(p).unwrap_or_default();
+    let half = |bits: u16| -> f32 {
+        let (sign, exponent, fraction) = (bits >> 15, (bits >> 10) & 0x1f, bits & 0x3ff);
+        let magnitude = match exponent {
+            0 => f32::from(fraction) * 2f32.powi(-24),
+            31 if fraction == 0 => f32::INFINITY,
+            31 => f32::NAN,
+            e => (1. + f32::from(fraction) / 1024.) * 2f32.powi(i32::from(e) - 15),
+        };
+        if sign == 1 { -magnitude } else { magnitude }
+    };
+    let mut worlds: Vec<_> = std::fs::read_dir(&a)
+        .expect("ZGX_GI_DIFF_A")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .filter(|n| n.to_string_lossy().starts_with("world-"))
+        .collect();
+    worlds.sort();
+    for world in worlds {
+        let (wa, wb) = (a.join(&world), b.join(&world));
+        let name = world.to_string_lossy();
+        let layout: Vec<u32> = read(&wa.join("layout.txt"))
+            .split_whitespace()
+            .filter_map(|w| w.parse().ok())
+            .collect();
+        let (total, rays) = (layout[0], layout[1] as usize);
+        let (la, lb) = (read(&wa.join("hashes.txt")), read(&wb.join("hashes.txt")));
+        let mut header = "";
+        let Some((line_a, line_b)) = la.lines().zip(lb.lines()).find(|(x, y)| {
+            if x.contains(" round ") && x == y {
+                header = x;
+            }
+            x != y
+        }) else {
+            println!("{name}: alike ({} lines)", la.lines().count());
+            continue;
+        };
+        println!("{name}: first differs\n  A {line_a}\n  B {line_b}");
+        if line_a.contains(" round ") {
+            println!("  the host's input differs");
+            continue;
+        }
+        let words: Vec<&str> = line_a.split_whitespace().collect();
+        let (frame, probe): (u32, u32) = (words[1].parse().unwrap(), words[3].parse().unwrap());
+        let first: u32 = header.split_whitespace().nth(5).unwrap().parse().unwrap();
+        let differing = la
+            .lines()
+            .zip(lb.lines())
+            .filter(|(x, y)| x.starts_with(&format!("frame {frame} probe ")) && x != y)
+            .count();
+        println!("  probes differing in frame {frame}: {differing} of {total}");
+        let bytes = |w: &Path, part: &str| {
+            std::fs::read(w.join(format!("frame-{frame}-{part}.bin"))).unwrap_or_default()
+        };
+        if words[5] != line_b.split_whitespace().nth(5).unwrap() {
+            let slot = ((probe + total - first) % total) as usize;
+            let floats = |b: Vec<u8>| -> Vec<[f32; 4]> {
+                b.as_chunks::<16>()
+                    .0
+                    .iter()
+                    .map(|c| {
+                        std::array::from_fn(|i| {
+                            f32::from_le_bytes(c[i * 4..i * 4 + 4].try_into().unwrap())
+                        })
+                    })
+                    .collect()
+            };
+            let (ra, rb) = (floats(bytes(&wa, "rays")), floats(bytes(&wb, "rays")));
+            println!("  its rays differ (ray: A rgb t | B rgb t):");
+            for i in slot * rays..(slot + 1) * rays {
+                if ra[i].map(f32::to_bits) != rb[i].map(f32::to_bits) {
+                    println!("    {:3}: {:?} | {:?}", i - slot * rays, ra[i], rb[i]);
+                }
+            }
+            continue;
+        }
+        println!("  its rays alike; its tiles' differing texels (x y: A | B):");
+        for (part, at) in [("light", 2), ("depth", 5)] {
+            let (width, tile) = (layout[at], layout[at + 2]);
+            let (ta, tb) = (bytes(&wa, part), bytes(&wb, part));
+            let (x0, y0) = ((probe % 64) * tile, (probe / 64) * tile);
+            for y in y0..y0 + tile {
+                for x in x0..x0 + tile {
+                    let i = ((y * width + x) * 8) as usize;
+                    let texel = |t: &[u8]| -> [f32; 4] {
+                        std::array::from_fn(|c| {
+                            half(u16::from_le_bytes([t[i + c * 2], t[i + c * 2 + 1]]))
+                        })
+                    };
+                    if ta[i..i + 8] != tb[i..i + 8] {
+                        println!("    {part} {x} {y}: {:?} | {:?}", texel(&ta), texel(&tb));
+                    }
+                }
+            }
+        }
+    }
 }

@@ -32,6 +32,8 @@ mod post;
 #[cfg(feature = "gi")]
 mod probes;
 #[cfg(feature = "gi")]
+mod probes_dump;
+#[cfg(feature = "gi")]
 mod probes_raster;
 #[cfg(feature = "gi")]
 mod raytrace;

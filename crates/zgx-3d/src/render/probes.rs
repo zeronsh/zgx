@@ -119,6 +119,7 @@ fn trace_lights(world: &Inner, out: &mut Vec<TraceLight>) {
 }
 
 struct Atlas {
+    texture: wgpu::Texture,
     view: wgpu::TextureView,
     size: [u32; 2],
     uniform: wgpu::Buffer,
@@ -137,7 +138,13 @@ fn atlas(device: &wgpu::Device, probes: u32, tile: u32, label: &str) -> Atlas {
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: FORMAT,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | if super::probes_dump::requested() {
+                wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::empty()
+            },
         view_formats: &[],
     });
     let uniform = AtlasUniform {
@@ -155,6 +162,7 @@ fn atlas(device: &wgpu::Device, probes: u32, tile: u32, label: &str) -> Atlas {
     );
     Atlas {
         view: texture.create_view(&Default::default()),
+        texture,
         size,
         uniform,
     }
@@ -486,6 +494,8 @@ pub(super) struct Probes {
     /// frame's (`trace_lights`).
     lights: Vec<TraceLight>,
     seen: Vec<TraceLight>,
+    /// Where asked for (`probes_dump`), a record of each update.
+    dump: Option<super::probes_dump::Dump>,
 }
 
 /// Whether `world`'s meshes take their diffuse light from probes on this
@@ -601,7 +611,11 @@ pub(super) fn frame(
         lit_by: None,
         lights: Vec::new(),
         seen: Vec::new(),
+        dump: super::probes_dump::Dump::from_env(device),
     });
+    if let Some(dump) = &mut probes.dump {
+        dump.flush();
+    }
     if probes
         .layout
         .as_ref()
@@ -1056,7 +1070,12 @@ fn update(
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("3D probe rays"),
             size,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE
+                | if super::probes_dump::requested() {
+                    wgpu::BufferUsages::COPY_SRC
+                } else {
+                    wgpu::BufferUsages::empty()
+                },
             mapped_at_creation: false,
         });
         tracer.rays = Some((buffer, size));
@@ -1150,6 +1169,23 @@ fn update(
             a: weight,
         });
         pass.draw(0..4, 0..count);
+    }
+    if let Some(dump) = &mut probes.dump {
+        dump.record(
+            encoder,
+            super::probes_dump::Update {
+                uniform: bytemuck::bytes_of(&uniform),
+                lights: bytemuck::cast_slice(&probes.lights),
+                round: probes.rounds,
+                first: probes.next,
+                count,
+                total: layout.total,
+                rays_per_probe: layout.rays,
+                rays,
+                atlases: [&layout.light, &layout.depth]
+                    .map(|a| (&a.texture, a.size, a.size[0] / COLUMNS)),
+            },
+        );
     }
     probes.next = (probes.next + count) % layout.total;
     probes.done += count;
