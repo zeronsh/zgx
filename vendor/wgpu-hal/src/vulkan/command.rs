@@ -613,7 +613,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
                                         + (triangles.first_vertex as u64 * triangles.vertex_stride),
                                 })
                                 .vertex_format(conv::map_vertex_format(triangles.vertex_format))
-                                .max_vertex(triangles.vertex_count)
+                                // zgx patch: the highest vertex index the build
+                                // reads, as Vulkan defines `maxVertex`, not the
+                                // count (one past the end of the geometry).
+                                .max_vertex(triangles.vertex_count.saturating_sub(1))
                                 .vertex_stride(triangles.vertex_stride);
 
                         let mut range = vk::AccelerationStructureBuildRangeInfoKHR::default();
