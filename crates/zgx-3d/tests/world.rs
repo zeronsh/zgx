@@ -2754,3 +2754,28 @@ fn a_light_on_a_surface_lights_it_rather_than_breaking_it() {
     let [r, g, b, a] = window.pixel(50, 50);
     assert!(r > 40 && g > 40 && b > 40 && a == 255, "{:?}", [r, g, b, a]);
 }
+
+#[test]
+fn a_materials_emission_is_kept_finite() {
+    // An infinite emission drew an infinite pixel, NaN once tone mapped
+    // (review finding EM1): a world keeps it finite and 0 or more.
+    let mut glowing = Material::rgb(0x808080);
+    glowing.emissive = [f32::INFINITY, -2., f32::NAN];
+    let (world, cube) = one(Geometry::cuboid(1., 1., 1.), glowing);
+    assert_eq!(world.object(cube).unwrap().material.emissive, [0.; 3]);
+    world.set_material(cube, glowing);
+    assert_eq!(world.object(cube).unwrap().material.emissive, [0.; 3]);
+    world.add_light(Light::Hemisphere {
+        sky: [1.; 3],
+        ground: [1.; 3],
+        intensity: 1.,
+    });
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let drawn = window.pixel(50, 50);
+    world.set_material(cube, Material::rgb(0x808080));
+    window.draw();
+    assert_eq!(window.pixel(50, 50), drawn, "as with none");
+}

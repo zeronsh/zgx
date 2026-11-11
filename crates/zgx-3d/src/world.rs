@@ -57,6 +57,14 @@ impl Default for Material {
     }
 }
 impl Material {
+    /// Its emission finite and 0 or more, as a world keeps it: an infinite
+    /// one drew a pixel no tone map brings back. (Kept so as it enters,
+    /// not checked by every frame.)
+    fn sanitize(&mut self) {
+        self.emissive = self
+            .emissive
+            .map(|c| if c.is_finite() { c.max(0.) } else { 0. });
+    }
     /// A dielectric of an sRGB colour (`0xRRGGBB`, as a design gives it).
     pub fn rgb(hex: u32) -> Self {
         let channel = |shift: u32| srgb_to_linear(((hex >> shift) & 0xff) as f32 / 255.);
@@ -1514,6 +1522,7 @@ impl World {
     /// Add `object`.
     pub fn add(&self, mut object: Object) -> ObjectId {
         object.transform = object.transform.sanitized();
+        object.material.sanitize();
         // No triangles draw nothing, as a group does, and upload nothing (the
         // GPU has no empty buffer to bind).
         object.geometry = object.geometry.filter(|geometry| !geometry.is_empty());
@@ -1626,6 +1635,7 @@ impl World {
             let before = object.clone();
             f(object);
             object.transform = object.transform.sanitized();
+            object.material.sanitize();
             let placed = (object.transform, object.visible) != (before.transform, before.visible);
             let changed = *object != before;
             // What else than its place changed may change the order meshes
