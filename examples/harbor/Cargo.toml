@@ -46,6 +46,10 @@ path = "src/bin/harbor.rs"
 name = "harbor_bench"
 path = "src/bin/harbor_bench.rs"
 
+[[bin]]
+name = "harbor_listen"
+path = "src/bin/harbor_listen.rs"
+
 # As zgx's workspace builds it: the patches zgx ships with
 # (the root Cargo.toml says why each).
 [patch.crates-io]
