@@ -39,7 +39,22 @@ struct Window {
 }
 impl Window {
     fn new(world: &World, (w, h): (u32, u32)) -> Option<Self> {
-        let gpu = match GpuRenderer::new(w, h) {
+        // FRESH_SHARED=1 (diagnostic): every window on one context (device
+        // and queue), made once per thread.
+        thread_local! {
+            static SHARED: std::cell::OnceCell<std::mem::ManuallyDrop<zgx_gpu::GpuContext>> = const { std::cell::OnceCell::new() };
+        }
+        let made = if std::env::var("FRESH_SHARED").is_ok_and(|v| v == "1") {
+            SHARED.with(|shared| match shared.get() {
+                Some(context) => GpuRenderer::new_with_context(w, h, context),
+                None => GpuRenderer::new(w, h).inspect(|gpu| {
+                    let _ = shared.set(std::mem::ManuallyDrop::new(gpu.context()));
+                }),
+            })
+        } else {
+            GpuRenderer::new(w, h)
+        };
+        let gpu = match made {
             Ok(gpu) => gpu,
             Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
                 panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
@@ -965,8 +980,9 @@ fn fresh_variation() {
             .map(|image| (b'A' + distinct.iter().position(|d| *d == image).unwrap() as u8) as char)
             .collect();
         println!(
-            "FRESH {:18} frames={frames} finish={finish} recreate={recreate}: {} distinct of {runs} ({order}), up to {most} px by up to {largest}, first {:016x}",
+            "FRESH {:18} frames={frames} finish={finish} recreate={recreate} shared={}: {} distinct of {runs} ({order}), up to {most} px by up to {largest}, first {:016x}",
             scene.name,
+            std::env::var("FRESH_SHARED").is_ok_and(|v| v == "1"),
             distinct.len(),
             images[0]
                 .iter()
