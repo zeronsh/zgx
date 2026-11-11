@@ -28,6 +28,9 @@ pub(crate) struct Feeding {
     pub decode: Box<dyn Decode>,
     pub writer: Writer,
     pub looping: bool,
+    /// Frames decoded and dropped before any is written: where a play
+    /// starts partway. Through rewinds, for a loop.
+    pub skip: u64,
 }
 
 struct Open {
@@ -169,6 +172,13 @@ fn fill(stream: &mut Open) -> bool {
             Ok(true) if !stream.pending.is_empty() => {
                 stream.since_rewind = true;
                 stream.empty = 0;
+                if stream.feeding.skip > 0 {
+                    let channels = stream.feeding.decode.channels().max(1);
+                    let frames = (stream.pending.len() / channels) as u64;
+                    let dropped = frames.min(stream.feeding.skip);
+                    stream.feeding.skip -= dropped;
+                    stream.at = dropped as usize * channels;
+                }
             }
             // A packet of nothing (Vorbis's first is): the next, unless
             // there have been too many.
@@ -241,6 +251,7 @@ mod tests {
                 decode,
                 writer,
                 looping,
+                skip: 0,
             }),
             reader,
         )
@@ -294,6 +305,7 @@ mod tests {
             }),
             writer,
             looping: false,
+            skip: 0,
         });
         std::thread::sleep(Duration::from_millis(50));
         let began = Instant::now();

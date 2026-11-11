@@ -54,6 +54,10 @@ pub(crate) enum Command {
         cutoff: f32,
         /// Buses it's also mixed into from its first frame, and how loud.
         sends: [Option<(u16, f32)>; SENDS],
+        /// The sound's frame it starts on, inside its loop if it loops (a
+        /// stream's decoder skips to it instead: 0 here). 32 bits: kept in
+        /// the command's padding.
+        offset: u32,
     },
     /// Voice `id` mixed into `bus` too, at `level` (0 takes the send away
     /// once there), along `ramp`.
@@ -1805,6 +1809,7 @@ impl Mixer {
             law,
             cutoff,
             sends,
+            offset,
         } = command
         else {
             unreachable!("only plays come here");
@@ -1843,6 +1848,7 @@ impl Mixer {
                         law,
                         cutoff,
                         sends,
+                        offset,
                     }),
                     Err(_) => unreachable!("a dropped play is given back as one"),
                 };
@@ -1861,10 +1867,17 @@ impl Mixer {
         let sending = self.sends[slot].active();
         let voice = &mut self.voices[slot];
         // A stream's first frames aren't here yet: it looks when they are.
+        // A sound's first is the one it starts on: past its end (a one-shot
+        // ends at once), its loop's.
         let start = match sound {
-            Feed::Sound(data) => data.samples[..data.channels.min(data.samples.len())]
-                .iter()
-                .fold(0f32, |p, s| p.max(s.abs())),
+            Feed::Sound(data) => {
+                let at = (offset as usize).saturating_mul(data.channels);
+                data.samples
+                    .get(at..at.saturating_add(data.channels))
+                    .unwrap_or_default()
+                    .iter()
+                    .fold(0f32, |p, s| p.max(s.abs()))
+            }
             Feed::Stream(_) => 0.,
         };
         let source_rate = sound.data().rate;
@@ -1872,7 +1885,7 @@ impl Mixer {
             id,
             sound: None,
             bus,
-            at: 0,
+            at: u64::from(offset) << 32,
             base_step: f64::from(source_rate) / f64::from(rate),
             region,
             gain: Smoothed::new(gain.max(0.)),

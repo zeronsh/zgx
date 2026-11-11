@@ -58,6 +58,8 @@ pub struct Emitter3d {
     occlusion: bool,
     air: bool,
     binaural: bool,
+    pitch: f32,
+    start: f32,
 }
 
 impl Emitter3d {
@@ -74,6 +76,8 @@ impl Emitter3d {
             occlusion: true,
             air: true,
             binaural: false,
+            pitch: 1.,
+            start: 0.,
         }
     }
     /// Whether it plays round and round.
@@ -110,6 +114,19 @@ impl Emitter3d {
     /// Whether the air dulls it with distance (`zgx_audio::spatial::air_cutoff`).
     pub fn air(mut self, air: bool) -> Emitter3d {
         self.air = air;
+        self
+    }
+    /// Its own pitch (2 an octave up), times Doppler's: a crowd of the same
+    /// sound, each a little apart.
+    pub fn pitch(mut self, pitch: f32) -> Emitter3d {
+        self.pitch = pitch;
+        self
+    }
+    /// Starts `seconds` into its sound: a crowd of the same loop, each
+    /// somewhere else in it (round the loop, however far). A one-shot
+    /// started past its end ends at once.
+    pub fn start(mut self, seconds: f32) -> Emitter3d {
+        self.start = seconds;
         self
     }
     /// Heard through a head (HRTF: the spherical head,
@@ -245,6 +262,8 @@ struct Shape {
     gain: f32,
     doppler: f32,
     air: bool,
+    /// Its own pitch, which Doppler's multiplies.
+    pitch: f32,
 }
 
 /// Its gain, pan, pitch and air's cutoff at `position`, facing `ahead`,
@@ -280,7 +299,7 @@ fn place(
     [
         shape.gain * shape.falloff.gain(distance) * cone,
         listener.pan(array(position)),
-        pitch,
+        shape.pitch * pitch,
         cutoff,
     ]
 }
@@ -1203,12 +1222,16 @@ impl Sound3d {
             gain: emitter.gain,
             doppler: emitter.doppler,
             air: emitter.air,
+            pitch: emitter.pitch,
         };
         let head = if emitter.binaural { self.head() } else { None };
         let bus = head.map_or(&self.bus, |h| &self.heads[h].bus);
+        // Its start in its sound's own frames.
+        let offset = (f64::from(emitter.start.max(0.)) * f64::from(emitter.sound.rate())) as u64;
         let mut play = Play::new()
             .bus(bus)
             .looping(emitter.looping)
+            .offset(offset)
             .law(PanLaw::EqualPower);
         // Placed where it is now, so it starts there.
         let at = Self::place_of(inner, object);
@@ -1239,7 +1262,7 @@ impl Sound3d {
                 }
                 play.gain(gain).pan(pan).pitch(pitch).cutoff(cutoff)
             }
-            None => play.gain(0.),
+            None => play.gain(0.).pitch(shape.pitch),
         };
         let voice = match self.audio.play(&emitter.sound, play) {
             Ok(voice) => voice,

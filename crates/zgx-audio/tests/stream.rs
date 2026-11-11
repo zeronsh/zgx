@@ -566,3 +566,32 @@ fn opus_loads_gapless_as_another_decoder_does_and_streams_and_loops() {
         -140.,
     );
 }
+
+#[test]
+fn a_stream_started_partway_sounds_as_the_sound_started_there() {
+    // 30,000 frames into a second of noise: the decoder drops what comes
+    // before. Looping, 100,000 in is 4,000 round twice over.
+    let bytes = noise(48_000, 2, 48_000);
+    for (offset, looping) in [(30_000u64, false), (100_000, true)] {
+        let whole = {
+            let (audio, mut mixer) = engine();
+            let sound = audio.load(Source::bytes(bytes.clone())).unwrap();
+            audio
+                .play(&sound, Play::new().offset(offset).looping(looping))
+                .unwrap();
+            mixer.frames(20_000)
+        };
+        let (audio, mut mixer) = engine();
+        audio
+            .stream(
+                Source::bytes(bytes.clone()),
+                Play::new().offset(offset).looping(looping),
+            )
+            .unwrap();
+        let streamed = blocks(&mut mixer, 20_000);
+        let at = whole.iter().zip(&streamed).position(|(a, b)| a != b);
+        assert_eq!(at, None, "{offset} in: the stream differs at sample {at:?}");
+        assert!(streamed.iter().any(|&s| s != 0.));
+        assert_eq!(audio.stats().dry, 0);
+    }
+}

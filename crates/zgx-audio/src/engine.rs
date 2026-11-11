@@ -728,6 +728,14 @@ impl Audio {
             law: play.law,
             cutoff: cutoff(play.cutoff),
             sends: self.sends_of(&play)?,
+            // Round its loop, however far; a one-shot's past its end ends
+            // it, however far.
+            offset: if region.looping && region.end > region.start && play.offset >= region.end {
+                region.start + (play.offset - region.end) % (region.end - region.start)
+            } else {
+                play.offset
+            }
+            .min(u64::from(u32::MAX)) as u32,
         };
         let time = play.at.map_or(0, |at| at.0);
         self.push(&mut control, time, command)?;
@@ -779,6 +787,7 @@ impl Audio {
             law: play.law,
             cutoff: cutoff(play.cutoff),
             sends: self.sends_of(&play)?,
+            offset: 0,
         };
         let time = play.at.map_or(0, |at| at.0);
         // The decode thread starts filling before the mixer hears of it.
@@ -791,6 +800,7 @@ impl Audio {
                 decode,
                 writer,
                 looping: play.looping,
+                skip: play.offset,
             });
         self.push(&mut control, time, command)?;
         control.next_id += 1;
@@ -976,6 +986,8 @@ pub struct Play {
     cutoff: f32,
     /// Buses it's also mixed into, each with its engine and level.
     sends: [Option<(u64, u16, f32)>; crate::mixer::SENDS],
+    /// Its sound's frame it starts on.
+    offset: u64,
 }
 
 impl Default for Play {
@@ -999,7 +1011,16 @@ impl Play {
             law: PanLaw::Balance,
             cutoff: crate::effects::VOICE_OPEN,
             sends: [None; crate::mixer::SENDS],
+            offset: 0,
         }
+    }
+    /// Starts `frames` into the sound (its own frames, at its own rate):
+    /// partway through. A looping sound starts that far round its loop,
+    /// however far; a one-shot started past its end ends at once. A stream
+    /// decodes its way there, dropping what comes before.
+    pub fn offset(mut self, frames: u64) -> Play {
+        self.offset = frames;
+        self
     }
     /// The bus it plays into: one of the engine's it's played on (another
     /// engine's is an error).

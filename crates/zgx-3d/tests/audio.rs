@@ -746,3 +746,78 @@ fn a_binaural_emitter_beside_the_listener_is_heard_through_a_head() {
         );
     }
 }
+
+#[test]
+fn an_emitter_s_own_pitch_multiplies_doppler_s() {
+    // A 400 Hz loop at pitch 1.5: still, 600 Hz; coming at 40 m/s, 600
+    // times Doppler's rise.
+    let heard = |moving: bool| -> (f64, f64) {
+        let (audio, mut mixer) = engine();
+        let world = world(&audio);
+        let at = |k: usize| {
+            let x = if moving {
+                -40. + 40. * k as f32 * 0.01
+            } else {
+                -20.
+            };
+            [x, 0., -4.]
+        };
+        let car = spot(&world, at(0));
+        world
+            .add_emitter3d(
+                car,
+                Emitter3d::new(&tone(400.))
+                    .looping(true)
+                    .pitch(1.5)
+                    .falloff(Falloff::inverse(2., 100.))
+                    .air(false)
+                    .occlusion(false),
+            )
+            .unwrap();
+        let clock = Clock(Instant::now());
+        world.update_audio(clock.at(0));
+        let mut out = Vec::new();
+        for k in 1..=30 {
+            world.set_transform(car, Transform::at(at(k)));
+            world.update_audio(clock.at(k));
+            out.extend(mixer.frames(FRAME));
+        }
+        let still = [0.; 3];
+        let velocity = if moving { [40., 0., 0.] } else { still };
+        let want = 600. * f64::from(doppler(at(23), velocity, still, still, 1.));
+        (frequency(&channel(&out, 0)[20 * FRAME..25 * FRAME]), want)
+    };
+    for moving in [false, true] {
+        let (got, want) = heard(moving);
+        assert!(
+            ((got - want) / want).abs() < 0.005,
+            "moving {moving}: {got:.2} Hz, not {want:.2}"
+        );
+    }
+    assert!(heard(true).0 > 640., "Doppler's rise on top");
+}
+
+#[test]
+fn an_emitter_started_partway_starts_there() {
+    // Half a second of silence, then a tone: started half a second in, it
+    // sounds at once; from its start, not for half a second.
+    let mut samples = vec![0f32; RATE as usize / 2];
+    samples.extend(
+        (0..RATE as usize / 2)
+            .map(|i| (i as f32 * 440. * std::f32::consts::TAU / RATE as f32).sin() * 0.5),
+    );
+    let sound = Sound::from_samples(&samples, 1, RATE).unwrap();
+    let first = |start: f32| -> f64 {
+        let (audio, mut mixer) = engine();
+        let world = world(&audio);
+        let here = spot(&world, [0., 0., -2.]);
+        world
+            .add_emitter3d(here, Emitter3d::new(&sound).start(start).occlusion(false))
+            .unwrap();
+        world.update_audio(Clock(Instant::now()).at(0));
+        level_db(&channel(&mixer.frames(FRAME), 0))
+    };
+    assert!(first(0.) < -120., "from its start: {:.1} dB", first(0.));
+    assert!(first(0.5) > -30., "half a second in: {:.1} dB", first(0.5));
+    assert!(first(1.75) < -120., "a one-shot past its end is silent");
+}

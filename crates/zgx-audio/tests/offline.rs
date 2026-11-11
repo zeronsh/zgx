@@ -946,3 +946,36 @@ fn a_send_for_a_play_still_waiting_for_a_slot_waits_with_it() {
     assert!(audio.stats().waited > 0);
     assert_eq!(out[4_799], 0.5, "it plays, and sends");
 }
+
+#[test]
+fn a_sound_started_partway_plays_from_that_frame() {
+    // A ramp, each frame its own value. Started 1,000 frames in, it plays
+    // what a start at 0 plays 1,000 frames on, after the millisecond's
+    // fade a start away from zero gets.
+    let ramp: Vec<f32> = (0..4_000).map(|i| i as f32 / 8_000.).collect();
+    let ramp = sound(&ramp, 1, RATE);
+    let fade = 2 * RATE as usize / 1000;
+    let whole = render(unlimited(), 4_000, |audio| {
+        audio.play(&ramp, Play::new()).unwrap();
+    });
+    let partway = render(unlimited(), 3_000, |audio| {
+        audio.play(&ramp, Play::new().offset(1_000)).unwrap();
+    });
+    assert_eq!(partway[0], 0., "it fades in");
+    assert!(partway[2] > 0.);
+    assert_eq!(&partway[fade..], &whole[2_000 + fade..]);
+    // Looping, 10,000 frames in is 2,000 round.
+    let round = render(unlimited(), 2_000, |audio| {
+        audio
+            .play(&ramp, Play::new().looping(true).offset(10_000))
+            .unwrap();
+    });
+    assert_eq!(round[0], 0., "it fades in from where it starts round");
+    assert_eq!(&round[fade..], &whole[4_000 + fade..]);
+    // A one-shot started past its end ends at once.
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let voice = audio.play(&ramp, Play::new().offset(4_000)).unwrap();
+    assert!(mixer.frames(512).iter().all(|&s| s == 0.));
+    audio.update();
+    assert!(!voice.playing());
+}
