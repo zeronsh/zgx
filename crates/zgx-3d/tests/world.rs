@@ -2729,3 +2729,28 @@ fn culling_culls_after_a_mesh_moved_while_it_rested_and_after_turning_on_again()
         "after turning on again"
     );
 }
+
+#[test]
+fn a_light_on_a_surface_lights_it_rather_than_breaking_it() {
+    // A point light exactly at a shaded point: its direction there was 0/0,
+    // and the pixel not a number (black, ambient light and all). In the
+    // surface's plane it adds nothing; the ambient light shows.
+    let (world, _) = one(Geometry::cuboid(1., 1., 1.), Material::rgb(0xc0c0c0));
+    world.add_light(Light::Hemisphere {
+        sky: [1.; 3],
+        ground: [1.; 3],
+        intensity: 1.,
+    });
+    world.add_light(Light::Point {
+        position: vec3(0., 0., 0.5),
+        color: [1.; 3],
+        intensity: 1.,
+        range: 2.,
+    });
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let [r, g, b, a] = window.pixel(50, 50);
+    assert!(r > 40 && g > 40 && b > 40 && a == 255, "{:?}", [r, g, b, a]);
+}

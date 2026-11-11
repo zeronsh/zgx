@@ -117,7 +117,7 @@
 //Y         for (var i = 0u; i < u32(frame.params.x); i++) {
 //Y             let light = frame.points[i];
 //Y             let to = light[0].xyz - in.world;
-//Y             let distance = length(to);
+//Y             let distance = max(length(to), 1e-4);
 //Y             let falloff = pow(clamp(1.0 - pow(distance / light[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);
             // Within a spot's cone (all round: 1).
 //Y             let cone = clamp(dot(light[2].xyz, -to / distance) + light[2].w, 0.0, 1.0);

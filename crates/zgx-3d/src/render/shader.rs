@@ -358,14 +358,14 @@ mod tests {
         // turns nothing on parses what it did; change this only with a
         // change to today's shading.
         let before = variants_text(1 << 11);
-        assert_eq!(before, 0x0a4b_2237_f883_7a85, "{before:#018x}");
+        assert_eq!(before, 0x962b_5cba_b074_7425, "{before:#018x}");
         // Those of bits 0 to 12 (clustered lights', cascades') as they were
         // before custom materials (bit 13), whose code they don't parse.
         let lit = variants_text(1 << 13);
-        assert_eq!(lit, 0x3d4d_9104_4d81_6ec5, "{lit:#018x}");
+        assert_eq!(lit, 0xc50d_f6a2_c213_b125, "{lit:#018x}");
         // And every variant of every bit there is now, as it is now.
         let all = variants_text(u32::from(Variant::ALL) + 1);
-        assert_eq!(all, 0x9386_fe72_4401_65a5, "{all:#018x}");
+        assert_eq!(all, 0x09ac_f1dd_7537_c325, "{all:#018x}");
     }
 
     /// `bits` as a variant a mesh can have: a cut-out, placed, glass, coated
@@ -493,6 +493,20 @@ mod tests {
             for samples in [1, 4] {
                 validates(possible(bits), samples)
                     .unwrap_or_else(|e| panic!("{:?} at {samples}: {e}", possible(bits)));
+            }
+        }
+    }
+
+    #[test]
+    fn a_light_at_the_shaded_point_divides_by_no_zero() {
+        // `to / distance` with the light at the point was 0/0, a pixel not a
+        // number. (A rasterised sample rarely lands exactly on a light, so
+        // the shader's own text is what's checked; `tests/world.rs` draws
+        // one beside it.) Each light path keeps its distance off zero.
+        for variant in [Variant::default(), Variant(Variant::CLUSTERED)] {
+            let text = wgsl(variant, 1);
+            for line in text.lines().filter(|l| l.contains("let distance = ")) {
+                assert!(line.contains("max("), "{variant:?}: {line}");
             }
         }
     }
