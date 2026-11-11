@@ -528,6 +528,9 @@ pub(crate) struct Animator {
     pub(crate) outer: Vec<Option<crate::Mat4>>,
     /// Its IK hook (`World::set_ik`).
     pub(crate) ik: Option<Ik>,
+    /// The world's `ordering` when its IK's parents and its layers' masks
+    /// were found from its hierarchy: found again once it moves.
+    pub(crate) bound: u64,
 }
 /// An IK hook: called with the blended pose each frame that poses it.
 pub(crate) type Ik = Box<dyn FnMut(&mut crate::ik::Pose<'_>)>;
@@ -551,6 +554,7 @@ impl Animator {
             above: Vec::new(),
             outer: Vec::new(),
             ik: None,
+            bound: 0,
         }
     }
     /// Layer `index`, made (as `Layer::new`) with those under it if it's
@@ -664,6 +668,20 @@ impl Animator {
             layer.states.clear();
         }
         self.dirty = true;
+    }
+    /// Whether it keeps anything found from the world's hierarchy.
+    pub(crate) fn binds(&self) -> bool {
+        self.ik.is_some() || self.layers.iter().any(|l| l.layer.mask.is_some())
+    }
+    /// Its layers' masks found again by `resolve`.
+    pub(crate) fn rebind_masks(&mut self, resolve: impl Fn(&Mask) -> Vec<f32>) {
+        for layer in &mut self.layers {
+            if let Some(mask) = &layer.layer.mask {
+                let weights = resolve(mask);
+                layer.shows = layer.layer.weight > 0. && weights.iter().any(|&w| w > 0.);
+                layer.mask = Some(weights);
+            }
+        }
     }
     /// Whether its pose changes as time goes on.
     /// Only what shows counts: a clip on a layer at no weight or masked

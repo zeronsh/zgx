@@ -53,11 +53,20 @@ pub(crate) fn advance(inner: &mut Inner, time: Instant) -> bool {
             let dt = animator.parked.take().map_or(dt, |parked| {
                 time.saturating_duration_since(parked).as_secs_f32()
             });
+            if animator.bound != inner.ordering && animator.binds() {
+                rebind(inner, animator);
+            }
             animator.step(dt);
             animator.evaluate();
             // Root motion apart: an animator without it runs none of it.
             let root = animator.root.is_some();
             if root {
+                // Its node's parents' turn as they're turned now.
+                let node = animator.root.as_ref().map(|r| r.motion.node);
+                if let Some(node) = node {
+                    let turn = turn_above(inner, node, animator.model);
+                    animator.root.as_mut().unwrap().parent = turn;
+                }
                 animator.take_root_motion();
             }
             if animator.ik.is_some() {
@@ -113,6 +122,72 @@ fn write(inner: &mut Inner, animator: &Animator) -> bool {
     changed
 }
 
+/// Each of `nodes`' parent among them (by index), and for one whose
+/// parent isn't, that parent.
+fn hierarchy(
+    inner: &Inner,
+    nodes: &[Option<crate::ObjectId>],
+) -> (Vec<Option<usize>>, Vec<Option<crate::ObjectId>>) {
+    let at: std::collections::HashMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, node)| Some(((*node)?, i)))
+        .collect();
+    let parent = |node: &Option<crate::ObjectId>| {
+        let id = (*node)?;
+        let index = inner.live(id.index, id.generation)?;
+        inner.objects[index].value.as_ref()?.parent
+    };
+    let parents = nodes
+        .iter()
+        .map(|node| parent(node).and_then(|p| at.get(&p).copied()))
+        .collect();
+    let above = nodes
+        .iter()
+        .map(|node| parent(node).filter(|p| !at.contains_key(p)))
+        .collect();
+    (parents, above)
+}
+/// How much of a layer each of `nodes` takes by `mask`, as the world's
+/// hierarchy is now.
+fn resolve(inner: &Inner, nodes: &[Option<crate::ObjectId>], mask: &crate::Mask) -> Vec<f32> {
+    let (parents, _) = hierarchy(inner, nodes);
+    mask.resolve(nodes, |i| parents[i])
+}
+/// The turn of `node`'s parent and those above it, up to `model` (the
+/// placed model's root), as they're turned now.
+fn turn_above(inner: &Inner, node: crate::ObjectId, model: Option<crate::ObjectId>) -> Quat {
+    let mut turn = Quat::IDENTITY;
+    let object = |id: crate::ObjectId| {
+        let index = inner.live(id.index, id.generation)?;
+        inner.objects[index].value.as_ref()
+    };
+    let mut at = object(node).and_then(|o| o.parent);
+    for _ in 0..64 {
+        let Some(id) = at.filter(|id| Some(*id) != model) else {
+            break;
+        };
+        let Some(above) = object(id) else {
+            break;
+        };
+        turn = above.transform.rotation * turn;
+        at = above.parent;
+    }
+    turn.normalized()
+}
+/// What `animator` keeps from the world's hierarchy (its IK's parents,
+/// its layers' masks) found again: a node moved under another since.
+#[cold]
+#[inline(never)]
+fn rebind(inner: &Inner, animator: &mut Animator) {
+    if animator.ik.is_some() {
+        (animator.parents, animator.above) = hierarchy(inner, &animator.nodes);
+    }
+    let nodes = animator.nodes.clone();
+    animator.rebind_masks(|mask| resolve(inner, &nodes, mask));
+    animator.bound = inner.ordering;
+}
+
 /// `animator`'s pose bent by its IK hook (`World::set_ik`), the world
 /// above its model as it is now.
 #[inline(never)]
@@ -135,6 +210,23 @@ fn bend(inner: &Inner, animator: &mut Animator) {
         locals: &mut animator.pose,
         posed: &mut animator.posed,
     };
+    // A hook calling the world finds it borrowed: in a debug build, said so.
+    #[cfg(debug_assertions)]
+    if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(&mut pose))) {
+        let said = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if said.contains("already borrowed") || said.contains("already mutably borrowed") {
+            panic!(
+                "an IK hook called its world, which is borrowed while the hook runs (inside the \
+                 frame): share what it reads by an Rc<Cell<_>>, and change the world outside it"
+            );
+        }
+        std::panic::resume_unwind(panic);
+    }
+    #[cfg(not(debug_assertions))]
     hook(&mut pose);
     animator.ik = Some(hook);
 }
@@ -289,29 +381,22 @@ impl World {
         if index >= crate::MAX_LAYERS {
             return Err(AnimatorError::Layer(index));
         }
-        let mask = {
+        let (mask, bound) = {
             let inner = self.inner.borrow();
             let Some(animator) = Self::animator_ref(&inner, id) else {
                 return Ok(());
             };
-            layer.mask.as_ref().map(|mask| {
-                let nodes = &animator.nodes;
-                let at: std::collections::HashMap<_, _> = nodes
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, node)| Some((((*node)?), i)))
-                    .collect();
-                let parent = |i: usize| {
-                    let id = nodes[i]?;
-                    let index = inner.live(id.index, id.generation)?;
-                    let parent = inner.objects[index].value.as_ref()?.parent?;
-                    at.get(&parent).copied()
-                };
-                mask.resolve(nodes, parent)
-            })
+            let mask = layer
+                .mask
+                .as_ref()
+                .map(|mask| resolve(&inner, &animator.nodes, mask));
+            (mask, inner.ordering)
         };
-        self.change_animator(id, |animator| animator.set_layer(index, layer, mask))
-            .unwrap_or(Ok(()))
+        self.change_animator(id, |animator| {
+            animator.bound = bound;
+            animator.set_layer(index, layer, mask)
+        })
+        .unwrap_or(Ok(()))
     }
     /// Animator `id`'s root motion (`None`: none, its default): the motion
     /// of a node (a character's hips or root bone) taken out of its pose
@@ -332,30 +417,11 @@ impl World {
                     .nodes
                     .iter()
                     .position(|n| *n == Some(motion.node))?;
-                // Its parent's turn from the model's root.
-                let mut parent = Quat::IDENTITY;
-                let mut at = inner
-                    .live(motion.node.index, motion.node.generation)
-                    .and_then(|i| inner.objects[i].value.as_ref()?.parent);
-                let mut depth = 0;
-                while let Some(id) = at
-                    && Some(id) != animator.model
-                    && depth < 64
-                {
-                    let Some(object) = inner
-                        .live(id.index, id.generation)
-                        .and_then(|i| inner.objects[i].value.as_ref())
-                    else {
-                        break;
-                    };
-                    parent = object.transform.rotation * parent;
-                    at = object.parent;
-                    depth += 1;
-                }
+                let parent = turn_above(&inner, motion.node, animator.model);
                 Some(Root {
                     motion,
                     node,
-                    parent: parent.normalized(),
+                    parent,
                 })
             })
         };
@@ -371,35 +437,18 @@ impl World {
     /// plays, `repose` asks for a frame to call it again (a target moved).
     pub fn set_ik(&self, id: AnimatorId, hook: impl FnMut(&mut crate::ik::Pose<'_>) + 'static) {
         // Each node's parent, among the model's nodes or the object above:
-        // found for IK alone, so an animator without it pays nothing.
-        let found = {
+        // found for IK alone, so an animator without it pays nothing (and
+        // found again as the world's hierarchy changes: `rebind`).
+        let (found, bound) = {
             let inner = self.inner.borrow();
             let Some(animator) = Self::animator_ref(&inner, id) else {
                 return;
             };
-            let nodes = &animator.nodes;
-            let at: std::collections::HashMap<_, _> = nodes
-                .iter()
-                .enumerate()
-                .filter_map(|(i, node)| Some(((*node)?, i)))
-                .collect();
-            let parent = |node: &Option<crate::ObjectId>| {
-                let id = (*node)?;
-                let index = inner.live(id.index, id.generation)?;
-                inner.objects[index].value.as_ref()?.parent
-            };
-            let parents: Vec<_> = nodes
-                .iter()
-                .map(|node| parent(node).and_then(|p| at.get(&p).copied()))
-                .collect();
-            let above: Vec<_> = nodes
-                .iter()
-                .map(|node| parent(node).filter(|p| !at.contains_key(p)))
-                .collect();
-            (parents, above)
+            (hierarchy(&inner, &animator.nodes), inner.ordering)
         };
         self.change_animator(id, |animator| {
             (animator.parents, animator.above) = found;
+            animator.bound = bound;
             animator.ik = Some(Box::new(hook));
         });
     }
@@ -1383,5 +1432,133 @@ mod tests {
                 "case {case}: {facing:?} {wanted:?}"
             );
         }
+    }
+
+    #[test]
+    fn ik_sees_the_hierarchy_as_it_is_not_as_it_was() {
+        // Set before the hierarchy changed, or after: the same frame.
+        let run = |ik_first: bool, change: &dyn Fn(&World, &Placed, [ObjectId; 3])| {
+            let world = World::new();
+            let (placed, chain) = arm(&world);
+            let animator = world.add_animator(&placed);
+            let set = |world: &World| {
+                world.set_ik(animator, move |pose| {
+                    crate::ik::two_bone(pose, chain, vec3(1., 1., 0.), Some(vec3(5., 0., 0.)), 1.);
+                });
+            };
+            if ik_first {
+                set(&world);
+                change(&world, &placed, chain);
+            } else {
+                change(&world, &placed, chain);
+                set(&world);
+            }
+            world.repose(animator);
+            Clock(Instant::now()).frame(&world, 0.);
+            (place(&world, chain[1]), place(&world, chain[2]))
+        };
+        // The model carried on a vehicle; then its middle joint moved out
+        // from under its upper (no chain left to bend).
+        let vehicle = |world: &World, placed: &Placed, _: [ObjectId; 3]| {
+            let car = world.add(Object::group().at([5., 0., 0.]));
+            world.update(car, |o| o.transform.rotation = Quat::from_euler(0., 1., 0.));
+            world.update(placed.root, |o| o.parent = Some(car));
+        };
+        let broken = |world: &World, placed: &Placed, [_, b, _]: [ObjectId; 3]| {
+            world.update(b, |o| o.parent = Some(placed.root));
+        };
+        for change in [&vehicle as &dyn Fn(&World, &Placed, [ObjectId; 3]), &broken] {
+            let (retained, fresh) = (run(true, change), run(false, change));
+            assert!(
+                near(retained.0, fresh.0) && near(retained.1, fresh.1),
+                "{retained:?} {fresh:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_mask_below_a_node_follows_the_hierarchy() {
+        let run = |mask_first: bool| {
+            let world = World::new();
+            let (placed, a, b) = rig(&world);
+            let animator = world.add_animator(&placed);
+            let both = clip(vec![
+                (0, Path::Translation, vec![0.], vec![x(1.)]),
+                (1, Path::Translation, vec![0.], vec![[1., 1., 0., 0.]]),
+            ]);
+            world.play(animator, &both, Play::new().layer(1)).unwrap();
+            let set = |world: &World| {
+                let below = Layer::new().mask(Mask::new().below(a, 1.));
+                world.set_layer(animator, 1, below).unwrap();
+            };
+            // `b` taken from under `a`: the mask below `a` no longer has it.
+            let moved = |world: &World| world.update(b, |o| o.parent = Some(placed.root));
+            if mask_first {
+                set(&world);
+                moved(&world);
+            } else {
+                moved(&world);
+                set(&world);
+            }
+            Clock(Instant::now()).frame(&world, 0.);
+            (at(&world, a).position, at(&world, b).position)
+        };
+        let (retained, fresh) = (run(true), run(false));
+        assert_eq!(retained, fresh);
+        assert_eq!(fresh.1, vec3(0., 1., 0.), "b at rest");
+    }
+
+    #[test]
+    fn root_motion_is_measured_as_the_model_is_turned_now() {
+        let run = |root_first: bool| {
+            let world = World::new();
+            let (placed, a, b) = rig(&world);
+            let animator = world.add_animator(&placed);
+            let walk = clip(vec![(
+                1,
+                Path::Translation,
+                vec![0., 1.],
+                vec![[0., 1., 0., 0.], [2., 1., 0., 0.]],
+            )]);
+            world.play(animator, &walk, Play::new()).unwrap();
+            let quarter = std::f32::consts::FRAC_PI_2;
+            let turn = |world: &World| {
+                world.update(a, |o| {
+                    o.transform.rotation = Quat::from_axis_angle(Vec3::Y, quarter)
+                })
+            };
+            let set = |world: &World| world.set_root_motion(animator, Some(RootMotion::new(b)));
+            if root_first {
+                set(&world);
+                turn(&world);
+            } else {
+                turn(&world);
+                set(&world);
+            }
+            let clock = Clock(Instant::now());
+            frames(&clock, &world, 0., 0.5);
+            world.animator_update(animator).moved
+        };
+        let (retained, fresh) = (run(true), run(false));
+        assert!(near(retained, fresh), "{retained:?} {fresh:?}");
+        assert!(
+            near(fresh, vec3(0., 0., -1.)),
+            "x turned a quarter about y: -z; {fresh:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "an IK hook called its world")]
+    fn an_ik_hook_calling_its_world_is_told_why_it_cannot() {
+        let world = World::new();
+        let (placed, [a, _, _]) = arm(&world);
+        let animator = world.add_animator(&placed);
+        let held = world.clone();
+        world.set_ik(animator, move |_| {
+            held.update(a, |o| o.transform.position = vec3(1., 0., 0.));
+        });
+        world.repose(animator);
+        Clock(Instant::now()).frame(&world, 0.);
     }
 }
