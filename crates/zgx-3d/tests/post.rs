@@ -8,6 +8,22 @@ use zgx_gpu::GpuRenderer;
 
 const SIZE: u32 = 96;
 
+thread_local! {
+    /// The test's clock (`zgx::clock`): frames 1/60 s apart however long
+    /// the machine takes to draw them (temporal antialiasing drops its
+    /// history after a gap, exposure eases by the frame's time).
+    static CLOCK: zgx::clock::VirtualClock = zgx::clock::VirtualClock::new();
+}
+/// The clock moved on a frame.
+fn tick() {
+    CLOCK.with(|clock| {
+        clock.advance(
+            clock.elapsed() + std::time::Duration::from_micros(16_667),
+            || {},
+        );
+    });
+}
+
 struct Window {
     ui: Ui,
     gpu: GpuRenderer,
@@ -31,6 +47,7 @@ impl Window {
         Some(Self { ui, gpu })
     }
     fn draw(&mut self) -> Vec<u8> {
+        tick();
         self.ui.prepare_frame();
         let report = self.ui.scene.borrow_mut().flush();
         self.gpu
@@ -371,6 +388,7 @@ fn drawn_at(world: &World, side: u32) -> Option<Vec<u8>> {
     };
     let mut ui = Ui::new(side as f32, side as f32);
     ui.mount(gpu_view("World", world.view()).size(side as f32, side as f32));
+    tick();
     ui.prepare_frame();
     let report = ui.scene.borrow_mut().flush();
     gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
@@ -1060,6 +1078,7 @@ fn dragged(count: u32) -> Option<(u64, u64, u32, Vec<u32>)> {
     let mut draw = |side: u32| {
         size.set(side as f32);
         world.view().invalidate();
+        tick();
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
         gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
@@ -1173,6 +1192,7 @@ fn jitter_reaches_neither_picking_nor_the_ui_over_the_view() {
         );
         for _ in 0..3 {
             world.view().invalidate();
+            tick();
             ui.prepare_frame();
             let report = ui.scene.borrow_mut().flush();
             gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
@@ -1279,6 +1299,7 @@ impl Boxes {
     }
     /// A frame: each box's pixels.
     fn draw(&mut self) -> Vec<Vec<u8>> {
+        tick();
         self.ui.prepare_frame();
         let report = self.ui.scene.borrow_mut().flush();
         self.gpu
