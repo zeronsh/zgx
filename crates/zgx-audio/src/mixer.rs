@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 /// pieces of this.
 pub(crate) const MAX_BLOCK: usize = 128;
 /// Buses at most, master included.
-pub(crate) const MAX_BUSES: usize = 32;
+pub(crate) const MAX_BUSES: usize = 64;
 /// Effects a bus can hold.
 pub(crate) const MAX_EFFECTS: usize = 8;
 /// The most a sample can be as it leaves a bus's effects, either way: 2^18.
@@ -97,6 +97,7 @@ pub(crate) enum Command {
     AddBus {
         bus: u16,
         parent: u16,
+        memory: BusMemory,
     },
     /// An effect, prepared, for the end of a bus's chain.
     AddEffect {
@@ -1067,9 +1068,10 @@ struct Chain {
 }
 
 impl Chain {
-    fn new() -> Chain {
+    #[allow(clippy::vec_box)]
+    fn new(effects: Vec<Box<Slot>>) -> Chain {
         Chain {
-            effects: Vec::with_capacity(MAX_EFFECTS),
+            effects,
             horizon: 0,
             active: false,
             fed: false,
@@ -1078,19 +1080,40 @@ impl Chain {
     }
 }
 
+/// What a bus mixes into and holds its effects in: made on the main
+/// thread as the bus is added and sent with it, so a bus never added
+/// costs no buffer.
+pub(crate) struct BusMemory {
+    left: Box<[f32; MAX_BLOCK]>,
+    right: Box<[f32; MAX_BLOCK]>,
+    /// Boxed, as in [`Chain`].
+    #[allow(clippy::vec_box)]
+    effects: Vec<Box<Slot>>,
+}
+
+impl BusMemory {
+    pub(crate) fn new() -> BusMemory {
+        BusMemory {
+            left: Box::new([0.; MAX_BLOCK]),
+            right: Box::new([0.; MAX_BLOCK]),
+            effects: Vec::with_capacity(MAX_EFFECTS),
+        }
+    }
+}
+
 impl Bus {
-    fn new() -> Bus {
+    fn new(parent: u16, left: Box<[f32; MAX_BLOCK]>, right: Box<[f32; MAX_BLOCK]>) -> Bus {
         Bus {
-            used: false,
-            parent: 0,
+            used: true,
+            parent,
             gain: Smoothed::new(1.),
             gate: Smoothed::new(1.),
             muted: false,
             soloed: false,
             quiet: false,
             driven: UNDRIVEN,
-            left: Box::new([0.; MAX_BLOCK]),
-            right: Box::new([0.; MAX_BLOCK]),
+            left,
+            right,
             touched: false,
         }
     }
@@ -1152,7 +1175,8 @@ pub(crate) struct Mixer {
     sends: Box<[VoiceSends]>,
     send_out: Box<[[f32; MAX_BLOCK]; 2]>,
     max_live: usize,
-    buses: Box<[Bus]>,
+    /// Those added, in room for [`MAX_BUSES`].
+    buses: Vec<Bus>,
     bus_count: usize,
     scratch: Box<Scratch>,
     limiter: Option<Limiter>,
@@ -1191,7 +1215,7 @@ pub(crate) struct Mixer {
     /// Effects with a side chain, anywhere.
     keyed: u32,
     /// Each bus's effects, by its index.
-    chains: Box<[Chain]>,
+    chains: Vec<Chain>,
     /// Effects on every bus.
     effects: usize,
     /// A bus's block interleaved, for its effects.
@@ -1205,8 +1229,13 @@ impl Mixer {
         returns: Producer<Return>,
         meter: Arc<Meter>,
     ) -> Mixer {
-        let mut buses: Box<[Bus]> = (0..MAX_BUSES).map(|_| Bus::new()).collect();
-        buses[0].used = true;
+        // Room for every bus, and master's memory now: the others' comes
+        // as they're added, so a bus never added costs no buffer.
+        let mut buses = Vec::with_capacity(MAX_BUSES);
+        let mut chains = Vec::with_capacity(MAX_BUSES);
+        let master = BusMemory::new();
+        buses.push(Bus::new(0, master.left, master.right));
+        chains.push(Chain::new(master.effects));
         Mixer {
             rate: setup.rate,
             interpolation: setup.interpolation,
@@ -1262,7 +1291,7 @@ impl Mixer {
             levels: [0.; MAX_BUSES],
             heard: [0.; MAX_BUSES],
             keyed: 0,
-            chains: (0..MAX_BUSES).map(|_| Chain::new()).collect(),
+            chains,
             effects: 0,
         }
     }
@@ -1665,12 +1694,18 @@ impl Mixer {
                 self.buses[usize::from(bus)].quiet = on;
                 self.gate();
             }
-            Command::AddBus { bus, parent } => {
-                let index = usize::from(bus);
-                let new = &mut self.buses[index];
-                new.used = true;
-                new.parent = parent;
-                self.bus_count = self.bus_count.max(index + 1);
+            Command::AddBus {
+                bus,
+                parent,
+                memory,
+            } => {
+                // The engine adds them in order, at most `MAX_BUSES`: each
+                // goes into room made for it, nothing allocated here.
+                debug_assert_eq!(usize::from(bus), self.buses.len(), "buses added in order");
+                debug_assert!(self.buses.len() < self.buses.capacity());
+                self.buses.push(Bus::new(parent, memory.left, memory.right));
+                self.chains.push(Chain::new(memory.effects));
+                self.bus_count = self.buses.len();
                 self.gate();
             }
             Command::AddEffect { bus, slot } => return self.add_effect(bus, slot),
@@ -2060,7 +2095,8 @@ impl Mixer {
     #[inline(never)]
     fn sum_with_effects(&mut self, n: usize) {
         if self.keyed > 0 {
-            self.heard = self.levels;
+            let count = self.bus_count;
+            self.heard[..count].copy_from_slice(&self.levels[..count]);
         }
         for b in (1..self.bus_count).rev() {
             let (below, above) = self.buses.split_at_mut(b);

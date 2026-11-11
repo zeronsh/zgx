@@ -5,8 +5,8 @@ use crate::device::{Device, Host, Message, Renderer};
 use crate::effect::{Effect, Slot};
 use crate::mixer::Streamed;
 use crate::mixer::{
-    Command, FADING_SLOTS, Feed, MAX_BUSES, MAX_EFFECTS, Meter, Mixer, PanLaw, Return, Setup,
-    VoiceParam,
+    BusMemory, Command, FADING_SLOTS, Feed, MAX_BUSES, MAX_EFFECTS, Meter, Mixer, PanLaw, Return,
+    Setup, VoiceParam,
 };
 use crate::queue::{Consumer, Producer, queue};
 use crate::ramp::{Curve, Ramp};
@@ -28,7 +28,7 @@ pub enum Error {
     /// quarter is kept for commands due now: ones for later get this
     /// sooner).
     QueueFull,
-    /// [`Audio::add_bus`] past the most buses there can be (32).
+    /// [`Audio::add_bus`] past the most buses there can be (64).
     TooManyBuses,
     /// [`Bus::add_effect`] past the most effects a bus can hold (8).
     TooManyEffects,
@@ -556,7 +556,14 @@ impl Audio {
         }
         for bus in 1..4 {
             audio
-                .send(0, Command::AddBus { bus, parent: 0 })
+                .send(
+                    0,
+                    Command::AddBus {
+                        bus,
+                        parent: 0,
+                        memory: BusMemory::new(),
+                    },
+                )
                 .expect("a new queue has room for 16 commands");
         }
         Ok((audio, mixer))
@@ -896,9 +903,12 @@ impl Audio {
             return Err(Error::TooManyBuses);
         }
         let index = control.buses.len() as u16;
+        // Its buffers made here, not on the audio thread: a bus never added
+        // costs none.
         let command = Command::AddBus {
             bus: index,
             parent: parent.index,
+            memory: BusMemory::new(),
         };
         self.push(&mut control, 0, command)?;
         control.buses.push((name.into(), parent.index));

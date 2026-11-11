@@ -69,7 +69,8 @@ voice.stop_after(0.05);                            // a fade, never a cut
 
 ## 6. Mixer
 
-- **Buses** form a tree under `master`: gain, mute, solo, a pan, an effect chain and sends. `ui`, `music` and `world` exist by default; apps add their own.
+- **Buses** form a tree under `master`: gain, mute, solo, a pan and an effect chain. Up to 64 with master; a bus's two block buffers and its effect slots are made when it's added, on the main thread, so a bus never added costs none, and the mixer's loops run over the buses added. Buses can't be removed.
+- **Sends:** a voice sends to up to two buses besides its own, each at a smoothed level (a reverb zone's room, a binaural bus, an app's aux). Bus-to-bus sends are open (section 12). `ui`, `music` and `world` exist by default; apps add their own.
 - **Parameters** are set with a ramp time and smoothed per sample, so a slider never zips. They're atomics underneath: a UI state or a `ui.tween` binding drives one with no script per frame.
 - **Ducking:** `music.duck(&dialogue, Duck { by_db: -9., attack: 0.05, release: 0.4 })`, a side-chained gain driven by another bus's level.
 - **Stock effects:** low-pass and high-pass (state-variable, 12 or 24 dB), a parametric EQ band, reverb (a feedback delay network: size, decay, damping, pre-delay, wet), delay, compressor, and a look-ahead limiter that sits on `master` by default so nothing clips.
@@ -226,5 +227,9 @@ Settled Nov 10 2026 by the coordinator, the maintainer having said designs need 
 7. **No DSP in Luau.**
 8. **Automated runs on the maintainer's Macs are at zero gain;** anything audible is asked for first.
 9. **iOS** waits for the host in draft to land.
+
+### Open
+
+- **Bus-to-bus sends.** The mixer sums buses in one pass, children before parents: a bus is added after its parent, so its index is higher, and the pass runs from the highest index down. A bus's chain runs once, when its turn comes, on whatever reached it by then. The ordering rule for a bus-to-bus send: **its target must come after its source in that pass** (a lower index), so the source's block is complete when it's added in, and the target's chain hears it in the same block. A send against the order (to a bus later added, or to a descendant) would either be heard a block late, as one-block feedback, or need a second pass. Either is refused until a use needs it. Cycles can't occur under the rule, since the order is total. A send to an ancestor is allowed by the rule and is heard twice, once through the tree and once by the send, as an aux to `master` would be. Not built now: per-voice sends cover zones, binaural and an app's aux.
 
 **The bar,** as for rendering: the mixer is measured against established engines' published figures and an open one run on the same machine (callback time per voice, latency, idle wakeups), and merges when it ties or beats them or says why not.
