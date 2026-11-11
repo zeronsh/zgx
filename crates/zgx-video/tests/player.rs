@@ -871,3 +871,76 @@ fn a_player_whose_device_is_lost_draws_on_a_new_one() {
     let error = player.error.with_untracked(Clone::clone);
     assert!(error.is_none(), "it stopped: {error:?}");
 }
+
+/// Played to its end (not looping), a player tells its last frame before it
+/// tells it stopped: what follows it sees the last frame as it stops, not
+/// one before it. Its frames come due far faster than they draw, so it
+/// reaches its end past frames it skipped, as a player behind time does.
+#[test]
+fn a_player_tells_its_last_frame_before_it_stops() {
+    const FAST: &str = r##"
+local video = require("@video")
+return video.compositions { video.composition {
+    id = "Bar", w = 100, h = 50, fps = 10000, duration = 300,
+    render = function()
+        local f = video.frame()
+        return ui.div { w_full = true, h_full = true, bg = "#000000",
+            ui.div { h = 50, w = function() return f:get() % 100 end, bg = "#00ff00" } }
+    end,
+} }
+"##;
+    let dir = temp_dir("player-last-frame");
+    std::fs::write(dir.join("video.luau"), FAST).unwrap();
+    let path = dir.to_path_buf();
+    let told: std::rc::Rc<std::cell::RefCell<Vec<String>>> = Default::default();
+    let mut held = None;
+    let mut stage = Stage::new(
+        StageOptions {
+            width: 100.,
+            height: 50.,
+            fps: 60.,
+            scale: 1.,
+            background: Color(255, 255, 255, 255),
+            ..Default::default()
+        },
+        |setting| {
+            let player = Player::new(setting.runtime, &path, 1.)?;
+            player.open("Bar", json!({}), 0);
+            player.looping(false);
+            let (listened, told) = (player.clone(), told.clone());
+            let view = zgx::compose::component(move |cx| {
+                let told = told.clone();
+                cx.tasks().spawn(listened.listen(move |event| match event {
+                    zgx_video::Event::Frame { frame, .. } => {
+                        told.borrow_mut().push(format!("frame {frame}"))
+                    }
+                    zgx_video::Event::Stopped => told.borrow_mut().push("stopped".into()),
+                    _ => {}
+                }));
+                div().w(100.).h(50.)
+            });
+            held = Some(player);
+            Ok(view)
+        },
+    )
+    .unwrap();
+    let player = held.unwrap();
+    player.play(true);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !told.borrow().iter().any(|event| event == "stopped") {
+        assert!(
+            Instant::now() < deadline,
+            "it never stopped: {:?}",
+            told.borrow()
+        );
+        stage.step().unwrap();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let told = told.borrow();
+    let at = told.iter().position(|event| event == "stopped").unwrap();
+    assert_eq!(
+        told[..at].last().map(String::as_str),
+        Some("frame 299"),
+        "told before it stopped: {told:?}"
+    );
+}
