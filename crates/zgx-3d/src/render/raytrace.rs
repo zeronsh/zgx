@@ -63,13 +63,21 @@ pub(super) struct Scene {
 }
 
 /// A traced mesh as rays see it: its geometry, its place (a TLAS
-/// instance's rows) and its colour, metalness and glow.
+/// instance's rows), its colour, metalness and glow, and whether it casts
+/// the sun's shadow (`World::set_casts_shadows`).
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct Held {
     pub(super) geometry: u64,
     pub(super) transform: [f32; 12],
     pub(super) material: [f32; 8],
+    pub(super) casts: bool,
 }
+
+/// A TLAS instance's mask bits: every traced mesh is `SEEN` (by the rays
+/// probes cast, which take any bit); one that casts shadows `CASTS` too,
+/// all that shadow rays take (`blocked` in `probes_trace.wgsl`).
+const SEEN: u32 = 2;
+const CASTS: u32 = 1;
 pub(super) fn held(d: &Drawn) -> Held {
     let c = &d.matrix.columns;
     let row = |r: usize| [c[0][r], c[1][r], c[2][r], c[3][r]];
@@ -96,6 +104,12 @@ pub(super) fn held(d: &Drawn) -> Held {
             glow[2],
             0.,
         ],
+        #[cfg(feature = "lighting")]
+        casts: d
+            .extras
+            .is_none_or(|e| e.shadows & crate::world::lighting::NO_CAST == 0),
+        #[cfg(not(feature = "lighting"))]
+        casts: true,
     }
 }
 
@@ -258,7 +272,7 @@ impl Scene {
                 &entry.blas,
                 h.transform,
                 i as u32,
-                0xff,
+                (SEEN | if h.casts { CASTS } else { 0 }) as u8,
             ));
             let m = &h.material;
             records.push(RayInstance {

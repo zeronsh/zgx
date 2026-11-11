@@ -892,6 +892,79 @@ fn a_tight_face_budget_converges_over_more_frames_to_the_same_light() {
     }
 }
 
+#[cfg(feature = "lighting")]
+#[test]
+fn a_roof_set_not_to_cast_leaves_the_probes_sunlit_beneath() {
+    // A roof over a sunlit floor, set not to cast the sun's shadow: the
+    // floor beneath it is sunlit, and so the roof's underside (lit only by
+    // light the floor bounces, through the probes) is bright, by rays as
+    // by faces. Rays tracing the sun's shadow through it would see the
+    // floor beneath in shade.
+    let test = "a_roof_set_not_to_cast_leaves_the_probes_sunlit_beneath";
+    let shade = |faces: bool, casts: bool| {
+        let world = World::new();
+        let white = Material {
+            color: [0.8, 0.8, 0.8, 1.],
+            roughness: 1.,
+            ..Material::default()
+        };
+        world.add(Object::mesh(Geometry::cuboid(12., 0.2, 12.), white).at([0., -0.1, 0.]));
+        let roof =
+            world.add(Object::mesh(Geometry::cuboid(4.4, 0.2, 4.4), white).at([0., 3.1, 0.]));
+        world.set_casts_shadows(roof, casts);
+        world.add_light(Light::Directional {
+            direction: vec3(0.2, -1., 0.1),
+            color: [1.; 3],
+            intensity: 3.,
+        });
+        world.set_shadows(true);
+        world.set_camera(Camera {
+            position: vec3(0., 0.8, 3.5),
+            target: vec3(0., 3., 0.),
+            fov: 50f32.to_radians(),
+            ..Camera::default()
+        });
+        world.set_background(Some(0x000000));
+        world.set_probes_rasterised(faces);
+        world
+            .add_probes(
+                ProbeVolume::new([-1.8, 0.4, -1.8], [1.8, 2.8, 1.8], [4, 3, 4]).per_frame(48),
+            )
+            .unwrap();
+        let mut window = Window::new(&world)?;
+        settle(&mut window, &world, 500);
+        let lit = if faces {
+            faced(&world, test)
+        } else {
+            traced(&world, test) && world.probes_status() == ProbesStatus::Traced
+        };
+        lit.then(|| window.pixels())
+    };
+    // The roof's underside, seen from below.
+    let under = (SIZE.0 / 2, SIZE.1 / 4);
+    let Some(faces) = shade(true, false) else {
+        return;
+    };
+    save("roof-faces", &faces);
+    let faces = around(&faces, under, 8);
+    let Some(rays) = shade(false, false) else {
+        eprintln!("GI-SKIPPED {test}: no rays to set beside the faces");
+        return;
+    };
+    save("roof-rays", &rays);
+    let rays = around(&rays, under, 8);
+    let shaded = around(&shade(false, true).unwrap(), under, 8);
+    eprintln!("underside: by faces {faces:?}, by rays {rays:?}, casting {shaded:?}");
+    assert!(
+        rays.iter().zip(faces).all(|(r, f)| (r - f).abs() < 0.06),
+        "by rays {rays:?}, by faces {faces:?}"
+    );
+    assert!(
+        rays[1] > shaded[1] + 0.05,
+        "not casting {rays:?}, casting {shaded:?}: rays saw the floor beneath in its shade"
+    );
+}
+
 #[test]
 fn the_room_lit_by_faces_matches_its_golden() {
     let world = World::new();
