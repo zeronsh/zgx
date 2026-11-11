@@ -8,16 +8,23 @@ use zgx_3d::*;
 mod harness;
 use harness::{caught, rests_caught};
 
+/// The compile worker held 400 ms a pipeline, set once for the binary
+/// before either test's first frame (no thread reads the environment
+/// before then).
+fn hold_worker() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    // SAFETY: set under `ONCE`, before any frame of this binary starts
+    // the worker that reads it.
+    ONCE.call_once(|| unsafe { std::env::set_var("ZGX_TEST_COMPILE_DELAY_MS", "400") });
+}
+
 #[test]
 fn a_mesh_shader_and_a_surface_layer_taken_off_while_they_compile() {
-    // The only test here: nothing else reads the variable meanwhile.
-    // SAFETY: no other thread of this binary reads the environment yet.
-    unsafe { std::env::set_var("ZGX_TEST_COMPILE_DELAY_MS", "400") };
+    hold_worker();
     rests_caught("shader compiling", |world, mesh, window| {
         // A mesh's own shader with a layer over it, as the shader lane's
         // compile test has them: compiled on the (held) worker. (A layer
-        // alone over stock meshes is never caught compiling here, held or
-        // not: the shader lane's to say whether it compiles on the worker.)
+        // alone over stock meshes isn't: see the next row.)
         let red = world
             .add_shader(MaterialShader::new(
                 "#zgx material 1
@@ -47,4 +54,36 @@ fn a_mesh_shader_and_a_surface_layer_taken_off_while_they_compile() {
             world.set_shader(mesh, None);
         }))
     });
+}
+
+#[test]
+fn a_surface_layer_alone_draws_in_its_first_frame_and_rests() {
+    // A layer over stock meshes holds no reason because nothing of it is
+    // left to wait for: the stock pipelines are made with it on the frame
+    // that sees it (`custom::relayer`), not on the compile worker, which is
+    // held here. Only a mesh shader's pipelines (each with every layer)
+    // compile there, holding `ShaderCompiling` for it and its layers.
+    hold_worker();
+    let (world, _) = harness::world();
+    let Some(mut window) = harness::Window::new(&world) else {
+        return;
+    };
+    window.draw(&world);
+    let layer = world
+        .add_surface_layer(MaterialShader::new(
+            "#zgx material 1
+             fn surface(s: SurfaceIn) -> Surface {
+                 var m = surface_default(s);
+                 m.base_color *= 0.5;
+                 return m;
+             }",
+        ))
+        .unwrap();
+    window.draw(&world);
+    assert!(
+        world.shader_ready(layer),
+        "drawn with it from its first frame"
+    );
+    assert!(!world.compiling(), "nothing of it on the worker");
+    assert!(!world.view().animating(), "nothing holds the world drawing");
 }
