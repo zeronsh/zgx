@@ -2177,6 +2177,53 @@ mod tests {
     }
 
     #[test]
+    fn the_apps_data_is_on_the_frames_device_before_the_renderer_draws_and_says_which() {
+        use zgx_gpu::viewport::Viewport;
+        let world = crate::World::new();
+        let buffer = world.add_buffer(crate::BufferDesc::bytes(64)).unwrap();
+        let texture = world
+            .add_texture(crate::TextureDesc::storage(4, 4, Format::Rgba8Unorm))
+            .unwrap();
+        assert!(buffer.device_buffer().is_none() && texture.device_view().is_none());
+        let draw = |painter: &mut dyn Viewport, (device, queue): &(wgpu::Device, wgpu::Queue)| {
+            let format = wgpu::TextureFormat::Bgra8Unorm;
+            let target = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 4,
+                    height: 4,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = target.create_view(&Default::default());
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let mut frame =
+                ViewportFrame::new(device, queue, &mut encoder, &view, format, (4, 4), 1.);
+            painter.render(&mut frame);
+            queue.submit([encoder.finish()]);
+        };
+        let mut painter = world.viewport();
+        let first = wgpu::Device::noop(&Default::default());
+        draw(&mut painter, &first);
+        let (generation, made) = buffer.device_buffer().expect("made with the frame");
+        assert_eq!(made.size(), 64);
+        assert_eq!(texture.device_view().unwrap().0, generation);
+        // A new device: made again, under another generation.
+        painter.device_changed();
+        let second = wgpu::Device::noop(&Default::default());
+        draw(&mut painter, &second);
+        let (again, _) = buffer.device_buffer().unwrap();
+        assert_ne!(again, generation);
+        assert_eq!(texture.device_view().unwrap().0, again);
+    }
+
+    #[test]
     fn a_whole_write_goes_before_earlier_readers_and_the_rest_keep_their_order() {
         let (x, y) = (Key::Buffer(1), Key::Buffer(2));
         use Access::*;

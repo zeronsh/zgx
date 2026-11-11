@@ -296,6 +296,17 @@ impl GpuBuffer {
     pub fn size(&self) -> u64 {
         self.0.size
     }
+    /// Its buffer on the device the frame being drawn uses, and that
+    /// device's generation: made before the renderer draws (the painter
+    /// prepares the app's data first), so a material binding it within a
+    /// frame finds it. Another generation than a binding was made with
+    /// means the device changed and the binding (and any frame kept with
+    /// it) must be made again. `None` before a frame made it, or where the
+    /// device refused it.
+    #[cfg_attr(not(test), allow(dead_code))] // The materials lane's `Param`s bind it.
+    pub(crate) fn device_buffer(&self) -> Option<(u64, wgpu::Buffer)> {
+        self.0.gpu.borrow().clone()
+    }
     /// Write `values` at byte `offset`, before the next frame's passes run;
     /// it asks for one.
     pub fn write<T: bytemuck::Pod>(&self, offset: u64, values: &[T]) -> Result<(), WriteError> {
@@ -394,6 +405,16 @@ impl PartialEq for GpuTexture {
     }
 }
 impl GpuTexture {
+    /// Its view on the device the frame being drawn uses, and that device's
+    /// generation: as `GpuBuffer::device_buffer`.
+    #[cfg_attr(not(test), allow(dead_code))] // The materials lane's `Param`s bind it.
+    pub(crate) fn device_view(&self) -> Option<(u64, wgpu::TextureView)> {
+        self.0
+            .gpu
+            .borrow()
+            .as_ref()
+            .map(|(g, _, view)| (*g, view.clone()))
+    }
     /// Its width and height in texels.
     pub fn size(&self) -> (u32, u32) {
         self.0.desc.size
