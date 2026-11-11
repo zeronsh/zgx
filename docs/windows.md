@@ -254,7 +254,9 @@ These are NVIDIA's numbers; AMD's and Intel's drivers have not been measured.
 wgpu runs on Direct3D 12 alone (`WGPU_BACKEND` still overrides, among the
 backends built in). Every Windows 10 and 11 machine has a Direct3D 12
 adapter: where the GPU's driver has no Direct3D 12, Windows' WARP renders in
-software. GPUs that old (Intel before Skylake, AMD before GCN, NVIDIA before
+software. `WGPU_FORCE_FALLBACK_ADAPTER=1` takes WARP even beside a GPU, for
+Direct3D 12 and 11 alike, as CI's runners draw: to run the software lines
+or bless a `warp` family of goldens on a machine with a GPU. GPUs that old (Intel before Skylake, AMD before GCN, NVIDIA before
 Kepler) have no Windows Vulkan driver either, so Vulkan is a feature
 (`vulkan`, on zgx-desktop, zgx-script or zgx-gpu), off by default, for a
 driver whose Direct3D 12 fails: with it, Vulkan stands in where Direct3D 12
