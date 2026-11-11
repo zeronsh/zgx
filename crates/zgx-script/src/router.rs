@@ -112,13 +112,26 @@ local function router(spec)
     end
     local self = {}
     self.route = new_state(route_at(spec.initial or "/", 2))
+    -- The places behind and ahead, each kept as one string, its route's
+    -- name and path (`packed`), not the route's tables: those are made as
+    -- the app moves, among what the move made and dropped, and kept they
+    -- held a heap page each long after the rest of it was free (about 6 KB
+    -- a step for 130 B of history). A string is interned, so going between
+    -- the same places again keeps nothing new; a new place keeps its bytes.
     local behind, ahead = {}, {}
-    -- A place behind, the oldest let go past the last `most`. Each is a few
-    -- small tables made as the app moves, among what that move made and
-    -- dropped: kept without end, they hold a page of the heap each long
-    -- after the rest of it is free.
+    local function packed(route)
+        return route.name .. "\0" .. route.path
+    end
+    -- A place kept, as the route it was: its params read from its path by
+    -- its route's pattern, as `navigate` and `open` make them.
+    local function unpacked(place)
+        local at = string.find(place, "\0", 1, true)
+        local name, path = string.sub(place, 1, at - 1), string.sub(place, at + 1)
+        return { name = name, path = path, params = match(by_name[name].pattern, path) }
+    end
+    -- A place behind, the oldest let go past the last `most`.
     local function leave(route)
-        table.insert(behind, route)
+        table.insert(behind, packed(route))
         if #behind > most then
             table.remove(behind, 1)
         end
@@ -163,8 +176,8 @@ local function router(spec)
             return
         end
         ui.batch(function()
-            table.insert(ahead, self.route:peek())
-            self.route:set(table.remove(behind))
+            table.insert(ahead, packed(self.route:peek()))
+            self.route:set(unpacked(table.remove(behind)))
             moved()
         end)
     end
@@ -174,7 +187,7 @@ local function router(spec)
         end
         ui.batch(function()
             leave(self.route:peek())
-            self.route:set(table.remove(ahead))
+            self.route:set(unpacked(table.remove(ahead)))
             moved()
         end)
     end

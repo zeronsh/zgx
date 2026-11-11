@@ -213,6 +213,71 @@ fn history_keeps_as_many_as_asked() {
     assert_eq!(app("math.huge"), "150 /thread/0; error error error");
 }
 
+/// Unlimited history keeps each place in its own bytes: 1,200 moves among
+/// 40 places, each made amid the tables a move makes and drops (a chat
+/// switch's), hold under 1 MB once collected, and under 256 KB more than the
+/// same moves keeping one place, where a place kept as the route's tables
+/// held a heap page each (1.1 MB more); back still returns through every
+/// one to the first, each with its params.
+#[test]
+fn unlimited_history_keeps_each_place_in_its_own_bytes() {
+    let moves = |history: &str| {
+        let mut h = Harness::inline(&format!(
+            r##"local router = ui.router {{ routes = {{ home = "/", thread = "/thread/:id" }}, history = {history} }}
+            local moved = ui.state("moved", "")
+            local made = {{}}
+            return ui.column {{
+                ui.text {{ id = "moved", "{{moved}}" }},
+                ui.button {{ id = "go", w = 40, h = 20, "go", on_click = function()
+                    for i = 1, 1200 do
+                        -- What a move makes and drops, shaped as a route is.
+                        for j = 1, 300 do
+                            made[j] = {{ name = "thread", path = "/thread/" .. j, params = {{ id = tostring(j) }} }}
+                        end
+                        router.navigate("thread", {{ id = i % 40 }})
+                    end
+                    table.clear(made)
+                end }},
+                ui.button {{ id = "back", w = 40, h = 20, "back", on_click = function()
+                    router.back()
+                    local r = router.route:peek()
+                    moved:set(`{{r.name}} {{r.path}} {{r.params.id}}`)
+                end }},
+                ui.button {{ id = "all-back", w = 40, h = 20, "all", on_click = function()
+                    local steps = 0
+                    while router.can_back:peek() do router.back() steps += 1 end
+                    moved:set(`{{steps}} {{router.route:peek().name}} {{router.route:peek().path}}`)
+                end }},
+            }}"##
+        ));
+        h.settle();
+        let before = h.host.script_memory();
+        h.click("go");
+        let held = h.host.script_memory().saturating_sub(before);
+        (h, held)
+    };
+    let (_, one) = moves("1");
+    let (mut h, all) = moves("math.huge");
+    assert!(all < 1_000_000, "1,200 places held {} KB", all / 1024);
+    assert!(
+        all < one + 256_000,
+        "unlimited history held {} KB more than one place",
+        all.saturating_sub(one) / 1024
+    );
+    h.click("back");
+    assert_eq!(
+        h.text("moved"),
+        "thread /thread/39 39",
+        "a place behind, as it was"
+    );
+    h.click("all-back");
+    assert_eq!(
+        h.text("moved"),
+        "1199 home /",
+        "every place, back to the first"
+    );
+}
+
 #[test]
 fn a_swipe_between_pages_over_the_view_goes_back_and_forward() {
     use zgx::input::{Navigation, ScrollGesture};
