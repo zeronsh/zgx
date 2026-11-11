@@ -346,16 +346,25 @@ pub(crate) fn host(
     drop(renderer);
 }
 
+/// How long dropping the engine waits for the host to close the device:
+/// past it, a driver that hangs closing its stream is left to finish on
+/// the host's thread, and the app goes on.
+const QUIT: Duration = Duration::from_secs(2);
+
 /// The host's handle, as [`Audio`](crate::Audio) holds it.
 pub(crate) struct Host {
     pub messages: Sender<Message>,
     pub thread: Option<std::thread::JoinHandle<()>>,
+    /// Closed when the host's thread returns.
+    pub quit: std::sync::mpsc::Receiver<()>,
 }
 
 impl Drop for Host {
     fn drop(&mut self) {
         let _ = self.messages.send(Message::Quit);
-        if let Some(thread) = self.thread.take() {
+        if let Err(std::sync::mpsc::RecvTimeoutError::Disconnected) = self.quit.recv_timeout(QUIT)
+            && let Some(thread) = self.thread.take()
+        {
             let _ = thread.join();
         }
     }

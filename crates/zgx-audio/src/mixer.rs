@@ -10,7 +10,7 @@ use crate::ramp::{Curve, Ramp, Smoothed};
 use crate::resample::{Interpolation, ONE, Position, Region, Resampler, Step};
 use crate::ring::Reader;
 use crate::sound::SoundData;
-use std::collections::BinaryHeap;
+use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -274,6 +274,104 @@ struct Scheduled {
     time: u64,
     seq: u64,
     command: Command,
+}
+
+/// The ids of plays waiting for a slot, so a command for a voice not found
+/// asks this, not every command waiting, whether its play is still to
+/// come. A fixed table, open addressed: made up front, it never
+/// allocates. Past half full, an id isn't kept but counted, and only then
+/// are the waiting commands searched.
+pub(crate) struct Retrying {
+    /// 0: empty (no voice has id 0).
+    slots: Box<[u64]>,
+    /// The most kept at once: half the slots.
+    held: usize,
+    len: usize,
+    /// Waiting plays not in the table.
+    overflow: usize,
+}
+
+impl Retrying {
+    /// Room for `held` at once (made a power of two, from 16 to 2^16).
+    fn new(held: usize) -> Retrying {
+        let held = held.clamp(16, 1 << 16).next_power_of_two();
+        Retrying {
+            slots: vec![0; held * 2].into(),
+            held,
+            len: 0,
+            overflow: 0,
+        }
+    }
+
+    fn home(&self, id: u64) -> usize {
+        // Fibonacci hashing: ids are consecutive, their slots spread.
+        (id.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 32) as usize & (self.slots.len() - 1)
+    }
+
+    fn contains(&self, id: u64) -> bool {
+        let mask = self.slots.len() - 1;
+        let mut at = self.home(id);
+        loop {
+            match self.slots[at] {
+                0 => return false,
+                held if held == id => return true,
+                _ => at = (at + 1) & mask,
+            }
+        }
+    }
+
+    /// Keeps `id`, or counts it if the table is half full.
+    fn add(&mut self, id: u64) {
+        if self.len >= self.held {
+            self.overflow += 1;
+            return;
+        }
+        let mask = self.slots.len() - 1;
+        let mut at = self.home(id);
+        while self.slots[at] != 0 {
+            at = (at + 1) & mask;
+        }
+        self.slots[at] = id;
+        self.len += 1;
+    }
+
+    /// Lets `id` go: out of the table, or off the count.
+    fn remove(&mut self, id: u64) {
+        let mask = self.slots.len() - 1;
+        let mut at = self.home(id);
+        loop {
+            match self.slots[at] {
+                0 => {
+                    self.overflow = self.overflow.saturating_sub(1);
+                    return;
+                }
+                held if held == id => break,
+                _ => at = (at + 1) & mask,
+            }
+        }
+        // Each one after it in its run moves back if it may (backward
+        // shift: no markers left behind, so a search ends at a gap).
+        self.slots[at] = 0;
+        self.len -= 1;
+        let mut gap = at;
+        let mut next = (at + 1) & mask;
+        while self.slots[next] != 0 {
+            let home = self.home(self.slots[next]);
+            // It may fill the gap unless its home lies after the gap, up to
+            // where it sits (cyclically).
+            let stays = if gap <= next {
+                gap < home && home <= next
+            } else {
+                gap < home || home <= next
+            };
+            if !stays {
+                self.slots[gap] = self.slots[next];
+                self.slots[next] = 0;
+                gap = next;
+            }
+            next = (next + 1) & mask;
+        }
+    }
 }
 impl PartialEq for Scheduled {
     fn eq(&self, other: &Self) -> bool {
@@ -817,6 +915,16 @@ pub(crate) struct Mixer {
     returns: Producer<Return>,
     meter: Arc<Meter>,
     schedule: BinaryHeap<Scheduled>,
+    /// Plays that found no slot, and commands sent for their voices, in
+    /// the order sent: only the first is tried, every [`RETRY`] frames,
+    /// and those behind it wait their turn, so a crowd waiting costs a
+    /// block one try, not one each. Made with room for the schedule's
+    /// whole room: what's here left the schedule, and together they never
+    /// pass it.
+    waiting: VecDeque<Command>,
+    /// When the first waiting is tried again.
+    retry_at: u64,
+    retrying: Box<Retrying>,
     /// Commands the schedule holds at most: its room, as configured (the
     /// heap's own capacity may be more).
     room: usize,
@@ -879,6 +987,9 @@ impl Mixer {
             returns,
             meter,
             schedule: BinaryHeap::with_capacity(setup.commands),
+            waiting: VecDeque::with_capacity(setup.commands),
+            retry_at: 0,
+            retrying: Box::new(Retrying::new(setup.commands)),
             room: setup.commands,
             seq: 0,
             voices: (0..setup.voices + FADING_SLOTS)
@@ -951,7 +1062,9 @@ impl Mixer {
         self.follow_drives(0);
         self.apply_due();
         self.meter.collected.store(self.collected, Ordering::SeqCst);
-        self.voices.iter().any(|v| v.id != 0) || !self.schedule.is_empty()
+        self.voices.iter().any(|v| v.id != 0)
+            || !self.schedule.is_empty()
+            || !self.waiting.is_empty()
     }
 
     /// Mixes at `rate` from now on: a device whose rate isn't the one the
@@ -997,13 +1110,18 @@ impl Mixer {
         while done < frames {
             self.apply_due();
             let mut n = (frames - done).min(MAX_BLOCK);
-            if let Some(next) = self.schedule.peek() {
+            let retry = (!self.waiting.is_empty()).then_some(self.retry_at);
+            if let Some(next) = self
+                .schedule
+                .peek()
+                .map(|s| s.time)
+                .into_iter()
+                .chain(retry)
+                .min()
+            {
                 // Kept to a block in u64 before it's a usize: a command
                 // 2^32 frames away is no block of 0 on a 32-bit target.
-                let until = next
-                    .time
-                    .saturating_sub(self.now)
-                    .clamp(1, MAX_BLOCK as u64);
+                let until = next.saturating_sub(self.now).clamp(1, MAX_BLOCK as u64);
                 n = n.min(until as usize);
             }
             if self.effects > 0 {
@@ -1066,19 +1184,30 @@ impl Mixer {
             && self.chains[..self.bus_count]
                 .iter()
                 .any(|c| c.horizon > self.now);
-        if self.voices.iter().any(|v| v.id != 0) || !quiet || ringing || !self.schedule.is_empty() {
+        if self.voices.iter().any(|v| v.id != 0)
+            || !quiet
+            || ringing
+            || !self.schedule.is_empty()
+            || !self.waiting.is_empty()
+        {
             meter.audible.store(self.now, Ordering::Relaxed);
         }
         if let Some(timing) = timing {
-            let after = |frames: u64| timing.heard + frames * 1_000_000_000 / u64::from(self.rate);
+            // A device's clock is its own: kept from wrapping at its end.
+            let after = |frames: u64| {
+                timing
+                    .heard
+                    .saturating_add(frames.saturating_mul(1_000_000_000) / u64::from(self.rate))
+            };
             meter.block_asked.store(timing.asked, Ordering::Relaxed);
             meter.block_heard.store(timing.heard, Ordering::Relaxed);
             if let Some(started) = self.started {
                 let latency = self.limiter.as_ref().map_or(0, Limiter::latency) as u64;
                 meter.play_asked.store(timing.asked, Ordering::Relaxed);
-                meter
-                    .play_heard
-                    .store(after(started - first + latency), Ordering::Release);
+                meter.play_heard.store(
+                    after(started.saturating_sub(first) + latency),
+                    Ordering::Release,
+                );
             }
         }
         meter.collected.store(self.collected, Ordering::SeqCst);
@@ -1098,7 +1227,7 @@ impl Mixer {
 
     /// Moves commands from the queue into the schedule, as many as fit.
     fn collect(&mut self) {
-        while self.schedule.len() < self.room {
+        while self.schedule.len() + self.waiting.len() < self.room {
             let Some((time, command)) = self.commands.pop() else {
                 break;
             };
@@ -1113,6 +1242,10 @@ impl Mixer {
     }
 
     fn apply_due(&mut self) {
+        // Those waiting were sent before anything due now: their turn first.
+        if !self.waiting.is_empty() && self.retry_at <= self.now {
+            self.retry_waiting();
+        }
         while self
             .schedule
             .peek()
@@ -1123,22 +1256,66 @@ impl Mixer {
             if time != 0 && time < self.now && matches!(command, Command::Play { .. }) {
                 self.late += 1;
             }
-            let result = self.apply(command);
-            if result.is_ok() {
-                self.taken += 1;
+            // Behind those waiting: a play, while any wait, and anything
+            // for a voice whose play waits.
+            let behind = match command {
+                Command::Play { .. } => !self.waiting.is_empty(),
+                Command::Stop { id, .. } | Command::Voice { id, .. } => self.waiting(id),
+                _ => false,
+            };
+            if behind {
+                self.wait(command);
+                continue;
             }
-            if let Err(command) = result {
-                // No slot yet (or, for a stop or a change, its play has
-                // none yet): tried again a little later, in the order sent.
-                // The heap has room: this one just left it.
-                if matches!(command, Command::Play { .. }) {
-                    self.waited += 1;
+            match self.apply(command) {
+                Ok(()) => self.taken += 1,
+                Err(command @ Command::Play { .. }) => self.wait(command),
+                Err(command) => {
+                    // Nowhere yet to give back what it took off: tried again
+                    // a little later. The heap has room: this one just left.
+                    self.schedule.push(Scheduled {
+                        time: self.now.saturating_add(RETRY),
+                        seq,
+                        command,
+                    });
                 }
-                self.schedule.push(Scheduled {
-                    time: self.now + RETRY,
-                    seq,
-                    command,
-                });
+            }
+        }
+    }
+
+    /// Puts `command` at the back of those waiting.
+    fn wait(&mut self, command: Command) {
+        if self.waiting.is_empty() {
+            self.retry_at = self.now.saturating_add(RETRY);
+        }
+        if let Command::Play { id, .. } = command {
+            self.waited += 1;
+            self.retrying.add(id);
+        }
+        // Room made for the schedule's whole room: no allocation.
+        self.waiting.push_back(command);
+    }
+
+    /// Tries those waiting in order, until one still can't be done.
+    fn retry_waiting(&mut self) {
+        while let Some(command) = self.waiting.pop_front() {
+            let play = match command {
+                Command::Play { id, .. } => Some(id),
+                _ => None,
+            };
+            match self.apply(command) {
+                Ok(()) => {
+                    self.taken += 1;
+                    if let Some(id) = play {
+                        self.retrying.remove(id);
+                    }
+                }
+                Err(command) => {
+                    // Still no slot: the rest wait behind it.
+                    self.waiting.push_front(command);
+                    self.retry_at = self.now.saturating_add(RETRY);
+                    return;
+                }
             }
         }
     }
@@ -1147,12 +1324,15 @@ impl Mixer {
         self.voices.iter_mut().find(|v| v.id == id && !v.ended)
     }
 
-    /// Whether the play of voice `id` waits in the schedule for a slot:
-    /// then what's sent for it after waits too, rather than be lost.
+    /// Whether the play of voice `id` waits for a slot: then what's sent
+    /// for it after waits too, rather than be lost.
     fn waiting(&self, id: u64) -> bool {
-        self.schedule
-            .iter()
-            .any(|s| matches!(s.command, Command::Play { id: play, .. } if play == id))
+        self.retrying.contains(id)
+            || (self.retrying.overflow > 0
+                && self
+                    .waiting
+                    .iter()
+                    .any(|c| matches!(c, Command::Play { id: play, .. } if *play == id)))
     }
 
     fn apply(&mut self, command: Command) -> Result<(), Command> {
@@ -1261,6 +1441,9 @@ impl Mixer {
                     .and_then(|slot| slot.params.get_mut(usize::from(index)));
                 if let Some(param) = param {
                     let value = if value.is_nan() { param.min } else { value };
+                    // The curves for gains take values as gains: none
+                    // below zero. A range that goes there moves straight.
+                    let curve = if param.min < 0. { Curve::Linear } else { curve };
                     param
                         .smoothed
                         .set(value.clamp(param.min, param.max), frames, curve);
@@ -1622,7 +1805,8 @@ fn run_effects(
     if now.is_multiple_of(CELL) {
         if chain.fed {
             let tail = chain.effects.iter().map(|slot| slot.tail()).max();
-            chain.horizon = now + tail.unwrap_or(0);
+            // A tail as long as time (`Duration::MAX`) rings for ever.
+            chain.horizon = now.saturating_add(tail.unwrap_or(0));
         }
         chain.active = now < chain.horizon;
         chain.fed = false;
@@ -1737,5 +1921,46 @@ fn sum_into(
     for i in 0..n {
         left[i] += bus.left[i] * gains[i];
         right[i] += bus.right[i] * gains[i];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn the_retried_plays_table_holds_what_a_set_would() {
+        let mut table = Retrying::new(2_048);
+        let mut set = HashSet::new();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = 1u64;
+        for _ in 0..200_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            if !seed.is_multiple_of(3) && set.len() < table.held {
+                table.add(next);
+                set.insert(next);
+                next += 1;
+            } else if let Some(&id) = set.iter().next() {
+                table.remove(id);
+                set.remove(&id);
+            }
+            let probe = seed % next.max(1);
+            assert_eq!(table.contains(probe), set.contains(&probe), "id {probe}");
+        }
+        assert_eq!(table.len, set.len());
+        assert_eq!(table.overflow, 0);
+        // Past what it holds: counted, and uncounted as they go.
+        for id in &set {
+            table.remove(*id);
+        }
+        for id in 0..table.held as u64 + 5 {
+            table.add(next + id);
+        }
+        assert_eq!((table.len, table.overflow), (table.held, 5));
+        table.remove(u64::MAX);
+        assert_eq!(table.overflow, 4);
     }
 }

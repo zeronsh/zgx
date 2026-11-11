@@ -744,3 +744,86 @@ fn ended_voices_no_one_asks_about_are_not_kept_forever() {
     assert!(kept <= 65_536, "{kept} ids kept for no one");
     assert!(kept > 0);
 }
+
+#[test]
+fn a_time_past_the_clock_s_end_is_its_end() {
+    let (audio, _mixer) = Audio::offline(unlimited()).unwrap();
+    let never = audio.now() + 1 + audio.seconds(f64::INFINITY);
+    assert_eq!(never, Time(u64::MAX));
+    assert_eq!(Time(u64::MAX - 1) + 5, Time(u64::MAX));
+    // Something due then never sounds, and nothing breaks.
+    let tone = sound(&tone(440., 0.1, RATE), 1, RATE);
+    audio.play(&tone, Play::new().at(never)).unwrap();
+}
+
+#[test]
+fn commands_for_ended_voices_cost_the_same_however_many_plays_wait() {
+    // A crowd of plays far ahead, and a block of changes to voices that
+    // have ended: the changes must not each search the crowd.
+    let block = |ahead: usize| -> std::time::Duration {
+        let (audio, mut mixer) = Audio::offline(Config {
+            commands: 131_072,
+            ..unlimited()
+        })
+        .unwrap();
+        let blip = sound(&[0., 0.5], 1, RATE);
+        let ended: Vec<_> = (0..64)
+            .map(|_| audio.play(&blip, Play::new()).unwrap())
+            .collect();
+        mixer.frames(256);
+        for k in 0..ahead {
+            audio
+                .play(&blip, Play::new().at(Time(1_000_000_000 + k as u64)))
+                .unwrap();
+        }
+        mixer.frames(128);
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..5 {
+            for voice in &ended {
+                let _ = voice.set_gain(0.5, Ramp::NONE);
+            }
+            let began = std::time::Instant::now();
+            mixer.frames(128);
+            best = best.min(began.elapsed());
+        }
+        best
+    };
+    let (alone, crowded) = (block(0), block(90_000));
+    assert!(
+        crowded < alone * 20 + std::time::Duration::from_micros(500),
+        "{crowded:?} with plays waiting, {alone:?} without"
+    );
+}
+
+#[test]
+fn a_crowd_of_plays_due_at_once_costs_a_block_no_more_than_a_few_do() {
+    // Plays all due on one frame, far more than there are voices: those
+    // that find no slot wait. Waiting must not cost each block a try of
+    // every one of them.
+    let worst = |plays: usize| -> std::time::Duration {
+        let (audio, mut mixer) = Audio::offline(Config {
+            commands: 131_072,
+            ..unlimited()
+        })
+        .unwrap();
+        let tone = sound(&tone(440., 1., RATE), 1, RATE);
+        for _ in 0..plays {
+            audio.play(&tone, Play::new().at(Time(1_024))).unwrap();
+        }
+        // The block they come due in looks at each once, as it would any
+        // command due: the blocks after, while they wait, are what's timed.
+        mixer.frames(1_024 + 128);
+        let mut worst = std::time::Duration::ZERO;
+        for _ in 0..40 {
+            let began = std::time::Instant::now();
+            mixer.frames(128);
+            worst = worst.max(began.elapsed());
+        }
+        worst
+    };
+    let (few, crowd) = (worst(200), worst(90_000));
+    assert!(
+        crowd < few * 20 + std::time::Duration::from_millis(1),
+        "{crowd:?} a block with a crowd waiting, {few:?} with a few"
+    );
+}

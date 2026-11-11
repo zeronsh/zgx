@@ -85,8 +85,9 @@ pub struct Time(pub u64);
 
 impl Add<u64> for Time {
     type Output = Time;
+    /// Past the clock's last frame is its last frame: never.
     fn add(self, frames: u64) -> Time {
-        Time(self.0 + frames)
+        Time(self.0.saturating_add(frames))
     }
 }
 
@@ -278,8 +279,11 @@ struct Control {
     buses: Vec<(String, u16)>,
     /// Voices sent and not yet given back.
     live: HashSet<u64>,
-    /// Each effect sent and not removed, by id: its bus.
-    effects: Vec<(u64, u16)>,
+    /// Each effect on a bus or on its way to one: its id, its bus, and
+    /// whether its removal is sent for a later frame. One leaving holds
+    /// its place until the mixer gives it back, so a bus never takes more
+    /// than it can hold.
+    effects: Vec<(u64, u16, bool)>,
 }
 
 /// The device and its host thread, made when first needed.
@@ -417,14 +421,19 @@ impl Audio {
                 unreachable!()
             };
             let (messages, inbox) = std::sync::mpsc::channel();
+            let (quitting, quit) = std::sync::mpsc::channel::<()>();
             let meter = self.0.meter.clone();
             let thread = std::thread::Builder::new()
                 .name("zgx-audio".into())
-                .spawn(move || crate::device::host(device, renderer, inbox, meter, hold))
+                .spawn(move || {
+                    crate::device::host(device, renderer, inbox, meter, hold);
+                    drop(quitting);
+                })
                 .expect("a thread for the audio device");
             *hosting = Hosting::Running(Host {
                 messages,
                 thread: Some(thread),
+                quit,
             });
         }
         if let Hosting::Running(host) = &*hosting {
@@ -532,7 +541,7 @@ impl Audio {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Sounds and effects the mixer is done with are dropped here, on
         // this thread.
-        let mut again = Vec::new();
+        let mut again: Vec<(u64, Command)> = Vec::new();
         while let Some(back) = control.returns.pop() {
             match back {
                 Return::Ended { id, sound } => {
@@ -544,17 +553,31 @@ impl Audio {
                     control.ended.push(id);
                     drop(sound);
                 }
-                Return::Effect(slot) => drop(slot),
+                Return::Effect(slot) => {
+                    control.effects.retain(|e| e.0 != slot.id);
+                    drop(slot);
+                }
                 Return::Unprepared { bus, mut slot } => {
-                    slot.prepare(self.rate());
-                    again.push(Command::AddEffect { bus, slot });
+                    // Sent again only if it's still to stay on its bus: a
+                    // removal sent meanwhile may have found nothing to
+                    // take off, and it would run for ever.
+                    let id = slot.id;
+                    if control.effects.iter().any(|e| e.0 == id && !e.2) {
+                        slot.prepare(self.rate());
+                        again.push((id, Command::AddEffect { bus, slot }));
+                    } else {
+                        control.effects.retain(|e| e.0 != id);
+                        drop(slot);
+                    }
                 }
             }
         }
-        for command in again {
+        for (id, command) in again {
             // Sent again as soon as it can be; on a full queue it's lost,
-            // as any command sent then would be.
-            let _ = self.push(&mut control, 0, command);
+            // as any command sent then would be, and off the books.
+            if self.push(&mut control, 0, command).is_err() {
+                control.effects.retain(|e| e.0 != id);
+            }
         }
         control
     }
@@ -1184,11 +1207,7 @@ impl Bus {
             }
         }
         let mut control = self.audio.control();
-        let held = control
-            .effects
-            .iter()
-            .filter(|(_, bus)| *bus == self.index)
-            .count();
+        let held = control.effects.iter().filter(|e| e.1 == self.index).count();
         if held >= MAX_EFFECTS {
             return Err(Error::TooManyEffects);
         }
@@ -1200,7 +1219,7 @@ impl Bus {
         };
         self.audio.push(&mut control, self.time, command)?;
         control.next_id += 1;
-        control.effects.push((id, self.index));
+        control.effects.push((id, self.index, false));
         Ok(EffectHandle {
             audio: self.audio.clone(),
             id,
@@ -1229,7 +1248,10 @@ impl EffectHandle {
 
     /// Moves parameter `index` to `value`, kept to its range, along `ramp`:
     /// the effect sees each frame's value. An index the effect hasn't is
-    /// ignored.
+    /// ignored. The curves for gains ([`Curve::EqualPower`],
+    /// [`Curve::Exponential`]) take values as gains, none below zero: a
+    /// parameter whose range goes below zero (decibels, mostly) moves in
+    /// straight steps whatever the ramp's curve.
     pub fn set(&self, index: usize, value: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         let ramp = ramp.into();
         self.audio.send(
@@ -1244,15 +1266,25 @@ impl EffectHandle {
     }
 
     /// Takes it off its bus, at once: its tail is cut. It's dropped on
-    /// this thread by a later call.
+    /// this thread by a later call. Taken off at a later frame, it holds
+    /// its place on the bus until then.
     pub fn remove(&self) -> Result<(), Error> {
         let mut control = self.audio.control();
+        let later = self.time > self.audio.now().0;
         self.audio.push(
             &mut control,
             self.time,
             Command::RemoveEffect { id: self.id },
         )?;
-        control.effects.retain(|(id, _)| *id != self.id);
+        if later {
+            // Off the books when the mixer gives it back.
+            for e in control.effects.iter_mut().filter(|e| e.0 == self.id) {
+                e.2 = true;
+            }
+        } else {
+            // The mixer takes it off before anything sent after.
+            control.effects.retain(|e| e.0 != self.id);
+        }
         Ok(())
     }
 }
@@ -1329,6 +1361,46 @@ mod tests {
         audio.update();
         assert_eq!(mixer.frames(64)[2], 0.5);
         assert_eq!(*prepared.lock().unwrap(), [44_100, 48_000]);
+    }
+
+    #[test]
+    fn an_effect_taken_off_before_a_change_of_rate_reached_it_stays_off() {
+        struct Doubles(Arc<std::sync::atomic::AtomicBool>);
+        impl Effect for Doubles {
+            fn prepare(&mut self, _: crate::Format, _: usize) {}
+            fn process(&mut self, block: &mut [f32], _: &crate::Context<'_>) {
+                block.iter_mut().for_each(|s| *s *= 2.);
+            }
+        }
+        impl Drop for Doubles {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let flat = Sound::from_samples(&[0., 0.25], 1, 48_000).unwrap();
+        let (audio, mut mixer) = Audio::offline(Config {
+            limiter: None,
+            ..Config::default()
+        })
+        .unwrap();
+        audio.play(&flat, Play::new().loop_frames(1..2)).unwrap();
+        let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        audio.0.meter.rate.store(44_100, Ordering::Release);
+        let effect = audio.master().add_effect(Doubles(dropped.clone())).unwrap();
+        audio.0.meter.rate.store(48_000, Ordering::Release);
+        // Taken off before the mixer saw it: the mixer gives it back to be
+        // made again, then finds nothing to take off.
+        effect.remove().unwrap();
+        assert_eq!(mixer.frames(64)[2], 0.25);
+        // So it isn't sent again, to run for ever: it's dropped here.
+        audio.update();
+        assert_eq!(mixer.frames(64)[2], 0.25, "it runs after its removal");
+        audio.update();
+        assert!(dropped.load(Ordering::Relaxed));
+        // And its place on the bus is free.
+        for _ in 0..MAX_EFFECTS {
+            audio.master().add_effect(Doubles(Arc::default())).unwrap();
+        }
     }
 
     #[test]

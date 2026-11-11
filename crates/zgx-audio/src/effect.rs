@@ -71,7 +71,7 @@ pub trait Effect: Send + 'static {
     /// the same rules as `process`) every 128 frames of the clock after one
     /// that brought sound, so it can follow the effect's parameters; how
     /// long its sound outlasts the last sound in, to within those 128
-    /// frames.
+    /// frames. `Duration::MAX` rings for ever: the bus never rests.
     fn tail(&self) -> Duration {
         Duration::ZERO
     }
@@ -217,10 +217,14 @@ impl Slot {
     /// by `n` frames.
     pub fn process(&mut self, block: &mut [f32], n: usize, time: u64, side: Option<f32>) {
         for param in self.params.iter_mut() {
-            param.first = param.smoothed.value();
+            let (min, max) = (param.min, param.max);
+            param.first = param.smoothed.value().clamp(min, max);
             param.moving = !param.smoothed.settled();
             if param.moving {
-                param.smoothed.fill(&mut param.values[..n]);
+                // Kept to its range whatever a curve's rounding does.
+                let values = &mut param.values[..n];
+                param.smoothed.fill(values);
+                values.iter_mut().for_each(|v| *v = v.clamp(min, max));
             }
         }
         let context = Context {

@@ -435,3 +435,89 @@ fn an_effect_with_parameters_that_can_t_be_kept_or_a_foreign_side_chain_is_an_er
     ui.add_effect(Odd(Parameter::new("fine", 2., 0., 1.)))
         .unwrap();
 }
+
+/// Rings for ever: its tail is as long as a `Duration` goes.
+struct Forever(Arc<AtomicUsize>);
+impl Effect for Forever {
+    fn prepare(&mut self, _: Format, _: usize) {}
+    fn process(&mut self, _: &mut [f32], _: &Context<'_>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+    fn tail(&self) -> Duration {
+        Duration::MAX
+    }
+}
+
+#[test]
+fn an_effect_that_rings_for_ever_runs_for_ever() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let world = audio.bus("world").unwrap();
+    world.add_effect(Forever(calls.clone())).unwrap();
+    let click = Sound::from_samples(&[0., 0.5], 1, RATE).unwrap();
+    audio.play(&click, Play::new().bus(&world)).unwrap();
+    mixer.frames(4096);
+    let ran = calls.load(Ordering::Relaxed);
+    mixer.frames(4096);
+    // Long after its sound, still run on every block.
+    assert!(
+        calls.load(Ordering::Relaxed) >= ran + 4096 / 512,
+        "its tail was cut"
+    );
+}
+
+#[test]
+fn a_gain_s_curve_moves_a_parameter_that_goes_below_zero_in_straight_steps() {
+    use zgx_audio::Curve;
+    for curve in [Curve::EqualPower, Curve::Exponential] {
+        let out = render(400, |audio| {
+            let world = audio.bus("world").unwrap();
+            audio
+                .play(&flat(1e-3), Play::new().bus(&world).loop_frames(1..2))
+                .unwrap();
+            let show = world.add_effect(Show).unwrap();
+            // a (0 to 1) keeps the curve; b (-2 to 2), from -1 to -2,
+            // can't take one made for gains: it moves in straight steps.
+            let ramp = Ramp::seconds(100. / f64::from(RATE)).curve(curve);
+            show.at(Time(100)).set(0, 1., ramp).unwrap();
+            show.at(Time(100)).set(1, -2., ramp).unwrap();
+        });
+        let (a, b) = (left(&out), right(&out));
+        // (Frame 0 is the sound's first, a zero: nothing to run on yet.)
+        assert!(
+            b[1..].iter().all(|&v| (-2. ..=-1.).contains(&v)),
+            "{curve:?}: b left its way"
+        );
+        assert_eq!(b[150], -1.5, "{curve:?}: b halfway");
+        assert_eq!(b[300], -2.);
+        // a's halfway is the curve's, not a straight line's.
+        let want = match curve {
+            Curve::EqualPower => (0.5f32 * 0.5 * 0.5 + 0.5).sqrt(),
+            _ => (0.5f32.ln() * 0.5).exp(),
+        };
+        assert!(
+            (a[150] - want).abs() < 1e-6,
+            "{curve:?}: a at {} not {want}",
+            a[150]
+        );
+    }
+}
+
+#[test]
+fn an_effect_s_place_is_kept_until_its_removal_is_due() {
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let ui = audio.bus("ui").unwrap();
+    audio
+        .play(&flat(0.25), Play::new().bus(&ui).loop_frames(1..2))
+        .unwrap();
+    let held: Vec<_> = (0..8).map(|_| ui.add_effect(Scale(1.)).unwrap()).collect();
+    // Taken off at frame 1000: until then the bus is full, so a ninth
+    // can't be added only to be thrown away.
+    held[3].at(Time(1000)).remove().unwrap();
+    assert_eq!(ui.add_effect(Scale(2.)).unwrap_err(), Error::TooManyEffects);
+    mixer.frames(1100);
+    audio.update();
+    let doubled = ui.add_effect(Scale(2.)).unwrap();
+    assert_eq!(left(&mixer.frames(512))[511], 0.5, "the new one runs");
+    doubled.remove().unwrap();
+}

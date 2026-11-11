@@ -380,3 +380,113 @@ fn a_device_that_reports_a_format_the_mixer_can_t_run_at_is_a_failure_not_a_pani
         until("a start", || audio.stats().running);
     }
 }
+
+/// A device whose clock is at its end: it renders one block at once, as it
+/// starts, timed there, and says whether that went through.
+struct FarClock {
+    held: Option<Box<Renderer>>,
+    rendered: Arc<Mutex<Option<bool>>>,
+}
+
+impl Device for FarClock {
+    fn format(&mut self) -> Result<Format, String> {
+        Ok(Format {
+            rate: 48_000,
+            channels: 2,
+        })
+    }
+    fn start(
+        &mut self,
+        mut renderer: Box<Renderer>,
+        _: Format,
+    ) -> Result<(), (String, Box<Renderer>)> {
+        let mut out = vec![0f32; 256 * 2];
+        let went = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            renderer.render(
+                &mut out,
+                Some(Timing {
+                    asked: u64::MAX - 10,
+                    heard: u64::MAX - 10,
+                }),
+            );
+        }))
+        .is_ok();
+        *self.rendered.lock().unwrap() = Some(went);
+        self.held = Some(renderer);
+        Ok(())
+    }
+    fn stop(&mut self) -> Option<Box<Renderer>> {
+        self.held.take()
+    }
+    fn close(&mut self) -> Option<Box<Renderer>> {
+        self.held.take()
+    }
+    fn lost(&mut self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_device_clock_at_its_end_times_a_sound_without_overflowing() {
+    let rendered = Arc::new(Mutex::new(None));
+    let audio = Audio::with_device(
+        Config {
+            gain: 0.,
+            ..Config::default()
+        },
+        FarClock {
+            held: None,
+            rendered: rendered.clone(),
+        },
+    )
+    .unwrap();
+    // Due a few frames in: started in the rendered block, which times it.
+    audio.play(&blip(), Play::new().at(Time(10))).unwrap();
+    until("a block", || rendered.lock().unwrap().is_some());
+    assert_eq!(*rendered.lock().unwrap(), Some(true), "the render panicked");
+}
+
+/// A device whose stream won't close: a driver that hangs.
+struct Stuck(Option<Box<Renderer>>);
+
+impl Device for Stuck {
+    fn format(&mut self) -> Result<Format, String> {
+        Ok(Format {
+            rate: 48_000,
+            channels: 2,
+        })
+    }
+    fn start(&mut self, renderer: Box<Renderer>, _: Format) -> Result<(), (String, Box<Renderer>)> {
+        self.0 = Some(renderer);
+        Ok(())
+    }
+    fn stop(&mut self) -> Option<Box<Renderer>> {
+        self.close()
+    }
+    fn close(&mut self) -> Option<Box<Renderer>> {
+        std::thread::sleep(Duration::from_secs(20));
+        self.0.take()
+    }
+    fn lost(&mut self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn dropping_the_engine_doesn_t_wait_on_a_device_that_won_t_close() {
+    let audio = Audio::with_device(
+        Config {
+            gain: 0.,
+            hold: Duration::from_secs(60),
+            ..Config::default()
+        },
+        Stuck(None),
+    )
+    .unwrap();
+    audio.prewarm();
+    until("a start", || audio.stats().running);
+    let began = Instant::now();
+    drop(audio);
+    let took = began.elapsed();
+    assert!(took < Duration::from_secs(5), "dropping waited {took:?}");
+}
