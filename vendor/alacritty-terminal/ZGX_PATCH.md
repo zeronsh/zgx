@@ -176,3 +176,18 @@ every cell, the history's too, and the cursor alike (with the wide
 character case left out, the first setup differs).
 `a_run_is_repeated_by_its_last_character` checks REP after a run. Version
 0.26.4.
+
+## XTGETTCAP answered
+
+`Term::request_termcap` answers each name asked for in a DCS string of its
+own, as kitty and foot do: `DCS 1 + r` and the name and value hex encoded
+(a flag without `=` and a value) for a capability it has, `DCS 0 + r` and
+the name as asked for one it hasn't. It reports what `TERM`
+(xterm-256color) has and what this terminal has beyond it, in terminfo's
+notation: `TN`, `name`, `Co` and `colors`; direct colour, `RGB`, tmux's `Tc`,
+`setrgbf` and `setrgbb`; OSC 52's `Ms`; the cursor's shape, `Ss` and `Se`;
+and underlines styled and coloured, `Smulx`, `Setulc` and kitty's `Su`.
+nvim asks for `Tc`, `RGB`, `setrgbf` and `setrgbb`, where `COLORTERM` isn't
+set, to turn on its own colours. `termcap_tests` check a value,
+a flag, an unknown name and one not hex, and every capability found by its
+name. Version 0.26.5, with `zgx-vte` 0.15.1.
