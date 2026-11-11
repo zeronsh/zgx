@@ -654,6 +654,7 @@ fn frames(scale: f32) -> Vec<Vec<u8>> {
     all.extend(cross_region_frames(scale));
     all.extend(view_frames(scale));
     all.extend(view_scene_frames(scale));
+    all.extend(blur_frames(scale));
     all
 }
 
@@ -811,6 +812,187 @@ fn view_frames(scale: f32) -> Vec<Vec<u8>> {
 }
 #[cfg(windows)]
 const VIEW_SIZE: (f32, f32) = (240., 160.);
+
+/// Backdrop blurs (`Effects::blur_radius`), drawn as Direct3D 12 draws them
+/// (blur.wgsl's passes into an atlas, then back over the target): a plain
+/// one, one fading at its edges, one saturated and brightened, zgx-fx's
+/// frosted lens and fluted glass, and glass reading the backdrop over a blur
+/// of its own (`BLUR_NAMES`). A bar moves under them all each frame, so each
+/// blurs again. Each cell must change with it, and the plain blur must not
+/// be its box opaque (as Direct3D 11 drew one, left out).
+#[cfg(windows)]
+fn blur_frames(scale: f32) -> Vec<Vec<u8>> {
+    use zgx::decoration::{FillShader, ShaderUniforms};
+    use zgx::scene::*;
+    let (cell, columns) = (BLUR_CELL, 3);
+    let size = (cell.0 * columns as f32, cell.1 * 2.);
+    let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let mut scene = Scene::new(size.0, size.1);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    let fixed = |width: f32, height: f32| Style {
+        width: Some(width),
+        height: Some(height),
+        ..Default::default()
+    };
+    // A checker of stripes and columns, then the bar that moves.
+    for i in 0..(size.1 / 12.).ceil() as usize {
+        let colour = match i % 2 {
+            0 => Color(30, 60, 200, 255),
+            _ => Color(230, 130, 30, 255),
+        };
+        let stripe = scene.append(root, NodeKind::Rect(colour), fixed(size.0, 12.));
+        scene.set_transform(
+            stripe,
+            Transform {
+                x: 0.,
+                y: i as f32 * 12.,
+            },
+        );
+    }
+    for j in (1..(size.0 / 12.).ceil() as usize).step_by(2) {
+        let column = scene.append(
+            root,
+            NodeKind::Rect(Color(40, 200, 90, 140)),
+            fixed(12., size.1),
+        );
+        scene.set_transform(
+            column,
+            Transform {
+                x: j as f32 * 12.,
+                y: 0.,
+            },
+        );
+    }
+    let bar = scene.append(
+        root,
+        NodeKind::Rect(Color(250, 250, 250, 255)),
+        fixed(30., size.1),
+    );
+    let fx = |name: &str| {
+        zgx_fx::catalog()
+            .into_iter()
+            .find(|(fx_name, _)| fx_name == name)
+            .unwrap_or_else(|| panic!("no {name} in zgx-fx's catalog"))
+            .1
+    };
+    let mix = FillShader::new(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+    let behind = zgx_backdrop(input.p + vec2(3., 2.));
+    return vec4(mix(behind.rgb, input.color.rgb, 0.3), max(behind.a, input.color.a));
+}",
+        None,
+    );
+    let now = std::time::Instant::now();
+    let boxes: Vec<NodeId> = (0..BLUR_NAMES.len())
+        .map(|index| {
+            let id = scene.append(
+                root,
+                NodeKind::Panel {
+                    layout: Layout::Overlay,
+                    quad: QuadStyle {
+                        radius: 8.,
+                        fill: Color(20, 24, 32, 110),
+                        ..Default::default()
+                    },
+                },
+                fixed(cell.0 - 32., cell.1 - 24.),
+            );
+            scene.set_transform(
+                id,
+                Transform {
+                    x: (index % columns) as f32 * cell.0 + 16.,
+                    y: (index / columns) as f32 * cell.1 + 12.,
+                },
+            );
+            let blur = |radius: f32| Effects {
+                blur_radius: radius,
+                ..Default::default()
+            };
+            match index {
+                0 => scene.set_effects(id, blur(12.)),
+                1 => scene.set_effects(
+                    id,
+                    Effects {
+                        edge_fade: 12.,
+                        ..blur(8.)
+                    },
+                ),
+                2 => scene.set_effects(
+                    id,
+                    Effects {
+                        saturate: 1.6,
+                        brightness: 1.1,
+                        ..blur(10.)
+                    },
+                ),
+                3 => fx("lens frosted").apply(&mut scene, id, 0.4, false, now),
+                4 => fx("fluted_glass frosted").apply(&mut scene, id, 0.4, false, now),
+                _ => {
+                    scene.set_effects(id, blur(10.));
+                    scene.set_layer_shader(id, Some(mix.clone()));
+                    scene.set_layer_uniforms(
+                        id,
+                        ShaderUniforms {
+                            time: 0.,
+                            params: [[0.; 4]; 4],
+                        },
+                    );
+                }
+            }
+            id
+        })
+        .collect();
+    let width = (size.0 * scale) as usize;
+    // The bar's left edge: over each column's middle (56, 168, 280) in turn,
+    // so each cell's middle changes from one frame to the next.
+    let frames: Vec<Vec<u8>> = [41., 153., 265., 306.]
+        .into_iter()
+        .map(|x| {
+            scene.set_transform(bar, Transform { x, y: 0. });
+            let report = scene.flush();
+            gpu.render(&scene, &report.damage).unwrap();
+            gpu.readback().unwrap()
+        })
+        .collect();
+    let at = |frame: &[u8], x: f32, y: f32| {
+        let i = ((y * scale) as usize * width + (x * scale) as usize) * 4;
+        [frame[i], frame[i + 1], frame[i + 2], frame[i + 3]]
+    };
+    for (index, name) in BLUR_NAMES.iter().enumerate() {
+        let (x, y) = (
+            (index % columns) as f32 * cell.0 + cell.0 / 2.,
+            (index / columns) as f32 * cell.1 + cell.1 / 2.,
+        );
+        let changes = frames
+            .windows(2)
+            .any(|pair| at(&pair[0], x, y) != at(&pair[1], x, y));
+        assert!(
+            changes,
+            "{name}: doesn't blur the bar moving under it at {scale}x"
+        );
+    }
+    let middle = at(&frames[0], cell.0 / 2., cell.1 / 2.);
+    assert!(
+        middle[3] == 255 && middle[..3] != [20, 24, 32],
+        "the plain blur drew as its box opaque: {middle:?} at {scale}x"
+    );
+    drop(boxes);
+    frames
+}
+#[cfg(windows)]
+const BLUR_CELL: (f32, f32) = (112., 80.);
+/// The blur frames' cells (`blur_frames`), for `where_`.
+#[cfg(windows)]
+const BLUR_NAMES: [&str; 6] = [
+    "backdrop blur",
+    "blur, edge fade",
+    "blur, saturated",
+    "lens frosted",
+    "fluted_glass frosted",
+    "glass over a blur",
+];
 
 /// Glass on a frame whose damage the scene's grid cuts (`CROSS_NAMES`): a
 /// box reading a bar 140 points below it (`zgx_backdrop` at an offset, its
@@ -1465,6 +1647,15 @@ fn where_(frame: usize, scale: f32, pixel: usize) -> String {
             LAYER_CELL,
             LAYER_COLUMNS,
             EFFECT_NAMES.map(String::from).to_vec(),
+        )
+    } else if frame
+        >= FRAMES + 3 + 5 + 4 + 2 + 2 + 5 + 2 + 3 + view_painters::VIEW_SCENE_NAMES.len() as u32
+    {
+        (
+            BLUR_CELL.0 * 3.,
+            BLUR_CELL,
+            3,
+            BLUR_NAMES.map(String::from).to_vec(),
         )
     } else if frame >= FRAMES + 3 + 5 + 4 + 2 + 2 + 5 + 2 + 3 {
         let name = view_painters::VIEW_SCENE_NAMES[(frame

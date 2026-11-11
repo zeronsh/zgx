@@ -650,7 +650,22 @@ jobs:
       - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --test d3d11_left_out --release --locked
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
-      - run: cargo test -p zgx-gpu --features d3d11 --lib --locked -- d3d11_frame
+      # Its ahead-compiled shaders (dxbc/) are FXC's bytecode of naga's HLSL
+      # today; stale ones are kept for a machine without FXC to take (and
+      # checked when the parity above failed: stale shaders fail it).
+      - name: Direct3D 11 shaders compiled ahead
+        if: ${{ !cancelled() }}
+        run: cargo test -p zgx-gpu --features d3d11 --lib --locked -- d3d11_frame
+        env:
+          ZGX_SHADER_OUT: ${{ runner.temp }}\zgx-d3d11-dxbc
+      - name: Keep the Direct3D 11 shaders compiled afresh
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: d3d11-dxbc
+          retention-days: 7
+          if-no-files-found: ignore
+          path: ${{ runner.temp }}\zgx-d3d11-dxbc
       # zgx-video's tests, as the linux and macOS jobs run them, with
       # ffmpeg (without it, the tests of what it encodes pass by skipping).
       # On a pull request only when it changes what zgx-video compiles:

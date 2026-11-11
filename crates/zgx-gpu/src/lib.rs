@@ -2509,49 +2509,6 @@ fn plain_box(item: &zgx::scene::PaintItem<'_>) -> bool {
         && item.rounded().iter().all(Option::is_none)
         && item.color().is_none()
 }
-/// Whether node `id` blurs what lies behind it (frosted glass among them),
-/// which Direct3D 11 doesn't (`GpuRenderer::d3d11_leave_out`).
-#[cfg(d3d11)]
-fn d3d11_blurs_backdrop(scene: &Scene, id: NodeId) -> bool {
-    scene.effects(id).blur_radius > 0.
-}
-/// A box's own colour drawn opaque, as the system's Reduce transparency
-/// draws glass: its translucent, untextured quads inside its box (`fade`;
-/// not its shadows), made opaque. Built so, a kept frame keeps them so.
-#[cfg(d3d11)]
-fn d3d11_opaque(quads: &mut [Quad], fade: [f32; 4]) {
-    let [x, y, width, height] = fade;
-    for quad in quads {
-        let [qx, qy, qw, qh] = quad.rect;
-        let inside = qx >= x && qy >= y && qx + qw <= x + width && qy + qh <= y + height;
-        if inside && quad.options[1] <= 0.5 && quad.shape[2] <= 0. && quad.color[3] > 0. {
-            quad.color[3] = 1.;
-        }
-    }
-}
-/// Whether a draw whose backdrop Direct3D 11 doesn't read has a colour of
-/// its own drawn opaque under what it holds (`d3d11_opaque`): a layer's
-/// node's fill, or a plain box's own opaque quad over its backdrop's bounds.
-#[cfg(d3d11)]
-fn d3d11_has_colour(scene: &Scene, quads: &[Quad], draw: &Draw) -> bool {
-    match draw.source {
-        TextureSource::Layer(id) => match scene.kind(id) {
-            NodeKind::Panel { quad, .. } | NodeKind::Quad(quad) => quad.fill.3 > 0,
-            NodeKind::Rect(color) => color.3 > 0,
-            _ => false,
-        },
-        _ => draw.blur.as_deref().is_some_and(|&(bounds, ..)| {
-            let rect = [bounds.x, bounds.y, bounds.width, bounds.height];
-            quads
-                .get(draw.start as usize..draw.end as usize)
-                .is_some_and(|drawn| {
-                    drawn.iter().any(|quad| {
-                        quad.rect == rect && quad.options[1] <= 0.5 && quad.color[3] >= 1.
-                    })
-                })
-        }),
-    }
-}
 /// A flat colour's quad over `fade` (a box's place), as it shows.
 #[inline(always)]
 fn rect_quad(color: Color, fade: [f32; 4], effects: zgx::scene::Effects) -> Quad {
@@ -10753,12 +10710,6 @@ impl GpuRenderer {
                     true => cull_on_cpu(&mut quads, start as usize, clip, viewport, self.scale),
                     false => (clip, None),
                 };
-                // Direct3D 11 blurs no backdrop: a box blurring it draws its
-                // own colour opaque instead (`d3d11_leave_out`).
-                #[cfg(d3d11)]
-                if self.d3d11.is_some() && d3d11_blurs_backdrop(scene, item.id) {
-                    d3d11_opaque(&mut quads[start as usize..], fade);
-                }
                 if quads.len() as u32 > start || item.effects.blur_radius > 0. {
                     let drawn =
                         culled_bounds.unwrap_or_else(|| quad_bounds(&quads[start as usize..]));
@@ -11002,10 +10953,10 @@ impl GpuRenderer {
         // from the same data `render_direct` takes.
         #[cfg(d3d11)]
         if self.d3d11.is_some() {
-            let (mut draws, mut batches) = (draws, batches);
+            let mut draws = draws;
             self.d3d11_app_shaders(&mut draws);
-            self.d3d11_leave_out(scene, &quads, &mut draws, &mut batches);
-            if let Some(lacks) = self.d3d11_lacks(&draws, &batches) {
+            self.d3d11_leave_out(&mut draws);
+            if let Some(lacks) = self.d3d11_lacks(&draws) {
                 let message = format!(
                     "ZGX_D3D11 draws no {lacks} yet, and leaving it out could mislead \
                      (docs/windows.md, Direct3D 11)"
@@ -11028,6 +10979,7 @@ impl GpuRenderer {
                 &points,
                 (&effect_jobs, effect_first),
                 &reads,
+                &batches,
                 stats,
             )?;
             self.frame_points = points;
@@ -11811,10 +11763,7 @@ impl GpuRenderer {
             let (id, shaders, kind) = match draw.shading {
                 Shading::Fill(id) => (id, &self.fill_shaders, AppShader::Fill),
                 Shading::Filter(id) => (id, &self.filter_shaders, AppShader::Filter),
-                // Glass blurring its backdrop draws opaque (`d3d11_leave_out`).
-                Shading::FilterBlend(id) if draw.blur.is_none() => {
-                    (id, &self.filter_shaders, AppShader::FilterBlend)
-                }
+                Shading::FilterBlend(id) => (id, &self.filter_shaders, AppShader::FilterBlend),
                 _ => continue,
             };
             let ready = shaders
@@ -11841,23 +11790,14 @@ impl GpuRenderer {
     /// What Direct3D 11 leaves out of a frame rather than fail it, where
     /// what's left can't show a picture a user would wrongly trust; each kind
     /// named once (`d3d11_frame::left_out`):
-    /// - images a GPU view draws: left empty, visibly missing;
-    /// - backdrop blurs (frosted glass among them): the box drawn opaque in
-    ///   its own colour under its content (built so, `d3d11_opaque`), as the
-    ///   system's Reduce transparency draws glass, so what's over it stays
-    ///   legible. A box with no colour of its own keeps the frame's error.
+    /// - images a GPU view draws, where the views' device couldn't be made
+    ///   (`view_host`): left empty, visibly missing.
     ///
     /// Content blurs, masks and drop shadows draw (`d3d11_effects`), and
-    /// layer shaders reading the backdrop unblurred (glass) over a copy of it
-    /// (`render_d3d11`).
+    /// backdrop blurs and layer shaders reading the backdrop (glass, frosted
+    /// or not) over a copy of it (`render_d3d11`).
     #[cfg(d3d11)]
-    fn d3d11_leave_out(
-        &self,
-        scene: &Scene,
-        quads: &[Quad],
-        draws: &mut [Draw],
-        batches: &mut Vec<(usize, Vec<usize>)>,
-    ) {
+    fn d3d11_leave_out(&self, draws: &mut [Draw]) {
         for draw in draws.iter_mut() {
             if let TextureSource::Image(id) | TextureSource::Pixelated(id) = draw.source
                 && id != effects::EFFECT_ATLAS
@@ -11868,29 +11808,12 @@ impl GpuRenderer {
                 draw.end = draw.start;
             }
         }
-        for draw in draws.iter_mut() {
-            if draw.blur.is_none() || !d3d11_has_colour(scene, quads, draw) {
-                continue;
-            }
-            d3d11_frame::left_out("backdrop blurs (drawn opaque)");
-            draw.blur = None;
-            if matches!(draw.shading, Shading::FilterBlend(_)) {
-                draw.shading = Shading::Full;
-            }
-        }
-        // The backdrop batches index draws: none is left to read them.
-        if draws.iter().all(|draw| draw.blur.is_none()) {
-            batches.clear();
-        }
     }
     /// What a frame needs that Direct3D 11 neither draws nor leaves out
     /// (`d3d11_leave_out`), if anything: it draws what the Windows suite's
     /// scenes do, shader fills and layer shaders not reading the backdrop.
     #[cfg(d3d11)]
-    fn d3d11_lacks(&self, draws: &[Draw], batches: &[(usize, Vec<usize>)]) -> Option<&'static str> {
-        if !batches.is_empty() {
-            return Some("backdrop blur over a box with no colour of its own");
-        }
+    fn d3d11_lacks(&self, draws: &[Draw]) -> Option<&'static str> {
         draws
             .iter()
             .filter(|draw| draw.end > draw.start)
@@ -11913,11 +11836,9 @@ impl GpuRenderer {
                     | Shading::Fill(_)
                     | Shading::Filter(_),
                 ) => None,
-                // Compiled (`d3d11_app_shaders`), over a copy of the backdrop.
-                (_, Shading::FilterBlend(_)) if draw.blur.is_none() => None,
-                (_, Shading::FilterBlend(_)) => {
-                    Some("layer shader reading the backdrop over a box with no colour of its own")
-                }
+                // Compiled (`d3d11_app_shaders`), over a copy of the backdrop
+                // (taken after a blur under it has drawn, `render_d3d11`).
+                (_, Shading::FilterBlend(_)) => None,
                 // Its pixel stage made when first drawn (`d3d11_frame::Frame::quads`).
                 (_, Shading::ImageEffect) => None,
                 // Over a copy of the target under it (`d3d11_frame::Frame::blended`).
@@ -12078,10 +11999,21 @@ impl GpuRenderer {
         points: &[[f32; 2]],
         (effect_jobs, effect_first): (&[effects::Job], u32),
         reads: &[(usize, Rect)],
+        batches: &[(usize, Vec<usize>)],
         mut stats: GpuStats,
     ) -> Result<GpuStats, GpuError> {
         let _span = zgx::profile::span(zgx::profile::Phase::Encode);
         let (width, height) = (self.width, self.height);
+        // Backdrop blurs a batch at a time, planned as Direct3D 12 plans them
+        // (`render_flat`): the records and slots, the atlas's size.
+        let plans: Vec<Option<BlurPlan>> = batches
+            .iter()
+            .map(|(_, members)| self.plan_blur(&batch_filters(&draws, regions, members)))
+            .collect();
+        let atlas_size = self.blur_scratch.as_ref().map(|scratch| {
+            let texture = &scratch.atlas[0];
+            (texture.width(), texture.height())
+        });
         let state = self.d3d11.as_mut().expect("checked by the caller");
         let device = state.device.clone();
         let parts = [bytemuck::cast_slice(&quads)];
@@ -12154,8 +12086,34 @@ impl GpuRenderer {
         {
             state.backdrop = Some(device.surface(width, height, false)?);
         }
+        // The blur's atlas pair at the plans' size; each batch's records.
+        if let Some((atlas_width, atlas_height)) =
+            atlas_size.filter(|_| plans.iter().any(Option::is_some))
+            && state
+                .blur_atlas
+                .as_ref()
+                .is_none_or(|a| (a[0].width, a[0].height) != (atlas_width, atlas_height))
+        {
+            state.blur_atlas = Some(device.blur_atlas(atlas_width, atlas_height)?);
+        }
+        let records = plans
+            .iter()
+            .map(|plan| {
+                let Some(plan) = plan else { return Ok(None) };
+                let slots: Vec<SlotRecord> = plan.slots.iter().map(|slot| slot.0).collect();
+                Ok(Some([
+                    device.records(bytemuck::cast_slice(&plan.blurs))?,
+                    device.records(bytemuck::cast_slice(&slots))?,
+                ]))
+            })
+            .collect::<Result<Vec<_>, GpuError>>()?;
         self.whole_frames = 0;
-        let first = occluded_from(&quads, &draws, regions, self.scale);
+        // Filters sample what lies beneath them: a frame blurring draws it all
+        // (as `render_flat`'s, whose split passes do).
+        let first = match batches.is_empty() {
+            true => occluded_from(&quads, &draws, regions, self.scale),
+            false => vec![0; regions.len()],
+        };
         let state = self.d3d11.as_ref().expect("checked by the caller");
         let views = self
             .layer_present
@@ -12182,8 +12140,12 @@ impl GpuRenderer {
             frame.copies(instances);
             stats.draw_calls += 1;
         }
-        let atlas = state.atlas.as_ref().and_then(|atlas| atlas.srv.as_ref());
-        frame.texture(atlas.expect("made above"));
+        let atlas_view = state
+            .atlas
+            .as_ref()
+            .and_then(|atlas| atlas.srv.as_ref())
+            .expect("made above");
+        frame.texture(atlas_view);
         // What batches sample: the atlas, a layer's content or an image.
         let mut sampled = TextureSource::Atlas;
         let mut unpainted = false;
@@ -12194,11 +12156,20 @@ impl GpuRenderer {
         };
         let kept = self.kept_now();
         // As Direct3D 12 splits its pass (`render_flat`): every region's draws
-        // up to each blended one, then the target under that one copied (all
-        // it reads, within the regions), then it in every region. A layer
-        // shader reading the backdrop (glass) may read past its own region.
+        // up to each batch of backdrop blurs or blended draw. A batch's blur
+        // passes then draw into its atlas, and it draws back over the target
+        // (its first draw's own quads draw after). A blended draw: the target
+        // under it copied (all it reads, within the regions), then it in every
+        // region. A blur comes first where both start at a draw (frosted
+        // glass reads what its blur drew). A layer shader reading the backdrop
+        // (glass) may read past its own region.
+        let mut cuts: Vec<(usize, Option<usize>)> = (batches.iter().enumerate())
+            .map(|(batch, (start, _))| (*start, Some(batch)))
+            .chain(blended.iter().map(|&at| (at, None)))
+            .collect();
+        cuts.sort_by_key(|&(at, batch)| (at, batch.is_none()));
         let mut from = 0;
-        for &at in blended.iter().chain(std::iter::once(&draws.len())) {
+        for &(at, batch) in cuts.iter().chain(std::iter::once(&(draws.len(), None))) {
             for (index, (region, region_scissor)) in regions.iter().enumerate() {
                 frame.scissor(*region_scissor);
                 if from == 0 && first[index] == 0 {
@@ -12208,6 +12179,38 @@ impl GpuRenderer {
                 self.batches(*region, &draws[from..at], first[index], kept, |batch| {
                     self.d3d11_batch(&mut frame, &mut sampled, &mut unpainted, &mut stats, batch)
                 });
+            }
+            if let Some(batch) = batch {
+                from = at;
+                let (Some(plan), Some(records), Some(atlas)) =
+                    (&plans[batch], &records[batch], &state.blur_atlas)
+                else {
+                    continue;
+                };
+                let slots: Vec<d3d11_frame::BlurSlot> = (plan.slots.iter())
+                    .map(|(record, (w, h), blurred)| d3d11_frame::BlurSlot {
+                        texels: (record.atlas[0] as u32, record.atlas[1] as u32, *w, *h),
+                        blurred: *blurred,
+                    })
+                    .collect();
+                let copies = plan.slots.iter().any(|slot| !slot.2);
+                let records = [&records[0], &records[1]];
+                let drawn = frame.blur(target, atlas, records, &slots, copies)
+                    && frame.blur_back(target, &atlas[0], records, &plan.draws, plan.mixed);
+                if drawn {
+                    stats.blur_passes += 3;
+                    stats.render_passes += 3;
+                    stats.draw_calls += plan.draws.len()
+                        + slots.iter().filter(|slot| slot.blurred).count() * 2
+                        + slots.len();
+                } else {
+                    unpainted = true;
+                }
+                // The frame's bindings again, and the glyph atlas sampled.
+                frame.rebind(state, target, &vertices);
+                frame.texture(atlas_view);
+                sampled = TextureSource::Atlas;
+                continue;
             }
             from = at + 1;
             let Some(draw) = draws.get(at) else {
