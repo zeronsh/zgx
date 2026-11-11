@@ -2029,6 +2029,9 @@ struct Local {
 /// What few scenes have, by node; each entry goes with its node.
 #[derive(Default)]
 struct ColdMaps {
+    /// Absolute nodes moved by an inset alone since the last layout
+    /// (`move_by_insets`), arranged at the next (`lay_out_moved`).
+    moved: Vec<NodeId>,
     /// Track lists of grids that have them (`set_grid_template`): none kept
     /// for a list no node has any more.
     grid_templates: NodeMap<Arc<crate::grid_tracks::GridTemplate>>,
@@ -9213,7 +9216,7 @@ impl Scene {
         match HELD {
             true => self.invalidate_layout_with::<true>(id, false, true, owner),
             false if (STOPS || self.relative_count != 0) && absolute => {
-                self.invalidate_absolute_layout(id)
+                self.invalidate_absolute_restyled(id)
             }
             false => self.invalidate_layout(id),
         }
@@ -9636,6 +9639,32 @@ impl Scene {
                             && parent.style.height.is_some()))
             })
     }
+    /// `invalidate_absolute_layout` for absolute node `id` restyled: moved by
+    /// an inset alone, of a fixed size, it is placed where its parent's layout
+    /// would put it, nothing measured (`move_by_insets`). Apart, so the walk's
+    /// own code stays as it was.
+    #[cold]
+    #[inline(never)]
+    fn invalidate_absolute_restyled(&mut self, id: NodeId) {
+        // Through a pointer: called directly, the layout code it reaches
+        // counts as reachable from `restyle` for rustc's MIR inliner, which
+        // then inlines less into `set_style_within` (19 more instructions
+        // on x86, every call).
+        let moved: fn(&mut Scene, NodeId) -> bool = Scene::moved_by_insets_alone;
+        if !moved(self, id) {
+            self.invalidate_absolute_layout(id)
+        }
+    }
+    /// `id` moved alone if its new style only moves it (`inset_move_laid`).
+    fn moved_by_insets_alone(&mut self, id: NodeId) -> bool {
+        let Some((at, mapped)) = self.inset_move_laid(id) else {
+            return false;
+        };
+        let parent = self.node(id).parent.expect("checked by `inset_move_laid`");
+        self.moved_leaf_style(parent, id, mapped);
+        self.move_by_insets(id, at);
+        true
+    }
     /// `invalidate_layout` for absolute node `id`: one placed by its parent (a
     /// thumb, a badge, a run of a row's text) changes nothing of its parent's
     /// answer, so the walk stops there, to lay it out alone
@@ -9650,6 +9679,70 @@ impl Scene {
         match self.absolute_stop(id) {
             Some(stop) => self.invalidate_layout_with::<true>(id, false, true, stop),
             None => self.invalidate_layout(id),
+        }
+    }
+    /// `id`, whose new style moves it alone to `at` in its parent
+    /// (`inset_move_laid`): its parent's result places it there, and the next
+    /// layout arranges it there (`lay_out_moved`), measuring nothing. Its
+    /// parent's other results go (they placed it where it was), and a layout
+    /// of its parent maps its new style (`style_writes`).
+    fn move_by_insets(&mut self, id: NodeId, at: (f32, f32)) {
+        let parent = self.node(id).parent.expect("checked by `inset_move_laid`");
+        let held = self.tree_node_mut(parent);
+        held.alternates.clear();
+        let result = held
+            .measurement
+            .as_mut()
+            .expect("checked by `inset_move_laid`");
+        for (child, rect, _) in &mut result.children {
+            if *child == id {
+                (rect.x, rect.y) = at;
+            }
+        }
+        let moved = &mut self.cold.get_or_insert_default().moved;
+        if !moved.contains(&id) {
+            moved.push(id);
+        }
+        // In the flush's queue, as `arrange` puts a node it moves.
+        self.invalidate(id, PAINTED);
+        self.alone_pending = true;
+    }
+    /// The nodes moved alone since the last layout (`move_by_insets`), each
+    /// arranged where its parent's results now place it. Not one laid out
+    /// anyway, or under a parent that is: that layout places it.
+    #[cold]
+    #[inline(never)]
+    fn lay_out_moved(&mut self, report: &mut FrameReport) {
+        // Its room kept: a thumb moves every frame of a scroll.
+        let mut moved = match &mut self.cold {
+            Some(cold) => std::mem::take(&mut cold.moved),
+            None => return,
+        };
+        for &id in &moved {
+            if !self.contains(id) {
+                continue;
+            }
+            let node = self.node(id);
+            let Some(parent) = node.parent else {
+                continue;
+            };
+            let held = self.node(parent);
+            if node.dirty & LAYOUT != 0 || held.dirty & LAYOUT != 0 {
+                continue;
+            }
+            let placed = held
+                .measurement
+                .as_ref()
+                .and_then(|m| m.children.iter().find(|(child, ..)| *child == id));
+            let Some(&(_, rect, _)) = placed else {
+                continue;
+            };
+            let origin = held.bounds;
+            self.arrange_from(id, origin.x + rect.x, origin.y + rect.y, report);
+        }
+        moved.clear();
+        if let Some(cold) = &mut self.cold {
+            cold.moved = moved;
         }
     }
     /// `invalidate_layout` for a change of a leaf's content (a text's): its
@@ -9964,6 +10057,13 @@ impl Scene {
         // row inside the box laid out alone): the deepest first, so that the
         // one around it measures it as it now is, and its arrange then
         // leaves nothing marked. Otherwise, as the queue holds them.
+        if self
+            .cold
+            .as_ref()
+            .is_some_and(|cold| !cold.moved.is_empty())
+        {
+            self.lay_out_moved(report);
+        }
         if std::mem::take(&mut self.absolute_alone) {
             self.lay_out_deepest_stops(report);
         }
@@ -20919,6 +21019,114 @@ mod set_box_tests {
             style.height = Some(25.);
             style.padding = 6.;
         });
+    }
+    /// A thumb moved by an inset alone, as its list scrolls
+    /// (`move_by_insets`): nothing is measured and the thumb alone is
+    /// arranged, where a page built with that inset places it, its old and
+    /// new boxes damaged; and so after its rail is laid out again. From its
+    /// top, from its bottom, and twice in a frame.
+    /// A move by an inset is only taken from a layout its parent's tree
+    /// holds (`inset_move_laid`). With none to read (a thumb moved in the
+    /// frame it was appended, or its parent's tree gone), its walk is the
+    /// stop's or the root's as before: measured, and placed where a page
+    /// built whole puts it.
+    #[test]
+    fn a_thumb_moved_with_no_layout_to_read_lays_out_as_before() {
+        use crate::layout::Length::Px;
+        let rail = placed(Some(8.), Some(700.), [Some(Px(0.)), Some(Px(0.)), None]);
+        let (badge, escaped) = (Style::default(), Style::default());
+        let thumb = |f: f32| placed(Some(4.), Some(60.), [Some(Px(f)), Some(Px(2.)), None]);
+        let page = |f: f32| rail_page(200, rail.clone(), thumb(f), badge.clone(), escaped.clone());
+        // Appended, then moved, in one frame: never laid out.
+        let (mut scene, [rail_id, _, ..]) = page(0.);
+        let late = scene.append(rail_id, NodeKind::Rect(Color(1, 1, 1, 255)), thumb(3.));
+        assert_eq!(
+            scene.inset_move_laid(late),
+            None,
+            "nothing to read for a new node"
+        );
+        scene.set_style(late, thumb(41.5));
+        scene.flush();
+        let rail_top = scene.bounds(rail_id).y;
+        assert_eq!(
+            scene.bounds(late).y,
+            rail_top + 41.5,
+            "placed by its layout"
+        );
+        // Its parent's tree gone (as a parent laid out another way would
+        // leave it): the move isn't taken, and the walk lays it out.
+        let (mut scene, [rail_id, id, ..]) = page(0.);
+        scene.node_mut(rail_id).advanced_layout = None;
+        let before = scene.measure_calls;
+        scene.set_style(id, thumb(22.25));
+        assert!(
+            scene.cold.as_ref().is_none_or(|cold| cold.moved.is_empty()),
+            "no move without its parent's tree"
+        );
+        scene.flush();
+        assert!(scene.measure_calls > before, "laid out by its walk");
+        same_bounds(&scene, &page(22.25).0);
+    }
+
+    #[test]
+    fn a_thumb_moved_by_an_inset_alone_measures_nothing() {
+        use crate::layout::Length::Px;
+        let rail = placed(Some(8.), Some(700.), [Some(Px(0.)), Some(Px(0.)), None]);
+        // No box another block places: each layout places those again.
+        let (badge, escaped) = (Style::default(), Style::default());
+        // Through `set_style` (what a style effect calls) and the stop asked
+        // for whatever the scene holds (`set_style_stopping`): the same move.
+        for (from_bottom, plain) in [(false, true), (true, true), (false, false), (true, false)] {
+            let write = |scene: &mut Scene, id: NodeId, style: Style| match plain {
+                true => scene.set_style(id, style),
+                false => scene.set_style_stopping(id, style),
+            };
+            let thumb = |f: f32| match from_bottom {
+                false => placed(Some(4.), Some(60.), [Some(Px(f)), Some(Px(2.)), None]),
+                true => placed(Some(4.), Some(60.), [None, Some(Px(2.)), Some(Px(f))]),
+            };
+            let page = |rail: &Style, f: f32| {
+                rail_page(200, rail.clone(), thumb(f), badge.clone(), escaped.clone())
+            };
+            let (mut scene, [rail_id, id, ..]) = page(&rail, 0.);
+            let mut at = 0.;
+            for f in 1..=8 {
+                at = f as f32 * 7.37;
+                let (before, was, revision) = (
+                    scene.measure_calls,
+                    scene.bounds(id),
+                    scene.geometry_revision(),
+                );
+                if f % 3 == 0 {
+                    write(&mut scene, id, thumb(at - 3.1));
+                }
+                write(&mut scene, id, thumb(at));
+                let report = scene.flush();
+                assert_eq!(scene.measure_calls, before, "measured nothing at {f}");
+                assert_eq!(report.layout_nodes, 1, "the thumb alone at {f}");
+                let now = scene.bounds(id);
+                assert_ne!(was, now);
+                for rect in [was, now] {
+                    assert!(
+                        report.damage.iter().any(|d| d.intersects(rect)),
+                        "{rect:?} damaged: {:?}",
+                        report.damage
+                    );
+                }
+                assert_ne!(scene.geometry_revision(), revision, "hit tests see it");
+                same_bounds(&scene, &page(&rail, at).0);
+            }
+            // Its rail laid out again: it stays where its inset places it,
+            // and moves on from there.
+            let mut shorter = rail.clone();
+            shorter.height = Some(650.);
+            scene.set_style(rail_id, shorter.clone());
+            scene.flush();
+            same_bounds(&scene, &page(&shorter, at).0);
+            write(&mut scene, id, thumb(3.5));
+            scene.flush();
+            same_bounds(&scene, &page(&shorter, 3.5).0);
+        }
     }
     /// A page of `rows` rows under a few columns, in an overlay 700 high with
     /// an absolute rail over it (`rail`), holding an absolute thumb
