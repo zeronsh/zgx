@@ -25,7 +25,7 @@ pub(crate) struct Animators {
 /// The last few clips and times posed, and the animator that posed each.
 #[derive(Default)]
 pub(crate) struct Recent {
-    keys: [((usize, u32), usize); RECENT],
+    keys: [(crate::animator::Shared, usize); RECENT],
     len: usize,
     next: usize,
 }
@@ -34,11 +34,11 @@ impl Recent {
     fn clear(&mut self) {
         (self.len, self.next) = (0, 0);
     }
-    fn get(&self, key: (usize, u32)) -> Option<usize> {
+    fn get(&self, key: crate::animator::Shared) -> Option<usize> {
         let keys = &self.keys[..self.len];
         keys.iter().find(|(k, _)| *k == key).map(|&(_, at)| at)
     }
-    fn insert(&mut self, key: (usize, u32), at: usize) {
+    fn insert(&mut self, key: crate::animator::Shared, at: usize) {
         self.keys[self.next] = (key, at);
         self.next = (self.next + 1) % RECENT;
         self.len = (self.len + 1).min(RECENT);
@@ -1838,6 +1838,45 @@ mod tests {
             assert_eq!(turned.rotation, at(&alone, la).rotation);
             assert_eq!(turned.position, vec3(5., 0., 0.), "its own rest");
             assert_eq!(moved, at(&alone, lb));
+        }
+    }
+
+    #[test]
+    fn rigs_of_other_sizes_playing_one_clip_pose_it_whole() {
+        // A clip moving nodes 0 to 2, on a rig of two nodes and one of
+        // three, posed in either order: each as it would alone.
+        let clip = clip(vec![
+            (0, Path::Translation, vec![0., 1.], vec![x(0.), x(1.)]),
+            (
+                1,
+                Path::Translation,
+                vec![0., 1.],
+                vec![[0., 1., 0., 0.], [1., 1., 0., 0.]],
+            ),
+            (
+                2,
+                Path::Translation,
+                vec![0., 1.],
+                vec![[0., 1., 0., 0.], [3., 1., 0., 0.]],
+            ),
+        ]);
+        for small_first in [true, false] {
+            let world = World::new();
+            let (two, _, _) = rig(&world);
+            let (three, [_, _, c]) = arm(&world);
+            let order: [&Placed; 2] = if small_first {
+                [&two, &three]
+            } else {
+                [&three, &two]
+            };
+            for placed in order {
+                let animator = world.add_animator(placed);
+                world.play(animator, &clip, Play::new()).unwrap();
+            }
+            let clock = Clock(Instant::now());
+            clock.frame(&world, 0.);
+            clock.frame(&world, 0.25);
+            assert_eq!(at(&world, c).position.x, 0.75, "small first: {small_first}");
         }
     }
 }

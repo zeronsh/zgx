@@ -299,6 +299,10 @@ const MORPH_TARGETS: usize = 4096;
 /// half goes (as zgx-audio's ended voices).
 pub(crate) const EVENTS: usize = 65_536;
 
+/// What animators share a pose by (`Animator::shared`): a clip, its time's
+/// bits, the animator's node count.
+pub(crate) type Shared = (usize, u32, usize);
+
 /// The longest a frame's step is taken to be: after a longer gap (its view
 /// hidden) an animation goes on where it was rather than jumping.
 pub(crate) const MAX_STEP: f32 = 0.25;
@@ -723,7 +727,7 @@ impl Animator {
     /// layer, wholly, unmasked, not fading; no root motion, IK or morph
     /// weights): another animator with the same poses the same places for
     /// the nodes the clip moves.
-    pub(crate) fn shared(&self) -> Option<(usize, u32)> {
+    pub(crate) fn shared(&self) -> Option<Shared> {
         let [layer] = &self.layers[..] else {
             return None;
         };
@@ -738,12 +742,10 @@ impl Animator {
             && self.root.is_none()
             && self.ik.is_none()
             && self.morphed.is_empty();
-        alone.then(|| {
-            (
-                std::sync::Arc::as_ptr(&state.clip.0) as usize,
-                state.time.to_bits(),
-            )
-        })
+        // Its node count too: a rig with fewer nodes posing the clip first
+        // would leave the rest of a larger one's at rest.
+        let clip = std::sync::Arc::as_ptr(&state.clip.0) as usize;
+        alone.then(|| (clip, state.time.to_bits(), self.nodes.len()))
     }
     /// Its pose from `source`, another's posing the same clip at the same
     /// time (`shared`): the parts of nodes the clip moves as there, the
