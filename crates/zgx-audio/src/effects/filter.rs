@@ -148,6 +148,85 @@ impl State {
     }
 }
 
+/// A voice's own low-pass ([`Voice::set_cutoff`](crate::Voice::set_cutoff)):
+/// one 12 dB section, flat, its cutoff ramped as the voice's other
+/// parameters are. At [`VOICE_OPEN`] and above, holding still, it's out of
+/// the way: a voice that never asks for one runs none.
+pub(crate) struct VoiceLowPass {
+    pub cutoff: crate::ramp::Smoothed,
+    state: State,
+    /// The coefficients and the cutoff they were made for.
+    made: (f32, Coefficients),
+    rate: Rate,
+}
+
+/// The cutoff, in hertz, from which a voice's low-pass is no filter.
+pub(crate) const VOICE_OPEN: f32 = 20_000.;
+
+impl VoiceLowPass {
+    pub fn new(rate: u32) -> VoiceLowPass {
+        VoiceLowPass {
+            cutoff: crate::ramp::Smoothed::new(VOICE_OPEN),
+            state: State::default(),
+            made: (f32::NAN, Coefficients::default()),
+            rate: Rate::new(rate),
+        }
+    }
+
+    pub fn set_rate(&mut self, rate: u32) {
+        self.rate = Rate::new(rate);
+        self.made.0 = f32::NAN;
+    }
+
+    /// For a new voice: at `hz`, nothing remembered.
+    pub fn reset(&mut self, hz: f32) {
+        self.cutoff = crate::ramp::Smoothed::new(hz);
+        self.state = State::default();
+    }
+
+    /// Whether it filters: below the open cutoff, or on its way.
+    #[inline]
+    pub fn active(&self) -> bool {
+        !self.cutoff.settled() || self.cutoff.value() < VOICE_OPEN
+    }
+
+    /// `left` (and `right`, a stereo sound's) through it, in place; its
+    /// cutoff moved on `n` frames, however many there were.
+    #[inline(never)]
+    pub fn run(&mut self, left: &mut [f32], right: Option<&mut [f32]>, n: usize) {
+        let moving = !self.cutoff.settled();
+        let make = |made: &mut (f32, Coefficients), hz: f32, rate: &Rate| {
+            if made.0 != hz {
+                *made = (hz, Coefficients::new(Shape::Low, hz, FLAT, 0., rate));
+            }
+        };
+        let rate = self.rate;
+        match right {
+            Some(right) => {
+                for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+                    make(&mut self.made, self.cutoff.next(), &rate);
+                    [*l, *r] = self.state.step(&self.made.1, Shape::Low, [*l, *r]);
+                }
+            }
+            None => {
+                for l in left.iter_mut() {
+                    make(&mut self.made, self.cutoff.next(), &rate);
+                    *l = self.state.step(&self.made.1, Shape::Low, [*l, 0.])[0];
+                }
+            }
+        }
+        // Frames the sound didn't fill (it ended) still move the cutoff.
+        let done = left.len();
+        if moving && n > done {
+            self.cutoff.advance(n - done);
+        }
+        if !self.active() {
+            // Open: nothing kept for when it closes again.
+            self.state = State::default();
+        }
+    }
+}
+
 /// Every frame of `frames` through `sections` sections of `shape`, the
 /// coefficients holding still: a loop of its own for each shape, so each
 /// mixes only what its shape needs.
@@ -489,5 +568,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_voice_s_low_pass_closing_from_open_takes_the_highs() {
+        let mut filter = VoiceLowPass::new(48_000);
+        filter.cutoff.set(300., 480, crate::Curve::Linear);
+        let mut block = vec![0f32; 2_048];
+        for (i, s) in block.iter_mut().enumerate() {
+            *s = (i as f32 * 3_000. * std::f32::consts::TAU / 48_000.).sin();
+        }
+        filter.run(&mut block, None, 2_048);
+        let tail: f32 = block[1_024..].iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(tail < 0.1 * (1_024f32 * 0.5).sqrt(), "{tail}");
     }
 }

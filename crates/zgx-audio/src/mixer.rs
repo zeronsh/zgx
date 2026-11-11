@@ -4,6 +4,7 @@
 //! and never locks, allocates, frees or calls the system: sounds it's done
 //! with go back to the main thread to be dropped there.
 use crate::effect::Slot;
+use crate::effects::VoiceLowPass;
 use crate::limiter::Limiter;
 use crate::queue::{Consumer, Producer};
 use crate::ramp::{Curve, Ramp, Smoothed};
@@ -49,6 +50,8 @@ pub(crate) enum Command {
         /// A fade in; `None`, a click-free start.
         fade_in: Option<Ramp>,
         law: PanLaw,
+        /// Its own low-pass's cutoff, in hertz.
+        cutoff: f32,
     },
     // Ramps are in seconds, made frames by the mixer at its rate: a device
     // may set the rate after a command was sent.
@@ -106,6 +109,7 @@ pub(crate) enum VoiceParam {
     Gain,
     Pan,
     Pitch,
+    Cutoff,
 }
 
 /// What the mixer gives back.
@@ -392,6 +396,15 @@ impl Ord for Scheduled {
     }
 }
 
+/// What a voice's mix is given besides its block: the frames a click-free
+/// start takes, the count of streams run dry, and its own low-pass if it
+/// filters.
+struct Along<'a> {
+    click: u32,
+    underruns: &'a mut u64,
+    filter: Option<&'a mut VoiceLowPass>,
+}
+
 struct Voice {
     /// 0: a free slot.
     id: u64,
@@ -415,6 +428,9 @@ struct Voice {
     resampler: Resampler,
     /// How its pan shares it between left and right.
     law: PanLaw,
+    /// Whether its own low-pass (the mixer's `filters`, by its slot)
+    /// filters: only then is it looked at.
+    filtered: bool,
 }
 
 impl Voice {
@@ -440,6 +456,7 @@ impl Voice {
             priority: 0,
             resampler: Resampler::new(Interpolation::Linear),
             law: PanLaw::Balance,
+            filtered: false,
         }
     }
 
@@ -463,9 +480,13 @@ impl Voice {
         scratch: &mut Scratch,
         left: &mut [f32],
         right: &mut [f32],
-        click: u32,
-        underruns: &mut u64,
+        along: Along<'_>,
     ) -> bool {
+        let Along {
+            click,
+            underruns,
+            mut filter,
+        } = along;
         self.fresh = false;
         let fixed = self.pitch.settled();
         let step = self.step(self.pitch.value());
@@ -492,6 +513,9 @@ impl Voice {
                 self.pan.advance(n);
                 self.envelope.advance(n);
                 stream.level.advance(n);
+                if let Some(filter) = &mut filter {
+                    filter.cutoff.advance(n);
+                }
                 return !(self.stopping && self.envelope.settled() && self.envelope.value() == 0.);
             }
         }
@@ -528,6 +552,12 @@ impl Voice {
                 &mut scratch.right[..n],
             )
         };
+        if let Some(filter) = filter {
+            // Its own low-pass, before its gain and pan: a mono sound's one
+            // channel, a stereo sound's two.
+            let (l, r) = (&mut scratch.left[..got], &mut scratch.right[..got]);
+            filter.run(l, (sound.channels != 1).then_some(r), n);
+        }
         let source_right: &[f32] = if sound.channels == 1 {
             &scratch.left
         } else {
@@ -931,6 +961,9 @@ pub(crate) struct Mixer {
     room: usize,
     seq: u64,
     voices: Box<[Voice]>,
+    /// Each voice slot's own low-pass, by the same index: apart from the
+    /// voices, so a voice without one is as before.
+    filters: Box<[VoiceLowPass]>,
     max_live: usize,
     buses: Box<[Bus]>,
     bus_count: usize,
@@ -999,6 +1032,9 @@ impl Mixer {
             seq: 0,
             voices: (0..setup.voices + FADING_SLOTS)
                 .map(|_| Voice::free())
+                .collect(),
+            filters: (0..setup.voices + FADING_SLOTS)
+                .map(|_| VoiceLowPass::new(setup.rate))
                 .collect(),
             max_live: setup.voices,
             buses,
@@ -1093,6 +1129,9 @@ impl Mixer {
         }
         for slot in self.chains.iter_mut().flat_map(|c| c.effects.iter_mut()) {
             slot.prepare(rate);
+        }
+        for filter in self.filters.iter_mut() {
+            filter.set_rate(rate);
         }
     }
 
@@ -1370,8 +1409,14 @@ impl Mixer {
                     return Err(command);
                 }
                 let (frames, curve) = (ramp.frames(self.rate), ramp.curve);
-                if let Some(voice) = self.voice(id) {
+                let slot = self.voices.iter().position(|v| v.id == id && !v.ended);
+                if let Some(slot) = slot {
+                    let voice = &mut self.voices[slot];
                     match param {
+                        VoiceParam::Cutoff => {
+                            self.filters[slot].cutoff.set(value, frames, curve);
+                            voice.filtered = self.filters[slot].active();
+                        }
                         VoiceParam::Gain => voice.gain.set(value.max(0.), frames, curve),
                         VoiceParam::Pan => {
                             voice.pan.set(value.clamp(-1., 1.), frames, Curve::Linear)
@@ -1503,6 +1548,7 @@ impl Mixer {
             priority,
             fade_in,
             law,
+            cutoff,
         } = command
         else {
             unreachable!("only plays come here");
@@ -1539,6 +1585,7 @@ impl Mixer {
                         priority,
                         fade_in,
                         law,
+                        cutoff,
                     }),
                     Err(_) => unreachable!("a dropped play is given back as one"),
                 };
@@ -1548,9 +1595,12 @@ impl Mixer {
             self.stolen += 1;
         }
         let (rate, click, interpolation) = (self.rate, self.click, self.interpolation);
-        let Some(voice) = self.voices.iter_mut().find(|v| v.id == 0) else {
+        let Some(slot) = self.voices.iter().position(|v| v.id == 0) else {
             return Err(command);
         };
+        self.filters[slot].reset(cutoff);
+        let filtered = self.filters[slot].active();
+        let voice = &mut self.voices[slot];
         // A stream's first frames aren't here yet: it looks when they are.
         let start = match sound {
             Feed::Sound(data) => data.samples[..data.channels.min(data.samples.len())]
@@ -1576,6 +1626,7 @@ impl Mixer {
             priority,
             resampler: Resampler::new(interpolation),
             law,
+            filtered,
         };
         match fade_in {
             Some(ramp) => {
@@ -1646,20 +1697,31 @@ impl Mixer {
         for bus in &mut self.buses[..self.bus_count] {
             bus.touched = false;
         }
-        for voice in self.voices.iter_mut() {
+        for (slot, voice) in self.voices.iter_mut().enumerate() {
             if voice.id == 0 {
                 continue;
             }
             if !voice.ended {
                 let bus = &mut self.buses[usize::from(voice.bus)];
                 bus.touch(n);
+                let filter = if voice.filtered {
+                    let filter = &mut self.filters[slot];
+                    // Open and still: out of the way from now on.
+                    voice.filtered = filter.active();
+                    voice.filtered.then_some(filter)
+                } else {
+                    None
+                };
                 if !voice.mix(
                     n,
                     &mut self.scratch,
                     &mut bus.left[..n],
                     &mut bus.right[..n],
-                    self.click,
-                    &mut self.underruns,
+                    Along {
+                        click: self.click,
+                        underruns: &mut self.underruns,
+                        filter,
+                    },
                 ) {
                     voice.ended = true;
                 }
