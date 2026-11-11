@@ -78,3 +78,7 @@ required-features = ["audio"]
 [[test]]
 name = "shader_compile"
 required-features = ["shaders"]
+
+[[example]]
+name = "audio_occlusion"
+required-features = ["audio"]

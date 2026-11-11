@@ -24,19 +24,23 @@ What a world takes beyond meshes and lights, each costing nothing until used:
   (`Model::clips`) move its nodes: `World::place_model` keeps them, and
   `Placed::pose(world, clip, seconds)` poses one at any time.
   `cargo run -p zgx-3d --features gltf --example model -- FILE`.
-- **Sound** (the `audio` feature): `World::set_audio(&audio)`, then
+- **Sound** (the `audio` feature): `World::set_audio(&audio, &bus)` (the
+  engine's `world` bus, which worlds share), then
   `World::add_emitter3d(object, Emitter3d::new(&sound).looping(true))` plays a
   zgx-audio sound from an object, following where it is: falling off with
   distance, louder in its cone, Doppler from how far it moved since the last
   frame, panned by equal power, dulled by the air. The listener is the camera
   (`World::set_listener`). Meshes between them dull it: rays against the
   triangles picking uses, a budget a frame (`set_occlusion_rays`), taken in
-  turn, cast only when an end or a mesh moved; each mesh met takes its
+  turn, cast only when an end or a mesh moved, down a tree of the meshes'
+  boxes kept while they hold still and refitted while they move, and a
+  budget of triangles a frame besides; each mesh met takes its
   transmission (`set_sound_transmission`, a quarter unless set) of the level
   and lowers the cutoff. Reverb zones (`add_reverb_zone`) are boxes the
   listener walks between, fading in over a distance. Each frame sends only
   what changed, as ramps over the time since the last: a still world sends
-  nothing. `World::update_audio(time)` does it for a world drawn by no view.
+  nothing; a sound that ended is let go, and a world dropped stops its
+  sounds. `World::update_audio(time)` does it for a world drawn by no view.
 - **Surfaces**: `World::set_double_sided(id, true)` draws a mesh's back faces
   too, and `World::set_alpha_cutoff(id, Some(0.5))` cuts it out by its base
   colour texture's alpha, in its shadow as well.

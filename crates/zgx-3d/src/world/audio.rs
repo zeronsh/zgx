@@ -26,6 +26,10 @@ pub(crate) const UNSETTLED: u32 = super::Reason::Audio as u32;
 /// Rays a frame, unless set (`World::set_occlusion_rays`).
 const RAYS: usize = 8;
 
+/// Triangles a frame's rays may test, besides their number: rays past it
+/// wait for the next frame.
+const TRIANGLES: usize = 100_000;
+
 /// What a mesh lets through unless set (`World::set_sound_transmission`):
 /// a quarter of its level, -12 dB.
 pub const TRANSMISSION: f32 = 0.25;
@@ -288,6 +292,230 @@ struct Placed {
     stale: bool,
 }
 
+/// A mesh that can block sound, as a frame's rays see it.
+struct Blocker {
+    index: usize,
+    matrix: crate::Mat4,
+    /// Its geometry's box's centre and half-sizes, and its box in the
+    /// world.
+    centre: Vec3,
+    half: Vec3,
+    min: Vec3,
+    max: Vec3,
+    through: f32,
+    triangles: usize,
+    /// Whether it's placed under another object: one an ancestor's move
+    /// moves.
+    parented: bool,
+}
+
+/// The box round a box of `centre` and `half` sizes placed by `matrix`:
+/// its centre moved, its half-sizes summed along each world axis by how
+/// much of each the matrix turns there (Arvo's), without its corners.
+fn placed_box(matrix: &crate::Mat4, centre: Vec3, half: Vec3) -> (Vec3, Vec3) {
+    let c = &matrix.columns;
+    let middle = matrix.project(centre);
+    let reach = |r: usize| c[0][r].abs() * half.x + c[1][r].abs() * half.y + c[2][r].abs() * half.z;
+    let reach = vec3(reach(0), reach(1), reach(2));
+    (middle - reach, middle + reach)
+}
+
+/// Object `index`'s matrix in the world, walked up its parents: as the
+/// world's own (`None` hidden, or under a hidden one, or a chain past 64),
+/// with nothing allocated, for the few objects a frame places.
+fn walk(inner: &Inner, index: usize) -> Option<crate::Mat4> {
+    let mut matrix = inner.locals.get(index).copied().flatten()?;
+    let mut parent = inner.objects[index].value.as_ref()?.parent;
+    for _ in 0..64 {
+        let Some(id) = parent else {
+            return Some(matrix);
+        };
+        let index = inner.live(id.index, id.generation)?;
+        matrix = inner.locals.get(index).copied().flatten()? * matrix;
+        parent = inner.objects[index].value.as_ref()?.parent;
+    }
+    None
+}
+
+/// A ray's segment, its direction's reciprocals worked out once for the
+/// many boxes it's tested against.
+struct Segment {
+    from: Vec3,
+    inverse: [f32; 3],
+}
+
+impl Segment {
+    fn new(from: Vec3, to: Vec3) -> Segment {
+        let along = to - from;
+        Segment {
+            from,
+            inverse: [along.x, along.y, along.z].map(|d| 1. / d),
+        }
+    }
+
+    /// Whether it passes through the box from `min` to `max` (the slabs'
+    /// test, multiplying where it would divide).
+    #[inline]
+    fn through(&self, min: Vec3, max: Vec3) -> bool {
+        let (mut enter, mut leave) = (0f32, 1f32);
+        for ((f, inverse), (lo, hi)) in [self.from.x, self.from.y, self.from.z]
+            .into_iter()
+            .zip(self.inverse)
+            .zip([(min.x, max.x), (min.y, max.y), (min.z, max.z)])
+        {
+            if inverse.is_infinite() {
+                // Along the slab: inside it or never.
+                if f < lo || f > hi {
+                    return false;
+                }
+                continue;
+            }
+            let (a, b) = ((lo - f) * inverse, (hi - f) * inverse);
+            enter = enter.max(a.min(b));
+            leave = leave.min(a.max(b));
+            if enter > leave {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// A tree of the blockers' boxes, each node's box round its children's:
+/// a ray goes down only where it passes, so a still world's thousands of
+/// meshes cost it a few dozen boxes. Made when the meshes have held still
+/// for a frame (`Sound3d::blockers`).
+#[derive(Default)]
+struct Tree {
+    nodes: Vec<Node>,
+    /// The blockers, in the order the leaves hold them.
+    order: Vec<u32>,
+}
+
+struct Node {
+    min: Vec3,
+    max: Vec3,
+    /// A leaf: its blockers, `order[start..start + count]`. Else its
+    /// children: the next node, and `start`.
+    start: u32,
+    count: u32,
+}
+
+/// Blockers a leaf holds at most.
+const LEAF: usize = 4;
+
+impl Tree {
+    fn new(blockers: &[Blocker]) -> Tree {
+        let mut tree = Tree {
+            nodes: Vec::with_capacity(blockers.len() / 2 + 1),
+            order: (0..blockers.len() as u32).collect(),
+        };
+        if !blockers.is_empty() {
+            tree.split(blockers, 0, blockers.len(), 0);
+        }
+        tree
+    }
+
+    /// The node for `order[start..end]`, and below it.
+    fn split(&mut self, blockers: &[Blocker], start: usize, end: usize, depth: u32) {
+        let here = self.nodes.len();
+        let (mut min, mut max) = (
+            vec3(f32::INFINITY, f32::INFINITY, f32::INFINITY),
+            vec3(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY),
+        );
+        for &b in &self.order[start..end] {
+            min = min.min(blockers[b as usize].min);
+            max = max.max(blockers[b as usize].max);
+        }
+        self.nodes.push(Node {
+            min,
+            max,
+            start: start as u32,
+            count: (end - start) as u32,
+        });
+        if end - start <= LEAF || depth > 40 {
+            return;
+        }
+        // Halved at the middle along its longest side, by the boxes'
+        // centres.
+        let size = max - min;
+        let axis = if size.x >= size.y && size.x >= size.z {
+            0
+        } else if size.y >= size.z {
+            1
+        } else {
+            2
+        };
+        let centre = |b: &u32| {
+            let b = &blockers[*b as usize];
+            let c = b.min + b.max;
+            [c.x, c.y, c.z][axis]
+        };
+        let middle = (start + end) / 2;
+        self.order[start..end]
+            .select_nth_unstable_by(middle - start, |a, b| centre(a).total_cmp(&centre(b)));
+        self.split(blockers, start, middle, depth + 1);
+        let right = self.nodes.len();
+        self.split(blockers, middle, end, depth + 1);
+        self.nodes[here].start = right as u32;
+        self.nodes[here].count = 0;
+    }
+
+    /// Each node's box made again round its blockers' (now `blockers`, the
+    /// same ones in the same places in the list): children come after
+    /// their parent, so from the last node back each is made from what's
+    /// already made.
+    fn refit(&mut self, blockers: &[Blocker]) {
+        for at in (0..self.nodes.len()).rev() {
+            let node = &self.nodes[at];
+            let (min, max) = if node.count > 0 {
+                let leaf = &self.order[node.start as usize..(node.start + node.count) as usize];
+                leaf.iter().fold(
+                    (
+                        vec3(f32::INFINITY, f32::INFINITY, f32::INFINITY),
+                        vec3(f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY),
+                    ),
+                    |(min, max), &b| {
+                        let b = &blockers[b as usize];
+                        (min.min(b.min), max.max(b.max))
+                    },
+                )
+            } else {
+                let (left, right) = (&self.nodes[at + 1], &self.nodes[node.start as usize]);
+                (left.min.min(right.min), left.max.max(right.max))
+            };
+            self.nodes[at].min = min;
+            self.nodes[at].max = max;
+        }
+    }
+
+    /// Each blocker whose box `segment` passes through, to `f`.
+    fn each(&self, blockers: &[Blocker], segment: &Segment, mut f: impl FnMut(&Blocker)) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let mut stack = vec![0usize];
+        while let Some(at) = stack.pop() {
+            let node = &self.nodes[at];
+            if !segment.through(node.min, node.max) {
+                continue;
+            }
+            if node.count > 0 {
+                let leaf = &self.order[node.start as usize..(node.start + node.count) as usize];
+                for &b in leaf {
+                    let blocker = &blockers[b as usize];
+                    if segment.through(blocker.min, blocker.max) {
+                        f(blocker);
+                    }
+                }
+            } else {
+                stack.push(node.start as usize);
+                stack.push(at + 1);
+            }
+        }
+    }
+}
+
 /// Where the listener is and how it moves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Heard {
@@ -307,8 +535,22 @@ pub(crate) struct Sound3d {
     listener: Listener,
     heard: Option<Heard>,
     last_frame: Option<Instant>,
-    /// Objects' transmission, by index and generation.
-    transmission: Vec<(ObjectId, f32)>,
+    /// Objects' transmission, set by the app, and a count of its changes.
+    transmission: std::collections::HashMap<ObjectId, f32>,
+    transmissions: u64,
+    /// The meshes that can block, and the world's meshes count and the
+    /// transmissions' when they were found (`Sound3d::blockers`).
+    blocking: (Option<(u64, u64)>, Vec<Blocker>),
+    /// Their tree, and the counts it was made for: made once they've held
+    /// still for a frame, so meshes that move every frame aren't sorted
+    /// every frame (their rays look at every box instead).
+    tree: (Option<(u64, u64)>, Tree),
+    /// The world's `ordering` when the blockers were last found whole; by
+    /// object index, its blocker's place in the list (`u32::MAX`: none);
+    /// and the blockers under another object.
+    ordering: u64,
+    position: Vec<u32>,
+    parented: Vec<u32>,
     rays: usize,
     /// The next emitter a ray is cast for.
     cursor: usize,
@@ -319,10 +561,11 @@ pub(crate) struct Sound3d {
     /// The world's count of changes to its meshes when last rayed: a wall
     /// put up or moved between two ends that are still is rayed again.
     meshes: u64,
+    /// Work the tests count, not time: world matrices walked, and meshes
+    /// whose triangles a ray met.
+    #[cfg(test)]
+    work: std::cell::Cell<[u64; 2]>,
 }
-
-/// Worlds given an engine: each one's bus is named for it.
-static WORLDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn array(v: Vec3) -> [f32; 3] {
     v.to_array()
@@ -332,7 +575,7 @@ impl Sound3d {
     /// Where `object` is and which way it faces, if it's there to hear.
     fn place_of(inner: &Inner, object: ObjectId) -> Option<(Vec3, Vec3)> {
         let index = inner.live(object.index, object.generation)?;
-        let matrix = inner.world_of(index)?;
+        let matrix = walk(inner, index)?;
         let position = matrix.project(Vec3::ZERO);
         let ahead = (matrix.project(vec3(0., 0., -1.)) - position).normalized();
         Some((position, ahead))
@@ -343,7 +586,7 @@ impl Sound3d {
         let (position, forward, up) = match self.listener {
             Listener::Object(id) => inner
                 .live(id.index, id.generation)
-                .and_then(|index| inner.world_of(index))
+                .and_then(|index| walk(inner, index))
                 .map(|m| {
                     let p = m.project(Vec3::ZERO);
                     let forward = (m.project(vec3(0., 0., -1.)) - p).normalized();
@@ -369,50 +612,191 @@ impl Sound3d {
         }
     }
 
+    /// The meshes that can block, kept while the world's meshes and the
+    /// transmissions set are as they were: each with its world matrix and
+    /// its box in the world, worked out once for every ray after. Objects
+    /// gone are let go of their transmissions here.
+    fn blockers(&mut self, inner: &Inner) {
+        let made = (inner.meshes, self.transmissions);
+        if self.blocking.0 == Some(made) {
+            if self.tree.0 != Some(made) {
+                self.tree = (Some(made), Tree::new(&self.blocking.1));
+            }
+            return;
+        }
+        // Only moves, poses and cutoffs since (the world's `ordering` and
+        // the transmissions as they were): the same meshes block, and only
+        // those stamped since, or under another, are placed again.
+        if let Some((meshes, transmissions)) = self.blocking.0
+            && transmissions == self.transmissions
+            && self.ordering == inner.ordering
+        {
+            let mut moved = false;
+            // The objects stamped since, from the stamps (a word an object),
+            // and those under others: theirs, placed again.
+            let stamped = inner
+                .stamps
+                .iter()
+                .enumerate()
+                .filter(|&(_, &s)| s > meshes)
+                .filter_map(|(index, _)| self.position.get(index).copied())
+                .filter(|&at| at != u32::MAX);
+            let again: Vec<u32> = stamped.chain(self.parented.iter().copied()).collect();
+            for at in again {
+                let blocker = &mut self.blocking.1[at as usize];
+                #[cfg(test)]
+                self.work.set({
+                    let mut w = self.work.get();
+                    w[0] += 1;
+                    w
+                });
+                // Gone from sight under a hidden one: blocks nothing.
+                let matrix = walk(inner, blocker.index).unwrap_or(crate::Mat4 {
+                    columns: [[0.; 4]; 4],
+                });
+                blocker.matrix = matrix;
+                (blocker.min, blocker.max) = placed_box(&matrix, blocker.centre, blocker.half);
+                moved = true;
+            }
+            // The tree refitted round what moved, or made, if the meshes
+            // haven't held still since they were found: what keeps moving
+            // is sorted once, and refitted after.
+            if self.tree.0.is_none() {
+                self.tree.1 = Tree::new(&self.blocking.1);
+            } else if moved {
+                self.tree.1.refit(&self.blocking.1);
+            }
+            self.tree.0 = Some(made);
+            self.blocking.0 = Some(made);
+            return;
+        }
+        self.ordering = inner.ordering;
+        self.transmission
+            .retain(|id, _| inner.live(id.index, id.generation).is_some());
+        let before = std::mem::take(&mut self.blocking.1);
+        let mut blocking = Vec::with_capacity(before.len());
+        for (index, slot) in inner.objects.iter().enumerate() {
+            let Some(geometry) = slot.value.as_ref().and_then(|o| o.geometry.as_ref()) else {
+                continue;
+            };
+            let id = ObjectId {
+                index: index as u32,
+                generation: slot.generation,
+            };
+            // (Most worlds set none: no hashing a lookup for each mesh.)
+            let through = if self.transmission.is_empty() {
+                TRANSMISSION
+            } else {
+                self.transmission.get(&id).copied().unwrap_or(TRANSMISSION)
+            };
+            if through >= 1. {
+                continue;
+            }
+            #[cfg(test)]
+            self.count(0);
+            let Some(matrix) = walk(inner, index) else {
+                continue;
+            };
+            let (low, high) = geometry.bounds();
+            let (centre, half) = ((low + high) * 0.5, (high - low) * 0.5);
+            let (min, max) = placed_box(&matrix, centre, half);
+            let parented = slot.value.as_ref().is_some_and(|o| o.parent.is_some());
+            blocking.push(Blocker {
+                index,
+                matrix,
+                centre,
+                half,
+                parented,
+                min,
+                max,
+                through,
+                triangles: geometry.indices().len() / 3,
+            });
+        }
+        // Where each object's blocker is, and which are under another.
+        self.position.clear();
+        self.position.resize(inner.objects.len(), u32::MAX);
+        self.parented.clear();
+        for (at, blocker) in blocking.iter().enumerate() {
+            self.position[blocker.index] = at as u32;
+            if blocker.parented {
+                self.parented.push(at as u32);
+            }
+        }
+        // The same meshes block as before, only moved: the tree keeps its
+        // shape, its boxes made again round what moved. Others, it's made
+        // anew once they hold still.
+        let same = before.len() == blocking.len()
+            && before
+                .iter()
+                .zip(&blocking)
+                .all(|(a, b)| a.index == b.index);
+        if same && self.tree.0.is_some() {
+            self.tree.1.refit(&blocking);
+            self.tree.0 = Some(made);
+        } else {
+            self.tree.0 = None;
+        }
+        self.blocking = (Some(made), blocking);
+    }
+
     /// What the meshes between `from` and `to` let through: each one met
     /// multiplies the gain by its transmission and the cutoff by its
     /// transmission to the power 1.5 (a quarter: -12 dB, 2.5 kHz).
     /// `own` (the emitter's object) and `listener` (its, if it has one)
-    /// don't count.
-    fn occlusion(&self, inner: &Inner, from: Vec3, to: Vec3, own: ObjectId) -> (f32, f32) {
+    /// don't count. Only a mesh whose box the segment passes through has
+    /// its triangles looked at; how many, it adds to `triangles`.
+    fn occlusion(
+        &self,
+        inner: &Inner,
+        from: Vec3,
+        to: Vec3,
+        own: ObjectId,
+        triangles: &mut usize,
+    ) -> (f32, f32) {
         let listener = match self.listener {
             Listener::Object(id) => Some(id.index as usize),
             Listener::Camera => None,
         };
         let (mut gain, mut cutoff) = (1f32, OPEN);
-        for index in 0..inner.objects.len() {
-            let slot = &inner.objects[index];
-            let Some(object) = &slot.value else { continue };
-            let Some(geometry) = &object.geometry else {
-                continue;
-            };
-            if index == own.index as usize || Some(index) == listener {
-                continue;
+        let segment = Segment::new(from, to);
+        let mut met = |blocker: &Blocker| {
+            if blocker.index == own.index as usize || Some(blocker.index) == listener {
+                return;
             }
-            let id = ObjectId {
-                index: index as u32,
-                generation: slot.generation,
+            let Some(geometry) = inner.objects[blocker.index]
+                .value
+                .as_ref()
+                .and_then(|o| o.geometry.as_ref())
+            else {
+                return;
             };
-            let through = self.transmission_of(id);
-            if through >= 1. {
-                continue;
+            #[cfg(test)]
+            self.count(1);
+            *triangles += blocker.triangles;
+            if crate::pick::meet(geometry, blocker.matrix, from, to).is_some() {
+                gain *= blocker.through;
+                cutoff *= blocker.through * blocker.through.sqrt();
             }
-            let Some(matrix) = inner.world_of(index) else {
-                continue;
-            };
-            if crate::pick::meet(geometry, matrix, from, to).is_some() {
-                gain *= through;
-                cutoff *= through * through.sqrt();
+        };
+        let blockers = &self.blocking.1;
+        if self.tree.0.is_some() && self.tree.0 == self.blocking.0 {
+            self.tree.1.each(blockers, &segment, met);
+        } else {
+            for blocker in blockers {
+                if segment.through(blocker.min, blocker.max) {
+                    met(blocker);
+                }
             }
         }
         (gain, cutoff.max(100.))
     }
 
-    fn transmission_of(&self, id: ObjectId) -> f32 {
-        self.transmission
-            .iter()
-            .find(|(object, _)| *object == id)
-            .map_or(TRANSMISSION, |(_, t)| *t)
+    #[cfg(test)]
+    fn count(&self, which: usize) {
+        let mut work = self.work.get();
+        work[which] += 1;
+        self.work.set(work);
     }
 
     /// The zones' reverb for a listener at `point`: their settings weighted
@@ -469,6 +853,13 @@ impl Sound3d {
         };
         let ramp = Ramp::seconds(step.max(0.));
         let mut moving = heard.velocity != Vec3::ZERO;
+        // Those whose sound has ended, let go: a one-shot is sent nothing
+        // after it's done.
+        for (_, slot) in self.emitters.iter_mut() {
+            if slot.as_ref().is_some_and(|p| !p.voice.playing()) {
+                *slot = None;
+            }
+        }
         // Each emitter's place and velocity.
         for (_, slot) in self.emitters.iter_mut() {
             let Some(placed) = slot else { continue };
@@ -505,11 +896,15 @@ impl Sound3d {
                 placed.rayed = None;
             }
         }
+        self.blockers(inner);
         self.cast = 0;
         let count = self.emitters.len();
         let start = self.cursor;
         let mut looked = 0;
-        while looked < count && self.cast < self.rays {
+        // What the rays may look at a frame besides their number: no frame
+        // tests more triangles than this, once it has cast one ray.
+        let mut triangles = 0;
+        while looked < count && self.cast < self.rays && (self.cast == 0 || triangles < TRIANGLES) {
             let index = (start + looked) % count;
             looked += 1;
             let Some(placed) = &self.emitters[index].1 else {
@@ -522,7 +917,13 @@ impl Sound3d {
             if !placed.occlusion || placed.rayed == Some(ends) {
                 continue;
             }
-            let occluded = self.occlusion(inner, heard.position, position, placed.object);
+            let occluded = self.occlusion(
+                inner,
+                heard.position,
+                position,
+                placed.object,
+                &mut triangles,
+            );
             self.cast += 1;
             let placed = self.emitters[index].1.as_mut().expect("looked at");
             placed.rayed = Some(ends);
@@ -621,6 +1022,19 @@ impl Sound3d {
     }
 }
 
+impl Drop for Sound3d {
+    /// A world dropped, or given another engine: its sounds stop, and its
+    /// reverb comes off its bus.
+    fn drop(&mut self) {
+        for placed in self.emitters.drain(..).filter_map(|(_, p)| p) {
+            let _ = placed.voice.stop();
+        }
+        if let Some(reverb) = self.reverb.take() {
+            let _ = reverb.remove();
+        }
+    }
+}
+
 /// One frame of `world`'s sound at `time`, if it has any: its view calls
 /// this after each frame it draws.
 pub(crate) fn frame(world: &std::cell::RefCell<Inner>, time: Instant) {
@@ -634,19 +1048,16 @@ pub(crate) fn frame(world: &std::cell::RefCell<Inner>, time: Instant) {
 }
 
 impl World {
-    /// Gives it sound through `audio`: its emitters play on a bus of their
-    /// own under `audio`'s master, which its reverb zones' reverb is on.
-    /// Again, with another engine, starts over: emitters added before are
-    /// stopped.
-    pub fn set_audio(&self, audio: &Audio) -> Result<(), Error> {
-        let n = WORLDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let bus = audio.add_bus(&format!("3d world {n}"), &audio.master())?;
+    /// Gives it sound through `audio`: its emitters play on `bus`, which
+    /// its reverb zones' reverb goes on. The engine's `world` bus
+    /// (`audio.bus("world")`) is the one meant for it, and worlds can share
+    /// it: an engine has few buses, and none can be taken away. Again
+    /// starts over: what it played before is stopped.
+    pub fn set_audio(&self, audio: &Audio, bus: &Bus) -> Result<(), Error> {
+        let bus = bus.clone();
         let mut inner = self.inner.borrow_mut();
-        if let Some(old) = inner.audio.take() {
-            for placed in old.emitters.into_iter().filter_map(|(_, p)| p) {
-                let _ = placed.voice.stop();
-            }
-        }
+        // The one before, if any, dropped: its sounds stop.
+        drop(inner.audio.take());
         inner.audio = Some(Box::new(Sound3d {
             audio: audio.clone(),
             bus,
@@ -656,12 +1067,20 @@ impl World {
             listener: Listener::Camera,
             heard: None,
             last_frame: None,
-            transmission: Vec::new(),
+            transmission: Default::default(),
+            transmissions: 0,
+            blocking: (None, Vec::new()),
+            tree: (None, Tree::default()),
+            ordering: 0,
+            position: Vec::new(),
+            parented: Vec::new(),
             rays: RAYS,
             cursor: 0,
             cast: 0,
             mixed: None,
             meshes: 0,
+            #[cfg(test)]
+            work: Default::default(),
         }));
         Ok(())
     }
@@ -755,8 +1174,8 @@ impl World {
             } else {
                 transmission.clamp(0., 1.)
             };
-            sound.transmission.retain(|(id, _)| *id != object);
-            sound.transmission.push((object, t));
+            sound.transmission.insert(object, t);
+            sound.transmissions += 1;
             // Each emitter's rays again.
             for placed in sound.emitters.iter_mut().filter_map(|(_, p)| p.as_mut()) {
                 placed.rayed = None;
@@ -798,5 +1217,59 @@ fn claim<T>(slots: &mut Vec<(u32, Option<T>)>, value: T) -> (u32, u32) {
     } else {
         slots.push((0, Some(value)));
         (slots.len() as u32 - 1, 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Camera, Geometry, Material, Object, Transform};
+
+    fn work(world: &World) -> [u64; 2] {
+        world.inner.borrow().audio.as_ref().unwrap().work.get()
+    }
+
+    #[test]
+    fn a_moving_listener_s_rays_cost_what_they_meet_not_the_world() {
+        // 2,000 meshes, none between the listener and its 8 emitters: a
+        // frame where only the listener moves walks no mesh's matrix and
+        // tests no mesh's triangles.
+        let (audio, _mixer) = zgx_audio::Audio::offline(zgx_audio::Config::default()).unwrap();
+        let world = World::new();
+        world.set_camera(Camera::looking_at([0., 0., 0.], [0., 0., -1.]));
+        world
+            .set_audio(&audio, &audio.bus("world").unwrap())
+            .unwrap();
+        for i in 0..2_000 {
+            let id = world.add(Object::mesh(
+                Geometry::cuboid(0.5, 0.5, 0.5),
+                Material::default(),
+            ));
+            world.set_transform(
+                id,
+                Transform::at([(i % 50) as f32 * 2. - 50., 20. + (i / 50) as f32, -10.]),
+            );
+        }
+        let tone = zgx_audio::Sound::from_samples(&[0., 0.5], 1, 48_000).unwrap();
+        for i in 0..8 {
+            let id = world.add(Object::group());
+            world.set_transform(id, Transform::at([i as f32 - 4., 0., -6.]));
+            world
+                .add_emitter3d(id, Emitter3d::new(&tone).looping(true))
+                .unwrap();
+        }
+        let start = Instant::now();
+        world.update_audio(start);
+        for k in 1..4 {
+            world.set_camera(Camera::looking_at([0.1 * k as f32, 0., 0.], [0., 0., -1.]));
+            let before = work(&world);
+            world.update_audio(start + std::time::Duration::from_millis(10 * k));
+            let after = work(&world);
+            assert_eq!(world.audio_rays(), 8);
+            let walked = after[0] - before[0];
+            let met = after[1] - before[1];
+            assert!(walked <= 64, "frame {k}: {walked} matrices walked");
+            assert_eq!(met, 0, "frame {k}: {met} meshes' triangles tested");
+        }
     }
 }

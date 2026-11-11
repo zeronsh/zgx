@@ -36,7 +36,9 @@ fn tone(hz: f64) -> Sound {
 fn world(audio: &Audio) -> World {
     let world = World::new();
     world.set_camera(Camera::looking_at([0., 0., 0.], [0., 0., -1.]));
-    world.set_audio(audio).unwrap();
+    world
+        .set_audio(audio, &audio.bus("world").unwrap())
+        .unwrap();
     world
 }
 
@@ -349,4 +351,196 @@ fn emitters_that_all_keep_moving_are_rayed_in_turn() {
     };
     let lost = level(false) - level(true);
     assert!((lost - 12.04).abs() < 0.5, "{lost:.2} dB behind the wall");
+}
+
+#[test]
+fn a_dropped_world_s_sounds_stop() {
+    let (audio, mut mixer) = engine();
+    let world = world(&audio);
+    let source = spot(&world, [0., 0., -3.]);
+    world
+        .add_emitter3d(source, Emitter3d::new(&tone(400.)).looping(true))
+        .unwrap();
+    world.update_audio(Instant::now());
+    mixer.frames(FRAME);
+    assert_eq!(audio.stats().voices, 1);
+    drop(world);
+    // Its fade, then nothing.
+    mixer.frames(RATE as usize / 10);
+    audio.update();
+    assert_eq!(
+        audio.stats().voices,
+        0,
+        "a looping emitter outlived its world"
+    );
+    assert!(mixer.frames(FRAME).iter().all(|&s| s == 0.));
+}
+
+#[test]
+fn worlds_share_the_engine_s_world_bus_however_many() {
+    // An engine has few buses and none can be taken away: worlds, and a
+    // world given its engine again and again, take none of their own.
+    let (audio, _mixer) = engine();
+    let bus = audio.bus("world").unwrap();
+    let worlds: Vec<World> = (0..40)
+        .map(|_| {
+            let world = World::new();
+            world.set_audio(&audio, &bus).unwrap();
+            world
+        })
+        .collect();
+    for _ in 0..40 {
+        worlds[0].set_audio(&audio, &bus).unwrap();
+    }
+    // And a bus of the app's own is free for it to make.
+    audio.add_bus("mine", &audio.master()).unwrap();
+}
+
+#[test]
+fn a_one_shot_that_ended_is_let_go() {
+    let (audio, mut mixer) = engine();
+    let world = world(&audio);
+    let blip: Vec<f32> = (0..480).map(|i| (i as f32 * 0.3).sin() * 0.2).collect();
+    let blip = Sound::from_samples(&blip, 1, RATE).unwrap();
+    let clock = Clock(Instant::now());
+    for i in 0..20 {
+        let source = spot(&world, [i as f32 - 10., 0., -4.]);
+        world.add_emitter3d(source, Emitter3d::new(&blip)).unwrap();
+    }
+    world.update_audio(clock.at(0));
+    // Played out and given back.
+    mixer.frames(4 * FRAME);
+    audio.update();
+    world.update_audio(clock.at(1));
+    // The listener walks on: nothing is sent for sounds that are over.
+    let sent = audio.stats().commands;
+    for k in 2..10 {
+        world.set_camera(Camera::looking_at([k as f32, 0., 0.], [k as f32, 0., -1.]));
+        world.update_audio(clock.at(k));
+        mixer.frames(FRAME);
+    }
+    assert_eq!(
+        audio.stats().commands,
+        sent,
+        "commands sent for ended sounds"
+    );
+}
+
+#[test]
+fn a_wall_moved_between_them_is_found_among_many_meshes() {
+    // 200 meshes high above, a wall off to the side and another under a
+    // group, both held still a while (so the rays' tree of boxes is made),
+    // then moved, one itself, one by its group, between the listener and
+    // a low tone ahead: each time the tone loses the wall's 12 dB.
+    let (audio, mut mixer) = engine();
+    let world = world(&audio);
+    for i in 0..200 {
+        let id = world.add(Object::mesh(
+            Geometry::cuboid(0.3, 0.3, 0.3),
+            Material::rgb(0x808080),
+        ));
+        world.set_transform(
+            id,
+            Transform::at([(i % 20) as f32 - 10., 20. + (i / 20) as f32, -4.]),
+        );
+    }
+    let wall = world.add(Object::mesh(
+        Geometry::cuboid(4., 4., 0.2),
+        Material::rgb(0x808080),
+    ));
+    world.set_transform(wall, Transform::at([30., 0., -4.]));
+    let group = world.add(Object::group());
+    world.set_transform(group, Transform::at([-30., 0., 0.]));
+    let mut hung = Object::mesh(Geometry::cuboid(4., 4., 0.2), Material::rgb(0x808080));
+    hung.parent = Some(group);
+    let hung = world.add(hung);
+    world.set_transform(hung, Transform::at([0., 0., -5.]));
+    let source = spot(&world, [0., 0., -8.]);
+    world
+        .add_emitter3d(source, Emitter3d::new(&tone(200.)).looping(true).air(false))
+        .unwrap();
+    let clock = Clock(Instant::now());
+    let mut k = 0;
+    let mut frames = |world: &World, mixer: &mut Offline, n: usize| {
+        for _ in 0..n {
+            world.update_audio(clock.at(k));
+            k += 1;
+            mixer.frames(FRAME);
+        }
+    };
+    let level = |mixer: &mut Offline| {
+        level_db(&channel(&mixer.frames(RATE as usize / 4), 0)[RATE as usize / 8..])
+    };
+    frames(&world, &mut mixer, 5);
+    let open = level(&mut mixer);
+    world.set_transform(wall, Transform::at([0., 0., -4.]));
+    frames(&world, &mut mixer, 2);
+    let walled = level(&mut mixer);
+    assert!(
+        ((open - walled) - 12.04).abs() < 0.5,
+        "moved in: {:.2} dB",
+        open - walled
+    );
+    world.set_transform(wall, Transform::at([30., 0., -4.]));
+    frames(&world, &mut mixer, 5);
+    world.set_transform(group, Transform::at([0., 0., 0.]));
+    frames(&world, &mut mixer, 2);
+    let hidden = level(&mut mixer);
+    assert!(
+        ((open - hidden) - 12.04).abs() < 0.5,
+        "by its group: {:.2} dB",
+        open - hidden
+    );
+}
+
+#[test]
+fn a_frame_s_rays_test_a_bounded_number_of_triangles() {
+    // A wall of 125,000 triangles across every ray: past the first, a ray
+    // waits for the next frame, so each frame casts one, and all eight
+    // emitters are rayed in eight.
+    let (audio, mut mixer) = engine();
+    let world = world(&audio);
+    let n = 250;
+    let mut vertices = Vec::new();
+    for j in 0..=n {
+        for i in 0..=n {
+            vertices.push(zgx_3d::Vertex {
+                position: [
+                    i as f32 / n as f32 * 20. - 10.,
+                    j as f32 / n as f32 * 4. - 2.,
+                    0.,
+                ],
+                normal: [0., 0., 1.],
+                uv: [0., 0.],
+            });
+        }
+    }
+    let mut indices = Vec::new();
+    for j in 0..n {
+        for i in 0..n {
+            let a = (j * (n + 1) + i) as u32;
+            let b = a + (n + 1) as u32;
+            indices.extend([a, a + 1, b, a + 1, b + 1, b]);
+        }
+    }
+    let wall = world.add(Object::mesh(
+        Geometry::new(vertices, indices).unwrap(),
+        Material::rgb(0x808080),
+    ));
+    world.set_transform(wall, Transform::at([0., 0., -3.]));
+    for i in 0..8 {
+        let id = spot(&world, [i as f32 - 4., 0., -6.]);
+        world
+            .add_emitter3d(id, Emitter3d::new(&tone(200.)).looping(true))
+            .unwrap();
+    }
+    let clock = Clock(Instant::now());
+    let cast: Vec<usize> = (0..10)
+        .map(|k| {
+            world.update_audio(clock.at(k));
+            mixer.frames(FRAME);
+            world.audio_rays()
+        })
+        .collect();
+    assert_eq!(cast, [1, 1, 1, 1, 1, 1, 1, 1, 0, 0]);
 }
