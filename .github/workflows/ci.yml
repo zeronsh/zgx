@@ -253,6 +253,43 @@ jobs:
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload -p zgx-script --all-targets --features zgx-script/scene3d --locked
       # Terminal sessions on real ptys (openpty, ConPTY): exact cells, input, exits.
       - run: cargo test -p zgx-terminal --locked
+      # Real programs on a real pty, driven by the keys the view sends
+      # (zgx-terminal's ignored `real_programs` tests): vim, less and git
+      # from the image, htop, tmux and fzf from linux-packages.txt, nvim and
+      # lazygit from their releases (24.04's nvim, 0.9, doesn't ask the
+      # terminal what it can do; lazygit isn't packaged), pinned by version
+      # and checksum and kept between runs. A missing program fails its test.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/nvim-0.11.4
+            ~/.local/lazygit-0.44.1
+          key: terminal-programs-nvim-0.11.4-lazygit-0.44.1-linux-x86_64
+      - name: Terminal programs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          # fetch DIR REPO TAG ASSET SHA256: the asset checked, then unpacked.
+          fetch() {
+            if [ ! -d "$1" ]; then
+              mkdir -p "$(dirname "$1")"
+              scripts/fetch_release.sh "$2" "$3" "$4" "$1.tar.gz"
+              echo "$5  $1.tar.gz" | sha256sum --check --strict -
+              mkdir -p "$1.part"
+              tar xzf "$1.tar.gz" -C "$1.part"
+              mv "$1.part" "$1"
+              rm "$1.tar.gz"
+            fi
+          }
+          nvim="$HOME/.local/nvim-0.11.4"
+          lazygit="$HOME/.local/lazygit-0.44.1"
+          fetch "$nvim" neovim/neovim v0.11.4 nvim-linux-x86_64.tar.gz \
+            a74740047e73b2b380d63a474282814063d10650cd6cc95efa16d1713c7e616c
+          fetch "$lazygit" jesseduffield/lazygit v0.44.1 lazygit_0.44.1_Linux_x86_64.tar.gz \
+            84682f4ad5a449d0a3ffbc8332200fe8651aee9dd91dcd8d87197ba6c2450dbc
+          ZGX_TUI_PATH="$nvim/nvim-linux-x86_64/bin:$lazygit" \
+            cargo test -p zgx-terminal --lib --locked real_programs -- --ignored
       # The optional effects package: every effect drawn, on each job's backend.
       - run: cargo test -p zgx-fx --locked
       # zgx-script's tests with all its features, as an app built by zgx-run
