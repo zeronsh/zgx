@@ -29,6 +29,9 @@ pub struct Stats {
     pub lights: (usize, usize),
     /// The world's revision (it changes when the world does).
     pub revision: u64,
+    /// Master's level while its sound is heard: dBFS RMS (over 300 ms) and
+    /// peak (since the last reading). `None` while it's off.
+    pub sound: Option<(f32, f32)>,
 }
 
 fn panel() -> View {
@@ -98,6 +101,10 @@ pub fn view(viewport: View, settings: &Settings, stats: Signal<Stats>) -> View {
         .child(line(|s| format!("{} containers", s.containers)))
         .child(line(|s| {
             format!("{} lights, {} shaded", s.lights.0, s.lights.1)
+        }))
+        .child(line(|s| match s.sound {
+            Some((rms, peak)) => format!("sound {rms:.0} dBFS  peak {peak:.0}"),
+            None => "sound off".into(),
         }));
     let value = |signal: &Signal<f32>, f: fn(f32) -> String| {
         let signal = signal.clone();
@@ -152,6 +159,18 @@ pub fn view(viewport: View, settings: &Settings, stats: Signal<Stats>) -> View {
                 .items_center()
                 .child(slider("Yard filled", s.yard.clone(), 0. ..=1.).grow())
                 .child(value(&s.yard, |v| format!("{:.0}%", v * 100.))),
+        )
+        .child(toggles([
+            ("Sound", s.sound.clone()),
+            ("Headphones", s.binaural.clone()),
+        ]))
+        .child(label("Volume"))
+        .child(
+            row()
+                .gap(8.)
+                .items_center()
+                .child(slider("Volume", s.volume.clone(), -40. ..=0.).grow())
+                .child(value(&s.volume, |v| format!("{v:.0} dB"))),
         );
     // The HUD's own switch stays visible.
     let toggle = div()

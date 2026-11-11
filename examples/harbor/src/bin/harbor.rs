@@ -7,8 +7,12 @@
 //! Run: cargo run --release --bin harbor (from examples/harbor)
 //! `--smoke-test` flies for two seconds, prints what it drew, and quits.
 //!
-//! It plays its sound through the system's output; `HARBOR_MUTE=1` (and
-//! `--smoke-test`) mixes it offline instead, opening no device.
+//! Its sound goes through the system's output, opened silent: the HUD's
+//! Sound switch (off at first) and volume raise master, a level meter
+//! shows it, it fades out while the window is hidden or covered, and
+//! Headphones hears its emitters through a head. `HARBOR_MUTE=1` (and
+//! `--smoke-test`, and a build without the `device` feature) mixes it
+//! offline instead, opening no device.
 use std::{cell::RefCell, rc::Rc, time::Instant};
 use zgx::{compose::prelude::*, input::InputEvent};
 use zgx_3d::{Camera, Orbit, OrbitControls, World};
@@ -75,13 +79,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Sound: through the system's output for a person running it;
             // offline (no device opened) for an unattended run.
             let mute = smoke || std::env::var("HARBOR_MUTE").as_deref() == Ok("1");
+            #[cfg(feature = "device")]
             let sound = if mute {
                 HarborSound::offline(&world, &harbor)
             } else {
                 HarborSound::device(&world, &harbor)
             };
+            #[cfg(not(feature = "device"))]
+            let sound = {
+                let _ = mute;
+                HarborSound::offline(&world, &harbor)
+            };
             let sound = match sound {
-                Ok(sound) => Some(sound),
+                Ok(sound) => Some(Rc::new(RefCell::new(sound))),
                 Err(error) => {
                     eprintln!("harbor: no sound: {error}");
                     None
@@ -95,6 +105,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 containers: harbor.yard.len() + harbor.deck.len(),
                 lights: (harbor.lamps.len(), harbor.lamps.len()),
                 ..Stats::default()
+            });
+            // Sound: heard as the settings say (silent until Sound is on),
+            // and master's level for the HUD ten times a second while on.
+            let meter = sound.as_ref().map(|sound| {
+                keep.extend(settings.bind_sound(
+                    &cx.ui.runtime,
+                    cx.ui.observe_shown(),
+                    &world,
+                    sound.clone(),
+                ));
+                let master = sound.borrow().audio.master();
+                let _ = master.set_metered(true);
+                let (on, stats) = (settings.sound.clone(), stats.clone());
+                cx.tasks.spawn_scoped(async move {
+                    loop {
+                        zgx::timer::sleep(std::time::Duration::from_millis(100)).await;
+                        let level = on.with_untracked(|on| *on).then(|| {
+                            let level = master.level();
+                            let db = |x: f32| 20. * x.max(1e-6).log10();
+                            (db(level.rms), db(level.peak))
+                        });
+                        if stats.with_untracked(|s| s.sound) != level {
+                            stats.update(|s| s.sound = level);
+                        }
+                    }
+                })
             });
             let controls = Rc::new(RefCell::new(OrbitControls::new(orbit_of(world.camera()))));
             let base = world.camera();
@@ -164,7 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     move |event| {
                         // The effects and the sound live as long as the
                         // view does.
-                        let _ = (&keep, &sound);
+                        let _ = (&keep, &sound, &meter);
                         if fly.with_untracked(|f| *f) {
                             return;
                         }

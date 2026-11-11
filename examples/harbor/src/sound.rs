@@ -7,14 +7,15 @@
 //! Two engines: offline (`HarborSound::offline`, a mixer the caller runs,
 //! no device opened: the bench, the tests and every automated run, master's
 //! gain 1 and the mix measured), and the system's output
-//! (`HarborSound::device`), for a person running the window, which plays
-//! at its normal level. An unattended run never opens the device: the
+//! (`HarborSound::device`, the crate's `device` feature), for a person
+//! running the window: it opens with master at 0, and the window's Sound
+//! setting raises it. An unattended run never opens the device: the
 //! window's `--smoke-test` and `HARBOR_MUTE=1` take the offline engine.
 use crate::{
     scene::Harbor,
     sounds::{self, RATE},
 };
-use zgx_3d::{Emitter3d, ReverbPreset, ReverbZone, World};
+use zgx_3d::{Emitter3d, Emitter3dId, ObjectId, ReverbPreset, ReverbZone, World};
 use zgx_audio::{Audio, Config, Error, Offline, Play, Sound, Voice, spatial::Falloff};
 
 /// Steel and stacks: a large, hard space, not long.
@@ -43,6 +44,11 @@ pub struct HarborSound {
     pub rain: Option<Voice>,
     /// Emitters placed on objects.
     pub emitters: usize,
+    /// Each emitter's object, how it was made, and its id: placed again to
+    /// be heard another way (`set_binaural`).
+    placed: Vec<(ObjectId, Emitter3d, Emitter3dId)>,
+    /// Whether its emitters are heard through a head (HRTF).
+    binaural: bool,
 }
 
 fn sound(samples: &[f32]) -> Result<Sound, Error> {
@@ -56,12 +62,30 @@ impl HarborSound {
         Self::on(world, harbor, audio, Some(mixer))
     }
 
-    /// Sound for `harbor` in `world` through the system's output, at its
-    /// normal level: for a person running the window, never an unattended
-    /// run.
+    /// Sound for `harbor` in `world` through the system's output, master
+    /// at 0 (nothing heard) until raised: for a person running the window,
+    /// never an unattended run.
+    #[cfg(feature = "device")]
     pub fn device(world: &World, harbor: &Harbor) -> Result<Self, Error> {
-        let audio = Audio::new(Config::default())?;
+        let audio = Audio::new(Config {
+            gain: 0.,
+            ..Config::default()
+        })?;
         Self::on(world, harbor, audio, None)
+    }
+
+    /// Its emitters heard through a head (HRTF, for headphones), or panned:
+    /// each placed again, so its loop starts again.
+    pub fn set_binaural(&mut self, world: &World, on: bool) -> Result<(), Error> {
+        if on == self.binaural {
+            return Ok(());
+        }
+        for (object, emitter, id) in &mut self.placed {
+            world.remove_emitter3d(*id);
+            *id = world.add_emitter3d(*object, emitter.clone().binaural(on))?;
+        }
+        self.binaural = on;
+        Ok(())
     }
 
     fn on(
@@ -82,9 +106,15 @@ impl HarborSound {
         }
         let seed = harbor.config.seed;
         let mut emitters = 0;
+        let mut placed = Vec::new();
+        let mut place = |object: ObjectId, emitter: Emitter3d| -> Result<(), Error> {
+            let id = world.add_emitter3d(object, emitter.clone())?;
+            placed.push((object, emitter, id));
+            Ok(())
+        };
         let motor = sound(&sounds::crane_motor(seed))?;
         for g in &harbor.gantries {
-            world.add_emitter3d(
+            place(
                 g.trolley,
                 Emitter3d::new(&motor)
                     .looping(true)
@@ -97,7 +127,7 @@ impl HarborSound {
             )?;
             emitters += 1;
         }
-        world.add_emitter3d(
+        place(
             harbor.funnel,
             Emitter3d::new(&sound(&sounds::generator(seed ^ 1))?)
                 .looping(true)
@@ -108,7 +138,7 @@ impl HarborSound {
                     rolloff: 1.,
                 }),
         )?;
-        world.add_emitter3d(
+        place(
             harbor.buoy,
             Emitter3d::new(&sound(&sounds::bell())?)
                 .looping(true)
@@ -146,6 +176,8 @@ impl HarborSound {
             mixer,
             rain,
             emitters,
+            placed,
+            binaural: false,
         })
     }
 

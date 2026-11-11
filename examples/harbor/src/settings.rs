@@ -1,7 +1,10 @@
 //! The settings panel's values: each a signal, each bound to the world by
 //! an effect, so a control only writes its signal and the world follows.
 //! The bench sets the same signals; nothing writes the world beside them.
-use crate::scene::{self, Harbor};
+use crate::{
+    scene::{self, Harbor},
+    sound::HarborSound,
+};
 use zgx::reactive::{Effect, Runtime, Signal};
 use zgx_3d::{AutoExposure, Bloom, Post, ToneMapping, World};
 
@@ -38,6 +41,12 @@ pub struct Settings {
     pub yard: Signal<f32>,
     /// The HUD shows.
     pub hud: Signal<bool>,
+    /// Its sound is heard: off at first, so the window opens silent.
+    pub sound: Signal<bool>,
+    /// How loud, dB on master.
+    pub volume: Signal<f32>,
+    /// Emitters heard through a head (HRTF), for headphones; off, panned.
+    pub binaural: Signal<bool>,
 }
 
 impl Settings {
@@ -58,7 +67,46 @@ impl Settings {
             sea: runtime.signal(true),
             yard: runtime.signal(1.),
             hud: runtime.signal(true),
+            sound: runtime.signal(false),
+            volume: runtime.signal(-20.),
+            binaural: runtime.signal(false),
         }
+    }
+
+    /// Bind the sound settings to `sound`: master's gain through its drive
+    /// (no command a change), 0 unless Sound is on and the window `shown`;
+    /// so it fades out (the drive's glide, 10 ms) when the window hides or
+    /// rests, and back when it shows. And its emitters heard binaurally or
+    /// panned. Keep the effects for as long as the binding.
+    pub fn bind_sound(
+        &self,
+        runtime: &Runtime,
+        shown: Signal<bool>,
+        world: &World,
+        sound: std::rc::Rc<std::cell::RefCell<HarborSound>>,
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        {
+            let master = sound.borrow().audio.master().drive();
+            let (on, volume) = (self.sound.clone(), self.volume.clone());
+            effects.push(runtime.effect(move || {
+                let heard = on.get() && shown.get();
+                master.set(if heard {
+                    10f32.powf(volume.get() / 20.)
+                } else {
+                    0.
+                });
+            }));
+        }
+        {
+            let (on, w) = (self.binaural.clone(), world.clone());
+            effects.push(runtime.effect(move || {
+                if let Err(error) = sound.borrow_mut().set_binaural(&w, on.get()) {
+                    eprintln!("harbor: emitters not placed again: {error}");
+                }
+            }));
+        }
+        effects
     }
 
     /// Bind each value to `world`: an effect each, run now and whenever
