@@ -157,8 +157,10 @@ fn levels_are_the_files_own(side: u32) {
 }
 
 /// `file` (`side` square, its first level red, the rest green) drawn near
-/// and far, where `has` says the world's device holds its format; else it
-/// draws as if it had no map, white, saying it skipped.
+/// and far: its levels show whether the world's device holds its format
+/// (`has`) or not, where its blocks are decoded to RGBA8 texels. There a
+/// square drawn without its map would be white, so red near and green far
+/// also say the decode was the path taken.
 fn file_levels_show(file: &[u8], side: u32, has: impl Fn(&Caps) -> bool) {
     // Near: far wider than the view, its texels larger than pixels.
     for (width, near) in [(40., true), (0.12, false)] {
@@ -170,12 +172,14 @@ fn file_levels_show(file: &[u8], side: u32, has: impl Fn(&Caps) -> bool) {
         };
         window.draw_loaded(&world);
         let p = window.middle();
-        if !has(&world.caps().expect("a frame drawn")) {
-            eprintln!("SKIPPED: this device can't hold the file's blocks");
-            assert!(p[..3].iter().all(|&c| c > 200), "white: {p:?}");
-            continue;
-        }
-        assert!(if near { red(p) } else { green(p) }, "near {near}: {p:?}");
+        let how = match has(&world.caps().expect("a frame drawn")) {
+            true => "its blocks on the device",
+            false => "decoded, the device lacking its blocks",
+        };
+        assert!(
+            if near { red(p) } else { green(p) },
+            "near {near}, {how}: {p:?}"
+        );
     }
 }
 
