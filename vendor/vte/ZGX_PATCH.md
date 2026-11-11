@@ -55,3 +55,9 @@ split by `;`. By default it does nothing; other DCS strings, and one longer
 than that, go unanswered as before. `termcap_requests_reach_the_handler_whole`
 checks a request split across reads, a sixel image, DECRQSS and an empty and
 a long request beside it. Version 0.15.1.
+
+## XTVERSION asked
+
+`CSI > q` (or `CSI > 0 q`, XTVERSION) calls `Handler::report_version`, by
+default nothing; `version_requests_reach_the_handler` checks another
+parameter asks nothing and DECSCUSR still sets the cursor. Version 0.15.2.

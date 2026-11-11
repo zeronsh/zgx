@@ -157,6 +157,27 @@ fn terminfo_capabilities_asked_of_the_terminal() {
     );
 }
 
+/// The terminal's name and version (XTVERSION), as programs ask before
+/// trusting what `TERM` says (over ssh, in tmux): the program name and
+/// version its command is given, the app's own when it sets them.
+#[test]
+fn the_terminal_names_itself() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(answer(b"\x1b[>q"), format!("\x1bP>|zgx({version})\x1b\\"));
+    assert_eq!(answer(b"\x1b[>0q"), format!("\x1bP>|zgx({version})\x1b\\"));
+    assert_eq!(answer(b"\x1b[>1q"), "", "only 0 asks");
+    let options = SessionOptions {
+        env: vec![
+            ("TERM_PROGRAM".into(), "app".into()),
+            ("TERM_PROGRAM_VERSION".into(), "2.1".into()),
+        ],
+        ..SessionOptions::default()
+    };
+    let (session, rx) = Session::replay_with(&options, crate::GridSize::new(40, 10), || {}, true);
+    session.feed(b"\x1b[>q");
+    assert_eq!(written(&rx), "\x1bP>|app(2.1)\x1b\\", "the app's own");
+}
+
 /// The mouse modes a program sets decide what a click sends it: nothing
 /// until it asks, X10 bytes or SGR as it asks, motion only with a button
 /// held (1002) or always (1003).

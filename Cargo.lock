@@ -5069,7 +5069,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-alacritty-terminal"
-version = "0.26.5"
+version = "0.26.6"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.13.2",
@@ -5366,7 +5366,7 @@ dependencies = [
 
 [[package]]
 name = "zgx-vte"
-version = "0.15.1"
+version = "0.15.2"
 dependencies = [
  "arrayvec",
  "bitflags 2.13.2",

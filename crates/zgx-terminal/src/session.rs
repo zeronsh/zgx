@@ -27,6 +27,10 @@ use std::{
     time::Instant,
 };
 
+/// The name a session's command is given as `TERM_PROGRAM`, and XTVERSION
+/// answers, unless the app gives its own.
+const PROGRAM: &str = "zgx";
+
 /// The screen model a session keeps.
 pub type Term = alacritty_terminal::Term<Listener>;
 
@@ -307,7 +311,7 @@ impl Session {
         let mut env: std::collections::HashMap<String, String> = [
             ("TERM", "xterm-256color"),
             ("COLORTERM", "truecolor"),
-            ("TERM_PROGRAM", "zgx"),
+            ("TERM_PROGRAM", PROGRAM),
             ("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION")),
         ]
         .into_iter()
@@ -582,8 +586,16 @@ struct Io {
     exited: Arc<Mutex<Option<i32>>>,
 }
 /// The screen model's configuration: device attributes announce sixel
-/// only where pictures can arrive.
+/// only where pictures can arrive, and XTVERSION answers with the program
+/// name and version the session's command is given (`TERM_PROGRAM` and
+/// `TERM_PROGRAM_VERSION`, the app's own if it sets them).
 fn config(options: &SessionOptions, pictures: bool) -> Config {
+    let given = |key: &str, default: &'static str| {
+        let set = options.env.iter().rev().find(|(name, _)| name == key);
+        set.map_or(default, |(_, value)| value.as_str())
+    };
+    let program = given("TERM_PROGRAM", PROGRAM);
+    let version = given("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
     Config {
         scrolling_history: options.scrollback,
         // Programs may set the clipboard, and ask to read it: the app asks
@@ -593,6 +605,7 @@ fn config(options: &SessionOptions, pictures: bool) -> Config {
         // view encodes keys as it asks.
         kitty_keyboard: true,
         sixel: pictures,
+        version: format!("{program}({version})"),
         ..Config::default()
     }
 }

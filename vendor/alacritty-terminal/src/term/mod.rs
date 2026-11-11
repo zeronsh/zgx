@@ -382,6 +382,10 @@ pub struct Config {
     /// zgx: whether device attributes announce sixel graphics (4). Off where
     /// the embedder can't show them, so programs don't send them.
     pub sixel: bool,
+
+    /// zgx: the name and version XTVERSION answers, `name(version)` as kitty,
+    /// foot and xterm give them; empty answers nothing.
+    pub version: String,
 }
 
 impl Default for Config {
@@ -394,6 +398,7 @@ impl Default for Config {
             kitty_keyboard: Default::default(),
             osc52: Default::default(),
             sixel: true,
+            version: String::new(),
         }
     }
 }
@@ -2789,6 +2794,15 @@ impl<T: EventListener> Handler for Term<T> {
         self.event_proxy.send_event(Event::PtyWrite(text));
     }
 
+    // zgx: XTVERSION, as `DCS > | name(version) ST`.
+    fn report_version(&mut self) {
+        if self.config.version.is_empty() {
+            return;
+        }
+        let text = format!("\x1bP>|{}\x1b\\", self.config.version);
+        self.event_proxy.send_event(Event::PtyWrite(text));
+    }
+
     // zgx: XTGETTCAP, answered a name at a time as kitty and foot do: `1+r`
     // with the name and its value (none for a flag), each hex encoded, for a
     // capability this terminal has; `0+r` and the name as asked for one it
@@ -4439,9 +4453,9 @@ mod grapheme_tests {
     }
 }
 
-/// zgx: XTGETTCAP's answers.
+/// zgx: XTGETTCAP's and XTVERSION's answers.
 #[cfg(test)]
-mod termcap_tests {
+mod report_tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
@@ -4483,6 +4497,23 @@ mod termcap_tests {
             answer(b"4D73"),
             "\x1bP1+r4D73=5C455D35323B25703125733B25703225735C303037\x1b\\"
         );
+    }
+
+    /// XTVERSION answers with the name and version set, and nothing
+    /// without one.
+    #[test]
+    fn the_version_is_answered_once_set() {
+        let answers = Answers::default();
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 3), answers.clone());
+        term.report_version();
+        assert_eq!(*answers.0.lock().unwrap(), "");
+        let config = Config {
+            version: "zgx(1.0)".into(),
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &TermSize::new(10, 3), answers.clone());
+        term.report_version();
+        assert_eq!(*answers.0.lock().unwrap(), "\x1bP>|zgx(1.0)\x1b\\");
     }
 
     /// Every capability reported is found by its name, hex encoded.
