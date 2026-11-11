@@ -74,6 +74,23 @@ cargo run --release -p zgx-gpu --example d3d12_device_churn
 
 It prints the GPU and driver, then each run's time; a run that hangs is reported and the process exits with 2.
 
+## Windows audio (WASAPI)
+
+`crates/zgx-audio/examples/device_probe.rs` runs on Windows as on macOS, at zero gain, through cpal's WASAPI in shared mode ("wakeups" are the context switches of the process's threads). On Windows 11 25H2, default output 48 kHz stereo with a 10 ms period, release build (2026-11-10):
+- **Nothing opened before a sound.** Without audio, and with an engine made and a sound loaded, the process has 4 threads and 1 wakeup in 10 s.
+- **The stream stops after its hold.** After one click, closed (`Stopping::Close`): 2 to 5 wakeups in 30 s. Eight threads outlive it, though (13 while it runs, 12 after): the engine's own and seven of the system's audio stack, which load as soon as the default output's format is asked. Paused instead (`Stopping::Pause`), all 13 stay and wake about 4 times a second. A cold start took 16 to 60 ms closed, 19 ms paused.
+- **Load.** 64 looping voices, half resampled from 44.1 kHz, for 10 s: no underrun; a block's mix took 287 µs at the median, 858 µs at p99 and 1,337 µs at most, of blocks lasting 5,333 µs.
+- **`latency` fails.** A cold start's first block reaches the mixer stamped 0 (cpal stamps WASAPI's pre-fill from a clock not yet running), so a play that starts the stream has no time and the mode gives up after 5 s.
+
+Heard, through a loopback capture of the default output (WASAPI, shared mode) while the engine played at a master gain of 0.1 (-20 dBFS for a full-scale sound), about 15 s in all: 1 kHz clicks of 10 ms on the `ui` bus, three from a closed stream and ten into a running one; a 997 Hz sine looped for 5.6 s on the `music` bus, the bus muted for 0.4 s and unmuted, then the voice stopped; and the same click as a WAV through `PlaySound`. Nothing else was playing (the capture was silent before the first click); the capture was analysed in memory and discarded.
+- **Play to heard.** From the call to the first captured frame: 47 to 68 ms from a closed stream (median 60), 61 to 69 ms into a running one (median 66), where the engine's own estimate (`Stats::play_heard`) was within 0.7 ms of the capture. `PlaySound` took 49 to 85 ms (median 58). Most of it is the shared-mode buffer: a block is heard 42 to 60 ms after the device asks for it.
+- **What is mixed is heard.** Over 5 s the sine measured -23.01 dBFS (a -20 dBFS sine's RMS), 997.2 Hz by zero crossings, left and right equal, and no sample out of step with a sine's recurrence past 0.002 (none dropped or repeated), the loop's five seams included.
+- **No clicks.** Muting, unmuting and stopping (5 ms fades) moved no frame further from the last than the sine itself does; muted and stopped are silent.
+
+```powershell
+cargo run --release -p zgx-audio --features device --example device_probe -- after 10 close
+```
+
 ## Linux native checks
 
 Native examples run under Xvfb with Openbox, using llvmpipe Vulkan:

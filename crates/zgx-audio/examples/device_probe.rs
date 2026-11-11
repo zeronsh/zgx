@@ -1,4 +1,4 @@
-//! What the device costs and how fast it starts, on macOS, at zero gain:
+//! What the device costs and how fast it starts, on macOS and Windows, at zero gain:
 //! master's gain is 0 from the first frame, so streams run and counters
 //! count but nothing is heard. Every mode checks the output stayed silent.
 //!
@@ -11,17 +11,28 @@
 //! - `threads <n>`: after one click, `n` windows of 30 s: wakeups and each thread's CPU time
 //!   (`queried`: only the default output's format asked; `streamed`: a stream played to its end)
 //! - `load <s>`: 64 voices looping for `s` seconds: block times, underruns
-#[cfg(target_os = "macos")]
+//!
+//! On Windows (WASAPI, shared mode) the same modes print the same lines:
+//! "wakeups" there are the context switches of the process's threads (the
+//! times they were woken to run), thread times are kernel plus user (counted
+//! in scheduler ticks, 15.6 ms), and the clock is the performance counter
+//! WASAPI's timestamps count. `latency` fails there after its 5 s wait for
+//! the first click: a cold start's first block reaches the mixer stamped 0
+//! (cpal stamps WASAPI's pre-fill from a clock not yet running), so a play
+//! that starts the stream is never given a time.
+#[cfg(any(target_os = "macos", windows))]
 mod probe {
     use std::time::{Duration, Instant};
     use zgx_audio::{Audio, Config, Cpal, Play, Sound, Stopping};
 
+    #[cfg(target_os = "macos")]
     #[repr(C)]
     struct RusageInfoV4 {
         uuid: [u8; 16],
         fields: [u64; 40],
     }
 
+    #[cfg(target_os = "macos")]
     unsafe extern "C" {
         fn proc_pid_rusage(pid: i32, flavor: i32, buffer: *mut RusageInfoV4) -> i32;
         fn proc_pidinfo(pid: i32, flavor: i32, arg: u64, buffer: *mut u8, size: i32) -> i32;
@@ -29,6 +40,7 @@ mod probe {
     }
 
     /// Package-idle and interrupt wakeups of this process so far.
+    #[cfg(target_os = "macos")]
     fn wakeups() -> u64 {
         let mut info = RusageInfoV4 {
             uuid: [0; 16],
@@ -43,6 +55,7 @@ mod probe {
         info.fields[2] + info.fields[3]
     }
 
+    #[cfg(target_os = "macos")]
     #[repr(C)]
     struct ThreadExtendedInfo {
         user_time: u64,
@@ -58,6 +71,7 @@ mod probe {
         name: [u8; 64],
     }
 
+    #[cfg(target_os = "macos")]
     #[repr(C)]
     struct ThreadIdentifierInfo {
         thread_id: u64,
@@ -65,6 +79,7 @@ mod probe {
         dispatch_qaddr: u64,
     }
 
+    #[cfg(target_os = "macos")]
     unsafe extern "C" {
         static mach_task_self_: u32;
         fn task_threads(task: u32, threads: *mut *mut u32, count: *mut u32) -> i32;
@@ -73,6 +88,7 @@ mod probe {
 
     /// Each of this process's threads: its id, name, and CPU time so far
     /// (user plus system, in nanoseconds).
+    #[cfg(target_os = "macos")]
     fn thread_times() -> Vec<(u64, String, u64)> {
         let mut list: *mut u32 = std::ptr::null_mut();
         let mut count = 0u32;
@@ -99,6 +115,7 @@ mod probe {
     }
 
     /// This process's threads.
+    #[cfg(target_os = "macos")]
     fn threads() -> i32 {
         let mut info = [0u8; 96];
         // SAFETY: PROC_PIDTASKINFO (4) fills a proc_taskinfo: six u64s, then
@@ -110,9 +127,144 @@ mod probe {
 
     /// The clock CoreAudio's host times count, in nanoseconds
     /// (CLOCK_UPTIME_RAW: mach_absolute_time).
+    #[cfg(target_os = "macos")]
     fn clock() -> u64 {
         // SAFETY: a clock id the system defines.
         unsafe { clock_gettime_nsec_np(8) }
+    }
+
+    #[cfg(windows)]
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtQuerySystemInformation(class: u32, info: *mut u8, length: u32, out: *mut u32) -> i32;
+    }
+
+    #[cfg(windows)]
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn QueryPerformanceCounter(count: *mut i64) -> i32;
+        fn QueryPerformanceFrequency(frequency: *mut i64) -> i32;
+        fn OpenThread(access: u32, inherit: i32, id: u32) -> isize;
+        fn GetThreadDescription(thread: isize, description: *mut *mut u16) -> i32;
+        fn LocalFree(memory: *mut u16) -> *mut u16;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+
+    /// Each of this process's threads: its id, its context switches and its
+    /// CPU time (kernel plus user, in nanoseconds) so far, as the kernel
+    /// lists them (SystemProcessInformation).
+    #[cfg(windows)]
+    fn snapshot() -> Vec<(u64, u64, u64)> {
+        // u64s, for the structures' alignment.
+        let mut buffer = vec![0u64; 1 << 17];
+        loop {
+            let mut needed = 0u32;
+            let bytes = (buffer.len() * 8) as u32;
+            // SAFETY: class 5 fills the buffer with SYSTEM_PROCESS_INFORMATION
+            // entries, writing no more than its length, and says how much it
+            // needed where it was too short (STATUS_INFO_LENGTH_MISMATCH).
+            let status = unsafe {
+                NtQuerySystemInformation(5, buffer.as_mut_ptr().cast(), bytes, &mut needed)
+            };
+            if status == 0xC000_0004_u32 as i32 {
+                buffer.resize(buffer.len().max(needed as usize / 8) * 2, 0);
+                continue;
+            }
+            assert_eq!(status, 0, "NtQuerySystemInformation: {status:#x}");
+            break;
+        }
+        // SAFETY: the buffer's own bytes, as many as it holds.
+        let bytes: &[u8] =
+            unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast(), buffer.len() * 8) };
+        let read = |at: usize, size: usize| {
+            let mut word = [0u8; 8];
+            word[..size].copy_from_slice(&bytes[at..at + size]);
+            u64::from_le_bytes(word)
+        };
+        // x64 layouts: a process entry is 256 bytes (NextEntryOffset at 0,
+        // NumberOfThreads at 4, UniqueProcessId at 80), its threads' 80 each
+        // after it (KernelTime at 0, UserTime at 8, UniqueThread at 48,
+        // ContextSwitches at 64; times in 100 ns).
+        let me = u64::from(std::process::id());
+        let mut entry = 0;
+        loop {
+            if read(entry + 80, 8) == me {
+                return (0..read(entry + 4, 4) as usize)
+                    .map(|i| {
+                        let thread = entry + 256 + i * 80;
+                        let time = (read(thread, 8) + read(thread + 8, 8)) * 100;
+                        (read(thread + 48, 8), read(thread + 64, 4), time)
+                    })
+                    .collect();
+            }
+            let next = read(entry, 4) as usize;
+            assert!(next != 0, "this process isn't listed");
+            entry += next;
+        }
+    }
+
+    /// Context switches of this process's threads so far, those that have
+    /// exited included (each thread's last count is kept).
+    #[cfg(windows)]
+    fn wakeups() -> u64 {
+        static SEEN: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+        let mut seen = SEEN.lock().unwrap();
+        for (id, switches, _) in snapshot() {
+            match seen.iter_mut().find(|(seen, _)| *seen == id) {
+                Some(entry) => entry.1 = entry.1.max(switches),
+                None => seen.push((id, switches)),
+            }
+        }
+        seen.iter().map(|&(_, switches)| switches).sum()
+    }
+
+    /// Each of this process's threads: its id, name, and CPU time so far
+    /// (kernel plus user, in nanoseconds).
+    #[cfg(windows)]
+    fn thread_times() -> Vec<(u64, String, u64)> {
+        snapshot()
+            .into_iter()
+            .map(|(id, _, time)| {
+                let mut name = String::new();
+                // SAFETY: a handle opened here to read the thread's name
+                // (THREAD_QUERY_LIMITED_INFORMATION), closed here; the name
+                // is a NUL-terminated string the system allocates and
+                // LocalFree releases.
+                unsafe {
+                    let thread = OpenThread(0x0800, 0, id as u32);
+                    if thread != 0 {
+                        let mut text: *mut u16 = std::ptr::null_mut();
+                        if GetThreadDescription(thread, &mut text) >= 0 && !text.is_null() {
+                            let length = (0..).take_while(|&i| *text.add(i) != 0).count();
+                            name =
+                                String::from_utf16_lossy(std::slice::from_raw_parts(text, length));
+                            LocalFree(text);
+                        }
+                        CloseHandle(thread);
+                    }
+                }
+                (id, name, time)
+            })
+            .collect()
+    }
+
+    /// This process's threads.
+    #[cfg(windows)]
+    fn threads() -> i32 {
+        snapshot().len() as i32
+    }
+
+    /// The clock WASAPI's timestamps count (the performance counter), in
+    /// nanoseconds on the 100 ns grid cpal puts them on.
+    #[cfg(windows)]
+    fn clock() -> u64 {
+        let (mut count, mut frequency) = (0i64, 0i64);
+        // SAFETY: both write the integer given.
+        unsafe {
+            QueryPerformanceCounter(&mut count);
+            QueryPerformanceFrequency(&mut frequency);
+        }
+        (count as u128 * 10_000_000 / frequency as u128 * 100) as u64
     }
 
     fn engine(stopping: Stopping) -> Audio {
@@ -404,8 +556,8 @@ mod probe {
 }
 
 fn main() {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     probe::run();
-    #[cfg(not(target_os = "macos"))]
-    eprintln!("device_probe measures with macOS's counters; nothing to do here");
+    #[cfg(not(any(target_os = "macos", windows)))]
+    eprintln!("device_probe measures with macOS's and Windows' counters; nothing to do here");
 }
