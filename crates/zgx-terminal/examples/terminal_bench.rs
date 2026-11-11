@@ -88,6 +88,34 @@ fn output(lines: usize) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// The output a few lines a read (`PER_FRAME`).
+struct Lines<'a> {
+    rest: &'a [u8],
+    per_read: usize,
+}
+impl<'a> Lines<'a> {
+    /// The next `per_read` lines, the last read what is left.
+    #[inline(never)]
+    fn next_read(&mut self) -> Option<&'a [u8]> {
+        if self.rest.is_empty() {
+            return None;
+        }
+        let mut end = 0;
+        for _ in 0..self.per_read {
+            match memchr::memmem::find(&self.rest[end..], b"\r\n") {
+                Some(at) => end += at + 2,
+                None => {
+                    end = self.rest.len();
+                    break;
+                }
+            }
+        }
+        let (read, rest) = self.rest.split_at(end);
+        self.rest = rest;
+        Some(read)
+    }
+}
+
 fn main() {
     let lines: usize = std::env::var("LINES")
         .ok()
@@ -118,26 +146,21 @@ fn main() {
     ui.prepare_frame();
     ui.scene.borrow_mut().flush();
     let output = output(lines);
-    // A frame's worth each: 4 KB reads, or so many lines.
-    let reads: Vec<&[u8]> = match per_frame {
-        None => output.chunks(4096).collect(),
-        Some(per_frame) => {
-            let mut reads = Vec::new();
-            let (mut start, mut count) = (0, 0);
-            for at in memchr::memmem::find_iter(&output, b"\r\n") {
-                count += 1;
-                if count == per_frame.max(1) {
-                    reads.push(&output[start..at + 2]);
-                    (start, count) = (at + 2, 0);
-                }
-            }
-            reads.push(&output[start..]);
-            reads
-        }
+    // A frame's worth each: 4 KB reads, or so many lines. Taken as they go,
+    // nothing allocated for them: the 4 KB reads cost what they did before
+    // `PER_FRAME` (a list of them moved the heap, and `terminal-reader`
+    // counted 0.04% more in malloc and in this function, none of it zgx's).
+    let mut chunks = output.chunks(4096);
+    let mut trickle = Lines {
+        rest: &output,
+        per_read: per_frame.unwrap_or(1).max(1),
     };
     let started = std::time::Instant::now();
     let mut frames = 0;
-    for read in reads {
+    while let Some(read) = match per_frame {
+        None => chunks.next(),
+        Some(_) => trickle.next_read(),
+    } {
         replay.feed(read);
         ui.prepare_frame();
         ui.scene.borrow_mut().flush();

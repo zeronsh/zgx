@@ -148,5 +148,27 @@ class FairTests(unittest.TestCase):
         self.assertNotIn('--fair-sched=yes', commands[1])
 
 
+class ReadsTests(unittest.TestCase):
+    def test_a_scene_naming_a_setting_runs_only_where_its_bench_reads_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            checkout = pathlib.Path(root)
+            examples = checkout / 'crates' / 'zgx-terminal' / 'examples'
+            examples.mkdir(parents=True)
+            bench = examples / 'terminal_bench.rs'
+            env = {'LINES': '1000', 'PER_FRAME': '1', 'READS': 'PER_FRAME'}
+            bench.write_text('std::env::var("LINES")')
+            self.assertFalse(gate.runs_scene(checkout, env, 'zgx-terminal', 'terminal_bench'))
+            bench.write_text('std::env::var("LINES"); std::env::var("PER_FRAME")')
+            self.assertTrue(gate.runs_scene(checkout, env, 'zgx-terminal', 'terminal_bench'))
+            # Without `READS`, as every other scene: run.
+            bench.write_text('')
+            self.assertTrue(gate.runs_scene(checkout, {'LINES': '1000'}, 'zgx-terminal', 'terminal_bench'))
+
+    def test_the_trickling_terminal_is_new_to_a_bench_without_per_frame(self):
+        name, package, example, env = next(s for s in gate.SCENES if s[0] == 'terminal-slow')
+        self.assertEqual(env['READS'], 'PER_FRAME')
+        self.assertTrue(gate.runs_scene(gate.ROOT, env, package, example))
+
+
 if __name__ == '__main__':
     unittest.main()
