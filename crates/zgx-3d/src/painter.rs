@@ -56,6 +56,11 @@ impl<V: Viewport> Viewport for Painter<V> {
         #[cfg(feature = "particles")]
         let particles = self.particles.before(&self.world, frame);
         self.painter.render(frame);
+        // The world's sound follows what this frame showed.
+        #[cfg(feature = "audio")]
+        if let Some(world) = self.world.upgrade() {
+            crate::world::audio::frame(&world, frame.time);
+        }
         #[cfg(feature = "particles")]
         if particles {
             self.particles.after(&self.world, frame);

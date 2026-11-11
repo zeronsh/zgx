@@ -19,6 +19,9 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # crate added.
 naga = { version = "29.0.4", default-features = false, features = ["wgsl-out"], optional = true }
 serde_json = { version = "1", optional = true }
+# Sound in the world (`World::add_emitter3d`): the audio engine, its
+# spatial maths and offline renderer. Nothing of zgx's below it.
+zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true, default-features = false }
 
 [features]
 # glTF 2.0 models (`Model`, `World::add_model`): `.glb` and `.gltf` files,
@@ -35,6 +38,9 @@ particles = ["compute"]
 # Global illumination: irradiance probe volumes (`World::add_probes`),
 # filled by ray queries where the device has them.
 gi = []
+# Sound in the world (design-audio.md, 7): emitters on objects, the
+# listener on the camera, occlusion by the meshes, reverb zones.
+audio = ["dep:zgx-audio"]
 
 # Custom materials (`MaterialShader`, `World::add_shader`, surface layers):
 # WGSL functions plugged into the lit pipeline. Off, a world draws as
@@ -64,3 +70,7 @@ required-features = ["shaders"]
 [[test]]
 name = "gi"
 required-features = ["gi"]
+
+[[test]]
+name = "audio"
+required-features = ["audio"]

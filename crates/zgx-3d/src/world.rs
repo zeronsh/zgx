@@ -7,6 +7,8 @@ use crate::{
 use std::{cell::RefCell, rc::Rc};
 #[cfg(feature = "gltf")]
 pub(crate) mod animation;
+#[cfg(feature = "audio")]
+pub(crate) mod audio;
 #[cfg(feature = "gi")]
 pub(crate) mod gi;
 #[cfg(feature = "lighting")]
@@ -599,6 +601,9 @@ pub(crate) struct Inner {
     /// Its probe volumes (`world/gi.rs`).
     #[cfg(feature = "gi")]
     pub(crate) gi: gi::Gi,
+    /// Its sound (`World::set_audio`).
+    #[cfg(feature = "audio")]
+    pub(crate) audio: Option<Box<audio::Sound3d>>,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -1332,6 +1337,8 @@ impl World {
             shaders: Default::default(),
             #[cfg(feature = "gi")]
             gi: Default::default(),
+            #[cfg(feature = "audio")]
+            audio: None,
         }));
         let view = zgx_gpu::viewport::view(crate::painter::Painter::new(
             crate::render::Renderer::new(Rc::downgrade(&inner)),

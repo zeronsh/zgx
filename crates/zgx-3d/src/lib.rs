@@ -98,6 +98,10 @@ pub use particles::{
 };
 pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};
+#[cfg(feature = "audio")]
+pub use world::audio::{
+    Emitter3d, Emitter3dId, Listener, ReverbPreset, ReverbZone, ReverbZoneId, TRANSMISSION,
+};
 #[cfg(feature = "gi")]
 pub use world::gi::{MAX_PROBE_VOLUMES, MAX_PROBES, ProbeVolume, ProbesId};
 #[cfg(feature = "lighting")]

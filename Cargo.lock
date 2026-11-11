@@ -5233,6 +5233,7 @@ dependencies = [
  "serde_json",
  "wgpu",
  "zgx",
+ "zgx-audio",
  "zgx-desktop",
  "zgx-gpu",
 ]
