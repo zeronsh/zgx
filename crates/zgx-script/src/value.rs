@@ -635,6 +635,15 @@ impl Value {
             kept: std::cell::OnceCell::new(),
         }))
     }
+    /// It to read through, a folded value opened for this reading only: for
+    /// a pass over many rows (a list's estimate) that `field` would leave
+    /// each kept open.
+    pub(crate) fn opened(&self) -> std::borrow::Cow<'_, Value> {
+        match self {
+            Value::Folded(folded) => std::borrow::Cow::Owned(folded.opened()),
+            _ => std::borrow::Cow::Borrowed(self),
+        }
+    }
     /// Whether Luau counts it as true: anything but `nil` and `false`.
     pub fn truthy(&self) -> bool {
         !matches!(self, Value::Nil | Value::Bool(false))
