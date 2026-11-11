@@ -112,7 +112,7 @@ RULES: list[tuple[tuple[str, ...], list[str]]] = [
     (NOTHING, [
         "site/**", "website/**", "changelog.d/**", "CHANGELOG.md", "LICENSE", ".gitignore", ".zed/**",
         ".github/workflows/site.yml", ".github/workflows/changelog.yml", ".github/workflows/release.yml",
-        ".github/workflows/d3d12-debug-layer.yml",
+        ".github/workflows/d3d12-debug-layer.yml", ".github/workflows/ci-caches.yml",
         ".github/workflows/perf-base.yml",
         "docs/results/**", "docs/platform-validation/**", "docs/performance/**", "scripts/**/*.md",
         # Comparisons outside the workspace and the fuzz crate: no job builds them.

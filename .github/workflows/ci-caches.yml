@@ -1,0 +1,40 @@
+name: CI caches
+
+# Keeps the repository's 10 GB of Actions cache for what main's CI restores:
+# deletes rust-cache entries a newer one of the same job supersedes, entries
+# saved from refs other than main, and perf's kept binaries but the newest
+# few (.github/ci/prune_caches.py says which, and why). Before, two
+# generations of each rust cache filled it, and perf's kept base binaries
+# (gate-bin-<sha>) were evicted within hours. perf-base.yml prunes the same
+# way after each push to main; this catches the rest.
+
+on:
+  schedule:
+    - cron: '41 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write  # delete cache entries
+
+concurrency:
+  group: ci-caches
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/ci
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh cache list -R "$GITHUB_REPOSITORY" --limit 1000 --json id,key,ref,createdAt,sizeInBytes > "$RUNNER_TEMP/caches.json"
+          python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print(len(c), "entries,", round(sum(e["sizeInBytes"] for e in c)/1e9, 2), "GB")' "$RUNNER_TEMP/caches.json"
+          python3 .github/ci/prune_caches.py < "$RUNNER_TEMP/caches.json" | while read -r id why; do
+            echo "deleting $id: $why"
+            gh cache delete -R "$GITHUB_REPOSITORY" "$id" || echo "::warning::could not delete cache $id"
+          done

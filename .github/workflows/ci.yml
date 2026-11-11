@@ -16,7 +16,8 @@ name: Rust
 #           a failure or a cancellation. The one check to require.
 #
 # Beside it: perf-base.yml builds perf's binaries for each push to main, for
-# pull requests to measure against without building their base.
+# pull requests to measure against without building their base, and
+# ci-caches.yml keeps the 10 GB of Actions cache for what main restores.
 #
 # Admission is shared with zeronsh/zeron. Both repositories' CI runs on the
 # organization's one pool of hosted runners (20 jobs at once, 5 of them
