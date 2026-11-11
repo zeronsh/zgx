@@ -16190,6 +16190,23 @@ impl GpuRenderer {
     ) -> Result<(), GpuError> {
         self.read_target(pixels, staging, true)
     }
+    /// Submits the last frame and waits for the GPU to finish it, reading
+    /// nothing back. `render` leaves its frame for the next frame, a present
+    /// or a readback to submit, so an offscreen bench or test that times
+    /// frames without reading them calls this; an app's frame loop doesn't
+    /// (presenting submits).
+    #[cold]
+    #[inline(never)]
+    pub fn finish(&self) -> Result<(), GpuError> {
+        if let Some(reason) = self.context.lost() {
+            return Err(GpuError::device_lost(&reason));
+        }
+        self.flush_pending();
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| GpuError(e.to_string()))?;
+        Ok(())
+    }
     fn read_target(
         &self,
         pixels: &mut Vec<u8>,
@@ -19753,6 +19770,58 @@ mod texel_upload_tests {
             assert_eq!(pixel(2), &[255, 0, 0, 255], "left, copied={copied}");
             assert_eq!(pixel(37), &[0, 0, 255, 255], "right, copied={copied}");
         }
+    }
+}
+
+#[cfg(test)]
+mod finish_tests {
+    use super::*;
+    use zgx::scene::{Color, Layout, Style};
+
+    fn scene() -> Scene {
+        let mut scene = Scene::new(40., 20.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        scene.append(
+            scene.root(),
+            NodeKind::Rect(Color(20, 120, 220, 255)),
+            Style {
+                width: Some(24.),
+                height: Some(12.),
+                ..Default::default()
+            },
+        );
+        scene
+    }
+    fn waiting(gpu: &GpuRenderer) -> bool {
+        #[cfg(target_os = "macos")]
+        if gpu.metal_inflight.borrow().is_some() {
+            return true;
+        }
+        gpu.pending.borrow().is_some()
+    }
+
+    /// A frame drawn is left to submit; `finish` submits it and leaves
+    /// nothing waiting, drawing nothing more: what's read after is the
+    /// frame a renderer that only read it back shows.
+    #[test]
+    fn finish_submits_the_frame_and_draws_nothing_more() {
+        let Ok(mut gpu) = GpuRenderer::new(40, 20) else {
+            return;
+        };
+        let mut drawn = scene();
+        let report = drawn.flush();
+        gpu.render(&drawn, &report.damage).unwrap();
+        assert!(waiting(&gpu), "a frame drawn waits to be submitted");
+        gpu.finish().unwrap();
+        assert!(!waiting(&gpu), "nothing waits after finish");
+        gpu.finish().unwrap();
+        let finished = gpu.readback().unwrap();
+
+        let mut read = GpuRenderer::new(40, 20).unwrap();
+        let mut again = scene();
+        let report = again.flush();
+        read.render(&again, &report.damage).unwrap();
+        assert_eq!(finished, read.readback().unwrap());
     }
 }
 /// wgpu's instance flags for the build, as zgx sets them: no indirect-call
