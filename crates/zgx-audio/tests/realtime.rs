@@ -402,6 +402,11 @@ fn main() {
             voice.at(at).set_gain(0.1, ramp).unwrap();
             voice.at(at).set_pan(1. - i as f32 / 3., ramp).unwrap();
             voice.at(at).set_pitch(1.5 - i as f32 * 0.1, ramp).unwrap();
+            // Its own low-pass closing, from open, along the ramp.
+            voice
+                .at(at)
+                .set_cutoff(800. + 500. * i as f32, ramp)
+                .unwrap();
         }
         for (i, bus) in buses.iter().enumerate() {
             bus.at(run.at(0.003)).fade_to(0.5, 0.05, curves[i]).unwrap();

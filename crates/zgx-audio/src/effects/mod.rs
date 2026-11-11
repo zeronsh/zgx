@@ -17,6 +17,7 @@ mod dynamics;
 #[cfg(feature = "hrtf")]
 mod fft;
 mod filter;
+pub(crate) use filter::{VOICE_OPEN, VoiceLowPass};
 #[cfg(feature = "hrtf")]
 mod hrtf;
 mod reverb;

@@ -161,6 +161,14 @@ fn pitch(value: f32) -> f32 {
         value.clamp(1. / 64., 16.)
     }
 }
+/// A voice's low-pass cutoff, from 10 Hz to open (not a number: open).
+fn cutoff(value: f32) -> f32 {
+    if value.is_nan() {
+        crate::effects::VOICE_OPEN
+    } else {
+        value.clamp(10., crate::effects::VOICE_OPEN)
+    }
+}
 
 impl Config {
     /// Whether an engine can be made with it: a rate from 1 kHz to
@@ -676,6 +684,7 @@ impl Audio {
             priority: play.priority,
             fade_in: play.fade_in,
             law: play.law,
+            cutoff: cutoff(play.cutoff),
         };
         let time = play.at.map_or(0, |at| at.0);
         self.push(&mut control, time, command)?;
@@ -720,6 +729,7 @@ impl Audio {
             priority: play.priority,
             fade_in: play.fade_in,
             law: play.law,
+            cutoff: cutoff(play.cutoff),
         };
         let time = play.at.map_or(0, |at| at.0);
         // The decode thread starts filling before the mixer hears of it.
@@ -910,6 +920,7 @@ pub struct Play {
     priority: i8,
     fade_in: Option<Ramp>,
     law: PanLaw,
+    cutoff: f32,
 }
 
 impl Default for Play {
@@ -931,6 +942,7 @@ impl Play {
             priority: 0,
             fade_in: None,
             law: PanLaw::Balance,
+            cutoff: crate::effects::VOICE_OPEN,
         }
     }
     /// The bus it plays into: one of the engine's it's played on (another
@@ -976,6 +988,11 @@ impl Play {
     /// default) or equal power (for sounds in space).
     pub fn law(mut self, law: PanLaw) -> Play {
         self.law = law;
+        self
+    }
+    /// Starts with its own low-pass at `hz` ([`Voice::set_cutoff`]).
+    pub fn cutoff(mut self, hz: f32) -> Play {
+        self.cutoff = hz;
         self
     }
     /// Kept over voices of lower priority when there are too many.
@@ -1046,6 +1063,7 @@ impl Voice {
             VoiceParam::Gain => gain(value),
             VoiceParam::Pan => pan(value),
             VoiceParam::Pitch => pitch(value),
+            VoiceParam::Cutoff => cutoff(value),
         };
         self.send(Command::Voice {
             id: self.id,
@@ -1068,6 +1086,15 @@ impl Voice {
     /// Moves its pitch to `pitch`.
     pub fn set_pitch(&self, pitch: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         self.set(VoiceParam::Pitch, pitch, ramp)
+    }
+
+    /// Moves its own low-pass's cutoff to `hz` (12 dB an octave, flat; kept
+    /// from 10 Hz to 20 kHz, where it's no filter): for what's between a
+    /// sound and its listener, a wall or the air. Before its gain and pan,
+    /// apart from its bus's effects. A voice whose cutoff stays at 20 kHz
+    /// runs none.
+    pub fn set_cutoff(&self, hz: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
+        self.set(VoiceParam::Cutoff, hz, ramp)
     }
 
     /// The id [`Audio::take_ended`] gives back when it ends.

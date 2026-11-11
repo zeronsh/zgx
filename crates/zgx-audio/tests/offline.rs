@@ -755,3 +755,106 @@ fn a_time_past_the_clock_s_end_is_its_end() {
     let tone = sound(&tone(440., 0.1, RATE), 1, RATE);
     audio.play(&tone, Play::new().at(never)).unwrap();
 }
+
+#[test]
+fn a_voice_s_own_low_pass_is_the_low_pass_effect_s_held_and_moving() {
+    use zgx_audio::effects::LowPass;
+    // Noise, mono and stereo, through the voice's own low-pass and,
+    // apart, through the effect on a bus of its own: the same, still and
+    // while the cutoff sweeps from 2 kHz to 300 Hz from frame 1000. (No
+    // fade in: the voice's filter comes before its gain, the effect after.)
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let noise: Vec<f32> = (0..9_600)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        })
+        .collect();
+    for channels in [1, 2] {
+        let noise = sound(&noise[..noise.len() / channels * channels], channels, RATE);
+        let sweep = Ramp::ms(50.);
+        let own = render(unlimited(), 4_000, |audio| {
+            let voice = audio
+                .play(&noise, Play::new().cutoff(2_000.).fade_in(0.))
+                .unwrap();
+            voice.at(Time(1_000)).set_cutoff(300., sweep).unwrap();
+        });
+        let effect = render(unlimited(), 4_000, |audio| {
+            let bus = audio.add_bus("filtered", &audio.master()).unwrap();
+            let lowpass = bus.add_effect(LowPass::new(2_000.)).unwrap();
+            audio
+                .play(&noise, Play::new().bus(&bus).fade_in(0.))
+                .unwrap();
+            lowpass
+                .at(Time(1_000))
+                .set(LowPass::CUTOFF, 300., sweep)
+                .unwrap();
+        });
+        let worst = own
+            .iter()
+            .zip(&effect)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(worst < 1e-6, "{channels} channels: {worst:e} apart");
+        // And it does filter: the highs are gone.
+        let plain = render(unlimited(), 4_000, |audio| {
+            audio.play(&noise, Play::new()).unwrap();
+        });
+        assert!(own.iter().zip(&plain).any(|(a, b)| (a - b).abs() > 0.05));
+    }
+}
+
+#[test]
+fn a_voice_s_low_pass_left_open_is_no_filter() {
+    let tone = sound(&tone(9_000., 0.1, RATE), 1, RATE);
+    let plain = render(unlimited(), 4_000, |audio| {
+        audio.play(&tone, Play::new()).unwrap();
+    });
+    let open = render(unlimited(), 4_000, |audio| {
+        // Past the top is the top; closed and opened again, it ends open.
+        let voice = audio.play(&tone, Play::new().cutoff(30_000.)).unwrap();
+        voice
+            .at(Time(3_000))
+            .set_cutoff(f32::NAN, Ramp::NONE)
+            .unwrap();
+    });
+    assert_eq!(plain, open);
+}
+
+#[test]
+fn a_voice_s_low_pass_closes_from_open_along_its_ramp() {
+    use zgx_audio::effects::LowPass;
+    // Open, then down to 300 Hz over 50 ms from frame 1000: once the
+    // effect's history and the voice's have died away, the same.
+    let tone = sound(&tone(3_000., 0.2, RATE), 1, RATE);
+    let sweep = Ramp::ms(50.);
+    let own = left(&render(unlimited(), 6_000, |audio| {
+        let voice = audio.play(&tone, Play::new().fade_in(0.)).unwrap();
+        voice.at(Time(1_000)).set_cutoff(300., sweep).unwrap();
+    }));
+    let effect = left(&render(unlimited(), 6_000, |audio| {
+        let bus = audio.add_bus("filtered", &audio.master()).unwrap();
+        let lowpass = bus.add_effect(LowPass::new(20_000.)).unwrap();
+        audio
+            .play(&tone, Play::new().bus(&bus).fade_in(0.))
+            .unwrap();
+        lowpass
+            .at(Time(1_000))
+            .set(LowPass::CUTOFF, 300., sweep)
+            .unwrap();
+    }));
+    // Down, the 3 kHz tone is 20 dB and more under what it was open.
+    let level = |s: &[f32]| s.iter().map(|x| x * x).sum::<f32>().sqrt();
+    assert!(
+        level(&own[4_000..4_400]) < 0.1 * level(&own[400..800]),
+        "it never closed"
+    );
+    let worst = own[5_000..]
+        .iter()
+        .zip(&effect[5_000..])
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(worst < 1e-5, "{worst:e} apart");
+}
