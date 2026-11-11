@@ -781,6 +781,22 @@ struct Sequence {
 fn added(rgb: u32) -> Object {
     Object::mesh(Geometry::cuboid(0.4, 0.4, 0.4), Material::rgb(rgb)).at([0.3, 0.5, 0.6])
 }
+/// "masked caster"'s maps: opaque, and its left half clear; the placement
+/// moving the map half across.
+fn opaque_map() -> Texture {
+    Texture::from_rgba8(2, 1, vec![255; 8]).unwrap()
+}
+fn half_map() -> Texture {
+    Texture::from_rgba8(2, 1, vec![255, 255, 255, 0, 255, 255, 255, 255]).unwrap()
+}
+fn half_across() -> MapPlacement {
+    MapPlacement::new().offset(0.5, 0.)
+}
+/// `camera` turned to look the other way, from where it stands.
+fn turned_away(camera: Camera) -> Camera {
+    let back = camera.position + (camera.position - camera.target);
+    Camera::looking_at(camera.position, back)
+}
 /// A sequence's check: the retained world and window, then the fresh ones.
 type Check = fn(&World, &mut Window, &World, &mut Window) -> Result<(), String>;
 
@@ -903,6 +919,75 @@ const SEQUENCES: &[Sequence] = &[
         }),
         settle: 0,
         check: None,
+    },
+    Sequence {
+        // A cut-out caster's map, placement and glass changed after it's
+        // drawn, ending on a map only (what its shadow must follow).
+        name: "masked caster",
+        run: |world, window, _, _| {
+            let card = world.add(added(0xffffff));
+            world.set_alpha_cutoff(card, Some(0.5));
+            world.set_map(card, Map::BaseColour, Some(opaque_map()));
+            window.draw();
+            world.set_map(card, Map::BaseColour, None);
+            window.draw();
+            world.set_transmission(card, Some(Transmission::new(1.)));
+            window.draw();
+            world.set_transmission(card, None);
+            world.set_map_placement(card, Map::BaseColour, Some(half_across()));
+            window.draw();
+            world.set_map(card, Map::BaseColour, Some(half_map()));
+            window.draw();
+        },
+        then: Some(|world, _, _| {
+            let card = world.add(added(0xffffff));
+            world.set_alpha_cutoff(card, Some(0.5));
+            world.set_map_placement(card, Map::BaseColour, Some(half_across()));
+            world.set_map(card, Map::BaseColour, Some(half_map()));
+        }),
+        settle: 0,
+        check: None,
+    },
+    Sequence {
+        // A mesh moved while culling rests, then the camera turned away:
+        // culling looks again within a rest, as a fresh world culls at once.
+        name: "culling at rest",
+        run: |world, window, _, objects| {
+            window.draw();
+            if let Some(&first) = objects.first() {
+                let place = world.object(first).unwrap().transform;
+                let mut moved = place;
+                moved.position.x += 0.01;
+                world.set_transform(first, moved);
+                window.draw();
+                world.set_transform(first, place);
+                window.draw();
+            }
+            // Turned away, frames past a rest (a nudge each: a frame only
+            // draws as something changes), ending where the fresh one looks.
+            let away = turned_away(world.camera());
+            for step in 1..=17 {
+                let mut nudged = away;
+                nudged.position.y += step as f32 * 1e-4;
+                world.set_camera(nudged);
+                window.draw();
+            }
+            world.set_camera(away);
+            window.draw();
+        },
+        then: Some(|world, _, _| world.set_camera(turned_away(world.camera()))),
+        settle: 0,
+        check: Some(|retained, _, fresh, _| {
+            if retained.culled() == fresh.culled() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "culled {} retained, {} fresh",
+                    retained.culled(),
+                    fresh.culled()
+                ))
+            }
+        }),
     },
     Sequence {
         name: "an object come and gone",
