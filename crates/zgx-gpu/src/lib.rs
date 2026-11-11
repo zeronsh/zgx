@@ -11535,11 +11535,12 @@ impl GpuRenderer {
                 };
                 let blur = blur_atlas.as_ref().expect("planned");
                 pass.blur(frame, &target, [&blur[0], &blur[1]], &records, rects);
+                pass.resume(&target);
                 pass.texture(&atlas);
                 sampled = TextureSource::Atlas;
-                stats.draw_calls += 3;
-                stats.render_passes += 2;
-                stats.blur_passes += 1;
+                stats.draw_calls += 3 * rects.iter().filter(|r| r.2 > 0 && r.3 > 0).count();
+                stats.render_passes += 4;
+                stats.blur_passes += 3;
                 blurred = Some((plan, slots, rects));
                 from = end;
             }
@@ -13112,9 +13113,7 @@ impl GpuRenderer {
                     SlotRecord {
                         atlas: [0., 0., size.0 as f32, size.1 as f32],
                         region: [x0, y0, factor, level / factor],
-                        // Blurred (blur.wgsl's compute stages, which Metal
-                        // drawn directly runs).
-                        owner: [index, 1, 0, 0],
+                        owner: [index, 0, 0, 0],
                     },
                     size,
                     true,
@@ -15506,8 +15505,8 @@ impl GpuRenderer {
         })
     }
     /// Diagnostics: split each frame drawn with Metal directly at its
-    /// backdrop blur (its stages' one compute pass), each part committed on
-    /// its own, for `debug_take_pass_times`. Off by default; it adds a command
+    /// backdrop blur's passes (reduce, across, down), each committed on its
+    /// own, for `debug_take_pass_times`. Off by default; it adds a command
     /// buffer a pass while on. Process-wide.
     #[cfg(target_os = "macos")]
     pub fn debug_time_passes(&self, on: bool) {
@@ -16717,14 +16716,7 @@ fn atlas_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Textur
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: BLUR_FORMAT,
-        // Metal drawn directly writes it from compute stages (metal_frame.rs).
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | if cfg!(target_os = "macos") {
-                wgpu::TextureUsages::STORAGE_BINDING
-            } else {
-                wgpu::TextureUsages::empty()
-            },
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     })
 }

@@ -32,8 +32,6 @@ struct Slot { atlas:vec4<f32>, region:vec4<f32>, owner:vec4<u32> }
 @group(0) @binding(2) var<storage, read> blurs:array<Blur>;
 @group(0) @binding(3) var<storage, read> slots:array<Slot>;
 @group(0) @binding(4) var linear:sampler;
-// Where a compute stage writes (`cs_*`).
-@group(0) @binding(5) var into:texture_storage_2d<rgba16float,write>;
 // A full-target triangle, scissored to a slot or an output; the instance
 // picks the slot (filter passes) or the filter (drawing back).
 struct Vertex { @builtin(position) p:vec4<f32>, @location(0) @interpolate(flat) index:u32 }
@@ -47,17 +45,16 @@ fn sigma(b:Blur, p:vec2<f32>)->f32{
  let t=clamp(min(d.x,d.y)/b.effect.y,0.,1.);
  return b.effect.z*t*t;
 }
+// Each texel: the mean of the area pixels in its factor-wide square, every
+// area pixel read once; bilinear samples between pixels average four at a
+// time. At factor 1, a copy.
 // A reduce's bilinear sample of the 2x2 texels at `start` + (x, y).
 fn tap(start:vec2<i32>, x:i32, y:i32, size:vec2<f32>)->vec4<f32>{
  return textureSampleLevel(source,linear,(vec2<f32>(start+vec2(x,y))+1.)/size,0.);
 }
-// Each texel `p` (its centre, in the atlas) of slot `s`: the mean of the
-// area pixels in its factor-wide square, every area pixel read once;
-// bilinear samples between pixels average four at a time. At factor 1, a
-// copy.
-fn reduced(s:Slot, p:vec2<f32>)->vec4<f32>{
- let b=blurs[s.owner.x];let f=i32(s.region.z);
- let start=vec2<i32>(s.region.xy)+(vec2<i32>(p)-vec2<i32>(s.atlas.xy))*f;
+@fragment fn fs_reduce(v:Vertex)->@location(0) vec4<f32>{
+ let s=slots[v.index];let b=blurs[s.owner.x];let f=i32(s.region.z);
+ let start=vec2<i32>(s.region.xy)+(vec2<i32>(v.p.xy)-vec2<i32>(s.atlas.xy))*f;
  let end=min(start+vec2(f),vec2<i32>(b.area.zw));
  var sum=vec4(0.);
  if f>1&&all(end-start==vec2(f)){
@@ -81,11 +78,11 @@ fn reduced(s:Slot, p:vec2<f32>)->vec4<f32>{
 fn mirror(x:i32, n:i32)->i32{
  let m=select(x,-1-x,x<0);return clamp(select(m,2*n-1-m,m>=n),0,n-1);
 }
-// One separable half in slot `s` at its texel `l`: Gaussian weights by
-// recurrence, q^(i*i), adjacent taps merged into one bilinear sample where
-// both lie inside it.
-fn along(s:Slot, l:vec2<i32>, step:vec2<i32>)->vec4<f32>{
- let o=vec2<i32>(s.atlas.xy);let n=vec2<i32>(s.atlas.zw);let st=s.region.w;
+// One separable half in a slot: Gaussian weights by recurrence, q^(i*i),
+// adjacent taps merged into one bilinear sample where both lie inside it.
+fn along(v:Vertex, step:vec2<i32>)->vec4<f32>{
+ let s=slots[v.index];let o=vec2<i32>(s.atlas.xy);let n=vec2<i32>(s.atlas.zw);
+ let l=vec2<i32>(v.p.xy)-o;let st=s.region.w;
  let r=i32(ceil(3.*st));let q=exp(-.5/(st*st));
  let at=dot(l,step);let extent=dot(n,step);
  let size=vec2<f32>(textureDimensions(source));let axis=vec2<f32>(step);
@@ -108,33 +105,8 @@ fn along(s:Slot, l:vec2<i32>, step:vec2<i32>)->vec4<f32>{
  }
  return sum/total;
 }
-@fragment fn fs_reduce(v:Vertex)->@location(0) vec4<f32>{return reduced(slots[v.index],v.p.xy);}
-// The blurs as passes of their own, where compute stages can't run
-// (`blur_compute`): the same texels, the same values.
-@fragment fn fs_across(v:Vertex)->@location(0) vec4<f32>{let s=slots[v.index];return along(s,vec2<i32>(v.p.xy)-vec2<i32>(s.atlas.xy),vec2(1,0));}
-@fragment fn fs_down(v:Vertex)->@location(0) vec4<f32>{let s=slots[v.index];return along(s,vec2<i32>(v.p.xy)-vec2<i32>(s.atlas.xy),vec2(0,1));}
-// The stages as dispatches of one compute pass, each over every slot of the
-// batch: `z` the slot, `x` and `y` its texel. A texel past its slot, or a
-// slot the stage passes over (`owner.y`: 0 for an area's copy, which is
-// averaged down but not blurred), writes nothing; the same texels as the
-// stages drawn as passes, the same values.
-fn texel(g:vec3<u32>, s:Slot)->bool{return all(g.xy<vec2<u32>(s.atlas.zw));}
-@compute @workgroup_size(8,8) fn cs_reduce(@builtin(global_invocation_id) g:vec3<u32>){
- let s=slots[g.z];if !texel(g,s){return;}
- let at=vec2<i32>(s.atlas.xy)+vec2<i32>(g.xy);textureStore(into,at,reduced(s,vec2<f32>(at)+.5));
-}
-@compute @workgroup_size(8,8) fn cs_reduce_blurred(@builtin(global_invocation_id) g:vec3<u32>){
- let s=slots[g.z];if !texel(g,s)||s.owner.y==0u{return;}
- let at=vec2<i32>(s.atlas.xy)+vec2<i32>(g.xy);textureStore(into,at,reduced(s,vec2<f32>(at)+.5));
-}
-@compute @workgroup_size(8,8) fn cs_across(@builtin(global_invocation_id) g:vec3<u32>){
- let s=slots[g.z];if !texel(g,s)||s.owner.y==0u{return;}
- textureStore(into,vec2<i32>(s.atlas.xy)+vec2<i32>(g.xy),along(s,vec2<i32>(g.xy),vec2(1,0)));
-}
-@compute @workgroup_size(8,8) fn cs_down(@builtin(global_invocation_id) g:vec3<u32>){
- let s=slots[g.z];if !texel(g,s)||s.owner.y==0u{return;}
- textureStore(into,vec2<i32>(s.atlas.xy)+vec2<i32>(g.xy),along(s,vec2<i32>(g.xy),vec2(0,1)));
-}
+@fragment fn fs_across(v:Vertex)->@location(0) vec4<f32>{return along(v,vec2(1,0));}
+@fragment fn fs_down(v:Vertex)->@location(0) vec4<f32>{return along(v,vec2(0,1));}
 fn coverage(b:Blur, p:vec2<f32>)->f32{
  let half=b.bounds.zw*.5;let q=p-b.bounds.xy-half;
  let r=select(select(b.shape.w,b.shape.z,q.x>0.),select(b.shape.x,b.shape.y,q.x>0.),q.y<0.);
