@@ -257,21 +257,21 @@ impl MetalFrame {
     /// it by then (`GpuRenderer::prepare_fill`), unless it `wait`s for it
     /// (offscreen).
     pub(crate) fn fills(&self, shader: &zgx::decoration::FillShader, wait: bool) -> bool {
-        self.start_fill(shader);
+        self.start_fill(shader, wait);
         let mut fills = self.fills.borrow_mut();
         let compiled = fills.get_mut(&shader.id()).expect("started");
         compiled.ready(wait).unwrap_or(false)
     }
 
     /// Start compiling `shader`'s fill off the frame (`crate::compile`), if
-    /// not yet.
-    pub(crate) fn start_fill(&self, shader: &zgx::decoration::FillShader) {
+    /// not yet; `here`, on this thread, for a renderer that waits for it.
+    pub(crate) fn start_fill(&self, shader: &zgx::decoration::FillShader, here: bool) {
         if self.fills.borrow().contains_key(&shader.id()) {
             return;
         }
         let device = Threaded(self.device.clone());
         let source = crate::fill_source(shader.source());
-        let slot = crate::compile::spawn(move || {
+        let slot = crate::compile::start(here, move || {
             let device = &device.0;
             crate::fill_validates(&source)
                 .then(|| Library::new(device, &source, Kind::Quads).ok())
