@@ -52,6 +52,16 @@ pub(crate) enum Command {
         law: PanLaw,
         /// Its own low-pass's cutoff, in hertz.
         cutoff: f32,
+        /// Buses it's also mixed into from its first frame, and how loud.
+        sends: [Option<(u16, f32)>; SENDS],
+    },
+    /// Voice `id` mixed into `bus` too, at `level` (0 takes the send away
+    /// once there), along `ramp`.
+    Send {
+        id: u64,
+        bus: u16,
+        level: f32,
+        ramp: Ramp,
     },
     // Ramps are in seconds, made frames by the mixer at its rate: a device
     // may set the rate after a command was sent.
@@ -433,6 +443,125 @@ struct Voice {
     filtered: bool,
     /// Where it is among the voices: where its low-pass is.
     slot: u16,
+    /// Whether it sends to other buses (the mixer's `sends`, at `slot`):
+    /// only then is it mixed apart first.
+    sending: bool,
+}
+
+/// A voice with sends: mixed into a block of its own, then that added into
+/// its bus and, at each send's level, into each send's bus. Apart, and not
+/// inlined: a voice without sends never comes here, and its mixing is as
+/// it was.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn mix_sending(
+    voice: &mut Voice,
+    n: usize,
+    buses: &mut [Bus],
+    filter: &mut VoiceLowPass,
+    sends: &mut VoiceSends,
+    out: &mut [[f32; MAX_BLOCK]; 2],
+    scratch: &mut Scratch,
+    (click, underruns): (u32, &mut u64),
+) -> bool {
+    let [left, right] = out;
+    left[..n].fill(0.);
+    right[..n].fill(0.);
+    let filtering = voice.filtered && filter.active();
+    voice.filtered = filtering;
+    let along = Along {
+        click,
+        underruns,
+        filter: filtering.then_some(filter),
+    };
+    let sounding = if along.filter.is_some() {
+        voice.mix::<true>(n, scratch, &mut left[..n], &mut right[..n], along)
+    } else {
+        voice.mix::<false>(n, scratch, &mut left[..n], &mut right[..n], along)
+    };
+    let add = |bus: &mut Bus, level: Option<&[f32]>, gain: f32| {
+        bus.touch(n);
+        match level {
+            Some(levels) => {
+                for i in 0..n {
+                    bus.left[i] += left[i] * levels[i];
+                    bus.right[i] += right[i] * levels[i];
+                }
+            }
+            None => {
+                for i in 0..n {
+                    bus.left[i] += left[i] * gain;
+                    bus.right[i] += right[i] * gain;
+                }
+            }
+        }
+    };
+    add(&mut buses[usize::from(voice.bus)], None, 1.);
+    for (target, level) in sends.targets.iter_mut().zip(&mut sends.levels) {
+        let Some(bus) = *target else { continue };
+        if level.settled() {
+            if level.value() == 0. {
+                // Down to nothing: the send is gone.
+                *target = None;
+                continue;
+            }
+            add(&mut buses[usize::from(bus)], None, level.value());
+        } else {
+            let levels = &mut scratch.values[..n];
+            level.fill(levels);
+            add(&mut buses[usize::from(bus)], Some(levels), 1.);
+        }
+    }
+    voice.sending = sends.active();
+    sounding
+}
+
+/// Buses a voice can be mixed into besides its own.
+pub(crate) const SENDS: usize = 2;
+
+/// A voice's sends: the buses it's also mixed into, each at a level of its
+/// own, smoothed. Kept beside the voices, so one without sends is as before.
+pub(crate) struct VoiceSends {
+    targets: [Option<u16>; SENDS],
+    levels: [Smoothed; SENDS],
+}
+
+impl VoiceSends {
+    fn new() -> VoiceSends {
+        VoiceSends {
+            targets: [None; SENDS],
+            levels: [Smoothed::new(0.), Smoothed::new(0.)],
+        }
+    }
+
+    /// For a new voice: `sends` from its first frame.
+    fn reset(&mut self, sends: [Option<(u16, f32)>; SENDS]) {
+        for ((target, level), send) in self.targets.iter_mut().zip(&mut self.levels).zip(sends) {
+            *target = send.map(|(bus, _)| bus);
+            *level = Smoothed::new(send.map_or(0., |(_, l)| l));
+        }
+    }
+
+    fn active(&self) -> bool {
+        self.targets.iter().any(Option::is_some)
+    }
+
+    /// The send to `bus` moved to `level`: the one there, or a free one
+    /// (from silence). Whether there was one.
+    fn set(&mut self, bus: u16, level: f32, frames: u32, curve: Curve) -> bool {
+        let at = (self.targets.iter().position(|t| *t == Some(bus)))
+            .or_else(|| self.targets.iter().position(Option::is_none));
+        let Some(at) = at else {
+            return false;
+        };
+        if self.targets[at].is_none() {
+            self.targets[at] = Some(bus);
+            self.levels[at] = Smoothed::new(0.);
+        }
+        self.levels[at].set(level, frames, curve);
+        true
+    }
 }
 
 impl Voice {
@@ -460,6 +589,7 @@ impl Voice {
             law: PanLaw::Balance,
             filtered: false,
             slot,
+            sending: false,
         }
     }
 
@@ -478,7 +608,10 @@ impl Voice {
     /// Mixes the next `n` frames into `left` and `right`. Returns whether
     /// it still sounds. Made twice: `FILTERED`, through its own low-pass;
     /// not, with none of the filter's code, so a voice that doesn't filter
-    /// mixes as it did before there was one.
+    /// mixes as it did before there was one. Always inlined: it has two
+    /// callers (the voices' loop, and a sending voice's), and a call would
+    /// cost every voice.
+    #[inline(always)]
     fn mix<const FILTERED: bool>(
         &mut self,
         n: usize,
@@ -1014,6 +1147,10 @@ pub(crate) struct Mixer {
     /// Each voice slot's own low-pass, by the same index: apart from the
     /// voices, so a voice without one is as before.
     filters: Box<[VoiceLowPass]>,
+    /// Each voice slot's sends, by the same index, and what a sending
+    /// voice is mixed into before its bus and its sends are given it.
+    sends: Box<[VoiceSends]>,
+    send_out: Box<[[f32; MAX_BLOCK]; 2]>,
     max_live: usize,
     buses: Box<[Bus]>,
     bus_count: usize,
@@ -1086,6 +1223,10 @@ impl Mixer {
             filters: (0..setup.voices + FADING_SLOTS)
                 .map(|_| VoiceLowPass::new(setup.rate))
                 .collect(),
+            sends: (0..setup.voices + FADING_SLOTS)
+                .map(|_| VoiceSends::new())
+                .collect(),
+            send_out: Box::new([[0.; MAX_BLOCK]; 2]),
             max_live: setup.voices,
             buses,
             bus_count: 1,
@@ -1356,7 +1497,9 @@ impl Mixer {
             // for a voice whose play waits.
             let behind = match command {
                 Command::Play { .. } => !self.waiting.is_empty(),
-                Command::Stop { id, .. } | Command::Voice { id, .. } => self.waiting(id),
+                Command::Stop { id, .. } | Command::Voice { id, .. } | Command::Send { id, .. } => {
+                    self.waiting(id)
+                }
                 _ => false,
             };
             if behind {
@@ -1474,6 +1617,23 @@ impl Mixer {
                         VoiceParam::Pitch => {
                             voice.pitch.set(value.clamp(1. / 64., 16.), frames, curve)
                         }
+                    }
+                }
+            }
+            Command::Send {
+                id,
+                bus,
+                level,
+                ramp,
+            } => {
+                if self.voice(id).is_none() && self.waiting(id) {
+                    return Err(command);
+                }
+                let slot = self.voices.iter().position(|v| v.id == id && !v.ended);
+                if let Some(slot) = slot {
+                    let (frames, curve) = (ramp.frames(self.rate), ramp.curve);
+                    if self.sends[slot].set(bus, level, frames, curve) {
+                        self.voices[slot].sending = true;
                     }
                 }
             }
@@ -1599,6 +1759,7 @@ impl Mixer {
             fade_in,
             law,
             cutoff,
+            sends,
         } = command
         else {
             unreachable!("only plays come here");
@@ -1636,6 +1797,7 @@ impl Mixer {
                         fade_in,
                         law,
                         cutoff,
+                        sends,
                     }),
                     Err(_) => unreachable!("a dropped play is given back as one"),
                 };
@@ -1650,6 +1812,8 @@ impl Mixer {
         };
         self.filters[slot].reset(cutoff);
         let filtered = self.filters[slot].active();
+        self.sends[slot].reset(sends);
+        let sending = self.sends[slot].active();
         let voice = &mut self.voices[slot];
         // A stream's first frames aren't here yet: it looks when they are.
         let start = match sound {
@@ -1678,6 +1842,7 @@ impl Mixer {
             law,
             filtered,
             slot: slot as u16,
+            sending,
         };
         match fade_in {
             Some(ramp) => {
@@ -1753,29 +1918,45 @@ impl Mixer {
                 continue;
             }
             if !voice.ended {
-                let bus = &mut self.buses[usize::from(voice.bus)];
-                bus.touch(n);
-                let filter = if voice.filtered {
-                    let filter = &mut self.filters[usize::from(voice.slot)];
-                    // Open and still: out of the way from now on.
-                    voice.filtered = filter.active();
-                    voice.filtered.then_some(filter)
+                if voice.sending {
+                    let sounding = mix_sending(
+                        voice,
+                        n,
+                        &mut self.buses,
+                        &mut self.filters[usize::from(voice.slot)],
+                        &mut self.sends[usize::from(voice.slot)],
+                        &mut self.send_out,
+                        &mut self.scratch,
+                        (self.click, &mut self.underruns),
+                    );
+                    if !sounding {
+                        voice.ended = true;
+                    }
                 } else {
-                    None
-                };
-                let (left, right) = (&mut bus.left[..n], &mut bus.right[..n]);
-                let along = Along {
-                    click: self.click,
-                    underruns: &mut self.underruns,
-                    filter,
-                };
-                let sounding = if along.filter.is_some() {
-                    voice.mix::<true>(n, &mut self.scratch, left, right, along)
-                } else {
-                    voice.mix::<false>(n, &mut self.scratch, left, right, along)
-                };
-                if !sounding {
-                    voice.ended = true;
+                    let bus = &mut self.buses[usize::from(voice.bus)];
+                    bus.touch(n);
+                    let filter = if voice.filtered {
+                        let filter = &mut self.filters[usize::from(voice.slot)];
+                        // Open and still: out of the way from now on.
+                        voice.filtered = filter.active();
+                        voice.filtered.then_some(filter)
+                    } else {
+                        None
+                    };
+                    let (left, right) = (&mut bus.left[..n], &mut bus.right[..n]);
+                    let along = Along {
+                        click: self.click,
+                        underruns: &mut self.underruns,
+                        filter,
+                    };
+                    let sounding = if along.filter.is_some() {
+                        voice.mix::<true>(n, &mut self.scratch, left, right, along)
+                    } else {
+                        voice.mix::<false>(n, &mut self.scratch, left, right, along)
+                    };
+                    if !sounding {
+                        voice.ended = true;
+                    }
                 }
             }
             if voice.ended {

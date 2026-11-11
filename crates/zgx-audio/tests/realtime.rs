@@ -408,6 +408,14 @@ fn main() {
                 .set_cutoff(800. + 500. * i as f32, ramp)
                 .unwrap();
         }
+        // Sends: each voice into the next bus, its level ramped up.
+        for (i, voice) in voices.iter().enumerate() {
+            let to = &buses[(i + 1) % buses.len()];
+            voice
+                .at(run.at(0.002))
+                .set_send(to, 0.5, Ramp::ms(20.))
+                .unwrap();
+        }
         for (i, bus) in buses.iter().enumerate() {
             bus.at(run.at(0.003)).fade_to(0.5, 0.05, curves[i]).unwrap();
         }

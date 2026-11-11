@@ -673,6 +673,20 @@ impl Audio {
     }
 
     /// Plays `sound` as `play` says.
+    /// A play's sends as the mixer takes them: buses of this engine only.
+    fn sends_of(&self, play: &Play) -> Result<[Option<(u16, f32)>; crate::mixer::SENDS], Error> {
+        let mut sends = [None; crate::mixer::SENDS];
+        for (send, wanted) in sends.iter_mut().zip(play.sends) {
+            if let Some((engine, bus, level)) = wanted {
+                if engine != self.0.id {
+                    return Err(Error::Foreign);
+                }
+                *send = Some((bus, level));
+            }
+        }
+        Ok(sends)
+    }
+
     pub fn play(&self, sound: &Sound, play: Play) -> Result<Voice, Error> {
         let frames = sound.frames() as u64;
         let region = match (&play.region, play.looping) {
@@ -706,6 +720,7 @@ impl Audio {
             fade_in: play.fade_in,
             law: play.law,
             cutoff: cutoff(play.cutoff),
+            sends: self.sends_of(&play)?,
         };
         let time = play.at.map_or(0, |at| at.0);
         self.push(&mut control, time, command)?;
@@ -756,6 +771,7 @@ impl Audio {
             fade_in: play.fade_in,
             law: play.law,
             cutoff: cutoff(play.cutoff),
+            sends: self.sends_of(&play)?,
         };
         let time = play.at.map_or(0, |at| at.0);
         // The decode thread starts filling before the mixer hears of it.
@@ -948,6 +964,8 @@ pub struct Play {
     fade_in: Option<Ramp>,
     law: PanLaw,
     cutoff: f32,
+    /// Buses it's also mixed into, each with its engine and level.
+    sends: [Option<(u64, u16, f32)>; crate::mixer::SENDS],
 }
 
 impl Default for Play {
@@ -970,6 +988,7 @@ impl Play {
             fade_in: None,
             law: PanLaw::Balance,
             cutoff: crate::effects::VOICE_OPEN,
+            sends: [None; crate::mixer::SENDS],
         }
     }
     /// The bus it plays into: one of the engine's it's played on (another
@@ -1020,6 +1039,15 @@ impl Play {
     /// Starts with its own low-pass at `hz` ([`Voice::set_cutoff`]).
     pub fn cutoff(mut self, hz: f32) -> Play {
         self.cutoff = hz;
+        self
+    }
+    /// Mixed into `bus` too, at `level` (a gain, 0 to [`MAX_GAIN`]), from
+    /// its first frame: a send ([`Voice::set_send`]). Two at most; a third
+    /// takes the second's place.
+    pub fn send(mut self, bus: &Bus, level: f32) -> Play {
+        let send = Some((bus.audio.0.id, bus.index, gain(level)));
+        let free = self.sends.iter().position(Option::is_none);
+        self.sends[free.unwrap_or(crate::mixer::SENDS - 1)] = send;
         self
     }
     /// Kept over voices of lower priority when there are too many.
@@ -1113,6 +1141,25 @@ impl Voice {
     /// Moves its pitch to `pitch`.
     pub fn set_pitch(&self, pitch: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         self.set(VoiceParam::Pitch, pitch, ramp)
+    }
+
+    /// Mixes it into `bus` too, besides its own, at `level` (a gain, 0 to
+    /// [`MAX_GAIN`]) along `ramp`: a send. Its sound after its gain, pan
+    /// and own low-pass goes there, scaled: to a bus with a reverb on it,
+    /// a binaural effect, or anything of the app's. A voice sends to two
+    /// buses at most: a send to a third is ignored until one of the two is
+    /// brought to 0, which takes it away. A voice with no sends costs
+    /// nothing more for them.
+    pub fn set_send(&self, bus: &Bus, level: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
+        if bus.audio.0.id != self.audio.0.id {
+            return Err(Error::Foreign);
+        }
+        self.send(Command::Send {
+            id: self.id,
+            bus: bus.index,
+            level: gain(level),
+            ramp: ramp.into(),
+        })
     }
 
     /// Moves its own low-pass's cutoff to `hz` (12 dB an octave, flat; kept

@@ -858,3 +858,91 @@ fn a_voice_s_low_pass_closes_from_open_along_its_ramp() {
         .fold(0f32, f32::max);
     assert!(worst < 1e-5, "{worst:e} apart");
 }
+
+#[test]
+fn a_voice_sends_to_other_buses_at_levels_of_its_own() {
+    // A constant 0.25 on master, sent at 0.5 to a bus whose gain is 2: the
+    // master hears 0.25 and 0.25; the send ramped to 0 over 100 frames from
+    // frame 1,000, it's gone, and a third send takes its place.
+    let flat = sound(&[0., 0.25], 1, RATE);
+    let out = left(&render(unlimited(), 3_000, |audio| {
+        let aux = audio.add_bus("aux", &audio.master()).unwrap();
+        let other = audio.add_bus("other", &audio.master()).unwrap();
+        let third = audio.add_bus("third", &audio.master()).unwrap();
+        aux.set_gain(2., Ramp::NONE).unwrap();
+        let voice = audio
+            .play(&flat, Play::new().loop_frames(1..2).send(&aux, 0.5))
+            .unwrap();
+        voice
+            .at(Time(500))
+            .set_send(&other, 1., Ramp::NONE)
+            .unwrap();
+        // Two already: ignored.
+        voice
+            .at(Time(600))
+            .set_send(&third, 1., Ramp::NONE)
+            .unwrap();
+        voice
+            .at(Time(1_000))
+            .set_send(&aux, 0., Ramp::seconds(100. / f64::from(RATE)))
+            .unwrap();
+        // Now there's room.
+        voice
+            .at(Time(2_000))
+            .set_send(&third, 0.5, Ramp::NONE)
+            .unwrap();
+    }));
+    assert_eq!(out[400], 0.5, "own and sent");
+    assert_eq!(out[700], 0.75, "and another, not a third");
+    assert_eq!(
+        out[1_050],
+        0.25 + 0.25 + 0.25 * 0.5 * 2. * 0.5,
+        "halfway down"
+    );
+    assert_eq!(out[1_500], 0.5, "the first gone");
+    assert_eq!(out[2_500], 0.625, "a third in its place");
+}
+
+#[test]
+fn a_send_to_another_engine_s_bus_is_refused() {
+    let (audio, _mixer) = Audio::offline(unlimited()).unwrap();
+    let (other, _other_mixer) = Audio::offline(unlimited()).unwrap();
+    let flat = sound(&[0., 0.25], 1, RATE);
+    let theirs = other.add_bus("theirs", &other.master()).unwrap();
+    assert_eq!(
+        audio
+            .play(&flat, Play::new().send(&theirs, 1.))
+            .unwrap_err(),
+        Error::Foreign
+    );
+    let voice = audio.play(&flat, Play::new()).unwrap();
+    assert_eq!(
+        voice.set_send(&theirs, 1., Ramp::NONE).unwrap_err(),
+        Error::Foreign
+    );
+}
+
+#[test]
+fn a_send_for_a_play_still_waiting_for_a_slot_waits_with_it() {
+    // One voice: 17 plays at once leave the 18th waiting for a slot (as
+    // a stop's test does). Its send, set as it's sent, must reach it.
+    let flat = sound(&[0., 0.25], 1, RATE);
+    let (audio, mut mixer) = Audio::offline(Config {
+        voices: 1,
+        ..unlimited()
+    })
+    .unwrap();
+    let aux = audio.add_bus("aux", &audio.master()).unwrap();
+    let mut last = None;
+    for priority in 0..18 {
+        last = Some(
+            audio
+                .play(&flat, Play::new().loop_frames(1..2).priority(priority))
+                .unwrap(),
+        );
+    }
+    last.unwrap().set_send(&aux, 1., Ramp::NONE).unwrap();
+    let out = left(&mixer.frames(4_800));
+    assert!(audio.stats().waited > 0);
+    assert_eq!(out[4_799], 0.5, "it plays, and sends");
+}
