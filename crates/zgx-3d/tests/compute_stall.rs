@@ -76,14 +76,39 @@ fn a_stuck_sandboxed_compile_fails_its_pass_and_holds_no_other_up() {
     }
     // Another owner's compiles at once, on a new worker: well before the
     // stuck one would have let it.
+    let ready = |id: ComputeId, draw: &mut dyn FnMut()| {
+        let started = Instant::now();
+        while world.compute_status(id) != Some(ComputeStatus::Ready) {
+            draw();
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                world.compute_status(id)
+            );
+        }
+    };
     let other = world.add_compute(pass().sandboxed("two")).unwrap();
-    let started = Instant::now();
-    while world.compute_status(other) != Some(ComputeStatus::Ready) {
-        draw();
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "{:?}",
-            world.compute_status(other)
-        );
+    ready(other, &mut draw);
+    // Three more stalls of "one"'s: its fourth, and it compiles no more.
+    // "two" still does.
+    for _ in 0..3 {
+        stall_sandboxed_compiles(Duration::from_millis(300), Duration::from_secs(5));
+        let stuck = world.add_compute(pass().sandboxed("one")).unwrap();
+        let started = Instant::now();
+        while !matches!(world.compute_status(stuck), Some(ComputeStatus::Failed(_))) {
+            draw();
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
     }
+    let refused = world.add_compute(pass().sandboxed("one")).unwrap();
+    for _ in 0..5 {
+        draw();
+    }
+    assert!(
+        matches!(world.compute_status(refused), Some(ComputeStatus::Failed(why)) if why.contains("stalled")),
+        "{:?}",
+        world.compute_status(refused)
+    );
+    let another = world.add_compute(pass().sandboxed("two")).unwrap();
+    ready(another, &mut draw);
 }

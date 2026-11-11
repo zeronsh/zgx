@@ -1572,8 +1572,8 @@ impl Frames {
                 };
                 // A plugin's on a worker of its own: a driver stuck on its
                 // shader holds up nobody else's.
-                let spawned = if pass.owner.is_some() {
-                    compile_sandboxed(job).map(Some)
+                let spawned = if let Some(owner) = &pass.owner {
+                    compile_sandboxed(job, Some(owner)).map(Some)
                 } else {
                     compile_off_the_frame(job).map(|()| None)
                 };
@@ -1604,7 +1604,9 @@ impl Frames {
                         pass,
                         format!("its shader took over {deadline:?} to compile"),
                     );
-                    replace_sandboxed_worker(worker);
+                    if let Some(owner) = &pass.owner {
+                        replace_sandboxed_worker(worker, owner);
+                    }
                 }
                 (None, _) => {}
                 (done, _) => match done.unwrap() {
@@ -2058,12 +2060,28 @@ pub(crate) fn compile_off_the_frame(job: impl FnOnce() + Send + 'static) -> Resu
 
 /// `job` on the worker sandboxed code compiles on: apart from the app's, so
 /// a driver taking too long over a plugin's shader holds up no other.
-/// The worker's generation, as `job` was given it.
-pub(crate) fn compile_sandboxed(job: impl FnOnce() + Send + 'static) -> Result<u64, String> {
-    if STALLS.load(Ordering::Relaxed) >= MOST_STALLS {
+/// The worker's generation, as `job` was given it. Refused for an owner
+/// whose shaders stalled drivers `MOST_STALLS` times, and for everyone once
+/// `MOST_STALLED_WORKERS` workers are stuck.
+pub(crate) fn compile_sandboxed(
+    job: impl FnOnce() + Send + 'static,
+    owner: Option<&str>,
+) -> Result<u64, String> {
+    if STALLS.load(Ordering::Relaxed) >= MOST_STALLED_WORKERS {
         return Err(format!(
-            "sandboxed shaders aren't compiled: drivers stalled on {MOST_STALLS} of them"
+            "sandboxed shaders aren't compiled: drivers stalled on {MOST_STALLED_WORKERS} of them"
         ));
+    }
+    if let Some(owner) = owner {
+        let stalls = OWNERS_STALLS.lock().unwrap_or_else(|p| p.into_inner());
+        if stalls
+            .iter()
+            .any(|(o, n)| **o == *owner && *n >= MOST_STALLS)
+        {
+            return Err(format!(
+                "`{owner}`'s shaders aren't compiled: drivers stalled on {MOST_STALLS} of them"
+            ));
+        }
     }
     let generation = SANDBOXED_WORKER.load(Ordering::Relaxed);
     on_worker(&SANDBOXED_QUEUE, Box::new(job))?;
@@ -2077,12 +2095,17 @@ pub(crate) fn compile_sandboxed(job: impl FnOnce() + Send + 'static) -> Result<u
 static SANDBOXED_QUEUE: Mutex<Option<std::sync::mpsc::Sender<Job>>> = Mutex::new(None);
 static SANDBOXED_WORKER: AtomicU64 = AtomicU64::new(0);
 /// Workers let go so far, and the most: past it, sandboxed shaders aren't
-/// compiled at all (stuck threads aren't made without end).
+/// compiled at all (stuck threads aren't made without end). And each
+/// owner's stalls, and the most an owner's may cause before its shaders
+/// aren't compiled (one owner's stalls don't stop another's).
 static STALLS: AtomicU64 = AtomicU64::new(0);
+const MOST_STALLED_WORKERS: u64 = 32;
+static OWNERS_STALLS: Mutex<Vec<(Arc<str>, u64)>> = Mutex::new(Vec::new());
 const MOST_STALLS: u64 = 4;
 
-/// The sandboxed worker of generation `stuck` let go, if it's still the one.
-fn replace_sandboxed_worker(stuck: u64) {
+/// The sandboxed worker of generation `stuck` let go, if it's still the one,
+/// the stall counted against `owner`.
+fn replace_sandboxed_worker(stuck: u64, owner: &Arc<str>) {
     let mut queue = SANDBOXED_QUEUE.lock().unwrap_or_else(|p| p.into_inner());
     if SANDBOXED_WORKER
         .compare_exchange(stuck, stuck + 1, Ordering::Relaxed, Ordering::Relaxed)
@@ -2090,6 +2113,11 @@ fn replace_sandboxed_worker(stuck: u64) {
     {
         *queue = None;
         STALLS.fetch_add(1, Ordering::Relaxed);
+        let mut stalls = OWNERS_STALLS.lock().unwrap_or_else(|p| p.into_inner());
+        match stalls.iter_mut().find(|(o, _)| o == owner) {
+            Some((_, n)) => *n += 1,
+            None => stalls.push((owner.clone(), 1)),
+        }
     }
 }
 
@@ -2102,7 +2130,7 @@ static SANDBOXED_COMPILE_MS: AtomicU64 = AtomicU64::new(10_000);
 #[doc(hidden)]
 pub fn stall_sandboxed_compiles(deadline: std::time::Duration, stall: std::time::Duration) {
     SANDBOXED_COMPILE_MS.store(deadline.as_millis() as u64, Ordering::Relaxed);
-    let _ = compile_sandboxed(move || std::thread::sleep(stall));
+    let _ = compile_sandboxed(move || std::thread::sleep(stall), None);
 }
 
 fn on_worker(queue: &Mutex<Option<std::sync::mpsc::Sender<Job>>>, job: Job) -> Result<(), String> {
