@@ -8,7 +8,8 @@ the new `src/metal/buffer_writes.rs`, and for Direct3D 12
 `src/dx12/shader_compilation.rs`, `src/dx12/mod.rs`, `src/dx12/adapter.rs`
 and the new `src/dx12/shader_disk_cache.rs` (see the last three sections), and
 `Cargo.toml`'s `metal` feature (naga's WGSL in, for single-use shader
-modules); search for "zgx patch".
+modules), and for Vulkan one line of `src/vulkan/command.rs` (the last
+section); search for "zgx patch".
 
 ## Why
 
@@ -165,3 +166,15 @@ and `Queue::submit` holds the process-wide `WARP_SUBMITS` lock across
 shares one wgpu device among its renderers on WARP. Tested by
 `crates/zgx-gpu/tests/warp_devices.rs`: sixteen threads, each with a wgpu
 device of its own on WARP, drawing and reading back at once.
+
+## Vulkan: a BLAS's `maxVertex` is its highest vertex index
+
+Building a bottom-level acceleration structure from triangles, upstream
+sets `VkAccelerationStructureGeometryTrianglesDataKHR::maxVertex` to the
+geometry's vertex count. Vulkan defines it as the highest index of a vertex
+the build addresses: one less. A driver may read vertices up to `maxVertex`
+inclusive, one past the end of a geometry packed at the end of its buffer.
+`src/vulkan/command.rs` passes `vertex_count - 1` (0 for none). Found while
+triaging lavapipe's crash in its first BLAS build (Mesa's own: a raw-Vulkan
+build of the same cube crashed too, so lavapipe's ray queries stay declined,
+docs/validation.md).
