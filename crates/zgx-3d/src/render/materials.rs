@@ -429,18 +429,12 @@ pub(super) fn upload(
     let decoded = decoded(texture)?;
     Some(upload_decoded(device, queue, texture, srgb, decoded))
 }
-/// A texture's pixels and their smaller levels, ready to upload: decoding
-/// them is most of an upload's time, and needs no device.
-type Decoded = (
-    std::sync::Arc<zgx::image::ImageData>,
-    Vec<(u32, u32, Vec<u8>)>,
-);
-/// `texture`'s pixels (decoded from its file if it keeps one) and their
-/// smaller levels; `None` if they don't decode.
-fn decoded(texture: &crate::Texture) -> Option<Decoded> {
-    let image = texture.pixels()?;
-    let smaller = crate::texture::mipmaps(texture.width(), texture.height(), image.pixels());
-    Some((image, smaller))
+/// A texture's levels, ready to upload: decoding them is most of an
+/// upload's time, and needs no device.
+type Decoded<'a> = crate::texture::Levels<'a>;
+/// `texture`'s levels (`Texture::levels`); `None` if they don't decode.
+fn decoded(texture: &crate::Texture) -> Option<Decoded<'_>> {
+    texture.levels()
 }
 /// `texture`, `decoded`, on the GPU (`upload`).
 fn upload_decoded(
@@ -448,11 +442,9 @@ fn upload_decoded(
     queue: &wgpu::Queue,
     texture: &crate::Texture,
     srgb: bool,
-    (image, smaller): Decoded,
+    decoded: Decoded,
 ) -> wgpu::TextureView {
-    let levels: Vec<&[u8]> = std::iter::once(image.pixels())
-        .chain(smaller.iter().map(|(_, _, pixels)| pixels.as_slice()))
-        .collect();
+    let levels = decoded.texels();
     let made = zgx_gpu::viewport::texture_with_levels(
         device,
         queue,

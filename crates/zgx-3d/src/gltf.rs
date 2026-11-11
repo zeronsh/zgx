@@ -886,8 +886,19 @@ fn material_image(doc: &Value, material: &Value, path: &[&str]) -> Option<usize>
         .try_fold(material, |at, key| at.get(key))?
         .get("index")?
         .as_u64()?;
-    let source = list(doc, "textures").get(texture as usize)?.get("source")?;
-    source.as_u64().map(|i| i as usize)
+    let texture = list(doc, "textures").get(texture as usize)?;
+    // A KTX2 image (`KHR_texture_basisu`), where the `ktx2` feature reads
+    // them: before the fallback `source` a file may also give.
+    #[cfg(feature = "ktx2")]
+    if let Some(ktx2) = texture
+        .get("extensions")
+        .and_then(|e| e.get("KHR_texture_basisu"))
+        .and_then(|e| e.get("source"))
+        .and_then(Value::as_u64)
+    {
+        return Some(ktx2 as usize);
+    }
+    texture.get("source")?.as_u64().map(|i| i as usize)
 }
 /// Where the texture `material` names at `path` sits: its `texCoord`, its
 /// sampler's wrapping and its `KHR_texture_transform`.

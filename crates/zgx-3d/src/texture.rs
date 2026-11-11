@@ -183,6 +183,13 @@ impl Texture {
     /// no copy of them.
     pub(crate) fn decode_owned(bytes: Vec<u8>) -> Result<Self, String> {
         let too_large = || "a texture is 1 to 8192 pixels on a side".to_owned();
+        // A KTX2 file (the `ktx2` feature): its levels read as they are, on
+        // upload; refused here, saying why, if it holds what isn't read.
+        #[cfg(feature = "ktx2")]
+        if bytes.starts_with(&crate::assets::ktx2::IDENTIFIER) {
+            let file = crate::assets::ktx2::read(&bytes)?;
+            return Ok(Self::made((file.width, file.height), None, Some(bytes)));
+        }
         #[cfg(feature = "gltf")]
         if let Some((width, height)) = size_of_file(&bytes) {
             // PNG and JPEG, which the `gltf` feature decodes: read as they
@@ -241,12 +248,57 @@ impl Texture {
         if self.0.failed.load(Ordering::Relaxed) {
             return None;
         }
-        let image = zgx_gpu::assets::decode_image(self.0.encoded.as_ref()?).ok();
+        let encoded = self.0.encoded.as_ref()?;
+        // A KTX2 file's first level, as it is.
+        #[cfg(feature = "ktx2")]
+        if encoded.starts_with(&crate::assets::ktx2::IDENTIFIER) {
+            let first = crate::assets::ktx2::read(encoded)
+                .ok()
+                .map(|file| encoded[file.levels[0].clone()].to_vec());
+            let image = first.and_then(|pixels| {
+                zgx::image::ImageData::new(self.0.width, self.0.height, pixels).ok()
+            });
+            if image.is_none() {
+                self.0.failed.store(true, Ordering::Relaxed);
+            }
+            return image.map(Arc::new);
+        }
+        let image = zgx_gpu::assets::decode_image(encoded).ok();
         let image = image.filter(|i| (i.width(), i.height()) == (self.0.width, self.0.height));
         if image.is_none() {
             self.0.failed.store(true, Ordering::Relaxed);
         }
         image
+    }
+    /// Its levels, ready to upload: a file's own where it has more than one
+    /// (a KTX2's, as they're stored: no copy, and its smaller levels as the
+    /// file made them), else its pixels and the levels below them made here
+    /// (`mipmaps`). `None` if they don't decode.
+    pub(crate) fn levels(&self) -> Option<Levels<'_>> {
+        if let Some(kept) = self.kept_levels() {
+            return Some(Levels::Kept(kept));
+        }
+        let image = self.pixels()?;
+        let smaller = mipmaps(self.0.width, self.0.height, image.pixels());
+        Some(Levels::Made(image, smaller))
+    }
+    /// Its file's own levels, as stored, where it has more than one (a KTX2
+    /// file's: the `ktx2` feature).
+    pub(crate) fn kept_levels(&self) -> Option<Vec<&[u8]>> {
+        #[cfg(feature = "ktx2")]
+        if let Some(encoded) = self.0.encoded.as_ref()
+            && encoded.starts_with(&crate::assets::ktx2::IDENTIFIER)
+            && let Ok(file) = crate::assets::ktx2::read(encoded)
+            && file.levels.len() > 1
+        {
+            return Some(
+                file.levels
+                    .into_iter()
+                    .map(|range| &encoded[range])
+                    .collect(),
+            );
+        }
+        None
     }
     /// Whether its file failed to decode (`pixels`): it draws none.
     pub(crate) fn failed(&self) -> bool {
@@ -270,6 +322,26 @@ impl Texture {
     }
     fn held(&self) -> std::sync::MutexGuard<'_, Option<Arc<zgx::image::ImageData>>> {
         self.0.pixels.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// A texture's levels, the first the largest (`Texture::levels`).
+pub(crate) enum Levels<'a> {
+    /// A file's own, as stored in it.
+    #[cfg_attr(not(feature = "ktx2"), allow(dead_code))]
+    Kept(Vec<&'a [u8]>),
+    /// Its pixels, and the levels below made from them.
+    Made(Arc<zgx::image::ImageData>, Vec<(u32, u32, Vec<u8>)>),
+}
+impl Levels<'_> {
+    /// Each level's texels, the first the largest.
+    pub(crate) fn texels(&self) -> Vec<&[u8]> {
+        match self {
+            Levels::Kept(levels) => levels.clone(),
+            Levels::Made(image, smaller) => std::iter::once(image.pixels())
+                .chain(smaller.iter().map(|(_, _, pixels)| pixels.as_slice()))
+                .collect(),
+        }
     }
 }
 

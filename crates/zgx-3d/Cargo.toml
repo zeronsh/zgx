@@ -27,6 +27,9 @@ zgx-audio = { path = "../zgx-audio", version = "0.1.10", optional = true, defaul
 # glTF 2.0 models (`Model`, `World::add_model`): `.glb` and `.gltf` files,
 # their textures PNG or JPEG.
 gltf = ["dep:serde_json", "zgx-gpu/png", "zgx-gpu/jpeg"]
+# KTX2 textures (`Texture::decode`, and glTF images that are KTX2 files):
+# RGBA8 ones, their levels read as stored. No dependency.
+ktx2 = []
 # The app's GPU data and compute passes (`World::add_buffer`,
 # `add_texture`, `add_compute`): WGSL checked by the naga wgpu brings.
 compute = ["dep:naga"]
@@ -64,6 +67,10 @@ required-features = ["gltf"]
 [[example]]
 name = "particles_bench"
 required-features = ["particles"]
+
+[[test]]
+name = "ktx2"
+required-features = ["ktx2", "gltf"]
 
 [[test]]
 name = "shaders"

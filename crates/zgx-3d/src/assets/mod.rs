@@ -19,6 +19,9 @@ use std::{
 };
 use zgx_gpu::wgpu;
 
+#[cfg(feature = "ktx2")]
+pub(crate) mod ktx2;
+
 /// Where a map is (`Loads::request`'s answer).
 pub(crate) enum Wanted {
     /// It must be put on the GPU before this frame draws.
@@ -151,8 +154,25 @@ fn put_on_gpu(
     srgb: bool,
     scratch: &mut Vec<u8>,
 ) -> Option<wgpu::Texture> {
-    let image = texture.pixels()?;
     let (width, height) = (texture.width(), texture.height());
+    let format = if srgb {
+        wgpu::TextureFormat::Rgba8UnormSrgb
+    } else {
+        wgpu::TextureFormat::Rgba8Unorm
+    };
+    // A file's own levels (a KTX2's): put on the GPU as they are.
+    if let Some(levels) = texture.kept_levels() {
+        let made = zgx_gpu::viewport::texture_with_levels(
+            device,
+            queue,
+            (width, height),
+            format,
+            &levels,
+            "3D map",
+        );
+        return Some(made);
+    }
+    let image = texture.pixels()?;
     let mut sizes = vec![(width, height)];
     while let Some(&(w, h)) = sizes.last().filter(|&&(w, h)| w > 1 || h > 1) {
         sizes.push(((w / 2).max(1), (h / 2).max(1)));
@@ -171,11 +191,6 @@ fn put_on_gpu(
         levels.push(above);
         rest = after;
     }
-    let format = if srgb {
-        wgpu::TextureFormat::Rgba8UnormSrgb
-    } else {
-        wgpu::TextureFormat::Rgba8Unorm
-    };
     let made = zgx_gpu::viewport::texture_with_levels(
         device,
         queue,
