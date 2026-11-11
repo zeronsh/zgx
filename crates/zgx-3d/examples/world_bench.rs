@@ -19,6 +19,8 @@
 //! `SCENE=shader` (with the `shaders` feature) is `textured`'s meshes, a
 //! tenth drawn by one of four custom materials (two shading, one moving its
 //! vertices, one cutting out), one shader's parameter set each frame.
+//! `SCENE=finishes` is `textured` with three meshes in four finished: a
+//! sheen, anisotropy or an iridescent film, each of three looks.
 //! `SCENE=probes` (with `--features gi`) is `textured` inside a volume of
 //! 8 by 4 by 8 irradiance probes on a device tracing rays: each frame the
 //! world turns, its ray scene is built again and 64 probes are updated.
@@ -164,6 +166,9 @@ fn world(mixed: bool, meshes: usize) -> (World, ObjectId, ObjectId, Vec<ObjectId
     let mut all = Vec::with_capacity(meshes);
     let side = (meshes as f32).sqrt().ceil() as usize;
     let mut morphs = Vec::new();
+    // `SCENE=finishes`: `textured`, three meshes in four finished (a
+    // sheen, anisotropy or a film), of three looks each.
+    let finishes = std::env::var("SCENE").is_ok_and(|scene| scene == "finishes");
     for i in 0..meshes {
         let kind = if mixed {
             MIXED[i % MIXED.len()]
@@ -182,6 +187,18 @@ fn world(mixed: bool, meshes: usize) -> (World, ObjectId, ObjectId, Vec<ObjectId
         let half = side as f32 / 2.;
         world.set_transform(mesh, Transform::at([(x - half) * 2., 0., (z - half) * 2.]));
         world.set_texture(mesh, Some(textures[i % TEXTURES].clone()));
+        if finishes {
+            let look = (i / 4 % 3) as f32 / 2.;
+            match i % 4 {
+                1 => world.set_sheen(mesh, Some(Sheen::new([1., 0.5, look]).roughness(0.5))),
+                2 => world.set_anisotropy(mesh, Some(Anisotropy::new(0.5 + 0.4 * look))),
+                3 => world.set_iridescence(
+                    mesh,
+                    Some(Iridescence::new(1.).thickness(300. + 300. * look)),
+                ),
+                _ => {}
+            }
+        }
         #[cfg(feature = "shaders")]
         all.push(mesh);
         match kind {
@@ -227,7 +244,10 @@ fn known(scene: &str) -> bool {
         ("particles", cfg!(feature = "particles")),
         ("probes", cfg!(feature = "gi")),
     ];
-    ["", "textured", "mixed", "still", "lights", "anim"].contains(&scene)
+    [
+        "", "textured", "mixed", "still", "lights", "anim", "finishes",
+    ]
+    .contains(&scene)
         || featured.iter().any(|&(name, on)| on && name == scene)
 }
 

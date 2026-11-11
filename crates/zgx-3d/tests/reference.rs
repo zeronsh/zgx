@@ -818,6 +818,17 @@ struct Sequence {
     /// then a fresh world's and window's, each drawn `settle` more frames.
     check: Option<Check>,
 }
+/// "finishes"' change to each of `objects`, by `step`: all three finishes,
+/// their numbers by it (which it has the same at every step).
+fn refinish(world: &World, objects: &[ObjectId], step: f32) {
+    for &id in objects {
+        let sheen = Sheen::new([1., 0.3 + 0.5 * step, 0.1]).roughness(0.9 - 0.5 * step);
+        world.set_sheen(id, Some(sheen));
+        let anisotropy = Anisotropy::new(0.3 + 0.5 * step).rotation(1. - step);
+        world.set_anisotropy(id, Some(anisotropy));
+        world.set_iridescence(id, Some(Iridescence::new(1.).thickness(900. - 600. * step)));
+    }
+}
 /// "an object added"'s object, in front of every scene's camera target.
 fn added(rgb: u32) -> Object {
     Object::mesh(Geometry::cuboid(0.4, 0.4, 0.4), Material::rgb(rgb)).at([0.3, 0.5, 0.6])
@@ -892,12 +903,17 @@ const SEQUENCES: &[Sequence] = &[
                         world.object(id).unwrap().material,
                         world.transmission(id),
                         world.clearcoat(id),
+                        (world.sheen(id), world.anisotropy(id), world.iridescence(id)),
                     );
                     let mut green = Material::rgb(0x00ff00);
                     green.unlit = true; // shown whatever lights it
                     world.set_material(id, green);
                     world.set_transmission(id, None);
                     world.set_clearcoat(id, Some(Clearcoat::new(1.)));
+                    // Finishes changed (their numbers, or which it has).
+                    world.set_sheen(id, Some(Sheen::new([0., 1., 0.])));
+                    world.set_anisotropy(id, None);
+                    world.set_iridescence(id, Some(Iridescence::new(0.5).thickness(900.)));
                     look
                 })
                 .collect();
@@ -915,13 +931,31 @@ const SEQUENCES: &[Sequence] = &[
                 "{}: the green it was changed to never showed",
                 scene.name
             );
-            for (&id, (material, transmission, clearcoat)) in objects.iter().zip(looks) {
+            for (&id, (material, transmission, clearcoat, finish)) in objects.iter().zip(looks) {
                 world.set_material(id, material);
                 world.set_transmission(id, transmission);
                 world.set_clearcoat(id, clearcoat);
+                world.set_sheen(id, finish.0);
+                world.set_anisotropy(id, finish.1);
+                world.set_iridescence(id, finish.2);
             }
         },
         then: None,
+        settle: 0,
+        check: None,
+    },
+    // Ends elsewhere: each object given finishes (`refinish`), drawn, then
+    // their numbers changed, its kinds as they were: a binding kept from
+    // before the last shows.
+    Sequence {
+        name: "finishes",
+        run: |world, window, _, objects| {
+            refinish(world, objects, 0.);
+            window.draw();
+            refinish(world, objects, 1.);
+            window.draw();
+        },
+        then: Some(|world, _, objects| refinish(world, objects, 1.)),
         settle: 0,
         check: None,
     },

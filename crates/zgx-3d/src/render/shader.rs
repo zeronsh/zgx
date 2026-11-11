@@ -75,6 +75,10 @@ fn tag_on(
     let named = |name: &str| match name {
         "probed" => variant.probed(),
         "probed_unlit" => variant.probed() && !variant.lit(),
+        // Sheen, anisotropy or iridescence over it (`shader/finish.wgsl`),
+        // and not.
+        "finish" => variant.finished(),
+        "no_finish" => !variant.finished(),
         // A mesh's own shader is in the custom code (not layers alone): its
         // binding holds what it reads, the instances' numbers among it.
         "mesh_shader" => custom.is_some_and(meshes),
@@ -95,7 +99,9 @@ fn tag_on(
         b'L' => variant.coated(),
         b'R' => variant.specular(),
         b'Q' => !variant.specular(),
-        b'W' => variant.transmitting() || variant.coated() || variant.specular(),
+        b'W' => {
+            variant.transmitting() || variant.coated() || variant.specular() || variant.finished()
+        }
         b'K' => variant.masked(),
         b'N' => !variant.masked(),
         b'A' => samples > 1,
@@ -117,7 +123,14 @@ fn tag_on(
 /// The tags of more than one letter (`//name `: lowercase letters, digits
 /// and `_`), by their codes from `NAMED_FROM`: a lane adds its own here and
 /// in `tag_on`. (Names cost nothing a frame: the text is read once.)
-const NAMED: &[&str] = &["probed", "probed_unlit", "mesh_shader", "sun_shadowed"];
+const NAMED: &[&str] = &[
+    "probed",
+    "probed_unlit",
+    "mesh_shader",
+    "sun_shadowed",
+    "finish",
+    "no_finish",
+];
 const NAMED_FROM: u8 = 128;
 /// The code of a line's tag `name`, if it is one: a letter's own byte, a
 /// name's from `NAMED` (one not there, `u8::MAX`: no variant keeps it).
@@ -246,7 +259,7 @@ macro_rules! parts {
 // place. Comments and blank lines cost nothing: they're dropped once.
 parts![
     "frame", "maps", "skin", "vertex", "caster", "light", "display", "fragment", "lights",
-    "shadows", "probes",
+    "shadows", "probes", "finish",
 ];
 
 #[cfg(test)]
@@ -325,31 +338,114 @@ mod tests {
         assert!(textured.contains("lit = shade(") && !textured.contains("shade_specular"));
     }
 
-    /// FNV-1a over the text of every variant whose bits are under `below`
-    /// (one sample a pixel and four), in order.
-    fn variants_text(below: u32) -> u64 {
-        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for bits in 0..below {
+    /// FNV-1a over the text of every variant under `FINISH` (one sample a
+    /// pixel and four), in order, as it stands after each of `checkpoints`
+    /// (the variants under it); then over the finished variants of bits 0
+    /// to 12 apart.
+    fn variants_text(checkpoints: &[u32]) -> Vec<u64> {
+        const START: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut hash = START;
+        let mut said = Vec::new();
+        let text = |hash: &mut u64, bits: u32| {
             for samples in [1, 4] {
-                for byte in wgsl(Variant(bits as u16), samples).bytes().chain([0]) {
-                    hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                for byte in wgsl(Variant(bits), samples).bytes().chain([0]) {
+                    *hash = (*hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
                 }
             }
+        };
+        for bits in 0..=Variant::FINISH {
+            if checkpoints.contains(&bits) {
+                said.push(hash);
+            }
+            if bits < Variant::FINISH {
+                text(&mut hash, bits);
+            }
         }
-        hash
+        let mut finished = START;
+        for bits in 0..1 << 13 {
+            text(&mut finished, Variant::FINISH | bits);
+        }
+        said.push(finished);
+        said
     }
-    /// The bits `variant.rs` declares (`const NAME: u16 = 1 << n;`).
+    /// The bits `variant.rs` declares (`const NAME: u32 = 1 << n;`).
     fn declared_bits() -> Vec<u32> {
         include_str!("variant.rs")
             .lines()
             .filter_map(|line| {
-                line.split_once(": u16 = 1 << ")?
+                line.split_once(": u32 = 1 << ")?
                     .1
                     .strip_suffix(';')?
                     .parse()
                     .ok()
             })
             .collect()
+    }
+
+    #[test]
+    fn a_sheens_albedo_is_its_lobes() {
+        // `finish.wgsl`'s table of how much a sheen reflects of light from
+        // all about (its directional albedo) is what its lobe there
+        // integrates to: the Charlie distribution and its visibility, over
+        // the hemisphere, at 16 roughnesses and 16 cosines (the first of
+        // each nudged off 0, where the lobe has no albedo to speak of).
+        let text = include_str!("shader/finish.wgsl");
+        let table: Vec<f32> = text
+            .split_once("array<f32, 256>(")
+            .and_then(|(_, rest)| rest.split_once(");"))
+            .expect("the table")
+            .0
+            .split(',')
+            .map(|word| word.trim().trim_start_matches("//finish").trim())
+            .filter(|word| !word.is_empty())
+            .map(|word| word.parse().expect("a number"))
+            .collect();
+        assert_eq!(table.len(), 256);
+        let fit = |x: f64, a: f64| {
+            let t = (1. - a) * (1. - a);
+            let mix = |p: f64, q: f64| p + (q - p) * t;
+            mix(21.5473, 25.3245) / (1. + mix(3.82987, 3.32435) * x.powf(mix(0.19823, 0.16801)))
+                + mix(-1.97760, -1.27393) * x
+                + mix(-4.32054, -4.85967)
+        };
+        let lambda = |c: f64, a: f64| {
+            if c < 0.5 {
+                fit(c, a).exp()
+            } else {
+                (2. * fit(0.5, a) - fit(1. - c, a)).exp()
+            }
+        };
+        let albedo = |mu: f64, r: f64| {
+            const N: usize = 128;
+            let a = (r * r).max(1e-6);
+            let v = [(1. - mu * mu).max(0.).sqrt(), 0., mu];
+            let mut sum = 0.;
+            for i in 0..N {
+                let ct = (i as f64 + 0.5) / N as f64;
+                let st = (1. - ct * ct).sqrt();
+                for j in 0..2 * N {
+                    let ph = (j as f64 + 0.5) / (2 * N) as f64 * std::f64::consts::TAU;
+                    let h = [st * ph.cos() + v[0], st * ph.sin() + v[1], ct + v[2]];
+                    let nh = h[2] / (h[0] * h[0] + h[1] * h[1] + h[2] * h[2]).sqrt();
+                    let d = (2. + 1. / a) * (1. - nh * nh).max(0.).powf(0.5 / a)
+                        / std::f64::consts::TAU;
+                    let vis = (1. / ((1. + lambda(mu, a) + lambda(ct, a)) * (4. * mu * ct)))
+                        .clamp(0., 1.);
+                    sum += d * vis * ct;
+                }
+            }
+            sum / N as f64 * (std::f64::consts::TAU / (2 * N) as f64)
+        };
+        for (i, baked) in table.iter().enumerate() {
+            let (row, column) = (i / 16, i % 16);
+            let r = (row as f64 / 15.).max(0.02);
+            let mu = (column as f64 / 15.).max(0.01);
+            let e = albedo(mu, r).min(1.);
+            assert!(
+                (e - f64::from(*baked)).abs() < 0.01,
+                "roughness {r}, cosine {mu}: {e} integrated, {baked} baked"
+            );
+        }
     }
 
     #[test]
@@ -370,26 +466,25 @@ mod tests {
         // turns nothing on parses what it did; change this only with a
         // change to today's shading.
         // Those of bits 0 to 12 (clustered lights', cascades') as they were
-        // before custom materials (bit 13), whose code they don't parse; and
-        // every variant of every bit there is now, as it is now. (All three
-        // said at once, so a deliberate change takes its new values in one
-        // run.)
-        let digests = [
-            variants_text(1 << 11),
-            variants_text(1 << 13),
-            variants_text(u32::from(Variant::ALL) + 1),
-        ];
+        // before custom materials (bit 13), whose code they don't parse;
+        // those of bits 0 to 15 as they were before finishes (bit 16); and
+        // the finished variants of bits 0 to 12 (the rest each validated
+        // with a finish, `every_variant_bit_and_pair_of_bits_validates`), as
+        // they are now. (All said at once, so a deliberate change takes its
+        // new values in one run.)
+        let digests = variants_text(&[1 << 11, 1 << 13, 1 << 16]);
         let pinned = [
             0xf935_b89f_ba82_c305,
             0xde7e_cd1c_b17b_6a05,
             0x6144_6130_bab1_cb65,
+            0x13b0_9cab_389e_9945,
         ];
         assert_eq!(digests, pinned, "{digests:#018x?}");
     }
 
     /// `bits` as a variant a mesh can have: a cut-out, placed, glass, coated
     /// or specular one is textured (`variant_of`).
-    fn possible(bits: u16) -> Variant {
+    fn possible(bits: u32) -> Variant {
         let needs = Variant::MASKED
             | Variant::PLACED
             | Variant::TRANSMITTING
@@ -420,7 +515,7 @@ mod tests {
         let mut tried = 0;
         for (i, &a) in bits.iter().enumerate() {
             for &b in &bits[i..] {
-                let variant = possible((1 << a | 1 << b) as u16);
+                let variant = possible(1 << a | 1 << b);
                 for samples in [1, 4] {
                     validates(variant, samples)
                         .unwrap_or_else(|e| panic!("{variant:?} at {samples}: {e}"));
@@ -469,7 +564,7 @@ mod tests {
         let bits = declared_bits();
         for (i, &a) in bits.iter().enumerate() {
             for &b in &bits[i..] {
-                let variant = possible((1 << a | 1 << b) as u16);
+                let variant = possible(1 << a | 1 << b);
                 for samples in [1, 4] {
                     text_validates(&wgsl_full(variant, samples, None, true))
                         .unwrap_or_else(|e| panic!("{variant:?} at {samples}: {e}"));

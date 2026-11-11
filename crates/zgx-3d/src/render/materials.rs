@@ -85,6 +85,14 @@ pub(super) fn layers_key(extras: &crate::world::Extras) -> u64 {
             mix(map.as_ref().map_or(0, crate::Texture::id));
         }
     }
+    if let Some(finish) = extras.finish() {
+        // Apart from the rest.
+        mix(0xf1a1);
+        finish
+            .iter()
+            .flatten()
+            .for_each(|n| mix(n.to_bits().into()));
+    }
     if let Some(specular) = extras.specular() {
         // Apart from both.
         mix(0x5bec);
@@ -181,7 +189,8 @@ pub(super) fn make_binding(
     let coat = d.extras.and_then(|e| e.clearcoat());
     let specular = d.extras.and_then(|e| e.specular());
     let placement = d.extras.and_then(|e| e.placement()).filter(|_| placed(d));
-    let layered = glass.is_some() || coat.is_some() || specular.is_some();
+    let finish = d.extras.and_then(|e| e.finish());
+    let layered = glass.is_some() || coat.is_some() || specular.is_some() || finish.is_some();
     let rows = (placement.is_some() || layered).then(|| {
         let rows = placement.copied().unwrap_or_default().map(|p| p.rows());
         uniform("3D map placements", bytemuck::cast_slice(&rows))
@@ -198,7 +207,14 @@ pub(super) fn make_binding(
             let [r, g, b] = s.f0();
             [r, g, b, s.factor]
         });
-        uniform("3D layers", bytemuck::cast_slice(&[a, b, c, d]))
+        // A finish's numbers after (only a finished pipeline reads them).
+        match finish {
+            Some([sheen, aniso, irid]) => uniform(
+                "3D layers",
+                bytemuck::cast_slice(&[a, b, c, d, sheen, aniso, irid]),
+            ),
+            None => uniform("3D layers", bytemuck::cast_slice(&[a, b, c, d])),
+        }
     });
     // Its layers' maps, uploaded for this binding alone (it keeps them):
     // light passing through's if it does, a coat's if it has one.

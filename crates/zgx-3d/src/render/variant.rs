@@ -3,54 +3,58 @@
 /// as bits: a frame makes one for every mesh and compares and hashes them
 /// a run, and one number costs those least.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(super) struct Variant(pub(super) u16);
+pub(super) struct Variant(pub(super) u32);
 impl Variant {
     /// It samples maps (or stand-ins).
-    pub(super) const TEXTURED: u16 = 1 << 0;
+    pub(super) const TEXTURED: u32 = 1 << 0;
     /// Its joints place its vertices.
-    pub(super) const SKINNED: u16 = 1 << 1;
+    pub(super) const SKINNED: u32 = 1 << 1;
     /// Lit by an environment.
-    pub(super) const LIT: u16 = 1 << 2;
+    pub(super) const LIT: u32 = 1 << 2;
     /// Its morph targets blend it.
-    pub(super) const MORPHING: u16 = 1 << 3;
+    pub(super) const MORPHING: u32 = 1 << 3;
     /// Its back faces draw.
-    pub(super) const TWO_SIDED: u16 = 1 << 4;
+    pub(super) const TWO_SIDED: u32 = 1 << 4;
     /// Cut out by its base colour's alpha.
-    pub(super) const MASKED: u16 = 1 << 5;
+    pub(super) const MASKED: u32 = 1 << 5;
     /// Its maps placed (`World::set_map_placement`).
-    pub(super) const PLACED: u16 = 1 << 6;
+    pub(super) const PLACED: u32 = 1 << 6;
     /// Its geometry has vertex colours.
-    pub(super) const COLORED: u16 = 1 << 7;
+    pub(super) const COLORED: u32 = 1 << 7;
     /// Light passes through it (`World::set_transmission`).
-    pub(super) const TRANSMITTING: u16 = 1 << 8;
+    pub(super) const TRANSMITTING: u32 = 1 << 8;
     /// A clear coat over it (`World::set_clearcoat`).
-    pub(super) const COATED: u16 = 1 << 9;
+    pub(super) const COATED: u32 = 1 << 9;
     /// It reflects as its specular says (`World::set_specular`).
-    pub(super) const SPECULAR: u16 = 1 << 10;
+    pub(super) const SPECULAR: u32 = 1 << 10;
     /// Its world shades point and spot lights through clusters (`lights`).
-    pub(super) const CLUSTERED: u16 = 1 << 11;
+    pub(super) const CLUSTERED: u32 = 1 << 11;
     /// Its world's sun casts its shadow through cascades.
-    pub(super) const CASCADED: u16 = 1 << 12;
+    pub(super) const CASCADED: u32 = 1 << 12;
     /// A custom material draws it (`World::set_shader`): which one, its
     /// binding says (`custom`).
-    pub(super) const CUSTOM: u16 = 1 << 13;
+    pub(super) const CUSTOM: u32 = 1 << 13;
     /// Its diffuse light from irradiance probes (`World::add_probes`).
-    pub(super) const PROBES: u16 = 1 << 14;
+    pub(super) const PROBES: u32 = 1 << 14;
     /// It doesn't receive the sun's shadow (`World::set_receives_shadows`).
-    pub(super) const UNSHADOWED: u16 = 1 << 15;
+    pub(super) const UNSHADOWED: u32 = 1 << 15;
+    /// A finish over it: sheen, anisotropy or iridescence
+    /// (`World::set_sheen` …), its numbers in its layers'.
+    pub(super) const FINISH: u32 = 1 << 16;
     // `Extras::kinds`' bits, shifted, are these (see `variant_of`).
     pub(super) const _KINDS: () = assert!(
-        Self::TRANSMITTING == crate::world::GLASS as u16 * Self::TRANSMITTING
-            && Self::COATED == crate::world::COAT as u16 * Self::TRANSMITTING
-            && Self::SPECULAR == crate::world::SPECULAR as u16 * Self::TRANSMITTING
-            && Self::CUSTOM == crate::world::SHADER as u16 * Self::TRANSMITTING
+        Self::TRANSMITTING == crate::world::GLASS as u32 * Self::TRANSMITTING
+            && Self::COATED == crate::world::COAT as u32 * Self::TRANSMITTING
+            && Self::SPECULAR == crate::world::SPECULAR as u32 * Self::TRANSMITTING
+            && Self::CUSTOM == crate::world::SHADER as u32 * Self::TRANSMITTING
+            && Self::FINISH == crate::world::FINISH as u32 * Self::TRANSMITTING
     );
     /// Every bit there is (`shader`'s tests cover each, and fail on one
     /// left out of this).
     #[cfg(test)]
-    pub(super) const ALL: u16 = u16::MAX;
+    pub(super) const ALL: u32 = Self::FINISH | (Self::FINISH - 1);
     /// It with `bit` on or off.
-    pub(super) fn with(self, bit: u16, on: bool) -> Self {
+    pub(super) fn with(self, bit: u32, on: bool) -> Self {
         Self(if on { self.0 | bit } else { self.0 & !bit })
     }
     pub(super) fn textured(self) -> bool {
@@ -101,6 +105,9 @@ impl Variant {
     pub(super) fn unshadowed(self) -> bool {
         self.0 & Self::UNSHADOWED != 0
     }
+    pub(super) fn finished(self) -> bool {
+        self.0 & Self::FINISH != 0
+    }
 }
 /// Hashes a `Variant` by its own bits: they're few and its, and the
 /// pipelines are looked up a run a frame.
@@ -117,6 +124,9 @@ impl std::hash::Hasher for VariantHasher {
         }
     }
     fn write_u16(&mut self, bits: u16) {
+        self.0 = u64::from(bits);
+    }
+    fn write_u32(&mut self, bits: u32) {
         self.0 = u64::from(bits);
     }
     fn write_u8(&mut self, bits: u8) {

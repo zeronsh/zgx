@@ -43,6 +43,10 @@
 //T     let dpy = dpdy(in.world);
 //T     let duvx = dpdx(uvs[2]);
 //T     let duvy = dpdy(uvs[2]);
+//finish     let finish_dpx = dpdx(in.world);
+//finish     let finish_dpy = dpdy(in.world);
+//finish     let finish_duvx = dpdx(in.uv);
+//finish     let finish_duvy = dpdy(in.uv);
     // How fast the surface's normal turns across the pixel, in uniform
     // control flow: widened into its roughness below (geometric specular
     // anti-aliasing, Tokuyoshi and Kaplanyan), so a highlight on a curve
@@ -100,6 +104,10 @@
 //V         let given = clamp(zm.roughness, 0.02, 1.0);
         let a = given * given;
         let roughness = sqrt(sqrt(clamp(a * a + widening, 0.0, 1.0)));
+        // A finish's, worked out once for every light (`finish.wgsl`).
+//finish //Q     let finish_f0 = mix(vec3(0.04), base, metallic);
+//finish //R     let finish_f0 = mix(layers.spec.w * min(layers.spec.rgb, vec3(1.0)), base, metallic);
+//finish         let zf = zgx_finished(n, v, finish_dpx, finish_dpy, finish_duvx, finish_duvy, finish_f0, roughness);
 //L         let coat_a = coat_given * coat_given;
 //L         let coat_rough = sqrt(sqrt(clamp(coat_a * coat_a + widening, 0.0, 1.0)));
         // What passes through takes the place of its diffuse light.
@@ -111,8 +119,9 @@
 //I //sun_shadowed             sun *= sunlit(in.world, n);
 //H //sun_shadowed             sun *= sunlit_cascaded(in.world, n);
         }
-//Q         lit = shade(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
-//R         lit = shade_specular(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
+//Q //no_finish         lit = shade(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
+//R //no_finish         lit = shade_specular(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun);
+//finish         lit = shade_finished(base, metallic, roughness, n, v, -frame.sun_direction.xyz, sun, zf);
         // A coat's own highlights: glass's (a black dielectric's alone).
 //L         var coat_lit = shade(vec3(0.0), 0.0, coat_rough, coat_n, v, -frame.sun_direction.xyz, sun);
 //Y         for (var i = 0u; i < u32(frame.params.x); i++) {
@@ -122,8 +131,9 @@
 //Y             let falloff = pow(clamp(1.0 - pow(distance / light[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);
             // Within a spot's cone (all round: 1).
 //Y             let cone = clamp(dot(light[2].xyz, -to / distance) + light[2].w, 0.0, 1.0);
-//Y //Q             lit += shade(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
-//Y //R             lit += shade_specular(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
+//Y //Q //no_finish             lit += shade(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
+//Y //R //no_finish             lit += shade_specular(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
+//Y //finish             lit += shade_finished(base, metallic, roughness, n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone, zf);
 //Y //L             coat_lit += shade(vec3(0.0), 0.0, coat_rough, coat_n, v, to / distance, light[1].rgb * light[1].w * falloff * cone * cone);
 //Y         }
         // Clustered: the fragment's cluster's lights (`lights.wgsl`).
@@ -132,8 +142,9 @@
 //X             let lamp = lamp_at(cluster_light(i), in.world);
             // A light listed but not reaching costs no shading.
 //X             if lamp.reach > 0.0 {
-//X //Q                 lit += shade(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
-//X //R                 lit += shade_specular(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
+//X //Q //no_finish                 lit += shade(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
+//X //R //no_finish                 lit += shade_specular(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance);
+//X //finish                 lit += shade_finished(base, metallic, widened(roughness, lamp.widen), n, v, lamp.l, lamp.radiance, zf);
 //X //L                 coat_lit += shade(vec3(0.0), 0.0, widened(coat_rough, lamp.widen), coat_n, v, lamp.l, lamp.radiance);
 //X             }
 //X         }
@@ -141,7 +152,8 @@
         // part, and along its reflection, by Fresnel, for its specular one
         // (what makes metals their colour away from the lights).
         let ambient = mix(frame.ground.rgb, frame.sky.rgb, n.y * 0.5 + 0.5);
-        let r = reflect(-v, n);
+//no_finish         let r = reflect(-v, n);
+//finish         let r = reflect(-v, zf.bent);
         let reflected = mix(frame.ground.rgb, frame.sky.rgb, r.y * 0.5 + 0.5);
 //Q         let f0 = mix(vec3(0.04), base, metallic);
 //R         let f0 = mix(layers.spec.w * min(layers.spec.rgb, vec3(1.0)), base, metallic);
@@ -149,20 +161,32 @@
         let rough = roughness * roughness;
 //Q         let fresnel = f0 + (max(vec3(1.0 - rough), f0) - f0) * pow(1.0 - n_v, 5.0);
 //R         let fresnel = f0 + (max(vec3(1.0 - rough) * mix(layers.spec.w, 1.0, metallic), f0) - f0) * pow(1.0 - n_v, 5.0);
-        var surround = ambient * base * (1.0 - metallic) * (1.0 - fresnel);
-        surround += reflected * fresnel * (1.0 - 0.5 * rough);
+//no_finish         var surround = ambient * base * (1.0 - metallic) * (1.0 - fresnel);
+//no_finish         surround += reflected * fresnel * (1.0 - 0.5 * rough);
+        // A film's Fresnel takes the place of the surface's as much as it
+        // says.
+//finish         let film_fresnel = mix(fresnel, zf.film_fresnel, zf.film);
+//finish         var surround = ambient * base * (1.0 - metallic) * (1.0 - film_fresnel);
+//finish         surround += reflected * film_fresnel * (1.0 - 0.5 * rough);
         // Lit by an environment instead: its diffuse light, and its light
         // along the reflection blurred as rough as the surface (the cube's
         // level) times the split sum's factor.
 //E     let along = textureSampleLevel(environment_cube, environment_sampler, turned(r), roughness * frame.environment.w).rgb;
-//E     surround = irradiance(turned(n)) * base * (1.0 - metallic) * (1.0 - fresnel);
-//E     surround = (surround + along * reflectance(f0, roughness, n_v)) * frame.environment.x;
+//E //no_finish     surround = irradiance(turned(n)) * base * (1.0 - metallic) * (1.0 - fresnel);
+//E //no_finish     surround = (surround + along * reflectance(f0, roughness, n_v)) * frame.environment.x;
+//E //finish     surround = irradiance(turned(n)) * base * (1.0 - metallic) * (1.0 - film_fresnel);
+//E //finish     surround = (surround + along * mix(reflectance(f0, roughness, n_v), zf.film_fresnel, zf.film)) * frame.environment.x;
         // Inside a probe volume, its probes' diffuse light takes the place
         // of the hemisphere's or environment's (`probes.wgsl`).
 //probed         let probed = probe_light(in.world, n, v);
 //probed_unlit         let around = ambient;
 //probed //E     let around = irradiance(turned(n)) * frame.environment.x;
 //probed         surround += (probed.rgb - around) * probed.a * base * (1.0 - metallic) * (1.0 - fresnel);
+        // A sheen over what's about it: its light along the reflection,
+        // as much as the sheen's albedo says, taken from what's under it.
+//finish         var sheen_around = mix(frame.ground.rgb, frame.sky.rgb, reflect(-v, n).y * 0.5 + 0.5);
+//finish //E     sheen_around = textureSampleLevel(environment_cube, environment_sampler, turned(reflect(-v, n)), zf.sheen_rough * frame.environment.w).rgb * frame.environment.x;
+//finish         surround = surround * zf.sheen_under + sheen_around * zf.sheen * zf.sheen_albedo;
         lit += surround * occlusion;
 //O         lit += in.emissive * glow;
 //V         lit += zm.emissive;

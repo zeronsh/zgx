@@ -45,6 +45,7 @@ mod caps;
 #[cfg(feature = "compute")]
 mod compute;
 mod environment;
+mod finish;
 mod geometry;
 #[cfg(feature = "gltf")]
 mod gltf;
@@ -85,6 +86,7 @@ pub use compute::stall_sandboxed_compiles;
 #[cfg(feature = "compute")]
 pub use compute::{Access, Compute, ComputeBudget, ComputeError, ComputeId, ComputeStatus, Point};
 pub use environment::Environment;
+pub use finish::{Anisotropy, Iridescence, Sheen};
 pub use geometry::{Geometry, MorphTarget, Vertex};
 #[cfg(feature = "gltf")]
 pub use gltf::{Model, ModelError};

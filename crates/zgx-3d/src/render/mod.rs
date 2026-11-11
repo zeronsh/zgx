@@ -220,7 +220,7 @@ fn prepare<'a>(
     (device, queue): (&wgpu::Device, &wgpu::Queue),
     world: &Inner,
     view: Mat4,
-    (lit, transmits, lighting): (bool, bool, u16),
+    (lit, transmits, lighting): (bool, bool, u32),
 ) -> Vec<&'a crate::world::Drawn<'a>> {
     // Meshes by geometry, translucent ones after, back to front: by a
     // key of one integer (a sort of integers, not of meshes).
@@ -503,10 +503,10 @@ fn prepare<'a>(
     // Runs of one geometry and texture, of one pass (opaque, then
     // translucent).
     let variant_of = |d: &crate::world::Drawn| {
-        // What it has of light passing through, a coat and a specular,
-        // in one byte.
+        // What it has of light passing through, a coat, a specular, a
+        // custom material and a finish (`Extras::kinds`).
         let kinds = d.extras.map_or(0, |e| e.kinds);
-        let bit = |on: bool, bit: u16| if on { bit } else { 0 };
+        let bit = |on: bool, bit: u32| if on { bit } else { 0 };
         Variant(
             // Light passing through it, a coat or a specular reads group
             // 1: maps or stand-ins.
@@ -523,7 +523,7 @@ fn prepare<'a>(
                 | bit(placed(d), Variant::PLACED)
                 | bit(d.geometry.colors().is_some(), Variant::COLORED)
                 // `kinds`' bits, in their order.
-                | (u16::from(kinds) * Variant::TRANSMITTING),
+                | (u32::from(kinds) * Variant::TRANSMITTING),
         )
     };
     // Of one geometry and maps, a world without poses or surfaces has

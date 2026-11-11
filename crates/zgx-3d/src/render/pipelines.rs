@@ -31,7 +31,7 @@ pub(super) fn make_main_pipelines(gpu: &mut Gpu, device: &wgpu::Device, variant:
 pub(super) fn extent_of(variant: Variant) -> Option<Extent> {
     if variant.transmitting() {
         Some(Extent::Glass)
-    } else if variant.coated() || variant.specular() {
+    } else if variant.coated() || variant.specular() || variant.finished() {
         Some(Extent::Layered)
     } else if variant.placed() {
         Some(Extent::Placed)

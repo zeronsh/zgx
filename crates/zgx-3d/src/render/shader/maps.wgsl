@@ -27,6 +27,12 @@
 //W     b: vec4<f32>,
 //W     coat: vec4<f32>,
 //W     spec: vec4<f32>,
+//finish     // A finish's: its sheen's colour and roughness; its anisotropy's
+//finish     // strength and the cosine and sine of its turn; its film's amount,
+//finish     // index of refraction and thickness (`crate::finish`).
+//finish     sheen: vec4<f32>,
+//finish     aniso: vec4<f32>,
+//finish     irid: vec4<f32>,
 //W }
 //W @group(1) @binding(7) var<uniform> layers: Layers;
 //G @group(1) @binding(8) var behind: texture_2d<f32>;
