@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 use zgx::{
+    clock::VirtualClock,
     compose::prelude::*,
     input::{InputEvent, ScrollGesture},
     reactive::Signal,
@@ -191,20 +192,20 @@ fn a_stretch_and_a_bounce_come_back_on_the_systems_curve() {
 #[test]
 fn a_stretch_let_go_while_pushing_goes_on_a_moment_first() {
     let pushed = |rest: Duration| {
+        // The fingers' time is the interface's: a virtual clock's, so a
+        // loaded machine's late wakes don't slow the push.
+        let clock = VirtualClock::new();
         let mut ui = Ui::new(300., 200.);
         ui.set_elastic_scrolling(true);
         ui.set_refresh_interval(Duration::from_millis(8));
         let (offset, content) = mount(&mut ui);
         phase(&mut ui, ScrollGesture::Began);
-        // 12 points every 8 ms: 1500 points a second, briefly. A short push
-        // leaves a small stretch against the speed: still growing needs only
-        // about 140 points a second, so sleeps that overrun on a loaded
-        // machine (a CI runner measured a third of it) still pass.
+        // 12 points every 8 ms: 1500 points a second, briefly.
         for _ in 0..5 {
-            std::thread::sleep(Duration::from_millis(8));
+            clock.advance(clock.elapsed() + Duration::from_millis(8), || {});
             scroll_by(&mut ui, -12.);
         }
-        std::thread::sleep(rest);
+        clock.advance(clock.elapsed() + rest, || {});
         let at_lift = shift(&ui, content, &offset);
         phase(&mut ui, ScrollGesture::Ended);
         let start = ui.next_interaction_deadline().expect("it springs back");
@@ -218,9 +219,12 @@ fn a_stretch_let_go_while_pushing_goes_on_a_moment_first() {
     };
     let (at_lift, soon) = pushed(Duration::ZERO);
     assert_eq!(at_lift, 3.);
+    // On the system's curve at their 1500 points a second, 16 ms on:
+    // (3 + 0.31 * 1500 * 0.016) e^(-12.5 * 0.016).
+    let curve = (3. + 0.31 * 1500. * 0.016) * (-12.5f32 * 0.016).exp();
     assert!(
-        soon > at_lift,
-        "still going 16 ms after: {soon} from {at_lift}"
+        (soon - curve).abs() < 0.05,
+        "still going 16 ms after, at their speed: {soon}, the curve's {curve}"
     );
     let (at_lift, soon) = pushed(Duration::from_millis(250));
     assert!(
