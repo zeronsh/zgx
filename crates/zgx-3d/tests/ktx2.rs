@@ -433,73 +433,189 @@ fn a_hostile_basis_universal_file_is_refused_not_read_past() {
     }
 }
 
-/// ETC1S (BasisLZ) can't be written by hand: where `ZGX_BASISU` names Basis
-/// Universal's encoder, a picture of this test's own four colours is encoded
-/// at test time (nothing of it kept), read and drawn, each quarter its
-/// colour within ETC1S's loss. Skipped, saying so, without one.
+/// This test's own picture, 32²: four colours, a quarter each.
 #[cfg(feature = "ktx2-basis")]
-#[test]
-fn an_etc1s_map_encoded_from_this_tests_pixels_is_transcoded() {
-    let Some(encoder) = std::env::var_os("ZGX_BASISU") else {
-        eprintln!("SKIPPED: ZGX_BASISU names no Basis Universal encoder");
-        return;
-    };
-    let colours = [
-        [230, 20, 20, 255],
-        [20, 230, 20, 255],
-        [20, 20, 230, 255],
-        [230, 230, 230, 255],
-    ];
-    let side = 64u32;
+const QUARTERS: [[u8; 4]; 4] = [
+    [230, 20, 20, 255],
+    [20, 230, 20, 255],
+    [20, 20, 230, 255],
+    [230, 230, 230, 255],
+];
+
+/// Basis Universal files Basis Universal's encoder made from `QUARTERS`
+/// (ETC1S, BasisLZ, can't be written by hand as UASTC's solid blocks
+/// can): our pixels, the encoder's output, nothing of the encoder's own.
+/// Made by `basis_universal_files_made_again` (ignored; `ZGX_BASISU`
+/// naming the encoder), with `basisu` v2.10.0, built from Basis
+/// Universal's tag v2_1_0, from `quarters.png` (`quarters_png`):
+///
+/// ```text
+/// basisu -etc1s -mipmap -ktx2 -output_file quarters-etc1s.ktx2 quarters.png
+/// basisu -uastc -mipmap -ktx2 -ktx2_zstandard_level 6 -output_file quarters-uastc.ktx2 quarters.png
+/// ```
+#[cfg(feature = "ktx2-basis")]
+const ENCODED: [(&str, &[u8]); 2] = [
+    (
+        "quarters-etc1s.ktx2",
+        include_bytes!("ktx2-files/quarters-etc1s.ktx2"),
+    ),
+    (
+        "quarters-uastc.ktx2",
+        include_bytes!("ktx2-files/quarters-uastc.ktx2"),
+    ),
+];
+
+/// `QUARTERS` as a PNG.
+#[cfg(feature = "ktx2-basis")]
+fn quarters_png() -> Vec<u8> {
+    let side = 32u32;
     let pixels: Vec<u8> = (0..side)
         .flat_map(|y| {
-            (0..side).flat_map(move |x| colours[usize::from(x >= 32) + 2 * usize::from(y >= 32)])
+            (0..side).flat_map(move |x| QUARTERS[usize::from(x >= 16) + 2 * usize::from(y >= 16)])
         })
         .collect();
-    let dir = std::env::temp_dir().join(format!("zgx-3d-etc1s-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let png = dir.join("quarters.png");
     let mut bytes = Vec::new();
-    let mut encoder_png = png::Encoder::new(&mut bytes, side, side);
-    encoder_png.set_color(png::ColorType::Rgba);
-    encoder_png.set_depth(png::BitDepth::Eight);
-    encoder_png
+    let mut encoder = png::Encoder::new(&mut bytes, side, side);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
         .write_header()
         .unwrap()
         .write_image_data(&pixels)
         .unwrap();
-    std::fs::write(&png, bytes).unwrap();
-    let out = dir.join("quarters.ktx2");
-    let done = std::process::Command::new(encoder)
-        .args(["-etc1s", "-mipmap", "-ktx2", "-output_file"])
-        .arg(&out)
-        .arg(&png)
-        .output()
-        .unwrap();
-    assert!(
-        done.status.success(),
-        "the encoder: {}",
-        String::from_utf8_lossy(&done.stderr)
-    );
-    let file = std::fs::read(&out).unwrap();
-    std::fs::remove_dir_all(&dir).unwrap();
-    let texture = Texture::decode(&file).unwrap();
-    let world = square(2.4, texture);
+    bytes
+}
+
+#[cfg(feature = "ktx2-basis")]
+#[test]
+fn etc1s_and_uastc_maps_the_encoder_made_from_our_pixels_are_transcoded() {
+    // Each quarter its colour, within ETC1S's loss.
+    for (name, file) in ENCODED {
+        let texture = Texture::decode(file).unwrap();
+        let world = square(2.4, texture);
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        window.draw_loaded(&world);
+        let drawn = window.gpu.readback().unwrap();
+        for (i, colour) in QUARTERS.iter().enumerate() {
+            let (x, y) = (16 + 32 * (i % 2), 16 + 32 * (i / 2));
+            let at = (y * 64 + x) * 4;
+            let p = &drawn[at..at + 3];
+            let worst = p
+                .iter()
+                .zip(colour)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max()
+                .unwrap();
+            assert!(worst <= 24, "{name}, quarter {i}: {p:?}, not {colour:?}");
+        }
+    }
+}
+
+#[cfg(feature = "ktx2-basis")]
+#[test]
+fn hostile_files_made_from_the_encoders_are_refused_or_draw_without_their_maps() {
+    // From each file the encoder made: every length cut short; each word
+    // of its header, section index and level index made huge or wrong
+    // (lengths past the file and past 64 MiB); every byte of its codebooks
+    // and level data inverted (bad codebook and selector indices, bad
+    // Huffman tables, bad Zstandard frames); and seeded random bytes there.
+    // Each is refused, or drawn as if it had no map: never a panic out of
+    // the transcoder or a read past the file.
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut random = move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        state
+    };
+    let mut files = Vec::new();
+    for (_, good) in ENCODED {
+        files.extend((0..good.len()).map(|end| good[..end].to_vec()));
+        let levels = u32::from_le_bytes(good[40..44].try_into().unwrap()) as usize;
+        for at in (12..80 + 24 * levels).step_by(4) {
+            for value in [0u32, 1, 0x7fff_ffff, (64 << 20) + 1, u32::MAX] {
+                let mut bad = good.to_vec();
+                bad[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                files.push(bad);
+            }
+        }
+        // The supercompression data's start (ETC1S's codebooks), else the
+        // first level's.
+        let sgd = u64::from_le_bytes(good[64..72].try_into().unwrap()) as usize;
+        let first = (0..levels)
+            .map(|i| u64::from_le_bytes(good[80 + 24 * i..][..8].try_into().unwrap()) as usize)
+            .min()
+            .unwrap();
+        let from = if sgd > 0 { sgd.min(first) } else { first };
+        for at in from..good.len() {
+            let mut bad = good.to_vec();
+            bad[at] ^= 0xff;
+            files.push(bad);
+        }
+        for _ in 0..256 {
+            let mut bad = good.to_vec();
+            for _ in 0..3 {
+                let at = from + random() as usize % (good.len() - from);
+                bad[at] = random() as u8;
+            }
+            files.push(bad);
+        }
+    }
+    // One window, its square's map changed file by file.
+    let world = World::new();
+    let mut material = Material::rgb(0xffffff);
+    material.unlit = true;
+    let mesh = world.add(Object::mesh(Geometry::cuboid(4., 4., 0.01), material));
+    world.set_camera(Camera::looking_at([0., 0., 3.], [0., 0., 0.]));
     let Some(mut window) = Window::new(&world) else {
         return;
     };
-    window.draw_loaded(&world);
-    let drawn = window.gpu.readback().unwrap();
-    for (i, colour) in colours.iter().enumerate() {
-        let (x, y) = (16 + 32 * (i % 2), 16 + 32 * (i / 2));
-        let at = (y * 64 + x) * 4;
-        let p = &drawn[at..at + 3];
-        let worst = p
-            .iter()
-            .zip(colour)
-            .map(|(a, b)| a.abs_diff(*b))
-            .max()
-            .unwrap();
-        assert!(worst <= 24, "quarter {i}: {p:?}, not {colour:?}");
+    let mut read = 0;
+    for file in &files {
+        if let Ok(texture) = Texture::decode(file) {
+            read += 1;
+            world.set_texture(mesh, Some(texture));
+            window.draw_loaded(&world);
+        }
     }
+    eprintln!("{} hostile files, {read} read and drawn", files.len());
+}
+
+/// The files `ENCODED` names made again, into `tests/ktx2-files`, by the
+/// encoder `ZGX_BASISU` names, from `quarters_png`: as they were made.
+#[cfg(feature = "ktx2-basis")]
+#[test]
+#[ignore = "makes the Basis Universal test files again, with ZGX_BASISU's encoder"]
+fn basis_universal_files_made_again() {
+    let encoder = std::env::var_os("ZGX_BASISU").expect("ZGX_BASISU names the encoder");
+    let into = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/ktx2-files");
+    std::fs::create_dir_all(&into).unwrap();
+    let dir = std::env::temp_dir().join(format!("zgx-3d-basisu-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("quarters.png"), quarters_png()).unwrap();
+    for (name, args) in [
+        ("quarters-etc1s.ktx2", &["-etc1s"][..]),
+        (
+            "quarters-uastc.ktx2",
+            &["-uastc", "-ktx2_zstandard_level", "6"][..],
+        ),
+    ] {
+        let done = std::process::Command::new(&encoder)
+            .current_dir(&dir)
+            .args(&args[..1])
+            .args(["-mipmap", "-ktx2"])
+            .args(&args[1..])
+            .args(["-output_file", name, "quarters.png"])
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "the encoder: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        std::fs::copy(dir.join(name), into.join(name)).unwrap();
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
 }
