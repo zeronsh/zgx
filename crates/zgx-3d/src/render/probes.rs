@@ -166,8 +166,7 @@ fn layout(device: &wgpu::Device, world: &Inner) -> Layout {
             }
         }
         let first = volume.probe_position([0; 3]);
-        let lo = [volume.min.x, volume.min.y, volume.min.z];
-        let hi = [volume.max.x, volume.max.y, volume.max.z];
+        let (lo, hi, fade) = reach(volume, step);
         let diagonal = (step[0] * step[0] + step[1] * step[1] + step[2] * step[2]).sqrt();
         far = far.max(diagonal * 1.5);
         let bias = 0.3
@@ -189,15 +188,7 @@ fn layout(device: &wgpu::Device, world: &Inner) -> Layout {
             counts: [volume.counts[0], volume.counts[1], volume.counts[2], 0],
             lo: [lo[0], lo[1], lo[2], 0.],
             hi: [hi[0], hi[1], hi[2], 0.],
-            fade: std::array::from_fn(|i| {
-                if i == 3 {
-                    0.
-                } else if step[i] > 0. {
-                    step[i] * 0.5
-                } else {
-                    (span[i] * 0.05).max(1e-3)
-                }
-            }),
+            fade: [fade[0], fade[1], fade[2], 0.],
         };
         total += volume.probes();
         rays = rays.max(volume.rays);
@@ -233,6 +224,26 @@ fn layout(device: &wgpu::Device, world: &Inner) -> Layout {
         set,
         cleared: false,
     }
+}
+
+/// Where `volume` (its probes `step` apart) lights fully, corner to corner,
+/// and how far past that its light fades out, by axis. A box of probes is
+/// laid just inside what it lights (a room's walls and floor), so it
+/// lights fully half a spacing past its outer probes and fades over the
+/// next half; an axis of one probe lights its box and fades over a
+/// twentieth of it.
+fn reach(volume: &crate::ProbeVolume, step: [f32; 3]) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    let (min, max) = (volume.min.to_array(), volume.max.to_array());
+    let lo = std::array::from_fn(|i| min[i] - step[i] * 0.5);
+    let hi = std::array::from_fn(|i| max[i] + step[i] * 0.5);
+    let fade = std::array::from_fn(|i| {
+        if step[i] > 0. {
+            step[i] * 0.5
+        } else {
+            ((max[i] - min[i]) * 0.05).max(1e-3)
+        }
+    });
+    (lo, hi, fade)
 }
 
 /// Group 0 of a probe-lit pipeline: the frame's (`frame::environment_layout`
@@ -1004,6 +1015,18 @@ mod tests {
             }
         }
         module("blend", include_str!("probes_blend.wgsl").into());
+    }
+
+    #[test]
+    fn a_volume_lights_half_a_spacing_past_its_outer_probes() {
+        // Probes 0.4 apart from -1 to 1 across, one probe up: the walls at
+        // ±1.2 are lit fully, light fades out by ±1.4; up, the box alone.
+        let volume = crate::ProbeVolume::new([-1., 0., -1.], [1., 2., 1.], [6, 1, 6]);
+        let (lo, hi, fade) = reach(&volume, [0.4, 0., 0.4]);
+        let near = |a: [f32; 3], b: [f32; 3]| a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-5);
+        assert!(near(lo, [-1.2, 0., -1.2]), "{lo:?}");
+        assert!(near(hi, [1.2, 2., 1.2]), "{hi:?}");
+        assert!(near(fade, [0.2, 0.1, 0.2]), "{fade:?}");
     }
 
     #[test]
