@@ -573,3 +573,51 @@ fn a_world_shown_twice_a_frame_sounds_as_one_shown_once() {
     assert_eq!(once.0, twice.0, "commands sent");
     assert!(once.1 == twice.1, "what was heard differs");
 }
+
+#[test]
+fn a_world_s_view_shown_in_two_boxes_steps_its_sound_once_a_frame() {
+    // Through a real renderer, the times the frames' own: the world's view
+    // mounted in two boxes sends what it sends mounted in one, a frame at a
+    // time, as a sound moves across it.
+    use zgx::{compose::prelude::*, scene::Color, widgets::Ui};
+    let commands = |boxes: usize| -> Option<u64> {
+        let mut gpu = match zgx_gpu::GpuRenderer::new(100, 100) {
+            Ok(gpu) => gpu,
+            Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
+                panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
+            }
+            Err(_) => return None,
+        };
+        let (audio, mut mixer) = engine();
+        let world = world(&audio);
+        let car = spot(&world, [-20., 0., -4.]);
+        world
+            .add_emitter3d(car, Emitter3d::new(&tone(400.)).looping(true))
+            .unwrap();
+        let mut ui = Ui::new(100., 100.);
+        let mut root = div().size(100., 100.).bg(Color(0, 0, 0, 255));
+        for k in 0..boxes {
+            root = root.child(
+                gpu_view("World", world.view())
+                    .absolute()
+                    .left(50. * k as f32)
+                    .size(50., 100.),
+            );
+        }
+        ui.mount(root);
+        let sent = audio.stats().commands;
+        for k in 0..30 {
+            world.set_transform(car, Transform::at([-20. + k as f32, 0., -4.]));
+            ui.prepare_frame();
+            let report = ui.scene.borrow_mut().flush();
+            gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+            mixer.frames(FRAME);
+        }
+        Some(audio.stats().commands - sent)
+    };
+    let (Some(once), Some(twice)) = (commands(1), commands(2)) else {
+        return;
+    };
+    assert!(once > 0, "nothing was sent: the view never drew");
+    assert_eq!(once, twice, "commands sent, one box against two");
+}
