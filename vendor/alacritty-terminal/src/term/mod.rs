@@ -2788,6 +2788,19 @@ impl<T: EventListener> Handler for Term<T> {
             })));
     }
 
+    // zgx: as `CSI 6 ; height ; width t`, from the embedder's cell size as
+    // the text area's in pixels is.
+    #[inline]
+    fn cell_size_pixels(&mut self) {
+        self.event_proxy
+            .send_event(Event::TextAreaSizeRequest(Arc::new(move |window_size| {
+                format!(
+                    "\x1b[6;{};{}t",
+                    window_size.cell_height, window_size.cell_width
+                )
+            })));
+    }
+
     #[inline]
     fn text_area_size_chars(&mut self) {
         let text = format!("\x1b[8;{};{}t", self.screen_lines(), self.columns());

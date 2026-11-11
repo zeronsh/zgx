@@ -725,6 +725,9 @@ pub trait Handler {
     /// Report text area size in characters.
     fn text_area_size_chars(&mut self) {}
 
+    /// zgx: report a cell's size in pixels (CSI 16 t).
+    fn cell_size_pixels(&mut self) {}
+
     /// zgx: XTVERSION, the terminal's name and version (should write back to
     /// the pty stream).
     fn report_version(&mut self) {}
@@ -1799,6 +1802,8 @@ where
             ('T', []) => handler.scroll_down(next_param_or(1) as usize),
             ('t', []) => match next_param_or(1) as usize {
                 14 => handler.text_area_size_pixels(),
+                // zgx: a cell's size in pixels.
+                16 => handler.cell_size_pixels(),
                 18 => handler.text_area_size_chars(),
                 22 => handler.push_title(),
                 23 => handler.pop_title(),
@@ -2188,6 +2193,23 @@ mod tests {
         parser.advance(&mut handler, &long);
         parser.advance(&mut handler, b"\x1b\\");
         assert_eq!(handler.0, [&b"544e;5463"[..], b"524742", b""]);
+    }
+
+    /// zgx: a cell's size in pixels asked for (CSI 16 t).
+    #[test]
+    fn cell_size_requests_reach_the_handler() {
+        #[derive(Default)]
+        struct Requests(usize);
+        impl Handler for Requests {
+            fn cell_size_pixels(&mut self) {
+                self.0 += 1;
+            }
+        }
+
+        let mut parser = Processor::<TestSyncHandler>::new();
+        let mut handler = Requests::default();
+        parser.advance(&mut handler, b"\x1b[16t\x1b[14t\x1b[18t");
+        assert_eq!(handler.0, 1);
     }
 
     /// zgx: XTVERSION asked with no parameter or 0, not with another, and

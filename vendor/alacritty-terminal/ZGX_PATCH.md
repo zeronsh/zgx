@@ -199,3 +199,11 @@ name. Version 0.26.5, with `zgx-vte` 0.15.1.
 ST`, the way kitty, foot and xterm write theirs; empty, it answers nothing.
 zgx-terminal sets it from the `TERM_PROGRAM` and `TERM_PROGRAM_VERSION` a
 session's command is given. Version 0.26.6, with `zgx-vte` 0.15.2.
+
+## A cell's size answered
+
+`Term::cell_size_pixels` answers `CSI 16 t` with `CSI 6 ; height ; width t`
+through `Event::TextAreaSizeRequest`, from the cell size the embedder gives,
+as `CSI 14 t` answers the text area's. Programs sizing pictures by the cell
+ask for it where the pty's size in pixels doesn't reach them. Version
+0.26.7, with `zgx-vte` 0.15.3.

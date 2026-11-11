@@ -178,6 +178,20 @@ fn the_terminal_names_itself() {
     assert_eq!(written(&rx), "\x1bP>|app(2.1)\x1b\\", "the app's own");
 }
 
+/// The text area and a cell in pixels (CSI 14 t, CSI 16 t), as programs
+/// size the pictures they send by: what the view last gave the session.
+#[test]
+fn sizes_in_pixels_are_the_views() {
+    let (session, rx) = session();
+    session.resize(crate::GridSize {
+        cell_width: 18,
+        cell_height: 36,
+        ..crate::GridSize::new(40, 10)
+    });
+    session.feed(b"\x1b[16t\x1b[14t");
+    assert_eq!(written(&rx), "\x1b[6;36;18t\x1b[4;360;720t");
+}
+
 /// The mouse modes a program sets decide what a click sends it: nothing
 /// until it asks, X10 bytes or SGR as it asks, motion only with a button
 /// held (1002) or always (1003).
