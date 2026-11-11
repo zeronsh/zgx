@@ -43,6 +43,9 @@ pub(super) struct State {
     layouts: HashMap<(u32, Extent), wgpu::BindGroupLayout>,
     /// Each shader's numbers, and the count of their changes they hold.
     uniforms: HashMap<u32, (wgpu::Buffer, u64)>,
+    /// Shaders whose pipelines this renderer holds, counted once each in
+    /// their `compiled`, and given back when they go (`let_go`).
+    holding: HashMap<u32, Rc<Shader>>,
     /// Pipelines being compiled on the worker, by shader, variant and
     /// whether its shadows' (`begin`, `collect`).
     pending: HashMap<(u32, Variant, bool), (Rc<Shader>, Slot)>,
@@ -64,9 +67,27 @@ pub(super) struct State {
     index: u32,
 }
 impl State {
+    /// Its pipelines and those compiling for it gone (its layers changed,
+    /// its device changed, it dropped): their shaders' counts given back.
+    fn let_go(&mut self) {
+        for (_, (shader, _)) in self.pending.drain() {
+            shader
+                .compiling
+                .set(shader.compiling.get().saturating_sub(1));
+        }
+        for (_, shader) in self.holding.drain() {
+            shader.compiled.set(shader.compiled.get().saturating_sub(1));
+        }
+    }
     /// The code every stock pipeline compiles with: the surface layers'.
     pub(super) fn layers(&self) -> Option<&Custom> {
         self.layer_code.as_ref()
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        self.let_go();
     }
 }
 
@@ -541,11 +562,7 @@ fn relayer(gpu: &mut Gpu, device: &wgpu::Device, layers: &[Rc<Shader>], runs: &[
     state.pipelines.clear();
     state.shadows.clear();
     // (Compiles under the old layers land nowhere.)
-    for (_, (shader, _)) in state.pending.drain() {
-        shader
-            .compiling
-            .set(shader.compiling.get().saturating_sub(1));
-    }
+    state.let_go();
     gpu.variants.clear();
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("3D"),
@@ -727,7 +744,9 @@ fn collect(gpu: &mut Gpu) -> bool {
             .set(shader.compiling.get().saturating_sub(1));
         match made {
             Ok(Made::Main(pipelines)) => {
-                shader.compiled.set(true);
+                if gpu.custom.holding.insert(id, shader.clone()).is_none() {
+                    shader.compiled.set(shader.compiled.get() + 1);
+                }
                 gpu.custom.pipelines.insert((id, variant), pipelines);
             }
             Ok(Made::Shadow(pipeline)) => {

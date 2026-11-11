@@ -243,10 +243,11 @@ pub(crate) struct Shader {
     /// What the device refused of it, if anything (`World::shader_error`):
     /// its meshes then draw without it.
     pub(crate) failed: RefCell<Option<String>>,
-    /// Its pipelines on the compile worker now, and whether one has been
-    /// made (`World::shader_ready`).
+    /// Its pipelines on the compile worker now, and the renderers holding
+    /// any made (`World::shader_ready`): one let go (its device changed,
+    /// its layers changed, it dropped) counts no more.
     pub(crate) compiling: std::cell::Cell<u32>,
-    pub(crate) compiled: std::cell::Cell<bool>,
+    pub(crate) compiled: std::cell::Cell<u32>,
 }
 
 /// Bounds on what an app may hand a world: a shader's text, its parameters

@@ -115,7 +115,7 @@ impl World {
         let inner = self.inner.borrow();
         inner
             .shader_of(shader)
-            .is_some_and(|s| s.compiled.get() && s.compiling.get() == 0)
+            .is_some_and(|s| s.compiled.get() > 0 && s.compiling.get() == 0)
     }
     /// Whether a custom material's pipeline is compiling (off the frame:
     /// its meshes draw by the plain pipeline, or not at all, till it's

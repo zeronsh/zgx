@@ -1046,3 +1046,81 @@ fn a_large_texture_parameter_loads_off_the_frame_and_then_shows() {
         window.pixel(50, 50)
     );
 }
+
+/// A device of wgpu's no-op backend and its queue: pipelines made, nothing
+/// drawn.
+fn noop_device() -> (zgx_gpu::wgpu::Device, zgx_gpu::wgpu::Queue) {
+    use zgx_gpu::wgpu;
+    let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+    descriptor.backends = wgpu::Backends::NOOP;
+    descriptor.backend_options.noop.enable = true;
+    fn now<T>(future: impl std::future::Future<Output = T>) -> T {
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match std::pin::pin!(future).poll(&mut context) {
+            std::task::Poll::Ready(value) => value,
+            std::task::Poll::Pending => panic!("the no-op backend waited"),
+        }
+    }
+    let adapter = now(wgpu::Instance::new(descriptor).request_adapter(&Default::default()));
+    now(adapter.unwrap().request_device(&Default::default())).unwrap()
+}
+
+#[test]
+fn a_shader_is_ready_only_while_a_renderer_holds_its_pipelines() {
+    // `shader_ready` stayed true after a device change, before the new
+    // device had compiled anything (review finding on 822fbb175).
+    use zgx_gpu::{
+        viewport::{Viewport, ViewportFrame},
+        wgpu,
+    };
+    let (world, mesh) = cube(unlit(0xffffff));
+    let tint = world
+        .add_shader(MaterialShader::new(TINT).param("tint", Param::Color))
+        .unwrap();
+    world.set_shader(mesh, Some(tint));
+    let (device, queue) = noop_device();
+    let format = wgpu::TextureFormat::Bgra8Unorm;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d {
+            width: 64,
+            height: 64,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = target.create_view(&Default::default());
+    let mut painter = world.viewport();
+    let frames_until_ready = |painter: &mut dyn zgx_gpu::viewport::Viewport| {
+        let start = std::time::Instant::now();
+        loop {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            let mut frame =
+                ViewportFrame::new(&device, &queue, &mut encoder, &view, format, (64, 64), 1.);
+            painter.render(&mut frame);
+            queue.submit([encoder.finish()]);
+            if world.shader_ready(tint) || start.elapsed() > std::time::Duration::from_secs(20) {
+                return world.shader_ready(tint);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    };
+    assert!(!world.shader_ready(tint), "nothing compiled before a frame");
+    assert!(frames_until_ready(&mut painter), "compiled by frames");
+    painter.device_changed();
+    assert!(
+        !world.shader_ready(tint),
+        "its device gone, its pipelines with it"
+    );
+    assert!(
+        frames_until_ready(&mut painter),
+        "compiled again on the new one"
+    );
+    drop(painter);
+    assert!(!world.shader_ready(tint), "no renderer holds them");
+}
