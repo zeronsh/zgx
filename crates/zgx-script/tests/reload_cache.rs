@@ -212,3 +212,36 @@ fn hosts_share_what_they_compiled_while_one_holds_it() {
         "no host held them: compiled again"
     );
 }
+
+/// A large file's key hashes only its ends: an edit in its middle that keeps
+/// its length (one word for another in a data module) shares the key of
+/// what was loaded before, and the reload still runs the new bytes.
+#[test]
+fn an_edit_in_a_large_files_middle_reloads() {
+    let app = App::new("middle", &["a"]);
+    let pad = "-".repeat(200 << 10);
+    let big = |label: &str| format!("--{pad}\nreturn \"{label}\"\n--{pad}\n");
+    app.write("big.luau", &big("big v1"));
+    app.write("app.luau", &App::main(&["a", "big"]));
+    let mut h = Harness::new(|runtime| ScriptHost::new(runtime, app.path()));
+    assert_eq!(h.text("labels"), "a v1,big v1");
+    // The first reload compiles and keeps every file.
+    app.write("big.luau", &big("big v2"));
+    assert!(h.host.reload_if_changed());
+    h.settle();
+    assert_eq!(h.text("labels"), "a v1,big v2");
+    // The same length, the same ends: only the middle tells them apart.
+    app.write("big.luau", &big("big v3"));
+    assert!(h.host.reload_if_changed());
+    h.settle();
+    assert_eq!(
+        h.text("labels"),
+        "a v1,big v3",
+        "the new middle, not the one kept"
+    );
+    assert_eq!(
+        h.host.compiled_sources(),
+        (3, 4),
+        "big compiled again for its new bytes"
+    );
+}

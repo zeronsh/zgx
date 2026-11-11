@@ -190,3 +190,57 @@ fn only_what_the_script_requires_is_compiled_ahead() {
         let _ = std::fs::remove_dir_all(d);
     }
 }
+
+/// What was compiled ahead for a module (a data module of most of a
+/// megabyte, here) is let go as soon as its `require` has loaded it, not
+/// held to the end of the load, through all the app does with its value.
+#[test]
+fn a_module_is_let_go_once_its_require_has_loaded_it() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let dir = std::env::temp_dir().join(format!("zgx-compile-ahead-held-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("data.luau"),
+        format!("return [==[{}]==]\n", "{\"m\":1}".repeat(100_000)),
+    )
+    .unwrap();
+    std::fs::write(dir.join("rest.luau"), "return \"rest\"\n").unwrap();
+    std::fs::write(
+        dir.join("app.luau"),
+        "local data = require(\"./data\")\n\
+         local after_data = ui.call_sync(\"held\")\n\
+         local rest = require(\"./rest\")\n\
+         local after_rest = ui.call_sync(\"held\")\n\
+         return ui.text { #data .. \" \" .. after_data .. \" \" .. after_rest .. \" \" .. rest, id = \"t\" }\n",
+    )
+    .unwrap();
+    let app = dir.join("app.luau");
+    let hits = compile_ahead_counts().3;
+    compile_ahead(&app, &[]);
+    finished(3);
+    let mut test = TestApp::new(|runtime| {
+        let host = ScriptHost::new(runtime, &app);
+        host.function("held", |_| {
+            zgx_script::Value::Num(compile_ahead_counts().4 as f64)
+        });
+        host
+    });
+    assert_eq!(test.host.error().get(), None);
+    assert_eq!(
+        test.text("t"),
+        "700000 1 0 rest",
+        "after data's require only rest is held; after rest's, nothing"
+    );
+    let (_, _, open, now, held) = compile_ahead_counts();
+    assert_eq!(
+        now - hits,
+        3,
+        "the app, its 0.7 MB data and rest, all compiled ahead"
+    );
+    assert!(!open);
+    assert_eq!(held, 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}

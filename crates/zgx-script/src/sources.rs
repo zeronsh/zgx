@@ -16,7 +16,9 @@
 //! The bytecode is what loading the text makes, compiled here from the text,
 //! never read from a file (Luau loads bytecode unchecked). A hit compares the
 //! stored source with the code byte for byte: the hash finds the entry, it
-//! doesn't vouch for it, so no source can stand for another.
+//! doesn't vouch for it, so no source can stand for another. It hashes a
+//! large source's ends alone ([`KEY_ENDS`]): sources that differ only in
+//! their middles share a key and are told apart by that compare.
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet},
@@ -33,16 +35,26 @@ use std::{
 const OPTIONS: u32 = 1;
 
 /// What finds an entry: the options, the source's length and a hash of it.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct Key {
     options: u32,
     len: usize,
     hash: u64,
 }
+/// At most this much of a source's start, and as much of its end, is
+/// hashed for its key: a data module of megabytes (a feed in a string) is
+/// hashed in microseconds, not a millisecond a megabyte, and a file of up
+/// to twice this whole.
+const KEY_ENDS: usize = 64 << 10;
 impl Key {
     fn of(code: &[u8]) -> Self {
         let mut hasher = std::hash::DefaultHasher::new();
-        hasher.write(code);
+        if code.len() <= 2 * KEY_ENDS {
+            hasher.write(code);
+        } else {
+            hasher.write(&code[..KEY_ENDS]);
+            hasher.write(&code[code.len() - KEY_ENDS..]);
+        }
         Self {
             options: OPTIONS,
             len: code.len(),
@@ -241,8 +253,9 @@ impl Sources {
     }
 }
 
-/// A source and its bytecode (none when it doesn't compile).
-type Ready = (Box<[u8]>, Option<Box<[u8]>>);
+/// A source, its key (made on the worker) and its bytecode (none when it
+/// doesn't compile).
+type Ready = (Key, Box<[u8]>, Option<Box<[u8]>>);
 
 /// What [`prefetch`] compiled ahead and the loading thread hasn't taken
 /// yet: one session at a time, open from the first `prefetch` until a load
@@ -273,8 +286,8 @@ static HITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::ne
 /// compiles its own, never waiting for one).
 static PAUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 thread_local! {
-    /// The entries this thread took from a session, held until its first
-    /// load ends.
+    /// The entries this thread took from a session and no `require` has
+    /// loaded yet, held until its first load ends.
     static HELD: RefCell<Vec<Rc<Compiled>>> = RefCell::default();
 }
 /// At most this many files, this many bytes in all, and none larger than
@@ -296,8 +309,11 @@ fn ahead() -> std::sync::MutexGuard<'static, Ahead> {
 fn required_names(code: &[u8]) -> Vec<String> {
     let mut names = Vec::new();
     let word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    // A data module of megabytes is searched at memory speed, not a
+    // comparison of seven bytes at every one.
+    let finder = memchr::memmem::Finder::new(b"require");
     let mut i = 0;
-    while let Some(at) = code[i..].windows(7).position(|w| w == b"require") {
+    while let Some(at) = finder.find(&code[i..]) {
         let start = i + at;
         i = start + 7;
         if start > 0 && word(code[start - 1]) || code.get(i).is_some_and(|&b| word(b)) {
@@ -473,7 +489,7 @@ pub(crate) fn prefetch(entry: &Path, packages: Vec<(String, std::path::PathBuf)>
             if ahead.generation != generation || !ahead.open {
                 break;
             }
-            ahead.ready.push((code.into(), bytecode));
+            ahead.ready.push((Key::of(&code), code.into(), bytecode));
             ahead.compiled += 1;
         }
         let mut ahead = ahead();
@@ -509,12 +525,9 @@ pub(crate) fn prefetched(code: &[u8]) -> Option<Rc<Compiled>> {
         std::mem::take(&mut ahead.ready)
     };
     let found = SHARED.with_borrow_mut(|shared| {
-        for (source, bytecode) in arrived {
+        for (key, source, bytecode) in arrived {
             let entry = Rc::new(Compiled { source, bytecode });
-            shared
-                .entry(Key::of(&entry.source))
-                .or_default()
-                .push(Rc::downgrade(&entry));
+            shared.entry(key).or_default().push(Rc::downgrade(&entry));
             HELD.with_borrow_mut(|held| held.push(entry));
         }
         shared
@@ -524,8 +537,12 @@ pub(crate) fn prefetched(code: &[u8]) -> Option<Rc<Compiled>> {
             .filter_map(Weak::upgrade)
             .find(|entry| entry.is(code))
     });
-    if found.is_some() {
+    if let Some(found) = &found {
         HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Its `require` holds it while it loads: not held to the load's end
+        // too (a data module's source and bytecode, megabytes each, would
+        // last through what the app does with its value).
+        HELD.with_borrow_mut(|held| held.retain(|entry| !Rc::ptr_eq(entry, found)));
     }
     found
 }
@@ -573,5 +590,48 @@ pub(crate) struct ReleaseAhead;
 impl Drop for ReleaseAhead {
     fn drop(&mut self) {
         release_prefetched();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two sources that differ only between the ends their key hashes share
+    /// a key, and are still told apart by their bytes: each compiles to its
+    /// own bytecode, and each is found again by its own.
+    #[test]
+    fn sources_alike_at_their_ends_each_compile_their_own() {
+        let pad = "-".repeat(KEY_ENDS);
+        let source = |label: &str| format!("--{pad}\nreturn \"{label}\"\n--{pad}\n").into_bytes();
+        let (one, two) = (source("one"), source("two"));
+        assert_eq!(one.len(), two.len());
+        assert!(
+            one.len() > 2 * KEY_ENDS,
+            "large enough that only its ends are hashed"
+        );
+        assert_eq!(
+            Key::of(&one),
+            Key::of(&two),
+            "one key: only their middles differ"
+        );
+        let (a, fresh_a) = compiled(&one);
+        let (b, fresh_b) = compiled(&two);
+        assert!(
+            fresh_a && fresh_b,
+            "each compiled, neither taken for the other"
+        );
+        assert!(!Rc::ptr_eq(&a, &b));
+        let (again, fresh) = compiled(&two);
+        assert!(!fresh && Rc::ptr_eq(&again, &b), "found again by its bytes");
+        let lua = mlua::Lua::new();
+        for (entry, label) in [(&a, "one"), (&b, "two")] {
+            let value: String = lua
+                .load(entry.bytecode().expect("compiles"))
+                .set_mode(mlua::chunk::ChunkMode::Binary)
+                .eval()
+                .unwrap();
+            assert_eq!(value, label);
+        }
     }
 }
