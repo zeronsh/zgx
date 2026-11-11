@@ -1249,3 +1249,95 @@ fn a_reload_takes_an_effect_off_even_past_a_full_queue() {
         "the filter came off once the queue had room: {open}"
     );
 }
+
+/// A scene with a looping sound at `x` metres to the camera's right, and a
+/// zone around the camera, its sounds' readiness as text `ready`.
+#[cfg(feature = "audio-spatial")]
+fn scene_with_sound(tone: &std::path::Path, x: f32) -> String {
+    format!(
+        "{READY}
+        local hum = audio.sound(\"{}\")
+        return ui.column {{
+            ui.text {{ id = \"ready\", count_ready(hum) }},
+            ui.scene3d {{
+                id = \"scene\",
+                w = 200,
+                h = 100,
+                camera = {{ position = {{ 0, 0, 0 }}, target = {{ 0, 0, -1 }} }},
+                ui.group {{
+                    ui.sound3d {{ sound = hum, loop = true, position = {{ {x}, 0, 0 }}, falloff = {{ ref = 1, max = 50 }} }},
+                }},
+                ui.reverb_zone {{ position = {{ 0, 0, 0 }}, size = {{ 10, 4, 10 }}, preset = \"hall\" }},
+            }},
+        }}",
+        tone.display()
+    )
+}
+
+// Sound in 3D scenes: zgx-script's `audio-spatial`.
+#[cfg(feature = "audio-spatial")]
+#[test]
+fn a_sound3d_plays_from_its_object_once_its_sound_is_ready() {
+    let tone = wav("sound3d", 2.);
+    let mut s = Sounding::new(&scene_with_sound(&tone, 4.));
+    s.ready(1);
+    s.app.frames(3);
+    assert_eq!(s.app.error(), None);
+    assert_eq!(s.audio.voices_playing(), 1, "its emitter's voice");
+    let out = s.mixer.frames(4800);
+    let (left, right) = out.chunks(2).fold((0f32, 0f32), |(l, r), f| {
+        (l.max(f[0].abs()), r.max(f[1].abs()))
+    });
+    // Inverse falloff from 1 m: a quarter at 4 m, all of it on the right.
+    assert!((right - 0.125).abs() < 0.005, "right {right}");
+    assert!(left < 0.001, "left {left}");
+}
+
+#[cfg(feature = "audio-spatial")]
+#[test]
+fn a_reload_stops_a_scenes_sounds() {
+    let tone = wav("sound3d-reload", 2.);
+    let dir = tone.parent().unwrap().join("sound3d-app");
+    std::fs::create_dir_all(&dir).unwrap();
+    let app = dir.join("app.luau");
+    std::fs::write(&app, scene_with_sound(&tone, 2.)).unwrap();
+    let path = app.clone();
+    let mut s = Sounding::with(move |runtime| ScriptHost::new(runtime, path));
+    s.ready(1);
+    s.app.frames(3);
+    assert_eq!(s.audio.voices_playing(), 1);
+    std::fs::write(&app, "return ui.text { id = \"ready\", \"1\" }").unwrap();
+    s.app.host.reload().unwrap();
+    s.app.frames(3);
+    s.render(0.1);
+    assert_eq!(
+        s.audio.voices_playing(),
+        0,
+        "the scene's world went, and its sound"
+    );
+}
+
+#[cfg(feature = "audio-spatial")]
+#[test]
+fn sound3d_and_reverb_zone_say_what_they_need() {
+    let mut app = TestApp::inline(
+        "local said = ui.state(\"said\", \"\")
+        return ui.column {
+            ui.text { id = \"said\", said },
+            ui.button { id = \"ask\", on_click = function()
+                local _, a = pcall(ui.sound3d, { loop = true })
+                local _, b = pcall(ui.reverb_zone, { size = { 1, 2, 3 }, preset = \"cave\" })
+                local _, c = pcall(ui.reverb_zone, {})
+                said:set(tostring(a) .. \"|\" .. tostring(b) .. \"|\" .. tostring(c))
+            end, \"Ask\" },
+        }",
+    );
+    app.click("ask");
+    let said = app.text("said");
+    assert!(
+        said.contains("ui.sound3d needs `sound = audio.sound(…)`"),
+        "{said}"
+    );
+    assert!(said.contains("\"room\", \"hall\", \"warehouse\""), "{said}");
+    assert!(said.contains("ui.reverb_zone needs a `size`"), "{said}");
+}

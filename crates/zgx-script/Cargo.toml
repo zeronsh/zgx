@@ -39,6 +39,10 @@ audio-effects = ["audio"]
 # Ogg Vorbis for `audio.sound` and `audio.music` (zgx-audio's `vorbis`),
 # besides WAV.
 audio-vorbis = ["audio", "zgx-audio/vorbis"]
+# `ui.sound3d` and `ui.reverb_zone` in `ui.scene3d`: sound placed in the
+# scene by zgx-3d's world audio (distance, cones, Doppler, occlusion,
+# reverb zones).
+audio-spatial = ["audio", "scene3d", "zgx-3d/audio"]
 # Localized messages' plural rules and numbers for every locale (zgx's
 # `i18n`, ICU4X's data: about 90 KB). Off by default: `ui.t` reaches the
 # formatters, so a host would carry them whether or not its scripts call

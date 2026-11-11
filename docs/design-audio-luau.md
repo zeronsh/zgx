@@ -194,3 +194,14 @@ The mixer's stock effects (zgx-audio's `effects`) on buses, built in `crates/zgx
 ## 11. What it costs, in parts (Nov 10 2026)
 
 A dist build of zgx-run measured by what each part links (unstripped, symbol sizes by crate; `audio` with Vorbis against none, at fc9cc48f4: +846,032 bytes): zgx-script's bindings about 250 KB with the effects' share, zgx-audio's engine, mixer, device host, streams and decoding about 145 KB, cpal and its glue about 123 KB, lewton and ogg 69 KB, the stock effects 32 KB, std's share 42 KB. A UI app playing clicks needs neither effects nor Vorbis, so they're features of their own: zgx-script's `audio` is the core (WAV), `audio-effects` adds `bus:add_effect` and `bus:duck` and with them the stock effects, `audio-vorbis` adds lewton. zgx-run has the same, and `audio-all`. (An earlier "WAV only" figure, +298,560 bytes, measured a build whose zgx-run made no engine, so the device's code wasn't linked: it understated the core.)
+
+## 12. Sound in 3D scenes (Nov 10 2026)
+
+`ui.sound3d` and `ui.reverb_zone` on zgx-3d's world audio (`World::set_audio`, `add_emitter3d`, `add_reverb_zone`), behind zgx-script's `audio-spatial` (`audio`, `scene3d` and `zgx-3d/audio`), in `crates/zgx-script/src/audio/spatial.rs` with hooks in `scene3d.rs`:
+
+- A `ui.sound3d` is an object of the scene with no geometry, placed and parented as any; its emitter is added to it once its sound is decoded (an effect reading `sound.ready`). It takes `sound = audio.sound(…)`, not a `src`: sounds load once, at the top, through the host's cache. Its parameters are literals for now: zgx-3d's emitters take theirs when they're made.
+- The world plays through the engine its sounds came from, on its `world` bus (`set_audio(&audio, &audio.bus("world"))`), set as the scene is built when any `ui.sound3d` is in it. A zone in a scene without one has no engine to play through and is skipped (said on stderr).
+- A zone's box is in the scene's coordinates, read once: its `position` is its centre, a group's transform isn't applied.
+- The scene's world going (a reload, the scene leaving) stops its sounds; zgx-audio's epoch bookkeeping doesn't track them.
+- Plugins can't use them: a plugin's sound plays on its own bus.
+- Lint: `sound3d-no-max`.

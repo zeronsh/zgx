@@ -2,7 +2,7 @@
 
 Sounds, music and the buses they play through, mixed by [zgx-audio](../../crates/zgx-audio): every start, stop and change lands on an exact frame, nothing clicks, and a limiter on master keeps the sum below full scale. The Rust side of each call is in [design-audio-luau.md](../design-audio-luau.md).
 
-**Where it is.** zgx-script's `audio` feature, off by default, in parts: `audio` is the core (WAV, voices, buses, `sound =`), `audio-effects` adds the effects on buses, and `audio-vorbis` adds Ogg Vorbis. `zgx-run` has the same features (`cargo run -p zgx-run --features audio -- app/`, or `audio-all` for every part); its `audio` turns on zgx-desktop's for the device. A Rust host turns on zgx-script's and gives the host an engine (`ScriptHost::set_audio`; a desktop app `zgx_run::play_through`). Without `audio`, `audio` is nil and `sound =` an unknown property; without `audio-effects`, `audio.low_pass` and the others, `bus:add_effect` and `bus:duck` are nil.
+**Where it is.** zgx-script's `audio` feature, off by default, in parts: `audio` is the core (WAV, voices, buses, `sound =`), `audio-effects` adds the effects on buses, `audio-vorbis` adds Ogg Vorbis, and `audio-spatial` adds sound in 3D scenes. `zgx-run` has the same features (`cargo run -p zgx-run --features audio -- app/`, or `audio-all` for every part); its `audio` turns on zgx-desktop's for the device. A Rust host turns on zgx-script's and gives the host an engine (`ScriptHost::set_audio`; a desktop app `zgx_run::play_through`). Without `audio`, `audio` is nil and `sound =` an unknown property; without `audio-effects`, `audio.low_pass` and the others, `bus:add_effect` and `bus:duck` are nil.
 
 **What it costs.** Nothing until a script calls `audio`: the engine is made then. Loading a sound, setting a bus's gain or muting one opens no device and touches nothing of the system's audio. The first play starts the output; a second after the last sound (fades and tails included) it stops, and the app is as idle as one without sound.
 
@@ -155,6 +155,37 @@ score:crossfade(next_track, 3)
 
 `sound = click` on a button, a checkbox, a menu item or any element with `on_click` plays the sound when it's activated: a press, Enter or Space, or assistive technology's activation. It plays on the `ui` bus at once, before the handler runs. `sound = { sound = click, gain = 0.6, pitch = 1.1 }` sets its options; a function answering a sound (or `false`) chooses one as it's activated; `sound = false` (or nil) plays nothing. A checkbox's sound plays after it toggles, as its `on_click` runs.
 
+## Sound in 3D scenes
+
+With `audio-spatial` (which takes `scene3d` with it), `ui.sound3d` and `ui.reverb_zone` go in a `ui.scene3d`, at its top or in a `ui.group`:
+
+```luau
+local hum = audio.sound("assets/engine.wav")
+return ui.scene3d {
+	ui.group { position = { 4, 0, -2 },
+		ui.sound3d { sound = hum, loop = true, falloff = { ref = 2, max = 60 } },
+	},
+	ui.reverb_zone { position = { 0, 2, 0 }, size = { 20, 6, 20 }, preset = "hall" },
+}
+```
+
+`ui.sound3d` plays its sound from where its object is, heard from the camera: it falls off with distance, is panned, its pitch moved by Doppler as it or the camera moves, dulled by the air, and dulled by the meshes between it and the camera. It's an object of the scene, placed (`position`, `rotation`) and parented like any.
+
+| | | default |
+| --- | --- | --- |
+| `sound` | `audio.sound`'s: loaded once, at the top | needed |
+| `loop` | plays round until the scene goes | false |
+| `gain` | its own level, before the rest | 1 |
+| `falloff` | `{ kind, ref, max, rolloff }`: full within `ref` metres, falling to `max` (where it holds) by `"inverse"`, `"linear"` or `"exponential"` | inverse, 1 to 100 m |
+| `cone` | `{ inner, outer, outer_gain }`, degrees about its -z: whole within `inner`, at `outer_gain` past `outer` | none |
+| `doppler` | how much movement moves its pitch: 1 as the air would, 0 none | 1 |
+| `occlusion` | whether the meshes between dull it (by a quarter, through each) | true |
+| `air` | whether the air dulls its highs with distance | true |
+
+`ui.reverb_zone` is a box (`position` its centre, `size` its `{ x, y, z }` in metres, in the scene's coordinates) whose reverb the camera hears inside it, fading in over `fade` metres outside (2). `preset` is `"room"` (the default), `"hall"`, `"warehouse"` or `{ size, decay, damping, wet }`. Zones work in a scene that has a `ui.sound3d`: the scene plays through its sounds' engine, on the `world` bus.
+
+The scene's sound goes with the scene: a reload, or the scene leaving, stops it. A scene where nothing moves sends nothing to the mixer. A plugin can't place sound in a scene (its sound plays on its own bus). A looping `ui.sound3d` without `falloff.max` is flagged (`sound3d-no-max`): heard to 100 m by default, a far one costs as a near one does.
+
 ## Stats
 
 `audio.stats()` returns `{ voices, stolen, dropped, late, dry, streams, underruns, running, starts, stops, peak }`: voices playing, voices stolen, plays that never started, plays and commands applied late (zgx-script's dropped late plays among them), times a stream ran dry, streams open, underruns the system reported, whether the output runs, its starts and stops, and the loudest sample sent.
@@ -172,5 +203,5 @@ A sandboxed plugin's `audio` plays only into a bus of its own (`plugin:<name>`, 
 | `audio-sound-too-long` | a literal path given to `audio.sound` whose file lasts over 10 s (its header read, nothing decoded): it's decoded whole, so stream it with `audio.music` |
 | `audio-param-in-loop` | `:gain`, `:pan` or `:pitch` called with a number from `ui.every` or a per-frame callback: bind a state or a tween instead |
 | `audio-effect-in-builder` | `bus:add_effect` or `bus:duck` in a component or row body: an effect for every instance |
+| `sound3d-no-max` | a looping `ui.sound3d` without `falloff.max`: heard and mixed to 100 m |
 
-`ui.sound3d`'s `sound3d-no-max` comes with 3D sound.

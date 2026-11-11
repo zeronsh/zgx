@@ -2732,6 +2732,35 @@ export type LightProps = Object3DProps & {
 	direction: Vec3?,
 	range: number?,
 }
+-- A sound placed in the scene (zgx-script's `audio-spatial`): it plays
+-- from where it is, falling off with distance, panned, its pitch moved by
+-- Doppler, dulled by the air and by the meshes between it and the camera.
+-- A child of the scene or a group, placed as any object is.
+export type Sound3DProps = Object3DProps & {
+	-- `audio.sound`'s: loaded once, at the top.
+	sound: Sound,
+	loop: boolean?,
+	gain: number?,
+	-- Full within `ref` metres (1), falling to `max` (100), where it holds:
+	-- "inverse" (the default), "linear" or "exponential", by `rolloff`.
+	falloff: { kind: ("inverse" | "linear" | "exponential")?, ref: number?, max: number?, rolloff: number? }?,
+	-- Degrees of its -z: whole within `inner`, at `outer_gain` past `outer`.
+	cone: { inner: number?, outer: number?, outer_gain: number? }?,
+	-- 1 as the air would, 0 none.
+	doppler: number?,
+	-- Whether the meshes between dull it (true).
+	occlusion: boolean?,
+	-- Whether the air dulls it with distance (true).
+	air: boolean?,
+}
+-- A box whose reverb the camera hears inside it, fading in over `fade`
+-- metres (2) outside: in the scene's coordinates, centred on `position`.
+export type ReverbZoneProps = Object3DProps & {
+	-- Metres: { x, y, z }, or one number for a cube.
+	size: { number } | number,
+	preset: ("room" | "hall" | "warehouse" | { size: number?, decay: number?, damping: number?, wet: number? })?,
+	fade: number?,
+}
 export type ModelProps = {
 	-- A .glb or .gltf file, from the script's directory: read off the main
 	-- thread, shown once read (zgx-script's `gltf` feature).
@@ -3689,6 +3718,9 @@ declare ui: {
 	light: (props: LightProps) -> Object3D,
 	group: (props: GroupProps) -> Object3D,
 	model: (props: ModelProps) -> Object3D,
+	-- Sound in the scene (zgx-script's `audio-spatial`).
+	sound3d: (props: Sound3DProps) -> Object3D,
+	reverb_zone: (props: ReverbZoneProps) -> Object3D,
 	webview: (props: WebViewProps) -> Node,
 	-- `ui.web(opts)`: a page for this run. `ui.web(id, opts)`: the host's
 	-- page for `id`, made with `opts` the first time, kept across reloads.

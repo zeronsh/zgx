@@ -95,6 +95,8 @@
 //! - `audio-effect-in-builder`: `:add_effect` or `:duck` in a component or
 //!   row: an effect on the bus for every instance, each running on every
 //!   block.
+//! - `sound3d-no-max`: a looping `ui.sound3d` without `falloff.max`: it's
+//!   heard (and mixed) to 100 m, however far it is.
 
 use crate::check::{CheckError, Diagnostic, Report, Severity, scripts};
 use std::path::{Path, PathBuf};
@@ -262,6 +264,10 @@ pub const RULES: &[(&str, &str)] = &[
     (
         "audio-effect-in-builder",
         "bus:add_effect or bus:duck in a component or row adds one for every instance",
+    ),
+    (
+        "sound3d-no-max",
+        "a looping ui.sound3d without falloff.max, heard and mixed to 100 m",
     ),
 ];
 
@@ -1958,6 +1964,31 @@ impl Linter<'_> {
                 ),
             );
         }
+        // `ui.sound3d { loop = true, … }` with no `falloff = { max = … }`.
+        if self.is(at, "ui")
+            && self.is(at + 1, ".")
+            && self.is(at + 2, "sound3d")
+            && self.is(at + 3, "{")
+            && !self.is(at.wrapping_sub(1), ".")
+            && self
+                .direct_field(at + 3, "loop")
+                .is_some_and(|value| self.is(value, "true"))
+        {
+            let max = self
+                .direct_field(at + 3, "falloff")
+                .filter(|&value| self.is(value, "{"))
+                .is_some_and(|open| self.direct_field(open, "max").is_some());
+            if !max {
+                self.report(
+                    at,
+                    "sound3d-no-max",
+                    "this sound loops with no `falloff.max`: it's heard, and mixed, to 100 m \
+                     however far the camera goes. Give `falloff = { max = … }` the distance it \
+                     stops being heard, so a far one costs nothing."
+                        .into(),
+                );
+            }
+        }
         // `bus:add_effect(…)` or `bus:duck(…)` in a component or row.
         if self.is(at, ":")
             && (self.is(at + 1, "add_effect") || self.is(at + 1, "duck"))
@@ -2446,6 +2477,8 @@ mod tests {
         "light",
         "group",
         "model",
+        "sound3d",
+        "reverb_zone",
     ];
 
     /// A function added to `ui` is either an element or listed in
@@ -2616,6 +2649,22 @@ end)
 "#;
         let mut found = one(5, "audio-effect-in-builder");
         found.extend(one(9, "audio-effect-in-builder"));
+        assert_eq!(rules(source), found);
+    }
+
+    #[test]
+    fn a_looping_sound3d_without_a_maximum_is_reported() {
+        let source = r#"
+local hum = audio.sound("hum.wav")
+ui.sound3d { sound = hum, loop = true }
+ui.sound3d { sound = hum, loop = true, falloff = { ref = 2, max = 40 } }
+ui.sound3d { sound = hum, loop = true, falloff = { ref = 2 } }
+ui.sound3d { sound = hum }
+-- zgx-lint: allow(sound3d-no-max)
+ui.sound3d { sound = hum, loop = true }
+"#;
+        let mut found = one(3, "sound3d-no-max");
+        found.extend(one(5, "sound3d-no-max"));
         assert_eq!(rules(source), found);
     }
 

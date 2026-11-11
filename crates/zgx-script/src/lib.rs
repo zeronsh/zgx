@@ -4368,9 +4368,22 @@ impl ScriptHost {
         let lazy = lazy::Lazy::default();
         lazy.ui(&["path", "linear"], canvas::install);
         lazy.ui(&["glass"], node::install_glass);
-        #[cfg(feature = "scene3d")]
+        #[cfg(all(feature = "scene3d", not(feature = "audio-spatial")))]
         lazy.ui(
             &["scene3d", "mesh", "light", "group", "model"],
+            scene3d::install,
+        );
+        #[cfg(feature = "audio-spatial")]
+        lazy.ui(
+            &[
+                "scene3d",
+                "mesh",
+                "light",
+                "group",
+                "model",
+                "sound3d",
+                "reverb_zone",
+            ],
             scene3d::install,
         );
         lazy.ui(&["json", "number", "sort"], data::install);

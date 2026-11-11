@@ -9,6 +9,8 @@
 //! a script calls `audio`: a script that never does makes none.
 #[cfg(feature = "audio-effects")]
 mod effects;
+#[cfg(feature = "audio-spatial")]
+pub(crate) mod spatial;
 
 use crate::Vm;
 use crate::node::{Anim, AnimUd, Curve};

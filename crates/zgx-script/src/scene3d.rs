@@ -75,6 +75,12 @@ pub(crate) enum Shape {
     /// the `gltf` feature).
     #[cfg_attr(not(feature = "gltf"), allow(dead_code))]
     Model(ModelSpec),
+    /// `ui.sound3d`: an emitter on an object of its own (`audio-spatial`).
+    #[cfg(feature = "audio-spatial")]
+    Sound(Rc<crate::audio::spatial::Sound3d>),
+    /// `ui.reverb_zone`: a box with a reverb (`audio-spatial`).
+    #[cfg(feature = "audio-spatial")]
+    Zone(crate::audio::spatial::Zone),
 }
 #[cfg_attr(not(feature = "gltf"), allow(dead_code))]
 pub(crate) struct ModelSpec {
@@ -707,7 +713,45 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
             lua.create_function(move |lua, table: Table| make(lua, table))?,
         )?;
     }
+    // Sound in the scene, with `audio-spatial`.
+    #[cfg(feature = "audio-spatial")]
+    {
+        let made: [(&str, Make); 2] = [("sound3d", sound3d), ("reverb_zone", reverb_zone)];
+        for (name, make) in made {
+            ui.set(
+                name,
+                lua.create_function(move |lua, table: Table| make(lua, table))?,
+            )?;
+        }
+    }
     Ok(())
+}
+
+/// `ui.sound3d { sound, loop, gain, falloff, cone, doppler, occlusion, air,
+/// position }`.
+#[cfg(feature = "audio-spatial")]
+fn sound3d(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
+    let sound = crate::audio::spatial::sound3d(lua, &table)?;
+    placed(lua, &table, Shape::Sound(Rc::new(sound)))
+}
+
+/// `ui.reverb_zone { position, size, preset, fade }`.
+#[cfg(feature = "audio-spatial")]
+fn reverb_zone(lua: &Lua, table: Table) -> mlua::Result<mlua::AnyUserData> {
+    let zone = crate::audio::spatial::reverb_zone(lua, &table)?;
+    placed(lua, &table, Shape::Zone(zone))
+}
+
+/// The sounds among `objects` (and in their groups).
+#[cfg(feature = "audio-spatial")]
+fn sounds_in(objects: &[Rc<ObjectSpec>], into: &mut Vec<Rc<crate::audio::spatial::Sound3d>>) {
+    for object in objects {
+        match &object.shape {
+            Shape::Sound(sound) => into.push(sound.clone()),
+            Shape::Group(children) => sounds_in(children, into),
+            _ => {}
+        }
+    }
 }
 
 /// `ui.mesh { geometry, size, material, position, rotation, scale }`.
@@ -1177,6 +1221,13 @@ pub(crate) fn lower(
         theme: &theme,
         handled: Vec::new(),
     };
+    // Its sounds play through the engine they came from, on `world`.
+    #[cfg(feature = "audio-spatial")]
+    {
+        let mut sounds = Vec::new();
+        sounds_in(&spec.objects, &mut sounds);
+        crate::audio::spatial::hear(&world, &sounds);
+    }
     for object in &spec.objects {
         add(&mut adding, object, None, cx);
     }
@@ -1564,7 +1615,16 @@ fn add(adding: &mut Adding, spec: &Rc<ObjectSpec>, parent: Option<ObjectId>, cx:
             let world = world.clone();
             follow(cx, Box::new(move || world.set_light(id, read())));
         }
-        Shape::Mesh(..) | Shape::Group(_) | Shape::Model(_) => {
+        // A box in the scene's coordinates: placed once, where it says.
+        #[cfg(feature = "audio-spatial")]
+        Shape::Zone(zone) => {
+            let centre = live
+                .position
+                .as_ref()
+                .map_or(Vec3::ZERO, |p| vm.runtime.untracked(|| p.get(vm)));
+            crate::audio::spatial::add_zone(world, centre, zone);
+        }
+        _ => {
             let (geometry, material, double_sided) = match &spec.shape {
                 Shape::Mesh(geometry, material) => (
                     Some(geometry.clone()),
@@ -1586,6 +1646,11 @@ fn add(adding: &mut Adding, spec: &Rc<ObjectSpec>, parent: Option<ObjectId>, cx:
             let id = world.add(object);
             if double_sided {
                 world.set_double_sided(id, true);
+            }
+            // A sound plays from the object once it's decoded.
+            #[cfg(feature = "audio-spatial")]
+            if let Shape::Sound(sound) = &spec.shape {
+                follow(cx, crate::audio::spatial::attach(world, id, sound.clone()));
             }
             if spec.on_click.is_some() || spec.on_hover.is_some() {
                 adding.handled.push((id, spec.clone()));
