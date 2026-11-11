@@ -146,6 +146,50 @@ impl Key {
         }
         hasher.finish()
     }
+    /// `Key::of(rich, caret_row).hash()`, its text's bytes' hash given
+    /// (`TextHash`, rustc-hash's: a stream's, read on from its last state),
+    /// without building the key (its spans' list and fonts): its runs
+    /// merged into spans as `of` merges them, each hashed as it ends.
+    #[cold]
+    #[inline(never)]
+    fn rich_hash_with(text_hash: u64, rich: &RichText, caret_row: bool) -> u64 {
+        let mut hasher = TextHash::hasher_after(text_hash);
+        caret_row.hash(&mut hasher);
+        let mut span: Option<(Range<usize>, &FontStyle, f32, f32)> = None;
+        for run in rich.runs() {
+            match &mut span {
+                Some((range, font, size, padding))
+                    if **font == run.font
+                        && *size == run.font_size
+                        && *padding == 0.
+                        && run.padding[0] == 0.
+                        && range.end == run.range.start =>
+                {
+                    range.end = run.range.end;
+                }
+                _ => {
+                    if let Some((range, font, size, padding)) = span.take() {
+                        Self::hash_span(&mut hasher, &range, font, size, padding);
+                    }
+                    span = Some((run.range.clone(), &run.font, run.font_size, run.padding[0]));
+                }
+            }
+        }
+        if let Some((range, font, size, padding)) = span {
+            Self::hash_span(&mut hasher, &range, font, size, padding);
+        }
+        hasher.finish()
+    }
+    /// `hash`, for a debug build's check of a hash worked out another way:
+    /// its bytes not counted as read (`HASHED_BYTES`, a test's).
+    fn hash_unread(&self) -> u64 {
+        #[cfg(test)]
+        let read = HASHED_BYTES.with(std::cell::Cell::get);
+        let hash = self.hash();
+        #[cfg(test)]
+        HASHED_BYTES.with(|count| count.set(read));
+        hash
+    }
     fn hash_span(
         hasher: &mut FxHasher,
         range: &Range<usize>,
@@ -177,14 +221,141 @@ impl Key {
         Self::hash_span(&mut hasher, &(0..text.len()), font, font_size, 0.);
         hasher.finish()
     }
+    /// `plain_hash`, from `text`'s bytes' hash (`TextHash`; as `Key::rich_hash_with`).
+    #[cold]
+    #[inline(never)]
+    fn plain_hash_from(text_hash: u64, text: &str, font_size: f32, font: &FontStyle) -> u64 {
+        let mut hasher = TextHash::hasher_after(text_hash);
+        true.hash(&mut hasher);
+        Self::hash_span(&mut hasher, &(0..text.len()), font, font_size, 0.);
+        hasher.finish()
+    }
     /// Whether this is plain text's key (`plain_hash`).
     fn is_plain(&self, text: &str, font_size: f32, font: &FontStyle) -> bool {
+        self.caret_row && *self.text == *text && self.plain_at(text.len(), font_size, font)
+    }
+    /// Whether this is a plain key for a text `len` bytes long at this size
+    /// and font, whatever its text.
+    fn plain_at(&self, len: usize, font_size: f32, font: &FontStyle) -> bool {
         self.caret_row
-            && *self.text == *text
             && matches!(&self.spans[..], [(range, f, size, padding)]
-                if *range == (0..text.len()) && f == font && *size == font_size && *padding == 0.)
+                if *range == (0..len) && f == font && *size == font_size && *padding == 0.)
     }
 }
+
+/// A text's bytes' hash as rustc-hash makes it (`FxHasher::write`'s), read
+/// sixteen at a time with the state they leave kept: a text that starts
+/// with one hashed goes on from there, reading only what follows, so a
+/// stream's next state costs its chunk, not its paragraph (`StreamHash`).
+/// Keys hash their text as ever; this only for a stream's, the same hash
+/// (`hasher_after`; tested against rustc-hash's).
+#[derive(Clone, Copy)]
+struct TextHash {
+    s0: u64,
+    s1: u64,
+    /// The bytes read into `s0` and `s1`: whole chunks of sixteen, each
+    /// before the text's last byte.
+    read: usize,
+}
+#[cfg(test)]
+thread_local! {
+    /// Bytes `TextHash::of` has read, for tests that a stream's chunk reads
+    /// its own.
+    static HASHED_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+impl TextHash {
+    /// A hasher as `str::hash` leaves it, from the text's bytes' hash
+    /// (`of`): rustc-hash takes bytes in as their hash, then the string's
+    /// end.
+    fn hasher_after(text_hash: u64) -> FxHasher {
+        let mut hasher = FxHasher::default();
+        hasher.write_u64(text_hash);
+        hasher.write_u8(0xff);
+        hasher
+    }
+    const START: Self = Self {
+        s0: 0x243f_6a88_85a3_08d3,
+        s1: 0x1319_8a2e_0370_7344,
+        read: 0,
+    };
+    fn mix(x: u64, y: u64) -> u64 {
+        let full = (x as u128).wrapping_mul(y as u128);
+        full as u64 ^ (full >> 64) as u64
+    }
+    fn word(bytes: &[u8]) -> u64 {
+        u64::from_le_bytes(bytes[..8].try_into().expect("eight bytes"))
+    }
+    /// `text`'s hash, and the state to go on from for a text that starts
+    /// with it; from `self`: `START`, or a state left by a text `text`
+    /// starts with.
+    fn of(self, text: &[u8]) -> (Self, u64) {
+        let len = text.len();
+        let (mut s0, mut s1) = (self.s0, self.s1);
+        if len <= 16 {
+            (s0, s1) = (Self::START.s0, Self::START.s1);
+            if len >= 8 {
+                s0 ^= Self::word(text);
+                s1 ^= Self::word(&text[len - 8..]);
+            } else if len >= 4 {
+                s0 ^= u32::from_le_bytes(text[..4].try_into().expect("four bytes")) as u64;
+                s1 ^= u32::from_le_bytes(text[len - 4..].try_into().expect("four bytes")) as u64;
+            } else if len > 0 {
+                s0 ^= text[0] as u64;
+                s1 ^= ((text[len - 1] as u64) << 8) | text[len / 2] as u64;
+            }
+            return (Self::START, Self::mix(s0, s1) ^ len as u64);
+        }
+        let bulk = (len - 1) / 16 * 16;
+        debug_assert!(self.read <= bulk);
+        #[cfg(test)]
+        HASHED_BYTES.with(|read| read.set(read.get() + (len - self.read)));
+        for chunk in text[self.read..bulk].as_chunks::<16>().0 {
+            let t = Self::mix(
+                s0 ^ Self::word(chunk),
+                0xa409_3822_299f_31d0 ^ Self::word(&chunk[8..]),
+            );
+            s0 = s1;
+            s1 = t;
+        }
+        let kept = Self { s0, s1, read: bulk };
+        let suffix = &text[len - 16..];
+        let hash = Self::mix(s0 ^ Self::word(suffix), s1 ^ Self::word(&suffix[8..])) ^ len as u64;
+        (kept, hash)
+    }
+}
+
+/// The stream a text last grew in (`TextCache::stream`), plain or rich (a
+/// Markdown paragraph's runs): the entry of its latest state, that text's
+/// length, its text's hash, and the state its bytes leave (`TextHash`).
+/// Armed only once a text is found to extend a recent one (`prepare`);
+/// until then its length is `usize::MAX`, which no text is longer than:
+/// other lookups pay a comparison. A hint, never trusted: read on from only
+/// while its entry holds that text, and only by a text that starts with it.
+#[derive(Clone, Copy)]
+struct StreamHash {
+    len: usize,
+    from: u64,
+    text_hash: u64,
+    state: TextHash,
+    /// Other texts as long, looked up since its last state was (`LAPSES`).
+    others: u8,
+}
+impl Default for StreamHash {
+    fn default() -> Self {
+        Self {
+            len: usize::MAX,
+            from: 0,
+            text_hash: 0,
+            state: TextHash::START,
+            others: 0,
+        }
+    }
+}
+/// Other texts at least as long as a stream's latest state, looked up in a
+/// row, after which it is let go (`TextCache::stream_text_hash`): long
+/// paragraphs that do not grow (a page of them) then pay no look at it. A
+/// stream that grows again is taken up again (`grew_from`).
+const LAPSES: u8 = 4;
 
 /// A shaped word, reduced to what line breaking reads (in a chunk of the
 /// `Slab`, packed: see `Word::pack`).
@@ -1078,6 +1249,9 @@ pub struct TextCache {
     /// Words taken from the paragraphs others grew from, all told.
     #[cfg(test)]
     taken: usize,
+    /// The stream plain text last grew in: its next state's hash read on
+    /// from its last's (`plain_entry`).
+    stream: StreamHash,
     entries: FxHashMap<u64, Entry>,
     recent: VecDeque<u64>,
     clock: u64,
@@ -1416,7 +1590,12 @@ impl TextCache {
         font: &FontStyle,
         need: Need,
     ) -> u64 {
-        let hash = Key::plain_hash(text, font_size, font);
+        // A stream's state, or a later one: hashed on from where its last
+        // one's bytes left off (no stream: never longer than `usize::MAX`).
+        let hash = match text.len() >= self.stream.len {
+            true => self.plain_stream_hash(text, font_size, font),
+            false => Key::plain_hash(text, font_size, font),
+        };
         if let Some(entry) = self.entries.get_mut(&hash)
             && entry.key.is_plain(text, font_size, font)
             && (entry.shaped() || (need != Need::Layout && entry.compact.is_some()))
@@ -1432,6 +1611,93 @@ impl TextCache {
             font,
         };
         self.entry_hashed(fonts, source, true, need, Some(hash))
+    }
+    /// The text hash (`TextHash`) of a text at least as long as the
+    /// stream's latest state (`stream`): that state again, its hash as it
+    /// was; a text that starts with it, hashed on from where its bytes left
+    /// off (only what was appended read), and `true`: the stream moves to it,
+    /// its entry's hash for the caller to set (`stream.from`). Any other
+    /// text: none, hashed whole by the caller. Only while the latest state's
+    /// entry holds that text (alive, so no other has its address); gone, the
+    /// stream is let go.
+    fn stream_text_hash(&mut self, text: &str) -> Option<(u64, bool)> {
+        let stream = self.stream;
+        let Some(entry) = self
+            .entries
+            .get(&stream.from)
+            .filter(|entry| entry.key.text.len() == stream.len)
+        else {
+            self.stream = StreamHash::default();
+            return None;
+        };
+        let last = &*entry.key.text;
+        if std::ptr::eq(last.as_ptr(), text.as_ptr()) && last.len() == text.len() {
+            self.stream.others = 0;
+            return Some((stream.text_hash, false));
+        }
+        if text.len() > last.len() && text.starts_with(last) {
+            let (state, text_hash) = stream.state.of(text.as_bytes());
+            self.stream = StreamHash {
+                len: text.len(),
+                text_hash,
+                state,
+                others: 0,
+                ..stream
+            };
+            return Some((text_hash, true));
+        }
+        // Another text: after a few in a row, the stream is let go.
+        self.stream.others += 1;
+        if self.stream.others >= LAPSES {
+            self.stream = StreamHash::default();
+        }
+        None
+    }
+    /// `Key::plain_hash` of a text at least as long as the stream's latest
+    /// state: read on from the stream's where it starts with it
+    /// (`stream_text_hash`).
+    #[cold]
+    #[inline(never)]
+    fn plain_stream_hash(&mut self, text: &str, font_size: f32, font: &FontStyle) -> u64 {
+        match self.stream_text_hash(text) {
+            Some((text_hash, moved)) => {
+                let hash = Key::plain_hash_from(text_hash, text, font_size, font);
+                if moved {
+                    self.stream.from = hash;
+                }
+                hash
+            }
+            None => Key::plain_hash(text, font_size, font),
+        }
+    }
+    /// The hash of `rich`'s key (`Key::of`) where its text is at least as
+    /// long as the stream's latest state (a Markdown paragraph's runs): read
+    /// on from the stream's where it starts with it (`stream_text_hash`),
+    /// without building the key; none otherwise, the caller hashing its key.
+    #[cold]
+    #[inline(never)]
+    fn rich_stream_hash(&mut self, rich: &RichText, caret_row: bool) -> Option<u64> {
+        let (text_hash, moved) = self.stream_text_hash(rich.text())?;
+        let hash = Key::rich_hash_with(text_hash, rich, caret_row);
+        if moved {
+            self.stream.from = hash;
+        }
+        Some(hash)
+    }
+    /// The stream a text grows in, from its state `text` (prepared, found
+    /// to extend a recent text: `prepare`), keyed `hash`: hashed once whole,
+    /// for its next states to read on from.
+    #[cold]
+    #[inline(never)]
+    fn arm_stream(&mut self, text: &str, hash: u64) {
+        let (state, text_hash) = TextHash::START.of(text.as_bytes());
+        self.stream = StreamHash {
+            len: text.len(),
+            from: hash,
+            text_hash,
+            state,
+            others: 0,
+        };
     }
     fn sized(&mut self, fonts: &mut FontSystem, hash: u64, width: Option<f32>) -> (f32, f32) {
         // Measuring changes no compact (`update` is not needed).
@@ -1524,6 +1790,7 @@ impl TextCache {
         self.spare_lists = Vec::new();
         self.spare_words = Vec::new();
         self.clamped = FxHashMap::default();
+        self.stream = StreamHash::default();
     }
     /// cosmic-text's run cache swept of words unused lately, once it has
     /// grown a quarter past what the last sweep left (and `WORDS_FLOOR` at
@@ -1562,7 +1829,15 @@ impl TextCache {
         caret_row: bool,
         need: Need,
     ) -> u64 {
-        self.entry_hashed(fonts, source, caret_row, need, None)
+        // A rich stream's state, or a later one (a Markdown paragraph):
+        // hashed on from its last (plain text asks in `plain_entry`).
+        let hashed = match source {
+            Source::Rich(rich) if rich.text().len() >= self.stream.len => {
+                self.rich_stream_hash(rich, caret_row)
+            }
+            _ => None,
+        };
+        self.entry_hashed(fonts, source, caret_row, need, hashed)
     }
     /// `entry`, with the key's hash if the caller worked it out
     /// (`plain_entry`'s `Key::plain_hash`, which is the plain key's `hash`).
@@ -1584,7 +1859,7 @@ impl TextCache {
             } => Key::plain(text, font_size, font, caret_row),
         };
         let hash = hashed.unwrap_or_else(|| key.hash());
-        debug_assert_eq!(hash, key.hash());
+        debug_assert_eq!(hash, key.hash_unread());
         let cached = self.entries.get_mut(&hash).filter(|entry| entry.key == key);
         if let Some(entry) = &cached
             && (entry.shaped() || (need != Need::Layout && entry.compact.is_some()))
@@ -1630,7 +1905,7 @@ impl TextCache {
         // without a line built around them; a stream's, from the words of
         // the paragraph it grew from (`grew_from`).
         let grew = match long && !known {
-            true => self.grew_from(&key, &extended),
+            true => self.grew_from(&key, hash, &extended),
             false => None,
         };
         if let Some((plain, base, taken)) = self.words_of(fonts, source, caret_row, grew) {
@@ -1811,12 +2086,19 @@ impl TextCache {
     /// Of the recent texts `key`'s extends (`extended_by`), the paragraph
     /// kept with its words that it grew from (`Key::extends`): a stream's
     /// last state, its words taken as far as they hold.
-    fn grew_from(&self, key: &Key, extended: &[u64]) -> Option<u64> {
-        extended.iter().rev().copied().find(|recent| {
+    /// It grew (plain text, or rich: a Markdown paragraph): a stream, its
+    /// next states hashed on from this one's, `hash` (`stream_text_hash`),
+    /// unless it is already at it.
+    fn grew_from(&mut self, key: &Key, hash: u64, extended: &[u64]) -> Option<u64> {
+        let grew = extended.iter().rev().copied().find(|recent| {
             self.entries
                 .get(recent)
                 .is_some_and(|entry| entry.words.is_some() && key.extends(&entry.key))
-        })
+        });
+        if grew.is_some() && self.stream.from != hash {
+            self.arm_stream(&key.text, hash);
+        }
+        grew
     }
     /// The recent texts `text` starts with, shorter and not short: a
     /// stream's earlier states, which go as it is prepared
@@ -2437,6 +2719,214 @@ mod tests {
             look_up(&row, 14.);
             drop(row);
         }
+    }
+    /// A text's hash gone on from any text it starts with (a stream's last
+    /// state) is its hash read whole, and so is the state it leaves.
+    #[test]
+    fn a_text_hash_goes_on_from_any_text_it_starts_with() {
+        let text: Vec<u8> = (0..200u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        for len in 0..=text.len() {
+            let (whole_state, whole) = TextHash::START.of(&text[..len]);
+            // rustc-hash's own, as hashing a string takes its bytes in.
+            let mut fx = FxHasher::default();
+            fx.write(&text[..len]);
+            fx.write_u8(0xff);
+            assert_eq!(TextHash::hasher_after(whole).finish(), fx.finish(), "{len}");
+            for start in 0..=len {
+                let (from, _) = TextHash::START.of(&text[..start]);
+                let (state, hash) = from.of(&text[..len]);
+                assert_eq!(hash, whole, "{start}..{len}");
+                assert_eq!(
+                    (state.s0, state.s1, state.read),
+                    (whole_state.s0, whole_state.s1, whole_state.read),
+                    "{start}..{len}"
+                );
+            }
+        }
+        // Texts a byte apart, anywhere, hash apart.
+        let (_, of) = TextHash::START.of(&text);
+        for at in 0..text.len() {
+            let mut other = text.clone();
+            other[at] ^= 1;
+            assert_ne!(TextHash::START.of(&other).1, of, "{at}");
+        }
+    }
+    /// A stream's chunks, each looked up as a frame does (measured at two
+    /// widths, its min-content, laid out): once it is found to grow, each
+    /// chunk's text is hashed on from the last (only what was appended
+    /// read), its state again not at all, and every hash is the one its
+    /// whole text makes, its entry its own.
+    #[test]
+    fn a_streams_chunk_hashes_only_what_it_appended() {
+        let mut fonts = FontSystem::new();
+        let font = FontStyle::default();
+        let words = "The reply arrives a few words at a time, each chunk an append. ";
+        let mut text = words.repeat(40);
+        let mut cache = TextCache::default();
+        let read = || HASHED_BYTES.with(|read| read.replace(0));
+        for chunk in 0..24 {
+            let appended = match chunk {
+                0 => text.len(),
+                _ => {
+                    let more = &words[(chunk * 7) % 40..][..24];
+                    text.push_str(more);
+                    more.len()
+                }
+            };
+            let shown: Arc<str> = text.as_str().into();
+            read();
+            let mut hashes = Vec::new();
+            for width in [Some(320.), None] {
+                cache.measure_plain(&mut fonts, &shown, 14., &font, width);
+                hashes.push(cache.plain_entry(&mut fonts, &shown, 14., &font, Need::Measure));
+            }
+            cache.layout_plain(&mut fonts, &shown, 14., &font, Some(320.));
+            let hashed = read();
+            // Its first two states are hashed whole: the second is the one
+            // found to grow (`prepare`), which the next ones read on from.
+            if chunk >= 2 {
+                assert!(
+                    hashed <= appended + 32,
+                    "chunk {chunk}: {hashed} bytes hashed for {appended} appended"
+                );
+            }
+            let whole = Key::plain_hash(&shown, 14., &font);
+            assert!(hashes.iter().all(|hash| *hash == whole), "chunk {chunk}");
+            assert_eq!(*cache.entries[&whole].key.text, *shown, "chunk {chunk}");
+        }
+        // A longer text that does not start with the stream's (another
+        // paragraph): hashed whole, not on from the stream's.
+        let other: Arc<str> = format!("A{text}").into();
+        let hash = cache.plain_entry(&mut fonts, &other, 14., &font, Need::Measure);
+        assert_eq!(hash, Key::plain_hash(&other, 14., &font));
+        assert_eq!(*cache.entries[&hash].key.text, *other);
+        // A few such texts in a row: the stream is let go, and its next
+        // states hashed whole until it is found to grow again; then read on
+        // from as before.
+        for i in 1..LAPSES {
+            let other: Arc<str> = format!("{i}{text}").into();
+            cache.plain_entry(&mut fonts, &other, 14., &font, Need::Measure);
+        }
+        assert_eq!(cache.stream.len, usize::MAX, "let go");
+        for chunk in 0..3 {
+            text.push_str("and still more of it arriving, ");
+            let shown: Arc<str> = text.as_str().into();
+            read();
+            let hash = cache.plain_entry(&mut fonts, &shown, 14., &font, Need::Measure);
+            let hashed = read();
+            assert_eq!(hash, Key::plain_hash(&shown, 14., &font), "again {chunk}");
+            if chunk >= 2 {
+                assert!(hashed <= 31 + 32, "again {chunk}: {hashed} bytes hashed");
+            }
+        }
+    }
+    /// A Markdown paragraph streamed: rich text of runs (plain, bold, a
+    /// code span's monospace, plain again) whose last run grows a chunk at
+    /// a time, each state measured at two widths and laid out as a frame
+    /// does. Once it is found to grow, each chunk's text is hashed on from
+    /// the last (only what was appended read), and every hash is the one
+    /// its whole key makes.
+    #[test]
+    fn a_streamed_markdown_paragraph_hashes_only_what_it_appended() {
+        let mut fonts = FontSystem::new();
+        let plain = FontStyle::default();
+        let bold = FontStyle {
+            weight: 700,
+            ..Default::default()
+        };
+        let code = FontStyle {
+            family: zgx::text_layout::FontFamily::Monospace,
+            ..Default::default()
+        };
+        // As Markdown renders it: its marks gone, its runs split at spaces.
+        let head = "A reply with bold words and a code span in it, then ";
+        let (bold_at, code_at) = (head.find("bold").unwrap(), head.find("code").unwrap());
+        let words = "more of the answer arriving a few words at a time as it streams. ";
+        let mut text = format!("{head}{}", words.repeat(30));
+        let mut cache = TextCache::default();
+        let read = || HASHED_BYTES.with(|read| read.replace(0));
+        for chunk in 0..16 {
+            let appended = match chunk {
+                0 => text.len(),
+                _ => {
+                    let more = &words[(chunk * 5) % 40..][..24];
+                    text.push_str(more);
+                    more.len()
+                }
+            };
+            let paragraph = rich(
+                &text,
+                &[
+                    (bold_at, plain.clone(), 14.),
+                    (bold_at + 10, bold.clone(), 14.),
+                    (code_at, plain.clone(), 14.),
+                    (code_at + 9, code.clone(), 14.),
+                    (text.len(), plain.clone(), 14.),
+                ],
+            );
+            read();
+            for width in [Some(320.), None] {
+                cache.measure(&mut fonts, &paragraph, width);
+            }
+            cache.layout(&mut fonts, &paragraph, Some(320.));
+            let hashed = read();
+            if chunk >= 2 {
+                assert!(
+                    hashed <= appended + 32,
+                    "chunk {chunk}: {hashed} bytes hashed for {appended} appended"
+                );
+            }
+            let key = Key::of(&paragraph, false);
+            let hash = key.hash();
+            assert!(cache.entries[&hash].key == key, "chunk {chunk}");
+            assert!(
+                cache.entries[&hash].words.is_some(),
+                "chunk {chunk}: laid out from its words, as a stream is"
+            );
+        }
+    }
+    /// Rows from one template, the same length and long, looked up in
+    /// turn, as another row grown, as copies at another address, grown as a
+    /// stream's next state, and after a rest: each is found by its own key,
+    /// never another row's, and its hash is the one its whole text makes.
+    #[test]
+    fn same_length_templated_rows_never_collide() {
+        let mut fonts = FontSystem::new();
+        let font = FontStyle::default();
+        let filler = "the same words in every row of the list, ".repeat(13);
+        let rows: Vec<Arc<str>> = (0..64)
+            .map(|i| format!("Row of the list {i:03}: {filler}").into())
+            .collect();
+        assert!(rows.iter().all(|row| row.len() == rows[0].len()));
+        let mut cache = TextCache::default();
+        let mut seen = std::collections::HashSet::new();
+        let look_up = |cache: &mut TextCache, fonts: &mut FontSystem, text: &Arc<str>| {
+            let hash = cache.plain_entry(fonts, text, 14., &font, Need::Measure);
+            assert_eq!(hash, Key::plain_hash(text, 14., &font), "{:?}", &text[..20]);
+            assert_eq!(*cache.entries[&hash].key.text, **text, "{:?}", &text[..20]);
+            hash
+        };
+        let grown = |row: &Arc<str>| -> Arc<str> { format!("{row} and more").into() };
+        for round in 0..2 {
+            for row in &rows {
+                let hash = look_up(&mut cache, &mut fonts, row);
+                if round == 0 {
+                    assert!(seen.insert(hash), "{:?}", &row[..20]);
+                }
+            }
+            for (i, row) in rows.iter().enumerate() {
+                let hash = look_up(&mut cache, &mut fonts, row);
+                let copy: Arc<str> = (**row).into();
+                assert_eq!(look_up(&mut cache, &mut fonts, &copy), hash);
+                look_up(&mut cache, &mut fonts, &grown(&rows[(i + 1) % rows.len()]));
+                look_up(&mut cache, &mut fonts, row);
+                look_up(&mut cache, &mut fonts, &grown(row));
+            }
+            cache.rest(std::iter::empty());
+        }
+        assert_eq!(seen.len(), rows.len());
     }
     #[test]
     fn plain_text_is_found_by_the_key_its_rich_text_makes() {
