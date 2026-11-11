@@ -139,7 +139,10 @@ fn around(rgba: &[u8], (x, y): (u32, u32), side: u32) -> [f32; 3] {
 /// `ZGX_GI_ALLOW_SKIP=1` lets it pass as skipped (a `GI-SKIPPED` line,
 /// shown with `--nocapture`), for a run on a device known to have none.
 fn traced(world: &World, test: &str) -> bool {
-    if world.probes_traced() {
+    if matches!(
+        world.probes_status(),
+        ProbesStatus::Traced | ProbesStatus::Rasterised
+    ) {
         return true;
     }
     let why = zgx_gpu::ray_queries_status();
@@ -375,49 +378,13 @@ fn the_probe_lit_room_matches_its_golden() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/reference")
         .join(family(&window.gpu))
-        .join("gi_room.png");
-    if std::env::var_os("ZGX_BLESS").is_some_and(|v| v == "1") {
-        let file = std::fs::File::create(&path).unwrap();
-        let mut encoder = png::Encoder::new(file, SIZE.0, SIZE.1);
-        encoder.set_color(png::ColorType::Rgba);
-        encoder.set_depth(png::BitDepth::Eight);
-        encoder.set_compression(png::Compression::High);
-        encoder
-            .write_header()
-            .unwrap()
-            .write_image_data(&actual)
-            .unwrap();
-        return;
-    }
-    if !path.exists() {
-        let required = std::env::var_os("ZGX_REQUIRE_GOLDENS").is_some();
-        assert!(
-            !required,
-            "no golden {}; bless with ZGX_BLESS=1",
-            path.display()
-        );
-        eprintln!("no golden {}; bless with ZGX_BLESS=1", path.display());
-        return;
-    }
-    let mut reader =
-        png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()))
-            .read_info()
-            .unwrap();
-    let mut expected = vec![0; reader.output_buffer_size().unwrap()];
-    reader.next_frame(&mut expected).unwrap();
-    // Shading by rays differs a little from GPU to GPU of a family; three
-    // levels in 1% of pixels.
-    let differing = actual
-        .chunks(4)
-        .zip(expected.chunks(4))
-        .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 3))
-        .count();
-    let allowed = (SIZE.0 * SIZE.1) as usize / 100;
-    assert!(
-        differing <= allowed,
-        "{differing} pixels differ past 3 from {}",
-        path.display()
-    );
+        // Faces drawn in place of rays shade a little differently.
+        .join(if world.probes_status() == ProbesStatus::Rasterised {
+            "gi_room_raster.png"
+        } else {
+            "gi_room.png"
+        });
+    golden(&path, &actual);
 }
 
 #[test]
@@ -503,7 +470,7 @@ fn a_world_says_what_its_probes_did() {
     window.draw();
     let status = world.probes_status();
     assert!(
-        matches!(status, ProbesStatus::Traced | ProbesStatus::NoRayQueries),
+        matches!(status, ProbesStatus::Traced | ProbesStatus::Rasterised),
         "{status:?}"
     );
     traced(&world, "a_world_says_what_its_probes_did");
@@ -625,4 +592,106 @@ fn a_world_whose_probes_go_with_its_renderer_comes_to_rest() {
         !world.view().animating(),
         "still drawing after {frames} frames: the probes' hold outlived them"
     );
+}
+
+/// `actual` against its golden at `path` (`ZGX_BLESS=1` writes it): three
+/// levels in 1% of pixels, as shading by rays or faces differs a little
+/// from GPU to GPU of a family.
+fn golden(path: &std::path::Path, actual: &[u8]) {
+    if std::env::var_os("ZGX_BLESS").is_some_and(|v| v == "1") {
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(file, SIZE.0, SIZE.1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.set_compression(png::Compression::High);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(actual)
+            .unwrap();
+        return;
+    }
+    if !path.exists() {
+        let required = std::env::var_os("ZGX_REQUIRE_GOLDENS").is_some();
+        assert!(
+            !required,
+            "no golden {}; bless with ZGX_BLESS=1",
+            path.display()
+        );
+        eprintln!("no golden {}; bless with ZGX_BLESS=1", path.display());
+        return;
+    }
+    let mut reader = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(path).unwrap()))
+        .read_info()
+        .unwrap();
+    let mut expected = vec![0; reader.output_buffer_size().unwrap()];
+    reader.next_frame(&mut expected).unwrap();
+    let differing = actual
+        .chunks(4)
+        .zip(expected.chunks(4))
+        .filter(|(a, b)| a.iter().zip(*b).any(|(a, b)| a.abs_diff(*b) > 3))
+        .count();
+    let allowed = (SIZE.0 * SIZE.1) as usize / 100;
+    assert!(
+        differing <= allowed,
+        "{differing} pixels differ past 3 from {}",
+        path.display()
+    );
+}
+
+#[test]
+fn faces_drawn_in_place_of_rays_light_the_room_alike() {
+    // Where the device has no ray queries, each probe draws the scene into
+    // cube faces about it instead. Forced here beside rays on one device,
+    // the room's bounced light comes out alike (rays shadow the lamp at
+    // what they hit; faces, as the meshes drawn directly, don't).
+    let shade = |faces: bool| {
+        let world = World::new();
+        room(&world);
+        world.set_probes_rasterised(faces);
+        world.add_probes(volume().per_frame(216)).unwrap();
+        let mut window = Window::new(&world)?;
+        let frames = settle(&mut window, &world, 500);
+        Some((world.probes_status(), frames, window.pixels()))
+    };
+    let Some((status, frames, faces)) = shade(true) else {
+        return;
+    };
+    assert_eq!(status, ProbesStatus::Rasterised);
+    assert!(frames <= 20, "{frames} frames to converge");
+    save("room-faces", &faces);
+    // (The faces are checked; without ray queries there are no rays to
+    // set them beside.)
+    let Some((ProbesStatus::Traced, _, rays)) = shade(false) else {
+        eprintln!(
+            "GI-SKIPPED faces_drawn_in_place_of_rays_light_the_room_alike: no rays to compare with"
+        );
+        return;
+    };
+    for at in [(102, 110), (80, 60), (40, 128), (12, 80), (150, 80)] {
+        let (a, b) = (around(&rays, at, 6), around(&faces, at, 6));
+        assert!(
+            a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.06),
+            "at {at:?}: {a:?} by rays, {b:?} by faces"
+        );
+    }
+}
+
+#[test]
+fn the_room_lit_by_faces_matches_its_golden() {
+    let world = World::new();
+    room(&world);
+    world.set_probes_rasterised(true);
+    world.add_probes(volume()).unwrap();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    settle(&mut window, &world, 2000);
+    assert_eq!(world.probes_status(), ProbesStatus::Rasterised);
+    let actual = window.pixels();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/reference")
+        .join(family(&window.gpu))
+        .join("gi_room_raster.png");
+    golden(&path, &actual);
 }

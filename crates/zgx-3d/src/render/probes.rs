@@ -377,12 +377,40 @@ type TraceKey = (u64, Option<u64>, u64, u64, u64);
 /// environment, the layout.
 type FrameKey = (bool, Option<u64>, u64);
 
+/// What the faces' bindings hold: the layout, the lights' and rays'
+/// buffers, the environment, whether the sun's shadow is on.
+type RasterKey = (u64, u64, u64, Option<u64>, bool, u64);
+
+impl Tracer {
+    /// Counts the times what the probes see of the meshes changed.
+    fn revision(&self) -> u64 {
+        match (&self.scene, &self.raster) {
+            (Some(scene), _) => scene.revision,
+            (_, Some(raster)) => raster.revision,
+            _ => 0,
+        }
+    }
+    /// Whether it holds the world's meshes yet.
+    fn built(&self) -> bool {
+        match (&self.scene, &self.raster) {
+            (Some(scene), _) => scene.meshes.is_some(),
+            (_, Some(raster)) => raster.meshes.is_some(),
+            _ => false,
+        }
+    }
+}
+
 /// What updates probes by rays: the scene, the tracer's and blender's
 /// pipelines, and their buffers.
 struct Tracer {
-    scene: Scene,
-    /// The tracer's group 0 and pipeline, without an environment and with.
-    trace_layouts: [wgpu::BindGroupLayout; 2],
+    /// Where the device has ray queries: the scene as rays see it, and the
+    /// tracer's group 0 (without an environment and with).
+    scene: Option<Scene>,
+    trace_layouts: Option<[wgpu::BindGroupLayout; 2]>,
+    /// Where it hasn't: the probes' faces drawn instead (`probes_raster`),
+    /// and their bindings with what they were made for.
+    raster: Option<super::probes_raster::Raster>,
+    raster_binds: Option<(RasterKey, [wgpu::BindGroup; 2])>,
     trace: [Option<wgpu::ComputePipeline>; 2],
     blend_layout: wgpu::BindGroupLayout,
     blend: wgpu::RenderPipeline,
@@ -461,14 +489,15 @@ pub(super) struct Probes {
 }
 
 /// Whether `world`'s meshes take their diffuse light from probes on this
-/// device this frame: it has volumes and the device traces rays. Where it
-/// has volumes and not, says why (`World::probes_status`).
+/// device this frame: it has volumes and the device traces rays or draws
+/// faces (`probes_raster`). Where it has volumes and not, says so
+/// (`World::probes_status`).
 pub(super) fn probed(world: &Inner, device: &wgpu::Device) -> bool {
     if !world.gi.any() {
         return false;
     }
-    if !super::raytrace::ray_queries(device) {
-        world.gi.status.set(crate::ProbesStatus::NoRayQueries);
+    if !super::raytrace::ray_queries(device) && !super::probes_raster::rasterises(device) {
+        world.gi.status.set(crate::ProbesStatus::Unsupported);
         return false;
     }
     true
@@ -548,6 +577,9 @@ pub(super) fn frame(
         uniforms: frame_buffer,
         environment: cube,
         environment_layout,
+        shadow_map,
+        stand_in,
+        sampler,
         #[cfg(feature = "lighting")]
         lights,
         ..
@@ -586,6 +618,7 @@ pub(super) fn frame(
         if let Some(tracer) = &mut probes.tracer {
             tracer.bind = None;
             tracer.blend_binds = None;
+            tracer.raster_binds = None;
         }
     }
     let layout = probes.layout.as_mut().unwrap();
@@ -607,13 +640,28 @@ pub(super) fn frame(
         }
         layout.cleared = true;
     }
-    let tracer = probes.tracer.get_or_insert_with(|| tracer(device));
-    if let Some(drawn) = drawn
-        && tracer.scene.meshes != Some(world.meshes)
+    // Rays where the device has them, unless the world asks for faces.
+    let rays = super::raytrace::ray_queries(device) && !world.gi.rasterised;
+    if probes
+        .tracer
+        .as_ref()
+        .is_some_and(|t| t.scene.is_some() != rays)
     {
-        tracer
-            .scene
-            .rebuild((device, queue), encoder, drawn, world.meshes);
+        probes.tracer = None;
+        probes.lit_by = None;
+    }
+    let tracer = probes.tracer.get_or_insert_with(|| tracer(device, rays));
+    if let Some(drawn) = drawn {
+        if let Some(scene) = &mut tracer.scene
+            && scene.meshes != Some(world.meshes)
+        {
+            scene.rebuild((device, queue), encoder, drawn, world.meshes);
+        }
+        if let Some(raster) = &mut tracer.raster
+            && raster.meshes != Some(world.meshes)
+        {
+            raster.rebuild(device, drawn, world.meshes);
+        }
     }
     // A change to what rays see or what lights it: converge again. (Not
     // the camera: nothing here follows it.)
@@ -624,26 +672,41 @@ pub(super) fn frame(
         upload_lights(tracer, &probes.lights, device, queue);
     }
     let environment = world.environment.as_ref().map(|e| e.data.id);
-    let now = (lighting(uniforms), tracer.scene.revision, environment);
+    let now = (lighting(uniforms), tracer.revision(), environment);
     if lights_changed || probes.lit_by.as_ref() != Some(&now) {
         probes.lit_by = Some(now);
         probes.rounds = 0;
         probes.done = 0;
     }
-    world.gi.status.set(crate::ProbesStatus::Traced);
+    world.gi.status.set(if tracer.scene.is_some() {
+        crate::ProbesStatus::Traced
+    } else {
+        crate::ProbesStatus::Rasterised
+    });
     let tracer = probes.tracer.as_ref().unwrap();
-    if probes.rounds < ROUNDS && tracer.scene.meshes.is_some() {
+    if probes.rounds < ROUNDS && tracer.built() {
         let environment = match (environment, cube.as_ref(), environment_layout.as_ref()) {
             (Some(id), Some((_, view)), Some((_, sampler))) => Some((id, view, sampler)),
             _ => None,
         };
-        update(probes, frame_buffer, environment, (device, queue), encoder);
+        let shadow = Shadow {
+            map: shadow_map.as_ref().unwrap_or(stand_in),
+            sampler,
+            on: shadow_map.is_some(),
+        };
+        update(
+            probes,
+            (frame_buffer, shadow),
+            environment,
+            (device, queue),
+            encoder,
+        );
     }
     world.unsettle(SETTLE, probes.rounds < ROUNDS);
     true
 }
 
-fn tracer(device: &wgpu::Device) -> Tracer {
+fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
     let compute = wgpu::ShaderStages::COMPUTE;
     let storage = |binding, read_only| wgpu::BindGroupLayoutEntry {
         binding,
@@ -755,9 +818,78 @@ fn tracer(device: &wgpu::Device) -> Tracer {
         multiview_mask: None,
         cache: None,
     });
+    // Drawing faces instead: the capture's group 0 (the frame's shadow,
+    // the probes', the updaters' uniform and lights) and the reading's.
+    let raster = (!rays).then(|| {
+        let both = wgpu::ShaderStages::VERTEX_FRAGMENT;
+        let mut entries = vec![
+            uniform(0, both),
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                count: None,
+            },
+        ];
+        entries.extend(probe_entries(both));
+        entries.extend([
+            uniform(21, both),
+            wgpu::BindGroupLayoutEntry {
+                binding: 22,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ]);
+        let capture = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("3D probe faces"),
+            entries: &entries,
+        });
+        let read = |lit: bool| {
+            let mut entries = vec![uniform(0, compute)];
+            if lit {
+                entries.extend(environment_entries(compute));
+            }
+            entries.extend([
+                storage(20, false),
+                uniform(21, compute),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 23,
+                    visibility: compute,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ]);
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("3D probe faces read"),
+                entries: &entries,
+            })
+        };
+        super::probes_raster::Raster::new((capture, [read(false), read(true)]))
+    });
     Tracer {
-        scene: Scene::new(device),
-        trace_layouts: [trace_layout(false), trace_layout(true)],
+        scene: rays.then(|| Scene::new(device)),
+        trace_layouts: rays.then(|| [trace_layout(false), trace_layout(true)]),
+        raster,
+        raster_binds: None,
         trace: [None, None],
         blend_layout,
         blend,
@@ -777,17 +909,42 @@ fn tracer(device: &wgpu::Device) -> Tracer {
     }
 }
 
-/// The tracer's WGSL: the frame's declarations, the probes' and its own,
-/// tags taken off (`//E ` lines kept where `lit`, other tagged lines
-/// dropped).
+/// The tracer's WGSL: the frame's declarations, the probes', the
+/// updaters' shared part and its own, tags taken off (`updater_source`).
 #[cold]
 fn trace_source(lit: bool) -> String {
-    let mut out = String::from("enable wgpu_ray_query;\n");
-    for text in [
-        include_str!("shader/frame.wgsl"),
-        include_str!("shader/probes.wgsl"),
-        include_str!("probes_trace.wgsl"),
-    ] {
+    updater_source(
+        "enable wgpu_ray_query;\n",
+        lit,
+        &[
+            include_str!("shader/frame.wgsl"),
+            include_str!("shader/probes.wgsl"),
+            include_str!("probes_common.wgsl"),
+            include_str!("probes_trace.wgsl"),
+        ],
+    )
+}
+/// The rasteriser's WGSL (`probes_raster.rs`): as the tracer's, its own
+/// part in place of the tracer's.
+#[cold]
+pub(super) fn raster_source(lit: bool) -> String {
+    updater_source(
+        "",
+        lit,
+        &[
+            include_str!("shader/frame.wgsl"),
+            include_str!("shader/probes.wgsl"),
+            include_str!("probes_common.wgsl"),
+            include_str!("probes_raster.wgsl"),
+        ],
+    )
+}
+/// `parts` after `head`, tags taken off: `//probed ` lines kept, `//E `
+/// lines kept where `lit`, other tagged lines dropped.
+#[cold]
+fn updater_source(head: &str, lit: bool, parts: &[&str]) -> String {
+    let mut out = String::from(head);
+    for text in parts {
         for line in text.lines() {
             // A tag is `//` and a capital or a name (lowercase letters,
             // digits, `_`), then a space: the shader's (`shader.rs`).
@@ -838,16 +995,21 @@ fn turn(n: u32) -> [[f32; 4]; 4] {
 /// into their maps by the round's weight.
 fn update(
     probes: &mut Probes,
-    frame: &wgpu::Buffer,
+    (frame, shadow): (&wgpu::Buffer, Shadow),
     environment: Option<(u64, &wgpu::TextureView, &wgpu::Sampler)>,
     (device, queue): (&wgpu::Device, &wgpu::Queue),
     encoder: &mut wgpu::CommandEncoder,
 ) {
     let layout = probes.layout.as_ref().unwrap();
     let tracer = probes.tracer.as_mut().unwrap();
-    let lit = environment.is_some();
     // Never past the round's end: the next round blends by another weight.
-    let count = layout.per_frame.min(layout.total - probes.done);
+    // Drawing faces, at most `MOST` a frame.
+    let most = if tracer.raster.is_some() {
+        super::probes_raster::MOST
+    } else {
+        u32::MAX
+    };
+    let count = layout.per_frame.min(layout.total - probes.done).min(most);
     let size = u64::from(layout.per_frame * layout.rays) * 16;
     if tracer.rays.as_ref().is_none_or(|(_, have)| *have < size) {
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -860,26 +1022,6 @@ fn update(
         tracer.bind = None;
         tracer.blend_binds = None;
     }
-    let (rays, rays_size) = tracer.rays.as_ref().unwrap();
-    let pipeline = tracer.trace[usize::from(lit)].get_or_insert_with(|| {
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("3D probe rays"),
-            source: wgpu::ShaderSource::Wgsl(trace_source(lit).into()),
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("3D probe rays"),
-            bind_group_layouts: &[Some(&tracer.trace_layouts[usize::from(lit)])],
-            immediate_size: 0,
-        });
-        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("3D probe rays"),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("trace_rays"),
-            compilation_options: Default::default(),
-            cache: None,
-        })
-    });
     let uniform = TraceUniform {
         turn: turn(probes.rounds),
         first: probes.next,
@@ -892,91 +1034,32 @@ fn update(
         seed: probes.rounds,
     };
     queue.write_buffer(&tracer.uniform, 0, bytemuck::bytes_of(&uniform));
-    let scene = &tracer.scene;
-    let key = (
-        scene.generation,
-        environment.map(|e| e.0),
-        layout.of,
-        *rays_size,
-        tracer.lights_made,
-    );
-    if tracer.bind.as_ref().is_none_or(|(k, _)| *k != key) {
-        let mut entries = vec![wgpu::BindGroupEntry {
-            binding: 0,
-            resource: frame.as_entire_binding(),
-        }];
-        if let Some((_, view, sampler)) = environment {
-            entries.push(wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(view),
-            });
-            entries.push(wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            });
-        }
-        entries.extend([
-            wgpu::BindGroupEntry {
-                binding: 9,
-                resource: wgpu::BindingResource::TextureView(&layout.light.view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 10,
-                resource: wgpu::BindingResource::TextureView(&layout.depth.view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 11,
-                resource: layout.set.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 12,
-                resource: wgpu::BindingResource::Sampler(&probes.sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 16,
-                resource: scene.tlas.as_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 17,
-                resource: scene.vertices.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 18,
-                resource: scene.indices.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 19,
-                resource: scene.instances.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 20,
-                resource: rays.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 21,
-                resource: tracer.uniform.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 22,
-                resource: tracer.lights.as_entire_binding(),
-            },
-        ]);
-        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("3D probe rays"),
-            layout: &tracer.trace_layouts[usize::from(lit)],
-            entries: &entries,
-        });
-        tracer.bind = Some((key, bind));
+    let atlases = Atlases {
+        light: &layout.light.view,
+        depth: &layout.depth.view,
+        set: &layout.set,
+        sampler: &probes.sampler,
+    };
+    if tracer.raster.is_some() {
+        rasterise(
+            tracer,
+            (device, encoder),
+            (frame, shadow),
+            environment,
+            atlases,
+            (layout.of, count, layout.rays),
+        );
+    } else {
+        trace(
+            tracer,
+            (device, encoder),
+            frame,
+            environment,
+            atlases,
+            (layout.of, count, layout.rays),
+        );
     }
-    if !tracer.noop {
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("3D probe rays"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &tracer.bind.as_ref().unwrap().1, &[]);
-        pass.dispatch_workgroups((count * layout.rays).div_ceil(64), 1, 1);
-    }
+    let (rays, rays_size) = tracer.rays.as_ref().unwrap();
     let key = (layout.of, *rays_size);
     if tracer.blend_binds.as_ref().is_none_or(|(k, _)| *k != key) {
         let bind = |atlas: &Atlas| {
@@ -1032,6 +1115,249 @@ fn update(
     if probes.done == layout.total {
         probes.done = 0;
         probes.rounds += 1;
+    }
+}
+
+/// What a probe-lit pass reads of the probes: their atlases, volumes and
+/// sampler.
+#[derive(Clone, Copy)]
+struct Atlases<'a> {
+    light: &'a wgpu::TextureView,
+    depth: &'a wgpu::TextureView,
+    set: &'a wgpu::Buffer,
+    sampler: &'a wgpu::Sampler,
+}
+/// The frame's shadow map (or stand-in), its sampler, and whether the sun
+/// casts through it.
+#[derive(Clone, Copy)]
+pub(super) struct Shadow<'a> {
+    map: &'a wgpu::TextureView,
+    sampler: &'a wgpu::Sampler,
+    on: bool,
+}
+
+/// This frame's probes' faces drawn and read along their rays into the
+/// rays buffer (`probes_raster`).
+fn rasterise(
+    tracer: &mut Tracer,
+    (device, encoder): (&wgpu::Device, &mut wgpu::CommandEncoder),
+    (frame, shadow): (&wgpu::Buffer, Shadow),
+    environment: Option<(u64, &wgpu::TextureView, &wgpu::Sampler)>,
+    atlases: Atlases,
+    (of, count, rays_per): (u64, u32, u32),
+) {
+    let lit = environment.is_some();
+    let (rays, rays_size) = tracer.rays.as_ref().unwrap();
+    let raster = tracer.raster.as_mut().unwrap();
+    raster.hold(device, count);
+    let key = (
+        of,
+        tracer.lights_made,
+        *rays_size,
+        environment.map(|e| e.0),
+        shadow.on,
+        raster.made,
+    );
+    if tracer.raster_binds.as_ref().is_none_or(|(k, _)| *k != key) {
+        let capture = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("3D probe faces"),
+            layout: raster.capture_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(shadow.map),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(shadow.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(atlases.light),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(atlases.depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: atlases.set.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::Sampler(atlases.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 21,
+                    resource: tracer.uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 22,
+                    resource: tracer.lights.as_entire_binding(),
+                },
+            ],
+        });
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: frame.as_entire_binding(),
+        }];
+        if let Some((_, view, sampler)) = environment {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
+        }
+        entries.extend([
+            wgpu::BindGroupEntry {
+                binding: 20,
+                resource: rays.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 21,
+                resource: tracer.uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 23,
+                resource: wgpu::BindingResource::TextureView(raster.faces()),
+            },
+        ]);
+        let read = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("3D probe faces read"),
+            layout: raster.read_layout(lit),
+            entries: &entries,
+        });
+        tracer.raster_binds = Some((key, [capture, read]));
+    }
+    let [capture, read] = &tracer.raster_binds.as_ref().unwrap().1;
+    raster.update(device, encoder, (capture, read), (lit, count, rays_per));
+}
+
+/// This frame's probes' rays traced into the rays buffer.
+fn trace(
+    tracer: &mut Tracer,
+    (device, encoder): (&wgpu::Device, &mut wgpu::CommandEncoder),
+    frame: &wgpu::Buffer,
+    environment: Option<(u64, &wgpu::TextureView, &wgpu::Sampler)>,
+    atlases: Atlases,
+    (of, count, rays_per): (u64, u32, u32),
+) {
+    let lit = environment.is_some();
+    let (rays, rays_size) = tracer.rays.as_ref().unwrap();
+    let trace_layouts = tracer
+        .trace_layouts
+        .as_ref()
+        .expect("traced where the device has ray queries");
+    let pipeline = tracer.trace[usize::from(lit)].get_or_insert_with(|| {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("3D probe rays"),
+            source: wgpu::ShaderSource::Wgsl(trace_source(lit).into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("3D probe rays"),
+            bind_group_layouts: &[Some(&trace_layouts[usize::from(lit)])],
+            immediate_size: 0,
+        });
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("3D probe rays"),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("trace_rays"),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    });
+    let scene = tracer.scene.as_ref().unwrap();
+    let key = (
+        scene.generation,
+        environment.map(|e| e.0),
+        of,
+        *rays_size,
+        tracer.lights_made,
+    );
+    if tracer.bind.as_ref().is_none_or(|(k, _)| *k != key) {
+        let mut entries = vec![wgpu::BindGroupEntry {
+            binding: 0,
+            resource: frame.as_entire_binding(),
+        }];
+        if let Some((_, view, sampler)) = environment {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
+        }
+        entries.extend([
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(atlases.light),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: wgpu::BindingResource::TextureView(atlases.depth),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: atlases.set.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 12,
+                resource: wgpu::BindingResource::Sampler(atlases.sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 16,
+                resource: scene.tlas.as_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 17,
+                resource: scene.vertices.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 18,
+                resource: scene.indices.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 19,
+                resource: scene.instances.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 20,
+                resource: rays.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 21,
+                resource: tracer.uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 22,
+                resource: tracer.lights.as_entire_binding(),
+            },
+        ]);
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("3D probe rays"),
+            layout: &trace_layouts[usize::from(lit)],
+            entries: &entries,
+        });
+        tracer.bind = Some((key, bind));
+    }
+    if !tracer.noop {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("3D probe rays"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &tracer.bind.as_ref().unwrap().1, &[]);
+        pass.dispatch_workgroups((count * rays_per).div_ceil(64), 1, 1);
     }
 }
 
@@ -1155,6 +1481,7 @@ mod tests {
         };
         for lit in [false, true] {
             module("rays", trace_source(lit));
+            module("faces", raster_source(lit));
             for other in [0, Variant::TEXTURED, Variant::TEXTURED | Variant::COATED] {
                 let variant = Variant(Variant::PROBES | other).with(Variant::LIT, lit);
                 module("mesh", wgsl(variant, 4));
@@ -1202,6 +1529,7 @@ mod tests {
         };
         for lit in [false, true] {
             assert_eq!(whole_loads(&trace_source(lit)), 0, "the tracer");
+            assert_eq!(whole_loads(&raster_source(lit)), 0, "the faces");
             let variant = Variant(Variant::PROBES).with(Variant::LIT, lit);
             assert_eq!(whole_loads(&wgsl(variant, 4)), 0, "a probe-lit mesh");
         }

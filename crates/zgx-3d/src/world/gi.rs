@@ -92,14 +92,17 @@ pub enum ProbesStatus {
     /// It has volumes and hasn't drawn a frame since.
     #[default]
     NotDrawn,
-    /// Its probes are traced, and lit meshes inside its volumes take their
-    /// diffuse light from them.
+    /// Its probes are filled by tracing rays, and lit meshes inside its
+    /// volumes take their diffuse light from them.
     Traced,
-    /// Its device has no ray queries (`zgx_gpu::request_ray_queries` not
-    /// called before the first window, the adapter has none, or Direct3D 12
-    /// compiles with FXC: `zgx_gpu::ray_queries_status` says which): its
-    /// volumes light nothing.
-    NoRayQueries,
+    /// Its device has no ray queries (`zgx_gpu::ray_queries_status` says
+    /// why), so its probes are filled by drawing the scene about each
+    /// instead, and lit meshes inside its volumes take their diffuse
+    /// light from them.
+    Rasterised,
+    /// Its device can neither trace rays nor run compute (GL): its volumes
+    /// light nothing.
+    Unsupported,
 }
 
 /// A volume in a world (`World::add_probes`).
@@ -119,6 +122,9 @@ pub(crate) struct Gi {
     pub(crate) layout: u64,
     /// What the last frame did with its probes (`World::probes_status`).
     pub(crate) status: std::cell::Cell<ProbesStatus>,
+    /// Probes drawn as on a device without ray queries even where it has
+    /// them (`World::set_probes_rasterised`).
+    pub(crate) rasterised: bool,
 }
 impl Gi {
     /// Whether it has any volume.
@@ -141,10 +147,10 @@ impl World {
     /// where the world holds `MAX_PROBE_VOLUMES` already or the probes
     /// would pass `MAX_PROBES`.
     ///
-    /// Probes are filled where the device traces rays (`zgx_gpu::
-    /// request_ray_queries`, before the first window); elsewhere they stay
-    /// dark and the volume lights nothing (`World::probes_traced` says
-    /// which).
+    /// Probes are filled by tracing rays where the device has ray queries
+    /// (`zgx_gpu::request_ray_queries`, before the first window), and by
+    /// drawing the scene about each elsewhere; on a device without compute
+    /// (GL) the volume lights nothing (`World::probes_status` says which).
     pub fn add_probes(&self, volume: ProbeVolume) -> Option<ProbesId> {
         let mut id = None;
         self.change(|inner| {
@@ -186,9 +192,19 @@ impl World {
     }
     /// Whether the last frame drawn filled probes by tracing rays (false
     /// before a frame, without volumes, or where the device has no ray
-    /// queries).
+    /// queries: `probes_status` says what it did instead).
     pub fn probes_traced(&self) -> bool {
         self.inner.borrow().gi.status.get() == ProbesStatus::Traced
+    }
+    /// Fill probes by drawing the scene about each, as on a device without
+    /// ray queries, even where it has them: for tests and comparisons.
+    #[doc(hidden)]
+    pub fn set_probes_rasterised(&self, on: bool) {
+        self.change(|inner| {
+            let changed = inner.gi.rasterised != on;
+            inner.gi.rasterised = on;
+            changed
+        });
     }
     /// What the last frame drawn did with its probes, and where it didn't
     /// light by them, why.

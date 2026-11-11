@@ -284,7 +284,12 @@ fn probes_removed_while_they_converge() {
             .unwrap();
         window.draw(world);
         window.draw(world);
-        if !world.probes_traced() {
+        // Traced, or drawn as faces where the device has no ray queries
+        // (this file asks for none).
+        if !matches!(
+            world.probes_status(),
+            ProbesStatus::Traced | ProbesStatus::Rasterised
+        ) {
             return None;
         }
         Some(Box::new(move |world| world.remove_probes(probes)))

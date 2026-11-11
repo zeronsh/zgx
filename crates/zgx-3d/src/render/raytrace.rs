@@ -64,12 +64,12 @@ pub(super) struct Scene {
 /// A traced mesh as rays see it: its geometry, its place (a TLAS
 /// instance's rows) and its colour, metalness and glow.
 #[derive(Clone, Copy, PartialEq)]
-struct Held {
-    geometry: u64,
-    transform: [f32; 12],
-    material: [f32; 8],
+pub(super) struct Held {
+    pub(super) geometry: u64,
+    pub(super) transform: [f32; 12],
+    pub(super) material: [f32; 8],
 }
-fn held(d: &Drawn) -> Held {
+pub(super) fn held(d: &Drawn) -> Held {
     let c = &d.matrix.columns;
     let row = |r: usize| [c[0][r], c[1][r], c[2][r], c[3][r]];
     let [a, b, e] = [row(0), row(1), row(2)];
@@ -106,7 +106,7 @@ pub(super) fn ray_queries(device: &wgpu::Device) -> bool {
 }
 
 /// Whether rays see `d`.
-fn traced(d: &Drawn) -> bool {
+pub(super) fn traced(d: &Drawn) -> bool {
     d.palette.is_none()
         && d.morph.is_none()
         && d.extras.is_none_or(|e| e.kinds & crate::world::GLASS == 0)
