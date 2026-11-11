@@ -444,20 +444,65 @@ struct Triangles {
     order: Vec<u32>,
 }
 
-/// A large mesh's tree: being made on a thread of its own (its mesh is
-/// met triangle by triangle meanwhile), or made.
+/// A large mesh's tree: queued or being made (its mesh is met triangle
+/// by triangle meanwhile; the token says it's still wanted), or made.
 enum MeshTree {
-    Building(std::sync::mpsc::Receiver<Triangles>),
+    Building {
+        made: std::sync::mpsc::Receiver<Triangles>,
+        /// Held while it's wanted: the tree thread skips one let go.
+        _wanted: std::sync::Arc<()>,
+    },
     Ready(Triangles),
 }
 
-/// The geometry of object `index`, which has one.
-fn geometry_of(inner: &Inner, index: usize) -> crate::Geometry {
-    inner.objects[index]
-        .value
-        .as_ref()
-        .and_then(|o| o.geometry.clone())
-        .expect("a blocker has a geometry")
+/// A tree to make: of `geometry`, sent back by `made`, unless nobody
+/// wants it by its turn.
+struct TreeJob {
+    geometry: crate::Geometry,
+    wanted: std::sync::Weak<()>,
+    made: std::sync::mpsc::Sender<Triangles>,
+}
+
+/// The one thread every world's trees are made on, in turn, made with the
+/// first: a level of hundreds of meshes queues them, not a thread each.
+/// It waits on its queue, never waking with nothing to do.
+static TREE_WORKER: std::sync::Mutex<Option<std::sync::mpsc::Sender<TreeJob>>> =
+    std::sync::Mutex::new(None);
+
+/// Threads made for trees so far (one, unless it went away).
+static TREE_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// `job` queued for the tree thread, made if need be; given back if no
+/// thread could be made (it's made where it's asked for, then).
+fn queue_tree(job: TreeJob) -> Result<(), TreeJob> {
+    let mut worker = TREE_WORKER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let job = match worker.as_ref() {
+        Some(queue) => match queue.send(job) {
+            Ok(()) => return Ok(()),
+            // Its thread gone: another made.
+            Err(std::sync::mpsc::SendError(job)) => job,
+        },
+        None => job,
+    };
+    let (queue, jobs) = std::sync::mpsc::channel::<TreeJob>();
+    let spawned = std::thread::Builder::new()
+        .name("zgx-3d-sound-trees".into())
+        .spawn(move || {
+            for job in jobs {
+                if job.wanted.strong_count() > 0 {
+                    let _ = job.made.send(Triangles::new(&job.geometry));
+                }
+            }
+        });
+    if spawned.is_err() {
+        return Err(job);
+    }
+    TREE_THREADS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let sent = queue.send(job).map_err(|e| e.0);
+    *worker = Some(queue);
+    sent
 }
 
 /// A box of a [`Triangles`] tree: a leaf's `count` triangles from `first`
@@ -1055,21 +1100,24 @@ impl Sound3d {
             let tree = (triangles > TREE_TRIANGLES).then(|| {
                 let building = &mut self.building;
                 self.trees.entry(geometry.id()).or_insert_with(|| {
-                    // 320,000 triangles take about 50 ms: not in a frame.
+                    // 320,000 triangles take about 50 ms: not in a frame,
+                    // and queued, not a thread each.
                     let (made, tree) = std::sync::mpsc::channel();
-                    let geometry = geometry.clone();
-                    let spawned = std::thread::Builder::new()
-                        .name("zgx-3d-sound-tree".into())
-                        .spawn(move || {
-                            let _ = made.send(Triangles::new(&geometry));
-                        });
-                    *building += 1;
-                    match spawned {
-                        Ok(_) => MeshTree::Building(tree),
-                        Err(_) => {
-                            *building -= 1;
-                            MeshTree::Ready(Triangles::new(&geometry_of(inner, index)))
+                    let wanted = std::sync::Arc::new(());
+                    let job = TreeJob {
+                        geometry: geometry.clone(),
+                        wanted: std::sync::Arc::downgrade(&wanted),
+                        made,
+                    };
+                    match queue_tree(job) {
+                        Ok(()) => {
+                            *building += 1;
+                            MeshTree::Building {
+                                made: tree,
+                                _wanted: wanted,
+                            }
                         }
+                        Err(job) => MeshTree::Ready(Triangles::new(&job.geometry)),
                     }
                 });
                 geometry.id()
@@ -1087,13 +1135,14 @@ impl Sound3d {
                 tree,
             });
         }
-        // Trees no blocker has any more, let go (one still being made
-        // finishes on its own thread, unheard).
+        // Trees no blocker has any more, let go (one queued isn't made).
         if !self.trees.is_empty() {
+            let held: std::collections::HashSet<u64> =
+                blocking.iter().filter_map(|b| b.tree).collect();
             let building = &mut self.building;
             self.trees.retain(|id, tree| {
-                let kept = blocking.iter().any(|b| b.tree == Some(*id));
-                if !kept && matches!(tree, MeshTree::Building(_)) {
+                let kept = held.contains(id);
+                if !kept && matches!(tree, MeshTree::Building { .. }) {
                     *building -= 1;
                 }
                 kept
@@ -1390,7 +1439,7 @@ impl Sound3d {
         // Trees made since, taken.
         if self.building > 0 {
             for tree in self.trees.values_mut() {
-                if let MeshTree::Building(made) = tree
+                if let MeshTree::Building { made, .. } = tree
                     && let Ok(made) = made.try_recv()
                 {
                     *tree = MeshTree::Ready(made);
@@ -2049,5 +2098,48 @@ mod tests {
         assert!(looked < 400, "{looked} looked at through its tree");
         assert_eq!(after, before);
         assert!(after.0 < 1., "the hills between block it");
+    }
+
+    #[test]
+    fn five_hundred_large_meshes_queue_their_trees_on_one_thread() {
+        // 500 distinct spheres of 324 triangles, all blocking: their trees
+        // are made in turn on the one tree thread, not a thread each, and
+        // every one is made.
+        let (audio, _mixer) = zgx_audio::Audio::offline(zgx_audio::Config::default()).unwrap();
+        let world = World::new();
+        world
+            .set_audio(&audio, &audio.bus("world").unwrap())
+            .unwrap();
+        for i in 0..500 {
+            let id = world.add(Object::mesh(
+                Geometry::sphere(1. + i as f32 * 0.001, 18),
+                Material::default(),
+            ));
+            world.set_transform(
+                id,
+                Transform::at([(i % 25) as f32 * 3., 0., (i / 25) as f32 * 3.]),
+            );
+        }
+        world.update_audio(Instant::now());
+        let triangles = Geometry::sphere(1., 18).indices().len() / 3;
+        assert!(triangles > TREE_TRIANGLES, "{triangles} triangles each");
+        assert_eq!(
+            world.inner.borrow().audio.as_ref().unwrap().trees.len(),
+            500
+        );
+        let start = Instant::now();
+        while world.inner.borrow().audio.as_ref().unwrap().building > 0 {
+            assert!(start.elapsed().as_secs() < 30, "not all made");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            world.update_audio(Instant::now());
+        }
+        let inner = world.inner.borrow();
+        let trees = &inner.audio.as_ref().unwrap().trees;
+        assert!(trees.values().all(|t| matches!(t, MeshTree::Ready(_))));
+        assert_eq!(
+            TREE_THREADS.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "one tree thread, for every world in this process"
+        );
     }
 }
