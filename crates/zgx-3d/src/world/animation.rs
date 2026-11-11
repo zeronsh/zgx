@@ -17,6 +17,55 @@ pub(crate) struct Animators {
     /// The last frame's time while any plays; `None` while none does, so
     /// the next to play starts from its first frame.
     last: Option<Instant>,
+    /// The last animators this frame to pose one clip alone, by clip and
+    /// time (`Animator::shared`), for those after to copy: a crowd of one
+    /// model added together, in step, finds its pose here.
+    poses: Recent,
+}
+/// The last few clips and times posed, and the animator that posed each.
+#[derive(Default)]
+pub(crate) struct Recent {
+    keys: [((usize, u32), usize); RECENT],
+    len: usize,
+    next: usize,
+}
+const RECENT: usize = 4;
+impl Recent {
+    fn clear(&mut self) {
+        (self.len, self.next) = (0, 0);
+    }
+    fn get(&self, key: (usize, u32)) -> Option<usize> {
+        let keys = &self.keys[..self.len];
+        keys.iter().find(|(k, _)| *k == key).map(|&(_, at)| at)
+    }
+    fn insert(&mut self, key: (usize, u32), at: usize) {
+        self.keys[self.next] = (key, at);
+        self.next = (self.next + 1) % RECENT;
+        self.len = (self.len + 1).min(RECENT);
+    }
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+}
+/// Animator `slots[at]` posed: as one before it this frame posed the same
+/// clip at the same time, or made, and noted for those after.
+#[inline(never)]
+fn pose(slots: &mut [Slot<Animator>], at: usize, poses: &mut Recent) {
+    let (before, after) = slots.split_at_mut(at);
+    let Some(animator) = after[0].value.as_mut() else {
+        return;
+    };
+    let Some(key) = animator.shared() else {
+        animator.evaluate();
+        return;
+    };
+    if let Some(source) = poses.get(key).and_then(|i| before[i].value.as_ref()) {
+        animator.pose_from(&source.pose);
+        return;
+    }
+    animator.evaluate();
+    poses.insert(key, at);
 }
 
 /// Step and pose `world`'s animators for its frame at `time`, before it's
@@ -46,8 +95,14 @@ pub(crate) fn advance(inner: &mut Inner, time: Instant) -> bool {
             .min(MAX_STEP)
     });
     let (mut changed, mut playing) = (false, false);
-    for animator in animators.slots.iter_mut().filter_map(|s| s.value.as_mut()) {
-        if animator.due() {
+    animators.poses.clear();
+    let slots = &mut animators.slots;
+    for at in 0..slots.len() {
+        let Some(animator) = slots[at].value.as_mut() else {
+            continue;
+        };
+        let due = animator.due();
+        if due {
             // Back from resting while its clips ran on unseen: on from
             // where it stopped, in step with the frames' time.
             let dt = animator.parked.take().map_or(dt, |parked| {
@@ -57,7 +112,12 @@ pub(crate) fn advance(inner: &mut Inner, time: Instant) -> bool {
                 rebind(inner, animator);
             }
             animator.step(dt);
-            animator.evaluate();
+            pose(slots, at, &mut animators.poses);
+        }
+        let Some(animator) = slots[at].value.as_mut() else {
+            continue;
+        };
+        if due {
             // Root motion apart: an animator without it runs none of it.
             let root = animator.root.is_some();
             if root {
@@ -1729,5 +1789,55 @@ mod tests {
         let stamp = world.inner().stamps[mesh.index as usize];
         clock.frame(&world, 3.);
         assert_eq!(world.inner().stamps[mesh.index as usize], stamp);
+    }
+
+    #[test]
+    fn animators_playing_one_clip_in_step_share_its_pose() {
+        let clip = clip(vec![
+            (
+                0,
+                Path::Rotation,
+                vec![0., 0.5, 1.],
+                vec![turn(0.), turn(1.), turn(0.3)],
+            ),
+            (
+                1,
+                Path::Translation,
+                vec![0., 1.],
+                vec![[0., 1., 0., 0.], [2., 1., 0., 0.]],
+            ),
+        ]);
+        let world = World::new();
+        let (first, a, b) = rig(&world);
+        let (second, a2, b2) = rig(&world);
+        // The second's upper node rests elsewhere: the clip doesn't move
+        // its place, only its turn.
+        world.update(a2, |o| o.transform.position = vec3(5., 0., 0.));
+        for placed in [&first, &second] {
+            let animator = world.add_animator(placed);
+            world.play(animator, &clip, Play::new()).unwrap();
+        }
+        let alone = World::new();
+        let (theirs, la, lb) = rig(&alone);
+        let animator = alone.add_animator(&theirs);
+        alone.play(animator, &clip, Play::new()).unwrap();
+        let clock = Clock(Instant::now());
+        for t in [0., 0.2, 0.45, 0.7] {
+            clock.frame(&world, t);
+            clock.frame(&alone, t);
+            assert_eq!(
+                world.inner().animators.poses.len(),
+                1,
+                "one pose made, shared"
+            );
+            assert_eq!(
+                (at(&world, a), at(&world, b)),
+                (at(&alone, la), at(&alone, lb))
+            );
+            let (turned, moved) = (at(&world, a2), at(&world, b2));
+            assert_eq!(turned.rotation, at(&alone, la).rotation);
+            assert_eq!(turned.position, vec3(5., 0., 0.), "its own rest");
+            assert_eq!(moved, at(&alone, lb));
+        }
     }
 }

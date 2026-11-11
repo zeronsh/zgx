@@ -719,6 +719,56 @@ impl Animator {
         }
         self.dirty = true;
     }
+    /// Its clip and that clip's time, if its pose is that clip's alone (one
+    /// layer, wholly, unmasked, not fading; no root motion, IK or morph
+    /// weights): another animator with the same poses the same places for
+    /// the nodes the clip moves.
+    pub(crate) fn shared(&self) -> Option<(usize, u32)> {
+        let [layer] = &self.layers[..] else {
+            return None;
+        };
+        let [state] = &layer.states[..] else {
+            return None;
+        };
+        let alone = layer.layer.blend == Blend::Override
+            && layer.layer.weight >= 1.
+            && layer.mask.is_none()
+            && state.to == 1.
+            && state.weight() >= 1.
+            && self.root.is_none()
+            && self.ik.is_none()
+            && self.morphed.is_empty();
+        alone.then(|| {
+            (
+                std::sync::Arc::as_ptr(&state.clip.0) as usize,
+                state.time.to_bits(),
+            )
+        })
+    }
+    /// Its pose from `source`, another's posing the same clip at the same
+    /// time (`shared`): the parts of nodes the clip moves as there, the
+    /// rest as its own rest.
+    #[inline(never)]
+    pub(crate) fn pose_from(&mut self, source: &[Transform]) {
+        let pose = &mut self.pose;
+        for &node in &self.posed {
+            pose[node as usize] = self.rest[node as usize];
+        }
+        let clip = &self.layers[0].states[0].clip.0;
+        for channel in &clip.channels {
+            let (Some(to), Some(from)) = (pose.get_mut(channel.node), source.get(channel.node))
+            else {
+                continue;
+            };
+            match channel.path {
+                Path::Translation => to.position = from.position,
+                Path::Rotation => to.rotation = from.rotation,
+                Path::Scale => to.scale = from.scale,
+                Path::Weight(_) => {}
+            }
+        }
+        self.dirty = false;
+    }
     /// Whether it keeps anything found from the world's hierarchy.
     pub(crate) fn binds(&self) -> bool {
         self.ik.is_some() || self.layers.iter().any(|l| l.layer.mask.is_some())

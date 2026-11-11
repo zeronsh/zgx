@@ -15,7 +15,7 @@
 //! playing the same motion as a clip instead (`animated`): `clip`, one
 //! layer; `layers`, a masked override and an additive layer over it;
 //! `crowd`, each skinned mesh a chain of its own playing the clip from its
-//! own time. Frames are then 1/60 s apart, whenever drawn.
+//! own time; `lockstep`, those all from the start (one pose, shared). Frames are then 1/60 s apart, whenever drawn.
 //! `SCENE=shader` (with the `shaders` feature) is `textured`'s meshes, a
 //! tenth drawn by one of four custom materials (two shading, one moving its
 //! vertices, one cutting out), one shader's parameter set each frame.
@@ -526,13 +526,15 @@ fn animated(world: &World, root: ObjectId, arm: &str) {
                 mesh(i, &skin);
             }
         }
-        "crowd" => {
+        "crowd" | "lockstep" => {
             for i in 0..meshes {
-                let (_, _, skin) = chain(i as f32 * 0.37);
+                // `lockstep`: all from the start, posing one pose.
+                let from = if arm == "crowd" { i as f32 * 0.37 } else { 0. };
+                let (_, _, skin) = chain(from);
                 mesh(i, &skin);
             }
         }
-        _ => panic!("ANIMATOR is clip, layers or crowd"),
+        _ => panic!("ANIMATOR is clip, layers, crowd or lockstep"),
     }
 }
 #[cfg(not(feature = "gltf"))]
