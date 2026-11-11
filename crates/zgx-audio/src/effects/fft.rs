@@ -43,6 +43,11 @@ impl Fft {
         }
     }
 
+    /// Its number of points.
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
     /// `data` transformed in place: forward, or `inverse` (unscaled: the
     /// caller divides by the size).
     pub fn run(&self, data: &mut [Complex], inverse: bool) {

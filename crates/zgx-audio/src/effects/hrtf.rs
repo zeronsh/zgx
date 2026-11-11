@@ -97,6 +97,124 @@ impl HrtfSet {
     }
 }
 
+/// The spherical head's radius, in metres: Brown and Duda's 8.75 cm, an
+/// average adult's.
+pub const HEAD_RADIUS: f32 = 0.0875;
+
+/// The least the head's shadow leaves of the highs (Brown and Duda's
+/// alpha minimum), and the angle from an ear where it does (150 degrees).
+const SHADOW_LEAST: f64 = 0.1;
+const SHADOW_DEEPEST: f64 = 150. * std::f64::consts::PI / 180.;
+
+/// The model's seconds from the head's centre to an ear `incidence`
+/// radians from the sound (0: the sound comes from the ear's own side):
+/// less than the radius's worth on the near side, the way round the head
+/// on the far. Its two ears differ by Woodworth's (a / c)(θ + sin θ).
+pub(crate) fn ear_delay(incidence: f64) -> f64 {
+    let radius = f64::from(HEAD_RADIUS) / f64::from(crate::spatial::SPEED_OF_SOUND);
+    let incidence = incidence.clamp(0., std::f64::consts::PI);
+    if incidence < std::f64::consts::FRAC_PI_2 {
+        radius * (1. - crate::math::sin_cos(incidence).1)
+    } else {
+        radius * (1. + incidence - std::f64::consts::FRAC_PI_2)
+    }
+}
+
+/// The head's shadow on an ear `incidence` radians from the sound, at
+/// `omega` radians a second: Brown and Duda's one pole and one zero,
+/// (1 + j α ω / 2ω₀) / (1 + j ω / 2ω₀), ω₀ = c / a, its zero moving with
+/// the angle: +6 dB of highs facing the sound, -20 dB at 150 degrees.
+pub(crate) fn shadow(incidence: f64, omega: f64) -> (f64, f64) {
+    let alpha = (1. + SHADOW_LEAST / 2.)
+        + (1. - SHADOW_LEAST / 2.)
+            * crate::math::sin_cos(incidence / SHADOW_DEEPEST * std::f64::consts::PI).1;
+    let x = omega * f64::from(HEAD_RADIUS) / (2. * f64::from(crate::spatial::SPEED_OF_SOUND));
+    // (1 + j α x) / (1 + j x), as real and imaginary parts.
+    let d = 1. + x * x;
+    ((1. + alpha * x * x) / d, (alpha - 1.) * x / d)
+}
+
+impl HrtfSet {
+    /// Brown and Duda's spherical head ([`HEAD_RADIUS`]), made at `rate`.
+    /// Each ear's response is its delay from the head's centre (less than
+    /// the radius's worth on the near side, the way round the head on the
+    /// far, so the ears differ by Woodworth's (a / c)(θ + sin θ)) and the
+    /// head's shadow on it: one pole and one zero, (1 + jαω/2ω₀) /
+    /// (1 + jω/2ω₀) with ω₀ = c / a, its zero moving with the angle from the
+    /// ear, +6 dB of highs facing the sound and -20 dB at 150 degrees. There
+    /// are directions every 5 degrees round and every 10 from 40 below to
+    /// straight above. It's owned outright,
+    /// made in code, and what [`Binaural::spherical`] hears through.
+    ///
+    /// What it is: the two cues a head gives by its size and its shadow,
+    /// which place a sound left and right (the time and level between the
+    /// ears) and dull what's behind an ear. What it isn't: no outer ears,
+    /// shoulders or room, so nothing tells above from below or front from
+    /// back but the angle to each ear; elevation is weak. A measured set
+    /// ([`HrtfSet::new`]) has those, and replaces it.
+    ///
+    /// Each response is about 4 ms long (a power of two of frames) and
+    /// starts an eighth of that late, both ears alike, so its fractional
+    /// delays can ring before as well as after. Below 80% of the
+    /// Nyquist frequency its spectrum is the model's exactly at each of
+    /// its bins; above, it falls smoothly to nothing.
+    pub fn spherical_head(rate: u32) -> HrtfSet {
+        let rate = rate.clamp(1_000, 768_000);
+        let n = ((f64::from(rate) * 0.004).ceil() as usize)
+            .next_power_of_two()
+            .max(64);
+        let fft = Fft::new(n);
+        let mut directions = Vec::new();
+        for elevation in (-40..=90).step_by(10) {
+            let round = if elevation == 90 { 1 } else { 72 };
+            for k in 0..round {
+                directions.push(toward(k as f32 * 5. - 180., elevation as f32));
+            }
+        }
+        let [mut left, mut right] = [Vec::new(), Vec::new()];
+        for d in &directions {
+            for (side, out) in [(-1f64, &mut left), (1., &mut right)] {
+                // The angle between the sound and this ear's side.
+                let along = (side * f64::from(d[0])).clamp(-1., 1.);
+                out.push(response(&fft, rate, crate::math::acos(along)));
+            }
+        }
+        HrtfSet::new(rate, directions, left, right).expect("the model makes a set")
+    }
+}
+
+/// One ear's response: the model's spectrum at each bin, delayed, made
+/// real by its mirror image, back to time.
+fn response(fft: &Fft, rate: u32, incidence: f64) -> Vec<f32> {
+    let n = fft.size();
+    let lead = n / 8;
+    let rate = f64::from(rate);
+    let delay = ear_delay(incidence) + lead as f64 / rate;
+    let mut spectrum = vec![[0f32; 2]; n];
+    for k in 0..n / 2 {
+        let omega = 2. * std::f64::consts::PI * k as f64 * rate / n as f64;
+        let (re, im) = shadow(incidence, omega);
+        let (sin, cos) = crate::math::sin_cos(omega * delay);
+        // Times e^(-j ω delay), and the roll-off from 80% of Nyquist.
+        let fraction = 2. * k as f64 / n as f64;
+        let keep = if fraction <= 0.8 {
+            1.
+        } else {
+            0.5 * (1. + crate::math::sin_cos((fraction - 0.8) / 0.2 * std::f64::consts::PI).1)
+        };
+        let z = [
+            ((re * cos + im * sin) * keep) as f32,
+            ((im * cos - re * sin) * keep) as f32,
+        ];
+        spectrum[k] = z;
+        if k > 0 {
+            spectrum[n - k] = [z[0], -z[1]];
+        }
+    }
+    fft.run(&mut spectrum, true);
+    spectrum.iter().map(|z| z[0] / n as f32).collect()
+}
+
 /// A direction from azimuth (degrees, 0 ahead, positive to the right) and
 /// elevation (degrees up).
 fn toward(azimuth: f32, elevation: f32) -> Vec3 {
@@ -150,6 +268,8 @@ pub struct Binaural {
     line: Vec<Complex>,
     newest: usize,
     scratch: Vec<Complex>,
+    /// The spherical head, made again at the engine's rate when prepared.
+    model: bool,
 }
 
 impl Binaural {
@@ -180,7 +300,18 @@ impl Binaural {
             line: Vec::new(),
             newest: 0,
             scratch: Vec::new(),
+            model: false,
         }
+    }
+
+    /// Through Brown and Duda's spherical head
+    /// ([`HrtfSet::spherical_head`]), made at the engine's rate: what a
+    /// head's size and shadow give, without outer ears, so elevation is
+    /// weak. From straight ahead.
+    pub fn spherical() -> Binaural {
+        let mut binaural = Binaural::new(Arc::new(HrtfSet::spherical_head(48_000)));
+        binaural.model = true;
+        binaural
     }
 
     /// From this direction at the start.
@@ -291,6 +422,9 @@ impl Effect for Binaural {
         // sample spread over its two nearest, going down (the first's
         // transpose, a triangle wide enough to take what would alias).
         self.rate = format.rate.max(1);
+        if self.model && self.set.rate != self.rate {
+            self.set = Arc::new(HrtfSet::spherical_head(self.rate));
+        }
         let ratio = f64::from(self.set.rate) / f64::from(self.rate);
         let taps = if self.set.rate == self.rate {
             self.set.taps

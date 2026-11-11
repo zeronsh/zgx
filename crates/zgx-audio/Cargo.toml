@@ -18,8 +18,8 @@ device = ["dep:cpal"]
 # Ogg Vorbis, loaded whole or streamed: lewton, pure Rust (MIT/Apache).
 vorbis = ["dep:lewton"]
 # Binaural sound for headphones: effects::Binaural, a partitioned
-# convolution with the app's own head-related impulse responses (HrtfSet).
-# No dependency; no response data ships yet.
+# convolution with a spherical head made in code, or the app's own measured
+# head-related impulse responses (HrtfSet). No dependency, no data.
 hrtf = []
 
 [dependencies]

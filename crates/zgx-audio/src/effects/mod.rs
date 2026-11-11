@@ -25,5 +25,5 @@ pub use delay::Delay;
 pub use dynamics::{Compressor, Duck};
 pub use filter::{FLAT, HighPass, LowPass, Peaking, Slope};
 #[cfg(feature = "hrtf")]
-pub use hrtf::{BLOCK, Binaural, HrtfSet};
+pub use hrtf::{BLOCK, Binaural, HEAD_RADIUS, HrtfSet};
 pub use reverb::Reverb;

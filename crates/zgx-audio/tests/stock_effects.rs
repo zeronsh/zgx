@@ -784,4 +784,134 @@ mod binaural {
             );
         }
     }
+
+    /// Brown and Duda's spherical head, as the papers give it, apart from
+    /// the crate's: each ear's delay from the head's centre, and its
+    /// shadow at `omega`, for an ear `incidence` radians from the sound.
+    fn model(incidence: f64, omega: f64) -> (f64, num::Complex) {
+        let (a, c) = (0.0875f64, 343.3f64);
+        let delay = if incidence < PI / 2. {
+            a / c * (1. - incidence.cos())
+        } else {
+            a / c * (1. + incidence - PI / 2.)
+        };
+        let alpha = 1.05 + 0.95 * (incidence / (150f64.to_radians()) * PI).cos();
+        let x = omega * a / (2. * c);
+        (delay, num::div([1., alpha * x], [1., x]))
+    }
+
+    mod num {
+        pub type Complex = [f64; 2];
+        pub fn mul(a: Complex, b: Complex) -> Complex {
+            [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]]
+        }
+        pub fn div(a: Complex, b: Complex) -> Complex {
+            let d = b[0] * b[0] + b[1] * b[1];
+            [
+                (a[0] * b[0] + a[1] * b[1]) / d,
+                (a[1] * b[0] - a[0] * b[1]) / d,
+            ]
+        }
+        pub fn polar(angle: f64) -> Complex {
+            [angle.cos(), angle.sin()]
+        }
+    }
+
+    /// Tones at bins 2 and 32 of `n`, heard through the spherical head from
+    /// `azimuth` and `elevation` at `rate`: for each, right over left, and
+    /// the two ears' levels.
+    fn ears(rate: u32, n: usize, azimuth: f32, elevation: f32) -> [(num::Complex, [f32; 2]); 2] {
+        let tone: Vec<f32> = (0..n)
+            .map(|i| {
+                let at = |k: usize| (2. * PI * (k * i) as f64 / n as f64).sin();
+                ((at(2) + at(32)) * 0.2) as f32
+            })
+            .collect();
+        let tone = Sound::from_samples(&tone, 1, rate).unwrap();
+        let (audio, mut mixer) = Audio::offline(Config {
+            rate,
+            ..unlimited()
+        })
+        .unwrap();
+        audio
+            .master()
+            .add_effect(Binaural::spherical().facing(azimuth, elevation))
+            .unwrap();
+        audio
+            .play(&tone, Play::new().looping(true).fade_in(0.))
+            .unwrap();
+        let out = mixer.frames(n * 40);
+        let window = &out[n * 20 * 2..];
+        let amplitude = |side: usize, k: usize| -> num::Complex {
+            let mut sum = [0f64; 2];
+            for (i, frame) in window.as_chunks::<2>().0.iter().enumerate() {
+                let a = -2. * PI * (k * i) as f64 / n as f64;
+                sum[0] += f64::from(frame[side]) * a.cos();
+                sum[1] += f64::from(frame[side]) * a.sin();
+            }
+            sum
+        };
+        let level = |z: num::Complex| (z[0].hypot(z[1]) * 2. / (window.len() / 2) as f64) as f32;
+        [2, 32].map(|k| {
+            let (l, r) = (amplitude(0, k), amplitude(1, k));
+            (num::div(r, l), [level(l), level(r)])
+        })
+    }
+
+    #[test]
+    fn the_spherical_head_s_ears_differ_by_woodworth_s_delay_and_brown_and_duda_s_shadow() {
+        for rate in [48_000u32, 96_000, 44_100] {
+            // Its responses' length: about 4 ms, a power of two.
+            let n = ((f64::from(rate) * 0.004).ceil() as usize).next_power_of_two();
+            for azimuth in [0f32, 30., 90., -45., 135., -150.] {
+                let phi = f64::from(azimuth).to_radians();
+                // The sound's angle from each ear's side.
+                let (from_left, from_right) = (wrap(PI / 2. + phi), wrap(PI / 2. - phi));
+                let heard = ears(rate, n, azimuth, 0.);
+                for (k, (got, _)) in [2usize, 32].into_iter().zip(heard) {
+                    let omega = 2. * PI * k as f64 * f64::from(rate) / n as f64;
+                    let (d_left, h_left) = model(from_left, omega);
+                    let (d_right, h_right) = model(from_right, omega);
+                    if azimuth.abs() <= 90. {
+                        // Woodworth's formula, from the two ears' delays.
+                        let woodworth = 0.0875 / 343.3 * (phi.abs() + phi.abs().sin());
+                        assert!(((d_left - d_right).abs() - woodworth).abs() < 1e-12);
+                    }
+                    let want = num::mul(
+                        num::div(h_right, h_left),
+                        num::polar(-omega * (d_right - d_left)),
+                    );
+                    let difference = num::div(got, want);
+                    let (db, radians) = (
+                        10. * (difference[0].powi(2) + difference[1].powi(2)).log10(),
+                        difference[1].atan2(difference[0]),
+                    );
+                    assert!(
+                        db.abs() < 0.01 && radians.abs() < 1e-3,
+                        "{rate} Hz, {azimuth} degrees, bin {k}: off by {db:.4} dB, {radians:.5} rad"
+                    );
+                }
+            }
+        }
+    }
+
+    /// An angle from the ear's side, folded into 0 to pi.
+    fn wrap(angle: f64) -> f64 {
+        let a = angle.rem_euclid(2. * PI);
+        if a > PI { 2. * PI - a } else { a }
+    }
+
+    #[test]
+    fn straight_ahead_behind_and_above_the_spherical_head_hears_alike_in_both_ears() {
+        // (Behind is a rounding off the middle: sin 180 degrees in single
+        // precision is -8.7e-8, so the ears differ by about that.)
+        for (azimuth, elevation) in [(0., 0.), (180., 0.), (0., 90.)] {
+            let [_, (ratio, levels)] = ears(48_000, 256, azimuth, elevation);
+            assert!(levels[0] > 0.05, "silent");
+            assert!(
+                (ratio[0] - 1.).abs() < 1e-5 && ratio[1].abs() < 1e-5,
+                "{azimuth}, {elevation}: {ratio:?}"
+            );
+        }
+    }
 }
