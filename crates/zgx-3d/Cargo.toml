@@ -32,6 +32,9 @@ lighting = []
 # Particle emitters (`World::add_emitter`): updated by compute where the
 # device runs it, on the CPU elsewhere.
 particles = ["compute"]
+# Global illumination: irradiance probe volumes (`World::add_probes`),
+# filled by ray queries where the device has them.
+gi = []
 
 # Custom materials (`MaterialShader`, `World::add_shader`, surface layers):
 # WGSL functions plugged into the lit pipeline. Off, a world draws as
@@ -57,3 +60,7 @@ required-features = ["particles"]
 [[test]]
 name = "shaders"
 required-features = ["shaders"]
+
+[[test]]
+name = "gi"
+required-features = ["gi"]

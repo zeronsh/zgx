@@ -75,6 +75,8 @@ pub(super) fn wgsl_full(
         b'B' => !prepass,
         b'F' => custom.is_some_and(times),
         b'J' => custom.is_some_and(|c| !times(c)),
+        b'g' => variant.probed(),
+        b'h' => variant.probed() && !variant.lit(),
         _ => false,
     };
     // The kept chunks, copied whole.
@@ -187,7 +189,7 @@ macro_rules! parts {
 // place. Comments and blank lines cost nothing: they're dropped once.
 parts![
     "frame", "maps", "skin", "vertex", "caster", "light", "display", "fragment", "lights",
-    "shadows",
+    "shadows", "probes",
 ];
 
 #[cfg(test)]
@@ -318,7 +320,7 @@ mod tests {
         assert_eq!(lit, 0x3d4d_9104_4d81_6ec5, "{lit:#018x}");
         // And every variant of every bit there is now, as it is now.
         let all = variants_text(u32::from(Variant::ALL) + 1);
-        assert_eq!(all, 0xbc9a_c07f_4884_1b65, "{all:#018x}");
+        assert_eq!(all, 0x9386_fe72_4401_65a5, "{all:#018x}");
     }
 
     /// `bits` as a variant a mesh can have: a cut-out, placed, glass, coated

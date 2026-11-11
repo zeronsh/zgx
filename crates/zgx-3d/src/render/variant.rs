@@ -34,6 +34,8 @@ impl Variant {
     /// A custom material draws it (`World::set_shader`): which one, its
     /// binding says (`custom`).
     pub(super) const CUSTOM: u16 = 1 << 13;
+    /// Its diffuse light from irradiance probes (`World::add_probes`).
+    pub(super) const PROBES: u16 = 1 << 14;
     // `Extras::kinds`' bits, shifted, are these (see `variant_of`).
     pub(super) const _KINDS: () = assert!(
         Self::TRANSMITTING == crate::world::GLASS as u16 * Self::TRANSMITTING
@@ -44,7 +46,7 @@ impl Variant {
     /// Every bit there is (`shader`'s tests cover each, and fail on one
     /// left out of this).
     #[cfg(test)]
-    pub(super) const ALL: u16 = (Self::CUSTOM << 1) - 1;
+    pub(super) const ALL: u16 = (Self::PROBES << 1) - 1;
     /// It with `bit` on or off.
     pub(super) fn with(self, bit: u16, on: bool) -> Self {
         Self(if on { self.0 | bit } else { self.0 & !bit })
@@ -90,6 +92,9 @@ impl Variant {
     }
     pub(super) fn custom(self) -> bool {
         self.0 & Self::CUSTOM != 0
+    }
+    pub(super) fn probed(self) -> bool {
+        self.0 & Self::PROBES != 0
     }
 }
 /// Hashes a `Variant` by its own bits: they're few and its, and the

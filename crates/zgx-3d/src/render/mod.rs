@@ -27,6 +27,10 @@ mod instances;
 mod lights;
 mod materials;
 mod pipelines;
+#[cfg(feature = "gi")]
+mod probes;
+#[cfg(feature = "gi")]
+mod raytrace;
 mod shader;
 mod shadows;
 mod targets;
@@ -637,8 +641,15 @@ impl Viewport for Renderer {
         );
         #[cfg(not(feature = "lighting"))]
         let (clustered, cascaded) = (false, false);
+        // Diffuse light from probes (`probes.rs`). Not yet beside clusters
+        // or cascades: those take group 0's other bindings.
+        #[cfg(feature = "gi")]
+        let probed = !clustered && !cascaded && probes::probed(&world, frame.device);
+        #[cfg(not(feature = "gi"))]
+        let probed = false;
         let lighting = if clustered { Variant::CLUSTERED } else { 0 }
-            | if cascaded { Variant::CASCADED } else { 0 };
+            | if cascaded { Variant::CASCADED } else { 0 }
+            | if probed { Variant::PROBES } else { 0 };
         let scratch = &mut self.scratch;
         // The sun's single map's (none while its shadow is in cascades).
         let sun = (world.shadows && !cascaded)
@@ -734,6 +745,15 @@ impl Viewport for Renderer {
         }
         #[cfg(feature = "lighting")]
         lights::bind(gpu, frame.device, lit);
+        #[cfg(feature = "gi")]
+        probes::frame(
+            gpu,
+            (frame.device, frame.queue),
+            frame.encoder,
+            &world,
+            &uniforms,
+            (probed, kept.is_none().then_some(&all[..])),
+        );
         frame
             .queue
             .write_buffer(&gpu.uniforms, 0, bytemuck::bytes_of(&uniforms));
@@ -796,7 +816,13 @@ impl Viewport for Renderer {
         // without them).
         #[cfg(feature = "shaders")]
         custom::prepare(gpu, &world, frame, (runs, shown));
+        #[cfg(feature = "gi")]
+        if probed {
+            probes::frame_bind(gpu, frame.device, lit);
+        }
         let frame_bind = match &gpu.environment_bind {
+            #[cfg(feature = "gi")]
+            _ if probed => &gpu.probes.as_ref().unwrap().bind.as_ref().unwrap().1,
             Some(bind) if lit => bind,
             _ => &gpu.bind,
         };

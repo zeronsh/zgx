@@ -54,7 +54,11 @@ pub(super) fn make_layouts(
     if key != 0 {
         super::lights::make_layouts(gpu, device, super::lights::key_of(variant));
     }
-    #[cfg(not(feature = "lighting"))]
+    #[cfg(feature = "gi")]
+    if variant.probed() {
+        super::probes::frame_layout_of(gpu, device, variant.lit());
+    }
+    #[cfg(not(any(feature = "lighting", feature = "gi")))]
     let _ = variant;
 }
 /// `variant`'s pipelines with `source`, group 1 bound as `group1` says (its
@@ -75,6 +79,8 @@ pub(super) fn pipelines_of(
     let group0 = match &gpu.environment_layout {
         #[cfg(feature = "lighting")]
         _ if key != 0 => super::lights::layout_of(gpu, super::lights::key_of(variant)),
+        #[cfg(feature = "gi")]
+        _ if variant.probed() => super::probes::frame_layout(gpu, variant.lit()),
         Some((layout, _)) if variant.lit() => layout,
         _ => &gpu.layout,
     };

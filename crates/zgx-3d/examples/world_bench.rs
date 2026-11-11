@@ -19,6 +19,9 @@
 //! `SCENE=shader` (with the `shaders` feature) is `textured`'s meshes, a
 //! tenth drawn by one of four custom materials (two shading, one moving its
 //! vertices, one cutting out), one shader's parameter set each frame.
+//! `SCENE=probes` (with `--features gi`) is `textured` inside a volume of
+//! 8 by 4 by 8 irradiance probes on a device tracing rays: each frame the
+//! world turns, its ray scene is built again and 64 probes are updated.
 //! `MESHES` and `FRAMES` size it; `CULLING=0` draws what the camera can't
 //! see too; `CASCADES=n`, with the `lighting` feature, casts the sun's
 //! shadow through n cascades (`still`: they follow the camera; `textured`:
@@ -61,7 +64,14 @@ fn now<T>(future: impl Future<Output = T>) -> T {
     }
 }
 
+// (Its scenes' modules' own: `compute`, `particles`.)
+#[cfg_attr(not(any(feature = "compute", feature = "particles")), allow(dead_code))]
 fn device() -> (wgpu::Device, wgpu::Queue) {
+    device_with(false)
+}
+
+/// The no-op device, asking for ray queries where `ray_queries` (`probes`).
+fn device_with(ray_queries: bool) -> (wgpu::Device, wgpu::Queue) {
     let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
     descriptor.backends = wgpu::Backends::NOOP;
     descriptor.backend_options.noop.enable = true;
@@ -70,7 +80,19 @@ fn device() -> (wgpu::Device, wgpu::Queue) {
         now(wgpu::Instance::new(descriptor)
             .request_adapter(&wgpu::RequestAdapterOptions::default()))
         .expect("the no-op adapter");
-    now(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("the no-op device")
+    let descriptor = if ray_queries {
+        wgpu::DeviceDescriptor {
+            required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+            required_limits: wgpu::Limits::default()
+                .using_minimum_supported_acceleration_structure_values(),
+            // SAFETY: the no-op backend runs nothing.
+            experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+            ..Default::default()
+        }
+    } else {
+        wgpu::DeviceDescriptor::default()
+    };
+    now(adapter.request_device(&descriptor)).expect("the no-op device")
 }
 
 /// A texture of `index`, its colour its own, clear in a corner.
@@ -201,6 +223,7 @@ fn known(scene: &str) -> bool {
         ("shader", cfg!(feature = "shaders")),
         ("compute", cfg!(feature = "compute")),
         ("particles", cfg!(feature = "particles")),
+        ("probes", cfg!(feature = "gi")),
     ];
     ["", "textured", "mixed", "still", "lights", "anim"].contains(&scene)
         || featured.iter().any(|&(name, on)| on && name == scene)
@@ -222,7 +245,8 @@ fn main() {
     }
     let mixed = std::env::var("SCENE").is_ok_and(|scene| scene == "mixed");
     let (meshes, frames) = (setting("MESHES", 2000), setting("FRAMES", 30));
-    let (device, queue) = device();
+    let probes = std::env::var("SCENE").is_ok_and(|scene| scene == "probes");
+    let (device, queue) = device_with(probes);
     let (world, root, joint, morphs) = world(mixed, meshes);
     let scene = std::env::var("SCENE").unwrap_or_default();
     if scene == "lights" {
@@ -241,6 +265,21 @@ fn main() {
         Vec::new()
     };
     let start = arm.as_ref().map(|_| std::time::Instant::now());
+    if probes {
+        #[cfg(feature = "gi")]
+        {
+            let half = (meshes as f32).sqrt().ceil();
+            world
+                .add_probes(ProbeVolume::new(
+                    [-half, -1., -half],
+                    [half, 6., half],
+                    [8, 4, 8],
+                ))
+                .expect("a volume");
+        }
+        #[cfg(not(feature = "gi"))]
+        panic!("SCENE=probes needs --features gi");
+    }
     let mut painter = world.viewport();
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("A frame"),

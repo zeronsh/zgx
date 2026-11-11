@@ -153,6 +153,12 @@
 //E     let along = textureSampleLevel(environment_cube, environment_sampler, turned(r), roughness * frame.environment.w).rgb;
 //E     surround = irradiance(turned(n)) * base * (1.0 - metallic) * (1.0 - fresnel);
 //E     surround = (surround + along * reflectance(f0, roughness, n_v)) * frame.environment.x;
+        // Inside a probe volume, its probes' diffuse light takes the place
+        // of the hemisphere's or environment's (`probes.wgsl`).
+//g         let probed = probe_light(in.world, n, v);
+//h         let around = ambient;
+//g //E     let around = irradiance(turned(n)) * frame.environment.x;
+//g         surround += (probed.rgb - around) * probed.a * base * (1.0 - metallic) * (1.0 - fresnel);
         lit += surround * occlusion;
 //O         lit += in.emissive * glow;
 //V         lit += zm.emissive;

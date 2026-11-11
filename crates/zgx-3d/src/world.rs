@@ -7,6 +7,8 @@ use crate::{
 use std::{cell::RefCell, rc::Rc};
 #[cfg(feature = "gltf")]
 pub(crate) mod animation;
+#[cfg(feature = "gi")]
+pub(crate) mod gi;
 #[cfg(feature = "lighting")]
 pub(crate) mod lighting;
 
@@ -594,6 +596,9 @@ pub(crate) struct Inner {
     /// Its custom materials and surface layers (`World::add_shader`).
     #[cfg(feature = "shaders")]
     pub(crate) shaders: crate::material::Shaders,
+    /// Its probe volumes (`world/gi.rs`).
+    #[cfg(feature = "gi")]
+    pub(crate) gi: gi::Gi,
 }
 
 /// What keeps a world drawing frames by itself (design-3d-aaa.md, 4.4): a
@@ -1317,6 +1322,8 @@ impl World {
             temporaries: std::cell::Cell::new(0),
             #[cfg(feature = "shaders")]
             shaders: Default::default(),
+            #[cfg(feature = "gi")]
+            gi: Default::default(),
         }));
         let view = zgx_gpu::viewport::view(crate::painter::Painter::new(
             crate::render::Renderer::new(Rc::downgrade(&inner)),
