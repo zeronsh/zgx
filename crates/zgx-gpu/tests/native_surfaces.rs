@@ -277,3 +277,69 @@ fn a_surface_replaced_is_let_go_while_the_window_draws_on() {
         "it went on collecting past a second and a half"
     );
 }
+
+/// A readback's pixel buffers go back at rest, but for the one still held.
+/// CoreVideo's texture cache keeps a texture of each buffer the pool still
+/// has, and the buffer with it: flushed before the pool (each frame), it
+/// keeps them, so a paused video player held two (7 MB at 1280 by 720) for
+/// as long as it was paused. Read as this process's IOSurface memory: one
+/// given back can still be looked up for a while, and the footprint as a
+/// whole moves by more with the allocator's own returns.
+#[test]
+fn a_readbacks_buffers_go_back_at_rest_but_the_one_held() {
+    unsafe extern "C" {
+        fn getpid() -> i32;
+    }
+    let surfaces = || {
+        let out = std::process::Command::new("footprint")
+            // SAFETY: getpid has no preconditions.
+            .args(["-p", &unsafe { getpid() }.to_string()])
+            .output()
+            .expect("footprint");
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let line = text
+            .lines()
+            .find(|line| line.trim_end().ends_with(" IOSurface"))
+            .unwrap_or_else(|| panic!("no IOSurface line in {text}"));
+        let mut words = line.split_whitespace();
+        let (number, unit) = (words.next().unwrap(), words.next().unwrap());
+        let scale = match unit {
+            "B" => 1.,
+            "KB" => 1024.,
+            "MB" => 1024. * 1024.,
+            "GB" => 1024. * 1024. * 1024.,
+            _ => panic!("{line}"),
+        };
+        (number.parse::<f64>().unwrap() * scale) as i64
+    };
+    let (width, height) = (1280u32, 720u32);
+    let frame_bytes = (width * height * 4) as i64;
+    let whole = [Rect::new(0., 0., width as f32, height as f32)];
+    let mut scene = Scene::new(width as f32, height as f32);
+    scene.flush();
+    let mut gpu = GpuRenderer::new(width, height).unwrap();
+    let mut staging = zgx_gpu::SurfaceReadback::default();
+    // Frames drawn as a window shows them: each held until the next is.
+    let mut held: std::collections::VecDeque<zgx_gpu::PixelBuffer> = Default::default();
+    for _ in 0..6 {
+        gpu.render(&scene, &whole).unwrap();
+        held.push_back(gpu.readback_surface(&mut staging).unwrap());
+        if held.len() > 2 {
+            held.pop_front();
+        }
+    }
+    // Paused: the last one shown still held, the rest given up.
+    let shown = held.pop_back().unwrap();
+    drop(held);
+    // At rest (a player's comes 5 s after its last frame).
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let before = surfaces();
+    assert!(before >= 2 * frame_bytes, "{before} bytes of surfaces held");
+    staging.release_unused();
+    let after = surfaces();
+    assert!(
+        after < 2 * frame_bytes,
+        "{after} bytes of surfaces held at rest (from {before}), a frame being {frame_bytes}"
+    );
+    drop(shown);
+}

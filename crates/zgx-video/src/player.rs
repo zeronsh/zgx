@@ -89,22 +89,31 @@ struct Kept {
     bytes: usize,
 }
 
+/// What its thread keeps count of, for the player to read (tests): the
+/// bytes of frames it keeps, and the times it gave back pixel buffers at rest.
+#[derive(Default)]
+pub(crate) struct Counts {
+    cached: AtomicUsize,
+    #[cfg(target_os = "macos")]
+    releases: AtomicUsize,
+}
+
 /// Frames drawn for this script, as they were: those shown while paused or
 /// scrubbing, not those played (played on, a frame isn't asked for again).
-/// `held` says how many bytes, for the player to read.
+/// `counts` says how many bytes, for the player to read.
 struct Cache {
     frames: HashMap<u64, Kept>,
     order: VecDeque<u64>,
     bytes: usize,
-    held: Arc<AtomicUsize>,
+    counts: Arc<Counts>,
 }
 impl Cache {
-    fn new(held: Arc<AtomicUsize>) -> Self {
+    fn new(counts: Arc<Counts>) -> Self {
         Self {
             frames: HashMap::new(),
             order: VecDeque::new(),
             bytes: 0,
-            held,
+            counts,
         }
     }
     fn get(&mut self, frame: u64) -> Option<Kept> {
@@ -124,11 +133,11 @@ impl Cache {
                 self.bytes -= gone.bytes;
             }
         }
-        self.held.store(self.bytes, Ordering::Relaxed);
+        self.counts.cached.store(self.bytes, Ordering::Relaxed);
     }
     fn clear(&mut self) {
-        *self = Self::new(self.held.clone());
-        self.held.store(0, Ordering::Relaxed);
+        *self = Self::new(self.counts.clone());
+        self.counts.cached.store(0, Ordering::Relaxed);
     }
 }
 
@@ -306,7 +315,7 @@ pub(crate) fn run(
     asks: Receiver<Ask>,
     tell: Sender<Event>,
     wake: Box<dyn Fn() + Send>,
-    held: Arc<AtomicUsize>,
+    counts: Arc<Counts>,
     #[cfg(target_os = "macos")] surfaces_to: Sender<(u64, zgx_gpu::PixelBuffer)>,
 ) {
     let wake: Rc<dyn Fn()> = Rc::from(wake as Box<dyn Fn()>);
@@ -316,7 +325,7 @@ pub(crate) fn run(
         composition: None,
         props: json!({}),
         stage: None,
-        cache: Cache::new(held),
+        cache: Cache::new(counts.clone()),
         tell,
         wake,
         tracks: 0,
@@ -334,6 +343,12 @@ pub(crate) fn run(
     let mut watched = true;
     let mut stale = false;
     let mut keep_for = CACHE_KEPT;
+    // Pixel buffers drawn since it last gave back those no one holds: once
+    // it rests (paused, nothing asked), a while on, it does (`keep_for`).
+    // Its pool can't free one CoreVideo still holds, about a second past the
+    // last frame, so giving back at the pause itself frees little.
+    #[cfg(target_os = "macos")]
+    let mut drawn_since_release = false;
     loop {
         // Until the next frame is due, or for ever: an idle preview waits.
         // Unseen and playing, only its end matters (not looping), or nothing.
@@ -364,6 +379,21 @@ pub(crate) fn run(
                     #[cfg(target_os = "macos")]
                     if let Some(stage) = &preview.stage {
                         stage.film.stage.release_surfaces();
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => return,
+            },
+            // At rest after drawing pixel buffers: those no one holds given
+            // back once, a while on.
+            #[cfg(target_os = "macos")]
+            None if drawn_since_release => match asks.recv_timeout(keep_for) {
+                Ok(ask) => Some(ask),
+                Err(RecvTimeoutError::Timeout) => {
+                    drawn_since_release = false;
+                    if let Some(stage) = &preview.stage {
+                        stage.film.stage.release_surfaces();
+                        counts.releases.fetch_add(1, Ordering::Relaxed);
                     }
                     continue;
                 }
@@ -509,6 +539,10 @@ pub(crate) fn run(
                 );
                 if watched {
                     result = preview.show(at, playing.is_none());
+                    #[cfg(target_os = "macos")]
+                    {
+                        drawn_since_release |= preview.surfaces;
+                    }
                     // Its device lost (a driver reset, a GPU removed): built
                     // again on a new one, and the frame drawn again, rather
                     // than stopping with an error the app can't undo.
@@ -563,8 +597,9 @@ pub struct Player {
     /// pixel buffers (macOS), they are read when an image's pixels are first
     /// asked for, and no frame is read back that no one reads.
     pub image: Signal<Option<Arc<ImageData>>>,
-    /// Bytes of drawn frames its thread keeps.
-    cached: Arc<AtomicUsize>,
+    /// What its thread keeps count of: the bytes of drawn frames it keeps,
+    /// and the times it gave back the pixel buffers no one held, at rest.
+    counts: Arc<Counts>,
     /// Its frames as pixel buffers, as its thread sends them (`view`, macOS).
     #[cfg(target_os = "macos")]
     surfaces: Receiver<(u64, zgx_gpu::PixelBuffer)>,
@@ -583,8 +618,8 @@ impl Player {
         #[cfg(target_os = "macos")]
         let (surfaces_to, surfaces) = channel();
         let path = path.to_owned();
-        let cached = Arc::new(AtomicUsize::new(0));
-        let held = cached.clone();
+        let counts = Arc::new(Counts::default());
+        let counted = counts.clone();
         std::thread::Builder::new()
             .name("zgx-video player".into())
             .spawn(move || {
@@ -596,7 +631,7 @@ impl Player {
                     Box::new(move || {
                         wake_up.send(());
                     }),
-                    held,
+                    counted,
                     #[cfg(target_os = "macos")]
                     surfaces_to,
                 );
@@ -611,7 +646,7 @@ impl Player {
             tracks: runtime.signal(Vec::new()),
             error: runtime.signal(None),
             image: runtime.signal(None),
-            cached,
+            counts,
             #[cfg(target_os = "macos")]
             surfaces,
             #[cfg(target_os = "macos")]
@@ -621,7 +656,13 @@ impl Player {
     /// Bytes of drawn frames its thread keeps now: for tests.
     #[doc(hidden)]
     pub fn cached_bytes(&self) -> usize {
-        self.cached.load(Ordering::Relaxed)
+        self.counts.cached.load(Ordering::Relaxed)
+    }
+    /// Times its thread gave back pixel buffers at rest: for tests.
+    #[cfg(target_os = "macos")]
+    #[doc(hidden)]
+    pub fn surface_releases(&self) -> usize {
+        self.counts.releases.load(Ordering::Relaxed)
     }
     /// How long it keeps drawn frames once nothing is asked of it (5 s):
     /// for tests.
