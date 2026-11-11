@@ -20698,21 +20698,27 @@ fn finite_effects(mut effects: Effects) -> Effects {
     effects.saturate = finite_factor(effects.saturate);
     effects
 }
-/// How far `children` is `current` turned round (each child `by` places
-/// on, the last round to the front), if that is all it is: two passes, no
-/// map. `current`'s children are each once in it, so `children` is then
-/// the same children, each once.
+/// How far `children` is `current` turned round by one, either way (a
+/// terminal's rows as it scrolls a line: the first to the end, or the last
+/// to the front), if that is all it is. Any other order is told apart in
+/// two comparisons, as most reorders are no turn at all; a longer turn takes
+/// the general path. `current`'s children are each once in it, so
+/// `children` is then the same children, each once.
 fn rotated_by(current: &[NodeId], children: &[NodeId]) -> Option<usize> {
     let count = current.len();
-    let first = *children.first()?;
-    let by = current.iter().position(|id| *id == first)?;
-    (by != 0
-        && children.len() == count
-        && children
-            .iter()
-            .enumerate()
-            .all(|(at, id)| *id == current[(at + by) % count]))
-    .then_some(by)
+    if count < 2 || children.len() != count {
+        return None;
+    }
+    let by = match (children[0] == current[1], children[0] == current[count - 1]) {
+        (true, _) => 1,
+        (false, true) => count - 1,
+        (false, false) => return None,
+    };
+    children
+        .iter()
+        .enumerate()
+        .all(|(at, id)| *id == current[(at + by) % count])
+        .then_some(by)
 }
 /// The indices of a longest strictly increasing subsequence of `values`
 /// (patience sorting, n log n).
@@ -21133,9 +21139,10 @@ mod set_box_tests {
         assert!(scene.measure_calls > before, "the column laid out");
         same_bounds_by(&scene, &column(&swapped).0, &swapped);
     }
-    /// A rotation is found as one (`rotated_by`), and it moves as many as
-    /// the general path's longest increasing run leaves; anything else is
-    /// not one.
+    /// A turn by one either way is found as one (`rotated_by`), and moves
+    /// just what the general path's longest increasing run leaves (the one
+    /// child that went round); a longer turn, or anything else, takes the
+    /// general path.
     #[test]
     fn a_rotation_moves_what_the_longest_run_leaves() {
         let ids: Vec<NodeId> = (0..9)
@@ -21144,12 +21151,26 @@ mod set_box_tests {
                 generation: 0,
             })
             .collect();
-        for by in 1..ids.len() {
+        let count = ids.len();
+        for by in 1..count {
             let turned: Vec<NodeId> = ids[by..].iter().chain(&ids[..by]).copied().collect();
-            assert_eq!(rotated_by(&ids, &turned), Some(by));
-            let places: Vec<usize> = turned.iter().map(|id| id.index as usize).collect();
-            let kept = longest_increasing(&places).len();
-            assert_eq!(kept, (ids.len() - by).max(by), "turned by {by}");
+            let one = by == 1 || by == count - 1;
+            assert_eq!(
+                rotated_by(&ids, &turned),
+                one.then_some(by),
+                "turned by {by}"
+            );
+            if one {
+                let places: Vec<usize> = turned.iter().map(|id| id.index as usize).collect();
+                let kept = longest_increasing(&places);
+                let moved: Vec<usize> = (0..count).filter(|at| !kept.contains(at)).collect();
+                // As the reorder works it out from the turn.
+                let tail_stays = count - by >= by;
+                let turn: Vec<usize> = (0..count)
+                    .filter(|at| (*at >= count - by) == tail_stays)
+                    .collect();
+                assert_eq!(moved, turn, "turned by {by}");
+            }
         }
         let mut swapped = ids.clone();
         swapped.swap(2, 5);
