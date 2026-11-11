@@ -232,6 +232,44 @@ fn a_reader_hears_every_read_of_output_since_the_last_frame() {
     assert_eq!(heard, ["alpha\nbeta", "gamma"]);
 }
 
+/// A screen of identical lines, one of them rewritten in place: the reader
+/// hears that line alone. Looking for a scroll over the whole screen once
+/// took it for lines scrolled in, the rewritten one and every one below.
+#[cfg(unix)]
+#[test]
+fn a_reader_hears_the_one_line_changed_among_identical_lines() {
+    let mut app = Harness::new();
+    app.ui.set_assistive_technology(true);
+    let command = "stty -echo; i=0; while [ $i -lt 200 ]; do echo same; i=$((i+1)); done; \
+                   printf same; read a; printf '\\033[5;1Hdiff'; sleep 30";
+    let term = Terminal::new(&app.ui.runtime, session(command));
+    let frames = zgx::frame::FrameClock::new();
+    let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
+    app.mount(provide(
+        frames.clone(),
+        provide(renderer, zgx::terminal::terminal(&term).w(600.).h(300.)),
+    ));
+    let mut index = 0;
+    let mut frame = |app: &mut Harness| {
+        index += 1;
+        frames.deliver(zgx::frame::Frame {
+            index,
+            time: Instant::now(),
+            interval: Duration::from_millis(16),
+        });
+        app.pump();
+    };
+    app.until("a screen of identical lines", |app| {
+        app.shows("same") && term.state().get().rows > 5
+    });
+    // What the lines' arrival said goes with this frame.
+    frame(&mut app);
+    term.input("\r");
+    app.until("the line rewritten", |app| app.shows("diff"));
+    frame(&mut app);
+    assert_eq!(news(&app), "diff");
+}
+
 #[cfg(unix)]
 #[test]
 fn the_process_in_front_is_named_again_after_it_execs_another() {
