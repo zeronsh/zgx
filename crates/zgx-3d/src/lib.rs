@@ -121,3 +121,7 @@ pub use world::{
     Camera, Clearcoat, Light, LightId, MAX_JOINTS, Material, Object, ObjectId, POINT_LIGHTS, Skin,
     Specular, Spot, ToneMapping, Transmission, World, srgb_to_linear,
 };
+/// Devices made from `Application::run` on ask for what a world uses where
+/// the GPU has it (timestamps, compressed textures): call it before `run`.
+/// See [`zgx_gpu::request_view_features`].
+pub use zgx_gpu::request_view_features;

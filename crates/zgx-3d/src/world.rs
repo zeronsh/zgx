@@ -1437,12 +1437,23 @@ impl World {
     /// An empty world: a camera 5 back and 1.5 up looking at the origin, no
     /// lights, a transparent background.
     ///
-    /// Devices made after it ask for what a world uses where it can (GPU
-    /// timestamps, compressed textures: `zgx_gpu::request_view_features`).
-    /// A world made after its window's device draws without them, as
-    /// `World::caps` then says.
+    /// It asks devices for what a world uses where it can (GPU timestamps,
+    /// compressed textures: [`request_view_features`](crate::request_view_features)),
+    /// which counts only before `Application::run` (or, without `run`,
+    /// before the first renderer's device). A world made after draws
+    /// without them, as `World::caps` says: call `request_view_features`
+    /// before `run`.
     pub fn new() -> Self {
         zgx_gpu::request_view_features();
+        #[cfg(debug_assertions)]
+        if zgx_gpu::view_features_decided() == Some(false) {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                eprintln!(
+                    "zgx-3d: a World made after Application::run began draws without GPU timestamps or compressed textures: call zgx_3d::request_view_features() before run (Luau: \"gpu\": {{ \"view_features\": true }} in zgx.json)"
+                );
+            });
+        }
         let inner = Rc::new(RefCell::new(Inner {
             objects: Vec::new(),
             lights: Vec::new(),

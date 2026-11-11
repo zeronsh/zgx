@@ -50,6 +50,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the window opens.
     let sun = sky::sun_toward(config.sun.0, config.sun.1);
     let environment = std::thread::spawn(move || sky::dawn(sun, 512));
+    // GPU timestamps and compressed textures where the GPU has them: asked
+    // before `run`, which decides before it starts the device.
+    zgx_3d::request_view_features();
     Application::new()
         .window(WindowOptions {
             title: "Harbor at dawn".into(),

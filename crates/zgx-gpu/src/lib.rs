@@ -18176,14 +18176,37 @@ pub fn ray_queries_status() -> Option<RayQueries> {
 }
 #[cfg(test)]
 mod view_feature_tests {
-    use super::{GpuContext, VIEW_FEATURE_LIST, VIEW_FEATURES, view_features};
+    use super::{GpuContext, VIEW_FEATURE_LIST, VIEW_FEATURES, ViewFeatures, view_features};
     use std::sync::atomic::Ordering;
+
+    /// Decided before the device is started (`Application::run` on its
+    /// thread): a request before counts, one after changes nothing; not
+    /// decided (a renderer made without `run`), a request counts as the
+    /// device is made.
+    #[test]
+    fn only_a_request_before_the_decision_counts() {
+        let early = ViewFeatures::new();
+        early.request();
+        assert!(early.decide());
+        assert!(early.wanted());
+        let late = ViewFeatures::new();
+        assert!(!late.decide());
+        late.request();
+        assert!(!late.wanted(), "asked after: unchanged");
+        assert_eq!(late.decided(), Some(false));
+        assert!(!late.decide(), "decided once");
+        let undecided = ViewFeatures::new();
+        assert!(!undecided.wanted());
+        undecided.request();
+        assert!(undecided.wanted());
+        assert_eq!(undecided.decided(), None);
+    }
 
     /// Nothing in this crate's tests asks for them (zgx-3d's `World::new`
     /// does): a device here is asked for what it was before they were.
     #[test]
     fn a_device_asks_for_no_view_features_unless_they_are_requested() {
-        assert!(!VIEW_FEATURES.load(Ordering::Relaxed));
+        assert!(!VIEW_FEATURES.requested.load(Ordering::Relaxed));
         assert_eq!(
             view_features(&wgpu::Features::all()),
             wgpu::Features::empty()
@@ -18253,9 +18276,51 @@ mod ray_query_tests {
 pub unsafe fn request_ray_queries() {
     RAY_QUERIES.store(true, std::sync::atomic::Ordering::Relaxed);
 }
-/// Devices made from now on ask for the optional features GPU views use
-/// (`request_view_features`).
-static VIEW_FEATURES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether devices ask for the optional features GPU views use: asked for
+/// (`request_view_features`), and decided once by an app's
+/// `Application::run` (`decide_view_features`).
+struct ViewFeatures {
+    requested: std::sync::atomic::AtomicBool,
+    /// 0 not decided (a device made outside `Application::run` reads
+    /// `requested` as it's made), 1 decided without them, 2 with.
+    decided: std::sync::atomic::AtomicU8,
+}
+impl ViewFeatures {
+    const fn new() -> Self {
+        Self {
+            requested: std::sync::atomic::AtomicBool::new(false),
+            decided: std::sync::atomic::AtomicU8::new(0),
+        }
+    }
+    fn request(&self) {
+        self.requested
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// Decided now, from what was asked so far, if not before: what later
+    /// requests can no longer change.
+    fn decide(&self) -> bool {
+        let wanted = self.requested.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = self.decided.compare_exchange(
+            0,
+            1 + u8::from(wanted),
+            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        self.decided() == Some(true)
+    }
+    fn decided(&self) -> Option<bool> {
+        match self.decided.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None,
+            decided => Some(decided == 2),
+        }
+    }
+    /// Whether a device made now asks for them.
+    fn wanted(&self) -> bool {
+        self.decided()
+            .unwrap_or_else(|| self.requested.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+static VIEW_FEATURES: ViewFeatures = ViewFeatures::new();
 /// Those features (`request_view_features` says what each is for).
 // When this branch meets main, this list and the other team's
 // `viewport::view_device_features()` (its Direct3D 11 views' device) become
@@ -18280,22 +18345,40 @@ const VIEW_FEATURE_LIST: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY
 ///   the memory).
 /// - `FLOAT32_FILTERABLE`: 32-bit float textures sampled with filtering.
 ///
-/// Call it before the first window or renderer is made: windows share one
-/// device, and a device already made keeps the features it was made with.
-/// zgx-3d's `World::new` calls it, so an app that makes its world before
-/// its first window needs nothing more.
+/// Call it before `Application::run`: `run` decides, on its own thread
+/// before it starts the device (on another thread, beside the launch), and
+/// a request after that changes nothing, on every platform and every
+/// launch. (A renderer made without `run`, as tests make one, reads the
+/// request as its device is made.) zgx-3d re-exports it, and Luau apps
+/// ask in their `zgx.json` (`"gpu": { "view_features": true }`).
 ///
 /// Not called, the device is asked for exactly what it was before; the
 /// only work this adds is one relaxed atomic load when a device is made.
 #[cold]
 pub fn request_view_features() {
-    VIEW_FEATURES.store(true, std::sync::atomic::Ordering::Relaxed);
+    VIEW_FEATURES.request();
+}
+/// Decides whether devices ask for the view features
+/// (`request_view_features`), from what was asked before now: called by
+/// `Application::run` on its thread before it starts the device. Later
+/// requests change nothing. Whether they're asked for.
+#[doc(hidden)]
+#[cold]
+pub fn decide_view_features() -> bool {
+    VIEW_FEATURES.decide()
+}
+/// Whether devices ask for the view features, if `Application::run` has
+/// decided (`None` before: a device made then reads
+/// `request_view_features` as it's made).
+#[cold]
+pub fn view_features_decided() -> Option<bool> {
+    VIEW_FEATURES.decided()
 }
 /// What of `adapter`'s features a device asks for its views
 /// (`request_view_features`): none unless asked.
 #[cold]
 fn view_features(adapter: &wgpu::Features) -> wgpu::Features {
-    if VIEW_FEATURES.load(std::sync::atomic::Ordering::Relaxed) {
+    if VIEW_FEATURES.wanted() {
         *adapter & VIEW_FEATURE_LIST
     } else {
         wgpu::Features::empty()

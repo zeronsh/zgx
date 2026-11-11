@@ -1063,6 +1063,11 @@ impl Application {
         // 300 on an RTX 4090), and this put the first content 16 to 24 ms
         // sooner. Linux makes it with the first window, as it chooses an
         // adapter by its surface (and GL needs its display).
+        // Whether devices ask for the optional features GPU views use
+        // (`zgx_gpu::request_view_features`), decided here, before the
+        // device is started on another thread: a request made before `run`
+        // counts, one after doesn't, on every platform and every launch.
+        zgx_gpu::decide_view_features();
         #[cfg(any(target_os = "macos", windows))]
         let early_gpu = zgx_gpu::GpuContext::prepare_in_background();
         let mut event_loop = EventLoop::<Event>::with_user_event();

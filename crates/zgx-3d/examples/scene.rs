@@ -12,6 +12,9 @@ use zgx_desktop::{Application, WindowOptions};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let smoke = std::env::args().any(|arg| arg == "--smoke-test");
+    // GPU timestamps and compressed textures where the GPU has them: asked
+    // before `run`, which decides before it starts the device.
+    zgx_3d::request_view_features();
     Application::new()
         .window(WindowOptions {
             title: "zgx 3D".into(),
