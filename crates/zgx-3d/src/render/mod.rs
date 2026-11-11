@@ -47,6 +47,10 @@ mod custom {
     pub(super) fn reads(_: &super::Gpu) -> bool {
         false
     }
+    /// Whether a custom material moves its vertices: none does.
+    pub(super) fn boxes_needed(_: &crate::world::Inner) -> bool {
+        false
+    }
 }
 use draw::{Run, draw_main};
 use frame::frame_uniforms;
@@ -661,9 +665,13 @@ impl Viewport for Renderer {
                     (lit, transmits, lighting),
                 );
                 // Cascades cull their casters by the boxes, resting or not.
-                if culls || cascaded {
+                // (And where a custom material moves its vertices: its boxes,
+                // grown, are what the sun's view fits.)
+                if culls || cascaded || custom::boxes_needed(&world) {
                     let skinning = gpu.skinning && world.posing();
                     cull::update(scratch, &drawn, (since, unmoved), world.meshes, skinning);
+                    #[cfg(feature = "shaders")]
+                    custom::grow_boxes(gpu, scratch, &drawn);
                 } else {
                     scratch.boxed = None;
                 }

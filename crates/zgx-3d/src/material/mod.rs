@@ -129,6 +129,7 @@ pub struct MaterialShader {
     params: Vec<(String, Param)>,
     reads_scene: bool,
     animated: bool,
+    reach: Option<f32>,
 }
 impl MaterialShader {
     /// A shader of `source`: WGSL, its first line `#zgx material 1`.
@@ -138,6 +139,7 @@ impl MaterialShader {
             params: Vec::new(),
             reads_scene: false,
             animated: false,
+            reach: None,
         }
     }
     /// A parameter it reads as `params.<name>`, set by `World::set_param`
@@ -150,6 +152,14 @@ impl MaterialShader {
     /// opaque meshes into a picture first, as for glass.
     pub fn reads_scene(mut self) -> Self {
         self.reads_scene = true;
+        self
+    }
+    /// Its `displace` moves a vertex at most `metres` from where its mesh
+    /// puts it: the mesh's box grows by that for culling and the sun's
+    /// shadow's fit. A shader that displaces without saying so is never
+    /// culled, and its displaced parts may fall outside its shadow.
+    pub fn displaces_by(mut self, metres: f32) -> Self {
+        self.reach = Some(metres);
         self
     }
     /// It reads time (`frame.time`, `frame.delta`, `frame.index`): the world
@@ -227,6 +237,8 @@ pub(crate) struct Shader {
     pub(crate) textures: u32,
     pub(crate) reads_scene: bool,
     pub(crate) animated: bool,
+    /// How far its `displace` moves a vertex, if it says (`displaces_by`).
+    pub(crate) reach: Option<f32>,
     pub(crate) values: RefCell<Values>,
     /// What the device refused of it, if anything (`World::shader_error`):
     /// its meshes then draw without it.
@@ -244,6 +256,8 @@ pub(crate) const MAX_PARAMS: usize = 64;
 pub(crate) const MAX_NAME: usize = 64;
 pub(crate) const MAX_SHADERS: usize = 1024;
 pub(crate) const MAX_LAYERS: usize = 8;
+/// The farthest `displaces_by` says a vertex moves, in metres.
+pub(crate) const MAX_REACH: f32 = 1e4;
 /// Textures a mesh's shader may read: with a mesh's own maps, the shadow
 /// map, an environment and what is behind, within the 16 a stage may.
 pub(crate) const MAX_TEXTURES: u32 = 4;
@@ -278,6 +292,16 @@ impl Shader {
                 0,
                 0,
                 format!("{} parameters: {MAX_PARAMS} at most", shader.params.len()),
+            ));
+        }
+        if shader
+            .reach
+            .is_some_and(|r| !(0.0..=MAX_REACH).contains(&r))
+        {
+            return Err(error(
+                0,
+                0,
+                format!("`displaces_by` takes 0 to {MAX_REACH} metres"),
             ));
         }
         let code = version(&shader.source)?;
@@ -385,6 +409,7 @@ impl Shader {
             textures,
             reads_scene: shader.reads_scene,
             animated: shader.animated,
+            reach: shader.reach,
             values: RefCell::new(Values {
                 bytes: vec![0; uniform_size as usize],
                 textures: vec![None; textures as usize],
@@ -515,6 +540,10 @@ impl Shaders {
     /// Whether it has none of either.
     pub(crate) fn is_empty(&self) -> bool {
         self.list.is_empty() && self.layers.is_empty()
+    }
+    /// Whether any of its shaders moves its meshes' vertices.
+    pub(crate) fn displacing(&self) -> bool {
+        self.list.iter().any(|s| s.displace)
     }
 }
 

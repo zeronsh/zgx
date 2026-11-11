@@ -304,6 +304,39 @@ fn whole(variant: Variant) -> Variant {
         .with(Variant::MASKED, false)
         .with(Variant::PLACED, false)
 }
+/// Whether a shader of the world's moves its meshes' vertices: their
+/// boxes are then made each frame its meshes change (`grow_boxes`).
+pub(super) fn boxes_needed(world: &Inner) -> bool {
+    world.shaders.displacing()
+}
+/// The boxes of meshes whose shader moves their vertices: grown by as far
+/// as it says (`MaterialShader::displaces_by`), else not sure (never
+/// culled). Made again from each mesh's own box, so frames don't grow
+/// them twice. (Out of the frame's code: only custom runs, in a world with
+/// a displacing shader.)
+#[cold]
+#[inline(never)]
+pub(super) fn grow_boxes(gpu: &Gpu, scratch: &mut super::Scratch, drawn: &[&crate::world::Drawn]) {
+    for run in scratch.runs.iter().filter(|run| run.variant.custom()) {
+        let Some(shader) = gpu.custom.by_binding.get(&run.maps).filter(|s| s.displace) else {
+            continue;
+        };
+        let range = run.instances.start as usize..run.instances.end as usize;
+        for (at, d) in drawn.iter().enumerate().take(range.end).skip(range.start) {
+            let (low, high) = super::cull::world_box(d);
+            let (grown, sure) = match shader.reach {
+                Some(r) => (
+                    (low - crate::vec3(r, r, r), high + crate::vec3(r, r, r)),
+                    true,
+                ),
+                None => ((low, high), false),
+            };
+            // (A posed mesh not drawn posed isn't sure either: as it was.)
+            let sure = sure && scratch.boxes.sure(at);
+            scratch.boxes.set(at, grown, sure);
+        }
+    }
+}
 /// Whether a run of the frame's custom materials reads what is behind it.
 pub(super) fn reads(gpu: &Gpu) -> bool {
     gpu.custom.reads

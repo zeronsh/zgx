@@ -23,14 +23,20 @@ impl Boxes {
     pub(super) fn len(&self) -> usize {
         self.sure.len()
     }
+    /// Whether instance `at`'s box holds what draws.
+    #[cfg(feature = "shaders")]
+    pub(super) fn sure(&self, at: usize) -> bool {
+        self.sure[at]
+    }
     /// As many as `len` (new ones empty and not sure, to be `set`).
     pub(super) fn resize(&mut self, len: usize) {
         self.axes.iter_mut().for_each(|axis| axis.resize(len, 0.));
         self.sure.resize(len, false);
     }
     /// Instance `at`'s box (`at < len()`; the frame writes them in step,
-    /// `update`).
-    #[cfg(test)]
+    /// `update`, and a custom material moving its vertices grows its own,
+    /// `custom::grow_boxes`).
+    #[cfg_attr(not(any(test, feature = "shaders")), allow(dead_code))]
     pub(super) fn set(&mut self, at: usize, (low, high): (Vec3, Vec3), sure: bool) {
         let values = [low.x, low.y, low.z, high.x, high.y, high.z];
         for (axis, value) in self.axes.iter_mut().zip(values) {

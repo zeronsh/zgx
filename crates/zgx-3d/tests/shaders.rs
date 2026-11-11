@@ -882,3 +882,67 @@ fn a_retained_world_with_cascades_and_custom_materials_draws_what_a_fresh_one_do
         world.set_shader(mesh, Some(ids[1]));
     });
 }
+
+#[test]
+fn a_mesh_its_shader_moves_into_view_is_drawn_while_culling() {
+    // A cube 20 m right of the view, its shader moving every vertex 20 m
+    // back: in view, culling or not (review finding CM1). Said or not how
+    // far, it draws; said, it's still culled where the box grown by that is
+    // out of view.
+    for reach in [None, Some(20.5)] {
+        let (world, mesh) = cube(unlit(0xffffff));
+        world.set_transform(mesh, Transform::at([20., 0., 0.]));
+        let mut shader = MaterialShader::new(
+            "#zgx material 1
+             fn displace(v: VertexIn) -> Displaced {
+                 var d: Displaced;
+                 d.position = v.position - vec3(20.0, 0.0, 0.0);
+                 d.normal = v.normal;
+                 return d;
+             }",
+        );
+        if let Some(r) = reach {
+            shader = shader.displaces_by(r);
+        }
+        let back = world.add_shader(shader).unwrap();
+        world.set_shader(mesh, Some(back));
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        window.draw();
+        assert!(
+            near(window.pixel(50, 50), [255; 4]),
+            "{reach:?}: {:?}",
+            window.pixel(50, 50)
+        );
+        assert_eq!(world.culled(), 0, "{reach:?}");
+    }
+    // Moving it 1 m and saying so: 20 m out, culled.
+    let (world, mesh) = cube(unlit(0xffffff));
+    world.set_transform(mesh, Transform::at([20., 0., 0.]));
+    let nudge = world
+        .add_shader(
+            MaterialShader::new(
+                "#zgx material 1
+                 fn displace(v: VertexIn) -> Displaced {
+                     var d: Displaced;
+                     d.position = v.position + vec3(0.0, 1.0, 0.0);
+                     d.normal = v.normal;
+                     return d;
+                 }",
+            )
+            .displaces_by(1.),
+        )
+        .unwrap();
+    world.set_shader(mesh, Some(nudge));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    assert_eq!(world.culled(), 1);
+    assert!(
+        world
+            .add_shader(MaterialShader::new(TINT).displaces_by(f32::NAN))
+            .is_err()
+    );
+}
