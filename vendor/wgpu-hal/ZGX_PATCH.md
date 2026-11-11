@@ -6,8 +6,9 @@ unchanged) and applied through `[patch.crates-io]` in the workspace
 the new `src/metal/buffer_writes.rs`, and for Direct3D 12
 `src/dx12/instance.rs`, `src/auxil/dxgi/factory.rs`,
 `src/dx12/shader_compilation.rs`, `src/dx12/mod.rs` and the new
-`src/dx12/shader_disk_cache.rs` (see the last two sections); search for
-"zgx patch".
+`src/dx12/shader_disk_cache.rs` (see the last two sections), and
+`Cargo.toml`'s `metal` feature (naga's WGSL in, for single-use shader
+modules); search for "zgx patch".
 
 ## Why
 
@@ -65,6 +66,30 @@ system CPU for zgx vs 1.4% for GPUI on the same animation
 
 Result: two command buffers per frame (one per render pass), 1.2 ms less
 kernel time per 100 frames, and zgx below GPUI in CPU per frame.
+
+## Metal: single-use shader modules let go of their IR
+
+wgpu-core keeps every shader module alive with each render pipeline made
+from it, and the Metal backend keeps the module's naga IR (module and
+validation info) so it can write MSL as a pipeline is made. zgx compiles each
+app shader (a fill, a layer shader, a blend, an effect's pass) into a module
+holding the whole quad shader, makes one pipeline from it and drops it, and
+yet each pipeline kept about 250 KB of IR. A heavy session in Zeron held
+29 MB of it.
+
+`metal::zgx_single_use_next_module(Some(wgsl))` says the next module the
+calling thread makes from WGSL is for one render pipeline, with `wgsl` the
+source wgpu parses for it (zgx-gpu's `single_use_module` sets it just
+before, and takes it back just after). Once a render pipeline is made from
+such a module, its source becomes `ShaderModuleSource::Spent` and the IR is
+freed; the module keeps the WGSL (about 13 KB for the quad shader). A later
+pipeline from a spent module parses that WGSL again for that pipeline, and
+the module stays spent. Spending costs nothing more than the drop. The
+source sits behind an `RwLock` for this, and the `metal` feature turns on
+naga's `wgsl-in`. Modules made otherwise are unchanged, and compute
+pipelines never spend a module. zgx-gpu's `single_use_module_tests` and
+`device_loss` tests cover a second pipeline and a fill drawn again on a new
+device.
 
 ## Direct3D 12: one adapter, one device
 

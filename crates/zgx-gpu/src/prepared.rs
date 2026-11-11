@@ -43,6 +43,12 @@ const COMPACT_BUDGET: usize = 16 * 1024 * 1024;
 /// all change every frame held about 1.3 MB more heap at 512 KB, for no
 /// measurable CPU difference.
 const UNDRAWN_BUDGET: usize = 64 * 1024;
+/// Past `UNDRAWN_BUDGET`, what is kept of it: half, so a text that changes as
+/// it is drawn (a counter, a header rolling its count) trims once in many
+/// frames rather than in every one it shapes, each of which would otherwise
+/// put it just past the budget again (a 54-character label: every frame, and
+/// once in 7 with this).
+const UNDRAWN_KEPT: usize = UNDRAWN_BUDGET / 2;
 /// Estimated bytes per character of shaped lines: a shape glyph and a layout
 /// glyph (96 + 88 bytes), and words and line text.
 const SHAPED_BYTES_PER_CHAR: usize = 190;
@@ -1436,6 +1442,11 @@ impl TextCache {
             key: hash,
         }
     }
+    /// How many times the cache was trimmed (`trim`, `rest`). For tests.
+    #[doc(hidden)]
+    pub fn trims(&self) -> u64 {
+        self.trims
+    }
     /// Whether texts are held past what `trim` keeps.
     pub fn needs_trim(&self) -> bool {
         self.shaped_bytes > self.drawn_bytes + UNDRAWN_BUDGET
@@ -1465,13 +1476,13 @@ impl TextCache {
             .filter(|(_, entry)| entry.shaped() && entry.drawn != mark)
             .map(|(hash, entry)| (entry.used, *hash))
             .collect();
-        // Newest first; keep those within the budget.
+        // Newest first; keep those within what is kept of the budget.
         undrawn.sort_unstable_by(|a, b| b.cmp(a));
         let mut kept = 0;
         for (_, hash) in undrawn {
             let entry = &self.entries[&hash];
             kept += entry.shaped_bytes();
-            if kept > UNDRAWN_BUDGET {
+            if kept > UNDRAWN_KEPT {
                 let entry = self.remove(hash);
                 self.retire(entry);
             }

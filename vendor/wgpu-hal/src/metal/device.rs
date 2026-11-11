@@ -143,7 +143,25 @@ impl super::Device {
         primitive_class: MTLPrimitiveTopologyClass,
         naga_stage: naga::ShaderStage,
     ) -> Result<CompiledShader, crate::PipelineError> {
-        match stage.module.source {
+        // zgx patch: read through the module's lock; a spent single-use
+        // module's IR is made again from its WGSL for this pipeline, and the
+        // module stays spent (`ShaderModule::spend`).
+        let source = stage.module.source();
+        let rebuilt;
+        let source = match *source {
+            ShaderModuleSource::Spent => {
+                rebuilt = stage.module.rebuilt().ok_or_else(|| {
+                    crate::PipelineError::Linkage(
+                        map_naga_stage(naga_stage),
+                        "a spent shader module's WGSL no longer makes a module".into(),
+                    )
+                })?;
+                &rebuilt
+            }
+            ref kept => kept,
+        };
+        match *source {
+            ShaderModuleSource::Spent => unreachable!("rebuilt above"),
             ShaderModuleSource::Naga(ref naga_shader) => {
                 let stage_bit = map_naga_stage(naga_stage);
                 let (module, module_info) = naga::back::pipeline_constants::process_overrides(
@@ -1147,8 +1165,9 @@ impl crate::Device for super::Device {
 
         match shader {
             crate::ShaderInput::Naga(naga) => Ok(super::ShaderModule {
-                source: ShaderModuleSource::Naga(naga),
+                source: std::sync::RwLock::new(ShaderModuleSource::Naga(naga)),
                 bounds_checks: desc.runtime_checks,
+                wgsl: super::take_single_use(),
             }),
             crate::ShaderInput::MetalLib {
                 file,
@@ -1161,12 +1180,15 @@ impl crate::Device for super::Device {
                 )
                 .map_err(|e| crate::ShaderError::Compilation(format!("Metallib: {e:?}")))?;
                 Ok(super::ShaderModule {
-                    source: ShaderModuleSource::Passthrough(PassthroughShader {
-                        library,
-                        num_workgroups,
-                    }),
+                    source: std::sync::RwLock::new(ShaderModuleSource::Passthrough(
+                        PassthroughShader {
+                            library,
+                            num_workgroups,
+                        },
+                    )),
                     // This goes unused for passthrough shaders
                     bounds_checks: wgt::ShaderRuntimeChecks::unchecked(),
+                    wgsl: None,
                 })
             }
             crate::ShaderInput::Msl {
@@ -1181,12 +1203,15 @@ impl crate::Device for super::Device {
                     .map_err(|e| crate::ShaderError::Compilation(format!("MSL: {e:?}")))?;
 
                 Ok(super::ShaderModule {
-                    source: ShaderModuleSource::Passthrough(PassthroughShader {
-                        library,
-                        num_workgroups,
-                    }),
+                    source: std::sync::RwLock::new(ShaderModuleSource::Passthrough(
+                        PassthroughShader {
+                            library,
+                            num_workgroups,
+                        },
+                    )),
                     // This goes unused for passthrough shaders
                     bounds_checks: wgt::ShaderRuntimeChecks::unchecked(),
+                    wgsl: None,
                 })
             }
             crate::ShaderInput::SpirV(_)
@@ -1208,7 +1233,7 @@ impl crate::Device for super::Device {
             super::PipelineCache,
         >,
     ) -> Result<super::RenderPipeline, crate::PipelineError> {
-        autoreleasepool(|_| {
+        let made = autoreleasepool(|_| {
             enum MetalGenericRenderPipelineDescriptor {
                 Standard(Retained<MTLRenderPipelineDescriptor>),
                 Mesh(Retained<MTLMeshRenderPipelineDescriptor>),
@@ -1665,7 +1690,28 @@ impl crate::Device for super::Device {
                 },
                 depth_stencil,
             })
-        })
+        });
+        // zgx patch: the pipeline made, its single-use modules' IR goes.
+        if made.is_ok() {
+            match &desc.vertex_processor {
+                crate::VertexProcessor::Standard { vertex_stage, .. } => {
+                    vertex_stage.module.spend()
+                }
+                crate::VertexProcessor::Mesh {
+                    task_stage,
+                    mesh_stage,
+                } => {
+                    if let Some(task_stage) = task_stage {
+                        task_stage.module.spend();
+                    }
+                    mesh_stage.module.spend();
+                }
+            }
+            if let Some(fragment_stage) = &desc.fragment_stage {
+                fragment_stage.module.spend();
+            }
+        }
+        made
     }
 
     unsafe fn destroy_render_pipeline(&self, _pipeline: super::RenderPipeline) {
@@ -1684,17 +1730,25 @@ impl crate::Device for super::Device {
             let descriptor = MTLComputePipelineDescriptor::new();
 
             let module = desc.stage.module;
-            let cs = if let ShaderModuleSource::Passthrough(passthrough_desc) = &module.source {
+            // zgx patch: the passthrough read out first, not holding the
+            // module's lock into `load_shader`.
+            let passthrough = match &*module.source() {
+                ShaderModuleSource::Passthrough(passthrough_desc) => Some((
+                    passthrough_desc.library.clone(),
+                    passthrough_desc.num_workgroups,
+                )),
+                _ => None,
+            };
+            let cs = if let Some((library, num_workgroups)) = passthrough {
                 CompiledShader {
-                    library: passthrough_desc.library.clone(),
-                    function: passthrough_desc
-                        .library
+                    function: library
                         .newFunctionWithName(&NSString::from_str(desc.stage.entry_point))
                         .ok_or(crate::PipelineError::EntryPoint(naga::ShaderStage::Compute))?,
+                    library,
                     wg_size: MTLSize {
-                        width: passthrough_desc.num_workgroups.0 as usize,
-                        height: passthrough_desc.num_workgroups.1 as usize,
-                        depth: passthrough_desc.num_workgroups.2 as usize,
+                        width: num_workgroups.0 as usize,
+                        height: num_workgroups.1 as usize,
+                        depth: num_workgroups.2 as usize,
                     },
                     wg_memory_sizes: vec![],
                     sized_bindings: vec![],

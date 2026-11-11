@@ -258,7 +258,10 @@ fn scaled_size(size: (u32, u32), image: &zgx::image::ImageData, scale: f32) -> (
     let side = |v: u32, full: u32| ((v as f32 * scale).ceil() as u32).clamp(1, full.max(1));
     (side(size.0, image.width()), side(size.1, image.height()))
 }
-use zgx::image::resample::{halve, shrink};
+use zgx::image::{
+    premultiply,
+    resample::{halve, shrink},
+};
 /// Why an image can have no texture: a frame goes on without it.
 const IMAGE_MISSES: [&str; 2] = [
     "visible images exceed the budget of 16,384",
@@ -7475,10 +7478,7 @@ impl GpuRenderer {
             None
         };
         shader_pipeline(device, || {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("shader"),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            });
+            let module = single_use_module(device, "shader", source);
             build(&module, fragment.as_ref().unwrap_or(&module))
         })
     }
@@ -16331,39 +16331,6 @@ pub(crate) fn bgra_to_rgba(word: u32) -> u32 {
     (word & 0xFF00_FF00) | ((word >> 16) & 0xFF) | ((word & 0xFF) << 16)
 }
 
-/// Straight RGBA pixels made premultiplied, in place, sixteen at a time: a
-/// block all opaque (a photo's, a video's) is as it was, one all
-/// transparent (around a canvas's marks) is zeros, and in the rest each
-/// colour is times its alpha, `(c · a + 127) / 255`, exactly, as a multiply
-/// and two shifts in 16 bits. No branch a pixel, so each part is
-/// vectorized: one per pixel (an early return for opaque pixels) made a
-/// canvas's a pixel at a time.
-fn premultiply(pixels: &mut [u8]) {
-    for block in pixels.chunks_mut(64) {
-        let (mut all, mut any) = (255u8, 0u8);
-        for pixel in block.as_chunks::<4>().0 {
-            all &= pixel[3];
-            any |= pixel[3];
-        }
-        if all == 255 {
-            continue;
-        }
-        if any == 0 {
-            block.fill(0);
-            continue;
-        }
-        for pixel in block.as_chunks_mut::<4>().0 {
-            let alpha = u16::from(pixel[3]);
-            for channel in &mut pixel[..3] {
-                // ⌊x / 255⌋ is (x + 1 + (x >> 8)) >> 8 for every x c · a + 127
-                // reaches (at most 65,152, where the sum is 65,407: 16 bits).
-                let x = u16::from(*channel) * alpha + 127;
-                *channel = ((x + 1 + (x >> 8)) >> 8) as u8;
-            }
-        }
-    }
-}
-
 /// What [`GpuRenderer::readback_into`] reads through, kept by whoever reads
 /// every frame (a video's stage) and made at its first read: a staging
 /// buffer, and the RGBA texture and pass the target is copied to. An app
@@ -16787,6 +16754,28 @@ fn rich_decoration_quad(d: &text::RichDecoration) -> TextQuad {
             [0.; 4]
         },
     }
+}
+/// A module made from `source` for one pipeline, as each app shader's is
+/// (`app_built`, an effect's pass). With Metal, its naga IR (about 250 KB:
+/// the quad shader's whole module) goes once that pipeline is made, where
+/// wgpu would keep it with the pipeline (zgx's wgpu-hal patch,
+/// `zgx_single_use_next_module`): the module keeps `source`, and a second
+/// pipeline from it parses that again.
+pub(crate) fn single_use_module(
+    device: &wgpu::Device,
+    label: &str,
+    source: &str,
+) -> wgpu::ShaderModule {
+    #[cfg(target_os = "macos")]
+    wgpu::hal::metal::zgx_single_use_next_module(Some(source.to_owned()));
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    // (Taken back if wgpu made no module of it.)
+    #[cfg(target_os = "macos")]
+    wgpu::hal::metal::zgx_single_use_next_module(None);
+    module
 }
 /// A shader fill's module: the quad shader (draw.wgsl), the `FillInput` its
 /// `fill` takes, the user's source and the fragment entry `zgx_fill`, which
@@ -19359,6 +19348,140 @@ mod native_surface_shader_tests {
                 compilation_options: Default::default(),
                 cache: None,
             });
+    }
+}
+
+/// A single-use module (`single_use_module`; with Metal, its IR goes once
+/// its pipeline is made) makes a second pipeline from its source again,
+/// drawing as the first does, and as a module made otherwise does.
+#[cfg(all(test, target_os = "macos"))]
+mod single_use_module_tests {
+    const SOURCE: &str =
+        "@vertex fn vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32> {
+ return vec4(f32(i & 1u) * 4. - 1., f32(i >> 1u) * 4. - 1., 0., 1.);
+}
+@fragment fn fs()->@location(0) vec4<f32> { return vec4(1., .5, .25, 1.); }";
+
+    /// Two pipelines from one module, each drawing a 4x4 target: whether
+    /// each built (no error), and what each drew.
+    fn two_pipelines_from_one_module(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        single_use: bool,
+    ) -> Vec<(bool, Vec<u8>)> {
+        let module = match single_use {
+            true => super::single_use_module(device, "single use", SOURCE),
+            false => device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("as wgpu makes it"),
+                source: wgpu::ShaderSource::Wgsl(SOURCE.into()),
+            }),
+        };
+        let format = wgpu::TextureFormat::Bgra8Unorm;
+        let made = || {
+            // (The hal's link failure reaches wgpu as an internal error.)
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Internal);
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("single use"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(format.into())],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+            let built = pollster::block_on(scope.pop()).is_none();
+            (built, drawn(device, queue, &pipeline, format))
+        };
+        vec![made(), made()]
+    }
+
+    fn drawn(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pipeline: &wgpu::RenderPipeline,
+        format: wgpu::TextureFormat,
+    ) -> Vec<u8> {
+        let size = wgpu::Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let view = target.create_view(&Default::default());
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(pipeline);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &out,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: None,
+                },
+            },
+            size,
+        );
+        queue.submit([encoder.finish()]);
+        out.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let mapped = out.slice(..).get_mapped_range();
+        mapped.to_vec()
+    }
+
+    #[test]
+    fn a_single_use_modules_second_pipeline_is_built_again_and_draws_the_same() {
+        let gpu = super::GpuRenderer::new(4, 4).unwrap();
+        let single_use = two_pipelines_from_one_module(&gpu.device, &gpu.queue, true);
+        let elsewhere = two_pipelines_from_one_module(&gpu.device, &gpu.queue, false);
+        let first = &elsewhere[0].1[..4];
+        assert_eq!((first[2], first[3]), (255, 255), "drawn (BGRA): {first:?}");
+        for (built, pixels) in single_use.iter().chain(&elsewhere) {
+            assert!(built);
+            assert_eq!(pixels, &elsewhere[0].1);
+        }
     }
 }
 
