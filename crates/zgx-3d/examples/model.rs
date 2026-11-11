@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 // Played by the world's frames: drawn while it plays.
                 let animator = world.add_animator(&placed);
-                world.play(animator, &clip, Play::new());
+                world.play(animator, &clip, Play::new()).expect("layer 0");
             }
             world.set_transform(
                 id,

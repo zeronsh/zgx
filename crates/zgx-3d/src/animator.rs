@@ -40,13 +40,13 @@ impl Mask {
     }
     /// It with `node` taking `weight` of the layer (0 to 1).
     pub fn node(mut self, node: ObjectId, weight: f32) -> Self {
-        self.entries.push((node, weight.clamp(0., 1.), false));
+        self.entries.push((node, unit(weight), false));
         self
     }
     /// It with `node` and every node under it taking `weight` of the layer
     /// (0 to 1).
     pub fn below(mut self, node: ObjectId, weight: f32) -> Self {
-        self.entries.push((node, weight.clamp(0., 1.), true));
+        self.entries.push((node, unit(weight), true));
         self
     }
     /// How much of a layer each of `nodes` takes, by index: `parent` says
@@ -75,6 +75,15 @@ impl Mask {
             }
         }
         weights
+    }
+}
+
+/// `weight` in 0 to 1, none if it's not a number.
+fn unit(weight: f32) -> f32 {
+    if weight.is_nan() {
+        0.
+    } else {
+        weight.clamp(0., 1.)
     }
 }
 
@@ -258,6 +267,34 @@ pub struct Fired {
     pub name: Arc<str>,
 }
 
+/// The most layers an animator has (`World::set_layer`, `Play::layer`):
+/// layers 0 to 15.
+pub const MAX_LAYERS: usize = 16;
+
+/// Why an animator refused a call.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnimatorError {
+    /// This layer is past its last (`MAX_LAYERS`).
+    Layer(usize),
+}
+impl std::fmt::Display for AnimatorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Layer(layer) => write!(
+                f,
+                "layer {layer} is past an animator's last ({})",
+                MAX_LAYERS - 1
+            ),
+        }
+    }
+}
+impl std::error::Error for AnimatorError {}
+
+/// The most events an animator keeps for its app: past it, the older
+/// half goes (as zgx-audio's ended voices).
+pub(crate) const EVENTS: usize = 65_536;
+
 /// The longest a frame's step is taken to be: after a longer gap (its view
 /// hidden) an animation goes on where it was rather than jumping.
 pub(crate) const MAX_STEP: f32 = 0.25;
@@ -279,6 +316,8 @@ struct State {
     between: Vec<Between>,
     /// Not yet stepped: its first step takes no time, posing its start.
     fresh: bool,
+    /// Whether its clip moves any node of the model.
+    drives: bool,
     /// Its time before its last step, and whether that step went round
     /// (1 forward, -1 backward): its root motion's span.
     before: f32,
@@ -307,7 +346,7 @@ impl State {
     }
     /// `dt` seconds on (`speed` the animator's): its events passed onto
     /// `fired`.
-    fn step(&mut self, dt: f32, speed: f32, layer: usize, fired: &mut Vec<Fired>) {
+    fn step(&mut self, dt: f32, speed: f32, layer: usize, mut fired: Option<&mut Vec<Fired>>) {
         let first = std::mem::replace(&mut self.fresh, false);
         let dt = if first { 0. } else { dt };
         self.elapsed = (self.elapsed + dt).min(self.length.max(0.));
@@ -315,7 +354,10 @@ impl State {
         let before = self.time;
         self.before = before;
         self.wrapped = 0;
-        let delta = dt * self.speed * speed;
+        // Bounded, and a number: a product too great for a float (each
+        // factor finite) would make its time NaN for good.
+        let delta = (dt * self.speed * speed).clamp(-1e6, 1e6);
+        let delta = if delta.is_nan() { 0. } else { delta };
         let mut after = before + delta;
         let events = &self.clip.0.events;
         let mut fire = |from: f32, to: f32, inclusive_from: bool| {
@@ -334,7 +376,10 @@ impl State {
                 } else {
                     *t < high || (inclusive_from && *t == high)
                 };
-                if past_low && before_high {
+                if past_low
+                    && before_high
+                    && let Some(fired) = fired.as_deref_mut()
+                {
                     fired.push(Fired {
                         layer,
                         name: name.clone(),
@@ -439,6 +484,8 @@ pub(crate) struct LayerState {
     pub(crate) layer: Layer,
     /// How much of it each node takes, by node index (its mask's).
     mask: Option<Vec<f32>>,
+    /// Whether any of it shows: it has weight, and its mask takes some.
+    shows: bool,
     /// The clips playing on it, the newest last.
     states: Vec<State>,
 }
@@ -466,6 +513,13 @@ pub(crate) struct Animator {
     pub(crate) motion: (Vec3, f32),
     /// The placed model's root.
     pub(crate) model: Option<ObjectId>,
+    /// Whether its app has asked what it did (`World::animator_update`):
+    /// until then it keeps no events.
+    pub(crate) listening: bool,
+    /// The frame it last stepped at while its clips ran on with nothing
+    /// showing (a layer at no weight): it rests, and the next frame posing
+    /// it steps it on from there, so it comes back in step.
+    pub(crate) parked: Option<std::time::Instant>,
 }
 impl Animator {
     pub(crate) fn new(nodes: Vec<Option<ObjectId>>, rest: Vec<Transform>) -> Self {
@@ -481,36 +535,50 @@ impl Animator {
             root: None,
             motion: (Vec3::ZERO, 0.),
             model: None,
+            listening: false,
+            parked: None,
         }
     }
     /// Layer `index`, made (as `Layer::new`) with those under it if it's
     /// not yet.
-    fn layer_mut(&mut self, index: usize) -> &mut LayerState {
+    fn layer_mut(&mut self, index: usize) -> Result<&mut LayerState, AnimatorError> {
+        if index >= MAX_LAYERS {
+            return Err(AnimatorError::Layer(index));
+        }
         while self.layers.len() <= index {
             self.layers.push(LayerState {
                 layer: Layer::new(),
                 mask: None,
+                shows: true,
                 states: Vec::new(),
             });
         }
-        &mut self.layers[index]
+        Ok(&mut self.layers[index])
     }
     /// Layer `index` as `layer`, its mask's weights `mask` by node.
-    pub(crate) fn set_layer(&mut self, index: usize, layer: Layer, mask: Option<Vec<f32>>) {
-        let state = self.layer_mut(index);
+    pub(crate) fn set_layer(
+        &mut self,
+        index: usize,
+        layer: Layer,
+        mask: Option<Vec<f32>>,
+    ) -> Result<(), AnimatorError> {
+        let state = self.layer_mut(index)?;
+        state.shows = layer.weight > 0. && mask.as_ref().is_none_or(|m| m.iter().any(|&w| w > 0.));
         state.layer = layer;
         state.mask = mask;
         self.dirty = true;
+        Ok(())
     }
     /// Play `clip` as `play` says.
-    pub(crate) fn play(&mut self, clip: &Clip, play: Play) {
+    pub(crate) fn play(&mut self, clip: &Clip, play: Play) -> Result<(), AnimatorError> {
+        self.layer_mut(play.layer)?;
         let nodes = self.nodes.len() as u32;
         for &node in clip.0.nodes.iter().filter(|&&n| n < nodes) {
             if let Err(at) = self.posed.binary_search(&node) {
                 self.posed.insert(at, node);
             }
         }
-        let layer = self.layer_mut(play.layer);
+        let layer = self.layer_mut(play.layer)?;
         let duration = clip.duration();
         let time = if duration > 0. {
             if play.looping {
@@ -529,7 +597,7 @@ impl Animator {
             last.speed = play.speed;
             last.looping = play.looping;
             self.dirty = true;
-            return;
+            return Ok(());
         }
         let fade = play.fade;
         if fade > 0. {
@@ -558,11 +626,13 @@ impl Animator {
             length,
             between: vec![Between::default(); clip.0.tracks.len()],
             fresh: true,
+            drives: clip.0.nodes.iter().any(|&n| n < nodes),
             before: time,
             wrapped: 0,
             root: None,
         });
         self.dirty = true;
+        Ok(())
     }
     /// Fade layer `index`'s clips out over `fade` seconds (at once if 0).
     pub(crate) fn stop(&mut self, index: usize, fade: f32) {
@@ -582,7 +652,17 @@ impl Animator {
         self.dirty = true;
     }
     /// Whether its pose changes as time goes on.
+    /// Only what shows counts: a clip on a layer at no weight or masked
+    /// to nothing, or moving no node of the model, runs on unseen.
     pub(crate) fn playing(&self) -> bool {
+        self.speed != 0.
+            && self
+                .layers
+                .iter()
+                .any(|layer| layer.shows && layer.states.iter().any(|s| s.drives && s.moving()))
+    }
+    /// Whether its clips' times run on, seen or not.
+    pub(crate) fn running(&self) -> bool {
         self.speed != 0.
             && self
                 .layers
@@ -596,15 +676,20 @@ impl Animator {
     /// `dt` seconds on: its clips' times and fades, its events noted.
     pub(crate) fn step(&mut self, dt: f32) {
         let speed = self.speed;
+        let listening = self.listening;
         let fired = &mut self.update.events;
         for (index, layer) in self.layers.iter_mut().enumerate() {
             for state in &mut layer.states {
-                state.step(dt, speed, index, fired);
+                state.step(dt, speed, index, listening.then_some(&mut *fired));
             }
             // Faded out: gone.
             layer
                 .states
                 .retain(|s| !(s.to == 0. && s.elapsed >= s.length));
+        }
+        // An app asking seldom keeps the newer half.
+        if fired.len() > EVENTS {
+            fired.drain(..fired.len() - EVENTS / 2);
         }
     }
     /// Its pose as its layers make it now, into `pose` (its nodes', by

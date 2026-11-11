@@ -372,7 +372,9 @@ fn animated(world: &World, root: ObjectId, arm: &str) {
             .collect();
         let skin = Skin::new(joints, vec![Mat4::IDENTITY; JOINTS]).expect("64 joints");
         let animator = world.add_animator(&placed);
-        world.play(animator, &clip, Play::new().from(from));
+        world
+            .play(animator, &clip, Play::new().from(from))
+            .expect("a layer it has");
         (placed, animator, skin)
     };
     let meshes = setting("MESHES", 2000) / 4;
@@ -395,10 +397,18 @@ fn animated(world: &World, root: ObjectId, arm: &str) {
             let (placed, animator, skin) = chain(0.);
             if arm == "layers" {
                 let upper = Mask::new().below(placed.node(JOINTS / 2).expect("a joint"), 1.);
-                world.set_layer(animator, 1, Layer::new().weight(0.5).mask(upper));
-                world.play(animator, &clip, Play::new().layer(1).from(1.));
-                world.set_layer(animator, 2, Layer::additive().weight(0.3));
-                world.play(animator, &clip, Play::new().layer(2).from(0.5));
+                world
+                    .set_layer(animator, 1, Layer::new().weight(0.5).mask(upper))
+                    .expect("a layer it has");
+                world
+                    .play(animator, &clip, Play::new().layer(1).from(1.))
+                    .expect("a layer it has");
+                world
+                    .set_layer(animator, 2, Layer::additive().weight(0.3))
+                    .expect("a layer it has");
+                world
+                    .play(animator, &clip, Play::new().layer(2).from(0.5))
+                    .expect("a layer it has");
             }
             for i in 0..meshes {
                 mesh(i, &skin);

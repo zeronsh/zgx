@@ -2,7 +2,10 @@
 use super::{Inner, Settle, Slot, World, claim, release};
 use crate::{
     Clip, Mat4, Placed, Quat, Transform, Vec3,
-    animator::{Animator, AnimatorId, AnimatorUpdate, Layer, MAX_STEP, Play, Root, RootMotion},
+    animator::{
+        Animator, AnimatorError, AnimatorId, AnimatorUpdate, Layer, MAX_STEP, Play, Root,
+        RootMotion,
+    },
 };
 use std::time::Instant;
 
@@ -45,6 +48,11 @@ pub(crate) fn advance(inner: &mut Inner, time: Instant) -> bool {
     let (mut changed, mut playing) = (false, false);
     for animator in animators.slots.iter_mut().filter_map(|s| s.value.as_mut()) {
         if animator.due() {
+            // Back from resting while its clips ran on unseen: on from
+            // where it stopped, in step with the frames' time.
+            let dt = animator.parked.take().map_or(dt, |parked| {
+                time.saturating_duration_since(parked).as_secs_f32()
+            });
             animator.step(dt);
             animator.evaluate();
             // Root motion apart: an animator without it runs none of it.
@@ -57,7 +65,11 @@ pub(crate) fn advance(inner: &mut Inner, time: Instant) -> bool {
                 changed |= carry(inner, animator);
             }
         }
-        playing |= animator.playing();
+        let plays = animator.playing();
+        if !plays && animator.parked.is_none() && animator.running() {
+            animator.parked = Some(time);
+        }
+        playing |= plays;
     }
     animators.last = playing.then_some(time);
     inner.animators = animators;
@@ -201,8 +213,11 @@ impl World {
     /// on which layer, crossfading over how long from what played there,
     /// how fast, looping or once. Playing what its layer plays already
     /// changes only its speed and looping.
-    pub fn play(&self, id: AnimatorId, clip: &Clip, play: Play) {
-        self.change_animator(id, |animator| animator.play(clip, play));
+    /// Fails for a layer past the last (`MAX_LAYERS`); nothing for an
+    /// animator gone.
+    pub fn play(&self, id: AnimatorId, clip: &Clip, play: Play) -> Result<(), AnimatorError> {
+        self.change_animator(id, |animator| animator.play(clip, play))
+            .unwrap_or(Ok(()))
     }
     /// Fade out what animator `id` plays on `layer` over `fade` seconds
     /// (at once if 0): the layers under it show through.
@@ -213,11 +228,20 @@ impl World {
     /// Animator `id`'s layer `index` (counted from 0, the lowest) as
     /// `layer` says: its weight, mask and blend. Layers up to it that
     /// weren't set override wholly.
-    pub fn set_layer(&self, id: AnimatorId, index: usize, layer: Layer) {
+    /// Fails for a layer past the last (`MAX_LAYERS`).
+    pub fn set_layer(
+        &self,
+        id: AnimatorId,
+        index: usize,
+        layer: Layer,
+    ) -> Result<(), AnimatorError> {
+        if index >= crate::MAX_LAYERS {
+            return Err(AnimatorError::Layer(index));
+        }
         let mask = {
             let inner = self.inner.borrow();
             let Some(animator) = Self::animator_ref(&inner, id) else {
-                return;
+                return Ok(());
             };
             layer.mask.as_ref().map(|mask| {
                 let nodes = &animator.nodes;
@@ -235,7 +259,8 @@ impl World {
                 mask.resolve(nodes, parent)
             })
         };
-        self.change_animator(id, |animator| animator.set_layer(index, layer, mask));
+        self.change_animator(id, |animator| animator.set_layer(index, layer, mask))
+            .unwrap_or(Ok(()))
     }
     /// Animator `id`'s root motion (`None`: none, its default): the motion
     /// of a node (a character's hips or root bone) taken out of its pose
@@ -292,11 +317,16 @@ impl World {
         self.change_animator(id, |animator| animator.speed = speed);
     }
     /// What animator `id` did since this was last asked: its clips' events
-    /// passed. Empty for one gone.
+    /// passed, and its root motion. An animator keeps its events once
+    /// this has been asked (ask once after adding it to hear its first),
+    /// the newest 65,536 at most. Empty for one gone.
     pub fn animator_update(&self, id: AnimatorId) -> AnimatorUpdate {
         let mut inner = self.inner.borrow_mut();
         Self::animator_of(&mut inner.animators.slots, id)
-            .map(|animator| std::mem::take(&mut animator.update))
+            .map(|animator| {
+                animator.listening = true;
+                std::mem::take(&mut animator.update)
+            })
             .unwrap_or_default()
     }
     /// Whether animator `id` plays: its pose changes as time goes on.
@@ -314,17 +344,17 @@ impl World {
             self.view.invalidate();
         }
     }
-    fn change_animator(&self, id: AnimatorId, f: impl FnOnce(&mut Animator)) {
+    /// `f` on animator `id`, if it lives: what it returned.
+    fn change_animator<T>(&self, id: AnimatorId, f: impl FnOnce(&mut Animator) -> T) -> Option<T> {
         let mut inner = self.inner.borrow_mut();
-        let Some(animator) = Self::animator_of(&mut inner.animators.slots, id) else {
-            return;
-        };
-        f(animator);
+        let animator = Self::animator_of(&mut inner.animators.slots, id)?;
+        let out = f(animator);
         let playing = Self::any_playing(&inner);
         inner.unsettle(Settle::ANIMATION, playing);
         drop(inner);
         // A frame poses it.
         self.view.invalidate();
+        Some(out)
     }
     fn any_playing(inner: &Inner) -> bool {
         let slots = &inner.animators.slots;
@@ -428,7 +458,7 @@ mod tests {
         let world = World::new();
         let (placed, a, _) = rig(&world);
         let animator = world.add_animator(&placed);
-        world.play(animator, &slide(0., 2.), Play::new());
+        world.play(animator, &slide(0., 2.), Play::new()).unwrap();
         let clock = Clock(Instant::now());
         // Its first frame poses its start, whenever it comes.
         clock.frame(&world, 10.);
@@ -467,7 +497,7 @@ mod tests {
             ),
         ]);
         let animator = world.add_animator(&placed);
-        world.play(animator, &clip, Play::new());
+        world.play(animator, &clip, Play::new()).unwrap();
         let clock = Clock(Instant::now());
         let other = World::new();
         let (theirs, oa, ob) = rig(&other);
@@ -487,10 +517,12 @@ mod tests {
         let world = World::new();
         let (placed, a, _) = rig(&world);
         let animator = world.add_animator(&placed);
-        world.play(animator, &slide(0., 0.), Play::new());
+        world.play(animator, &slide(0., 0.), Play::new()).unwrap();
         let clock = Clock(Instant::now());
         clock.frame(&world, 0.);
-        world.play(animator, &slide(2., 2.), Play::new().fade(1.));
+        world
+            .play(animator, &slide(2., 2.), Play::new().fade(1.))
+            .unwrap();
         clock.frame(&world, 0.1);
         assert_eq!(at(&world, a).position.x, 0., "the new clip's first frame");
         clock.frame(&world, 0.35);
@@ -513,20 +545,28 @@ mod tests {
                 (1, Path::Translation, vec![0.], vec![x(v)]),
             ])
         };
-        world.play(animator, &both(1.), Play::new());
-        world.play(animator, &both(3.), Play::new().layer(1));
-        world.set_layer(animator, 1, Layer::new().weight(0.25));
+        world.play(animator, &both(1.), Play::new()).unwrap();
+        world
+            .play(animator, &both(3.), Play::new().layer(1))
+            .unwrap();
+        world
+            .set_layer(animator, 1, Layer::new().weight(0.25))
+            .unwrap();
         let clock = Clock(Instant::now());
         clock.frame(&world, 0.);
         assert_eq!(at(&world, a).position.x, 1.5, "a quarter of the way");
         assert_eq!(at(&world, b).position.x, 1.5);
         // Masked to `b` alone, at half.
-        world.set_layer(animator, 1, Layer::new().mask(Mask::new().node(b, 0.5)));
+        world
+            .set_layer(animator, 1, Layer::new().mask(Mask::new().node(b, 0.5)))
+            .unwrap();
         clock.frame(&world, 0.1);
         assert_eq!(at(&world, a).position.x, 1., "unmasked: under it");
         assert_eq!(at(&world, b).position.x, 2.);
         // Masked below `a`: both.
-        world.set_layer(animator, 1, Layer::new().mask(Mask::new().below(a, 1.)));
+        world
+            .set_layer(animator, 1, Layer::new().mask(Mask::new().below(a, 1.)))
+            .unwrap();
         clock.frame(&world, 0.2);
         assert_eq!(
             (at(&world, a).position.x, at(&world, b).position.x),
@@ -556,9 +596,13 @@ mod tests {
             (0, Path::Rotation, vec![0., 1.], vec![turn(1.), turn(2.)]),
             (0, Path::Translation, vec![0., 1.], vec![x(5.), x(7.)]),
         ]);
-        world.play(animator, &base, Play::new());
-        world.play(animator, &lean, Play::new().layer(1).once());
-        world.set_layer(animator, 1, Layer::additive().weight(0.5));
+        world.play(animator, &base, Play::new()).unwrap();
+        world
+            .play(animator, &lean, Play::new().layer(1).once())
+            .unwrap();
+        world
+            .set_layer(animator, 1, Layer::additive().weight(0.5))
+            .unwrap();
         let clock = Clock(Instant::now());
         clock.frame(&world, 0.);
         let pose = at(&world, a);
@@ -586,7 +630,9 @@ mod tests {
         let (placed, a, b) = rig(&world);
         let animator = world.add_animator(&placed);
         assert!(!world.view().animating(), "an animator alone plays nothing");
-        world.play(animator, &slide(0., 2.), Play::new().once());
+        world
+            .play(animator, &slide(0., 2.), Play::new().once())
+            .unwrap();
         assert!(world.view().animating() && world.animator_playing(animator));
         let clock = Clock(Instant::now());
         let b_stamp = || world.inner().stamps[b.index as usize];
@@ -603,7 +649,7 @@ mod tests {
         clock.frame(&world, 2.);
         assert_eq!(world.revision(), revision);
         // Paused, a looping clip settles too.
-        world.play(animator, &slide(0., 1.), Play::new());
+        world.play(animator, &slide(0., 1.), Play::new()).unwrap();
         assert!(world.view().animating());
         world.set_animator_speed(animator, 0.);
         assert!(!world.view().animating());
@@ -611,7 +657,7 @@ mod tests {
         assert!(world.view().animating());
         world.remove_animator(animator);
         assert!(!world.view().animating());
-        world.play(animator, &slide(0., 1.), Play::new());
+        world.play(animator, &slide(0., 1.), Play::new()).unwrap();
         assert!(
             !world.view().animating(),
             "a removed animator plays nothing"
@@ -634,12 +680,14 @@ mod tests {
                 ),
                 (1, Path::Translation, vec![0., 0.8], vec![x(0.), x(3.)]),
             ]);
-            world.play(animator, &clip, Play::new().speed(1.3));
+            world.play(animator, &clip, Play::new().speed(1.3)).unwrap();
             let clock = Clock(Instant::now());
             let mut poses = Vec::new();
             for (i, &t) in times.iter().enumerate() {
                 if i == 4 {
-                    world.play(animator, &slide(1., 2.), Play::new().fade(0.3));
+                    world
+                        .play(animator, &slide(1., 2.), Play::new().fade(0.3))
+                        .unwrap();
                 }
                 clock.frame(&world, t);
                 poses.push((at(&world, a), at(&world, b)));
@@ -707,7 +755,7 @@ mod tests {
             vec![0., 0.5, 1.],
             vec![[0., 0., 0., 0.], [1., 0.5, 0., 0.], [2., 0., 0., 0.]],
         )]);
-        world.play(animator, &walk, Play::new());
+        world.play(animator, &walk, Play::new()).unwrap();
         let clock = Clock(Instant::now());
         frames(&clock, &world, 0., 2.5);
         let update = world.animator_update(animator);
@@ -735,11 +783,13 @@ mod tests {
         let (placed, a, _) = rig(&world);
         let animator = world.add_animator(&placed);
         world.set_root_motion(animator, Some(RootMotion::new(a)));
-        world.play(animator, &slide(0., 1.), Play::new());
+        world.play(animator, &slide(0., 1.), Play::new()).unwrap();
         let clock = Clock(Instant::now());
         clock.frame(&world, 0.);
         world.animator_update(animator);
-        world.play(animator, &slide(0., 3.), Play::new().fade(1.));
+        world
+            .play(animator, &slide(0., 3.), Play::new().fade(1.))
+            .unwrap();
         // Its first frame takes no time; then four quarter seconds at
         // weights 0.25 to 1 of the run: speeds 1.5, 2, 2.5 and 3.
         frames(&clock, &world, 0.25, 1.25);
@@ -768,7 +818,7 @@ mod tests {
                 vec![turn(0.), turn(quarter)],
             ),
         ]);
-        world.play(animator, &walk, Play::new().once());
+        world.play(animator, &walk, Play::new().once()).unwrap();
         let clock = Clock(Instant::now());
         frames(&clock, &world, 0., 0.25);
         let update = world.animator_update(animator);
@@ -808,7 +858,7 @@ mod tests {
             vec![0., 1.],
             vec![[0., 1., 0., 0.], [0., 2., 0., 0.]],
         )]);
-        world.play(animator, &forward, Play::new().once());
+        world.play(animator, &forward, Play::new().once()).unwrap();
         let clock = Clock(Instant::now());
         frames(&clock, &world, 0., 0.5);
         let moved = world.animator_update(animator).moved;
@@ -825,7 +875,9 @@ mod tests {
         let world = World::new();
         let (placed, a, _) = rig(&world);
         let animator = world.add_animator(&placed);
-        world.play(animator, &slide(0., 4.), Play::new().once());
+        world
+            .play(animator, &slide(0., 4.), Play::new().once())
+            .unwrap();
         let clock = Clock(Instant::now());
         clock.frame(&world, 0.);
         clock.frame(&world, 30.);
@@ -840,7 +892,9 @@ mod tests {
         let clip = slide(0., 1.)
             .with_event(0.5, "step")
             .with_event(0., "start");
-        world.play(animator, &clip, Play::new());
+        // Asked once: it keeps them from now on.
+        assert!(world.animator_update(animator).events.is_empty());
+        world.play(animator, &clip, Play::new()).unwrap();
         let clock = Clock(Instant::now());
         let names = |world: &World| -> Vec<String> {
             let update = world.animator_update(animator);
@@ -860,5 +914,132 @@ mod tests {
         clock.frame(&world, 1.4);
         clock.frame(&world, 1.6);
         assert_eq!(names(&world), ["start", "step"], "round again");
+    }
+
+    #[test]
+    fn a_layer_at_no_weight_lets_the_world_rest_and_resumes_in_step() {
+        let world = World::new();
+        let (placed, a, _) = rig(&world);
+        let animator = world.add_animator(&placed);
+        world.play(animator, &slide(0., 2.), Play::new()).unwrap();
+        let clock = Clock(Instant::now());
+        frames(&clock, &world, 0., 1.);
+        world
+            .set_layer(animator, 0, Layer::new().weight(0.))
+            .unwrap();
+        clock.frame(&world, 1.25);
+        assert!(!world.view().animating(), "nothing it plays shows");
+        let revision = world.revision();
+        frames(&clock, &world, 1.5, 3.);
+        assert_eq!(world.revision(), revision, "no frame changes anything");
+        // Back on 3.1 s in: where the clip would be had it played on.
+        world.set_layer(animator, 0, Layer::new()).unwrap();
+        assert!(world.view().animating());
+        clock.frame(&world, 3.1);
+        assert!(close(at(&world, a).position.x, 0.2), "{:?}", at(&world, a));
+        // A mask taking nothing, and a clip moving no node of its model,
+        // play nothing either.
+        world
+            .set_layer(animator, 0, Layer::new().mask(Mask::new()))
+            .unwrap();
+        clock.frame(&world, 3.2);
+        assert!(!world.view().animating());
+        let elsewhere = clip(vec![(
+            7,
+            Path::Translation,
+            vec![0., 1.],
+            vec![x(0.), x(1.)],
+        )]);
+        world
+            .play(animator, &elsewhere, Play::new().layer(1))
+            .unwrap();
+        clock.frame(&world, 3.3);
+        assert!(!world.view().animating());
+    }
+
+    #[test]
+    fn events_are_kept_only_for_an_app_that_asks_and_only_so_many() {
+        let world = World::new();
+        let (placed, _, _) = rig(&world);
+        let animator = world.add_animator(&placed);
+        let mut busy = slide(0., 1.);
+        for i in 0..1000 {
+            busy = busy.with_event(i as f32 / 1000., "tick");
+        }
+        world.play(animator, &busy, Play::new()).unwrap();
+        let clock = Clock(Instant::now());
+        let kept = |world: &World| {
+            let inner = world.inner();
+            let slot = &inner.animators.slots[animator.index as usize];
+            slot.value.as_ref().unwrap().update.events.len()
+        };
+        frames(&clock, &world, 0., 5.);
+        assert_eq!(kept(&world), 0, "never asked: none kept");
+        assert!(world.animator_update(animator).events.is_empty());
+        frames(&clock, &world, 5.25, 80.);
+        let held = kept(&world);
+        assert!(held > 0 && held <= crate::animator::EVENTS, "{held}");
+    }
+
+    #[test]
+    fn layers_past_the_last_are_refused() {
+        let world = World::new();
+        let (placed, _, _) = rig(&world);
+        let animator = world.add_animator(&placed);
+        let last = crate::MAX_LAYERS - 1;
+        assert!(
+            world
+                .play(animator, &slide(0., 1.), Play::new().layer(last))
+                .is_ok()
+        );
+        let past = world.play(animator, &slide(0., 1.), Play::new().layer(1 << 30));
+        assert_eq!(past, Err(crate::AnimatorError::Layer(1 << 30)));
+        assert!(world.set_layer(animator, last + 1, Layer::new()).is_err());
+        let inner = world.inner();
+        let slot = &inner.animators.slots[animator.index as usize];
+        assert_eq!(slot.value.as_ref().unwrap().layers.len(), last + 1);
+    }
+
+    #[test]
+    fn speeds_too_great_to_multiply_keep_a_pose() {
+        let world = World::new();
+        let (placed, a, _) = rig(&world);
+        let animator = world.add_animator(&placed);
+        let clip = slide(0., 2.);
+        world
+            .play(animator, &clip, Play::new().speed(3e38))
+            .unwrap();
+        world.set_animator_speed(animator, 3e38);
+        let clock = Clock(Instant::now());
+        frames(&clock, &world, 0., 1.);
+        let pose = at(&world, a).position;
+        assert!(pose.is_finite() && (0. ..=2.).contains(&pose.x), "{pose:?}");
+        // Its time still a time: at ordinary speeds it plays on.
+        world.play(animator, &clip, Play::new()).unwrap();
+        world.set_animator_speed(animator, 1.);
+        let before = at(&world, a).position.x;
+        clock.frame(&world, 1.1);
+        let after = at(&world, a).position.x;
+        assert!(
+            close((after - before).rem_euclid(2.), 0.2),
+            "{before} to {after}"
+        );
+    }
+
+    #[test]
+    fn a_mask_weight_not_a_number_takes_none() {
+        let world = World::new();
+        let (placed, a, _) = rig(&world);
+        let animator = world.add_animator(&placed);
+        world.play(animator, &slide(1., 1.), Play::new()).unwrap();
+        world
+            .play(animator, &slide(3., 3.), Play::new().layer(1))
+            .unwrap();
+        let mask = Mask::new().node(a, f32::NAN);
+        world
+            .set_layer(animator, 1, Layer::new().mask(mask))
+            .unwrap();
+        Clock(Instant::now()).frame(&world, 0.);
+        assert_eq!(at(&world, a).position.x, 1., "the layer under it");
     }
 }

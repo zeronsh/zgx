@@ -61,7 +61,9 @@ mod world;
 #[cfg(feature = "gltf")]
 pub use animation::{Clip, Placed};
 #[cfg(feature = "gltf")]
-pub use animator::{AnimatorId, AnimatorUpdate, Fired, Layer, Mask, Play, RootMotion};
+pub use animator::{
+    AnimatorError, AnimatorId, AnimatorUpdate, Fired, Layer, MAX_LAYERS, Mask, Play, RootMotion,
+};
 #[cfg(feature = "compute")]
 pub use buffer::{
     BufferDesc, DEFAULT_MEMORY_CAP, DEFAULT_READBACK_BUDGET, Format, GpuBuffer, GpuDataError,

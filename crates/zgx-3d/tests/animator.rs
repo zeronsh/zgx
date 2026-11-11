@@ -95,7 +95,7 @@ fn frames_pose_a_playing_clip_at_their_time() {
     let world = World::new();
     let placed = world.place_model(&model);
     let animator = world.add_animator(&placed);
-    world.play(animator, &clip, Play::new());
+    world.play(animator, &clip, Play::new()).unwrap();
     assert!(
         world.view().animating(),
         "playing: the world draws by itself"
@@ -122,7 +122,9 @@ fn a_finished_clip_lets_the_world_rest() {
     let world = World::new();
     let placed = world.place_model(&model);
     let animator = world.add_animator(&placed);
-    world.play(animator, &clip, Play::new().once().speed(4.));
+    world
+        .play(animator, &clip, Play::new().once().speed(4.))
+        .unwrap();
     let mut painter = Painter::new(&world);
     let mut t = 0.;
     while world.view().animating() {
@@ -147,13 +149,19 @@ fn the_same_frame_times_pose_the_same_every_time() {
         let world = World::new();
         let placed = world.place_model(&model);
         let animator = world.add_animator(&placed);
-        world.play(animator, &clip, Play::new().speed(1.25));
+        world
+            .play(animator, &clip, Play::new().speed(1.25))
+            .unwrap();
         let mut painter = Painter::new(&world);
         let mut bits = Vec::new();
         for (i, t) in times.into_iter().enumerate() {
             if i == 5 {
-                world.play(animator, &clip, Play::new().layer(1).from(0.7).fade(0.2));
-                world.set_layer(animator, 1, Layer::new().weight(0.6));
+                world
+                    .play(animator, &clip, Play::new().layer(1).from(0.7).fade(0.2))
+                    .unwrap();
+                world
+                    .set_layer(animator, 1, Layer::new().weight(0.6))
+                    .unwrap();
             }
             painter.frame(t);
             for node in 1..=16 {
@@ -165,4 +173,30 @@ fn the_same_frame_times_pose_the_same_every_time() {
         bits
     };
     assert_eq!(run(), run());
+}
+
+#[test]
+fn a_layer_turned_off_draws_no_frames() {
+    let model = Model::from_bytes(&rig::rig(4)).unwrap();
+    let clip = model.clip("Wave").unwrap().clone();
+    let world = World::new();
+    let placed = world.place_model(&model);
+    let animator = world.add_animator(&placed);
+    world.play(animator, &clip, Play::new()).unwrap();
+    let mut painter = Painter::new(&world);
+    for frame in 0..30 {
+        painter.frame(frame as f64 / 60.);
+    }
+    world
+        .set_layer(animator, 0, Layer::new().weight(0.))
+        .unwrap();
+    // The frame it asked for poses its rest; then it asks for none.
+    painter.frame(0.5);
+    let drawn = world.frames_drawn();
+    for frame in 31..631 {
+        if world.view().animating() {
+            painter.frame(frame as f64 / 60.);
+        }
+    }
+    assert_eq!(world.frames_drawn() - drawn, 0, "10 s, no frame");
 }
