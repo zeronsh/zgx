@@ -1,0 +1,85 @@
+name: Perf base binaries
+
+# perf's binaries for every commit pushed to main, kept for pull requests to
+# measure against (CI's perf job, .github/ci/gate_base.py): without them a
+# pull request's perf job builds its base as well as its own side, about 25
+# of its 60 minutes. CI's main runs keep their commit's binaries too, but a
+# push waiting for the run before is superseded by the next one: in busy
+# hours 27 of 30 main pushes never ran, and the pull requests based on them
+# built their base, each one.
+#
+# Only the head stage of the gate (scripts/perf/gate.py --stage head), the
+# same build in the same place as the perf job's, on its dependency cache.
+# Skipped when the push changes nothing perf builds (docs, tests, other
+# platforms' code): the binaries of the commit before stand for it then.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Every commit's own: none supersedes another's.
+concurrency:
+  group: perf-base-${{ github.sha }}
+  cancel-in-progress: false
+
+# As CI's: part of the dependency cache's key (Swatinem/rust-cache hashes
+# CARGO_* variables), so this job restores the perf job's cache.
+env:
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  # Named `perf`, as CI's job: the dependency cache's key includes the job's name.
+  perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Does this push change what perf builds?
+        id: needed
+        continue-on-error: true  # unsure: build
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: python3 .github/ci/gate_base.py needed "$BEFORE" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.needed.outputs.build != 'false'
+      - id: apt-key
+        if: steps.needed.outputs.build != 'false'
+        run: echo "month=$(date +%Y-%m)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        if: steps.needed.outputs.build != 'false'
+        with:
+          path: ~/apt-archives
+          key: apt-perf-${{ runner.arch }}-${{ steps.apt-key.outputs.month }}
+          restore-keys: apt-perf-${{ runner.arch }}-
+      - name: Packages
+        if: steps.needed.outputs.build != 'false'
+        timeout-minutes: 10
+        run: sh .github/apt-install.sh valgrind cmake pkg-config fonts-dejavu-core libdbus-1-dev libfontconfig1-dev libwayland-dev libxcb1-dev libxkbcommon-dev libxrandr-dev
+      - uses: Swatinem/rust-cache@v2
+        if: steps.needed.outputs.build != 'false'
+        with:
+          key: perf-gate
+          save-if: false
+      # The base argument is unused by the head stage: HEAD keeps the
+      # checkout shallow.
+      - name: Binaries
+        id: head
+        if: steps.needed.outputs.build != 'false'
+        env:
+          ZGX_GATE_TARGET: target/perf-gate
+          ZGX_GATE_BIN_CACHE: ${{ runner.temp }}/gate-bin
+        run: |
+          python3 scripts/perf/gate.py HEAD --stage head
+          if [ -f "$ZGX_GATE_BIN_CACHE/built-from" ]; then echo "binaries=yes" >> "$GITHUB_OUTPUT"; fi
+      # Already kept when CI's main run of this commit saved them first.
+      - uses: actions/cache/save@v4
+        if: steps.head.outputs.binaries == 'yes'
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/gate-bin
+          key: gate-bin-${{ github.sha }}
