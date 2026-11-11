@@ -9,7 +9,7 @@
 # own under $LOCAL_CI_DIR (default /tmp/zgx-local-ci), built into one
 # target directory there, deleted at the end unless --keep:
 #   fmt; clippy 1.99 on the workspace, on zgx-script without default
-#   features and on zgx-3d with every feature; the MSRV check; the Python tests; changelog.py check against
+#   features and on zgx-3d with every feature and with each alone; the MSRV check; the Python tests; changelog.py check against
 #   --base; StyLua; the script lint and, when luau-lsp is on PATH or in
 #   $LUAU_LSP, the script type check; the tests of every crate the jobs
 #   test, zgx-audio's and zgx-video's (with ffmpeg) among them; the doc
@@ -115,6 +115,17 @@ step "clippy 1.99 zgx-script no default features" \
 # shows only with them all on (93cc82512's world_bench) reached every lane.
 step "clippy 1.99 zgx-3d every feature" \
   cargo +1.99 clippy -p zgx-3d --all-features --all-targets --locked -- -D warnings
+# And with each feature alone, its library and tests: a cfg gate that holds
+# only beside another feature (`post` without `compute`) passes both with
+# every feature and with none. The features are read from the manifest, so
+# a new one is checked from the commit that adds it.
+for feature in $(cargo metadata --no-deps --format-version 1 --locked 2>/dev/null | python3 -c '
+import json, sys
+package = [p for p in json.load(sys.stdin)["packages"] if p["name"] == "zgx-3d"][0]
+print(" ".join(sorted(f for f in package["features"] if f != "default")))'); do
+  step "clippy 1.99 zgx-3d $feature alone" \
+    cargo +1.99 clippy -p zgx-3d --no-default-features --features "$feature" --lib --tests --locked -- -D warnings
+done
 step "script lint" cargo run -q -p zgx-script --bin zgx --locked -- lint \
   crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
 lsp=${LUAU_LSP:-$(command -v luau-lsp || true)}
