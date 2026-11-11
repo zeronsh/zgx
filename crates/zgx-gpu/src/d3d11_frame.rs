@@ -878,6 +878,14 @@ impl Device {
         }
     }
 
+    /// `target` cleared to transparent: a fade band's texture, before its
+    /// pass (`crate::GpuRenderer::render_d3d11`), as `encode_band` clears it.
+    pub(crate) fn clear(&self, target: &Surface) {
+        let rtv = target.rtv.as_ref().expect("a render target");
+        // SAFETY: A live render target view of this device.
+        unsafe { self.context.ClearRenderTargetView(rtv, &[0.; 4]) };
+    }
+
     pub(crate) fn begin<'a>(
         &'a self,
         state: &'a State,
