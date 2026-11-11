@@ -127,6 +127,14 @@ fn decode(c: vec3<f32>) -> vec3<f32> {
     let high = pow((c + 0.055) / 1.055, vec3(2.4));
     return select(high, low, c <= vec3(0.04045));
 }
+// Linear sRGB (Rec. 709, D65) to ACES's AP1 primaries (D60, Bradford), and
+// ACEScct's log encoding of it (S-2016-001).
+const TO_AP1 = mat3x3(vec3(0.61309732, 0.07019422, 0.02061560), vec3(0.33952285, 0.91635557, 0.10956983), vec3(0.04737928, 0.01345259, 0.86981512));
+fn acescct(c: vec3<f32>) -> vec3<f32> {
+    let low = 10.5402377416545 * c + 0.0729055341958355;
+    let high = (log2(max(c, vec3(1e-10))) + 9.72) / 17.52;
+    return clamp(select(high, low, c <= vec3(0.0078125)), vec3(0.0), vec3(1.0));
+}
 // Lift, gamma, gain and saturation on what the display shows (encoded).
 fn graded(p: vec3<f32>) -> vec3<f32> {
     var c = look.gain.rgb * (p + look.lift.rgb * (1.0 - p));
@@ -247,7 +255,15 @@ fn tent(uv: vec2<f32>) -> vec3<f32> {
         exposed *= 1.0 / ((1.0 + r2) * (1.0 + r2));
     }
     var mapped = clamp(tone_map(exposed), vec3(0.0), vec3(1.0));
-    if GRADE || TABLE {
+    if TABLE && look.gamma.w > 0.5 {
+        // A table in ACEScct maps the light to what the display shows
+        // itself, in place of the tone curve.
+        var shown = looked_up(acescct(TO_AP1 * max(exposed, vec3(0.0))));
+        if GRADE {
+            shown = graded(shown);
+        }
+        mapped = decode(shown);
+    } else if GRADE || TABLE {
         var shown = encode(mapped);
         if GRADE {
             shown = graded(shown);
