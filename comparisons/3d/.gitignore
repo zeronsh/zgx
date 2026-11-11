@@ -1,3 +1,4 @@
 .wgpu-hal-timed/
 .zgx-plain/
 .zgx-cull/
+.zgx-tree-*/

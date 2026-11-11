@@ -83,7 +83,10 @@ fn main() {
     let phases = std::env::args().any(|a| a == "--load-phases=1");
     let mut read_ms = 0.;
     let mut images: Vec<Vec<u8>> = Vec::new();
-    let model = boxes.is_none().then(|| {
+    let generated = boxes.is_some()
+        || report::materials(&setup.model).is_some()
+        || report::hierarchy(&setup.model).is_some();
+    let model = (!generated).then(|| {
         let path = Path::new(&setup.model);
         let folder = path.parent().unwrap().to_path_buf();
         let read = Instant::now();
@@ -182,6 +185,95 @@ fn main() {
         }
         None => Vec::new(),
     };
+    // `materials:N` and `hierarchy:D:F` (see report.rs): shapes the instance
+    // and culling work wasn't tuned on.
+    let mut cubes = cubes;
+    let mut spinners: Vec<ObjectId> = Vec::new();
+    if let Some(count) = report::materials(&setup.model) {
+        let shapes: Vec<Geometry> = (0..8)
+            .map(|i| match i % 4 {
+                0 => Geometry::cuboid(1., 1. + i as f32 * 0.1, 1.),
+                1 => Geometry::sphere(0.6, 12 + i),
+                2 => Geometry::cylinder(0.5, 1., 10 + i),
+                _ => Geometry::torus(0.5, 0.15, 12 + i),
+            })
+            .collect();
+        let textures: Vec<Texture> = (0..64u32)
+            .map(|t| {
+                let v = (t * 4) as u8;
+                Texture::from_rgba8(4, 4, [v, 255 - v, 128, 255].repeat(16)).unwrap()
+            })
+            .collect();
+        for i in 0..count {
+            let [x, y, z] = report::box_at(i, count, 0);
+            let colour = (i as u32).wrapping_mul(2654435761) >> 8;
+            let material =
+                Material::rgb(colour).with((i % 7) as f32 / 6., 0.2 + (i % 5) as f32 * 0.2);
+            let id =
+                world.add(Object::mesh(shapes[i % shapes.len()].clone(), material).at([x, y, z]));
+            if i % 4 == 0 {
+                world.set_texture(id, Some(textures[i % textures.len()].clone()));
+            }
+            cubes.push(id);
+        }
+    }
+    if let Some((depth, fanout)) = report::hierarchy(&setup.model) {
+        let cube = Geometry::cuboid(0.8, 0.8, 0.8);
+        let material = Material::rgb(0xc8c0b4).with(0., 0.6);
+        // Each level's children spread on a ring a quarter the size of the
+        // last's; the leaves are cubes.
+        fn grow(
+            world: &World,
+            parent: ObjectId,
+            level: usize,
+            depth: usize,
+            fanout: usize,
+            radius: f32,
+            cube: &Geometry,
+            material: Material,
+            leaves: &mut Vec<ObjectId>,
+        ) {
+            for c in 0..fanout {
+                let a = c as f32 / fanout as f32 * std::f32::consts::TAU;
+                let at = [radius * a.cos(), 0., radius * a.sin()];
+                if level + 1 == depth {
+                    leaves.push(
+                        world.add(Object::mesh(cube.clone(), material).at(at).child_of(parent)),
+                    );
+                } else {
+                    let node = world.add(Object::group().at(at).child_of(parent));
+                    grow(
+                        world,
+                        node,
+                        level + 1,
+                        depth,
+                        fanout,
+                        radius * 0.3,
+                        cube,
+                        material,
+                        leaves,
+                    );
+                }
+            }
+        }
+        let root = world.add(Object::group());
+        for c in 0..fanout {
+            let a = c as f32 / fanout as f32 * std::f32::consts::TAU;
+            let top = world.add(
+                Object::group()
+                    .at([60. * a.cos(), 1., 60. * a.sin()])
+                    .child_of(root),
+            );
+            spinners.push(top);
+            grow(
+                &world, top, 1, depth, fanout, 18., &cube, material, &mut cubes,
+            );
+        }
+    }
+    let spinner_at: Vec<Vec3> = spinners
+        .iter()
+        .map(|&id| world.object(id).unwrap().transform.position)
+        .collect();
     let moving = boxes.map_or(0, |(_, moving)| moving);
     let camera = |(position, target): ([f32; 3], [f32; 3])| Camera {
         fov: setup.fov.to_radians(),
@@ -341,6 +433,16 @@ fn main() {
         world.set_camera(camera(pose));
         for (i, &cube) in cubes.iter().take(moving).enumerate() {
             world.set_transform(cube, Transform::at(report::box_at(i, cubes.len(), frame)));
+        }
+        for (i, (&top, &at)) in spinners.iter().zip(&spinner_at).enumerate() {
+            world.set_transform(
+                top,
+                Transform {
+                    position: at,
+                    rotation: Quat::from_axis_angle(Vec3::Y, frame as f32 * 0.02 + i as f32),
+                    ..Transform::default()
+                },
+            );
         }
         if shadow_every_frame {
             world.set_light(sun_id, sun(if frame % 2 == 0 { 1e-4 } else { 0. }));
@@ -694,7 +796,10 @@ fn at_rest(
     for _ in 0..8 {
         tick(&mut ui); // its first frames: pipelines, textures, the view's
     }
-    let ticks = 1200; // ten seconds, as the other arms'
+    // Ten seconds, as the other arms' (`--rest-ticks=N` to change).
+    let ticks: u64 = std::env::args()
+        .find_map(|a| a.strip_prefix("--rest-ticks=").map(|v| v.parse().unwrap()))
+        .unwrap_or(1200);
     let before = rusage::sample();
     let mut frames = 0;
     for _ in 0..ticks {

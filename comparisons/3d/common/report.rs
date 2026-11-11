@@ -209,3 +209,17 @@ pub fn busy(mut intervals: Vec<(f64, f64)>) -> (f64, f64) {
     };
     (total, covered)
 }
+
+/// `materials:N`: N meshes, each with a material of its own (and every
+/// fourth a texture of 64): many draws that don't batch alike.
+pub fn materials(model: &str) -> Option<usize> {
+    model.strip_prefix("materials:")?.parse().ok()
+}
+
+/// `hierarchy:D:F`: a tree D levels deep, F children a node, cubes at its
+/// leaves; the F subtrees under the root turn every frame, so every leaf's
+/// world placement changes through its parents.
+pub fn hierarchy(model: &str) -> Option<(usize, usize)> {
+    let (d, f) = model.strip_prefix("hierarchy:")?.split_once(':')?;
+    Some((d.parse().ok()?, f.parse().ok()?))
+}

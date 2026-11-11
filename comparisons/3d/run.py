@@ -45,6 +45,12 @@ SCENES = {
     # 1.5 m grid, the first M bobbing every frame.
     "boxes-100k-still": {"model": "boxes:100000:0", "sun": (-0.45, -1.0, 0.3)},
     "boxes-10k-moving": {"model": "boxes:10000:10000", "sun": (-0.45, -1.0, 0.3)},
+    # zgx only, for the instance and culling work: shapes it wasn't tuned on.
+    # 5,000 meshes, each with its own material (every fourth textured).
+    "materials-5k": {"model": "materials:5000", "sun": (-0.45, -1.0, 0.3)},
+    # A tree 5 deep, 6 a node (7,776 leaf cubes under 1,555 groups); its 6
+    # top subtrees turn every frame, moving every leaf through its parents.
+    "hierarchy-7776": {"model": "hierarchy:5:6", "sun": (-0.45, -1.0, 0.3)},
 }
 ENVIRONMENT = "polyhaven/kloofendal_48d_partly_cloudy_puresky_2k.hdr"
 
@@ -60,8 +66,8 @@ def camera_path(scene, frames):
             a = math.pi * (0.15 + t)
             poses.append(((25.0 + 70.0 * math.cos(a), 45.0 + 3.0 * math.sin(2 * a), 4.0 + 70.0 * math.sin(a)),
                           (25.0, 0.0, 4.0)))
-        elif scene.startswith("boxes"):
-            # Round the grid's middle, low enough to see along its rows.
+        elif scene.startswith(("boxes", "materials", "hierarchy")):
+            # Round the middle, low enough to see along the rows.
             radius = 100.0 if "100k" in scene else 70.0
             a = 2 * math.pi * t
             poses.append(((radius * math.cos(a), 30.0, radius * math.sin(a)), (0.0, 0.0, 0.0)))
@@ -119,6 +125,40 @@ ARMS = {
     "bevy": {"dir": "bevy", "bin": "bevy-compare-3d"},
     "filament": {"dir": "filament", "bin": "filament-compare-3d"},
 }
+
+
+def trees():
+    """`ZGX_3D_TREES=label=path,...`: zgx checkouts to run as arms `zgx@label`."""
+    found = {}
+    for item in filter(None, os.environ.get("ZGX_3D_TREES", "").split(",")):
+        label, path = item.split("=", 1)
+        found[label] = Path(path).resolve()
+    return found
+
+
+for _label in trees():
+    ARMS[f"zgx@{_label}"] = {"dir": f".zgx-tree-{_label}", "bin": "zgx-compare-3d",
+                             "target": f"zgx@{_label}"}
+
+
+def tree_zgx(arm):
+    """The zgx arm's sources against the checkout `zgx@label` names, its
+    culling hooks on where that tree has them."""
+    label = arm.split("@", 1)[1]
+    tree = trees()[label]
+    copy = HERE / f".zgx-tree-{label}"
+    copy.mkdir(exist_ok=True)
+    manifest = (HERE / "zgx" / "Cargo.toml").read_text()
+    manifest = manifest.replace('path = "../../../crates/', f'path = "{tree}/crates/')
+    culls = "pub fn set_culling" in (tree / "crates/zgx-3d/src/world.rs").read_text()
+    if culls:
+        manifest = manifest.replace('default = ["gpu-time"]', 'default = ["gpu-time", "cull-tree"]')
+    (copy / "Cargo.toml").write_text(manifest)
+    if not (copy / "src").exists():
+        (copy / "src").symlink_to(HERE / "zgx" / "src")
+    lock = HERE / "zgx" / "Cargo.lock"
+    if lock.exists() and not (copy / "Cargo.lock").exists():
+        shutil.copy(lock, copy / "Cargo.lock")
 
 
 def target_dir(arm):
@@ -188,12 +228,21 @@ def build(arm):
         plain_zgx()
     if arm == "zgx-cull":
         cull_zgx()
-    env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_PROFILE_DEV_DEBUG="0")
+    if arm.startswith("zgx@"):
+        tree_zgx(arm)
+    # The tree arms share one target (their dependencies are the same) and
+    # each copies its binary out to its own.
+    shared = arm.startswith("zgx@")
+    build_target = target.parent / "target-zgx-trees" if shared else target
+    env = dict(os.environ, CARGO_TARGET_DIR=str(build_target), CARGO_PROFILE_DEV_DEBUG="0")
     # The plain copy's lock differs from the arm's by wgpu-hal's source alone.
-    locked = [] if arm in ("zgx-plain", "zgx-cull") else ["--locked"]
+    locked = [] if arm in ("zgx-plain", "zgx-cull") or arm.startswith("zgx@") else ["--locked"]
     features = ["--features", ",".join(ARMS[arm]["features"])] if "features" in ARMS[arm] else []
     subprocess.run(["cargo", "build", "--release", "--bin", ARMS[arm]["bin"], *locked, *features],
                    cwd=HERE / ARMS[arm]["dir"], env=env, check=True)
+    if shared:
+        (target / "release").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(build_target / "release" / ARMS[arm]["bin"], target / "release" / ARMS[arm]["bin"])
     return target / "release" / ARMS[arm]["bin"]
 
 
@@ -202,7 +251,7 @@ def run_arm(binary, arm, scene, args, out_dir, round_):
     png = out_dir / f"{scene}-{arm}-{round_}.png"
     command = [
         str(binary),
-        "--model=" + (SCENES[scene]["model"] if SCENES[scene]["model"].startswith("boxes:")
+        "--model=" + (SCENES[scene]["model"] if SCENES[scene]["model"].startswith(("boxes:", "materials:", "hierarchy:"))
                       else str(CACHE / SCENES[scene]["model"])),
         f"--environment={CACHE / ENVIRONMENT}",
         f"--path={path_file}",
@@ -216,6 +265,8 @@ def run_arm(binary, arm, scene, args, out_dir, round_):
     if ARMS[arm].get("target", arm) == "filament":
         command.append(f"--ibl={CACHE / 'filament-ibl'}")
     command += ARMS[arm].get("args", [])
+    if args.quick and ARMS[arm].get("target", arm).startswith("zgx"):
+        command += ["--rest-s=0", "--rest-ticks=0"]
     done = subprocess.run(command, capture_output=True, text=True, timeout=900)
     log = out_dir / f"{scene}-{arm}-{round_}.log"
     log.write_text(done.stdout + "\n--- stderr ---\n" + done.stderr)
@@ -276,6 +327,8 @@ def main():
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument("--out", default=str(CACHE / "runs" / "latest"))
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--quick", action="store_true",
+                        help="zgx arms: skip the rest measurements (footprint and frames at rest)")
     args = parser.parse_args()
     arms = args.arms.split(",")
     out_dir = Path(args.out)
