@@ -7,7 +7,7 @@ use objc2_core_video::{
 };
 use objc2_metal::{MTLPixelFormat, MTLTextureType};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     ptr::NonNull,
     rc::Rc,
     sync::{
@@ -91,7 +91,7 @@ impl SurfaceCache {
             completed.fetch_max(epoch, Ordering::Release);
         });
     }
-    pub fn retain(&mut self, live: &HashSet<u64>) {
+    pub fn retain(&mut self, live: &rustc_hash::FxHashSet<u64>) {
         let _ = self.device.poll(wgpu::PollType::Poll);
         let dead: Vec<_> = self
             .entries

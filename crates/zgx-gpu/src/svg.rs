@@ -46,12 +46,33 @@ impl SvgCache {
     pub fn retain(&mut self, scene: &Scene) {
         let entries = &mut self.entries;
         self.nodes.retain(|node, shown| {
-            let live = scene.contains(*node) && matches!(scene.kind(*node), NodeKind::Svg(_));
+            let live = shows_svg(scene, *node);
             if !live && let Some(entry) = entries.get_mut(&shown.key) {
                 entry.users -= 1;
             }
             live
         });
+        self.trim();
+    }
+    /// `retain` for the nodes `changed` alone (`Scene::resource_changes`).
+    pub fn retain_changed(&mut self, scene: &Scene, changed: &[NodeId]) {
+        let mut gone = false;
+        for &node in changed {
+            if !self.nodes.contains_key(&node) || shows_svg(scene, node) {
+                continue;
+            }
+            let shown = self.nodes.remove(&node).expect("looked up above");
+            if let Some(entry) = self.entries.get_mut(&shown.key) {
+                entry.users -= 1;
+            }
+            gone = true;
+        }
+        if gone {
+            self.trim();
+        }
+    }
+    /// Drop unused rasters past the budget, the least recently used first.
+    fn trim(&mut self) {
         let mut unused: Vec<_> = self
             .entries
             .iter()
@@ -345,4 +366,8 @@ mod tests {
                 .sum::<usize>()
         );
     }
+}
+/// Whether `node` is in the scene, showing an SVG.
+fn shows_svg(scene: &Scene, node: NodeId) -> bool {
+    scene.contains(node) && matches!(scene.kind(node), NodeKind::Svg(_))
 }

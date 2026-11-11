@@ -4395,6 +4395,9 @@ pub struct GpuRenderer {
     /// resized or restyled node gets a new raster; the old texture goes at
     /// once instead of waiting for a structural prune.
     node_images: FxHashMap<NodeId, u64>,
+    /// The images the scene's nodes show, counted (`prune_images`).
+    /// Boxed: the renderer's own fields stay where they were.
+    scene_images: Option<Box<SceneImages>>,
     /// Gradient ramps (see `axis_gradient`) by their stops, and the ramp
     /// each node draws, so a ramp lives while a node shows it.
     ramps: FxHashMap<RampKey, Arc<zgx::image::ImageData>>,
@@ -5239,6 +5242,7 @@ impl GpuRenderer {
                 mapped_at_creation: false,
             }),
             node_images: FxHashMap::default(),
+            scene_images: None,
             ramps: FxHashMap::default(),
             node_ramps: FxHashMap::default(),
             failed_svgs: Default::default(),
@@ -6266,11 +6270,12 @@ impl GpuRenderer {
             self.shaped_bytes = 0;
             self.fresh = true;
             self.pruned_revision = None;
+            self.scene_images = None;
         }
         // Caches only go stale when nodes are added, removed or change kind.
         if self.pruned_revision != Some(scene.content_revision()) {
             self.pruned_revision = Some(scene.content_revision());
-            self.prune(scene);
+            self.prune_moved(scene);
         }
         let frame = self.layer_frame;
         self.layers.retain(|id, cache| {
@@ -6565,18 +6570,11 @@ impl GpuRenderer {
         stats.vertex_buffer_allocations += layer_stats.vertex_buffer_allocations;
         Ok(stats)
     }
-    /// Drop cached shapes, canvases, SVGs and textures of nodes that are gone.
+    /// Drop cached shapes, canvases, SVGs and textures of nodes that are gone,
+    /// looking over all it keeps.
     fn prune(&mut self, scene: &Scene) {
         self.node_images.retain(|id, _| scene.contains(*id));
         self.node_ramps.retain(|id, _| scene.contains(*id));
-        let shown: std::collections::HashSet<&RampKey> = self.node_ramps.values().collect();
-        // A ramp no box shows stays while its texture does (kept with the
-        // images no node shows, until the window goes idle): the same
-        // gradient shown again, as a page pushed again shows its edge, takes
-        // that texture rather than a new one each time.
-        let images = &self.images;
-        self.ramps
-            .retain(|key, ramp| shown.contains(key) || images.contains_key(&ramp.id()));
         self.shapes.retain(|id, _| {
             scene.contains(*id)
                 && matches!(
@@ -6593,6 +6591,105 @@ impl GpuRenderer {
             }
         }
         self.canvases.retain(scene);
+        self.svgs.retain(scene);
+        // The images nodes show, counted from here on as they change; with
+        // none uploaded, not looked for (`SceneImages::counted`).
+        let images = self.scene_images.get_or_insert_default();
+        images.counted = false;
+        if !self.images.is_empty() {
+            images.walk(scene);
+        }
+        self.prune_rest(scene);
+    }
+    /// What `prune` does when the content revision moved: for the nodes the
+    /// scene names as changed since the last (`Scene::resource_changes`),
+    /// or with images no longer shown (`SceneImages::dropped`); past a gap,
+    /// for all. With neither (a canvas drawn again, a node appended), none.
+    /// Out of line: the frame runs as before.
+    #[inline(never)]
+    fn prune_moved(&mut self, scene: &Scene) {
+        let (covered, changed) = scene.resource_changes();
+        match &mut self.scene_images {
+            Some(images) if *covered.start() <= images.through + 1 => {
+                // Counted from the first move with textures to keep; after
+                // that, the few counted are looked at again (a node given
+                // another kind isn't named: an image node made a box lets
+                // go of its image, as it did when all nodes were walked for).
+                let uncounted = !images.counted && !self.images.is_empty();
+                if images.counted {
+                    images.recheck(scene);
+                }
+                let dropped = images.dropped || uncounted;
+                // Rasters of nodes no longer drawing one (a box's detailed
+                // decoration taken off) go as they did: they are few, and
+                // the scene doesn't name a node given another kind.
+                if !self.canvases.is_empty() {
+                    self.canvases.retain(scene);
+                }
+                if !changed.is_empty() || dropped {
+                    self.prune_changed(scene, changed);
+                } else {
+                    #[cfg(target_os = "macos")]
+                    self.retain_lone_surfaces(scene);
+                }
+            }
+            _ => self.prune(scene),
+        }
+        if let Some(images) = &mut self.scene_images {
+            images.through = *covered.end();
+        }
+    }
+    /// `prune` for the nodes `changed` alone (`Scene::resource_changes`):
+    /// those gone, or showing something else.
+    fn prune_changed(&mut self, scene: &Scene, changed: &[NodeId]) {
+        let images = self.scene_images.get_or_insert_default();
+        if images.counted {
+            for &id in changed {
+                let kind = scene.contains(id).then(|| scene.kind(id));
+                images.show(id, kind.and_then(shown_image));
+            }
+        } else if !self.images.is_empty() {
+            images.walk(scene);
+        }
+        for &id in changed {
+            let kind = scene.contains(id).then(|| scene.kind(id));
+            if kind.is_none() {
+                self.node_images.remove(&id);
+                self.node_ramps.remove(&id);
+            }
+            if !matches!(
+                kind,
+                Some(NodeKind::Text { .. } | NodeKind::RichText { .. })
+            ) && let Some(shaped) = self.shapes.remove(&id)
+            {
+                self.shaped_bytes -= shaped.bytes();
+                if let Some(blurred) = &mut self.blurred {
+                    blurred.texts.remove(&id);
+                }
+            }
+        }
+        if self
+            .blurred
+            .as_ref()
+            .is_some_and(|blurred| blurred.texts.is_empty())
+        {
+            self.blurred = None;
+        }
+        self.canvases.retain_changed(scene, changed);
+        self.svgs.retain_changed(scene, changed);
+        self.prune_rest(scene);
+    }
+    /// What `prune` and `prune_changed` share: ramps, outlines and textures
+    /// none shows.
+    fn prune_rest(&mut self, scene: &Scene) {
+        let shown: std::collections::HashSet<&RampKey> = self.node_ramps.values().collect();
+        // A ramp no box shows stays while its texture does (kept with the
+        // images no node shows, until the window goes idle): the same
+        // gradient shown again, as a page pushed again shows its edge, takes
+        // that texture rather than a new one each time.
+        let images = &self.images;
+        self.ramps
+            .retain(|key, ramp| shown.contains(key) || images.contains_key(&ramp.id()));
         // Pixelated images' bind groups go with their textures; with the last, all.
         if let Some(nearest) = &mut self.nearest {
             nearest.binds.retain(|id, _| self.images.contains_key(id));
@@ -6611,83 +6708,76 @@ impl GpuRenderer {
                 self.outlines = None;
             }
         }
-        self.svgs.retain(scene);
-        // Surfaces with no picture beside them (a video player alone): let
-        // go of those no longer shown as frames are drawn, as below does with
-        // pictures. Else a playing window kept each frame's until it rested.
         #[cfg(target_os = "macos")]
-        if self.images.is_empty()
-            && let Some(cache) = &mut self.native_surfaces
-        {
-            let live = (scene.paint_items())
-                .filter_map(|item| match item.kind {
-                    NodeKind::NativeSurface(frame) => Some(frame.id()),
-                    _ => None,
-                })
-                .collect();
-            cache.retain(&live);
-        }
+        self.retain_lone_surfaces(scene);
         if !self.images.is_empty() {
-            let mut live_images: std::collections::HashSet<u64> = scene
-                .paint_items()
-                .filter_map(|item| match item.kind {
-                    NodeKind::Image(image) => Some(image.id()),
-                    #[cfg(target_os = "macos")]
-                    NodeKind::NativeSurface(frame) => Some(frame.id()),
-                    _ => None,
-                })
-                .collect();
-            live_images.extend(self.canvases.image_ids());
-            // Only the ramps boxes show: the rest go as other unshown images do.
-            live_images.extend(
-                (self.node_ramps.values())
-                    .filter_map(|key| self.ramps.get(key))
-                    .map(|ramp| ramp.id()),
-            );
-            live_images.extend(self.svgs.image_ids());
-            // Boxes' background images.
-            live_images.extend(scene.paint_items().filter_map(|item| match item.kind {
-                NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
-                    match quad.decoration.as_deref()?.background.as_ref()? {
-                        zgx::decoration::Background::Image { image, .. } => Some(image.id()),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            }));
-            // Effect layers' atlas and masks.
-            live_images.insert(effects::EFFECT_ATLAS);
-            live_images.extend(
-                self.layers
-                    .keys()
-                    .filter(|id| scene.contains(**id))
-                    .filter_map(|id| scene.mask(*id).map(|mask| mask.image.id())),
-            );
-            #[cfg(target_os = "macos")]
-            if let Some(cache) = &mut self.native_surfaces {
-                cache.retain(&live_images);
-            }
-            // A picture whose row went (a list scrolled past) may come back
-            // with its pixels long given up, to decode blank again: its
-            // texture stays, within a bound, until the window goes idle.
-            // Others' are gone with their nodes; they have no `image_drawn`.
-            // Nor one nothing holds any more (a video's frame, replaced by
-            // the next): no node can show it again.
-            let (drawn, holders) = (&self.image_drawn, &self.image_holders);
-            self.images.retain(|id, _| {
-                live_images.contains(id)
-                    || drawn.contains_key(id) && holders.get(id).is_none_or(|h| h.any())
-            });
-            let images = &self.images;
-            self.image_holders.retain(|id, _| images.contains_key(id));
-            self.images_gone.clear();
-            self.images_gone
-                .extend(self.images.keys().filter(|id| !live_images.contains(id)));
-            self.bound_images_gone();
-            let images = &self.images;
-            self.image_drawn.retain(|id, _| images.contains_key(id));
+            self.prune_images(scene);
         }
         self.retain_views();
+    }
+    /// `prune` for image textures: those no node, canvas, ramp, picture or
+    /// layer shows go, within the bound kept for pictures that may come back.
+    /// Those nodes show are counted (`SceneImages`), not walked for. Out of
+    /// line: `prune` stays as it was.
+    #[inline(never)]
+    fn prune_images(&mut self, scene: &Scene) {
+        let images = self.scene_images.get_or_insert_default();
+        if !images.counted {
+            images.walk(scene);
+        }
+        images.dropped = false;
+        #[cfg(debug_assertions)]
+        {
+            let shown = scene_image_ids(scene);
+            assert!(
+                images.users.keys().all(|id| shown.contains(id)),
+                "an image counted that no node shows"
+            );
+        }
+        // Those nodes show, and the rest: canvases', boxes' ramps (the rest
+        // go as other unshown images do), pictures', effect layers' atlas and
+        // masks.
+        let mut others = FxHashSet::default();
+        others.extend(self.canvases.image_ids());
+        others.extend(
+            (self.node_ramps.values())
+                .filter_map(|key| self.ramps.get(key))
+                .map(|ramp| ramp.id()),
+        );
+        others.extend(self.svgs.image_ids());
+        others.insert(effects::EFFECT_ATLAS);
+        others.extend(
+            self.layers
+                .keys()
+                .filter(|id| scene.contains(**id))
+                .filter_map(|id| scene.mask(*id).map(|mask| mask.image.id())),
+        );
+        let walked = &self.scene_images.as_deref().expect("counted above").users;
+        let live = |id: &u64| walked.contains_key(id) || others.contains(id);
+        #[cfg(target_os = "macos")]
+        if let Some(cache) = &mut self.native_surfaces {
+            let mut live_images: FxHashSet<u64> = walked.keys().copied().collect();
+            live_images.extend(others.iter().copied());
+            cache.retain(&live_images);
+        }
+        // A picture whose row went (a list scrolled past) may come back
+        // with its pixels long given up, to decode blank again: its
+        // texture stays, within a bound, until the window goes idle.
+        // Others' are gone with their nodes; they have no `image_drawn`.
+        // Nor one nothing holds any more (a video's frame, replaced by
+        // the next): no node can show it again.
+        let (drawn, holders) = (&self.image_drawn, &self.image_holders);
+        self.images.retain(|id, _| {
+            live(id) || drawn.contains_key(id) && holders.get(id).is_none_or(|h| h.any())
+        });
+        let images = &self.images;
+        self.image_holders.retain(|id, _| images.contains_key(id));
+        self.images_gone.clear();
+        self.images_gone
+            .extend(self.images.keys().filter(|id| !live(id)));
+        self.bound_images_gone();
+        let images = &self.images;
+        self.image_drawn.retain(|id, _| images.contains_key(id));
     }
     /// Textures of `images_gone` past their bound, least recently drawn first.
     fn bound_images_gone(&mut self) {
@@ -6712,6 +6802,24 @@ impl GpuRenderer {
             }
             self.images_gone.remove(&id);
             count -= 1;
+        }
+    }
+    /// Surfaces with no picture beside them (a video player alone): let go
+    /// of those no longer shown as frames are drawn, as `prune_images` does
+    /// with pictures. Else a playing window kept each frame's until it
+    /// rested.
+    #[cfg(target_os = "macos")]
+    fn retain_lone_surfaces(&mut self, scene: &Scene) {
+        if self.images.is_empty()
+            && let Some(cache) = &mut self.native_surfaces
+        {
+            let live = (scene.paint_items())
+                .filter_map(|item| match item.kind {
+                    NodeKind::NativeSurface(frame) => Some(frame.id()),
+                    _ => None,
+                })
+                .collect();
+            cache.retain(&live);
         }
     }
     /// Forget GPU views whose frames' textures are gone.
@@ -9527,7 +9635,8 @@ impl GpuRenderer {
                                     && let Some(quad) = background_quad(
                                         image, *fit, style, bounds, opacity, edge_fade,
                                     )
-                                    && self.ensure_image(
+                                    && self.ensure_shown_image(
+                                        item.id,
                                         image,
                                         Some((
                                             quad.rect[2] * self.scale,
@@ -9809,6 +9918,7 @@ impl GpuRenderer {
                             let bind = self.texture_bind(&view, "native CoreVideo frame");
                             self.images.insert(frame.id(), (bind, bytes, None, (0, 0)));
                         }
+                        self.drew_surface(item.id, frame.id());
                         canvas_image = Some(frame.id());
                         quads.push(Quad {
                             rect: fade,
@@ -9845,7 +9955,7 @@ impl GpuRenderer {
                             bounds.width * self.scale * stretch,
                             bounds.height * self.scale * stretch,
                         );
-                        if !self.ensure_image(image, Some(drawn), &mut stats)? {
+                        if !self.ensure_shown_image(item.id, image, Some(drawn), &mut stats)? {
                             continue;
                         }
                         let transform = image.paint_transform(bounds);
@@ -13549,6 +13659,38 @@ impl GpuRenderer {
         self.canvases.uploaded(node);
         Ok(found.id)
     }
+    /// `ensure_image` for `image` drawn as what `node` shows, counted while
+    /// it shows it (`drew_image`). Out of line: the frame's draw loop calls
+    /// it where it called `ensure_image`, and runs as it did.
+    #[inline(never)]
+    fn ensure_shown_image(
+        &mut self,
+        node: NodeId,
+        image: &zgx::image::ImageData,
+        drawn: Option<(f32, f32)>,
+        stats: &mut GpuStats,
+    ) -> Result<bool, GpuError> {
+        self.drew_image(node, image.id());
+        self.ensure_image(image, drawn, stats)
+    }
+    /// `drew_image` for a native surface's frame. Out of line, as
+    /// `ensure_shown_image`: the draw loop runs as it did.
+    #[cfg(target_os = "macos")]
+    #[inline(never)]
+    fn drew_surface(&mut self, node: NodeId, frame: u64) {
+        self.drew_image(node, frame);
+    }
+    /// `node` drew `image`: counted while it shows it (`SceneImages`), as a
+    /// node appended or given an image isn't named by the scene's changes.
+    #[inline]
+    fn drew_image(&mut self, node: NodeId, image: u64) {
+        if let Some(images) = &mut self.scene_images
+            && images.counted
+            && images.by_node.get(&node) != Some(&image)
+        {
+            images.show(node, Some(image));
+        }
+    }
     /// `image`'s texture for this frame: uploaded if it has none, and
     /// marked drawn now, so it is the last to go past the budget. `false`:
     /// no texture to be had (`IMAGE_MISSES`): this frame goes on without it.
@@ -16421,6 +16563,98 @@ impl GpuRenderer {
 #[inline]
 pub(crate) fn bgra_to_rgba(word: u32) -> u32 {
     (word & 0xFF00_FF00) | ((word >> 16) & 0xFF) | ((word & 0xFF) << 16)
+}
+
+/// The images a scene's nodes show, by node and counted
+/// (`GpuRenderer::prune_images`): walked for once (`counted`), then kept as
+/// they are drawn (`GpuRenderer::drew_image`), as nodes go
+/// (`Scene::resource_changes`), and as the counted ones are looked at again
+/// when content changes (`recheck`): a node appended, or given an image,
+/// is counted once drawn, and only then has a texture to keep. With
+/// the last flush whose changes it holds (`through`), and whether an image
+/// went uncounted since textures were last looked over (`dropped`).
+#[derive(Default)]
+struct SceneImages {
+    counted: bool,
+    dropped: bool,
+    through: u64,
+    by_node: FxHashMap<NodeId, u64>,
+    users: FxHashMap<u64, u32>,
+}
+impl SceneImages {
+    /// Count the images `scene`'s nodes show, all over again.
+    fn walk(&mut self, scene: &Scene) {
+        self.by_node.clear();
+        self.users.clear();
+        for item in scene.paint_items() {
+            if let Some(image) = shown_image(item.kind) {
+                self.show(item.id, Some(image));
+            }
+        }
+        self.counted = true;
+    }
+    /// The nodes counted showing an image show it still, or what they show
+    /// now is counted instead: one lookup for each, not a walk of the scene.
+    fn recheck(&mut self, scene: &Scene) {
+        let stale: Vec<(NodeId, Option<u64>)> = (self.by_node.iter())
+            .filter_map(|(node, image)| {
+                let now = (scene.contains(*node))
+                    .then(|| scene.kind(*node))
+                    .and_then(shown_image);
+                (now != Some(*image)).then_some((*node, now))
+            })
+            .collect();
+        for (node, now) in stale {
+            self.show(node, now);
+        }
+    }
+    /// `node` shows `image` now, or none.
+    fn show(&mut self, node: NodeId, image: Option<u64>) {
+        let old = match image {
+            Some(image) => self.by_node.insert(node, image),
+            None => self.by_node.remove(&node),
+        };
+        if old == image {
+            return;
+        }
+        if let Some(old) = old
+            && let Some(users) = self.users.get_mut(&old)
+        {
+            *users -= 1;
+            if *users == 0 {
+                self.users.remove(&old);
+                self.dropped = true;
+            }
+        }
+        if let Some(image) = image {
+            *self.users.entry(image).or_default() += 1;
+        }
+    }
+}
+/// The image a node of `kind` shows: an image (a native surface's frame
+/// too) or a box's background image.
+fn shown_image(kind: &NodeKind) -> Option<u64> {
+    match kind {
+        NodeKind::Image(image) => Some(image.id()),
+        #[cfg(target_os = "macos")]
+        NodeKind::NativeSurface(frame) => Some(frame.id()),
+        NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
+            match quad.decoration.as_deref()?.background.as_ref()? {
+                zgx::decoration::Background::Image { image, .. } => Some(image.id()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// The images `scene`'s nodes show: images (native surfaces' frames too)
+/// and boxes' background images, each id once.
+fn scene_image_ids(scene: &Scene) -> FxHashSet<u64> {
+    scene
+        .paint_items()
+        .filter_map(|item| shown_image(item.kind))
+        .collect()
 }
 
 /// What [`GpuRenderer::readback_into`] reads through, kept by whoever reads

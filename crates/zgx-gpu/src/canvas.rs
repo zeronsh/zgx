@@ -56,17 +56,20 @@ pub struct CanvasCache {
 impl CanvasCache {
     /// Forget the rasters of nodes that are gone or no longer draw one.
     pub fn retain(&mut self, scene: &Scene) {
-        self.entries.retain(|id, _| {
-            scene.contains(*id)
-                && match scene.kind(*id) {
-                    NodeKind::Canvas(_) => true,
-                    NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } => {
-                        style.decoration.is_some()
-                    }
-                    _ => false,
-                }
-        });
+        self.entries.retain(|id, _| draws_raster(scene, *id));
         self.bytes = self.entries.values().map(|e| e.bytes).sum();
+    }
+    /// Whether it holds no raster.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    /// `retain` for the nodes `changed` alone (`Scene::resource_changes`).
+    pub fn retain_changed(&mut self, scene: &Scene, changed: &[NodeId]) {
+        for &node in changed {
+            if self.entries.contains_key(&node) && !draws_raster(scene, node) {
+                self.forget(node);
+            }
+        }
     }
     /// Forget the rasters of nodes `keep` says no to.
     pub fn retain_nodes(&mut self, keep: impl Fn(NodeId) -> bool) {
@@ -196,6 +199,17 @@ impl CanvasCache {
             pixels: Some(image),
         })
     }
+}
+/// Whether `node` is in the scene, a canvas or a decorated box.
+fn draws_raster(scene: &Scene, node: NodeId) -> bool {
+    scene.contains(node)
+        && match scene.kind(node) {
+            NodeKind::Canvas(_) => true,
+            NodeKind::Quad(style) | NodeKind::Panel { quad: style, .. } => {
+                style.decoration.is_some()
+            }
+            _ => false,
+        }
 }
 fn color(color: zgx::scene::Color) -> sk::Color {
     sk::Color::from_rgba8(color.0, color.1, color.2, color.3)
