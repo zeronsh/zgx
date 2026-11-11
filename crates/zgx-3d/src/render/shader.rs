@@ -32,6 +32,22 @@ pub(super) fn wgsl(variant: Variant, samples: u32) -> String {
 #[cold]
 #[inline(never)]
 pub(super) fn wgsl_with(variant: Variant, samples: u32, custom: Option<&Custom>) -> String {
+    wgsl_full(variant, samples, custom, false)
+}
+/// `wgsl_with`'s shader for a world drawing a depth prepass (`prepass`):
+/// its lines marked `//Z ` that world's alone, `//B ` any other's. Its
+/// meshes' vertex stage then places a vertex by `zgx_place`, as the
+/// prepass's does (the graph lane's part), and its clip position is
+/// `@invariant`, so both draw the same depth.
+#[cold]
+#[inline(never)]
+#[cfg_attr(not(test), allow(dead_code))] // The prepass (the graph lane's) calls it.
+pub(super) fn wgsl_full(
+    variant: Variant,
+    samples: u32,
+    custom: Option<&Custom>,
+    prepass: bool,
+) -> String {
     let on = |tag: u8| match tag {
         b'T' => variant.textured(),
         b'S' => variant.skinned(),
@@ -55,6 +71,8 @@ pub(super) fn wgsl_with(variant: Variant, samples: u32, custom: Option<&Custom>)
         b'V' => custom.is_some(),
         b'O' => custom.is_none(),
         b'D' => custom.is_some_and(cuts),
+        b'Z' => prepass,
+        b'B' => !prepass,
         b'F' => custom.is_some_and(times),
         b'J' => custom.is_some_and(|c| !times(c)),
         _ => false,
@@ -346,6 +364,79 @@ mod tests {
         }
         validates(Variant::default(), 4).unwrap();
         assert_eq!(tried, bits.len() * (bits.len() + 1));
+    }
+
+    /// `text` parsed and validated by naga.
+    fn text_validates(text: &str) -> Result<(), String> {
+        use zgx_gpu::wgpu::naga;
+        let module = naga::front::wgsl::parse_str(text).map_err(|e| e.emit_to_string(text))?;
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .map_err(|e| e.emit_to_string(text))?;
+        Ok(())
+    }
+
+    #[test]
+    fn with_the_prepass_a_vertex_is_placed_by_one_function() {
+        // The meshes' vertex stage places by `zgx_place`, which the prepass
+        // calls too, its clip position `@invariant`: the same depth.
+        let text = wgsl_full(
+            possible(Variant::SKINNED | Variant::MORPHING),
+            4,
+            None,
+            true,
+        );
+        assert_eq!(text.matches("@invariant").count(), 1, "{text}");
+        assert!(text.contains("fn zgx_place(a: VertexAttributes) -> Placed {"));
+        assert!(text.contains(
+            "@vertex fn vertex(a: VertexAttributes) -> Out {\n    let p = zgx_place(a);"
+        ));
+        assert_eq!(
+            text.matches("@vertex fn vertex(").count(),
+            1,
+            "one vertex stage"
+        );
+        // Each bit alone and with each other, as without it.
+        let bits = declared_bits();
+        for (i, &a) in bits.iter().enumerate() {
+            for &b in &bits[i..] {
+                let variant = possible((1 << a | 1 << b) as u16);
+                for samples in [1, 4] {
+                    text_validates(&wgsl_full(variant, samples, None, true))
+                        .unwrap_or_else(|e| panic!("{variant:?} at {samples}: {e}"));
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "shaders")]
+    #[test]
+    fn with_the_prepass_a_custom_material_displaces_in_zgx_place() {
+        let shader = crate::material::Shader::new(
+            crate::MaterialShader::new(
+                "#zgx material 1
+                 fn displace(v: VertexIn) -> Displaced {
+                     var d: Displaced;
+                     d.position = v.position * 2.0;
+                     d.normal = v.normal;
+                     return d;
+                 }",
+            ),
+            1,
+            false,
+        )
+        .unwrap();
+        let custom = Custom::new(Some(&shader), std::iter::empty());
+        for bits in [0, Variant::SKINNED, Variant::PLACED | Variant::COLORED] {
+            let variant = possible(bits | Variant::TEXTURED | Variant::CUSTOM);
+            let text = wgsl_full(variant, 4, Some(&custom), true);
+            text_validates(&text).unwrap_or_else(|e| panic!("{variant:?}: {e}"));
+            let place = &text[text.find("fn zgx_place").unwrap()..];
+            assert!(place[..place.find("\n}").unwrap()].contains("zgx_displace(zv)"));
+        }
     }
 
     #[test]

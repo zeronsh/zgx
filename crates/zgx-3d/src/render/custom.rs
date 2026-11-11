@@ -515,6 +515,32 @@ fn make_pipelines(gpu: &mut Gpu, device: &wgpu::Device, shader: &Rc<Shader>, var
         Err(error) => refused(gpu, shader, (variant, false), error),
     }
 }
+/// A custom run's shader for a depth prepass (the graph lane's): its text,
+/// placing its vertices by `zgx_place` with its shader's `displace`, as the
+/// meshes' pass does with the prepass on, and its group 1's layout (bind
+/// the run's own binding, `gpu.bindings[&run.maps]`). `None` for a run
+/// without a custom material, or one the device refused.
+#[allow(dead_code)] // The prepass (the graph lane's) calls it.
+pub(super) fn source_of(
+    gpu: &mut Gpu,
+    device: &wgpu::Device,
+    run: &Run,
+) -> Option<(String, wgpu::BindGroupLayout)> {
+    let shader = gpu.custom.by_binding.get(&run.maps)?.clone();
+    if gpu.custom.failed.contains(&(shader.id, run.variant, false)) {
+        return None;
+    }
+    let extent = extent_of(run.variant).unwrap_or(Extent::Maps);
+    let layout = gpu
+        .custom
+        .layouts
+        .entry((shader.id, extent))
+        .or_insert_with(|| layout_of(device, &shader, extent))
+        .clone();
+    let custom = Custom::new(Some(&shader), gpu.custom.layers.iter().map(|l| &**l));
+    let text = super::shader::wgsl_full(run.variant, gpu.samples, Some(&custom), true);
+    Some((text, layout))
+}
 /// `shader`'s shadows' pipeline for `variant`'s meshes: moved by its
 /// `displace`, cut out by its `opacity` (and its base colour's alpha, if
 /// it's cut out by that too).
