@@ -1,37 +1,65 @@
 name: Rust
+
+# Every pull request push and every push to main, in four stages:
+#
+#   plan    which of linux, perf, macos and windows the change needs
+#           (.github/ci/plan.py, which has the rules): docs, the site and the
+#           changelog run nothing; code built for one platform alone runs
+#           that platform's job; tests run the three platform jobs; anything
+#           else (the crates, vendor/, Cargo.*, CI itself) runs all four. A
+#           change it can't list runs everything. perf runs on a pull request
+#           only when the change touches what its scenes run, or with the
+#           `ci:perf` label (add it, then re-run); on main with every run.
+#   admit   waits until every runner the run needs is free (.github/ci/admit.py).
+#   jobs    linux, perf, macos and windows, all started together once admitted.
+#   result  "CI result": passes when every job passed or was skipped, fails on
+#           a failure or a cancellation. The one check to require.
+#
+# Admission is shared with zeronsh/zeron. Both repositories' CI runs on the
+# organization's one pool of hosted runners (20 jobs at once, 5 of them
+# macOS). GitHub starts any queued job when a runner frees up, so under load
+# every run got some of its jobs going and held those runners while the rest
+# queued behind other runs' jobs: hours of queue for everyone. Now a run's
+# `admit` job waits until the runners for the whole run fit in the budget,
+# then all of its jobs start; each runner is released when its job ends. Runs
+# are served first come, first served, across both repositories: the admit
+# job's name carries the run's reservation (`admit [linux=3 windows=1
+# macos=1] #123`), which every waiting run, here and in zeron, reads.
+# zeron's runs list this workflow as a peer by its file name (ci.yml): keep
+# it. admit.py is zeron's scripts/ci/admit.py, vendored unchanged: change it
+# there first (see its header). zeron's docs/reference/ci.md has the details.
+#
+# Labels on a pull request (adding one needs the triage role):
+#   ci:perf      run perf even though the change doesn't touch what it measures
+#   ci:priority  the pull request's runs go to the front of the shared queue
+#   ci:lock      a full run's worth of runners kept for the pull request until
+#                it's merged, closed or unlabelled, or CI_LOCK_HOURS pass
+# (Labels are read when the run starts: re-run after adding one.)
+#
+# Repository variables (all optional), the same as zeron's:
+#   CI_BUDGET_TOTAL      hosted runners all admitted runs may hold at once (20, the org limit)
+#   CI_BUDGET_MACOS      ... macOS runners (5, the org limit)
+#   CI_BUDGET_WINDOWS    ... Windows runners (10, so Linux keeps half)
+#   CI_ADMISSION         off: start every run at once (the kill switch)
+#   CI_DEBOUNCE_SECONDS  a pull request run waits this long for further pushes first (60)
+#   CI_LOCK_HOURS        how long a ci:lock label holds runners (6)
+#   CI_PEERS             the other repositories in the queue (zeronsh/zeron:ci.yml)
+#   CI_SEE_OUTSIDE       off: ignore runs of other workflows (releases, the site)
+# Admission never blocks CI: after 2 hours, or when the API fails, a run starts.
 on:
   push:
     branches: [main]
-    paths:
-      - "**"
-      - "!site/**"
-      - "!website/**"
-      - "!.github/workflows/site.yml"
-      - "!**/*.md"
-      # Markdown compiled as doctests.
-      - "README.md"
-      - "docs/3d.md"
-      - "docs/composition.md"
-      - "docs/i18n.md"
-      - "docs/styling.md"
-      - "docs/window-controls.md"
   pull_request:
-    paths:
-      - "**"
-      - "!site/**"
-      - "!website/**"
-      - "!.github/workflows/site.yml"
-      - "!**/*.md"
-      # Markdown compiled as doctests.
-      - "README.md"
-      - "docs/3d.md"
-      - "docs/composition.md"
-      - "docs/i18n.md"
-      - "docs/styling.md"
-      - "docs/window-controls.md"
-# A newer push to a PR supersedes its running check. On main every run
-# finishes (a full signal per commit, and the caches it saves); a newer
-# push waits, replacing any run still waiting.
+  # Everything, on any branch.
+  workflow_dispatch:
+# A newer push to a PR supersedes its running check (and a waiting one stops
+# waiting). On main every run finishes (a full signal per commit, and the
+# caches and perf binaries it saves); a newer push waits, replacing any run
+# still waiting.
+# A cancelled run still runs its `CI result` job (`if: always()`), and the
+# next run in the group waits for it. If that ever holds new runs up, zeron's
+# answer is a group per run, with ci-supersede.yml force-cancelling the older
+# runs of a pull request (zeronsh/zeron .github/workflows/ci-supersede.yml).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
@@ -40,9 +68,71 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
 jobs:
+  # Named `plan`: admission (admit.py) leaves a job of that name out of reservations.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      jobs: ${{ steps.plan.outputs.jobs }}
+      reservation: ${{ steps.plan.outputs.reservation }}
+      pr: ${{ steps.plan.outputs.pr }}
+      any: ${{ steps.plan.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+      - name: Planner and admission tests
+        run: python3 -m unittest discover -s .github/ci -p 'test_*.py'
+      - id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -I .github/ci/plan.py
+
+  # Skipped when no job runs (only `CI result`, which needs no admission).
+  admit:
+    name: "admit [${{ needs.plan.outputs.reservation }}]${{ needs.plan.outputs.pr != '' && format(' #{0}', needs.plan.outputs.pr) || '' }}"
+    needs: plan
+    if: needs.plan.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    # GitHub stops a hosted job at 6 hours; admit.py lets the run start after MAX_WAIT_MINUTES.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read  # ci:priority / ci:lock labels and pull request heads
+      issues: read  # when ci:lock was added
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/ci
+      - env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_RESERVATION: ${{ needs.plan.outputs.reservation }}
+          CI_BUDGET_TOTAL: ${{ vars.CI_BUDGET_TOTAL }}
+          CI_BUDGET_MACOS: ${{ vars.CI_BUDGET_MACOS }}
+          CI_BUDGET_WINDOWS: ${{ vars.CI_BUDGET_WINDOWS }}
+          CI_ADMISSION: ${{ vars.CI_ADMISSION }}
+          CI_DEBOUNCE_SECONDS: ${{ vars.CI_DEBOUNCE_SECONDS }}
+          CI_LOCK_HOURS: ${{ vars.CI_LOCK_HOURS }}
+          # The other repository with admitted CI on the same runners: one queue, one budget.
+          # (Read with this token: it's public. Its other workflows, and this repository's,
+          # count as holding what they run; CI_SEE_OUTSIDE=off ignores them.)
+          CI_PEERS: ${{ vars.CI_PEERS || 'zeronsh/zeron:ci.yml' }}
+          CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
+          # The pull request's head as this run tests it: a newer push supersedes the run.
+          CI_PR: ${{ needs.plan.outputs.pr }}
+          CI_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MAX_WAIT_MINUTES: 120
+        run: python3 -I .github/ci/admit.py
+
   # Checks, unit tests, Vulkan rendering and every native Linux probe in one
   # job: the examples the tests build are the probes' fixtures.
   linux:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.jobs).linux
     runs-on: ubuntu-latest
     # A cold cache (a release's version bump changes Cargo.lock) takes about
     # twice a warm one's 21 minutes.
@@ -296,7 +386,11 @@ jobs:
   # Exact instruction counts (cachegrind) of the CPU-only headless scenes
   # against the PR's base, as a PR comment; more than +1% fails. On main,
   # against the commit before (no failure), which also keeps its cache.
+  # On a pull request only when the change touches what the scenes run, or
+  # with the `ci:perf` label (.github/ci/plan.py); on main with every run.
   perf:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.jobs).perf
     runs-on: ubuntu-latest
     # With the base's binaries not cached, both sides build: the head's took
     # 19 minutes and the base's was cut at 26 (Nov 7, as scenes grew); the
@@ -469,17 +563,21 @@ jobs:
           if [ "$status" != 0 ]; then exit "$status"; fi
           exit "$inline"
   macos:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.jobs).macos
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Also here: a change to macOS-only code runs this job without the Linux one.
+      - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
       # Text in every script, shaped in the system's own fonts.
@@ -554,6 +652,8 @@ jobs:
   # Compile everything and run the core unit tests; native Windows probes and
   # the GPU suite run on developer machines.
   windows:
+    needs: [plan, admit]
+    if: fromJSON(needs.plan.outputs.jobs).windows
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -562,10 +662,14 @@ jobs:
         with:
           fetch-depth: 2
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Also here: a change to Windows-only code runs this job without the Linux one.
+      - run: cargo fmt --all -- --check
       # Clippy compiles what `cargo check` would, and lints the Windows-only
       # code Linux and macOS never build; WebView2 (off by default) with it.
       - run: cargo clippy --workspace --all-targets --features zgx-desktop/webview2 --locked -- -D warnings
@@ -707,3 +811,21 @@ jobs:
           ffmpeg -version > /dev/null
           ffprobe -version > /dev/null
           cargo test -p zgx-video --locked
+
+  # One check for all of the above, to require on main: passes when every job
+  # passed or was skipped (the plan didn't need it), fails on a failure or a
+  # cancellation, the plan's and admission's included. Counted in the run's
+  # reservation (plan.py): one Linux runner.
+  result:
+    name: CI result
+    needs: [plan, admit, linux, perf, macos, windows]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | python3 -c 'import json,sys; [print(k.ljust(8), v["result"]) for k, v in json.load(sys.stdin).items()]'
+          test "$FAILED" = false
