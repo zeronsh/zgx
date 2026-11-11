@@ -104,8 +104,6 @@ fn tag_on(
         b'B' => !prepass,
         b'F' => custom.is_some_and(times),
         b'J' => custom.is_some_and(|c| !times(c)),
-        b'g' => variant.probed(),
-        b'h' => variant.probed() && !variant.lit(),
         NAMED_FROM.. => named(NAMED.get(usize::from(tag - NAMED_FROM))?),
         _ => return None,
     })

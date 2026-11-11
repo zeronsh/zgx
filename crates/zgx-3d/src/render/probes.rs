@@ -756,11 +756,23 @@ fn trace_source(lit: bool) -> String {
         include_str!("probes_trace.wgsl"),
     ] {
         for line in text.lines() {
-            let line = match line.as_bytes() {
-                [b'/', b'/', b'g', b' ', ..] => &line[4..],
-                [b'/', b'/', b'E', b' ', ..] if lit => &line[4..],
-                [b'/', b'/', tag, b' ', ..] if tag.is_ascii_alphabetic() => continue,
-                _ => line,
+            // A tag is `//` and a capital or a name (lowercase letters,
+            // digits, `_`), then a space: the shader's (`shader.rs`).
+            let tag = line.strip_prefix("//").and_then(|rest| {
+                let end = rest.find(' ')?;
+                let tag = &rest[..end];
+                let letter = tag.len() == 1 && tag.as_bytes()[0].is_ascii_uppercase();
+                let name = tag.len() > 1
+                    && tag
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_');
+                (letter || name).then(|| (tag, &rest[end + 1..]))
+            });
+            let line = match tag {
+                Some(("probed", rest)) => rest,
+                Some(("E", rest)) if lit => rest,
+                Some(_) => continue,
+                None => line,
             };
             out.push_str(line);
             out.push('\n');
