@@ -179,3 +179,17 @@ class VerdictTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class AudioCost(unittest.TestCase):
+    def test_a_symbol_belongs_to_the_first_crate_its_name_holds(self):
+        self.assertEqual(sizes.crate_of('<zgx_script::audio::VoiceUd>::call'), 'zgx-script: the Luau bindings')
+        self.assertEqual(sizes.crate_of('zgx_audio::mixer::Mixer::render'), 'zgx-audio: mixer')
+        self.assertEqual(sizes.crate_of('zgx_audio::wav::read'), 'zgx-audio: the rest')
+        self.assertEqual(sizes.crate_of('<cpal::host::coreaudio::Stream>::play'), 'cpal')
+        self.assertEqual(sizes.crate_of('memcpy'), 'other')
+
+    def test_every_audio_arm_is_a_feature_zgx_run_has(self):
+        manifest = (sizes.ROOT / 'crates' / 'zgx-run' / 'Cargo.toml').read_text()
+        for arm in sizes.AUDIO_ARMS:
+            self.assertRegex(manifest, rf'(?m)^{arm} = \[', arm)

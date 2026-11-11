@@ -2,6 +2,7 @@
 """Binary sizes of what UI apps ship, base against head: nothing may move.
 
     python3 scripts/perf/sizes.py BASE [--markdown out.md] [--keep]
+    python3 scripts/perf/sizes.py --audio-cost [--markdown out.md]
 
 Builds this checkout and BASE, each with `cargo build --release --locked`:
 - the gate's UI scenes (`gate.SCENES`, less zgx-3d's and zgx-video's
@@ -46,6 +47,14 @@ symbols that moved (largest first; added and removed included). Exits 1 if
 any binary's stripped size, any section's size or any symbol's size moved,
 0 if nothing did. The 3D design's promise that UI
 apps pay nothing for 3D work is this script passing on each 3D change.
+
+`--audio-cost` measures this checkout alone: `zgx-run` as a UI app ships it
+(its defaults less `scene3d` and `gltf`), built `--profile dist`, then the
+same with each part of sound (zgx-run's `audio`, `audio-effects`,
+`audio-vorbis`, `audio-streams`, `audio-spatial`, `audio-all`). Prints each
+one's stripped size and what it adds, and what `audio` alone adds by crate
+(and zgx-audio's by module): the table docs/validation.md keeps. It never
+fails: it says, and a change that grows sound shows in it.
 """
 import argparse
 import collections
@@ -280,12 +289,95 @@ def report(name, size_before, size_after, rows, shown=15, section_rows=(), notes
     return lines
 
 
+# What each part of sound turns on in zgx-run, in the order they're shown.
+AUDIO_ARMS = ('audio', 'audio-effects', 'audio-vorbis', 'audio-streams', 'audio-spatial', 'audio-all')
+
+# Where a symbol's bytes belong, by the first of these its name holds.
+AUDIO_CRATES = (
+    ('zgx_script::audio', 'zgx-script: the Luau bindings'),
+    ('zgx_desktop::audio', 'zgx-desktop: the app\'s engine'),
+    ('zgx_audio::via_cpal', 'zgx-audio: cpal glue'),
+    ('zgx_audio::device', 'zgx-audio: device host'),
+    ('zgx_audio::engine', 'zgx-audio: engine'),
+    ('zgx_audio::mixer', 'zgx-audio: mixer'),
+    ('zgx_audio::stream', 'zgx-audio: streams'),
+    ('zgx_audio::resample', 'zgx-audio: resampling'),
+    ('zgx_audio::effect', 'zgx-audio: effects'),
+    ('zgx_audio', 'zgx-audio: the rest'),
+    ('cpal', 'cpal'),
+    ('coreaudio', 'coreaudio-rs'),
+    ('lewton', 'lewton (Vorbis)'),
+    ('std::', 'std, core, alloc'),
+    ('core::', 'std, core, alloc'),
+    ('alloc::', 'std, core, alloc'),
+)
+
+
+def crate_of(name):
+    """Which of `AUDIO_CRATES` a symbol's name belongs to, or 'other'."""
+    for needle, label in AUDIO_CRATES:
+        if needle in name:
+            return label
+    return 'other'
+
+
+def audio_cost(markdown):
+    """Builds zgx-run as a UI app ships it, then with each of AUDIO_ARMS,
+    `--profile dist`, into WORK/sizes-target-audio; prints the table."""
+    nm, size = llvm_nm(), llvm_tool('llvm-size')
+    target = WORK / 'sizes-target-audio'
+    env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_INCREMENTAL='0')
+    run = gate.package_in(ROOT, 'zgx-run')
+    scratch = WORK / 'sizes' / 'audio'
+    scratch.mkdir(parents=True, exist_ok=True)
+    head = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    measured = {}
+    for arm in ('none',) + AUDIO_ARMS:
+        features = run_features(ROOT) + ([] if arm == 'none' else [arm])
+        subprocess.run(['cargo', 'build', '--profile', 'dist', '--locked', '--quiet', '-p', run, '--bin', run,
+                        '--no-default-features', '--features', ','.join(features)],
+                       cwd=ROOT, env=env, check=True)
+        shutil.copy2(target / 'dist' / run, scratch / arm)
+        stripped, symbols, _ = measure(scratch / arm, scratch, nm, size)
+        measured[arm] = (stripped, symbols)
+    base_size, base_syms = measured['none']
+    lines = [f'zgx-run, --profile dist, stripped, at {head}: its defaults less scene3d and gltf, then each part of sound',
+             '',
+             '| features | stripped bytes | added |',
+             '| --- | --- | --- |',
+             f'| none | {base_size:,} | |']
+    for arm in AUDIO_ARMS:
+        size, _ = measured[arm]
+        lines.append(f'| `{arm}` | {size:,} | +{size - base_size:,} |')
+    _, core_syms = measured['audio']
+    by = collections.Counter()
+    for name, size in core_syms.items():
+        added = size - base_syms.get(name, 0)
+        if added:
+            by[crate_of(name)] += added
+    lines += ['', 'What `audio` alone adds, by symbol size (unstripped):', '', '| from | bytes |', '| --- | --- |']
+    for label, size in by.most_common():
+        if abs(size) >= 1024:
+            lines.append(f'| {label} | {size:+,} |')
+    text = '\n'.join(lines)
+    print(text)
+    if markdown:
+        markdown.write_text(text + '\n')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('base')
+    parser.add_argument('base', nargs='?')
     parser.add_argument('--markdown', type=pathlib.Path)
     parser.add_argument('--keep', action='store_true', help="keep the base's worktree")
+    parser.add_argument('--audio-cost', action='store_true',
+                        help='what each part of sound adds to zgx-run, at this checkout')
     args = parser.parse_args()
+    if args.audio_cost:
+        audio_cost(args.markdown)
+        return
+    if not args.base:
+        parser.error('BASE is needed, unless --audio-cost')
     nm, size, objcopy = llvm_nm(), llvm_tool('llvm-size'), llvm_tool('llvm-objcopy')
     base = base_dir()
     same_lengths(ROOT, base)
