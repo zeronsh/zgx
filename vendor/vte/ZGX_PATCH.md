@@ -67,3 +67,10 @@ parameter asks nothing and DECSCUSR still sets the cursor. Version 0.15.2.
 `CSI 16 t` calls `Handler::cell_size_pixels`, by default nothing;
 `cell_size_requests_reach_the_handler` checks it beside `14 t` and `18 t`.
 Version 0.15.3.
+
+## DECRQSS gathered and asked for
+
+A DCS string `$q` (DECRQSS) is gathered as XTGETTCAP's is and given to
+`Handler::report_setting(&[u8])` as it ends: the setting's final bytes (`m`,
+` q`, `r`). `setting_requests_reach_the_handler_whole` checks one split
+across reads and XTGETTCAP's beside it. Version 0.15.4.

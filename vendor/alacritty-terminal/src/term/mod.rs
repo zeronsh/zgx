@@ -2816,6 +2816,41 @@ impl<T: EventListener> Handler for Term<T> {
         self.event_proxy.send_event(Event::PtyWrite(text));
     }
 
+    // zgx: DECRQSS, as xterm answers it: `DCS 1 $ r`, the setting as a
+    // program would set it, and its final bytes; `DCS 0 $ r` for one not
+    // kept. The text's attributes (SGR, with underline styles as `4:3`, as
+    // nvim looks for curly underlines), the cursor's style (DECSCUSR) and
+    // the scrolling region (DECSTBM).
+    fn report_setting(&mut self, setting: &[u8]) {
+        let value = match setting {
+            b"m" => Some(sgr_setting(&self.grid.cursor.template)),
+            b" q" => {
+                let style = self
+                    .cursor_style
+                    .unwrap_or(self.config.default_cursor_style);
+                let steady = match style.shape {
+                    CursorShape::Underline => 4,
+                    CursorShape::Beam => 6,
+                    CursorShape::Block | CursorShape::HollowBlock | CursorShape::Hidden => 2,
+                };
+                Some(format!("{}", steady - u8::from(style.blinking)))
+            }
+            b"r" => {
+                let region = &self.scroll_region;
+                Some(format!("{};{}", region.start.0 + 1, region.end.0))
+            }
+            _ => None,
+        };
+        let text = match value {
+            Some(value) => {
+                let setting = str::from_utf8(setting).unwrap_or_default();
+                format!("\x1bP1$r{value}{setting}\x1b\\")
+            }
+            None => String::from("\x1bP0$r\x1b\\"),
+        };
+        self.event_proxy.send_event(Event::PtyWrite(text));
+    }
+
     // zgx: XTGETTCAP, answered a name at a time as kitty and foot do: `1+r`
     // with the name and its value (none for a flag), each hex encoded, for a
     // capability this terminal has; `0+r` and the name as asked for one it
@@ -2870,6 +2905,53 @@ const TERMCAPS: &[(&str, Option<&str>)] = &[
     ),
     ("Su", None),
 ];
+
+/// zgx: the text attributes `template` holds as SGR would set them, after a
+/// reset (`0`): underline styles as `4:2` to `4:5`, colours by name, or by
+/// index or value in their colon forms (`38:5:n`, `48:2:r:g:b`; nvim reads
+/// direct colour only so), the underline's as `58`.
+fn sgr_setting(template: &Cell) -> String {
+    let mut text = String::from("0");
+    let flags = template.flags;
+    let codes = [
+        (Flags::BOLD, "1"),
+        (Flags::DIM, "2"),
+        (Flags::ITALIC, "3"),
+        (Flags::UNDERLINE, "4"),
+        (Flags::DOUBLE_UNDERLINE, "4:2"),
+        (Flags::UNDERCURL, "4:3"),
+        (Flags::DOTTED_UNDERLINE, "4:4"),
+        (Flags::DASHED_UNDERLINE, "4:5"),
+        (Flags::INVERSE, "7"),
+        (Flags::HIDDEN, "8"),
+        (Flags::STRIKEOUT, "9"),
+    ];
+    for (flag, code) in codes {
+        if flags.contains(flag) {
+            text.push(';');
+            text.push_str(code);
+        }
+    }
+    let mut color = |color: Color, base: u8, extended: u8| match color {
+        Color::Named(name) if (name as usize) < 8 => {
+            text.push_str(&format!(";{}", base + name as u8));
+        }
+        Color::Named(name) if (name as usize) < 16 => {
+            text.push_str(&format!(";{}", base + 60 + name as u8 - 8));
+        }
+        Color::Named(_) => {}
+        Color::Indexed(index) => text.push_str(&format!(";{extended}:5:{index}")),
+        Color::Spec(Rgb { r, g, b }) => text.push_str(&format!(";{extended}:2:{r}:{g}:{b}")),
+    };
+    color(template.fg, 30, 38);
+    color(template.bg, 40, 48);
+    match template.underline_color() {
+        Some(Color::Indexed(index)) => text.push_str(&format!(";58:5:{index}")),
+        Some(Color::Spec(Rgb { r, g, b })) => text.push_str(&format!(";58:2:{r}:{g}:{b}")),
+        _ => {}
+    }
+    text
+}
 
 /// zgx: hex text (either case) as the bytes it encodes, or none if it isn't.
 fn decode_hex(hex: &[u8]) -> Option<Vec<u8>> {
@@ -4509,6 +4591,30 @@ mod report_tests {
         assert_eq!(
             answer(b"4D73"),
             "\x1bP1+r4D73=5C455D35323B25703125733B25703225735C303037\x1b\\"
+        );
+    }
+
+    /// DECRQSS: SGR after a reset, the cursor's style, the scrolling region,
+    /// and not valid for a setting not kept.
+    #[test]
+    fn settings_are_reported_as_set() {
+        let answers = Answers::default();
+        let mut term = Term::new(Config::default(), &TermSize::new(10, 5), answers.clone());
+        term.terminal_attribute(Attr::Undercurl);
+        term.terminal_attribute(Attr::Foreground(Color::Named(NamedColor::BrightBlue)));
+        term.terminal_attribute(Attr::UnderlineColor(Some(Color::Indexed(9))));
+        term.report_setting(b"m");
+        term.set_cursor_style(Some(CursorStyle {
+            shape: CursorShape::Underline,
+            blinking: true,
+        }));
+        term.report_setting(b" q");
+        term.set_scrolling_region(2, Some(4));
+        term.report_setting(b"r");
+        term.report_setting(b"\"p");
+        assert_eq!(
+            *answers.0.lock().unwrap(),
+            "\x1bP1$r0;4:3;94;58:5:9m\x1b\\\x1bP1$r3 q\x1b\\\x1bP1$r2;4r\x1b\\\x1bP0$r\x1b\\"
         );
     }
 
