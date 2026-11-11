@@ -1624,6 +1624,12 @@ pub(crate) struct UiStorage {
     observed_sizes: RefCell<crate::scene::NodeMap<Signal<(f32, f32)>>>,
     observed_bounds: RefCell<crate::scene::NodeMap<Signal<Rect>>>,
     observed_visibility: RefCell<crate::scene::NodeMap<Signal<bool>>>,
+    /// Of those, the ones that count as shown within a margin of the view
+    /// (`observe_visibility_within`): only nodes asked so are here.
+    visibility_margins: RefCell<crate::scene::NodeMap<f32>>,
+    /// How many nodes were observed when those margins were last checked
+    /// against them (`forget_unobserved_margins`): fewer since, one went.
+    margins_checked: Cell<usize>,
     /// Scroll views' insets kept clear scrolling into view
     /// (`set_scroll_padding`).
     scroll_padding: RefCell<crate::scene::NodeMap<crate::scene::Insets>>,
@@ -1906,6 +1912,10 @@ impl Ui {
                 .try_borrow()
                 .map_or(0, |m| map_bytes(&m))
             + storage
+                .visibility_margins
+                .try_borrow()
+                .map_or(0, |m| map_bytes(&m))
+            + storage
                 .scroll_padding
                 .try_borrow()
                 .map_or(0, |m| map_bytes(&m))
@@ -1994,6 +2004,8 @@ impl Ui {
             observed_sizes: RefCell::default(),
             observed_bounds: RefCell::default(),
             observed_visibility: RefCell::default(),
+            visibility_margins: RefCell::default(),
+            margins_checked: Cell::new(0),
             scroll_padding: RefCell::default(),
             after_layout: RefCell::new(Vec::new()),
             layout_listeners: RefCell::default(),
@@ -2807,6 +2819,12 @@ impl Ui {
             self.storage.observed_visibility.borrow().len(),
         ]
     }
+    /// How many nodes are observed with a margin (`observe_visibility_within`):
+    /// for tests that what unmounts lets go.
+    #[doc(hidden)]
+    pub fn visibility_margin_count(&self) -> usize {
+        self.storage.visibility_margins.borrow().len()
+    }
     pub(crate) fn observe_size(&self, node: NodeId) -> Signal<(f32, f32)> {
         if let Some(signal) = self.storage.observed_sizes.borrow().get(&node) {
             return signal.clone();
@@ -3460,6 +3478,36 @@ impl Ui {
                 open.set(false);
             }
         }
+    }
+    /// As `observe_visibility`, but shown when any of the node's box grown
+    /// by `margin` on every side would show (`Scene::shows_within`): true
+    /// as it comes within `margin` of the view, before it shows.
+    pub(crate) fn observe_visibility_within(&self, node: NodeId, margin: f32) -> Signal<bool> {
+        let margin = margin.max(0.);
+        let changed = self
+            .storage
+            .visibility_margins
+            .borrow_mut()
+            .insert(node, margin)
+            .is_none_or(|was| was != margin);
+        if changed {
+            // Judged again at the next frame, with this margin.
+            self.storage.bounds_geometry_revision.set(None);
+        }
+        self.observe_visibility(node)
+    }
+    /// Lets go of the margins of nodes no longer observed (removed).
+    #[cold]
+    #[inline(never)]
+    fn forget_unobserved_margins(&self) {
+        let observed = self.storage.observed_visibility.borrow();
+        if observed.len() < self.storage.margins_checked.get() {
+            self.storage
+                .visibility_margins
+                .borrow_mut()
+                .retain(|node, _| observed.contains_key(node));
+        }
+        self.storage.margins_checked.set(observed.len());
     }
     pub(crate) fn observe_visibility(&self, node: NodeId) -> Signal<bool> {
         if let Some(signal) = self.storage.observed_visibility.borrow().get(&node) {
@@ -4160,10 +4208,22 @@ impl Ui {
             };
             let mut visibility = Vec::new();
             if geometry_changed {
+                // Margins of nodes no longer observed go here, not as each
+                // node is removed: removal stays as it is for every node.
+                if !self.storage.visibility_margins.borrow().is_empty() {
+                    self.forget_unobserved_margins();
+                }
                 let scene = self.scene.borrow();
+                let margins = self.storage.visibility_margins.borrow();
                 for (node, signal) in self.storage.observed_visibility.borrow().iter() {
                     if scene.contains(*node) {
-                        let now = scene.visible_bounds(*node).is_some();
+                        let now = match margins.is_empty() {
+                            true => scene.visible_bounds(*node).is_some(),
+                            false => match margins.get(node) {
+                                Some(margin) => scene.shows_within(*node, *margin),
+                                None => scene.visible_bounds(*node).is_some(),
+                            },
+                        };
                         if signal.with_untracked(|told| *told != now) {
                             visibility.push((*node, signal.clone(), now));
                         }

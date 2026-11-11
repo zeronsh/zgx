@@ -3263,6 +3263,288 @@ fn on_visible_handlers_that_move_layout_settle() {
     h.ui.prepare_frame();
 }
 
+/// Its calls so far, as `on_visible` wrote them: "name:true name:false …".
+fn margin_calls(h: &mut common::Harness) -> Vec<String> {
+    h.text("seen")
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn scroll_to(h: &mut common::Harness, offset: f64) {
+    h.host
+        .set_state("off", zgx_script::Value::Num(offset))
+        .unwrap();
+    h.ui.prepare_frame();
+    wait_ms(h, 15);
+}
+
+#[test]
+fn visible_margin_reports_a_node_within_it_on_a_scroll_alone() {
+    // A view 100 tall over a row at 1,000: within 300 of it once the view's
+    // bottom passes 700 (offset 600), well before it shows (offset 900); out
+    // again once the view's top passes 1,400. A scroll alone moves it:
+    // nothing lays out again.
+    let mut h = common::Harness::inline(
+        r##"local off = ui.state("off", 0)
+        local seen = ui.state("seen", "")
+        return ui.column { w = 200,
+            ui.scroll { h = 100, offset = off,
+                ui.div { h = 1000 },
+                ui.div { id = "row", h = 100, visible_margin = 300,
+                    on_visible = function(on) seen:set(seen:get() .. "row:" .. tostring(on) .. " ") end },
+                ui.div { h = 1000 },
+            },
+            ui.text { "{seen}", id = "seen" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    assert_eq!(
+        margin_calls(&mut h),
+        ["row:false"],
+        "told once at first layout"
+    );
+    let row = h.find("row").unwrap();
+    for (offset, calls) in [
+        (500., 1),
+        (590., 1),
+        (610., 2),
+        (850., 2),
+        (1000., 2),
+        (1390., 2),
+        (1410., 3),
+        (1300., 4),
+    ] {
+        scroll_to(&mut h, offset);
+        assert_eq!(margin_calls(&mut h).len(), calls, "at {offset}");
+    }
+    assert_eq!(
+        margin_calls(&mut h),
+        ["row:false", "row:true", "row:false", "row:true"],
+        "once each way per crossing"
+    );
+    // Told it's in view while it doesn't show yet.
+    scroll_to(&mut h, 0.);
+    scroll_to(&mut h, 650.);
+    assert_eq!(margin_calls(&mut h).last().unwrap(), "row:true");
+    assert!(
+        h.ui.scene.borrow().visible_bounds(row).is_none(),
+        "not shown yet"
+    );
+}
+
+#[test]
+fn visible_margin_flips_ahead_of_a_fast_fling() {
+    // Forty rows of 100 under a view of 400, each in view within 600; the
+    // view flung down 500 a frame. Each frame's calls come after it, so a
+    // row that shows has to have been told a frame before: within 600 of
+    // the view one 500-point step earlier.
+    let mut h = common::Harness::inline(
+        r##"local off = ui.state("off", 0)
+        local seen = ui.state("seen", "")
+        local rows = {}
+        for i = 1, 40 do
+            rows[i] = ui.div { id = "r" .. i, h = 100, visible_margin = 600,
+                on_visible = function(on) seen:set(seen:get() .. i .. ":" .. tostring(on) .. " ") end }
+        end
+        return ui.column { w = 200,
+            ui.scroll { h = 400, offset = off, rows },
+            ui.text { "{seen}", id = "seen" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    let near = |calls: &[String]| {
+        let mut near = std::collections::BTreeSet::new();
+        for call in calls {
+            let (row, on) = call.split_once(':').unwrap();
+            let row: usize = row.parse().unwrap();
+            if on == "true" {
+                near.insert(row);
+            } else {
+                near.remove(&row);
+            }
+        }
+        near
+    };
+    let rows: Vec<_> = (1..=40)
+        .map(|i| h.find(&format!("r{i}")).unwrap())
+        .collect();
+    let mut offset = 0.;
+    while offset < 3600. {
+        let told = near(&margin_calls(&mut h));
+        offset += 500.;
+        scroll_to(&mut h, offset);
+        for (i, row) in rows.iter().enumerate() {
+            if h.ui.scene.borrow().visible_bounds(*row).is_some() {
+                assert!(
+                    told.contains(&(i + 1)),
+                    "row {} showed at {offset} untold",
+                    i + 1
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn visible_margin_jumps_tell_each_row_once() {
+    // A jump from the top to far down in one step: the rows near the top
+    // leave, those near the new place come, each told once; the rows the
+    // view jumped over, never near, are told nothing.
+    let mut h = common::Harness::inline(
+        r##"local off = ui.state("off", 0)
+        local seen = ui.state("seen", "")
+        local rows = {}
+        for i = 1, 60 do
+            rows[i] = ui.div { id = "r" .. i, h = 100, visible_margin = 200,
+                on_visible = function(on) seen:set(seen:get() .. i .. ":" .. tostring(on) .. " ") end }
+        end
+        return ui.column { w = 200,
+            ui.scroll { h = 300, offset = off, rows },
+            ui.text { "{seen}", id = "seen" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    let first = margin_calls(&mut h);
+    // Rows 1-5 (0 to 500) are within 200 of a view 0 to 300.
+    let near_top: Vec<String> = (1..=5).map(|i| format!("{i}:true")).collect();
+    assert!(near_top.iter().all(|c| first.contains(c)), "{first:?}");
+    scroll_to(&mut h, 4000.);
+    let calls = margin_calls(&mut h)[first.len()..].to_vec();
+    let mut told = std::collections::BTreeMap::new();
+    for call in &calls {
+        *told.entry(call.clone()).or_insert(0) += 1;
+    }
+    assert!(told.values().all(|n| *n == 1), "each once: {calls:?}");
+    for i in 1..=5 {
+        assert!(
+            told.contains_key(&format!("{i}:false")),
+            "row {i} left: {calls:?}"
+        );
+    }
+    // The view 4,000 to 4,300, within 200 (3,800 to 4,500): rows 39 to 45;
+    // row 46 starts at 4,500, only touching it.
+    for i in 39..=45 {
+        assert!(
+            told.contains_key(&format!("{i}:true")),
+            "row {i} came: {calls:?}"
+        );
+    }
+    assert!(
+        calls.iter().all(|c| {
+            let i: usize = c.split_once(':').unwrap().0.parse().unwrap();
+            i <= 5 || (39..=45).contains(&i)
+        }),
+        "nothing for the rows jumped over: {calls:?}"
+    );
+}
+
+#[test]
+fn on_visible_tells_a_node_mounted_in_a_frame_within_that_frame() {
+    // A row that mounts as the view jumps (a list's new rows): its first
+    // report comes in the frame that shows it, so what it builds lays out
+    // before that frame is drawn, not a frame later.
+    let mut h = common::Harness::inline(
+        r##"local shown = ui.state("shown", false)
+        local seen = ui.state("seen", "")
+        return ui.column { w = 200,
+            ui.show(shown,
+                ui.div { h = 20, visible_margin = 100,
+                    on_visible = function(on) seen:set(seen:get() .. "row:" .. tostring(on) .. " ") end }),
+            ui.text { "{seen}", id = "seen" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    assert!(margin_calls(&mut h).is_empty());
+    h.host
+        .set_state("shown", zgx_script::Value::Bool(true))
+        .unwrap();
+    h.frame();
+    assert_eq!(
+        margin_calls(&mut h),
+        ["row:true"],
+        "told in its first frame"
+    );
+}
+
+#[test]
+fn visible_margin_goes_with_its_node() {
+    // Removed, a node's margin goes too, at the next frame that looks at
+    // visibility: removal itself does nothing more for it.
+    let mut h = common::Harness::inline(
+        r##"local shown = ui.state("shown", true)
+        return ui.column { w = 200,
+            ui.show(shown,
+                ui.div { h = 20, visible_margin = 100, on_visible = function() end }),
+            ui.div { h = 20, on_visible = function() end },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    assert_eq!(h.ui.visibility_margin_count(), 1);
+    h.host
+        .set_state("shown", zgx_script::Value::Bool(false))
+        .unwrap();
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    assert_eq!(h.ui.visibility_margin_count(), 0, "gone with its node");
+    assert_eq!(h.ui.observer_counts()[3], 1, "the other still observed");
+}
+
+#[test]
+fn visible_margin_is_judged_inside_nested_scroll_views() {
+    // A row across a view 200 wide that scrolls sideways, inside a view
+    // that scrolls down: the chip 350 to the right is within its margin of
+    // 200 only once the inner view has scrolled 100 its way, and only
+    // while the outer one shows the row.
+    let mut h = common::Harness::inline(
+        r##"local off = ui.state("off", 0)
+        local across = ui.state("across", 0)
+        local seen = ui.state("seen", "")
+        return ui.column { w = 200,
+            ui.scroll { h = 100, offset = off,
+                ui.scroll_x { w = 200, h = 40, offset = across,
+                    ui.row { w = 1000, h = 40,
+                        ui.div { w = 550, h = 40 },
+                        ui.div { id = "chip", w = 40, h = 40, visible_margin = 200,
+                            on_visible = function(on) seen:set(seen:get() .. "chip:" .. tostring(on) .. " ") end },
+                    },
+                },
+                ui.div { h = 2000 },
+            },
+            ui.text { "{seen}", id = "seen" },
+        }"##,
+    );
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 20);
+    assert_eq!(
+        margin_calls(&mut h),
+        ["chip:false"],
+        "350 to the right of the inner view"
+    );
+    h.host
+        .set_state("across", zgx_script::Value::Num(200.))
+        .unwrap();
+    h.ui.prepare_frame();
+    wait_ms(&mut h, 15);
+    assert_eq!(
+        margin_calls(&mut h),
+        ["chip:false", "chip:true"],
+        "150 away: within 200"
+    );
+    // The outer view scrolls the row 300 above it: within 200 no longer.
+    scroll_to(&mut h, 340.);
+    assert_eq!(
+        margin_calls(&mut h),
+        ["chip:false", "chip:true", "chip:false"],
+        "out of the outer view's margin"
+    );
+}
+
 #[test]
 fn border_over_reaches_the_scene() {
     let mut h = common::Harness::inline(
