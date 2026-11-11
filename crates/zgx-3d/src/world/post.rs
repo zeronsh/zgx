@@ -193,6 +193,11 @@ impl World {
         };
         let adapts = post.auto_exposure.is_some();
         self.change_view(|inner| {
+            // Turned on, or on with other settings: what was read back is
+            // of the exposure before.
+            if adapts && inner.post.auto_exposure != post.auto_exposure {
+                inner.adapted.set(None);
+            }
             let changed = inner.post != post;
             inner.post = post;
             changed
@@ -208,9 +213,12 @@ impl World {
     /// the scene's light is exposed by before tone mapping, `set_exposure`'s
     /// stops included (log2 0.18, less log2 of the scene's mean luminance
     /// adapted to, plus them). As a painter last read it back from the
-    /// device, a frame or two after drawing it; `None` before then, with
-    /// automatic exposure off, or where the device runs no compute shaders
-    /// (`World::caps`; `set_exposure`'s stops alone apply there).
+    /// device, a frame or two after drawing it (with two painters, the last
+    /// to read back); `None` before then, again from when it starts over
+    /// (turned on, its settings changed, its renderer made again, or after
+    /// a pause) until it is read back, with automatic exposure off, or
+    /// where the device runs no compute shaders (`World::caps`;
+    /// `set_exposure`'s stops alone apply there).
     pub fn adapted_exposure(&self) -> Option<f32> {
         let inner = self.inner.borrow();
         inner.post.auto_exposure?;

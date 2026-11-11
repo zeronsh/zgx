@@ -476,10 +476,15 @@ impl Chain {
             .get_or_insert_with(|| exposure::Exposure::new(device.0));
         exposure.run(device, encoder, graph, &self.state, settings, time)
     }
-    /// The mean luminance automatic exposure adapted to, log2, as last read
-    /// back.
-    pub(super) fn adapted(&self) -> Option<f32> {
-        self.exposure.as_ref()?.adapted()
+    /// What the world holds of the mean luminance automatic exposure adapted
+    /// to (log2) after its last run: as read back, nothing once it restarted
+    /// until one is read again (`Some(None)`), or as it was (`None`).
+    pub(super) fn adapted(&self) -> Option<Option<f32>> {
+        let exposure = self.exposure.as_ref()?;
+        match exposure.adapted() {
+            Some(adapted) => Some(Some(adapted)),
+            None => exposure.restarted().then_some(None),
+        }
     }
 
     /// The app's passes of `stage` (`apps::Apps::run`).

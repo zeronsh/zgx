@@ -820,6 +820,92 @@ fn the_exposure_automatic_exposure_adapted_to_reads_back_in_stops() {
     assert_eq!(world.adapted_exposure(), None, "automatic exposure off");
 }
 
+/// Frames (each asked for) until `world`'s adapted exposure reads back, at
+/// most 12: what it reads.
+fn read_back(world: &World, window: &mut Window) -> Option<f32> {
+    for _ in 0..12 {
+        world.view().invalidate();
+        window.draw();
+        if let Some(stops) = world.adapted_exposure() {
+            return Some(stops);
+        }
+    }
+    None
+}
+
+/// A world adapted to a dim scene, the mean 0.01: with its window, and the
+/// stops read back.
+fn adapted_dim() -> Option<(World, Window, f32)> {
+    let world = flat([0.01, 0.01, 0.01, 1.]);
+    world.set_post(Post {
+        auto_exposure: Some(AutoExposure::default()),
+        ..Default::default()
+    });
+    let mut window = Window::new(&world)?;
+    let stops = read_back(&world, &mut window).expect("read back within 12 frames");
+    Some((world, window, stops))
+}
+
+#[test]
+fn automatic_exposure_turned_off_and_on_reads_back_anew() {
+    // Turned off and on, with a frame between and without, and on with
+    // other settings: nothing read before is served, until a frame reads
+    // the exposure back again.
+    for between in [false, true] {
+        let Some((world, mut window, _)) = adapted_dim() else {
+            return;
+        };
+        world.set_post(Post::default());
+        if between {
+            world.view().invalidate();
+            window.draw();
+        }
+        world.set_post(Post {
+            auto_exposure: Some(AutoExposure::default()),
+            ..Default::default()
+        });
+        assert_eq!(world.adapted_exposure(), None, "on again ({between})");
+        assert!(
+            read_back(&world, &mut window).is_some(),
+            "read again ({between})"
+        );
+        world.set_post(Post {
+            auto_exposure: Some(AutoExposure {
+                up: 5.,
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(world.adapted_exposure(), None, "other settings ({between})");
+    }
+}
+
+#[test]
+fn automatic_exposure_made_again_with_its_renderer_reads_back_anew() {
+    // A brighter scene put in front, and the renderer made again (another
+    // sample count): its exposure starts from the frame's light, and what
+    // was read of the dim one isn't served meanwhile.
+    let Some((world, mut window, dim)) = adapted_dim() else {
+        return;
+    };
+    let lit = Material {
+        color: [4., 4., 4., 1.],
+        unlit: true,
+        ..Default::default()
+    };
+    world.add(Object::mesh(Geometry::cuboid(20., 20., 0.1), lit).at([0., 0., 1.]));
+    world.set_samples(1);
+    window.draw();
+    assert_eq!(
+        world.adapted_exposure(),
+        None,
+        "made again: {dim} not served"
+    );
+    let bright = (0.18f32 / 4.).log2();
+    let stops = read_back(&world, &mut window).unwrap();
+    assert!((stops - bright).abs() < 0.1, "{stops} stops, not {bright}");
+}
+
 #[test]
 fn a_pixel_not_finite_spreads_through_neither_bloom_nor_the_exposure() {
     // One pixel of the scene made NaN by an HDR pass (as an infinite light
@@ -1509,6 +1595,9 @@ fn automatic_exposure_after_a_pause_starts_from_the_frame_s_own_light() {
         world.add(Object::mesh(Geometry::cuboid(20., 20., 0.1), lit).at([0., 0., 1.]));
         if paused {
             pause(std::time::Duration::from_millis(300));
+            frame(&mut window);
+            // What was read of the dim scene's exposure went with it.
+            assert_eq!(world.adapted_exposure(), None, "restarted");
         }
         for _ in 0..6 {
             frame(&mut window);

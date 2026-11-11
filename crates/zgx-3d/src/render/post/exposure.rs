@@ -44,8 +44,14 @@ pub(super) struct Exposure {
     last: Option<Instant>,
     answer: Option<bool>,
     /// The mean luminance adapted to, log2, as last read back (`None`
-    /// before a frame adapted).
+    /// before a frame adapted, and from a restart until one is read).
     adapted: Option<f32>,
+    /// Its last run started again from the frame's own light (its first,
+    /// or after a gap): what was read back before is gone.
+    restarted: bool,
+    /// A readback being mapped is from before a restart: dropped as it
+    /// lands.
+    stale: bool,
 }
 
 impl Exposure {
@@ -135,12 +141,19 @@ impl Exposure {
             last: None,
             answer: None,
             adapted: None,
+            restarted: false,
+            stale: false,
         }
     }
 
-    /// The mean luminance adapted to, log2, as last read back.
+    /// The mean luminance adapted to, log2, as last read back since it
+    /// last restarted.
     pub(super) fn adapted(&self) -> Option<f32> {
         self.adapted
+    }
+    /// Whether its last run started again from the frame's own light.
+    pub(super) fn restarted(&self) -> bool {
+        self.restarted
     }
 
     /// Lets go of its binding of the scene.
@@ -166,15 +179,20 @@ impl Exposure {
         if self.last == Some(time) {
             return self.answer;
         }
-        let settled = self.settled();
-        self.answer = settled;
-        let scene = graph.targets.as_ref()?.scene.as_ref()?;
-        // A step of frame time; after a long gap, the frame's own light.
+        // A step of frame time; after a long gap, the frame's own light,
+        // and what was read back of the state before goes with it.
         let step = self
             .last
             .map(|last| time.saturating_duration_since(last).as_secs_f32());
-        self.last = Some(time);
         let restart = step.is_none_or(|s| s > 0.25);
+        self.restarted = restart;
+        if restart {
+            self.forget();
+        }
+        let settled = self.settled();
+        self.answer = settled;
+        let scene = graph.targets.as_ref()?.scene.as_ref()?;
+        self.last = Some(time);
         let values = Settings {
             range: [
                 settings.min,
@@ -236,11 +254,29 @@ impl Exposure {
         settled
     }
 
+    /// Lets go of what was read back of the state and of a copy not yet
+    /// read: the state starts again.
+    fn forget(&mut self) {
+        self.adapted = None;
+        match self.copy.load(Ordering::Acquire) {
+            COPIED => self.copy.store(IDLE, Ordering::Release),
+            MAPPED => {
+                self.read.unmap();
+                self.copy.store(IDLE, Ordering::Release);
+            }
+            MAPPING => self.stale = true,
+            _ => {}
+        }
+    }
+
     /// Whether the last state read back had settled; the copy made since
     /// mapped, to be read with a later frame.
     fn settled(&mut self) -> Option<bool> {
         match self.copy.load(Ordering::Acquire) {
             COPIED => {
+                // Copied since any restart (a copy follows only an idle
+                // readback).
+                self.stale = false;
                 let copy = self.copy.clone();
                 copy.store(MAPPING, Ordering::Release);
                 self.read
@@ -251,6 +287,13 @@ impl Exposure {
                             Ordering::Release,
                         );
                     });
+                None
+            }
+            MAPPED if self.stale => {
+                // From before a restart.
+                self.read.unmap();
+                self.copy.store(IDLE, Ordering::Release);
+                self.stale = false;
                 None
             }
             MAPPED => {

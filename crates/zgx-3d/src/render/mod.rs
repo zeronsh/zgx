@@ -1201,7 +1201,7 @@ impl Viewport for Renderer {
                         // Drawing until a frame reads back it got there.
                         world.unsettle(crate::world::Settle::EXPOSURE, settled != Some(true));
                         if let Some(adapted) = post.adapted() {
-                            world.adapted.set(Some(adapted));
+                            world.adapted.set(adapted);
                         }
                     }
                 }
