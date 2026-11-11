@@ -170,7 +170,10 @@ SCENES = [
     # reply streaming arrive: each frame scrolls the screen one line, so its
     # cost is what one new line costs, which the screen's height shouldn't
     # multiply.
+    # `READS`: a base whose bench doesn't read `PER_FRAME` would count its
+    # 4 KB reads under this name (`runs_scene`), so it shows as new.
     ('terminal-slow', 'zgx-terminal', 'terminal_bench', {'LINES': '1000', 'PER_FRAME': '1',
+                                                          'READS': 'PER_FRAME',
                                                           'GLIBC_TUNABLES': 'glibc.malloc.mxfast=0'}),
     # Pictures in that terminal, drawn by wgpu's no-op backend: placed (RGBA
     # in chunks, a PNG), scrolled, replaced under their ids and deleted;
@@ -305,11 +308,17 @@ def has_example(checkout, package, example):
     return (crate / 'examples' / f'{example}.rs').exists() or f'name = "{example}"' in manifest
 
 
-def runs_scene(checkout, env):
+def runs_scene(checkout, env, package=None, example=None):
     """Whether `checkout`'s binary runs the scene `env` asks for: the app
     scenes (`APP`) are `support/apps.rs`'s, which an older base lacks (its
     binary would count its own bench under their name), and an interaction
-    measured alone that its `apps.rs` lacks."""
+    measured alone that its `apps.rs` lacks. A scene naming a setting new to
+    its bench (`READS`) runs only where the bench's source reads it: an
+    older bench would ignore it and count another workload under the name."""
+    if 'READS' in env and package and example:
+        source = checkout / 'crates' / package_in(checkout, package) / 'examples' / f'{example}.rs'
+        if not source.exists() or f'"{env["READS"]}"' not in source.read_text():
+            return False
     apps = checkout / 'crates' / package_in(checkout, 'zgx-script') / 'examples/support/apps.rs'
     if 'APP' not in env:
         return True
@@ -634,7 +643,7 @@ def main():
         base_binary = WORK / 'gate-bin-base' / example
         head_binary = WORK / 'gate-bin-head' / example
         try:
-            runs = base_binary.exists() and runs_scene(base, env)
+            runs = base_binary.exists() and runs_scene(base, env, package, example)
             before, after, delta, deltas = compared(name, package, env, (base_binary, base) if runs else None,
                                                     (head_binary, ROOT))
         except Infra as error:
