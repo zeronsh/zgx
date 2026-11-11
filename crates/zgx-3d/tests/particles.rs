@@ -985,3 +985,45 @@ fn a_painter_still_compiling_that_draws_first_costs_the_world_no_time() {
         "{stepped} s stepped in a frame of 1/60"
     );
 }
+
+#[cfg(feature = "post")]
+#[test]
+fn a_fast_particle_under_temporal_antialiasing_keeps_its_light() {
+    // One white particle crossing the view at 4 m/s: under temporal
+    // antialiasing its frames weigh as a moving mesh's (half at least), so
+    // it isn't pulled toward the background, its brightest pixel near
+    // multisampling's.
+    let brightest = |antialiasing| {
+        let world = world();
+        world.set_antialiasing(antialiasing);
+        world
+            .add_emitter(
+                Emitter::new(1)
+                    .spawn(Spawn::point([-1.2, 0., 0.]))
+                    .burst(1)
+                    .lifetime(5.0..5.0)
+                    .velocity([4., 0., 0.], 0.)
+                    .size(0.15..0.15)
+                    .color([1., 1., 1., 1.]),
+            )
+            .unwrap();
+        let mut frames = Frames::new(&world)?;
+        frames.ready(&world, 0.);
+        for frame in 1..=10 {
+            frames.draw(f64::from(frame) / 60.);
+        }
+        let pixels = frames.pixels();
+        Some(pixels.chunks(4).map(|p| p[2]).max().unwrap_or(0))
+    };
+    let Some(msaa) = brightest(Antialiasing::Msaa) else {
+        return;
+    };
+    let taa = brightest(Antialiasing::Taa).unwrap();
+    assert!(msaa > 200, "drawn: {msaa}");
+    // Half its frame (until the prepass's velocity): 225 of 255 here, 121
+    // when it blended as a still frame.
+    assert!(
+        u16::from(taa) + 40 >= u16::from(msaa),
+        "TAA {taa}, multisampling {msaa}"
+    );
+}

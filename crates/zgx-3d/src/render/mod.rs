@@ -1117,12 +1117,9 @@ impl Viewport for Renderer {
                         meshes: world.meshes,
                         revision: world.revision,
                         tick: gpu.tick.index,
-                        // A material moving by the time (until the prepass
-                        // follows it).
-                        #[cfg(feature = "shaders")]
-                        animated: world.settle.holds(custom::ANIMATED),
-                        #[cfg(not(feature = "shaders"))]
-                        animated: false,
+                        // A material moving by the time, or live particles
+                        // (until the prepass follows them).
+                        animated: animated(&world),
                     };
                     // The display's curve, as the last pass maps (the stops alone).
                     let tone = match world.tone_mapping {
@@ -1272,6 +1269,17 @@ impl Viewport for Renderer {
             world.borrow().temporaries.set(gpu.temporary_bytes());
         }
     }
+}
+
+/// Whether something on screen moves by itself this frame: a material by
+/// its time, or particles alive (`Settle`'s reasons for them).
+#[cfg(feature = "post")]
+fn animated(world: &Inner) -> bool {
+    #[cfg(feature = "shaders")]
+    let shader = world.settle.holds(custom::ANIMATED);
+    #[cfg(not(feature = "shaders"))]
+    let shader = false;
+    shader || world.settle.holds(crate::world::Reason::Particles as u32)
 }
 
 /// Each of `world`'s scene draws prepared for the scene's targets, once
