@@ -498,6 +498,8 @@ pub(super) mod tests {
         static TRIED: Cell<u32> = const { Cell::new(0) };
         /// The HDR passes the last frame's chain counted.
         pub(in crate::render) static COUNTED: RefCell<Option<u8>> = const { RefCell::new(None) };
+        /// Whether the chain takes the device to run no compute.
+        pub(in crate::render) static WITHOUT_COMPUTE: Cell<bool> = const { Cell::new(false) };
     }
     /// A refusal, as a backend's would come, for the pass a test names.
     pub(super) fn refused(id: PostPassId) -> Option<String> {
@@ -598,6 +600,21 @@ fn post(p: PostIn) -> vec4<f32> {
         }
         assert_eq!(TRIED.with(Cell::get), 1, "tried once");
         assert_eq!(COUNTED.with(|c| *c.borrow()), Some(1), "counted out");
+    }
+
+    #[test]
+    fn automatic_exposure_on_a_device_without_compute_lets_its_world_rest() {
+        let Some(mut frames) = Frames::new() else {
+            return;
+        };
+        WITHOUT_COMPUTE.with(|w| w.set(true));
+        frames.world.set_post(crate::Post {
+            auto_exposure: Some(crate::AutoExposure::default()),
+            ..Default::default()
+        });
+        assert!(frames.world.view().animating(), "until a frame says");
+        frames.centre();
+        assert!(!frames.world.view().animating(), "the stops alone: at rest");
     }
 
     #[test]

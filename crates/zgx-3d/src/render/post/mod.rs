@@ -8,6 +8,12 @@ pub(in crate::render) use apps::Apps;
 pub(super) fn counted(hdr: u8) {
     apps::tests::COUNTED.with(|c| *c.borrow_mut() = Some(hdr));
 }
+/// For the tests: whether the frame's chain takes the device to run no
+/// compute.
+#[cfg(test)]
+pub(super) fn without_compute() -> bool {
+    apps::tests::WITHOUT_COMPUTE.with(std::cell::Cell::get)
+}
 mod exposure;
 
 use super::graph::{Graph, SCENE, bloom_format};

@@ -642,6 +642,13 @@ impl Viewport for Renderer {
             // stops alone: `AutoExposure`).
             let adapts = world.post.auto_exposure.is_some()
                 && world.caps.get().is_some_and(|caps| caps.compute);
+            #[cfg(test)]
+            let adapts = adapts && !post::without_compute();
+            // Not adapting (off, or no compute on the device): nothing for
+            // the world to keep drawing for.
+            if !adapts {
+                world.unsettle(crate::world::Settle::EXPOSURE, false);
+            }
             graph::Chain {
                 on: world.post.any() || hdr + display > 0,
                 bloom: world.post.bloom.is_some(),
