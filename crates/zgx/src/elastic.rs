@@ -294,7 +294,9 @@ pub(crate) fn before_scroll(ui: &Ui, event: InputEvent) -> Option<InputEvent> {
     {
         let mut state = ui.elastic_state().borrow_mut();
         if state.fingers {
-            let now = Instant::now();
+            // The interface's time, as the spring's: a virtual clock's
+            // too, or a push's speed would be the wall clock's.
+            let now = crate::clock::now();
             state.speed[0].scrolled(delta_x, now);
             state.speed[1].scrolled(delta_y, now);
         }
