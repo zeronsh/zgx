@@ -446,3 +446,111 @@ mod aac {
         assert!(error.to_string().contains("AAC"), "{error}");
     }
 }
+
+/// How much of `samples` (one channel at `rate`) is a sine of `hz`: its
+/// amplitude, by least squares over whole windows.
+#[cfg(any(feature = "mp3", feature = "opus"))]
+fn sine_amplitude(samples: &[f32], hz: f64, rate: f64) -> f64 {
+    let w = hz * std::f64::consts::TAU / rate;
+    let (mut ys, mut yc) = (0f64, 0f64);
+    for (i, &y) in samples.iter().enumerate() {
+        let (sin, cos) = (w * i as f64).sin_cos();
+        ys += f64::from(y) * sin;
+        yc += f64::from(y) * cos;
+    }
+    2. * ys.hypot(yc) / samples.len() as f64
+}
+
+/// A format's tone (0.5 s, 440 Hz left and 660 Hz right at 1/16 of full
+/// scale) loaded whole: exactly `frames` at `rate`, its frames 4,000 to
+/// 8,096 within `worst_db` of `reference`'s (another decoder's, of the
+/// same file), and streamed and looped as loaded.
+#[cfg(any(feature = "mp3", feature = "opus"))]
+fn a_tone(bytes: &'static [u8], rate: u32, reference: &[u8], worst_db: f64) {
+    let (audio, _mixer) = engine();
+    let sound = audio.load(Source::bytes(bytes)).unwrap();
+    assert_eq!((sound.channels(), sound.rate()), (2, rate));
+    assert_eq!(sound.frames(), rate as usize / 2, "gapless");
+    let reference = wav::read(reference).unwrap();
+    let mine = {
+        let (audio, mut mixer) = Audio::offline(Config {
+            rate,
+            limiter: None,
+            ..Config::default()
+        })
+        .unwrap();
+        audio.play(&sound, Play::new().fade_in(0.)).unwrap();
+        mixer.frames(rate as usize / 2)
+    };
+    let worst = mine[4_000 * 2..8_096 * 2]
+        .iter()
+        .zip(&reference.samples)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        20. * f64::from(worst).log10() < worst_db,
+        "{:.1} dB from the reference",
+        20. * f64::from(worst).log10()
+    );
+    // Each side its tone.
+    let side = |c: usize| -> Vec<f32> {
+        mine.as_chunks::<2>().0[2_000..20_000]
+            .iter()
+            .map(|f| f[c])
+            .collect()
+    };
+    let db = |a: f64| 20. * (a * 16.).log10();
+    assert!(db(sine_amplitude(&side(0), 440., f64::from(rate))).abs() < 1.);
+    assert!(db(sine_amplitude(&side(1), 660., f64::from(rate))).abs() < 1.);
+    // Streamed: the same samples. Looped: round again as loud.
+    let whole = {
+        let (audio, mut mixer) = engine();
+        audio.play(&sound, Play::new()).unwrap();
+        mixer.frames(30_000)
+    };
+    let (audio, mut mixer) = engine();
+    audio.stream(Source::bytes(bytes), Play::new()).unwrap();
+    assert_eq!(blocks(&mut mixer, 30_000), whole, "streamed");
+    let (audio, mut mixer) = engine();
+    audio
+        .stream(Source::bytes(bytes), Play::new().looping(true))
+        .unwrap();
+    let looped = blocks(&mut mixer, 72_000);
+    let left: Vec<f32> = looped.as_chunks::<2>().0[50_000..68_000]
+        .iter()
+        .map(|f| f[0])
+        .collect();
+    assert!(
+        db(sine_amplitude(&left, 440., 48_000.)).abs() < 1.,
+        "looped"
+    );
+}
+
+#[cfg(feature = "mp3")]
+#[test]
+fn mp3_loads_gapless_as_the_platform_decodes_it_and_streams_and_loops() {
+    // tone.mp3: our tone, at 44.1 kHz, encoded by rusty_mp3 at 128 kbps;
+    // tone_mp3_audiotoolbox.wav: frames 4,000 to 8,096 of macOS's decode
+    // of it (afconvert to 32-bit float). Two decoders: within -90 dB.
+    a_tone(
+        include_bytes!("assets/tone.mp3"),
+        44_100,
+        include_bytes!("assets/tone_mp3_audiotoolbox.wav"),
+        -90.,
+    );
+}
+
+#[cfg(feature = "opus")]
+#[test]
+fn opus_loads_gapless_as_another_decoder_does_and_streams_and_loops() {
+    // tone.opus: our tone at 48 kHz, encoded by opus-pure at 96 kb/s and
+    // written in Ogg with its pre-skip and end trim; tone_opus_opus1.wav:
+    // frames 4,000 to 8,096 of opus1's decode of it (a separate port of
+    // libopus), trimmed the same. Within -140 dB.
+    a_tone(
+        include_bytes!("assets/tone.opus"),
+        48_000,
+        include_bytes!("assets/tone_opus_opus1.wav"),
+        -140.,
+    );
+}

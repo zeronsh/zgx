@@ -123,6 +123,13 @@ impl Source {
             let wav = crate::wav::read(&bytes).map_err(named)?;
             return Sound::from_samples(&wav.samples, wav.channels, wav.rate);
         }
+        // Opus first: it's in Ogg pages too.
+        #[cfg(feature = "opus")]
+        if crate::decode::opus::is_opus(&bytes) {
+            let (samples, channels, rate) =
+                crate::decode::opus::decode_whole(bytes.into_owned().into()).map_err(named)?;
+            return Sound::from_samples(&samples, channels, rate);
+        }
         #[cfg(feature = "vorbis")]
         if bytes.starts_with(b"OggS") {
             let (samples, channels, rate) =
@@ -136,21 +143,39 @@ impl Source {
                 crate::decode::aac::decode_whole(bytes.into_owned().into()).map_err(named)?;
             return Sound::from_samples(&samples, channels, rate);
         }
-        Err(named(Error::Format(Self::READS.into())))
+        #[cfg(feature = "mp3")]
+        if crate::decode::mp3::is_mp3(&bytes) {
+            let (samples, channels, rate) =
+                crate::decode::mp3::decode_whole(bytes.into_owned().into()).map_err(named)?;
+            return Sound::from_samples(&samples, channels, rate);
+        }
+        Err(named(Error::Format(Self::reads())))
     }
 
-    const READS: &'static str = match (cfg!(feature = "vorbis"), cfg!(feature = "aac")) {
-        (true, true) => "not a format zgx-audio reads (WAV, Ogg Vorbis, AAC)",
-        (true, false) => {
-            "not a format zgx-audio reads (WAV, Ogg Vorbis; AAC with the `aac` feature)"
+    /// What isn't a format it reads says which it does, and which a
+    /// feature would add.
+    fn reads() -> String {
+        let formats = [
+            ("Ogg Vorbis", "vorbis", cfg!(feature = "vorbis")),
+            ("Ogg Opus", "opus", cfg!(feature = "opus")),
+            ("MP3", "mp3", cfg!(feature = "mp3")),
+            ("AAC", "aac", cfg!(feature = "aac")),
+        ];
+        let mut read = vec!["WAV".to_string()];
+        let mut more = Vec::new();
+        for (name, feature, on) in formats {
+            if on {
+                read.push(name.into());
+            } else {
+                more.push(format!("{name} with the `{feature}` feature"));
+            }
         }
-        (false, true) => {
-            "not a format zgx-audio reads (WAV, AAC; Ogg Vorbis with the `vorbis` feature)"
+        let mut reads = read.join(", ");
+        if !more.is_empty() {
+            reads = format!("{reads}; {}", more.join(", "));
         }
-        (false, false) => {
-            "not a format zgx-audio reads (WAV; Ogg Vorbis and AAC with the `vorbis` and `aac` features)"
-        }
-    };
+        format!("not a format zgx-audio reads ({reads})")
+    }
 
     /// Where a Vorbis decoder reads from: bytes already read, the bytes in
     /// memory, or the file again.
@@ -169,31 +194,49 @@ impl Source {
     /// Vorbis; WAV decoded whole and read out in pieces.
     pub(crate) fn decoder(&self) -> Result<Box<dyn crate::decode::Decode>, Error> {
         let head = match self {
-            Source::Bytes(bytes) => bytes[..bytes.len().min(8)].to_vec(),
+            Source::Bytes(bytes) => bytes[..bytes.len().min(64)].to_vec(),
             Source::File(path) => {
                 use std::io::Read;
-                let mut head = [0u8; 8];
+                let mut head = [0u8; 64];
                 let mut file = std::fs::File::open(path)
                     .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
                 let got = file.read(&mut head).unwrap_or(0);
                 head[..got].to_vec()
             }
         };
-        #[cfg(feature = "aac")]
-        if crate::decode::aac::is_aac(&head) {
-            // Compressed, read whole and decoded as it plays.
-            let bytes: std::sync::Arc<[u8]> = match self {
+        // Compressed formats decoded from memory: read whole (they're
+        // small beside what they decode to), then decoded as they play.
+        #[allow(unused_variables)]
+        let whole = || -> Result<std::sync::Arc<[u8]>, Error> {
+            Ok(match self {
                 Source::Bytes(bytes) => bytes[..].into(),
                 Source::File(path) => std::fs::read(path)
                     .map_err(|e| Error::Io(format!("{}: {e}", path.display())))?
                     .into(),
-            };
-            let aac = crate::decode::aac::Aac::new(bytes);
-            return match self {
-                Source::File(path) => aac.map_err(|e| e.within(&path.display().to_string())),
-                Source::Bytes(_) => aac,
-            }
-            .map(|a| Box::new(a) as Box<dyn crate::decode::Decode>);
+            })
+        };
+        #[allow(unused_variables)]
+        let named = |error: Error| match self {
+            Source::File(path) => error.within(&path.display().to_string()),
+            Source::Bytes(_) => error,
+        };
+        #[cfg(feature = "opus")]
+        if crate::decode::opus::is_opus(&head) {
+            return crate::decode::opus::Opus::new(whole()?)
+                .map(|d| Box::new(d) as Box<dyn crate::decode::Decode>)
+                .map_err(named);
+        }
+        #[cfg(feature = "aac")]
+        if crate::decode::aac::is_aac(&head) {
+            return crate::decode::aac::Aac::new(whole()?)
+                .map(|d| Box::new(d) as Box<dyn crate::decode::Decode>)
+                .map_err(named);
+        }
+        #[cfg(feature = "mp3")]
+        if crate::decode::mp3::is_mp3(&head) {
+            return crate::decode::mp3::Mp3::new(whole()?)
+                .map(|d| Box::new(d) as Box<dyn crate::decode::Decode>)
+                .map_err(named);
         }
         #[cfg(feature = "vorbis")]
         if head.starts_with(b"OggS") {
