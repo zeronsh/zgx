@@ -17,19 +17,31 @@
 //H fn sunlit_cascaded(world: vec3<f32>, n: vec3<f32>) -> f32 {
 //H     let facing = saturate(dot(n, -frame.sun_direction.xyz));
 //H     let texel = cascades.params.y;
+//H     // The first cascade holding it, found and left (no return from the
+//H     // loop, no copy of a cascade out of its array: DXC at -Od miscompiles
+//H     // those together), then looked up once.
+//H     var found = false;
+//H     var at = vec3(0.0);
+//H     var layer = 0u;
 //H     for (var c = 0u; c < u32(cascades.params.x); c++) {
-//H         let offset = cascades.offsets[c];
-//H         let p = cascades.matrices[c] * vec4(world + n * (offset.z - offset.w * facing), 1.0);
+//H         let off = cascades.offsets[c].z - cascades.offsets[c].w * facing;
+//H         let p = cascades.matrices[c] * vec4(world + n * off, 1.0);
 //H         let uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
 //H         if all(uv > vec2(texel * 2.0)) && all(uv < vec2(1.0 - texel * 2.0)) && p.z <= 1.0 {
-//H             let half = texel * 0.5;
-//H             var sum = 0.0;
-//H             sum += textureSampleCompareLevel(cascade_maps, shadow_sampler, uv + vec2(-half, -half), c, p.z);
-//H             sum += textureSampleCompareLevel(cascade_maps, shadow_sampler, uv + vec2(half, -half), c, p.z);
-//H             sum += textureSampleCompareLevel(cascade_maps, shadow_sampler, uv + vec2(-half, half), c, p.z);
-//H             sum += textureSampleCompareLevel(cascade_maps, shadow_sampler, uv + vec2(half, half), c, p.z);
-//H             return sum * 0.25;
+//H             found = true;
+//H             at = vec3(uv, p.z);
+//H             layer = c;
+//H             break;
 //H         }
 //H     }
-//H     return 1.0;
+//H     if !found {
+//H         return 1.0;
+//H     }
+//H     let half = texel * 0.5;
+//H     var sum = 0.0;
+//H     sum += textureSampleCompareLevel(cascade_maps, shadow_sampler, at.xy + vec2(-half, -half), layer, at.z);
+//H     sum += textureSampleCompareLevel(cascade_maps, shadow_sampler, at.xy + vec2(half, -half), layer, at.z);
+//H     sum += textureSampleCompareLevel(cascade_maps, shadow_sampler, at.xy + vec2(-half, half), layer, at.z);
+//H     sum += textureSampleCompareLevel(cascade_maps, shadow_sampler, at.xy + vec2(half, half), layer, at.z);
+//H     return sum * 0.25;
 //H }

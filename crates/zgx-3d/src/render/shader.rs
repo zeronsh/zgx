@@ -378,8 +378,8 @@ mod tests {
         ];
         let pinned = [
             0xf935_b89f_ba82_c305,
-            0x450b_dfb0_59be_5f05,
-            0x61cc_9cca_6937_7125,
+            0xde7e_cd1c_b17b_6a05,
+            0x113a_4565_531e_91a5,
         ];
         assert_eq!(digests, pinned, "{digests:#018x?}");
     }
