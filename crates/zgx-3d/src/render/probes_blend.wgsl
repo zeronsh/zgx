@@ -16,6 +16,11 @@ struct Trace {
     // Point and spot lights in `lights`; the round.
     lights: u32,
     seed: u32,
+    // For tests (`World::poison_probe_rays`): 0, or every seventh ray
+    // brings back no finite light (1), let into the probes (2); and a zero
+    // to divide by.
+    poison: u32,
+    zero: f32,
 }
 @group(0) @binding(0) var<storage, read> rays: array<vec4<f32>>;
 @group(0) @binding(1) var<uniform> trace: Trace;
@@ -94,7 +99,8 @@ struct Tile {
         let ray = rays[start + i];
         // A ray that brought back no finite light (a glow without bound)
         // stays out of the average: one would ruin the texel for good.
-        if !finite(ray) {
+        // (Let in for tests: `World::poison_probe_rays`.)
+        if !finite(ray) && trace.poison != 2u {
             continue;
         }
         let along = normalize((trace.turn * vec4(fibonacci(i, trace.rays), 0.0)).xyz);

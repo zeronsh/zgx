@@ -60,6 +60,10 @@ struct TraceUniform {
     /// light a hit samples where there are many).
     lights: u32,
     seed: u32,
+    /// `Gi::poison`, and a zero the GPU divides by where it's on.
+    poison: u32,
+    zero: f32,
+    _pad: [u32; 2],
 }
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -486,6 +490,8 @@ pub(super) struct Probes {
     /// frame's (`trace_lights`).
     lights: Vec<TraceLight>,
     seen: Vec<TraceLight>,
+    /// The world's `Gi::poison`, as of this frame.
+    poison: u32,
 }
 
 /// Whether `world`'s meshes take their diffuse light from probes on this
@@ -601,7 +607,9 @@ pub(super) fn frame(
         lit_by: None,
         lights: Vec::new(),
         seen: Vec::new(),
+        poison: 0,
     });
+    probes.poison = world.gi.poison;
     if probes
         .layout
         .as_ref()
@@ -1073,6 +1081,9 @@ fn update(
         lift: layout.lift,
         lights: tracer.light_count,
         seed: probes.rounds,
+        poison: probes.poison,
+        zero: 0.,
+        _pad: [0; 2],
     };
     queue.write_buffer(&tracer.uniform, 0, bytemuck::bytes_of(&uniform));
     let atlases = Atlases {

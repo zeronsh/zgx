@@ -19,6 +19,11 @@ struct Trace {
     // Point and spot lights in `lights`; the round.
     lights: u32,
     seed: u32,
+    // For tests (`World::poison_probe_rays`): 0, or every seventh ray
+    // brings back no finite light (1), let into the probes (2); and a zero
+    // to divide by.
+    poison: u32,
+    zero: f32,
 }
 @group(0) @binding(20) var<storage, read_write> rays: array<vec4<f32>>;
 @group(0) @binding(21) var<uniform> trace: Trace;
@@ -28,6 +33,17 @@ struct Trace {
 @group(0) @binding(22) var<storage, read> lights: array<array<vec4<f32>, 3>>;
 
 const PI: f32 = 3.14159265;
+
+// Ray `i`'s light and distance into `rays`; for tests, every seventh made
+// infinite or not a number, from a zero only known as the GPU runs.
+fn put(i: u32, value: vec4<f32>) {
+    var out = value;
+    if trace.poison != 0u && i % 7u == 3u {
+        let infinite = trace.far / trace.zero;
+        out = vec4(select(vec3(infinite), vec3(infinite * trace.zero), i % 14u == 3u) + value.rgb, value.w);
+    }
+    rays[i] = out;
+}
 
 // The `i`th of `n` directions spread evenly over the sphere.
 fn fibonacci(i: u32, n: u32) -> vec3<f32> {

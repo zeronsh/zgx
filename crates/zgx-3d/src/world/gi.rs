@@ -125,6 +125,10 @@ pub(crate) struct Gi {
     /// Probes drawn as on a device without ray queries even where it has
     /// them (`World::set_probes_rasterised`).
     pub(crate) rasterised: bool,
+    /// Rays made to bring back no finite light, for tests: 0 none; 1 every
+    /// seventh, kept out of the probes as any such ray is; 2 let in
+    /// (`World::poison_probe_rays`).
+    pub(crate) poison: u32,
 }
 impl Gi {
     /// Whether it has any volume.
@@ -203,6 +207,27 @@ impl World {
         self.change(|inner| {
             let changed = inner.gi.rasterised != on;
             inner.gi.rasterised = on;
+            changed
+        });
+    }
+    /// Make every seventh ray the probes cast bring back no finite light
+    /// (infinite or not a number, from a value the GPU divides by zero
+    /// as it runs), as a glow without bound or a broken mesh would: for
+    /// tests of what the probes make of it. `let_in` lets such rays into
+    /// the probes' averages, as they'd be without the check keeping them
+    /// out. The probes converge again.
+    #[doc(hidden)]
+    pub fn poison_probe_rays(&self, on: bool, let_in: bool) {
+        let poison = match (on, let_in) {
+            (false, _) => 0,
+            (true, false) => 1,
+            (true, true) => 2,
+        };
+        self.change(|inner| {
+            let changed = inner.gi.poison != poison;
+            inner.gi.poison = poison;
+            // Laid out again: converging from nothing.
+            inner.gi.layout += u64::from(changed);
             changed
         });
     }

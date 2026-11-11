@@ -90,13 +90,13 @@ fn trace_rays(@builtin(global_invocation_id) id: vec3<u32>) {
     rayQueryProceed(&q);
     let hit = rayQueryGetCommittedIntersection(&q);
     if hit.kind == RAY_QUERY_INTERSECTION_NONE {
-        rays[id.x] = vec4(sky_along(d), trace.far);
+        put(id.x, vec4(sky_along(d), trace.far));
         return;
     }
     if !hit.front_face {
         // Inside a mesh, or behind a wall: dark, and nearer than it is, so
         // the probe isn't trusted that way.
-        rays[id.x] = vec4(0.0, 0.0, 0.0, -hit.t * 0.2);
+        put(id.x, vec4(0.0, 0.0, 0.0, -hit.t * 0.2));
         return;
     }
     let instance = instances[hit.instance_custom_data];
@@ -129,5 +129,5 @@ fn trace_rays(@builtin(global_invocation_id) id: vec3<u32>) {
     let probed = probe_light(at, n, -d);
     light += mix(around(n), probed.rgb, probed.a);
     let albedo = instance.albedo.rgb * (1.0 - instance.albedo.w);
-    rays[id.x] = vec4(albedo * light + instance.emissive.rgb, min(hit.t, trace.far));
+    put(id.x, vec4(albedo * light + instance.emissive.rgb, min(hit.t, trace.far)));
 }

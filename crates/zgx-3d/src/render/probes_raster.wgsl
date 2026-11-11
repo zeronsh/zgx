@@ -133,8 +133,8 @@ fn faces_to_rays(@builtin(global_invocation_id) id: vec3<u32>) {
     let texel = min(vec2<u32>((uv * 0.5 + 0.5) * f32(FACE)), vec2(FACE - 1u));
     let seen = textureLoad(faces, vec2(face, slot) * FACE + texel, 0);
     if seen.a >= EMPTY * 0.5 {
-        rays[id.x] = vec4(sky_along(d), trace.far);
+        put(id.x, vec4(sky_along(d), trace.far));
         return;
     }
-    rays[id.x] = seen;
+    put(id.x, seen);
 }

@@ -605,42 +605,58 @@ fn probes_light_a_world_shading_through_clusters_and_cascades() {
 
 #[test]
 fn a_ray_bringing_no_finite_light_leaves_the_probes_finite() {
-    // A speck glowing without bound in a corner: rays that hit it bring
-    // back infinite light. Kept out of the probes' running averages, the
-    // room shades as it does without it; let in, every probe reading it
-    // is ruined for good (a blend never sheds what isn't finite).
-    let shade = |speck: bool| {
+    // Every seventh ray made to bring back infinite light or no number at
+    // all (what a glow without bound or a broken mesh would), divided out
+    // of a zero the GPU only meets as it runs, so no compiler folds it
+    // away. (A world can't be given such a glow: it keeps emission
+    // finite.) Kept out of the probes' running averages, the room shades
+    // as it does without; let in, the probes are ruined (a blend never
+    // sheds what isn't finite), which shows the rays really brought it.
+    // By rays and by faces: both write rays the same way.
+    let test = "a_ray_bringing_no_finite_light_leaves_the_probes_finite";
+    let shade = |faces: bool, poison: Option<bool>| {
         let world = World::new();
         room(&world);
-        if speck {
-            world.add(
-                Object::mesh(
-                    Geometry::cuboid(0.05, 0.05, 0.05),
-                    Material {
-                        emissive: [f32::INFINITY; 3],
-                        ..Material::default()
-                    },
-                )
-                .at([-0.9, 0.05, -0.9]),
-            );
+        world.set_probes_rasterised(faces);
+        if let Some(let_in) = poison {
+            world.poison_probe_rays(true, let_in);
         }
         world.add_probes(volume().per_frame(216)).unwrap();
         let mut window = Window::new(&world)?;
         settle(&mut window, &world, 500);
-        traced(
-            &world,
-            "a_ray_bringing_no_finite_light_leaves_the_probes_finite",
-        )
-        .then(|| window.pixels())
+        traced(&world, test).then(|| window.pixels())
     };
-    let (Some(clean), Some(hot)) = (shade(false), shade(true)) else {
-        return;
-    };
-    for at in [(102, 110), (80, 60), (128, 140), (40, 128)] {
-        let (a, b) = (around(&clean, at, 6), around(&hot, at, 6));
+    for faces in [false, true] {
+        let (Some(clean), Some(kept_out), Some(let_in)) = (
+            shade(faces, None),
+            shade(faces, Some(false)),
+            shade(faces, Some(true)),
+        ) else {
+            return;
+        };
+        let path = if faces { "faces" } else { "rays" };
+        save(&format!("unfinite-{path}-clean"), &clean);
+        save(&format!("unfinite-{path}-kept-out"), &kept_out);
+        save(&format!("unfinite-{path}-let-in"), &let_in);
+        let points = [(102, 110), (80, 60), (128, 140), (40, 128)];
+        for at in points {
+            let (a, b) = (around(&clean, at, 6), around(&kept_out, at, 6));
+            assert!(
+                a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.03),
+                "{path} at {at:?}: {a:?} clean, {b:?} with the rays kept out"
+            );
+        }
+        let ruined = points
+            .iter()
+            .filter(|&&at| {
+                let (a, b) = (around(&clean, at, 6), around(&let_in, at, 6));
+                a.iter().zip(b).any(|(a, b)| (a - b).abs() > 0.1)
+            })
+            .count();
         assert!(
-            a.iter().zip(b).all(|(a, b)| (a - b).abs() < 0.03),
-            "at {at:?}: {a:?} without the speck, {b:?} with it"
+            ruined >= 3,
+            "{path}: let in, the rays ruined {ruined} of {} points: they didn't bring what isn't finite",
+            points.len()
         );
     }
 }
