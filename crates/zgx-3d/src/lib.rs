@@ -108,7 +108,7 @@ pub use world::audio::{
     Emitter3d, Emitter3dId, Listener, ReverbPreset, ReverbZone, ReverbZoneId, TRANSMISSION,
 };
 #[cfg(feature = "gi")]
-pub use world::gi::{MAX_PROBE_VOLUMES, MAX_PROBES, ProbeVolume, ProbesId};
+pub use world::gi::{MAX_PROBE_VOLUMES, MAX_PROBES, ProbeVolume, ProbesId, ProbesStatus};
 #[cfg(feature = "lighting")]
 pub use world::lighting::{Cascades, PointLight};
 pub use world::{

@@ -52,6 +52,50 @@ pub(super) struct Scene {
     /// binds them is made again with it.
     pub(super) generation: u64,
     rebuilds: u64,
+    /// What rays see of each traced mesh as built (`Held`), and this
+    /// frame's, to compare: a change to meshes rays don't see (a pose of a
+    /// skinned one, glass moving) builds nothing.
+    held: Vec<Held>,
+    seen: Vec<Held>,
+    /// Counts the times what rays see changed: the probes converge again.
+    pub(super) revision: u64,
+}
+
+/// A traced mesh as rays see it: its geometry, its place (a TLAS
+/// instance's rows) and its colour, metalness and glow.
+#[derive(Clone, Copy, PartialEq)]
+struct Held {
+    geometry: u64,
+    transform: [f32; 12],
+    material: [f32; 8],
+}
+fn held(d: &Drawn) -> Held {
+    let c = &d.matrix.columns;
+    let row = |r: usize| [c[0][r], c[1][r], c[2][r], c[3][r]];
+    let [a, b, e] = [row(0), row(1), row(2)];
+    let m = d.material;
+    let [r, g, bl, _] = m.color;
+    let (albedo, glow) = if m.unlit {
+        ([0.; 3], [r, g, bl])
+    } else {
+        ([r, g, bl], m.emissive)
+    };
+    Held {
+        geometry: d.geometry.id(),
+        transform: [
+            a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], e[0], e[1], e[2], e[3],
+        ],
+        material: [
+            albedo[0],
+            albedo[1],
+            albedo[2],
+            m.metallic.clamp(0., 1.),
+            glow[0],
+            glow[1],
+            glow[2],
+            0.,
+        ],
+    }
 }
 
 /// Whether the device traces rays.
@@ -111,11 +155,15 @@ impl Scene {
             instances: instance_buffer(device, capacity),
             generation: 0,
             rebuilds: 0,
+            held: Vec::new(),
+            seen: Vec::new(),
+            revision: 0,
         }
     }
 
     /// The scene made again of `drawn`, the world's meshes as of `meshes`:
-    /// new geometries' structures and the instances built into `encoder`.
+    /// new geometries' structures and the instances built into `encoder`,
+    /// where what rays see of them changed (`revision` then moves on).
     pub(super) fn rebuild(
         &mut self,
         (device, queue): (&wgpu::Device, &wgpu::Queue),
@@ -123,7 +171,16 @@ impl Scene {
         drawn: &[Drawn],
         meshes: u64,
     ) {
+        let first = self.meshes.is_none();
         self.meshes = Some(meshes);
+        self.seen.clear();
+        self.seen
+            .extend(drawn.iter().filter(|d| traced(d)).map(held));
+        if self.seen == self.held && !first {
+            return;
+        }
+        std::mem::swap(&mut self.seen, &mut self.held);
+        self.revision += 1;
         self.rebuilds += 1;
         let now = self.rebuilds;
         // Geometries: when one is new, the buffers are made again holding
@@ -186,7 +243,7 @@ impl Scene {
             self.generation += 1;
         }
         // Instances, and their materials.
-        let count = drawn.iter().filter(|d| traced(d)).count() as u32;
+        let count = self.held.len() as u32;
         if count > self.capacity {
             self.capacity = count.next_power_of_two();
             self.tlas = tlas(device, self.capacity);
@@ -194,30 +251,18 @@ impl Scene {
             self.generation += 1;
         }
         let mut records = Vec::with_capacity(count as usize);
-        for (i, d) in drawn.iter().filter(|d| traced(d)).enumerate() {
-            let entry = &self.geometries[&d.geometry.id()];
-            let c = &d.matrix.columns;
-            let row = |r: usize| [c[0][r], c[1][r], c[2][r], c[3][r]];
-            let [a, b, e] = [row(0), row(1), row(2)];
-            let transform = [
-                a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], e[0], e[1], e[2], e[3],
-            ];
+        for (i, h) in self.held.iter().enumerate() {
+            let entry = &self.geometries[&h.geometry];
             self.tlas[i] = Some(wgpu::TlasInstance::new(
                 &entry.blas,
-                transform,
+                h.transform,
                 i as u32,
                 0xff,
             ));
-            let m = d.material;
-            let [r, g, bl, _] = m.color;
-            let (albedo, glow) = if m.unlit {
-                ([0.; 3], [r, g, bl])
-            } else {
-                ([r, g, bl], m.emissive)
-            };
+            let m = &h.material;
             records.push(RayInstance {
-                albedo: [albedo[0], albedo[1], albedo[2], m.metallic.clamp(0., 1.)],
-                emissive: [glow[0], glow[1], glow[2], 0.],
+                albedo: [m[0], m[1], m[2], m[3]],
+                emissive: [m[4], m[5], m[6], 0.],
                 geometry: [entry.first_vertex, entry.first_index, 0, 0],
             });
         }

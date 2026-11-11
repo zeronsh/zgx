@@ -83,6 +83,28 @@ impl ProbeVolume {
     }
 }
 
+/// What a world's last frame did with its probes (`World::probes_status`).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProbesStatus {
+    /// It has no volumes.
+    NoVolumes,
+    /// It has volumes and hasn't drawn a frame since.
+    #[default]
+    NotDrawn,
+    /// Its probes are traced, and lit meshes inside its volumes take their
+    /// diffuse light from them.
+    Traced,
+    /// Its device has no ray queries (`zgx_gpu::request_ray_queries` not
+    /// called before the first window, or the adapter has none): its
+    /// volumes light nothing.
+    NoRayQueries,
+    /// It shades through clustered lights or the sun's cascades (the
+    /// `lighting` feature), beside which probes don't yet light meshes:
+    /// its volumes light nothing.
+    BesideClustersOrCascades,
+}
+
 /// A volume in a world (`World::add_probes`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProbesId {
@@ -98,8 +120,8 @@ pub(crate) struct Gi {
     /// Counts changes to the volumes: the renderer lays out its probes
     /// again when it moves.
     pub(crate) layout: u64,
-    /// Whether the last frame filled probes by tracing rays.
-    pub(crate) traced: std::cell::Cell<bool>,
+    /// What the last frame did with its probes (`World::probes_status`).
+    pub(crate) status: std::cell::Cell<ProbesStatus>,
 }
 impl Gi {
     /// Whether it has any volume.
@@ -140,6 +162,7 @@ impl World {
             let generation = gi.generations[slot];
             gi.volumes[slot] = Some((generation, volume));
             gi.layout += 1;
+            gi.status.set(ProbesStatus::NotDrawn);
             id = Some(ProbesId {
                 index: slot as u32,
                 generation,
@@ -168,6 +191,16 @@ impl World {
     /// before a frame, without volumes, or where the device has no ray
     /// queries).
     pub fn probes_traced(&self) -> bool {
-        self.inner.borrow().gi.traced.get()
+        self.inner.borrow().gi.status.get() == ProbesStatus::Traced
+    }
+    /// What the last frame drawn did with its probes, and where it didn't
+    /// light by them, why.
+    pub fn probes_status(&self) -> ProbesStatus {
+        let inner = self.inner.borrow();
+        if inner.gi.any() {
+            inner.gi.status.get()
+        } else {
+            ProbesStatus::NoVolumes
+        }
     }
 }

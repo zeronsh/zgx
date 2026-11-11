@@ -665,7 +665,7 @@ impl Viewport for Renderer {
         // Diffuse light from probes (`probes.rs`). Not yet beside clusters
         // or cascades: those take group 0's other bindings.
         #[cfg(feature = "gi")]
-        let probed = !clustered && !cascaded && probes::probed(&world, frame.device);
+        let probed = probes::probed(&world, frame.device, clustered || cascaded);
         #[cfg(not(feature = "gi"))]
         let probed = false;
         let lighting = if clustered { Variant::CLUSTERED } else { 0 }

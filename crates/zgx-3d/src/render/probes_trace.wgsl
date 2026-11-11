@@ -20,7 +20,9 @@ struct Trace {
     // shadow ray starts.
     far: f32,
     lift: f32,
-    _pad: vec2<f32>,
+    // Point and spot lights in `lights`; the round.
+    lights: u32,
+    seed: u32,
 }
 // A mesh in the scene's acceleration structure (`raytrace.rs`): its
 // colour and metalness, its glow, and where its vertices and indices start.
@@ -37,6 +39,10 @@ struct RayInstance {
 @group(0) @binding(19) var<storage, read> instances: array<RayInstance>;
 @group(0) @binding(20) var<storage, read_write> rays: array<vec4<f32>>;
 @group(0) @binding(21) var<uniform> trace: Trace;
+// Every point and spot light (`trace_lights`): place and range, colour
+// and intensity, cone; not the frame's `points`, which are the eight
+// nearest the camera's target.
+@group(0) @binding(22) var<storage, read> lights: array<array<vec4<f32>, 3>>;
 
 const PI: f32 = 3.14159265;
 
@@ -94,6 +100,72 @@ fn around(n: vec3<f32>) -> vec3<f32> {
 //E         + k[7].rgb * (t.x * t.z) + k[8].rgb * (t.x * t.x - t.y * t.y)) * frame.environment.x;
     return light;
 }
+// Light `i`'s light reaching a surface at `at` facing `n`, unshadowed, and
+// the way to it.
+fn lamp(i: u32, at: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
+    let point = lights[i];
+    let to = point[0].xyz - at;
+    let distance = length(to);
+    let l = to / max(distance, 1e-6);
+    let n_l = dot(n, l);
+    if n_l <= 0.0 || distance >= point[0].w {
+        return vec4(0.0);
+    }
+    let falloff = pow(clamp(1.0 - pow(distance / point[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);
+    let cone = clamp(dot(point[2].xyz, -l) + point[2].w, 0.0, 1.0);
+    return vec4(point[1].rgb * point[1].w * falloff * cone * cone * n_l, distance);
+}
+fn luminance(c: vec3<f32>) -> f32 {
+    return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+// The point and spot lights' light over pi at a hit: each shadowed by a
+// ray of its own where there are eight or fewer; where more, one picked
+// in proportion to its light reaching the hit, shadowed, and weighed by
+// its odds (the same on average, a ray a hit).
+fn lamps(at: vec3<f32>, n: vec3<f32>, lifted: vec3<f32>, ray: u32) -> vec3<f32> {
+    var light = vec3(0.0);
+    if trace.lights <= 8u {
+        for (var i = 0u; i < trace.lights; i++) {
+            let reaching = lamp(i, at, n);
+            if any(reaching.rgb > vec3(0.0)) {
+                let l = normalize(lights[i][0].xyz - at);
+                if !blocked(lifted, l, reaching.w - trace.lift) {
+                    light += reaching.rgb;
+                }
+            }
+        }
+        return light / PI;
+    }
+    var total = 0.0;
+    for (var i = 0u; i < trace.lights; i++) {
+        total += luminance(lamp(i, at, n).rgb);
+    }
+    if total <= 0.0 {
+        return vec3(0.0);
+    }
+    var pick = f32(hash(ray * 9781u + trace.seed * 6271u) >> 8u) / 16777216.0 * total;
+    for (var i = 0u; i < trace.lights; i++) {
+        let reaching = lamp(i, at, n);
+        let weight = luminance(reaching.rgb);
+        if weight <= 0.0 {
+            continue;
+        }
+        pick -= weight;
+        if pick <= 0.0 || i + 1u == trace.lights {
+            let l = normalize(lights[i][0].xyz - at);
+            if blocked(lifted, l, reaching.w - trace.lift) {
+                return vec3(0.0);
+            }
+            return reaching.rgb * (total / weight) / PI;
+        }
+    }
+    return vec3(0.0);
+}
+fn hash(x: u32) -> u32 {
+    var h = x * 747796405u + 2891336453u;
+    h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
+    return (h >> 22u) ^ h;
+}
 fn vertex_at(i: u32) -> vec3<f32> {
     return vec3(vertices[i * 8u], vertices[i * 8u + 1u], vertices[i * 8u + 2u]);
 }
@@ -146,22 +218,7 @@ fn trace_rays(@builtin(global_invocation_id) id: vec3<u32>) {
     if facing > 0.0 && any(frame.sun_color.rgb > vec3(0.0)) && !blocked(lifted, sun, 1e4) {
         light += frame.sun_color.rgb * facing / PI;
     }
-    for (var i = 0u; i < u32(frame.params.x); i++) {
-        let point = frame.points[i];
-        let to = point[0].xyz - at;
-        let distance = length(to);
-        let l = to / distance;
-        let n_l = dot(n, l);
-        if n_l <= 0.0 {
-            continue;
-        }
-        let falloff = pow(clamp(1.0 - pow(distance / point[0].w, 4.0), 0.0, 1.0), 2.0) / max(distance * distance, 1e-4);
-        let cone = clamp(dot(point[2].xyz, -l) + point[2].w, 0.0, 1.0);
-        let reaching = point[1].rgb * point[1].w * falloff * cone * cone * n_l;
-        if any(reaching > vec3(0.0)) && !blocked(lifted, l, distance - trace.lift) {
-            light += reaching / PI;
-        }
-    }
+    light += lamps(at, n, lifted, id.x);
     // Light bounced before: the probes', the world's where none reach.
     let probed = probe_light(at, n, -d);
     light += mix(around(n), probed.rgb, probed.a);

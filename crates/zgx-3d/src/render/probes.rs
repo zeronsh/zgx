@@ -56,7 +56,10 @@ struct TraceUniform {
     total: u32,
     far: f32,
     lift: f32,
-    _pad: [f32; 2],
+    /// Point and spot lights in `lights`, and the round (seeding which
+    /// light a hit samples where there are many).
+    lights: u32,
+    seed: u32,
 }
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -66,25 +69,53 @@ struct AtlasUniform {
     depth: f32,
 }
 
-/// What the light a frame shades with is: when it changes, the probes
-/// converge again.
-fn lighting(uniforms: &FrameUniforms) -> [f32; 117] {
-    let mut out = [0.; 117];
-    let parts: [&[f32]; 7] = [
+/// What of the light a frame shades with probes read, but its point and
+/// spot lights (`trace_lights`): the sun, the hemisphere and the
+/// environment's intensity and turn. None follows the camera.
+fn lighting(uniforms: &FrameUniforms) -> [f32; 20] {
+    let mut out = [0.; 20];
+    let parts: [&[f32; 4]; 5] = [
         &uniforms.sun_direction,
         &uniforms.sun_color,
         &uniforms.sky,
         &uniforms.ground,
-        bytemuck::cast_slice(&uniforms.points),
-        &uniforms.params[..1],
         &uniforms.environment,
     ];
-    let mut at = 0;
-    for part in parts {
-        out[at..at + part.len()].copy_from_slice(part);
-        at += part.len();
+    for (i, part) in parts.into_iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(part);
     }
     out
+}
+
+/// A point or spot light as a ray's hit is lit by it (`TraceLight` in
+/// `probes_trace.wgsl`): as the frame's `points` hold them.
+type TraceLight = [[f32; 4]; 3];
+/// Every point and spot light of `world`, in the world's order (the
+/// frame's `points` are the eight nearest the camera's target, which turn
+/// with it), into `out`.
+fn trace_lights(world: &Inner, out: &mut Vec<TraceLight>) {
+    out.clear();
+    world.for_each_light(|light, spot| {
+        if let crate::world::Light::Point {
+            position,
+            color,
+            intensity,
+            range,
+        } = light
+        {
+            let cone = spot.map_or([0., 0., 0., 1.], |spot| {
+                let (inner, outer) = (spot.inner.cos(), spot.outer.cos());
+                let scale = 1. / (inner - outer).max(1e-3);
+                let d = spot.direction.normalized() * scale;
+                [d.x, d.y, d.z, -outer * scale]
+            });
+            out.push([
+                [position.x, position.y, position.z, range.max(1e-3)],
+                [color[0], color[1], color[2], intensity],
+                cone,
+            ]);
+        }
+    });
 }
 
 struct Atlas {
@@ -341,7 +372,7 @@ fn probe_entries(stage: wgpu::ShaderStages) -> [wgpu::BindGroupLayoutEntry; 4] {
 
 /// What a tracer's binding holds: the scene's generation, the
 /// environment, the layout and the rays' buffer's size.
-type TraceKey = (u64, Option<u64>, u64, u64);
+type TraceKey = (u64, Option<u64>, u64, u64, u64);
 /// What a probe-lit frame's binding holds: whether shadows are on, the
 /// environment, the layout.
 type FrameKey = (bool, Option<u64>, u64);
@@ -368,6 +399,40 @@ struct Tracer {
     /// structures at nothing: wgpu then records no build, and a pass
     /// tracing them fails. Everything but that pass runs.
     noop: bool,
+    /// Every point and spot light (`trace_lights`), its count, and how many
+    /// times it was made again (what binds it is made again with it).
+    lights: wgpu::Buffer,
+    light_count: u32,
+    lights_made: u64,
+}
+
+/// `lights` into the tracer's buffer: made again where it outgrew it.
+fn upload_lights(
+    tracer: &mut Tracer,
+    lights: &[TraceLight],
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) {
+    let bytes: &[u8] = bytemuck::cast_slice(lights);
+    if bytes.len() as u64 > tracer.lights.size() {
+        tracer.lights = light_buffer(device, bytes.len() as u64);
+        tracer.lights_made += 1;
+    }
+    if !bytes.is_empty() {
+        queue.write_buffer(&tracer.lights, 0, bytes);
+    }
+    tracer.light_count = lights.len() as u32;
+}
+fn light_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("3D probe lights"),
+        // A light at least: a binding isn't empty.
+        size: size
+            .max(std::mem::size_of::<TraceLight>() as u64)
+            .next_power_of_two(),
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
 }
 
 pub(super) struct Probes {
@@ -388,13 +453,30 @@ pub(super) struct Probes {
     next: u32,
     rounds: u32,
     done: u32,
-    lit_by: Option<([f32; 117], u64, Option<u64>)>,
+    lit_by: Option<([f32; 20], u64, Option<u64>)>,
+    /// The point and spot lights rays are lit by, as uploaded, and this
+    /// frame's (`trace_lights`).
+    lights: Vec<TraceLight>,
+    seen: Vec<TraceLight>,
 }
 
 /// Whether `world`'s meshes take their diffuse light from probes on this
-/// device: it has volumes and the device traces rays.
-pub(super) fn probed(world: &Inner, device: &wgpu::Device) -> bool {
-    world.gi.any() && super::raytrace::ray_queries(device)
+/// device this frame: it has volumes, the device traces rays, and it
+/// shades through no clusters or cascades (`beside`). Where it has
+/// volumes and not, says why (`World::probes_status`).
+pub(super) fn probed(world: &Inner, device: &wgpu::Device, beside: bool) -> bool {
+    if !world.gi.any() {
+        return false;
+    }
+    let off = if !super::raytrace::ray_queries(device) {
+        crate::ProbesStatus::NoRayQueries
+    } else if beside {
+        crate::ProbesStatus::BesideClustersOrCascades
+    } else {
+        return true;
+    };
+    world.gi.status.set(off);
+    false
 }
 
 /// Group 0's layout for a probe-lit pipeline (`lit`: with the environment
@@ -430,7 +512,6 @@ pub(super) fn frame(
         if gpu.probes.take().is_some() {
             world.unsettle(SETTLE, false);
         }
-        world.gi.traced.set(false);
         return false;
     }
     // The renderer's frame uniforms and environment, beside its probes.
@@ -456,6 +537,8 @@ pub(super) fn frame(
         rounds: 0,
         done: 0,
         lit_by: None,
+        lights: Vec::new(),
+        seen: Vec::new(),
     });
     if probes
         .layout
@@ -491,14 +574,6 @@ pub(super) fn frame(
         }
         layout.cleared = true;
     }
-    // A change to the light or the meshes: converge again.
-    let environment = world.environment.as_ref().map(|e| e.data.id);
-    let now = (lighting(uniforms), world.meshes, environment);
-    if probes.lit_by.as_ref() != Some(&now) {
-        probes.lit_by = Some(now);
-        probes.rounds = 0;
-        probes.done = 0;
-    }
     let tracer = probes.tracer.get_or_insert_with(|| tracer(device));
     if let Some(drawn) = drawn
         && tracer.scene.meshes != Some(world.meshes)
@@ -507,7 +582,23 @@ pub(super) fn frame(
             .scene
             .rebuild((device, queue), encoder, drawn, world.meshes);
     }
-    world.gi.traced.set(true);
+    // A change to what rays see or what lights it: converge again. (Not
+    // the camera: nothing here follows it.)
+    trace_lights(world, &mut probes.seen);
+    let lights_changed = probes.seen != probes.lights;
+    if lights_changed {
+        std::mem::swap(&mut probes.seen, &mut probes.lights);
+        upload_lights(tracer, &probes.lights, device, queue);
+    }
+    let environment = world.environment.as_ref().map(|e| e.data.id);
+    let now = (lighting(uniforms), tracer.scene.revision, environment);
+    if lights_changed || probes.lit_by.as_ref() != Some(&now) {
+        probes.lit_by = Some(now);
+        probes.rounds = 0;
+        probes.done = 0;
+    }
+    world.gi.status.set(crate::ProbesStatus::Traced);
+    let tracer = probes.tracer.as_ref().unwrap();
     if probes.rounds < ROUNDS && tracer.scene.meshes.is_some() {
         let environment = match (environment, cube.as_ref(), environment_layout.as_ref()) {
             (Some(id), Some((_, view)), Some((_, sampler))) => Some((id, view, sampler)),
@@ -561,6 +652,7 @@ fn tracer(device: &wgpu::Device) -> Tracer {
             storage(19, true),
             storage(20, false),
             uniform(21, compute),
+            storage(22, true),
         ]);
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("3D probe rays"),
@@ -646,6 +738,9 @@ fn tracer(device: &wgpu::Device) -> Tracer {
         bind: None,
         blend_binds: None,
         noop: device.adapter_info().backend == wgpu::Backend::Noop,
+        lights: light_buffer(device, 0),
+        light_count: 0,
+        lights_made: 0,
     }
 }
 
@@ -748,7 +843,8 @@ fn update(
         total: layout.total,
         far: layout.far,
         lift: layout.lift,
-        _pad: [0.; 2],
+        lights: tracer.light_count,
+        seed: probes.rounds,
     };
     queue.write_buffer(&tracer.uniform, 0, bytemuck::bytes_of(&uniform));
     let scene = &tracer.scene;
@@ -757,6 +853,7 @@ fn update(
         environment.map(|e| e.0),
         layout.of,
         *rays_size,
+        tracer.lights_made,
     );
     if tracer.bind.as_ref().is_none_or(|(k, _)| *k != key) {
         let mut entries = vec![wgpu::BindGroupEntry {
@@ -813,6 +910,10 @@ fn update(
             wgpu::BindGroupEntry {
                 binding: 21,
                 resource: tracer.uniform.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 22,
+                resource: tracer.lights.as_entire_binding(),
             },
         ]);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {

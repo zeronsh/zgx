@@ -379,3 +379,107 @@ fn the_probe_lit_room_matches_its_golden() {
         path.display()
     );
 }
+
+#[test]
+fn turning_the_camera_between_lamps_doesnt_converge_the_probes_again() {
+    // Two more lamps at x = ±0.7: the frame shades its point lights
+    // nearest the camera's target first, and turning from one to the
+    // other reorders them. No light changed: the probes stay converged.
+    let world = World::new();
+    room(&world);
+    for x in [-0.7, 0.7] {
+        world.add_light(Light::Point {
+            position: vec3(x, 1.2, 0.3),
+            color: [0.6, 0.6, 0.6],
+            intensity: 1.,
+            range: 10.,
+        });
+    }
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    world.add_probes(volume().per_frame(216)).unwrap();
+    settle(&mut window, &world, 500);
+    if !world.probes_traced() {
+        return;
+    }
+    let aim = |x: f32| {
+        world.set_camera(Camera {
+            position: vec3(0., 1., 3.4),
+            target: vec3(x, 1., 0.),
+            fov: 40f32.to_radians(),
+            ..Camera::default()
+        })
+    };
+    aim(-0.6);
+    settle(&mut window, &world, 500);
+    aim(0.6);
+    let frames = settle(&mut window, &world, 500);
+    assert_eq!(frames, 1, "a turn of the camera drew {frames} frames");
+}
+
+#[test]
+fn a_mesh_rays_dont_see_moving_doesnt_converge_the_probes_again() {
+    // A pane light passes through is left out of the rays' scene: moving
+    // it changes the world's meshes, but nothing the probes see.
+    let world = World::new();
+    room(&world);
+    let pane = world.add(
+        Object::mesh(Geometry::cuboid(0.3, 0.3, 0.02), Material::rgb(0xffffff)).at([-0.5, 1., 0.5]),
+    );
+    world.set_transmission(pane, Some(Transmission::new(1.)));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    world.add_probes(volume().per_frame(216)).unwrap();
+    settle(&mut window, &world, 500);
+    if !world.probes_traced() {
+        return;
+    }
+    world.set_transform(pane, Transform::at([-0.4, 1., 0.5]));
+    let frames = settle(&mut window, &world, 500);
+    assert_eq!(
+        frames, 1,
+        "moving a pane rays don't see drew {frames} frames"
+    );
+}
+
+#[test]
+fn a_world_says_what_its_probes_did() {
+    let world = World::new();
+    room(&world);
+    assert_eq!(world.probes_status(), ProbesStatus::NoVolumes);
+    world.add_probes(volume()).unwrap();
+    assert_eq!(world.probes_status(), ProbesStatus::NotDrawn);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let status = world.probes_status();
+    assert!(
+        matches!(status, ProbesStatus::Traced | ProbesStatus::NoRayQueries),
+        "{status:?}"
+    );
+    assert_eq!(world.probes_traced(), status == ProbesStatus::Traced);
+}
+
+#[cfg(feature = "lighting")]
+#[test]
+fn a_world_shading_through_clusters_says_its_probes_are_off() {
+    let world = World::new();
+    room(&world);
+    world.set_clustered_lights(true);
+    world.add_probes(volume()).unwrap();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    if world.probes_status() == ProbesStatus::NoRayQueries {
+        return;
+    }
+    assert_eq!(
+        world.probes_status(),
+        ProbesStatus::BesideClustersOrCascades
+    );
+    assert!(!world.probes_traced());
+}

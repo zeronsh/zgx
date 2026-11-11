@@ -13,7 +13,9 @@ struct Trace {
     total: u32,
     far: f32,
     lift: f32,
-    _pad: vec2<f32>,
+    // Point and spot lights in `lights`; the round.
+    lights: u32,
+    seed: u32,
 }
 @group(0) @binding(0) var<storage, read> rays: array<vec4<f32>>;
 @group(0) @binding(1) var<uniform> trace: Trace;
