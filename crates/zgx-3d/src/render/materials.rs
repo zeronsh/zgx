@@ -433,9 +433,10 @@ pub(super) fn upload(
 /// upload's time, and needs no device.
 type Decoded<'a> = crate::texture::Levels<'a>;
 /// `texture`'s levels for a device of `features` (`Texture::levels`);
-/// `None` if they don't decode.
+/// `None` if they don't decode, or a decoder panics (caught: on the frame's
+/// thread too, a hostile file draws as if it had no map).
 fn decoded(texture: &crate::Texture, features: wgpu::Features) -> Option<Decoded<'_>> {
-    texture.levels(features)
+    crate::assets::guarded(texture, || texture.levels(features))
 }
 /// `texture`, `decoded`, on the GPU (`upload`); `None` where the device
 /// can't hold its levels (`assets::upload_levels`).

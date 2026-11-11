@@ -64,15 +64,34 @@ impl Ktx2 {
             .ok()?;
         (written == *length).then_some(Cow::Owned(out))
     }
-    /// Its levels transcoded to `target`, from `file` (the bytes it was read
-    /// from; its Basis Universal texels), the first the largest: each its
-    /// blocks or RGBA8 texels, as long as its size says. `None` if the file
-    /// doesn't transcode (its transcoder refused it, or gave other sizes).
+    /// Its first `count` levels (or all it has, if fewer) transcoded to
+    /// `target`, from `file` (the bytes it was read from; its Basis
+    /// Universal texels), the first the largest: each its blocks or RGBA8
+    /// texels, as long as its size says. `None` if the file doesn't
+    /// transcode: a level would be more than `MAX_LEVEL` (checked before the
+    /// transcoder makes it), the transcoder refused it, gave other sizes, or
+    /// panicked (caught here, on whichever thread: a hostile file is a map
+    /// that draws as if it had none).
     #[cfg(feature = "ktx2-basis")]
-    pub(crate) fn transcoded(&self, file: &[u8], target: Target) -> Option<Vec<Vec<u8>>> {
+    pub(crate) fn transcoded(
+        &self,
+        file: &[u8],
+        target: Target,
+        count: usize,
+    ) -> Option<Vec<Vec<u8>>> {
         if self.texels != Texels::Basis {
             return None;
         }
+        let count = count.min(self.level_count());
+        let expected = |level| self.transcoded_size(target, level);
+        if !self.transcodes_within(target) {
+            return None;
+        }
+        let format = match target {
+            Target::Bc7 => basisu::TargetFormat::Bc7Rgba,
+            Target::Astc => basisu::TargetFormat::Astc4x4Rgba,
+            Target::Rgba8 => basisu::TargetFormat::Rgba32,
+        };
         // Zstandard's levels decompressed here (by this crate's decoder, not
         // a second one): the file as if stored so.
         let stored;
@@ -82,31 +101,41 @@ impl Ktx2 {
         } else {
             file
         };
-        let transcoder = basisu::Transcoder::new(input).ok()?;
-        if transcoder.level_count() as usize != self.level_count() {
-            return None;
+        std::panic::catch_unwind(|| {
+            let transcoder = basisu::Transcoder::new(input).ok()?;
+            if transcoder.level_count() as usize != self.level_count() {
+                return None;
+            }
+            (0..count)
+                .map(|level| {
+                    let out = transcoder
+                        .transcode(level as u32, format, basisu::DecodeFlags::NONE)
+                        .ok()?;
+                    (out.len() == expected(level)).then_some(out)
+                })
+                .collect()
+        })
+        .ok()?
+    }
+    /// Level `level`'s bytes transcoded to `target`.
+    #[cfg(feature = "ktx2-basis")]
+    fn transcoded_size(&self, target: Target, level: usize) -> usize {
+        let (w, h) = (
+            (self.width >> level).max(1) as usize,
+            (self.height >> level).max(1) as usize,
+        );
+        match target {
+            Target::Rgba8 => w * h * 4,
+            Target::Bc7 | Target::Astc => w.div_ceil(4) * h.div_ceil(4) * 16,
         }
-        let format = match target {
-            Target::Bc7 => basisu::TargetFormat::Bc7Rgba,
-            Target::Astc => basisu::TargetFormat::Astc4x4Rgba,
-            Target::Rgba8 => basisu::TargetFormat::Rgba32,
-        };
-        (0..self.level_count())
-            .map(|level| {
-                let (w, h) = (
-                    (self.width >> level).max(1) as usize,
-                    (self.height >> level).max(1) as usize,
-                );
-                let expected = match target {
-                    Target::Rgba8 => w * h * 4,
-                    Target::Bc7 | Target::Astc => w.div_ceil(4) * h.div_ceil(4) * 16,
-                };
-                let out = transcoder
-                    .transcode(level as u32, format, basisu::DecodeFlags::NONE)
-                    .ok()?;
-                (out.len() == expected).then_some(out)
-            })
-            .collect()
+    }
+    /// Whether its largest level transcoded to `target` is within
+    /// `MAX_LEVEL` (an 8192² map's RGBA8 texels aren't, its BC7 blocks
+    /// are): if not, a device that takes `target` refuses it, unread, and
+    /// another may take it (`Texture::kept_levels`).
+    #[cfg(feature = "ktx2-basis")]
+    pub(crate) fn transcodes_within(&self, target: Target) -> bool {
+        self.transcoded_size(target, 0) <= MAX_LEVEL
     }
     /// `file` with its Zstandard levels decompressed, as if stored so: its
     /// header, index and other sections as they are (all before its first

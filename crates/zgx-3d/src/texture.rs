@@ -254,12 +254,22 @@ impl Texture {
         #[cfg(feature = "ktx2")]
         if encoded.starts_with(&crate::assets::ktx2::IDENTIFIER) {
             use crate::assets::ktx2;
-            let first = ktx2::read(encoded).ok().and_then(|file| match file.texels {
+            let file = ktx2::read(encoded).ok();
+            // Basis Universal's, too large as RGBA8: not here, not failed
+            // (`kept_levels`).
+            #[cfg(feature = "ktx2-basis")]
+            if let Some(file) = &file
+                && file.texels == ktx2::Texels::Basis
+                && !file.transcodes_within(ktx2::Target::Rgba8)
+            {
+                return None;
+            }
+            let first = file.and_then(|file| match file.texels {
                 ktx2::Texels::Rgba8 => Some(file.level(encoded, 0)?.into_owned()),
                 // Basis Universal's, transcoded to RGBA8.
                 #[cfg(feature = "ktx2-basis")]
                 ktx2::Texels::Basis => file
-                    .transcoded(encoded, ktx2::Target::Rgba8)?
+                    .transcoded(encoded, ktx2::Target::Rgba8, 1)?
                     .into_iter()
                     .next(),
                 ktx2::Texels::Blocks(_) => None,
@@ -327,7 +337,23 @@ impl Texture {
                     use crate::assets::ktx2::Target;
                     let size = (self.0.width, self.0.height);
                     let (target, format) = Target::for_device(features, size);
-                    let Some(levels) = file.transcoded(encoded, target) else {
+                    // Too large for what this device takes: refused here
+                    // (`pixels` too), not failed (another may take it).
+                    if !file.transcodes_within(target) {
+                        #[cfg(debug_assertions)]
+                        crate::assets::said_once("Basis Universal, too large", || {
+                            format!(
+                                "a Basis Universal map of {} by {} draws as if it had none on \
+                                 a device without BC or ASTC: its first level would be {} MiB \
+                                 as RGBA8, over the 64 MiB a map may hold",
+                                size.0,
+                                size.1,
+                                (size.0 as u64 * size.1 as u64 * 4) >> 20
+                            )
+                        });
+                        return None;
+                    }
+                    let Some(levels) = file.transcoded(encoded, target, usize::MAX) else {
                         self.failed_to_decode();
                         return None;
                     };

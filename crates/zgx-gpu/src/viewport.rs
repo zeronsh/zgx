@@ -296,9 +296,30 @@ fn shared_levels(
     count: u32,
     label: &str,
 ) -> Option<wgpu::Texture> {
+    let metal = shared_texture(device, size, format, layers, count)?;
+    for (level, texels) in levels.iter().enumerate() {
+        write_shared(&metal, size, level, layers, texels);
+    }
+    // SAFETY: Every level written whole, just now.
+    Some(unsafe { shared_as_wgpu(device, metal, size, format, layers, count, label) })
+}
+/// A Metal texture the CPU writes in place.
+#[cfg(target_os = "macos")]
+type SharedTexture =
+    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLTexture>>;
+/// A new shared texture of `format` (RGBA8, sRGB or not, or RGB9E5), `size`,
+/// `layers` (1, or a cube's 6) and `count` levels, on a Metal `device` with
+/// unified memory; `None` on another device.
+#[cfg(target_os = "macos")]
+fn shared_texture(
+    device: &wgpu::Device,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+    layers: u32,
+    count: u32,
+) -> Option<SharedTexture> {
     use objc2_metal::{
-        MTLDevice, MTLOrigin, MTLPixelFormat, MTLRegion, MTLSize, MTLStorageMode, MTLTexture,
-        MTLTextureDescriptor, MTLTextureType, MTLTextureUsage,
+        MTLDevice, MTLPixelFormat, MTLStorageMode, MTLTextureDescriptor, MTLTextureUsage,
     };
     // SAFETY: The raw device only makes a texture; nothing destroys it, and
     // the guard is dropped before wgpu is called again.
@@ -311,10 +332,9 @@ fn shared_levels(
         wgpu::TextureFormat::Rgb9e5Ufloat => MTLPixelFormat::RGB9E5Float,
         _ => MTLPixelFormat::RGBA8Unorm,
     };
-    let cube = layers == 6;
     // SAFETY: A plain 2D or cube texture descriptor of this size.
     let descriptor = unsafe {
-        if cube {
+        if layers == 6 {
             MTLTextureDescriptor::textureCubeDescriptorWithPixelFormat_size_mipmapped(
                 pixel_format,
                 size.0 as usize,
@@ -334,45 +354,69 @@ fn shared_levels(
     unsafe { descriptor.setMipmapLevelCount(count as usize) };
     descriptor.setUsage(MTLTextureUsage::ShaderRead);
     descriptor.setStorageMode(MTLStorageMode::Shared);
-    let metal = hal.raw_device().newTextureWithDescriptor(&descriptor)?;
-    drop(hal);
-    for (level, texels) in levels.iter().enumerate() {
-        let (width, height) = ((size.0 >> level).max(1), (size.1 >> level).max(1));
-        let region = MTLRegion {
-            origin: MTLOrigin { x: 0, y: 0, z: 0 },
-            size: MTLSize {
-                width: width as usize,
-                height: height as usize,
-                depth: 1,
-            },
+    hal.raw_device().newTextureWithDescriptor(&descriptor)
+}
+/// Level `level` of `metal` (`shared_texture`'s, its first level `size`),
+/// every one of its `layers`, written whole from `texels`: each layer's
+/// rows of 4-byte texels one after another. Panics if `texels` holds other
+/// than that.
+#[cfg(target_os = "macos")]
+fn write_shared(metal: &SharedTexture, size: (u32, u32), level: usize, layers: u32, texels: &[u8]) {
+    use objc2_metal::{MTLOrigin, MTLRegion, MTLSize, MTLTexture};
+    let (width, height) = ((size.0 >> level).max(1), (size.1 >> level).max(1));
+    let layer_bytes = (width * height * 4) as usize;
+    assert_eq!(texels.len(), layer_bytes * layers as usize);
+    let region = MTLRegion {
+        origin: MTLOrigin { x: 0, y: 0, z: 0 },
+        size: MTLSize {
+            width: width as usize,
+            height: height as usize,
+            depth: 1,
+        },
+    };
+    for layer in 0..layers as usize {
+        let bytes = &texels[layer * layer_bytes..][..layer_bytes];
+        // SAFETY: Layer `layer` of level `level` whole, of a new texture
+        // of 4-byte texels no submission reads, from `bytes` holding its
+        // rows of `width * 4` bytes (asserted above).
+        unsafe {
+            metal.replaceRegion_mipmapLevel_slice_withBytes_bytesPerRow_bytesPerImage(
+                region,
+                level,
+                layer,
+                std::ptr::NonNull::from(bytes).cast(),
+                (width * 4) as usize,
+                layer_bytes,
+            )
         };
-        let layer_bytes = (width * height * 4) as usize;
-        for layer in 0..layers as usize {
-            let bytes = &texels[layer * layer_bytes..][..layer_bytes];
-            // SAFETY: Layer `layer` of level `level` whole, of a new texture
-            // of 4-byte texels no submission reads, from `bytes` holding its
-            // rows of `width * 4` bytes (asserted by the caller).
-            unsafe {
-                metal.replaceRegion_mipmapLevel_slice_withBytes_bytesPerRow_bytesPerImage(
-                    region,
-                    level,
-                    layer,
-                    std::ptr::NonNull::from(bytes).cast(),
-                    (width * 4) as usize,
-                    layer_bytes,
-                )
-            };
-        }
     }
+}
+/// `metal` (`shared_texture`'s, made with these `size`, `format`, `layers`
+/// and `count`) as a wgpu texture of `device`, readable by shaders.
+///
+/// # Safety
+/// Every level of `metal` has been written whole (`write_shared`): wgpu
+/// takes it as initialized.
+#[cfg(target_os = "macos")]
+unsafe fn shared_as_wgpu(
+    device: &wgpu::Device,
+    metal: SharedTexture,
+    size: (u32, u32),
+    format: wgpu::TextureFormat,
+    layers: u32,
+    count: u32,
+    label: &str,
+) -> wgpu::Texture {
+    use objc2_metal::MTLTextureType;
     // SAFETY: Metal made this texture on this device: `format`, this size,
     // `count` levels and `layers` layers (a cube's six as its faces),
     // readable by shaders; wgpu takes ownership of it, written (and so
-    // initialized) whole.
-    Some(unsafe {
+    // initialized) whole, as the caller promises.
+    unsafe {
         let raw = wgpu::hal::metal::Device::texture_from_raw(
             metal,
             format,
-            if cube {
+            if layers == 6 {
                 MTLTextureType::TypeCube
             } else {
                 MTLTextureType::Type2D
@@ -402,7 +446,150 @@ fn shared_levels(
                 view_formats: &[],
             },
         )
-    })
+    }
+}
+
+/// A texture for a painter to sample, as `texture_with_levels` makes, made
+/// a level at a time: for levels made one after another (decoded, say), so
+/// that only one need be held at once. Each level is written once
+/// (`write`), in any order, then the texture taken (`finish`). Dropped
+/// before then, nothing is made.
+pub struct TextureLevels {
+    size: (u32, u32),
+    written: Vec<bool>,
+    /// Its format and label, for a shared texture's wgpu one (`finish`).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    format: wgpu::TextureFormat,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    label: String,
+    made: LevelsMade,
+}
+enum LevelsMade {
+    /// Written in place by the CPU (`shared_texture`).
+    #[cfg(target_os = "macos")]
+    Shared(SharedTexture),
+    /// Written with `Queue::write_texture`.
+    Copied(wgpu::Texture),
+}
+impl TextureLevels {
+    /// A texture of `count` levels, the first `size` and each next half the
+    /// one before (at least 1), of `format`: `Rgba8UnormSrgb` or
+    /// `Rgba8Unorm`, as `texture_with_levels` says.
+    ///
+    /// Panics if `format` is neither, or `count` is 0 or more than `size`'s
+    /// full chain.
+    pub fn new(
+        device: &wgpu::Device,
+        size: (u32, u32),
+        format: wgpu::TextureFormat,
+        count: u32,
+        label: &str,
+    ) -> Self {
+        assert!(
+            matches!(
+                format,
+                wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Rgba8Unorm
+            ),
+            "TextureLevels makes Rgba8UnormSrgb or Rgba8Unorm textures, not {format:?}"
+        );
+        let chain = 32 - size.0.max(size.1).max(1).leading_zeros();
+        assert!(
+            (1..=chain).contains(&count),
+            "a {} by {} texture has 1 to {chain} levels, not {count}",
+            size.0,
+            size.1
+        );
+        #[cfg(target_os = "macos")]
+        let shared = shared_texture(device, size, format, 1, count).map(LevelsMade::Shared);
+        #[cfg(not(target_os = "macos"))]
+        let shared = None;
+        let made = shared.unwrap_or_else(|| {
+            LevelsMade::Copied(device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: size.0,
+                    height: size.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: count,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }))
+        });
+        Self {
+            size,
+            format,
+            written: vec![false; count as usize],
+            label: label.to_owned(),
+            made,
+        }
+    }
+    /// Level `level` written whole from `texels`: its rows of 4-byte texels,
+    /// top to bottom. Taken before this returns: `texels` may be reused.
+    ///
+    /// Panics if there's no such level, it's been written, or `texels` holds
+    /// other than its width times height times 4 bytes.
+    pub fn write(&mut self, queue: &wgpu::Queue, level: u32, texels: &[u8]) {
+        let written = self
+            .written
+            .get_mut(level as usize)
+            .unwrap_or_else(|| panic!("no level {level}"));
+        assert!(!*written, "level {level} is written once");
+        *written = true;
+        let (width, height) = ((self.size.0 >> level).max(1), (self.size.1 >> level).max(1));
+        assert_eq!(
+            texels.len() as u64,
+            u64::from(width) * u64::from(height) * 4,
+            "texture level {level}: {width} by {height} 4-byte texels"
+        );
+        match &self.made {
+            #[cfg(target_os = "macos")]
+            LevelsMade::Shared(metal) => write_shared(metal, self.size, level as usize, 1, texels),
+            LevelsMade::Copied(texture) => queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: level,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                texels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * 4),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            ),
+        }
+    }
+    /// The texture, every level written.
+    ///
+    /// Panics if a level wasn't.
+    pub fn finish(self, device: &wgpu::Device) -> wgpu::Texture {
+        if let Some(level) = self.written.iter().position(|w| !w) {
+            panic!("level {level} wasn't written");
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = device;
+        match self.made {
+            #[cfg(target_os = "macos")]
+            LevelsMade::Shared(metal) => {
+                let count = self.written.len() as u32;
+                // SAFETY: Every level written whole (`write`, checked above).
+                unsafe {
+                    shared_as_wgpu(device, metal, self.size, self.format, 1, count, &self.label)
+                }
+            }
+            LevelsMade::Copied(texture) => texture,
+        }
+    }
 }
 
 /// A texture for a painter to sample of block-compressed `levels`: BC1 to

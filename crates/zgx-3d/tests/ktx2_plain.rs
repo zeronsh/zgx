@@ -196,6 +196,7 @@ fn a_bc7_map_on_a_device_without_bc_draws_as_its_png() {
     };
     #[cfg(feature = "ktx2-basis")]
     let basis = made();
+    let hostile = made();
     let (blocks, caps) = frame(a, Texture::decode(&ktx2()).unwrap());
     assert!(
         !caps.compressed.bc && !caps.compressed.astc,
@@ -228,4 +229,35 @@ fn a_bc7_map_on_a_device_without_bc_draws_as_its_png() {
         let (transcoded, _) = frame(gpu, Texture::decode(&uastc()).unwrap());
         close(&transcoded, "Basis Universal");
     }
+    // An 8² map (decoded in the frame, as small) of ASTC blocks that panic
+    // the decoder (one found by seeded search: texture2ddecoder 0.1.2 reads
+    // past its tables): caught, the frame drawn, the square white, as if
+    // it had no map.
+    if let Some(gpu) = hostile {
+        const PANICS: [u8; 16] = [
+            173, 118, 54, 116, 236, 121, 207, 234, 139, 142, 21, 3, 253, 158, 31, 255,
+        ];
+        let file = ktx2_of(8, 157, &PANICS.repeat(4));
+        let (drawn, _) = frame(gpu, Texture::decode(&file).unwrap());
+        let middle = &drawn[((SIZE / 2 * SIZE + SIZE / 2) * 4) as usize..][..3];
+        assert!(
+            middle.iter().all(|&c| c > 250),
+            "white, as without its map: {middle:?}"
+        );
+    }
+}
+
+/// A KTX2 file `side` square of one level of Vulkan `format`'s `blocks`.
+fn ktx2_of(side: u32, format: u32, blocks: &[u8]) -> Vec<u8> {
+    let mut file = b"\xabKTX 20\xbb\r\n\x1a\n".to_vec();
+    for v in [format, 1, side, side, 0, 0, 1, 1, 0] {
+        file.extend(u32::to_le_bytes(v));
+    }
+    file.extend([0u8; 32]);
+    let length = blocks.len() as u64;
+    [104, length, length]
+        .iter()
+        .for_each(|v: &u64| file.extend(v.to_le_bytes()));
+    file.extend(blocks);
+    file
 }

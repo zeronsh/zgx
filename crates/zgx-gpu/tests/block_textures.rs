@@ -1,8 +1,9 @@
 //! `viewport::texture_with_block_levels`: a BC and an ASTC texture made
 //! with every level, as the device has their features, without a
-//! validation error. (A world's tests draw their texels: zgx-3d's KTX2
-//! tests.)
-use zgx_gpu::viewport::texture_with_block_levels;
+//! validation error; and `viewport::TextureLevels`, an RGBA8 texture made a
+//! level at a time. (A world's tests draw their texels: zgx-3d's KTX2
+//! tests, blocks decoded a level at a time among them.)
+use zgx_gpu::viewport::{TextureLevels, texture_with_block_levels};
 
 /// A device with BC and ASTC textures where the adapter has them.
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
@@ -103,4 +104,46 @@ fn a_size_of_part_blocks_is_refused() {
         panic!("whole 4 by 4 blocks (no adapter: stood in)")
     };
     made(&gpu, wgpu::TextureFormat::Bc1RgbaUnorm, (6, 4), &BC1_RED);
+}
+
+#[test]
+fn an_rgba8_texture_is_made_a_level_at_a_time() {
+    // 20 by 12, its 5 levels written out of order from one buffer reused
+    // (each taken as it's written), without a validation error.
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (20, 12);
+    for format in [
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        wgpu::TextureFormat::Rgba8Unorm,
+    ] {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let mut made = TextureLevels::new(&device, size, format, 5, "test");
+        let mut buffer = vec![0u8; 20 * 12 * 4];
+        for level in [3, 0, 4, 1, 2] {
+            let (w, h) = ((size.0 >> level).max(1), (size.1 >> level).max(1));
+            let texels = &mut buffer[..(w * h * 4) as usize];
+            texels.fill(level as u8 * 50);
+            made.write(&queue, level, texels);
+        }
+        let texture = made.finish(&device);
+        assert_eq!(texture.format(), format);
+        assert_eq!(texture.mip_level_count(), 5);
+        assert_eq!((texture.width(), texture.height()), size);
+        queue.submit([]);
+        assert!(pollster::block_on(scope.pop()).is_none(), "{format:?}");
+    }
+}
+
+#[test]
+#[should_panic(expected = "level 1 wasn't written")]
+fn a_texture_with_a_level_unwritten_isnt_made() {
+    let Some((device, queue)) = device() else {
+        panic!("level 1 wasn't written (no adapter: stood in)")
+    };
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut made = TextureLevels::new(&device, (4, 4), format, 2, "test");
+    made.write(&queue, 0, &[0; 64]);
+    made.finish(&device);
 }

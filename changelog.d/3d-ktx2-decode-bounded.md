@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **A KTX2 map decoded for a device without its blocks holds a bounded amount of memory** (zgx-3d, the `ktx2` feature): its first level may hold at most 64 MiB of texels decoded, as a PNG's pixels may. A larger one (an 8192² BC1 file's would be 256 MiB) draws as if it had no map on that device; before, it was decoded whatever its size. Each level is decoded into one buffer and put on the GPU before the next (`zgx_gpu::viewport::TextureLevels`), where before a padded copy and every level were held at once: a 1024² BC1 map peaked at 8.4 MB, now 4.2 MB. A Basis Universal map is refused the same way where its RGBA8 texels would be over the bound (`ktx2-basis`). A file whose blocks make the decoder or the transcoder panic (random ASTC and BC6H blocks do) draws as if it had no map, in a frame as on a texture thread; before, in a frame the panic stopped the app.
