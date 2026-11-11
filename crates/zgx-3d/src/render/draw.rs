@@ -175,7 +175,12 @@ pub(super) fn draw_main(
             view: depth_view,
             depth_ops: Some(wgpu::Operations {
                 load: wgpu::LoadOp::Clear(1.),
-                store: wgpu::StoreOp::Discard,
+                // Kept where temporal antialiasing reprojects by it.
+                store: if cfg!(feature = "post") && targets.depth_read {
+                    wgpu::StoreOp::Store
+                } else {
+                    wgpu::StoreOp::Discard
+                },
             }),
             stencil_ops: None,
         }),

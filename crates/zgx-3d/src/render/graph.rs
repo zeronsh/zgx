@@ -39,6 +39,9 @@ pub(super) enum Resource {
     /// display passes, and its other half.
     Shown,
     Shown2,
+    /// What the meshes drew, under temporal antialiasing: blended with the
+    /// history into the scene (`Pass::Taa`).
+    Fresh,
     /// The exposure automatic exposure adapted to: kept between frames.
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     Exposure,
@@ -60,6 +63,7 @@ impl Resource {
                 | Self::Scene2
                 | Self::Shown
                 | Self::Shown2
+                | Self::Fresh
         )
     }
 }
@@ -77,6 +81,10 @@ pub(super) enum Pass {
     /// bright it is so a bright edge is as smooth as a dim one.
     #[cfg(feature = "post")]
     Resolve,
+    /// What the meshes drew blended with the frames before, reprojected
+    /// (temporal antialiasing), into the scene.
+    #[cfg(feature = "post")]
+    Taa,
     /// The app's HDR passes (`World::add_post`), in turn.
     #[cfg(feature = "post")]
     AppHdr,
@@ -95,7 +103,7 @@ pub(super) enum Pass {
 }
 impl Pass {
     /// How many there are: the most a list holds.
-    const COUNT: usize = if cfg!(feature = "post") { 9 } else { 3 };
+    const COUNT: usize = if cfg!(feature = "post") { 10 } else { 3 };
     pub(super) fn reads(self) -> &'static [Resource] {
         match self {
             Self::Shadows => &[],
@@ -103,6 +111,8 @@ impl Pass {
             Self::Main => &[Resource::ShadowMap, Resource::Behind],
             #[cfg(feature = "post")]
             Self::Resolve => &[Resource::Colour],
+            #[cfg(feature = "post")]
+            Self::Taa => &[Resource::Fresh, Resource::Depth],
             #[cfg(feature = "post")]
             Self::AppHdr => &[Resource::Scene, Resource::Scene2],
             #[cfg(feature = "post")]
@@ -119,9 +129,16 @@ impl Pass {
         match self {
             Self::Shadows => &[Resource::ShadowMap],
             Self::Behind => &[Resource::Colour, Resource::Depth, Resource::Behind],
-            Self::Main => &[Resource::Colour, Resource::Depth, Resource::Scene],
+            Self::Main => &[
+                Resource::Colour,
+                Resource::Depth,
+                Resource::Scene,
+                Resource::Fresh,
+            ],
             #[cfg(feature = "post")]
             Self::Resolve => &[Resource::Scene],
+            #[cfg(feature = "post")]
+            Self::Taa => &[Resource::Scene],
             #[cfg(feature = "post")]
             Self::AppHdr => &[Resource::Scene, Resource::Scene2],
             #[cfg(feature = "post")]
@@ -195,6 +212,8 @@ pub(super) struct Chain {
     pub(super) display: u8,
     /// Automatic exposure, where the device runs compute.
     pub(super) adapts: bool,
+    /// Temporal antialiasing (one sample a pixel).
+    pub(super) taa: bool,
 }
 
 /// The scene's format where the post chain follows: linear light, past 1.
@@ -243,7 +262,10 @@ pub(super) struct Targets {
     /// The scene's other half, what the display shows and its other half,
     /// for the app's passes (`Resource::Scene2`, `Shown`, `Shown2`).
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
-    pub(super) others: [Option<wgpu::TextureView>; 3],
+    pub(super) others: [Option<wgpu::TextureView>; 4],
+    /// The depth is kept, and read, after the meshes' pass (temporal
+    /// antialiasing).
+    pub(super) depth_read: bool,
     /// The frame's size, in pixels.
     #[cfg_attr(not(feature = "post"), allow(dead_code))]
     pub(super) size: (u32, u32),
@@ -345,6 +367,8 @@ impl Graph {
             #[cfg(feature = "post")]
             resolves.then_some(Pass::Resolve),
             #[cfg(feature = "post")]
+            config.post.taa.then_some(Pass::Taa),
+            #[cfg(feature = "post")]
             (config.post.hdr > 0).then_some(Pass::AppHdr),
             #[cfg(feature = "post")]
             config.post.adapts.then_some(Pass::Exposure),
@@ -381,7 +405,12 @@ impl Graph {
                         ..target(config.size, self.format)
                     },
                     Resource::Colour if self.samples > 1 => target(config.size, self.format),
+                    Resource::Depth if config.post.taa => Desc {
+                        usage: read,
+                        ..target(config.size, DEPTH)
+                    },
                     Resource::Depth => target(config.size, DEPTH),
+                    Resource::Fresh if config.post.taa => scene,
                     Resource::Scene if config.post.on => scene,
                     Resource::Scene2 if config.post.hdr > 0 => scene,
                     Resource::Shown if config.post.display > 0 => Desc {
@@ -418,7 +447,9 @@ impl Graph {
                 Resource::Colour => "3D colour",
                 Resource::Scene => "3D scene",
                 Resource::Bloom => "3D bloom",
-                Resource::Scene2 | Resource::Shown | Resource::Shown2 => "3D post",
+                Resource::Scene2 | Resource::Shown | Resource::Shown2 | Resource::Fresh => {
+                    "3D post"
+                }
                 _ => "3D depth",
             };
             textures[slot].get_or_insert_with(|| self.pool.take(device, desc, label));
@@ -434,7 +465,13 @@ impl Graph {
         };
         let (colour, depth) = (view(Resource::Colour), view(Resource::Depth));
         let scene = view(Resource::Scene);
-        let others = [Resource::Scene2, Resource::Shown, Resource::Shown2].map(view);
+        let others = [
+            Resource::Scene2,
+            Resource::Shown,
+            Resource::Shown2,
+            Resource::Fresh,
+        ]
+        .map(view);
         let bloom = match used.iter().position(|(r, ..)| *r == Resource::Bloom) {
             Some(at) => {
                 let texture = &textures[slots[at]].as_ref().expect("taken").texture;
@@ -457,6 +494,7 @@ impl Graph {
             bloom,
             stored: resolves,
             others,
+            depth_read: config.post.taa,
             size: config.size,
             textures: textures.into_iter().flatten().collect(),
         });

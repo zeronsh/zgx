@@ -21,6 +21,8 @@ mod post;
 #[cfg(feature = "post")]
 mod post_pass;
 #[cfg(feature = "post")]
+mod temporal;
+#[cfg(feature = "post")]
 pub use grade::{Grade, Lut, LutError};
 #[cfg(feature = "post")]
 pub use post::{AutoExposure, Bloom, ChromaticAberration, Grain, Post, Vignette};
@@ -31,6 +33,8 @@ pub use post_pass::{
     MAX_POST_PARAMS, MAX_POST_PASSES, MAX_POST_SOURCE, PostError, PostParam, PostParamValue,
     PostPass, PostPassId, PostStage,
 };
+#[cfg(feature = "post")]
+pub use temporal::Antialiasing;
 
 /// How a surface takes light: a metallic-roughness material, as glTF's.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -568,6 +572,12 @@ pub(crate) struct Inner {
     pub(crate) post_passes: Vec<post_pass::AppPass>,
     #[cfg(feature = "post")]
     pub(crate) post_ids: u64,
+    /// Temporal antialiasing on (`World::set_antialiasing`), and the cuts
+    /// asked for so far (`World::cut`).
+    #[cfg(feature = "post")]
+    pub(crate) taa: bool,
+    #[cfg(feature = "post")]
+    pub(crate) cuts: u64,
     /// Samples a pixel (`World::set_samples`): 4 or 1.
     pub(crate) samples: u32,
     /// Objects' textures (`World::set_map`), by index, in `Map::ALL`'s order,
@@ -695,6 +705,8 @@ pub(crate) enum Reason {
     PostPass = 1 << 13,
     /// Automatic exposure is still adapting (`world::post`).
     Exposure = 1 << 14,
+    /// Temporal antialiasing has frames still to gather (`world::temporal`).
+    Taa = 1 << 15,
     /// An app's post pass is being compiled off the frame
     /// (`render::post::Apps`).
     PostCompiling = 1 << 16,
@@ -1450,6 +1462,10 @@ impl World {
             post_passes: Vec::new(),
             #[cfg(feature = "post")]
             post_ids: 0,
+            #[cfg(feature = "post")]
+            taa: false,
+            #[cfg(feature = "post")]
+            cuts: 0,
             samples: 4,
             textures: Default::default(),
             skins: Default::default(),
@@ -2140,6 +2156,7 @@ mod tests {
             Reason::Audio,
             Reason::PostPass,
             Reason::Exposure,
+            Reason::Taa,
             Reason::PostCompiling,
             Reason::Test,
         ]

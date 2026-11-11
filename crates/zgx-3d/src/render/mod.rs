@@ -711,11 +711,12 @@ impl Viewport for Renderer {
                 world.unsettle(crate::world::Settle::EXPOSURE, false);
             }
             graph::Chain {
-                on: world.post.any() || hdr + display > 0,
+                on: world.post.any() || hdr + display > 0 || world.taa,
                 bloom: world.post.bloom.is_some(),
                 hdr,
                 display,
                 adapts,
+                taa: world.taa,
             }
         };
         #[cfg(not(feature = "post"))]
@@ -744,6 +745,13 @@ impl Viewport for Renderer {
                 sun.held = Default::default();
             }
         }
+        // Temporal antialiasing off: its history goes.
+        #[cfg(feature = "post")]
+        if !chain.taa
+            && let Some(post) = &mut gpu.post
+        {
+            post.drop_taa();
+        }
         let size = frame.size;
         // The frame's passes, compiled again only as what they follow
         // changes.
@@ -766,9 +774,24 @@ impl Viewport for Renderer {
         let view = camera.view();
         let projection = camera.projection(aspect);
         let view_projection = projection * view;
-        // What draws beside the meshes is given the camera apart.
-        let camera_parts = (view, projection, view_projection);
-        let mut uniforms = frame_uniforms(&world, view_projection, encode && !chain.on);
+        // Under temporal antialiasing the meshes draw a fraction of a pixel
+        // aside, the frame's jitter (by the renderer's clock: a view drawn
+        // twice in a frame, the same): in the drawn view alone (culling, the
+        // lights' grid, shadows and picking keep the unjittered).
+        #[cfg(feature = "post")]
+        let drawn = match chain.taa {
+            true => post::jittered(
+                projection,
+                post::jitter(u64::from(gpu.tick.index) + 1),
+                size,
+            ),
+            false => projection,
+        };
+        #[cfg(not(feature = "post"))]
+        let drawn = projection;
+        // What draws beside the meshes is given the camera apart, as drawn.
+        let camera_parts = (view, drawn, drawn * view);
+        let mut uniforms = frame_uniforms(&world, camera_parts.2, encode && !chain.on);
         if chain.on {
             // Exposed and mapped by the chain's last pass.
             uniforms.params[2] = 1.;
@@ -1039,7 +1062,12 @@ impl Viewport for Renderer {
                 Pass::Main => {
                     // Into the scene where the chain follows: the background
                     // shows past it, after its tones are mapped.
-                    let scene = gpu.graph.targets.as_ref().and_then(|t| t.scene.as_ref());
+                    // Under temporal antialiasing, into what it blends.
+                    let targets = gpu.graph.targets.as_ref();
+                    let scene = targets.and_then(|t| match chain.taa {
+                        true => t.others[3].as_ref(),
+                        false => t.scene.as_ref(),
+                    });
                     let (into, clear) = match scene {
                         Some(scene) => (scene, wgpu::Color::TRANSPARENT),
                         None => (target, clear),
@@ -1054,6 +1082,24 @@ impl Viewport for Renderer {
                         clear,
                         (draws, &camera_parts),
                     )
+                }
+                #[cfg(feature = "post")]
+                Pass::Taa => {
+                    let post = gpu
+                        .post
+                        .get_or_insert_with(|| post::Chain::new(frame.device));
+                    let device = (frame.device, frame.queue);
+                    let at = (view_projection, frame.time, world.cuts, world.meshes);
+                    // The display's curve, as the last pass maps (the stops alone).
+                    let tone = match world.tone_mapping {
+                        crate::ToneMapping::Neutral => 0.,
+                        crate::ToneMapping::Aces => 1.,
+                        crate::ToneMapping::Linear => 2.,
+                    };
+                    let look = (world.revision, (world.exposure.exp2(), tone));
+                    let since = post.taa(device, frame.encoder, &gpu.graph, at, look);
+                    // Drawing until its frames since the last change are in.
+                    world.unsettle(crate::world::Settle::TAA, since + 1 < post::FRAMES);
                 }
                 #[cfg(feature = "post")]
                 Pass::Resolve => {
