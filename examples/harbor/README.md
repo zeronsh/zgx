@@ -10,7 +10,7 @@ Everything is made by code here, from a seed: the quay, about 5,000 containers, 
 - the sky's radiance and emissive surfaces on the same scale;
 - all of it brought to the display by an exposure of EV 11 (`scene::EV`).
 
-The sun's shadow is cut into four cascades over 600 m. It rains (`weather.rs`): particle streaks in a box that follows the camera, splashing where they land.
+The sun's shadow is cut into four cascades over 600 m. It rains (`weather.rs`): particle streaks in a box that follows the camera, splashing where they land. The four gantry cranes work: each is a model the demo writes in code as a `.glb`, placed with an animator playing its cycle. The trolley runs out over the ship and back, and the spreader lowers and hoists.
 
 What the API can't express yet is in [GAPS.md](GAPS.md). Those gaps are reported, not worked around.
 
@@ -67,6 +67,8 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | `LAMPS=0` | | Every lamp at zero lumens |
 | `LAMP_REACH` | 1 | Scales every lamp's range (0: none built) |
 | `RAIN=0` | | No rain made |
+| `CRANES` | `working` | `idle`: animators playing nothing; `still`: no animators |
+| `GANTRIES` | 4 | Cranes on the quay |
 | `SUN` | 7 | The sun's elevation in degrees, its light and the sky's |
 | `EXPOSURE` | 0 | Stops over the harbor's own (the panel's slider) |
 | `HASHES=file` | | Each frame's hash, a line each |
@@ -81,6 +83,8 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | --- | --- |
 | `src/scene.rs` | The world: quay, yard, gantries, ship, lamps, shore |
 | `src/shapes.rs` | Geometry made in code: beams, corrugated containers, the lofted hull, the ridge |
+| `src/crane.rs`, `src/glb.rs` | The gantry crane, written in code as a `.glb` with its work as a clip, placed with an animator each |
+| `src/weather.rs` | The rain, on particle emitters |
 | `src/textures.rs` | Container wear, concrete, asphalt, from noise |
 | `src/sky.rs` | The dawn sky as an equirect `Environment`, and the sun |
 | `src/path.rs` | The fly-through (Catmull-Rom through key views, on frame time) |

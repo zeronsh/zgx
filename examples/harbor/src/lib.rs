@@ -13,6 +13,8 @@
 //! - [`hud`] is the zgx interface over the view.
 //! - [`weather`] is the rain, on particle emitters.
 //! - [`perf`] reads the process's counters, for `harbor_bench`.
+pub mod crane;
+pub mod glb;
 pub mod hud;
 pub mod path;
 pub mod perf;

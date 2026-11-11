@@ -15,7 +15,8 @@
 //! - `SHADOWS=0` turns the sun's shadows off, `CASCADES=0` its cascades,
 //!   `LAMPS=0` the lamps;
 //!   `SUN=degrees` sets the sun's elevation, its light's and the sky's;
-//!   `RAIN=0` makes no rain;
+//!   `RAIN=0` makes no rain; `CRANES=idle` gives the cranes animators
+//!   playing nothing, `CRANES=still` none; `GANTRIES` (4) how many;
 //!   `LAMP_REACH` scales every lamp's range (0: none built); `EXPOSURE`
 //!   adds stops (as the panel's slider).
 //! - `HASHES=file` writes each frame's hash, a line each.
@@ -35,7 +36,7 @@ use zgx_gpu::{GpuRenderer, Readback};
 use zgx_harbor::{
     hud::{self, Stats},
     path, perf,
-    scene::{Config, Harbor},
+    scene::{Config, Cranes, Harbor},
     settings::Settings,
     sky,
 };
@@ -99,6 +100,14 @@ fn main() {
         // `SUN=degrees`: the sun's elevation, its light and the sky's both.
         sun: (env("SUN", defaults.sun.0), defaults.sun.1),
         lamp_reach: env("LAMP_REACH", 1.),
+        // `GANTRIES`: how many cranes stand on the quay.
+        gantries: env("GANTRIES", defaults.gantries),
+        // `CRANES=idle`: their animators play nothing; `still`: none.
+        cranes: match std::env::var("CRANES").as_deref() {
+            Ok("idle") => Cranes::Idle,
+            Ok("still") => Cranes::Still,
+            _ => Cranes::Working,
+        },
         // `RAIN=0`: no rain made at all.
         rain: std::env::var("RAIN").as_deref() != Ok("0"),
         ..Config::default()

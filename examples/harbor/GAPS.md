@@ -12,11 +12,13 @@ Each entry is a primitive any game would need, in general form, with the smalles
 | G4 | No per-mesh opt-out of the sun's shadow | lighting lane | partly closed by cascades |
 | G5 | The offscreen renderer has no wait but a readback | zgx-gpu (another team) | open |
 | G6 | Animators play glTF clips only: nothing made in code can be animated by one | animation lane | open |
-| G7 | A GPU view's frame time is the wall clock's, even under a `VirtualClock` | zgx-gpu's view seam | open (bug) |
-| G8 | An emitter's rate, velocity and forces can't change once it's added | particles lane | open |
+| G7 | A GPU view's frame time is the wall clock's, even under a `VirtualClock` | zgx-gpu (assigned by the coordinator) | open (bug) |
+| G8 | An emitter's rate, velocity and forces can't change once it's added | compute lane | open |
 | L1 | Spot lights are binned by their sphere, not their cone | lighting lane | open (performance) |
 | L2 | A light at zero intensity is still binned and shaded | lighting lane | open (performance) |
-| L3 | Frames aren't reproducible run to run with cascades or with clustered lights | lighting lane | open (bug) |
+| L3 | Frames aren't reproducible run to run with cascades or with clustered lights | this M1 Max's GPU at MSAA edges | M1 Max only, under investigation |
+| L4 | One moving caster redraws every caster in its cascades | lighting lane | open (performance) |
+| M1 | Anything moving costs about 1.3 M instructions a frame over a camera-only frame | graph lane | measurement |
 | B1 | Short checkbox and radio labels lost their last glyph in the bench | the bench's setup | resolved by setup; engine default landing on main |
 
 ## G1. A world's frame statistics are hidden
@@ -86,7 +88,16 @@ impl GpuRenderer { pub fn finish(&self) -> Result<(), GpuError>; }
 
 **What that leaves.** Objects built with `Object::mesh` and groups can't be given clips, layers, crossfades, events or root motion. An app moves them by hand each frame, and that's a CPU loop outside the animator, so the world doesn't know it's animating.
 
-The harbor's gantries are code-built groups with a trolley and a spreader ready to move. The design (§10) has the cranes as glTF models "modelled for" the demo, so the harbor will generate a crane `.glb` in code to use the animator. That's the design's path, not a workaround; this entry is the general need.
+The harbor's gantry is modelled for the demo in code. To give it an animator it's written as a `.glb` by the demo itself (`glb.rs`, `crane.rs`), read back with `Model::from_bytes`, and placed four times, each with an animator playing its work.
+
+That's the design's path for the cranes (§10: glTF models "modelled for" the demo), not a workaround. What it cost is the general need:
+- **A glTF writer:** about 300 lines.
+- **Unused decoders:** the `gltf` feature, which brings PNG and JPEG decoding the demo doesn't use.
+- **Nodes by index only:** reaching the trolley and the spreader goes through `Placed::node(index)`, with the indices kept by the writer. A model's nodes have names, but nothing finds one by name.
+
+```rust
+impl Placed { pub fn node_named(&self, name: &str) -> Option<ObjectId>; }
+```
 
 ```rust
 let clip = Clip::new(4.0)
@@ -149,21 +160,39 @@ The settings panel's "Lamps" turns 221 lights to zero lumens. With the original 
 
 ## L3. Frames aren't reproducible run to run with cascades or with clustered lights
 
-**Needed by:** reference images, video renders, the temporal tests of design §12.
+**On this M1 Max only, under investigation** (the coordinator's note): a diagnostic showed this machine's GPU drawing one of two images at MSAA edges, with byte-identical shaders. A frames' hash that differs here isn't taken as the demo's bug, or the engine's, unless it differs beyond edges.
 
-The same `harbor_bench` binary, run three or four times, gives frames that differ in a few frames of 600:
-- **How big:** up to 257 scattered pixels, by up to 5 levels, on lit geometry: container faces and edges, across the whole frame.
-- **Which frames:** different ones each run, mostly over the yard (frames 265–347 and 493).
+What the harbor saw:
+- **How big:** up to 257 scattered pixels by up to 5 levels, on container faces and edges.
+- **When:** in a few frames of 600, with cascades or with clustered lights on.
+- **Repro:** `for i in 1 2 3; do HASHES=h$i.txt harbor_bench; done; diff h1.txt h2.txt`.
 
-| Arm (environment of `harbor_bench`) | Reproducible over 3–4 runs |
+## L4. One moving caster redraws every caster in its cascades
+
+**Needed by:** any scene with a few moving things in a large still one: cranes, vehicles, doors among buildings.
+
+A cascade's map is drawn again when any caster inside it moves, and drawn whole. Four working cranes among 5,000 still containers redraw the cascades they're in every frame.
+
+Measured (`CRANES=working` against `CRANES=still`, no rain, 600 frames, M1 Max):
+- shadows off: +3.1 M instructions a frame;
+- shadows on: +4.05 M and +0.7 ms of GPU.
+
+So about 0.9 M instructions and most of the GPU time are the cascades' redraws.
+
+**What would close it:** keep still casters' depth apart from moving ones' (a static layer redrawn when the cascade or the sun moves, the dynamic casters drawn over a copy of it each frame), as the larger engines do.
+
+## M1. Anything moving costs about 1.3 M instructions a frame over a camera-only frame
+
+**A measurement, for the graph lane.** Shadows off, no rain:
+
+| | Minstr/frame |
 | --- | --- |
-| `CASCADES=0 LAMP_REACH=0` (neither) | yes, every frame |
-| `LAMP_REACH=0` (cascades, no lamps) | no |
-| `CASCADES=0` (clustered lamps, one map) | no |
-| default (both) | no |
-| stage 0, before the `lighting` feature | yes (4 runs, and across rebases) |
+| cranes still (`CRANES=still`) | 9.46 (1 crane), 9.65 (4) |
+| idle animators (`CRANES=idle`, 4) | about the same as still |
+| 1 crane working | 11.22 |
+| 4 cranes working | 12.79 |
 
-Something in the cascades' or the clusters' path depends on timing, not only on the frame. **Repro:** `for i in 1 2 3; do HASHES=h$i.txt harbor_bench; done; diff h1.txt h2.txt`. Add `PNGS=dir PNG_AT=frames` to save the frames that differ.
+So about 1.3 M a frame is a fixed cost once any object moves, in a world of 5,717 objects, and about 0.45 M is each animator's own (6 nodes, 18 channels). Kept instance data with dirty ranges (design §6.7) is the place this would show if it isn't there yet.
 
 ## B1. Short labels lost their last glyph in the bench: resolved by setup
 

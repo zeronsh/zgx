@@ -48,6 +48,8 @@ pub struct Config {
     pub rain: bool,
     /// The wind, m/s.
     pub wind: [f32; 3],
+    /// How the cranes are animated.
+    pub cranes: Cranes,
 }
 
 impl Default for Config {
@@ -62,6 +64,7 @@ impl Default for Config {
             sun: (7., 28.),
             rain: true,
             wind: [2.5, 0., 1.],
+            cranes: Cranes::Working,
         }
     }
 }
@@ -132,7 +135,7 @@ pub struct Harbor {
     pub yard: Vec<ObjectId>,
     /// The containers on the ship.
     pub deck: Vec<ObjectId>,
-    /// Each gantry crane's group, its trolley's group and its spreader's.
+    /// The gantry cranes, each a placed model on an animator.
     pub gantries: Vec<Gantry>,
     /// The water's surface.
     pub water: ObjectId,
@@ -144,16 +147,7 @@ pub struct Harbor {
     pub triangles: usize,
 }
 
-/// A gantry crane's moving parts.
-#[derive(Clone, Copy, Debug)]
-pub struct Gantry {
-    /// The whole crane (moves along the quay).
-    pub root: ObjectId,
-    /// The trolley, along the boom (Z).
-    pub trolley: ObjectId,
-    /// The spreader under it (Y, in the trolley's frame).
-    pub spreader: ObjectId,
-}
+pub use crate::crane::{Cranes, Gantry};
 
 /// The shared meshes: each geometry is made once, so its instances draw
 /// in one call.
@@ -232,9 +226,6 @@ const PALETTE: [u32; 12] = [
     0x6b4a2f, 0x7a3a5e, 0x5d8fb8,
 ];
 
-const CRANE_PAINT: u32 = 0xb8442c;
-const CRANE_WHITE: u32 = 0xe4e2dc;
-
 impl Harbor {
     /// Build the harbor into `world` (which should be empty), lit by
     /// `environment` if given, else by a hemisphere of the sky's colours.
@@ -275,10 +266,17 @@ impl Harbor {
 
         let water = quay(&mut b);
         let yard = yard(&mut b, config);
+        // The cranes: one model, written in code, placed along the quay,
+        // each working a quarter of its cycle after the last.
+        let crane = crate::crane::model();
+        let parts = crane.parts;
+        let crane = zgx_3d::Model::from_bytes(&crane.bytes).expect("the crane's model reads");
         let gantries: Vec<Gantry> = (0..config.gantries)
             .map(|i| {
                 let x = (i as f32 - (config.gantries as f32 - 1.) * 0.5) * 66.;
-                gantry(&mut b, x)
+                b.objects += parts + 3;
+                b.triangles += parts * 12;
+                crate::crane::place(world, &crane, x, i as f32 * 12., config.cranes)
             })
             .collect();
         let (ship_root, deck) = ship(&mut b);
@@ -468,158 +466,6 @@ fn yard(b: &mut Build, config: &Config) -> Vec<ObjectId> {
         }
     }
     out
-}
-
-/// A ship-to-shore gantry crane at `x`: legs on the rails at Z = 3 and 33,
-/// a boom out over the water, an A-frame with its stays, a machinery
-/// house, and a trolley with its spreader.
-fn gantry(b: &mut Build, x: f32) -> Gantry {
-    let root = b.group(vec3(x, 0., 0.), None);
-    let paint = Material::rgb(CRANE_PAINT).with(0.2, 0.5);
-    let white = Material::rgb(CRANE_WHITE).with(0.1, 0.45);
-    let dark = Material::rgb(0x2a2c30).with(0.6, 0.5);
-    let (half_span, water_z, land_z, top) = (9., 3., 33., 46.);
-    // Legs, with sill beams joining each side's pair low down.
-    for &lx in &[-half_span, half_span] {
-        for &lz in &[water_z, land_z] {
-            b.part(
-                beam(vec3(lx, 0.6, lz), vec3(lx, top, lz), 1.8, 1.8),
-                paint,
-                root,
-            );
-            // Bogies on the rail.
-            b.part(block(vec3(lx, 0., lz), vec3(5., 1.2, 1.6)), dark, root);
-        }
-        b.part(
-            beam(vec3(lx, 15., water_z), vec3(lx, 15., land_z), 1.4, 2.2),
-            paint,
-            root,
-        );
-        // A brace in each side's frame.
-        b.part(
-            beam(vec3(lx, 15., water_z), vec3(lx, top - 2., land_z), 0.8, 0.8),
-            paint,
-            root,
-        );
-    }
-    // Portal beams across the top, along X.
-    for &lz in &[water_z, land_z] {
-        b.part(
-            beam(
-                vec3(-half_span - 1., top, lz),
-                vec3(half_span + 1., top, lz),
-                2.2,
-                2.6,
-            ),
-            paint,
-            root,
-        );
-    }
-    // The boom: two box girders from the backreach out over the water.
-    let (out_z, back_z) = (-62., 56.);
-    for &gx in &[-4.2, 4.2] {
-        b.part(
-            beam(
-                vec3(gx, top + 2., back_z),
-                vec3(gx, top + 2., out_z),
-                1.3,
-                3.2,
-            ),
-            paint,
-            root,
-        );
-    }
-    // Cross ties under the boom.
-    let mut z = out_z + 4.;
-    while z < back_z {
-        b.part(
-            beam(vec3(-4.2, top + 0.6, z), vec3(4.2, top + 0.6, z), 0.5, 0.5),
-            paint,
-            root,
-        );
-        z += 9.;
-    }
-    // The A-frame and its stays.
-    let apex = |gx: f32| vec3(gx, top + 32., land_z - 4.);
-    for &gx in &[-4.2, 4.2] {
-        b.part(
-            beam(vec3(gx * 1.6, top, land_z), apex(gx), 1.5, 1.5),
-            paint,
-            root,
-        );
-        b.part(
-            beam(vec3(gx * 1.6, top, water_z + 8.), apex(gx), 1.2, 1.2),
-            paint,
-            root,
-        );
-        b.part(
-            beam(apex(gx), vec3(gx, top + 3.6, -22.), 0.45, 0.45),
-            white,
-            root,
-        );
-        b.part(
-            beam(apex(gx), vec3(gx, top + 3.6, -52.), 0.45, 0.45),
-            white,
-            root,
-        );
-        b.part(
-            beam(apex(gx), vec3(gx, top + 3.6, back_z - 2.), 0.6, 0.6),
-            white,
-            root,
-        );
-    }
-    b.part(beam(apex(-4.2), apex(4.2), 1.2, 1.2), paint, root);
-    // Machinery house on the backreach.
-    b.part(
-        block(vec3(0., top + 3.6, 46.), vec3(12., 6.5, 15.)),
-        white,
-        root,
-    );
-    // The trolley and the spreader hanging under it.
-    let trolley = b.group(vec3(0., top + 3.6, -26.), Some(root));
-    b.part(block(vec3(0., 0., 0.), vec3(10.5, 2.4, 7.)), white, trolley);
-    // The operator's cab under the trolley, glazed.
-    let cab_glass = b.part(
-        block(vec3(5.5, -4.2, -1.5), vec3(3., 3., 3.6)),
-        Material::rgb(0xd8e4ec).with(0., 0.05),
-        trolley,
-    );
-    b.world
-        .set_transmission(cab_glass, Some(Transmission::new(0.85).ior(1.5)));
-    b.part(
-        block(vec3(5.5, -1.3, -1.5), vec3(3.2, 1.3, 3.8)),
-        white,
-        trolley,
-    );
-    let spreader = b.group(vec3(0., -22., 0.), Some(trolley));
-    b.part(
-        block(
-            vec3(0., 0., 0.),
-            vec3(CONTAINER_40 + 0.4, 0.9, CONTAINER_WIDTH + 0.3),
-        ),
-        Material::rgb(0xd9a12b).with(0.3, 0.5),
-        spreader,
-    );
-    // Ropes from the trolley's corners to the spreader's (the spreader's
-    // frame is 22 m under the trolley's).
-    let rope = Material::rgb(0x202020).with(0.8, 0.4);
-    for (sx, sz) in [(-4., -2.5), (4., -2.5), (-4., 2.5), (4., 2.5)] {
-        b.part(
-            beam(
-                vec3(sx, 0., sz),
-                vec3(sx * 0.6, -21.1, sz * 0.4),
-                0.08,
-                0.08,
-            ),
-            rope,
-            trolley,
-        );
-    }
-    Gantry {
-        root,
-        trolley,
-        spreader,
-    }
 }
 
 /// The ship at its berth: hull, hatch covers, deck stacks, the
