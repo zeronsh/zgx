@@ -642,6 +642,11 @@ impl Triangles {
         Self::build(nodes, right, first + half as u32, corners, centres);
     }
 
+    /// What it holds.
+    fn bytes(&self) -> usize {
+        self.nodes.len() * size_of::<TriangleNode>() + self.order.len() * size_of::<u32>()
+    }
+
     /// Whether the segment from `start` along `along` (in the geometry's
     /// space) meets any of its triangles; the boxes and triangles it looked
     /// at, added to `looked`.
@@ -1828,6 +1833,23 @@ impl World {
         self.inner.borrow().audio.as_ref().map_or(0, |s| s.cast)
     }
 
+    /// Bytes its sound holds in memory (not the device's, so not in
+    /// [`World::memory`]) for occlusion: the trees over its large meshes'
+    /// triangles (a 320,000-triangle ground's is 5.5 MB). A tree goes when
+    /// its mesh goes or no longer blocks; a mesh given other triangles gets
+    /// a new one. None for a world whose meshes are all small.
+    pub fn sound_bytes(&self) -> usize {
+        self.inner.borrow().audio.as_ref().map_or(0, |s| {
+            s.trees
+                .values()
+                .map(|tree| match tree {
+                    MeshTree::Ready(tree) => tree.bytes(),
+                    MeshTree::Building { .. } => 0,
+                })
+                .sum()
+        })
+    }
+
     /// Its sound's frame at `time`: what moved since the last is sent to
     /// the engine. Its view does this after each frame it draws; call it
     /// to hear a world drawn by no view (offline, in a test).
@@ -1901,6 +1923,12 @@ mod tests {
             assert!(walked <= 64, "frame {k}: {walked} matrices walked");
             assert_eq!(met, 0, "frame {k}: {met} meshes' triangles tested");
         }
+        // Small meshes only: no tree made, none queued.
+        let inner = world.inner.borrow();
+        let sound = inner.audio.as_ref().unwrap();
+        assert!(sound.trees.is_empty() && sound.building == 0);
+        drop(inner);
+        assert_eq!(world.sound_bytes(), 0);
     }
 
     #[test]
@@ -2141,5 +2169,54 @@ mod tests {
             1,
             "one tree thread, for every world in this process"
         );
+    }
+
+    #[test]
+    fn a_large_mesh_s_tree_is_made_anew_for_new_triangles_and_goes_with_it() {
+        let (audio, _mixer) = zgx_audio::Audio::offline(zgx_audio::Config::default()).unwrap();
+        let world = World::new();
+        world
+            .set_audio(&audio, &audio.bus("world").unwrap())
+            .unwrap();
+        let settle = |world: &World| {
+            let start = Instant::now();
+            loop {
+                world.update_audio(Instant::now());
+                if world.inner.borrow().audio.as_ref().unwrap().building == 0 {
+                    break;
+                }
+                assert!(start.elapsed().as_secs() < 10, "no tree made");
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        let ids = |world: &World| -> Vec<u64> {
+            world
+                .inner
+                .borrow()
+                .audio
+                .as_ref()
+                .unwrap()
+                .trees
+                .keys()
+                .copied()
+                .collect()
+        };
+        let first = hills(40);
+        let ground = world.add(Object::mesh(first.clone(), Material::default()));
+        settle(&world);
+        assert_eq!(ids(&world), [first.id()]);
+        let bytes = world.sound_bytes();
+        assert!(bytes > 0);
+        // Other triangles: a tree for them, the first's let go.
+        let second = hills(50);
+        world.update(ground, |o| o.geometry = Some(second.clone()));
+        settle(&world);
+        assert_eq!(ids(&world), [second.id()]);
+        assert!(world.sound_bytes() > bytes, "a larger mesh's tree");
+        // The mesh gone: its tree too.
+        world.remove(ground);
+        world.update_audio(Instant::now());
+        assert!(ids(&world).is_empty());
+        assert_eq!(world.sound_bytes(), 0);
     }
 }
