@@ -2004,12 +2004,7 @@ impl TextCache {
             false => None,
         };
         let grown = grew.map(|(hash, _)| hash);
-        // Only a text that grew at its end from a recent one (a stream's)
-        // takes words across runs or padded runs (`words_of`).
-        let stream = !extended.is_empty();
-        if let Some((plain, base, taken, stolen)) =
-            self.words_of(fonts, source, caret_row, grew, stream)
-        {
+        if let Some((plain, base, taken, stolen)) = self.words_of(fonts, source, caret_row, grew) {
             return self.prepared_words(
                 key,
                 hash,
@@ -2083,7 +2078,6 @@ impl TextCache {
         source: Source<'s>,
         caret_row: bool,
         grew: Option<(u64, usize)>,
-        stream: bool,
     ) -> Option<(Box<words::Words>, &'s FontStyle, usize, Option<Stolen>)> {
         // Most text that doesn't qualify is turned away by its bytes alone
         // (a line break): before anything is done with its runs.
@@ -2130,9 +2124,7 @@ impl TextCache {
                     let mut at = 0;
                     while index < runs.len() {
                         let run = &runs[index];
-                        // A padded run, as a word across runs, only in a
-                        // stream's (`words::WordCache::words`).
-                        if run.range.start != at || (!stream && run.padding[0] != 0.) {
+                        if run.range.start != at {
                             return None;
                         }
                         let mut end = index + 1;
@@ -2180,16 +2172,9 @@ impl TextCache {
                 Some(at.min(before.saturating_sub(1))).filter(|at| *at > 0)
             });
         let (Some(hash), Some(at)) = (grew, at) else {
-            let (words, taken) = self.words.words(
-                fonts,
-                text,
-                &runs,
-                base,
-                size,
-                &mut self.spare_words,
-                None,
-                stream,
-            )?;
+            let (words, taken) =
+                self.words
+                    .words(fonts, text, &runs, base, size, &mut self.spare_words, None)?;
             return Some((words, base, taken, None));
         };
         // A text it supersedes, which goes as it is prepared
@@ -2208,16 +2193,9 @@ impl TextCache {
             };
             self.retire(entry);
             let grew = Some((words::Grew::Owned(words, taken.length), at));
-            let made = self.words.words(
-                fonts,
-                text,
-                &runs,
-                base,
-                size,
-                &mut self.spare_words,
-                grew,
-                true,
-            );
+            let made =
+                self.words
+                    .words(fonts, text, &runs, base, size, &mut self.spare_words, grew);
             let Some((words, taken_words)) = made else {
                 self.retire_compact(taken.compact);
                 return None;
@@ -2233,7 +2211,6 @@ impl TextCache {
             size,
             &mut self.spare_words,
             Some((words::Grew::Shared(grew), at)),
-            true,
         )?;
         Some((words, base, taken, None))
     }
@@ -3178,9 +3155,7 @@ mod tests {
                     .iter()
                     .map(|g| {
                         let at = [g.x, g.y, g.w, g.font_size].map(f32::to_bits);
-                        // (Only an ellipsis's metadata is read: a word's
-                        // holds no run's index, a line's its span's.)
-                        (g.glyph_id, g.start..g.end, at, g.metadata == usize::MAX)
+                        (g.glyph_id, g.start..g.end, at, g.metadata)
                     })
                     .collect();
                 let geometry = [run.line_y, run.line_top, run.line_height, run.line_w];
@@ -4192,9 +4167,7 @@ mod tests {
     /// their line (glyphs, their colours and whether they are an
     /// ellipsis's, runs, size); runs of compatible fonts meeting inside a
     /// word (only their size differs: cosmic-text shapes them as one) take
-    /// the line's path. Words across runs and padded runs are a stream's
-    /// only (a text that grew at its end from a recent one): any other such
-    /// paragraph takes the line's path, as it did before streams were.
+    /// the line's path.
     #[test]
     fn rich_paragraphs_from_their_words_lay_out_as_their_line() {
         use zgx::text_layout::FontFamily;
@@ -4210,17 +4183,11 @@ mod tests {
         };
         let text = "Prepared text is shaped once and wrapping is arithmetic over cached advances.";
         let at = |word: &str| text.find(word).unwrap();
-        // Each case's runs (end, font, size, padding), and the path it
-        // takes.
-        #[derive(Clone, Copy, PartialEq, Debug)]
-        enum Path {
-            Words,
-            Stream,
-            Line,
-        }
-        type Case = (Vec<(usize, FontStyle, f32, f32)>, Path);
+        // Each case's runs (end, font, size, padding), and whether it
+        // qualifies.
+        type Case = (Vec<(usize, FontStyle, f32, f32)>, bool);
         let cases: Vec<Case> = vec![
-            (vec![(text.len(), body.clone(), 14., 0.)], Path::Words),
+            (vec![(text.len(), body.clone(), 14., 0.)], true),
             (
                 vec![
                     (at("shaped"), body.clone(), 14., 0.),
@@ -4229,7 +4196,7 @@ mod tests {
                     (at("over"), code.clone(), 14., 0.),
                     (text.len(), body.clone(), 14., 0.),
                 ],
-                Path::Words,
+                true,
             ),
             (
                 vec![
@@ -4237,7 +4204,7 @@ mod tests {
                     (at("wrapping"), bold.clone(), 14., 0.),
                     (text.len(), body.clone(), 11., 0.),
                 ],
-                Path::Words,
+                true,
             ),
             // Runs meeting inside a word, in other fonts: shaped in parts.
             (
@@ -4245,7 +4212,7 @@ mod tests {
                     (at("shaped") + 3, body.clone(), 14., 0.),
                     (text.len(), bold.clone(), 14., 0.),
                 ],
-                Path::Stream,
+                true,
             ),
             (
                 vec![
@@ -4254,7 +4221,7 @@ mod tests {
                     (at("arithmetic") + 5, body.clone(), 14., 0.),
                     (text.len(), code.clone(), 14., 0.),
                 ],
-                Path::Stream,
+                true,
             ),
             // Inline code chips, padded: a word alone, two words, and one
             // with the comma after it in the text's run.
@@ -4268,7 +4235,7 @@ mod tests {
                     (at("cached") + 6, code.clone(), 13., 2.),
                     (text.len(), body.clone(), 14., 0.),
                 ],
-                Path::Stream,
+                true,
             ),
             (
                 vec![
@@ -4276,7 +4243,7 @@ mod tests {
                     (at("once") + 4, code.clone(), 14., 3.),
                     (text.len(), body.clone(), 14., 0.),
                 ],
-                Path::Stream,
+                true,
             ),
             // Two chips side by side, and one at the text's start and end.
             (
@@ -4286,7 +4253,7 @@ mod tests {
                     (at("advances"), body.clone(), 14., 0.),
                     (text.len(), code.clone(), 14., 2.),
                 ],
-                Path::Stream,
+                true,
             ),
             // Only their size differs: cosmic-text shapes them as one.
             (
@@ -4294,7 +4261,7 @@ mod tests {
                     (at("shaped") + 3, body.clone(), 14., 0.),
                     (text.len(), body.clone(), 16., 0.),
                 ],
-                Path::Line,
+                false,
             ),
         ];
         let glyphs = |runs: LayoutRunIter<'_>| -> Vec<_> {
@@ -4321,12 +4288,13 @@ mod tests {
             })
             .collect()
         };
-        let make = |text: &str, runs: &[(usize, FontStyle, f32, f32)]| {
+        let mut cache = TextCache::default();
+        for (runs, qualifies) in cases {
             let mut start = 0;
             let made: Vec<TextRun> = runs
                 .iter()
                 .map(|(end, font, font_size, padding)| {
-                    let range = start..(*end).min(text.len());
+                    let range = start..*end;
                     start = *end;
                     TextRun {
                         range,
@@ -4337,20 +4305,7 @@ mod tests {
                     }
                 })
                 .collect();
-            RichText::new(text, made).unwrap()
-        };
-        let mut cache = TextCache::default();
-        for (runs, path) in cases {
-            let rich = make(text, &runs);
-            let qualifies = path != Path::Line;
-            if path == Path::Stream {
-                // Alone, it takes the line's path; grown at its end from a
-                // recent text (laid out just before it), its words.
-                let mut alone = TextCache::default();
-                let key = alone.layout(&mut fonts, &rich, None).key();
-                assert!(alone.entries[&key].words.is_none(), "{runs:?} alone");
-                cache.layout(&mut fonts, &make(&text[..text.len() - 1], &runs), None);
-            }
+            let rich = RichText::new(text, made).unwrap();
             let mut reference =
                 crate::text::rich_buffer_unshaped(&mut fonts, &rich, false, Vec::new());
             let metrics = reference.metrics();
@@ -4412,7 +4367,7 @@ mod tests {
                 padding: 0.,
             }];
             cache
-                .words(&mut fonts, text, &runs, &font, 14., &mut spare, None, true)
+                .words(&mut fonts, text, &runs, &font, 14., &mut spare, None)
                 .map(|(words, _)| words)
                 .unwrap()
         };

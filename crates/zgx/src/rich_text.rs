@@ -465,15 +465,17 @@ impl RichText {
             if now == was {
                 continue;
             }
+            // The font, a family's name and more, compared last: a
+            // restyle (a fade's colour) differs before it.
             let alike = now.range.start == was.range.start
-                && now.font == was.font
                 && now.font_size == was.font_size
                 && now.color == was.color
                 && now.background == was.background
                 && now.underline == was.underline
                 && now.strikethrough == was.strikethrough
                 && now.padding == was.padding
-                && now.radius == was.radius;
+                && now.radius == was.radius
+                && now.font == was.font;
             return Some(match alike {
                 // Alike but where it ends (the last run going on).
                 true => now.range.end.min(was.range.end),
