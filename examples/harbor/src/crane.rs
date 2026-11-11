@@ -278,8 +278,18 @@ pub struct Written {
 pub struct Gantry {
     /// The whole crane (moves along the quay).
     pub root: ObjectId,
+    /// Its trolley, as the animator moves it.
+    pub trolley: ObjectId,
     /// Its animator, playing its work (`Cranes::Still`: none).
     pub animator: Option<AnimatorId>,
+}
+
+/// The crane's model as read, and which of its nodes is the trolley.
+pub struct Placing {
+    /// The model.
+    pub model: Model,
+    /// The trolley's node.
+    pub trolley: usize,
 }
 
 /// How the cranes are animated: for the bench to tell the costs apart.
@@ -295,8 +305,10 @@ pub enum Cranes {
 
 /// `model` placed at `x` along the quay, working from `phase` seconds into
 /// its cycle as `cranes` says.
-pub fn place(world: &World, model: &Model, x: f32, phase: f32, cranes: Cranes) -> Gantry {
+pub fn place(world: &World, written: &Placing, x: f32, phase: f32, cranes: Cranes) -> Gantry {
+    let model = &written.model;
     let placed = world.place_model(model);
+    let trolley = placed.node(written.trolley).unwrap_or(placed.root);
     world.set_transform(placed.root, Transform::at([x, 0., 0.]));
     let animator = (cranes != Cranes::Still).then(|| world.add_animator(&placed));
     if let Some(animator) = animator
@@ -308,6 +320,7 @@ pub fn place(world: &World, model: &Model, x: f32, phase: f32, cranes: Cranes) -
     }
     Gantry {
         root: placed.root,
+        trolley,
         animator,
     }
 }

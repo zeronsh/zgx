@@ -18,13 +18,16 @@ zgx = { path = "../../crates/zgx", default-features = false }
 # lighting: clustered point and spot lights in physical units, cascades;
 # particles: the rain; gltf: the crane, a model written in code, and its
 # animator.
-zgx-3d = { path = "../../crates/zgx-3d", features = ["lighting", "particles", "gltf"] }
+zgx-3d = { path = "../../crates/zgx-3d", features = ["lighting", "particles", "gltf", "audio"] }
 zgx-desktop = { path = "../../crates/zgx-desktop", default-features = false }
 # `GpuRenderer`: the public offscreen renderer the bench draws through
 # (zgx-desktop doesn't re-export it).
 zgx-gpu = { path = "../../crates/zgx-gpu", default-features = false }
 # Writing a bench frame as a PNG (already in zgx's tree).
 png = "0.18"
+# Sound: the engine, offline only (no `device` feature, so no output can
+# be opened). zgx-3d's `audio` feature places it in the world.
+zgx-audio = { path = "../../crates/zgx-audio", default-features = false }
 
 [features]
 # GPU busy time, read from the perf lane's patched wgpu-hal

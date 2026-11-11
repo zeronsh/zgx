@@ -12,6 +12,15 @@ Everything is made by code here, from a seed: the quay, about 5,000 containers, 
 
 The sun's shadow is cut into four cascades over 600 m. It rains (`weather.rs`): particle streaks in a box that follows the camera, splashing where they land. The four gantry cranes work: each is a model the demo writes in code as a `.glb`, placed with an animator playing its cycle. The trolley runs out over the ship and back, and the spreader lowers and hoists.
 
+**Sound** (`sound.rs`, `sounds.rs`) is placed on objects through zgx-3d's spatial audio:
+- each crane's drive on its trolley;
+- the ship's generator at its funnel;
+- a bell on a buoy in the channel;
+- rain as a bed;
+- reverb zones under the gantries and in the container canyons.
+
+Every sound is synthesised in code. The engine is always offline: no device is built in (zgx-audio without `device`), master gain is zero, and only the bench mixes it. The window doesn't play sound yet.
+
 What the API can't express yet is in [GAPS.md](GAPS.md). Those gaps are reported, not worked around.
 
 ## Running
@@ -67,6 +76,7 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | `LAMPS=0` | | Every lamp at zero lumens |
 | `LAMP_REACH` | 1 | Scales every lamp's range (0: none built) |
 | `RAIN=0` | | No rain made |
+| `SOUND=0` | | No sound (otherwise offline, at master gain zero) |
 | `CRANES` | `working` | `idle`: animators playing nothing; `still`: no animators |
 | `GANTRIES` | 4 | Cranes on the quay |
 | `SUN` | 7 | The sun's elevation in degrees, its light and the sky's |
@@ -85,6 +95,7 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | `src/shapes.rs` | Geometry made in code: beams, corrugated containers, the lofted hull, the ridge |
 | `src/crane.rs`, `src/glb.rs` | The gantry crane, written in code as a `.glb` with its work as a clip, placed with an animator each |
 | `src/weather.rs` | The rain, on particle emitters |
+| `src/sound.rs`, `src/sounds.rs` | Spatial sound on the harbor's objects; the sounds, synthesised |
 | `src/textures.rs` | Container wear, concrete, asphalt, from noise |
 | `src/sky.rs` | The dawn sky as an equirect `Environment`, and the sun |
 | `src/path.rs` | The fly-through (Catmull-Rom through key views, on frame time) |

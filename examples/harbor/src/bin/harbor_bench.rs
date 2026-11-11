@@ -15,7 +15,7 @@
 //! - `SHADOWS=0` turns the sun's shadows off, `CASCADES=0` its cascades,
 //!   `LAMPS=0` the lamps;
 //!   `SUN=degrees` sets the sun's elevation, its light's and the sky's;
-//!   `RAIN=0` makes no rain; `CRANES=idle` gives the cranes animators
+//!   `RAIN=0` makes no rain; `SOUND=0` no sound (offline, gain 0 otherwise); `CRANES=idle` gives the cranes animators
 //!   playing nothing, `CRANES=still` none; `GANTRIES` (4) how many;
 //!   `LAMP_REACH` scales every lamp's range (0: none built); `EXPOSURE`
 //!   adds stops (as the panel's slider).
@@ -124,6 +124,12 @@ fn main() {
     let world = World::new();
     let harbor = Harbor::build(&world, &config, environment);
     let build_ms = started.elapsed().as_secs_f64() * 1e3 - sky_ms;
+    // Sound, offline at master gain zero (`SOUND=0`: none).
+    let mut sound = (std::env::var("SOUND").as_deref() != Ok("0"))
+        .then(|| zgx_harbor::sound::HarborSound::new(&world, &harbor).expect("the harbor's sound"));
+    let mut rays = 0usize;
+    // The mixer's own instructions, apart from the world's sound work.
+    let mixing = std::cell::Cell::new(0u64);
 
     let (points_w, points_h) = (width as f32 / scale, height as f32 / scale);
     let mut ui = Ui::new(points_w, points_h);
@@ -201,6 +207,13 @@ fn main() {
         let report = ui.scene.borrow_mut().flush();
         gpu.render(&ui.scene.borrow(), &report.damage)
             .expect("a frame");
+        // The sound of the frame's step, as a device would ask for it.
+        if let Some(sound) = sound.as_mut() {
+            let before = perf::sample();
+            sound.mix(step);
+            mixing.set(mixing.get() + (perf::sample().instructions - before.instructions));
+            rays += world.audio_rays();
+        }
         let rendered = begin.elapsed().as_secs_f64() * 1e3;
         gpu.readback_into(pixels, &mut staging).expect("its pixels");
         let total = begin.elapsed().as_secs_f64() * 1e3;
@@ -338,6 +351,17 @@ fn main() {
             "rain: drops {:?}, splashes {:?}",
             world.emitter_status(rain.drops),
             world.emitter_status(rain.splashes),
+        );
+    }
+    if let Some(sound) = &sound {
+        let stats = sound.audio.stats();
+        println!(
+            "sound: {} emitters, {} voices; mixing {:.2} M instructions a second of sound; {:.0}% of frames mixed with sound (before master's gain of 0); {:.1} occlusion rays a frame",
+            sound.emitters,
+            stats.voices,
+            mixing.get() as f64 / ((frames + warm) as f64 * f64::from(step)) / 1e6,
+            stats.sounding as f64 * 100. / stats.frames.max(1) as f64,
+            rays as f64 / (frames + warm) as f64,
         );
     }
     match gpu_busy {

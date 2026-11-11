@@ -14,6 +14,7 @@ Each entry is a primitive any game would need, in general form, with the smalles
 | G6 | Animators play glTF clips only: nothing made in code can be animated by one | animation lane | open |
 | G7 | A GPU view's frame time is the wall clock's, even under a `VirtualClock` | zgx-gpu (assigned by the coordinator) | open (bug) |
 | G8 | An emitter's rate, velocity and forces can't change once it's added | compute lane | open |
+| G9 | A 3D emitter can't start partway into its sound or take its own pitch | audio lane | open |
 | L1 | Spot lights are binned by their sphere, not their cone | lighting lane | open (performance) |
 | L2 | A light at zero intensity is still binned and shaded | lighting lane | open (performance) |
 | L3 | Frames aren't reproducible run to run with cascades or with clustered lights | this M1 Max's GPU at MSAA edges | M1 Max only, under investigation |
@@ -134,6 +135,18 @@ impl World {
 }
 ```
 
+## G9. A 3D emitter can't start partway into its sound or take its own pitch
+
+**Needed by:** any game with several of the same machine, creature or crowd: engines, generators, fans, birds.
+
+`Emitter3d` has `looping`, `gain`, `falloff`, `cone`, `doppler`, `occlusion` and `air`. Nothing says where in the sound it starts, and nothing sets a pitch of its own (Doppler moves pitch, nothing else).
+
+The harbor's four cranes play one synthesised drive, so the four loops start together and stay in phase, and the hum combs as the listener moves between them. A plain voice has `Play::pitch`; an emitter doesn't. The only way to vary them is to make each crane a sound of its own.
+
+```rust
+impl Emitter3d { pub fn from(self, seconds: f32) -> Self; pub fn pitch(self, pitch: f32) -> Self; }
+```
+
 ## L1. Spot lights are binned by their sphere, not their cone
 
 **Needed by:** any scene of floodlights, street lights or stage lights, aimed down or narrow.
@@ -232,4 +245,11 @@ The frames' hashes changed with the HUD's text. The figures in the stage 0 and s
 
 - **Lamps by the hundred:** 221 point and spot lights in lumens through clusters (stage 1). There were 8 nearest at stage 0.
 - **Shadow detail over the quay:** four cascades over 600 m (stage 1).
+- **Sound placed on emitters, with reverb zones:**
+  - each crane's drive on its trolley, moving with the animator;
+  - the ship's generator at its funnel;
+  - a bell on a buoy;
+  - rain as a bed;
+  - reverb under each gantry's portal and in the container canyons;
+  - all synthesised, mixed offline at master gain zero.
 - **Rain:** 45,000 streaks a second in a 160 m box following the camera, splashing where they land through a sub-emitter (stage 1).

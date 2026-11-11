@@ -139,6 +139,10 @@ pub struct Harbor {
     pub gantries: Vec<Gantry>,
     /// The water's surface.
     pub water: ObjectId,
+    /// Where the ship's funnel is (its generator's sound).
+    pub funnel: ObjectId,
+    /// The buoy out in the water (its bell).
+    pub buoy: ObjectId,
     /// The rain, if it was made (`Config::rain`, and a device for it).
     pub rain: Option<crate::weather::Rain>,
     /// Objects added, of every kind.
@@ -268,9 +272,12 @@ impl Harbor {
         let yard = yard(&mut b, config);
         // The cranes: one model, written in code, placed along the quay,
         // each working a quarter of its cycle after the last.
-        let crane = crate::crane::model();
-        let parts = crane.parts;
-        let crane = zgx_3d::Model::from_bytes(&crane.bytes).expect("the crane's model reads");
+        let written = crate::crane::model();
+        let parts = written.parts;
+        let crane = crate::crane::Placing {
+            model: zgx_3d::Model::from_bytes(&written.bytes).expect("the crane's model reads"),
+            trolley: written.trolley,
+        };
         let gantries: Vec<Gantry> = (0..config.gantries)
             .map(|i| {
                 let x = (i as f32 - (config.gantries as f32 - 1.) * 0.5) * 66.;
@@ -280,6 +287,8 @@ impl Harbor {
             })
             .collect();
         let (ship_root, deck) = ship(&mut b);
+        let funnel = b.group(vec3(-101., 30., 0.), Some(ship_root));
+        let buoy = buoy(&mut b);
         let lamps = lamps(&mut b, config, &gantries, ship_root);
         // The shore across the water.
         let ridge = shapes::ridge(-1500., 5000., WATER_LEVEL - 1., 90., config.seed as u32);
@@ -295,6 +304,8 @@ impl Harbor {
             other => other.and_then(Result::ok),
         };
         Self {
+            funnel,
+            buoy,
             rain,
             config: config.clone(),
             sun,
@@ -466,6 +477,27 @@ fn yard(b: &mut Build, config: &Config) -> Vec<ObjectId> {
         }
     }
     out
+}
+
+/// A channel buoy out in the water: a red can on a float, a light on top.
+fn buoy(b: &mut Build) -> ObjectId {
+    let root = b.group(vec3(-70., WATER_LEVEL, -140.), None);
+    let red = Material::rgb(0xb3261e).with(0.1, 0.5);
+    let cylinder = b.kit.cylinder.clone();
+    b.add(
+        Object::mesh(cylinder, red)
+            .transformed(Transform {
+                position: vec3(0., 0.6, 0.),
+                rotation: Quat::IDENTITY,
+                scale: vec3(2.4, 1.6, 2.4),
+            })
+            .child_of(root),
+    );
+    b.part(block(vec3(0., 1.4, 0.), vec3(1.2, 2.6, 1.2)), red, root);
+    let mut lamp = Material::rgb(0x301010).with(0., 0.4);
+    lamp.emissive = [3. * UNIT, 0.4 * UNIT, 0.3 * UNIT];
+    b.part(block(vec3(0., 4., 0.), vec3(0.4, 0.4, 0.4)), lamp, root);
+    root
 }
 
 /// The ship at its berth: hull, hatch covers, deck stacks, the

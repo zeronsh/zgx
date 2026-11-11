@@ -4023,8 +4023,13 @@ dependencies = [
  "naga",
  "serde_json",
  "zgx",
+ "zgx-audio",
  "zgx-gpu",
 ]
+
+[[package]]
+name = "zgx-audio"
+version = "0.1.10"
 
 [[package]]
 name = "zgx-cosmic-text"
@@ -4132,6 +4137,7 @@ dependencies = [
  "png 0.18.1",
  "zgx",
  "zgx-3d",
+ "zgx-audio",
  "zgx-desktop",
  "zgx-gpu",
 ]

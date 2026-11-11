@@ -23,5 +23,7 @@ pub mod scene;
 pub mod settings;
 pub mod shapes;
 pub mod sky;
+pub mod sound;
+pub mod sounds;
 pub mod textures;
 pub mod weather;
