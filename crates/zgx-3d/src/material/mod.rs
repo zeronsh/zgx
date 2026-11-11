@@ -328,6 +328,8 @@ pub(crate) const MAX_REACH: f32 = 1e4;
 pub(crate) const MAX_TEXTURES: u32 = 4;
 /// GPU data (buffers and textures an app made) a mesh's shader may read.
 pub(crate) const MAX_DATA: u32 = 4;
+/// Group 1's binding of the instances' numbers (`zgx_instances`).
+pub(crate) const INSTANCES_BINDING: u32 = 23;
 /// Group 1's bindings for a shader's GPU data, from here.
 pub(crate) const DATA_BINDING: u32 = 24;
 /// Bytes of the frame for surface layers' parameters (`FRAME_TAIL`).
@@ -687,6 +689,9 @@ impl Shader {
 pub(crate) struct Shaders {
     pub(crate) list: Vec<std::rc::Rc<Shader>>,
     pub(crate) layers: Vec<std::rc::Rc<Shader>>,
+    /// Whether a mesh has had numbers of its own (`set_instance_floats`):
+    /// the frame then writes every instance's.
+    pub(crate) floats: bool,
 }
 impl Shaders {
     /// Whether it has none of either.
@@ -705,6 +710,8 @@ pub(crate) struct Custom {
     pub(crate) code: String,
     /// The mesh's shader cuts itself out (`opacity`).
     pub(crate) opacity: bool,
+    /// A mesh's own shader is in it (not surface layers alone).
+    pub(crate) mesh: bool,
     /// Its mesh's shader or a layer reads time (`.animated()`): only then
     /// is the frame's time named `frame.time`.
     pub(crate) animated: bool,
@@ -760,6 +767,12 @@ impl Custom {
             let _ = writeln!(
                 code,
                 "@group(1) @binding({SAMPLER_BINDING}) var material_sampler: sampler;"
+            );
+            // The instances' numbers (`World::set_instance_floats`), by
+            // instance index.
+            let _ = writeln!(
+                code,
+                "@group(1) @binding({INSTANCES_BINDING}) var<storage, read> zgx_instances: array<vec4<f32>>;"
             );
             if shader.uniform_size > 0 {
                 let _ = writeln!(
@@ -854,6 +867,7 @@ impl Custom {
         Self {
             code,
             opacity,
+            mesh: mesh.is_some(),
             animated,
             user_line: user_line.unwrap_or(0),
             edits,
@@ -861,10 +875,11 @@ impl Custom {
     }
     /// No code, the engine's custom lines on: what a shader is checked
     /// against.
-    pub(crate) fn bare(opacity: bool, animated: bool) -> Self {
+    pub(crate) fn bare(mesh: bool, opacity: bool, animated: bool) -> Self {
         Self {
             code: String::new(),
             opacity,
+            mesh,
             animated,
             user_line: 0,
             edits: Vec::new(),

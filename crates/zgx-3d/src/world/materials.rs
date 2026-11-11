@@ -124,6 +124,29 @@ impl World {
             .shader_of(shader)
             .is_some_and(|s| s.compiled.get() > 0 && s.compiling.get() == 0)
     }
+    /// Mesh `id`'s four numbers for its custom material, `VertexIn.instance`
+    /// and `SurfaceIn.instance` in its WGSL (`None`: zeros): what sets one
+    /// mesh apart from another of the same shader (a colour's variation, a
+    /// wave's phase, a crate's wear), read by instance with no binding of
+    /// its own. Made finite.
+    pub fn set_instance_floats(&self, id: ObjectId, floats: Option<[f32; 4]>) {
+        let floats = floats.map(|f| f.map(|v| if v.is_finite() { v } else { 0. }));
+        self.change_object(id, |inner| {
+            if inner.live(id.index, id.generation).is_none() {
+                return false;
+            }
+            inner.shaders.floats |= floats.is_some();
+            let extras = inner.extras_mut(id.index, id.generation);
+            let changed = std::mem::replace(&mut extras.floats, floats) != floats;
+            inner.tidy_extras(id.index);
+            changed
+        });
+    }
+    /// Mesh `id`'s numbers for its custom material, if it has any.
+    pub fn instance_floats(&self, id: ObjectId) -> Option<[f32; 4]> {
+        let inner = self.inner.borrow();
+        inner.extras(id.index as usize, id.generation)?.floats
+    }
     /// Whether a custom material's pipeline is compiling (off the frame:
     /// its meshes draw by the plain pipeline, or not at all, till it's
     /// ready). For tests to wait on.

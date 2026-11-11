@@ -75,6 +75,9 @@ fn tag_on(
     let named = |name: &str| match name {
         "probed" => variant.probed(),
         "probed_unlit" => variant.probed() && !variant.lit(),
+        // A mesh's own shader is in the custom code (not layers alone): its
+        // binding holds what it reads, the instances' numbers among it.
+        "mesh_shader" => custom.is_some_and(meshes),
         _ => false,
     };
     Some(match tag {
@@ -111,7 +114,7 @@ fn tag_on(
 /// The tags of more than one letter (`//name `: lowercase letters, digits
 /// and `_`), by their codes from `NAMED_FROM`: a lane adds its own here and
 /// in `tag_on`. (Names cost nothing a frame: the text is read once.)
-const NAMED: &[&str] = &["probed", "probed_unlit"];
+const NAMED: &[&str] = &["probed", "probed_unlit", "mesh_shader"];
 const NAMED_FROM: u8 = 128;
 /// The code of a line's tag `name`, if it is one: a letter's own byte, a
 /// name's from `NAMED` (one not there, `u8::MAX`: no variant keeps it).
@@ -186,6 +189,14 @@ fn code_of(custom: &Custom) -> &str {
 #[cfg(feature = "shaders")]
 fn times(custom: &Custom) -> bool {
     custom.animated
+}
+#[cfg(feature = "shaders")]
+fn meshes(custom: &Custom) -> bool {
+    custom.mesh
+}
+#[cfg(not(feature = "shaders"))]
+fn meshes(custom: &Custom) -> bool {
+    match *custom {}
 }
 #[cfg(not(feature = "shaders"))]
 fn cuts(custom: &Custom) -> bool {

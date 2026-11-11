@@ -796,6 +796,9 @@ pub(crate) struct Extras {
     /// Its custom material (`World::set_shader`, `SHADER`).
     #[cfg(feature = "shaders")]
     pub(crate) shader: Option<ShaderRef>,
+    /// Its four numbers for custom materials (`World::set_instance_floats`).
+    #[cfg(feature = "shaders")]
+    pub(crate) floats: Option<[f32; 4]>,
 }
 /// `Extras::kinds`' bits.
 pub(crate) const GLASS: u8 = 1;

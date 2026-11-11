@@ -9,6 +9,7 @@
 //V     uv1: vec2<f32>,
 //V     color: vec4<f32>,
 //V     world: vec3<f32>,
+//V     instance: vec4<f32>,
 //V }
 //V struct Displaced {
 //V     position: vec3<f32>,
@@ -25,6 +26,7 @@
 //V     depth: f32,
 //V     screen_uv: vec2<f32>,
 //V     front_facing: bool,
+//V     instance: vec4<f32>,
 //V }
 //V struct Surface {
 //V     base_color: vec3<f32>,

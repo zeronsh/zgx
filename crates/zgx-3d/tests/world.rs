@@ -2734,7 +2734,11 @@ fn culling_culls_after_a_mesh_moved_while_it_rested_and_after_turning_on_again()
 fn a_light_on_a_surface_lights_it_rather_than_breaking_it() {
     // A point light exactly at a shaded point: its direction there was 0/0,
     // and the pixel not a number (black, ambient light and all). In the
-    // surface's plane it adds nothing; the ambient light shows.
+    // surface's plane it adds nothing; the ambient light shows. (This can't
+    // fail: no rasterised sample lands exactly on the light, so the 0/0 is
+    // never reached and the pixel is 188 grey with the guard or without.
+    // `render::shader`'s `a_light_at_the_shaded_point_divides_by_no_zero`
+    // checks the guard; this keeps a light on a surface drawing lit.)
     let (world, _) = one(Geometry::cuboid(1., 1., 1.), Material::rgb(0xc0c0c0));
     world.add_light(Light::Hemisphere {
         sky: [1.; 3],

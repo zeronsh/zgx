@@ -10,6 +10,7 @@
 //K     @location(2) uv: vec2<f32>, @location(9) n2: vec4<f32>,
 //V     @location(1) normal: vec3<f32>,
 //V //N     @location(2) uv: vec2<f32>,
+//V     @builtin(instance_index) instance_index: u32,
 //N ) -> @builtin(position) vec4<f32> {
 //K ) -> ShadowOut {
     var model = mat4x4(m0, m1, m2, m3);
@@ -27,13 +28,15 @@
 //V     zv.uv1 = uv;
 //V     zv.color = vec4(1.0);
 //V     zv.world = (model * vec4(at, 1.0)).xyz;
+//V     zv.instance = vec4(0.0);
+//V //mesh_shader     zv.instance = zgx_instances[instance_index];
 //V     at = zgx_displace(zv).position;
 //N     return frame.shadow * model * vec4(at, 1.0);
 //K     var cut_uv = uv;
 //K //U     cut_uv = placed(0u, uv, second_uv);
 //K //O     return ShadowOut(frame.shadow * model * vec4(at, 1.0), cut_uv, n2.w);
 //K //V     let zn = normalize(mat3x3(model[0].xyz, model[1].xyz, model[2].xyz) * normal);
-//K //V     return ShadowOut(frame.shadow * model * vec4(at, 1.0), cut_uv, n2.w, (model * vec4(at, 1.0)).xyz, zn);
+//K //V     return ShadowOut(frame.shadow * model * vec4(at, 1.0), cut_uv, n2.w, (model * vec4(at, 1.0)).xyz, zn, zv.instance);
 }
 //K struct ShadowOut {
 //K     @builtin(position) position: vec4<f32>,
@@ -41,6 +44,7 @@
 //K     @location(1) word: f32,
 //K //V     @location(2) world: vec3<f32>,
 //K //V     @location(3) normal: vec3<f32>,
+//K //V     @location(4) @interpolate(flat) instance: vec4<f32>,
 //K }
 //K // A surface's alpha cutoff from its third material word (`surface_word`).
 //K fn cutoff_of(word: f32) -> f32 {
@@ -59,6 +63,7 @@
 //K //D     zs.color = vec4(1.0);
 //K //D     zs.view = -frame.sun_direction.xyz;
 //K //D     zs.front_facing = true;
+//K //D     zs.instance = in.instance;
 //K //D     if zgx_opacity(zs) < zgx_cutoff(in.word) {
 //K //D         discard;
 //K //D     }

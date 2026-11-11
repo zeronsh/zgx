@@ -68,6 +68,7 @@
 //V     zs.depth = -(frame.view * vec4(in.world, 1.0)).z;
 //V     zs.screen_uv = in.position.xy / frame.size;
 //V     zs.front_facing = front;
+//V     zs.instance = in.instance;
 //D     if zgx_opacity(zs) < zgx_cutoff(in.material.z) {
 //D         discard;
 //D     }

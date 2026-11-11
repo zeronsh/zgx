@@ -775,6 +775,10 @@ impl Viewport for Renderer {
                 } else {
                     scratch.boxed = None;
                 }
+                // The instances' numbers custom materials read, in the
+                // instances' order (none in a world without any).
+                #[cfg(feature = "shaders")]
+                custom::instance_floats(gpu, &world, &drawn, (frame.device, frame.queue));
                 // The sun's view, fit to the opaque meshes' boxes where this
                 // frame made them.
                 let opaque = scratch.runs.iter().filter(|run| !run.glass);

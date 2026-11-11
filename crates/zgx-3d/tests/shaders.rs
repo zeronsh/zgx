@@ -1246,3 +1246,136 @@ fn surface(s: SurfaceIn) -> Surface {
         );
     }
 }
+
+/// Each mesh its four numbers (`set_instance_floats`), read as a colour.
+const BY_INSTANCE: &str = "#zgx material 1
+fn surface(s: SurfaceIn) -> Surface {
+    var m = surface_default(s);
+    m.base_color = s.instance.rgb;
+    return m;
+}";
+
+#[test]
+fn meshes_of_one_shader_tell_themselves_apart_by_their_numbers() {
+    let world = World::new();
+    world.set_camera(Camera::looking_at([0., 0., 4.], [0., 0., 0.]));
+    let shader = world.add_shader(MaterialShader::new(BY_INSTANCE)).unwrap();
+    let cubes: Vec<ObjectId> = [-1.2f32, 0., 1.2]
+        .into_iter()
+        .map(|x| {
+            let cube = world.add(
+                Object::mesh(Geometry::cuboid(0.8, 0.8, 0.8), unlit(0xffffff)).at([x, 0., 0.]),
+            );
+            world.set_shader(cube, Some(shader));
+            cube
+        })
+        .collect();
+    world.set_instance_floats(cubes[0], Some([1., 0., 0., 0.]));
+    world.set_instance_floats(cubes[2], Some([0., 0., 1., 0.]));
+    assert_eq!(world.instance_floats(cubes[0]), Some([1., 0., 0., 0.]));
+    assert_eq!(world.instance_floats(cubes[1]), None);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    assert!(
+        near(window.pixel(20, 50), [255, 0, 0, 255]),
+        "{:?}",
+        window.pixel(20, 50)
+    );
+    assert!(
+        near(window.pixel(50, 50), [0, 0, 0, 255]),
+        "none: zeros {:?}",
+        window.pixel(50, 50)
+    );
+    assert!(
+        near(window.pixel(80, 50), [0, 0, 255, 255]),
+        "{:?}",
+        window.pixel(80, 50)
+    );
+    // Changed, the frame draws it so.
+    world.set_instance_floats(cubes[1], Some([0., 1., 0., 0.]));
+    window.draw();
+    assert!(
+        near(window.pixel(50, 50), [0, 255, 0, 255]),
+        "{:?}",
+        window.pixel(50, 50)
+    );
+    // Not a number: zero.
+    world.set_instance_floats(cubes[0], Some([f32::NAN, 1., 0., 0.]));
+    assert_eq!(world.instance_floats(cubes[0]), Some([0., 1., 0., 0.]));
+}
+
+#[test]
+fn displace_and_opacity_read_a_meshs_numbers_in_both_passes() {
+    // `v.instance` moves it; `s.instance` cuts it out, its shadow too.
+    let world = World::new();
+    world.set_shadows(true);
+    world.add_light(Light::Directional {
+        direction: vec3(0.3, -1., 0.2),
+        color: [1.; 3],
+        intensity: 3.,
+    });
+    world.add(
+        Object::mesh(Geometry::cuboid(8., 0.2, 8.), Material::rgb(0xc0c0c0)).at([0., -0.6, 0.]),
+    );
+    let cube = world
+        .add(Object::mesh(Geometry::cuboid(1., 1., 1.), Material::rgb(0xc0c0c0)).at([0., 0.5, 0.]));
+    world.set_camera(Camera::looking_at([0., 6., 3.], [0., 0., 0.]));
+    let shader = world
+        .add_shader(MaterialShader::new(
+            "#zgx material 1
+             fn displace(v: VertexIn) -> Displaced {
+                 var d: Displaced;
+                 d.position = v.position + vec3(v.instance.x, 0.0, 0.0);
+                 d.normal = v.normal;
+                 return d;
+             }
+             fn opacity(s: SurfaceIn) -> f32 {
+                 return 1.0 - s.instance.y;
+             }",
+        ))
+        .unwrap();
+    world.set_shader(cube, Some(shader));
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let still = dark(&window);
+    assert!(still > 20, "its shadow: {still}");
+    world.set_instance_floats(cube, Some([50., 0., 0., 0.]));
+    window.draw();
+    assert!(
+        dark(&window) < 5,
+        "moved far by its numbers, its shadow too: {}",
+        dark(&window)
+    );
+    world.set_instance_floats(cube, Some([0., 1., 0., 0.]));
+    window.draw();
+    assert!(
+        dark(&window) < 5,
+        "cut out by its numbers, its shadow too: {}",
+        dark(&window)
+    );
+    world.set_instance_floats(cube, None);
+    window.draw();
+    assert_eq!(dark(&window), still, "as it was");
+}
+
+#[test]
+fn a_meshs_numbers_changed_draw_as_a_fresh_world_with_them_does() {
+    retained_matches_fresh(
+        "numbers",
+        |world| {
+            let shader = world.add_shader(MaterialShader::new(BY_INSTANCE)).unwrap();
+            let cube = world.add(
+                Object::mesh(Geometry::cuboid(1., 1., 1.), Material::rgb(0xffffff))
+                    .at([0., 0.5, 0.]),
+            );
+            world.set_shader(cube, Some(shader));
+            world.set_instance_floats(cube, Some([0.9, 0.2, 0.1, 0.]));
+            (vec![shader], cube)
+        },
+        |world, _, cube| world.set_instance_floats(cube, Some([0.1, 0.3, 0.9, 0.])),
+    );
+}

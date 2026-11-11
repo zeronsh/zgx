@@ -13,6 +13,7 @@ struct Out {
     @location(5) uv: vec2<f32>,
 //U     @location(6) second_uv: vec2<f32>,
 //G     @location(7) scale: f32,
+//V     @location(8) @interpolate(flat) instance: vec4<f32>,
 }
 
 //Z // What a vertex stage reads of a mesh: its vertex's attributes and its
@@ -35,6 +36,7 @@ struct Out {
 //Z //U     @location(14) second_uv: vec2<f32>,
 //Z //C     @location(15) vertex_color: vec4<f32>,
 //Z //M     @builtin(vertex_index) index: u32,
+//Z //V     @builtin(instance_index) instance_index: u32,
 //Z }
 //Z // A vertex placed: where it is in the world, its normal there (not
 //Z // normalised), and the matrix that placed it (its joints', skinned).
@@ -42,6 +44,7 @@ struct Out {
 //Z     world: vec4<f32>,
 //Z     normal: vec3<f32>,
 //Z     model: mat4x4<f32>,
+//Z //V     instance: vec4<f32>,
 //Z }
 //Z // Where vertex `a` is this frame: morphed, skinned, then moved by a
 //Z // custom material's `displace`. The meshes' pass and the prepass both
@@ -67,10 +70,13 @@ struct Out {
 //Z //V     zv.color = vec4(1.0);
 //Z //V //C     zv.color = a.vertex_color;
 //Z //V     zv.world = (model * vec4(at, 1.0)).xyz;
+//Z //V     zv.instance = vec4(0.0);
+//Z //V //mesh_shader     zv.instance = zgx_instances[a.instance_index];
 //Z //V     let zd = zgx_displace(zv);
 //Z //V     at = zd.position;
 //Z //V     facing = zd.normal;
-//Z     return Placed(model * vec4(at, 1.0), normals * facing, model);
+//Z //O     return Placed(model * vec4(at, 1.0), normals * facing, model);
+//Z //V     return Placed(model * vec4(at, 1.0), normals * facing, model, zv.instance);
 //Z }
 //Z @vertex fn vertex(a: VertexAttributes) -> Out {
 //Z     let p = zgx_place(a);
@@ -80,6 +86,7 @@ struct Out {
 //Z         frame.view_projection * p.world, p.world.xyz, p.normal, tint, a.emissive.xyz, vec3(a.n0.w, a.n1.w, a.n2.w), a.uv,
 //Z //U         a.second_uv,
 //Z //G         length(p.model[0].xyz),
+//Z //V         p.instance,
 //Z     );
 //Z }
 //B @vertex fn vertex(
@@ -91,6 +98,7 @@ struct Out {
 //B //U     @location(14) second_uv: vec2<f32>,
 //B //C     @location(15) vertex_color: vec4<f32>,
 //B //M     @builtin(vertex_index) index: u32,
+//B //V     @builtin(instance_index) instance_index: u32,
 //B ) -> Out {
 //B     var model = mat4x4(m0, m1, m2, m3);
 //B     var normals = mat3x3(n0.xyz, n1.xyz, n2.xyz);
@@ -112,6 +120,8 @@ struct Out {
 //B //V     zv.color = vec4(1.0);
 //B //V //C     zv.color = vertex_color;
 //B //V     zv.world = (model * vec4(at, 1.0)).xyz;
+//B //V     zv.instance = vec4(0.0);
+//B //V //mesh_shader     zv.instance = zgx_instances[instance_index];
 //B //V     let zd = zgx_displace(zv);
 //B //V     at = zd.position;
 //B //V     facing = zd.normal;
@@ -123,5 +133,6 @@ struct Out {
 //B         frame.view_projection * world, world.xyz, n, tint, emissive.xyz, vec3(n0.w, n1.w, n2.w), uv,
 //B //U         second_uv,
 //B //G         length(model[0].xyz),
+//B //V         zv.instance,
 //B     );
 //B }

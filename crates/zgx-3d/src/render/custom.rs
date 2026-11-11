@@ -13,8 +13,8 @@ use super::{
 };
 use crate::{
     material::{
-        Custom, DATA_BINDING, FRAME_TAIL, Param, SAMPLER_BINDING, SCENE_BINDING, Shader,
-        TEXTURE_BINDING, UNIFORM_BINDING, layer_offsets,
+        Custom, DATA_BINDING, FRAME_TAIL, INSTANCES_BINDING, Param, SAMPLER_BINDING, SCENE_BINDING,
+        Shader, TEXTURE_BINDING, UNIFORM_BINDING, layer_offsets,
     },
     texture::MAPS,
     world::Inner,
@@ -32,8 +32,15 @@ pub(crate) const COMPILING: u32 = crate::world::Reason::ShaderCompiling as u32;
 #[derive(Default)]
 pub(super) struct State {
     /// What a buffer parameter binds before its data is on the device.
-    #[cfg(feature = "compute")]
     zeros: Option<wgpu::Buffer>,
+    /// The instances' numbers (`World::set_instance_floats`), in the
+    /// frame's instances' order, and its room in them; and whether it was
+    /// made anew since the last frame (bindings holding the old made
+    /// again).
+    instances: Option<(wgpu::Buffer, usize)>,
+    rebound: bool,
+    /// A number for the instances' numbers as last written.
+    floats_key: u64,
     /// Each shader's GPU data's copies as its bindings were made with them
     /// (`Shader::data_key`).
     #[cfg(feature = "compute")]
@@ -155,6 +162,11 @@ pub(super) fn binding_of(
         .or_insert_with(|| layout_of(device, shader, extent))
         .clone();
     let mut resources = vec![(SAMPLER_BINDING, Resource::Sampler(own.sampler.clone()))];
+    let instances = match &state.instances {
+        Some((buffer, _)) => buffer.clone(),
+        None => zeros(state, device).clone(),
+    };
+    resources.push((INSTANCES_BINDING, Resource::Buffer(instances)));
     if shader.uniform_size > 0 {
         let (buffer, _) = uniform_of(state, device, queue, shader);
         resources.push((UNIFORM_BINDING, Resource::Buffer(buffer.clone())));
@@ -232,9 +244,60 @@ fn rebind(gpu: &mut Gpu, shader: &Rc<Shader>) {
     gpu.kept = None;
     gpu.shadow_drawn = None;
 }
+/// The instances' numbers (`World::set_instance_floats`) written in the
+/// order of the frame's instances (`drawn`), for custom materials to read
+/// by instance index: made larger as they grow (custom bindings then made
+/// again). In a world where no mesh has any, nothing. (A frame making its
+/// instances calls it: rarely more than that.)
+#[cold]
+#[inline(never)]
+pub(super) fn instance_floats(
+    gpu: &mut Gpu,
+    world: &Inner,
+    drawn: &[&crate::world::Drawn],
+    (device, queue): (&wgpu::Device, &wgpu::Queue),
+) {
+    if !world.shaders.floats {
+        return;
+    }
+    let floats: Vec<[f32; 4]> = drawn
+        .iter()
+        .map(|d| d.extras.and_then(|e| e.floats).unwrap_or_default())
+        .collect();
+    let bytes: &[u8] = bytemuck::cast_slice(&floats);
+    let state = &mut gpu.custom;
+    if state
+        .instances
+        .as_ref()
+        .is_none_or(|(_, room)| *room < bytes.len())
+    {
+        let room = bytes.len().next_power_of_two().max(4096);
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("3D instances' numbers"),
+            size: room as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        state.instances = Some((buffer, room));
+        // Custom bindings held the old (or zeros): made again next frame.
+        for key in state.by_binding.keys() {
+            gpu.bindings.remove(key);
+        }
+        state.by_binding.clear();
+        // (`prepare` drops the frame kept: set here, the frame's own
+        // `Kept` would be written over it.)
+        state.rebound = true;
+    }
+    // A number for them, which a caster's shadow follows (`prepare`).
+    gpu.custom.floats_key = bytes.iter().fold(0xcbf2_9ce4_8422_2325, |key, &b| {
+        (key ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    });
+    if !bytes.is_empty() {
+        queue.write_buffer(&gpu.custom.instances.as_ref().unwrap().0, 0, bytes);
+    }
+}
 /// A buffer of zeros a buffer parameter binds until its data is on the
 /// device: as large as any element a shader may index first.
-#[cfg(feature = "compute")]
 fn zeros<'a>(state: &'a mut State, device: &wgpu::Device) -> &'a wgpu::Buffer {
     state.zeros.get_or_insert_with(|| {
         device.create_buffer(&wgpu::BufferDescriptor {
@@ -356,6 +419,16 @@ fn layout_of(device: &wgpu::Device, shader: &Shader, extent: Extent) -> wgpu::Bi
     };
     let mut entries = map_layout_entries(extent);
     entries.push(sampler(SAMPLER_BINDING));
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: INSTANCES_BINDING,
+        visibility: both,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only: true },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    });
     if shader.uniform_size > 0 {
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: UNIFORM_BINDING,
@@ -537,8 +610,13 @@ pub(super) fn prepare(
     if !same(&gpu.custom.layers, &shaders.layers) {
         relayer(gpu, device, &shaders.layers, runs);
     }
-    #[cfg_attr(not(feature = "compute"), allow(unused_mut))]
     let mut landed = collect(gpu);
+    // Bindings dropped for the instances' numbers' new buffer: one more
+    // frame, which makes them again.
+    if std::mem::take(&mut gpu.custom.rebound) {
+        gpu.kept = None;
+        landed = true;
+    }
     write_tail(gpu, world, frame);
     let mut reads = false;
     let mut casting = 0xcbf2_9ce4_8422_2325_u64;
@@ -631,7 +709,11 @@ pub(super) fn prepare(
     // (And for the frame after one that took a compile: a shadow's draws
     // the map again there.)
     world.unsettle(COMPILING, landed || !gpu.custom.pending.is_empty());
-    // Meshes cast by other shaders than the map holds: drawn again.
+    // Meshes cast by other shaders than the map holds, or by other numbers
+    // of theirs (`set_instance_floats`): drawn again.
+    if casting != 0xcbf2_9ce4_8422_2325 {
+        casting = (casting ^ gpu.custom.floats_key).wrapping_mul(0x0100_0000_01b3);
+    }
     if std::mem::replace(&mut gpu.custom.casting, casting) != casting {
         gpu.shadow_drawn = None;
     }
@@ -942,7 +1024,7 @@ pub(crate) fn engine_text(mesh: bool, opacity: bool, animated: bool) -> String {
     } else {
         Variant::default()
     };
-    wgsl_with(variant, 4, Some(&Custom::bare(opacity, animated)))
+    wgsl_with(variant, 4, Some(&Custom::bare(mesh, opacity, animated)))
 }
 
 #[cfg(test)]
