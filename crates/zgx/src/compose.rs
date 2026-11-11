@@ -1183,6 +1183,16 @@ impl View {
         self.children.extend(children);
         self
     }
+    /// `children`, already a vector: taken as it is when this view has none,
+    /// where `children` would move each view (hundreds of bytes) again.
+    #[inline]
+    pub fn children_vec(mut self, mut children: Vec<View>) -> Self {
+        match self.children.is_empty() {
+            true => self.children = children,
+            false => self.children.append(&mut children),
+        }
+        self
+    }
     /// A child that exists only while `select` returns `Some`: built from
     /// its value, mounted directly under this view after its other
     /// children, and removed when it returns `None`. Unlike `switch` it
