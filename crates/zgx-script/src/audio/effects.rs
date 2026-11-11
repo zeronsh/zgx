@@ -6,7 +6,7 @@
 //! (`zgx_audio::Effect`): a script can't run on the audio thread.
 use super::{AudioHost, BusUd, Follow, GLIDE, Param, curve, fail, finite};
 use crate::value::Value;
-use mlua::{Lua, Table, UserData, UserDataMethods};
+use mlua::{Lua, MultiValue, Table, UserData, UserDataMethods};
 use std::rc::Rc;
 use zgx_audio::effects::{Compressor, Delay, Duck, HighPass, LowPass, Peaking, Reverb, Slope};
 use zgx_audio::{EffectHandle, Ramp, Time};
@@ -347,73 +347,93 @@ impl EffectUd {
 }
 impl UserData for EffectUd {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("set", |lua, e, (name, value): (String, mlua::Value)| {
-            let Some((handle, kind)) = e.live() else {
-                return Ok(());
-            };
-            let index = kind.index(&name)?;
-            let what = format!("{}'s `{name}`", kind.name());
-            let set = setter(&handle, index);
-            let follow = match Param::read(lua, value, 0., &what)? {
-                Param::Lit(value) => {
-                    if finite(&Value::Num(f64::from(value))).is_some() {
-                        set(value, GLIDE);
-                    }
-                    None
-                }
-                Param::Followed(followed) => {
-                    let now = followed.now();
-                    set(now, GLIDE);
-                    Some(e.host.follow_number(followed, now, set))
-                }
-            };
-            e.replace(index, follow);
-            Ok(())
-        });
-        methods.add_method(
-            "fade",
-            |_, e, (name, value, seconds, curve_name): (String, f32, f64, Option<String>)| {
-                let Some((handle, kind)) = e.live() else {
-                    return Ok(());
+        // One closure for every method, each a branch of `call`.
+        for name in ["set", "fade", "remove", "at"] {
+            methods.add_method(name, move |lua, e, args: MultiValue| {
+                e.call(lua, name, args)
+            });
+        }
+    }
+}
+
+impl EffectUd {
+    fn call(&self, lua: &Lua, name: &str, args: MultiValue) -> mlua::Result<MultiValue> {
+        match name {
+            "set" => {
+                let (param, value): (String, mlua::Value) = lua.unpack_multi(args)?;
+                let Some((handle, kind)) = self.live() else {
+                    return Ok(MultiValue::new());
                 };
-                let index = kind.index(&name)?;
+                let index = kind.index(&param)?;
+                let what = format!("{}'s `{param}`", kind.name());
+                let set = setter(&handle, index);
+                let follow = match Param::read(lua, value, 0., &what)? {
+                    Param::Lit(value) => {
+                        if finite(&Value::Num(f64::from(value))).is_some() {
+                            set(value, GLIDE);
+                        }
+                        None
+                    }
+                    Param::Followed(followed) => {
+                        let now = followed.now();
+                        set(now, GLIDE);
+                        Some(self.host.follow_number(followed, now, set))
+                    }
+                };
+                self.replace(index, follow);
+            }
+            "fade" => {
+                let (param, value, seconds, curve_name): (String, f32, f64, Option<String>) =
+                    lua.unpack_multi(args)?;
+                let Some((handle, kind)) = self.live() else {
+                    return Ok(MultiValue::new());
+                };
+                let index = kind.index(&param)?;
                 let mut ramp = Ramp::seconds(seconds);
                 if let Some(name) = curve_name {
                     ramp = ramp.curve(curve(&name)?);
                 }
                 // A fade takes the parameter over from what followed state.
-                e.replace(index, None);
+                self.replace(index, None);
                 handle
                     .set(index, value, ramp)
-                    .map_err(|error| fail("effect:fade", error))
-            },
-        );
-        methods.add_method("remove", |_, e, ()| {
-            let Some((handle, _)) = e.live() else {
-                return Ok(());
-            };
-            // Off the books once the engine has the removal: refused (a
-            // full queue), it's still on, and the script may try again.
-            handle
-                .remove()
-                .map_err(|error| fail("effect:remove", error))?;
-            e.host.effects.borrow_mut().remove(&e.id);
-            Ok(())
-        });
-        methods.add_method("at", |_, e, seconds: f64| {
-            let audio = e.host.engine()?;
-            Ok(EffectUd {
-                host: e.host.clone(),
-                id: e.id,
-                at: Some(super::time(&audio, seconds)),
-            })
-        });
+                    .map_err(|error| fail("effect:fade", error))?;
+            }
+            "remove" => {
+                if let Some((handle, _)) = self.live() {
+                    // Off the books once the engine has the removal: refused
+                    // (a full queue), it's still on, and the script may try
+                    // again.
+                    handle
+                        .remove()
+                        .map_err(|error| fail("effect:remove", error))?;
+                    self.host.effects.borrow_mut().remove(&self.id);
+                }
+            }
+            _ => {
+                let seconds: f64 = lua.unpack_multi(args)?;
+                let audio = self.host.engine()?;
+                return lua.pack_multi(EffectUd {
+                    host: self.host.clone(),
+                    id: self.id,
+                    at: Some(super::time(&audio, seconds)),
+                });
+            }
+        }
+        Ok(MultiValue::new())
     }
 }
 
-/// `bus:add_effect(spec)` and `bus:duck(side, opts)`, on a bus's methods.
-pub(super) fn bus_methods<M: UserDataMethods<BusUd>>(methods: &mut M) {
-    methods.add_method("add_effect", |lua, b, spec: mlua::AnyUserData| {
+/// `bus:add_effect(spec)` and `bus:duck(side, opts)`: a bus's methods
+/// (`BusUd::call`) with `audio-effects`.
+pub(super) fn bus_call(
+    lua: &Lua,
+    b: &BusUd,
+    name: &str,
+    args: MultiValue,
+) -> mlua::Result<MultiValue> {
+    let effect = if name == "add_effect" {
+        let spec: mlua::AnyUserData = lua.unpack_multi(args)?;
         let spec = spec
             .borrow::<SpecUd>()
             .map_err(|_| {
@@ -422,23 +442,21 @@ pub(super) fn bus_methods<M: UserDataMethods<BusUd>>(methods: &mut M) {
                 )
             })?
             .clone();
-        b.host.add_effect(lua, b, &spec, None, "bus:add_effect")
-    });
-    methods.add_method(
-        "duck",
-        |lua, b, (side, opts): (mlua::AnyUserData, Option<Table>)| {
-            if b.plugin.is_some() {
-                return Err(mlua::Error::runtime(
-                    "bus:duck: a plugin's bus ducks under no other",
-                ));
-            }
-            let side = side
-                .borrow::<BusUd>()
-                .map_err(|_| mlua::Error::runtime("bus:duck takes the bus to duck under"))?
-                .bus
-                .clone();
-            let spec = spec(lua, Kind::Duck, opts)?;
-            b.host.add_effect(lua, b, &spec, Some(&side), "bus:duck")
-        },
-    );
+        b.host.add_effect(lua, b, &spec, None, "bus:add_effect")?
+    } else {
+        let (side, opts): (mlua::AnyUserData, Option<Table>) = lua.unpack_multi(args)?;
+        if b.plugin.is_some() {
+            return Err(mlua::Error::runtime(
+                "bus:duck: a plugin's bus ducks under no other",
+            ));
+        }
+        let side = side
+            .borrow::<BusUd>()
+            .map_err(|_| mlua::Error::runtime("bus:duck takes the bus to duck under"))?
+            .bus
+            .clone();
+        let spec = spec(lua, Kind::Duck, opts)?;
+        b.host.add_effect(lua, b, &spec, Some(&side), "bus:duck")?
+    };
+    lua.pack_multi(effect)
 }

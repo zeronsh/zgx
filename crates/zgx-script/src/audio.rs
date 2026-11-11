@@ -16,7 +16,7 @@ use crate::Vm;
 use crate::node::{Anim, AnimUd, Curve};
 use crate::timers::Timers;
 use crate::value::{ReadState, State, Value};
-use mlua::{Lua, Table, UserData, UserDataFields, UserDataMethods};
+use mlua::{Lua, MultiValue, Table, UserData, UserDataFields, UserDataMethods};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::future::poll_fn;
@@ -1081,51 +1081,61 @@ impl UserData for VoiceUd {
         });
     }
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("stop", |_, v, seconds: Option<f64>| {
-            match v.voice() {
-                Some(voice) => match seconds {
-                    Some(seconds) => voice.stop_after(Ramp::seconds(seconds)),
-                    None => voice.stop(),
-                }
-                .map_err(|e| fail("voice:stop", e)),
-                // Not started: it never will.
-                None => {
-                    v.cell.cancelled.set(true);
-                    v.cell.playing.set(Value::Bool(false));
-                    Ok(())
+        // One closure for every method, each a branch of `call`: mlua's
+        // glue is made once, not once a method.
+        for name in ["stop", "fade", "crossfade", "gain", "pan", "pitch", "at"] {
+            methods.add_method(name, move |lua, v, args: MultiValue| {
+                v.call(lua, name, args)
+            });
+        }
+    }
+}
+
+impl VoiceUd {
+    fn call(&self, lua: &Lua, name: &str, args: MultiValue) -> mlua::Result<MultiValue> {
+        match name {
+            "stop" => {
+                let seconds: Option<f64> = lua.unpack_multi(args)?;
+                match self.voice() {
+                    Some(voice) => match seconds {
+                        Some(seconds) => voice.stop_after(Ramp::seconds(seconds)),
+                        None => voice.stop(),
+                    }
+                    .map_err(|e| fail("voice:stop", e))?,
+                    // Not started: it never will.
+                    None => {
+                        self.cell.cancelled.set(true);
+                        self.cell.playing.set(Value::Bool(false));
+                    }
                 }
             }
-        });
-        methods.add_method(
-            "fade",
-            |_, v, (gain, seconds, name): (f32, f64, Option<String>)| {
+            "fade" => {
+                let (gain, seconds, name): (f32, f64, Option<String>) = lua.unpack_multi(args)?;
                 let mut ramp = Ramp::seconds(seconds);
                 if let Some(name) = name {
                     ramp = ramp.curve(curve(&name)?);
                 }
-                let Some(voice) = v.voice() else {
-                    return Ok(());
-                };
-                // A fade takes the gain over from what followed state.
-                if let Some(live) = v.host.voices.borrow_mut().get_mut(&voice.id()) {
-                    live.follows[0] = None;
+                if let Some(voice) = self.voice() {
+                    // A fade takes the gain over from what followed state.
+                    if let Some(live) = self.host.voices.borrow_mut().get_mut(&voice.id()) {
+                        live.follows[0] = None;
+                    }
+                    voice
+                        .set_gain(gain, ramp)
+                        .map_err(|e| fail("voice:fade", e))?;
                 }
-                voice
-                    .set_gain(gain, ramp)
-                    .map_err(|e| fail("voice:fade", e))
-            },
-        );
-        // An equal-power crossfade: this voice out and stopped, `to` (started
-        // silent) up to `gain`, over the same seconds.
-        methods.add_method(
-            "crossfade",
-            |_, v, (to, seconds, gain): (mlua::AnyUserData, f64, Option<f32>)| {
+            }
+            // An equal-power crossfade: this voice out and stopped, `to`
+            // (started silent) up to `gain`, over the same seconds.
+            "crossfade" => {
+                let (to, seconds, gain): (mlua::AnyUserData, f64, Option<f32>) =
+                    lua.unpack_multi(args)?;
                 let to = to.borrow::<VoiceUd>().map_err(|_| {
                     mlua::Error::runtime("voice:crossfade takes the voice to fade to")
                 })?;
                 let ramp = Ramp::seconds(seconds).curve(zgx_audio::Curve::EqualPower);
-                let mut voices = v.host.voices.borrow_mut();
-                match v.voice() {
+                let mut voices = self.host.voices.borrow_mut();
+                match self.voice() {
                     Some(voice) => {
                         if let Some(live) = voices.get_mut(&voice.id()) {
                             live.follows[0] = None;
@@ -1135,8 +1145,8 @@ impl UserData for VoiceUd {
                             .map_err(|e| fail("voice:crossfade", e))?;
                     }
                     None => {
-                        v.cell.cancelled.set(true);
-                        v.cell.playing.set(Value::Bool(false));
+                        self.cell.cancelled.set(true);
+                        self.cell.playing.set(Value::Bool(false));
                     }
                 }
                 if let Some(voice) = to.voice() {
@@ -1147,22 +1157,27 @@ impl UserData for VoiceUd {
                         .set_gain(gain.unwrap_or(1.), ramp)
                         .map_err(|e| fail("voice:crossfade", e))?;
                 }
-                Ok(())
-            },
-        );
-        for (name, at) in [("gain", 0), ("pan", 1), ("pitch", 2)] {
-            methods.add_method(name, move |lua, v, value: mlua::Value| {
-                v.set(lua, at, value, &format!("voice:{name}"))
-            });
+            }
+            "gain" | "pan" | "pitch" => {
+                let at = match name {
+                    "gain" => 0,
+                    "pan" => 1,
+                    _ => 2,
+                };
+                let value: mlua::Value = lua.unpack_multi(args)?;
+                self.set(lua, at, value, &format!("voice:{name}"))?;
+            }
+            _ => {
+                let seconds: f64 = lua.unpack_multi(args)?;
+                let audio = self.host.engine()?;
+                return lua.pack_multi(VoiceUd {
+                    cell: self.cell.clone(),
+                    host: self.host.clone(),
+                    at: Some(time(&audio, seconds)),
+                });
+            }
         }
-        methods.add_method("at", |_, v, seconds: f64| {
-            let at = v.host.engine()?;
-            Ok(VoiceUd {
-                cell: v.cell.clone(),
-                host: v.host.clone(),
-                at: Some(time(&at, seconds)),
-            })
-        });
+        Ok(MultiValue::new())
     }
 }
 
@@ -1211,44 +1226,71 @@ impl BusUd {
 }
 impl UserData for BusUd {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("gain", |lua, b, value: mlua::Value| {
-            if !matches!(
-                value,
-                mlua::Value::Number(_) | mlua::Value::Integer(_) | mlua::Value::Function(_)
-            ) && Followed::read(lua, &value)?.is_none()
-            {
-                return Err(mlua::Error::runtime(format!(
-                    "bus:gain takes a number, a state, a function or a binding, not {}",
-                    value.type_name()
-                )));
-            }
-            // A store the mixer reads each block: no command, whatever the
-            // rate it changes at.
-            let drive = b.bus.drive();
-            b.follow(lua, "gain", value, move |value| {
-                if let Some(gain) = finite(value) {
-                    drive.set(gain);
+        for &name in BUS_METHODS {
+            methods.add_method(name, move |lua, b, args: MultiValue| {
+                b.call(lua, name, args)
+            });
+        }
+    }
+}
+
+/// A bus's methods: its own, and with `audio-effects` its effects'.
+const BUS_METHODS: &[&str] = &[
+    "gain",
+    "fade",
+    "mute",
+    "solo",
+    "at",
+    #[cfg(feature = "audio-effects")]
+    "add_effect",
+    #[cfg(feature = "audio-effects")]
+    "duck",
+];
+
+impl BusUd {
+    fn call(&self, lua: &Lua, name: &str, args: MultiValue) -> mlua::Result<MultiValue> {
+        match name {
+            "gain" => {
+                let value: mlua::Value = lua.unpack_multi(args)?;
+                if !matches!(
+                    value,
+                    mlua::Value::Number(_) | mlua::Value::Integer(_) | mlua::Value::Function(_)
+                ) && Followed::read(lua, &value)?.is_none()
+                {
+                    return Err(mlua::Error::runtime(format!(
+                        "bus:gain takes a number, a state, a function or a binding, not {}",
+                        value.type_name()
+                    )));
                 }
-            })
-        });
-        methods.add_method(
-            "fade",
-            |_, b, (gain, seconds, name): (f32, f64, Option<String>)| {
+                // A store the mixer reads each block: no command, whatever
+                // the rate it changes at.
+                let drive = self.bus.drive();
+                self.follow(lua, "gain", value, move |value| {
+                    if let Some(gain) = finite(value) {
+                        drive.set(gain);
+                    }
+                })?;
+            }
+            "fade" => {
+                let (gain, seconds, name): (f32, f64, Option<String>) = lua.unpack_multi(args)?;
                 let curve = match name {
                     Some(name) => curve(&name)?,
                     None => zgx_audio::Curve::Linear,
                 };
                 // A fade takes the gain over from what followed state.
-                b.host.buses.borrow_mut().remove(&(b.name.clone(), "gain"));
-                b.bus
+                self.host
+                    .buses
+                    .borrow_mut()
+                    .remove(&(self.name.clone(), "gain"));
+                self.bus
                     .fade_to(gain, seconds, curve)
-                    .map_err(|e| fail("bus:fade", e))
-            },
-        );
-        for what in ["mute", "solo"] {
-            methods.add_method(what, move |lua, b, value: mlua::Value| {
-                let (bus, last) = (b.bus.clone(), Cell::new(None));
-                b.follow(lua, what, value, move |value| {
+                    .map_err(|e| fail("bus:fade", e))?;
+            }
+            "mute" | "solo" => {
+                let what = if name == "mute" { "mute" } else { "solo" };
+                let value: mlua::Value = lua.unpack_multi(args)?;
+                let (bus, last) = (self.bus.clone(), Cell::new(None));
+                self.follow(lua, what, value, move |value| {
                     let on = value.truthy();
                     if last.replace(Some(on)) == Some(on) {
                         return;
@@ -1260,20 +1302,24 @@ impl UserData for BusUd {
                     if let Err(error) = sent {
                         eprintln!("bus:{what}: {error}");
                     }
-                })
-            });
+                })?;
+            }
+            "at" => {
+                let seconds: f64 = lua.unpack_multi(args)?;
+                let audio = self.host.engine()?;
+                return lua.pack_multi(BusUd {
+                    host: self.host.clone(),
+                    bus: self.bus.at(time(&audio, seconds)),
+                    name: self.name.clone(),
+                    plugin: self.plugin.clone(),
+                });
+            }
+            #[cfg(feature = "audio-effects")]
+            name => return effects::bus_call(lua, self, name, args),
+            #[cfg(not(feature = "audio-effects"))]
+            _ => {}
         }
-        methods.add_method("at", |_, b, seconds: f64| {
-            let audio = b.host.engine()?;
-            Ok(BusUd {
-                host: b.host.clone(),
-                bus: b.bus.at(time(&audio, seconds)),
-                name: b.name.clone(),
-                plugin: b.plugin.clone(),
-            })
-        });
-        #[cfg(feature = "audio-effects")]
-        effects::bus_methods(methods);
+        Ok(MultiValue::new())
     }
 }
 
@@ -1287,279 +1333,26 @@ pub(crate) fn install(
     plugin: Option<Rc<str>>,
 ) -> mlua::Result<()> {
     let audio = lua.create_table()?;
-    {
+    // One closure for every function, each a branch of `call`: mlua's glue
+    // is made once, not once a function.
+    let names: &[&str] = match plugin {
+        None => &[
+            "sound", "play", "music", "now", "stats", "bus", "add_bus", "prewarm",
+        ],
+        Some(_) => &["sound", "play", "music", "now", "stats", "bus"],
+    };
+    for &name in names {
         let (host, plugin) = (host.clone(), plugin.clone());
         audio.set(
-            "sound",
-            lua.create_function(move |lua, (src, opts): (String, Option<Table>)| {
-                let engine = host.engine()?;
-                let path = resolve(lua, &src, plugin.is_some(), "audio.sound")?;
-                let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-                // The app's are shared and kept; a plugin's are its own.
-                let cached = match plugin {
-                    Some(_) => None,
-                    None => host
-                        .sounds
-                        .borrow()
-                        .get(&path)
-                        .filter(|slot| slot.stamp == stamp)
-                        .cloned(),
-                };
-                host.uses.set(host.uses.get() + 1);
-                let slot = match cached {
-                    Some(slot) => slot,
-                    None => {
-                        let meter = match plugin {
-                            Some(_) => crate::node::env(lua)?.meter.clone(),
-                            None => None,
-                        };
-                        let slot = Rc::new(SoundSlot {
-                            host: Rc::downgrade(&host),
-                            path: path.clone(),
-                            stamp,
-                            sound: RefCell::default(),
-                            ready: host.runtime.signal(Value::Bool(false)),
-                            error: host.runtime.signal(Value::Nil),
-                            loading: Cell::new(false),
-                            waiting: RefCell::default(),
-                            meter,
-                            used: Cell::new(0),
-                        });
-                        host.slots.borrow_mut().push(Rc::downgrade(&slot));
-                        if plugin.is_none() {
-                            host.sounds.borrow_mut().insert(path, slot.clone());
-                            host.trim(UNHELD_BYTES);
-                        }
-                        slot
-                    }
-                };
-                slot.used.set(host.uses.get());
-                let preload = match &opts {
-                    Some(opts) => opts.get::<Option<bool>>("preload")?.unwrap_or(true),
-                    None => true,
-                };
-                if preload {
-                    slot.load(&engine);
-                }
-                Ok(SoundUd(slot))
-            })?,
-        )?;
-    }
-    {
-        let (host, plugin) = (host.clone(), plugin.clone());
-        audio.set(
-            "play",
-            lua.create_function(
-                move |lua, (sound, opts): (mlua::AnyUserData, Option<Table>)| {
-                    let slot = sound
-                        .borrow::<SoundUd>()
-                        .map_err(|_| {
-                            mlua::Error::runtime("audio.play takes a sound (audio.sound's)")
-                        })?
-                        .0
-                        .clone();
-                    let audio = host.engine()?;
-                    let spec = spec(
-                        lua,
-                        &host,
-                        &audio,
-                        opts.as_ref(),
-                        "world",
-                        plugin.as_ref(),
-                        "audio.play",
-                    )?;
-                    if let Some(plugin) = &plugin
-                        && host.plugin_voices(plugin) >= PLUGIN_VOICES
-                    {
-                        // Refused: a voice that never plays.
-                        let cell = Rc::new(VoiceCell {
-                            voice: RefCell::default(),
-                            playing: host.runtime.signal(Value::Bool(false)),
-                            cancelled: Cell::new(true),
-                        });
-                        return Ok(VoiceUd {
-                            cell,
-                            host: host.clone(),
-                            at: None,
-                        });
-                    }
-                    let cell = slot.play(&host, &audio, spec);
-                    Ok(VoiceUd {
-                        cell,
-                        host: host.clone(),
-                        at: None,
-                    })
-                },
-            )?,
-        )?;
-    }
-    {
-        let (host, plugin) = (host.clone(), plugin.clone());
-        audio.set(
-            "music",
-            lua.create_function(move |lua, (src, opts): (String, Option<Table>)| {
-                let audio = host.engine()?;
-                let path = resolve(lua, &src, plugin.is_some(), "audio.music")?;
-                // A stream is a voice too (and a window, a ring and decoding):
-                // a plugin's count among its voices.
-                if let Some(plugin) = &plugin
-                    && host.plugin_voices(plugin) >= PLUGIN_VOICES
-                {
-                    return Ok(VoiceUd {
-                        cell: Rc::new(VoiceCell {
-                            voice: RefCell::default(),
-                            playing: host.runtime.signal(Value::Bool(false)),
-                            cancelled: Cell::new(true),
-                        }),
-                        host: host.clone(),
-                        at: None,
-                    });
-                }
-                let spec = spec(
-                    lua,
-                    &host,
-                    &audio,
-                    opts.as_ref(),
-                    "music",
-                    plugin.as_ref(),
-                    "audio.music",
-                )?;
-                let (gain, pan, pitch) = (spec.gain.now(), spec.pan.now(), spec.pitch.now());
-                let mut play = Play::new()
-                    .bus(&spec.bus)
-                    .gain(gain)
-                    .pan(pan)
-                    .pitch(pitch)
-                    .priority(spec.priority)
-                    .looping(spec.looping);
-                if let Some(at) = spec.at {
-                    play = play.at(at);
-                }
-                if let Some(fade) = spec.fade_in {
-                    play = play.fade_in(fade);
-                }
-                let cell = Rc::new(VoiceCell {
-                    voice: RefCell::default(),
-                    playing: host.runtime.signal(Value::Bool(true)),
-                    cancelled: Cell::new(false),
-                });
-                let voice = audio
-                    .stream(Source::file(path), play)
-                    .map_err(|e| fail("audio.music", e))?;
-                host.track(voice, &cell, spec, [gain, pan, pitch]);
-                Ok(VoiceUd {
-                    cell,
-                    host: host.clone(),
-                    at: None,
-                })
-            })?,
-        )?;
-    }
-    {
-        let host = host.clone();
-        audio.set(
-            "now",
-            lua.create_function(move |_, ()| {
-                let audio = host.engine()?;
-                Ok(audio.now().0 as f64 / f64::from(audio.rate()))
-            })?,
-        )?;
-    }
-    {
-        let host = host.clone();
-        audio.set(
-            "stats",
-            lua.create_function(move |lua, ()| {
-                let stats = host.engine()?.stats();
-                let t = lua.create_table()?;
-                t.set("voices", stats.voices)?;
-                t.set("stolen", stats.stolen)?;
-                t.set("dropped", stats.dropped)?;
-                t.set("late", stats.late + host.late.get())?;
-                t.set("dry", stats.dry)?;
-                t.set("streams", stats.streams)?;
-                t.set("underruns", stats.underruns)?;
-                t.set("running", stats.running)?;
-                t.set("starts", stats.starts)?;
-                t.set("stops", stats.stops)?;
-                t.set("peak", stats.peak)?;
-                Ok(t)
-            })?,
-        )?;
-    }
-    {
-        // `audio.bus(name)`; a plugin's `audio.bus()` is its own, and the
-        // only one it reaches.
-        let (host, plugin) = (host.clone(), plugin.clone());
-        audio.set(
-            "bus",
-            lua.create_function(move |_, name: Option<String>| {
-                let audio = host.engine()?;
-                match (&plugin, name) {
-                    (Some(plugin), None) => Ok(Some(BusUd {
-                        host: host.clone(),
-                        bus: host.plugin_bus(&audio, plugin)?,
-                        name: format!("plugin:{plugin}"),
-                        plugin: Some(plugin.clone()),
-                    })),
-                    (Some(_), Some(_)) => Ok(None),
-                    (None, Some(name)) => Ok(audio.bus(&name).map(|bus| BusUd {
-                        host: host.clone(),
-                        bus,
-                        name,
-                        plugin: None,
-                    })),
-                    (None, None) => Err(mlua::Error::runtime(
-                        "audio.bus names a bus: \"master\", \"ui\", \"music\", \"world\" or one \
-                         added",
-                    )),
-                }
+            name,
+            lua.create_function(move |lua, args: MultiValue| {
+                call(lua, &host, &plugin, name, args)
             })?,
         )?;
     }
     #[cfg(feature = "audio-effects")]
     effects::install(lua, &audio)?;
     if plugin.is_none() {
-        {
-            let host = host.clone();
-            audio.set(
-                "add_bus",
-                lua.create_function(move |_, (name, opts): (String, Option<Table>)| {
-                    let audio = host.engine()?;
-                    let parent = match &opts {
-                        Some(opts) => opts.get::<Option<String>>("parent")?,
-                        None => None,
-                    }
-                    .unwrap_or_else(|| "master".into());
-                    let parent = audio.bus(&parent).ok_or_else(|| {
-                        mlua::Error::runtime(format!("audio.add_bus: no bus named {parent:?}"))
-                    })?;
-                    // A reload makes it again: the bus there is the same one.
-                    let bus = match audio.bus(&name) {
-                        Some(bus) => bus,
-                        None => audio
-                            .add_bus(&name, &parent)
-                            .map_err(|e| fail("audio.add_bus", e))?,
-                    };
-                    Ok(BusUd {
-                        host: host.clone(),
-                        bus,
-                        name,
-                        plugin: None,
-                    })
-                })?,
-            )?;
-        }
-        {
-            let host = host.clone();
-            audio.set(
-                "prewarm",
-                lua.create_function(move |_, ()| {
-                    host.engine()?.prewarm();
-                    Ok(())
-                })?,
-            )?;
-        }
         audio.set(
             "ui_sounds_enabled",
             ReadState(
@@ -1570,6 +1363,241 @@ pub(crate) fn install(
     }
     audio.set_readonly(true);
     globals.raw_set("audio", audio)
+}
+
+/// `audio.<name>(args)`.
+fn call(
+    lua: &Lua,
+    host: &Rc<AudioHost>,
+    plugin: &Option<Rc<str>>,
+    name: &str,
+    args: MultiValue,
+) -> mlua::Result<MultiValue> {
+    match name {
+        "sound" => {
+            let (src, opts): (String, Option<Table>) = lua.unpack_multi(args)?;
+            let engine = host.engine()?;
+            let path = resolve(lua, &src, plugin.is_some(), "audio.sound")?;
+            let stamp = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            // The app's are shared and kept; a plugin's are its own.
+            let cached = match plugin {
+                Some(_) => None,
+                None => host
+                    .sounds
+                    .borrow()
+                    .get(&path)
+                    .filter(|slot| slot.stamp == stamp)
+                    .cloned(),
+            };
+            host.uses.set(host.uses.get() + 1);
+            let slot = match cached {
+                Some(slot) => slot,
+                None => {
+                    let meter = match plugin {
+                        Some(_) => crate::node::env(lua)?.meter.clone(),
+                        None => None,
+                    };
+                    let slot = Rc::new(SoundSlot {
+                        host: Rc::downgrade(host),
+                        path: path.clone(),
+                        stamp,
+                        sound: RefCell::default(),
+                        ready: host.runtime.signal(Value::Bool(false)),
+                        error: host.runtime.signal(Value::Nil),
+                        loading: Cell::new(false),
+                        waiting: RefCell::default(),
+                        meter,
+                        used: Cell::new(0),
+                    });
+                    host.slots.borrow_mut().push(Rc::downgrade(&slot));
+                    if plugin.is_none() {
+                        host.sounds.borrow_mut().insert(path, slot.clone());
+                        host.trim(UNHELD_BYTES);
+                    }
+                    slot
+                }
+            };
+            slot.used.set(host.uses.get());
+            let preload = match &opts {
+                Some(opts) => opts.get::<Option<bool>>("preload")?.unwrap_or(true),
+                None => true,
+            };
+            if preload {
+                slot.load(&engine);
+            }
+            lua.pack_multi(SoundUd(slot))
+        }
+        "play" | "music" => {
+            let (what, opts): (mlua::Value, Option<Table>) = lua.unpack_multi(args)?;
+            let audio = host.engine()?;
+            let call = if name == "play" {
+                "audio.play"
+            } else {
+                "audio.music"
+            };
+            let source = match (name, what) {
+                ("play", mlua::Value::UserData(ud)) if ud.is::<SoundUd>() => {
+                    Ok(ud.borrow::<SoundUd>()?.0.clone())
+                }
+                ("play", _) => {
+                    return Err(mlua::Error::runtime(
+                        "audio.play takes a sound (audio.sound's)",
+                    ));
+                }
+                (_, mlua::Value::String(src)) => {
+                    Err(resolve(lua, &src.to_str()?, plugin.is_some(), call)?)
+                }
+                (_, other) => {
+                    return Err(mlua::Error::runtime(format!(
+                        "audio.music takes a file's path, not {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            // A stream is a voice too (and a window, a ring and decoding):
+            // a plugin's count among its voices. Past them, a voice that
+            // never plays.
+            if let Some(plugin) = plugin
+                && host.plugin_voices(plugin) >= PLUGIN_VOICES
+            {
+                return lua.pack_multi(VoiceUd {
+                    cell: Rc::new(VoiceCell {
+                        voice: RefCell::default(),
+                        playing: host.runtime.signal(Value::Bool(false)),
+                        cancelled: Cell::new(true),
+                    }),
+                    host: host.clone(),
+                    at: None,
+                });
+            }
+            let default_bus = if name == "play" { "world" } else { "music" };
+            let spec = spec(
+                lua,
+                host,
+                &audio,
+                opts.as_ref(),
+                default_bus,
+                plugin.as_ref(),
+                call,
+            )?;
+            let cell = match source {
+                Ok(slot) => slot.play(host, &audio, spec),
+                Err(path) => {
+                    let (gain, pan, pitch) = (spec.gain.now(), spec.pan.now(), spec.pitch.now());
+                    let mut play = Play::new()
+                        .bus(&spec.bus)
+                        .gain(gain)
+                        .pan(pan)
+                        .pitch(pitch)
+                        .priority(spec.priority)
+                        .looping(spec.looping);
+                    if let Some(at) = spec.at {
+                        play = play.at(at);
+                    }
+                    if let Some(fade) = spec.fade_in {
+                        play = play.fade_in(fade);
+                    }
+                    let cell = Rc::new(VoiceCell {
+                        voice: RefCell::default(),
+                        playing: host.runtime.signal(Value::Bool(true)),
+                        cancelled: Cell::new(false),
+                    });
+                    let voice = audio
+                        .stream(Source::file(path), play)
+                        .map_err(|e| fail("audio.music", e))?;
+                    host.track(voice, &cell, spec, [gain, pan, pitch]);
+                    cell
+                }
+            };
+            lua.pack_multi(VoiceUd {
+                cell,
+                host: host.clone(),
+                at: None,
+            })
+        }
+        "now" => {
+            let audio = host.engine()?;
+            lua.pack_multi(audio.now().0 as f64 / f64::from(audio.rate()))
+        }
+        "stats" => {
+            let stats = host.engine()?.stats();
+            let t = lua.create_table()?;
+            let late = stats.late + host.late.get();
+            for (key, value) in [
+                ("voices", stats.voices),
+                ("stolen", stats.stolen),
+                ("dropped", stats.dropped),
+                ("late", late),
+                ("dry", stats.dry),
+                ("streams", stats.streams),
+                ("underruns", stats.underruns),
+                ("starts", stats.starts),
+                ("stops", stats.stops),
+            ] {
+                t.raw_set(key, value)?;
+            }
+            t.raw_set("running", stats.running)?;
+            t.raw_set("peak", stats.peak)?;
+            lua.pack_multi(t)
+        }
+        // `audio.bus(name)`; a plugin's `audio.bus()` is its own, and the
+        // only one it reaches.
+        "bus" => {
+            let name: Option<String> = lua.unpack_multi(args)?;
+            let audio = host.engine()?;
+            let bus = match (plugin, name) {
+                (Some(plugin), None) => Some(BusUd {
+                    host: host.clone(),
+                    bus: host.plugin_bus(&audio, plugin)?,
+                    name: format!("plugin:{plugin}"),
+                    plugin: Some(plugin.clone()),
+                }),
+                (Some(_), Some(_)) => None,
+                (None, Some(name)) => audio.bus(&name).map(|bus| BusUd {
+                    host: host.clone(),
+                    bus,
+                    name,
+                    plugin: None,
+                }),
+                (None, None) => {
+                    return Err(mlua::Error::runtime(
+                        "audio.bus names a bus: \"master\", \"ui\", \"music\", \"world\" or one \
+                         added",
+                    ));
+                }
+            };
+            lua.pack_multi(bus)
+        }
+        "add_bus" => {
+            let (name, opts): (String, Option<Table>) = lua.unpack_multi(args)?;
+            let audio = host.engine()?;
+            let parent = match &opts {
+                Some(opts) => opts.get::<Option<String>>("parent")?,
+                None => None,
+            }
+            .unwrap_or_else(|| "master".into());
+            let parent = audio.bus(&parent).ok_or_else(|| {
+                mlua::Error::runtime(format!("audio.add_bus: no bus named {parent:?}"))
+            })?;
+            // A reload makes it again: the bus there is the same one.
+            let bus = match audio.bus(&name) {
+                Some(bus) => bus,
+                None => audio
+                    .add_bus(&name, &parent)
+                    .map_err(|e| fail("audio.add_bus", e))?,
+            };
+            lua.pack_multi(BusUd {
+                host: host.clone(),
+                bus,
+                name,
+                plugin: None,
+            })
+        }
+        _ => {
+            host.engine()?.prewarm();
+            Ok(MultiValue::new())
+        }
+    }
 }
 
 /// `src` as a path: relative to the script, as images are. A plugin's
