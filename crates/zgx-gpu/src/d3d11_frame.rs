@@ -622,6 +622,41 @@ impl Device {
         }
     }
 
+    /// `cells` of `from` (x, y, width and height, then where each goes)
+    /// copied into `to`: the glyph atlas shrunk at idle
+    /// (`crate::GpuRenderer::shrink_atlas`), its glyphs kept.
+    pub(crate) fn copy_cells(
+        &self,
+        from: &Surface,
+        to: &Surface,
+        cells: impl Iterator<Item = (u32, u32, u32, u32, u32, u32)>,
+    ) {
+        for (x, y, width, height, to_x, to_y) in cells {
+            let area = D3D11_BOX {
+                left: x,
+                top: y,
+                front: 0,
+                right: x + width,
+                bottom: y + height,
+                back: 1,
+            };
+            // SAFETY: Each cell lies inside `from`, and its place inside
+            // `to` (`pack_cells`), both of the atlas's format.
+            unsafe {
+                self.context.CopySubresourceRegion(
+                    &to.texture,
+                    0,
+                    to_x,
+                    to_y,
+                    0,
+                    &from.texture,
+                    0,
+                    Some(&area),
+                );
+            }
+        }
+    }
+
     /// Scroll `copies` within `target`, through `spare` (the target's size):
     /// as wgpu's path copies them before its pass, when no shown surface
     /// draws them.
