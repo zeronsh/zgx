@@ -3400,6 +3400,11 @@ pub struct Scene {
     /// Tests: a damaged paint walk filters every child (`searched` unused).
     #[cfg(test)]
     pub(crate) linear_walks: bool,
+    /// Whether some node's children ever outgrew `COLUMN_KEPT_FROM` (set as
+    /// `append` grows a long list): hit tests ask each node whether to search
+    /// its children (`hit_rows`) only then. Never cleared: a search checks
+    /// what it searches, and walks a list that isn't long whole.
+    long_lists: bool,
     /// Long lists a hit test searched (`hit_rows`). For tests.
     #[cfg(test)]
     hit_rows_searched: std::cell::Cell<u64>,
@@ -3660,6 +3665,7 @@ impl Scene {
             reference_walks: false,
             #[cfg(test)]
             linear_walks: false,
+            long_lists: false,
             #[cfg(test)]
             hit_rows_searched: Default::default(),
             long_children: std::cell::RefCell::new(std::collections::HashMap::with_hasher(
@@ -5956,9 +5962,13 @@ impl Scene {
         if self.has_hit_targets() {
             return self.hit_test_targets(x, y);
         }
-        match self.plain_walks() {
-            true => self.hit_test_walk::<false>(x, y),
-            false => self.hit_test_walk::<true>(x, y),
+        // A scene where no node's children ever outgrew a long list's
+        // (`long_lists`) walks every child: no node asks whether to search
+        // them (two instructions a node, and code moved around them).
+        match (self.plain_walks(), self.long_lists) {
+            (true, false) => self.hit_test_walk::<false, false>(x, y),
+            (true, true) => self.hit_test_walk::<false, true>(x, y),
+            (false, _) => self.hit_test_walk::<true, false>(x, y),
         }
     }
     /// Whether some node takes hits where it's going (`set_hit_target`).
@@ -6217,7 +6227,10 @@ impl Scene {
         }
     }
     /// `POPUPS`: popup roots exist, whose subtrees are hit past the viewport.
-    fn hit_test_walk<const POPUPS: bool>(&self, x: f32, y: f32) -> Vec<NodeId> {
+    /// `SEARCH`: some node may hold a long column (`long_lists`), whose rows
+    /// are searched (`hit_rows`); without, no node asks, and the walk
+    /// compiles as it did.
+    fn hit_test_walk<const POPUPS: bool, const SEARCH: bool>(&self, x: f32, y: f32) -> Vec<NodeId> {
         let inside = |r: Rect, (x, y): (f32, f32)| {
             x >= r.x && y >= r.y && x < r.x + r.width && y < r.y + r.height
         };
@@ -6330,7 +6343,7 @@ impl Scene {
             siblings = match POPUPS {
                 true => self.paint_order(id, node).iter(),
                 false => match self.children_raw(node) {
-                    all if all.len() >= SEARCHED_CHILDREN => {
+                    all if SEARCH && all.len() >= SEARCHED_CHILDREN => {
                         self.hit_rows(all, transform, point).iter()
                     }
                     all => all.iter(),
@@ -7565,6 +7578,7 @@ impl Scene {
         // knowing which it is.
         if siblings.len() == siblings.capacity() {
             if siblings.len() >= COLUMN_KEPT_FROM {
+                self.long_lists = true;
                 self.children_outgrown(parent);
                 self.node_mut(parent).children.get_mut().push(id);
             } else {
@@ -15833,6 +15847,45 @@ mod tests {
                 assert_eq!(nested_stops(align, first, second), None);
             }
         }
+    }
+    /// Hit tests search a column's rows only in a scene where some list grew
+    /// long (`long_lists`, set as `append` grows it): until then no node is
+    /// asked, and once one is, its rows are searched.
+    #[test]
+    fn hit_tests_search_rows_once_a_list_has_grown_long() {
+        let sized = |w: f32, h: f32| Style {
+            width: Some(w),
+            height: Some(h),
+            ..Style::default()
+        };
+        let mut scene = Scene::new(300., 400.);
+        let root = scene.root();
+        scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+        let column = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        let quad = || NodeKind::Quad(QuadStyle::default());
+        let mut rows = 0;
+        let hits = |scene: &mut Scene| {
+            scene.flush();
+            let before = scene.hit_rows_searched.get();
+            for y in 0..40 {
+                scene.hit_test_all_walked(50., y as f32 * 10. + 1.);
+            }
+            scene.hit_rows_searched.get() - before
+        };
+        while rows < 60 {
+            let row = scene.append(column, NodeKind::Container(Layout::Row), sized(300., 20.));
+            scene.append(row, quad(), sized(40., 20.));
+            rows += 1;
+        }
+        assert!(!scene.long_lists);
+        assert_eq!(hits(&mut scene), 0, "60 rows, short: walked");
+        while rows < 200 {
+            let row = scene.append(column, NodeKind::Container(Layout::Row), sized(300., 20.));
+            scene.append(row, quad(), sized(40., 20.));
+            rows += 1;
+        }
+        assert!(scene.long_lists);
+        assert!(hits(&mut scene) > 0, "200 rows: searched");
     }
     /// A hit test over a long column searches its rows (`hit_rows`) and
     /// finds what the walk over every row finds (`linear_walks`): at points
