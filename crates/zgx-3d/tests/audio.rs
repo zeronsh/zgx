@@ -821,3 +821,51 @@ fn an_emitter_started_partway_starts_there() {
     assert!(first(0.5) > -30., "half a second in: {:.1} dB", first(0.5));
     assert!(first(1.75) < -120., "a one-shot past its end is silent");
 }
+
+#[cfg(feature = "hrtf")]
+#[test]
+fn a_binaural_source_stepping_across_the_back_stays_behind() {
+    // Noise 3 m behind, 1 degree to the right, steps to 1 degree to the
+    // left: its head turns from 179 to -179 through 180, the short way.
+    // Through the ramp, block by block (the head's), the ears stay within
+    // 3 dB of each other; the long way round, through hard right and hard
+    // left, they'd part by about 13.
+    let (audio, mut mixer) = engine();
+    let world = world(&audio);
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let noise: Vec<f32> = (0..RATE as usize)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        })
+        .collect();
+    let noise = Sound::from_samples(&noise, 1, RATE).unwrap();
+    let side = 3. * 1f32.to_radians().tan();
+    let at = spot(&world, [side, 0., 3.]);
+    world
+        .add_emitter3d(
+            at,
+            Emitter3d::new(&noise)
+                .looping(true)
+                .occlusion(false)
+                .air(false)
+                .binaural(true),
+        )
+        .unwrap();
+    let clock = Clock(Instant::now());
+    world.update_audio(clock.at(0));
+    mixer.frames(RATE as usize / 5);
+    world.set_transform(at, Transform::at([-side, 0., 3.]));
+    world.update_audio(clock.at(1));
+    let out = mixer.frames(RATE as usize / 10);
+    let (left, right) = (channel(&out, 0), channel(&out, 1));
+    let energy = |s: &[f32]| s.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>();
+    let widest = left
+        .chunks(128)
+        .zip(right.chunks(128))
+        .map(|(l, r)| (10. * (energy(l) / energy(r)).log10()).abs())
+        .fold(0f64, f64::max);
+    assert!(widest < 3., "the ears parted by {widest:.1} dB");
+}
