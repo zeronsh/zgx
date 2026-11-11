@@ -18,6 +18,9 @@ struct Draw {
     // Colour and size over life: at its start, a third, two thirds, end.
     colors: array<vec4<f32>, 4>,
     sizes: vec4<f32>,
+    // A pixel's width and height in clip space, and the view depths it
+    // fades in between from the camera.
+    viewport: vec4<f32>,
 }
 @group(0) @binding(1) var<uniform> draw: Draw;
 
@@ -66,9 +69,24 @@ fn vs(@builtin(vertex_index) vertex: u32, p: Instance) -> Out {
     }
     let t = clamp(p.age / p.life, 0.0, 1.0);
     let corner = vec2(f32(vertex & 1u) * 2.0 - 1.0, f32(vertex >> 1u) * 2.0 - 1.0);
-    let size = p.size * over_life(draw.sizes, t);
+    var size = p.size * over_life(draw.sizes, t);
     let right = draw.right.xyz;
     let up = draw.up.xyz;
+    var coverage = 1.0;
+    // At least two pixels wide (a soft disc a pixel wide can fall between
+    // pixels' centres and draw nothing): one thinner is drawn two pixels
+    // wide and as much fainter, so a far drop fades rather than flickering
+    // in and out or vanishing.
+    let middle = frame.view_projection * vec4(p.position, 1.0);
+    let aside = frame.view_projection * vec4(p.position + right * size, 1.0);
+    if middle.w > 0.0 && aside.w > 0.0 {
+        let across = (aside.xy / aside.w - middle.xy / middle.w) / draw.viewport.xy;
+        let pixels = length(across);
+        if pixels < 2.0 {
+            coverage = pixels / 2.0;
+            size = size * 2.0 / max(pixels, 1e-4);
+        }
+    }
     // Its offset from its middle along the camera's right and up.
     var offset: vec2<f32>;
     if draw.shape.x > 0.5 {
@@ -78,13 +96,20 @@ fn vs(@builtin(vertex_index) vertex: u32, p: Instance) -> Out {
         let side = vec2(-along.y, along.x);
         let stretch = across * draw.shape.y;
         offset = along * corner.y * (stretch + size) * 0.5 + side * corner.x * size * 0.5;
+        // Its light spread along where it went in the shutter's time: a
+        // long streak as faint as it is longer than the drop.
+        coverage *= size / (size + stretch);
     } else {
         offset = corner * size * 0.5;
     }
+    // Fading in from the camera: none drawn over the whole view.
+    let depth = dot(p.position - frame.camera.xyz, cross(up, right));
+    coverage *= smoothstep(draw.viewport.z, draw.viewport.w, depth);
     let at = p.position + right * offset.x + up * offset.y;
     out.position = frame.view_projection * vec4(at, 1.0);
     out.corner = corner;
     out.color = p.color * color_over_life(t);
+    out.color.a *= coverage;
     return out;
 }
 

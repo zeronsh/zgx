@@ -1209,3 +1209,77 @@ fn rain_giving_birth_to_splashes_draws_the_same_twice() {
         assert_eq!(differ, 0, "{differ} pixels differ at the {frame}th image");
     }
 }
+
+/// `emitter`'s burst drawn a frame on: the frame's pixels against black.
+fn one_frame_of(emitter: Emitter) -> Option<Vec<u8>> {
+    let world = world();
+    world.add_emitter(emitter).unwrap();
+    let mut frames = Frames::new(&world)?;
+    frames.ready(&world, 0.);
+    frames.draw(1. / 60.);
+    Some(frames.pixels())
+}
+
+/// Its brightest red.
+fn brightest(pixels: &[u8]) -> u8 {
+    pixels.chunks(4).map(|p| p[2]).max().unwrap_or(0)
+}
+
+#[test]
+fn a_streak_spreads_its_light_along_its_length() {
+    // The same drop slow and fast: drawn as long as it moves in 0.05 s,
+    // the fast one's light spread over a streak ten times as long.
+    let drop = |speed: f32| {
+        Emitter::new(1)
+            .burst(1)
+            .lifetime(10.0..10.0)
+            .velocity([0., -speed, 0.], 0.)
+            .draw(Shape::Streak { length: 0.05 }, Blend::Alpha)
+            .size(0.2..0.2)
+            .color([1., 0., 0., 0.5])
+    };
+    let Some(slow) = one_frame_of(drop(0.5)) else {
+        return;
+    };
+    let fast = one_frame_of(drop(40.)).unwrap();
+    let (slow, fast) = (brightest(&slow), brightest(&fast));
+    assert!(slow > 150, "drawn: {slow}");
+    assert!(
+        u16::from(fast) * 2 < u16::from(slow),
+        "fast {fast}, slow {slow}"
+    );
+}
+
+#[test]
+fn a_drop_thinner_than_a_pixel_shows_faintly() {
+    // 2 mm at 4 m: a twentieth of a pixel here. Drawn a pixel wide and a
+    // twentieth as strong, not missed between pixels.
+    let Some(pixels) = one_frame_of(
+        Emitter::new(16)
+            .burst(16)
+            .lifetime(10.0..10.0)
+            .size(0.002..0.002)
+            .color([1., 0., 0., 1.]),
+    ) else {
+        return;
+    };
+    let lit = pixels.chunks(4).filter(|p| p[2] > 0).count();
+    assert!(lit > 0, "nothing drawn");
+    assert!(brightest(&pixels) < 200, "faint: {}", brightest(&pixels));
+}
+
+#[test]
+fn a_particle_at_the_camera_isnt_drawn_over_the_view() {
+    // 0.2 m in front of the camera (at 4): it would cover the view.
+    let Some(pixels) = one_frame_of(
+        Emitter::new(1)
+            .burst(1)
+            .spawn(Spawn::point([0., 0., 3.8]))
+            .lifetime(10.0..10.0)
+            .size(1.0..1.0)
+            .color([1., 0., 0., 1.]),
+    ) else {
+        return;
+    };
+    assert_eq!(brightest(&pixels), 0);
+}

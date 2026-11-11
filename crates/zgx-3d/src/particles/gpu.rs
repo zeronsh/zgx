@@ -48,7 +48,14 @@ struct DrawUniforms {
     shape: [f32; 4],
     colors: [[f32; 4]; 4],
     sizes: [f32; 4],
+    /// A pixel's width and height in clip space (2 / the frame's size),
+    /// and the view depths a particle fades in between (`NEAR_FADE`).
+    viewport: [f32; 4],
 }
+
+/// View depths (m) over which a particle fades in from the camera: none
+/// nearer than the first, whole past the second.
+const NEAR_FADE: (f32, f32) = (0.3, 1.5);
 
 /// `live`'s numbers for a frame spawning `count` from slot `base`, at
 /// `time`, `step` seconds on, in a pool of `slots`.
@@ -319,6 +326,7 @@ impl Shared {
                 },
                 colors: e.colors,
                 sizes: e.sizes,
+                viewport: [0.; 4],
             };
             planned.push(Planned {
                 id: live.id,
@@ -413,9 +421,20 @@ impl Shared {
                     }
                 }
             }
-            frame
-                .queue
-                .write_buffer(&pool.draw, 0, bytemuck::bytes_of(&planned.draw));
+            frame.queue.write_buffer(
+                &pool.draw,
+                0,
+                bytemuck::bytes_of(&DrawUniforms {
+                    // This device's frame's pixels.
+                    viewport: [
+                        2. / frame.size.0.max(1) as f32,
+                        2. / frame.size.1.max(1) as f32,
+                        NEAR_FADE.0,
+                        NEAR_FADE.1,
+                    ],
+                    ..planned.draw
+                }),
+            );
             let child = planned.child.filter(|id| self.pools.contains_key(id));
             // A parent's place to count its births, made with its first.
             if child.is_some()
