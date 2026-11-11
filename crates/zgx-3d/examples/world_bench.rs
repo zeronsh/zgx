@@ -195,13 +195,15 @@ mod particles;
 /// Whether this build runs `SCENE=scene`: one it doesn't, unknown or its
 /// feature off, would count `textured` under another's name.
 fn known(scene: &str) -> bool {
-    match scene {
-        "" | "textured" | "mixed" | "still" | "lights" | "anim" => true,
-        "shader" => cfg!(feature = "shaders"),
-        "compute" => cfg!(feature = "compute"),
-        "particles" => cfg!(feature = "particles"),
-        _ => false,
-    }
+    // A table, not a match: with every feature on, a match of `true`s and
+    // one `false` is clippy's `matches!`, and off it isn't.
+    let featured = [
+        ("shader", cfg!(feature = "shaders")),
+        ("compute", cfg!(feature = "compute")),
+        ("particles", cfg!(feature = "particles")),
+    ];
+    ["", "textured", "mixed", "still", "lights", "anim"].contains(&scene)
+        || featured.iter().any(|&(name, on)| on && name == scene)
 }
 
 fn main() {

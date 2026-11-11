@@ -8,8 +8,8 @@
 # job that don't need Linux. The commit is checked out in a worktree of its
 # own under $LOCAL_CI_DIR (default /tmp/zgx-local-ci), built into one
 # target directory there, deleted at the end unless --keep:
-#   fmt; clippy 1.99 on the workspace and on zgx-script without default
-#   features; the MSRV check; the Python tests; changelog.py check against
+#   fmt; clippy 1.99 on the workspace, on zgx-script without default
+#   features and on zgx-3d with every feature; the MSRV check; the Python tests; changelog.py check against
 #   --base; StyLua; the script lint and, when luau-lsp is on PATH or in
 #   $LUAU_LSP, the script type check; the tests of every crate the jobs
 #   test, zgx-audio's and zgx-video's (with ffmpeg) among them; the doc
@@ -110,6 +110,11 @@ step "msrv $msrv check (no default features)" \
 step "clippy 1.99 workspace" cargo +1.99 clippy --workspace --all-targets --locked -- -D warnings
 step "clippy 1.99 zgx-script no default features" \
   cargo +1.99 clippy -p zgx-script --no-default-features --all-targets --locked -- -D warnings
+# zgx-3d with every feature, its examples and tests among the targets: the
+# workspace's clippy builds its default features only, and a lint that
+# shows only with them all on (93cc82512's world_bench) reached every lane.
+step "clippy 1.99 zgx-3d every feature" \
+  cargo +1.99 clippy -p zgx-3d --all-features --all-targets --locked -- -D warnings
 step "script lint" cargo run -q -p zgx-script --bin zgx --locked -- lint \
   crates/zgx-script/examples crates/zgx-desktop/examples crates/zgx-fx/examples/gallery
 lsp=${LUAU_LSP:-$(command -v luau-lsp || true)}
