@@ -6,7 +6,7 @@ use zgx_3d::*;
 
 #[path = "common/settle.rs"]
 mod harness;
-use harness::{caught, rests_caught};
+use harness::{caught, rests_caught, shows};
 
 /// The compile worker held 400 ms a pipeline, set once for the binary
 /// before either test's first frame (no thread reads the environment
@@ -86,4 +86,37 @@ fn a_surface_layer_alone_draws_in_its_first_frame_and_rests() {
     );
     assert!(!world.compiling(), "nothing of it on the worker");
     assert!(!world.view().animating(), "nothing holds the world drawing");
+}
+
+#[test]
+fn a_mesh_shader_and_a_surface_layer_show_once_compiled() {
+    // Compiled on the held worker, drawn as a window draws: the world
+    // rests only with its picture drawn by both.
+    hold_worker();
+    shows("shader compiled", |world, mesh, _| {
+        let red = world
+            .add_shader(MaterialShader::new(
+                "#zgx material 1
+                 fn surface(s: SurfaceIn) -> Surface {
+                     var m = surface_default(s);
+                     m.base_color = vec3(1.0, 0.0, 0.0);
+                     return m;
+                 }",
+            ))
+            .unwrap();
+        world.set_shader(mesh, Some(red));
+        let layer = world
+            .add_surface_layer(MaterialShader::new(
+                "#zgx material 1
+                 fn surface(s: SurfaceIn) -> Surface {
+                     var m = surface_default(s);
+                     m.base_color *= 0.5;
+                     return m;
+                 }",
+            ))
+            .unwrap();
+        Some(Box::new(move |world| {
+            world.shader_ready(red) && world.shader_ready(layer) && !world.compiling()
+        }))
+    });
 }

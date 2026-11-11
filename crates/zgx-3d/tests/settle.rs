@@ -12,7 +12,7 @@ use zgx_3d::*;
 
 #[path = "common/settle.rs"]
 mod harness;
-use harness::{caught, rests, rests_caught};
+use harness::{caught, rests, rests_caught, shows};
 
 #[cfg(feature = "gltf")]
 #[path = "../examples/common/rig.rs"]
@@ -241,5 +241,93 @@ fn the_last_animator_removed_while_it_plays() {
         let animator = world.add_animator(&placed);
         world.play(animator, &clip, Play::new()).unwrap();
         Some(Box::new(move |world| world.remove_animator(animator)))
+    });
+}
+
+#[cfg(feature = "post")]
+#[test]
+fn a_post_pass_shows_once_compiled() {
+    shows("post compiled", |world, _, _| {
+        let pass = world
+            .add_post(
+                PostPass::new(
+                    "#zgx post 1
+fn post(p: PostIn) -> vec4<f32> {
+    return color(p.uv) * params.k;
+}
+",
+                )
+                .param("k", PostParam::Float),
+            )
+            .unwrap();
+        world.set_post_param(pass, "k", 0.5f32).unwrap();
+        // Shown is all there is to ask of it (the forced frame).
+        Some(Box::new(|_| true))
+    });
+}
+
+#[cfg(feature = "gltf")]
+#[test]
+fn a_map_shows_once_loaded() {
+    shows("map loaded", |world, mesh, _| {
+        let side = 512u32;
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, side, side);
+            encoder.set_color(png::ColorType::Rgba);
+            let pixels: Vec<u8> = (0..side * side)
+                .flat_map(|i| [(i % 251) as u8, (i % 241) as u8, 128, 255])
+                .collect();
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&pixels)
+                .unwrap();
+        }
+        world.set_texture(mesh, Some(Texture::decode(&bytes).unwrap()));
+        Some(Box::new(|world| !world.loading()))
+    });
+}
+
+#[cfg(feature = "compute")]
+#[test]
+fn a_compute_pass_shows_once_compiled() {
+    // On demand: it runs once when ready, colouring the mesh it feeds
+    // through a material reading its buffer, and the world rests drawn by it.
+    shows("compute compiled", |world, mesh, _| {
+        let buffer = world.add_buffer(BufferDesc::from_slice(&[[0f32; 4]])).unwrap();
+        let pass = world
+            .add_compute(
+                Compute::new(
+                    "@group(0) @binding(0) var<storage, read_write> c: array<vec4<f32>>;
+                     @compute @workgroup_size(1) fn paint() { c[0] = vec4(1.0, 0.0, 1.0, 1.0); }",
+                )
+                .buffer("c", &buffer, Access::ReadWrite)
+                .threads([1, 1, 1]),
+            )
+            .unwrap();
+        #[cfg(feature = "shaders")]
+        {
+            let tint = world
+                .add_shader(
+                    MaterialShader::new(
+                        "#zgx material 1
+                         fn surface(s: SurfaceIn) -> Surface {
+                             var m = surface_default(s);
+                             m.base_color = params.c[0].rgb;
+                             return m;
+                         }",
+                    )
+                    .buffer("c", "array<vec4<f32>>"),
+                )
+                .unwrap();
+            world.set_param(tint, "c", &buffer).unwrap();
+            world.set_shader(mesh, Some(tint));
+        }
+        #[cfg(not(feature = "shaders"))]
+        let _ = mesh;
+        Some(Box::new(move |world| {
+            world.compute_status(pass) == Some(ComputeStatus::Ready)
+        }))
     });
 }

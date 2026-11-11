@@ -65,6 +65,10 @@ impl Window {
             .render(&self.ui.scene.borrow(), &report.damage)
             .unwrap();
     }
+    /// The last frame's pixels.
+    pub fn pixels(&self) -> Vec<u8> {
+        self.gpu.readback().unwrap()
+    }
     /// Frames until `done`, `frames` at least and `cap` at most in time:
     /// whether it came.
     pub fn until(
@@ -149,6 +153,46 @@ pub fn try_rests_drawing(name: &str, hold: Hold, mode: Draw) -> bool {
         "{name} ({mode:?}): turned off, its world still draws by itself"
     );
     true
+}
+
+/// What a "shows" row does: starts work that finishes off the frame (a
+/// compile, a load) in `world`, and hands back whether it's done; `None`
+/// if this device can't do it.
+pub type Work = fn(&World, ObjectId, &mut Window) -> Option<Box<dyn Fn(&World) -> bool>>;
+
+/// Starts `work`, draws as a window until the world rests, and asserts
+/// the work is done and shown: a frame forced after the rest draws what
+/// the rested picture already holds. (A world that stopped asking for
+/// frames one frame before its work showed would rest without it: the
+/// rest rows can't see that.)
+pub fn shows(name: &str, work: Work) {
+    let (world, mesh) = world();
+    let Some(mut window) = Window::drawing(&world, Draw::AsAWindow) else {
+        return;
+    };
+    window.draw(&world);
+    let Some(done) = work(&world, mesh, &mut window) else {
+        eprintln!("SETTLE-SKIPPED {name}: this device can't do it");
+        return;
+    };
+    let rested = window.until(&world, 2, Duration::from_secs(20), || {
+        !world.view().animating()
+    });
+    assert!(rested, "{name}: its world never rested");
+    assert!(done(&world), "{name}: rested with its work not done");
+    let at_rest = window.pixels();
+    world.view().invalidate();
+    window.draw(&world);
+    let differ = window
+        .pixels()
+        .iter()
+        .zip(&at_rest)
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(
+        differ, 0,
+        "{name}: rested before its work showed ({differ} channels change on a frame forced after)"
+    );
 }
 
 /// `try_rests` for a reason a device may not hold (it says so and passes).
