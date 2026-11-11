@@ -23,7 +23,9 @@
 //! 8 by 4 by 8 irradiance probes on a device tracing rays: each frame the
 //! world turns, its ray scene is built again and 64 probes are updated.
 //! `MESHES` and `FRAMES` size it; `CULLING=0` draws what the camera can't
-//! see too; `CASCADES=n`, with the `lighting` feature, casts the sun's
+//! see too; `SHADOWS=0` draws no sun shadows; `MOVE=one` keeps the meshes
+//! and camera still but for one box moving among them each frame (a
+//! working crane in a still yard); `CASCADES=n`, with the `lighting` feature, casts the sun's
 //! shadow through n cascades (`still`: they follow the camera; `textured`:
 //! their casters move). `SCENE=compute`, with the `compute` feature, adds
 //! the app's GPU data and compute passes to `textured`
@@ -309,8 +311,23 @@ fn main() {
     if let Some(count) = std::env::var("CASCADES").ok().and_then(|n| n.parse().ok()) {
         world.set_cascades(Some(Cascades::new(count)));
     }
+    // `SHADOWS=0`: no sun shadows, to compare.
+    if std::env::var("SHADOWS").is_ok_and(|on| on == "0") {
+        world.set_shadows(false);
+    }
+    // `MOVE=one`: the meshes and the camera still, but for one box moving
+    // through them each frame (a working crane in a still yard).
+    let mover = std::env::var("MOVE").is_ok_and(|m| m == "one").then(|| {
+        world.add(Object::mesh(
+            Geometry::cuboid(2., 6., 2.),
+            Material::rgb(0xd0a040).with(0.2, 0.5),
+        ))
+    });
     for frame in 0..frames {
-        if still {
+        if let Some(mover) = mover {
+            let t = frame as f32 * 0.05;
+            world.set_transform(mover, Transform::at([10. * t.sin(), 3., 10. * t.cos()]));
+        } else if still {
             orbit(&world, frame);
         } else {
             moved(&world, (root, joint, &morphs), frame);
