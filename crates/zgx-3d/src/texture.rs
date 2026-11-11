@@ -254,10 +254,16 @@ impl Texture {
         #[cfg(feature = "ktx2")]
         if encoded.starts_with(&crate::assets::ktx2::IDENTIFIER) {
             use crate::assets::ktx2;
-            let first = ktx2::read(encoded)
-                .ok()
-                .filter(|file| file.texels == ktx2::Texels::Rgba8)
-                .and_then(|file| Some(file.level(encoded, 0)?.into_owned()));
+            let first = ktx2::read(encoded).ok().and_then(|file| match file.texels {
+                ktx2::Texels::Rgba8 => Some(file.level(encoded, 0)?.into_owned()),
+                // Basis Universal's, transcoded to RGBA8.
+                #[cfg(feature = "ktx2-basis")]
+                ktx2::Texels::Basis => file
+                    .transcoded(encoded, ktx2::Target::Rgba8)?
+                    .into_iter()
+                    .next(),
+                ktx2::Texels::Blocks(_) => None,
+            });
             let image = first.and_then(|pixels| {
                 zgx::image::ImageData::new(self.0.width, self.0.height, pixels).ok()
             });
@@ -277,8 +283,10 @@ impl Texture {
     /// KTX2's, as they're stored, or decompressed: no decoding, and its
     /// smaller levels as the file made them), else its pixels and the levels
     /// below them made here (`mipmaps`). `None` if they don't decode.
-    pub(crate) fn levels(&self) -> Option<Levels<'_>> {
-        if let Some(kept) = self.kept_levels() {
+    /// A Basis Universal file's are transcoded for a device of `features`
+    /// (`ktx2::Target::for_device`); no other's read them.
+    pub(crate) fn levels(&self, features: zgx_gpu::wgpu::Features) -> Option<Levels<'_>> {
+        if let Some(kept) = self.kept_levels(features) {
             return Some(kept);
         }
         let image = self.pixels()?;
@@ -288,8 +296,11 @@ impl Texture {
     /// Its file's own levels (a KTX2 file's, the `ktx2` feature): its
     /// blocks, or its RGBA8 texels where it has more than one level (one
     /// level of texels has the rest made, `levels`). `None` where it has
-    /// none, or they don't decompress.
-    pub(crate) fn kept_levels(&self) -> Option<Levels<'_>> {
+    /// none, or they don't decompress. A Basis Universal file's levels are
+    /// transcoded for a device of `features`: blocks it holds, or RGBA8.
+    pub(crate) fn kept_levels(&self, features: zgx_gpu::wgpu::Features) -> Option<Levels<'_>> {
+        #[cfg(not(feature = "ktx2-basis"))]
+        let _ = features;
         #[cfg(feature = "ktx2")]
         if let Some(encoded) = self.0.encoded.as_ref()
             && encoded.starts_with(&crate::assets::ktx2::IDENTIFIER)
@@ -311,9 +322,41 @@ impl Texture {
                 },
                 Texels::Rgba8 if file.level_count() > 1 => levels().map(Levels::Kept),
                 Texels::Rgba8 => None,
+                #[cfg(feature = "ktx2-basis")]
+                Texels::Basis => {
+                    use crate::assets::ktx2::Target;
+                    let size = (self.0.width, self.0.height);
+                    let (target, format) = Target::for_device(features, size);
+                    let Some(levels) = file.transcoded(encoded, target) else {
+                        self.failed_to_decode();
+                        return None;
+                    };
+                    let levels: Vec<_> = levels.into_iter().map(std::borrow::Cow::Owned).collect();
+                    Some(match format {
+                        Some(format) => Levels::Blocks(format, levels),
+                        None if levels.len() > 1 => Levels::Kept(levels),
+                        // One level of texels: the rest made, as a PNG's.
+                        None => {
+                            let first = levels.into_iter().next()?.into_owned();
+                            let image = zgx::image::ImageData::new(size.0, size.1, first).ok()?;
+                            let smaller = mipmaps(size.0, size.1, image.pixels());
+                            Levels::Made(Arc::new(image), smaller)
+                        }
+                    })
+                }
             };
         }
         None
+    }
+    /// Whether it's a Basis Universal file's, transcoded as it's put on a
+    /// device: never in a frame (`assets::Loads::request`).
+    pub(crate) fn transcodes(&self) -> bool {
+        #[cfg(feature = "ktx2-basis")]
+        if let Some(encoded) = self.0.encoded.as_ref() {
+            return encoded.starts_with(&crate::assets::ktx2::IDENTIFIER)
+                && encoded.get(12..16) == Some(&[0; 4]);
+        }
+        false
     }
     /// Whether its file failed to decode (`pixels`): it draws none.
     pub(crate) fn failed(&self) -> bool {

@@ -426,15 +426,16 @@ pub(super) fn upload(
     texture: &crate::Texture,
     srgb: bool,
 ) -> Option<wgpu::TextureView> {
-    let decoded = decoded(texture)?;
+    let decoded = decoded(texture, device.features())?;
     upload_decoded(device, queue, texture, srgb, decoded)
 }
 /// A texture's levels, ready to upload: decoding them is most of an
 /// upload's time, and needs no device.
 type Decoded<'a> = crate::texture::Levels<'a>;
-/// `texture`'s levels (`Texture::levels`); `None` if they don't decode.
-fn decoded(texture: &crate::Texture) -> Option<Decoded<'_>> {
-    texture.levels()
+/// `texture`'s levels for a device of `features` (`Texture::levels`);
+/// `None` if they don't decode.
+fn decoded(texture: &crate::Texture, features: wgpu::Features) -> Option<Decoded<'_>> {
+    texture.levels(features)
 }
 /// `texture`, `decoded`, on the GPU (`upload`); `None` where the device
 /// can't hold its levels (`assets::upload_levels`).
@@ -486,7 +487,8 @@ pub(super) fn upload_missing(
     // Pixels in hand, or few of them: here, in turn. A thread costs more
     // than they do.
     let (wanted, here): (Vec<_>, Vec<_>) = wanted.into_iter().partition(|(texture, _)| {
-        !texture.holds_pixels() && texture.width() * texture.height() > crate::texture::SMALL
+        !texture.holds_pixels()
+            && (texture.width() * texture.height() > crate::texture::SMALL || texture.transcodes())
     });
     let workers = decoders().min(wanted.len());
     for (texture, srgb) in here
@@ -503,6 +505,7 @@ pub(super) fn upload_missing(
     if workers <= 1 {
         return;
     }
+    let features = device.features();
     let next = std::sync::atomic::AtomicUsize::new(0);
     let (sent, received) = std::sync::mpsc::sync_channel(workers);
     std::thread::scope(|scope| {
@@ -514,7 +517,7 @@ pub(super) fn upload_missing(
                     let Some(&(texture, _)) = wanted.get(at) else {
                         break;
                     };
-                    if sent.send((at, decoded(texture))).is_err() {
+                    if sent.send((at, decoded(texture, features))).is_err() {
                         break;
                     }
                 }

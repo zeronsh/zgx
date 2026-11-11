@@ -100,7 +100,10 @@ impl Loads {
             return Wanted::Coming;
         }
         if texture.holds_pixels()
-            || texture.width() * texture.height() <= crate::texture::SMALL
+            // Small, and not to be transcoded (a Basis Universal file's
+            // never is in a frame).
+            || (texture.width() * texture.height() <= crate::texture::SMALL
+                && !texture.transcodes())
             || zgx::image::whole_frames_on_this_thread()
         {
             return Wanted::Now;
@@ -313,7 +316,7 @@ fn put_on_gpu(
         wgpu::TextureFormat::Rgba8Unorm
     };
     // A file's own levels (a KTX2's): put on the GPU as they are.
-    if let Some(levels) = texture.kept_levels() {
+    if let Some(levels) = texture.kept_levels(device.features()) {
         return upload_levels(device, queue, texture, srgb, &levels);
     }
     let image = texture.pixels()?;
@@ -475,7 +478,7 @@ mod tests {
         );
         let file = ktx2::write(4, 4, 146, &[vec![0; 16], vec![0; 16], vec![0; 16]]);
         let texture = crate::Texture::decode(&file).unwrap();
-        let levels = texture.levels().expect("its blocks");
+        let levels = texture.levels(wgpu::Features::empty()).expect("its blocks");
         assert!(matches!(levels, crate::texture::Levels::Blocks(..)));
         let made = upload_levels(&device, &queue, &texture, true, &levels).expect("decoded");
         assert_eq!(made.format(), wgpu::TextureFormat::Rgba8UnormSrgb);

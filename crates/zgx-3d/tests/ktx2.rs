@@ -222,9 +222,12 @@ fn a_ktx2_map_loaded_off_the_frame_keeps_the_files_levels() {
 
 #[test]
 fn a_ktx2_file_that_isnt_read_says_why() {
-    let basis = ktx2(4, RED, GREEN, 0);
-    let error = Texture::decode(&basis).unwrap_err();
-    assert!(error.contains("Basis Universal"), "{error}");
+    // A Basis Universal file without the feature that transcodes it.
+    #[cfg(not(feature = "ktx2-basis"))]
+    {
+        let error = Texture::decode(&ktx2(4, RED, GREEN, 0)).unwrap_err();
+        assert!(error.contains("ktx2-basis"), "{error}");
+    }
     // BC1 of a size that isn't whole blocks.
     let error = Texture::decode(&blocks(134, 6, (4, 4), &BC1_RED, &BC1_GREEN, false)).unwrap_err();
     assert!(error.contains("whole blocks"), "{error}");
@@ -235,9 +238,20 @@ fn a_ktx2_file_that_isnt_read_says_why() {
 
 #[test]
 fn a_gltf_texture_names_its_ktx2_image_by_khr_texture_basisu() {
-    // A quad whose texture's KTX2 image is given by the extension, with a
-    // PNG-less fallback `source` past the images (as a file made for viewers
-    // without it may not be): the extension's is read.
+    gltf_shows_its_ktx2_image(&ktx2(64, RED, GREEN, 43));
+}
+
+/// A Basis Universal image, as `KHR_texture_basisu` means one to be.
+#[cfg(feature = "ktx2-basis")]
+#[test]
+fn a_gltf_textures_basis_universal_image_is_transcoded() {
+    gltf_shows_its_ktx2_image(&uastc(64, 64, RED, GREEN, true));
+}
+
+/// A quad whose texture's KTX2 `image` (red first) is given by the
+/// extension, with a fallback `source` past the images (as a file made for
+/// viewers without it may not have): the extension's is read, and shows.
+fn gltf_shows_its_ktx2_image(image: &[u8]) {
     let base64 = |bytes: &[u8]| {
         const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         let mut out = String::new();
@@ -275,7 +289,7 @@ fn a_gltf_texture_names_its_ktx2_image_by_khr_texture_basisu() {
 "buffers":[{{"uri":"data:application/octet-stream;base64,{bin}","byteLength":{len}}}],
 "bufferViews":[{{"buffer":0,"byteOffset":0,"byteLength":48}},{{"buffer":0,"byteOffset":48,"byteLength":32}},{{"buffer":0,"byteOffset":80,"byteLength":12}}],
 "accessors":[{{"bufferView":0,"componentType":5126,"count":4,"type":"VEC3","min":[-2,-2,0],"max":[2,2,0]}},{{"bufferView":1,"componentType":5126,"count":4,"type":"VEC2"}},{{"bufferView":2,"componentType":5123,"count":6,"type":"SCALAR"}}]}}"#,
-        image = base64(&ktx2(64, RED, GREEN, 43)),
+        image = base64(image),
         bin = base64(&bin),
         len = bin.len(),
     );
@@ -297,4 +311,195 @@ fn a_gltf_texture_names_its_ktx2_image_by_khr_texture_basisu() {
         p[0] > 2 * p[1].max(p[2]) && p[0] > 60,
         "its map's red: {p:?}"
     );
+}
+
+/// A UASTC block of one colour (its solid-colour mode: mode code 0x17 in 5
+/// bits, then red, green, blue and alpha, 8 bits each).
+#[cfg(feature = "ktx2-basis")]
+fn uastc_solid([r, g, b, a]: [u8; 4]) -> [u8; 16] {
+    let bits: u128 =
+        0x17 | u128::from(r) << 5 | u128::from(g) << 13 | u128::from(b) << 21 | u128::from(a) << 29;
+    bits.to_le_bytes()
+}
+
+/// A Basis Universal (UASTC) KTX2 file, `width` by `height`, a full chain:
+/// its first level's blocks all `first`, every smaller one's `rest`; each
+/// level a Zstandard frame with `zstd`. Its data format descriptor is
+/// UASTC's (colour model 166, 4 by 4 blocks of 16 bytes, RGBA, sRGB).
+#[cfg(feature = "ktx2-basis")]
+fn uastc(width: u32, height: u32, first: [u8; 4], rest: [u8; 4], zstd: bool) -> Vec<u8> {
+    let count = 32 - width.max(height).leading_zeros();
+    let levels: Vec<Vec<u8>> = (0..count)
+        .map(|level| {
+            let (w, h) = ((width >> level).max(1), (height >> level).max(1));
+            let block = uastc_solid(if level == 0 { first } else { rest });
+            block.repeat((w.div_ceil(4) * h.div_ceil(4)) as usize)
+        })
+        .collect();
+    let stored: Vec<Vec<u8>> = if zstd {
+        levels.iter().map(|level| zstd_frame(level)).collect()
+    } else {
+        levels.clone()
+    };
+    let dfd: Vec<u8> = [
+        44u32,
+        0,
+        2 | 40 << 16,
+        166 | 1 << 8 | 2 << 16,
+        3 | 3 << 8,
+        16,
+        0,
+        127 << 16 | 3 << 24,
+        0,
+        0,
+        u32::MAX,
+    ]
+    .iter()
+    .flat_map(|v| v.to_le_bytes())
+    .collect();
+    let mut file = b"\xabKTX 20\xbb\r\n\x1a\n".to_vec();
+    let scheme = if zstd { 2 } else { 0 };
+    for v in [0, 1, width, height, 0, 0, 1, count, scheme] {
+        file.extend(u32::to_le_bytes(v));
+    }
+    let dfd_at = 80 + 24 * count;
+    for v in [dfd_at, dfd.len() as u32, 0, 0] {
+        file.extend(v.to_le_bytes());
+    }
+    file.extend([0u8; 16]);
+    // The level index, filled in as the levels are placed.
+    let index_at = file.len();
+    file.resize(index_at + 24 * count as usize, 0);
+    file.extend(&dfd);
+    for (i, (level, stored)) in levels.iter().zip(&stored).enumerate() {
+        file.resize(file.len().next_multiple_of(16), 0);
+        let entry = [file.len() as u64, stored.len() as u64, level.len() as u64];
+        let at = index_at + 24 * i;
+        file[at..at + 24].copy_from_slice(&entry.map(u64::to_le_bytes).concat());
+        file.extend(stored);
+    }
+    file
+}
+
+#[cfg(feature = "ktx2-basis")]
+#[test]
+fn a_basis_universal_map_is_transcoded_with_its_levels() {
+    // UASTC, 256²: transcoded on the texture threads to what the device
+    // holds (BC7 here, if it holds BC), its levels the file's own.
+    file_levels_show(&uastc(256, 256, RED, GREEN, false), 256, |_| true);
+    // Its levels Zstandard frames, decompressed by this crate first.
+    file_levels_show(&uastc(256, 256, RED, GREEN, true), 256, |_| true);
+    // A small one too: never transcoded in a frame, but on the threads.
+    file_levels_show(&uastc(64, 64, RED, GREEN, false), 64, |_| true);
+}
+
+#[cfg(feature = "ktx2-basis")]
+#[test]
+fn a_basis_universal_map_of_part_blocks_is_transcoded_to_rgba8() {
+    // 300 by 172: not whole 4 by 4 blocks, so not BC7 or ASTC on the GPU:
+    // RGBA8. Near, its first level.
+    let texture = Texture::decode(&uastc(300, 172, RED, GREEN, false)).unwrap();
+    assert_eq!((texture.width(), texture.height()), (300, 172));
+    let world = square(40., texture);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw_loaded(&world);
+    assert!(red(window.middle()), "{:?}", window.middle());
+}
+
+#[cfg(feature = "ktx2-basis")]
+#[test]
+fn a_hostile_basis_universal_file_is_refused_not_read_past() {
+    // Every length of a good file cut short, and its level index and
+    // descriptor's words made wrong: refused, or a map drawn as if it had
+    // none, never a panic or a read past it.
+    let good = uastc(16, 16, RED, GREEN, true);
+    let mut files: Vec<Vec<u8>> = (0..good.len()).map(|end| good[..end].to_vec()).collect();
+    for at in (48..good.len().min(80 + 24 * 5 + 44)).step_by(4) {
+        for value in [0u32, 1, 15, 0xffff, u32::MAX] {
+            let mut bad = good.clone();
+            bad[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            files.push(bad);
+        }
+    }
+    for file in files {
+        if let Ok(texture) = Texture::decode(&file) {
+            let world = square(4., texture);
+            if let Some(mut window) = Window::new(&world) {
+                window.draw_loaded(&world);
+            }
+        }
+    }
+}
+
+/// ETC1S (BasisLZ) can't be written by hand: where `ZGX_BASISU` names Basis
+/// Universal's encoder, a picture of this test's own four colours is encoded
+/// at test time (nothing of it kept), read and drawn, each quarter its
+/// colour within ETC1S's loss. Skipped, saying so, without one.
+#[cfg(feature = "ktx2-basis")]
+#[test]
+fn an_etc1s_map_encoded_from_this_tests_pixels_is_transcoded() {
+    let Some(encoder) = std::env::var_os("ZGX_BASISU") else {
+        eprintln!("SKIPPED: ZGX_BASISU names no Basis Universal encoder");
+        return;
+    };
+    let colours = [
+        [230, 20, 20, 255],
+        [20, 230, 20, 255],
+        [20, 20, 230, 255],
+        [230, 230, 230, 255],
+    ];
+    let side = 64u32;
+    let pixels: Vec<u8> = (0..side)
+        .flat_map(|y| {
+            (0..side).flat_map(move |x| colours[usize::from(x >= 32) + 2 * usize::from(y >= 32)])
+        })
+        .collect();
+    let dir = std::env::temp_dir().join(format!("zgx-3d-etc1s-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let png = dir.join("quarters.png");
+    let mut bytes = Vec::new();
+    let mut encoder_png = png::Encoder::new(&mut bytes, side, side);
+    encoder_png.set_color(png::ColorType::Rgba);
+    encoder_png.set_depth(png::BitDepth::Eight);
+    encoder_png
+        .write_header()
+        .unwrap()
+        .write_image_data(&pixels)
+        .unwrap();
+    std::fs::write(&png, bytes).unwrap();
+    let out = dir.join("quarters.ktx2");
+    let done = std::process::Command::new(encoder)
+        .args(["-etc1s", "-mipmap", "-ktx2", "-output_file"])
+        .arg(&out)
+        .arg(&png)
+        .output()
+        .unwrap();
+    assert!(
+        done.status.success(),
+        "the encoder: {}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let file = std::fs::read(&out).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let texture = Texture::decode(&file).unwrap();
+    let world = square(2.4, texture);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw_loaded(&world);
+    let drawn = window.gpu.readback().unwrap();
+    for (i, colour) in colours.iter().enumerate() {
+        let (x, y) = (16 + 32 * (i % 2), 16 + 32 * (i / 2));
+        let at = (y * 64 + x) * 4;
+        let p = &drawn[at..at + 3];
+        let worst = p
+            .iter()
+            .zip(colour)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(worst <= 24, "quarter {i}: {p:?}, not {colour:?}");
+    }
 }

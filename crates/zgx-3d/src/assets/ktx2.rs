@@ -2,8 +2,9 @@
 //! or not, and block-compressed ones (BC1 to BC7, ETC2 and EAC, ASTC),
 //! Zstandard-supercompressed or not, their levels taken as they are (no
 //! decoding, and their smaller levels the file's own, not made again).
-//! Basis Universal payloads, and files of more than one 2D image, are
-//! refused, saying so.
+//! Basis Universal payloads (ETC1S, UASTC) are transcoded with the
+//! `ktx2-basis` feature (`Ktx2::transcoded`), refused without it; files of
+//! more than one 2D image are refused, saying so.
 use std::borrow::Cow;
 use zgx_gpu::wgpu;
 
@@ -25,6 +26,10 @@ pub(crate) enum Texels {
     /// Blocks of this format (its sRGB-ness as the file says: a map reads
     /// it as its use needs).
     Blocks(wgpu::TextureFormat),
+    /// Basis Universal's (ETC1S or UASTC), transcoded to what a device
+    /// holds (`Ktx2::transcoded`): the `ktx2-basis` feature.
+    #[cfg(feature = "ktx2-basis")]
+    Basis,
 }
 
 /// What a KTX2 file holds that a texture reads: its size, its texels, and
@@ -58,6 +63,103 @@ impl Ktx2 {
             .decode_all(stored, &mut out)
             .ok()?;
         (written == *length).then_some(Cow::Owned(out))
+    }
+    /// Its levels transcoded to `target`, from `file` (the bytes it was read
+    /// from; its Basis Universal texels), the first the largest: each its
+    /// blocks or RGBA8 texels, as long as its size says. `None` if the file
+    /// doesn't transcode (its transcoder refused it, or gave other sizes).
+    #[cfg(feature = "ktx2-basis")]
+    pub(crate) fn transcoded(&self, file: &[u8], target: Target) -> Option<Vec<Vec<u8>>> {
+        if self.texels != Texels::Basis {
+            return None;
+        }
+        // Zstandard's levels decompressed here (by this crate's decoder, not
+        // a second one): the file as if stored so.
+        let stored;
+        let input = if self.zstd {
+            stored = self.decompressed(file)?;
+            &stored[..]
+        } else {
+            file
+        };
+        let transcoder = basisu::Transcoder::new(input).ok()?;
+        if transcoder.level_count() as usize != self.level_count() {
+            return None;
+        }
+        let format = match target {
+            Target::Bc7 => basisu::TargetFormat::Bc7Rgba,
+            Target::Astc => basisu::TargetFormat::Astc4x4Rgba,
+            Target::Rgba8 => basisu::TargetFormat::Rgba32,
+        };
+        (0..self.level_count())
+            .map(|level| {
+                let (w, h) = (
+                    (self.width >> level).max(1) as usize,
+                    (self.height >> level).max(1) as usize,
+                );
+                let expected = match target {
+                    Target::Rgba8 => w * h * 4,
+                    Target::Bc7 | Target::Astc => w.div_ceil(4) * h.div_ceil(4) * 16,
+                };
+                let out = transcoder
+                    .transcode(level as u32, format, basisu::DecodeFlags::NONE)
+                    .ok()?;
+                (out.len() == expected).then_some(out)
+            })
+            .collect()
+    }
+    /// `file` with its Zstandard levels decompressed, as if stored so: its
+    /// header, index and other sections as they are (all before its first
+    /// level), its levels after them. `None` if a level doesn't decompress
+    /// or a section isn't before them.
+    #[cfg(feature = "ktx2-basis")]
+    fn decompressed(&self, file: &[u8]) -> Option<Vec<u8>> {
+        let first = self.levels.iter().map(|(range, _)| range.start).min()?;
+        let mut out = file.get(..first)?.to_vec();
+        out.get_mut(44..48)?.copy_from_slice(&0u32.to_le_bytes());
+        for level in 0..self.level_count() {
+            let texels = self.level(file, level)?;
+            // Each level on 16 bytes, as KTX2 lays UASTC's blocks.
+            out.resize(out.len().next_multiple_of(16), 0);
+            let (at, length) = (out.len() as u64, texels.len() as u64);
+            let index = 80 + 24 * level;
+            out.get_mut(index..index + 24)?
+                .copy_from_slice(&[at, length, length].map(u64::to_le_bytes).concat());
+            out.extend_from_slice(&texels);
+        }
+        Some(out)
+    }
+}
+
+/// What a Basis Universal texture is transcoded to: what the device holds.
+#[cfg(feature = "ktx2-basis")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Target {
+    Bc7,
+    Astc,
+    Rgba8,
+}
+#[cfg(feature = "ktx2-basis")]
+impl Target {
+    /// The best of BC7 and ASTC 4x4 a device with `features` holds for a
+    /// texture of `size` (whole 4 by 4 blocks, as WebGPU asks of them), else
+    /// RGBA8; and the texture format it's put on the GPU as (`None`: RGBA8).
+    pub(crate) fn for_device(
+        features: wgpu::Features,
+        (width, height): (u32, u32),
+    ) -> (Target, Option<wgpu::TextureFormat>) {
+        let whole = width.is_multiple_of(4) && height.is_multiple_of(4);
+        if whole && features.contains(wgpu::Features::TEXTURE_COMPRESSION_BC) {
+            (Target::Bc7, Some(wgpu::TextureFormat::Bc7RgbaUnormSrgb))
+        } else if whole && features.contains(wgpu::Features::TEXTURE_COMPRESSION_ASTC) {
+            let format = wgpu::TextureFormat::Astc {
+                block: wgpu::AstcBlock::B4x4,
+                channel: wgpu::AstcChannel::UnormSrgb,
+            };
+            (Target::Astc, Some(format))
+        } else {
+            (Target::Rgba8, None)
+        }
     }
 }
 
@@ -139,10 +241,13 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Ktx2, String> {
         (u32_at(32)?, u32_at(36)?, u32_at(40)?, u32_at(44)?);
     let texels = match format {
         RGBA8 | RGBA8_SRGB => Texels::Rgba8,
+        #[cfg(feature = "ktx2-basis")]
+        0 => Texels::Basis,
+        #[cfg(not(feature = "ktx2-basis"))]
         0 => {
             return Err(
-                "a Basis Universal KTX2 texture (ETC1S or UASTC): it needs a transcoder, \
-                 not read yet"
+                "a Basis Universal KTX2 texture (ETC1S or UASTC): it needs zgx-3d's \
+                 `ktx2-basis` feature"
                     .into(),
             );
         }
@@ -150,10 +255,16 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Ktx2, String> {
             format!("a KTX2 texture of Vulkan format {other}: not RGBA8, BC, ETC2, EAC or ASTC")
         })?),
     };
-    // None, or Zstandard (2): BasisLZ (1) is Basis Universal's.
+    // None, or Zstandard (2); BasisLZ (1) is Basis Universal's ETC1S, read
+    // by its transcoder (its levels aren't ours to size).
+    #[cfg(feature = "ktx2-basis")]
+    let basislz = supercompression == 1 && texels == Texels::Basis;
+    #[cfg(not(feature = "ktx2-basis"))]
+    let basislz = false;
     let zstd = match supercompression {
         0 => false,
         2 => true,
+        1 if basislz => false,
         other => {
             return Err(format!(
                 "a KTX2 texture of supercompression {other}: not read"
@@ -170,8 +281,16 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Ktx2, String> {
     let (bw, bh) = match texels {
         Texels::Rgba8 => (1, 1),
         Texels::Blocks(format) => format.block_dimensions(),
+        // UASTC's 4 by 4 blocks; any size (transcoded to RGBA8 where it
+        // isn't whole blocks).
+        #[cfg(feature = "ktx2-basis")]
+        Texels::Basis => (4, 4),
     };
-    if !width.is_multiple_of(bw) || !height.is_multiple_of(bh) {
+    #[cfg(feature = "ktx2-basis")]
+    let whole_blocks_asked = texels != Texels::Basis;
+    #[cfg(not(feature = "ktx2-basis"))]
+    let whole_blocks_asked = true;
+    if whole_blocks_asked && (!width.is_multiple_of(bw) || !height.is_multiple_of(bh)) {
         return Err(format!(
             "a KTX2 texture of {bw} by {bh} blocks {width} by {height}: not whole blocks"
         ));
@@ -179,6 +298,8 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Ktx2, String> {
     let block = match texels {
         Texels::Rgba8 => 4,
         Texels::Blocks(format) => format.block_copy_size(None).unwrap_or(16) as usize,
+        #[cfg(feature = "ktx2-basis")]
+        Texels::Basis => 16,
     };
     // No levels given: the first alone.
     let count = count.max(1);
@@ -198,7 +319,12 @@ pub(crate) fn read(bytes: &[u8]) -> Result<Ktx2, String> {
             return Err("a KTX2 level of more than 64 MiB".into());
         }
         let length = if zstd { length } else { stored };
-        if length != expected as u64 {
+        // ETC1S's levels are its transcoder's to size: only no larger than
+        // a level may be.
+        if basislz && stored > MAX_LEVEL as u64 {
+            return Err("a KTX2 level of more than 64 MiB".into());
+        }
+        if !basislz && length != expected as u64 {
             return Err(format!(
                 "a KTX2 texture's level {level} isn't {w} by {h}'s {expected} bytes"
             ));
@@ -358,15 +484,33 @@ mod tests {
         assert!(read(&huge).is_err());
     }
 
+    #[cfg(feature = "ktx2-basis")]
+    #[test]
+    fn a_basis_texture_is_transcoded_to_what_its_device_holds() {
+        use wgpu::Features as F;
+        let both = F::TEXTURE_COMPRESSION_BC | F::TEXTURE_COMPRESSION_ASTC;
+        assert_eq!(Target::for_device(both, (64, 64)).0, Target::Bc7);
+        assert_eq!(
+            Target::for_device(F::TEXTURE_COMPRESSION_ASTC, (64, 64)).0,
+            Target::Astc
+        );
+        assert_eq!(Target::for_device(F::empty(), (64, 64)).0, Target::Rgba8);
+        // Not whole 4 by 4 blocks: RGBA8, whatever the device holds.
+        assert_eq!(Target::for_device(both, (300, 171)).0, Target::Rgba8);
+    }
+
     #[test]
     fn what_isnt_read_says_why() {
         let file = write(4, 4, RGBA8, &[vec![1; 64]]);
         let mut unknown = file.clone();
         unknown[12..16].copy_from_slice(&1000u32.to_le_bytes());
         assert!(read(&unknown).unwrap_err().contains("format 1000"));
-        let mut basis = file.clone();
-        basis[12..16].copy_from_slice(&0u32.to_le_bytes());
-        assert!(read(&basis).unwrap_err().contains("Basis"));
+        #[cfg(not(feature = "ktx2-basis"))]
+        {
+            let mut basis = file.clone();
+            basis[12..16].copy_from_slice(&0u32.to_le_bytes());
+            assert!(read(&basis).unwrap_err().contains("Basis"));
+        }
         let mut basislz = file.clone();
         basislz[44..48].copy_from_slice(&1u32.to_le_bytes());
         assert!(read(&basislz).unwrap_err().contains("supercompression 1"));

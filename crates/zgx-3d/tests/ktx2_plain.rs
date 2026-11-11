@@ -119,9 +119,71 @@ fn frame(mut gpu: GpuRenderer, texture: Texture) -> (Vec<u8>, Caps) {
     )
 }
 
+/// The picture as a Basis Universal (UASTC) KTX2 file: each block its
+/// colour in UASTC's solid-colour mode, every level, UASTC's data format
+/// descriptor (colour model 166).
+#[cfg(feature = "ktx2-basis")]
+fn uastc() -> Vec<u8> {
+    let solid = |[r, g, b, a]: [u8; 4]| -> [u8; 16] {
+        let bits: u128 = 0x17
+            | u128::from(r) << 5
+            | u128::from(g) << 13
+            | u128::from(b) << 21
+            | u128::from(a) << 29;
+        bits.to_le_bytes()
+    };
+    let count = 32 - SIZE.leading_zeros();
+    let levels: Vec<Vec<u8>> = (0..count)
+        .map(|level| {
+            let side = (SIZE >> level).max(1);
+            let (blocks, scale) = (side.div_ceil(4), SIZE / side);
+            (0..blocks)
+                .flat_map(|by| (0..blocks).map(move |bx| (bx, by)))
+                .flat_map(|(bx, by)| solid(picture(bx * 4 * scale, by * 4 * scale)))
+                .collect()
+        })
+        .collect();
+    let dfd: Vec<u8> = [
+        44u32,
+        0,
+        2 | 40 << 16,
+        166 | 1 << 8 | 2 << 16,
+        3 | 3 << 8,
+        16,
+        0,
+        127 << 16 | 3 << 24,
+        0,
+        0,
+        u32::MAX,
+    ]
+    .iter()
+    .flat_map(|v| v.to_le_bytes())
+    .collect();
+    let mut file = b"\xabKTX 20\xbb\r\n\x1a\n".to_vec();
+    for v in [0, 1, SIZE, SIZE, 0, 0, 1, count, 0] {
+        file.extend(u32::to_le_bytes(v));
+    }
+    for v in [80 + 24 * count, dfd.len() as u32, 0, 0] {
+        file.extend(v.to_le_bytes());
+    }
+    file.extend([0u8; 16]);
+    let index_at = file.len();
+    file.resize(index_at + 24 * count as usize, 0);
+    file.extend(&dfd);
+    for (i, level) in levels.iter().enumerate() {
+        file.resize(file.len().next_multiple_of(16), 0);
+        let length = level.len() as u64;
+        let (at, here) = (index_at + 24 * i, file.len() as u64);
+        file[at..at + 24].copy_from_slice(&[here, length, length].map(u64::to_le_bytes).concat());
+        file.extend(level);
+    }
+    file
+}
+
 #[test]
 fn a_bc7_map_on_a_device_without_bc_draws_as_its_png() {
-    // Both renderers made before any world asks for compressed textures.
+    // Every renderer made before any world asks for compressed textures
+    // (the first world made asks, for the devices made after it).
     let made = || match GpuRenderer::new(SIZE, SIZE) {
         Ok(gpu) => Some(gpu),
         Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
@@ -132,27 +194,38 @@ fn a_bc7_map_on_a_device_without_bc_draws_as_its_png() {
     let (Some(a), Some(b)) = (made(), made()) else {
         return;
     };
+    #[cfg(feature = "ktx2-basis")]
+    let basis = made();
     let (blocks, caps) = frame(a, Texture::decode(&ktx2()).unwrap());
     assert!(
-        !caps.compressed.bc,
-        "this device holds BC textures: the test can't see the decode"
+        !caps.compressed.bc && !caps.compressed.astc,
+        "this device holds compressed textures: the test can't see the decode"
     );
     let (pixels, _) = frame(b, Texture::decode(&png()).unwrap());
-    let worst = blocks
-        .iter()
-        .zip(&pixels)
-        .map(|(a, b)| a.abs_diff(*b))
-        .max()
-        .unwrap();
-    assert!(
-        worst <= 1,
-        "the BC7 map drew up to {worst} levels from its PNG"
-    );
-    // And it drew the picture: its four colours.
-    let at = |x: usize, y: usize| &blocks[(y * SIZE as usize + x) * 4..][..3];
-    assert!(
-        at(8, 8)[0] > 200 && at(56, 8)[1] > 200 && at(8, 56)[2] > 200,
-        "{:?}",
-        at(8, 8)
-    );
+    let close = |drawn: &[u8], what: &str| {
+        let worst = drawn
+            .iter()
+            .zip(&pixels)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(
+            worst <= 1,
+            "the {what} map drew up to {worst} levels from its PNG"
+        );
+        // And it drew the picture: its four colours.
+        let at = |x: usize, y: usize| &drawn[(y * SIZE as usize + x) * 4..][..3];
+        assert!(
+            at(8, 8)[0] > 200 && at(56, 8)[1] > 200 && at(8, 56)[2] > 200,
+            "{what}: {:?}",
+            at(8, 8)
+        );
+    };
+    close(&blocks, "BC7");
+    // A Basis Universal map there: transcoded to RGBA8, the same picture.
+    #[cfg(feature = "ktx2-basis")]
+    if let Some(gpu) = basis {
+        let (transcoded, _) = frame(gpu, Texture::decode(&uastc()).unwrap());
+        close(&transcoded, "Basis Universal");
+    }
 }
