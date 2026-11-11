@@ -243,6 +243,10 @@ pub(crate) struct Shader {
     /// What the device refused of it, if anything (`World::shader_error`):
     /// its meshes then draw without it.
     pub(crate) failed: RefCell<Option<String>>,
+    /// Its pipelines on the compile worker now, and whether one has been
+    /// made (`World::shader_ready`).
+    pub(crate) compiling: std::cell::Cell<u32>,
+    pub(crate) compiled: std::cell::Cell<bool>,
 }
 
 /// Bounds on what an app may hand a world: a shader's text, its parameters
@@ -417,6 +421,8 @@ impl Shader {
                 pictures: 0,
             }),
             failed: RefCell::new(None),
+            compiling: Default::default(),
+            compiled: Default::default(),
         };
         made.check(layer)?;
         Ok(made)

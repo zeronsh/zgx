@@ -541,7 +541,11 @@ fn relayer(gpu: &mut Gpu, device: &wgpu::Device, layers: &[Rc<Shader>], runs: &[
     state.pipelines.clear();
     state.shadows.clear();
     // (Compiles under the old layers land nowhere.)
-    state.pending.clear();
+    for (_, (shader, _)) in state.pending.drain() {
+        shader
+            .compiling
+            .set(shader.compiling.get().saturating_sub(1));
+    }
     gpu.variants.clear();
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("3D"),
@@ -689,6 +693,7 @@ fn begin(
     };
     match crate::worker::compile_off_the_frame(job) {
         Ok(()) => {
+            shader.compiling.set(shader.compiling.get() + 1);
             gpu.custom
                 .pending
                 .insert((shader.id, which.0, which.1), (shader.clone(), slot));
@@ -717,8 +722,12 @@ fn collect(gpu: &mut Gpu) -> bool {
     let landed = !done.is_empty();
     for ((id, variant, shadow), shader, made) in done {
         gpu.custom.pending.remove(&(id, variant, shadow));
+        shader
+            .compiling
+            .set(shader.compiling.get().saturating_sub(1));
         match made {
             Ok(Made::Main(pipelines)) => {
+                shader.compiled.set(true);
                 gpu.custom.pipelines.insert((id, variant), pipelines);
             }
             Ok(Made::Shadow(pipeline)) => {

@@ -103,6 +103,20 @@ impl World {
         let inner = self.inner.borrow();
         inner.shader_of(shader)?.failed.borrow().clone()
     }
+    /// Whether `shader`'s pipelines are compiled and none is still
+    /// compiling: its meshes draw by it from the next frame. A shader's
+    /// pipelines compile off the frame once a mesh using it is in a frame
+    /// (in view or not: culling doesn't wait for them), and until then a
+    /// mesh whose frame binds otherwise than the plain pipeline's (lit by an
+    /// environment, clusters, cascades or probes) isn't drawn. Show such a
+    /// mesh once this says so, after a frame with it out of view, to avoid
+    /// its popping in.
+    pub fn shader_ready(&self, shader: ShaderId) -> bool {
+        let inner = self.inner.borrow();
+        inner
+            .shader_of(shader)
+            .is_some_and(|s| s.compiled.get() && s.compiling.get() == 0)
+    }
     /// Whether a custom material's pipeline is compiling (off the frame:
     /// its meshes draw by the plain pipeline, or not at all, till it's
     /// ready). For tests to wait on.
