@@ -24,9 +24,10 @@ pub struct Grade {
     pub gain: [f32; 3],
     /// 0 grey, 1 as it is, above 1 more saturated.
     pub saturation: f32,
-    /// A look-up table applied last, to what the display shows (sRGB
-    /// encoded in, sRGB encoded out, as `.cube` files from grading tools
-    /// for the display are).
+    /// A look-up table: applied last, to what the display shows (sRGB
+    /// encoded in, sRGB encoded out, as `.cube` files for the display are),
+    /// or, made `Lut::in_acescct`, to the scene's light in ACEScct in place
+    /// of the tone curve (as an ACES look and output transform's table).
     pub lut: Option<Lut>,
 }
 impl Default for Grade {
@@ -86,6 +87,8 @@ pub struct Lut {
     /// The table as a strip: N tables of N by N side by side, blue across
     /// them, red across each, green down; RGBA, 8 bits a channel.
     strip: Arc<[u8]>,
+    /// Read in ACEScct, in place of the tone curve (`in_acescct`).
+    cct: bool,
 }
 impl std::fmt::Debug for Lut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -94,7 +97,7 @@ impl std::fmt::Debug for Lut {
 }
 impl PartialEq for Lut {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.id == other.id && self.cct == other.cct
     }
 }
 
@@ -227,7 +230,20 @@ impl Lut {
             id: IDS.fetch_add(1, Ordering::Relaxed),
             size,
             strip: strip.into(),
+            cct: false,
         }
+    }
+    /// The table read in ACEScct (log-encoded ACEScg: the light exposed,
+    /// before tone mapping, as ACES's tables take it), its entries what the
+    /// display shows: it maps the tones itself, in place of
+    /// `World::set_tone_mapping`'s curve.
+    pub fn in_acescct(mut self) -> Self {
+        self.cct = true;
+        self
+    }
+    /// Whether it's read in ACEScct (`in_acescct`).
+    pub fn is_acescct(&self) -> bool {
+        self.cct
     }
     /// Entries a side.
     pub fn size(&self) -> u32 {

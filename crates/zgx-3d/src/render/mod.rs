@@ -1334,7 +1334,12 @@ fn post_look(
         },
         gamma: {
             let [r, g, b] = grade.map_or([1.; 3], |g| g.gamma.map(|v| 1. / v));
-            [r, g, b, 0.]
+            [
+                r,
+                g,
+                b,
+                f32::from(u8::from(table.is_some_and(|t| t.is_acescct()))),
+            ]
         },
         gain: {
             let [r, g, b] = grade.map_or([1.; 3], |g| g.gain);

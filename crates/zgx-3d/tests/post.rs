@@ -1100,3 +1100,32 @@ fn temporal_history_goes_as_the_world_rests_and_as_it_is_turned_off() {
         "off: no history, no chain"
     );
 }
+
+#[test]
+fn a_table_in_acescct_maps_the_light_itself_in_place_of_the_tone_curve() {
+    // An identity table read in ACEScct shows each light's ACEScct code:
+    // middle grey (0.18) is 0.4136, a stop above 0.4707 (S-2016-001).
+    let world = flat([0.18, 0.18, 0.18, 1.]);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    world.set_post(Post {
+        grade: Some(Grade {
+            lut: Some(Lut::identity(33).in_acescct()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    let shown = |window: &mut Window| at(&window.draw(), SIZE / 2, SIZE / 2);
+    let code = |c: f32| (c * 255.).round() as u8;
+    let grey = shown(&mut window);
+    for v in &grey[..3] {
+        assert!(v.abs_diff(code(0.4136)) <= 1, "{grey:?}");
+    }
+    world.set_exposure(1.);
+    let up = shown(&mut window)[0];
+    assert!(up.abs_diff(code(0.4707)) <= 1, "{up}");
+    // The tone curve doesn't apply: the same with ACES.
+    world.set_tone_mapping(ToneMapping::Aces);
+    assert_eq!(shown(&mut window)[0], up);
+}
