@@ -8,7 +8,7 @@
 //! `--smoke-test` flies for two seconds, prints what it drew, and quits.
 use std::{cell::RefCell, rc::Rc, time::Instant};
 use zgx::{compose::prelude::*, input::InputEvent};
-use zgx_3d::{Camera, Orbit, OrbitControls, POINT_LIGHTS, World};
+use zgx_3d::{Camera, Orbit, OrbitControls, World};
 use zgx_desktop::{Application, ScopedTask, WindowOptions};
 use zgx_harbor::{
     hud::{self, Stats},
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 objects: harbor.objects,
                 triangles: harbor.triangles,
                 containers: harbor.yard.len() + harbor.deck.len(),
-                lights: (harbor.lamps.len(), harbor.lamps.len().min(POINT_LIGHTS)),
+                lights: (harbor.lamps.len(), harbor.lamps.len()),
                 ..Stats::default()
             });
             let controls = Rc::new(RefCell::new(OrbitControls::new(orbit_of(world.camera()))));
@@ -102,6 +102,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     s.frame_ms = elapsed * 1e3 / count as f32;
                                     s.time = t;
                                     s.revision = world.revision();
+                                    s.lights.1 =
+                                        s.lights.0.saturating_sub(world.lights_left_out() as usize);
                                 });
                                 (count, since) = (0, Instant::now());
                             }

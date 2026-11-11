@@ -12,9 +12,14 @@
 //!   pixels a point, as a Retina window.
 //! - `BLOCKS` (`5x7`) the yard's blocks; `SKY=0` lights it by a hemisphere
 //!   instead of the dawn sky's environment.
-//! - `SHADOWS=0` turns the sun's shadows off.
+//! - `SHADOWS=0` turns the sun's shadows off, `CASCADES=0` its cascades,
+//!   `LAMPS=0` the lamps;
+//!   `SUN=degrees` sets the sun's elevation, its light's and the sky's;
+//!   `LAMP_REACH` scales every lamp's range (0: none built); `EXPOSURE`
+//!   adds stops (as the panel's slider).
+//! - `HASHES=file` writes each frame's hash, a line each.
 //! - `PNG=path` writes the last frame; `PNGS=dir` writes six frames along
-//!   the path, for looks to be judged.
+//!   the path, for looks to be judged (`PNG_AT=i,j` those frames instead).
 //!
 //! Each frame is waited for by reading it back (the renderer has no other
 //! public wait: GAPS.md, G5) and hashed; the readback's own cost, measured
@@ -24,7 +29,7 @@
 //! copies included.
 use std::time::Instant;
 use zgx::{compose::prelude::*, widgets::Ui};
-use zgx_3d::{POINT_LIGHTS, World};
+use zgx_3d::World;
 use zgx_gpu::{GpuRenderer, Readback};
 use zgx_harbor::{
     hud::{self, Stats},
@@ -87,8 +92,12 @@ fn main() {
             Some((x.parse().ok()?, z.parse().ok()?))
         })
         .unwrap_or(Config::default().blocks);
+    let defaults = Config::default();
     let config = Config {
         blocks,
+        // `SUN=degrees`: the sun's elevation, its light and the sky's both.
+        sun: (env("SUN", defaults.sun.0), defaults.sun.1),
+        lamp_reach: env("LAMP_REACH", 1.),
         ..Config::default()
     };
 
@@ -108,11 +117,21 @@ fn main() {
     settings
         .shadows
         .set(std::env::var("SHADOWS").as_deref() != Ok("0"));
+    // `CASCADES=0`: one shadow map over everything, as before cascades.
+    settings
+        .cascades
+        .set(std::env::var("CASCADES").as_deref() != Ok("0"));
+    // `EXPOSURE=stops`: the panel's exposure, over the harbor's own.
+    settings.exposure.set(env("EXPOSURE", 0.));
+    // `LAMPS=0`: every lamp dark (an attribution arm: the lights' cost).
+    settings
+        .lamps
+        .set(std::env::var("LAMPS").as_deref() != Ok("0"));
     let stats = ui.runtime.signal(Stats {
         objects: harbor.objects,
         triangles: harbor.triangles,
         containers: harbor.yard.len() + harbor.deck.len(),
-        lights: (harbor.lamps.len(), harbor.lamps.len().min(POINT_LIGHTS)),
+        lights: (harbor.lamps.len(), harbor.lamps.len()),
         ..Stats::default()
     });
     ui.mount(div().size(points_w, points_h).child(hud::view(
@@ -132,6 +151,10 @@ fn main() {
         std::fs::create_dir_all(dir).expect("the PNGs' folder");
     }
     let shot_every = (frames / 6).max(1);
+    // `PNG_AT=i,j,...`: those frames, in place of six along the path.
+    let at: Vec<usize> = std::env::var("PNG_AT")
+        .map(|v| v.split(',').filter_map(|i| i.trim().parse().ok()).collect())
+        .unwrap_or_default();
 
     // One frame: the camera where the path is at `seconds`, the HUD's
     // readout, a render, and a wait for it by reading it back.
@@ -145,6 +168,8 @@ fn main() {
             // display, so no rate is shown.
             s.frame_ms = step * 1e3;
             s.revision = world.revision();
+            // Shaded: all but those the last frame left out.
+            s.lights.1 = s.lights.0.saturating_sub(world.lights_left_out() as usize);
         });
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
@@ -163,6 +188,7 @@ fn main() {
     let before = perf::sample();
     let (mut totals, mut renders) = (Vec::with_capacity(frames), Vec::with_capacity(frames));
     let (mut changed, mut hash) = (0usize, 0u64);
+    let mut hashes = Vec::with_capacity(frames);
     let measured = Instant::now();
     for i in 0..frames {
         let seconds = i as f32 * step;
@@ -173,9 +199,15 @@ fn main() {
         // Every 61st pixel: proof each frame differs, at a sliver of a
         // full hash's cost (the full one is the last frame's, below).
         let sample: Vec<u8> = pixels.chunks(4).step_by(61).flatten().copied().collect();
-        hash = perf::hash(&sample) ^ hash.rotate_left(5);
+        let frame_hash = perf::hash(&sample);
+        hash = frame_hash ^ hash.rotate_left(5);
+        hashes.push(frame_hash);
         if let Some(dir) = &shots
-            && i % shot_every == 0
+            && (if at.is_empty() {
+                i % shot_every == 0
+            } else {
+                at.contains(&i)
+            })
         {
             write_png(
                 &dir.join(format!("harbor-{:05.2}s.png", seconds)),
@@ -212,6 +244,12 @@ fn main() {
         .count() as f64
         / (pixels.len() / 4).max(1) as f64;
     let last_hash = perf::hash(&pixels);
+    // `HASHES=file`: each frame's hash a line, to find the frames two runs
+    // disagree on.
+    if let Ok(path) = std::env::var("HASHES") {
+        let lines: String = hashes.iter().map(|h| format!("{h:016x}\n")).collect();
+        std::fs::write(path, lines).expect("the hashes' file");
+    }
     if let Ok(path) = std::env::var("PNG") {
         write_png(std::path::Path::new(&path), width, height, &pixels);
     }
@@ -222,12 +260,12 @@ fn main() {
         path::LOOP
     );
     println!(
-        "scene: {} objects, {:.2} M triangles, {} containers, {} lamps ({} shaded); sky {:.0} ms, build {:.0} ms",
+        "scene: {} objects, {:.2} M triangles, {} containers, {} lights ({} left out of the last frame); sky {:.0} ms, build {:.0} ms",
         harbor.objects,
         harbor.triangles as f64 / 1e6,
         harbor.yard.len() + harbor.deck.len(),
         harbor.lamps.len(),
-        harbor.lamps.len().min(POINT_LIGHTS),
+        world.lights_left_out(),
         sky_ms,
         build_ms,
     );

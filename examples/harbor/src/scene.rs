@@ -11,8 +11,9 @@ use crate::{
     sky, textures,
 };
 use zgx_3d::{
-    Camera, Clearcoat, Environment, Geometry, Light, LightId, Map, MapPlacement, Material, Object,
-    ObjectId, Quat, ToneMapping, Transform, Transmission, Vec3, World, vec3,
+    Camera, Cascades, Clearcoat, Environment, Geometry, Light, LightId, Map, MapPlacement,
+    Material, Object, ObjectId, PointLight, Quat, ToneMapping, Transform, Transmission, Vec3,
+    World, vec3,
 };
 
 /// The water's surface, below the quay's deck.
@@ -35,8 +36,12 @@ pub struct Config {
     pub max_tiers: usize,
     /// Ship-to-shore gantry cranes on the quay.
     pub gantries: usize,
-    /// Lamp masts in the yard, each a sodium point light.
-    pub lamps: usize,
+    /// High masts in the yard: along each lane, and lanes. Each carries
+    /// four sodium floods.
+    pub masts: (usize, usize),
+    /// Every lamp's reach, as a share of where its light falls to
+    /// [`DARK_LUX`] (1: there; 0: no lamps built at all).
+    pub lamp_reach: f32,
     /// The sun's elevation and azimuth, degrees (`sky::sun_toward`).
     pub sun: (f32, f32),
 }
@@ -48,20 +53,33 @@ impl Default for Config {
             blocks: (5, 7),
             max_tiers: 5,
             gantries: 4,
-            lamps: 14,
+            masts: (11, 4),
+            lamp_reach: 1.,
             sun: (7., 28.),
         }
     }
 }
 
-/// Sun light's strength at full elevation, in the engine's units.
-const SUN_INTENSITY: f32 = 3.2;
+/// The exposure, in stops down, that brings the harbor's physical light to
+/// the display: lamps are in lumens and the sun in lux (a point light's
+/// candela over its distance squared is on the sun's scale), so a dawn
+/// lit by both is brought down by this much (EV 11: 2048 lux shows as 1).
+/// The sky's radiance and emissive surfaces are given on the same scale.
+pub const EV: f32 = 11.;
+/// One displayed unit of light at [`EV`], in lux.
+pub const UNIT: f32 = 2048.;
 
-/// The sun as a light at `elevation` and `azimuth` degrees.
+/// The sun's illuminance with the sun high, lux (a hazy morning's; the
+/// clear midday sun gives about 100,000).
+const SUN_LUX: f32 = 6500.;
+
+/// The sun as a light at `elevation` and `azimuth` degrees, in lux.
 pub fn sun_light(elevation: f32, azimuth: f32) -> Light {
     let toward = sky::sun_toward(elevation, azimuth);
-    // Dimmer near the horizon (more air to cross), never off.
-    let strength = SUN_INTENSITY * (0.35 + 0.65 * (elevation / 25.).clamp(0., 1.));
+    // Dimmer near the horizon (more air to cross), and gone a degree
+    // under it.
+    let risen = ((elevation + 1.) / 3.).clamp(0., 1.);
+    let strength = SUN_LUX * (0.35 + 0.65 * (elevation / 25.).clamp(0., 1.)) * risen;
     Light::Directional {
         direction: -toward,
         color: sky::sun_color(elevation),
@@ -69,14 +87,28 @@ pub fn sun_light(elevation: f32, azimuth: f32) -> Light {
     }
 }
 
-/// A sodium lamp at `position`, on or off.
-pub fn lamp_light(position: Vec3, on: bool) -> Light {
-    Light::Point {
-        position,
-        color: [1., 0.52, 0.16],
-        intensity: if on { 420. } else { 0. },
-        range: 70.,
-    }
+/// The sun's shadow in four cascades over the view's first 600 m: the
+/// whole quay and yard from anywhere on the fly-through's low passes.
+pub fn cascades() -> Cascades {
+    Cascades::new(4).distance(600.)
+}
+
+/// High-pressure sodium's colour, linear.
+const SODIUM: [f32; 3] = [1., 0.55, 0.2];
+/// A white LED flood's colour, linear.
+const LED: [f32; 3] = [0.86, 0.93, 1.];
+
+/// The illuminance a lamp's reach ends at, lux: about a full moon's.
+pub const DARK_LUX: f32 = 0.5;
+
+/// Where `light`, straight ahead of it, falls to [`DARK_LUX`].
+pub fn reach(light: &PointLight) -> f32 {
+    (light.candela / DARK_LUX).sqrt()
+}
+
+/// `light` on, or off (no lumens).
+pub fn lamp(light: PointLight, on: bool) -> PointLight {
+    if on { light } else { light.lumens(0.) }
 }
 
 /// The harbor's handles: what the settings and animations reach.
@@ -88,8 +120,8 @@ pub struct Harbor {
     pub sun: LightId,
     /// The sky's light from all round (when no environment is set).
     pub ambient: LightId,
-    /// The lamps, and where each shines from.
-    pub lamps: Vec<(LightId, Vec3)>,
+    /// The lamps, each as lit.
+    pub lamps: Vec<(LightId, PointLight)>,
     /// The yard's containers, in the order built (the ship's are apart).
     pub yard: Vec<ObjectId>,
     /// The containers on the ship.
@@ -216,14 +248,16 @@ impl Harbor {
         world.set_background(Some(sky::BACKGROUND));
         world.set_tone_mapping(ToneMapping::Aces);
         world.set_shadows(true);
+        world.set_cascades(Some(cascades()));
+        world.set_exposure(-EV);
         let has_environment = environment.is_some();
-        world.set_environment(environment);
+        world.set_environment(environment.map(|e| e.intensity(UNIT)));
         let (elevation, azimuth) = config.sun;
         let sun = world.add_light(sun_light(elevation, azimuth));
         let ambient = world.add_light(Light::Hemisphere {
             sky: [0.36, 0.42, 0.62],
             ground: [0.12, 0.1, 0.09],
-            intensity: if has_environment { 0. } else { 0.7 },
+            intensity: if has_environment { 0. } else { 0.7 * UNIT },
         });
         world.set_camera(Camera {
             near: 0.5,
@@ -233,14 +267,14 @@ impl Harbor {
 
         let water = quay(&mut b);
         let yard = yard(&mut b, config);
-        let gantries = (0..config.gantries)
+        let gantries: Vec<Gantry> = (0..config.gantries)
             .map(|i| {
                 let x = (i as f32 - (config.gantries as f32 - 1.) * 0.5) * 66.;
                 gantry(&mut b, x)
             })
             .collect();
-        let deck = ship(&mut b);
-        let lamps = lamps(&mut b, config);
+        let (ship_root, deck) = ship(&mut b);
+        let lamps = lamps(&mut b, config, &gantries, ship_root);
         // The shore across the water.
         let ridge = shapes::ridge(-1500., 5000., WATER_LEVEL - 1., 90., config.seed as u32);
         b.add(Object::mesh(ridge, Material::rgb(0x3c4250).with(0., 0.95)));
@@ -570,9 +604,9 @@ fn gantry(b: &mut Build, x: f32) -> Gantry {
 }
 
 /// The ship at its berth: hull, hatch covers, deck stacks, the
-/// accommodation block with its bridge and funnel. Returns the deck's
-/// containers.
-fn ship(b: &mut Build) -> Vec<ObjectId> {
+/// accommodation block with its bridge and funnel. Returns its group and
+/// the deck's containers.
+fn ship(b: &mut Build) -> (ObjectId, Vec<ObjectId>) {
     let (length, beam_width, deck) = (232., 32.2, 9.);
     let root = b.group(vec3(0., 0., SHIP_Z), None);
     let hull = shapes::hull(
@@ -654,7 +688,7 @@ fn ship(b: &mut Build) -> Vec<ObjectId> {
             let lit = b.rng.chance(0.3);
             let mut m = Material::rgb(0x111518).with(0., 0.1);
             if lit {
-                m.emissive = [1.6, 1.1, 0.55];
+                m.emissive = [1.6 * UNIT, 1.1 * UNIT, 0.55 * UNIT];
             }
             let z = (k as f32 - 3.) * 3.;
             let y = deck + 3. + level as f32 * 3.2;
@@ -683,30 +717,112 @@ fn ship(b: &mut Build) -> Vec<ObjectId> {
             })
             .child_of(root),
     );
-    out
+    (root, out)
 }
 
-/// Lamp masts in the yard's lanes: a pole, a head, a sodium light each.
-fn lamps(b: &mut Build, config: &Config) -> Vec<(LightId, Vec3)> {
+/// The lights of a working night not yet over: high masts over the yard's
+/// lanes with four sodium floods each, posts along the quay, floods under
+/// each gantry's boom (following the crane), and the ship's deck lights.
+/// Some hundreds in all, shaded through clusters.
+fn lamps(
+    b: &mut Build,
+    config: &Config,
+    gantries: &[Gantry],
+    ship: ObjectId,
+) -> Vec<(LightId, PointLight)> {
     let root = b.group(Vec3::ZERO, None);
     let pole = Material::rgb(0x8d9196).with(0.8, 0.4);
-    let mut head = Material::rgb(0x222222).with(0.2, 0.5);
-    head.emissive = [4., 2.1, 0.6];
+    let mut glow = Material::rgb(0x222222).with(0.2, 0.5);
+    glow.emissive = [3.5 * UNIT, 1.9 * UNIT, 0.7 * UNIT];
+    let mut white = Material::rgb(0x222222).with(0.2, 0.5);
+    white.emissive = [2.6 * UNIT, 2.8 * UNIT, 3. * UNIT];
     let mut out = Vec::new();
-    let columns = config.lamps.div_ceil(2).max(1);
-    for k in 0..config.lamps {
-        let (col, row) = (k % columns, k / columns);
-        let x = (col as f32 - (columns as f32 - 1.) * 0.5) * (QUAY_LENGTH / columns as f32);
-        let z = if row == 0 { 66. } else { 190. };
-        let height = 32.;
+    if config.lamp_reach <= 0. {
+        return out;
+    }
+    let reach = config.lamp_reach;
+    let mut add = |b: &mut Build, light: PointLight, parent: Option<ObjectId>| {
+        let light = light.range(self::reach(&light) * reach);
+        let id = b.world.add_point_light(light);
+        if parent.is_some() {
+            b.world.set_light_parent(id, parent);
+        }
+        out.push((id, light));
+    };
+    // High masts: in the lanes between the yard's block rows, at block
+    // ends and middles along them.
+    let block_z = 6. * (CONTAINER_WIDTH + 0.32) + 14.;
+    let block_x = 8. * (CONTAINER_40 + 0.7) + 20.;
+    let (along, lanes) = config.masts;
+    for lane in 0..lanes {
+        let z = 76. + (lane as f32 * 2. - 0.5) * block_z;
+        for k in 0..along {
+            let x = (k as f32 - (along as f32 - 1.) * 0.5) * block_x * 0.5;
+            let height = 35.;
+            b.part(
+                beam(vec3(x, 0., z), vec3(x, height, z), 0.7, 0.7),
+                pole,
+                root,
+            );
+            b.part(block(vec3(x, height, z), vec3(4., 0.5, 4.)), pole, root);
+            for (dx, dz) in [(1., 1.), (1., -1.), (-1., 1.), (-1., -1.)] {
+                let at = vec3(x + dx * 1.6, height - 0.3, z + dz * 1.6);
+                b.part(
+                    block(at - vec3(0., 0.35, 0.), vec3(0.9, 0.35, 0.9)),
+                    glow,
+                    root,
+                );
+                let light = Light::spot(at, vec3(dx, -2.2, dz))
+                    .lumens(32_000.)
+                    .color(SODIUM)
+                    .cone(0.55, 0.95)
+                    .radius(0.25);
+                add(b, light, None);
+            }
+        }
+    }
+    // Posts along the apron's back edge.
+    let mut x = -QUAY_LENGTH * 0.5 + 20.;
+    while x < QUAY_LENGTH * 0.5 {
+        let (z, height) = (56., 12.);
         b.part(
-            beam(vec3(x, 0., z), vec3(x, height, z), 0.5, 0.5),
+            beam(vec3(x, 0., z), vec3(x, height, z), 0.3, 0.3),
             pole,
             root,
         );
-        b.part(block(vec3(x, height, z), vec3(3.2, 0.6, 1.4)), head, root);
-        let at = vec3(x, height - 0.4, z);
-        out.push((b.world.add_light(lamp_light(at, true)), at));
+        b.part(
+            block(vec3(x, height, z - 0.6), vec3(0.6, 0.3, 1.4)),
+            glow,
+            root,
+        );
+        let light = Light::point(vec3(x, height - 0.2, z - 0.8))
+            .lumens(14_000.)
+            .color(SODIUM)
+            .radius(0.15);
+        add(b, light, None);
+        x += 40.;
+    }
+    // Floods under each boom, in the crane's frame.
+    for g in gantries {
+        for z in [-56., -40., -24., -6., 12.] {
+            let at = vec3(0., 47.2, z);
+            b.part(block(at, vec3(1.2, 0.4, 0.8)), white, g.root);
+            let light = Light::spot(at, vec3(0., -1., 0.))
+                .lumens(24_000.)
+                .color(LED)
+                .cone(0.4, 0.7)
+                .radius(0.2);
+            add(b, light, Some(g.root));
+        }
+    }
+    // The ship's deck lights, in its frame.
+    for k in 0..9 {
+        let at = vec3(-75. + k as f32 * 18., 10.8, 0.);
+        let light = Light::point(at)
+            .lumens(6_000.)
+            .color([1., 0.86, 0.66])
+            .radius(0.1);
+        add(b, light, Some(ship));
     }
     out
 }
@@ -746,8 +862,9 @@ mod tests {
         let containers = h.yard.len() + h.deck.len();
         assert!(containers > 3000, "{containers}");
         assert!(
-            h.lamps.len() > zgx_3d::POINT_LIGHTS,
-            "more lamps than are shaded"
+            h.lamps.len() > 200,
+            "lamps by the hundred: {}",
+            h.lamps.len()
         );
     }
 }

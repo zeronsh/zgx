@@ -20,6 +20,16 @@ pub fn sun_color(elevation: f32) -> [f32; 3] {
 
 /// The sky's colour, linear, toward `d` (unit), the sun toward `sun`.
 pub fn radiance(d: Vec3, sun: Vec3) -> [f32; 3] {
+    let c = clear(d, sun);
+    // Twilight: the whole sky dims as the sun goes under, through about
+    // a thousandth with it 12 degrees down (night lit by lamps).
+    let t = ((sun.y + 0.21) / 0.29).clamp(0., 1.);
+    let dim = 0.0008 + 0.9992 * (t * t * (3. - 2. * t)).powi(3);
+    c.map(|v| v * dim)
+}
+
+/// [`radiance`] before twilight dims it.
+fn clear(d: Vec3, sun: Vec3) -> [f32; 3] {
     let up = d.y;
     let lit = (sun.y / 0.3).clamp(0., 1.);
     if up < 0. {
@@ -45,7 +55,11 @@ pub fn radiance(d: Vec3, sun: Vec3) -> [f32; 3] {
     // The glow round the sun, then its disc.
     let cos = d.dot(sun).clamp(-1., 1.);
     let glow = cos.max(0.).powf(64.) * 6. + cos.max(0.).powf(8.) * 0.8;
-    let disc = if cos > 0.99985 { 400. } else { 0. };
+    let disc = if cos > 0.99985 && sun.y > -0.01 {
+        400.
+    } else {
+        0.
+    };
     let tint = sun_color(sun.y.asin().to_degrees());
     for i in 0..3 {
         c[i] += (glow + disc) * tint[i];

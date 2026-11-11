@@ -88,7 +88,7 @@ pub fn view(viewport: View, settings: &Settings, stats: Signal<Stats>) -> View {
         }))
         .child(line(|s| format!("{} containers", s.containers)))
         .child(line(|s| {
-            format!("{} lamps, {} shaded a frame", s.lights.0, s.lights.1)
+            format!("{} lights, {} shaded", s.lights.0, s.lights.1)
         }));
     let value = |signal: &Signal<f32>, f: fn(f32) -> String| {
         let signal = signal.clone();
@@ -107,7 +107,7 @@ pub fn view(viewport: View, settings: &Settings, stats: Signal<Stats>) -> View {
             row()
                 .gap(8.)
                 .items_center()
-                .child(slider("Sun elevation", s.sun_elevation.clone(), 1. ..=40.).grow())
+                .child(slider("Sun elevation", s.sun_elevation.clone(), -6. ..=40.).grow())
                 .child(value(&s.sun_elevation, |v| format!("{v:.0}°"))),
         )
         .child(label("Exposure"))
@@ -115,7 +115,7 @@ pub fn view(viewport: View, settings: &Settings, stats: Signal<Stats>) -> View {
             row()
                 .gap(8.)
                 .items_center()
-                .child(slider("Exposure", s.exposure.clone(), -3. ..=3.).grow())
+                .child(slider("Exposure", s.exposure.clone(), -4. ..=10.).grow())
                 .child(value(&s.exposure, |v| format!("{v:+.1}"))),
         )
         .child(label("Tone mapping"))
@@ -127,6 +127,7 @@ pub fn view(viewport: View, settings: &Settings, stats: Signal<Stats>) -> View {
                 .child(radio("Linear", tone, ToneMapping::Linear)),
         )
         .child(checkbox("Sun shadows", s.shadows.clone()))
+        .child(checkbox("Shadow cascades", s.cascades.clone()))
         .child(checkbox("4x multisampling", s.msaa.clone()))
         .child(checkbox("Lamps", s.lamps.clone()))
         .child(label("Yard filled"))

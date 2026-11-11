@@ -15,7 +15,8 @@ description = "The reference demo of zgx-3d's primitives: a harbor at dawn, in r
 
 [dependencies]
 zgx = { path = "../../crates/zgx", default-features = false }
-zgx-3d = { path = "../../crates/zgx-3d" }
+# lighting: clustered point and spot lights in physical units, cascades.
+zgx-3d = { path = "../../crates/zgx-3d", features = ["lighting"] }
 zgx-desktop = { path = "../../crates/zgx-desktop", default-features = false }
 # `GpuRenderer`: the public offscreen renderer the bench draws through
 # (zgx-desktop doesn't re-export it).

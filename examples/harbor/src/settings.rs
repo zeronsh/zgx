@@ -19,6 +19,8 @@ pub struct Settings {
     pub tone_mapping: Signal<ToneMapping>,
     /// The sun casts shadows.
     pub shadows: Signal<bool>,
+    /// Its shadow is cut into cascades (off: one map over everything).
+    pub cascades: Signal<bool>,
     /// 4x multisampling; off, one sample.
     pub msaa: Signal<bool>,
     /// The yard's lamps are lit.
@@ -38,6 +40,7 @@ impl Settings {
             exposure: runtime.signal(0.),
             tone_mapping: runtime.signal(ToneMapping::Aces),
             shadows: runtime.signal(true),
+            cascades: runtime.signal(true),
             msaa: runtime.signal(true),
             lamps: runtime.signal(true),
             yard: runtime.signal(1.),
@@ -57,7 +60,7 @@ impl Settings {
         }
         {
             let (s, w) = (self.exposure.clone(), world.clone());
-            effects.push(runtime.effect(move || w.set_exposure(s.get())));
+            effects.push(runtime.effect(move || w.set_exposure(s.get() - scene::EV)));
         }
         {
             let (s, w) = (self.tone_mapping.clone(), world.clone());
@@ -68,6 +71,12 @@ impl Settings {
             effects.push(runtime.effect(move || w.set_shadows(s.get())));
         }
         {
+            let (s, w) = (self.cascades.clone(), world.clone());
+            effects.push(runtime.effect(move || {
+                w.set_cascades(s.get().then(scene::cascades));
+            }));
+        }
+        {
             let (s, w) = (self.msaa.clone(), world.clone());
             effects.push(runtime.effect(move || w.set_samples(if s.get() { 4 } else { 1 })));
         }
@@ -75,8 +84,8 @@ impl Settings {
             let (s, w, lamps) = (self.lamps.clone(), world.clone(), harbor.lamps.clone());
             effects.push(runtime.effect(move || {
                 let on = s.get();
-                for &(id, at) in &lamps {
-                    w.set_light(id, scene::lamp_light(at, on));
+                for &(id, light) in &lamps {
+                    w.set_point_light(id, scene::lamp(light, on));
                 }
             }));
         }
