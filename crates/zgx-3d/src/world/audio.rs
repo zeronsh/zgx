@@ -448,11 +448,14 @@ struct Triangles {
 /// by triangle meanwhile; the token says it's still wanted), or made.
 enum MeshTree {
     Building {
-        made: std::sync::mpsc::Receiver<Triangles>,
+        /// The tree, or `None` if making it panicked.
+        made: std::sync::mpsc::Receiver<Option<Triangles>>,
         /// Held while it's wanted: the tree thread skips one let go.
         _wanted: std::sync::Arc<()>,
     },
     Ready(Triangles),
+    /// Its making panicked: its mesh is tested triangle by triangle.
+    Failed,
 }
 
 /// A tree to make: of `geometry`, sent back by `made`, unless nobody
@@ -460,12 +463,15 @@ enum MeshTree {
 struct TreeJob {
     geometry: crate::Geometry,
     wanted: std::sync::Weak<()>,
-    made: std::sync::mpsc::Sender<Triangles>,
+    made: std::sync::mpsc::Sender<Option<Triangles>>,
 }
 
 /// The one thread every world's trees are made on, in turn, made with the
 /// first: a level of hundreds of meshes queues them, not a thread each.
-/// It waits on its queue, never waking with nothing to do.
+/// Once made it stays for the life of the process, waiting on its queue
+/// (parked: no wakeups with nothing to do), unlike the audio engine's host
+/// thread, which ends once its stream is closed. A tree whose making
+/// panics is answered `None`, and the thread goes on to the next.
 static TREE_WORKER: std::sync::Mutex<Option<std::sync::mpsc::Sender<TreeJob>>> =
     std::sync::Mutex::new(None);
 
@@ -492,7 +498,10 @@ fn queue_tree(job: TreeJob) -> Result<(), TreeJob> {
         .spawn(move || {
             for job in jobs {
                 if job.wanted.strong_count() > 0 {
-                    let _ = job.made.send(Triangles::new(&job.geometry));
+                    let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        Triangles::new(&job.geometry)
+                    }));
+                    let _ = job.made.send(made.ok());
                 }
             }
         });
@@ -573,8 +582,18 @@ fn axis(v: Vec3, k: usize) -> f32 {
     }
 }
 
+/// Tests: a geometry whose tree's making panics.
+#[cfg(test)]
+static PANICS_FOR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+
 impl Triangles {
     fn new(geometry: &crate::Geometry) -> Triangles {
+        #[cfg(test)]
+        assert_ne!(
+            geometry.id(),
+            PANICS_FOR.load(std::sync::atomic::Ordering::Relaxed),
+            "made to panic"
+        );
         let (vertices, indices) = (geometry.vertices(), geometry.indices());
         let count = indices.len() / 3;
         let corners = |t: u32| -> [Vec3; 3] {
@@ -1441,15 +1460,32 @@ impl Sound3d {
             }
         }
         self.blockers(inner);
-        // Trees made since, taken.
+        // Trees made since, taken. One whose making panicked stays without
+        // (its mesh tested triangle by triangle: making it again would
+        // panic again). One whose thread went before making it is let go,
+        // and the blockers found again next frame: queued anew.
         if self.building > 0 {
-            for tree in self.trees.values_mut() {
-                if let MeshTree::Building { made, .. } = tree
-                    && let Ok(made) = made.try_recv()
-                {
-                    *tree = MeshTree::Ready(made);
-                    self.building -= 1;
+            let mut lost = false;
+            let building = &mut self.building;
+            self.trees.retain(|_, tree| {
+                let MeshTree::Building { made, .. } = tree else {
+                    return true;
+                };
+                match made.try_recv() {
+                    Ok(Some(made)) => *tree = MeshTree::Ready(made),
+                    Ok(None) => *tree = MeshTree::Failed,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => return true,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        *building -= 1;
+                        lost = true;
+                        return false;
+                    }
                 }
+                *building -= 1;
+                true
+            });
+            if lost {
+                self.blocking.0 = None;
             }
         }
         self.cast = 0;
@@ -1844,7 +1880,7 @@ impl World {
                 .values()
                 .map(|tree| match tree {
                     MeshTree::Ready(tree) => tree.bytes(),
-                    MeshTree::Building { .. } => 0,
+                    MeshTree::Building { .. } | MeshTree::Failed => 0,
                 })
                 .sum()
         })
@@ -2218,5 +2254,44 @@ mod tests {
         world.update_audio(Instant::now());
         assert!(ids(&world).is_empty());
         assert_eq!(world.sound_bytes(), 0);
+    }
+
+    #[test]
+    fn a_tree_whose_making_panics_leaves_its_mesh_linear_and_the_rest_made() {
+        // Three large meshes queued together; the second's tree panics.
+        // The tree thread goes on: the first's and third's are made, the
+        // second's mesh stays tested triangle by triangle, nothing waits.
+        let (audio, _mixer) = zgx_audio::Audio::offline(zgx_audio::Config::default()).unwrap();
+        let world = World::new();
+        world
+            .set_audio(&audio, &audio.bus("world").unwrap())
+            .unwrap();
+        let grounds = [hills(31), hills(32), hills(33)];
+        PANICS_FOR.store(grounds[1].id(), std::sync::atomic::Ordering::Relaxed);
+        for ground in &grounds {
+            world.add(Object::mesh(ground.clone(), Material::default()));
+        }
+        let threads = TREE_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+        let start = Instant::now();
+        loop {
+            world.update_audio(Instant::now());
+            if world.inner.borrow().audio.as_ref().unwrap().building == 0 {
+                break;
+            }
+            assert!(start.elapsed().as_secs() < 10, "still waiting");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let inner = world.inner.borrow();
+        let trees = &inner.audio.as_ref().unwrap().trees;
+        let state = |g: &Geometry| match trees.get(&g.id()) {
+            Some(MeshTree::Ready(_)) => "ready",
+            Some(MeshTree::Failed) => "failed",
+            Some(MeshTree::Building { .. }) => "building",
+            None => "none",
+        };
+        assert_eq!(grounds.each_ref().map(state), ["ready", "failed", "ready"]);
+        // The same thread, still there (one a process, at most, beside any
+        // other test's first).
+        assert!(TREE_THREADS.load(std::sync::atomic::Ordering::Relaxed) <= threads.max(1));
     }
 }
