@@ -1362,6 +1362,49 @@ fn surface(s: SurfaceIn) -> Surface {
         );
     }
 
+    #[test]
+    fn a_shadow_cast_by_gpu_data_follows_its_data_swapped() {
+        // GB2: two buffers never written (their counts alike), swapped by
+        // `set_param`: the shadow is cast by the one bound now. (Through the
+        // API this can't fail for GB2's cause alone: binding anew makes a
+        // new binding key, which casts anew too. The key itself is
+        // `world::materials::tests::data_bound_in_turn_casts_by_which_it_is`.)
+        let other = std::cell::RefCell::new(None);
+        let setup = |world: &World| {
+            let (shader, _, cube) = lifted_by_data(world, 0.);
+            let lifted = world
+                .add_buffer(BufferDesc::from_slice(&[[1.2f32, 0., 0., 0.]]))
+                .unwrap();
+            other.replace(Some(lifted));
+            (vec![shader], cube)
+        };
+        retained_matches_fresh("data swapped", setup, |world, ids, _| {
+            let other = other.borrow();
+            world
+                .set_param(ids[0], "lift", other.as_ref().unwrap())
+                .unwrap();
+        });
+        // And back: the first again, as a world that never swapped draws.
+        let first = std::cell::RefCell::new(None);
+        retained_matches_fresh(
+            "data swapped back",
+            |world| {
+                let (shader, buffer, cube) = lifted_by_data(world, 0.);
+                first.replace(Some(buffer));
+                (vec![shader], cube)
+            },
+            |world, ids, _| {
+                let lifted = world
+                    .add_buffer(BufferDesc::from_slice(&[[1.2f32, 0., 0., 0.]]))
+                    .unwrap();
+                world.set_param(ids[0], "lift", &lifted).unwrap();
+                world
+                    .set_param(ids[0], "lift", first.borrow().as_ref().unwrap())
+                    .unwrap();
+            },
+        );
+    }
+
     #[cfg(feature = "lighting")]
     #[test]
     fn a_cascaded_shadow_cast_by_gpu_data_follows_the_apps_writes_to_it() {

@@ -624,17 +624,23 @@ impl Shader {
     /// A number for the device copies of its GPU data a binding of it
     /// holds (each one's generation): another means its bindings are made
     /// again (`custom::prepare`).
-    /// How many times its GPU data has changed, together
-    /// (`GpuBuffer::writes`): its shadow is cast anew when this moves, if
-    /// it casts by that data (`casts_data`).
+    /// A number for its GPU data as it is now: which buffer or texture
+    /// each parameter binds and how many times that has changed
+    /// (`GpuBuffer::writes`). Its shadow is cast anew when this moves, if
+    /// it casts by that data (`casts_data`): data written, or other data
+    /// bound (GB2: two never-written buffers swapped count alike).
     #[cfg(feature = "compute")]
-    pub(crate) fn data_writes(&self) -> u64 {
+    pub(crate) fn data_cast_key(&self) -> u64 {
         let values = self.values.borrow();
-        values.data.iter().flatten().fold(0, |sum, d| {
-            sum.wrapping_add(match d {
-                Data::Buffer(b) => b.writes(),
-                Data::Texture(t) => t.writes(),
-            })
+        values.data.iter().fold(0xcbf2_9ce4_8422_2325, |key, d| {
+            let (id, writes) = match d {
+                Some(Data::Buffer(b)) => (b.0.id, b.writes()),
+                Some(Data::Texture(t)) => (t.0.id, t.writes()),
+                None => (0, 0),
+            };
+            [id, writes]
+                .into_iter()
+                .fold(key, |key, n| (key ^ n).wrapping_mul(0x0100_0000_01b3))
         })
     }
     #[cfg(feature = "compute")]

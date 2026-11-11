@@ -209,3 +209,53 @@ impl World {
         Ok(ShaderId(id))
     }
 }
+
+#[cfg(all(test, feature = "compute"))]
+mod tests {
+    use crate::{BufferDesc, MaterialShader, World};
+
+    #[test]
+    fn data_bound_in_turn_casts_by_which_it_is() {
+        // GB2: two buffers never written count their changes alike (0), so
+        // a key of counts alone took one swapped for the other as no change
+        // (recast then only because binding anew happens to make a new
+        // binding key). Which buffer it is goes into the key too.
+        let world = World::new();
+        let shader = world
+            .add_shader(
+                MaterialShader::new(
+                    "#zgx material 1
+                     fn displace(v: VertexIn) -> Displaced {
+                         var d: Displaced;
+                         d.position = v.position + params.lift[0].xyz;
+                         d.normal = v.normal;
+                         return d;
+                     }",
+                )
+                .buffer("lift", "array<vec4<f32>>"),
+            )
+            .unwrap();
+        let [low, high] = [0f32, 1.].map(|lift| {
+            world
+                .add_buffer(BufferDesc::from_slice(&[[lift, 0., 0., 0.]]))
+                .unwrap()
+        });
+        let key = || {
+            world
+                .inner
+                .borrow()
+                .shader_of(shader)
+                .unwrap()
+                .data_cast_key()
+        };
+        let read = world.inner.borrow().shader_of(shader).unwrap().casts_data;
+        assert!(read, "its displace reads its data");
+        world.set_param(shader, "lift", &low).unwrap();
+        let at_low = key();
+        world.set_param(shader, "lift", &high).unwrap();
+        let at_high = key();
+        assert_ne!(at_low, at_high, "another buffer bound");
+        world.set_param(shader, "lift", &low).unwrap();
+        assert_eq!(key(), at_low, "the first again");
+    }
+}

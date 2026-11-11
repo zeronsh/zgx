@@ -49,6 +49,11 @@ pub(super) struct State {
     /// shadow map was last drawn with them (`data_cast_changed`).
     #[cfg(feature = "compute")]
     data_cast: u64,
+    /// The shaders whose `displace` or `opacity` reads GPU data that the
+    /// last frame drew as casters (`prepare`): what `data_cast_changed`
+    /// looks at (not every binding still kept).
+    #[cfg(feature = "compute")]
+    casting_data: Vec<Rc<Shader>>,
     /// Pipelines by shader and variant, made with the layers as they are
     /// (`layers`).
     pipelines: HashMap<(u32, Variant), [wgpu::RenderPipeline; 2]>,
@@ -608,6 +613,8 @@ pub(super) fn prepare(
     let shaders = &world.shaders;
     if shaders.is_empty() && gpu.custom.layers.is_empty() {
         gpu.custom.reads = false;
+        #[cfg(feature = "compute")]
+        gpu.custom.casting_data.clear();
         return;
     }
     let device = frame.device;
@@ -624,6 +631,10 @@ pub(super) fn prepare(
     write_tail(gpu, world, frame);
     let mut reads = false;
     let mut casting = 0xcbf2_9ce4_8422_2325_u64;
+    #[cfg(feature = "compute")]
+    let mut casting_data = std::mem::take(&mut gpu.custom.casting_data);
+    #[cfg(feature = "compute")]
+    casting_data.clear();
     for run in runs.iter().filter(|run| run.variant.custom()) {
         let Some(shader) = gpu.custom.by_binding.get(&run.maps).cloned() else {
             continue;
@@ -656,6 +667,10 @@ pub(super) fn prepare(
         if casts && !run.glass {
             for n in [shader.id, run.instances.start, run.instances.end].map(u64::from) {
                 casting = (casting ^ n).wrapping_mul(0x0100_0000_01b3);
+            }
+            #[cfg(feature = "compute")]
+            if shader.casts_data && !casting_data.iter().any(|s| Rc::ptr_eq(s, &shader)) {
+                casting_data.push(shader.clone());
             }
         }
         if shader.uniform_size > 0 {
@@ -721,6 +736,10 @@ pub(super) fn prepare(
     if std::mem::replace(&mut gpu.custom.casting, casting) != casting {
         gpu.shadow_drawn = None;
     }
+    #[cfg(feature = "compute")]
+    {
+        gpu.custom.casting_data = casting_data;
+    }
     // Bindings gone, their shaders with them.
     let bindings = &gpu.bindings;
     gpu.custom
@@ -736,13 +755,14 @@ pub(super) fn prepare(
 #[cfg(feature = "compute")]
 pub(super) fn data_cast_changed(gpu: &mut Gpu) -> bool {
     let state = &mut gpu.custom;
-    if state.by_binding.is_empty() {
+    if state.casting_data.is_empty() {
         return false;
     }
     let mut key = 0xcbf2_9ce4_8422_2325_u64;
-    for shader in state.by_binding.values().filter(|s| s.casts_data) {
-        let n = u64::from(shader.id) ^ shader.data_writes().rotate_left(17);
-        key = key.wrapping_add(n.wrapping_mul(0x0100_0000_01b3));
+    for shader in &state.casting_data {
+        for n in [u64::from(shader.id), shader.data_cast_key()] {
+            key = (key ^ n).wrapping_mul(0x0100_0000_01b3);
+        }
     }
     std::mem::replace(&mut state.data_cast, key) != key
 }
