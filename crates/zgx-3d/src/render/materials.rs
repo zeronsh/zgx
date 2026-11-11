@@ -426,7 +426,7 @@ pub(super) fn upload(
     texture: &crate::Texture,
     srgb: bool,
 ) -> Option<wgpu::TextureView> {
-    let decoded = decoded(texture, device.features())?;
+    let decoded = decoded(texture, srgb, device.features())?;
     upload_decoded(device, queue, texture, srgb, decoded)
 }
 /// A texture's levels, ready to upload: decoding them is most of an
@@ -435,8 +435,8 @@ type Decoded<'a> = crate::texture::Levels<'a>;
 /// `texture`'s levels for a device of `features` (`Texture::levels`);
 /// `None` if they don't decode, or a decoder panics (caught: on the frame's
 /// thread too, a hostile file draws as if it had no map).
-fn decoded(texture: &crate::Texture, features: wgpu::Features) -> Option<Decoded<'_>> {
-    crate::assets::guarded(texture, || texture.levels(features))
+fn decoded(texture: &crate::Texture, srgb: bool, features: wgpu::Features) -> Option<Decoded<'_>> {
+    crate::assets::guarded(texture, || texture.levels(features, srgb))
 }
 /// `texture`, `decoded`, on the GPU (`upload`); `None` where the device
 /// can't hold its levels (`assets::upload_levels`).
@@ -515,10 +515,10 @@ pub(super) fn upload_missing(
             scope.spawn(move || {
                 loop {
                     let at = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    let Some(&(texture, _)) = wanted.get(at) else {
+                    let Some(&(texture, srgb)) = wanted.get(at) else {
                         break;
                     };
-                    if sent.send((at, decoded(texture, features))).is_err() {
+                    if sent.send((at, decoded(texture, srgb, features))).is_err() {
                         break;
                     }
                 }

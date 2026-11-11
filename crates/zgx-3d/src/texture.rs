@@ -294,13 +294,18 @@ impl Texture {
     /// smaller levels as the file made them), else its pixels and the levels
     /// below them made here (`mipmaps`). `None` if they don't decode.
     /// A Basis Universal file's are transcoded for a device of `features`
-    /// (`ktx2::Target::for_device`); no other's read them.
-    pub(crate) fn levels(&self, features: zgx_gpu::wgpu::Features) -> Option<Levels<'_>> {
-        if let Some(kept) = self.kept_levels(features) {
+    /// (`ktx2::Target::for_device`); no other's read them. Levels made here
+    /// are made for a map read as sRGB colours or not (`srgb`, `mipmaps`).
+    pub(crate) fn levels(
+        &self,
+        features: zgx_gpu::wgpu::Features,
+        srgb: bool,
+    ) -> Option<Levels<'_>> {
+        if let Some(kept) = self.kept_levels(features, srgb) {
             return Some(kept);
         }
         let image = self.pixels()?;
-        let smaller = mipmaps(self.0.width, self.0.height, image.pixels());
+        let smaller = mipmaps(self.0.width, self.0.height, image.pixels(), srgb);
         Some(Levels::Made(image, smaller))
     }
     /// Its file's own levels (a KTX2 file's, the `ktx2` feature): its
@@ -308,9 +313,13 @@ impl Texture {
     /// level of texels has the rest made, `levels`). `None` where it has
     /// none, or they don't decompress. A Basis Universal file's levels are
     /// transcoded for a device of `features`: blocks it holds, or RGBA8.
-    pub(crate) fn kept_levels(&self, features: zgx_gpu::wgpu::Features) -> Option<Levels<'_>> {
+    pub(crate) fn kept_levels(
+        &self,
+        features: zgx_gpu::wgpu::Features,
+        srgb: bool,
+    ) -> Option<Levels<'_>> {
         #[cfg(not(feature = "ktx2-basis"))]
-        let _ = features;
+        let _ = (features, srgb);
         #[cfg(feature = "ktx2")]
         if let Some(encoded) = self.0.encoded.as_ref()
             && encoded.starts_with(&crate::assets::ktx2::IDENTIFIER)
@@ -365,7 +374,7 @@ impl Texture {
                         None => {
                             let first = levels.into_iter().next()?.into_owned();
                             let image = zgx::image::ImageData::new(size.0, size.1, first).ok()?;
-                            let smaller = mipmaps(size.0, size.1, image.pixels());
+                            let smaller = mipmaps(size.0, size.1, image.pixels(), srgb);
                             Levels::Made(Arc::new(image), smaller)
                         }
                     })
@@ -439,7 +448,12 @@ impl Levels<'_> {
 
 /// Each half-size level below `pixels` (`width` by `height`, RGBA8), down
 /// to 1 by 1 (`halve`). `pixels` itself is the first level, not copied.
-pub(crate) fn mipmaps(width: u32, height: u32, pixels: &[u8]) -> Vec<(u32, u32, Vec<u8>)> {
+pub(crate) fn mipmaps(
+    width: u32,
+    height: u32,
+    pixels: &[u8],
+    srgb: bool,
+) -> Vec<(u32, u32, Vec<u8>)> {
     let mut levels: Vec<(u32, u32, Vec<u8>)> = Vec::new();
     loop {
         let (w, h, above) = match levels.last() {
@@ -451,37 +465,178 @@ pub(crate) fn mipmaps(width: u32, height: u32, pixels: &[u8]) -> Vec<(u32, u32, 
         }
         let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
         let mut next = vec![0_u8; nw as usize * nh as usize * 4];
-        halve((w, h), above, &mut next);
+        halve((w, h), above, &mut next, srgb);
         levels.push((nw, nh, next));
     }
     levels
 }
 /// The level below `above` (`w` by `h`, RGBA8) into `next`, half as large
-/// (at least 1): each texel the mean of the up to 2 by 2 above it, its
-/// edges' repeated where `above` is odd.
-pub(crate) fn halve((w, h): (u32, u32), above: &[u8], next: &mut [u8]) {
+/// (at least 1): each texel the mean of the texels above it, 2 by 2, or 3
+/// across or down at an odd side's end (so its last row and column count,
+/// not dropped). Read as sRGB colours (`srgb`), red, green and blue are
+/// averaged in linear light, as light adds (a 1-pixel black and white
+/// checker is half the light: 188, not the bytes' 128, a third as bright);
+/// alpha, and every channel of a map read as data (a normal, whose mean
+/// keeps its length), as stored.
+pub(crate) fn halve((w, h): (u32, u32), above: &[u8], next: &mut [u8], srgb: bool) {
     let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+    // Each texel's span along a side: 2 above it, the last 3 where the
+    // side is odd (1 where it's 1).
+    let span = |i: u32, n: u32, side: u32| {
+        let start = (i * 2).min(side - 1);
+        let end = if i + 1 == n { side } else { start + 2 };
+        (start, end)
+    };
+    let columns: Vec<(u32, u32)> = (0..nw).map(|x| span(x, nw, w)).collect();
+    let linear = srgb.then(srgb_tables);
     for y in 0..nh {
-        for x in 0..nw {
+        let (y0, y1) = span(y, nh, h);
+        for (x, &(x0, x1)) in columns.iter().enumerate() {
             let mut sum = [0_u32; 4];
-            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                let (sx, sy) = ((x * 2 + dx).min(w - 1), (y * 2 + dy).min(h - 1));
-                let at = (sy * w + sx) as usize * 4;
-                for (total, &byte) in sum.iter_mut().zip(&above[at..at + 4]) {
-                    *total += u32::from(byte);
+            for sy in y0..y1 {
+                let row = &above[(sy * w) as usize * 4..][..w as usize * 4];
+                for texel in row[x0 as usize * 4..x1 as usize * 4].as_chunks::<4>().0 {
+                    match linear {
+                        Some((to_linear, _)) => {
+                            for c in 0..3 {
+                                sum[c] += u32::from(to_linear[usize::from(texel[c])]);
+                            }
+                            sum[3] += u32::from(texel[3]);
+                        }
+                        None => {
+                            for (total, &byte) in sum.iter_mut().zip(texel) {
+                                *total += u32::from(byte);
+                            }
+                        }
+                    }
                 }
             }
-            let at = (y * nw + x) as usize * 4;
-            for (out, total) in next[at..at + 4].iter_mut().zip(sum) {
-                *out = ((total + 2) / 4) as u8;
+            let count = (x1 - x0) * (y1 - y0);
+            let mean = |total: u32| (total + count / 2) / count;
+            let out = &mut next[(y * nw) as usize * 4 + x * 4..][..4];
+            match linear {
+                Some((_, to_srgb)) => {
+                    for c in 0..3 {
+                        out[c] = to_srgb[mean(sum[c]) as usize];
+                    }
+                    out[3] = mean(sum[3]) as u8;
+                }
+                None => {
+                    for (out, total) in out.iter_mut().zip(sum) {
+                        *out = mean(total) as u8;
+                    }
+                }
             }
         }
     }
+}
+/// sRGB bytes as linear light in 16 bits, and 16-bit linear light as the
+/// nearest sRGB byte: made once.
+fn srgb_tables() -> &'static ([u16; 256], Vec<u8>) {
+    static TABLES: std::sync::OnceLock<([u16; 256], Vec<u8>)> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        let decode = |s: f64| {
+            if s <= 0.04045 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let encode = |l: f64| {
+            if l <= 0.0031308 {
+                l * 12.92
+            } else {
+                1.055 * l.powf(1.0 / 2.4) - 0.055
+            }
+        };
+        let to_linear = std::array::from_fn(|i| (decode(i as f64 / 255.) * 65535.).round() as u16);
+        let to_srgb = (0..=u16::MAX)
+            .map(|l| (encode(f64::from(l) / 65535.) * 255.).round() as u8)
+            .collect();
+        (to_linear, to_srgb)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `side`² checker of 1-pixel white and black texels, opaque.
+    fn checker(side: u32) -> Vec<u8> {
+        (0..side * side)
+            .flat_map(|i| {
+                let white = (i % side + i / side).is_multiple_of(2);
+                if white {
+                    [255, 255, 255, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_colour_maps_mips_are_its_mean_in_linear_light() {
+        // Half white, half black: half the light, 188 in sRGB (0.5 encoded),
+        // not the bytes' mean, 128 (0.21 of the light: too dark).
+        let levels = mipmaps(64, 64, &checker(64), true);
+        let (w, h, last) = levels.last().unwrap();
+        assert_eq!((*w, *h), (1, 1));
+        assert_eq!(
+            last[..],
+            [188, 188, 188, 255],
+            "colours in linear light, alpha as it is"
+        );
+        // Every level below the first is the same grey.
+        for (w, h, level) in &levels {
+            assert!(
+                level.chunks(4).all(|t| t == [188, 188, 188, 255]),
+                "{w} by {h}"
+            );
+        }
+        // Grey of one value stays that value (no drift from the tables).
+        for v in [0u8, 1, 2, 10, 54, 128, 187, 254, 255] {
+            let flat = [v, v, v, v].repeat(16);
+            let levels = mipmaps(4, 4, &flat, true);
+            assert!(
+                levels
+                    .iter()
+                    .all(|(_, _, l)| l.chunks(4).all(|t| t == [v, v, v, v])),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_data_maps_mips_are_its_bytes_mean() {
+        // Read as data (a normal, metal and roughness, occlusion): the mean of
+        // the values as stored, so a normal's average keeps its length.
+        let levels = mipmaps(64, 64, &checker(64), false);
+        assert_eq!(levels.last().unwrap().2[..], [128, 128, 128, 255]);
+    }
+
+    #[test]
+    fn an_odd_sides_last_row_and_column_count() {
+        // 3 by 1: black, black, white. Its 1 by 1 is a third of white, not
+        // the first two's black.
+        let pixels = [[0, 0, 0, 255], [0, 0, 0, 255], [255, 255, 255, 255]].concat();
+        let data = mipmaps(3, 1, &pixels, false);
+        assert_eq!(data[0].2[..], [85, 85, 85, 255]);
+        // In linear light, a third: 156 in sRGB.
+        let colour = mipmaps(3, 1, &pixels, true);
+        assert_eq!(colour[0].2[..], [156, 156, 156, 255]);
+        // 5 by 5, its last row and column white: they reach the 2 by 2.
+        let mut pixels = [0u8, 0, 0, 255].repeat(25);
+        for i in 0..25 {
+            if i % 5 == 4 || i / 5 == 4 {
+                pixels[i * 4..i * 4 + 3].copy_from_slice(&[255; 3]);
+            }
+        }
+        let next = &mipmaps(5, 5, &pixels, false)[0];
+        assert_eq!((next.0, next.1), (2, 2));
+        assert_eq!(next.2[0], 0, "the top left: no white");
+        assert!(next.2[3 * 4] > 0, "the bottom right: its share of white");
+    }
 
     /// A 2 by 1 PNG: red, then blue.
     #[cfg(feature = "gltf")]

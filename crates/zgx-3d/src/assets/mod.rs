@@ -411,7 +411,7 @@ fn put_on_gpu(
         wgpu::TextureFormat::Rgba8Unorm
     };
     // A file's own levels (a KTX2's): put on the GPU as they are.
-    if let Some(levels) = texture.kept_levels(device.features()) {
+    if let Some(levels) = texture.kept_levels(device.features(), srgb) {
         return upload_levels(device, queue, texture, srgb, &levels);
     }
     let image = texture.pixels()?;
@@ -428,7 +428,7 @@ fn put_on_gpu(
     let mut levels: Vec<&[u8]> = vec![image.pixels()];
     for pair in sizes.windows(2) {
         let (level, after) = std::mem::take(&mut rest).split_at_mut(bytes(pair[1]));
-        crate::texture::halve(pair[0], above, level);
+        crate::texture::halve(pair[0], above, level, srgb);
         above = level;
         levels.push(above);
         rest = after;
@@ -568,7 +568,9 @@ mod tests {
         );
         let file = ktx2::write(4, 4, 146, &[vec![0; 16], vec![0; 16], vec![0; 16]]);
         let texture = crate::Texture::decode(&file).unwrap();
-        let levels = texture.levels(wgpu::Features::empty()).expect("its blocks");
+        let levels = texture
+            .levels(wgpu::Features::empty(), true)
+            .expect("its blocks");
         assert!(matches!(levels, crate::texture::Levels::Blocks(..)));
         let made = upload_levels(&device, &queue, &texture, true, &levels).expect("decoded");
         assert_eq!(made.format(), wgpu::TextureFormat::Rgba8UnormSrgb);
@@ -705,7 +707,9 @@ mod tests {
         // marked failed (a device that holds BC takes its blocks as they are).
         let file = ktx2::write(size.0, size.1, 131, &[first]);
         let texture = crate::Texture::decode(&file).unwrap();
-        let levels = texture.levels(wgpu::Features::empty()).expect("its blocks");
+        let levels = texture
+            .levels(wgpu::Features::empty(), true)
+            .expect("its blocks");
         let (device, queue) = noop_device();
         assert!(upload_levels(&device, &queue, &texture, false, &levels).is_none());
         assert!(!texture.failed());
@@ -720,7 +724,7 @@ mod tests {
         let file = ktx2::write(8192, 8192, 0, &[vec![0; 64 << 20]]);
         let texture = crate::Texture::decode_owned(file).unwrap();
         let peak = counting::peak_during(|| {
-            assert!(texture.kept_levels(wgpu::Features::empty()).is_none());
+            assert!(texture.kept_levels(wgpu::Features::empty(), true).is_none());
             assert!(texture.pixels().is_none());
         });
         assert!(peak < 64 << 10, "allocated {peak} bytes for a refused map");
