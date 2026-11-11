@@ -5219,10 +5219,11 @@ impl Scene {
         size
     }
     /// The min-content size of `id`'s content along an axis (`horizontal`,
-    /// or down, at the width it is `asked` for): what it needs at the least,
-    /// its own size set aside. A text measures as narrow as it wraps (or as
-    /// tall as it wraps at that width), a box as its children need plus its
-    /// padding and border; something that clips needs nothing.
+    /// or down, at the width it has where it is `asked`: `within_own_width`):
+    /// what it needs at the least, its own size set aside. A text measures as
+    /// narrow as it wraps (or as tall as it wraps at that width), a box as
+    /// its children need plus its padding and border; something that clips
+    /// needs nothing.
     fn min_content(&mut self, id: NodeId, asked: Constraints, horizontal: bool) -> f32 {
         let id = self.laid_out_as(id);
         let node = self.node(id);
@@ -5257,6 +5258,10 @@ impl Scene {
             _ => unreachable!(),
         };
         let (gap, children) = (node.style.gap, self.children_raw(node).clone());
+        // Down a column, what it holds lays out at its own width (CSS's
+        // content box), not the width its parent was asked: found once, for
+        // the first child measured by what it holds.
+        let mut within = None;
         // Children that wrap onto lines need only the widest of them.
         let wraps = node
             .style
@@ -5302,7 +5307,7 @@ impl Scene {
                             if horizontal {
                                 Constraints::default()
                             } else {
-                                asked
+                                *within.get_or_insert_with(|| self.within_own_width(id, asked))
                             },
                             horizontal,
                         )
@@ -5328,6 +5333,32 @@ impl Scene {
             } else {
                 insets.top + insets.bottom
             }
+    }
+    /// What box `id`'s children are asked within, for its min-content height
+    /// (`min_content`) where it is `asked`: the width it has (its parent's
+    /// forced width, its own `width` or share, else the room it is asked to
+    /// fit), less its padding and border, and the basis of their
+    /// percentages where that width is definite, as laying it out gives
+    /// them (`measure_uncached`). Asked with no width at all, as it was.
+    #[inline(never)]
+    fn within_own_width(&self, id: NodeId, asked: Constraints) -> Constraints {
+        let style = &self.node(id).style;
+        let explicit = asked
+            .force_width
+            .or(style.width)
+            .or_else(|| percentage(style.width_percent, asked.percent_width))
+            .map(|w| dimension(w, style.min_width, style.max_width));
+        let Some(width) = explicit.or(asked.width) else {
+            return asked;
+        };
+        let insets = self.content_insets(id);
+        let inner = (width - insets.left - insets.right).max(0.);
+        Constraints {
+            width: Some(inner),
+            percent_width: explicit.map(|_| inner),
+            force_width: None,
+            ..asked
+        }
     }
     /// The cursor over `id`: its own, else its nearest ancestor's.
     pub fn cursor_for(&self, mut id: NodeId) -> Option<crate::cursor::Cursor> {
