@@ -918,7 +918,9 @@ mod tests {
         .validate(&module)
         .unwrap();
         let costs = cost(&module, &info).unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
+        // Linear, not exponential: 2^40 calls would never end, so any bound
+        // shows it; a generous one holds on a loaded machine's debug build.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         assert!(costs[0] > 1 << 40, "{}", costs[0]);
         let refused = sandbox(module, "main", 64, &Limits::default());
         assert!(refused.is_err_and(|why| why.contains("cost")));

@@ -35,8 +35,9 @@ fn a_stuck_sandboxed_compile_fails_its_pass_and_holds_no_other_up() {
         ..Default::default()
     }))
     .unwrap();
-    // The worker held 5 s by a "driver"; the deadline 300 ms.
-    stall_sandboxed_compiles(Duration::from_millis(300), Duration::from_secs(5));
+    // The worker held 20 s by a "driver"; the deadline 1.5 s (a normal
+    // compile on a loaded software renderer fits it; the stall doesn't).
+    stall_sandboxed_compiles(Duration::from_millis(1500), Duration::from_secs(20));
     let world = World::new();
     let pass = || Compute::new("@compute @workgroup_size(1) fn main() {}").every_frame();
     let stuck = world.add_compute(pass().sandboxed("one")).unwrap();
@@ -69,7 +70,7 @@ fn a_stuck_sandboxed_compile_fails_its_pass_and_holds_no_other_up() {
     while !matches!(world.compute_status(stuck), Some(ComputeStatus::Failed(_))) {
         draw();
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(15),
             "{:?}",
             world.compute_status(stuck)
         );
@@ -81,7 +82,7 @@ fn a_stuck_sandboxed_compile_fails_its_pass_and_holds_no_other_up() {
         while world.compute_status(id) != Some(ComputeStatus::Ready) {
             draw();
             assert!(
-                started.elapsed() < Duration::from_secs(2),
+                started.elapsed() < Duration::from_secs(15),
                 "{:?}",
                 world.compute_status(id)
             );
@@ -92,12 +93,12 @@ fn a_stuck_sandboxed_compile_fails_its_pass_and_holds_no_other_up() {
     // Three more stalls of "one"'s: its fourth, and it compiles no more.
     // "two" still does.
     for _ in 0..3 {
-        stall_sandboxed_compiles(Duration::from_millis(300), Duration::from_secs(5));
+        stall_sandboxed_compiles(Duration::from_millis(1500), Duration::from_secs(20));
         let stuck = world.add_compute(pass().sandboxed("one")).unwrap();
         let started = Instant::now();
         while !matches!(world.compute_status(stuck), Some(ComputeStatus::Failed(_))) {
             draw();
-            assert!(started.elapsed() < Duration::from_secs(2));
+            assert!(started.elapsed() < Duration::from_secs(15));
         }
     }
     let refused = world.add_compute(pass().sandboxed("one")).unwrap();

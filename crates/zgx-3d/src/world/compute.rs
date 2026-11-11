@@ -95,6 +95,13 @@ impl World {
         });
     }
 
+    /// A frame's compute passes' GPU times charged as the device's timestamps
+    /// would charge them, for tests to judge budgets without timing a GPU.
+    #[doc(hidden)]
+    pub fn time_compute_frame(&self, times: &[(ComputeId, f32)]) {
+        self.data(|data| data.charge_frame(times));
+    }
+
     /// Bytes written to its buffers waiting for a frame. For tests.
     #[doc(hidden)]
     pub fn writes_queued(&self) -> u64 {

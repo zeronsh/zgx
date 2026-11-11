@@ -691,11 +691,14 @@ fn order(passes: &[(u64, &[(Key, Access)])]) -> Option<Vec<usize>> {
 
 /// A pipeline compiled on a thread of its own: `None` until it's done.
 type Compiled = Arc<Mutex<Option<Result<wgpu::ComputePipeline, String>>>>;
+/// When the worker began compiling it: its deadline runs from then, not
+/// from when it was queued behind others.
+type Began = Arc<Mutex<Option<Instant>>>;
 
 enum Gpu {
     /// Compiling since then, on the sandboxed worker of that generation if
     /// it's sandboxed.
-    Compiling(Compiled, Instant, Option<u64>),
+    Compiling(Compiled, Began, Option<u64>),
     Ready(wgpu::ComputePipeline, Vec<wgpu::BindGroup>),
     Failed,
 }
@@ -1007,6 +1010,17 @@ impl Data {
             _ => ComputeStatus::Compiling,
         })
     }
+    /// A frame's GPU times charged as timestamps would charge them (tests).
+    pub(crate) fn charge_frame(&mut self, times: &[(ComputeId, f32)]) {
+        let times: Vec<(u32, u64, f32)> = times
+            .iter()
+            .filter_map(|&(id, ms)| {
+                let added = self.pass_mut(id)?.added;
+                Some((id.index, added, ms))
+            })
+            .collect();
+        charge(&mut self.passes, &mut self.owners, self.limits, &times);
+    }
     /// Whether it keeps the world drawing: a pass due by the next frame, or
     /// a read on its way.
     pub(crate) fn wants_frames(&self) -> bool {
@@ -1150,37 +1164,50 @@ impl Frames {
             }
         }
         self.spent = 0;
-        // Sandboxed work: a frame's, and each owner's.
-        let mut sandboxed = 0u64;
-        let mut owners: Vec<(Arc<str>, u64)> = Vec::new();
+        // The app's own passes first, those that waited before the rest.
         for waited in [true, false] {
             for &at in &due {
                 let pass = data.passes[at as usize].1.as_mut().unwrap();
-                if pass.waited != waited {
+                if pass.waited != waited || pass.owner.is_some() {
                     continue;
                 }
                 let invocations = pass.checked.invocations;
-                if self.spent.saturating_add(invocations) > limit {
+                if self.spent.saturating_add(invocations) <= limit {
+                    self.spent += invocations;
+                    pass.chosen = true;
+                }
+            }
+        }
+        // Sandboxed passes by owner, in turn (`share`): each owner a pass a
+        // round, the round's first owner moving on a frame, so none starves.
+        let mut owners: Vec<Arc<str>> = Vec::new();
+        let mut candidates: Vec<(usize, u64, u64, u32)> = Vec::new();
+        for waited in [true, false] {
+            for &at in &due {
+                let pass = data.passes[at as usize].1.as_ref().unwrap();
+                let Some(owner) = &pass.owner else { continue };
+                if pass.waited != waited {
                     continue;
                 }
-                if let Some(owner) = &pass.owner {
-                    let held = owners
-                        .iter()
-                        .find(|(o, _)| o == owner)
-                        .map_or(0, |(_, w)| *w);
-                    if sandboxed.saturating_add(pass.work) > SANDBOX_FRAME_WORK
-                        || held.saturating_add(pass.work) > SANDBOX_OWNER_WORK
-                    {
-                        continue;
+                let o = match owners.iter().position(|o| o == owner) {
+                    Some(o) => o,
+                    None => {
+                        owners.push(owner.clone());
+                        owners.len() - 1
                     }
-                    sandboxed += pass.work;
-                    match owners.iter_mut().find(|(o, _)| o == owner) {
-                        Some((_, w)) => *w += pass.work,
-                        None => owners.push((owner.clone(), pass.work)),
-                    }
+                };
+                candidates.push((o, pass.work, pass.checked.invocations, at));
+            }
+        }
+        if !candidates.is_empty() {
+            let start = (self.index % owners.len() as u64) as usize;
+            let room = limit.saturating_sub(self.spent);
+            let chosen = share(&candidates, owners.len(), start, room);
+            for (&(_, _, invocations, at), chosen) in candidates.iter().zip(chosen) {
+                if chosen {
+                    self.spent += invocations;
+                    data.passes[at as usize].1.as_mut().unwrap().chosen = true;
                 }
-                self.spent += invocations;
-                pass.chosen = true;
             }
         }
         for &at in &due {
@@ -1230,74 +1257,14 @@ impl Frames {
                         // before it: a GPU runs passes that share nothing at
                         // once, and one's span then holds another's work.
                         let mut ended = 0u64;
-                        let mut owners: Vec<(Arc<str>, f32)> = Vec::new();
+                        let mut times = Vec::with_capacity(timed.len());
                         for (k, &(at, added)) in timed.iter().enumerate() {
                             let (began, end) = (ticks[2 * k], ticks[2 * k + 1]);
                             let own = end.saturating_sub(began.max(ended));
                             ended = ended.max(end);
-                            let Some((_, Some(pass))) = passes.get_mut(at as usize) else {
-                                continue;
-                            };
-                            if pass.added != added || pass.failed.is_some() {
-                                continue;
-                            }
-                            let ms = own as f32 * period / 1e6;
-                            if let Some(owner) = &pass.owner {
-                                match owners.iter_mut().find(|(o, _)| o == owner) {
-                                    Some((_, sum)) => *sum += ms,
-                                    None => owners.push((owner.clone(), ms)),
-                                }
-                            }
-                            let budget = if pass.owner.is_some() {
-                                limits.sandboxed_gpu_ms
-                            } else {
-                                limits.gpu_ms
-                            };
-                            let (history, tripped) = judge(pass.over, ms > budget, limits.frames);
-                            pass.over = history;
-                            if tripped {
-                                pass.over_budget = Some(ms);
-                                fail(
-                                    pass,
-                                    format!(
-                                        "it took {ms:.2} ms of the GPU, over its {budget} ms, in {} of its last 8 timed frames",
-                                        history.count_ones()
-                                    ),
-                                );
-                            }
+                            times.push((at, added, own as f32 * period / 1e6));
                         }
-                        // An owner's passes together: over its budget as often,
-                        // all are turned off.
-                        for (owner, ms) in owners {
-                            let at = match histories.iter().position(|(o, _)| *o == owner) {
-                                Some(at) => at,
-                                None => {
-                                    histories.push((owner.clone(), 0));
-                                    histories.len() - 1
-                                }
-                            };
-                            let (history, tripped) =
-                                judge(histories[at].1, ms > limits.owner_gpu_ms, limits.frames);
-                            histories[at].1 = history;
-                            if !tripped {
-                                continue;
-                            }
-                            for (_, pass) in passes.iter_mut() {
-                                if let Some(pass) = pass
-                                    && pass.owner.as_ref() == Some(&owner)
-                                    && pass.failed.is_none()
-                                {
-                                    pass.over_budget = Some(ms);
-                                    fail(
-                                        pass,
-                                        format!(
-                                            "`{owner}`'s passes took {ms:.2} ms of the GPU together, over its {} ms",
-                                            limits.owner_gpu_ms
-                                        ),
-                                    );
-                                }
-                            }
-                        }
+                        charge(passes, histories, limits, &times);
                     }
                     staging.unmap();
                 }
@@ -1549,7 +1516,10 @@ impl Frames {
                     pass.checked.entry.clone(),
                 );
                 let done = slot.clone();
+                let began: Began = Arc::default();
+                let starting = began.clone();
                 let job = move || {
+                    *starting.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
                     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
                     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                         label: Some("3D compute"),
@@ -1584,12 +1554,13 @@ impl Frames {
                         continue;
                     }
                 };
-                pass.gpu = Some((generation, Gpu::Compiling(slot, Instant::now(), worker)));
+                pass.gpu = Some((generation, Gpu::Compiling(slot, began, worker)));
             }
-            let Some((_, Gpu::Compiling(slot, since, worker))) = &pass.gpu else {
+            let Some((_, Gpu::Compiling(slot, began, worker))) = &pass.gpu else {
                 continue;
             };
-            let (since, worker) = (*since, *worker);
+            let worker = *worker;
+            let began = *began.lock().unwrap_or_else(|p| p.into_inner());
             let deadline =
                 std::time::Duration::from_millis(SANDBOXED_COMPILE_MS.load(Ordering::Relaxed));
             let done = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
@@ -1598,7 +1569,7 @@ impl Frames {
                 (None, Some(worker)) if worker != SANDBOXED_WORKER.load(Ordering::Relaxed) => {
                     pass.gpu = None;
                 }
-                (None, Some(worker)) if since.elapsed() > deadline => {
+                (None, Some(worker)) if began.is_some_and(|b| b.elapsed() > deadline) => {
                     pass.gpu = Some((generation, Gpu::Failed));
                     fail(
                         pass,
@@ -2036,6 +2007,126 @@ fn fail(pass: &mut Pass, why: String) {
     pass.demanded = false;
 }
 
+/// Which sandboxed passes a frame runs: `candidates` (owner, work,
+/// invocations, pass), each owner's in the order it should go, taken a pass
+/// an owner a round, owners from `start` round, while the frame's sandboxed
+/// work (`SANDBOX_FRAME_WORK`), the owner's (`SANDBOX_OWNER_WORK`) and the
+/// invocations left (`room`) allow. One that doesn't fit is passed over for
+/// the frame. So an owner with a pass due runs one within as many frames
+/// as there are owners: a pass's work is within a frame's.
+fn share(
+    candidates: &[(usize, u64, u64, u32)],
+    owners: usize,
+    start: usize,
+    room: u64,
+) -> Vec<bool> {
+    let mut queues: Vec<std::collections::VecDeque<usize>> = vec![Default::default(); owners];
+    for (at, &(owner, ..)) in candidates.iter().enumerate() {
+        queues[owner].push_back(at);
+    }
+    let mut chosen = vec![false; candidates.len()];
+    let (mut work, mut invocations) = (0u64, 0u64);
+    let mut held = vec![0u64; owners];
+    loop {
+        let mut took = false;
+        for k in 0..owners {
+            let owner = (start + k) % owners;
+            while let Some(at) = queues[owner].pop_front() {
+                let (_, w, n, _) = candidates[at];
+                if work.saturating_add(w) <= SANDBOX_FRAME_WORK
+                    && held[owner].saturating_add(w) <= SANDBOX_OWNER_WORK
+                    && invocations.saturating_add(n) <= room
+                {
+                    work += w;
+                    held[owner] += w;
+                    invocations += n;
+                    chosen[at] = true;
+                    took = true;
+                    break;
+                }
+            }
+        }
+        if !took {
+            break;
+        }
+    }
+    chosen
+}
+
+/// A frame's passes' GPU times (`(pass, when added, ms)`) charged to them
+/// and their owners: a pass over its budget, or an owner's together over
+/// theirs, in `limits.frames` of their last 8 timed frames is turned off.
+fn charge(
+    passes: &mut [(u32, Option<Pass>)],
+    histories: &mut Vec<(Arc<str>, u8)>,
+    limits: ComputeBudget,
+    times: &[(u32, u64, f32)],
+) {
+    let mut owners: Vec<(Arc<str>, f32)> = Vec::new();
+    for &(at, added, ms) in times {
+        let Some((_, Some(pass))) = passes.get_mut(at as usize) else {
+            continue;
+        };
+        if pass.added != added || pass.failed.is_some() {
+            continue;
+        }
+        if let Some(owner) = &pass.owner {
+            match owners.iter_mut().find(|(o, _)| o == owner) {
+                Some((_, sum)) => *sum += ms,
+                None => owners.push((owner.clone(), ms)),
+            }
+        }
+        let budget = if pass.owner.is_some() {
+            limits.sandboxed_gpu_ms
+        } else {
+            limits.gpu_ms
+        };
+        let (history, tripped) = judge(pass.over, ms > budget, limits.frames);
+        pass.over = history;
+        if tripped {
+            pass.over_budget = Some(ms);
+            fail(
+                pass,
+                format!(
+                    "it took {ms:.2} ms of the GPU, over its {budget} ms, in {} of its last 8 timed frames",
+                    history.count_ones()
+                ),
+            );
+        }
+    }
+    // An owner's passes together: over its budget as often, all are turned
+    // off.
+    for (owner, ms) in owners {
+        let at = match histories.iter().position(|(o, _)| *o == owner) {
+            Some(at) => at,
+            None => {
+                histories.push((owner.clone(), 0));
+                histories.len() - 1
+            }
+        };
+        let (history, tripped) = judge(histories[at].1, ms > limits.owner_gpu_ms, limits.frames);
+        histories[at].1 = history;
+        if !tripped {
+            continue;
+        }
+        for (_, pass) in passes.iter_mut() {
+            if let Some(pass) = pass
+                && pass.owner.as_ref() == Some(&owner)
+                && pass.failed.is_none()
+            {
+                pass.over_budget = Some(ms);
+                fail(
+                    pass,
+                    format!(
+                        "`{owner}`'s passes took {ms:.2} ms of the GPU together, over its {} ms",
+                        limits.owner_gpu_ms
+                    ),
+                );
+            }
+        }
+    }
+}
+
 /// A pass's history of its last 8 timed frames, `slow` the newest, and
 /// whether `frames` of them over budget turn it off.
 fn judge(history: u8, slow: bool, frames: u32) -> (u8, bool) {
@@ -2138,6 +2229,45 @@ pub(crate) fn now<T>(future: impl std::future::Future<Output = T>) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandboxed_owners_take_turns_none_starving() {
+        // Three owners, two passes each, each an owner's whole budget: a
+        // frame holds two passes (two owners'), the first owner moving on a
+        // frame, so over three frames each owner runs twice.
+        let w = SANDBOX_OWNER_WORK;
+        let candidates: Vec<(usize, u64, u64, u32)> =
+            (0..6).map(|i| (i / 2, w, 1, i as u32)).collect();
+        let mut ran = [0u32; 3];
+        for frame in 0..3 {
+            let chosen = share(&candidates, 3, frame % 3, u64::MAX);
+            assert_eq!(chosen.iter().filter(|&&c| c).count(), 2);
+            for (at, c) in chosen.iter().enumerate() {
+                if *c {
+                    ran[at / 2] += 1;
+                }
+            }
+        }
+        assert_eq!(ran, [2, 2, 2]);
+        // Room for two owners' work a frame, an owner's budget for half:
+        // owners alternate and each gets a pass every frame it can.
+        let half = SANDBOX_OWNER_WORK;
+        let candidates: Vec<(usize, u64, u64, u32)> =
+            (0..8).map(|i| (i / 4, half, 1, i as u32)).collect();
+        let chosen = share(&candidates, 2, 0, u64::MAX);
+        let by_owner = |o: usize| (0..8).filter(|&i| i / 4 == o && chosen[i]).count();
+        assert_eq!((by_owner(0), by_owner(1)), (1, 1));
+        // A pass that doesn't fit is passed over, not a wall for the rest.
+        let candidates = vec![
+            (0, SANDBOX_FRAME_WORK + 1, 1, 0),
+            (0, 1, 1, 1),
+            (1, 1, 1, 2),
+        ];
+        assert_eq!(share(&candidates, 2, 0, u64::MAX), [false, true, true]);
+        // Invocations are shared with the app's own passes' leftovers.
+        let candidates = vec![(0, 1, 10, 0), (1, 1, 10, 1)];
+        assert_eq!(share(&candidates, 2, 1, 15), [false, true]);
+    }
 
     #[test]
     fn a_pass_slow_on_some_of_its_timed_frames_trips_as_one_slow_on_all() {
