@@ -926,6 +926,32 @@ fn a_play_s_sends_keep_to_two_as_a_voice_s_do() {
 }
 
 #[test]
+fn a_send_to_a_third_bus_is_refused_and_counted_either_way() {
+    // A play's third send, then a voice's: each refused, each counted. A
+    // send to a bus it sends to already sets a level, refused by neither.
+    let (audio, mut mixer) = Audio::offline(unlimited()).unwrap();
+    let flat = sound(&[0., 0.25], 1, RATE);
+    let buses: Vec<_> = ["one", "two", "three"]
+        .iter()
+        .map(|name| audio.add_bus(name, &audio.master()).unwrap())
+        .collect();
+    let play = Play::new()
+        .loop_frames(1..2)
+        .send(&buses[0], 0.5)
+        .send(&buses[1], 0.5)
+        .send(&buses[2], 0.5)
+        .send(&buses[0], 0.25);
+    let voice = audio.play(&flat, play).unwrap();
+    assert_eq!(audio.stats().sends_refused, 1, "the play's third");
+    voice.set_send(&buses[2], 1., Ramp::NONE).unwrap();
+    mixer.frames(256);
+    assert_eq!(audio.stats().sends_refused, 2, "the voice's third");
+    voice.set_send(&buses[1], 0.25, Ramp::NONE).unwrap();
+    mixer.frames(256);
+    assert_eq!(audio.stats().sends_refused, 2, "a level, not a third");
+}
+
+#[test]
 fn a_send_to_another_engine_s_bus_is_refused() {
     let (audio, _mixer) = Audio::offline(unlimited()).unwrap();
     let (other, _other_mixer) = Audio::offline(unlimited()).unwrap();

@@ -164,6 +164,9 @@ pub(crate) struct Meter {
     pub voices: AtomicU64,
     pub stolen: AtomicU64,
     pub dropped: AtomicU64,
+    /// Sends refused: to a third bus while a voice sends to two (counted
+    /// here by the mixer for `set_send`, by the engine for `Play::send`).
+    pub sends_refused: AtomicU64,
     pub late: AtomicU64,
     pub blocks: AtomicU64,
     pub waited: AtomicU64,
@@ -237,6 +240,7 @@ impl Meter {
             voices: zero(),
             stolen: zero(),
             dropped: zero(),
+            sends_refused: zero(),
             late: zero(),
             blocks: zero(),
             waited: zero(),
@@ -1701,6 +1705,9 @@ impl Mixer {
                     let (frames, curve) = (ramp.frames(self.rate), ramp.curve);
                     if self.sends[slot].set(bus, level, frames, curve) {
                         self.voices[slot].sending = true;
+                    } else {
+                        // Two held: refused, and counted.
+                        self.meter.sends_refused.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             }

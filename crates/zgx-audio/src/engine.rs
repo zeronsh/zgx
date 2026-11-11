@@ -257,6 +257,9 @@ pub struct Stats {
     pub stolen: u64,
     /// Plays that lost to every voice playing and never started.
     pub dropped: u64,
+    /// Sends refused: to a third bus while two are held, by
+    /// [`Play::send`] or [`Voice::set_send`].
+    pub sends_refused: u64,
     /// Commands applied after the frame they asked for.
     pub late: u64,
     /// Commands sent to the mixer since the engine was made: what a
@@ -731,6 +734,16 @@ impl Audio {
         Ok(sends)
     }
 
+    /// Counts the sends `play` refused, once it's played.
+    fn refused(&self, play: &Play) {
+        if play.refused > 0 {
+            self.0
+                .meter
+                .sends_refused
+                .fetch_add(u64::from(play.refused), Ordering::Relaxed);
+        }
+    }
+
     pub fn play(&self, sound: &Sound, play: Play) -> Result<Voice, Error> {
         let frames = sound.frames() as u64;
         let region = match (&play.region, play.looping) {
@@ -776,6 +789,7 @@ impl Audio {
         };
         let time = play.at.map_or(0, |at| at.0);
         self.push(&mut control, time, command)?;
+        self.refused(&play);
         control.next_id += 1;
         control.live.insert(id);
         Ok(Voice {
@@ -840,6 +854,7 @@ impl Audio {
                 skip: play.offset,
             });
         self.push(&mut control, time, command)?;
+        self.refused(&play);
         control.next_id += 1;
         control.live.insert(id);
         Ok(Voice {
@@ -975,6 +990,7 @@ impl Audio {
             voices: meter.voices.load(Ordering::Relaxed),
             stolen: meter.stolen.load(Ordering::Relaxed),
             dropped: meter.dropped.load(Ordering::Relaxed),
+            sends_refused: meter.sends_refused.load(Ordering::Relaxed),
             late: meter.late.load(Ordering::Relaxed),
             commands: meter.sent.load(Ordering::SeqCst),
             sounding: meter.sounding.load(Ordering::Relaxed),
@@ -1021,8 +1037,10 @@ pub struct Play {
     fade_in: Option<Ramp>,
     law: PanLaw,
     cutoff: f32,
-    /// Buses it's also mixed into, each with its engine and level.
+    /// Buses it's also mixed into, each with its engine and level, and
+    /// those refused (past two).
     sends: [Option<(u64, u16, f32)>; crate::mixer::SENDS],
+    refused: u32,
     /// Its sound's frame it starts on.
     offset: u64,
 }
@@ -1048,6 +1066,7 @@ impl Play {
             law: PanLaw::Balance,
             cutoff: crate::effects::VOICE_OPEN,
             sends: [None; crate::mixer::SENDS],
+            refused: 0,
             offset: 0,
         }
     }
@@ -1111,8 +1130,9 @@ impl Play {
     }
     /// Mixed into `bus` too, at `level` (a gain, 0 to [`MAX_GAIN`]), from
     /// its first frame: a send ([`Voice::set_send`]). Two buses at most, as
-    /// there: a send to a third is ignored; another to a bus it sends to
-    /// already sets that one's level.
+    /// there: a send to a third is refused, counted in
+    /// [`Stats::sends_refused`] when it's played; another to a bus it
+    /// sends to already sets that one's level.
     pub fn send(mut self, bus: &Bus, level: f32) -> Play {
         let (engine, index) = (bus.audio.0.id, bus.index);
         let send = Some((engine, index, gain(level)));
@@ -1120,8 +1140,9 @@ impl Play {
             .sends
             .iter()
             .position(|s| s.is_some_and(|(e, b, _)| (e, b) == (engine, index)));
-        if let Some(at) = same.or_else(|| self.sends.iter().position(Option::is_none)) {
-            self.sends[at] = send;
+        match same.or_else(|| self.sends.iter().position(Option::is_none)) {
+            Some(at) => self.sends[at] = send,
+            None => self.refused = self.refused.saturating_add(1),
         }
         self
     }
@@ -1222,8 +1243,9 @@ impl Voice {
     /// [`MAX_GAIN`]) along `ramp`: a send. Its sound after its gain, pan
     /// and own low-pass goes there, scaled: to a bus with a reverb on it,
     /// a binaural effect, or anything of the app's. A voice sends to two
-    /// buses at most: a send to a third is ignored until one of the two is
-    /// brought to 0, which takes it away. A voice with no sends costs
+    /// buses at most: a send to a third is refused (counted in
+    /// [`Stats::sends_refused`]) until one of the two is brought to 0,
+    /// which takes it away. A voice with no sends costs
     /// nothing more for them.
     pub fn set_send(&self, bus: &Bus, level: f32, ramp: impl Into<Ramp>) -> Result<(), Error> {
         if bus.audio.0.id != self.audio.0.id {
