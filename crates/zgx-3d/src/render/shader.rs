@@ -355,15 +355,22 @@ mod tests {
         // a feature adds keeps its lines behind its own tag, so a world that
         // turns nothing on parses what it did; change this only with a
         // change to today's shading.
-        let before = variants_text(1 << 11);
-        assert_eq!(before, 0x962b_5cba_b074_7425, "{before:#018x}");
         // Those of bits 0 to 12 (clustered lights', cascades') as they were
-        // before custom materials (bit 13), whose code they don't parse.
-        let lit = variants_text(1 << 13);
-        assert_eq!(lit, 0xc50d_f6a2_c213_b125, "{lit:#018x}");
-        // And every variant of every bit there is now, as it is now.
-        let all = variants_text(u32::from(Variant::ALL) + 1);
-        assert_eq!(all, 0x09ac_f1dd_7537_c325, "{all:#018x}");
+        // before custom materials (bit 13), whose code they don't parse; and
+        // every variant of every bit there is now, as it is now. (All three
+        // said at once, so a deliberate change takes its new values in one
+        // run.)
+        let digests = [
+            variants_text(1 << 11),
+            variants_text(1 << 13),
+            variants_text(u32::from(Variant::ALL) + 1),
+        ];
+        let pinned = [
+            0xf935_b89f_ba82_c305,
+            0x359c_6df2_16d9_5dc5,
+            0x509c_9126_ab7b_b5e5,
+        ];
+        assert_eq!(digests, pinned, "{digests:#018x?}");
     }
 
     /// `bits` as a variant a mesh can have: a cut-out, placed, glass, coated
@@ -487,10 +494,13 @@ mod tests {
     #[test]
     #[ignore = "every variant: run in release (cargo test --release -- --ignored)"]
     fn every_variant_validates() {
+        // With the prepass and without.
         for bits in 0..=Variant::ALL {
             for samples in [1, 4] {
                 validates(possible(bits), samples)
                     .unwrap_or_else(|e| panic!("{:?} at {samples}: {e}", possible(bits)));
+                text_validates(&wgsl_full(possible(bits), samples, None, true))
+                    .unwrap_or_else(|e| panic!("{:?} at {samples}, prepass: {e}", possible(bits)));
             }
         }
     }
@@ -501,11 +511,18 @@ mod tests {
         // number. (A rasterised sample rarely lands exactly on a light, so
         // the shader's own text is what's checked; `tests/world.rs` draws
         // one beside it.) Each light path keeps its distance off zero.
-        for variant in [Variant::default(), Variant(Variant::CLUSTERED)] {
+        for variant in [
+            Variant::default(),
+            Variant(Variant::CLUSTERED),
+            possible(Variant::SPECULAR),
+        ] {
             let text = wgsl(variant, 1);
             for line in text.lines().filter(|l| l.contains("let distance = ")) {
                 assert!(line.contains("max("), "{variant:?}: {line}");
             }
+            // Nor, looking exactly along a light, the half vector: `v + l`
+            // is zero there.
+            assert!(!text.contains("normalize(v + l)"), "{variant:?}");
         }
     }
 

@@ -35,7 +35,7 @@ fn smith(n_v: f32, n_l: f32, a: f32) -> f32 {
     return (n_v / (n_v * (1.0 - k) + k)) * (n_l / (n_l * (1.0 - k) + k));
 }
 fn shade(base: vec3<f32>, metallic: f32, roughness: f32, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
-    let h = normalize(v + l);
+    let h = (v + l) / max(length(v + l), 1e-4);
     let n_l = max(dot(n, l), 0.0);
     let n_v = max(dot(n, v), 1e-4);
     let n_h = max(dot(n, h), 0.0);
@@ -50,7 +50,7 @@ fn shade(base: vec3<f32>, metallic: f32, roughness: f32, n: vec3<f32>, v: vec3<f
 //R // (`layers.spec`): as much facing it as its index of refraction and
 //R // colour say, and that and its grazing reflection scaled by its factor.
 //R fn shade_specular(base: vec3<f32>, metallic: f32, roughness: f32, n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, radiance: vec3<f32>) -> vec3<f32> {
-//R     let h = normalize(v + l);
+//R     let h = (v + l) / max(length(v + l), 1e-4);
 //R     let n_l = max(dot(n, l), 0.0);
 //R     let n_v = max(dot(n, v), 1e-4);
 //R     let n_h = max(dot(n, h), 0.0);
