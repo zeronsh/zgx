@@ -193,6 +193,23 @@ impl super::Instance {
         )
     }
 
+    /// zgx patch: `raw` itself exposed, if it has Direct3D 12: the very
+    /// adapter another API's device is on (zgx's Direct3D 11 frames, whose
+    /// GPU views share textures with a Direct3D 12 device). WARP's adapter
+    /// has a LUID of its own in each DXGI factory, so it can't be found again
+    /// by its LUID in this instance's.
+    pub fn expose_dxgi_adapter(
+        &self,
+        raw: &Dxgi::IDXGIAdapter,
+    ) -> Option<crate::ExposedAdapter<super::Api>> {
+        use windows::core::Interface as _;
+        let raw = match raw.cast::<Dxgi::IDXGIAdapter4>() {
+            Ok(adapter) => auxil::dxgi::factory::DxgiAdapter::Adapter4(adapter),
+            Err(_) => auxil::dxgi::factory::DxgiAdapter::Adapter3(raw.cast().ok()?),
+        };
+        self.expose(raw)
+    }
+
     /// zgx patch: the first adapter in DXGI's order for `power` that has
     /// Direct3D 12, a GPU before software (WARP) whatever that order.
     /// Unlike `enumerate_adapters`, it creates no device on the adapters

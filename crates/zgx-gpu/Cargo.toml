@@ -35,7 +35,7 @@ vulkan = ["wgpu/vulkan"]
 # Windows, experimental: frames drawn with Direct3D 11 when `ZGX_D3D11=1`
 # (d3d11_frame.rs), wgpu's no-op backend standing in for its device, so no
 # Direct3D 12 device is opened. Off, nothing of it is built.
-d3d11 = ["wgpu/noop", "windows/Win32_Graphics_Direct3D", "windows/Win32_Graphics_Direct3D11"]
+d3d11 = ["wgpu/noop", "windows/Win32_Graphics_Direct3D", "windows/Win32_Graphics_Direct3D11", "windows/Win32_Security"]
 
 [dependencies]
 hypher = { version = "0.1.8", optional = true }

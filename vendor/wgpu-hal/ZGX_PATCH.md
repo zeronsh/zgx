@@ -105,7 +105,9 @@ measured 89.8 MiB private where it is 81.0 MiB with one device.
 in DXGI's own order for that power preference (`EnumAdapterByGpuPreference`,
 `EnumAdapters1` without DXGI 1.6), that has Direct3D 12, a GPU before
 software (WARP) whatever that order, and opens no device on the rest; `auxil::dxgi::factory::enumerate_adapters_by` is the ordered
-enumeration. zgx-gpu (`preferred_dx12_adapter`) passes the result to
+enumeration. `dx12::Instance::expose_dxgi_adapter(raw)` exposes a given
+DXGI adapter (Direct3D 11's, for its GPU views' Direct3D 12 device: WARP's
+LUID differs from one DXGI factory to the next). zgx-gpu (`preferred_dx12_adapter`) passes the result to
 `wgpu::Instance::create_adapter_from_hal`, and falls back to
 `request_adapter` when it finds none or it cannot present to the window.
 Tested, for low power and high performance, by

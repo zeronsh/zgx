@@ -186,7 +186,58 @@ fn main() {
         .expect("a frame with a blend mode draws");
     assert_ne!(blended, plain, "the blend mode drew nothing");
 
+    // A GPU view draws (`view_host`): its painter's colour, on the views'
+    // own Direct3D 12 device on Direct3D 11's adapter (on a machine without
+    // a GPU, WARP, which wgpu's own list of adapters leaves out).
+    {
+        use zgx::{compose::prelude::*, widgets::Ui};
+        use zgx_gpu::viewport::{Viewport, ViewportFrame, view};
+        struct Clear;
+        impl Viewport for Clear {
+            fn render(&mut self, frame: &mut ViewportFrame<'_>) {
+                frame
+                    .encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("clear"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: frame.target,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: 0.2,
+                                    g: 0.8,
+                                    b: 0.4,
+                                    a: 1.0,
+                                }),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        ..Default::default()
+                    });
+            }
+        }
+        let mut gpu = GpuRenderer::new(64, 64).unwrap();
+        let painter = view(Clear);
+        let mut ui = Ui::new(64., 64.);
+        ui.mount(gpu_view("view", &painter).size(64., 64.));
+        ui.prepare_frame();
+        let report = ui.scene.borrow_mut().flush();
+        gpu.render(&ui.scene.borrow(), &report.damage)
+            .expect("a frame with a GPU view draws");
+        let pixels = gpu.readback().unwrap();
+        let middle = &pixels[(32 * 64 + 32) * 4..][..4];
+        assert!(
+            middle[1] > 180 && middle[0] < 90 && middle[2] < 140,
+            "the GPU view didn't draw its painter's colour: {middle:?}"
+        );
+    }
+
     let left_out = GpuRenderer::debug_d3d11_left_out();
+    assert!(
+        !left_out.contains(&"images a GPU view draws"),
+        "a GPU view was left out: {left_out:?}"
+    );
     let kind = "backdrop blurs (drawn opaque)";
     assert!(left_out.contains(&kind), "{kind} not named: {left_out:?}");
     assert_eq!(
