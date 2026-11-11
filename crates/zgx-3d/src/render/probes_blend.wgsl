@@ -3,19 +3,15 @@
 // texels) or of the depth atlas (16 by 16); each texel sums the probe's
 // rays about its direction, cosine-weighted for light, sharply for
 // distance. The pipeline blends the result over what was there by the
-// round's weight (`set_blend_constant`).
+// probe's round's weight (in alpha). Joined after `probes_turn.wgsl`.
 
 struct Trace {
-    turn: mat4x4<f32>,
-    first: u32,
     count: u32,
     rays: u32,
     total: u32,
     far: f32,
     lift: f32,
-    // Point and spot lights in `lights`; the round.
     lights: u32,
-    seed: u32,
     // For tests (`World::poison_probe_rays`): 0, or every seventh ray
     // brings back no finite light (1), let into the probes (2); and a zero
     // to divide by.
@@ -32,15 +28,13 @@ struct Atlas {
     depth: f32,
 }
 @group(0) @binding(2) var<uniform> atlas: Atlas;
+// This frame's probes, each its index and its round above (`probes.rs`).
+@group(0) @binding(3) var<storage, read> slots: array<u32>;
 
 const PI: f32 = 3.14159265;
 
-fn fibonacci(i: u32, n: u32) -> vec3<f32> {
-    let phi = 2.0 * PI * fract(f32(i) * 0.618034);
-    let z = 1.0 - (2.0 * f32(i) + 1.0) / f32(n);
-    let r = sqrt(max(1.0 - z * z, 0.0));
-    return vec3(r * cos(phi), r * sin(phi), z);
-}
+// The least a round blends by (`FLOOR` in `probes.rs`).
+const FLOOR: f32 = 0.2;
 // Whether every part of `v` is a finite number, by its bits (a compiler's
 // fast math may take `v != v` to be false).
 fn finite(v: vec4<f32>) -> bool {
@@ -58,17 +52,18 @@ fn unfolded(o: vec2<f32>) -> vec3<f32> {
 
 struct Tile {
     @builtin(position) position: vec4<f32>,
-    // Which of this frame's probes.
+    // Which of this frame's probes, and its round.
     @location(0) @interpolate(flat) slot: u32,
+    @location(2) @interpolate(flat) round: u32,
     // Its tile's corner, in texels.
     @location(1) @interpolate(flat) corner: vec2<f32>,
 }
 @vertex fn tile(@builtin(vertex_index) vertex: u32, @builtin(instance_index) slot: u32) -> Tile {
-    let probe = (trace.first + slot) % trace.total;
+    let probe = slots[slot] & 0xffffu;
     let corner = vec2(f32(probe % 64u), f32(probe / 64u)) * atlas.tile;
     let at = corner + vec2(f32(vertex & 1u), f32((vertex >> 1u) & 1u)) * atlas.tile;
     let ndc = at / atlas.size * vec2(2.0, -2.0) + vec2(-1.0, 1.0);
-    return Tile(vec4(ndc, 0.0, 1.0), slot, corner);
+    return Tile(vec4(ndc, 0.0, 1.0), slot, slots[slot] >> 16u, corner);
 }
 
 @fragment fn blend(in: Tile) -> @location(0) vec4<f32> {
@@ -103,7 +98,7 @@ struct Tile {
         if !finite(ray) && trace.poison != 2u {
             continue;
         }
-        let along = normalize((trace.turn * vec4(fibonacci(i, trace.rays), 0.0)).xyz);
+        let along = turned(i, trace.rays, in.round);
         let cosine = max(dot(d, along), 0.0);
         if atlas.depth > 0.5 {
             let w = pow(cosine, 50.0);
@@ -115,5 +110,7 @@ struct Tile {
             weights += cosine;
         }
     }
-    return vec4(sum / max(weights, 1e-6), 1.0);
+    // Blended over what was there by the round's weight: round r at
+    // 1 / (r + 1), early rounds replacing, later ones averaging.
+    return vec4(sum / max(weights, 1e-6), max(1.0 / f32(in.round + 1u), FLOOR));
 }

@@ -78,7 +78,7 @@ struct Mesh {
     let at = vec4(position, 1.0);
     let world = vec3(dot(p0, at), dot(p1, at), dot(p2, at));
     let turned = vec3(dot(t0.xyz, normal), dot(t1.xyz, normal), dot(t2.xyz, normal));
-    let origin = probe_place((trace.first + face / 6u) % trace.total);
+    let origin = probe_place(slot_probe(face / 6u));
     let f = on_face(face % 6u, world - origin);
     let clip = vec4(f.x, -f.y, (f.z - NEAR) * FAR / (FAR - NEAR), f.z);
     return Captured(clip, world, turned, albedo.rgb, glow.rgb, origin);
@@ -132,7 +132,7 @@ fn faces_to_rays(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let slot = id.x / trace.rays;
-    let d = ray_direction(id.x % trace.rays);
+    let d = ray_direction(slot, id.x % trace.rays);
     let a = abs(d);
     var face = 0u;
     var uv = vec2(0.0);

@@ -31,6 +31,8 @@ struct Entry {
     size: wgpu::BlasTriangleGeometrySizeDescriptor,
     first_vertex: u32,
     first_index: u32,
+    /// A sphere about its vertices, in its own space (`local_sphere`).
+    sphere: [f32; 4],
     /// Built: its structure needs no build again.
     built: bool,
     /// The last rebuild that used it.
@@ -60,6 +62,72 @@ pub(super) struct Scene {
     seen: Vec<Held>,
     /// Counts the times what rays see changed: the probes converge again.
     pub(super) revision: u64,
+    /// What the last change moved (`moved`).
+    pub(super) moved: Option<Vec<[f32; 4]>>,
+}
+
+/// A sphere about `vertices` (centre and radius), in their own space.
+pub(super) fn local_sphere(vertices: &[crate::Vertex]) -> [f32; 4] {
+    let (mut lo, mut hi) = ([f32::MAX; 3], [f32::MIN; 3]);
+    for v in vertices {
+        for i in 0..3 {
+            lo[i] = lo[i].min(v.position[i]);
+            hi[i] = hi[i].max(v.position[i]);
+        }
+    }
+    if vertices.is_empty() {
+        return [0.; 4];
+    }
+    let half: [f32; 3] = std::array::from_fn(|i| (hi[i] - lo[i]) * 0.5);
+    [
+        (lo[0] + hi[0]) * 0.5,
+        (lo[1] + hi[1]) * 0.5,
+        (lo[2] + hi[2]) * 0.5,
+        (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt(),
+    ]
+}
+
+/// `sphere` (its own space) placed by `transform` (a 3 by 4 matrix's rows).
+fn placed(transform: &[f32; 12], sphere: [f32; 4]) -> [f32; 4] {
+    let row = |r: usize| {
+        transform[r * 4] * sphere[0]
+            + transform[r * 4 + 1] * sphere[1]
+            + transform[r * 4 + 2] * sphere[2]
+            + transform[r * 4 + 3]
+    };
+    let scale = (0..3)
+        .map(|c| {
+            (transform[c].powi(2) + transform[4 + c].powi(2) + transform[8 + c].powi(2)).sqrt()
+        })
+        .fold(0f32, f32::max);
+    [row(0), row(1), row(2), sphere[3] * scale]
+}
+
+/// What changed from meshes `old` to `new` (each mesh in the same place
+/// in both, its geometry's sphere by `sphere`): about each that moved or
+/// changed, a sphere where it was and one where it is. `None` where a mesh
+/// came, went or changed its geometry: then anything may have.
+pub(super) fn moved(
+    old: &[Held],
+    new: &[Held],
+    sphere: impl Fn(u64) -> [f32; 4],
+) -> Option<Vec<[f32; 4]>> {
+    if old.len() != new.len() {
+        return None;
+    }
+    let mut out = Vec::new();
+    for (a, b) in old.iter().zip(new) {
+        if a == b {
+            continue;
+        }
+        if a.geometry != b.geometry {
+            return None;
+        }
+        let s = sphere(a.geometry);
+        out.push(placed(&a.transform, s));
+        out.push(placed(&b.transform, s));
+    }
+    Some(out)
 }
 
 /// A traced mesh as rays see it: its geometry, its place (a TLAS
@@ -173,6 +241,7 @@ impl Scene {
             held: Vec::new(),
             seen: Vec::new(),
             revision: 0,
+            moved: None,
         }
     }
 
@@ -231,6 +300,7 @@ impl Scene {
                             size,
                             first_vertex: 0,
                             first_index: 0,
+                            sphere: local_sphere(d.geometry.vertices()),
                             built: false,
                             used: now,
                         },
@@ -238,6 +308,10 @@ impl Scene {
                 }
             }
         }
+        // What moved, while the geometries it was built of are still held.
+        self.moved = (!first)
+            .then(|| moved(&self.seen, &self.held, |g| self.geometries[&g].sphere))
+            .flatten();
         let gone = self.geometries.len();
         self.geometries.retain(|_, entry| entry.used == now);
         if fresh || gone != self.geometries.len() {

@@ -19,12 +19,11 @@ const DEPTH_TILE: u32 = 16;
 /// Probes a row of the atlases.
 const COLUMNS: u32 = 64;
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-/// Rounds (every probe updated once) after a change before the probes are
-/// taken as converged. Round `r` blends at `1 / (r + 1)`, `FLOOR` at
-/// least: early rounds replace (light follows a change at once), later
-/// ones average the noise away and let light bounce on.
+/// Rounds (updates of a probe) after a change before it's taken as
+/// converged. Round `r` blends at `1 / (r + 1)`, 0.2 at least (`FLOOR` in
+/// `probes_blend.wgsl`): early rounds replace (light follows a change at
+/// once), later ones average the noise away and let light bounce on.
 pub(crate) const ROUNDS: u32 = 16;
-const FLOOR: f32 = 0.2;
 /// The world's reason while its probes converge (`Settle::PROBES`).
 const SETTLE: u32 = crate::world::Settle::PROBES;
 
@@ -49,21 +48,17 @@ struct SetUniform {
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct TraceUniform {
-    turn: [[f32; 4]; 4],
-    first: u32,
+    /// This frame's probes (`Layout::slots`), rays a probe, all probes.
     count: u32,
     rays: u32,
     total: u32,
     far: f32,
     lift: f32,
-    /// Point and spot lights in `lights`, and the round (seeding which
-    /// light a hit samples where there are many).
+    /// Point and spot lights in `lights`.
     lights: u32,
-    seed: u32,
     /// `Gi::poison`, and a zero the GPU divides by where it's on.
     poison: u32,
     zero: f32,
-    _pad: [u32; 2],
 }
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -177,8 +172,11 @@ struct Layout {
     depth: Atlas,
     set: wgpu::Buffer,
     /// Every probe's place, in order (as `probe_place` finds it): where
-    /// faces are culled from.
+    /// faces are culled from, and what a moved mesh reopens.
     places: Vec<[f32; 3]>,
+    /// This frame's probes, each its index and its round above (16 bits
+    /// each): what the updaters and the blend read (`slots`).
+    slots: wgpu::Buffer,
     /// Written once by a pass clearing them (a blit into a texture opens
     /// driver blocks on Metal; a render pass doesn't).
     cleared: bool,
@@ -269,6 +267,12 @@ fn layout(device: &wgpu::Device, world: &Inner) -> Layout {
         depth,
         set,
         places,
+        slots: device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("3D probe slots"),
+            size: u64::from(total.max(1)) * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }),
         cleared: false,
     }
 }
@@ -406,6 +410,15 @@ impl Tracer {
             _ => 0,
         }
     }
+    /// What its last change moved or recoloured: spheres about each such
+    /// mesh where it was and where it is; `None` where meshes came or went.
+    fn moved(&self) -> Option<&[[f32; 4]]> {
+        match (&self.scene, &self.raster) {
+            (Some(scene), _) => scene.moved.as_deref(),
+            (_, Some(raster)) => raster.moved.as_deref(),
+            _ => None,
+        }
+    }
     /// Whether it holds the world's meshes yet.
     fn built(&self) -> bool {
         match (&self.scene, &self.raster) {
@@ -488,16 +501,18 @@ pub(super) struct Probes {
     frame_layouts: [Option<wgpu::BindGroupLayout>; 2],
     pub(super) bind: Option<(FrameKey, wgpu::BindGroup)>,
     tracer: Option<Tracer>,
-    /// The next probe to update; rounds finished since the last change and
-    /// probes updated in this one; the light and meshes they're for. A
-    /// round's probes all blend by its weight and turn their rays by its
-    /// rotation, so what the probes converge to after a change doesn't
-    /// depend on what came before it but through light bounced in its
-    /// first rounds.
-    next: u32,
-    rounds: u32,
-    done: u32,
-    lit_by: Option<([f32; 20], u64, Option<u64>)>,
+    /// Each probe's rounds since what it sees last changed (`ROUNDS`:
+    /// converged), and where the next frame starts looking for open ones;
+    /// this frame's. A probe's round sets its blend's weight and turns its
+    /// rays, so what it converges to after a change doesn't depend on what
+    /// came before but through light bounced in its first rounds.
+    rounds: Vec<u8>,
+    cursor: u32,
+    picked: Vec<u32>,
+    /// The light (the frame's, the environment) the probes are for, and
+    /// the scene's revision.
+    lit_by: Option<([f32; 20], Option<u64>)>,
+    revision: u64,
     /// The point and spot lights rays are lit by, as uploaded, and this
     /// frame's (`trace_lights`).
     lights: Vec<TraceLight>,
@@ -614,10 +629,11 @@ pub(super) fn frame(
         frame_layouts: [None, None],
         bind: None,
         tracer: None,
-        next: 0,
-        rounds: 0,
-        done: 0,
+        rounds: Vec::new(),
+        cursor: 0,
+        picked: Vec::new(),
         lit_by: None,
+        revision: 0,
         lights: Vec::new(),
         seen: Vec::new(),
         poison: 0,
@@ -635,9 +651,8 @@ pub(super) fn frame(
         // Clusters' and cascades' bindings hold the atlases too.
         #[cfg(feature = "lighting")]
         lights.remade();
-        probes.next = 0;
-        probes.rounds = 0;
-        probes.done = 0;
+        probes.rounds = vec![0; probes.layout.as_ref().unwrap().total as usize];
+        probes.cursor = 0;
         if let Some(tracer) = &mut probes.tracer {
             tracer.bind = None;
             tracer.blend_binds = None;
@@ -694,20 +709,43 @@ pub(super) fn frame(
         std::mem::swap(&mut probes.seen, &mut probes.lights);
         upload_lights(tracer, &probes.lights, device, queue);
     }
+    // The light changed: every probe converges again. What rays see did:
+    // those within a face's reach of what moved (as it was and as it is),
+    // where that's known, every probe where it isn't.
     let environment = world.environment.as_ref().map(|e| e.data.id);
-    let now = (lighting(uniforms), tracer.revision(), environment);
-    if lights_changed || probes.lit_by.as_ref() != Some(&now) {
-        probes.lit_by = Some(now);
-        probes.rounds = 0;
-        probes.done = 0;
+    let lit = (lighting(uniforms), environment);
+    let revision = tracer.revision();
+    let layout = probes.layout.as_ref().unwrap();
+    if lights_changed || probes.lit_by.as_ref() != Some(&lit) {
+        probes.lit_by = Some(lit);
+        probes.rounds.fill(0);
+    } else if revision != probes.revision {
+        match tracer.moved() {
+            Some(spheres) if revision == probes.revision + 1 => {
+                let reach = super::probes_raster::cut(layout.far);
+                for (round, place) in probes.rounds.iter_mut().zip(&layout.places) {
+                    let near = spheres.iter().any(|s| {
+                        let d = [s[0] - place[0], s[1] - place[1], s[2] - place[2]];
+                        let r = reach + s[3];
+                        d[0] * d[0] + d[1] * d[1] + d[2] * d[2] <= r * r
+                    });
+                    if near {
+                        *round = 0;
+                    }
+                }
+            }
+            _ => probes.rounds.fill(0),
+        }
     }
+    probes.revision = revision;
     world.gi.status.set(if tracer.scene.is_some() {
         crate::ProbesStatus::Traced
     } else {
         crate::ProbesStatus::Rasterised
     });
     let tracer = probes.tracer.as_ref().unwrap();
-    if probes.rounds < ROUNDS && tracer.built() {
+    let open = |rounds: &[u8]| rounds.iter().any(|&r| u32::from(r) < ROUNDS);
+    if open(&probes.rounds) && tracer.built() {
         let environment = match (environment, cube.as_ref(), environment_layout.as_ref()) {
             (Some(id), Some((_, view)), Some((_, sampler))) => Some((id, view, sampler)),
             _ => None,
@@ -730,7 +768,7 @@ pub(super) fn frame(
             encoder,
         );
     }
-    world.unsettle(SETTLE, probes.rounds < ROUNDS);
+    world.unsettle(SETTLE, open(&probes.rounds));
     true
 }
 
@@ -777,6 +815,7 @@ fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
             storage(20, false),
             uniform(21, compute),
             storage(22, true),
+            storage(24, true),
         ]);
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("3D probe rays"),
@@ -799,20 +838,37 @@ fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
             },
             uniform(1, fragment),
             uniform(2, fragment),
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     });
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("3D probe blend"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("probes_blend.wgsl").into()),
+        source: wgpu::ShaderSource::Wgsl(blend_source().into()),
     });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("3D probe blend"),
         bind_group_layouts: &[Some(&blend_layout)],
         immediate_size: 0,
     });
+    // Over what was there by the probe's round's weight, the blend's alpha
+    // (an atlas's own alpha is left as it is: nothing reads it).
     let weighted = wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::Constant,
-        dst_factor: wgpu::BlendFactor::OneMinusConstant,
+        src_factor: wgpu::BlendFactor::SrcAlpha,
+        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+        operation: wgpu::BlendOperation::Add,
+    };
+    let kept = wgpu::BlendComponent {
+        src_factor: wgpu::BlendFactor::Zero,
+        dst_factor: wgpu::BlendFactor::One,
         operation: wgpu::BlendOperation::Add,
     };
     let blend = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -832,7 +888,7 @@ fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
                 format: FORMAT,
                 blend: Some(wgpu::BlendState {
                     color: weighted,
-                    alpha: weighted,
+                    alpha: kept,
                 }),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
@@ -871,6 +927,16 @@ fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
         ];
         entries.extend(probe_entries(both));
         entries.extend([
+            wgpu::BindGroupLayoutEntry {
+                binding: 24,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
             uniform(21, both),
             wgpu::BindGroupLayoutEntry {
                 binding: 22,
@@ -923,6 +989,7 @@ fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
             entries.extend([
                 storage(20, false),
                 uniform(21, compute),
+                storage(24, true),
                 wgpu::BindGroupLayoutEntry {
                     binding: 23,
                     visibility: compute,
@@ -971,6 +1038,15 @@ fn tracer(device: &wgpu::Device, rays: bool) -> Tracer {
 /// The tracer's WGSL: the frame's declarations, the probes', the
 /// updaters' shared part and its own, tags taken off (`updater_source`).
 #[cold]
+/// The blend's source: the probes' rays' turns, then its own.
+fn blend_source() -> String {
+    format!(
+        "{}{}",
+        include_str!("probes_turn.wgsl"),
+        include_str!("probes_blend.wgsl")
+    )
+}
+
 fn trace_source(lit: bool) -> String {
     updater_source(
         "enable wgpu_ray_query;\n",
@@ -978,6 +1054,7 @@ fn trace_source(lit: bool) -> String {
         &[
             include_str!("shader/frame.wgsl"),
             include_str!("shader/probes.wgsl"),
+            include_str!("probes_turn.wgsl"),
             include_str!("probes_common.wgsl"),
             include_str!("probes_trace.wgsl"),
         ],
@@ -995,6 +1072,7 @@ pub(super) fn raster_source(lit: bool, cascaded: bool) -> String {
             include_str!("shader/frame.wgsl"),
             include_str!("shader/probes.wgsl"),
             include_str!("shader/shadows.wgsl"),
+            include_str!("probes_turn.wgsl"),
             include_str!("probes_common.wgsl"),
             include_str!("probes_raster.wgsl"),
         ],
@@ -1035,28 +1113,10 @@ fn updater_source(head: &str, (lit, cascaded): (bool, bool), parts: &[&str]) -> 
     out
 }
 
-/// A rotation turning round `n`'s rays, the same for the same `n`.
-fn turn(n: u32) -> [[f32; 4]; 4] {
-    let hash = |x: u32| {
-        let mut h = x.wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
-        h = ((h >> ((h >> 28) + 4)) ^ h).wrapping_mul(277_803_737);
-        ((h >> 22) ^ h) as f32 / u32::MAX as f32
-    };
-    // A random unit quaternion (Shoemake).
-    let (u1, u2, u3) = (hash(n * 3), hash(n * 3 + 1), hash(n * 3 + 2));
-    let tau = std::f32::consts::TAU;
-    let (a, b) = ((1. - u1).sqrt(), u1.sqrt());
-    let q = crate::Quat {
-        x: a * (tau * u2).sin(),
-        y: a * (tau * u2).cos(),
-        z: b * (tau * u3).sin(),
-        w: b * (tau * u3).cos(),
-    };
-    crate::Mat4::from_transform(crate::Vec3::ZERO, q, crate::vec3(1., 1., 1.)).columns
-}
-
-/// One frame's update: this frame's probes' rays traced, then blended
-/// into their maps by the round's weight.
+/// One frame's update: this frame's probes (the open ones, from the
+/// cursor on, `per_frame` at most and, drawing faces, as many as the
+/// budget holds) have their rays traced, then blended into their maps by
+/// each one's round's weight; each goes on a round.
 fn update(
     probes: &mut Probes,
     (frame, shadow): (&wgpu::Buffer, Shadow),
@@ -1066,21 +1126,41 @@ fn update(
 ) {
     let layout = probes.layout.as_ref().unwrap();
     let tracer = probes.tracer.as_mut().unwrap();
-    // Never past the round's end: the next round blends by another weight.
     // Drawing faces, at most `MOST` a frame.
     let most = if tracer.raster.is_some() {
         super::probes_raster::MOST
     } else {
         u32::MAX
     };
-    let mut count = layout.per_frame.min(layout.total - probes.done).min(most);
+    let limit = layout.per_frame.min(most) as usize;
+    let picked = &mut probes.picked;
+    picked.clear();
+    for k in 0..layout.total {
+        if picked.len() == limit {
+            break;
+        }
+        let probe = (probes.cursor + k) % layout.total;
+        if u32::from(probes.rounds[probe as usize]) < ROUNDS {
+            picked.push(probe);
+        }
+    }
     // Drawing faces: as many of those as fit the budget, each face culled.
     if let Some(raster) = &mut tracer.raster {
-        let places: Vec<[f32; 3]> = (0..count)
-            .map(|k| layout.places[((probes.next + k) % layout.total) as usize])
-            .collect();
+        let places: Vec<[f32; 3]> = picked.iter().map(|&p| layout.places[p as usize]).collect();
         let cut = super::probes_raster::cut(layout.far);
-        count = raster.plan((device, queue), &places, cut, probes.face_budget);
+        let fit = raster.plan((device, queue), &places, cut, probes.face_budget);
+        picked.truncate(fit as usize);
+    }
+    let count = picked.len() as u32;
+    if let Some(&last) = picked.last() {
+        probes.cursor = (last + 1) % layout.total;
+    }
+    let slots: Vec<u32> = picked
+        .iter()
+        .map(|&p| p | u32::from(probes.rounds[p as usize]) << 16)
+        .collect();
+    if !slots.is_empty() {
+        queue.write_buffer(&layout.slots, 0, bytemuck::cast_slice(&slots));
     }
     let size = u64::from(layout.per_frame * layout.rays) * 16;
     if tracer.rays.as_ref().is_none_or(|(_, have)| *have < size) {
@@ -1095,18 +1175,14 @@ fn update(
         tracer.blend_binds = None;
     }
     let uniform = TraceUniform {
-        turn: turn(probes.rounds),
-        first: probes.next,
         count,
         rays: layout.rays,
         total: layout.total,
         far: layout.far,
         lift: layout.lift,
         lights: tracer.light_count,
-        seed: probes.rounds,
         poison: probes.poison,
         zero: 0.,
-        _pad: [0; 2],
     };
     queue.write_buffer(&tracer.uniform, 0, bytemuck::bytes_of(&uniform));
     let atlases = Atlases {
@@ -1114,6 +1190,7 @@ fn update(
         depth: &layout.depth.view,
         set: &layout.set,
         sampler: &probes.sampler,
+        slots: &layout.slots,
     };
     if tracer.raster.is_some() {
         rasterise(
@@ -1154,12 +1231,15 @@ fn update(
                         binding: 2,
                         resource: atlas.uniform.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: layout.slots.as_entire_binding(),
+                    },
                 ],
             })
         };
         tracer.blend_binds = Some((key, [bind(&layout.light), bind(&layout.depth)]));
     }
-    let weight = f64::from((1. / (probes.rounds + 1) as f32).max(FLOOR));
     let binds = &tracer.blend_binds.as_ref().unwrap().1;
     for (atlas, bind) in [&layout.light, &layout.depth].into_iter().zip(binds) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1177,19 +1257,10 @@ fn update(
         });
         pass.set_pipeline(&tracer.blend);
         pass.set_bind_group(0, bind, &[]);
-        pass.set_blend_constant(wgpu::Color {
-            r: weight,
-            g: weight,
-            b: weight,
-            a: weight,
-        });
         pass.draw(0..4, 0..count);
     }
-    probes.next = (probes.next + count) % layout.total;
-    probes.done += count;
-    if probes.done == layout.total {
-        probes.done = 0;
-        probes.rounds += 1;
+    for &probe in &probes.picked {
+        probes.rounds[probe as usize] += 1;
     }
 }
 
@@ -1201,6 +1272,8 @@ struct Atlases<'a> {
     depth: &'a wgpu::TextureView,
     set: &'a wgpu::Buffer,
     sampler: &'a wgpu::Sampler,
+    /// This frame's probes (`Layout::slots`).
+    slots: &'a wgpu::Buffer,
 }
 /// The frame's shadow map (or stand-in), its sampler, whether the sun
 /// casts through it, and the sun's cascades' uniforms and maps where it
@@ -1275,6 +1348,10 @@ fn rasterise(
                 binding: 22,
                 resource: tracer.lights.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 24,
+                resource: atlases.slots.as_entire_binding(),
+            },
         ];
         if let Some((uniforms, maps)) = shadow.cascades {
             entries.push(wgpu::BindGroupEntry {
@@ -1317,6 +1394,10 @@ fn rasterise(
             wgpu::BindGroupEntry {
                 binding: 23,
                 resource: wgpu::BindingResource::TextureView(raster.faces()),
+            },
+            wgpu::BindGroupEntry {
+                binding: 24,
+                resource: atlases.slots.as_entire_binding(),
             },
         ]);
         let read = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1436,6 +1517,10 @@ fn trace(
             wgpu::BindGroupEntry {
                 binding: 22,
                 resource: tracer.lights.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 24,
+                resource: atlases.slots.as_entire_binding(),
             },
         ]);
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1583,7 +1668,7 @@ mod tests {
                 module("mesh", wgsl(variant, 4));
             }
         }
-        module("blend", include_str!("probes_blend.wgsl").into());
+        module("blend", blend_source());
     }
 
     #[test]

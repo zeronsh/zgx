@@ -53,7 +53,7 @@ fn lamps(at: vec3<f32>, n: vec3<f32>, lifted: vec3<f32>, ray: u32) -> vec3<f32> 
     if total <= 0.0 {
         return vec3(0.0);
     }
-    var pick = f32(hash(ray * 9781u + trace.seed * 6271u) >> 8u) / 16777216.0 * total;
+    var pick = f32(hash(ray * 9781u + slot_round(ray / trace.rays) * 6271u) >> 8u) / 16777216.0 * total;
     for (var i = 0u; i < trace.lights; i++) {
         let reaching = lamp(i, at, n);
         let weight = luminance(reaching.rgb);
@@ -83,9 +83,9 @@ fn trace_rays(@builtin(global_invocation_id) id: vec3<u32>) {
         return;
     }
     let ray = id.x % trace.rays;
-    let probe = (trace.first + id.x / trace.rays) % trace.total;
-    let origin = probe_place(probe);
-    let d = ray_direction(ray);
+    let slot = id.x / trace.rays;
+    let origin = probe_place(slot_probe(slot));
+    let d = ray_direction(slot, ray);
     var q: ray_query;
     rayQueryInitialize(&q, scene, RayDesc(RAY_FLAG_FORCE_OPAQUE, 0xffu, 0.0, 1e4, origin, d));
     rayQueryProceed(&q);

@@ -166,6 +166,8 @@ struct Shape {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     clusters: Vec<Cluster>,
+    /// A sphere about all of it (`raytrace::local_sphere`).
+    sphere: [f32; 4],
     /// The last rebuild that used it.
     used: u64,
 }
@@ -284,8 +286,9 @@ pub(super) struct Raster {
     held: Vec<Held>,
     seen: Vec<Held>,
     /// Counts the times what the faces see changed: the probes converge
-    /// again.
+    /// again; and what the last change moved (`raytrace::moved`).
     pub(super) revision: u64,
+    pub(super) moved: Option<Vec<[f32; 4]>>,
     rebuilds: u64,
     shapes: HashMap<u64, Shape>,
     /// The meshes as instances, grouped by geometry: the buffer and how
@@ -366,6 +369,7 @@ impl Raster {
             held: Vec::new(),
             seen: Vec::new(),
             revision: 0,
+            moved: None,
             rebuilds: 0,
             shapes: HashMap::new(),
             instances: None,
@@ -473,6 +477,7 @@ impl Raster {
                         "3D probe faces' indices",
                     ),
                     clusters,
+                    sphere: super::raytrace::local_sphere(d.geometry.vertices()),
                     used: now,
                 }
             });
@@ -503,6 +508,10 @@ impl Raster {
                 },
             ));
         }
+        // What moved, while the geometries it was drawn with are still held.
+        self.moved = (!first)
+            .then(|| super::raytrace::moved(&self.seen, &self.held, |g| self.shapes[&g].sphere))
+            .flatten();
         let shapes = &self.shapes;
         self.cluster_bytes -= shapes
             .values()

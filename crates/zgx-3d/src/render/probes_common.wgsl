@@ -4,11 +4,8 @@
 // (`shader/probes.wgsl`), their tags taken off.
 
 struct Trace {
-    // Turns this round's rays.
-    turn: mat4x4<f32>,
-    // The first probe updated (of all volumes', in order), how many, rays
-    // a probe, and how many probes there are.
-    first: u32,
+    // How many probes this frame updates (`slots`), rays a probe, and how
+    // many probes there are.
     count: u32,
     rays: u32,
     total: u32,
@@ -16,9 +13,8 @@ struct Trace {
     // shadow ray starts.
     far: f32,
     lift: f32,
-    // Point and spot lights in `lights`; the round.
+    // Point and spot lights in `lights`.
     lights: u32,
-    seed: u32,
     // For tests (`World::poison_probe_rays`): 0, or every seventh ray
     // brings back no finite light (1), let into the probes (2); and a zero
     // to divide by.
@@ -45,15 +41,17 @@ fn put(i: u32, value: vec4<f32>) {
     rays[i] = out;
 }
 
-// The `i`th of `n` directions spread evenly over the sphere.
-fn fibonacci(i: u32, n: u32) -> vec3<f32> {
-    let phi = 2.0 * PI * fract(f32(i) * 0.618034);
-    let z = 1.0 - (2.0 * f32(i) + 1.0) / f32(n);
-    let r = sqrt(max(1.0 - z * z, 0.0));
-    return vec3(r * cos(phi), r * sin(phi), z);
+// This frame's probes, each its index and its round above (`probes.rs`).
+@group(0) @binding(24) var<storage, read> slots: array<u32>;
+fn slot_probe(slot: u32) -> u32 {
+    return slots[slot] & 0xffffu;
 }
-fn ray_direction(i: u32) -> vec3<f32> {
-    return normalize((trace.turn * vec4(fibonacci(i, trace.rays), 0.0)).xyz);
+fn slot_round(slot: u32) -> u32 {
+    return slots[slot] >> 16u;
+}
+// This frame's `slot`th probe's ray `i` (`probes_turn.wgsl`).
+fn ray_direction(slot: u32, i: u32) -> vec3<f32> {
+    return turned(i, trace.rays, slot_round(slot));
 }
 // Probe `index`'s place (of all volumes', in order).
 fn probe_place(index: u32) -> vec3<f32> {
