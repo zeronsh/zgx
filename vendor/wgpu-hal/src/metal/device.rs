@@ -223,6 +223,25 @@ impl super::Device {
                     naga_stage,
                     &source
                 );
+                // Diagnostic (zgx lane/aaa-perf-fresh-variation, not for
+                // landing): each MSL source handed to Metal, by its hash,
+                // and the order compiled in `index.txt`.
+                if let Some(dir) = std::env::var_os("ZGX_DUMP_MSL") {
+                    let hash = source
+                        .bytes()
+                        .fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+                    let dir = std::path::PathBuf::from(dir);
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::fs::write(dir.join(format!("{hash:016x}-{}.metal", stage.entry_point)), &source);
+                    use std::io::Write as _;
+                    if let Ok(mut index) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(dir.join("index.txt"))
+                    {
+                        let _ = writeln!(index, "{} {:?} {} {hash:016x}", std::process::id(), naga_stage, stage.entry_point);
+                    }
+                }
 
                 let options = MTLCompileOptions::new();
                 options.setLanguageVersion(self.shared.private_caps.msl_version);

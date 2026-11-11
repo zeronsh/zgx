@@ -912,9 +912,29 @@ fn fresh_variation() {
     let frames: usize = std::env::var("FRESH_FRAMES").map_or(1, |v| v.parse().unwrap());
     let finish = std::env::var("FRESH_FINISH").is_ok_and(|v| v == "1");
     let runs: usize = std::env::var("FRESH_RUNS").map_or(8, |v| v.parse().unwrap());
+    // FRESH_RECREATE=1: one world and window per scene, its 3D renderer
+    // (pipelines, targets, buffers) made again each run by taking samples
+    // to 1 and back to 4.
+    let recreate = std::env::var("FRESH_RECREATE").is_ok_and(|v| v == "1");
     for scene in scenes() {
         let mut images: Vec<Vec<u8>> = Vec::new();
+        let (kept_world, _) = scene.world();
+        let mut kept = if recreate {
+            Window::new(&kept_world, (SIDE, SIDE))
+        } else {
+            None
+        };
         for _ in 0..runs {
+            if let Some(window) = kept.as_mut() {
+                kept_world.set_samples(1);
+                window.draw();
+                kept_world.set_samples(4);
+                for _ in 0..frames {
+                    window.draw();
+                }
+                images.push(window.pixels());
+                continue;
+            }
             let (world, _) = scene.world();
             let Some(mut fresh) = Window::new(&world, (SIDE, SIDE)) else {
                 return;
@@ -939,11 +959,19 @@ fn fresh_variation() {
             most = most.max(count);
             largest = largest.max(by);
         }
+        // Which image each run gave, in order: A the first seen, B the next.
+        let order: String = images
+            .iter()
+            .map(|image| (b'A' + distinct.iter().position(|d| *d == image).unwrap() as u8) as char)
+            .collect();
         println!(
-            "FRESH {:18} frames={frames} finish={finish}: {} distinct of {runs}, up to {most} px by up to {largest}, first {:016x}",
+            "FRESH {:18} frames={frames} finish={finish} recreate={recreate}: {} distinct of {runs} ({order}), up to {most} px by up to {largest}, first {:016x}",
             scene.name,
             distinct.len(),
-            images[0].iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+            images[0]
+                .iter()
+                .fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64)
+                    .wrapping_mul(0x100000001b3))
         );
     }
 }
