@@ -1,5 +1,6 @@
 use std::{cell::RefCell, rc::Rc, time::Duration};
 use zgx::{
+    clock::VirtualClock,
     compose::{TaskRunner, Tooltip, prelude::*},
     input::{InputEvent, Key, Modifiers},
     scene::NodeKind,
@@ -61,6 +62,8 @@ fn a_tooltip_shows_on_hover_and_goes_as_the_pointer_leaves_or_a_key_is_pressed()
 
 #[test]
 fn a_tooltip_waits_for_the_pointer_to_rest_and_an_interactive_card_takes_typing() {
+    let clock = VirtualClock::new();
+    let timing = zgx::compose::TooltipTiming::default();
     let mut ui = Ui::new(300., 200.);
     let executor = Rc::new(RefCell::new(LocalExecutor::new()));
     ui.mount(provide(
@@ -74,43 +77,24 @@ fn a_tooltip_waits_for_the_pointer_to_rest_and_an_interactive_card_takes_typing(
             )),
     ));
     ui.prepare_frame();
-    // Until `done`, or `ms` have passed: whether it happened. Timers run on
-    // a thread of their own, which a loaded machine runs late.
-    let until = |ui: &mut Ui, ms: u64, done: &dyn Fn(&Ui) -> bool| {
-        let end = std::time::Instant::now() + Duration::from_millis(ms);
-        loop {
-            while executor.borrow_mut().tick() > 0 {}
-            ui.prepare_frame();
-            if done(ui) {
-                return true;
-            }
-            if std::time::Instant::now() >= end {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    };
     hover(&mut ui, 70., 70.);
     assert!(!showing(&ui, "Plain"), "not at once");
-    assert!(
-        until(&mut ui, 2000, &|ui| showing(ui, "Plain")),
-        "after a rest"
-    );
-    // Within a second of it, the next opens at once: before a rest (300 ms)
-    // would have shown it.
+    wait(&mut ui, &executor, &clock, timing.delay + STEP);
+    assert!(showing(&ui, "Plain"), "after a rest");
+    // Within a second of it, the next opens at once (on Linux after GTK's
+    // short reshow wait): before a rest would have shown it.
     hover(&mut ui, 70., 110.);
-    assert!(until(&mut ui, 250, &|ui| showing(ui, "Card")), "at once");
-    assert!(
-        until(&mut ui, 2000, &|ui| !showing(ui, "Plain")),
-        "the last faded out"
-    );
+    wait(&mut ui, &executor, &clock, timing.reshow_delay + STEP);
+    assert!(showing(&ui, "Card"), "at once");
+    assert!(timing.reshow_delay + STEP < timing.delay);
+    // Its fade out: 100 ms.
+    wait(&mut ui, &executor, &clock, FADE_OUT);
+    assert!(!showing(&ui, "Plain"), "the last faded out");
     key(&mut ui, Key::Character("x".into()));
     assert!(showing(&ui, "Card"), "a card takes typing");
     key(&mut ui, Key::Escape);
-    assert!(
-        until(&mut ui, 2000, &|ui| !showing(ui, "Card")),
-        "and closes on Escape"
-    );
+    wait(&mut ui, &executor, &clock, FADE_OUT);
+    assert!(!showing(&ui, "Card"), "and closes on Escape");
 }
 
 #[test]
@@ -228,6 +212,42 @@ fn a_menu_matching_its_trigger_is_as_wide_as_it() {
     assert!(panel.width >= trigger.width, "{panel:?} {trigger:?}");
 }
 
+/// Two views with tooltips, with a task runner on a virtual clock: a busy
+/// machine's late wake can't pass for a wait.
+fn two_tooltips() -> (Ui, Rc<RefCell<LocalExecutor>>, VirtualClock) {
+    let clock = VirtualClock::new();
+    let mut ui = Ui::new(300., 200.);
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    ui.mount(provide(
+        TaskRunner::from_executor(executor.clone()),
+        column()
+            .p(60.)
+            .gap(20.)
+            .child(div().size(60., 24.).tooltip("First"))
+            .child(div().size(60., 24.).tooltip("Second")),
+    ));
+    ui.prepare_frame();
+    (ui, executor, clock)
+}
+
+/// Move `clock` on `by`, running each task and frame as its sleep falls due.
+fn wait(ui: &mut Ui, executor: &RefCell<LocalExecutor>, clock: &VirtualClock, by: Duration) {
+    let mut settle = || {
+        while executor.borrow_mut().tick() > 0 {}
+        ui.prepare_frame();
+    };
+    // What was asked for starts its sleeps now.
+    settle();
+    clock.advance(clock.elapsed() + by, &mut settle);
+    settle();
+}
+
+/// A fade's first step.
+const STEP: Duration = Duration::from_millis(8);
+/// A fade out, to its last step.
+const FADE_OUT: Duration = Duration::from_millis(100 + 8);
+const MS: Duration = Duration::from_millis(1);
+
 /// The system's timing (`set_tooltip_timing`, which a desktop host sets:
 /// Windows' from its hover time): a reshow within the window waits its own
 /// delay rather than none, a single timer.
@@ -240,42 +260,20 @@ fn a_reshow_waits_as_the_systems_timing_says() {
         reshow_delay: Duration::from_millis(400),
         reshow_from_open: false,
     });
-    let mut ui = Ui::new(300., 200.);
-    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
-    ui.mount(provide(
-        TaskRunner::from_executor(executor.clone()),
-        column()
-            .p(60.)
-            .gap(20.)
-            .child(div().size(60., 24.).tooltip("First"))
-            .child(div().size(60., 24.).tooltip("Second")),
-    ));
-    ui.prepare_frame();
-    let until = |ui: &mut Ui, ms: u64, done: &dyn Fn(&Ui) -> bool| {
-        let end = std::time::Instant::now() + Duration::from_millis(ms);
-        loop {
-            while executor.borrow_mut().tick() > 0 {}
-            ui.prepare_frame();
-            if done(ui) {
-                return true;
-            }
-            if std::time::Instant::now() >= end {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    };
+    let (mut ui, executor, clock) = two_tooltips();
     hover(&mut ui, 70., 70.);
-    assert!(until(&mut ui, 2000, &|ui| showing(ui, "First")));
+    wait(
+        &mut ui,
+        &executor,
+        &clock,
+        Duration::from_millis(100) + STEP,
+    );
+    assert!(showing(&ui, "First"));
     hover(&mut ui, 70., 110.);
-    assert!(
-        !until(&mut ui, 250, &|ui| showing(ui, "Second")),
-        "a reshow waits its delay"
-    );
-    assert!(
-        until(&mut ui, 3000, &|ui| showing(ui, "Second")),
-        "then shows"
-    );
+    wait(&mut ui, &executor, &clock, Duration::from_millis(400) - MS);
+    assert!(!showing(&ui, "Second"), "a reshow waits its delay");
+    wait(&mut ui, &executor, &clock, MS + STEP);
+    assert!(showing(&ui, "Second"), "then shows");
     set_tooltip_timing(TooltipTiming::default());
 }
 
@@ -285,33 +283,21 @@ fn a_reshow_waits_as_the_systems_timing_says() {
 /// reshows after a wait there, at once here.
 #[test]
 fn a_reshow_waits_as_its_platforms_do() {
-    let mut ui = Ui::new(300., 200.);
-    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
-    ui.mount(provide(
-        TaskRunner::from_executor(executor.clone()),
-        column()
-            .p(60.)
-            .gap(20.)
-            .child(div().size(60., 24.).tooltip("First"))
-            .child(div().size(60., 24.).tooltip("Second")),
-    ));
-    ui.prepare_frame();
-    let until = |ui: &mut Ui, ms: u64, done: &dyn Fn(&Ui) -> bool| {
-        let end = std::time::Instant::now() + Duration::from_millis(ms);
-        loop {
-            while executor.borrow_mut().tick() > 0 {}
-            ui.prepare_frame();
-            if done(ui) {
-                return true;
-            }
-            if std::time::Instant::now() >= end {
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(2));
-        }
+    // (delay, reshow delay): GTK's on Linux, zgx's elsewhere.
+    let (delay, reshow_delay) = match cfg!(target_os = "linux") {
+        true => (500, 60),
+        false => (300, 0),
     };
+    let (delay, reshow_delay) = (
+        Duration::from_millis(delay),
+        Duration::from_millis(reshow_delay),
+    );
+    let (mut ui, executor, clock) = two_tooltips();
     hover(&mut ui, 70., 70.);
-    assert!(until(&mut ui, 3000, &|ui| showing(ui, "First")));
+    wait(&mut ui, &executor, &clock, delay - MS);
+    assert!(!showing(&ui, "First"), "waits its delay");
+    wait(&mut ui, &executor, &clock, MS + STEP);
+    assert!(showing(&ui, "First"), "shows after it");
     hover(&mut ui, 70., 110.);
     // At once (zgx's) shows within a frame; GTK's 60 ms waits a little.
     let at_once = showing(&ui, "Second");
@@ -320,10 +306,12 @@ fn a_reshow_waits_as_its_platforms_do() {
         !cfg!(target_os = "linux"),
         "a reshow at once only off Linux"
     );
-    assert!(
-        until(&mut ui, 2000, &|ui| showing(ui, "Second")),
-        "then shows"
-    );
+    if !at_once {
+        wait(&mut ui, &executor, &clock, reshow_delay - MS);
+        assert!(!showing(&ui, "Second"), "waits its reshow delay");
+    }
+    wait(&mut ui, &executor, &clock, MS + STEP);
+    assert!(showing(&ui, "Second"), "then shows");
 }
 
 /// A menu and a tooltip in popup windows, as a desktop host has them.
@@ -403,18 +391,11 @@ fn view_root_of_open_popup(ui: &Ui) -> zgx::scene::NodeId {
 
 #[test]
 fn a_tooltip_at_the_back_does_not_show_until_the_app_comes_forward() {
+    let clock = VirtualClock::new();
     let (mut ui, _open, executor) = with_popup_windows();
     ui.set_app_active(false);
     hover(&mut ui, 40., 80.);
-    let tick = |ui: &mut Ui, ms: u64| {
-        let end = std::time::Instant::now() + Duration::from_millis(ms);
-        while std::time::Instant::now() < end {
-            while executor.borrow_mut().tick() > 0 {}
-            ui.prepare_frame();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    };
-    tick(&mut ui, 900);
+    wait(&mut ui, &executor, &clock, Duration::from_millis(900));
     assert!(
         ui.scene.borrow().popups().is_empty(),
         "under the pointer, at the back"
