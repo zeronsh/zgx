@@ -1558,6 +1558,23 @@ struct Adding<'a> {
     handled: Vec<(ObjectId, Rc<ObjectSpec>)>,
 }
 /// Add `spec` (a child of `parent`) to the world, following what it reads.
+/// The shapes `add` makes an object of, by its pattern: a sound's too with
+/// `audio-spatial`. Spelled out rather than `_`, so a build without it
+/// compiles the match `add` had before sound (a `_` arm is lowered to other
+/// code).
+#[cfg(not(feature = "audio-spatial"))]
+macro_rules! objects {
+    () => {
+        Shape::Mesh(..) | Shape::Group(_) | Shape::Model(_)
+    };
+}
+#[cfg(feature = "audio-spatial")]
+macro_rules! objects {
+    () => {
+        Shape::Mesh(..) | Shape::Group(_) | Shape::Model(_) | Shape::Sound(_)
+    };
+}
+
 fn add(adding: &mut Adding, spec: &Rc<ObjectSpec>, parent: Option<ObjectId>, cx: &mut Context) {
     let (world, vm, theme) = (adding.world, adding.vm, adding.theme);
     let live = LiveObject {
@@ -1624,7 +1641,7 @@ fn add(adding: &mut Adding, spec: &Rc<ObjectSpec>, parent: Option<ObjectId>, cx:
                 .map_or(Vec3::ZERO, |p| vm.runtime.untracked(|| p.get(vm)));
             crate::audio::spatial::add_zone(world, centre, zone);
         }
-        _ => {
+        objects!() => {
             let (geometry, material, double_sided) = match &spec.shape {
                 Shape::Mesh(geometry, material) => (
                     Some(geometry.clone()),
