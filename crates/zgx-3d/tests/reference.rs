@@ -901,3 +901,49 @@ fn the_goldens_fit_their_budget() {
         "the goldens hold {total} bytes, past {BUDGET}"
     );
 }
+
+/// Diagnostic (not committed): each scene's fresh image drawn `runs` times,
+/// each from a new world and window, after `FRESH_FRAMES` frames (default
+/// 1), with `FRESH_FINISH=1` finishing every frame first. Prints how many
+/// distinct images each scene gave and how far they spread.
+#[test]
+#[ignore]
+fn fresh_variation() {
+    let frames: usize = std::env::var("FRESH_FRAMES").map_or(1, |v| v.parse().unwrap());
+    let finish = std::env::var("FRESH_FINISH").is_ok_and(|v| v == "1");
+    let runs: usize = std::env::var("FRESH_RUNS").map_or(8, |v| v.parse().unwrap());
+    for scene in scenes() {
+        let mut images: Vec<Vec<u8>> = Vec::new();
+        for _ in 0..runs {
+            let (world, _) = scene.world();
+            let Some(mut fresh) = Window::new(&world, (SIDE, SIDE)) else {
+                return;
+            };
+            for _ in 0..frames {
+                fresh.draw();
+                if finish {
+                    fresh.gpu.finish().unwrap();
+                }
+            }
+            images.push(fresh.pixels());
+        }
+        let mut distinct: Vec<&Vec<u8>> = Vec::new();
+        for image in &images {
+            if !distinct.contains(&image) {
+                distinct.push(image);
+            }
+        }
+        let (mut most, mut largest) = (0, 0);
+        for image in &images[1..] {
+            let (count, by) = differ(image, &images[0], 0);
+            most = most.max(count);
+            largest = largest.max(by);
+        }
+        println!(
+            "FRESH {:18} frames={frames} finish={finish}: {} distinct of {runs}, up to {most} px by up to {largest}, first {:016x}",
+            scene.name,
+            distinct.len(),
+            images[0].iter().fold(0xcbf29ce484222325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+        );
+    }
+}
