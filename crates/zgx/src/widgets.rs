@@ -1697,6 +1697,9 @@ pub(crate) struct UiStorage {
     /// mounts on, until it does (`View::scrollbar_style`).
     scrollbar_styles:
         RefCell<rustc_hash::FxHashMap<NodeId, Rc<crate::compose_scrollbar::ScrollbarStyle>>>,
+    /// The style of the scroll view or list opening now, until its node is
+    /// known (`compose::hold_scrollbar_style`).
+    held_scrollbar_style: RefCell<Option<Rc<crate::compose_scrollbar::ScrollbarStyle>>>,
     /// Input is being dispatched: what scrolls now, the user scrolled.
     dispatching: Cell<bool>,
     /// A platform's wheel is being dispatched (`Ui::wheel_in_window`).
@@ -2033,6 +2036,7 @@ impl Ui {
             paging: Default::default(),
             scrollbar_fades: RefCell::new(Vec::new()),
             scrollbar_styles: Default::default(),
+            held_scrollbar_style: Default::default(),
             dispatching: Cell::new(false),
             wheel_in_window: Cell::new(false),
             document_listeners: RefCell::new(Vec::new()),
@@ -3033,6 +3037,19 @@ impl Ui {
     /// Whether input is being dispatched, so a scroll now is the user's.
     pub(crate) fn is_dispatching(&self) -> bool {
         self.storage.dispatching.get()
+    }
+    /// Hold the style of the element opening now (`None`: it has none).
+    pub(crate) fn hold_scrollbar_style(
+        &self,
+        style: Option<Rc<crate::compose_scrollbar::ScrollbarStyle>>,
+    ) {
+        *self.storage.held_scrollbar_style.borrow_mut() = style;
+    }
+    /// The style held for the element just opened, taken.
+    pub(crate) fn held_scrollbar_style(
+        &self,
+    ) -> Option<Rc<crate::compose_scrollbar::ScrollbarStyle>> {
+        self.storage.held_scrollbar_style.borrow_mut().take()
     }
     /// Keep `style` for the scrollbar that mounts on `node`.
     pub(crate) fn keep_scrollbar_style(
