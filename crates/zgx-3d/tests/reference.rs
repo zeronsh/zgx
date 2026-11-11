@@ -44,7 +44,20 @@ struct Window {
 }
 impl Window {
     fn new(world: &World, (w, h): (u32, u32)) -> Option<Self> {
-        let gpu = match GpuRenderer::new(w, h) {
+        // Every window on one device (a thread's first window's context),
+        // as an app's windows are: on the M1 Max, each new device drew a
+        // scene's silhouette edges as one of two images (`APPLE7`).
+        thread_local! {
+            static SHARED: std::cell::OnceCell<std::mem::ManuallyDrop<zgx_gpu::GpuContext>> =
+                const { std::cell::OnceCell::new() };
+        }
+        let made = SHARED.with(|shared| match shared.get() {
+            Some(context) => GpuRenderer::new_with_context(w, h, context),
+            None => GpuRenderer::new(w, h).inspect(|gpu| {
+                let _ = shared.set(std::mem::ManuallyDrop::new(gpu.context()));
+            }),
+        });
+        let gpu = match made {
             Ok(gpu) => gpu,
             Err(error) if std::env::var_os("ZGX_REQUIRE_GPU").is_some() => {
                 panic!("ZGX_REQUIRE_GPU, but no renderer: {error}")
@@ -1028,16 +1041,17 @@ const SEQUENCES: &[Sequence] = &[
 ];
 
 /// Apple7 GPUs (the M1 family): an exception to fresh-against-retained,
-/// cause under investigation. There, a fresh window's image is one of two,
-/// run to run and within a process, at silhouette edges of scenes drawn
-/// without shadows, and stays so for the window's life (later frames and
-/// `finish` don't change it); Metal's validation reports nothing. Measured
-/// on an M1 Max (lane/aaa-perf-fresh-variation): fresh against fresh up to
-/// 44 pixels by 11 levels, fresh against retained up to 24 pixels by 18.
-/// The M5 Max and llvmpipe draw both exactly. So there, up to `APPLE7`
-/// (pixels, levels) may differ from the fresh window, and the retained
-/// sequence, which is stable there, must draw the same image twice.
-const APPLE7: (usize, u8) = (64, 20);
+/// cause under investigation. On an M1 Max, each new GPU device drew a
+/// scene without shadows with its silhouette edges as one of two images
+/// (up to 44 pixels by 11 levels), kept for the device's life; the shader
+/// text Metal compiled was byte-identical every time, and Metal's
+/// validation reported nothing (lane/aaa-perf-fresh-variation, runs a-g).
+/// Windows here share one device (`Window::new`), which leaves one scene
+/// with a residue: `lighting`'s second window, 15 pixels by up to 3 in two
+/// processes of three. The M5 Max and llvmpipe draw every image exactly.
+/// So there, up to `APPLE7` (pixels, levels) may differ from the fresh
+/// window, and the retained sequence must draw the same image twice.
+const APPLE7: (usize, u8) = (16, 3);
 fn apple7(window: &Window) -> bool {
     let info = window.gpu.adapter_info();
     info.backend == zgx_gpu::wgpu::Backend::Metal && info.name.starts_with("Apple M1")
