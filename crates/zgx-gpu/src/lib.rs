@@ -4618,6 +4618,9 @@ pub struct GpuRenderer {
     image_drawn: FxHashMap<u64, u64>,
     /// Textures kept of images no node shows (`bound_images_gone`).
     images_gone: rustc_hash::FxHashSet<u64>,
+    /// Whether anything still holds each image uploaded: one nothing holds
+    /// can't be shown again, so its texture isn't kept once no node shows it.
+    image_holders: FxHashMap<u64, zgx::image::Holders>,
     /// Frames drawn, for `image_drawn`.
     image_frame: u64,
     /// The scene the frame under way draws, for what an image giving way must
@@ -5318,6 +5321,7 @@ impl GpuRenderer {
             images_uploaded: false,
             image_drawn: FxHashMap::default(),
             images_gone: Default::default(),
+            image_holders: Default::default(),
             image_frame: 0,
             frame_scene: None,
             images_decoding: 0,
@@ -6594,9 +6598,15 @@ impl GpuRenderer {
             // with its pixels long given up, to decode blank again: its
             // texture stays, within a bound, until the window goes idle.
             // Others' are gone with their nodes; they have no `image_drawn`.
-            let drawn = &self.image_drawn;
-            self.images
-                .retain(|id, _| live_images.contains(id) || drawn.contains_key(id));
+            // Nor one nothing holds any more (a video's frame, replaced by
+            // the next): no node can show it again.
+            let (drawn, holders) = (&self.image_drawn, &self.image_holders);
+            self.images.retain(|id, _| {
+                live_images.contains(id)
+                    || drawn.contains_key(id) && holders.get(id).is_none_or(|h| h.any())
+            });
+            let images = &self.images;
+            self.image_holders.retain(|id, _| images.contains_key(id));
             self.images_gone.clear();
             self.images_gone
                 .extend(self.images.keys().filter(|id| !live_images.contains(id)));
@@ -13855,6 +13865,7 @@ impl GpuRenderer {
         self.images_outgoing.remove(&image.id());
         self.images
             .insert(image.id(), (bind, bytes, Some(texture), held_size));
+        self.image_holders.insert(image.id(), image.holders());
         self.image_drawn.insert(image.id(), self.image_frame);
         Ok(())
     }

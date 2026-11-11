@@ -230,7 +230,8 @@ fn a_kept_file_returning_to_the_scene_draws_at_once() {
 }
 
 /// What textures of pictures no node shows may hold is bounded, the least
-/// recently drawn going first.
+/// recently drawn going first. (Held by the app, as a cache holds them: one
+/// nothing holds goes with its node, below.)
 #[test]
 fn textures_of_images_gone_are_bounded() {
     let _decoded = decoded_kept();
@@ -238,8 +239,11 @@ fn textures_of_images_gone_are_bounded() {
     let mut scene = Scene::new(800., 600.);
     let mut gpu = GpuRenderer::new(800, 600).unwrap();
     // 40 photos of 1.2 MB, each in the scene a frame: 48 MB seen, 32 MB kept.
+    let mut held = Vec::new();
     for i in 0..40 {
-        let node = scene.append(scene.root(), photo(i), photo_style());
+        let photo = photo(i);
+        held.push(photo.clone());
+        let node = scene.append(scene.root(), photo, photo_style());
         scene.flush();
         gpu.render(&scene, &whole).unwrap();
         scene.remove(node);
@@ -259,6 +263,39 @@ fn textures_of_images_gone_are_bounded() {
     );
     gpu.trim();
     assert_eq!(gpu.debug_cache_stats().image_bytes, 0);
+    drop(held);
+}
+
+/// A picture replaced by another, frame after frame, as a video's frames
+/// are: one nothing holds any more can't be shown again, so its texture goes
+/// with it, not kept for its node's return. A player kept nine of them
+/// (32 MB of 1280 by 720 frames) as it played and for as long as it paused.
+#[test]
+fn a_picture_nothing_holds_gives_its_texture_back_once_replaced() {
+    let _decoded = decoded_kept();
+    let whole = [Rect::new(0., 0., 800., 600.)];
+    let mut scene = Scene::new(800., 600.);
+    let mut gpu = GpuRenderer::new(800, 600).unwrap();
+    let node = scene.append(scene.root(), photo(0), photo_style());
+    for i in 1..40 {
+        scene.set_kind(node, photo(i));
+        scene.flush();
+        gpu.render(&scene, &whole).unwrap();
+    }
+    let stats = gpu.debug_cache_stats();
+    assert_eq!(stats.image_textures, 1, "{} bytes held", stats.image_bytes);
+    // One still held (an app's cache), shown again, draws without uploading.
+    let kept = photo(40);
+    scene.set_kind(node, kept.clone());
+    scene.flush();
+    gpu.render(&scene, &whole).unwrap();
+    scene.set_kind(node, photo(41));
+    scene.flush();
+    gpu.render(&scene, &whole).unwrap();
+    assert_eq!(gpu.debug_cache_stats().image_textures, 2, "a held one kept");
+    scene.set_kind(node, kept);
+    scene.flush();
+    assert_eq!(gpu.render(&scene, &whole).unwrap().image_uploads, 0);
 }
 
 /// A 2 by 2 checker, black and white, drawn at 100 by 100: smooth, its
