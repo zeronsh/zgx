@@ -946,3 +946,24 @@ fn a_mesh_its_shader_moves_into_view_is_drawn_while_culling() {
             .is_err()
     );
 }
+
+#[test]
+fn time_read_another_way_still_needs_animated() {
+    // The token check saw `frame.time` alone; `let f = frame; f.time` read
+    // time unseen, and the shader froze (review finding CM4).
+    let source = "#zgx material 1
+fn surface(s: SurfaceIn) -> Surface {
+    var m = surface_default(s);
+    let f = frame;
+    m.roughness = fract(f.time);
+    return m;
+}";
+    let e = error_of(MaterialShader::new(source));
+    assert_eq!(e.line, 5, "{e}");
+    assert!(e.message.contains("animated"), "{e}");
+    assert!(
+        World::new()
+            .add_shader(MaterialShader::new(source).animated())
+            .is_ok()
+    );
+}

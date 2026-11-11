@@ -26,7 +26,9 @@ pub(super) fn wgsl(variant: Variant, samples: u32) -> String {
 }
 /// `wgsl`'s shader with `custom` code (a mesh's shader, the world's surface
 /// layers): its lines marked `//V ` are a custom one's alone, `//O ` any
-/// other's, and `//D ` one whose mesh's shader cuts it out (`opacity`).
+/// other's, `//D ` one whose mesh's shader cuts it out (`opacity`), and
+/// `//F ` and `//J ` one whose code reads time and one whose doesn't (its
+/// frame's time named so none can read it: `.animated()`).
 #[cold]
 #[inline(never)]
 pub(super) fn wgsl_with(variant: Variant, samples: u32, custom: Option<&Custom>) -> String {
@@ -53,6 +55,8 @@ pub(super) fn wgsl_with(variant: Variant, samples: u32, custom: Option<&Custom>)
         b'V' => custom.is_some(),
         b'O' => custom.is_none(),
         b'D' => custom.is_some_and(cuts),
+        b'F' => custom.is_some_and(times),
+        b'J' => custom.is_some_and(|c| !times(c)),
         _ => false,
     };
     // The kept chunks, copied whole.
@@ -116,12 +120,20 @@ fn cuts(custom: &Custom) -> bool {
 fn code_of(custom: &Custom) -> &str {
     &custom.code
 }
+#[cfg(feature = "shaders")]
+fn times(custom: &Custom) -> bool {
+    custom.animated
+}
 #[cfg(not(feature = "shaders"))]
 fn cuts(custom: &Custom) -> bool {
     match *custom {}
 }
 #[cfg(not(feature = "shaders"))]
 fn code_of(custom: &Custom) -> &str {
+    match *custom {}
+}
+#[cfg(not(feature = "shaders"))]
+fn times(custom: &Custom) -> bool {
     match *custom {}
 }
 /// The shader's parts (`shader/*.wgsl`), in order, as one text; with the

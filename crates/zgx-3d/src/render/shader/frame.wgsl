@@ -17,9 +17,12 @@ struct Frame {
 //V     view: mat4x4<f32>,
 //V     projection: mat4x4<f32>,
 //V     size: vec2<f32>,
-//V     time: f32,
-//V     delta: f32,
-//V     index: u32,
+//V //F     time: f32,
+//V //F     delta: f32,
+//V //F     index: u32,
+//V //J     zgx_time: f32,
+//V //J     zgx_delta: f32,
+//V //J     zgx_index: u32,
 //V     layers: ZgxLayers,
 }
 @group(0) @binding(0) var<uniform> frame: Frame;

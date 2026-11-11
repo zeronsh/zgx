@@ -427,16 +427,20 @@ pub(super) fn prepare(
             }
         }
     }
-    let animated = shaders.list.iter().any(|s| s.animated)
-        && shown.chunk_by(|a, b| a.0 == b.0).any(|spans| {
-            let run = &runs[spans[0].0 as usize];
-            run.variant.custom()
-                && gpu
-                    .custom
-                    .by_binding
-                    .get(&run.maps)
-                    .is_some_and(|shader| shader.animated)
-        });
+    // A layer reading time animates every lit mesh it runs over; a mesh's
+    // shader, its own.
+    let layered = shaders.layers.iter().any(|l| l.animated) && !shown.is_empty();
+    let animated = layered
+        || shaders.list.iter().any(|s| s.animated)
+            && shown.chunk_by(|a, b| a.0 == b.0).any(|spans| {
+                let run = &runs[spans[0].0 as usize];
+                run.variant.custom()
+                    && gpu
+                        .custom
+                        .by_binding
+                        .get(&run.maps)
+                        .is_some_and(|shader| shader.animated)
+            });
     world.unsettle(ANIMATED, animated);
     // Meshes cast by other shaders than the map holds: drawn again.
     if std::mem::replace(&mut gpu.custom.casting, casting) != casting {
@@ -637,13 +641,13 @@ fn write_tail(gpu: &mut Gpu, world: &Inner, frame: &ViewportFrame<'_>) {
 /// The engine's shader as a custom material is checked against: a mesh's
 /// (textured, multisampled; cut out by its `opacity` if `opacity`) or a
 /// surface layer's (plain).
-pub(crate) fn engine_text(mesh: bool, opacity: bool) -> String {
+pub(crate) fn engine_text(mesh: bool, opacity: bool, animated: bool) -> String {
     let variant = if mesh {
         Variant(Variant::TEXTURED | Variant::CUSTOM)
     } else {
         Variant::default()
     };
-    wgsl_with(variant, 4, Some(&Custom::bare(opacity)))
+    wgsl_with(variant, 4, Some(&Custom::bare(opacity, animated)))
 }
 
 #[cfg(test)]

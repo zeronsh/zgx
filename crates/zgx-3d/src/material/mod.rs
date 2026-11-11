@@ -431,7 +431,7 @@ impl Shader {
             (Some(self), &[][..])
         };
         let custom = Custom::new(mesh, layers.iter());
-        let engine = crate::render::engine_text(!layer, custom.opacity);
+        let engine = crate::render::engine_text(!layer, custom.opacity, custom.animated);
         let text = format!("{engine}{}", custom.code);
         // The assembled text's line (from 1) its own first is at.
         let engine_lines = engine.matches('\n').count() as u32;
@@ -459,7 +459,16 @@ impl Shader {
         let Some((at, message)) = found else {
             return Ok(());
         };
-        let message = message.replace(if layer { "_zgxl0" } else { "_zgxm" }, "");
+        let mut message = message.replace(if layer { "_zgxl0" } else { "_zgxm" }, "");
+        // Time reached another way than `frame.time` (its fields aren't
+        // there without `.animated()`).
+        if !self.animated
+            && ["`time`", "`delta`", "`index`"]
+                .iter()
+                .any(|f| message.contains(f))
+        {
+            message.push_str(" (frame.time, .delta and .index need `.animated()`)");
+        }
         let lines = self.code.lines().count() as u32;
         match at {
             Some(at) if at.line_number >= start && at.line_number < start + lines => {
@@ -553,6 +562,9 @@ pub(crate) struct Custom {
     pub(crate) code: String,
     /// The mesh's shader cuts itself out (`opacity`).
     pub(crate) opacity: bool,
+    /// Its mesh's shader or a layer reads time (`.animated()`): only then
+    /// is the frame's time named `frame.time`.
+    pub(crate) animated: bool,
     /// The line of `code` its mesh's shader's (else its first layer's) text
     /// starts at, from 0.
     user_line: u32,
@@ -681,19 +693,22 @@ impl Custom {
                 "fn zgx_opacity(s: SurfaceIn) -> f32 {\n    return opacity_zgxm(s);\n}\n",
             );
         }
+        let animated = mesh.is_some_and(|s| s.animated) || layers.iter().any(|l| l.animated);
         Self {
             code,
             opacity,
+            animated,
             user_line: user_line.unwrap_or(0),
             edits,
         }
     }
     /// No code, the engine's custom lines on: what a shader is checked
     /// against.
-    pub(crate) fn bare(opacity: bool) -> Self {
+    pub(crate) fn bare(opacity: bool, animated: bool) -> Self {
         Self {
             code: String::new(),
             opacity,
+            animated,
             user_line: 0,
             edits: Vec::new(),
         }
