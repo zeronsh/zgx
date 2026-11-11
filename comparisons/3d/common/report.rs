@@ -223,3 +223,27 @@ pub fn hierarchy(model: &str) -> Option<(usize, usize)> {
     let (d, f) = model.strip_prefix("hierarchy:")?.split_once(':')?;
     Some((d.parse().ok()?, f.parse().ok()?))
 }
+
+/// The post columns' grade, as a strip of `n` tables of `n` by `n` (blue
+/// across them, red across each, green down; RGBA): a warm look, reds
+/// lifted and blues lowered a little with a soft contrast, the same for
+/// every engine that reads a table.
+pub fn warm_lut(n: usize) -> Vec<u8> {
+    let mut strip = vec![0u8; n * n * n * 4];
+    let curve = |v: f32| v * v * (3. - 2. * v) * 0.35 + v * 0.65;
+    for g in 0..n {
+        for b in 0..n {
+            for r in 0..n {
+                let unit = |i: usize| i as f32 / (n - 1) as f32;
+                let (rf, gf, bf) = (curve(unit(r)), curve(unit(g)), curve(unit(b)));
+                let px = [(rf * 1.04).min(1.), gf, bf * 0.94];
+                let at = (g * n * n + b * n + r) * 4;
+                for c in 0..3 {
+                    strip[at + c] = (px[c] * 255.).round() as u8;
+                }
+                strip[at + 3] = 255;
+            }
+        }
+    }
+    strip
+}

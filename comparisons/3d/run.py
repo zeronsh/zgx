@@ -122,6 +122,20 @@ ARMS = {
                         "args": ["--no-indirect=1"]},
     "zgx-shadows": {"dir": "zgx", "bin": "zgx-compare-3d", "target": "zgx",
                     "args": ["--shadow-every-frame=1"]},
+    # The post column: bloom, ACES and a grade through a 32³ table
+    # (`report::warm_lut`) in each engine (zgx-3d's `post` feature, Bevy's
+    # Bloom and ColorGrading, Filament's bloom and ColorGrading); and zgx
+    # with the chain compiled in but off, against `zgx` (today's path).
+    "zgx-post": {"dir": "zgx", "bin": "zgx-compare-3d", "target": "zgx-post",
+                 "features": ["post"], "args": ["--post=bloom,lut"]},
+    "zgx-post-off": {"dir": "zgx", "bin": "zgx-compare-3d", "target": "zgx-post"},
+    "bevy-post": {"dir": "bevy", "bin": "bevy-compare-3d", "target": "bevy", "args": ["--post=bloom,lut"]},
+    # With mipmaps (as bevy-mips): without them Bevy's textures alias into
+    # bright HDR texels, which bloom then spreads over the frame.
+    "bevy-mips-post": {"dir": "bevy", "bin": "bevy-compare-3d", "target": "bevy",
+                       "args": ["--mips=1", "--post=bloom,lut"]},
+    "filament-post": {"dir": "filament", "bin": "filament-compare-3d", "target": "filament",
+                      "args": ["--post=bloom,lut"]},
     "bevy": {"dir": "bevy", "bin": "bevy-compare-3d"},
     "filament": {"dir": "filament", "bin": "filament-compare-3d"},
 }

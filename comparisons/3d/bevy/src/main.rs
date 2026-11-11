@@ -375,6 +375,21 @@ fn scene(
     if std::env::args().any(|a| a == "--no-indirect=1") {
         camera.insert(bevy::render::view::NoIndirectDrawing);
     }
+    // `--post=bloom,lut`: the post column. Bloom at Bevy's natural setting
+    // (an HDR camera, as Bloom requires) and a warm grade: Bevy grades by
+    // parameters in its tone-mapping pass, not through a table.
+    if let Some(parts) = std::env::args().find_map(|a| a.strip_prefix("--post=").map(str::to_owned)) {
+        let on = |part: &str| parts.split(',').any(|p| p == part);
+        if on("bloom") {
+            camera.insert(bevy::post_process::bloom::Bloom::NATURAL);
+        }
+        if on("lut") {
+            let mut grading = bevy::render::view::ColorGrading::default();
+            grading.global.temperature = 0.1;
+            grading.midtones.contrast = 1.05;
+            camera.insert(grading);
+        }
+    }
 }
 
 /// The equirectangular `.hdr` as a cube (+x, −x, +y, −y, +z, −z) of

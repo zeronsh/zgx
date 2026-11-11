@@ -167,6 +167,22 @@ fn main() {
     // other engines redraw theirs every frame. `--shadow-every-frame=1`
     // nudges the sun each frame so zgx does the same work.
     let shadow_every_frame = std::env::args().any(|a| a == "--shadow-every-frame=1");
+    // `--post=bloom,lut` (with the `post` feature): the chain the other
+    // engines' post columns run: bloom at its default mix, a grade through
+    // `report::warm_lut`'s 32³ table; ACES as everywhere. Built with the
+    // feature and no `--post`: the chain compiled in and off.
+    #[cfg(feature = "post")]
+    if let Some(parts) = std::env::args().find_map(|a| a.strip_prefix("--post=").map(str::to_owned)) {
+        let on = |part: &str| parts.split(',').any(|p| p == part);
+        world.set_post(Post {
+            bloom: on("bloom").then(Bloom::default),
+            grade: on("lut").then(|| Grade {
+                lut: Some(Lut::from_strip(32 * 32, 32, &report::warm_lut(32)).expect("a strip")),
+                ..Grade::default()
+            }),
+            ..Post::default()
+        });
+    }
     if let Some(model) = &model {
         let added = Instant::now();
         world.add_model(model);

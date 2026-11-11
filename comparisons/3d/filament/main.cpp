@@ -250,10 +250,24 @@ int main(int argc, char** argv) {
     msaa.sampleCount = samples;
     view->setMultiSampleAntiAliasingOptions(msaa);
     view->setShadowType(View::ShadowType::PCF);
-    ColorGrading* grading = ColorGrading::Builder()
-        .toneMapping(ColorGrading::ToneMapping::ACES)
-        .build(*engine);
+    // `--post=bloom,lut`: the post column. Filament grades through a 3D
+    // table it bakes from the grading's parameters, in every arm (ACES
+    // included), so the post arm's grade costs the table it always reads;
+    // bloom at Filament's default strength.
+    std::string post = args.count("post") ? args["post"] : "";
+    auto postOn = [&](const char* part) { return ("," + post + ",").find(std::string(",") + part + ",") != std::string::npos; };
+    ColorGrading::Builder gradingBuilder;
+    gradingBuilder.toneMapping(ColorGrading::ToneMapping::ACES);
+    if (postOn("lut")) {
+        gradingBuilder.whiteBalance(0.1f, 0.f).contrast(1.05f);
+    }
+    ColorGrading* grading = gradingBuilder.build(*engine);
     view->setColorGrading(grading);
+    if (postOn("bloom")) {
+        View::BloomOptions bloom;
+        bloom.enabled = true;
+        view->setBloomOptions(bloom);
+    }
     Renderer::ClearOptions clear;
     clear.clearColor = {std::pow(CLEAR[0] / 255.f, 2.2f), std::pow(CLEAR[1] / 255.f, 2.2f),
                         std::pow(CLEAR[2] / 255.f, 2.2f), 1.f};

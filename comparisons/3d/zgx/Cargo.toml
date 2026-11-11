@@ -26,6 +26,8 @@ gpu-time = []
 cull-tree = []
 # Clustered lights (run.py's zgx-lights).
 lighting = ["zgx-3d/lighting"]
+# The post chain (run.py's zgx-post and zgx-post-off).
+post = ["zgx-3d/post"]
 mimalloc = ["dep:mimalloc"]
 
 # The Metal device's allocated bytes, beside the footprint (as zgx-gpu reads it).

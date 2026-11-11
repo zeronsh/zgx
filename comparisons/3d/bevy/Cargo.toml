@@ -13,6 +13,9 @@ publish = false
 bevy = { version = "0.19.1", default-features = false, features = [
     "3d_bevy_render", "default_app", "std", "multi_threaded",
     "jpeg", "png", "hdr", "tonemapping_luts", "bevy_world_serialization",
+    # Bloom (`--post`): its plugin is in every arm's build; without the
+    # component it draws nothing.
+    "bevy_post_process",
 ] }
 half = "2"
 image = { version = "0.25", default-features = false, features = ["hdr"] }

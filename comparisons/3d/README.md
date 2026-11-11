@@ -135,6 +135,12 @@ Each renderer is free to skip what it can prove invisible (culling) or unchanged
 - **Meshes and culling:** both zgx and Bevy draw a primitive as a mesh: 1,591 of them. On this path Bevy's frustum keeps a median 1,471, and so does zgx-cull's. Bevy culls by frustum on the CPU and again on the GPU. zgx on main culls nothing and draws all 1,591; `zgx-cull` culls by frustum on the CPU.
 - **Point lights:** the 256 point lights are 150 lm each, reaching 8 m, in every arm: zgx's `zgx-lights` shades them through clusters (zgx-3d's `lighting` feature; its arm `zgx` without the lights is the base). zgx's are given in candela, 150 / 4π.
 
+**The post column (Bistro):** bloom, ACES and a grade in each engine; `zgx-post-off` is zgx built with the chain, switched off.
+- **Grade:** zgx reads a 32³ table (`report::warm_lut`, made in code). Filament bakes its grading into a 3D table it reads every frame in every arm, so only bloom is new to its post arm. Bevy grades by parameters in its tone-mapping pass, with no table; its arm sets a slight warmth and contrast.
+- **Bloom:** each engine's own at its default: zgx mixes 0.04, Bevy `Bloom::NATURAL` (0.15, on an HDR camera as it requires), Filament's default strength. Bloom's cost doesn't depend on what it blurs, but the frames don't look alike: Bevy's blooms its bright specular edges strongly, and with the warm grade its frame turns pink.
+- **Mipmaps:** the Bevy post arm to read is `bevy-mips-post`, against `bevy-mips`.
+- Every Bevy arm now carries Bevy's post-processing plugin (`bevy_post_process`); without its components it draws nothing.
+
 **Boxes:**
 - **Batching:** one mesh and one material for every cube in every arm. Bevy and zgx batch them into instanced draws. Filament draws a renderable per cube (gltfio's nodes): its natural API without instancing, so its CPU numbers carry that.
 - **Moving boxes:** each arm moves the 10,000 boxes through its own API every frame. zgx: `set_transform`. Bevy: `Transform`. Filament: `TransformManager`.
@@ -268,6 +274,25 @@ The union of command-buffer intervals counts each moment the GPU worked once, wh
 - Bevy (clustered forward): 3.17 ms GPU, 61.5 M instructions a frame (+0.17 ms, +1.3 M over its base).
 - Filament (froxels): 2.35 ms, 39.5 M (+0.26 ms, +1.3 M).
 - zgx shades 8 lights and isn't in this table.
+
+### Nov 11 2026, M5 Max: the post column
+
+Bistro, 1920x1080, MSAA 4, 300 frames, 5 rounds, interleaved; machine load 16–36 (other jobs), so the CPU rows are rough. Medians of the rounds' medians.
+
+| | zgx | zgx-post-off | zgx-post | bevy-mips | bevy-mips-post | filament | filament-post |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| GPU busy ms | 1.100–1.138 | 1.103 | 1.474–1.498 | 3.774 | 3.875 | 3.619 | 3.499 |
+| Minstr a frame | 17.5 | 17.5 | 22.8–22.9 | 52.9 | 64.0 | 38.5 | 41.5 |
+| footprint MB | 2,486–2,492 | 2,488 | 2,812–2,816 | 4,419 | 4,455 | 3,000 | 3,015 |
+
+(zgx's ranges span the two runs it was in, one with every arm, one beside the Bevy arms with mipmaps.)
+
+- **The chain off costs nothing:** zgx-post-off draws the frame zgx does (the same hash), with GPU, CPU and instructions within the spread.
+- **What the chain adds:**
+  - **zgx:** +0.34–0.40 ms of GPU, +5.3 M instructions and about +240–325 MB a frame.
+  - **Bevy:** +0.10 ms and +11 M.
+  - **Filament:** nothing measurable on the GPU (its table was always read), +3 M.
+  - zgx's chain costs the most GPU time of the three; zgx with it is still under half of either engine without it.
 
 ### Withdrawn (Nov 10, rough, loaded machine)
 
