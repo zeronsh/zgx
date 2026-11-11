@@ -124,7 +124,22 @@ pub(crate) fn sandbox(
         .iter()
         .position(|e| e.name == entry)
         .ok_or_else(|| format!("no entry point `{entry}`"))?;
-    let costs = cost(&module).ok_or("a function calls itself")?;
+    let info = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&module)
+    .map_err(|e| format!("{e}"))?;
+    // One value moving a whole array: as large as an invocation's memory
+    // at most, wherever it's from.
+    let largest = largest_value(&module, &info);
+    if largest > limits.memory {
+        return Err(format!(
+            "a value of {largest} bytes: a sandboxed shader's are at most {} (copy an array a part at a time)",
+            limits.memory
+        ));
+    }
+    let costs = cost(&module, &info)?;
     let cost = costs[at];
     if cost > limits.cost {
         return Err(format!(
@@ -233,98 +248,194 @@ fn memory(module: &naga::Module) -> Result<(u64, u64), String> {
 }
 
 /// What a shader may cost, statically, before its loops repeat: every
-/// statement and expression of an entry point and of every function it
-/// calls (each call site counted with its callee's whole cost, so calls are
-/// expanded, as a driver inlining them would), each loop's body once.
-/// Weighted: a texture sample 16, another image access 4, an atomic 8, a
-/// derivative 4, anything else 1. Saturating. Its loops then repeat at most
-/// `cap` times all told an invocation (`bound_loops`), so an invocation's
-/// work is at most this times `cap + 1`.
+/// value of an entry point and of every function it calls (each call site
+/// counted with its callee's whole cost, so calls are expanded, as a driver
+/// inlining them would), each loop's body once. A value weighs its size in
+/// 16-byte units, at least 1 (a pointer 1): loading, storing, composing,
+/// selecting or passing a whole array moves all of it. A texture sample
+/// weighs 16 more, another image access 4, an atomic 8, a derivative 4.
+/// Saturating. Its loops then repeat at most `cap` times all told an
+/// invocation (`bound_loops`), so an invocation's work is at most this
+/// times `cap + 1`.
 ///
-/// `None` where a function calls itself, directly or not (naga's validator
-/// refuses that too).
-pub(crate) fn cost(module: &naga::Module) -> Option<Vec<u64>> {
-    // Each function's once every function it calls has one: a call graph
-    // is a DAG, each function weighed once, however many paths reach it.
-    let count = module.functions.len();
+/// Each function is weighed once, after those it calls, however the module
+/// orders them: the call graph walked depth first with a memo, so the
+/// weighing is linear in the module's size. An error where a function
+/// calls itself, directly or not (naga's validator refuses that too).
+pub(crate) fn cost(
+    module: &naga::Module,
+    info: &naga::valid::ModuleInfo,
+) -> Result<Vec<u64>, String> {
+    let handles: Vec<naga::Handle<naga::Function>> =
+        module.functions.iter().map(|(h, _)| h).collect();
+    let count = handles.len();
     let mut costs: Vec<Option<u64>> = vec![None; count];
-    loop {
-        let mut progressed = false;
-        for (handle, function) in module.functions.iter() {
-            let at = handle.index();
-            if costs[at].is_some() {
+    // 0 not met, 1 on the path being walked, 2 weighed.
+    let mut state = vec![0u8; count];
+    for &start in &handles {
+        if state[start.index()] == 2 {
+            continue;
+        }
+        let mut stack = vec![(start, false)];
+        while let Some((at, after)) = stack.pop() {
+            let i = at.index();
+            if after {
+                let function = &module.functions[at];
+                costs[i] = Some(function_cost(module, function, &info[at], &costs));
+                state[i] = 2;
                 continue;
             }
-            if let Some(cost) = function_cost(function, &costs) {
-                costs[at] = Some(cost);
-                progressed = true;
+            match state[i] {
+                2 => continue,
+                1 => return Err("a function calls itself".into()),
+                _ => {}
+            }
+            state[i] = 1;
+            stack.push((at, true));
+            let mut callees = Vec::new();
+            calls(&module.functions[at].body, &mut callees);
+            for callee in callees {
+                match state[callee.index()] {
+                    1 => return Err("a function calls itself".into()),
+                    0 => stack.push((callee, false)),
+                    _ => {}
+                }
             }
         }
-        if costs.iter().all(Option::is_some) {
-            break;
-        }
-        if !progressed {
-            return None;
-        }
     }
-    let costs: Vec<u64> = costs.into_iter().map(Option::unwrap).collect();
-    let known: Vec<Option<u64>> = costs.iter().copied().map(Some).collect();
-    Some(
-        module
-            .entry_points
-            .iter()
-            .map(|entry| function_cost(&entry.function, &known).unwrap_or(u64::MAX))
-            .collect(),
-    )
-}
-
-/// `function`'s cost, if every function it calls has one in `costs`.
-fn function_cost(function: &naga::Function, costs: &[Option<u64>]) -> Option<u64> {
-    let expressions: u64 = function
-        .expressions
+    Ok(module
+        .entry_points
         .iter()
-        .map(|(_, e)| expression_cost(e))
-        .fold(0, u64::saturating_add);
-    Some(expressions.saturating_add(block_cost(&function.body, costs)?))
+        .enumerate()
+        .map(|(at, entry)| function_cost(module, &entry.function, info.get_entry_point(at), &costs))
+        .collect())
 }
 
-fn expression_cost(expression: &naga::Expression) -> u64 {
-    match expression {
-        naga::Expression::ImageSample { .. } => 16,
-        naga::Expression::ImageLoad { .. } | naga::Expression::ImageQuery { .. } => 4,
-        naga::Expression::Derivative { .. } => 4,
-        _ => 1,
-    }
-}
-
-fn block_cost(block: &naga::Block, costs: &[Option<u64>]) -> Option<u64> {
-    let mut total = 0u64;
+/// The functions `block` calls.
+fn calls(block: &naga::Block, out: &mut Vec<naga::Handle<naga::Function>>) {
     for statement in block.iter() {
-        let cost = match statement {
-            naga::Statement::Call { function, .. } => 1u64.saturating_add(costs[function.index()]?),
-            naga::Statement::Atomic { .. } | naga::Statement::ImageAtomic { .. } => 8,
-            naga::Statement::ImageStore { .. } => 4,
-            naga::Statement::Block(inner) => block_cost(inner, costs)?,
-            naga::Statement::If { accept, reject, .. } => 1u64
-                .saturating_add(block_cost(accept, costs)?)
-                .saturating_add(block_cost(reject, costs)?),
+        match statement {
+            naga::Statement::Call { function, .. } => out.push(*function),
+            naga::Statement::Block(inner) => calls(inner, out),
+            naga::Statement::If { accept, reject, .. } => {
+                calls(accept, out);
+                calls(reject, out);
+            }
             naga::Statement::Switch { cases, .. } => {
-                let mut sum = 1u64;
                 for case in cases {
-                    sum = sum.saturating_add(block_cost(&case.body, costs)?);
+                    calls(&case.body, out);
                 }
-                sum
             }
             naga::Statement::Loop {
                 body, continuing, ..
+            } => {
+                calls(body, out);
+                calls(continuing, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A value's bytes (a pointer's, none: what it points to isn't moved).
+fn bytes(module: &naga::Module, inner: &naga::TypeInner) -> u64 {
+    match inner {
+        naga::TypeInner::Pointer { .. } | naga::TypeInner::ValuePointer { .. } => 0,
+        _ => inner.try_size(module.to_ctx()).map_or(u64::MAX, u64::from),
+    }
+}
+
+/// A value's weight: its bytes in 16-byte units, at least 1.
+fn weight(module: &naga::Module, inner: &naga::TypeInner) -> u64 {
+    bytes(module, inner).div_ceil(16).max(1)
+}
+
+/// The largest single value any function of `module` makes, in bytes.
+pub(crate) fn largest_value(module: &naga::Module, info: &naga::valid::ModuleInfo) -> u64 {
+    let of = |function: &naga::Function, fi: &naga::valid::FunctionInfo| {
+        function
+            .expressions
+            .iter()
+            .map(|(h, _)| bytes(module, fi[h].ty.inner_with(&module.types)))
+            .max()
+            .unwrap_or(0)
+    };
+    let functions = module.functions.iter().map(|(h, f)| of(f, &info[h]));
+    let entries = module
+        .entry_points
+        .iter()
+        .enumerate()
+        .map(|(at, e)| of(&e.function, info.get_entry_point(at)));
+    functions.chain(entries).max().unwrap_or(0)
+}
+
+/// `function`'s cost, those it calls weighed in `costs`.
+fn function_cost(
+    module: &naga::Module,
+    function: &naga::Function,
+    fi: &naga::valid::FunctionInfo,
+    costs: &[Option<u64>],
+) -> u64 {
+    let value =
+        |h: naga::Handle<naga::Expression>| weight(module, fi[h].ty.inner_with(&module.types));
+    let expressions = function
+        .expressions
+        .iter()
+        .map(|(h, e)| {
+            let extra = match e {
+                naga::Expression::ImageSample { .. } => 16,
+                naga::Expression::ImageLoad { .. } | naga::Expression::ImageQuery { .. } => 4,
+                naga::Expression::Derivative { .. } => 4,
+                _ => 0,
+            };
+            value(h).saturating_add(extra)
+        })
+        .fold(0, u64::saturating_add);
+    expressions.saturating_add(block_cost(&function.body, &value, costs))
+}
+
+fn block_cost(
+    block: &naga::Block,
+    value: &dyn Fn(naga::Handle<naga::Expression>) -> u64,
+    costs: &[Option<u64>],
+) -> u64 {
+    let mut total = 0u64;
+    for statement in block.iter() {
+        let cost = match statement {
+            // Its arguments passed by value, its callee's work, its result.
+            naga::Statement::Call {
+                function,
+                arguments,
+                ..
+            } => arguments
+                .iter()
+                .map(|&a| value(a))
+                .fold(1u64, u64::saturating_add)
+                .saturating_add(costs[function.index()].unwrap_or(u64::MAX)),
+            naga::Statement::Store { value: stored, .. } => value(*stored),
+            naga::Statement::Return {
+                value: Some(returned),
+            } => value(*returned),
+            naga::Statement::Atomic { .. } | naga::Statement::ImageAtomic { .. } => 8,
+            naga::Statement::ImageStore { .. } => 4,
+            naga::Statement::Block(inner) => block_cost(inner, value, costs),
+            naga::Statement::If { accept, reject, .. } => 1u64
+                .saturating_add(block_cost(accept, value, costs))
+                .saturating_add(block_cost(reject, value, costs)),
+            naga::Statement::Switch { cases, .. } => cases
+                .iter()
+                .map(|case| block_cost(&case.body, value, costs))
+                .fold(1u64, u64::saturating_add),
+            naga::Statement::Loop {
+                body, continuing, ..
             } => 1u64
-                .saturating_add(block_cost(body, costs)?)
-                .saturating_add(block_cost(continuing, costs)?),
+                .saturating_add(block_cost(body, value, costs))
+                .saturating_add(block_cost(continuing, value, costs)),
             _ => 1,
         };
         total = total.saturating_add(cost);
     }
-    Some(total)
+    total
 }
 
 /// `module` with every loop's iterations counted against `cap` an
@@ -800,7 +911,13 @@ mod tests {
             "no loop to bound"
         );
         let started = std::time::Instant::now();
-        let costs = cost(&module).unwrap();
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap();
+        let costs = cost(&module, &info).unwrap();
         assert!(started.elapsed() < std::time::Duration::from_millis(100));
         assert!(costs[0] > 1 << 40, "{}", costs[0]);
         let refused = sandbox(module, "main", 64, &Limits::default());
@@ -867,5 +984,77 @@ mod tests {
             ..Limits::default()
         };
         assert!(sandbox(parse(&long), "main", 1, &few).is_err_and(|w| w.contains("nodes")));
+    }
+
+    #[test]
+    fn a_whole_value_weighs_its_size_and_one_past_the_memory_is_refused() {
+        // A million-element array copied whole in a loop: 16 MB a copy, one
+        // value past an invocation's memory. Refused.
+        let storage = "
+            @group(0) @binding(0) var<storage, read> a: array<vec4<f32>, 1000000>;
+            @group(0) @binding(1) var<storage, read_write> b: array<vec4<f32>, 1000000>;
+            @compute @workgroup_size(1) fn main() {
+                for (var k = 0u; k < 1000000u; k++) { b = a; }
+            }";
+        let refused = sandbox(parse(storage), "main", 1, &Limits::default());
+        assert!(
+            refused.is_err_and(|why| why.contains("a value of")),
+            "copying arrays whole"
+        );
+        // An 8,000-byte private array copied there and back (16,000 bytes
+        // held, within the memory), each copy weighing 500: its loop gets
+        // far fewer iterations than a light one.
+        let private = format!(
+            "{HEAD}
+            var<private> big: array<vec4<u32>, 500>;
+            @compute @workgroup_size(1) fn main() {{
+                var p: array<vec4<u32>, 500>;
+                loop {{ p = big; p[0].x += input[0]; big = p; }}
+                output[0] = big[0].x;
+            }}"
+        );
+        let heavy = sandbox(parse(&private), "main", 1, &Limits::default());
+        let light = sandbox(
+            parse(&shader("", "loop { n += input[0]; }")),
+            "main",
+            1,
+            &Limits::default(),
+        )
+        .unwrap();
+        let heavy = heavy.unwrap();
+        // Two loads and two stores of 500 units each an iteration: at least
+        // 2,000, against some 25 for the light loop.
+        assert!(heavy.work / (u64::from(heavy.cap) + 1) >= 2000);
+        assert!(
+            heavy.cap * 50 < light.cap,
+            "{} against {}",
+            heavy.cap,
+            light.cap
+        );
+        assert!(heavy.work <= Limits::default().work);
+    }
+
+    #[test]
+    fn values_passed_and_returned_weigh_their_size() {
+        // A function taking and returning a 4 KB array by value, called in
+        // a loop: each call moves it in and out.
+        let source = format!(
+            "{HEAD}
+            fn relay(x: array<vec4<u32>, 256>) -> array<vec4<u32>, 256> {{ return x; }}
+            @compute @workgroup_size(1) fn main() {{
+                var a: array<vec4<u32>, 256>;
+                for (var k = 0u; k < input[0]; k++) {{ a = relay(a); }}
+                output[0] = a[0].x;
+            }}"
+        );
+        let module = parse(&source);
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .unwrap();
+        // Argument, result, the store, the return: four moves of 256 units.
+        assert!(cost(&module, &info).unwrap()[0] >= 4 * 256);
     }
 }

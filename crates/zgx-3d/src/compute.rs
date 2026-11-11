@@ -693,8 +693,9 @@ fn order(passes: &[(u64, &[(Key, Access)])]) -> Option<Vec<usize>> {
 type Compiled = Arc<Mutex<Option<Result<wgpu::ComputePipeline, String>>>>;
 
 enum Gpu {
-    /// Compiling since then.
-    Compiling(Compiled, Instant),
+    /// Compiling since then, on the sandboxed worker of that generation if
+    /// it's sandboxed.
+    Compiling(Compiled, Instant, Option<u64>),
     Ready(wgpu::ComputePipeline, Vec<wgpu::BindGroup>),
     Failed,
 }
@@ -1025,10 +1026,6 @@ static GENERATIONS: AtomicU64 = AtomicU64::new(1);
 const MOST_SANDBOXED_SOURCE: usize = 1 << 20;
 /// The most compute passes a world holds: each holds a pipeline.
 const MOST_PASSES: usize = 1024;
-
-/// How long a sandboxed pass's pipeline may take to compile: past it, the
-/// pass fails (its worker may stay busy; it's sandboxed code's alone).
-const SANDBOXED_COMPILE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Sandboxed passes a world holds, and those of one owner.
 const MOST_SANDBOXED: usize = 64;
@@ -1576,40 +1573,52 @@ impl Frames {
                 // A plugin's on a worker of its own: a driver stuck on its
                 // shader holds up nobody else's.
                 let spawned = if pass.owner.is_some() {
-                    compile_sandboxed(job)
+                    compile_sandboxed(job).map(Some)
                 } else {
-                    compile_off_the_frame(job)
+                    compile_off_the_frame(job).map(|()| None)
                 };
-                if let Err(error) = spawned {
-                    fail(pass, format!("no thread to compile it on: {error}"));
-                    continue;
-                }
-                pass.gpu = Some((generation, Gpu::Compiling(slot, Instant::now())));
+                let worker = match spawned {
+                    Ok(worker) => worker,
+                    Err(error) => {
+                        fail(pass, format!("no thread to compile it on: {error}"));
+                        continue;
+                    }
+                };
+                pass.gpu = Some((generation, Gpu::Compiling(slot, Instant::now(), worker)));
             }
-            let Some((_, Gpu::Compiling(slot, since))) = &pass.gpu else {
+            let Some((_, Gpu::Compiling(slot, since, worker))) = &pass.gpu else {
                 continue;
             };
-            let late = pass.owner.is_some() && since.elapsed() > SANDBOXED_COMPILE;
+            let (since, worker) = (*since, *worker);
+            let deadline =
+                std::time::Duration::from_millis(SANDBOXED_COMPILE_MS.load(Ordering::Relaxed));
             let done = slot.lock().unwrap_or_else(|p| p.into_inner()).take();
-            match done {
-                None if late => {
+            match (done, worker) {
+                // Queued on a worker let go since: sent again.
+                (None, Some(worker)) if worker != SANDBOXED_WORKER.load(Ordering::Relaxed) => {
+                    pass.gpu = None;
+                }
+                (None, Some(worker)) if since.elapsed() > deadline => {
                     pass.gpu = Some((generation, Gpu::Failed));
                     fail(
                         pass,
-                        format!("its shader took over {SANDBOXED_COMPILE:?} to compile"),
+                        format!("its shader took over {deadline:?} to compile"),
                     );
+                    replace_sandboxed_worker(worker);
                 }
-                None => {}
-                Some(Err(why)) => {
-                    pass.gpu = Some((generation, Gpu::Failed));
-                    fail(pass, why);
-                }
-                Some(Ok(pipeline)) => match self.bind(pass, &pipeline, device) {
-                    Ok(binds) => pass.gpu = Some((generation, Gpu::Ready(pipeline, binds))),
+                (None, _) => {}
+                (done, _) => match done.unwrap() {
                     Err(why) => {
                         pass.gpu = Some((generation, Gpu::Failed));
                         fail(pass, why);
                     }
+                    Ok(pipeline) => match self.bind(pass, &pipeline, device) {
+                        Ok(binds) => pass.gpu = Some((generation, Gpu::Ready(pipeline, binds))),
+                        Err(why) => {
+                            pass.gpu = Some((generation, Gpu::Failed));
+                            fail(pass, why);
+                        }
+                    },
                 },
             }
         }
@@ -2049,9 +2058,51 @@ pub(crate) fn compile_off_the_frame(job: impl FnOnce() + Send + 'static) -> Resu
 
 /// `job` on the worker sandboxed code compiles on: apart from the app's, so
 /// a driver taking too long over a plugin's shader holds up no other.
-pub(crate) fn compile_sandboxed(job: impl FnOnce() + Send + 'static) -> Result<(), String> {
-    static QUEUE: Mutex<Option<std::sync::mpsc::Sender<Job>>> = Mutex::new(None);
-    on_worker(&QUEUE, Box::new(job))
+/// The worker's generation, as `job` was given it.
+pub(crate) fn compile_sandboxed(job: impl FnOnce() + Send + 'static) -> Result<u64, String> {
+    if STALLS.load(Ordering::Relaxed) >= MOST_STALLS {
+        return Err(format!(
+            "sandboxed shaders aren't compiled: drivers stalled on {MOST_STALLS} of them"
+        ));
+    }
+    let generation = SANDBOXED_WORKER.load(Ordering::Relaxed);
+    on_worker(&SANDBOXED_QUEUE, Box::new(job))?;
+    Ok(generation)
+}
+
+/// The sandboxed worker's queue and generation: a driver stuck on a
+/// sandboxed shader past the deadline has its worker let go (the thread
+/// left to finish or not), a new one taking the queue from then, and passes
+/// waiting on the old sent again.
+static SANDBOXED_QUEUE: Mutex<Option<std::sync::mpsc::Sender<Job>>> = Mutex::new(None);
+static SANDBOXED_WORKER: AtomicU64 = AtomicU64::new(0);
+/// Workers let go so far, and the most: past it, sandboxed shaders aren't
+/// compiled at all (stuck threads aren't made without end).
+static STALLS: AtomicU64 = AtomicU64::new(0);
+const MOST_STALLS: u64 = 4;
+
+/// The sandboxed worker of generation `stuck` let go, if it's still the one.
+fn replace_sandboxed_worker(stuck: u64) {
+    let mut queue = SANDBOXED_QUEUE.lock().unwrap_or_else(|p| p.into_inner());
+    if SANDBOXED_WORKER
+        .compare_exchange(stuck, stuck + 1, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        *queue = None;
+        STALLS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// How long a sandboxed pass's pipeline may take to compile (10 s), in
+/// milliseconds: past it, the pass fails and its worker is let go.
+static SANDBOXED_COMPILE_MS: AtomicU64 = AtomicU64::new(10_000);
+
+/// For tests: the sandboxed compile deadline, and a job holding the
+/// sandboxed worker for `stall`, as a driver stuck on a shader would.
+#[doc(hidden)]
+pub fn stall_sandboxed_compiles(deadline: std::time::Duration, stall: std::time::Duration) {
+    SANDBOXED_COMPILE_MS.store(deadline.as_millis() as u64, Ordering::Relaxed);
+    let _ = compile_sandboxed(move || std::thread::sleep(stall));
 }
 
 fn on_worker(queue: &Mutex<Option<std::sync::mpsc::Sender<Job>>>, job: Job) -> Result<(), String> {
