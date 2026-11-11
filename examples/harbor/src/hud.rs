@@ -42,6 +42,15 @@ fn panel() -> View {
         .text_size(12.)
 }
 
+/// Checkboxes two to a row, so the panel fits a short window.
+fn toggles<const N: usize>(items: [(&str, Signal<bool>); N]) -> View {
+    let mut grid = row().flex_wrap().gap_y(6.);
+    for (name, value) in items {
+        grid = grid.child(div().w(108.).child(checkbox(name, value)));
+    }
+    grid
+}
+
 fn label(text_: &str) -> View {
     text(text_).text_color(rgb(0x9fb0c2)).text_size(11.)
 }
@@ -126,11 +135,15 @@ pub fn view(viewport: View, settings: &Settings, stats: Signal<Stats>) -> View {
                 .child(radio("Neutral", tone.clone(), ToneMapping::Neutral))
                 .child(radio("Linear", tone, ToneMapping::Linear)),
         )
-        .child(checkbox("Sun shadows", s.shadows.clone()))
-        .child(checkbox("Shadow cascades", s.cascades.clone()))
-        .child(checkbox("4x multisampling", s.msaa.clone()))
-        .child(checkbox("Lamps", s.lamps.clone()))
-        .child(checkbox("Rain", s.rain.clone()))
+        .child(toggles([
+            ("Auto exposure", s.auto_exposure.clone()),
+            ("Bloom", s.bloom.clone()),
+            ("Sun shadows", s.shadows.clone()),
+            ("Cascades", s.cascades.clone()),
+            ("4x MSAA", s.msaa.clone()),
+            ("Lamps", s.lamps.clone()),
+            ("Rain", s.rain.clone()),
+        ]))
         .child(label("Yard filled"))
         .child(
             row()

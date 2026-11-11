@@ -3,7 +3,7 @@
 //! The bench sets the same signals; nothing writes the world beside them.
 use crate::scene::{self, Harbor};
 use zgx::reactive::{Effect, Runtime, Signal};
-use zgx_3d::{ToneMapping, World};
+use zgx_3d::{AutoExposure, Bloom, Post, ToneMapping, World};
 
 /// What the panel controls.
 #[derive(Clone)]
@@ -13,8 +13,13 @@ pub struct Settings {
     pub fly: Signal<bool>,
     /// The sun's elevation, degrees.
     pub sun_elevation: Signal<f32>,
-    /// Exposure, stops.
+    /// Exposure, stops: over the harbor's own (EV 11), or with
+    /// `auto_exposure` on, over where it has adapted to.
     pub exposure: Signal<f32>,
+    /// Exposure follows the scene's light, as an eye adapts.
+    pub auto_exposure: Signal<bool>,
+    /// Light spreads round what's bright, as a lens's glare.
+    pub bloom: Signal<bool>,
     /// How light reaches the display's range.
     pub tone_mapping: Signal<ToneMapping>,
     /// The sun casts shadows.
@@ -40,6 +45,8 @@ impl Settings {
             fly: runtime.signal(true),
             sun_elevation: runtime.signal(harbor.config.sun.0),
             exposure: runtime.signal(0.),
+            auto_exposure: runtime.signal(true),
+            bloom: runtime.signal(true),
             tone_mapping: runtime.signal(ToneMapping::Aces),
             shadows: runtime.signal(true),
             cascades: runtime.signal(true),
@@ -62,14 +69,28 @@ impl Settings {
                 .push(runtime.effect(move || w.set_light(sun, scene::sun_light(s.get(), azimuth))));
         }
         {
-            let (s, w, sea) = (self.exposure.clone(), world.clone(), harbor.sea);
+            let (s, auto, w, sea) = (
+                self.exposure.clone(),
+                self.auto_exposure.clone(),
+                world.clone(),
+                harbor.sea,
+            );
             effects.push(runtime.effect(move || {
                 let stops = s.get();
-                w.set_exposure(stops - scene::EV);
+                // Adapting, the stops are compensation over where it is.
+                w.set_exposure(if auto.get() { stops } else { stops - scene::EV });
                 if let Some(sea) = sea {
                     sea.set_exposure(&w, stops);
                 }
             }));
+        }
+        {
+            let (auto, bloom, w) = (
+                self.auto_exposure.clone(),
+                self.bloom.clone(),
+                world.clone(),
+            );
+            effects.push(runtime.effect(move || w.set_post(post(auto.get(), bloom.get()))));
         }
         {
             let (s, w) = (self.tone_mapping.clone(), world.clone());
@@ -122,5 +143,20 @@ impl Settings {
             }));
         }
         effects
+    }
+}
+
+/// The harbor's post chain: bloom and adapting exposure as asked.
+pub fn post(auto_exposure: bool, bloom: bool) -> Post {
+    Post {
+        bloom: bloom.then_some(Bloom { intensity: 0.05 }),
+        auto_exposure: auto_exposure.then(|| AutoExposure {
+            // In the harbor's units (lux and candela): a lamp-lit night to
+            // a bright morning.
+            min: -4.,
+            max: 16.,
+            ..AutoExposure::default()
+        }),
+        ..Post::default()
     }
 }

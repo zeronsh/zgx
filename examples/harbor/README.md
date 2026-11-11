@@ -12,6 +12,8 @@ Everything is made by code here, from a seed: the quay, about 5,000 containers, 
 
 The sun's shadow is cut into four cascades over 600 m. It rains (`weather.rs`): particle streaks in a box that follows the camera, splashing where they land. The four gantry cranes work: each is a model the demo writes in code as a `.glb`, placed with an animator playing its cycle. The trolley runs out over the ship and back, and the spreader lowers and hoists.
 
+**The post chain** blooms the lamps and windows and lets exposure adapt, so one scene holds from a hazy dawn to a lamp-lit night (the panel's exposure is then compensation).
+
 **The water and the wet** are the demo's own custom materials (`water.rs`, `shaders/`):
 - the sea: six wind waves moving a 1.6 km grid on frame time, ripples (and rain's rings) in its normal, and the scene behind seen through it;
 - a surface layer making everything wet while it rains, with puddles on the ground.
@@ -83,6 +85,8 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | `SOUND=0` | | No sound (otherwise offline, at master gain zero) |
 | `WATER` | | `stock`: the plain material, no wet; `dry`: no wet layer; `opaque`: no refraction |
 | `WET=0` | | Rain, but nothing made wet |
+| `POST=0` | | No post chain (exposure fixed at EV 11, no bloom) |
+| `AUTO=0` | | Bloom, but exposure fixed |
 | `CRANES` | `working` | `idle`: animators playing nothing; `still`: no animators |
 | `GANTRIES` | 4 | Cranes on the quay |
 | `SUN` | 7 | The sun's elevation in degrees, its light and the sky's |

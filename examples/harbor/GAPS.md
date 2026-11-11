@@ -17,11 +17,13 @@ Each entry is a primitive any game would need, in general form, with the smalles
 | G9 | A 3D emitter can't start partway into its sound or take its own pitch | audio lane | open |
 | G10 | `scene_color` is the scene as displayed, not its light: a material can't put it back | graph lane (HDR target) | open |
 | G11 | Nothing says when a surface layer has taken effect | materials lane | open |
+| G12 | The exposure automatic exposure has adapted to can't be read | graph lane (post) | open |
 | L1 | Spot lights are binned by their sphere, not their cone | lighting lane | open (performance) |
 | L2 | A light at zero intensity is still binned and shaded | lighting lane | open (performance) |
 | L3 | Frames aren't reproducible run to run with cascades or with clustered lights | this M1 Max's GPU at MSAA edges | M1 Max only, under investigation |
 | L4 | One moving caster redraws every caster in its cascades | lighting lane | open (performance) |
 | L5 | Sound occlusion tests a large mesh's triangles one by one, spending the frame's budget | audio lane | open (performance) |
+| M2 | The post chain's memory: 108 MB measured against the docs' 33 MB at 1080p | graph lane (post) | measurement |
 | M1 | Anything moving costs about 1.3 M instructions a frame over a camera-only frame | graph lane | measurement |
 | B1 | Short checkbox and radio labels lost their last glyph in the bench | the bench's setup | resolved by setup; engine default landing on main |
 
@@ -170,6 +172,18 @@ It's the design's known gap (§1: no HDR target), and closes with R1's HDR targe
 impl World { pub fn layer_ready(&self, layer: ShaderId) -> bool; } // or shader_ready answering for layers too
 ```
 
+## G12. The exposure automatic exposure has adapted to can't be read
+
+**Needed by:** anything that must know what the frame's exposure is: a material reading `scene_color` (G10), a HUD showing exposure, a camera model, a sound or effect keyed to brightness.
+
+With `Post::auto_exposure` the frame's exposure is the GPU's own, eased in frame time, and nothing returns it. The harbor's water undoes the exposure on `scene_color` through a parameter. With adapting exposure on, it can only assume EV 11.
+
+By night (`SUN=-12`) the exposure adapts about nine stops brighter, and the water, multiplying by the wrong factor, blows out to white-cyan (`~/zgx-aaa/demo-frames/stage1-post-night/`). With G10 closed (`scene_color` in the scene's light) the water wouldn't need it. A readback would serve the rest:
+
+```rust
+impl World { pub fn exposure_now(&self) -> Option<f32>; } // stops, a frame or so late
+```
+
 ## L1. Spot lights are binned by their sphere, not their cone
 
 **Needed by:** any scene of floodlights, street lights or stage lights, aimed down or narrow.
@@ -238,6 +252,16 @@ The harbor sets the sea's sound transmission to 1 (`set_sound_transmission`), as
 
 **What would close it:** a tree over each large mesh's triangles (or meshes split into clusters for rays), so a ray tests the few triangles near it.
 
+## M2. The post chain's memory
+
+**A measurement, for the graph lane.** `docs/3d.md` says the chain costs "about 33 MB more than without the chain at 1920 by 1080". The harbor (1920×1080, 4x MSAA, bloom and automatic exposure) measures the process's physical footprint at 547 MB with it and 439 MB without (`POST=0`): 108 MB, repeated across runs. The footprint holds more than the targets (driver blocks, pools), so the gap may not all be the chain's, but it's three times the stated figure.
+
+| | Minstr/frame | GPU busy ms/frame | footprint MB |
+| --- | --- | --- | --- |
+| chain on (bloom, auto exposure) | 24.7 | 10.41 | 547 |
+| bloom, exposure fixed (`AUTO=0`) | 24.1 | 10.24 | 538 |
+| no chain (`POST=0`) | 21.9 | 10.00 | 439 |
+
 ## M1. Anything moving costs about 1.3 M instructions a frame over a camera-only frame
 
 **A measurement, for the graph lane.** Shadows off, no rain:
@@ -274,10 +298,8 @@ The frames' hashes changed with the HUD's text. The figures in the stage 0 and s
 
 | In the scene | Lacking | Milestone |
 | --- | --- | --- |
-| Dawn to night in one scene | Automatic exposure: the harbor is in physical units (sun in lux, lamps in lumens, at EV 11), and its lamps only read with the exposure moved by hand | R1 |
 | Haze and depth: the far ridge reads as a dark wall | Height and distance fog, aerial perspective | R6 |
 | A sky that follows the sun | The physical sky; the environment's prefilter on the GPU (a new sun costs 30–70 ms of CPU to relight, so the panel's sun slider moves the light, not the sky) | R6, R8 |
-| Lamp heads and lit windows that glow | Bloom: their emission clips to white today | R1 |
 | Rain landing on the water, the containers and the cranes | Collision with the depth buffer (`Collide::Depth`, design §5.4); today one plane, so drops over the water stop at the quay's height, 3 m above it | R7 |
 | Rain hidden behind what's in front of it | Particles drawn against the scene's depth: today they draw over every mesh (`docs/3d.md`, Particles) | R7, the pass list |
 | Rain that takes the lamps' and the sky's light | Lit particles: today they're unlit, so the rain's colour is set by hand on the harbor's physical scale | R7 |
@@ -290,6 +312,7 @@ The frames' hashes changed with the HUD's text. The figures in the stage 0 and s
 
 - **Lamps by the hundred:** 221 point and spot lights in lumens through clusters (stage 1). There were 8 nearest at stage 0.
 - **Shadow detail over the quay:** four cascades over 600 m (stage 1).
+- **Dawn to night, and glow (the post chain):** automatic exposure follows the harbor's physical light from a hazy dawn to a lamp-lit night (`SUN=-12`), and bloom spreads the lamp heads and windows.
 - **Water and wet (custom materials):**
   - the sea is a material of the demo's own (`shaders/water.wgsl`): six wind waves moving a 1.6 km grid on frame time, ripples and rain rings in its normal, the scene behind seen through it;
   - a surface layer (`shaders/wet.wgsl`) darkens and smooths everything while it rains, with puddles on the ground.

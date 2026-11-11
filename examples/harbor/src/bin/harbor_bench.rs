@@ -18,6 +18,7 @@
 //!   `WATER=stock` draws the sea by the stock material, no wet; `WET=0`
 //!   keeps the wet layer dry; `WATER=dry` makes none, `WATER=opaque` a sea
 //!   that sees nothing behind it;
+//!   `POST=0` turns the post chain off, `AUTO=0` its adapting exposure;
 //!   `RAIN=0` makes no rain; `SOUND=0` no sound (offline, gain 0 otherwise); `CRANES=idle` gives the cranes animators
 //!   playing nothing, `CRANES=still` none; `GANTRIES` (4) how many;
 //!   `LAMP_REACH` scales every lamp's range (0: none built); `EXPOSURE`
@@ -154,6 +155,13 @@ fn main() {
     settings
         .cascades
         .set(std::env::var("CASCADES").as_deref() != Ok("0"));
+    // `POST=0`: no post chain (no bloom, exposure fixed at EV 11);
+    // `AUTO=0`: bloom, but exposure fixed.
+    let post = std::env::var("POST").as_deref() != Ok("0");
+    settings
+        .auto_exposure
+        .set(post && std::env::var("AUTO").as_deref() != Ok("0"));
+    settings.bloom.set(post);
     // `EXPOSURE=stops`: the panel's exposure, over the harbor's own.
     settings.exposure.set(env("EXPOSURE", 0.));
     // `WET=0`: rain, but nothing made wet (the wet layer's own effect).
