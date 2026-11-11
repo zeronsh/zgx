@@ -134,6 +134,19 @@ impl Pass {
             ],
         }
     }
+    /// What it reads in a list compiled for a chain that `folds` the
+    /// samples' resolve into the last pass: as `reads`, and there the
+    /// last pass reads the samples themselves.
+    fn reads_in(self, folds: bool) -> impl Iterator<Item = Resource> {
+        #[cfg(feature = "post")]
+        let samples = (folds && self == Self::Final).then_some(Resource::Colour);
+        #[cfg(not(feature = "post"))]
+        let samples = {
+            let _ = folds;
+            None
+        };
+        self.reads().iter().copied().chain(samples)
+    }
     pub(super) fn writes(self) -> &'static [Resource] {
         match self {
             Self::Shadows => &[Resource::ShadowMap],
@@ -355,6 +368,9 @@ pub(super) struct Graph {
     /// the first): bindings of its targets are made again as it changes,
     /// those kept past it being made anew too (`post::Apps`).
     pub(super) compiled: u64,
+    /// The device keeps transient textures in no memory of their own
+    /// (`TextureUsages::TRANSIENT` on Apple's GPUs): they count as none.
+    memoryless: bool,
 }
 impl Graph {
     pub(super) fn new(format: wgpu::TextureFormat, samples: u32) -> Self {
@@ -371,6 +387,7 @@ impl Graph {
             pool: Pool::default(),
             bytes: 0,
             compiled: 0,
+            memoryless: false,
         }
     }
     /// The list for `config`, compiled if it was for another: whether what
@@ -416,7 +433,14 @@ impl Graph {
     fn summed(&self) -> u64 {
         let targets = self.targets.iter().flat_map(|t| &t.textures);
         let behind = self.behind.iter().map(|b| &b.texture);
-        targets.chain(behind).map(|t| t.desc.bytes()).sum()
+        let held = |t: &&Temporary| {
+            !(self.memoryless && t.desc.usage.contains(wgpu::TextureUsages::TRANSIENT))
+        };
+        targets
+            .chain(behind)
+            .filter(held)
+            .map(|t| t.desc.bytes())
+            .sum()
     }
     /// The list for `config` and its temporaries: those it had given back to
     /// the pool and taken again where alike, what is behind kept if its size
@@ -427,6 +451,7 @@ impl Graph {
         // The chain resolves the samples itself: in a pass of its own
         // (`Pass::Resolve`), or in the last.
         let folds = config.post.folds(self.samples);
+        #[cfg(feature = "post")]
         let resolves = config.post.on && self.samples > 1 && !folds;
         let wanted = [
             config.shadows.then_some(Pass::Shadows),
@@ -464,20 +489,33 @@ impl Graph {
             usage: read,
             ..target(config.size, self.format)
         };
+        // Whether a pass of the list reads `resource` after the one writing
+        // it. One no pass reads lives within the pass drawing it, cleared
+        // as it starts and let go as it ends: transient (memoryless where
+        // the device can keep it so, Apple's GPUs).
+        let passes = self.passes;
+        let read_later = |resource| {
+            passes
+                .iter()
+                .any(|p| p.reads_in(folds).any(|r| r == resource))
+        };
+        let within = |resource| match read_later(resource) {
+            true => read,
+            false => wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT,
+        };
+        let (colour_read, depth_read) = (read_later(Resource::Colour), read_later(Resource::Depth));
         let mut used: Vec<(Resource, Desc, usize, usize)> = Vec::new();
         for (at, pass) in self.passes.iter().enumerate() {
             for &resource in pass.reads().iter().chain(pass.writes()) {
                 let desc = match resource {
-                    Resource::Colour if resolves || folds => Desc {
-                        usage: read,
+                    Resource::Colour if self.samples > 1 => Desc {
+                        usage: within(Resource::Colour),
                         ..target(config.size, self.format)
                     },
-                    Resource::Colour if self.samples > 1 => target(config.size, self.format),
-                    Resource::Depth if config.post.taa => Desc {
-                        usage: read,
+                    Resource::Depth => Desc {
+                        usage: within(Resource::Depth),
                         ..target(config.size, DEPTH)
                     },
-                    Resource::Depth => target(config.size, DEPTH),
                     Resource::Fresh if config.post.taa => scene,
                     Resource::Scene if config.post.on && !folds => scene,
                     Resource::Scene2 if config.post.hdr > 0 => scene,
@@ -571,9 +609,9 @@ impl Graph {
             scene,
             bloom,
             bloom_up,
-            stored: resolves || folds,
+            stored: colour_read,
             others,
-            depth_read: config.post.taa,
+            depth_read,
             size: config.size,
             textures: textures.into_iter().flatten().collect(),
         });
@@ -596,6 +634,7 @@ impl Graph {
         };
         self.pool.clear();
         self.config = Some(config);
+        self.memoryless = device.adapter_info().transient_saves_memory;
         self.bytes = self.summed();
         static COMPILES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         self.compiled = COMPILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -681,6 +720,68 @@ mod tests {
         assert!(graph.targets.is_none() && graph.behind.is_none());
         assert!(graph.prepare(&device, plain) || graph.targets.is_some());
         assert_eq!(graph.bytes(), targets);
+    }
+
+    #[test]
+    fn what_no_later_pass_reads_lives_and_goes_within_its_pass() {
+        // The samples and the depth are transient unless a pass of the list
+        // reads them after the one drawing them.
+        let device = device();
+        let usage = |graph: &Graph, format, samples| {
+            let targets = graph.targets.as_ref().unwrap();
+            let found = targets
+                .textures
+                .iter()
+                .find(|t| t.desc.format == format && t.desc.samples == samples);
+            found.map(|t| t.desc.usage)
+        };
+        let within = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TRANSIENT;
+        let config = |post| Config {
+            size: (64, 32),
+            shadows: false,
+            transmits: true,
+            post,
+        };
+        let mut graph = Graph::new(SCENE, 4);
+        // The meshes into the target, what is behind into its own: both
+        // drawn, cleared and let go within each pass.
+        graph.prepare(&device, config(Chain::default()));
+        assert_eq!(usage(&graph, SCENE, 4), Some(within));
+        assert_eq!(usage(&graph, DEPTH, 4), Some(within));
+        let targets = graph.targets.as_ref().unwrap();
+        assert!(!targets.stored && !targets.depth_read);
+        #[cfg(feature = "post")]
+        {
+            let read =
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+            // A pass of its own resolving the samples reads them.
+            let bloom = Chain {
+                on: true,
+                bloom: true,
+                ..Default::default()
+            };
+            graph.prepare(&device, config(bloom));
+            assert_eq!(usage(&graph, SCENE, 4), Some(read), "resolved by a pass");
+            assert_eq!(usage(&graph, DEPTH, 4), Some(within));
+            // So does the last pass resolving them itself.
+            let folded = Chain {
+                on: true,
+                ..Default::default()
+            };
+            graph.prepare(&device, config(folded));
+            assert_eq!(usage(&graph, SCENE, 4), Some(read), "resolved by the last");
+            assert!(graph.targets.as_ref().unwrap().stored);
+            // Temporal antialiasing reads the depth after the meshes' pass.
+            let mut one = Graph::new(SCENE, 1);
+            let taa = Chain {
+                on: true,
+                taa: true,
+                ..Default::default()
+            };
+            one.prepare(&device, config(taa));
+            assert_eq!(usage(&one, DEPTH, 1), Some(read), "reprojected by");
+            assert!(one.targets.as_ref().unwrap().depth_read);
+        }
     }
 
     #[cfg(feature = "post")]

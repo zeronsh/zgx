@@ -666,8 +666,11 @@ fn a_resting_world_holds_no_temporaries() {
         };
         window.draw();
         let held = world.temporary_bytes();
-        // Multisampled colour and depth, 100 by 100 by 4 samples, at least.
-        assert!(held >= 100 * 100 * 4 * 8, "{what}: {held}");
+        // Multisampled colour and depth, 100 by 100 by 4 samples, at least,
+        // where the device keeps memory for what lives within a pass.
+        if !window.gpu.adapter_info().transient_saves_memory {
+            assert!(held >= 100 * 100 * 4 * 8, "{what}: {held}");
+        }
         window.gpu.trim();
         assert_eq!(world.temporary_bytes(), 0, "{what} at rest");
         world.view().invalidate();

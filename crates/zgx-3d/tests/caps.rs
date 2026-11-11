@@ -70,8 +70,13 @@ fn a_worlds_memory_counts_its_frames_targets() {
     ui.prepare_frame();
     let report = ui.scene.borrow_mut().flush();
     gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
-    // Colour and depth, four samples a pixel.
-    assert_eq!(world.memory().targets, 32 * 32 * 4 * (4 + 4));
+    // Colour and depth, four samples a pixel: drawn and let go within the
+    // meshes' pass, in no memory where the device keeps them so.
+    let held = match gpu.adapter_info().transient_saves_memory {
+        true => 0,
+        false => 32 * 32 * 4 * (4 + 4),
+    };
+    assert_eq!(world.memory().targets, held);
 }
 
 #[test]

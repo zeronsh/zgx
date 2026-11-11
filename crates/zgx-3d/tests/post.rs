@@ -236,18 +236,22 @@ fn the_chains_targets_go_as_the_world_rests() {
         ..Default::default()
     });
     let held = window.draw();
-    // Without: four samples of colour and of depth, 4 bytes each. With, the
-    // samples' colour in 8 bytes, the scene one sample of 8, and bloom's
-    // steps from half its size, and its steps up apart from its second's
-    // size to its last but one: by passes, 4 bytes a texel where the device
-    // draws into three floats packed so, else 8; as dispatches, 8.
+    // Without: four samples of colour and of depth, 4 bytes each, drawn
+    // and let go within the meshes' pass (in no memory where the device
+    // keeps them so). With, the samples' colour in 8 bytes (kept for the
+    // resolve), the scene one sample of 8, and bloom's steps from half its
+    // size, and its steps up apart from its second's size to its last but
+    // one: by passes, 4 bytes a texel where the device draws into three
+    // floats packed so, else 8; as dispatches, 8.
     let pixels = u64::from(SIZE * SIZE);
-    assert_eq!(plain, pixels * 4 * (4 + 4));
+    let memoryless = window.gpu.adapter_info().transient_saves_memory;
+    let within = |bytes: u64| if memoryless { 0 } else { bytes };
+    assert_eq!(plain, within(pixels * 4 * (4 + 4)));
     let level = |l: u32| u64::from((SIZE / 2) >> l).pow(2);
     let steps: u64 = (0..5).map(level).sum();
     let up: u64 = (1..4).map(level).sum();
     let chain = world.temporary_bytes();
-    let bloom = chain - pixels * (4 * (8 + 4) + 8);
+    let bloom = chain - pixels * (4 * 8 + 8) - within(pixels * 4 * 4);
     assert!(
         [4 * (steps + up), 8 * (steps + up)].contains(&bloom),
         "{chain}: bloom {bloom}"
@@ -1401,9 +1405,11 @@ fn temporal_history_goes_as_the_world_rests_and_as_it_is_turned_off() {
     assert_eq!(world.temporary_bytes(), 0);
     world.set_antialiasing(Antialiasing::None);
     window.draw();
+    // The depth alone, let go within the meshes' pass.
+    let memoryless = window.gpu.adapter_info().transient_saves_memory;
     assert_eq!(
         world.temporary_bytes(),
-        pixels * 4,
+        if memoryless { 0 } else { pixels * 4 },
         "off: no history, no chain"
     );
 }
