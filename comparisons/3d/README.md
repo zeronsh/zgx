@@ -85,6 +85,20 @@ cd comparisons/3d/zgx && cargo build --release --bin anim && for arm in play sti
 - **zgx** (`zgx/src/bin/anim.rs`): each instance an animator (`World::add_animator`) playing the clip. What playing adds: sampling, writing the joints that moved, their world matrices, the palettes and their upload, and drawing the frame (a still world draws none).
 - **Numbers so far** (M1 Max, Nov 10 2026, a loaded machine; 3 interleaved rounds): Bevy 0.19.1 22.80 M instructions a frame playing, 14.27 M still: 8.53 M, about 4,490 a joint a frame. zgx, by an in-process split of the same frames on wgpu's no-op device: sampling and pose writes 561 a joint a frame (`Placed::pose` before animators: 1,819), joint matrices 213, palettes 163, their copy and upload 56: about 990, the rest of the frame (instances, passes) apart. The zgx arm here, on Metal: 2.55 M playing, 0.61 M still (every frame drawn in both; a still world's frame is its last kept): 1.94 M, about 1,020 a joint a frame, within 1% over 3 rounds. A later run of the Bevy arms at load 37 spread 14 to 24 M between rounds: its threads move with the machine's load, so run it on a quiet one.
 
+### Poses against Blender's
+
+The milestone's check (design section 13, R10): the same clips at the same weights posed by Blender and by an animator, every joint's place in the world compared. `blender-anim/poses.py` imports the model with Blender's glTF importer, plays the bottom clip's NLA strip under the top's at an influence (Replace), and writes each joint's head at each time and weight in glTF's axes; `zgx/src/bin/anim_poses.rs` poses the same cases with the bottom clip on layer 0 and the top on layer 1 at that weight, and prints how far apart each case's joints are (`DETAIL=1`: each joint over 0.01).
+
+```sh
+Blender --background --factory-startup --python comparisons/3d/blender-anim/poses.py -- Fox.glb Run Walk fox.json --continuous
+cd comparisons/3d/zgx && cargo run --release --bin anim_poses -- Fox.glb Run Walk fox.json
+```
+
+Fox.glb (glTF-Sample-Assets at 8f492390), Run under Walk, times 0 to 0.7 s, weights 0 to 1 (30 cases), Blender 5.3.0, Nov 10 2026:
+- **On the clips' keys** (0 and 0.25 s) every joint within 0.0001 of Blender's, at every weight, on a model about 100 across.
+- **Between keys**, within 0.47 (0.46%), most cases within 0.04: Blender interpolates a quaternion's four components apart and normalises, where glTF (and zgx) turns along the arc (slerp); the gap grows with the turn between keys (Run's keys are 0.2 s apart, up to 27 degrees).
+- **Without `--continuous`**, up to 83 apart: Fox's keys put a joint's rotation on either side of the quaternion sphere (the left upper arm's Run and Walk keys disagree, as do some of Run's own neighbours), and Blender interpolates and mixes the components as they are, through a turn of nearly nothing, where glTF says to take the shorter arc. `--continuous` flips each key to its neighbour's side and the top clip's to the bottom's (the same rotations), so both sides blend the same turns.
+
 ## What each arm does
 
 | | zgx (`zgx/`) | Bevy (`bevy/`) | Filament (`filament/`) |
