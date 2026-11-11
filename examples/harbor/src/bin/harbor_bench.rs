@@ -19,7 +19,7 @@
 //!   keeps the wet layer dry; `WATER=dry` makes none, `WATER=opaque` a sea
 //!   that sees nothing behind it;
 //!   `POST=0` turns the post chain off, `AUTO=0` its adapting exposure;
-//!   `PROBES=0` adds no probes; `RAIN=0` makes no rain; `SOUND=0` no sound (offline, gain 0 otherwise); `CRANES=idle` gives the cranes animators
+//!   `WEAR=0` wears every container alike; `PROBES=0` adds no probes; `RAIN=0` makes no rain; `SOUND=0` no sound (offline, gain 0 otherwise); `CRANES=idle` gives the cranes animators
 //!   playing nothing, `CRANES=still` none; `GANTRIES` (4) how many;
 //!   `LAMP_REACH` scales every lamp's range (0: none built); `EXPOSURE`
 //!   adds stops (as the panel's slider).
@@ -120,6 +120,8 @@ fn main() {
             refraction: std::env::var("WATER").as_deref() != Ok("opaque"),
             wet: std::env::var("WATER").as_deref() != Ok("dry"),
         },
+        // `WEAR=0`: the containers all worn alike (the stock material).
+        wear: std::env::var("WEAR").as_deref() != Ok("0"),
         // `PROBES=0`: no bounced light.
         probes: std::env::var("PROBES").as_deref() != Ok("0"),
         // `RAIN=0`: no rain made at all.
@@ -139,8 +141,9 @@ fn main() {
     let harbor = Harbor::build(&world, &config, environment);
     let build_ms = started.elapsed().as_secs_f64() * 1e3 - sky_ms;
     // Sound, mixed offline: no device (`SOUND=0`: none).
-    let mut sound = (std::env::var("SOUND").as_deref() != Ok("0"))
-        .then(|| zgx_harbor::sound::HarborSound::new(&world, &harbor).expect("the harbor's sound"));
+    let mut sound = (std::env::var("SOUND").as_deref() != Ok("0")).then(|| {
+        zgx_harbor::sound::HarborSound::offline(&world, &harbor).expect("the harbor's sound")
+    });
     let mut rays = 0usize;
     // The mixer's own instructions, apart from the world's sound work.
     let mixing = std::cell::Cell::new(0u64);
@@ -170,10 +173,14 @@ fn main() {
     settings.exposure.set(env("EXPOSURE", 0.));
     // `WET=0`: rain, but nothing made wet (the wet layer's own effect).
     if std::env::var("WET").as_deref() == Ok("0")
-        && let Some(wet) = harbor.sea.and_then(|sea| sea.wet)
+        && let Some(wet) = harbor.sea.as_ref().and_then(|sea| sea.wet)
     {
         let _ = world.set_param(wet, "wet", 0.);
     }
+    // `SEA=still`: the sea's waves don't move (its pass is off).
+    settings
+        .sea
+        .set(std::env::var("SEA").as_deref() != Ok("still"));
     // `LAMPS=0`: every lamp dark (an attribution arm: the lights' cost).
     settings
         .lamps
@@ -185,11 +192,21 @@ fn main() {
         lights: (harbor.lamps.len(), harbor.lamps.len()),
         ..Stats::default()
     });
-    ui.mount(div().size(points_w, points_h).child(hud::view(
-        gpu_view("The harbor", world.view()),
-        &settings,
-        stats.clone(),
-    )));
+    // `HUD=0`: the world's view alone, for stills to judge the picture by.
+    let viewport = gpu_view("The harbor", world.view());
+    if std::env::var("HUD").as_deref() == Ok("0") {
+        ui.mount(
+            div()
+                .size(points_w, points_h)
+                .child(viewport.w_full().h_full()),
+        );
+    } else {
+        ui.mount(div().size(points_w, points_h).child(hud::view(
+            viewport,
+            &settings,
+            stats.clone(),
+        )));
+    }
     // SAFETY: the bench takes on wgpu's experimental contract for ray
     // queries (zgx_gpu::request_ray_queries), for the probes to trace;
     // asked before the renderer, and its device, are made.
@@ -203,6 +220,7 @@ fn main() {
     ui.refresh_text_geometry();
 
     let step = path::LOOP / frames as f32;
+    let still_camera = std::env::var("PATH").as_deref() == Ok("still");
     let base = world.camera();
     let mut pixels = Vec::new();
     let mut staging = Readback::default();
@@ -226,7 +244,8 @@ fn main() {
             || {},
         );
         let before = world.revision();
-        let camera = path::camera(seconds, base);
+        // `PATH=still`: the camera stays at the path's start.
+        let camera = path::camera(if still_camera { 0. } else { seconds }, base);
         world.set_camera(camera);
         if let Some(rain) = harbor.rain {
             rain.follow(&world, camera.position);
@@ -269,8 +288,8 @@ fn main() {
     // aren't drawn in this world (lit by an environment and clusters): warm
     // on until the sea's are in, so no measured frame lacks it.
     let mut waited = 0;
-    while let Some(sea) = harbor.sea
-        && !world.shader_ready(sea.shader)
+    while let Some(sea) = &harbor.sea
+        && !sea.ready(&world)
         && waited < 2000
     {
         draw(1e-3 * (warm + waited) as f32, &mut pixels);
@@ -399,11 +418,13 @@ fn main() {
         "readback alone ms (in each frame above): p50 {:.2}",
         p(&readback, 50.)
     );
-    if let Some(sea) = harbor.sea {
+    if let Some(sea) = &harbor.sea {
         println!(
-            "water: ready after {waited} frames past warm-up ({}), error {:?}; wet layer: ready {}, error {:?}",
-            world.shader_ready(sea.shader),
-            world.shader_error(sea.shader),
+            "water: ready after {waited} frames past warm-up ({}), errors {:?} {:?}; waves {:?}; wet layer: ready {}, error {:?}",
+            sea.ready(&world),
+            world.shader_error(sea.calm),
+            world.shader_error(sea.raining),
+            world.compute_status(sea.waves),
             sea.wet.is_some_and(|wet| world.shader_ready(wet)),
             sea.wet.and_then(|wet| world.shader_error(wet)),
         );

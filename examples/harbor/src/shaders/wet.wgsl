@@ -15,17 +15,21 @@ fn surface(s: SurfaceIn) -> Surface {
         return m;
     }
     let up = clamp(s.geometric_normal.y, 0.0, 1.0);
-    let w = params.wet * (0.35 + 0.65 * smoothstep(0.3, 0.9, up));
-    // Paint and concrete darken as their pores fill; metal less so.
-    m.base_color *= mix(1.0, mix(0.55, 0.85, m.metallic), w);
-    m.roughness = mix(m.roughness, 0.14, w);
+    let w = params.wet * (0.25 + 0.75 * smoothstep(0.3, 0.9, up));
+    // Paint and concrete darken as their pores fill; metal less so. A
+    // film of water smooths them, but rough ground stays fairly rough:
+    // wet asphalt is dark and dull with a sheen, not glass.
+    m.base_color *= mix(1.0, mix(0.6, 0.88, m.metallic), w);
+    m.roughness = mix(m.roughness, max(m.roughness * 0.6, 0.38), w);
     // Puddles, on the ground alone.
     let ground = 1.0 - smoothstep(0.05, 0.4, abs(s.world_position.y - params.ground));
     if up > 0.97 && ground > 0.0 {
         let p = s.world_position.xz;
-        let low = noise2(p * 0.11) * 0.7 + noise2(p * 0.43) * 0.3;
-        let puddle = smoothstep(0.58, 0.64, low) * params.wet * ground;
-        m.roughness = mix(m.roughness, 0.02, puddle);
+        let low = noise2(p * 0.23) * 0.6 + noise2(p * 0.9) * 0.4;
+        // Puddles where the ground is lowest: a few small ones, not a
+        // flood.
+        let puddle = smoothstep(0.74, 0.78, low) * params.wet * ground;
+        m.roughness = mix(m.roughness, 0.06, puddle);
         m.base_color *= mix(1.0, 0.6, puddle);
         m.normal = normalize(mix(m.normal, vec3(0.0, 1.0, 0.0), puddle));
     }

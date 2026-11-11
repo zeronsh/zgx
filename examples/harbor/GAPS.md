@@ -8,24 +8,24 @@ Each entry is a primitive any game would need, in general form, with the smalles
 | --- | --- | --- | --- |
 | G1 | A world's frame statistics are hidden | graph lane | open (design §7) |
 | G2 | The environment can't be the background; the background ignores exposure | GI lane | open |
-| G3 | Per-instance data beyond colour and emission | materials lane | planned (§5.1, landing) |
+| G3 | Per-instance data beyond colour and emission | materials lane | closed (7c6595faa): the containers' wear |
 | G4 | No per-mesh opt-out of the sun's shadow | lighting lane | partly closed by cascades |
 | G5 | The offscreen renderer has no wait but a readback | zgx-gpu (another team) | open |
 | G6 | Animators play glTF clips only: nothing made in code can be animated by one | animation lane | open |
 | G7 | A GPU view's frame time is the wall clock's, even under a `VirtualClock` | zgx-gpu | closed (73933e56b) |
 | G8 | An emitter's rate, velocity and forces can't change once it's added | compute lane | open |
 | G9 | A 3D emitter can't start partway into its sound or take its own pitch | audio lane | open |
-| G10 | `scene_color` is the scene as displayed, not its light: a material can't put it back | graph lane (HDR target) | open |
-| G11 | Nothing says when a surface layer has taken effect | materials lane | open |
-| G12 | The exposure automatic exposure has adapted to can't be read | graph lane (post) | open |
-| G13 | A bus's level can't be read | audio lane | open |
+| G10 | `scene_color` is the scene as displayed, not its light: a material can't put it back | materials lane | answered (bb24bbe5b): `scene_is_light()`; the water uses it |
+| G11 | Nothing says when a surface layer has taken effect | materials lane | closed: `shader_ready` answers for layers |
+| G12 | The exposure automatic exposure has adapted to can't be read | graph lane (post) | closed (9161837ea): `World::adapted_exposure` |
+| G13 | A bus's level can't be read | audio lane | closed (8df625dcb): `Bus::set_metered`, `Bus::level` |
 | P1 | GPU particles aren't reproducible run to run, under a virtual clock | particles lane | open (bug) |
 | L1 | Spot lights are binned by their sphere, not their cone | lighting lane | closed (dedd5f83f); cost re-measured |
 | L2 | A light at zero intensity is still binned and shaded | lighting lane | open (performance) |
 | L3 | Frames aren't reproducible run to run with cascades or with clustered lights | this M1 Max's GPU at MSAA edges | M1 Max only, under investigation |
 | L4 | One moving caster redraws every caster in its cascades | lighting lane | open (performance) |
 | L6 | One moving mesh restarts every probe's rounds | GI lane | open (performance) |
-| L5 | Sound occlusion tests a large mesh's triangles one by one, spending the frame's budget | audio lane | open (performance) |
+| L5 | Sound occlusion tests a large mesh's triangles one by one, spending the frame's budget | audio lane | closed (6a8e9772a) |
 | M2 | The post chain's memory: 108 MB measured against the docs' 33 MB at 1080p | graph lane (post) | measurement |
 | M1 | Anything moving costs about 1.3 M instructions a frame over a camera-only frame | graph lane | measurement |
 | B1 | Short checkbox and radio labels lost their last glyph in the bench | the bench's setup | resolved by setup; engine default landing on main |
@@ -181,7 +181,16 @@ The harbor's four cranes play one synthesised drive, so the four loops start tog
 impl Emitter3d { pub fn from(self, seconds: f32) -> Self; pub fn pitch(self, pitch: f32) -> Self; }
 ```
 
-## G10. `scene_color` is the scene as displayed, not its light
+## G10. `scene_color` is the scene as displayed, not its light: answered
+
+**Answered by bb24bbe5b:** with the post chain on, `scene_color` is already the scene's light before exposure and tone mapping; with it off, it's the scene as displayed; and `scene_is_light()` tells a material which. The harbor's water now leaves it as it is when it's light, and undoes the panel's exposure only when it's the displayed scene.
+
+**What the harbor got wrong before, and what it showed:**
+- The water multiplied the scene's light by 2^11 more, assuming the displayed scene. That gave the turquoise (the flat background, the only thing under most of the water, made bright) and a white band where the water meets the hull.
+- Corrected, the water reads dark slate-blue with the sky reflected toward the horizon: `~/zgx-aaa/demo-frames/stage1-sea/`.
+- The background still sits outside the scene's light (G2), so where it's seen through the water it's dimmer than the sky would be.
+
+### As first found
 
 **Needed by:** any refracting or transmitting material: water, ice, thick glass, heat haze.
 

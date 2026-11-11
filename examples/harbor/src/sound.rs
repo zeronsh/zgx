@@ -4,11 +4,12 @@
 //! under each gantry's portal and in the container canyons. Every sound is
 //! synthesised (`sounds.rs`).
 //!
-//! The engine is offline here, always: `Audio::offline`, a mixer the caller
-//! runs, with no device built in (zgx-audio without its `device` feature),
-//! so nothing can reach a speaker. Offline, master's gain is 1 and the
-//! mix is measured; a device, when there is one, opens at gain zero until
-//! the maintainer says otherwise.
+//! Two engines: offline (`HarborSound::offline`, a mixer the caller runs,
+//! no device opened: the bench, the tests and every automated run, master's
+//! gain 1 and the mix measured), and the system's output
+//! (`HarborSound::device`), for a person running the window, which plays
+//! at its normal level. An unattended run never opens the device: the
+//! window's `--smoke-test` and `HARBOR_MUTE=1` take the offline engine.
 use crate::{
     scene::Harbor,
     sounds::{self, RATE},
@@ -35,8 +36,9 @@ const CANYON: ReverbPreset = ReverbPreset {
 pub struct HarborSound {
     /// The engine.
     pub audio: Audio,
-    /// Its mixer: run it with `frames` (offline).
-    pub mixer: Offline,
+    /// Its mixer, offline: run it with `mix`. `None` for the device,
+    /// whose own thread runs it.
+    pub mixer: Option<Offline>,
     /// The rain's bed, playing while it rains.
     pub rain: Option<Voice>,
     /// Emitters placed on objects.
@@ -48,9 +50,26 @@ fn sound(samples: &[f32]) -> Result<Sound, Error> {
 }
 
 impl HarborSound {
-    /// Sound for `harbor` in `world`, mixed offline (no device).
-    pub fn new(world: &World, harbor: &Harbor) -> Result<Self, Error> {
+    /// Sound for `harbor` in `world`, mixed offline: no device is opened.
+    pub fn offline(world: &World, harbor: &Harbor) -> Result<Self, Error> {
         let (audio, mixer) = Audio::offline(Config::default())?;
+        Self::on(world, harbor, audio, Some(mixer))
+    }
+
+    /// Sound for `harbor` in `world` through the system's output, at its
+    /// normal level: for a person running the window, never an unattended
+    /// run.
+    pub fn device(world: &World, harbor: &Harbor) -> Result<Self, Error> {
+        let audio = Audio::new(Config::default())?;
+        Self::on(world, harbor, audio, None)
+    }
+
+    fn on(
+        world: &World,
+        harbor: &Harbor,
+        audio: Audio,
+        mixer: Option<Offline>,
+    ) -> Result<Self, Error> {
         let bus = audio
             .bus("world")
             .ok_or_else(|| Error::Effect("no world bus".into()))?;
@@ -58,7 +77,7 @@ impl HarborSound {
         // The sea lies under every way from a sound to the listener: it
         // blocks none of them (and its grid's triangles needn't be tried).
         world.set_sound_transmission(harbor.water, 1.);
-        if let Some(sea) = harbor.sea {
+        if let Some(sea) = &harbor.sea {
             world.set_sound_transmission(sea.near, 1.);
         }
         let seed = harbor.config.seed;
@@ -132,8 +151,11 @@ impl HarborSound {
 
     /// Mix the next `seconds` of sound (offline), what a device would ask
     /// for over a frame: the master's samples, interleaved.
+    /// Nothing for the device, which mixes on its own.
     pub fn mix(&mut self, seconds: f32) -> Vec<f32> {
         let frames = (seconds * RATE as f32).round() as usize;
-        self.mixer.frames(frames)
+        self.mixer
+            .as_mut()
+            .map_or_else(Vec::new, |mixer| mixer.frames(frames))
     }
 }

@@ -55,6 +55,9 @@ pub struct Config {
     pub water: bool,
     /// Which of the water's parts are made.
     pub water_parts: crate::water::Parts,
+    /// Each container's paint worn its own way (a custom material reading
+    /// four numbers a container); off, all wear the shared texture alike.
+    pub wear: bool,
     /// Irradiance probes under the gantries and through the yard (traced
     /// where the device has ray queries).
     pub probes: bool,
@@ -76,6 +79,7 @@ impl Default for Config {
             water: true,
             water_parts: Default::default(),
             probes: true,
+            wear: true,
         }
     }
 }
@@ -176,6 +180,8 @@ struct Kit {
     box20: Geometry,
     box40: Geometry,
     wear: zgx_3d::Texture,
+    /// The containers' worn paint, each its own (`Config::wear`).
+    paint: Option<zgx_3d::ShaderId>,
 }
 
 struct Build<'a> {
@@ -234,6 +240,18 @@ impl Build<'_> {
                 .child_of(parent),
         );
         self.world.set_texture(id, Some(self.kit.wear.clone()));
+        // Its own wear: drawn whether or not the paint shader is on, so the
+        // harbor is the same either way.
+        let wear = [
+            self.rng.unit().powi(2),
+            self.rng.unit(),
+            self.rng.unit().powf(1.5),
+            self.rng.range(0., 100.),
+        ];
+        if let Some(paint) = self.kit.paint {
+            self.world.set_shader(id, Some(paint));
+            self.world.set_instance_floats(id, Some(wear));
+        }
         id
     }
 }
@@ -255,6 +273,17 @@ impl Harbor {
             box20: shapes::container(CONTAINER_20),
             box40: shapes::container(CONTAINER_40),
             wear: textures::container_wear(config.seed),
+            paint: config
+                .wear
+                .then(|| {
+                    world
+                        .add_shader(zgx_3d::MaterialShader::new(include_str!(
+                            "shaders/container.wgsl"
+                        )))
+                        .map_err(|error| eprintln!("harbor: containers' wear: {error}"))
+                        .ok()
+                })
+                .flatten(),
         };
         let mut b = Build {
             world,
@@ -318,10 +347,9 @@ impl Harbor {
             }
             other => other.and_then(Result::ok),
         };
-        let sea = match config
-            .water
-            .then(|| crate::water::Water::new(world, water, config.wind, config.water_parts))
-        {
+        let sea = match config.water.then(|| {
+            crate::water::Water::new(world, water, config.wind, config.seed, config.water_parts)
+        }) {
             Some(Ok(sea)) => {
                 b.objects += 1;
                 b.triangles += crate::water::Water::triangles();
@@ -810,8 +838,12 @@ mod tests {
         );
         // The water's and the wet's WGSL are taken (a refused one would
         // leave the stock material, quietly).
-        let sea = h.sea.expect("the water's and the wet's shaders are taken");
+        let sea = h
+            .sea
+            .expect("the water's, the waves' and the wet's shaders are taken");
         assert!(sea.wet.is_some());
-        assert_eq!(world.shader_error(sea.shader), None);
+        assert_eq!(world.shader_error(sea.calm), None);
+        // The containers' wear is taken (a refused one leaves them stock).
+        assert!(world.shader(h.yard[0]).is_some(), "the containers' paint");
     }
 }

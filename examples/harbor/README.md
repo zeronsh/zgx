@@ -14,8 +14,9 @@ The sun's shadow is cut into four cascades over 600 m. It rains (`weather.rs`): 
 
 **The post chain** blooms the lamps and windows and lets exposure adapt, so one scene holds from a hazy dawn to a lamp-lit night (the panel's exposure is then compensation).
 
-**The water and the wet** are the demo's own custom materials (`water.rs`, `shaders/`):
-- the sea: six wind waves moving a 1.6 km grid on frame time, ripples (and rain's rings) in its normal, and the scene behind seen through it;
+**The water and the wet** are the demo's own, on the public API (`water.rs`, `shaders/`):
+- the sea's waves are a compute pass: 64 wind waves on a 128 m tile's lattice, summed each frame into a field (a `GpuTexture`) by the sea's own clock, so a paused sea stops its passes and goes on where it stood;
+- the water is a custom material reading that field: band-limited by each pixel's footprint (what it can't hold goes into roughness, so nothing aliases and the sun's glint is a soft path), roughness from the wind, murky, refraction a small bend that fades out at grazing and distance;
 - a surface layer making everything wet while it rains, with puddles on the ground.
 
 **Sound** (`sound.rs`, `sounds.rs`) is placed on objects through zgx-3d's spatial audio:
@@ -25,7 +26,9 @@ The sun's shadow is cut into four cascades over 600 m. It rains (`weather.rs`): 
 - rain as a bed;
 - reverb zones under the gantries and in the container canyons.
 
-Every sound is synthesised in code. The engine is always offline: no device is built in (zgx-audio without `device`), so nothing can be heard. The bench mixes it at master gain 1 and reports the master mix's RMS and peak. The window doesn't play sound yet; when it does, its device opens at gain zero until the maintainer says otherwise.
+Every sound is synthesised in code. The window plays it through the system's output when a person runs it. `HARBOR_MUTE=1` (and `--smoke-test`) mixes it offline instead, opening no device. The bench always mixes offline, at master gain 1, and reports the master mix's RMS and peak.
+
+**Containers wear their own way:** a custom material reads four numbers each container has (`World::set_instance_floats`: rust, grime, fading, a seed).
 
 **Bounced light:** irradiance probes fill the apron under the gantries and the yard's canyons (`World::add_probes`). They're traced by ray queries, which the bench and the window ask for (`zgx_gpu::request_ray_queries`, unsafe: wgpu's experimental feature).
 
@@ -58,7 +61,7 @@ Its `[patch.crates-io]` and profiles mirror the root's, so it builds against the
 
 It draws the app as it runs (HUD over world) through the public offscreen renderer `zgx_gpu::GpuRenderer`. `FRAMES` frames are spread evenly over the 60 s fly-through. Each frame is waited for by reading it back (GAPS.md, G5).
 
-It installs a `zgx::clock::VirtualClock` and moves it a fixed step a frame, so whatever moves by itself is placed by the path's time. GPU views don't follow it yet (GAPS.md, G7).
+It installs a `zgx::clock::VirtualClock` and moves it a fixed step a frame, so whatever moves by itself is placed by the path's time.
 
 It prints:
 - frames rendered, and frames where the world changed;
@@ -86,6 +89,10 @@ The scene and the path are deterministic. Without cascades and clustered lights 
 | `RAIN=0` | | No rain made |
 | `SOUND=0` | | No sound (otherwise mixed offline, no device) |
 | `PROBES=0` | | No probes |
+| `WEAR=0` | | Every container worn alike (the stock material) |
+| `SEA=still` | | The sea's waves stopped (its passes off) |
+| `PATH=still` | | The camera held at the path's start |
+| `HUD=0` | | The world's view alone, for stills |
 | `WATER` | | `stock`: the plain material, no wet; `dry`: no wet layer; `opaque`: no refraction |
 | `WET=0` | | Rain, but nothing made wet |
 | `POST=0` | | No post chain (exposure fixed at EV 11, no bloom) |

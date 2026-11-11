@@ -26,7 +26,7 @@ fi
 cp "$here/Cargo.lock" "$target/harbor-Cargo.lock.saved"
 trap 'cp "$target/harbor-Cargo.lock.saved" "$here/Cargo.lock"' EXIT
 cd "$here"
-CARGO_TARGET_DIR="$target/gpu-time" cargo build --release --offline \
+CARGO_TARGET_DIR="$target/gpu-time" nice -n 15 cargo build -j 4 --release --offline \
     --features gpu-time --bin harbor_bench \
     --config "patch.crates-io.wgpu-hal.path=\"$timed\""
 "$target/gpu-time/release/harbor_bench"

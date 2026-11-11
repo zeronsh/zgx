@@ -32,6 +32,8 @@ pub struct Settings {
     pub lamps: Signal<bool>,
     /// It rains.
     pub rain: Signal<bool>,
+    /// The sea's waves move.
+    pub sea: Signal<bool>,
     /// How much of the yard's containers show, 0 to 1.
     pub yard: Signal<f32>,
     /// The HUD shows.
@@ -53,6 +55,7 @@ impl Settings {
             msaa: runtime.signal(true),
             lamps: runtime.signal(true),
             rain: runtime.signal(harbor.rain.is_some()),
+            sea: runtime.signal(true),
             yard: runtime.signal(1.),
             hud: runtime.signal(true),
         }
@@ -73,13 +76,13 @@ impl Settings {
                 self.exposure.clone(),
                 self.auto_exposure.clone(),
                 world.clone(),
-                harbor.sea,
+                harbor.sea.clone(),
             );
             effects.push(runtime.effect(move || {
                 let stops = s.get();
                 // Adapting, the stops are compensation over where it is.
                 w.set_exposure(if auto.get() { stops } else { stops - scene::EV });
-                if let Some(sea) = sea {
+                if let Some(sea) = &sea {
                     sea.set_exposure(&w, stops);
                 }
             }));
@@ -119,12 +122,16 @@ impl Settings {
                 }
             }));
         }
+        if let Some(sea) = harbor.sea.clone() {
+            let (s, w) = (self.sea.clone(), world.clone());
+            effects.push(runtime.effect(move || sea.set_moving(&w, s.get())));
+        }
         if let Some(rain) = harbor.rain {
-            let (s, w, sea) = (self.rain.clone(), world.clone(), harbor.sea);
+            let (s, w, sea) = (self.rain.clone(), world.clone(), harbor.sea.clone());
             effects.push(runtime.effect(move || {
                 let on = s.get();
                 rain.set(&w, on);
-                if let Some(sea) = sea {
+                if let Some(sea) = &sea {
                     sea.set_rain(&w, if on { 1. } else { 0. });
                 }
             }));

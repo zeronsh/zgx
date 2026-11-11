@@ -6,6 +6,9 @@
 //!
 //! Run: cargo run --release --bin harbor (from examples/harbor)
 //! `--smoke-test` flies for two seconds, prints what it drew, and quits.
+//!
+//! It plays its sound through the system's output; `HARBOR_MUTE=1` (and
+//! `--smoke-test`) mixes it offline instead, opening no device.
 use std::{cell::RefCell, rc::Rc, time::Instant};
 use zgx::{compose::prelude::*, input::InputEvent};
 use zgx_3d::{Camera, Orbit, OrbitControls, World};
@@ -16,6 +19,7 @@ use zgx_harbor::{
     scene::{Config, Harbor},
     settings::Settings,
     sky,
+    sound::HarborSound,
     weather::Rain,
 };
 
@@ -68,6 +72,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let world = World::new();
             let harbor = Harbor::build(&world, &config, environment.join().ok());
             let rain = harbor.rain;
+            // Sound: through the system's output for a person running it;
+            // offline (no device opened) for an unattended run.
+            let mute = smoke || std::env::var("HARBOR_MUTE").as_deref() == Ok("1");
+            let sound = if mute {
+                HarborSound::offline(&world, &harbor)
+            } else {
+                HarborSound::device(&world, &harbor)
+            };
+            let sound = match sound {
+                Ok(sound) => Some(sound),
+                Err(error) => {
+                    eprintln!("harbor: no sound: {error}");
+                    None
+                }
+            };
             let settings = Settings::new(&cx.ui.runtime, &harbor);
             let mut keep = settings.bind(&cx.ui.runtime, &world, &harbor);
             let stats = cx.ui.signal(Stats {
@@ -143,8 +162,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     let stats = stats.clone();
                     move |event| {
-                        // The effects live as long as the view does.
-                        let _ = &keep;
+                        // The effects and the sound live as long as the
+                        // view does.
+                        let _ = (&keep, &sound);
                         if fly.with_untracked(|f| *f) {
                             return;
                         }

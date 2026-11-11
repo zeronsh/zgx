@@ -143,6 +143,7 @@ pub fn view(viewport: View, settings: &Settings, stats: Signal<Stats>) -> View {
             ("4x MSAA", s.msaa.clone()),
             ("Lamps", s.lamps.clone()),
             ("Rain", s.rain.clone()),
+            ("Sea moves", s.sea.clone()),
         ]))
         .child(label("Yard filled"))
         .child(

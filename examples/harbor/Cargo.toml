@@ -26,9 +26,10 @@ zgx-desktop = { path = "../../crates/zgx-desktop", default-features = false }
 zgx-gpu = { path = "../../crates/zgx-gpu", default-features = false }
 # Writing a bench frame as a PNG (already in zgx's tree).
 png = "0.18"
-# Sound: the engine, offline only (no `device` feature, so no output can
-# be opened). zgx-3d's `audio` feature places it in the world.
-zgx-audio = { path = "../../crates/zgx-audio", default-features = false }
+# Sound: the engine; `device` for the window's output when a person runs
+# it (automated runs take the offline engine). zgx-3d's `audio` feature
+# places it in the world.
+zgx-audio = { path = "../../crates/zgx-audio", default-features = false, features = ["device"] }
 
 [features]
 # GPU busy time, read from the perf lane's patched wgpu-hal
