@@ -797,3 +797,221 @@ fn post(p: PostIn) -> vec4<f32> {{
     );
     assert!(most <= 4, "and near it, by {most}");
 }
+
+/// A white square turned on black, unlit, as `antialiasing` says.
+fn slanted(antialiasing: Antialiasing) -> World {
+    slanted_square(antialiasing).0
+}
+/// The turn of `slanted`'s square.
+fn turn() -> Quat {
+    Quat::from_axis_angle(vec3(0., 0., 1.), 0.37)
+}
+/// `slanted`, and its square.
+fn slanted_square(antialiasing: Antialiasing) -> (World, ObjectId) {
+    let world = World::new();
+    let white = Material {
+        color: [1., 1., 1., 1.],
+        unlit: true,
+        ..Default::default()
+    };
+    let id = world.add(Object::mesh(Geometry::cuboid(1.6, 1.6, 0.1), white));
+    world.update(id, |o| o.transform.rotation = turn());
+    world.set_background_linear(Some([0., 0., 0., 1.]));
+    world.set_camera(Camera::looking_at([0., 0., 4.], [0., 0., 0.]));
+    world.set_tone_mapping(ToneMapping::Linear);
+    world.set_antialiasing(antialiasing);
+    (world, id)
+}
+
+/// Mean difference of the green channel, over the reference's edge pixels.
+fn edge_error(pixels: &[u8], reference: &[u8]) -> f32 {
+    let s = SIZE as usize;
+    let g = |p: &[u8], x: usize, y: usize| i32::from(p[(y * s + x) * 4 + 1]);
+    let mut errors = Vec::new();
+    for y in 1..s - 1 {
+        for x in 1..s - 1 {
+            let here = g(reference, x, y);
+            if (1..255).contains(&here) {
+                errors.push((g(pixels, x, y) - here).abs());
+            }
+        }
+    }
+    errors.iter().sum::<i32>() as f32 / errors.len().max(1) as f32
+}
+
+/// The 64-sample frame of `world` as it is: drawn 8 times the size, one
+/// sample a pixel, averaged 8 by 8 in linear light.
+fn supersampled(world: &World) -> Option<Vec<u8>> {
+    let antialiasing = world.antialiasing();
+    world.set_antialiasing(Antialiasing::None);
+    let big = drawn_at(world, SIZE * 8);
+    world.set_antialiasing(antialiasing);
+    Some(shrunk(&big?, SIZE, 8))
+}
+
+#[test]
+fn temporal_antialiasing_smooths_a_still_edge_finer_than_multisampling_in_its_8_frames() {
+    let still = slanted(Antialiasing::None);
+    let Some(reference) = supersampled(&still) else {
+        return;
+    };
+    let none = edge_error(&drawn_at(&still, SIZE).unwrap(), &reference);
+    let msaa = edge_error(
+        &drawn_at(&slanted(Antialiasing::Msaa), SIZE).unwrap(),
+        &reference,
+    );
+    let world = slanted(Antialiasing::Taa);
+    let mut window = Window::new(&world).unwrap();
+    window.draw();
+    assert!(world.view().animating(), "drawing its frames");
+    let mut last = Vec::new();
+    for _ in 1..8 {
+        world.view().invalidate();
+        last = window.draw();
+    }
+    assert!(!world.view().animating(), "settled after its 8 frames");
+    let taa = edge_error(&last, &reference);
+    // Measured on Metal: none 70.3, MSAA 23.5, TAA 20.7 at the 8th frame.
+    assert!(
+        taa < msaa && taa < none / 3.,
+        "TAA {taa}, MSAA {msaa}, none {none}"
+    );
+}
+
+#[test]
+fn under_camera_motion_temporal_antialiasing_leaves_no_trail_on_still_meshes() {
+    let Some(_) = supersampled(&slanted(Antialiasing::None)) else {
+        return;
+    };
+    let world = slanted(Antialiasing::Taa);
+    let (msaa, reference) = (slanted(Antialiasing::Msaa), slanted(Antialiasing::None));
+    let mut window = Window::new(&world).unwrap();
+    for step in 0..12 {
+        let x = step as f32 * 0.05;
+        let camera = Camera::looking_at([x, 0., 4.], [x, 0., 0.]);
+        for w in [&world, &msaa, &reference] {
+            w.set_camera(camera);
+        }
+        let taa = window.draw();
+        let truth = supersampled(&reference).unwrap();
+        let (taa, msaa) = (
+            edge_error(&taa, &truth),
+            edge_error(&drawn_at(&msaa, SIZE).unwrap(), &truth),
+        );
+        // From its third frame on, as smooth as multisampling while the
+        // camera pans (the history follows it by the depth).
+        if step >= 3 {
+            assert!(taa < msaa * 1.3, "step {step}: TAA {taa}, MSAA {msaa}");
+        }
+    }
+}
+
+#[test]
+fn a_moving_mesh_under_temporal_antialiasing_leans_on_its_frame_until_the_prepass() {
+    // The limit until the depth prepass follows each mesh: a frame in which
+    // a mesh moved weighs at least half, so a moving square trails no more
+    // than a frame without antialiasing shows, and isn't smoothed.
+    let (world, id) = slanted_square(Antialiasing::Taa);
+    let (reference, rid) = slanted_square(Antialiasing::None);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let mut errors = Vec::new();
+    for step in 1..12 {
+        let at = Transform {
+            position: vec3(step as f32 * 0.05, 0., 0.),
+            rotation: turn(),
+            ..Default::default()
+        };
+        world.set_transform(id, at);
+        reference.set_transform(rid, at);
+        let taa = window.draw();
+        let truth = supersampled(&reference).unwrap();
+        errors.push(edge_error(&taa, &truth));
+    }
+    let none = edge_error(
+        &drawn_at(&reference, SIZE).unwrap(),
+        &supersampled(&reference).unwrap(),
+    );
+    let mean = errors.iter().sum::<f32>() / errors.len() as f32;
+    assert!(
+        mean < none * 1.15,
+        "moving: {mean} on average, without antialiasing {none}"
+    );
+}
+
+#[test]
+fn jitter_reaches_neither_picking_nor_the_ui_over_the_view() {
+    // Picking reads the camera unjittered: the same hit either way.
+    let (taa, msaa) = (slanted(Antialiasing::Taa), slanted(Antialiasing::Msaa));
+    for point in [(48., 48.), (20., 70.), (5., 5.)] {
+        let hit = |w: &World| {
+            w.pick(point, (SIZE as f32, SIZE as f32))
+                .map(|h| (h.object, h.point))
+        };
+        assert_eq!(hit(&taa), hit(&msaa), "at {point:?}");
+    }
+    // A panel over the view: its pixels the same whichever antialiasing.
+    let shown = |world: &World| {
+        let mut gpu = GpuRenderer::new(SIZE, SIZE).ok()?;
+        let mut ui = Ui::new(SIZE as f32, SIZE as f32);
+        ui.mount(
+            div()
+                .size(SIZE as f32, SIZE as f32)
+                .child(
+                    gpu_view("World", world.view())
+                        .absolute()
+                        .size(SIZE as f32, SIZE as f32),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .size(SIZE as f32 / 2., SIZE as f32)
+                        .bg(Color(30, 90, 160, 255)),
+                ),
+        );
+        for _ in 0..3 {
+            world.view().invalidate();
+            ui.prepare_frame();
+            let report = ui.scene.borrow_mut().flush();
+            gpu.render(&ui.scene.borrow(), &report.damage).unwrap();
+        }
+        let pixels = gpu.readback().unwrap();
+        let panel: Vec<u8> = pixels
+            .chunks(4 * SIZE as usize)
+            .flat_map(|row| row[..4 * SIZE as usize / 2].to_vec())
+            .collect();
+        Some(panel)
+    };
+    let Some(over_taa) = shown(&taa) else {
+        return;
+    };
+    assert!(over_taa == shown(&msaa).unwrap(), "the panel differs");
+}
+
+#[test]
+fn temporal_history_goes_as_the_world_rests_and_as_it_is_turned_off() {
+    let world = slanted(Antialiasing::Msaa);
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    window.draw();
+    let msaa = world.temporary_bytes();
+    world.set_antialiasing(Antialiasing::Taa);
+    window.draw();
+    // One sample a pixel: colour and depth 4 bytes each, the scene and what
+    // the meshes drew 8 each, two frames of history 8 + 4 each.
+    let pixels = u64::from(SIZE * SIZE);
+    let taa = world.temporary_bytes();
+    assert_eq!(taa, pixels * (4 + 8 + 8 + 2 * (8 + 4)), "MSAA held {msaa}");
+    window.gpu.trim();
+    assert_eq!(world.temporary_bytes(), 0);
+    world.set_antialiasing(Antialiasing::None);
+    window.draw();
+    assert_eq!(
+        world.temporary_bytes(),
+        pixels * 4,
+        "off: no history, no chain"
+    );
+}

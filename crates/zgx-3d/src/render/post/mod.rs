@@ -8,6 +8,8 @@ pub(super) fn counted(hdr: u8) {
     apps::tests::COUNTED.with(|c| *c.borrow_mut() = Some(hdr));
 }
 mod exposure;
+mod taa;
+pub(super) use taa::{FRAMES, jitter, jittered};
 
 use super::graph::{Graph, SCENE, bloom_format};
 use zgx_gpu::wgpu;
@@ -103,6 +105,8 @@ pub(super) struct Chain {
     /// unused), and its passes, made with the first frame adapting.
     state: wgpu::Buffer,
     exposure: Option<exposure::Exposure>,
+    /// Temporal antialiasing's history and pass, made with its first frame.
+    taa: Option<taa::Taa>,
     binds: Option<Binds>,
 }
 
@@ -297,6 +301,7 @@ impl Chain {
                 mapped_at_creation: false,
             }),
             exposure: None,
+            taa: None,
             binds: None,
         }
     }
@@ -310,6 +315,38 @@ impl Chain {
         if let Some(exposure) = &mut self.exposure {
             exposure.rest();
         }
+        if let Some(taa) = &mut self.taa {
+            taa.rest();
+        }
+    }
+
+    /// Temporal antialiasing's blend (`taa::Taa::run`), the world at
+    /// `revision`: frames drawn since it last changed.
+    pub(super) fn taa(
+        &mut self,
+        device: (&wgpu::Device, &wgpu::Queue),
+        encoder: &mut wgpu::CommandEncoder,
+        graph: &Graph,
+        at: (crate::math::Mat4, std::time::Instant, u64, u64),
+        (revision, look): (u64, (f32, f32)),
+    ) -> u32 {
+        let taa = self.taa.get_or_insert_with(|| taa::Taa::new(device.0));
+        if taa.revision == revision {
+            taa.since += 1;
+        } else {
+            taa.revision = revision;
+            taa.since = 0;
+        }
+        taa.run(device, encoder, graph, at, look);
+        taa.since
+    }
+    /// Temporal antialiasing's history let go of (it's off).
+    pub(super) fn drop_taa(&mut self) {
+        self.taa = None;
+    }
+    /// The bytes temporal antialiasing's history holds.
+    pub(super) fn history_bytes(&self) -> u64 {
+        self.taa.as_ref().map_or(0, taa::Taa::bytes)
     }
 
     /// Automatic exposure's passes (`exposure::Exposure::run`): whether it

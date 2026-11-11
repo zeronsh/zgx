@@ -17,6 +17,8 @@ mod post;
 #[cfg(feature = "post")]
 mod post_pass;
 #[cfg(feature = "post")]
+mod temporal;
+#[cfg(feature = "post")]
 pub use grade::{Grade, Lut, LutError};
 #[cfg(feature = "post")]
 pub use post::{AutoExposure, Bloom, ChromaticAberration, Grain, Post, Vignette};
@@ -26,6 +28,8 @@ pub(crate) use post_pass::AppPass;
 pub use post_pass::{
     MAX_POST_PARAMS, Param, ParamValue, PostError, PostPass, PostPassId, PostStage,
 };
+#[cfg(feature = "post")]
+pub use temporal::Antialiasing;
 
 /// How a surface takes light: a metallic-roughness material, as glTF's.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -466,6 +470,12 @@ pub(crate) struct Inner {
     pub(crate) post_passes: Vec<post_pass::AppPass>,
     #[cfg(feature = "post")]
     pub(crate) post_ids: u64,
+    /// Temporal antialiasing on (`World::set_antialiasing`), and the cuts
+    /// asked for so far (`World::cut`).
+    #[cfg(feature = "post")]
+    pub(crate) taa: bool,
+    #[cfg(feature = "post")]
+    pub(crate) cuts: u64,
     /// Samples a pixel (`World::set_samples`): 4 or 1.
     pub(crate) samples: u32,
     /// Objects' textures (`World::set_map`), by index, in `Map::ALL`'s order,
@@ -1210,6 +1220,10 @@ impl World {
             post_passes: Vec::new(),
             #[cfg(feature = "post")]
             post_ids: 0,
+            #[cfg(feature = "post")]
+            taa: false,
+            #[cfg(feature = "post")]
+            cuts: 0,
             samples: 4,
             textures: Default::default(),
             skins: Default::default(),

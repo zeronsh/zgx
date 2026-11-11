@@ -150,7 +150,9 @@ impl Gpu {
             + match &self.post {
                 Some(chain) if self.graph.targets.is_none() => chain.held(),
                 _ => 0,
-            };
+            }
+            // Temporal antialiasing's history, with the frame's.
+            + self.post.as_ref().map_or(0, |c| c.history_bytes());
         self.graph.bytes() + behind
     }
     /// The shadow map made while `on` (dropped while off), and the frame's
