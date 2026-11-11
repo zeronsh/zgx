@@ -139,6 +139,10 @@ step "test zgx, components, desktop, workload" \
   cargo test -p zgx -p zgx-components -p zgx-desktop -p zgx-workload --all-targets --locked
 step "test zgx-gpu text_scripts, editor_selection" \
   cargo test -p zgx-gpu --test text_scripts --test editor_selection --locked
+# GPU views' extras (Viewport::rest, the views' clock, ray queries, view
+# features) are zgx-gpu's `view-features` feature: their tests run with it.
+step "test zgx-gpu view-features" \
+  cargo test -p zgx-gpu --features view-features --lib --test gpu_views --locked
 step "test zgx-fx" cargo test -p zgx-fx --locked
 step "test zgx-audio" cargo test -p zgx-audio --locked
 step "test zgx-terminal" cargo test -p zgx-terminal --locked
