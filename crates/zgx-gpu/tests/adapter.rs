@@ -43,13 +43,40 @@ fn assert_on(info: &wgpu::AdapterInfo, expected: (String, u32, u32, bool)) {
     }
 }
 
+/// The software adapter asked for (`WGPU_FORCE_FALLBACK_ADAPTER=1`).
+fn forced() -> bool {
+    std::env::var_os("WGPU_FORCE_FALLBACK_ADAPTER").is_some_and(|value| value == "1")
+}
+
 #[test]
 fn the_device_is_on_dxgis_first_gpu_for_low_power() {
+    let info = zgx_gpu::GpuRenderer::new(8, 8).unwrap().adapter_info();
+    if info.backend != wgpu::Backend::Dx12 || forced() {
+        return;
+    }
+    assert_on(&info, first(DXGI_GPU_PREFERENCE_MINIMUM_POWER));
+}
+
+/// `WGPU_FORCE_FALLBACK_ADAPTER=1` puts the device on WARP even beside a
+/// GPU, as a machine without one draws (CI's runners). Run again in a
+/// process of its own with the variable set, where it isn't.
+#[test]
+fn a_forced_fallback_takes_warp() {
+    if !forced() {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "a_forced_fallback_takes_warp"])
+            .env("WGPU_FORCE_FALLBACK_ADAPTER", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
     let info = zgx_gpu::GpuRenderer::new(8, 8).unwrap().adapter_info();
     if info.backend != wgpu::Backend::Dx12 {
         return;
     }
-    assert_on(&info, first(DXGI_GPU_PREFERENCE_MINIMUM_POWER));
+    assert_eq!(info.device_type, wgpu::DeviceType::Cpu, "{info:?}");
+    assert_eq!(info.vendor, 0x1414, "{info:?}");
 }
 
 #[test]
