@@ -57,12 +57,16 @@ fn seen_at(world: &World, p: Vec3) -> usize {
 /// A floor and a tall box a sun shines straight down beside, from above
 /// at 45° travelling toward -x: its shadow falls on the floor at -x.
 fn scene() -> World {
+    scene_with_ids().0
+}
+/// `scene`, with its floor's and its box's ids.
+fn scene_with_ids() -> (World, ObjectId, ObjectId) {
     let world = World::new();
-    world.add(Object::mesh(
+    let floor = world.add(Object::mesh(
         Geometry::plane(60., 60.),
         Material::rgb(0xc0c0c0).with(0., 0.9),
     ));
-    world
+    let post = world
         .add(Object::mesh(Geometry::cuboid(1., 3., 1.), Material::rgb(0xc0c0c0)).at([0., 1.5, 0.]));
     world.add_light(Light::Directional {
         direction: vec3(-1., -1., 0.),
@@ -76,7 +80,7 @@ fn scene() -> World {
     });
     world.set_shadows(true);
     world.set_camera(Camera::looking_at([0., 6., 9.], [1., 0., 0.]));
-    world
+    (world, floor, post)
 }
 
 #[test]
@@ -301,6 +305,74 @@ fn turning_cascades_or_shadows_off_while_a_cascade_is_owed_lets_the_world_rest()
         assert!(
             !world.view().animating(),
             "{name}: still drawing for cascades it no longer has"
+        );
+    }
+}
+
+/// The floor in the box's shadow and out of it, as `scene` draws it, with
+/// cascades or with the single map.
+fn shadow_and_lit(world: &World, window: &mut Window) -> (u8, u8) {
+    let pixels = window.draw();
+    let (shadow, lit) = (
+        seen_at(world, vec3(-2., 0., 0.)),
+        seen_at(world, vec3(2., 0., 0.)),
+    );
+    (pixels[shadow], pixels[lit])
+}
+
+#[test]
+fn a_mesh_set_not_to_cast_leaves_no_shadow_and_casts_again_when_set_back() {
+    for cascaded in [false, true] {
+        let (world, _, post) = scene_with_ids();
+        if cascaded {
+            world.set_cascades(Some(Cascades::new(2).distance(40.)));
+        }
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        let (shadow, lit) = shadow_and_lit(&world, &mut window);
+        assert!(
+            shadow + 40 < lit,
+            "cascaded {cascaded}: the control, {shadow} {lit}"
+        );
+        world.set_casts_shadows(post, false);
+        assert!(!world.casts_shadows(post));
+        let (shadow, lit) = shadow_and_lit(&world, &mut window);
+        assert!(
+            shadow.abs_diff(lit) < 4,
+            "cascaded {cascaded}: it still casts, {shadow} {lit}"
+        );
+        world.set_casts_shadows(post, true);
+        let (shadow, lit) = shadow_and_lit(&world, &mut window);
+        assert!(
+            shadow + 40 < lit,
+            "cascaded {cascaded}: set back, no shadow, {shadow} {lit}"
+        );
+    }
+}
+
+#[test]
+fn a_mesh_set_not_to_receive_is_lit_where_a_shadow_falls_on_it() {
+    for cascaded in [false, true] {
+        let (world, floor, _) = scene_with_ids();
+        if cascaded {
+            world.set_cascades(Some(Cascades::new(2).distance(40.)));
+        }
+        let Some(mut window) = Window::new(&world) else {
+            return;
+        };
+        world.set_receives_shadows(floor, false);
+        assert!(!world.receives_shadows(floor));
+        let (shadow, lit) = shadow_and_lit(&world, &mut window);
+        assert!(
+            shadow.abs_diff(lit) < 4,
+            "cascaded {cascaded}: still shadowed, {shadow} {lit}"
+        );
+        world.set_receives_shadows(floor, true);
+        let (shadow, lit) = shadow_and_lit(&world, &mut window);
+        assert!(
+            shadow + 40 < lit,
+            "cascaded {cascaded}: set back, no shadow, {shadow} {lit}"
         );
     }
 }

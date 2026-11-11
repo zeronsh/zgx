@@ -78,6 +78,9 @@ fn tag_on(
         // A mesh's own shader is in the custom code (not layers alone): its
         // binding holds what it reads, the instances' numbers among it.
         "mesh_shader" => custom.is_some_and(meshes),
+        // A mesh receiving the sun's shadow (all but those set not to,
+        // `World::set_receives_shadows`).
+        "sun_shadowed" => !variant.unshadowed(),
         _ => false,
     };
     Some(match tag {
@@ -114,7 +117,7 @@ fn tag_on(
 /// The tags of more than one letter (`//name `: lowercase letters, digits
 /// and `_`), by their codes from `NAMED_FROM`: a lane adds its own here and
 /// in `tag_on`. (Names cost nothing a frame: the text is read once.)
-const NAMED: &[&str] = &["probed", "probed_unlit", "mesh_shader"];
+const NAMED: &[&str] = &["probed", "probed_unlit", "mesh_shader", "sun_shadowed"];
 const NAMED_FROM: u8 = 128;
 /// The code of a line's tag `name`, if it is one: a letter's own byte, a
 /// name's from `NAMED` (one not there, `u8::MAX`: no variant keeps it).
@@ -379,7 +382,7 @@ mod tests {
         let pinned = [
             0xf935_b89f_ba82_c305,
             0xde7e_cd1c_b17b_6a05,
-            0x113a_4565_531e_91a5,
+            0x6144_6130_bab1_cb65,
         ];
         assert_eq!(digests, pinned, "{digests:#018x?}");
     }

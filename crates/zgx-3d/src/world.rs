@@ -857,6 +857,10 @@ pub(crate) struct Extras {
     /// Its four numbers for custom materials (`World::set_instance_floats`).
     #[cfg(feature = "shaders")]
     pub(crate) floats: Option<[f32; 4]>,
+    /// Whether it casts and receives the sun's shadow, by its bits
+    /// (`lighting::NO_CAST`, `NO_RECEIVE`): 0, both, as every mesh.
+    #[cfg(feature = "lighting")]
+    pub(crate) shadows: u8,
 }
 /// `Extras::kinds`' bits.
 pub(crate) const GLASS: u8 = 1;

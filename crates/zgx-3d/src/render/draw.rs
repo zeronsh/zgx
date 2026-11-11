@@ -10,6 +10,8 @@ pub(super) struct Run {
     pub(super) maps: [u64; MAPS],
     pub(super) variant: Variant,
     pub(super) instances: std::ops::Range<u32>,
+    /// Its meshes cast the sun's shadow (`World::set_casts_shadows`).
+    pub(super) casts: bool,
 }
 
 /// What a pass has bound, by address, so a run sets only what differs from

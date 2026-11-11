@@ -343,8 +343,8 @@ pub(super) fn draw_shadows(
     });
     pass.set_bind_group(0, &gpu.shadow_bind, &[]);
     pass.set_vertex_buffer(1, instances.slice(..));
-    // Translucent meshes cast none.
-    for run in runs.iter().filter(|run| !run.glass) {
+    // Translucent meshes cast none, nor those set not to.
+    for run in runs.iter().filter(|run| !run.glass && run.casts) {
         let buffers = &gpu.geometries[&run.geometry];
         let (skinned, morphing) = (run.variant.skinned(), run.variant.morphing());
         let key = shadow_key(run.variant);
@@ -397,7 +397,7 @@ pub(super) fn draw_casters(
     let mut bound = super::draw::Bound::default();
     for spans in spans.chunk_by(|a, b| a.0 == b.0) {
         let run = &runs[spans[0].0 as usize];
-        if run.glass {
+        if run.glass || !run.casts {
             continue;
         }
         let key = shadow_key(run.variant);

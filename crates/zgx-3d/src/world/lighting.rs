@@ -1,13 +1,18 @@
 //! The lighting milestone's settings on a world (design-3d-aaa.md, 6.3):
 //! clustered lights and point and spot lights in physical units. Behind the
 //! `lighting` feature.
-use super::{ByIndex, Inner, Light, LightId, Settle, Spot, World};
+use super::{ByIndex, Inner, Light, LightId, ObjectId, Settle, Spot, World};
 use crate::math::Vec3;
 
 impl Settle {
     /// The sun's cascades have one still to follow the camera.
     pub(crate) const CASCADES: u32 = super::Reason::Cascades as u32;
 }
+
+/// `Extras::shadows`' bits: the mesh casts no shadow from the sun, and it
+/// is lit by the sun wherever the sun's shadow would fall on it.
+pub(crate) const NO_CAST: u8 = 1;
+pub(crate) const NO_RECEIVE: u8 = 2;
 
 /// A world's lighting settings.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -39,6 +44,15 @@ impl Lighting {
 }
 
 impl Inner {
+    /// The shadow bits any mesh has (`World::set_casts_shadows`,
+    /// `set_receives_shadows`): 0 where every mesh casts and receives, as
+    /// by default. (Asked once a frame that makes its runs: the table holds
+    /// the few meshes with something of their own.)
+    pub(crate) fn shadow_flags(&self) -> u8 {
+        self.extras
+            .values()
+            .fold(0, |bits, (_, extras)| bits | extras.shadows)
+    }
     /// Whether a light still in the world has a radius.
     pub(crate) fn has_radii(&self) -> bool {
         let lighting = &self.lighting;
@@ -298,6 +312,56 @@ impl World {
     /// The sun's cascades, if its shadow is cut into them.
     pub fn cascades(&self) -> Option<Cascades> {
         self.inner.borrow().lighting.cascades
+    }
+    /// Whether object `id` casts the sun's shadow (on, the default): a mesh
+    /// that doesn't is left out of the sun's map or cascades, as a glass
+    /// pane is, and turning it changes no other mesh's frame.
+    pub fn set_casts_shadows(&self, id: ObjectId, on: bool) {
+        self.set_shadow_bit(id, NO_CAST, !on);
+    }
+    /// Whether object `id` casts the sun's shadow.
+    pub fn casts_shadows(&self, id: ObjectId) -> bool {
+        self.shadow_bits(id) & NO_CAST == 0
+    }
+    /// Whether object `id` receives the sun's shadow (on, the default): a
+    /// mesh that doesn't is lit by the sun wherever its shadow would fall on
+    /// it (a sign that must read in the dark, an effect's own light), its
+    /// own shadow included; others' shadows of it fall as before.
+    pub fn set_receives_shadows(&self, id: ObjectId, on: bool) {
+        self.set_shadow_bit(id, NO_RECEIVE, !on);
+    }
+    /// Whether object `id` receives the sun's shadow.
+    pub fn receives_shadows(&self, id: ObjectId) -> bool {
+        self.shadow_bits(id) & NO_RECEIVE == 0
+    }
+    fn shadow_bits(&self, id: ObjectId) -> u8 {
+        let inner = self.inner.borrow();
+        if inner.live(id.index, id.generation).is_none() {
+            return 0;
+        }
+        inner
+            .extras(id.index as usize, id.generation)
+            .map_or(0, |extras| extras.shadows)
+    }
+    /// Object `id`'s shadow bit `bit` set (`on`) or not: a change to what
+    /// its meshes draw (their runs and pipelines follow it).
+    fn set_shadow_bit(&self, id: ObjectId, bit: u8, on: bool) {
+        self.change(|inner: &mut Inner| {
+            if inner.live(id.index, id.generation).is_none() {
+                return false;
+            }
+            let extras = inner.extras_mut(id.index, id.generation);
+            let before = extras.shadows;
+            extras.shadows = if on { before | bit } else { before & !bit };
+            let changed = extras.shadows != before;
+            inner.tidy_extras(id.index);
+            // Its instance written again, so the cascades holding it see a
+            // caster changed (as a map's change does, K1) and draw again.
+            if changed {
+                inner.stamp(id.index as usize);
+            }
+            changed
+        });
     }
     /// Add `light`, a point or spot light in physical units.
     pub fn add_point_light(&self, light: PointLight) -> LightId {

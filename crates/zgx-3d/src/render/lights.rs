@@ -276,6 +276,68 @@ fn clusters(
     true
 }
 
+/// `runs` cut where their meshes (`drawn`, in instance order) differ in
+/// casting or receiving the sun's shadow (`World::set_casts_shadows`,
+/// `set_receives_shadows`), each piece marked: not casting (`Run::casts`)
+/// or not receiving (`Variant::UNSHADOWED`). Nothing where no mesh is set
+/// either way, the world's table of meshes' extras looked at once.
+#[inline(never)]
+pub(super) fn shadow_runs(
+    runs: &mut Vec<super::Run>,
+    drawn: &[&crate::world::Drawn],
+    world: &Inner,
+) {
+    if world.shadow_flags() == 0 {
+        return;
+    }
+    cut_shadow_runs(runs, drawn);
+}
+#[cold]
+#[inline(never)]
+fn cut_shadow_runs(runs: &mut Vec<super::Run>, drawn: &[&crate::world::Drawn]) {
+    use crate::world::lighting::{NO_CAST, NO_RECEIVE};
+    let bits = |at: u32| drawn[at as usize].extras.map_or(0, |e| e.shadows);
+    let mut out = Vec::with_capacity(runs.len() + 8);
+    for run in runs.drain(..) {
+        let mut start = run.instances.start;
+        while start < run.instances.end {
+            let here = bits(start);
+            let end = (start..run.instances.end)
+                .find(|&at| bits(at) != here)
+                .unwrap_or(run.instances.end);
+            out.push(super::Run {
+                variant: run
+                    .variant
+                    .with(super::Variant::UNSHADOWED, here & NO_RECEIVE != 0),
+                instances: start..end,
+                casts: here & NO_CAST == 0,
+                ..run
+            });
+            start = end;
+        }
+    }
+    *runs = out;
+}
+
+/// The single map's casters (`Casting`'s meshes, of the opaque meshes of
+/// `drawn` in order) without those set not to cast. Rare: only where one is.
+#[cold]
+#[inline(never)]
+pub(super) fn casting_only(meshes: &mut Vec<(u64, Mat4, u32)>, drawn: &[&crate::world::Drawn]) {
+    use crate::world::lighting::NO_CAST;
+    meshes.clear();
+    meshes.extend(
+        drawn
+            .iter()
+            .filter(|d| d.material.color[3] >= 1.)
+            .filter(|d| d.extras.is_none_or(|e| e.shadows & NO_CAST == 0))
+            .map(|d| {
+                let cutoff = d.surface.alpha_cutoff.map_or(0, f32::to_bits);
+                (d.geometry.id(), d.matrix, cutoff)
+            }),
+    );
+}
+
 /// The casters' box along the sun, from a frame that drew the meshes
 /// again (`cascades` keeps it for frames that don't). Out of the frame's
 /// code, as `cascades` is.

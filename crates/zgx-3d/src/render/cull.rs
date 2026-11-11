@@ -313,6 +313,7 @@ mod tests {
             maps: [0; crate::texture::MAPS],
             variant: Default::default(),
             instances,
+            casts: true,
         };
         // Run 0 all shown; run 1 a gap of 1 then of 3; run 2 none shown.
         let runs = [run(0, 0..4), run(1, 4..12), run(2, 12..14)];

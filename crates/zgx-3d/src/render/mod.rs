@@ -557,9 +557,15 @@ fn prepare<'a>(
             maps,
             variant,
             instances: start as u32..end as u32,
+            casts: true,
         });
         start = end;
     }
+    // Meshes set not to cast or receive the sun's shadow, if any: their
+    // runs cut apart from the others' (`lights::shadow_runs`, out of this
+    // loop's code: a world with none pays a look at its table).
+    #[cfg(feature = "lighting")]
+    lights::shadow_runs(runs, &drawn, world);
     // A clustered or cascaded world's pipelines read its lights' lists or
     // cascades (`lighting`, `Variant` bits): its runs' alone, so the
     // meshes' loop above reads nothing more.
@@ -628,6 +634,11 @@ fn casting_of(
             }
             (d.geometry.id(), d.matrix, cutoff)
         }));
+        // Those set not to cast left out, where any is.
+        #[cfg(feature = "lighting")]
+        if runs.iter().any(|run| !run.casts) {
+            lights::casting_only(&mut meshes, drawn);
+        }
         // Poses: an empty palette has none, so no mesh need be asked.
         if !palette.is_empty() {
             joints.extend(opaque().flat_map(|d| d.palette.iter().copied().flatten().copied()));
