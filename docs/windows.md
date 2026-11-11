@@ -218,9 +218,16 @@ compiled by FXC off the frame as Direct3D 12's is, in a process of its own, imag
 (image_effects.wgsl's pixel stage, made when one first draws), and layer
 effects: blend modes (over that copy too), content blurs, masks and drop
 shadows, their passes drawn into the effect atlas with effects.wgsl as on
-Direct3D 12. What it doesn't draw yet, it leaves out where what's
+Direct3D 12, and GPU views (`zgx::gpu_view`: zgx-3d's worlds, `scene3d`):
+their painters draw with wgpu on a Direct3D 12 device of the views' own,
+on Direct3D 11's adapter, made the first time one shows, into textures
+shared with Direct3D 11, which waits on a shared fence before sampling
+them (`crates/zgx-gpu/src/view_host.rs`). A painter needs nothing
+different: it draws with `frame.device` as anywhere, the device asking
+for what `viewport::view_device_features` lists where the adapter has
+it. What it doesn't draw yet, it leaves out where what's
 left can't show a picture a user would wrongly trust, naming each kind once
-on stderr: images a GPU view draws are left
+on stderr: GPU views, where the views' device can't be made, are left
 empty; a backdrop blur (frosted glass among them) draws its box opaque in
 its own colour, as the system's Reduce transparency
 draws glass, so what's over it stays legible. The rest fails the frame

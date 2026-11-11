@@ -83,6 +83,23 @@ impl<'a> ViewportFrame<'a> {
     }
 }
 
+/// What a device GPU views draw with asks for where its adapter has it, if
+/// the renderer makes one of their own (under Direct3D 11, `view_host`):
+/// each optional, so a painter probes `frame.device.features()` before
+/// relying on one.
+pub fn view_device_features() -> wgpu::Features {
+    wgpu::Features::TIMESTAMP_QUERY
+        | wgpu::Features::TEXTURE_COMPRESSION_BC
+        | wgpu::Features::INDIRECT_FIRST_INSTANCE
+        | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT
+        | wgpu::Features::TEXTURE_BINDING_ARRAY
+        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+        | wgpu::Features::FLOAT32_FILTERABLE
+        | wgpu::Features::RG11B10UFLOAT_RENDERABLE
+        | wgpu::Features::PIPELINE_CACHE
+        | wgpu::Features::DUAL_SOURCE_BLENDING
+}
+
 /// A view's painter, and the context whose device it last drew with: by
 /// identity (wgpu's devices compare equal across instances), held weakly,
 /// so its allocation, not its device, outlives it.
@@ -433,7 +450,7 @@ impl GpuRenderer {
         image: &zgx::image::ImageData,
         frame: &zgx::gpu_view::GpuFrame,
     ) -> Result<(), GpuError> {
-        let max = self.device.limits().max_texture_dimension_2d;
+        let max = self.view_device().0.limits().max_texture_dimension_2d;
         let size = (
             ((frame.width * self.scale).ceil() as u32).clamp(1, max),
             ((frame.height * self.scale).ceil() as u32).clamp(1, max),
@@ -497,9 +514,9 @@ impl GpuRenderer {
                          {shown} held by {count} other views"
                     )));
                 }
-                let texture = self.view_texture(key, size);
+                let texture = self.view_texture(key, size)?;
                 let target = texture.create_view(&Default::default());
-                let bind = self.texture_bind(&target, "GPU view");
+                let bind = self.view_bind(&target);
                 let srgb = self.view_srgb().then(|| {
                     texture.create_view(&wgpu::TextureViewDescriptor {
                         format: Some(crate::FORMAT.add_srgb_suffix()),
@@ -597,20 +614,88 @@ impl GpuRenderer {
         Ok(())
     }
     /// The device and queue views draw with: the renderer's own, as it
-    /// draws with wgpu.
+    /// draws with wgpu, or under Direct3D 11 the views' own Direct3D 12
+    /// device (`view_host`).
     fn view_device(&self) -> (&wgpu::Device, &wgpu::Queue) {
+        #[cfg(d3d11)]
+        if let Some(host) = self.d3d11_view_host() {
+            return (&host.device, &host.queue);
+        }
         (&self.device, &self.queue)
     }
     /// After a view's frame is submitted (`key`: the view and the box
     /// showing it), before the frame showing it: nothing to do where the
-    /// renderer draws on the same queue.
-    fn after_view_submit(&self, _key: (u64, u64)) {}
+    /// renderer draws on the same queue; under Direct3D 11, the views'
+    /// queue signals what Direct3D 11 waits on.
+    fn after_view_submit(&self, _key: (u64, u64)) {
+        #[cfg(d3d11)]
+        if let Some(host) = self.d3d11_view_host()
+            && let Err(error) = host.hand_over()
+        {
+            eprintln!("zgx: {}", error.0);
+        }
+    }
+    /// Under Direct3D 11, the device GPU views draw with (`view_host`), made
+    /// the first time one shows; `None` elsewhere, or where it couldn't be
+    /// made (its views then draw nothing, as before, and it says so once).
+    #[cfg(d3d11)]
+    fn d3d11_view_host(&self) -> Option<&crate::view_host::ViewHost> {
+        let state = self.d3d11.as_ref()?;
+        self.view_host
+            .get_or_init(|| match crate::view_host::ViewHost::new(&state.device) {
+                Ok(host) => Some(host),
+                Err(error) => {
+                    eprintln!("zgx: {}", error.0);
+                    None
+                }
+            })
+            .as_ref()
+    }
+    /// What a view's box binds to be drawn: its texture's, where the
+    /// renderer samples with wgpu. Under Direct3D 11 the texture is another
+    /// device's, which Direct3D 11 samples itself (`d3d11_texture`): the
+    /// renderer's no-op device binds a stand-in.
+    fn view_bind(&self, target: &wgpu::TextureView) -> wgpu::BindGroup {
+        #[cfg(d3d11)]
+        if self.d3d11_view_host().is_some() {
+            let stand_in = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("GPU view (Direct3D 11's own)"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: crate::FORMAT,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            return self.texture_bind(&stand_in.create_view(&Default::default()), "GPU view");
+        }
+        self.texture_bind(target, "GPU view")
+    }
     /// The texture of a view's box (`key`: the view and the box): drawn to
     /// with the views' device, sampled by the renderer, and viewable as
-    /// sRGB where the device allows.
-    fn view_texture(&self, _key: (u64, u64), (width, height): (u32, u32)) -> wgpu::Texture {
+    /// sRGB where the device allows. Under Direct3D 11, shared with it
+    /// (`view_host`), and its view kept for frames to sample.
+    fn view_texture(
+        &mut self,
+        _key: (u64, u64),
+        (width, height): (u32, u32),
+    ) -> Result<wgpu::Texture, GpuError> {
+        #[cfg(d3d11)]
+        if let Some(host) = self.d3d11_view_host() {
+            let (texture, surface) = host.texture((width, height))?;
+            if let Some(state) = &mut self.d3d11 {
+                state.textures.insert(texture.clone(), surface);
+            }
+            return Ok(texture);
+        }
         let srgb = [crate::FORMAT.add_srgb_suffix()];
-        self.view_device()
+        Ok(self
+            .view_device()
             .0
             .create_texture(&wgpu::TextureDescriptor {
                 label: Some("GPU view"),
@@ -628,10 +713,16 @@ impl GpuRenderer {
                     | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::COPY_DST,
                 view_formats: if self.view_srgb() { &srgb } else { &[] },
-            })
+            }))
     }
     /// Whether textures can be viewed in their sRGB twin format (not on GL).
     fn view_srgb(&self) -> bool {
+        // Under Direct3D 11 the views' textures are made viewable as sRGB
+        // (`view_host`), whatever the renderer's no-op adapter says.
+        #[cfg(d3d11)]
+        if self.d3d11_view_host().is_some() {
+            return true;
+        }
         self.context
             .inner
             .adapter

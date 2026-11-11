@@ -29,6 +29,8 @@ mod fxc_child;
 #[doc(hidden)]
 pub mod iosurface;
 mod passes;
+#[cfg(d3d11)]
+mod view_host;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]
 pub use core_text_glyphs::core_text_glyph;
@@ -4881,6 +4883,10 @@ pub struct GpuRenderer {
     /// renderer's buffers, atlas and offscreen target there.
     #[cfg(d3d11)]
     d3d11: Option<d3d11_frame::State>,
+    /// Under Direct3D 11, the Direct3D 12 device GPU views draw with, made
+    /// the first time one shows (`None` inside: it couldn't be).
+    #[cfg(d3d11)]
+    view_host: std::cell::OnceCell<Option<view_host::ViewHost>>,
     /// Shifted texel copies drawn in a render pass (copy_offset.wgsl).
     #[cfg(own_surfaces)]
     copy_offset: Option<wgpu::RenderPipeline>,
@@ -5463,6 +5469,8 @@ impl GpuRenderer {
             viewport_values: [0.; 4],
             #[cfg(d3d11)]
             d3d11,
+            #[cfg(d3d11)]
+            view_host: Default::default(),
             #[cfg(own_surfaces)]
             copy_offset: None,
             in_layer: false,
