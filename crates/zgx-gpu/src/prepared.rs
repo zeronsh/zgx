@@ -59,10 +59,6 @@ const TAB_WIDTH: u16 = 8;
 /// Texts at least this long (bytes) that a new text extends are dropped as a
 /// stream's previous states.
 const SUPERSEDED: usize = 32;
-/// Bytes from which a plain text's hash is kept while it is looked up
-/// (`TextCache::hashed`): hashing a long one (a stream's paragraph) again for
-/// each read reads it all; a short one costs less hashed again than kept.
-const HASHED: usize = 512;
 /// Lines of dropped texts kept for new texts to shape into, and the longest
 /// kept: values that change every frame replace as many texts as they shape.
 /// Only short lines: a reused line keeps the capacity it grew to.
@@ -168,26 +164,17 @@ impl Key {
     }
     /// `hash` of plain text's key (`plain`, with its caret row), without
     /// building it.
-    #[cfg(test)]
     fn plain_hash(text: &str, font_size: f32, font: &FontStyle) -> u64 {
         let mut hasher = FxHasher::default();
         text.hash(&mut hasher);
-        Self::plain_hash_from(hasher, text, font_size, font)
-    }
-    /// `plain_hash`, from `hasher` that has hashed `text` (`TextCache`'s
-    /// `hashed`, which keeps it for a text looked up again).
-    fn plain_hash_from(mut hasher: FxHasher, text: &str, font_size: f32, font: &FontStyle) -> u64 {
         true.hash(&mut hasher);
         Self::hash_span(&mut hasher, &(0..text.len()), font, font_size, 0.);
         hasher.finish()
     }
     /// Whether this is plain text's key (`plain_hash`).
     fn is_plain(&self, text: &str, font_size: f32, font: &FontStyle) -> bool {
-        // The same text where it is the same (the key keeps it): most
-        // lookups, a frame's of a text it drew, without reading it all.
-        let same = std::ptr::eq(self.text.as_ptr(), text.as_ptr()) && self.text.len() == text.len();
         self.caret_row
-            && (same || *self.text == *text)
+            && *self.text == *text
             && matches!(&self.spans[..], [(range, f, size, padding)]
                 if *range == (0..text.len()) && f == font && *size == font_size && *padding == 0.)
     }
@@ -294,6 +281,9 @@ impl Compact {
             lines: smallvec::SmallVec::with_capacity(lines.len()),
         };
         let (mut word_at, mut glyph_at) = (0, 0);
+        // Written in turn (not indexed): a pointer steps a word, wherever
+        // this is inlined, with no register held for a word's stride.
+        let (mut packed, mut advances) = (packed.iter_mut(), advances.iter_mut());
         // What does not qualify leaves the chunk as it was.
         let filled = (|| {
             for line in lines {
@@ -315,10 +305,10 @@ impl Compact {
                             if glyph.metrics_opt.map(|metrics| metrics.line_height) != line_height {
                                 return None;
                             }
-                            advances[glyph_at] = glyph.width(font_size).to_bits();
+                            *advances.next()? = glyph.width(font_size).to_bits();
                             glyph_at += 1;
                         }
-                        packed[word_at] = Word {
+                        *packed.next()? = Word {
                             width: word.width(font_size),
                             blank: word.blank,
                             glyphs,
@@ -1104,11 +1094,6 @@ pub struct TextCache {
     spare_lists: Vec<Vec<BufferLine>>,
     /// Every compact's words and advances.
     slab: Slab,
-    /// The plain text last looked up (`plain_entry`) and its hash so far:
-    /// a text node is measured at its widths and laid out each frame, a
-    /// stream's long one each chunk, and hashing it again for each read it
-    /// whole. Kept by the text itself, so no other takes its address.
-    hashed: Option<(Arc<str>, FxHasher)>,
     /// The run cache's words after its last sweep, and whether the next
     /// text shaped looks at them again (`sweep_words`).
     words_kept: usize,
@@ -1414,22 +1399,6 @@ impl TextCache {
         let hash = self.plain_entry(fonts, text, font_size, font, Need::Layout);
         self.laid_out(fonts, hash, width)
     }
-    /// `Key::plain_hash` of a long `text`, hashed once while it is the one
-    /// looked up (`hashed`).
-    #[cold]
-    #[inline(never)]
-    fn long_plain_hash(&mut self, text: &Arc<str>, font_size: f32, font: &FontStyle) -> u64 {
-        let hasher = match &self.hashed {
-            Some((last, hasher)) if Arc::ptr_eq(last, text) => hasher.clone(),
-            _ => {
-                let mut hasher = FxHasher::default();
-                text.hash(&mut hasher);
-                self.hashed = Some((text.clone(), hasher.clone()));
-                hasher
-            }
-        };
-        Key::plain_hash_from(hasher, text, font_size, font)
-    }
     /// The entry for plain text. Found, as most lookups are (a layout
     /// measures a text at a few widths, each frame draws it again), it costs
     /// no rich text or key built to look it up.
@@ -1441,16 +1410,7 @@ impl TextCache {
         font: &FontStyle,
         need: Need,
     ) -> u64 {
-        // A long text's hash kept for it (`hashed`); a short one hashed
-        // again, which costs less than keeping it.
-        let hash = match text.len() >= HASHED {
-            true => self.long_plain_hash(text, font_size, font),
-            false => {
-                let mut hasher = FxHasher::default();
-                text.hash(&mut hasher);
-                Key::plain_hash_from(hasher, text, font_size, font)
-            }
-        };
+        let hash = Key::plain_hash(text, font_size, font);
         if let Some(entry) = self.entries.get_mut(&hash)
             && entry.key.is_plain(text, font_size, font)
             && (entry.shaped() || (need != Need::Layout && entry.compact.is_some()))
@@ -1553,7 +1513,6 @@ impl TextCache {
         self.spare_lists = Vec::new();
         self.spare_words = Vec::new();
         self.clamped = FxHashMap::default();
-        self.hashed = None;
     }
     /// cosmic-text's run cache swept of words unused lately, once it has
     /// grown a quarter past what the last sweep left (and `WORDS_FLOOR` at
@@ -2433,6 +2392,39 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+    /// A long text is found by its own hash wherever it is used: the same
+    /// text at another size, and texts of one length dropped and made again
+    /// (likely at the address the last one had), each get the hash their
+    /// whole text makes, and their own entry.
+    #[test]
+    fn a_long_texts_kept_hash_is_never_another_texts() {
+        let mut fonts = FontSystem::new();
+        let font = FontStyle::default();
+        let filler = "the same words in every row of the list, ".repeat(13);
+        let mut cache = TextCache::default();
+        let mut look_up = |text: &Arc<str>, size: f32| {
+            let hash = cache.plain_entry(&mut fonts, text, size, &font, Need::Measure);
+            assert_eq!(
+                hash,
+                Key::plain_hash(text, size, &font),
+                "{:?} at {size}",
+                &text[..20]
+            );
+            assert!(cache.entries[&hash].key.is_plain(text, size, &font));
+        };
+        let kept: Arc<str> = format!("Row of the list 000: {filler}").into();
+        for size in [14., 14., 16., 14., 16., 16.] {
+            look_up(&kept, size);
+        }
+        for i in 0..32 {
+            // Made, looked up twice, and dropped: the next is likely where
+            // it was.
+            let row: Arc<str> = format!("Row of the list {i:03}: {filler}").into();
+            look_up(&row, 14.);
+            look_up(&row, 14.);
+            drop(row);
         }
     }
     #[test]
