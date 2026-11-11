@@ -1,11 +1,13 @@
 //! Reference images of worlds, two ways.
 //!
 //! **Fresh against retained:** each scene drawn by a window made for it, and
-//! by one that reached the same state through other sizes, settings turned
-//! off and on, materials changed and changed back, and an object added and
-//! removed, drawing a frame after each. Stale caches or history show as a
-//! difference: none at all on a software adapter, at most one level a
-//! channel on hardware.
+//! by one that reached the same state the long way round, by each of
+//! `SEQUENCES` in turn: other sizes, settings turned off and on, materials
+//! changed and changed back, an object added and removed, and what each kept
+//! structure adds. Stale caches or history show as a difference: none at
+//! all on a software adapter, at most one level a channel on hardware. A
+//! sequence may also check what pixels can't show (a count) against the
+//! fresh world's.
 //!
 //! **Goldens:** each scene against a PNG in `tests/reference/<family>/`, one
 //! family an adapter kind (`llvmpipe`, `warp`, `metal`, …: software and
@@ -751,89 +753,115 @@ fn each_scene_matches_its_golden() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-#[test]
-fn a_retained_window_draws_what_a_fresh_one_does() {
-    let mut failures = Vec::new();
-    for scene in scenes() {
-        let (world, _) = scene.world();
-        let Some(mut fresh) = Window::new(&world, (SIDE, SIDE)) else {
-            return;
-        };
-        fresh.draw();
-        let expected = fresh.pixels();
-        let software = fresh.software();
-        drop(fresh);
+/// A way a world reaches its state the long way round: changes made and
+/// changed back, a frame drawn after each step, so that what it leaves must
+/// draw as a world built that way does. Every scene runs every sequence
+/// (`a_retained_window_draws_what_a_fresh_one_does`): a kept structure adds
+/// one entry, and is tried against every scene.
+struct Sequence {
+    name: &'static str,
+    /// From the scene as built and settled, in a `SIDE` window drawn once.
+    /// It must end with the window back at `SIDE` and the scene's settings
+    /// as they were (the test settles them again after).
+    run: fn(&World, &mut Window, &Scene, &[ObjectId]),
+    /// Frames drawn at the final state before comparing: what rests before
+    /// looking again (culling) catches up within them.
+    settle: usize,
+    /// Compares what pixels can't show: the retained world and window,
+    /// then a fresh world's and window's, each drawn `settle` more frames.
+    check: Option<Check>,
+}
+/// A sequence's check: the retained world and window, then the fresh ones.
+type Check = fn(&World, &mut Window, &World, &mut Window) -> Result<(), String>;
 
-        // Another world, reaching the same state the long way round.
-        let world = World::new();
-        let objects = (scene.build)(&world);
-        world.set_shadows(!scene.shadows);
-        let mut window = Window::new(&world, (96, 72)).unwrap();
-        window.draw();
-        scene.settle(&world);
-        window.draw();
-        window.resize((160, 120));
-        world.set_shadows(!scene.shadows);
-        window.draw();
-        world.set_tone_mapping(match scene.tone {
-            ToneMapping::Aces => ToneMapping::Linear,
-            _ => ToneMapping::Aces,
-        });
-        world.set_exposure(1.5);
-        window.draw();
-        world.set_environment(match (scene.environment)() {
-            Some(_) => None,
-            None => Some(Environment::studio()),
-        });
-        world.set_background(None);
-        window.draw();
-        let mut moved = scene.camera;
-        moved.position.x += 0.7;
-        moved.fov *= 0.8;
-        world.set_camera(moved);
-        world.set_samples(1);
-        window.draw();
-        // Each object's look changed and changed back.
-        let looks: Vec<_> = objects
-            .iter()
-            .map(|&id| {
-                let look = (
-                    world.object(id).unwrap().material,
-                    world.transmission(id),
-                    world.clearcoat(id),
-                );
-                let mut green = Material::rgb(0x00ff00);
-                green.unlit = true; // shown whatever lights it
-                world.set_material(id, green);
-                world.set_transmission(id, None);
-                world.set_clearcoat(id, Some(Clearcoat::new(1.)));
-                look
-            })
-            .collect();
-        window.draw();
-        // The control: the changes showed (green, however exposed).
-        let changed = window.pixels();
-        let greens = changed
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .filter(|p| p[1] > p[0].saturating_add(30) && p[1] > p[2].saturating_add(30))
-            .count();
-        assert!(
-            greens > 100,
-            "{}: the green it was changed to never showed",
-            scene.name
-        );
-        for (&id, (material, transmission, clearcoat)) in objects.iter().zip(looks) {
-            world.set_material(id, material);
-            world.set_transmission(id, transmission);
-            world.set_clearcoat(id, clearcoat);
-        }
-        // Each object's custom material taken off and put back.
-        #[cfg(feature = "shaders")]
-        {
+const SEQUENCES: &[Sequence] = &[
+    Sequence {
+        name: "sizes",
+        run: |_, window, _, _| {
+            window.resize((96, 72));
+            window.resize((160, 120));
+            window.resize((SIDE, SIDE));
+        },
+        settle: 0,
+        check: None,
+    },
+    Sequence {
+        name: "settings",
+        run: |world, window, scene, _| {
+            world.set_shadows(!scene.shadows);
+            window.draw();
+            world.set_tone_mapping(match scene.tone {
+                ToneMapping::Aces => ToneMapping::Linear,
+                _ => ToneMapping::Aces,
+            });
+            world.set_exposure(1.5);
+            window.draw();
+            world.set_environment(match (scene.environment)() {
+                Some(_) => None,
+                None => Some(Environment::studio()),
+            });
+            world.set_background(None);
+            window.draw();
+            let mut moved = scene.camera;
+            moved.position.x += 0.7;
+            moved.fov *= 0.8;
+            world.set_camera(moved);
+            world.set_samples(1);
+            window.draw();
+        },
+        settle: 0,
+        check: None,
+    },
+    Sequence {
+        name: "looks",
+        run: |world, window, scene, objects| {
+            // Each object's look changed and changed back.
+            let looks: Vec<_> = objects
+                .iter()
+                .map(|&id| {
+                    let look = (
+                        world.object(id).unwrap().material,
+                        world.transmission(id),
+                        world.clearcoat(id),
+                    );
+                    let mut green = Material::rgb(0x00ff00);
+                    green.unlit = true; // shown whatever lights it
+                    world.set_material(id, green);
+                    world.set_transmission(id, None);
+                    world.set_clearcoat(id, Some(Clearcoat::new(1.)));
+                    look
+                })
+                .collect();
+            window.draw();
+            // The control: the changes showed (green, however exposed).
+            let changed = window.pixels();
+            let greens = changed
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|p| p[1] > p[0].saturating_add(30) && p[1] > p[2].saturating_add(30))
+                .count();
+            assert!(
+                greens > 100,
+                "{}: the green it was changed to never showed",
+                scene.name
+            );
+            for (&id, (material, transmission, clearcoat)) in objects.iter().zip(looks) {
+                world.set_material(id, material);
+                world.set_transmission(id, transmission);
+                world.set_clearcoat(id, clearcoat);
+            }
+        },
+        settle: 0,
+        check: None,
+    },
+    // Each object's custom material taken off and put back.
+    #[cfg(feature = "shaders")]
+    Sequence {
+        name: "custom materials",
+        run: |world, window, _, objects| {
             let shaders: Vec<_> = objects.iter().map(|&id| world.shader(id)).collect();
-            for &id in &objects {
+            for &id in objects {
                 world.set_shader(id, None);
             }
             window.draw();
@@ -841,34 +869,73 @@ fn a_retained_window_draws_what_a_fresh_one_does() {
                 world.set_shader(id, shader);
             }
             window.draw();
-        }
-        // An object come and gone.
-        let extra = world.add(Object::mesh(
-            Geometry::cuboid(1., 1., 1.),
-            Material::rgb(0xff00ff),
-        ));
-        world.set_transmission(extra, Some(Transmission::new(1.)));
-        window.draw();
-        world.remove(extra);
-        window.draw();
-        window.resize((SIDE, SIDE));
-        scene.settle(&world);
-        window.draw();
-        let actual = window.pixels();
-
-        let level = if software { 0 } else { 1 };
-        let (count, largest) = differ(&actual, &expected, level);
-        if count > 0 {
-            failures.push(format!(
-                "{}: {count} pixels differ past {level} from a fresh window's, by up to {largest}:\n  {}",
-                scene.name,
-                keep_failure(
-                    &format!("{}-retained", scene.name),
-                    (SIDE, SIDE),
-                    &actual,
-                    &expected
-                )
+        },
+        settle: 0,
+        check: None,
+    },
+    Sequence {
+        name: "an object come and gone",
+        run: |world, window, _, _| {
+            let extra = world.add(Object::mesh(
+                Geometry::cuboid(1., 1., 1.),
+                Material::rgb(0xff00ff),
             ));
+            world.set_transmission(extra, Some(Transmission::new(1.)));
+            window.draw();
+            world.remove(extra);
+            window.draw();
+        },
+        settle: 0,
+        check: None,
+    },
+];
+
+#[test]
+fn a_retained_window_draws_what_a_fresh_one_does() {
+    let mut failures = Vec::new();
+    for scene in scenes() {
+        for sequence in SEQUENCES {
+            let (fresh_world, _) = scene.world();
+            let Some(mut fresh) = Window::new(&fresh_world, (SIDE, SIDE)) else {
+                return;
+            };
+            for _ in 0..=sequence.settle {
+                fresh.draw();
+            }
+            let expected = fresh.pixels();
+            let software = fresh.software();
+
+            // Another world, reaching the same state the long way round.
+            let (world, objects) = scene.world();
+            let mut window = Window::new(&world, (SIDE, SIDE)).unwrap();
+            window.draw();
+            (sequence.run)(&world, &mut window, &scene, &objects);
+            scene.settle(&world);
+            for _ in 0..=sequence.settle {
+                window.draw();
+            }
+            let actual = window.pixels();
+
+            let level = if software { 0 } else { 1 };
+            let (count, largest) = differ(&actual, &expected, level);
+            if count > 0 {
+                failures.push(format!(
+                    "{} after {}: {count} pixels differ past {level} from a fresh window's, by up to {largest}:\n  {}",
+                    scene.name,
+                    sequence.name,
+                    keep_failure(
+                        &format!("{}-{}", scene.name, sequence.name.replace(' ', "-")),
+                        (SIDE, SIDE),
+                        &actual,
+                        &expected
+                    )
+                ));
+            }
+            if let Some(check) = sequence.check
+                && let Err(why) = check(&world, &mut window, &fresh_world, &mut fresh)
+            {
+                failures.push(format!("{} after {}: {why}", scene.name, sequence.name));
+            }
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
