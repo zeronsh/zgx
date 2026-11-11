@@ -630,6 +630,11 @@ impl Settle {
     pub(crate) fn settled(&self) -> bool {
         self.unsettled.get() == 0
     }
+    /// Whether `reason` keeps it drawing.
+    #[cfg(feature = "shaders")]
+    pub(crate) fn holds(&self, reason: u32) -> bool {
+        self.unsettled.get() & reason != 0
+    }
     /// `reason` unsettled (`on`) or settled: whether that changed whether
     /// anything is.
     fn set(&self, reason: u32, on: bool) -> bool {

@@ -38,6 +38,9 @@ struct Window {
     ui: Ui,
     gpu: GpuRenderer,
     size: (u32, u32),
+    /// Its world, to wait for custom materials' compiles (`draw`).
+    #[cfg(feature = "shaders")]
+    world: World,
 }
 impl Window {
     fn new(world: &World, (w, h): (u32, u32)) -> Option<Self> {
@@ -60,9 +63,26 @@ impl Window {
             ui,
             gpu,
             size: (w, h),
+            #[cfg(feature = "shaders")]
+            world: world.clone(),
         })
     }
+    /// A frame, and with custom materials more while one's pipeline
+    /// compiles off the frame, until it's drawn by it: what a window's
+    /// frame clock draws.
     fn draw(&mut self) {
+        self.frame();
+        #[cfg(feature = "shaders")]
+        {
+            let start = std::time::Instant::now();
+            while self.world.compiling() && start.elapsed() < std::time::Duration::from_secs(20) {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+                self.world.view().invalidate();
+                self.frame();
+            }
+        }
+    }
+    fn frame(&mut self) {
         self.ui.prepare_frame();
         let report = self.ui.scene.borrow_mut().flush();
         self.gpu

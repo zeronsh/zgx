@@ -74,3 +74,7 @@ required-features = ["gi"]
 [[test]]
 name = "audio"
 required-features = ["audio"]
+
+[[test]]
+name = "shader_compile"
+required-features = ["shaders"]

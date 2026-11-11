@@ -118,6 +118,11 @@ pub(super) fn make_binding(
     queue: &wgpu::Queue,
     d: &crate::world::Drawn,
 ) -> wgpu::BindGroup {
+    // A custom material's textures, as its maps are: on the GPU or coming.
+    #[cfg(feature = "shaders")]
+    if let Some(shader) = d.extras.and_then(|e| e.shader.as_ref()) {
+        super::custom::request_textures(gpu, device, queue, &shader.0);
+    }
     let stand_ins = gpu.stand_ins.get_or_insert_with(|| {
         let flat = |rgba: [u8; 4], srgb| {
             let texture = crate::Texture::from_rgba8(1, 1, rgba.to_vec()).unwrap();
@@ -143,6 +148,7 @@ pub(super) fn make_binding(
         sampler: &gpu.texture_sampler,
         white: [&stand_ins[0], &stand_ins[1]],
         behind: behind.as_ref().map(|b| (&b.whole, &b.sampler)),
+        views,
     };
     let view = |i: usize| {
         d.maps[i]

@@ -6,8 +6,8 @@
 use super::{
     Gpu, Run, Variant,
     frame::FrameUniforms,
-    materials::{Extent, map_layout_entries, upload},
-    pipelines::{extent_of, main_pipelines, make_main_pipelines, pipelines_of},
+    materials::{Extent, map_layout_entries},
+    pipelines::{extent_of, group0_of, main_pipelines, make_main_pipelines},
     shader::wgsl_with,
     shadows::{make_shadow_pipeline, shadow_key, shadow_pipeline},
 };
@@ -24,6 +24,9 @@ use zgx_gpu::{viewport::ViewportFrame, wgpu};
 
 /// The `Settle` reason of a mesh in view whose shader reads time.
 pub(crate) const ANIMATED: u32 = 1 << 1;
+/// The `Settle` reason of a custom pipeline compiling on the worker: the
+/// world draws until it's ready, and then by it.
+pub(crate) const COMPILING: u32 = 1 << 10;
 
 /// What a renderer keeps of custom materials.
 #[derive(Default)]
@@ -40,11 +43,12 @@ pub(super) struct State {
     layouts: HashMap<(u32, Extent), wgpu::BindGroupLayout>,
     /// Each shader's numbers, and the count of their changes they hold.
     uniforms: HashMap<u32, (wgpu::Buffer, u64)>,
+    /// Pipelines being compiled on the worker, by shader, variant and
+    /// whether its shadows' (`begin`, `collect`).
+    pending: HashMap<(u32, Variant, bool), (Rc<Shader>, Slot)>,
     /// Pipelines the device refused, by shader, variant and whether its
     /// shadows': not made again.
     failed: std::collections::HashSet<(u32, Variant, bool)>,
-    /// Shaders' textures, uploaded, by id and whether read as sRGB.
-    views: HashMap<(u64, bool), wgpu::TextureView>,
     /// The surface layers the stock pipelines were made with, and the code
     /// they add.
     layers: Vec<Rc<Shader>>,
@@ -72,6 +76,8 @@ pub(super) struct Own<'a> {
     pub(super) sampler: &'a wgpu::Sampler,
     pub(super) white: [&'a wgpu::TextureView; 2],
     pub(super) behind: Option<(&'a wgpu::TextureView, &'a wgpu::Sampler)>,
+    /// Maps on the GPU, its shaders' textures among them (`request_textures`).
+    pub(super) views: &'a HashMap<(u64, bool), (wgpu::TextureView, u64)>,
 }
 enum Resource {
     Buffer(wgpu::Buffer),
@@ -146,17 +152,13 @@ pub(super) fn binding_of(
             }
             fits
         });
+        // On the GPU (`request_textures`), else white till it arrives.
         let view = texture
-            .and_then(|texture| {
-                use std::collections::hash_map::Entry;
-                match state.views.entry((texture.id(), srgb)) {
-                    Entry::Occupied(held) => Some(held.get().clone()),
-                    Entry::Vacant(free) => {
-                        Some(free.insert(upload(device, queue, texture, srgb)?).clone())
-                    }
-                }
-            })
-            .unwrap_or_else(|| own.white[usize::from(!srgb)].clone());
+            .and_then(|texture| own.views.get(&(texture.id(), srgb)))
+            .map_or_else(
+                || own.white[usize::from(!srgb)].clone(),
+                |(view, _)| view.clone(),
+            );
         resources.push((TEXTURE_BINDING + slot.at, Resource::View(view)));
     }
     if shader.reads_scene {
@@ -165,6 +167,62 @@ pub(super) fn binding_of(
         resources.push((SCENE_BINDING + 1, Resource::Sampler(sampler.clone())));
     }
     Binding { layout, resources }
+}
+/// `shader`'s textures, on the GPU, as drawn by this frame (kept while
+/// drawn, as a mesh's maps are).
+fn mark_used(gpu: &mut Gpu, shader: &Shader) {
+    let (now, values) = (gpu.frame, shader.values.borrow());
+    for slot in shader.slots.iter() {
+        let srgb = match slot.kind {
+            Param::Texture => true,
+            Param::DataTexture => false,
+            _ => continue,
+        };
+        let Some(texture) = &values.textures[slot.at as usize] else {
+            continue;
+        };
+        if let Some((_, used)) = gpu.views.get_mut(&(texture.id(), srgb)) {
+            *used = now;
+        }
+    }
+}
+/// `shader`'s textures put on the GPU as a mesh's maps are
+/// (`materials::upload_missing`): small ones, or ones whose pixels are in
+/// hand, here; the rest on the loading threads, a binding made meanwhile
+/// with white in their place and made again as they arrive (the frame's
+/// arrival clears bindings, kept frames and shadows). Before a binding of
+/// it is made: rarely.
+#[cold]
+#[inline(never)]
+pub(super) fn request_textures(
+    gpu: &mut Gpu,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    shader: &Shader,
+) {
+    let values = shader.values.borrow();
+    let largest = device.limits().max_texture_dimension_2d;
+    let missing: Vec<(&crate::Texture, bool)> = shader
+        .slots
+        .iter()
+        .filter_map(|slot| {
+            let srgb = match slot.kind {
+                Param::Texture => true,
+                Param::DataTexture => false,
+                _ => return None,
+            };
+            let texture = values.textures[slot.at as usize].as_ref()?;
+            let key = (texture.id(), srgb);
+            let wanted = texture.width().max(texture.height()) <= largest
+                && !texture.failed()
+                && !gpu.views.contains_key(&key)
+                && !gpu.loads.coming(key);
+            wanted.then_some((texture, srgb))
+        })
+        .collect();
+    if !missing.is_empty() {
+        super::materials::upload_missing(gpu, (device, queue), missing);
+    }
 }
 /// What the device refused of a binding of `shader`'s, keyed `key`: its
 /// mesh binds as without it and draws by the stock pipelines.
@@ -337,6 +395,14 @@ pub(super) fn grow_boxes(gpu: &Gpu, scratch: &mut super::Scratch, drawn: &[&crat
         }
     }
 }
+/// Whether a custom run's mesh can draw by the plain pipeline while its
+/// own isn't ready: where its frame binds as the plain one's does (not lit
+/// by an environment, clusters, cascades or probes).
+#[cold]
+#[inline(never)]
+pub(super) fn plain_fits(variant: Variant) -> bool {
+    variant.0 & (Variant::LIT | Variant::CLUSTERED | Variant::CASCADED | Variant::PROBES) == 0
+}
 /// Whether a run of the frame's custom materials reads what is behind it.
 pub(super) fn reads(gpu: &Gpu) -> bool {
     gpu.custom.reads
@@ -372,6 +438,7 @@ pub(super) fn prepare(
     if !same(&gpu.custom.layers, &shaders.layers) {
         relayer(gpu, device, &shaders.layers, runs);
     }
+    let landed = collect(gpu);
     write_tail(gpu, world, frame);
     let mut reads = false;
     let mut casting = 0xcbf2_9ce4_8422_2325_u64;
@@ -380,6 +447,10 @@ pub(super) fn prepare(
             continue;
         };
         reads |= shader.reads_scene;
+        // Its textures drawn this frame: kept on the GPU as maps are.
+        if shader.textures > 0 {
+            mark_used(gpu, &shader);
+        }
         // It casts by a pipeline of its own if it moves or cuts out its
         // mesh, or its mesh is cut out (its binding is its shader's).
         let casts = shader.displace
@@ -404,10 +475,10 @@ pub(super) fn prepare(
                 }
             }
         }
+        // Made, refused or on the worker: not begun again.
         let failed = |gpu: &Gpu, shadow| {
-            gpu.custom
-                .failed
-                .contains(&(shader.id, run.variant, shadow))
+            let key = (shader.id, run.variant, shadow);
+            gpu.custom.failed.contains(&key) || gpu.custom.pending.contains_key(&key)
         };
         if !gpu.custom.pipelines.contains_key(&(shader.id, run.variant)) && !failed(gpu, false) {
             make_pipelines(gpu, device, &shader, run.variant);
@@ -442,6 +513,9 @@ pub(super) fn prepare(
                         .is_some_and(|shader| shader.animated)
             });
     world.unsettle(ANIMATED, animated);
+    // (And for the frame after one that took a compile: a shadow's draws
+    // the map again there.)
+    world.unsettle(COMPILING, landed || !gpu.custom.pending.is_empty());
     // Meshes cast by other shaders than the map holds: drawn again.
     if std::mem::replace(&mut gpu.custom.casting, casting) != casting {
         gpu.shadow_drawn = None;
@@ -466,6 +540,8 @@ fn relayer(gpu: &mut Gpu, device: &wgpu::Device, layers: &[Rc<Shader>], runs: &[
     state.layer_code = (!layers.is_empty()).then(|| Custom::new(None, layers.iter().map(|l| &**l)));
     state.pipelines.clear();
     state.shadows.clear();
+    // (Compiles under the old layers land nowhere.)
+    state.pending.clear();
     gpu.variants.clear();
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("3D"),
@@ -492,68 +568,57 @@ fn relayer(gpu: &mut Gpu, device: &wgpu::Device, layers: &[Rc<Shader>], runs: &[
         }
     }
 }
-/// `shader`'s pipelines for `variant`.
+/// A custom pipeline compiled on the worker: the meshes' pair, or a
+/// shadow's.
+enum Made {
+    Main([wgpu::RenderPipeline; 2]),
+    Shadow(wgpu::RenderPipeline),
+}
+/// Where a compile on the worker leaves what it made, or why it couldn't.
+type Slot = std::sync::Arc<std::sync::Mutex<Option<Result<Made, String>>>>;
+/// `shader`'s pipelines for `variant`, begun on the compile worker: its
+/// text and layouts made here, the driver's compile there, never on the
+/// frame. Until they're ready its meshes draw by the plain pipeline.
 #[cold]
 #[inline(never)]
 fn make_pipelines(gpu: &mut Gpu, device: &wgpu::Device, shader: &Rc<Shader>, variant: Variant) {
     let extent = extent_of(variant).unwrap_or(Extent::Maps);
-    let layout = gpu
-        .custom
-        .layouts
-        .entry((shader.id, extent))
-        .or_insert_with(|| layout_of(device, shader, extent))
-        .clone();
+    let layout = layout_for(gpu, device, shader, extent);
     super::pipelines::make_layouts(gpu, device, variant, Some(extent));
     let custom = Custom::new(Some(shader), gpu.custom.layers.iter().map(|l| &**l));
     let source = wgsl_with(variant, gpu.samples, Some(&custom));
-    match scoped(device, || {
-        pipelines_of(gpu, device, variant, source, &layout)
-    }) {
-        Ok(pipelines) => {
-            gpu.custom.pipelines.insert((shader.id, variant), pipelines);
-        }
-        Err(error) => refused(gpu, shader, (variant, false), error),
-    }
+    let layouts = [
+        group0_of(gpu, variant).clone(),
+        layout,
+        gpu.palette_layout.clone(),
+        gpu.morph_layout.clone(),
+    ];
+    let count = layouts_count(variant);
+    let target = (gpu.format, gpu.samples);
+    begin(gpu, device, shader, (variant, false), move |device| {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("3D custom material"),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
+        let layouts = layouts.each_ref().map(Some);
+        Made::Main(main_pipelines(
+            device,
+            target,
+            &module,
+            &layouts[..count],
+            variant,
+        ))
+    });
 }
-/// A custom run's shader for a depth prepass (the graph lane's): its text,
-/// placing its vertices by `zgx_place` with its shader's `displace`, as the
-/// meshes' pass does with the prepass on, and its group 1's layout (bind
-/// the run's own binding, `gpu.bindings[&run.maps]`). `None` for a run
-/// without a custom material, or one the device refused.
-#[allow(dead_code)] // The prepass (the graph lane's) calls it.
-pub(super) fn source_of(
-    gpu: &mut Gpu,
-    device: &wgpu::Device,
-    run: &Run,
-) -> Option<(String, wgpu::BindGroupLayout)> {
-    let shader = gpu.custom.by_binding.get(&run.maps)?.clone();
-    if gpu.custom.failed.contains(&(shader.id, run.variant, false)) {
-        return None;
-    }
-    let extent = extent_of(run.variant).unwrap_or(Extent::Maps);
-    let layout = gpu
-        .custom
-        .layouts
-        .entry((shader.id, extent))
-        .or_insert_with(|| layout_of(device, &shader, extent))
-        .clone();
-    let custom = Custom::new(Some(&shader), gpu.custom.layers.iter().map(|l| &**l));
-    let text = super::shader::wgsl_full(run.variant, gpu.samples, Some(&custom), true);
-    Some((text, layout))
-}
-/// `shader`'s shadows' pipeline for `variant`'s meshes: moved by its
-/// `displace`, cut out by its `opacity` (and its base colour's alpha, if
-/// it's cut out by that too).
+/// `shader`'s shadows' pipeline for `variant`'s meshes, begun on the
+/// compile worker: moved by its `displace`, cut out by its `opacity` (and
+/// its base colour's alpha, if it's cut out by that too). Until it's
+/// ready they cast as their variant without it does, whole.
 #[cold]
 #[inline(never)]
 fn make_shadow(gpu: &mut Gpu, device: &wgpu::Device, shader: &Rc<Shader>, variant: Variant) {
     let extent = extent_of(variant).unwrap_or(Extent::Maps);
-    let layout = gpu
-        .custom
-        .layouts
-        .entry((shader.id, extent))
-        .or_insert_with(|| layout_of(device, shader, extent))
-        .clone();
+    let layout = layout_for(gpu, device, shader, extent);
     let casting = Variant::default()
         .with(Variant::TEXTURED, true)
         .with(Variant::CUSTOM, true)
@@ -561,30 +626,112 @@ fn make_shadow(gpu: &mut Gpu, device: &wgpu::Device, shader: &Rc<Shader>, varian
         .with(Variant::MORPHING, variant.morphing())
         .with(Variant::MASKED, shader.opacity || variant.masked());
     let custom = Custom::new(Some(shader), std::iter::empty());
-    let made = scoped(device, || {
+    let source = wgsl_with(casting, 1, Some(&custom));
+    let layouts = [
+        gpu.shadow_layout.clone(),
+        layout,
+        gpu.palette_layout.clone(),
+        gpu.morph_layout.clone(),
+    ];
+    let count = layouts_count(variant);
+    begin(gpu, device, shader, (variant, true), move |device| {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("3D custom material's shadows"),
-            source: wgpu::ShaderSource::Wgsl(wgsl_with(casting, 1, Some(&custom)).into()),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        let layouts = [
-            Some(&gpu.shadow_layout),
-            Some(&layout),
-            Some(&gpu.palette_layout),
-            Some(&gpu.morph_layout),
-        ];
-        let count = match (variant.skinned(), variant.morphing()) {
-            (_, true) => 4,
-            (true, false) => 3,
-            (false, false) => 2,
-        };
-        shadow_pipeline(device, &module, &layouts[..count], casting)
+        let layouts = layouts.each_ref().map(Some);
+        Made::Shadow(shadow_pipeline(device, &module, &layouts[..count], casting))
     });
-    match made {
-        Ok(pipeline) => {
-            gpu.custom.shadows.insert((shader.id, variant), pipeline);
-        }
-        Err(error) => refused(gpu, shader, (variant, true), error),
+}
+/// Group 1's layout for `shader` as far as `extent`, made once.
+fn layout_for(
+    gpu: &mut Gpu,
+    device: &wgpu::Device,
+    shader: &Shader,
+    extent: Extent,
+) -> wgpu::BindGroupLayout {
+    gpu.custom
+        .layouts
+        .entry((shader.id, extent))
+        .or_insert_with(|| layout_of(device, shader, extent))
+        .clone()
+}
+/// How many groups `variant`'s pipelines bind: joints' and morphs' after
+/// the frame's and the maps'.
+fn layouts_count(variant: Variant) -> usize {
+    match (variant.skinned(), variant.morphing()) {
+        (_, true) => 4,
+        (true, false) => 3,
+        (false, false) => 2,
     }
+}
+/// `make` run on the compile worker in an error scope, what it made (or
+/// why not) left for `collect`; or refused here if no worker can start.
+fn begin(
+    gpu: &mut Gpu,
+    device: &wgpu::Device,
+    shader: &Rc<Shader>,
+    which: (Variant, bool),
+    make: impl FnOnce(&wgpu::Device) -> Made + Send + 'static,
+) {
+    let slot: Slot = Default::default();
+    let (device, done) = (device.clone(), slot.clone());
+    let job = move || {
+        // (A test's slow driver, to show the frame doesn't wait.)
+        if let Some(ms) = std::env::var("ZGX_TEST_COMPILE_DELAY_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+        let made = scoped(&device, || make(&device));
+        *done.lock().unwrap_or_else(|p| p.into_inner()) = Some(made);
+    };
+    match crate::worker::compile_off_the_frame(job) {
+        Ok(()) => {
+            gpu.custom
+                .pending
+                .insert((shader.id, which.0, which.1), (shader.clone(), slot));
+        }
+        Err(error) => refused(
+            gpu,
+            shader,
+            which,
+            format!("no thread to compile it on: {error}"),
+        ),
+    }
+}
+/// What the compile worker has made since the last frame, put where the
+/// frame draws by it (a shadow's drawing the map again), or refused:
+/// whether it took anything.
+fn collect(gpu: &mut Gpu) -> bool {
+    let done: Vec<_> = gpu
+        .custom
+        .pending
+        .iter()
+        .filter_map(|(&key, (shader, slot))| {
+            let made = slot.lock().unwrap_or_else(|p| p.into_inner()).take()?;
+            Some((key, shader.clone(), made))
+        })
+        .collect();
+    let landed = !done.is_empty();
+    for ((id, variant, shadow), shader, made) in done {
+        gpu.custom.pending.remove(&(id, variant, shadow));
+        match made {
+            Ok(Made::Main(pipelines)) => {
+                gpu.custom.pipelines.insert((id, variant), pipelines);
+            }
+            Ok(Made::Shadow(pipeline)) => {
+                gpu.custom.shadows.insert((id, variant), pipeline);
+                // The map drew it as its variant without it: drawn again,
+                // by a frame that makes its casters again.
+                gpu.shadow_drawn = None;
+                gpu.kept = None;
+            }
+            Err(error) => refused(gpu, &shader, (variant, shadow), error),
+        }
+    }
+    landed
 }
 /// What the device refused of `shader`'s pipeline for a variant (its
 /// shadows' if `.1`): kept, so its meshes draw without it and it isn't

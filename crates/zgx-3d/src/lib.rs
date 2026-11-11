@@ -63,6 +63,8 @@ mod render;
 #[cfg(feature = "compute")]
 mod shader_sandbox;
 mod texture;
+#[cfg(any(feature = "compute", feature = "shaders"))]
+mod worker;
 mod world;
 
 #[cfg(feature = "gltf")]
@@ -78,10 +80,10 @@ pub use buffer::{
 };
 pub use caps::{Backend, Caps, Compressed, Tier};
 #[cfg(feature = "compute")]
-pub use compute::{Access, Compute, ComputeBudget, ComputeError, ComputeId, ComputeStatus, Point};
-#[cfg(feature = "compute")]
 #[doc(hidden)]
-pub use compute::{compile_threads, stall_sandboxed_compiles};
+pub use compute::stall_sandboxed_compiles;
+#[cfg(feature = "compute")]
+pub use compute::{Access, Compute, ComputeBudget, ComputeError, ComputeId, ComputeStatus, Point};
 pub use environment::Environment;
 pub use geometry::{Geometry, MorphTarget, Vertex};
 #[cfg(feature = "gltf")]
@@ -98,6 +100,9 @@ pub use particles::{
 };
 pub use pick::Hit;
 pub use texture::{Map, MapPlacement, Texture, Wrap};
+#[cfg(any(feature = "compute", feature = "shaders"))]
+#[doc(hidden)]
+pub use worker::compile_threads;
 #[cfg(feature = "audio")]
 pub use world::audio::{
     Emitter3d, Emitter3dId, Listener, ReverbPreset, ReverbZone, ReverbZoneId, TRANSMISSION,

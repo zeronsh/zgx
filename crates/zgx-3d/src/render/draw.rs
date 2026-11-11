@@ -86,6 +86,13 @@ pub(super) fn draw_run(
             .then(|| super::custom::pipelines(gpu, run))
             .flatten()
     });
+    // One whose pipelines aren't ready (compiling, or refused) draws by the
+    // plain pipeline where its frame's layout is the plain one's; else not
+    // until they are.
+    #[cfg(feature = "shaders")]
+    if pipelines.is_none() && run.variant.custom() && !super::custom::plain_fits(run.variant) {
+        return;
+    }
     #[cfg(not(feature = "shaders"))]
     let pipelines = gpu.variants.get(&run.variant);
     match pipelines {

@@ -103,6 +103,13 @@ impl World {
         let inner = self.inner.borrow();
         inner.shader_of(shader)?.failed.borrow().clone()
     }
+    /// Whether a custom material's pipeline is compiling (off the frame:
+    /// its meshes draw by the plain pipeline, or not at all, till it's
+    /// ready). For tests to wait on.
+    #[doc(hidden)]
+    pub fn compiling(&self) -> bool {
+        self.inner.borrow().settle.holds(crate::render::COMPILING)
+    }
     /// Remove surface layer `layer`.
     pub fn remove_surface_layer(&self, layer: ShaderId) {
         self.change(|inner| {

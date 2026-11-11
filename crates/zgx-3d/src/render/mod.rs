@@ -43,7 +43,7 @@ use crate::{
 };
 use behind::{Behind, draw_behind};
 #[cfg(feature = "shaders")]
-pub(crate) use custom::engine_text;
+pub(crate) use custom::{COMPILING, engine_text};
 /// Custom materials: none without the `shaders` feature.
 #[cfg(not(feature = "shaders"))]
 mod custom {

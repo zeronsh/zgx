@@ -9,6 +9,7 @@ use zgx_gpu::GpuRenderer;
 struct Window {
     ui: Ui,
     gpu: GpuRenderer,
+    world: World,
 }
 const SIZE: f32 = 100.;
 impl Window {
@@ -29,9 +30,26 @@ impl Window {
                     .bg(Color(0, 128, 0, 255)),
             ),
         );
-        Some(Self { ui, gpu })
+        Some(Self {
+            ui,
+            gpu,
+            world: world.clone(),
+        })
     }
+    /// A frame, and more while a custom material's pipeline compiles (off
+    /// the frame) until it's drawn by it: what a window's frame clock
+    /// would draw.
     fn draw(&mut self) -> zgx_gpu::GpuStats {
+        let stats = self.frame();
+        let start = std::time::Instant::now();
+        while self.world.compiling() && start.elapsed() < std::time::Duration::from_secs(20) {
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            self.world.view().invalidate();
+            self.frame();
+        }
+        stats
+    }
+    fn frame(&mut self) -> zgx_gpu::GpuStats {
         self.ui.prepare_frame();
         let report = self.ui.scene.borrow_mut().flush();
         self.gpu
@@ -965,5 +983,66 @@ fn surface(s: SurfaceIn) -> Surface {
         World::new()
             .add_shader(MaterialShader::new(source).animated())
             .is_ok()
+    );
+}
+
+/// A PNG of `side` squared pixels of `rgba`.
+#[cfg(feature = "gltf")]
+fn png_of(side: u32, rgba: [u8; 4]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut encoder = png::Encoder::new(&mut bytes, side, side);
+    encoder.set_color(png::ColorType::Rgba);
+    let pixels = rgba.repeat((side * side) as usize);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&pixels)
+        .unwrap();
+    bytes
+}
+
+// (PNG files decode with the `gltf` feature: zgx-gpu's `png`.)
+#[cfg(feature = "gltf")]
+#[test]
+fn a_large_texture_parameter_loads_off_the_frame_and_then_shows() {
+    // A texture parameter is decoded and put on the GPU as a mesh's maps
+    // are, on the loading threads: the mesh draws with white in its place
+    // meanwhile, and by it once it arrives (review addition to CM3).
+    let (world, mesh) = cube(unlit(0xffffff));
+    let picture = world
+        .add_shader(
+            MaterialShader::new(
+                "#zgx material 1
+                 fn surface(s: SurfaceIn) -> Surface {
+                     var m = surface_default(s);
+                     m.base_color = textureSample(params.picture, material_sampler, s.uv).rgb;
+                     return m;
+                 }",
+            )
+            .param("picture", Param::Texture),
+        )
+        .unwrap();
+    world.set_shader(mesh, Some(picture));
+    let red = Texture::decode(&png_of(512, [255, 0, 0, 255])).unwrap();
+    world.set_param(picture, "picture", &red).unwrap();
+    let Some(mut window) = Window::new(&world) else {
+        return;
+    };
+    // The frame first binding it asks for it and draws on.
+    window.frame();
+    assert!(world.loading(), "on its way, not decoded in the frame");
+    window.draw();
+    let start = std::time::Instant::now();
+    while world.loading() && start.elapsed() < std::time::Duration::from_secs(20) {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        world.view().invalidate();
+        window.frame();
+    }
+    assert!(!world.loading());
+    window.draw();
+    assert!(
+        near(window.pixel(50, 50), [255, 0, 0, 255]),
+        "{:?}",
+        window.pixel(50, 50)
     );
 }

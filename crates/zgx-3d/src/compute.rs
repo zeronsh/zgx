@@ -2043,20 +2043,10 @@ fn judge(history: u8, slow: bool, frames: u32) -> (u8, bool) {
     (history, history.count_ones() >= frames.clamp(1, 8))
 }
 
-/// Work for the compile worker: pipelines and shader modules made off the
-/// frame.
-type Job = Box<dyn FnOnce() + Send>;
-
-/// Compile workers started in this process: one, ever.
-static WORKERS: AtomicU64 = AtomicU64::new(0);
-
-/// `job` run on the process's one compile worker, started with the first
-/// job and parked on its queue while there's none: however many passes and
-/// devices, one thread. Its error if the worker can't be started.
-pub(crate) fn compile_off_the_frame(job: impl FnOnce() + Send + 'static) -> Result<(), String> {
-    static QUEUE: Mutex<Option<std::sync::mpsc::Sender<Job>>> = Mutex::new(None);
-    on_worker(&QUEUE, Box::new(job))
-}
+// The compile worker's queue and the app's worker are `crate::worker`'s,
+// shared with custom materials; the sandboxed worker is this module's.
+pub(crate) use crate::worker::compile_off_the_frame;
+use crate::worker::{Job, on_worker};
 
 /// `job` on the worker sandboxed code compiles on: apart from the app's, so
 /// a driver taking too long over a plugin's shader holds up no other.
@@ -2131,35 +2121,6 @@ static SANDBOXED_COMPILE_MS: AtomicU64 = AtomicU64::new(10_000);
 pub fn stall_sandboxed_compiles(deadline: std::time::Duration, stall: std::time::Duration) {
     SANDBOXED_COMPILE_MS.store(deadline.as_millis() as u64, Ordering::Relaxed);
     let _ = compile_sandboxed(move || std::thread::sleep(stall), None);
-}
-
-fn on_worker(queue: &Mutex<Option<std::sync::mpsc::Sender<Job>>>, job: Job) -> Result<(), String> {
-    let mut queue = queue.lock().unwrap_or_else(|p| p.into_inner());
-    if queue.is_none() {
-        let (send, receive) = std::sync::mpsc::channel::<Job>();
-        std::thread::Builder::new()
-            .name("zgx-3d compile".into())
-            .spawn(move || {
-                for job in receive {
-                    job();
-                }
-            })
-            .map_err(|error| error.to_string())?;
-        WORKERS.fetch_add(1, Ordering::Relaxed);
-        *queue = Some(send);
-    }
-    queue
-        .as_ref()
-        .unwrap()
-        .send(job)
-        .map_err(|_| "the compile worker stopped".to_owned())
-}
-
-/// Compile workers this process has started: one for the app's, one for
-/// sandboxed code, at most. For tests.
-#[doc(hidden)]
-pub fn compile_threads() -> u64 {
-    WORKERS.load(Ordering::Relaxed)
 }
 
 /// `future`, which resolves at once (wgpu's error scopes on native).

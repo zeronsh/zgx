@@ -61,6 +61,20 @@ pub(super) fn make_layouts(
     #[cfg(not(any(feature = "lighting", feature = "gi")))]
     let _ = variant;
 }
+/// The frame's layout `variant`'s pipelines bind (group 0): lit by an
+/// environment, shading through clusters or cascades, or neither.
+pub(super) fn group0_of(gpu: &Gpu, variant: Variant) -> &wgpu::BindGroupLayout {
+    #[cfg(feature = "lighting")]
+    let key = super::lights::key_of(variant) & !super::lights::LIT;
+    match &gpu.environment_layout {
+        #[cfg(feature = "lighting")]
+        _ if key != 0 => super::lights::layout_of(gpu, super::lights::key_of(variant)),
+        #[cfg(feature = "gi")]
+        _ if variant.probed() => super::probes::frame_layout(gpu, variant.lit()),
+        Some((layout, _)) if variant.lit() => layout,
+        _ => &gpu.layout,
+    }
+}
 /// `variant`'s pipelines with `source`, group 1 bound as `group1` says (its
 /// other layouts made: `make_layouts`).
 pub(super) fn pipelines_of(
@@ -74,16 +88,7 @@ pub(super) fn pipelines_of(
         label: Some("3D mesh variant"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
-    #[cfg(feature = "lighting")]
-    let key = super::lights::key_of(variant) & !super::lights::LIT;
-    let group0 = match &gpu.environment_layout {
-        #[cfg(feature = "lighting")]
-        _ if key != 0 => super::lights::layout_of(gpu, super::lights::key_of(variant)),
-        #[cfg(feature = "gi")]
-        _ if variant.probed() => super::probes::frame_layout(gpu, variant.lit()),
-        Some((layout, _)) if variant.lit() => layout,
-        _ => &gpu.layout,
-    };
+    let group0 = group0_of(gpu, variant);
     let layouts = [
         Some(group0),
         Some(group1),
