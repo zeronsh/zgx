@@ -839,6 +839,7 @@ impl Node {
             #[cfg(feature = "scene3d")]
             Kind::Scene3d(_) => "scene3d",
             Kind::WebView(_) => "webview",
+            Kind::Host(_) => "host_view",
             Kind::Terminal(_) => "terminal",
             Kind::Checkbox { .. } => "checkbox",
             Kind::Input { .. } => "input",
@@ -1368,6 +1369,8 @@ pub(crate) enum Kind {
     /// scene on screen or not.
     #[cfg(feature = "scene3d")]
     Scene3d(Rc<crate::scene3d::Scene3dSpec>),
+    /// `ui.host_view { name }`: the view the host registered under `name` (`zgx_script::host_view`).
+    Host(Rc<str>),
 }
 impl Kind {
     fn takes_children(&self) -> bool {
@@ -6373,6 +6376,19 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "ref",
         lua.create_function(|lua, ()| Ok(RefUd(Ref::new(&env(lua)?.runtime))))?,
+    )?;
+    ui.set(
+        "host_view",
+        lua.create_function(|lua, table: Table| {
+            let name: String = table.get("name")?;
+            table.raw_set("name", mlua::Value::Nil)?;
+            let node = fill(
+                lua,
+                Node::new(owner(lua)?, Kind::Host(name.into())),
+                Some(&table),
+            )?;
+            node_ud(lua, node)
+        })?,
     )?;
     ui.set(
         "webview",

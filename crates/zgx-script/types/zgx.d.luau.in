@@ -3533,6 +3533,8 @@ export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	on_download: ((d: Download) -> ...unknown)?,
 }>>
 export type TerminalProps = Merge<Props, { term: Term }>
+-- The name the host registered with `zgx_script::host_view`.
+export type HostViewProps = Merge<Props, { name: string }>
 -- `from`: only what that plugin (by name) contributes.
 export type SlotProps = Merge<Props, { context: unknown?, from: string? }>
 -- What a plugin targets: an element by its `id` (`"#save"`), declared hook
@@ -3752,6 +3754,8 @@ declare ui: {
 	-- page for `id`, made with `opts` the first time, kept across reloads.
 	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
 	terminal: (props: TerminalProps) -> Node,
+	-- A view the host made in Rust, mounted in this tree under its popups.
+	host_view: (props: HostViewProps) -> Node,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
