@@ -563,7 +563,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   drag    target|x,y to                          drag with the primary button; `to` is a target or x,y
   type    target text                            click it, then type text
   key     keys                                   e.g. \"Enter\", \"cmd+k\", \"alt+ArrowDown\"
-  scroll  target dy                              scroll the viewport under it
+  scroll  target dy [dx]                         scroll the viewport under it
   snapshot target [width=4096]                   its pixels as the window last drew them: a PNG, user-only
   record  [stop]                                 record the window's wheel input; stop answers the tape
   replay  target tape [repeat=1] [every]         play a tape back through the window's input path: its
@@ -900,7 +900,12 @@ impl Session {
             })(),
             "scroll" => (|| {
                 let node = reachable(&ui)?;
-                driver::scroll(&mut ui, node, number("dy").unwrap_or(100.) as f32);
+                let dy = number("dy").unwrap_or(100.) as f32;
+                match number("dx") {
+                    // A trackpad's sideways motion too (`scroll <target> <dy> <dx>`).
+                    Some(dx) => driver::wheel(&mut ui, node, dx as f32, dy, None),
+                    None => driver::scroll(&mut ui, node, dy),
+                }
                 Ok((format!("scrolled @{}", driver::number(node)), Value::Nil))
             })(),
             "command" => (|| {
