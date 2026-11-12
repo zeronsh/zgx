@@ -1216,3 +1216,122 @@ mod modifier_tap_tests {
         );
     }
 }
+
+/// One live control of a window as `controls` lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Control {
+    /// Its role, as ARIA names it.
+    pub role: &'static str,
+    /// Its accessible name, else its text.
+    pub name: String,
+    /// The part of its box that shows, in window points.
+    pub bounds: Rect,
+    /// It is disabled.
+    pub disabled: bool,
+    /// Selected, if it can be (a tab, an option).
+    pub selected: Option<bool>,
+    /// Open, if it can be (a menu's trigger, a disclosure).
+    pub expanded: Option<bool>,
+    /// It has the keyboard focus.
+    pub focused: bool,
+    /// Names it for `press`, as long as it is there.
+    pub handle: u64,
+}
+
+/// The controls on screen, in document order with the layers drawn over
+/// the window (popups, modals) last, as the accessibility tree has them:
+/// nodes with a role of their own (not structure such as a group, a text, a
+/// scroll view or a table's rows), that show and have a box that does. `limit` stops the list there. Nothing is
+/// built until it is asked for.
+pub fn controls(ui: &Ui, limit: Option<usize>) -> Vec<Control> {
+    let scene = ui.scene.borrow();
+    let semantics = ui.semantics.borrow();
+    let focused = ui.input.focused();
+    let mut out = Vec::new();
+    let mut stack = vec![scene.root()];
+    while let Some(node) = stack.pop() {
+        if limit.is_some_and(|limit| out.len() >= limit) {
+            break;
+        }
+        stack.extend(scene.children(node).iter().rev().copied());
+        let Some(s) = semantics.get(node) else {
+            continue;
+        };
+        // Structure and plain text are not controls.
+        let structural = matches!(
+            s.role,
+            Role::Window
+                | Role::Group
+                | Role::Label
+                | Role::ScrollView
+                | Role::ScrollBar
+                | Role::Document
+                | Role::Article
+                | Role::Grid
+                | Role::Row
+                | Role::Cell
+        );
+        if s.hidden || structural || !shows(&scene, node) {
+            continue;
+        }
+        let role = semantic_role_name(s);
+        let Some(bounds) = scene
+            .visible_bounds(node)
+            .filter(|b| b.width > 0. && b.height > 0.)
+        else {
+            continue;
+        };
+        let name = Some(s.label.clone())
+            .filter(|label| !label.is_empty())
+            .or_else(|| first_text(&scene, node))
+            .unwrap_or_default();
+        out.push(Control {
+            role,
+            name,
+            bounds,
+            disabled: s.disabled,
+            selected: s.selected,
+            expanded: s.expanded,
+            focused: focused == Some(node),
+            handle: node.to_bits(),
+        });
+    }
+    out
+}
+
+/// Presses the control `handle` names (`Control::handle`) as `click` does
+/// (`press_control`, as `press` is a key's):
+/// the primary button down and up at the middle of the part of it that
+/// shows, through the window's input. False, doing nothing, when the node
+/// is gone, doesn't show, or is covered there by something else.
+pub fn press_control(ui: &mut Ui, handle: u64) -> bool {
+    let node = NodeId::from_bits(handle);
+    let shown = {
+        let scene = ui.scene.borrow();
+        if !scene.contains(node) || !shows(&scene, node) {
+            return false;
+        }
+        let Some(shown) = scene.visible_bounds(node) else {
+            return false;
+        };
+        let off = scene.hit_offset(node);
+        let (x, y) = middle(Rect::new(
+            shown.x + off.x,
+            shown.y + off.y,
+            shown.width,
+            shown.height,
+        ));
+        let hit = ui.input.pointer_target(&scene, x, y);
+        let reached = hit.is_none_or(|hit| {
+            hit == node
+                || scene.ancestors(hit).any(|a| a == node)
+                || scene.ancestors(node).any(|a| a == hit)
+        });
+        if !reached {
+            return false;
+        }
+        shown
+    };
+    click_at(ui, shown);
+    true
+}

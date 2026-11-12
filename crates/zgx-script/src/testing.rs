@@ -352,6 +352,7 @@ impl TestApp {
         // goes on.
         ui.contain_layout_feedback();
         let host = host(&ui.runtime);
+        host.window_controls(&ui);
         let error = host.error();
         host.on_issue(move |kind, issue| {
             if kind == zgx::issues::IssueKind::Degraded && issue.contains("did not settle") {
