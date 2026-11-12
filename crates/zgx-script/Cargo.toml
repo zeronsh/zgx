@@ -102,6 +102,8 @@ required-features = ["scene3d"]
 
 [dev-dependencies]
 zgx-desktop = { path = "../zgx-desktop" }
+# Decodes `ui.render_canvas`'s pictures (tests/render_canvas.rs).
+png = "0.18"
 # The benchmark workload of the vlist_luau example.
 zgx-workload = { path = "../../comparisons/workload" }
 

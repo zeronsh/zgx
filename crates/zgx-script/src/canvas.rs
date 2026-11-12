@@ -455,5 +455,114 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 .map_err(mlua::Error::runtime)
         })?,
     )?;
+    ui.set("render_canvas", lua.create_function(render_canvas)?)?;
     Ok(())
+}
+
+thread_local! {
+    /// What `c:measure_text` measures in while `ui.render_canvas` draws:
+    /// a scene with text services and nothing in it, made at the first.
+    static MEASURING: Rc<RefCell<zgx::scene::Scene>> = {
+        let mut scene = zgx::scene::Scene::new(1., 1.);
+        zgx_gpu::TextServices::new().install(&mut scene);
+        Rc::new(RefCell::new(scene))
+    };
+}
+/// The text rasterizer `ui.render_canvas`'s threads share: the system's
+/// fonts, loaded once.
+static TEXT: std::sync::Mutex<Option<zgx_gpu::text::CpuTextRaster>> = std::sync::Mutex::new(None);
+
+/// `ui.render_canvas(draw, { width, height, scale, x, y, background })`: a
+/// promise of `draw(c, width, height)`'s drawing as a PNG, in base64. The
+/// drawing is what a `ui.canvas` given that `draw` shows: its shapes, then
+/// its text over them, `x`, `y` at the picture's top left. No window shows
+/// it, so it works with none showing (a plugin's tool, an export). It draws
+/// now; the pixels and the PNG are made on a thread of their own.
+fn render_canvas(
+    lua: &Lua,
+    (draw, options): (mlua::Function, Table),
+) -> mlua::Result<crate::calls::PromiseUd> {
+    let size = |key: &str| -> mlua::Result<f32> {
+        match options.get::<Option<f32>>(key)? {
+            Some(v) if v.is_finite() && v > 0. => Ok(v),
+            _ => Err(mlua::Error::runtime(format!(
+                "ui.render_canvas: `{key}` is a size in points, over 0"
+            ))),
+        }
+    };
+    let (width, height) = (size("width")?, size("height")?);
+    let scale = match options.get::<Option<f32>>("scale")? {
+        None => 1.,
+        Some(_) => size("scale")?,
+    };
+    let x = options.get::<Option<f32>>("x")?.unwrap_or(0.);
+    let y = options.get::<Option<f32>>("y")?.unwrap_or(0.);
+    let env = crate::node::env(lua)?;
+    let theme = zgx::theme::Themes::of(&env.runtime).root().clone();
+    let recorder = lua.create_userdata(Recorder(Default::default()))?;
+    let background = draw_in(theme, || {
+        let background = match options.get::<mlua::Value>("background")? {
+            mlua::Value::Nil => None,
+            v => Some(self::color(&v)?),
+        };
+        MEASURING.with(|scene| {
+            zgx::canvas::drawing_for(scene, || draw.call::<()>((&recorder, width, height)))
+        })?;
+        mlua::Result::Ok(background)
+    })?;
+    let canvas = recorder.take::<Recorder>()?.0.into_inner();
+    let view = zgx::scene::CanvasView {
+        scale: 1.,
+        x: -x,
+        y: -y,
+    };
+    let (tell, mut heard) = zgx::task::latest::<Result<String, String>>();
+    let promise = crate::calls::pending(lua, "ui.render_canvas".into())?;
+    std::thread::spawn(move || {
+        let mut text = TEXT.lock().unwrap_or_else(|e| e.into_inner());
+        let text = text.get_or_insert_with(Default::default);
+        tell.send(
+            zgx_gpu::canvas::picture(&canvas, view, width, height, scale, background, text)
+                .and_then(|image| png(&image))
+                .map(|png| base64(&png))
+                .map_err(|e| e.0),
+        );
+    });
+    crate::calls::settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+        match heard.recv().await {
+            Some(Ok(png)) => Ok(crate::Value::Str(png.into())),
+            Some(Err(error)) => Err(format!("ui.render_canvas: {error}")),
+            None => Err("ui.render_canvas: the drawing thread stopped".into()),
+        }
+    })?;
+    Ok(crate::calls::PromiseUd(promise))
+}
+
+#[cfg(feature = "png")]
+fn png(image: &zgx::image::ImageData) -> Result<Vec<u8>, zgx_gpu::GpuError> {
+    zgx_gpu::canvas::png(image)
+}
+#[cfg(not(feature = "png"))]
+fn png(_: &zgx::image::ImageData) -> Result<Vec<u8>, zgx_gpu::GpuError> {
+    Err(zgx_gpu::GpuError(
+        "zgx-script is built without `png`".into(),
+    ))
+}
+/// `bytes` in base64 (RFC 4648, padded): what an MCP image's data is.
+fn base64(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = u32::from(chunk[0]) << 16
+            | u32::from(*chunk.get(1).unwrap_or(&0)) << 8
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(DIGITS[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }

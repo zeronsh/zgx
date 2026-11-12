@@ -268,6 +268,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "ref",
     "path",
     "linear",
+    "render_canvas",
     "sort",
     "number",
     "toast",

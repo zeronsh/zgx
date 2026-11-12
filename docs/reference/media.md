@@ -8,6 +8,7 @@ ui.svg(props: SvgProps) -> Node
 ui.canvas(props: CanvasProps) -> Node
 ui.path() -> Path
 ui.linear(x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush
+ui.render_canvas(draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<string>
 ui.bitmap(w: number, h: number, alpha: (x: number, y: number) -> number) -> Bitmap
 ui.shader(source: string, opts: { fps: number? }?) -> Shader
 ```
@@ -106,6 +107,32 @@ return ui.overlay {
 			c:rect(s.x, s.y, s.w, s.h, "$accent", 4)
 		end,
 	},
+}
+```
+
+### A drawing as a PNG: `ui.render_canvas`
+
+`ui.render_canvas(draw, { width, height, scale?, x?, y?, background? })` draws `draw(c, width, height)` as a canvas would, with the same `c`, and gives a promise of the picture as a PNG in base64: what an MCP image's `data` takes, or an export. It needs no canvas or window, so it works when no window shows (a plugin's window paused while the app is hidden, answering a tool). `c:measure_text` measures as on screen, and theme tokens resolve in the app's theme.
+
+- **Size.** The picture is `width * scale` by `height * scale` pixels (`scale` is 1 if not given), up to 32 MiB of pixels. `x`, `y` (0) is the point of the drawing at its top left, so one frame of a board can be pictured alone.
+- **Background.** `background` is a color, transparent if not given.
+- **Layering.** As on a canvas, the text goes over the shapes and isn't clipped.
+- **Threading.** `draw` runs at once, in the caller's time. The pixels and the PNG are made on a thread of their own.
+
+```lua
+local size = ui.state("size", "")
+return ui.button {
+	"Picture it",
+	on_click = function()
+		ui.task(function()
+			local png = ui.render_canvas(function(c, w, h)
+				c:rect(0, 0, w, h, "$surface.raised", 12)
+				c:text("Welcome", w / 2, 40, { size = 24, align = "center" })
+			end, { width = 390, height = 844, scale = 2, background = "#ffffff" }):await()
+			-- 780 by 1688 pixels, in base64
+			size:set(`{#png} characters`)
+		end)
+	end,
 }
 ```
 

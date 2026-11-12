@@ -933,6 +933,42 @@ impl CpuTextRaster {
         }
         images
     }
+    /// [`CpuTextRaster::rasterize`] at `scale` device pixels a point, each
+    /// glyph placed as the GPU renderer places it (`styled_glyphs`: below
+    /// 2x on whole pixels): its position and image in pixels.
+    pub fn rasterize_scaled(
+        &mut self,
+        text: &str,
+        size: f32,
+        width: f32,
+        height: f32,
+        font: &zgx::text_layout::FontStyle,
+        scale: f32,
+    ) -> Vec<(i32, i32, cosmic_text::SwashImage)> {
+        let size = size.max(1.);
+        let mut buffer = Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
+        buffer.set_size(wrap_width(Some(width)), Some(height));
+        set_buffer_text(&mut self.fonts, &mut buffer, text, font, size);
+        buffer.shape_until_scroll(&mut self.fonts, false);
+        let glyphs = crate::styled_glyphs(Vec::new(), buffer.layout_runs(), scale, |_, _| 0);
+        glyphs
+            .into_iter()
+            .filter_map(|glyph| {
+                let image = glyph_image(&mut self.swash, &mut self.fonts, glyph.key)?;
+                Some((glyph.x as i32, glyph.y as i32, image))
+            })
+            .collect()
+    }
+    /// The width and height `text` takes at `size` in `font`, as a scene
+    /// measures it (`Scene::measure_text_with_font` with these fonts).
+    pub fn measure(
+        &mut self,
+        text: &str,
+        size: f32,
+        font: &zgx::text_layout::FontStyle,
+    ) -> (f32, f32) {
+        ShapedText::with_font(&mut self.fonts, text, size, None, font).size()
+    }
 }
 
 #[cfg(test)]

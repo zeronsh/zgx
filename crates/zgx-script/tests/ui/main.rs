@@ -89,6 +89,8 @@ mod pointer_through;
 mod regions;
 #[path = "../reload_focus.rs"]
 mod reload_focus;
+#[path = "../render_canvas.rs"]
+mod render_canvas;
 #[path = "../rtl.rs"]
 mod rtl;
 #[cfg(feature = "scene3d")]

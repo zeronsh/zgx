@@ -568,7 +568,7 @@ pub struct CanvasText {
 }
 impl CanvasText {
     /// Its top left, given its size.
-    pub(crate) fn origin(&self, (width, height): (f32, f32)) -> (f32, f32) {
+    pub fn origin(&self, (width, height): (f32, f32)) -> (f32, f32) {
         let x = match self.anchor {
             TextAnchor::Start => self.x,
             TextAnchor::Center => self.x - width / 2.,
@@ -588,11 +588,9 @@ thread_local! {
     static DRAWING_FOR: RefCell<Option<Rc<RefCell<crate::scene::Scene>>>> =
         const { RefCell::new(None) };
 }
-/// Runs `draw` with `scene` as what `measure_text` measures in.
-pub(crate) fn drawing_for<R>(
-    scene: &Rc<RefCell<crate::scene::Scene>>,
-    draw: impl FnOnce() -> R,
-) -> R {
+/// Runs `draw` with `scene` as what `measure_text` measures in: a canvas's
+/// drawing, or one drawn with no window (`ui.render_canvas`).
+pub fn drawing_for<R>(scene: &Rc<RefCell<crate::scene::Scene>>, draw: impl FnOnce() -> R) -> R {
     let previous = DRAWING_FOR.with(|slot| slot.replace(Some(scene.clone())));
     let drawn = draw();
     DRAWING_FOR.with(|slot| *slot.borrow_mut() = previous);

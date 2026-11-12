@@ -156,6 +156,11 @@ required-features = ["png", "jpeg"]
 name = "svg"
 required-features = ["svg"]
 
+# `canvas::png`'s encoder.
+[[test]]
+name = "canvas_picture"
+required-features = ["png"]
+
 # Runs itself again with `ZGX_D3D11=1` (read once a process) and compares.
 [[test]]
 name = "d3d11_parity"
