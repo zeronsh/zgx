@@ -219,12 +219,15 @@ fn a_pointer_press_on_a_toast_leaves_focus_where_it_was() {
     ui.prepare_frame();
     assert_eq!(ui.input.focused(), Some(first));
     // The card, its action and its Dismiss take the click, not the focus.
-    click(&mut ui, with_role(&ui, Role::Status)[0]);
+    let card = with_role(&ui, Role::Status)[0];
+    click(&mut ui, card);
     assert_eq!(ui.input.focused(), Some(first), "a press on the card");
-    click(&mut ui, button_named(&ui, "Undo"));
+    let undo = button_named(&ui, "Undo");
+    click(&mut ui, undo);
     assert_eq!(ui.input.focused(), Some(first), "its action removed it");
     assert_eq!(toaster.showing().len(), 1);
-    click(&mut ui, button_named(&ui, "Dismiss"));
+    let dismiss = button_named(&ui, "Dismiss");
+    click(&mut ui, dismiss);
     assert!(toaster.showing().is_empty());
     assert_eq!(ui.input.focused(), Some(first), "its Dismiss removed it");
 }
