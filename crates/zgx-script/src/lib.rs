@@ -29,6 +29,7 @@ mod anim;
 mod anime;
 pub mod app_config;
 pub mod app_types;
+mod b64;
 mod bundle;
 mod calls;
 mod canvas;

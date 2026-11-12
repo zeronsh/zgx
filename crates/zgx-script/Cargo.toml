@@ -55,6 +55,8 @@ zgx-3d = { path = "../zgx-3d", version = "0.1.10", optional = true }
 zgx-gpu = { path = "../zgx-gpu", version = "0.1.10", default-features = false }
 mlua = { package = "zgx-mlua", version = "0.12.8", path = "../../vendor/mlua", features = ["luau"] }
 memchr = "2.7"
+# A font's or a picture's bytes a script hands over as base64 (`b64.rs`).
+base64 = "0.22"
 # `.luaurc` aliases for `require("@alias/...")`.
 serde = "1"
 serde_json = "1"
