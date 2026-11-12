@@ -483,5 +483,159 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
                 .map_err(mlua::Error::runtime)
         })?,
     )?;
+    ui.set("render_canvas", lua.create_function(render_canvas)?)?;
     Ok(())
+}
+
+/// The fonts a render shapes with beside the system's: the app's windows'
+/// (`Platform::fonts`), in their order.
+type Fonts = Vec<std::sync::Arc<[u8]>>;
+/// Whether two font lists are the same files.
+fn same_fonts(a: &Fonts, b: &Fonts) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| std::sync::Arc::ptr_eq(a, b))
+}
+/// Each of `fonts` that is a font, installed by `install`.
+fn each_font(fonts: &Fonts, mut install: impl FnMut(&zgx_gpu::text::FontData)) {
+    for bytes in fonts {
+        if let Ok(font) = zgx_gpu::text::FontData::new(bytes.clone()) {
+            install(&font);
+        }
+    }
+}
+
+thread_local! {
+    /// What `c:measure_text` measures in while `ui.render_canvas` draws:
+    /// a scene with text services and nothing in it, made again when the
+    /// app's fonts change.
+    static MEASURING: RefCell<Option<(Fonts, Rc<RefCell<zgx::scene::Scene>>)>> =
+        const { RefCell::new(None) };
+}
+/// The scene `ui.render_canvas` measures in with `fonts`.
+fn measuring(fonts: &Fonts) -> Rc<RefCell<zgx::scene::Scene>> {
+    MEASURING.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some((had, scene)) = &*slot
+            && same_fonts(had, fonts)
+        {
+            return scene.clone();
+        }
+        let services = zgx_gpu::TextServices::new();
+        each_font(fonts, |font| {
+            font.install(&mut services.text_system().borrow_mut())
+        });
+        let mut scene = zgx::scene::Scene::new(1., 1.);
+        services.install(&mut scene);
+        let scene = Rc::new(RefCell::new(scene));
+        *slot = Some((fonts.clone(), scene.clone()));
+        scene
+    })
+}
+/// The text rasterizer `ui.render_canvas`'s threads share: the system's
+/// fonts and the app's, loaded again when the app's change.
+static TEXT: std::sync::Mutex<Option<(Fonts, zgx_gpu::text::CpuTextRaster)>> =
+    std::sync::Mutex::new(None);
+
+/// `ui.render_canvas(draw, { width, height, scale, x, y, background })`: a
+/// promise of `draw(c, width, height)`'s drawing as a PNG, in base64. The
+/// drawing is what a `ui.canvas` given that `draw` shows: its shapes, then
+/// its text over them, `x`, `y` at the picture's top left. No window shows
+/// it, so it works with none showing (a plugin's tool, an export). It draws
+/// now; the pixels and the PNG are made on a thread of their own.
+fn render_canvas(
+    lua: &Lua,
+    (draw, options): (mlua::Function, Table),
+) -> mlua::Result<crate::calls::PromiseUd> {
+    let size = |key: &str| -> mlua::Result<f32> {
+        match options.get::<Option<f32>>(key)? {
+            Some(v) if v.is_finite() && v > 0. => Ok(v),
+            _ => Err(mlua::Error::runtime(format!(
+                "ui.render_canvas: `{key}` is a size in points, over 0"
+            ))),
+        }
+    };
+    let (width, height) = (size("width")?, size("height")?);
+    let scale = match options.get::<Option<f32>>("scale")? {
+        None => 1.,
+        Some(_) => size("scale")?,
+    };
+    let x = options.get::<Option<f32>>("x")?.unwrap_or(0.);
+    let y = options.get::<Option<f32>>("y")?.unwrap_or(0.);
+    let env = crate::node::env(lua)?;
+    let theme = zgx::theme::Themes::of(&env.runtime).root().clone();
+    // The app's own fonts (bundled, loaded), as its windows shape with.
+    let fonts: Fonts = (env.platform.borrow().as_ref()).map_or_else(Vec::new, |p| p.0.fonts());
+    let recorder = lua.create_userdata(Recorder(Default::default()))?;
+    let background = draw_in(theme, || {
+        let background = match options.get::<mlua::Value>("background")? {
+            mlua::Value::Nil => None,
+            v => Some(self::color(&v)?),
+        };
+        zgx::canvas::drawing_for(&measuring(&fonts), || {
+            draw.call::<()>((&recorder, width, height))
+        })?;
+        mlua::Result::Ok(background)
+    })?;
+    let canvas = recorder.take::<Recorder>()?.0.into_inner();
+    let view = zgx::scene::CanvasView {
+        scale: 1.,
+        x: -x,
+        y: -y,
+    };
+    let (tell, mut heard) = zgx::task::latest::<Result<String, String>>();
+    let promise = crate::calls::pending(lua, "ui.render_canvas".into())?;
+    std::thread::spawn(move || {
+        let mut held = TEXT.lock().unwrap_or_else(|e| e.into_inner());
+        if !held
+            .as_ref()
+            .is_some_and(|(had, _)| same_fonts(had, &fonts))
+        {
+            let mut text = zgx_gpu::text::CpuTextRaster::default();
+            each_font(&fonts, |font| text.register_font(font));
+            *held = Some((fonts, text));
+        }
+        let text = &mut held.as_mut().expect("made just now").1;
+        tell.send(
+            zgx_gpu::canvas::picture(&canvas, view, width, height, scale, background, text)
+                .and_then(|image| png(&image))
+                .map(|png| base64(&png))
+                .map_err(|e| e.0),
+        );
+    });
+    crate::calls::settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+        match heard.recv().await {
+            Some(Ok(png)) => Ok(crate::Value::Str(png.into())),
+            Some(Err(error)) => Err(format!("ui.render_canvas: {error}")),
+            None => Err("ui.render_canvas: the drawing thread stopped".into()),
+        }
+    })?;
+    Ok(crate::calls::PromiseUd(promise))
+}
+
+#[cfg(feature = "png")]
+fn png(image: &zgx::image::ImageData) -> Result<Vec<u8>, zgx_gpu::GpuError> {
+    zgx_gpu::canvas::png(image)
+}
+#[cfg(not(feature = "png"))]
+fn png(_: &zgx::image::ImageData) -> Result<Vec<u8>, zgx_gpu::GpuError> {
+    Err(zgx_gpu::GpuError(
+        "zgx-script is built without `png`".into(),
+    ))
+}
+/// `bytes` in base64 (RFC 4648, padded): what an MCP image's data is.
+fn base64(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = u32::from(chunk[0]) << 16
+            | u32::from(*chunk.get(1).unwrap_or(&0)) << 8
+            | u32::from(*chunk.get(2).unwrap_or(&0));
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(DIGITS[(n >> (18 - 6 * i) & 63) as usize] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }

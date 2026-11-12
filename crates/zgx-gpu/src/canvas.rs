@@ -355,6 +355,155 @@ pub fn rasterize_viewed(
     height: f32,
     scale: f32,
 ) -> Result<ImageData, GpuError> {
+    straight(paint(canvas, view, width, height, scale, None)?)
+}
+/// `canvas` as a `ui.canvas` shows it, alone: its shapes under `view`, then
+/// its text over them (as `CanvasLabels` lays it out, whatever the shapes'
+/// order or clips), at `width` by `height` logical points and `scale`, on
+/// `background` (transparent if none). A picture of a drawing with no
+/// window or frame: `ui.render_canvas`.
+pub fn picture(
+    canvas: &Canvas,
+    view: zgx::scene::CanvasView,
+    width: f32,
+    height: f32,
+    scale: f32,
+    background: Option<zgx::scene::Color>,
+    text: &mut crate::text::CpuTextRaster,
+) -> Result<ImageData, GpuError> {
+    let mut pixmap = paint(canvas, view, width, height, scale, background)?;
+    let zoom = scale * view.scale;
+    for label in canvas.texts() {
+        let (x, y, size) = label_box(label, text);
+        let left = ((view.x + x * view.scale) * scale).round() as i32;
+        let top = ((view.y + y * view.scale) * scale).round() as i32;
+        // A mask's coverage firmed below 2x by how light the text is, as
+        // `draw.wgsl`'s `firm` does.
+        let (r, g, b) = (label.color.0, label.color.1, label.color.2);
+        let light = (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)) / 255.;
+        let firmness = if zoom < crate::SHARP_TEXT_BELOW {
+            (light * 2.).clamp(0., 1.)
+        } else {
+            0.
+        };
+        let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
+        let glyphs =
+            rasterize_scaled(text, &label.text, label.size, size.0, size.1, &label.font, zoom);
+        let pixels = pixmap.pixels_mut();
+        for (gx, gy, image) in glyphs {
+            let gx = left + gx + image.placement.left;
+            let gy = top + gy - image.placement.top;
+            for by in 0..image.placement.height as i32 {
+                let py = gy + by;
+                if py < 0 || py >= h {
+                    continue;
+                }
+                for bx in 0..image.placement.width as i32 {
+                    let px = gx + bx;
+                    if px < 0 || px >= w {
+                        continue;
+                    }
+                    let i = (by * image.placement.width as i32 + bx) as usize;
+                    let (ink, coverage) = match image.content {
+                        cosmic_text::SwashContent::Mask => {
+                            let a = f32::from(image.data[i]) / 255.;
+                            ((r, g, b), a + firmness * 0.67 * a * (1. - a))
+                        }
+                        cosmic_text::SwashContent::Color => (
+                            (
+                                image.data[i * 4],
+                                image.data[i * 4 + 1],
+                                image.data[i * 4 + 2],
+                            ),
+                            f32::from(image.data[i * 4 + 3]) / 255.,
+                        ),
+                        cosmic_text::SwashContent::SubpixelMask => {
+                            ((r, g, b), f32::from(image.data[i * 4]) / 255.)
+                        }
+                    };
+                    let alpha = coverage * f32::from(label.color.3) / 255.;
+                    let under = pixels[(py * w + px) as usize];
+                    // Over what is there, premultiplied as the pixmap is.
+                    let over = |ink: u8, under: u8| {
+                        (f32::from(ink) * alpha + f32::from(under) * (1. - alpha)).round() as u8
+                    };
+                    let a = over(255, under.alpha());
+                    pixels[(py * w + px) as usize] = sk::PremultipliedColorU8::from_rgba(
+                        over(ink.0, under.red()).min(a),
+                        over(ink.1, under.green()).min(a),
+                        over(ink.2, under.blue()).min(a),
+                        a,
+                    )
+                    .unwrap_or(under);
+                }
+            }
+        }
+    }
+    straight(pixmap)
+}
+/// Where `label` lays out, as `CanvasLabels` places its text node: its
+/// box's top left and size. Its lines wrap at the box's width: a
+/// paragraph's (`width`), else the text's own.
+fn label_box(label: &CanvasText, text: &mut crate::text::CpuTextRaster) -> (f32, f32, (f32, f32)) {
+    let wrap = label.width.filter(|w| w.is_finite() && *w > 0.);
+    let (width, height) = text.measure(&label.text, label.size, wrap, &label.font);
+    let size = (wrap.unwrap_or(width), height);
+    let (x, y) = label.origin(size);
+    (x, y, size)
+}
+/// `text` rasterized by `raster` at `scale` device pixels a point, each
+/// glyph placed as the GPU renderer places it (`styled_glyphs`: below 2x on
+/// whole pixels): its position and image in pixels.
+fn rasterize_scaled(
+    raster: &mut crate::text::CpuTextRaster,
+    text: &str,
+    size: f32,
+    width: f32,
+    height: f32,
+    font: &zgx::text_layout::FontStyle,
+    scale: f32,
+) -> Vec<(i32, i32, cosmic_text::SwashImage)> {
+    use crate::text::{glyph_image, set_buffer_text, wrap_width};
+    use cosmic_text::{Buffer, Metrics};
+    let (fonts, swash) = raster.parts();
+    let size = size.max(1.);
+    let mut buffer = Buffer::new_empty(Metrics::new(size, font.line_height.resolve(size)));
+    buffer.set_size(wrap_width(Some(width)), Some(height));
+    set_buffer_text(fonts, &mut buffer, text, font, size);
+    buffer.shape_until_scroll(fonts, false);
+    let glyphs = crate::styled_glyphs(Vec::new(), buffer.layout_runs(), scale, |_, _| 0);
+    glyphs
+        .into_iter()
+        .filter_map(|glyph| {
+            let image = glyph_image(swash, fonts, glyph.key)?;
+            Some((glyph.x as i32, glyph.y as i32, image))
+        })
+        .collect()
+}
+/// `image` as a PNG file's bytes (8-bit RGBA).
+#[cfg(feature = "png")]
+pub fn png(image: &ImageData) -> Result<Vec<u8>, GpuError> {
+    use image::ImageEncoder;
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            image.pixels(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|e| GpuError(e.to_string()))?;
+    Ok(bytes)
+}
+/// `canvas`'s shapes drawn into premultiplied pixels over `background`.
+fn paint(
+    canvas: &Canvas,
+    view: zgx::scene::CanvasView,
+    width: f32,
+    height: f32,
+    scale: f32,
+    background: Option<zgx::scene::Color>,
+) -> Result<sk::Pixmap, GpuError> {
     if ![width, height, scale]
         .iter()
         .all(|v| v.is_finite() && *v > 0.)
@@ -376,6 +525,9 @@ pub fn rasterize_viewed(
     }
     let mut pixmap =
         sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
+    if let Some(background) = background {
+        pixmap.fill(color(background));
+    }
     // Exact scaling to rounded texture extents avoids a fractional final-pixel seam.
     let transform = sk::Transform::from_scale(w as f32 / width, h as f32 / height).pre_concat(
         sk::Transform::from_row(view.scale, 0., 0., view.scale, view.x, view.y),
@@ -541,6 +693,11 @@ pub fn rasterize_viewed(
     if !masks.is_empty() {
         return Err(GpuError("unbalanced canvas clip".into()));
     }
+    Ok(pixmap)
+}
+/// Premultiplied pixels as an image's straight ones.
+fn straight(pixmap: sk::Pixmap) -> Result<ImageData, GpuError> {
+    let (w, h) = (pixmap.width(), pixmap.height());
     let mut pixels = pixmap.take();
     for p in pixels.as_chunks_mut::<4>().0 {
         let alpha = u32::from(p[3]);
