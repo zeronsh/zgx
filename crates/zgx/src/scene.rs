@@ -23980,7 +23980,7 @@ mod leaf_move_tests {
 
     /// A column (clipping or not) of leaves (boxes, panels with a shadow
     /// past their clip) and a group of two: the scene the comparisons run.
-    fn built(scene: &mut Scene) -> (NodeId, NodeId, Vec<NodeId>) {
+    fn built(scene: &mut Scene) -> (NodeId, NodeId, NodeId, Vec<NodeId>) {
         let column = scene.append(
             scene.root(),
             NodeKind::Container(Layout::Column),
@@ -24009,6 +24009,12 @@ mod leaf_move_tests {
                     ..Default::default()
                 };
                 let kind = match i % 3 {
+                    // Some text: damaged by its ink (`text_ink`).
+                    0 if i % 2 == 0 => NodeKind::Text {
+                        text: format!("row {i}").into(),
+                        color: Color(0, 0, 0, 255),
+                        font_size: 12.,
+                    },
                     0 => NodeKind::Rect(Color(1, 2, 3, 255)),
                     _ => NodeKind::Panel {
                         layout: Layout::Overlay,
@@ -24043,8 +24049,19 @@ mod leaf_move_tests {
                 },
             ));
         }
+        // Beside the column, unrelated to what moves: scaled now and then,
+        // which turns every move over to the walks (`transformed`).
+        let badge = scene.append(
+            scene.root(),
+            NodeKind::Rect(Color(9, 9, 200, 255)),
+            Style {
+                width: Some(20.),
+                height: Some(20.),
+                ..Default::default()
+            },
+        );
         scene.flush();
-        (column, group, leaves)
+        (column, group, badge, leaves)
     }
 
     /// What a frame of `step` damages, with moved leaves damaged together
@@ -24053,10 +24070,11 @@ mod leaf_move_tests {
     /// Each frame's damage and where the leaves are.
     type Frames = Vec<(Vec<Rect>, Vec<Rect>)>;
 
-    fn frames(seed: u64, steps: usize, leaf: bool) -> (Frames, [u64; 2]) {
+    /// Also: moves made while something was transformed, and text moves.
+    fn frames(seed: u64, steps: usize, leaf: bool) -> (Frames, [u64; 2], [u64; 2]) {
         let mut scene = Scene::new(400.5, 16_000.25);
         scene.leaf_moves_off = !leaf;
-        let (column, group, leaves) = built(&mut scene);
+        let (column, group, badge, leaves) = built(&mut scene);
         let mut state = seed
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
@@ -24067,6 +24085,7 @@ mod leaf_move_tests {
             (state >> 33) % n
         };
         let mut out = Vec::new();
+        let mut walked = [0; 2];
         for _ in 0..steps {
             let moves = match next(6) {
                 // Every leaf: more than the list holds, so the grid takes them.
@@ -24075,6 +24094,8 @@ mod leaf_move_tests {
             };
             for _ in 0..moves {
                 let id = leaves[next(leaves.len() as u64) as usize];
+                walked[0] += (scene.transformed > 0) as u64;
+                walked[1] += matches!(scene.node(id).kind, NodeKind::Text { .. }) as u64;
                 // Within its own gap down the column: apart from its
                 // neighbours' areas, so a frame moving every leaf leaves more
                 // areas than the list holds.
@@ -24082,7 +24103,7 @@ mod leaf_move_tests {
                 let y = next(60) as f32 * 0.29 - 8.;
                 scene.set_transform(id, Transform { x, y });
             }
-            match next(9) {
+            match next(10) {
                 0 => scene.set_transform(
                     group,
                     Transform {
@@ -24119,6 +24140,16 @@ mod leaf_move_tests {
                     };
                     scene.set_effects(group, effects);
                 }
+                5 => {
+                    let local = match next(2) {
+                        0 => LocalTransform::IDENTITY,
+                        _ => LocalTransform {
+                            scale: (1.5, 1.5),
+                            ..LocalTransform::IDENTITY
+                        },
+                    };
+                    scene.set_local_transform(badge, local);
+                }
                 _ => {}
             }
             // In any order: a leaf's two areas added as one (or one after
@@ -24132,25 +24163,29 @@ mod leaf_move_tests {
             let bounds = leaves.iter().map(|id| scene.bounds(*id)).collect();
             out.push((damage, bounds));
         }
-        (out, scene.leaf_moves)
+        (out, scene.leaf_moves, walked)
     }
 
-    /// Leaves moved by `set_transform` (with the grid taking them or not,
-    /// clipped, hidden, blurred behind, beside a moved group and a filtered
-    /// one) damage, frame by frame, the same rectangles to the bit as the
-    /// two subtree walks did.
+    /// Leaves moved by `set_transform` (boxes, panels and text, with the
+    /// grid taking them or not, clipped, hidden, blurred behind, beside a
+    /// moved group, a filtered one and a scaled one) damage, frame by frame,
+    /// the same rectangles to the bit as the two subtree walks did.
     #[test]
     fn moved_leaves_damage_what_the_walks_did() {
-        let mut taken = [0; 2];
+        let (mut taken, mut moved) = ([0; 2], [0; 2]);
         for seed in 0..40 {
-            let (leaf, counted) = frames(seed, 30, true);
-            let (walked, none) = frames(seed, 30, false);
+            let (leaf, counted, also) = frames(seed, 30, true);
+            let (walked, none, _) = frames(seed, 30, false);
             assert_eq!(leaf, walked, "seed {seed}");
             assert_eq!(none, [0; 2], "the walks' run took no leaf path");
             taken = [taken[0] + counted[0], taken[1] + counted[1]];
+            moved = [moved[0] + also[0], moved[1] + also[1]];
         }
         // Both ways ran: to the list, and to the grid's cells.
         assert!(taken[1] > 1_000 && taken[0] - taken[1] > 1_000, "{taken:?}");
+        // Moves while something was transformed (walked instead), and
+        // text moved (damaged by its ink).
+        assert!(moved[0] > 100 && moved[1] > 100, "{moved:?}");
     }
 
     /// A leaf moved alone is damaged where it was and where it lands, as one
