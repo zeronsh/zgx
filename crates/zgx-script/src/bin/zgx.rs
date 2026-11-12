@@ -679,9 +679,10 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let fields: Vec<(String, Value)> = fields
         .into_iter()
         .map(|(k, v)| match (&*k, &v) {
-            ("dy" | "dx" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every", Value::Str(s)) => {
-                (k, s.parse::<f64>().map(Value::Num).unwrap_or(v))
-            }
+            (
+                "dy" | "dx" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every",
+                Value::Str(s),
+            ) => (k, s.parse::<f64>().map(Value::Num).unwrap_or(v)),
             _ => (k, v),
         })
         .collect();
@@ -880,7 +881,11 @@ const TOOLS: &[Tool] = &[
     (
         "zgx_scroll",
         "scroll",
-        &[("target", "string", true), ("dy", "number", true), ("dx", "number", false)],
+        &[
+            ("target", "string", true),
+            ("dy", "number", true),
+            ("dx", "number", false),
+        ],
         "Scroll the viewport under a node by dy points (down is positive).",
     ),
     (

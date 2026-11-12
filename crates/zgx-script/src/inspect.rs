@@ -902,7 +902,12 @@ impl Session {
                 // Any target `click` and `hover` take, or a point; a trackpad's sideways motion with `dx`.
                 let delta_y = number("dy").unwrap_or(100.) as f32;
                 let delta_x = number("dx").unwrap_or(0.) as f32;
-                ui.dispatch(zgx::input::InputEvent::Scroll { x, y, delta_x, delta_y });
+                ui.dispatch(zgx::input::InputEvent::Scroll {
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                });
                 (format!("scrolled at {x:.0},{y:.0}"), Value::Nil)
             }),
             "command" => (|| {

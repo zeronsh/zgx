@@ -88,4 +88,9 @@ fn key_value_words_are_the_commands_fields() {
     // A number reads as one: no complaint about it (no app answers here).
     let said = run(&["frames", "n=300", "since=drag"]);
     assert!(!said.contains("takes a number"), "{said}");
+    // A scroll's sideways motion is a number too (`scroll <target|x,y> <dy> [dx]`).
+    let said = run(&["scroll", "500,300", "0", "lots"]);
+    assert!(said.contains("`dx` takes a number, not `lots`"), "{said}");
+    let said = run(&["scroll", "500,300", "0", "120"]);
+    assert!(!said.contains("takes a number"), "{said}");
 }
