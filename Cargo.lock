@@ -5215,9 +5215,7 @@ dependencies = [
  "ash",
  "block2 0.6.2",
  "bytemuck",
- "fontconfig-parser",
  "gif",
- "hypher",
  "image",
  "objc2 0.6.4",
  "objc2-core-foundation",
@@ -5230,7 +5228,6 @@ dependencies = [
  "pollster",
  "resvg",
  "rustc-hash 2.1.3",
- "smallvec",
  "tiny-skia",
  "unicode-script",
  "unicode-segmentation",
@@ -5242,6 +5239,7 @@ dependencies = [
  "zgx-cosmic-text",
  "zgx-fx",
  "zgx-harfrust",
+ "zgx-text",
  "zgx-zune-jpeg",
 ]
 
@@ -5348,6 +5346,19 @@ dependencies = [
  "zgx-alacritty-terminal",
  "zgx-gpu",
  "zgx-workload",
+]
+
+[[package]]
+name = "zgx-text"
+version = "0.1.10"
+dependencies = [
+ "fontconfig-parser",
+ "hypher",
+ "rustc-hash 2.1.3",
+ "smallvec",
+ "unicode-segmentation",
+ "zgx",
+ "zgx-cosmic-text",
 ]
 
 [[package]]

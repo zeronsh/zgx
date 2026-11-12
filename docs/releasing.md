@@ -12,7 +12,7 @@ zgx 0.1.10 is on crates.io (2026-11-04, tag `v0.1.10`; 0.1.0, the first, on 2026
 
 ## What is published
 
-zgx's crates: `zgx`, `zgx-components`, `zgx-gpu`, `zgx-3d`, `zgx-desktop`, `zgx-script`, `zgx-run`, `zgx-terminal` and `zgx-ghostty-sys` (its declarations only; its `link` feature builds Ghostty from a pinned source with Zig). Not published (`publish = false`): `zgx-demo` and `zgx-workload`, the benchmarks in `comparisons/`.
+zgx's crates: `zgx`, `zgx-components`, `zgx-text`, `zgx-gpu`, `zgx-3d`, `zgx-desktop`, `zgx-script`, `zgx-run`, `zgx-terminal` and `zgx-ghostty-sys` (its declarations only; its `link` feature builds Ghostty from a pinned source with Zig). Not published (`publish = false`): `zgx-demo` and `zgx-workload`, the benchmarks in `comparisons/`.
 
 And four forks, as zgx's own crates, published first:
 
