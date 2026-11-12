@@ -10847,7 +10847,25 @@ mod tests {
             held_after_user_event: true,
             held_after_wait: true,
         };
+        // Bounded: a loop that never wakes fails the run (winit used to
+        // wait for a message after `resumed` asked it to exit, and on an
+        // idle desktop none came).
+        let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = done.clone();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            while !flag.load(std::sync::atomic::Ordering::Acquire) {
+                if start.elapsed() >= std::time::Duration::from_secs(20) {
+                    eprintln!(
+                        "a_turns_pointer_moves_come_as_its_last_on_windows: the loop didn't return in 20 s"
+                    );
+                    std::process::exit(101);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
         event_loop.run_app(&mut probe).unwrap();
+        done.store(true, std::sync::atomic::Ordering::Release);
         assert_eq!(probe.held, Some(999.));
         assert!(!probe.held_after_press, "a press hands the move on first");
         assert!(!probe.held_after_user_event, "so does the app's own event");
