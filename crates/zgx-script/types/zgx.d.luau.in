@@ -1407,6 +1407,11 @@ export type CanvasTextOptions = {
 	font: string?,
 	align: ("start" | "center" | "end")?,
 	baseline: ("top" | "middle" | "bottom")?,
+	-- Points between lines, and added after each character.
+	line_height: number?,
+	letter_spacing: number?,
+	-- Wrapped to lines this many points wide, in a box that wide.
+	width: number?,
 }
 declare extern type Canvas with
 	function rect(self, x: number, y: number, w: number, h: number, paint: Paint, radius: number?): ()
@@ -1417,7 +1422,8 @@ declare extern type Canvas with
 	-- Clips what follows to the path, until `restore`.
 	function clip(self, path: Path): ()
 	function restore(self): ()
-	-- A line of text at (x, y), over the shapes whatever their order.
+	-- A line of text at (x, y), or a paragraph wrapped to `opts.width`,
+	-- over the shapes whatever their order.
 	function text(self, text: string, x: number, y: number, opts: CanvasTextOptions?): ()
 	-- Its width and height, for placing what goes around it.
 	function measure_text(self, text: string, opts: CanvasTextOptions?): (number, number)
