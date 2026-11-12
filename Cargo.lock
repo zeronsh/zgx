@@ -5290,6 +5290,7 @@ dependencies = [
 name = "zgx-script"
 version = "0.1.10"
 dependencies = [
+ "base64 0.22.1",
  "icu_locale_core",
  "icu_plurals",
  "libc",

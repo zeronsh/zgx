@@ -222,32 +222,46 @@ fn read_font(path: &Path) -> Result<Vec<u8>, String> {
 }
 
 /// `ui.load_font(src)`: the font file at `src` (a path from the script's
-/// directory, or a `File` the user picked) added to every window's text,
-/// read off the main thread. A promise of the family names it holds.
+/// directory, or a `File` the user picked), or a font's bytes in base64
+/// (`{ base64 = … }`: one a server or a host's call handed over), added to
+/// every window's text, read off the main thread. A promise of the family
+/// names it holds.
 fn load_font(lua: &Lua, src: mlua::Value, shared: SharedPlatform) -> mlua::Result<PromiseUd> {
-    let given = match &src {
-        mlua::Value::String(path) => path.to_str()?.to_string(),
-        mlua::Value::Table(file) => file.get::<String>("path")?,
+    type Read = Box<dyn FnOnce() -> Result<Vec<u8>, String> + Send>;
+    let file = |given: String| -> mlua::Result<(String, Read)> {
+        let vm = crate::node::env(lua)?.vm.upgrade();
+        let vm = vm.ok_or_else(|| mlua::Error::runtime("ui.load_font: its script is gone"))?;
+        let path =
+            crate::lower::resolve_path_of(&vm, &given, "fonts").map_err(mlua::Error::runtime)?;
+        Ok((given, Box::new(move || read_font(&path))))
+    };
+    let (given, read) = match &src {
+        mlua::Value::String(path) => file(path.to_str()?.to_string())?,
+        mlua::Value::Table(t) => match t.get::<Option<mlua::LuaString>>("base64")? {
+            Some(encoded) => {
+                let encoded = encoded.as_bytes().to_vec();
+                let read: Read =
+                    Box::new(move || crate::b64::decode(&encoded, FONT_LIMIT as usize, "a font"));
+                ("{ base64 }".to_string(), read)
+            }
+            None => file(t.get::<String>("path")?)?,
+        },
         other => {
             return Err(mlua::Error::runtime(format!(
-                "ui.load_font takes a path or a File, not {}",
+                "ui.load_font takes a path, a File or {{ base64 = … }}, not {}",
                 other.type_name()
             )));
         }
     };
-    let vm = crate::node::env(lua)?.vm.upgrade();
-    let vm = vm.ok_or_else(|| mlua::Error::runtime("ui.load_font: its script is gone"))?;
-    let path = crate::lower::resolve_path_of(&vm, &given, "fonts").map_err(mlua::Error::runtime)?;
     let (tell, mut heard) = zgx::task::latest::<Result<Vec<u8>, String>>();
     let promise = pending(lua, format!("load_font {given}"))?;
-    let reading = path.clone();
-    std::thread::spawn(move || tell.send(read_font(&reading)));
+    std::thread::spawn(move || tell.send(read()));
     settle_with(lua, &promise, crate::errors::Kind::Io, async move {
         let bytes = heard.recv().await.ok_or("the file thread stopped")??;
         let families = later(&shared, "ui.load_font")?
             .0
             .add_font(bytes.into())
-            .map_err(|e| format!("{}: {e}", path.display()))?;
+            .map_err(|e| format!("{given}: {e}"))?;
         Ok(Value::List(
             families.into_iter().map(|f| Value::Str(f.into())).collect(),
         ))

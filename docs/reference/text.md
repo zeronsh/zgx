@@ -211,7 +211,7 @@ return ui.column {
 
 ## Fonts
 
-`font` names a family the system has installed, one the host registered, or one the script loaded. `ui.load_font(src)` loads a TrueType or OpenType file (`.ttf`, `.otf`, `.ttc`, up to 64 MiB) for every window: `src` is a path from the script's directory, or a `File` the user picked. It returns a promise of the family names the file holds, which is what `font` then names. Text in those families, `ui.text` and a canvas's `c:text` alike, lays out and draws again in it; another file of the same family (its bold, its italic) adds that face beside the others.
+`font` names a family the system has installed, one the host registered, or one the script loaded. `ui.load_font(src)` loads a TrueType or OpenType file (`.ttf`, `.otf`, `.ttc`, up to 64 MiB) for every window: `src` is a path from the script's directory, a `File` the user picked, or `{ base64 = text }`: a font's bytes in base64, as a server or a host's call hands them over (a font the app downloaded). It returns a promise of the family names the file holds, which is what `font` then names. Text in those families, `ui.text` and a canvas's `c:text` alike, lays out and draws again in it; another file of the same family (its bold, its italic) adds that face beside the others.
 
 ```lua
 -- The system's sans until Inter loads, and if it can't.
@@ -229,7 +229,7 @@ return ui.text { "Handgloves", font = function() return family:get() end, text_s
 
 A canvas's `draw` runs again when a state it reads changes: have it read one the load sets (`family` above) so `c:measure_text` measures in the font once it is there.
 
-A file that is not a font rejects the promise (`kind` `"io"`), as does one that can't be read. A plugin's fonts come from its directory or below (or a file the user picked), and only with `Capability::Fonts` (`fonts` in `zgx.json`): a loaded font is the app's too, so the host decides.
+A file that is not a font rejects the promise (`kind` `"io"`), as do one that can't be read and text that isn't base64. A plugin's fonts come from its directory or below (or a file the user picked), and only with `Capability::Fonts` (`fonts` in `zgx.json`): a loaded font is the app's too, so the host decides.
 
 ## Selectable text
 

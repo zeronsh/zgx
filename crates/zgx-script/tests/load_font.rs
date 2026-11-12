@@ -126,6 +126,48 @@ fn a_loaded_font_measures_and_lays_out_text_in_its_family() {
     assert_eq!(h.host.error().get(), None);
 }
 
+/// A font's bytes in base64 (one a server or the host's call handed over)
+/// load as its file does.
+#[test]
+fn a_font_from_its_bytes_measures_and_lays_out_text_in_its_family() {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(std::fs::read(FONT).unwrap());
+    let code = MEASURES.replace("PATH", &format!("{{ base64 = {encoded:?} }}"));
+    let mut h = app(code, None);
+    settled(&mut h);
+    h.click("read");
+    settled(&mut h);
+    let fallback: f32 = h.text("label").parse().unwrap();
+    h.click("load");
+    h.wait_until(|h| h.text("label") == "Instrument Serif" || h.host.error().get().is_some());
+    assert_eq!(h.host.error().get(), None);
+    h.click("read");
+    settled(&mut h);
+    let loaded: f32 = h.text("label").parse().unwrap();
+    assert!(
+        (loaded - fallback).abs() > 1.,
+        "measured {fallback} before, {loaded} after"
+    );
+    assert!((h.bounds("sample").width - loaded).abs() < 1.);
+}
+
+#[test]
+fn bytes_that_are_not_base64_or_not_a_font_are_an_error() {
+    for (base64, said) in [
+        ("not base64!", "isn't base64"),
+        ("aGVsbG8=", "invalid or unsupported"),
+    ] {
+        let code = format!(
+            "local _ = ui.task(function() ui.load_font({{ base64 = {base64:?} }}):await() end)
+return ui.text {{ \"x\" }}"
+        );
+        let mut h = app(code, None);
+        h.wait_until(|h| h.host.error().get().is_some());
+        let error = h.host.error().get().unwrap_or_default();
+        assert!(error.contains(said), "{error}");
+    }
+}
+
 #[test]
 fn a_file_that_is_not_a_font_is_an_error() {
     let dir = common::temp_dir("load-font");
