@@ -1428,6 +1428,9 @@ declare extern type Canvas with
 	-- A picture (a path, a URL, `host:<name>` or a Bitmap) in a box, as
 	-- `ui.image` fits one; nothing while one isn't there yet.
 	function image(self, src: string | Bitmap, x: number, y: number, w: number, h: number, opts: CanvasImageOptions?): ()
+	-- The shadow the path casts, written as a `shadow` property is, under
+	-- what is drawn after it.
+	function shadow(self, path: Path, shadow: ShadowSpec?): ()
 	-- Clips what follows to the path, until `restore`.
 	function clip(self, path: Path): ()
 	function restore(self): ()
