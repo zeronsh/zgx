@@ -284,6 +284,9 @@ fn wrap_width(options: Option<&Table>) -> mlua::Result<Option<f32>> {
     }
     Ok(Some(width))
 }
+/// A canvas shadow's colour where its options give none: a `shadow`
+/// property's.
+const SHADOW: Color = Color(0, 0, 0, 90);
 
 impl UserData for Recorder {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
@@ -512,6 +515,38 @@ impl UserData for Recorder {
                     fit,
                     radius.max(0.),
                     opacity.clamp(0., 1.),
+                );
+                Ok(())
+            },
+        );
+        // The shadow a path casts, written as a `shadow` property is
+        // (`{ x, y, blur, spread, color }`, CSS's blur): drawn first, under
+        // the shape drawn after it.
+        methods.add_method(
+            "shadow",
+            |_, c, (path, options): (mlua::AnyUserData, Option<Table>)| {
+                let path = path_arg(&path)?;
+                let number = |key: &str| -> mlua::Result<f32> {
+                    Ok(options
+                        .as_ref()
+                        .map_or(Ok(None), |o| o.get::<Option<f32>>(key))?
+                        .unwrap_or(0.))
+                };
+                let color = match options
+                    .as_ref()
+                    .map(|o| o.get::<mlua::Value>("color"))
+                    .transpose()?
+                {
+                    None | Some(mlua::Value::Nil) => SHADOW,
+                    Some(color) => self::color(&color)?,
+                };
+                // CSS's blur is twice the Gaussian's sigma zgx takes.
+                c.0.borrow_mut().shadow(
+                    path,
+                    color,
+                    Point::new(number("x")?, number("y")?),
+                    number("blur")?.max(0.) / 2.,
+                    number("spread")?,
                 );
                 Ok(())
             },
