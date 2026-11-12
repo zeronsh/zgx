@@ -543,12 +543,9 @@ fn a_canvas_view_places_its_drawing_without_drawing_it_again() {
     assert_eq!(rgb(&bytes, 200, 25, 25), [255, 0, 0]);
 }
 
-/// A board larger than its box, of curves, an ellipse, a gradient and a
-/// clip: panned, its raster moves with no rasterizing, or rasterizes what
-/// the pan shows anew alone, and looks as its raster under the view does.
-#[test]
-fn a_panned_canvas_moves_its_raster_and_looks_as_drawn_under_the_view() {
-    use zgx::scene::CanvasView;
+/// A board larger than a 200 by 120 box, of curves, ellipses, a gradient
+/// and a clip.
+fn board() -> Arc<Canvas> {
     let mut board = Canvas::new();
     board.fill(
         Path::rectangle(Rect::new(0., 0., 400., 300.)),
@@ -594,7 +591,15 @@ fn a_panned_canvas_moves_its_raster_and_looks_as_drawn_under_the_view() {
         );
     }
     board.restore();
-    let board = Arc::new(board);
+    Arc::new(board)
+}
+/// A board larger than its box, of curves, an ellipse, a gradient and a
+/// clip: panned, its raster moves with no rasterizing, or rasterizes what
+/// the pan shows anew alone, and looks as its raster under the view does.
+#[test]
+fn a_panned_canvas_moves_its_raster_and_looks_as_drawn_under_the_view() {
+    use zgx::scene::CanvasView;
+    let board = board();
     let mut scene = Scene::new(200., 120.);
     scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
     let node = scene.append(
@@ -690,6 +695,87 @@ fn a_panned_canvas_moves_its_raster_and_looks_as_drawn_under_the_view() {
     let zoomed = at(-40., -20., 2.);
     assert_eq!(show(&mut gpu, zoomed).canvas_rasterizations, 1);
     assert_eq!(differ(&gpu.readback().unwrap(), &drawn(zoomed)), (0, 0));
+}
+
+/// Zoomed, a window's canvas shows the raster of the zoom before, scaled,
+/// rasterizing nothing on the frame; the new zoom's raster is made off it,
+/// the window woken, and the next frame shows it, as drawn under the view.
+#[test]
+fn a_zoom_shows_the_raster_before_scaled_until_its_own_is_made() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use zgx::scene::CanvasView;
+    static WOKEN: AtomicUsize = AtomicUsize::new(0);
+    zgx::image::set_decoded_wake(|| {
+        WOKEN.fetch_add(1, Ordering::SeqCst);
+    });
+    let board = board();
+    let mut scene = Scene::new(200., 120.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let node = scene.append(
+        scene.root(),
+        NodeKind::Canvas(board.clone()),
+        Style {
+            width: Some(200.),
+            height: Some(120.),
+            ..Default::default()
+        },
+    );
+    let at = |x: f32, y: f32, scale: f32| CanvasView { x, y, scale };
+    let mut gpu = GpuRenderer::new(300, 180).unwrap();
+    gpu.set_scale_factor(1.5);
+    gpu.debug_go_without();
+    let mut show = |gpu: &mut GpuRenderer, view: CanvasView| {
+        scene.set_canvas_view(node, Some(view));
+        let report = scene.flush();
+        gpu.render(&scene, &report.damage).unwrap()
+    };
+    let start = at(-10., -6., 1.5);
+    assert_eq!(show(&mut gpu, start).canvas_rasterizations, 1);
+    assert!(!gpu.take_images_awaited());
+    // Zoomed by a third about the box's middle: the first raster, scaled.
+    let zoomed = at(-40., -20., 2.);
+    let woken = WOKEN.load(Ordering::SeqCst);
+    let stats = show(&mut gpu, zoomed);
+    assert_eq!(stats.canvas_rasterizations, 0);
+    assert_eq!(stats.image_uploads, 0);
+    let scaled = gpu.readback().unwrap();
+    let drawn = zgx_gpu::canvas::rasterize_viewed(&board, zoomed, 200., 120., 1.5).unwrap();
+    // Close to it, but for what scaling blurs.
+    let near = (0..300 * 180)
+        .filter(|i| (0..3).all(|c| scaled[i * 4 + c].abs_diff(drawn.pixels()[i * 4 + c]) < 48))
+        .count();
+    assert!(near > 300 * 180 * 9 / 10, "{near} pixels near");
+    // Made off the frame: the window is woken and draws it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while WOKEN.load(Ordering::SeqCst) == woken {
+        assert!(std::time::Instant::now() < deadline, "never woken");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(gpu.images_decoded());
+    // The view as it was: the scene damages nothing, the renderer all.
+    let stats = show(&mut gpu, zoomed);
+    assert_eq!(stats.canvas_rasterizations, 1, "the new zoom's, landed");
+    assert_eq!(stats.image_uploads, 1);
+    assert!(!gpu.take_images_awaited());
+    let shown = gpu.readback().unwrap();
+    for i in 0..300 * 180 {
+        assert_eq!(
+            shown[i * 4..i * 4 + 3],
+            drawn.pixels()[i * 4..i * 4 + 3],
+            "pixel {i}"
+        );
+    }
+    // And pans at it as any: what a pan shows anew, then nothing.
+    assert_eq!(show(&mut gpu, at(-46., -26., 2.)).canvas_rasterizations, 1);
+    assert_eq!(show(&mut gpu, zoomed).canvas_rasterizations, 0);
+    assert!(!gpu.take_images_awaited());
+    // An offscreen renderer waits for it, as it does for shaders.
+    let mut waits = GpuRenderer::new(300, 180).unwrap();
+    waits.set_scale_factor(1.5);
+    assert_eq!(show(&mut waits, start).canvas_rasterizations, 1);
+    assert_eq!(show(&mut waits, zoomed).canvas_rasterizations, 1);
+    assert!(!waits.take_images_awaited());
+    assert_eq!(waits.readback().unwrap(), shown);
 }
 
 /// A filled area under a chart's line, its top chain jagged, in a gradient
