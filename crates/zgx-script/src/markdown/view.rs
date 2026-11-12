@@ -829,9 +829,9 @@ struct Reveal {
     ticking: std::cell::Cell<bool>,
 }
 /// Blocks shown at once when a long text lands: more than a screenful.
-const REVEAL_FIRST: usize = 60;
+const REVEAL_FIRST: usize = 30;
 /// Blocks added each frame after them, and how often without a frame clock.
-const REVEAL_CHUNK: usize = 120;
+const REVEAL_CHUNK: usize = 60;
 const REVEAL_TICK: Duration = Duration::from_millis(8);
 impl Reveal {
     fn show(&self, all: Vec<Value>) -> Vec<Value> {
