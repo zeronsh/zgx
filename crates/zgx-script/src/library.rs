@@ -225,6 +225,7 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
         })
     };
     ui.set("toast", lua.create_function(toast)?)?;
+    ui.set("toast_defaults", lua.create_function(toast_defaults)?)?;
     ui.set(
         "dismiss_toast",
         lua.create_function(|lua, id: u64| {
@@ -1537,6 +1538,43 @@ fn toast(lua: &Lua, table: Table) -> mlua::Result<u64> {
         });
     }
     Ok(Toaster::of(&runtime).show(toast))
+}
+
+/// `ui.toast_defaults { duration?, warning_duration?, error_duration? }`: how
+/// long toasts shown from now on stay when they do not say, in milliseconds;
+/// `false` until dismissed. What is not given stays as it was.
+fn toast_defaults(lua: &Lua, table: Table) -> mlua::Result<()> {
+    let runtime = crate::node::env(lua)?.runtime.clone();
+    let toaster = Toaster::of(&runtime);
+    let mut defaults = toaster.defaults();
+    let read = |key: &str, slot: &mut Option<std::time::Duration>| -> mlua::Result<()> {
+        match table.get::<mlua::Value>(key)? {
+            mlua::Value::Nil => {}
+            mlua::Value::Boolean(false) => *slot = None,
+            mlua::Value::Boolean(true) => {
+                return Err(mlua::Error::runtime(format!(
+                    "ui.toast_defaults's `{key}` is milliseconds, or false for until dismissed"
+                )));
+            }
+            other => {
+                let ms: f64 = mlua::FromLua::from_lua(other, lua).map_err(|_| {
+                    mlua::Error::runtime(format!(
+                        "ui.toast_defaults's `{key}` takes milliseconds, or false"
+                    ))
+                })?;
+                *slot = Some(crate::duration_ms(
+                    &format!("ui.toast_defaults's {key}"),
+                    ms,
+                )?);
+            }
+        }
+        Ok(())
+    };
+    read("duration", &mut defaults.info)?;
+    read("warning_duration", &mut defaults.warning)?;
+    read("error_duration", &mut defaults.error)?;
+    toaster.set_defaults(defaults);
+    Ok(())
 }
 
 /// What a disclosure's summary shows: text, or a node of the app's.

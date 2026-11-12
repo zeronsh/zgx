@@ -185,7 +185,8 @@ pub(crate) fn activate(
         .filter(|d| !d.is_zero());
     let themes = crate::theme::Themes::of(&ui.runtime);
     let shown = std::rc::Rc::new(std::cell::Cell::new(false));
-    let fading: std::rc::Rc<std::cell::RefCell<Option<crate::compose::TaskToken>>> = Default::default();
+    let fading: std::rc::Rc<std::cell::RefCell<Option<crate::compose::TaskToken>>> =
+        Default::default();
     ui.retain(owner, fading.clone());
     ui.bind(owner, move || {
         let blocked = disabled.iter().any(|disabled| disabled.get());
@@ -208,7 +209,9 @@ pub(crate) fn activate(
         let fade = fade.filter(|_| !themes.system_preferences().reduced_motion);
         fading.borrow_mut().take();
         let fades = match (fade, &runner) {
-            (Some(duration), Some(runner)) if desired && !was_shown && !crate::input::keyboard_in_use() => {
+            (Some(duration), Some(runner))
+                if desired && !was_shown && !crate::input::keyboard_in_use() =>
+            {
                 Some((duration, runner, 0., 1.))
             }
             (Some(duration), Some(runner)) if !desired && was_shown && !picked => {
@@ -245,7 +248,9 @@ pub(crate) fn activate(
             let started = crate::clock::now();
             *fading.borrow_mut() = Some(runner.spawn(Box::pin(async move {
                 loop {
-                    let done = (crate::clock::since(started).as_secs_f32() / duration.as_secs_f32()).min(1.);
+                    let done = (crate::clock::since(started).as_secs_f32()
+                        / duration.as_secs_f32())
+                    .min(1.);
                     // Metal's ease-out, cubic-bezier(0.16, 1, 0.3, 1), near enough
                     let eased = 1. - (1. - done).powi(4);
                     let opacity = from + (to - from) * eased;

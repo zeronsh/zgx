@@ -240,7 +240,7 @@ return ui.sealed { w_full = true, h_full = true,
 
 ## toast
 
-`ui.toast { title, body?, kind?, duration?, action? }` shows a short message stacked in the window's bottom corner, at the end of the line (the left, right to left), over everything and taking no focus, as Radix's and the system's notifications; it returns the toast's id, which `ui.dismiss_toast(id)` dismisses. A toast goes after its `duration` (5000 ms, 7000 for a warning), paused while the pointer is over it, or at its ×; an error stays until dismissed. `action = { label = "Undo", run = fn }` puts a button on it, the toast going after `run`. Assistive technology hears each as it comes, an error at once. F8 moves focus into the stack, and Escape (or Delete) dismisses the focused toast. Four show at most; older ones wait. The stack is built while a toast shows, and is nothing otherwise.
+`ui.toast { title, body?, kind?, duration?, action? }` shows a short message stacked in the window's bottom corner, at the end of the line (the left, right to left), over everything and taking no focus, as Radix's and the system's notifications; it returns the toast's id, which `ui.dismiss_toast(id)` dismisses. A toast goes after its `duration` (5000 ms, 7000 for a warning), paused while the pointer is over it, or at its ×; an error stays until dismissed. `ui.toast_defaults { duration?, warning_duration?, error_duration? }` sets those for the toasts shown after it (an app's own, as Metal's: every toast 5000, errors too; `false` is until dismissed; what is not given stays), and a toast's own `duration` still wins. `action = { label = "Undo", run = fn }` puts a button on it, the toast going after `run`. Assistive technology hears each as it comes, an error at once. F8 moves focus into the stack, and Escape (or Delete) dismisses the focused toast. Four show at most; older ones wait. The stack is built while a toast shows, and is nothing otherwise.
 
 ```lua
 ui.command {
@@ -258,5 +258,5 @@ return ui.button {
 }
 ```
 
-In Rust (`zgx-components`), `Toaster::of(&runtime).show(Toast::new("Saved").kind(ToastKind::Success))`, with one `toast_host()` in the window.
+In Rust (`zgx-components`), `Toaster::of(&runtime).show(Toast::new("Saved").kind(ToastKind::Success))`, with one `toast_host()` in the window; `Toaster::set_defaults(ToastDefaults { .. })` sets the durations.
 

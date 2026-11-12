@@ -9740,7 +9740,8 @@ impl GpuRenderer {
                             };
                             for shadow in style.shadows().iter().take(shown) {
                                 // A negative spread shrinks the box, as CSS's does.
-                                let spread = shadow.spread.max(-bounds.width.min(bounds.height) * 0.5);
+                                let spread =
+                                    shadow.spread.max(-bounds.width.min(bounds.height) * 0.5);
                                 let core = bounds.expand(spread);
                                 let core = Rect::new(
                                     core.x + shadow.offset.x,
@@ -18313,7 +18314,12 @@ fn outline_quad(
         color: rgba(outline.color, opacity),
         fade,
         options: [edge_fade, 0., 0., 1.],
-        shape: [width + 4096. * width, -1., width + 4096. * width, zgx::style::corner_shape()],
+        shape: [
+            width + 4096. * width,
+            -1.,
+            width + 4096. * width,
+            zgx::style::corner_shape(),
+        ],
         border: corners,
         mask: NO_MASK,
     }

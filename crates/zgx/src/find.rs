@@ -1243,7 +1243,12 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
                     .merge_styles(&look.count)
                     .live(crate::semantics::Live::Polite),
             )
-            .child(small("‹", &look.icons.previous, "Previous", Rc::new(previous)))
+            .child(small(
+                "‹",
+                &look.icons.previous,
+                "Previous",
+                Rc::new(previous),
+            ))
             .child(small("›", &look.icons.next, "Next", Rc::new(next)))
     };
     let mut group = row().gap(6.).items_center().merge_styles(&look.group);

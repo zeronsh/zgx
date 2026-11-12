@@ -35,6 +35,8 @@ mod hit_target;
 mod host_surfaces;
 #[path = "../host_top_layer.rs"]
 mod host_top_layer;
+#[path = "../host_view.rs"]
+mod host_view;
 #[path = "../i18n_script.rs"]
 mod i18n_script;
 #[path = "../idle_gc.rs"]
@@ -83,12 +85,14 @@ mod markdown_lazy;
 mod markdown_links;
 #[path = "../markdown_math.rs"]
 mod markdown_math;
-#[path = "../rich_wrap.rs"]
-mod rich_wrap;
 #[path = "../mentions.rs"]
 mod mentions;
+#[path = "../menu_rows_width.rs"]
+mod menu_rows_width;
 #[path = "../modal_focus.rs"]
 mod modal_focus;
+#[path = "../panel_width_auto.rs"]
+mod panel_width_auto;
 #[path = "../pointer_lock.rs"]
 mod pointer_lock;
 #[path = "../pointer_through.rs"]
@@ -97,6 +101,8 @@ mod pointer_through;
 mod regions;
 #[path = "../reload_focus.rs"]
 mod reload_focus;
+#[path = "../rich_wrap.rs"]
+mod rich_wrap;
 #[path = "../rtl.rs"]
 mod rtl;
 #[cfg(feature = "scene3d")]

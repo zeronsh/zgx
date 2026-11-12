@@ -1385,7 +1385,7 @@ pub(crate) enum Kind {
     /// scene on screen or not.
     #[cfg(feature = "scene3d")]
     Scene3d(Rc<crate::scene3d::Scene3dSpec>),
-    /// `ui.host_view { name }`: the view the host registered under `name` (`ScriptHost::host_view`).
+    /// `ui.host_view { name }`: the view the host registered under `name` (`zgx_script::host_view`).
     Host(Rc<str>),
 }
 impl Kind {
@@ -1499,7 +1499,7 @@ pub(crate) struct Span {
     pub underline_color: Option<Themed<Color>>,
     pub underline_thickness: Option<f32>,
     /// A link's look under the pointer: underlined, and its colour.
-    pub hover: Option<(bool, Option<Themed<Color>>, Option<Themed<Color>>)>,
+    pub hover: Option<HoverFill>,
     /// What few spans have (an icon, a menu), apart: most spans carry none.
     pub rare: Option<Rc<SpanRare>>,
 }
@@ -1511,6 +1511,8 @@ fn rare_mut(span: &mut Span) -> &mut SpanRare {
     let rare = span.rare.get_or_insert_with(Rc::default);
     Rc::get_mut(rare).expect("held by the span being made alone")
 }
+/// A span's hover: whether it shows its own background, then its colours.
+pub(crate) type HoverFill = (bool, Option<Themed<Color>>, Option<Themed<Color>>);
 /// A span's options few set (`Span::rare`).
 #[derive(Default)]
 pub(crate) struct SpanRare {
@@ -7562,6 +7564,29 @@ fn scroll_padding(lua: &Lua, value: mlua::Value) -> mlua::Result<zgx::scene::Ins
     }
 }
 
+/// A table of styles in plain values (`context_menu_style`, the parts of
+/// `ui.menu_look`), `what` naming it in errors.
+pub(crate) fn plain_styles(lua: &Lua, value: mlua::Value, what: &str) -> mlua::Result<Styles> {
+    let mlua::Value::Table(styles) = value else {
+        return Err(mlua::Error::runtime(format!(
+            "`{what}` takes a table of styles"
+        )));
+    };
+    let mut lits = Vec::new();
+    for pair in styles.pairs::<String, mlua::Value>() {
+        let (name, value) = pair?;
+        let prop = Prop::parse(&name)
+            .ok_or_else(|| mlua::Error::runtime(format!("unknown style `{name}` in `{what}`")))?;
+        let Source::Lit(lit) = source(lua, prop.ty(), &name, value)? else {
+            return Err(mlua::Error::runtime(format!(
+                "`{what}.{name}` must be a plain value"
+            )));
+        };
+        lits.push((prop, lit));
+    }
+    Ok(lits.into())
+}
+
 #[cfg(test)]
 mod tests {
     /// The constructors' own fields are matched before style properties
@@ -7806,25 +7831,4 @@ mod tests {
             .unwrap();
         assert_eq!(seen, 1);
     }
-}
-
-/// A table of styles in plain values (`context_menu_style`, the parts of
-/// `ui.menu_look`), `what` naming it in errors.
-pub(crate) fn plain_styles(lua: &Lua, value: mlua::Value, what: &str) -> mlua::Result<Styles> {
-    let mlua::Value::Table(styles) = value else {
-        return Err(mlua::Error::runtime(format!("`{what}` takes a table of styles")));
-    };
-    let mut lits = Vec::new();
-    for pair in styles.pairs::<String, mlua::Value>() {
-        let (name, value) = pair?;
-        let prop = Prop::parse(&name)
-            .ok_or_else(|| mlua::Error::runtime(format!("unknown style `{name}` in `{what}`")))?;
-        let Source::Lit(lit) = source(lua, prop.ty(), &name, value)? else {
-            return Err(mlua::Error::runtime(format!(
-                "`{what}.{name}` must be a plain value"
-            )));
-        };
-        lits.push((prop, lit));
-    }
-    Ok(lits.into())
 }

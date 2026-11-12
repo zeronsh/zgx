@@ -1561,21 +1561,31 @@ fn math_renderer(on_math: mlua::Function, vm: &Rc<Vm>) -> crate::markdown::view:
 }
 
 /// A markdown view's `link_menu`, told the link's address and text with the point, its entries lowered.
-fn link_menu_builder(build: mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> crate::markdown::view::LinkMenuFn {
+fn link_menu_builder(
+    build: mlua::Function,
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+) -> crate::markdown::view::LinkMenuFn {
     let (vm, low) = (vm.clone(), low.clone());
-    Rc::new(move |e: &zgx::compose::ContextMenuEvent, href: &str, text: &str| {
-        let point = vm.lua.create_table().and_then(|t| {
-            t.set("x", e.x)?;
-            t.set("y", e.y)?;
-            t.set("local_x", e.local_x)?;
-            t.set("local_y", e.local_y)?;
-            t.set("href", href)?;
-            t.set("text", text)?;
-            Ok(t)
-        });
-        let items = point.and_then(|p| vm.runtime.clone().batch(|| vm.call::<Option<mlua::Table>>(&build, p)));
-        lowered_menu(&vm, &low, items)
-    })
+    Rc::new(
+        move |e: &zgx::compose::ContextMenuEvent, href: &str, text: &str| {
+            let point = vm.lua.create_table().and_then(|t| {
+                t.set("x", e.x)?;
+                t.set("y", e.y)?;
+                t.set("local_x", e.local_x)?;
+                t.set("local_y", e.local_y)?;
+                t.set("href", href)?;
+                t.set("text", text)?;
+                Ok(t)
+            });
+            let items = point.and_then(|p| {
+                vm.runtime
+                    .clone()
+                    .batch(|| vm.call::<Option<mlua::Table>>(&build, p))
+            });
+            lowered_menu(&vm, &low, items)
+        },
+    )
 }
 
 /// A markdown view's `on_link`: asked first of its links; one it handles
@@ -3136,7 +3146,9 @@ fn kind_view(
             use crate::markdown::view::Source;
             let options = crate::markdown::view::ViewOptions {
                 math: on_math.clone().map(|on_math| math_renderer(on_math, vm)),
-                link_menu: link_menu.clone().map(|build| link_menu_builder(build, vm, low)),
+                link_menu: link_menu
+                    .clone()
+                    .map(|build| link_menu_builder(build, vm, low)),
                 ..options.clone()
             };
             // A state's text, as it is (`"{reply}"`): not copied into a
@@ -8598,7 +8610,11 @@ fn context_menu_items(
 }
 
 /// A script's menu entries (`menu_item`s, `submenu`s, separators), lowered; an error reported and nothing shown.
-fn lowered_menu(vm: &Rc<Vm>, low: &Rc<Lowering>, items: mlua::Result<Option<mlua::Table>>) -> Vec<View> {
+fn lowered_menu(
+    vm: &Rc<Vm>,
+    low: &Rc<Lowering>,
+    items: mlua::Result<Option<mlua::Table>>,
+) -> Vec<View> {
     match items {
         Ok(Some(items)) => items
             .sequence_values::<mlua::AnyUserData>()
@@ -8647,11 +8663,7 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         underline_style: Option<zgx::rich_text::LineStyle>,
         underline_color: Option<zgx::theme::Themed<Color>>,
         underline_thickness: Option<f32>,
-        hover: Option<(
-            bool,
-            Option<zgx::theme::Themed<Color>>,
-            Option<zgx::theme::Themed<Color>>,
-        )>,
+        hover: Option<crate::node::HoverFill>,
     }
     // Whether any span fades in: known as they're taken, so a paragraph
     // none of whose spans does builds them as before, and only one that has
@@ -9113,7 +9125,8 @@ pub(crate) fn install_menu_look(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Resu
                 match look.get::<mlua::Value>(name)? {
                     mlua::Value::Nil => Ok(None),
                     value => {
-                        let lits = crate::node::plain_styles(lua, value, &format!("menu_look.{name}"))?;
+                        let lits =
+                            crate::node::plain_styles(lua, value, &format!("menu_look.{name}"))?;
                         Ok(Some(apply_all(Styles::new(), &lits)))
                     }
                 }
@@ -9149,23 +9162,35 @@ pub(crate) fn install_find_look(
                 match look.get::<mlua::Value>(name)? {
                     mlua::Value::Nil => Ok(None),
                     value => {
-                        let lits = crate::node::plain_styles(lua, value, &format!("find_look.{name}"))?;
+                        let lits =
+                            crate::node::plain_styles(lua, value, &format!("find_look.{name}"))?;
                         Ok(Some(apply_all(Styles::new(), &lits)))
                     }
                 }
             };
             let icons = look.get::<Option<mlua::Table>>("icons")?;
             let icon = |name: &str| -> mlua::Result<Option<Arc<SvgData>>> {
-                let Some(src) = icons.as_ref().map(|t| t.get::<Option<String>>(name)).transpose()?.flatten() else {
+                let Some(src) = icons
+                    .as_ref()
+                    .map(|t| t.get::<Option<String>>(name))
+                    .transpose()?
+                    .flatten()
+                else {
                     return Ok(None);
                 };
                 let bytes = if src.trim_start().starts_with('<') {
                     src.into_bytes()
                 } else {
-                    let vm = vm.upgrade().ok_or_else(|| mlua::Error::runtime("find_look: the script has ended"))?;
+                    let vm = vm
+                        .upgrade()
+                        .ok_or_else(|| mlua::Error::runtime("find_look: the script has ended"))?;
                     let path = resolve_path(&vm, &src).map_err(mlua::Error::runtime)?;
-                    std::fs::read(&path)
-                        .map_err(|e| mlua::Error::runtime(format!("find_look.icons.{name}: {}: {e}", path.display())))?
+                    std::fs::read(&path).map_err(|e| {
+                        mlua::Error::runtime(format!(
+                            "find_look.icons.{name}: {}: {e}",
+                            path.display()
+                        ))
+                    })?
                 };
                 SvgData::new(bytes)
                     .map(|svg| Some(Arc::new(svg)))
@@ -9356,8 +9381,10 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         match (prop, l) {
             (W, Length::Px(v)) => return s.w(v),
             (W, Length::Percent(p)) => return s.w_percent(pct(p)),
+            (W, Length::Auto) => return s.w_auto(),
             (H, Length::Px(v)) => return s.h(v),
             (H, Length::Percent(p)) => return s.h_percent(pct(p)),
+            (H, Length::Auto) => return s.h_auto(),
             (MinW, Length::Px(v)) => return s.min_w(v),
             (MinW, Length::Percent(p)) => return s.min_w_percent(pct(p)),
             (MaxW, Length::Px(v)) => return s.max_w(v),

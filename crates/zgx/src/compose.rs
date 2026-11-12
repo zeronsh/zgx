@@ -2496,7 +2496,9 @@ pub use crate::compose_rich::{
     text_span,
 };
 pub use crate::compose_scrollbar::{ScrollbarEase, ScrollbarStyle};
-pub use crate::compose_tooltip::{Tooltip, TooltipLook, TooltipTiming, set_tooltip_look, set_tooltip_timing};
+pub use crate::compose_tooltip::{
+    Tooltip, TooltipLook, TooltipTiming, set_tooltip_look, set_tooltip_timing,
+};
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
     View::new(Kind::RichText(Box::new(compute)))
@@ -4605,7 +4607,14 @@ fn mount_portal_panel(
     let (placement, modal_placement, autofocus, over, arrow, keep_below) = rare
         .and_then(|r| r.portal.take())
         .map_or((None, None, None, None, None, 0.), |p| {
-            (p.placement, p.modal_placement, p.autofocus, p.over, p.arrow, p.keep_below)
+            (
+                p.placement,
+                p.modal_placement,
+                p.autofocus,
+                p.over,
+                p.arrow,
+                p.keep_below,
+            )
         });
     // The arrow is drawn as the panel is: a copy of its styles, and of what
     // its reactive style gives each time it runs (a background following

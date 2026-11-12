@@ -831,7 +831,9 @@ fn calc_sized(styles: &Styles) -> (bool, bool) {
         .cold
         .as_ref()
         .and_then(|cold| cold.size_calcs.as_ref())
-        .map_or((false, false), |calcs| (calcs.width.is_some(), calcs.height.is_some()))
+        .map_or((false, false), |calcs| {
+            (calcs.width.is_some(), calcs.height.is_some())
+        })
 }
 /// What of `styles`' size is worked out from its containing block.
 fn size_calcs(styles: &mut Styles) -> &mut crate::size_calc::SizeCalcs {
@@ -982,7 +984,9 @@ impl RareStyles {
         if let Some(theirs) = other.outline {
             // a width alone keeps the colour (or its token) already here
             self.outline = Some(match (theirs, self.outline) {
-                (Some((width, c)), Some(Some((_, mine)))) if c == OUTLINE_COLOR_UNSET => Some((width, mine)),
+                (Some((width, c)), Some(Some((_, mine)))) if c == OUTLINE_COLOR_UNSET => {
+                    Some((width, mine))
+                }
                 _ => theirs,
             });
         }
@@ -1223,23 +1227,22 @@ impl Styles {
         // A width (or height) replaces the one here whatever its kind: points
         // or a percentage over `"max-content"`, and the other way round.
         let (their_calc_w, their_calc_h) = calc_sized(other);
-        let their_w = other.width.is_some() || other.width_percent.is_some();
-        let their_h = other.height.is_some() || other.height_percent.is_some();
+        let their_w = other.set & (bit::WIDTH | bit::WIDTH_PERCENT) != 0 && !their_calc_w;
+        let their_h = other.set & (bit::HEIGHT | bit::HEIGHT_PERCENT) != 0 && !their_calc_h;
         let (mine_calc_w, mine_calc_h) = calc_sized(self);
-        if (their_w && mine_calc_w) || (their_h && mine_calc_h) {
-            if let Some(calcs) = self
+        if ((their_w && mine_calc_w) || (their_h && mine_calc_h))
+            && let Some(calcs) = self
                 .rare_mut()
                 .cold
                 .as_mut()
                 .and_then(|cold| cold.size_calcs.as_mut())
-            {
-                let calcs = std::sync::Arc::make_mut(calcs);
-                if their_w {
-                    calcs.width = None;
-                }
-                if their_h {
-                    calcs.height = None;
-                }
+        {
+            let calcs = std::sync::Arc::make_mut(calcs);
+            if their_w {
+                calcs.width = None;
+            }
+            if their_h {
+                calcs.height = None;
             }
         }
         if their_calc_w {
@@ -1345,11 +1348,12 @@ impl Styles {
         if other.overflow().layout.is_some() {
             self.fields_mut(bit::LAYOUT).overflow_mut().layout = other.overflow().layout;
         }
-        if other.width.is_some() || other.width_percent.is_some() {
+        // Set, not only given: `auto` and a calculated width clear a width under them.
+        if other.set & (bit::WIDTH | bit::WIDTH_PERCENT) != 0 {
             self.fields_mut(bit::WIDTH).width = other.width;
             self.fields_mut(bit::WIDTH_PERCENT).width_percent = other.width_percent;
         }
-        if other.height.is_some() || other.height_percent.is_some() {
+        if other.set & (bit::HEIGHT | bit::HEIGHT_PERCENT) != 0 {
             self.fields_mut(bit::HEIGHT).height = other.height;
             self.fields_mut(bit::HEIGHT_PERCENT).height_percent = other.height_percent;
         }
@@ -2126,6 +2130,23 @@ pub trait Styled: Sized {
     fn h(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
         value_or_token!(self, value, crate::theme::Field::Height);
         self.styles_mut().fields_mut(bit::HEIGHT).height = Some(value).into();
+        self.styles_mut()
+            .fields_mut(bit::HEIGHT_PERCENT)
+            .height_percent = Opt32::none();
+        self
+    }
+    /// The width the layout gives it from what it holds (CSS `auto`), over a
+    /// default or an earlier width.
+    fn w_auto(mut self) -> Self {
+        self.styles_mut().fields_mut(bit::WIDTH).width = Opt32::none();
+        self.styles_mut()
+            .fields_mut(bit::WIDTH_PERCENT)
+            .width_percent = Opt32::none();
+        self
+    }
+    /// The height the layout gives it from what it holds (CSS `auto`).
+    fn h_auto(mut self) -> Self {
+        self.styles_mut().fields_mut(bit::HEIGHT).height = Opt32::none();
         self.styles_mut()
             .fields_mut(bit::HEIGHT_PERCENT)
             .height_percent = Opt32::none();
@@ -3602,16 +3623,36 @@ mod tests {
     #[test]
     fn a_merged_width_replaces_one_of_another_kind() {
         let mut panel = Styles::new().w(240.).h(100.);
-        panel.merge(&Styles::new().w_calc("max-content".parse::<crate::size_calc::SizeCalc>().unwrap()));
+        panel.merge(
+            &Styles::new().w_calc("max-content".parse::<crate::size_calc::SizeCalc>().unwrap()),
+        );
         assert!(panel.width.is_none() && panel.width_percent.is_none());
         assert_eq!(calc_sized(&panel), (true, false));
         assert!(panel.height.is_some());
         panel.merge(&Styles::new().w(200.));
         assert_eq!(calc_sized(&panel), (false, false));
         assert!(panel.width.is_some());
-        let mut tall = Styles::new().h_calc("max-content".parse::<crate::size_calc::SizeCalc>().unwrap());
+        let mut tall =
+            Styles::new().h_calc("max-content".parse::<crate::size_calc::SizeCalc>().unwrap());
         tall.merge(&Styles::new().h_percent(50.));
         assert_eq!(calc_sized(&tall), (false, false));
+    }
+
+    #[test]
+    fn auto_and_a_calculated_width_replace_a_width_they_merge_over() {
+        let mut base = Styles::new().w(240.);
+        base.merge(&Styles::new().w_auto());
+        assert!(base.width.is_none() && base.width_percent.is_none());
+        let mut base = Styles::new().h(40.);
+        base.merge(&Styles::new().h_auto());
+        assert!(base.height.is_none() && base.height_percent.is_none());
+        // A style that sets neither leaves them.
+        let mut base = Styles::new().w(240.);
+        base.merge(&Styles::new().p(4.));
+        assert!(base.width.is_some());
+        let mut base = Styles::new().w(240.);
+        base.merge(&Styles::new().w_percent(50.));
+        assert!(base.width.is_none() && base.width_percent.is_some());
     }
 
     /// A style setting none of the properties few set (`Overflow`) holds

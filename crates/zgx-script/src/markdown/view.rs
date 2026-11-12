@@ -109,7 +109,11 @@ fn span(run: &Value, bold: bool, options: &ViewOptions) -> zgx::compose::TextSpa
         return zgx::compose::text_span(tex).inline_svg(drawn);
     }
     let code = fields.code || fields.math > 0;
-    let label = if options.link_menu.is_some() && fields.link.is_some() { tex.clone() } else { String::new() };
+    let label = if options.link_menu.is_some() && fields.link.is_some() {
+        tex.clone()
+    } else {
+        String::new()
+    };
     let mut out = zgx::compose::text_span(tex);
     if bold || fields.bold {
         out = out.font_bold();
@@ -950,7 +954,7 @@ fn piece_end(text: &str, at: usize) -> usize {
     let mut from = at;
     while let Some(found) = text[from..].find("\n\n") {
         let cut = from + found + 2;
-        if text[..cut].matches("```").count() % 2 == 0 {
+        if text[..cut].matches("```").count().is_multiple_of(2) {
             return cut;
         }
         from = cut;

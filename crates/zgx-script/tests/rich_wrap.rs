@@ -19,7 +19,7 @@ return ui.column {{ w = {width}, ui.rich {{ id = "p", wrap = true, w_full = true
 }} }}"##
     );
     let code: &'static str = Box::leak(code.into_boxed_str());
-    let mut h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
+    let h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
     h.ui.prepare_frame();
     h.settle();
     h.ui.prepare_frame();
@@ -35,7 +35,12 @@ fn boxes(tree: &str) -> Vec<(f32, f32, f32, f32)> {
             let at = words.next()?;
             let (x, y) = at.split_once(',')?;
             let (w, h) = size.split_once('x')?;
-            Some((x.parse().ok()?, y.parse().ok()?, w.parse().ok()?, h.parse().ok()?))
+            Some((
+                x.parse().ok()?,
+                y.parse().ok()?,
+                w.parse().ok()?,
+                h.parse().ok()?,
+            ))
         })
         .collect()
 }
@@ -47,17 +52,27 @@ fn padded_chips_wrap_inside_the_width() {
         let p = h.bounds("p");
         let tree = h.tree();
         for (x, _, w, _) in boxes(&tree) {
-            assert!(x + w <= p.x + p.width + 0.5, "{width}: a chip ends at {} past {}\n{tree}", x + w, p.x + p.width);
+            assert!(
+                x + w <= p.x + p.width + 0.5,
+                "{width}: a chip ends at {} past {}\n{tree}",
+                x + w,
+                p.x + p.width
+            );
         }
     }
 }
 
 fn formula(ems: f32) -> String {
-    format!(r#"ui.span {{ "IDEAL[B] = f", literal = true, inline_svg = {{ svg = "{BOX}", w = {ems}, h = 1, d = 0.4 }} }},"#)
+    format!(
+        r#"ui.span {{ "IDEAL[B] = f", literal = true, inline_svg = {{ svg = "{BOX}", w = {ems}, h = 1, d = 0.4 }} }},"#
+    )
 }
 
 fn text_box(tree: &str) -> (f32, f32) {
-    let line = tree.lines().find(|l| l.contains(" text \"The ideal")).expect("the paragraph's text");
+    let line = tree
+        .lines()
+        .find(|l| l.contains(" text \"The ideal"))
+        .expect("the paragraph's text");
     let size = line.split_whitespace().last().unwrap();
     let (w, h) = size.split_once('x').unwrap();
     (w.parse().unwrap(), h.parse().unwrap())
@@ -69,10 +84,18 @@ fn a_box_wider_than_the_paragraph_overflows_it_and_the_lines_wrap_at_its_width()
     let p = h.bounds("p");
     let tree = h.tree();
     let (w, height) = text_box(&tree);
-    assert_eq!(w, p.width, "the text is laid out at the paragraph's width\n{tree}");
+    assert_eq!(
+        w, p.width,
+        "the text is laid out at the paragraph's width\n{tree}"
+    );
     assert_eq!(height, p.height, "and is as tall as it measured\n{tree}");
     for (x, _, w, _) in boxes(&tree) {
-        assert!(x + w <= p.x + p.width + 0.5, "a chip ends at {} past {}\n{tree}", x + w, p.x + p.width);
+        assert!(
+            x + w <= p.x + p.width + 0.5,
+            "a chip ends at {} past {}\n{tree}",
+            x + w,
+            p.x + p.width
+        );
     }
 }
 
@@ -80,13 +103,19 @@ fn a_box_wider_than_the_paragraph_overflows_it_and_the_lines_wrap_at_its_width()
 fn a_chip_with_no_break_inside_stays_whole() {
     let mut h = paragraph(300., "", "");
     let split = boxes(&h.tree());
-    assert!(split.iter().any(|b| b.2 < 60.), "the plain label breaks inside: {split:?}");
+    assert!(
+        split.iter().any(|b| b.2 < 60.),
+        "the plain label breaks inside: {split:?}"
+    );
     let whole = r##"ui.span { "Aho\u{a0}et\u{a0}al.,\u{a0}2007", literal = true, padding = { 4, 2 }, bg = "#dddddd",
         icon = { src = "x.svg", size = 14, gap = 2 }, on_click = function() return true end },"##;
     let mut h = paragraph(300., "", whole);
     let tree = h.tree();
     let chips = boxes(&tree);
-    assert!(chips.iter().any(|b| b.2 > 100.), "the whole chip is on one line: {chips:?}\n{tree}");
+    assert!(
+        chips.iter().any(|b| b.2 > 100.),
+        "the whole chip is on one line: {chips:?}\n{tree}"
+    );
 }
 
 #[test]
@@ -107,7 +136,10 @@ return ui.column { w = 300,
     h.ui.prepare_frame();
     let tree = h.tree();
     let chip = boxes(&tree)[0];
-    assert!(chip.2 >= 14., "the chip's box takes its icon: {chip:?}\n{tree}");
+    assert!(
+        chip.2 >= 14.,
+        "the chip's box takes its icon: {chip:?}\n{tree}"
+    );
     // the icon is drawn by a node of its own over the chip's box: a press there must not stop at it
     {
         let p = h.find("p").unwrap();
@@ -123,10 +155,16 @@ return ui.column { w = 300,
         let icon = icon.expect("the chip's icon is drawn");
         let b = scene.bounds(icon);
         let hit = scene.hit_test(b.x + b.width / 2., b.y + b.height / 2.);
-        assert!(hit.is_some_and(|n| n != icon), "the icon took the press: {hit:?}");
+        assert!(
+            hit.is_some_and(|n| n != icon),
+            "the icon took the press: {hit:?}"
+        );
     }
     // the icon's middle: its own node is drawn there, over the chip's box
-    zgx_script::driver::click_at(&mut h.ui, zgx::scene::Rect::new(chip.0 + 4., chip.1, 14., chip.3));
+    zgx_script::driver::click_at(
+        &mut h.ui,
+        zgx::scene::Rect::new(chip.0 + 4., chip.1, 14., chip.3),
+    );
     h.settle();
     assert_eq!(h.text("clicked"), "yes");
 }

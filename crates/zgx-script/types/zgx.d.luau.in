@@ -1243,6 +1243,14 @@ export type ToastOptions = {
 	action: { label: string, run: () -> () }?,
 }
 
+export type ToastDefaults = {
+	-- Milliseconds toasts stay when they do not say (5000), a warning's
+	-- (7000) and an error's (until dismissed); `false` is until dismissed.
+	duration: number?,
+	warning_duration: (number | false)?,
+	error_duration: (number | false)?,
+}
+
 export type NumberOptions = {
 	-- Digits after the point (default: none for whole numbers, else 2).
 	decimals: number?,
@@ -2623,6 +2631,10 @@ export type SpanProps = {
 	-- How far below the baseline the underline sits (CSS's
 	-- `text-underline-offset`).
 	underline_offset: number?,
+	-- How far its background reaches past the text on each side, taking no
+	-- room (CSS's negative inline margin under the same padding): a search
+	-- match's mark.
+	outset: number?,
 	-- How the underline is drawn, its colour and its thickness; any of them
 	-- underlines the span (unless `underline = false`). `"wavy"` marks a
 	-- mistake or a diagnostic.
@@ -3551,6 +3563,8 @@ export type WebViewProps = Merge<Props, Merge<WebOptions, {
 	on_download: ((d: Download) -> ...unknown)?,
 }>>
 export type TerminalProps = Merge<Props, { term: Term }>
+-- The name the host registered with `zgx_script::host_view`.
+export type HostViewProps = Merge<Props, { name: string }>
 -- `from`: only what that plugin (by name) contributes.
 export type SlotProps = Merge<Props, { context: unknown?, from: string? }>
 -- What a plugin targets: an element by its `id` (`"#save"`), declared hook
@@ -3772,6 +3786,8 @@ declare ui: {
 	-- page for `id`, made with `opts` the first time, kept across reloads.
 	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
 	terminal: (props: TerminalProps) -> Node,
+	-- A view the host made in Rust, mounted in this tree under its popups.
+	host_view: (props: HostViewProps) -> Node,
 	-- The session for `id`, started the first time; `ui.term(id)` without
 	-- options only looks it up.
 	term: (id: string, opts: TermOptions?) -> Term,
@@ -4119,6 +4135,8 @@ declare ui: {
 	-- A toast in the window's corner: it goes after `duration` ms (5000;
 	-- 7000 a warning; an error stays), or at its ×. Returns its id.
 	toast: (opts: ToastOptions) -> number,
+	-- How long toasts shown from now on stay when they do not say.
+	toast_defaults: (opts: ToastDefaults) -> (),
 	dismiss_toast: (id: number) -> (),
 	-- JSON: `encode(value, { pretty = true })` writes what state could hold
 	-- (lists as arrays, tables as objects, `ui.null` as null); `decode(text)`

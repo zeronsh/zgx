@@ -98,7 +98,11 @@ fn main() {
         );
         let titles: Vec<&str> = items.iter().map(|(t, ..)| t.as_str()).collect();
         assert!(titles[0].starts_with("About "), "{titles:?}");
-        assert_eq!(&titles[1..4], ["", "Checking for Updates…", ""], "{titles:?}");
+        assert_eq!(
+            &titles[1..4],
+            ["", "Checking for Updates…", ""],
+            "{titles:?}"
+        );
         assert_eq!(titles[4], "Settings…", "{titles:?}");
         assert!(
             titles[5..].contains(&"Services") && !items[2].1,

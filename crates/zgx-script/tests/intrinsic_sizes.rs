@@ -126,7 +126,9 @@ fn a_menu_fades_out_unless_an_item_was_chosen() {
     std::thread::sleep(std::time::Duration::from_millis(150));
     h.frames(3);
     assert!(!drawn(&mut h), "gone once faded");
-    h.host.set_state("open", zgx_script::Value::Bool(true)).unwrap();
+    h.host
+        .set_state("open", zgx_script::Value::Bool(true))
+        .unwrap();
     h.frames(3);
     std::thread::sleep(std::time::Duration::from_millis(130));
     h.frames(3);
@@ -191,7 +193,10 @@ fn a_tooltip_look_keeps_tips_below_the_titlebar_band() {
     zgx::compose::set_tooltip_look(Default::default());
     assert_eq!(h.error(), None);
     let at = at.expect("the tip shows");
-    assert!(at.y >= badge.y + badge.height, "below the badge: {at:?} {badge:?}");
+    assert!(
+        at.y >= badge.y + badge.height,
+        "below the badge: {at:?} {badge:?}"
+    );
 }
 
 /// `ui.modal { scrim_blur }` blurs what lies behind its backdrop.
@@ -222,7 +227,10 @@ fn a_tooltip_keeps_below_the_band_when_popups_may_leave_the_window() {
     h.frames(2);
     h.hover("search");
     h.frames(6);
-    let at = h.target("\"Search\"").ok().map(|t| h.ui.scene.borrow().bounds(t));
+    let at = h
+        .target("\"Search\"")
+        .ok()
+        .map(|t| h.ui.scene.borrow().bounds(t));
     zgx::compose::set_tooltip_look(Default::default());
     assert_eq!(h.error(), None);
     let at = at.expect("the tip shows");

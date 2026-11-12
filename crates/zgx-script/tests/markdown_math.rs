@@ -14,7 +14,7 @@ return ui.column {{
 }}"##
     );
     let code: &'static str = Box::leak(code.into_boxed_str());
-    let mut h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
+    let h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
     h.ui.prepare_frame();
     h.settle();
     h.ui.prepare_frame();
