@@ -697,8 +697,9 @@ static TEXT: std::sync::Mutex<Option<(Fonts, zgx_gpu::text::CpuTextRaster)>> =
 
 /// `ui.render_canvas(draw, { width, height, scale, x, y, background })`: a
 /// promise of `draw(c, width, height)`'s drawing as a PNG, in base64. The
-/// drawing is what a `ui.canvas` given that `draw` shows: its shapes, then
-/// its text over them, `x`, `y` at the picture's top left. No window shows
+/// drawing is what a `ui.canvas` given that `draw` shows: its shapes and
+/// text in the same layers, clips and transforms, `x`, `y` at the
+/// picture's top left. No window shows
 /// it, so it works with none showing (a plugin's tool, an export). It draws
 /// now; the pixels and the PNG are made on a thread of their own.
 fn render_canvas(

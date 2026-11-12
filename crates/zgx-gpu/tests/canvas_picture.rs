@@ -291,3 +291,169 @@ fn a_view_moves_the_drawing_and_its_text_and_a_background_fills_under() {
     assert_eq!(decoded.dimensions(), (40, 40));
     assert_eq!(decoded.as_raw().as_slice(), picture.pixels());
 }
+
+#[test]
+fn a_centred_paragraphs_short_lines_are_centred_on_its_point() {
+    let mut text = zgx_gpu::text::CpuTextRaster::default();
+    for baseline in [TextBaseline::Top, TextBaseline::Middle] {
+        let mut c = Canvas::new();
+        c.fill(
+            zgx::canvas::Path::rectangle(Rect::new(0., 0., 200., 100.)),
+            Color(255, 255, 255, 255),
+        );
+        c.text(CanvasText {
+            text: "MM\nMM".into(),
+            x: 100.,
+            y: 40.,
+            size: 16.,
+            color: Color(0, 0, 0, 255),
+            font: zgx::text_layout::FontStyle {
+                align: zgx::text_layout::TextAlign::Center,
+                ..Default::default()
+            },
+            anchor: TextAnchor::Center,
+            baseline,
+            width: None,
+        });
+        let picture =
+            zgx_gpu::canvas::picture(&c, CanvasView::default(), 200., 100., 1., None, &mut text)
+                .unwrap();
+        let inked: Vec<u32> = (0..200)
+            .filter(|x| (0..100).any(|y| picture.pixels()[((y * 200 + x) * 4) as usize] < 128))
+            .collect();
+        let (left, right) = (inked[0] as f32, *inked.last().unwrap() as f32 + 1.);
+        assert!(
+            ((left + right) / 2. - 100.).abs() <= 1.5,
+            "{baseline:?}: {left}..{right}"
+        );
+        // And on screen.
+        let mut gpu = GpuRenderer::new(200, 100).expect("a GPU adapter");
+        let mut ui = Ui::new(200., 100.);
+        gpu.install_text(&mut ui.scene.borrow_mut());
+        let drawn = c.clone();
+        let handle = ui.mount(
+            div()
+                .w(200.)
+                .h(100.)
+                .child(canvas(move |_| drawn.clone()).w(200.).h(100.)),
+        );
+        ui.prepare_frame();
+        let damage = ui.scene.borrow_mut().flush().damage;
+        gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        std::mem::forget(handle);
+        let shown = gpu.readback().unwrap();
+        let inked: Vec<u32> = (0..200)
+            .filter(|x| (0..100).any(|y| shown[((y * 200 + x) * 4) as usize] < 128))
+            .collect();
+        let (left, right) = (inked[0] as f32, *inked.last().unwrap() as f32 + 1.);
+        assert!(
+            ((left + right) / 2. - 100.).abs() <= 1.5,
+            "on screen, {baseline:?}: {left}..{right}"
+        );
+    }
+}
+
+/// `c` as a window shows it, `w` by `h` points at `scale`, read back.
+fn shown_of(c: &Canvas, (w, h): (f32, f32), scale: f32) -> Vec<u8> {
+    let mut gpu = GpuRenderer::new((w * scale) as u32, (h * scale) as u32).expect("a GPU adapter");
+    gpu.set_scale_factor(scale);
+    let mut ui = Ui::new(w, h);
+    gpu.install_text(&mut ui.scene.borrow_mut());
+    let drawn = c.clone();
+    let handle = ui.mount(
+        div()
+            .w(w)
+            .h(h)
+            .child(canvas(move |_| drawn.clone()).w(w).h(h)),
+    );
+    ui.prepare_frame();
+    let damage = ui.scene.borrow_mut().flush().damage;
+    gpu.render(&ui.scene.borrow(), &damage).unwrap();
+    std::mem::forget(handle);
+    gpu.readback().unwrap()
+}
+
+/// Text under a shape drawn after it, text cut by a clip, and text turned:
+/// a picture shows each as a window does.
+#[test]
+fn layers_clips_turned_text_and_gradients_render_as_on_screen() {
+    use zgx::affine::Affine;
+    let (w, h) = (240., 160.);
+    let label = |text: &str, x: f32, y: f32| CanvasText {
+        text: text.into(),
+        x,
+        y,
+        size: 18.,
+        color: Color(10, 10, 20, 255),
+        font: zgx::text_layout::FontStyle {
+            weight: 700,
+            ..Default::default()
+        },
+        anchor: TextAnchor::Start,
+        baseline: TextBaseline::Top,
+        width: None,
+    };
+    let stops = vec![
+        GradientStop {
+            offset: 0.,
+            color: Color(250, 200, 40, 255),
+        },
+        GradientStop {
+            offset: 1.,
+            color: Color(40, 90, 220, 255),
+        },
+    ];
+    let mut c = Canvas::new();
+    c.fill(
+        Path::rounded_rect(Rect::new(0., 0., w, h), 0.).unwrap(),
+        Color(255, 255, 255, 255),
+    );
+    // A card's title, then a second card over its left half.
+    c.text(label("Overlapped", 8., 8.));
+    c.fill(
+        Path::rounded_rect(Rect::new(0., 0., 60., 40.), 6.).unwrap(),
+        zgx::canvas::Brush::linear(
+            zgx::canvas::Point::new(0., 0.),
+            zgx::canvas::Point::new(60., 40.),
+            stops.clone(),
+        )
+        .unwrap(),
+    );
+    c.text(label("On top", 8., 44.));
+    // A frame clipping its text to a rounded box.
+    c.clip(
+        Path::rounded_rect(Rect::new(120., 10., 100., 50.), 12.).unwrap(),
+        zgx::canvas::FillRule::Winding,
+    );
+    c.text(label("Clipped text runs on", 100., 20.));
+    c.restore();
+    // A dial with a turned label beside it.
+    c.fill(
+        Path::ellipse(Rect::new(20., 80., 70., 70.)).unwrap(),
+        zgx::canvas::Brush::linear(
+            zgx::canvas::Point::new(20., 80.),
+            zgx::canvas::Point::new(90., 150.),
+            stops,
+        )
+        .unwrap(),
+    );
+    c.text_transformed(
+        label("Turned", 150., 80.),
+        Affine::rotation(0.5).around(150., 80.),
+    );
+    let mut text = zgx_gpu::text::CpuTextRaster::default();
+    for scale in [1., 2.] {
+        let shown = shown_of(&c, (w, h), scale);
+        let picture =
+            zgx_gpu::canvas::picture(&c, CanvasView::default(), w, h, scale, None, &mut text)
+                .unwrap();
+        // Measured on Direct3D 12: 0.007 at 1x, 0.002 at 2x, none over
+        // 32 (nightly's picture before: 4.7, and 3.5% over 48).
+        let (mean, outliers) = apart(picture.pixels(), &shown, 32);
+        assert!(mean < 0.25, "scale {scale}: mean channel difference {mean}");
+        assert!(
+            outliers < 0.001,
+            "scale {scale}: {outliers} of pixels differ by over 32"
+        );
+    }
+}
