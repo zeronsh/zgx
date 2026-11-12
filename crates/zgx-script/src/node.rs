@@ -2221,9 +2221,15 @@ pub(crate) fn node_ud(lua: &Lua, mut node: Node) -> mlua::Result<mlua::AnyUserDa
     if node.owner.upgrade().is_some_and(|vm| vm.locate.get()) {
         node.source = location(lua);
     }
+    // Written into its place: a node is hundreds of bytes, which `Rc::new`
+    // moves once more on the way.
+    let mut held = Rc::new_uninit();
+    Rc::get_mut(&mut held).expect("just made").write(node);
+    // SAFETY: written just above.
+    let held = unsafe { held.assume_init() };
     // Every `ui.*` call makes one: without the memory limit's protected
     // call around each (see vendor/mlua/ZGX_PATCH.md).
-    lua.create_userdata_relaxed(NodeUd(Rc::new(node)))
+    lua.create_userdata_relaxed(NodeUd(held))
 }
 /// The script line calling the `ui` function running now: `app.luau:12`.
 fn location(lua: &Lua) -> Option<Rc<str>> {
