@@ -280,6 +280,7 @@ fn toast_view(id: u64, toast: Toast, toaster: Rc<Toaster>, cx: &mut zgx::compose
             None => toast.title.clone(),
         })
         .focusable(true)
+        .focus_on_press(false)
         .w_full()
         .p(12.)
         .gap(10.)
