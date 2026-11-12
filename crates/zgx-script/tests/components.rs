@@ -1423,3 +1423,33 @@ fn a_dialog_an_app_builds_itself_is_modal_when_it_says_so() {
     assert!(node(&mut h, "sheet").modal);
     assert!(!node(&mut h, "panel").modal, "only when it says so");
 }
+
+#[test]
+fn ui_toast_defaults_set_how_long_toasts_stay_and_unset_ones_stay_as_they_were() {
+    use zgx_components::{ToastDefaults, Toaster};
+    let h = Harness::inline(
+        r##"ui.toast_defaults { duration = 1000, error_duration = 5000 }
+        ui.toast_defaults { warning_duration = false }
+        return ui.text { "x" }"##,
+    );
+    assert_eq!(h.error(), None);
+    let defaults = Toaster::of(&h.ui.runtime).defaults();
+    let ms = |ms: u64| Some(std::time::Duration::from_millis(ms));
+    assert_eq!(
+        defaults,
+        ToastDefaults {
+            info: ms(1000),
+            warning: None,
+            error: ms(5000)
+        }
+    );
+    let wrong = zgx_script::testing::TestApp::try_new(|runtime| {
+        zgx_script::ScriptHost::inline(
+            runtime,
+            "app",
+            "ui.toast_defaults { error_duration = true } return ui.text { 'x' }",
+        )
+    });
+    let said = wrong.err().expect("a boolean true is not a duration");
+    assert!(said.contains("error_duration"), "{said}");
+}

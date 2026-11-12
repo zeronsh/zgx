@@ -176,3 +176,61 @@ fn past_four_the_oldest_wait() {
     assert_eq!(with_role(&ui, Role::Alert).len(), 4);
     assert!(!texts(&ui).contains(&"Toast 0".to_owned()));
 }
+
+fn run_for(ui: &mut Ui, executor: &Rc<RefCell<LocalExecutor>>, ms: u64) {
+    let until = std::time::Instant::now() + Duration::from_millis(ms);
+    while std::time::Instant::now() < until {
+        while executor.borrow_mut().tick() > 0 {}
+        ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// An error stays until dismissed, and every toast stays the time the app's defaults give: zgx's own
+/// defaults apply until it sets them, and a toast's own duration beats them.
+#[test]
+fn the_toasters_defaults_set_how_long_toasts_stay() {
+    let mut ui = Ui::new(800., 600.);
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    host(&mut ui, &executor);
+    let toaster = Toaster::of(&ui.runtime);
+    assert_eq!(toaster.defaults(), ToastDefaults::default());
+    assert_eq!(ToastDefaults::default().error, None, "an error stays");
+    let error = |title: &str| Toast::new(title).kind(ToastKind::Error);
+    toaster.show(error("Stays"));
+    ui.prepare_frame();
+    run_for(&mut ui, &executor, 250);
+    assert_eq!(toaster.showing().len(), 1, "an error stays by default");
+    toaster.clear();
+    // Metal's: every toast the same, errors included (shortened here to keep the test fast).
+    let brief = Some(Duration::from_millis(60));
+    toaster.set_defaults(ToastDefaults {
+        info: brief,
+        warning: brief,
+        error: brief,
+    });
+    toaster.show(error("Error"));
+    toaster.show(Toast::new("Info"));
+    toaster.show(Toast::new("Warn").kind(ToastKind::Warning));
+    toaster.show(error("Long").duration(Duration::from_secs(60)));
+    ui.prepare_frame();
+    ui.prepare_frame();
+    assert_eq!(toaster.showing().len(), 4);
+    run_for(&mut ui, &executor, 800);
+    let left: Vec<String> = toaster.showing().into_iter().map(|t| t.1).collect();
+    assert_eq!(
+        left,
+        ["Long"],
+        "the defaults ended three; its own duration kept one"
+    );
+    // `None` is until dismissed, for any kind.
+    toaster.clear();
+    toaster.set_defaults(ToastDefaults {
+        info: None,
+        ..ToastDefaults::default()
+    });
+    toaster.show(Toast::new("Held"));
+    ui.prepare_frame();
+    run_for(&mut ui, &executor, 250);
+    assert_eq!(toaster.showing().len(), 1);
+}

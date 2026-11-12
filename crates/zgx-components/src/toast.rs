@@ -56,8 +56,8 @@ pub struct Toast {
     pub body: Option<String>,
     /// Its colour and urgency.
     pub kind: ToastKind,
-    /// How long it stays: 5 seconds by default (7 for a warning); an error
-    /// stays until dismissed.
+    /// How long it stays, over the toaster's defaults (`ToastDefaults`: 5
+    /// seconds, 7 for a warning, an error until dismissed).
     pub duration: Option<Duration>,
     /// A button on it.
     pub action: Option<ToastAction>,
@@ -93,12 +93,34 @@ impl Toast {
         });
         self
     }
-    fn stays(&self) -> Option<Duration> {
+    fn stays(&self, defaults: ToastDefaults) -> Option<Duration> {
         match (self.duration, self.kind) {
             (Some(d), _) => Some(d),
-            (None, ToastKind::Error) => None,
-            (None, ToastKind::Warning) => Some(Duration::from_secs(7)),
-            (None, _) => Some(Duration::from_secs(5)),
+            (None, ToastKind::Error) => defaults.error,
+            (None, ToastKind::Warning) => defaults.warning,
+            (None, _) => defaults.info,
+        }
+    }
+}
+
+/// How long a toast stays when it does not say (`Toaster::set_defaults`);
+/// `None` until it is dismissed. zgx's own: 5 seconds, 7 for a warning, an
+/// error until dismissed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ToastDefaults {
+    /// An info or success toast.
+    pub info: Option<Duration>,
+    /// A warning.
+    pub warning: Option<Duration>,
+    /// An error.
+    pub error: Option<Duration>,
+}
+impl Default for ToastDefaults {
+    fn default() -> Self {
+        Self {
+            info: Some(Duration::from_secs(5)),
+            warning: Some(Duration::from_secs(7)),
+            error: None,
         }
     }
 }
@@ -120,6 +142,7 @@ impl PartialEq for Showing {
 pub struct Toaster {
     showing: Signal<Vec<Showing>>,
     next: Cell<u64>,
+    defaults: Cell<ToastDefaults>,
 }
 impl Toaster {
     /// The runtime's toaster.
@@ -127,7 +150,17 @@ impl Toaster {
         runtime.extension(|runtime| Toaster {
             showing: runtime.signal(Vec::new()),
             next: Cell::new(0),
+            defaults: Cell::new(ToastDefaults::default()),
         })
+    }
+    /// How long toasts stay that do not say.
+    pub fn defaults(&self) -> ToastDefaults {
+        self.defaults.get()
+    }
+    /// Sets how long toasts shown from now on stay when they do not say
+    /// (an app's own, as Metal's: every toast 5 seconds, errors too).
+    pub fn set_defaults(&self, defaults: ToastDefaults) {
+        self.defaults.set(defaults);
     }
     /// Show `toast`; its id dismisses it.
     pub fn show(&self, toast: Toast) -> u64 {
@@ -236,7 +269,7 @@ fn toast_view(id: u64, toast: Toast, toaster: Rc<Toaster>, cx: &mut zgx::compose
     // Its time: dismissed once it has passed with the pointer elsewhere (a
     // task of the toast's own, ending as it goes). Without a task runner,
     // toasts stay until dismissed.
-    if let Some(stays) = toast.stays()
+    if let Some(stays) = toast.stays(toaster.defaults())
         && cx.try_service::<TaskRunner>().is_some()
     {
         let (toaster, hovered) = (toaster.clone(), hovered.clone());
