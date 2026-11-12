@@ -131,6 +131,16 @@ fn scattered_damage_presented_through_surfaces_matches_drawing_whole() {
 /// lies outside it, down the view (a user's report: a trail of corners).
 #[cfg(target_os = "macos")]
 fn panel(offset: Signal<f32>) -> View {
+    panel_at(offset, 20.)
+}
+/// The same, laid out between device pixels (centred in a window of odd
+/// width): it copies within its whole pixels.
+#[cfg(target_os = "macos")]
+fn panel_off_grid(offset: Signal<f32>) -> View {
+    panel_at(offset, 20.3)
+}
+#[cfg(target_os = "macos")]
+fn panel_at(offset: Signal<f32>, left: f32) -> View {
     let mut cards = column().gap(6.).p(6.);
     for i in 0..40 {
         cards = cards.child(div().w(300.).h(36.).bg(if i % 2 == 0 {
@@ -146,7 +156,7 @@ fn panel(offset: Signal<f32>) -> View {
             row()
                 .w(600.)
                 .h(380.)
-                .left(20.)
+                .left(left)
                 .top(10.)
                 .rounded(16.)
                 .bg(Color(17, 17, 17, 255))
@@ -168,6 +178,11 @@ fn rounded_panel_scrolled_through_surfaces_matches_drawing_whole() {
     let copies = scrolled_matches_drawing_whole(panel, STEPS);
     // Each step moved by whole pixels: each copied, its corners repainted.
     assert!(copies > 0, "no scroll copied");
+    // Between device pixels, the moves by whole ones still copy.
+    for scale in [1., 2.] {
+        let off_grid = scrolled_matches_drawing_whole_at(panel_off_grid, STEPS, scale);
+        assert!(off_grid > 0, "scale {scale}: no copy between pixels");
+    }
 }
 
 /// A scroll view's content under something that stays where it is: a
@@ -968,6 +983,32 @@ fn input_after_idle_wakes_the_gpu_once() {
     assert_eq!(window.gpu.debug_warms(), 2, "the next idle");
 }
 
+/// A frame shows once its work is scheduled (`schedule_direct`), not done:
+/// the next frame waits for it as it encodes, so its GPU time comes then,
+/// and what it showed matches drawing whole.
+#[cfg(target_os = "macos")]
+fn a_frame_shows_once_scheduled_and_the_next_waits_for_it() {
+    let mut window = Window::new(1);
+    window.show();
+    window.live.set(2);
+    let shown = window.show();
+    assert!(shown == Window::new(2).show(), "the frame shown differs");
+    let _ = window.gpu.take_gpu_time();
+    assert_eq!(window.gpu.take_gpu_time(), None, "shown, not waited for");
+    window.live.set(3);
+    window.ui.prepare_frame();
+    let damage = window.ui.scene.borrow_mut().flush().damage;
+    window
+        .gpu
+        .render(&window.ui.scene.borrow(), &damage)
+        .unwrap();
+    assert!(
+        window.gpu.take_gpu_time().is_some(),
+        "the next frame waits for the one shown as it encodes"
+    );
+    window.gpu.present().unwrap();
+}
+
 /// A pixelated image presented through the Metal frame's own pipelines
 /// (`metal_frame`, its inline sampler nearest): a 2 by 2 checker drawn at
 /// 100 points is black or white, where a smooth one blends along the middle.
@@ -1119,6 +1160,8 @@ fn main() {
         println!("layer_frames: full-rate frames show as tiles without a video layer");
         input_after_idle_wakes_the_gpu_once();
         println!("layer_frames: input after idle wakes the GPU once");
+        a_frame_shows_once_scheduled_and_the_next_waits_for_it();
+        println!("layer_frames: a frame shows once scheduled and the next waits for it");
         rounded_panel_scrolled_through_surfaces_matches_drawing_whole();
         println!("layer_frames: a rounded panel scrolled through surfaces matches drawing whole");
         still_over_a_scroll_repainted_where_it_is_leaves_no_ghost();
@@ -1135,7 +1178,40 @@ fn main() {
         println!("layer_frames: faded scrolls copy their interior and match drawing whole");
         rounded_corners_scrolled_by_a_copy_match_drawing_whole();
         println!("layer_frames: rounded corners scrolled by a copy match drawing whole");
+        a_long_list_far_down_copies_whole_pixels_at_one_and_a_half();
+        println!("layer_frames: a long list far down copies whole pixels at 1.5x");
     }
+}
+
+/// A list 24,000 points long, scrolled near its end at 1.5x a whole pixel
+/// (2/3 of a point) at a time, as a trackpad's scroll moves: no f32 holds
+/// the offsets exactly, and each move still copies.
+#[cfg(target_os = "macos")]
+fn a_long_list_far_down_copies_whole_pixels_at_one_and_a_half() {
+    fn rows(offset: Signal<f32>) -> View {
+        virtual_list(
+            offset,
+            24.,
+            2,
+            || 1000,
+            |i| i,
+            |_, key, _| {
+                div()
+                    .w(600.)
+                    .h(24.)
+                    .bg(Color(30 + (key % 7) as u8 * 20, 60, 110, 255))
+            },
+        )
+        .w(SIZE.0)
+        .h(SIZE.1)
+    }
+    let mut steps = vec![20_000_f32];
+    for _ in 0..8 {
+        let last = *steps.last().unwrap();
+        steps.push(last + 2. / 3.);
+    }
+    let copies = scrolled_matches_drawing_whole_at(rows, &steps, 1.5);
+    assert!(copies >= 7, "{copies} of 8 moves copied");
 }
 
 /// A scroll view fading 40 px at top and bottom over cards (light paper,

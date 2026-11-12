@@ -1243,6 +1243,44 @@ const FRAME_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(5
 /// Frames presented this close together are a steady run.
 #[cfg(target_os = "macos")]
 const STEADY_GAP: std::time::Duration = std::time::Duration::from_millis(50);
+/// `delta` (points) in whole device pixels (`pixel` points each), what's
+/// short of one added to and kept in `carry` for the next: a trackpad's and
+/// its coast's motion comes in fractions of a pixel, and a scroll moved by a
+/// fraction repaints its whole view, where one moved by whole pixels copies
+/// what it drew (zgx-gpu's `scroll_copies`). Over a gesture the content
+/// moves as far; each refresh, by up to a pixel less or more.
+fn on_pixel_grid(carry: &mut (f32, f32), delta: (f32, f32), pixel: f32) -> Option<(f32, f32)> {
+    let snap = |carried: &mut f32, d: f32| {
+        let total = *carried + d;
+        let whole = if pixel > 0. {
+            (total / pixel).trunc() * pixel
+        } else {
+            total
+        };
+        *carried = total - whole;
+        whole
+    };
+    let out = (snap(&mut carry.0, delta.0), snap(&mut carry.1, delta.1));
+    (out != (0., 0.)).then_some(out)
+}
+#[cfg(test)]
+#[test]
+fn a_trackpads_fractions_move_in_whole_pixels_and_add_up() {
+    let mut carry = (0., 0.);
+    // At 2x a pixel is half a point: 0.3 + 0.3 is one pixel, then nothing.
+    assert_eq!(on_pixel_grid(&mut carry, (0., 0.3), 0.5), None);
+    assert_eq!(on_pixel_grid(&mut carry, (0., 0.3), 0.5), Some((0., 0.5)));
+    // A gesture's fractions add up to its motion, less what's under a pixel.
+    let mut carry = (0., 0.);
+    let moved: f32 = (0..100)
+        .filter_map(|_| on_pixel_grid(&mut carry, (0., -0.37), 0.5))
+        .map(|(_, dy)| dy)
+        .sum();
+    assert!((moved - -37.).abs() < 0.5, "{moved}");
+    for (_, dy) in (0..10).filter_map(|_| on_pixel_grid(&mut carry, (0., 1.26), 0.5)) {
+        assert_eq!((dy / 0.5).fract(), 0., "{dy}");
+    }
+}
 /// Sleep until `at`: a long sleep ends up to a millisecond or two late (the
 /// kernel coalesces timers in proportion to their length), so the last
 /// stretch is a short one of its own.
@@ -1931,6 +1969,9 @@ struct Host {
     damage_check: Option<u64>,
     /// Wheel and trackpad motion waiting for display refreshes.
     scroll: crate::scroll_resample::ScrollResampler,
+    /// What a trackpad's scroll moved short of a whole device pixel, carried
+    /// to the next refresh (`on_pixel_grid`).
+    scroll_carry: (f32, f32),
     /// Fingers and pens on the screen, as the pointer.
     touch: crate::touch::Touches,
     /// What had focus before a finger pressed, for a pan to give it back.
@@ -2222,6 +2263,7 @@ impl Host {
                 scroll.set_wheel_eases(cfg!(not(target_os = "macos")));
                 scroll
             },
+            scroll_carry: (0., 0.),
             touch: Default::default(),
             touch_focus: None,
             #[cfg(windows)]
@@ -3225,7 +3267,7 @@ impl Host {
                 drop(transaction);
                 #[cfg(target_os = "macos")]
                 {
-                    self.presented_at = Some(std::time::Instant::now());
+                    let previous = self.presented_at.replace(std::time::Instant::now());
                     self.late_sample
                         .handed_over(ready_at.get().unwrap_or_else(std::time::Instant::now));
                     // What it shows now, for `Ui::snapshot` (the last frame's
@@ -3233,7 +3275,12 @@ impl Host {
                     *self.shown.borrow_mut() = renderer
                         .shown_frame()
                         .map(|frame| (frame, self.scale_factor));
-                    if let Some(gpu) = renderer.take_gpu_time() {
+                    // The frame presented before this one (`take_gpu_time`):
+                    // after a pause, one from before it, which says nothing
+                    // of the GPU now.
+                    if let Some(gpu) = renderer.take_gpu_time()
+                        && previous.is_some_and(|at| at.elapsed() < STEADY_GAP)
+                    {
                         zgx::profile::gpu_time(gpu);
                         if grid.is_some() {
                             self.latch.ran(gpu);
@@ -5297,6 +5344,11 @@ impl Host {
                 if gesture == Some(zgx::input::ScrollGesture::Ended) {
                     crate::coast::fingers_down(false);
                 }
+                // A new gesture starts on the grid: what the last one moved
+                // short of a pixel was for its view and its direction.
+                if gesture == Some(zgx::input::ScrollGesture::Began) {
+                    self.scroll_carry = (0., 0.);
+                }
                 // A touchpad's scroll is a gesture to a paged view, not a wheel's
                 // notches (Wayland says when: libinput's axis stop). Paged views
                 // alone hear it: elsewhere it scrolls as ever.
@@ -6226,6 +6278,10 @@ impl Host {
             } else {
                 None
             };
+            let delta = delta.and_then(|delta| {
+                let pixel = self.device_pixel();
+                on_pixel_grid(&mut self.scroll_carry, delta, pixel)
+            });
             if let Some((delta_x, delta_y)) = delta {
                 zgx_gpu::present_log::log(|| {
                     format!(
@@ -6269,7 +6325,10 @@ impl Host {
                 true => std::time::Instant::now() + self.frame_interval,
                 false => self.coast.ends().unwrap_or_else(std::time::Instant::now),
             };
-            if let Some(((delta_x, delta_y), done)) = self.coast.sample(shows) {
+            if let Some((delta, done)) = self.coast.sample(shows) {
+                let pixel = self.device_pixel();
+                let (delta_x, delta_y) =
+                    on_pixel_grid(&mut self.scroll_carry, delta, pixel).unwrap_or((0., 0.));
                 if delta_x != 0. || delta_y != 0. {
                     zgx_gpu::present_log::log(|| {
                         format!("scroll-applied source=coast dx={delta_x:.3} dy={delta_y:.3}")

@@ -3378,6 +3378,12 @@ static WARM_AFTER_IDLE: std::sync::LazyLock<bool> =
 #[cfg(windows)]
 static DXGI_PRESENT: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| zgx::env::var_os("ZGX_DXGI_PRESENT").is_none_or(|v| v != "0"));
+/// `ZGX_PRESENT_COMPLETED=1`: a surface's frame is waited for until it
+/// completes before it shows, as before `schedule_direct`; to compare.
+#[cfg(target_os = "macos")]
+static PRESENT_COMPLETED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+    zgx::env::var_os("ZGX_PRESENT_COMPLETED").is_some_and(|v| v != "0")
+});
 /// `ZGX_PRESENT_DRAWABLE`: full-rate frames draw into `CAMetalLayer`
 /// drawables, which Metal presents (`layer_present::Layer::next_drawable`),
 /// instead of surfaces of the renderer's own shown as tiles.
@@ -4841,7 +4847,8 @@ pub struct GpuRenderer {
     /// (`warm_up`).
     #[cfg(target_os = "macos")]
     idle: bool,
-    /// How long the GPU took to run the last direct frame (`take_gpu_time`).
+    /// How long the GPU took to run the last direct frame waited for
+    /// (`take_gpu_time`).
     #[cfg(target_os = "macos")]
     gpu_time: std::cell::Cell<Option<std::time::Duration>>,
     /// The viewport uniform `select_viewport` chose last, for direct frames.
@@ -12557,6 +12564,25 @@ impl GpuRenderer {
         self.frame_draws = draws;
         Ok(stats)
     }
+    /// Wait for a directly encoded frame (`render_direct`) to be scheduled on
+    /// the GPU, not to complete, and the main thread goes on with the next
+    /// frame meanwhile. Its completion is waited for when its ring buffers
+    /// are written again (`finish_direct` at the next encode).
+    /// The window server's composite reads the surface after the scheduled
+    /// work that writes it: the driver orders a surface's writers and
+    /// readers, as ANGLE and Chromium take it for IOSurfaces Core Animation
+    /// shows. Tests read frames back themselves and wait for them, so they
+    /// can't show that on screen; `ZGX_PRESENT_COMPLETED=1` waits as before.
+    #[cfg(target_os = "macos")]
+    fn schedule_direct(&self) -> bool {
+        use objc2_metal::MTLCommandBuffer;
+        let inflight = self.metal_inflight.borrow();
+        let Some(buffer) = inflight.as_ref() else {
+            return false;
+        };
+        buffer.waitUntilScheduled();
+        true
+    }
     /// Wait for a directly encoded frame (`render_direct`) to complete.
     #[cfg(target_os = "macos")]
     fn finish_direct(&self) -> bool {
@@ -12594,10 +12620,10 @@ impl GpuRenderer {
     }
     /// Split the last flush's scroll moves into pixel copies this frame can
     /// apply and clips it must repaint instead. A copy is exact only when the
-    /// retained target holds the previous flush, both the clip and the shift
-    /// land on whole pixels, and within the clip nothing but the content
-    /// changes position: whatever lies under it is hidden by one opaque
-    /// rectangle, and anything over it is repainted anyway.
+    /// retained target holds the previous flush, the shift lands on whole
+    /// pixels, and within the clip nothing but the content changes position
+    /// (`copy_blocker`). It copies within the clip's whole pixels and
+    /// repaints the slivers past them.
     #[inline]
     fn scroll_copies(&self, scene: &Scene, damage: &[Rect]) -> (Vec<ScrollCopy>, Vec<Rect>) {
         // A frame with no scroll moved, nearly every one that isn't scrolling,
@@ -12637,20 +12663,44 @@ impl GpuRenderer {
                 continue;
             }
             carried.clear();
+            // A move of whole pixels, to the error of the two offsets it is
+            // the difference of: at 1.5x a whole pixel (zgx-desktop's
+            // `on_pixel_grid`) is 2/3 of a point, which no f32 holds, and
+            // 20,000 points down a list the move is off by up to 0.003 px
+            // (0.012 px at 100,000). Copied, the content lands that far from
+            // where it would be drawn: no pixel tells.
             let whole = |value: f32| {
                 let scaled = value * self.scale;
-                ((scaled - scaled.round()).abs() < 1e-3).then_some(scaled.round() as i32)
+                ((scaled - scaled.round()).abs() < 1. / 64.).then_some(scaled.round() as i32)
             };
-            // The copy of `clip`'s pixels the move makes, if whole.
+            // A view's edge on a device pixel, or the first whole one inside
+            // it (up for its left and top, down for its right and bottom): a
+            // view laid out between pixels (centred in a window of odd width)
+            // copies within them, and the slivers past them repaint.
+            let edge = |value: f32, up: bool| {
+                let scaled = value * self.scale;
+                if (scaled - scaled.round()).abs() < 1e-3 {
+                    scaled.round() as i32
+                } else if up {
+                    scaled.ceil() as i32
+                } else {
+                    scaled.floor() as i32
+                }
+            };
+            let screen = Rect::new(
+                0.,
+                0.,
+                self.width as f32 / self.scale,
+                self.height as f32 / self.scale,
+            );
+            // The copy of `clip`'s pixels the move makes, if the move is whole.
             let pixels_of = |clip: Rect| {
-                let clip = clip.intersection(Rect::new(
-                    0.,
-                    0.,
-                    self.width as f32 / self.scale,
-                    self.height as f32 / self.scale,
-                ))?;
-                let (x, y) = (whole(clip.x)?, whole(clip.y)?);
-                let (right, bottom) = (whole(clip.x + clip.width)?, whole(clip.y + clip.height)?);
+                let clip = clip.intersection(screen)?;
+                let (x, y) = (edge(clip.x, true), edge(clip.y, true));
+                let (right, bottom) = (
+                    edge(clip.x + clip.width, false),
+                    edge(clip.y + clip.height, false),
+                );
                 let (dx, dy) = (whole(scroll.dx)?, whole(scroll.dy)?);
                 // Destination: the clip minus the exposed strip; source: the
                 // same pixels before the move.
@@ -12683,12 +12733,38 @@ impl GpuRenderer {
                 carried.clear();
                 self.copy_next.set(clear);
             }
+            // What of the view lies past its whole pixels: repainted beside
+            // a copy, which leaves it as it was.
+            if pixels.is_some()
+                && let Some(clip) = scroll.clip.intersection(screen)
+            {
+                let at = |pixel: i32| pixel as f32 / self.scale;
+                let (x, y) = (at(edge(clip.x, true)), at(edge(clip.y, true)));
+                let (right, bottom) = (
+                    at(edge(clip.x + clip.width, false)),
+                    at(edge(clip.y + clip.height, false)),
+                );
+                let off_grid = [
+                    Rect::new(clip.x, clip.y, x - clip.x, clip.height),
+                    Rect::new(right, clip.y, clip.x + clip.width - right, clip.height),
+                    Rect::new(clip.x, clip.y, clip.width, y - clip.y),
+                    Rect::new(clip.x, bottom, clip.width, clip.y + clip.height - bottom),
+                ];
+                carried.extend(
+                    off_grid
+                        .into_iter()
+                        .filter(|r| r.width > 0. && r.height > 0.),
+                );
+            }
             // Why it repaints, for devtools (`zgx inspect frames`).
             let refused: Result<_, fn(&Scene) -> String> = match pixels {
                 _ if !zgx::switches::SCROLL_COPY.on() => {
                     Err(|_| "switched off (zgx inspect switch scroll_copy on)".into())
                 }
-                None => Err(|_| "its view or its move falls between device pixels".into()),
+                None if whole(scroll.dx).is_none() || whole(scroll.dy).is_none() => {
+                    Err(|_| "its move falls between device pixels".into())
+                }
+                None => Err(|_| "its view holds no whole device pixel to copy".into()),
                 Some(_) if !copyable => Err(|_| {
                     "the window presents through the system's surface, whose first copy holds \
                      100 MB of graphics memory (macOS)"
@@ -15506,9 +15582,14 @@ impl GpuRenderer {
         // A drawable's frame encoded directly presented as it committed.
         let presented = present.buffers[index].0.drawable && self.metal_inflight.borrow().is_some();
         // The window server reads the surface from its next composite: the
-        // frame must be complete by then.
+        // frame's work must be scheduled by then (`schedule_direct`).
         // (A drawable's direct frame is not waited for: it presents itself.)
-        if presented || self.finish_direct() {
+        let handed = if *PRESENT_COMPLETED {
+            self.finish_direct()
+        } else {
+            self.schedule_direct()
+        };
+        if presented || handed {
             // wgpu still frees what was dropped once its own work is done.
             if present.frame.is_multiple_of(64) {
                 let _ = self.device.poll(wgpu::PollType::Poll);
@@ -16018,7 +16099,8 @@ impl GpuRenderer {
     #[cfg(target_os = "macos")]
     pub fn shown_pixels(&self) -> Option<(u32, u32, Vec<u8>)> {
         let frame = self.shown_frame()?;
-        // Direct frames are waited for before they are shown; wgpu's here.
+        // A direct frame is waited for by `read` (`ShownFrame::pending`);
+        // wgpu's here.
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         frame.read(0, 0, u32::MAX, u32::MAX)
     }
@@ -16032,8 +16114,7 @@ impl GpuRenderer {
         let (buffer, _) = present.buffers.get(present.shown?)?;
         Some(ShownFrame {
             surface: buffer.surface.clone(),
-            pending: buffer
-                .drawable
+            pending: (buffer.drawable || !*PRESENT_COMPLETED)
                 .then(|| self.metal_inflight.borrow().clone())
                 .flatten(),
             over: self.over_frames(),
@@ -16055,10 +16136,13 @@ impl GpuRenderer {
     pub fn debug_take_pass_times(&self) -> Vec<(&'static str, f64)> {
         metal_frame::take_pass_times()
     }
-    /// How long the GPU took to run the frame last presented, when it was
+    /// How long the GPU took to run the last frame waited for, when it was
     /// encoded with Metal directly: the frame's own work, plus however long
     /// other work on the GPU (the window server's compositing, other apps)
-    /// held it up. Taken: `None` until another such frame presents.
+    /// held it up. A frame shows once it is scheduled (`schedule_direct`)
+    /// and is waited for at the next encode, so after a present this is the
+    /// frame before it (the one presented, with `ZGX_PRESENT_COMPLETED=1`).
+    /// Taken: `None` until another such frame completes.
     #[cfg(target_os = "macos")]
     pub fn take_gpu_time(&mut self) -> Option<std::time::Duration> {
         self.gpu_time.take()
