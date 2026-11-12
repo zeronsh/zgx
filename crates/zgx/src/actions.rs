@@ -51,7 +51,9 @@ impl PartialEq for Action {
 }
 
 /// A key with the modifiers held. Bindings match it exactly: the same key and
-/// exactly these modifiers.
+/// exactly these modifiers; failing any, a character Shift only produced (a
+/// digit or punctuation a layout needs Shift for) matches as though Shift
+/// were up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Keystroke {
     /// The key.
@@ -63,6 +65,28 @@ impl Keystroke {
     /// `key` with `modifiers`.
     pub fn new(key: Key, modifiers: Modifiers) -> Self {
         Self { key, modifiers }
+    }
+    /// It as though Shift were up, if Shift may only have produced its
+    /// character: one with no letter in it (punctuation, a digit), which a
+    /// layout can need Shift for. `/` is Shift+7 on a German layout and
+    /// Shift+: on a French one, whose digits need Shift too, so ⌘/ or Ctrl+1
+    /// bound arrive with Shift held. A letter's Shift is its case: Ctrl+K
+    /// bound never takes Ctrl+Shift+K. Browsers and VS Code match these
+    /// characters the same way.
+    fn unshifted(&self) -> Option<Keystroke> {
+        let Key::Character(text) = &self.key else {
+            return None;
+        };
+        if !self.modifiers.shift || text.is_empty() || text.chars().any(char::is_alphabetic) {
+            return None;
+        }
+        Some(Keystroke {
+            key: self.key.clone(),
+            modifiers: Modifiers {
+                shift: false,
+                ..self.modifiers
+            },
+        })
     }
 }
 
@@ -147,6 +171,18 @@ impl KeyBinding {
                     && strokes[0].modifiers == self.sequence[0].modifiers
             }
         }
+    }
+    /// Whether it starts with `strokes`, a stroke whose Shift only produced
+    /// its character taken as though Shift were up
+    /// ([`Keystroke::unshifted`]): tried once no binding starts with them
+    /// exactly, so one that names Shift (Ctrl+Shift+/) wins. A physical
+    /// key's binding is matched exactly.
+    fn starts_with_unshifted(&self, strokes: &[Keystroke]) -> bool {
+        self.code.is_none()
+            && strokes.len() <= self.sequence.len()
+            && self.sequence.iter().zip(strokes).all(|(bound, pressed)| {
+                bound == pressed || pressed.unshifted().is_some_and(|up| *bound == up)
+            })
     }
     /// The app's whatever has the keyboard: a native view with focus (a web
     /// page, a terminal) never has it first, as a browser keeps ⌘T and ⌘W
@@ -370,16 +406,24 @@ impl Registry {
                 context
             })
             .collect();
-        path.iter()
-            .filter_map(|node| self.maps.get(node))
-            .flat_map(|maps| maps.iter().rev())
-            .flat_map(|(_, map)| map.bindings.iter().rev())
-            .find(|binding| {
-                binding.starts_with(std::slice::from_ref(stroke), code)
-                    && binding
+        let bindings = || {
+            path.iter()
+                .filter_map(|node| self.maps.get(node))
+                .flat_map(|maps| maps.iter().rev())
+                .flat_map(|(_, map)| map.bindings.iter().rev())
+                .filter(|binding| {
+                    binding
                         .context
                         .as_ref()
                         .is_none_or(|context| context.matches(&contexts))
+                })
+        };
+        let strokes = std::slice::from_ref(stroke);
+        bindings()
+            .find(|binding| binding.starts_with(strokes, code))
+            .or_else(|| {
+                stroke.unshifted()?;
+                bindings().find(|binding| binding.starts_with_unshifted(strokes))
             })
     }
     /// Whether a binding on `path` takes `stroke` (alone or as a sequence's
@@ -394,6 +438,49 @@ impl Registry {
         self.deciding(path, stroke, code).is_some_and(|binding| {
             binding.reserved && binding.action.downcast_ref::<NoAction>().is_none()
         })
+    }
+    /// The actions of the bindings on `path` (focus first) that `matches`
+    /// takes for `strokes` whole, and whether one is a longer sequence's
+    /// start (a prefix), as `resolve` weighs them.
+    fn candidates(
+        &self,
+        path: &[NodeId],
+        contexts: &[KeyContext],
+        strokes: &[Keystroke],
+        matches: impl Fn(&KeyBinding) -> bool,
+    ) -> (Vec<Action>, bool) {
+        let mut candidates = Vec::new();
+        let mut prefix = false;
+        for node in path {
+            if let Some(maps) = self.maps.get(node) {
+                for (_, map) in maps.iter().rev() {
+                    for binding in map.bindings.iter().rev() {
+                        if binding
+                            .context
+                            .as_ref()
+                            .is_some_and(|context| !context.matches(contexts))
+                            || !matches(binding)
+                        {
+                            continue;
+                        }
+                        if binding.sequence.len() == strokes.len() {
+                            candidates.push(binding.action.clone());
+                            if binding.action.downcast_ref::<NoAction>().is_some() {
+                                break;
+                            }
+                        } else if candidates.is_empty() {
+                            prefix = true;
+                        }
+                    }
+                }
+            }
+            // An inner prefix has precedence over ancestor commands; exact
+            // candidates still retain ancestor fallbacks when no prefix wins.
+            if prefix {
+                break;
+            }
+        }
+        (candidates, prefix)
     }
     pub(crate) fn resolve(
         &mut self,
@@ -426,36 +513,15 @@ impl Registry {
                 context
             })
             .collect();
-        let mut candidates = Vec::new();
-        let mut prefix = false;
-        for node in &path {
-            if let Some(maps) = self.maps.get(node) {
-                for (_, map) in maps.iter().rev() {
-                    for binding in map.bindings.iter().rev() {
-                        if binding
-                            .context
-                            .as_ref()
-                            .is_some_and(|context| !context.matches(&contexts))
-                            || !binding.starts_with(&strokes, code)
-                        {
-                            continue;
-                        }
-                        if binding.sequence.len() == strokes.len() {
-                            candidates.push(binding.action.clone());
-                            if binding.action.downcast_ref::<NoAction>().is_some() {
-                                break;
-                            }
-                        } else if candidates.is_empty() {
-                            prefix = true;
-                        }
-                    }
-                }
-            }
-            // An inner prefix has precedence over ancestor commands; exact
-            // candidates still retain ancestor fallbacks when no prefix wins.
-            if prefix {
-                break;
-            }
+        let (mut candidates, mut prefix) = self.candidates(&path, &contexts, &strokes, |binding| {
+            binding.starts_with(&strokes, code)
+        });
+        // None takes them exactly: a character Shift only produced, as though
+        // Shift were up (Ctrl+Shift+7 for Ctrl+/ on a German layout).
+        if !prefix && candidates.is_empty() && strokes.iter().any(|s| s.unshifted().is_some()) {
+            (candidates, prefix) = self.candidates(&path, &contexts, &strokes, |binding| {
+                binding.starts_with_unshifted(&strokes)
+            });
         }
         if !prefix && candidates.is_empty() {
             return previous.map_or(Resolution::None, |previous| {
@@ -553,6 +619,75 @@ mod tests {
             panic!("exact binding did not win")
         };
         assert_eq!(replay.candidates[0].downcast_ref::<u8>(), Some(&3));
+    }
+    /// What each layout's host sends for a shortcut on a character: on US
+    /// `/` needs no Shift, on German it is Shift+7 and on French Shift+:,
+    /// whose digits need Shift too. A character Shift only produced matches
+    /// as though Shift were up; one bound with Shift wins; a letter's Shift
+    /// is its case.
+    #[test]
+    fn a_shortcut_on_a_character_is_typed_on_any_layout() {
+        let node = crate::scene::Scene::new(100., 100.).root();
+        let registry = Rc::new(RefCell::new(Registry::default()));
+        let ctrl = Modifiers {
+            control: true,
+            ..Default::default()
+        };
+        let ctrl_shift = Modifiers {
+            shift: true,
+            ..ctrl
+        };
+        let at = |key: &str, modifiers| Keystroke::new(Key::Character(key.into()), modifiers);
+        let bind = |key: &str, modifiers, id: u8| {
+            KeyBinding::new([at(key, modifiers)], Action::new(id)).unwrap()
+        };
+        let _guard = Registry::bind(
+            &registry,
+            node,
+            Keymap::new()
+                .bind(bind("/", ctrl, 1))
+                .bind(bind("1", ctrl, 2))
+                .bind(bind("k", ctrl, 3))
+                // Bound first, so tried after Ctrl+; (later bindings are
+                // tried first): it wins as the exact match.
+                .bind(bind(";", ctrl_shift, 5))
+                .bind(bind(";", ctrl, 4)),
+        );
+        let now = Instant::now();
+        let fired = |stroke: Keystroke| -> Option<u8> {
+            match registry
+                .borrow_mut()
+                .resolve(vec![node], stroke, None, false, now)
+            {
+                Resolution::Matched(replay) => replay.candidates[0].downcast_ref::<u8>().copied(),
+                _ => None,
+            }
+        };
+        let binds = |stroke: &Keystroke| registry.borrow().binds(&[node], stroke, None);
+        // US: Ctrl+/ and Ctrl+1 as bound; Ctrl+Shift+/ is `?`, not `/`.
+        assert_eq!(fired(at("/", ctrl)), Some(1), "US Ctrl+/");
+        assert_eq!(fired(at("1", ctrl)), Some(2), "US Ctrl+1");
+        assert_eq!(fired(at("?", ctrl_shift)), None, "US Ctrl+Shift+/ is ?");
+        // German: `/` is Shift+7.
+        assert_eq!(fired(at("/", ctrl_shift)), Some(1), "German Ctrl+Shift+7");
+        assert!(
+            binds(&at("/", ctrl_shift)),
+            "and it is bound, for a native view"
+        );
+        // French: `/` is Shift+: and `1` is Shift+&.
+        assert_eq!(fired(at("1", ctrl_shift)), Some(2), "French Ctrl+Shift+&");
+        // Shift bound wins over Shift only producing it.
+        assert_eq!(fired(at(";", ctrl_shift)), Some(5), "Ctrl+Shift+; bound");
+        assert_eq!(fired(at(";", ctrl)), Some(4));
+        // A letter's Shift is its case, and other modifiers still count.
+        assert_eq!(fired(at("K", ctrl_shift)), None, "Ctrl+Shift+K");
+        assert_eq!(fired(at("k", ctrl_shift)), None, "Ctrl+Shift+k");
+        let ctrl_alt_shift = Modifiers {
+            alt: true,
+            ..ctrl_shift
+        };
+        assert_eq!(fired(at("/", ctrl_alt_shift)), None, "Ctrl+Alt+Shift+7");
+        assert!(!binds(&at("/", ctrl_alt_shift)));
     }
     #[test]
     fn keymap_guard_releases_captured_actions_outside_registry_borrow() {
