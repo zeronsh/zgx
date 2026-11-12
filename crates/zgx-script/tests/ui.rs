@@ -5684,6 +5684,59 @@ fn a_canvas_texts_width_must_be_a_size() {
     );
 }
 
+/// `c:shadow` records the shadow a path casts, in the drawing's order,
+/// written as a `shadow` property is: CSS's blur, half as the sigma drawn,
+/// and its colour by default.
+#[test]
+fn a_canvas_shadow_is_written_as_a_shadow_property_is() {
+    let mut h = Harness::inline(
+        r##"local card = ui.path():rect(10, 10, 80, 40, 8)
+        return ui.canvas { id = "c", w = 200, h = 100,
+            draw = function(c)
+                c:shadow(card, { y = 4, blur = 12, spread = -2, color = "#ff000080" })
+                c:shadow(card)
+                c:fill(card, "#ffffff")
+            end }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    let root = h.find("c").unwrap();
+    let scene = h.ui.scene.borrow();
+    let mut stack = vec![root];
+    let canvas = loop {
+        let n = stack.pop().expect("a canvas");
+        if let zgx::scene::NodeKind::Canvas(canvas) = scene.kind(n) {
+            break canvas.clone();
+        }
+        stack.extend(scene.children(n).iter().copied());
+    };
+    use zgx::canvas::{Draw, Point};
+    use zgx::scene::Color;
+    let drawn: Vec<_> = canvas
+        .commands()
+        .iter()
+        .map(|draw| match draw {
+            Draw::Shadow {
+                color,
+                offset,
+                blur,
+                spread,
+                ..
+            } => format!("{color:?} {offset:?} {blur} {spread}"),
+            Draw::Fill { .. } => "fill".into(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        drawn,
+        [
+            format!("{:?} {:?} 6 -2", Color(255, 0, 0, 128), Point::new(0., 4.)),
+            format!("{:?} {:?} 0 0", Color(0, 0, 0, 90), Point::new(0., 0.)),
+            "fill".into(),
+        ]
+    );
+}
+
 /// A pointer's place in a node's box is the same however it is zoomed, in
 /// any column: a hover tilt read from it stays in its range, so a far card
 /// doesn't tilt itself across its neighbours. Each event that says where.

@@ -533,6 +533,19 @@ pub enum Draw {
         /// How opaque it is, 0 to 1.
         opacity: f32,
     },
+    /// The shadow `path` casts (see [`Canvas::shadow`]).
+    Shadow {
+        /// The shape casting it, filled by the nonzero rule.
+        path: Path,
+        /// Its colour.
+        color: Color,
+        /// How far it falls from the shape.
+        offset: Point,
+        /// Its blur's Gaussian sigma, in points; 0 draws it sharp.
+        blur: f32,
+        /// How far it grows past the shape, or below 0 shrinks into it.
+        spread: f32,
+    },
 }
 /// Where a text's point falls across it (`Canvas::text`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -690,6 +703,27 @@ impl Canvas {
             fit,
             radius,
             opacity,
+        });
+        self
+    }
+    /// Draw the shadow `path` casts: the shape grown by `spread`, moved by
+    /// `offset` and blurred by a Gaussian of `blur` sigma, in `color`, under
+    /// what is drawn after it (the shape itself, drawn next, for a card's
+    /// drop shadow). All of it is drawn, under the shape too.
+    pub fn shadow(
+        &mut self,
+        path: Path,
+        color: Color,
+        offset: Point,
+        blur: f32,
+        spread: f32,
+    ) -> &mut Self {
+        self.commands.push(Draw::Shadow {
+            path,
+            color,
+            offset,
+            blur,
+            spread,
         });
         self
     }
