@@ -17,7 +17,9 @@ use std::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-pub use crate::editor_lines::{Highlighter, LineColors, LineInset, LineInsets, LineSpans, SpanHighlighter, SpanStyle};
+pub use crate::editor_lines::{
+    Highlighter, LineColors, LineInset, LineInsets, LineSpans, SpanHighlighter, SpanStyle,
+};
 
 #[derive(Default)]
 struct Owned {
