@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Vendored from zeronsh/zeron: scripts/ci/admit.py at 7091b0de7, unchanged below
+# Vendored from zeronsh/zeron: scripts/ci/admit.py at 7ac383d88, unchanged below
 # this header. zeron's and zgx's CI share the organization's hosted runners
 # through one admission queue, so the two copies must stay in sync: change it in
 # zeron first, then copy it here whole (keeping this header) and update the hash.
 # .github/ci/test_ci_plan.py checks everything below the header against it.
-# upstream sha256: 9712672fec9a691385e20f1bbf9dd666270eff90cdbcd8c307d2c3d5b6c5125b
+# upstream sha256: d87315880eb7c7ba08cbbe6ce5526f4879ff75e3a3c09f7794add94ec65581fb
 """Admission control for CI runs: a run starts only when all its runners are free.
 
 GitHub queues every job of every run as soon as it can, so under load each run
@@ -130,7 +130,7 @@ KEEP_WAITING_SHARE = 4
 PRIORITY_LABEL = "ci:priority"
 LOCK_LABEL = "ci:lock"
 LOCK_HOURS = 6
-PR_CLAIM = re.compile(r"#(\d{1,4})\s*$")
+PR_CLAIM = re.compile(r"#(\d{1,7})\s*$")  # (pull request numbers: zgx grows ~70 a day; never thousands of digits)
 
 
 def parse_reservation(name: str) -> dict[str, int] | None:
