@@ -1354,6 +1354,14 @@ impl QuadStyle {
             None => painted,
         }
     }
+    /// `paint_bounds` without its shadows: where the box itself and its
+    /// outline paint.
+    pub fn body_bounds(&self, bounds: Rect) -> Rect {
+        match self.outline.filter(Outline::visible) {
+            Some(outline) => bounds.union(outline.outer(bounds)),
+            None => bounds,
+        }
+    }
     /// Whether it paints nothing at all: a box held for its layout or clip.
     pub fn paints_nothing(&self) -> bool {
         self.fill.3 == 0
