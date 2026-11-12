@@ -136,7 +136,7 @@ export const sets = [
       { slug: 'reference/containers', src: 'docs/reference/containers.md', title: 'Containers' },
       { slug: 'reference/controls', src: 'docs/reference/controls.md', title: 'Controls' },
       { slug: 'reference/text', src: 'docs/reference/text.md', title: 'Text', intro: true,
-        sections: ['Text', 'Text options', 'Rich text and spans', 'Example', 'Markdown', 'Selectable text', 'Gotchas'] },
+        sections: ['Text', 'Text options', 'Rich text and spans', 'Example', 'Markdown', 'Fonts', 'Selectable text', 'Gotchas'] },
       { slug: 'reference/dynamic', src: 'docs/reference/dynamic.md', title: 'Dynamic content' },
       { slug: 'reference/scrolling', src: 'docs/reference/scrolling.md', title: 'Scrolling and lists' },
       { slug: 'reference/overlays', src: 'docs/reference/overlays.md', title: 'Overlays and menus' },

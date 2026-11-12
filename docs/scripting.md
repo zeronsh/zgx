@@ -410,6 +410,7 @@ A plugin can also add next to any element of the app, or in its place, without a
 | shared state (`ui.shared`, `{key}` in a template) | every key | those `expose_shared(key, capability)` exposes, likewise; those `expose_shared_read(key, capability)` exposes, to read and follow only (a write is an error naming the key) |
 | `ui.fetch`, `ui.socket`, remote images | yes | with `Capability::Fetch`, and what the app's `fetch_policy` allows |
 | the clipboard, file dialogs | yes | with `Capability::Clipboard`, `Capability::Files` |
+| fonts (`ui.load_font`) | yes | with `Capability::Fonts`, from its directory or below: a font it loads is every window's |
 | terminals (`ui.term`) | yes | with `Capability::Terminals` |
 | web pages (`ui.web`, `ui.webview`) | yes | with `Capability::Web`: its own pages, with their own cookies and storage, not the app's |
 | windows of its own (`ui.window`) | yes | with `Capability::Windows` (one could pose as the app's, or the system's asking for a password); never the app's title bar (`ui.window.titlebar_area`, `controls`) |

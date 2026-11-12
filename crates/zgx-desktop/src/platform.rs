@@ -115,6 +115,13 @@ impl Platform for Desktop {
             let _ = windows.set_text_language(language.map(str::to_owned));
         }
     }
+    fn add_font(&self, bytes: Arc<[u8]>) -> Result<Vec<String>, String> {
+        let windows = self.windows.as_ref().ok_or("no windows here")?;
+        let font = zgx_gpu::text::FontData::new(bytes)?;
+        let families = font.families().to_vec();
+        windows.add_font(font)?;
+        Ok(families)
+    }
     fn open_url(&self, url: &str) -> bool {
         // The launcher runs detached: nothing waits on the browser.
         crate::url::valid_url(url) && open::that_detached(url).is_ok()
