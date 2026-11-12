@@ -2163,6 +2163,39 @@ mod rich_tests {
         );
     }
     #[test]
+    fn a_clamp_of_several_lines_ends_its_ellipsis_at_a_word() {
+        use zgx::text_layout::{TextOptions, TextOverflow};
+        let mut db = cosmic_text::fontdb::Database::new();
+        db.load_font_data(include_bytes!("../tests/fonts/Geist-500-subset.ttf").to_vec());
+        let mut fonts = FontSystem::new_with_locale_and_db("en-US".into(), db);
+        let text = "aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp qq rr ss tt";
+        let rich = RichText::new(
+            text,
+            vec![TextRun {
+                range: 0..text.len(),
+                font_size: 14.,
+                ..Default::default()
+            }],
+        )
+        .unwrap()
+        .with_options(TextOptions {
+            overflow: TextOverflow::Ellipsis,
+            line_clamp: std::num::NonZeroU32::new(2),
+        });
+        // Whatever the width, the clamp ends at a word: no space is left before the ellipsis.
+        for width in (40..=140).step_by(10) {
+            let buffer = rich_buffer(&mut fonts, &rich, Some(width as f32), None);
+            let shown: String = buffer
+                .lines
+                .iter()
+                .map(|line| line.text().to_owned())
+                .collect();
+            assert!(shown.ends_with('\u{2026}'), "{width}: {shown:?}");
+            assert!(!shown.contains(" \u{2026}"), "{width}: {shown:?}");
+        }
+    }
+
+    #[test]
     fn display_line_clamp_shapes_ellipsis_and_excludes_hidden_link_geometry() {
         use zgx::text_layout::{TextOptions, TextOverflow};
         let mut fonts = FontSystem::new();
