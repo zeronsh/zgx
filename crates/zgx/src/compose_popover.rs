@@ -567,8 +567,9 @@ fn submenu_placement(
     rtl: bool,
 ) -> (f32, f32) {
     let right_edge = viewport.x + viewport.width;
-    let right = anchor.x + anchor.width + 4.;
-    let left = anchor.x - width - 4.;
+    // Base UI's submenu: 1 over its menu's edge (the item sits 4 in) and 4 up, so its first item meets the trigger
+    let right = anchor.x + anchor.width + 3.;
+    let left = anchor.x - width - 3.;
     let right_room = right_edge - right;
     let left_room = anchor.x - 4. - viewport.x;
     let x = match rtl {
@@ -579,7 +580,7 @@ fn submenu_placement(
     };
     (
         x.clamp(viewport.x, (right_edge - width).max(viewport.x)),
-        anchor.y.clamp(
+        (anchor.y - 4.).clamp(
             viewport.y,
             (viewport.y + viewport.height - height).max(viewport.y),
         ),
@@ -716,11 +717,11 @@ mod tests {
         let menu = Rect::new(10., 20., 300., 200.);
         assert_eq!(
             submenu_placement(Rect::new(230., 190., 60., 20.), menu, 100., 60., true),
-            (126., 160.)
+            (127., 160.)
         );
         assert_eq!(
             submenu_placement(Rect::new(30., 50., 80., 20.), menu, 100., 60., true),
-            (114., 50.)
+            (113., 46.)
         );
         // A pop-up button's item lines up with its right edge.
         let button = Rect::new(100., 150., 120., 24.);
@@ -795,11 +796,11 @@ mod tests {
         let viewport = Rect::new(10., 20., 300., 200.);
         assert_eq!(
             submenu_placement(Rect::new(30., 50., 80., 20.), viewport, 100., 60., false),
-            (114., 50.)
+            (113., 46.)
         );
         assert_eq!(
             submenu_placement(Rect::new(230., 190., 60., 20.), viewport, 100., 60., false),
-            (126., 160.)
+            (127., 160.)
         );
         // Both sides are too small; choose the more spacious side then clamp.
         assert_eq!(
