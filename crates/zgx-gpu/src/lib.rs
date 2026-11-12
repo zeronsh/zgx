@@ -9694,22 +9694,35 @@ impl GpuRenderer {
                         } else {
                             let before = self.canvases.rasterizations();
                             let (width, height, scale) = (bounds.width, bounds.height, self.scale);
+                            // Drawn to be panned: where the view puts it.
+                            let mut placed = None;
                             let id = self.canvas_texture(item.id, &mut stats, |cache| {
-                                cache.get_viewed(item.id, canvas, view, width, height, scale)
+                                let (raster, placement) = cache
+                                    .get_panned(item.id, canvas, view, width, height, scale)?;
+                                placed = Some(placement);
+                                Ok(raster)
                             })?;
                             stats.canvas_rasterizations +=
                                 (self.canvases.rasterizations() - before) as usize;
-                            canvas_image = Some(id);
-                            quads.push(Quad {
-                                rect: fade,
-                                uv: [0., 0., 1., 1.],
-                                color: [1., 1., 1., item.effects.opacity],
-                                fade,
-                                options: [item.effects.edge_fade, 2., 0., 0.],
-                                shape: [0.; 4],
-                                border: [0.; 4],
-                                mask: NO_MASK,
-                            });
+                            let canvas::Placement { rect, uv } = placed.expect("placed");
+                            if rect[2] > 0. && rect[3] > 0. {
+                                canvas_image = Some(id);
+                                quads.push(Quad {
+                                    rect: [
+                                        bounds.x + rect[0],
+                                        bounds.y + rect[1],
+                                        rect[2],
+                                        rect[3],
+                                    ],
+                                    uv,
+                                    color: [1., 1., 1., item.effects.opacity],
+                                    fade,
+                                    options: [item.effects.edge_fade, 2., 0., 0.],
+                                    shape: [0.; 4],
+                                    border: [0.; 4],
+                                    mask: NO_MASK,
+                                });
+                            }
                         }
                     }
                     NodeKind::Rect(color) => quads.push(rect_quad(*color, fade, item.effects)),
