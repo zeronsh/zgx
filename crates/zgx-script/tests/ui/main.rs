@@ -9,6 +9,8 @@ mod components;
 mod container_queries;
 #[path = "../decision.rs"]
 mod decision;
+#[path = "../decode_image.rs"]
+mod decode_image;
 #[path = "../display_contents.rs"]
 mod display_contents;
 #[path = "../driver.rs"]
