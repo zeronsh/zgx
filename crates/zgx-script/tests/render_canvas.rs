@@ -139,6 +139,101 @@ fn measure_text_measures_as_a_window_does() {
     assert_eq!(width as f32, shown);
 }
 
+/// A platform whose app has its own font, as Zeron has Geist.
+struct WithFonts(Vec<std::sync::Arc<[u8]>>);
+impl zgx::platform::Platform for WithFonts {
+    fn fonts(&self) -> Vec<std::sync::Arc<[u8]>> {
+        self.0.clone()
+    }
+    fn clipboard_text(&self) -> Option<String> {
+        None
+    }
+    fn set_clipboard_text(&self, _: String) -> bool {
+        false
+    }
+    fn open_files(
+        &self,
+        _: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Vec<std::path::PathBuf>, String>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    fn save_file(
+        &self,
+        _: zgx::platform::FilePicker,
+    ) -> zgx::platform::Pending<Result<Option<std::path::PathBuf>, String>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+const GEIST: &[u8] = include_bytes!("../../zgx-desktop/examples/support/fonts/GeistVariable.ttf");
+const LINE: &str = "The quick brown fox jumps";
+
+#[test]
+fn the_apps_own_fonts_measure_and_draw_as_in_its_windows() {
+    let heard: Heard = Rc::default();
+    let sink = heard.clone();
+    let h = Harness::wrapped(
+        move |runtime| {
+            let host = ScriptHost::inline(
+                runtime,
+                "app",
+                r##"
+ui.on_mount(function()
+    ui.task(function()
+        local font = { font = "Geist", size = 16, weight = 600, color = "#000000" }
+        ui.invoke("rendered", ui.render_canvas(function(c)
+            ui.invoke("measured", (c:measure_text("The quick brown fox jumps", font)))
+            c:text("The quick brown fox jumps", 0, 0, font)
+        end, { width = 300, height = 30, background = "#ffffff" }):await())
+    end)
+end)
+return ui.div {}
+"##,
+            );
+            for name in ["rendered", "measured"] {
+                let heard = sink.clone();
+                host.action(name, move |value| {
+                    heard.borrow_mut().push((name.into(), value))
+                });
+            }
+            host
+        },
+        |view| {
+            let fonts = WithFonts(vec![GEIST.into()]);
+            zgx::compose::provide(zgx::platform::PlatformService(Rc::new(fonts)), view)
+        },
+    );
+    let Value::Num(measured) = wait(&h, &heard, "measured") else {
+        panic!("not a width");
+    };
+    // A window's measure, with the app's fonts installed as its renderer's.
+    let font = zgx::text_layout::FontStyle {
+        family: zgx::text_layout::FontFamily::Named("Geist".into()),
+        weight: 600,
+        ..Default::default()
+    };
+    let width = |fonts: &[&[u8]]| {
+        let services = zgx_gpu::TextServices::new();
+        for bytes in fonts {
+            let font = zgx_gpu::text::FontData::new(bytes.to_vec()).unwrap();
+            font.install(&mut services.text_system().borrow_mut());
+        }
+        let mut scene = zgx::scene::Scene::new(1., 1.);
+        services.install(&mut scene);
+        scene.measure_text_with_font(LINE, 16., None, &font).0
+    };
+    let (geist, fallback) = (width(&[GEIST]), width(&[]));
+    assert_eq!(measured as f32, geist);
+    assert!((geist - fallback).abs() > 2., "{geist} and {fallback}");
+    // Drawn in Geist: its ink ends where Geist's width does.
+    let (w, _, pixels) = decode(&wait(&h, &heard, "rendered"));
+    let right = (0..w)
+        .rev()
+        .find(|&x| (0..30).any(|y| pixels[((y * w + x) * 4) as usize] < 128))
+        .unwrap() as f32
+        + 1.;
+    assert!((right - geist).abs() <= 2., "ink to {right}, Geist {geist}");
+}
+
 #[test]
 fn a_size_must_be_given_and_over_zero() {
     let runtime = zgx::reactive::Runtime::new();

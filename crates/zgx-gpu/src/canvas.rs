@@ -374,8 +374,7 @@ pub fn picture(
     let mut pixmap = paint(canvas, view, width, height, scale, background)?;
     let zoom = scale * view.scale;
     for label in canvas.texts() {
-        let size = text.measure(&label.text, label.size, &label.font);
-        let (x, y) = label.origin(size);
+        let (x, y, size) = label_box(label, text);
         let left = ((view.x + x * view.scale) * scale).round() as i32;
         let top = ((view.y + y * view.scale) * scale).round() as i32;
         // A mask's coverage firmed below 2x by how light the text is, as
@@ -441,6 +440,13 @@ pub fn picture(
         }
     }
     straight(pixmap)
+}
+/// Where `label` lays out, as `CanvasLabels` places its text node: its
+/// box's top left and size. Its lines wrap at the box's width.
+fn label_box(label: &CanvasText, text: &mut crate::text::CpuTextRaster) -> (f32, f32, (f32, f32)) {
+    let size = text.measure(&label.text, label.size, None, &label.font);
+    let (x, y) = label.origin(size);
+    (x, y, size)
 }
 /// `image` as a PNG file's bytes (8-bit RGBA).
 #[cfg(feature = "png")]

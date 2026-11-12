@@ -112,7 +112,7 @@ return ui.overlay {
 
 ### A drawing as a PNG: `ui.render_canvas`
 
-`ui.render_canvas(draw, { width, height, scale?, x?, y?, background? })` draws `draw(c, width, height)` as a canvas would, with the same `c`, and gives a promise of the picture as a PNG in base64: what an MCP image's `data` takes, or an export. It needs no canvas or window, so it works when no window shows (a plugin's window paused while the app is hidden, answering a tool). `c:measure_text` measures as on screen, and theme tokens resolve in the app's theme.
+`ui.render_canvas(draw, { width, height, scale?, x?, y?, background? })` draws `draw(c, width, height)` as a canvas would, with the same `c`, and gives a promise of the picture as a PNG in base64: what an MCP image's `data` takes, or an export. It needs no canvas or window, so it works when no window shows (a plugin's window paused while the app is hidden, answering a tool). `c:measure_text` measures as on screen, in the system's fonts and the app's own (bundled with `Application::font`, or replaced since: `Platform::fonts`), and theme tokens resolve in the app's theme.
 
 - **Size.** The picture is `width * scale` by `height * scale` pixels (`scale` is 1 if not given), up to 32 MiB of pixels. `x`, `y` (0) is the point of the drawing at its top left, so one frame of a board can be pictured alone.
 - **Background.** `background` is a color, transparent if not given.

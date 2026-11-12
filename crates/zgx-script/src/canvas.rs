@@ -459,18 +459,53 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     Ok(())
 }
 
+/// The fonts a render shapes with beside the system's: the app's windows'
+/// (`Platform::fonts`), in their order.
+type Fonts = Vec<std::sync::Arc<[u8]>>;
+/// Whether two font lists are the same files.
+fn same_fonts(a: &Fonts, b: &Fonts) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| std::sync::Arc::ptr_eq(a, b))
+}
+/// Each of `fonts` that is a font, installed by `install`.
+fn each_font(fonts: &Fonts, mut install: impl FnMut(&zgx_gpu::text::FontData)) {
+    for bytes in fonts {
+        if let Ok(font) = zgx_gpu::text::FontData::new(bytes.clone()) {
+            install(&font);
+        }
+    }
+}
+
 thread_local! {
     /// What `c:measure_text` measures in while `ui.render_canvas` draws:
-    /// a scene with text services and nothing in it, made at the first.
-    static MEASURING: Rc<RefCell<zgx::scene::Scene>> = {
+    /// a scene with text services and nothing in it, made again when the
+    /// app's fonts change.
+    static MEASURING: RefCell<Option<(Fonts, Rc<RefCell<zgx::scene::Scene>>)>> =
+        const { RefCell::new(None) };
+}
+/// The scene `ui.render_canvas` measures in with `fonts`.
+fn measuring(fonts: &Fonts) -> Rc<RefCell<zgx::scene::Scene>> {
+    MEASURING.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if let Some((had, scene)) = &*slot
+            && same_fonts(had, fonts)
+        {
+            return scene.clone();
+        }
+        let services = zgx_gpu::TextServices::new();
+        each_font(fonts, |font| {
+            font.install(&mut services.text_system().borrow_mut())
+        });
         let mut scene = zgx::scene::Scene::new(1., 1.);
-        zgx_gpu::TextServices::new().install(&mut scene);
-        Rc::new(RefCell::new(scene))
-    };
+        services.install(&mut scene);
+        let scene = Rc::new(RefCell::new(scene));
+        *slot = Some((fonts.clone(), scene.clone()));
+        scene
+    })
 }
 /// The text rasterizer `ui.render_canvas`'s threads share: the system's
-/// fonts, loaded once.
-static TEXT: std::sync::Mutex<Option<zgx_gpu::text::CpuTextRaster>> = std::sync::Mutex::new(None);
+/// fonts and the app's, loaded again when the app's change.
+static TEXT: std::sync::Mutex<Option<(Fonts, zgx_gpu::text::CpuTextRaster)>> =
+    std::sync::Mutex::new(None);
 
 /// `ui.render_canvas(draw, { width, height, scale, x, y, background })`: a
 /// promise of `draw(c, width, height)`'s drawing as a PNG, in base64. The
@@ -499,14 +534,16 @@ fn render_canvas(
     let y = options.get::<Option<f32>>("y")?.unwrap_or(0.);
     let env = crate::node::env(lua)?;
     let theme = zgx::theme::Themes::of(&env.runtime).root().clone();
+    // The app's own fonts (bundled, loaded), as its windows shape with.
+    let fonts: Fonts = (env.platform.borrow().as_ref()).map_or_else(Vec::new, |p| p.0.fonts());
     let recorder = lua.create_userdata(Recorder(Default::default()))?;
     let background = draw_in(theme, || {
         let background = match options.get::<mlua::Value>("background")? {
             mlua::Value::Nil => None,
             v => Some(self::color(&v)?),
         };
-        MEASURING.with(|scene| {
-            zgx::canvas::drawing_for(scene, || draw.call::<()>((&recorder, width, height)))
+        zgx::canvas::drawing_for(&measuring(&fonts), || {
+            draw.call::<()>((&recorder, width, height))
         })?;
         mlua::Result::Ok(background)
     })?;
@@ -519,8 +556,16 @@ fn render_canvas(
     let (tell, mut heard) = zgx::task::latest::<Result<String, String>>();
     let promise = crate::calls::pending(lua, "ui.render_canvas".into())?;
     std::thread::spawn(move || {
-        let mut text = TEXT.lock().unwrap_or_else(|e| e.into_inner());
-        let text = text.get_or_insert_with(Default::default);
+        let mut held = TEXT.lock().unwrap_or_else(|e| e.into_inner());
+        if !held
+            .as_ref()
+            .is_some_and(|(had, _)| same_fonts(had, &fonts))
+        {
+            let mut text = zgx_gpu::text::CpuTextRaster::default();
+            each_font(&fonts, |font| text.register_font(font));
+            *held = Some((fonts, text));
+        }
+        let text = &mut held.as_mut().expect("made just now").1;
         tell.send(
             zgx_gpu::canvas::picture(&canvas, view, width, height, scale, background, text)
                 .and_then(|image| png(&image))

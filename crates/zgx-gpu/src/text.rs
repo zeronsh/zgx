@@ -66,6 +66,10 @@ impl FontData {
     pub fn families(&self) -> &[String] {
         &self.families
     }
+    /// Its file's bytes, shared.
+    pub fn bytes(&self) -> Arc<[u8]> {
+        self.bytes.clone()
+    }
     /// Its size in bytes.
     pub fn byte_len(&self) -> usize {
         self.bytes.len()
@@ -959,15 +963,17 @@ impl CpuTextRaster {
             })
             .collect()
     }
-    /// The width and height `text` takes at `size` in `font`, as a scene
-    /// measures it (`Scene::measure_text_with_font` with these fonts).
+    /// The width and height `text` takes at `size` in `font`, wrapped at
+    /// `width` if given, as a scene measures it
+    /// (`Scene::measure_text_with_font` with these fonts).
     pub fn measure(
         &mut self,
         text: &str,
         size: f32,
+        width: Option<f32>,
         font: &zgx::text_layout::FontStyle,
     ) -> (f32, f32) {
-        ShapedText::with_font(&mut self.fonts, text, size, None, font).size()
+        ShapedText::with_font(&mut self.fonts, text, size, width, font).size()
     }
 }
 

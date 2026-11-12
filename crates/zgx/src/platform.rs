@@ -170,6 +170,13 @@ pub trait Platform {
     fn set_text_language(&self, language: Option<&str>) {
         let _ = language;
     }
+    /// The fonts the app's windows shape text with beside the system's
+    /// (bundled, or replaced since), each a TrueType or OpenType file, in
+    /// the order they took them: what a renderer of its own installs to
+    /// shape and draw as the windows do (`ui.render_canvas`). None here.
+    fn fonts(&self) -> Vec<Arc<[u8]>> {
+        Vec::new()
+    }
     /// Whether the platform looks words up (`look_up`): macOS's dictionary
     /// panel. A context menu offers Look Up where it does.
     fn looks_up(&self) -> bool {

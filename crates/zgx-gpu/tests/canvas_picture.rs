@@ -90,7 +90,38 @@ fn drawing() -> Canvas {
             baseline,
         });
     }
+    // The app's own font (registered as `Application::font` does), and a
+    // text of two lines.
+    for (text, x, anchor, font) in [
+        ("Stillwater 9:41", 14., TextAnchor::Start, geist_semibold()),
+        ("Two\nlines", 226., TextAnchor::End, Default::default()),
+    ] {
+        c.text(CanvasText {
+            text: text.into(),
+            x,
+            y: 66.,
+            size: 13.,
+            color: Color(20, 60, 40, 255),
+            font,
+            anchor,
+            baseline: TextBaseline::Top,
+        });
+    }
     c
+}
+
+fn geist() -> zgx_gpu::text::FontData {
+    zgx_gpu::text::FontData::new(
+        &include_bytes!("../../zgx-desktop/examples/support/fonts/GeistVariable.ttf")[..],
+    )
+    .unwrap()
+}
+fn geist_semibold() -> zgx::text_layout::FontStyle {
+    zgx::text_layout::FontStyle {
+        family: zgx::text_layout::FontFamily::Named("Geist".into()),
+        weight: 600,
+        ..Default::default()
+    }
 }
 
 /// The canvas as a window shows it, read back from the GPU, `scale` pixels
@@ -99,6 +130,7 @@ fn on_screen(scale: f32) -> Vec<u8> {
     let (w, h) = ((W * scale) as u32, (H * scale) as u32);
     let mut gpu = GpuRenderer::new(w, h).expect("a GPU adapter");
     gpu.set_scale_factor(scale);
+    geist().install(&mut gpu.text_system().borrow_mut());
     let mut ui = Ui::new(W, H);
     gpu.install_text(&mut ui.scene.borrow_mut());
     let handle = ui.mount(div().w(W).h(H).child(canvas(|_| drawing()).w(W).h(H)));
@@ -135,7 +167,17 @@ fn apart(a: &[u8], b: &[u8], far: u8) -> (f64, f64) {
 
 #[test]
 fn a_picture_is_what_the_gpu_shows_of_the_canvas() {
+    let fallback = zgx_gpu::text::CpuTextRaster::default().measure(
+        "Stillwater 9:41",
+        13.,
+        None,
+        &geist_semibold(),
+    );
     let mut text = zgx_gpu::text::CpuTextRaster::default();
+    text.register_font(&geist());
+    // Geist, not the face it falls back to without it.
+    let geist = text.measure("Stillwater 9:41", 13., None, &geist_semibold());
+    assert_ne!(geist.0, fallback.0);
     for scale in [1., 2.] {
         let shown = on_screen(scale);
         let picture = zgx_gpu::canvas::picture(
@@ -165,7 +207,10 @@ fn a_picture_is_what_the_gpu_shows_of_the_canvas() {
 
 #[test]
 fn text_is_where_and_as_wide_as_the_canvas_puts_it() {
+    // Geist, so the face (and its side bearings) is the same on every
+    // system, not each one's fallback.
     let mut text = zgx_gpu::text::CpuTextRaster::default();
+    text.register_font(&geist());
     let mut c = Canvas::new();
     c.text(CanvasText {
         text: "MMMM".into(),
@@ -173,22 +218,23 @@ fn text_is_where_and_as_wide_as_the_canvas_puts_it() {
         y: 40.,
         size: 20.,
         color: Color(0, 0, 0, 255),
-        font: Default::default(),
+        font: geist_semibold(),
         anchor: TextAnchor::Center,
         baseline: TextBaseline::Middle,
     });
-    let (width, _) = text.measure("MMMM", 20., &Default::default());
+    let (width, _) = text.measure("MMMM", 20., None, &geist_semibold());
     let picture =
         zgx_gpu::canvas::picture(&c, CanvasView::default(), 200., 80., 1., None, &mut text)
             .unwrap();
-    // Inked columns: centred on 100, about as wide as measured.
+    // Inked columns: centred on 100, as wide as measured less the first
+    // and last M's side bearings (Geist 600: 66..133 for 71.2).
     let inked: Vec<u32> = (0..200)
         .filter(|x| (0..80).any(|y| picture.pixels()[((y * 200 + x) * 4 + 3) as usize] > 128))
         .collect();
     let (left, right) = (inked[0] as f32, *inked.last().unwrap() as f32 + 1.);
     assert!(((left + right) / 2. - 100.).abs() <= 1.5, "{left}..{right}");
     assert!(
-        (right - left - width).abs() <= 4.,
+        right - left <= width + 1. && right - left >= width - 6.,
         "{left}..{right} for {width}"
     );
 }
