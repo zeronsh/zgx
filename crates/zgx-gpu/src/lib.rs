@@ -4062,6 +4062,9 @@ struct GpuContextInner {
     fonts: Rc<RefCell<FontSystem>>,
     /// Shaped text shared by layout measurement and every renderer.
     text_cache: Rc<RefCell<prepared::TextCache>>,
+    /// `fonts` and `text_cache` as text services a scene with none takes
+    /// (`default_text_services`): one for every renderer on this context.
+    text_default: Rc<zgx::scene::DefaultTextServices>,
     quads: QuadPipelines,
     /// Bind group layouts of the quad pipelines: texture and sampler, viewport.
     texture_layout: wgpu::BindGroupLayout,
@@ -4377,24 +4380,29 @@ impl GpuContext {
             areas,
         };
         Self {
-            inner: Rc::new(GpuContextInner {
-                shared,
-                lost,
-                instance,
-                adapter,
-                device,
-                queue,
-                info,
-                fonts: Rc::new(RefCell::new(fonts)),
-                text_cache: Default::default(),
-                quads,
-                texture_layout,
-                viewport_layout,
-                quad_layout,
-                mapped_uploads,
-                vertex_ring,
-                #[cfg(d3d11)]
-                d3d11: d3d11.map(|made| Rc::new(made.0)),
+            inner: Rc::new({
+                let fonts = Rc::new(RefCell::new(fonts));
+                let text_cache = Rc::default();
+                GpuContextInner {
+                    text_default: default_text_services(&fonts, &text_cache),
+                    shared,
+                    lost,
+                    instance,
+                    adapter,
+                    device,
+                    queue,
+                    info,
+                    fonts,
+                    text_cache,
+                    quads,
+                    texture_layout,
+                    viewport_layout,
+                    quad_layout,
+                    mapped_uploads,
+                    vertex_ring,
+                    #[cfg(d3d11)]
+                    d3d11: d3d11.map(|made| Rc::new(made.0)),
+                }
             }),
         }
     }
@@ -4962,6 +4970,17 @@ impl GpuRenderer {
 impl GpuRenderer {
     /// An offscreen renderer `width` by `height` physical pixels, on a context
     /// of its own.
+    ///
+    /// Its context's text services become its thread's default: a scene on
+    /// this thread laid out with none installed (`install_text` not called)
+    /// takes them at its next layout, so its text is measured as it is
+    /// drawn from its first frame, not by zgx's estimate. Renderers sharing
+    /// a context share its text services. Made after another renderer on a
+    /// context of its own, its default replaces that one's for scenes laid
+    /// out from then; a scene keeps the services it took, whichever renderer
+    /// draws it (the first other one to says so, once: `take_issues`). A host
+    /// that calls `install_text` keeps what it installed, and chooses.
+    /// Every renderer constructor does the same.
     pub fn new(width: u32, height: u32) -> Result<Self, GpuError> {
         let context = GpuContext::new()?;
         Self::create(None, width, height, &context)
@@ -5341,6 +5360,8 @@ impl GpuRenderer {
                 | wgpu::BufferUsages::STORAGE,
             mapped_at_creation: false,
         });
+        // A scene laid out without `install_text` is measured by its text.
+        Scene::set_default_text_services(Some(context.inner.text_default.clone()));
         Ok(Self {
             context: context.clone(),
             #[cfg(windows)]
@@ -6057,7 +6078,9 @@ impl GpuRenderer {
     /// Install this renderer's text services on `scene`: native shaping,
     /// and measurement from the prepared text it draws from, so layout and
     /// drawing break lines identically. Call `Ui::refresh_text_geometry`
-    /// afterwards for a scene with mounted text.
+    /// afterwards for a scene with mounted text. Without it a scene takes a
+    /// renderer's text services by itself (`GpuRenderer::new`); installing
+    /// says which, and keeps them.
     pub fn install_text(&self, scene: &mut Scene) {
         install_text(scene, &self.text_system(), &self.text_cache());
     }
@@ -6257,6 +6280,15 @@ impl GpuRenderer {
     /// Draw `scene`'s `damage` (logical rectangles) to the target, and report
     /// what it did.
     pub fn render(&mut self, scene: &Scene, damage: &[Rect]) -> Result<GpuStats, GpuError> {
+        // Drawn first by this renderer, a scene that took another context's
+        // text services (the thread's last made) keeps them: said, once
+        // (`take_issues`).
+        if scene.drawn_with_other_text_services(&self.context.inner.text_default) {
+            self.warn(
+                "a scene measured with another renderer's text services is drawn by this one: \
+                 install_text chooses",
+            );
+        }
         #[cfg(target_os = "macos")]
         {
             self.loop_watch.set_damage(damage.len());
@@ -19942,6 +19974,24 @@ impl TextServices {
     }
 }
 
+/// `fonts` and `cache` as text services a scene whose host installed none
+/// takes (`Scene::set_default_text_services`): a renderer's, so a scene it
+/// draws without `install_text` is measured as it is drawn, not by zgx's
+/// estimate (a row's label narrower than its glyphs, its last one cut).
+/// Held weakly: once they go, scenes keep what they have.
+fn default_text_services(
+    fonts: &Rc<RefCell<FontSystem>>,
+    cache: &Rc<RefCell<prepared::TextCache>>,
+) -> Rc<zgx::scene::DefaultTextServices> {
+    let (fonts, cache) = (Rc::downgrade(fonts), Rc::downgrade(cache));
+    Rc::new(move |scene: &mut Scene| {
+        let (Some(fonts), Some(cache)) = (fonts.upgrade(), cache.upgrade()) else {
+            return false;
+        };
+        install_text(scene, &fonts, &cache);
+        true
+    })
+}
 /// Install text services sharing `shared_fonts` and `shared_cache` on `scene`.
 fn install_text(
     scene: &mut Scene,

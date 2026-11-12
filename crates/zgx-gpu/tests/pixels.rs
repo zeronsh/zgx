@@ -916,6 +916,10 @@ fn shared_device_and_fonts_outlive_individual_renderers_with_lazy_atlases() {
     assert_eq!(second.debug_cache_stats().atlas_bytes, 512 * 512 * 4);
     second.readback().unwrap();
     drop(second);
+    // The scene measures its text with them (a renderer's, taken as it had
+    // none): they go with it.
+    assert!(fonts.upgrade().is_some());
+    drop(scene);
     assert!(fonts.upgrade().is_none());
 }
 
