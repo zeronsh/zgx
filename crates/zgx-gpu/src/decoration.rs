@@ -304,10 +304,10 @@ pub fn shadow_corners(style: &QuadStyle, width: f32, height: f32, spread: f32) -
         .unwrap_or(Corners::all(style.radius));
     radii(
         Corners {
-            top_left: c.top_left + spread,
-            top_right: c.top_right + spread,
-            bottom_right: c.bottom_right + spread,
-            bottom_left: c.bottom_left + spread,
+            top_left: (c.top_left + spread).max(0.),
+            top_right: (c.top_right + spread).max(0.),
+            bottom_right: (c.bottom_right + spread).max(0.),
+            bottom_left: (c.bottom_left + spread).max(0.),
         },
         width,
         height,
@@ -317,7 +317,30 @@ pub fn shadow_corners(style: &QuadStyle, width: f32, height: f32, spread: f32) -
 
 #[cfg(test)]
 mod shadow_tests {
-    use super::shadow_coverage;
+    use super::{shadow_corners, shadow_coverage};
+    use zgx::scene::{Color, QuadStyle};
+
+    fn rounded(radius: f32) -> QuadStyle {
+        QuadStyle {
+            fill: Color(255, 255, 255, 255),
+            radius,
+            border_color: Color(0, 0, 0, 0),
+            border_width: 0.,
+            shadow: None,
+            decoration: None,
+            border_over: false,
+            outline: None,
+        }
+    }
+
+    #[test]
+    fn a_negative_spread_shrinks_the_shadows_corners_to_no_less_than_square() {
+        let style = rounded(8.);
+        assert_eq!(shadow_corners(&style, 100., 100., 4.), [12.; 4]);
+        assert_eq!(shadow_corners(&style, 100., 100., -3.), [5.; 4]);
+        assert_eq!(shadow_corners(&style, 100., 100., -20.), [0.; 4]);
+    }
+
     #[test]
     fn shadow_coverage_is_a_blurred_edge() {
         // Half at the box's edge, as a blurred box is (not fully opaque up

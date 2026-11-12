@@ -9739,7 +9739,9 @@ impl GpuRenderer {
                                 32
                             };
                             for shadow in style.shadows().iter().take(shown) {
-                                let core = bounds.expand(shadow.spread.max(0.));
+                                // A negative spread shrinks the box, as CSS's does.
+                                let spread = shadow.spread.max(-bounds.width.min(bounds.height) * 0.5);
+                                let core = bounds.expand(spread);
                                 let core = Rect::new(
                                     core.x + shadow.offset.x,
                                     core.y + shadow.offset.y,
@@ -9755,7 +9757,7 @@ impl GpuRenderer {
                                     fade: [core.x, core.y, core.width, core.height],
                                     options: [0., 0., 0., 1.],
                                     shape: [
-                                        style.radius + shadow.spread.max(0.),
+                                        (style.radius + spread).max(0.),
                                         0.,
                                         shadow.blur_radius.max(0.001),
                                         0.,
@@ -9764,7 +9766,7 @@ impl GpuRenderer {
                                         style,
                                         core.width,
                                         core.height,
-                                        shadow.spread.max(0.),
+                                        spread,
                                     ),
                                     mask: NO_MASK,
                                 });
