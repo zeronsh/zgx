@@ -1,4 +1,4 @@
-# Vendored from zeronsh/zeron: scripts/tests/test_ci_admit.py at 7091b0de7, the
+# Vendored from zeronsh/zeron: scripts/tests/test_ci_admit.py at 7ac383d88, the
 # tests of admit.py (vendored beside it). Keep in sync with zeron's copy, as
 # admit.py. zgx's changes are marked `zgx:`: admit.py's directory, the cap
 # check (zgx's plan is smaller than zeron's), and no emergency.py here.
@@ -54,6 +54,7 @@ class ReservationTests(unittest.TestCase):
         self.assertIsNone(parse_reservation("admit [linux=12345]"))
         self.assertIsNone(admit.PR_CLAIM.search(f"admit [linux=2] #{giant}"))
         self.assertEqual(admit.PR_CLAIM.search("admit [linux=2] #1356").group(1), "1356")
+        self.assertEqual(admit.PR_CLAIM.search("admit [linux=2] #123456").group(1), "123456")
         scheduler = admit.Scheduler(None, "o/r", 1)
         run = {"event": "pull_request", "head_sha": "abc"}
         self.assertIsNone(scheduler.verified_pr(f"admit [linux=2] #{giant}", run, {77}))
