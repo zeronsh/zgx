@@ -239,10 +239,10 @@ mod state {
                 return;
             };
             SAMPLES.fetch_add(1, Ordering::Relaxed);
-            if (x - at.0).abs() > 0.5 || (y - at.1).abs() > 0.5 {
-                if WRONG.fetch_add(1, Ordering::Relaxed) == 0 {
-                    *FIRST_WRONG.lock().unwrap() = format!("{x:.1},{y:.1}");
-                }
+            if ((x - at.0).abs() > 0.5 || (y - at.1).abs() > 0.5)
+                && WRONG.fetch_add(1, Ordering::Relaxed) == 0
+            {
+                *FIRST_WRONG.lock().unwrap() = format!("{x:.1},{y:.1}");
             }
         });
         // kCFRunLoopBeforeWaiting, repeating, after Core Animation's commit (order 2000000).
