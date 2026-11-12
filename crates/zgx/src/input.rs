@@ -1751,19 +1751,20 @@ impl InputDispatcher {
     /// button that slid away from it stops being hovered (and what slid
     /// under it starts) without waiting for the pointer to move. Nothing
     /// changes while a press holds the pointer or a drag is under way.
-    pub fn refresh_hover(&self, scene: &Rc<RefCell<Scene>>) {
+    /// Whether a listener heard an enter or leave.
+    pub fn refresh_hover(&self, scene: &Rc<RefCell<Scene>>) -> bool {
         let pointer = {
             let state = self.state.borrow();
             if state.captured.is_some() || state.drag.is_some() {
-                return;
+                return false;
             }
             state.pointer
         };
         let Some((x, y)) = pointer else {
-            return;
+            return false;
         };
         let hit = self.hit_target(&scene.borrow(), x, y);
-        self.set_hover(scene, hit);
+        self.set_hover(scene, hit)
     }
     /// Hover where the pointer passed (`Ui::try_pointer_passed`): what a
     /// move to `x, y` does to hover, its enters and leaves, and nothing more.

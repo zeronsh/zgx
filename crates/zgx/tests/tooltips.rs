@@ -408,3 +408,46 @@ fn a_tooltip_at_the_back_does_not_show_until_the_app_comes_forward() {
         Some(zgx::scene::PopupRole::Tooltip)
     );
 }
+
+#[test]
+fn a_card_opening_under_the_pointer_tells_its_view_nothing() {
+    use std::cell::Cell;
+    let mut ui = Ui::new(420., 300.);
+    ui.set_popup_screens(vec![zgx::scene::Rect::new(0., 0., 1000., 1000.)]);
+    let executor = Rc::new(RefCell::new(LocalExecutor::new()));
+    let (entered, left) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
+    let (enters, leaves) = (entered.clone(), left.clone());
+    // Where a card not yet placed lies, at the window's corner, before it
+    // moves above its view.
+    ui.mount(provide(
+        TaskRunner::from_executor(executor.clone()),
+        column().p(16.).child(
+            div()
+                .size(120., 28.)
+                .on_event(move |cx| {
+                    if cx.target != cx.current_target {
+                        return;
+                    }
+                    match cx.event {
+                        InputEvent::PointerEnter => enters.set(enters.get() + 1),
+                        InputEvent::PointerLeave => leaves.set(leaves.get() + 1),
+                        _ => {}
+                    }
+                })
+                .tooltip(
+                    Tooltip::from(column().size(160., 80.).child(text("Card"))).interactive(true),
+                ),
+        ),
+    ));
+    ui.prepare_frame();
+    hover(&mut ui, 76., 30.);
+    let end = std::time::Instant::now() + Duration::from_secs(2);
+    while ui.scene.borrow().popups().is_empty() {
+        assert!(std::time::Instant::now() < end, "the card never opened");
+        while executor.borrow_mut().tick() > 0 {}
+        ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    ui.prepare_frame();
+    assert_eq!((entered.get(), left.get()), (1, 0));
+}
