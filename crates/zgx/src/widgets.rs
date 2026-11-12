@@ -3035,7 +3035,7 @@ impl Ui {
         self.storage.pixel_scale.clone()
     }
     /// Whether input is being dispatched, so a scroll now is the user's.
-    pub(crate) fn is_dispatching(&self) -> bool {
+    pub fn is_dispatching(&self) -> bool {
         self.storage.dispatching.get()
     }
     /// Hold the style of the element opening now (`None`: it has none).
@@ -3209,6 +3209,11 @@ impl Ui {
     /// ever (`Ui::dismiss_popups`). The host's to tell, as focus changes.
     pub fn set_app_active(&self, active: bool) {
         self.scene.borrow_mut().set_popups_held(!active);
+    }
+    /// Whether the window is the active one now, its keys going to it
+    /// (`Ui::set_window_active`).
+    pub fn window_is_active(&self) -> bool {
+        !self.storage.selection.borrow().inactive
     }
     /// Whether the window is the active one, its keys going to it
     /// (`Ui::set_window_active`), as it changes.
