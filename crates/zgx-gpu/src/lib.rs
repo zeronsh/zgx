@@ -15,6 +15,8 @@ mod composition;
 mod core_text_glyphs;
 #[cfg(d3d11)]
 mod d3d11_frame;
+#[cfg(target_os = "linux")]
+mod display_gpu;
 #[cfg(windows)]
 mod dx12_fill;
 #[cfg(windows)]
@@ -3787,7 +3789,8 @@ pub fn measure_text(
     text::ShapedText::new(fonts, text, size, width).size()
 }
 /// The GPU an interface draws on: the integrated one of a machine with two,
-/// which keeps a laptop's discrete GPU asleep.
+/// which keeps a laptop's discrete GPU asleep. On Linux, where the display
+/// server says which GPU it composites with, that one (display_gpu.rs).
 const POWER: wgpu::PowerPreference = wgpu::PowerPreference::LowPower;
 /// `WGPU_FORCE_FALLBACK_ADAPTER=1` (wgpu's own name): the software adapter
 /// even where there is a GPU (WARP on Windows, for both Direct3D 12 and
@@ -4210,7 +4213,34 @@ impl GpuContext {
                         .as_ref()
                         .is_none_or(|surface| adapter.is_surface_supported(surface))
                 });
-            #[cfg(not(windows))]
+            // Linux: the adapter on the GPU the window's display server
+            // composites with, which shows its frames without handing them
+            // across from another (display_gpu.rs); else the low-power one.
+            // Vulkan's adapters report where they are; GL's, made only
+            // where Vulkan has no driver, don't.
+            #[cfg(target_os = "linux")]
+            let preferred = (!fallback && backends.contains(wgpu::Backends::VULKAN))
+                .then(|| {
+                    window
+                        .as_deref()
+                        .and_then(display_gpu::DisplayGpu::of_window)
+                })
+                .flatten()
+                .and_then(|gpu| {
+                    let mut adapters: Vec<wgpu::Adapter> =
+                        pollster::block_on(instance.enumerate_adapters(backends))
+                            .into_iter()
+                            .filter(|adapter| {
+                                surface
+                                    .as_ref()
+                                    .is_none_or(|surface| adapter.is_surface_supported(surface))
+                            })
+                            .collect();
+                    let infos: Vec<wgpu::AdapterInfo> =
+                        adapters.iter().map(wgpu::Adapter::get_info).collect();
+                    gpu.adapter(&infos).map(|at| adapters.swap_remove(at))
+                });
+            #[cfg(not(any(windows, target_os = "linux")))]
             let preferred = None;
             let adapter = match preferred {
                 Some(adapter) => Ok(adapter),
