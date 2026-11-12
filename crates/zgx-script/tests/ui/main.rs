@@ -35,6 +35,8 @@ mod hit_target;
 mod host_surfaces;
 #[path = "../host_top_layer.rs"]
 mod host_top_layer;
+#[path = "../host_view.rs"]
+mod host_view;
 #[path = "../i18n_script.rs"]
 mod i18n_script;
 #[path = "../idle_gc.rs"]
