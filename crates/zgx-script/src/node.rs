@@ -1524,6 +1524,10 @@ pub(crate) struct SpanRare {
     /// `on_hover = function(inside, box) end`: a link told of the pointer
     /// coming and going, with its box `{ x, y, w, h }` in the window.
     pub on_hover: Option<Function>,
+    /// `inline_svg = { svg = "<svg …>", w, h, d }`: an SVG in place of the
+    /// text, in ems of it (width, height above the baseline, depth below):
+    /// a formula among words (`TextSpan::inline_svg`).
+    pub inline_svg: Option<(String, f32, f32, f32)>,
 }
 /// `ui.span { icon = { src = …, size = 12, gap = 4, tint = …, bg = …,
 /// radius = 4, pad = 2 } }`.
@@ -5038,6 +5042,16 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 b"fade_in" => span_fade_in(lua, given, &mut span)?,
                 b"on_click" => span.click = Some(handler(given)?),
                 b"on_hover" => rare_mut(&mut span).on_hover = Some(lua.unpack(given)?),
+                b"inline_svg" => {
+                    let t: Table = lua.unpack(given)?;
+                    let num = |k: &str| -> mlua::Result<f32> {
+                        Ok(t.get::<Option<f32>>(k)?
+                            .filter(|v| v.is_finite() && *v >= 0.)
+                            .unwrap_or(0.))
+                    };
+                    rare_mut(&mut span).inline_svg =
+                        Some((t.get::<String>("svg")?, num("w")?, num("h")?, num("d")?));
+                }
                 b"href" => span.href = Some(lua.unpack::<String>(given)?.into()),
                 b"context_menu" => match given {
                     mlua::Value::Function(f) => rare_mut(&mut span).menu = Some(f),

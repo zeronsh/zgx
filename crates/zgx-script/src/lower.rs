@@ -1502,6 +1502,25 @@ fn tooltip(anchor: View, tip: &crate::node::Tooltip, low: &Rc<Lowering>) -> View
 }
 
 /// `view` under the theme scope `theme = …` asks for.
+/// An inline SVG's data by its source: the same picture keeps one identity,
+/// so a paragraph built again (a reply streaming) doesn't raster it again.
+fn inline_svg_data(source: &str) -> Option<Arc<zgx::svg::SvgData>> {
+    thread_local! {
+        static MADE: std::cell::RefCell<HashMap<String, Arc<zgx::svg::SvgData>>> = Default::default();
+    }
+    MADE.with_borrow_mut(|made| {
+        if let Some(found) = made.get(source) {
+            return Some(found.clone());
+        }
+        let data = Arc::new(zgx::svg::SvgData::new(source.as_bytes().to_vec()).ok()?);
+        if made.len() >= 512 {
+            made.clear();
+        }
+        made.insert(source.to_owned(), data.clone());
+        Some(data)
+    })
+}
+
 /// A markdown view's `on_math`, each formula asked once: the same SVG
 /// (one identity, so rasterized once) for every build that shows it.
 fn math_renderer(on_math: mlua::Function, vm: &Rc<Vm>) -> crate::markdown::view::MathFn {
@@ -8801,6 +8820,16 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     }
                 }
                 let rare = span.rare.as_deref();
+                if let Some((svg, w, h, d)) = rare.and_then(|rare| rare.inline_svg.as_ref())
+                    && let Some(svg) = inline_svg_data(svg)
+                {
+                    out = out.inline_svg(zgx::compose::InlineSvg {
+                        svg,
+                        width: *w,
+                        height: *h,
+                        depth: *d,
+                    });
+                }
                 if let Some(hook) = rare.and_then(|rare| rare.on_hover.clone()) {
                     let vm = vm.clone();
                     out = out.on_hover(move |inside, b| {

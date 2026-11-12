@@ -45,8 +45,10 @@ pub struct Options {
     /// More fields for a code block, from its language and text (coloured
     /// lines, say): `(name, value)` pairs.
     pub code: Option<CodeFields>,
-    /// TeX between dollars is math: `$…$` a run with `m` 1, `$$…$$` one
-    /// with `m` 2, or a `math` block (`x`) when it is its paragraph whole.
+    /// TeX between double dollars is math, as remark-math reads it with
+    /// `singleDollarTextMath` off: `$$…$$` among words a run with `m` 2, a
+    /// `math` block (`x`) when it is its paragraph whole. Single dollars are
+    /// text.
     pub math: bool,
 }
 
@@ -1951,7 +1953,8 @@ impl Builder<'_> {
                 None => self.push_text(&text, false),
             },
             Event::Code(text) => self.push_text(&text, true),
-            Event::InlineMath(text) => self.push_math(&text, 1),
+            // single dollars are text, as remark-math's `singleDollarTextMath: false`: "$5 and $6"
+            Event::InlineMath(text) => self.push_text(&format!("${text}$"), false),
             Event::DisplayMath(text) => self.push_math(&text, 2),
             Event::SoftBreak => {
                 let breaks = self.options.breaks;

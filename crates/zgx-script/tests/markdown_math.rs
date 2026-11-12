@@ -32,7 +32,7 @@ fn drawing(h: f32) -> String {
 
 #[test]
 fn inline_math_is_drawn_in_the_line_and_reads_as_its_tex() {
-    let mut h = app("a $x^2$ b", &drawing(1.));
+    let mut h = app("a $$x^2$$ b", &drawing(1.));
     assert_eq!(h.text("asked"), "x^2;");
     let tree = h.tree();
     assert!(tree.contains("\"a x^2 b\""), "{tree}");
@@ -40,8 +40,8 @@ fn inline_math_is_drawn_in_the_line_and_reads_as_its_tex() {
 
 #[test]
 fn a_tall_formula_grows_its_line() {
-    let short = app("a $x$ b", &drawing(0.5)).bounds("md").height;
-    let tall = app("a $x$ b", &drawing(4.)).bounds("md").height;
+    let short = app("a $$x$$ b", &drawing(0.5)).bounds("md").height;
+    let tall = app("a $$x$$ b", &drawing(4.)).bounds("md").height;
     assert!(tall >= short + 40., "short {short}, tall {tall}");
 }
 
@@ -55,8 +55,15 @@ fn display_math_alone_is_its_own_block() {
 
 #[test]
 fn math_it_cannot_draw_shows_as_code() {
-    let mut h = app("a $\\nope$ b", "on_math = function() return nil end,");
+    let mut h = app("a $$\\nope$$ b", "on_math = function() return nil end,");
     assert!(h.tree().contains("\\nope"), "{}", h.tree());
+}
+
+#[test]
+fn single_dollars_are_text_even_with_on_math() {
+    let mut h = app("costs $5 and $6", &drawing(1.));
+    assert_eq!(h.text("asked"), "");
+    assert!(h.tree().contains("costs $5 and $6"), "{}", h.tree());
 }
 
 #[test]
@@ -165,4 +172,24 @@ fn a_long_text_the_host_holds_is_read_without_the_script_and_shown_over_frames()
     h.frames(400);
     h.ui.find_text("The last line.");
     assert_eq!(h.ui.find_status().count, 1);
+}
+
+#[test]
+fn a_span_draws_an_inline_svg_in_its_line() {
+    let rich = |h: f32| {
+        let code = format!(
+            r##"return ui.column {{ w = 300, ui.rich {{ id = "p", text_size = 16,
+    ui.span {{ "a ", literal = true }},
+    ui.span {{ "x", literal = true, inline_svg = {{ svg = "{BOX}", w = 1, h = {h}, d = 0.5 }} }},
+    ui.span {{ " b", literal = true }} }} }}"##
+        );
+        let code: &'static str = Box::leak(code.into_boxed_str());
+        let mut h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
+        h.frames(2);
+        (h.bounds("p").height, h.tree())
+    };
+    let (short, tree) = rich(0.5);
+    let (tall, _) = rich(4.);
+    assert!(tall >= short + 40., "short {short}, tall {tall}");
+    assert!(tree.contains("a x b"), "reads as its text: {tree}");
 }

@@ -98,7 +98,8 @@ fn span(run: &Value, bold: bool, math: Option<&MathFn>) -> zgx::compose::TextSpa
     let fields = RunFields::of(run);
     let tex = text_of(fields.text);
     if fields.math > 0
-        && let Some(drawn) = math.and_then(|math| math(&tex, fields.math == 2))
+        // among words a formula is inline, as KaTeX draws remark-math's inlineMath
+        && let Some(drawn) = math.and_then(|math| math(&tex, false))
     {
         return zgx::compose::text_span(tex).inline_svg(drawn);
     }
