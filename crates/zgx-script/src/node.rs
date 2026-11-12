@@ -1307,6 +1307,8 @@ pub(crate) enum Kind {
         /// `dismiss_on_backdrop = false`: a click outside doesn't close it
         /// (a dialog that must be answered).
         dismiss: Option<bool>,
+        /// `scrim_blur = sigma`: what lies behind the backdrop blurs.
+        scrim_blur: Option<f32>,
         /// `on_close` beside a state `open`: runs as the person closes it
         /// (Escape, the backdrop); a controlled `open` has its own.
         on_close: Option<Function>,
@@ -3642,6 +3644,7 @@ const WIDGET_FIELDS: &[&str] = &[
     "on_change",
     "on_commit",
     "dismiss_on_backdrop",
+    "scrim_blur",
     "match_anchor_width",
     "step",
     "options",
@@ -4769,7 +4772,7 @@ fn modal_placement_of(value: mlua::Value) -> mlua::Result<Option<zgx::compose::M
 
 /// `placement = { side = "bottom", align = "end", offset = 4 }`: where an
 /// anchored popover or menu opens.
-fn placement_of(value: mlua::Value) -> mlua::Result<Option<zgx::compose::Placement>> {
+pub(crate) fn placement_of(value: mlua::Value) -> mlua::Result<Option<zgx::compose::Placement>> {
     use zgx::compose::{Placement, PlacementEdge, PlacementSide};
     let table = match value {
         mlua::Value::Nil => return Ok(None),
@@ -6090,6 +6093,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         autofocus: table.get::<Option<bool>>("autofocus")?.unwrap_or(true),
                         layer: false,
                         dismiss: table.get("dismiss_on_backdrop")?,
+                        scrim_blur: table.get("scrim_blur")?,
                         on_close,
                     },
                 ),
@@ -6123,6 +6127,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             autofocus: false,
                             layer: true,
                             dismiss: None,
+                            scrim_blur: None,
                             on_close: None,
                         },
                     ),

@@ -18111,6 +18111,9 @@ export type ModalProps = {
 	-- false: a click outside doesn't close it (a dialog that must be
 	-- answered; Escape still does).
 	dismiss_on_backdrop: boolean?,
+	-- What lies behind the backdrop blurs by this sigma, the panel sharp
+	-- (CSS `backdrop-filter: blur()` on a dialog's backdrop).
+	scrim_blur: number?,
 }
 -- Where an anchored popover or menu opens: on `side` of its trigger
 -- (flipping when that side lacks room), lined up with its start, centre
@@ -21822,6 +21825,16 @@ declare ui: {
 	-- panel, each item, an item under the pointer and one with keyboard focus, in plain values.
 	-- `fade`: ms a menu fades in as it opens and out as it closes (at once from the keyboard, and when an item is chosen).
 	menu_look: (look: { panel: Styles?, item: Styles?, hover: Styles?, focus: Styles?, fade: number? }) -> (),
+	-- The look of the find bar zgx builds (Command-F), as the app's own search field: the floating panel,
+	-- the group holding the icon, field, count and steps (close sits after it), the field and its focus,
+	-- the count, the buttons and their hover and press, each icon's box, in plain values. `icons`: SVG
+	-- paths from the script's folder, or SVG markup, in the text's colour; `search` leads the field.
+	-- `short_count` shows "1/3" for "1 of 3"; the count and steps show once `navigator_after` characters are typed.
+	find_look: (look: { panel: Styles?, group: Styles?, field: Styles?, field_focus: Styles?, count: Styles?, button: Styles?, button_hover: Styles?, button_active: Styles?, icon: Styles?, icons: { search: string?, previous: string?, next: string?, close: string? }?, placeholder: string?, short_count: boolean?, navigator_after: number? }) -> (),
+	-- The look every text tip takes (`tooltip = "…"`): its panel in plain values, where tips go unless their
+	-- node sets `tooltip_placement`, and `keep_below`: points at the window's top (a titlebar) no tip reaches
+	-- into, a tip above its node flipping below it instead.
+	tooltip_look: (look: { panel: Styles?, placement: Placement?, keep_below: number? }) -> (),
 	-- Whether the last input was the keyboard's (a key that moves or types since the last press), as
 	-- `:focus-visible` reads it: what it opens can skip its fade, as a menu opened from the keyboard does.
 	keyboard_in_use: () -> boolean,

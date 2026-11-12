@@ -219,13 +219,18 @@ pub(crate) fn activate(
         let fading_out = fades.is_some() && !desired;
         // Shown while focus moves into it (a scope pushes only into what shows);
         // the fade starts once it has.
-        ui.scene.borrow_mut().set_effects(
-            overlay,
-            Effects {
-                opacity: if desired || fading_out { 1. } else { 0. },
-                ..Default::default()
-            },
-        );
+        {
+            // its other effects (a backdrop's blur, `scrim_blur`) stay
+            let mut scene = ui.scene.borrow_mut();
+            let kept = scene.effects(overlay);
+            scene.set_effects(
+                overlay,
+                Effects {
+                    opacity: if desired || fading_out { 1. } else { 0. },
+                    ..kept
+                },
+            );
+        }
         let start_fade = |ui: &Ui| {
             let Some((duration, runner, from, to)) = fades else {
                 return;

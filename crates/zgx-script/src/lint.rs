@@ -259,6 +259,8 @@ const NOT_ELEMENTS: &[&str] = &[
     "run_command",
     "shortcut_owner",
     "menu_look",
+    "find_look",
+    "tooltip_look",
     "keyboard_in_use",
     "window_rect",
     "windows",

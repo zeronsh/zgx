@@ -84,6 +84,7 @@ pub(crate) fn mount(
     // `View::open_over`'s item, if any.
     over: Option<Box<dyn Fn() -> Option<NodeId>>>,
     arrow: Option<Arrow>,
+    keep_below: f32,
 ) {
     mount_placement(
         screens,
@@ -96,6 +97,7 @@ pub(crate) fn mount(
         Some(at),
         over,
         arrow,
+        keep_below,
     );
 }
 
@@ -110,7 +112,7 @@ pub(crate) fn mount_submenu(
     panel: NodeId,
 ) {
     mount_placement(
-        screens, ui, owner, anchor, overlay, position, panel, None, None, None,
+        screens, ui, owner, anchor, overlay, position, panel, None, None, None, 0.,
     );
 }
 
@@ -214,6 +216,7 @@ fn mount_placement(
     at: Option<Placement>,
     over: Option<Box<dyn Fn() -> Option<NodeId>>>,
     arrow: Option<Arrow>,
+    keep_below: f32,
 ) {
     let anchor_bounds = ui.observe_bounds(anchor);
     let viewport = ui.observe_bounds(overlay);
@@ -227,6 +230,10 @@ fn mount_placement(
         let viewport = screens
             .with(|screens| screen_of(screens, anchor))
             .unwrap_or_else(|| viewport.get());
+        let viewport = match keep_below > 0. && keep_below < viewport.height {
+            true => Rect::new(viewport.x, viewport.y + keep_below, viewport.width, viewport.height - keep_below),
+            false => viewport,
+        };
         let panel = panel_bounds.get();
         let current = position_bounds.get();
         let Some(ui) = weak.upgrade() else {

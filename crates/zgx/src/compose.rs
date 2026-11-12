@@ -451,6 +451,10 @@ type EventListener = Box<dyn FnMut(&mut EventContext)>;
 #[derive(Default)]
 struct PortalOptions {
     placement: Option<crate::compose_popover::Placement>,
+    /// `keep_below`: placed as if the window began this far down (a titlebar band).
+    keep_below: f32,
+    /// `scrim_blur`: what lies behind a modal's backdrop blurs by this sigma.
+    scrim_blur: f32,
     /// `layer`: a non-modal layer (toasts).
     layer: bool,
     /// `top_layer`: a layer above every other, under the document root.
@@ -1067,6 +1071,19 @@ impl View {
     /// it, start-aligned, 4 points away unless set).
     pub fn placement(mut self, placement: crate::compose_popover::Placement) -> Self {
         self.rare_mut().portal.get_or_insert_default().placement = Some(placement);
+        self
+    }
+    /// Place this popover as if the window began `top` points down: it
+    /// flips below its trigger rather than reach into that band (a
+    /// titlebar's).
+    /// A modal's backdrop blurs what lies behind it by `sigma` points (CSS
+    /// `backdrop-filter: blur()` on a dialog's backdrop), its panel sharp.
+    pub fn scrim_blur(mut self, sigma: f32) -> Self {
+        self.rare_mut().portal.get_or_insert_default().scrim_blur = sigma.max(0.);
+        self
+    }
+    pub(crate) fn keep_below(mut self, top: f32) -> Self {
+        self.rare_mut().portal.get_or_insert_default().keep_below = top.max(0.);
         self
     }
     /// Hear a person's paste into this editor before it goes in, from a
@@ -2479,7 +2496,7 @@ pub use crate::compose_rich::{
     text_span,
 };
 pub use crate::compose_scrollbar::{ScrollbarEase, ScrollbarStyle};
-pub use crate::compose_tooltip::{Tooltip, TooltipTiming, set_tooltip_timing};
+pub use crate::compose_tooltip::{Tooltip, TooltipLook, TooltipTiming, set_tooltip_look, set_tooltip_timing};
 /// Reactive inline children; equal resolved content preserves paragraph layout/paint.
 pub fn rich_text_signal(compute: impl FnMut() -> Vec<TextSpan> + 'static) -> View {
     View::new(Kind::RichText(Box::new(compute)))
@@ -4427,6 +4444,9 @@ fn mount_portal_panel(
         .and_then(|r| r.portal.as_ref())
         .is_some_and(|p| p.layer || p.at_caret);
     if !anchored && !overlay_only {
+        let scrim_blur = (view.rare.as_ref())
+            .and_then(|r| r.portal.as_ref())
+            .map_or(0., |p| p.scrim_blur);
         // The theme's backdrop, following it.
         let (scene, theme, overlay) = (ui.scene.clone(), ui.theme_scope(), portal.overlay);
         ui.bind(overlay, move || {
@@ -4441,6 +4461,12 @@ fn mount_portal_panel(
                     },
                 },
             );
+            if scrim_blur > 0. {
+                let mut scene = scene.borrow_mut();
+                let mut effects = scene.effects(overlay);
+                effects.blur_radius = scrim_blur;
+                scene.set_effects(overlay, effects);
+            }
         });
     }
     // A modal (not a layer, nor a panel at a caret) opening closes the
@@ -4576,10 +4602,10 @@ fn mount_portal_panel(
     let dismiss_backdrop = rare.as_mut().and_then(|r| r.dismiss_backdrop.take());
     let on_dismiss = rare.as_mut().and_then(|r| r.on_dismiss.take());
     let dismiss_backdrop = dismiss_backdrop.unwrap_or(!is_submenu);
-    let (placement, modal_placement, autofocus, over, arrow) = rare
+    let (placement, modal_placement, autofocus, over, arrow, keep_below) = rare
         .and_then(|r| r.portal.take())
-        .map_or((None, None, None, None, None), |p| {
-            (p.placement, p.modal_placement, p.autofocus, p.over, p.arrow)
+        .map_or((None, None, None, None, None, 0.), |p| {
+            (p.placement, p.modal_placement, p.autofocus, p.over, p.arrow, p.keep_below)
         });
     // The arrow is drawn as the panel is: a copy of its styles, and of what
     // its reactive style gives each time it runs (a background following
@@ -4751,6 +4777,7 @@ fn mount_portal_panel(
                 placement,
                 over,
                 arrow,
+                keep_below,
             );
         }
     } else {

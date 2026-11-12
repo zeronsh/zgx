@@ -136,3 +136,73 @@ fn a_menu_fades_out_unless_an_item_was_chosen() {
     zgx::compose::set_menu_look(Default::default());
     assert!(!drawn(&mut h), "a chosen item closes it at once");
 }
+
+/// `ui.find_look` gives the find bar zgx builds the app's look: its field
+/// takes the height, and Enter steps only once the navigator shows.
+#[test]
+fn a_find_look_styles_the_find_bar() {
+    let mut h = Harness::inline(
+        r##"ui.find_look {
+            panel = { rounded = 10 }, field = { h = 28 }, short_count = true, navigator_after = 3,
+            placeholder = "Search",
+            icons = { search = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><circle cx='8' cy='8' r='5'/></svg>" },
+        }
+        return ui.column { w = 800, h = 600, ui.text { "apple apple apple" } }"##,
+    );
+    h.frames(2);
+    assert!(h.ui.open_find());
+    h.frames(2);
+    let field = h.ui.input.focused().unwrap();
+    let height = h.ui.scene.borrow().bounds(field).height;
+    let search = |h: &mut Harness, text: &str| {
+        h.keys("cmd+a");
+        h.key(zgx::input::Key::Backspace);
+        h.ui.dispatch(zgx::input::InputEvent::Text(text.into()));
+        h.frames(3);
+        h.key(zgx::input::Key::Enter);
+        h.frames(3);
+        h.ui.find_status().current
+    };
+    let short = search(&mut h, "ap");
+    let long = search(&mut h, "apple");
+    zgx::find::set_find_look(Default::default());
+    assert_eq!(h.error(), None);
+    assert_eq!(height, 28.);
+    assert_eq!((short, long), (Some(0), Some(1)));
+}
+
+/// `ui.tooltip_look { keep_below }`: a tip that would open above a node in
+/// that top band (a titlebar's) flips below it, and takes the look's panel.
+#[test]
+fn a_tooltip_look_keeps_tips_below_the_titlebar_band() {
+    let mut h = Harness::inline(
+        r##"ui.tooltip_look { panel = { px = 8, py = 4, rounded = 10 }, placement = { side = "top", align = "center", offset = 4 }, keep_below = 40 }
+        return ui.column { w = 600, h = 400,
+            ui.div { h = 10 },
+            ui.button { id = "badge", w = 40, h = 20, tooltip = "3 files in library", tooltip_delay = 0, "3" },
+        }"##,
+    );
+    h.frames(2);
+    h.hover("badge");
+    h.frames(6);
+    let tip = h.target("\"3 files in library\"").ok();
+    let at = tip.map(|t| h.ui.scene.borrow().bounds(t));
+    let badge = h.bounds("badge");
+    zgx::compose::set_tooltip_look(Default::default());
+    assert_eq!(h.error(), None);
+    let at = at.expect("the tip shows");
+    assert!(at.y >= badge.y + badge.height, "below the badge: {at:?} {badge:?}");
+}
+
+/// `ui.modal { scrim_blur }` blurs what lies behind its backdrop.
+#[test]
+fn a_modal_scrim_blur_blurs_behind_the_backdrop() {
+    let h = Harness::inline(
+        r##"return ui.column { w = 400, h = 300,
+            ui.modal { open = ui.state("open", true), scrim_blur = 2, ui.text { "Picture" } },
+        }"##,
+    );
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    assert!(h.ui.scene.borrow().has_backdrop_blur());
+}

@@ -200,6 +200,27 @@ fn after(
     }
 }
 
+/// The look an app gives every tip: a text tip's panel in place of the
+/// platform's, where tips go unless their view says, and a band at the
+/// window's top (a titlebar) they keep out of, flipping below their view.
+#[derive(Clone, Default)]
+pub struct TooltipLook {
+    /// A text tip's panel: padding, fill, corners, type.
+    pub panel: Option<Styles>,
+    /// Where a tip goes unless its view sets `placement`.
+    pub placement: Option<Placement>,
+    /// Points at the window's top no tip reaches into.
+    pub keep_below: f32,
+}
+thread_local! { static TOOLTIP_LOOK: RefCell<Rc<TooltipLook>> = RefCell::default(); }
+/// Gives every tip mounted after it `look` (`ui.tooltip_look`).
+pub fn set_tooltip_look(look: TooltipLook) {
+    TOOLTIP_LOOK.with(|now| *now.borrow_mut() = Rc::new(look));
+}
+fn tooltip_look() -> Rc<TooltipLook> {
+    TOOLTIP_LOOK.with(|now| now.borrow().clone())
+}
+
 fn wrap(anchor: View, tip: Tooltip) -> View {
     crate::compose::component(move |cx| {
         let runtime = cx.runtime();
@@ -218,8 +239,14 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             Content::Text(text) => Some(text.clone()),
             Content::View(_) => None,
         };
+        let app_look = tooltip_look();
         let content = match content {
             Content::View(view) => *view,
+            Content::Text(text) if app_look.panel.is_some() => crate::compose::column()
+                .max_w(320.)
+                .text_wrap(true)
+                .merge_styles(app_look.panel.as_ref().expect("checked"))
+                .child(crate::compose::text(text)),
             Content::Text(text) => {
                 let look = &crate::compose::OVERLAY;
                 let (x, above, below) = look.tooltip_padding;
@@ -459,7 +486,7 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
         } else {
             content
         };
-        let placement = placement.unwrap_or(Placement {
+        let placement = placement.or(app_look.placement).unwrap_or(Placement {
             side: PlacementSide::Top,
             align: PlacementEdge::Center,
             offset: 6.,
@@ -472,6 +499,7 @@ fn wrap(anchor: View, tip: Tooltip) -> View {
             .lazy()
             .autofocus(false)
             .placement(placement)
+            .keep_below(app_look.keep_below)
             .pointer_events(interactive)
             .child(content);
         // A plain tip is the view's description, not a dialog of its own.

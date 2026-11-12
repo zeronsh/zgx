@@ -1057,10 +1057,79 @@ pub(crate) fn after_dispatch(ui: &Ui, event: &InputEvent, prevented: bool) -> bo
 /// The find field's id in the bar.
 const FIELD: &str = "zgx-find-field";
 
+/// The look an app gives find's bar (`ui.find_look`), so the bar zgx
+/// builds looks as the app's own search field. Each part merges over zgx's.
+#[derive(Clone, Default)]
+pub struct FindLook {
+    /// The floating bar.
+    pub panel: Styles,
+    /// What holds the icon, the field, the count and the steps; close sits
+    /// after it.
+    pub group: Styles,
+    /// The text field.
+    pub field: Styles,
+    /// The field with focus, in place of the focus ring.
+    pub field_focus: Option<Styles>,
+    /// How many matches.
+    pub count: Styles,
+    /// The previous, next and close buttons.
+    pub button: Styles,
+    /// A button under the pointer, in place of the platform's.
+    pub button_hover: Option<Styles>,
+    /// A button pressed, in place of the platform's.
+    pub button_active: Option<Styles>,
+    /// Each icon's box.
+    pub icon: Styles,
+    /// Icons in the text's colour, in place of the glyphs: the search one
+    /// leads the field.
+    pub icons: FindIcons,
+    /// The empty field's text.
+    pub placeholder: Option<String>,
+    /// "1/3" for "1 of 3", and "0/0" for "No results".
+    pub short_count: bool,
+    /// The count and the steps show once this many characters are typed.
+    pub navigator_after: usize,
+}
+/// `FindLook`'s icons.
+#[derive(Clone, Default)]
+pub struct FindIcons {
+    /// Leads the field.
+    pub search: Option<std::sync::Arc<crate::svg::SvgData>>,
+    /// Steps to the match before.
+    pub previous: Option<std::sync::Arc<crate::svg::SvgData>>,
+    /// Steps to the next match.
+    pub next: Option<std::sync::Arc<crate::svg::SvgData>>,
+    /// Closes the bar.
+    pub close: Option<std::sync::Arc<crate::svg::SvgData>>,
+}
+thread_local! { static FIND_LOOK: std::cell::RefCell<Rc<FindLook>> = Default::default(); }
+/// Gives find's bar, as it next opens, `look` (`ui.find_look`).
+pub fn set_find_look(look: FindLook) {
+    FIND_LOOK.with(|now| *now.borrow_mut() = Rc::new(look));
+}
+fn find_look() -> Rc<FindLook> {
+    FIND_LOOK.with(|now| now.borrow().clone())
+}
+
+/// The count as shown: "2 of 5", or "2/5" short; "+" while still counting.
+fn count_text(s: &FindStatus, short: bool) -> String {
+    if s.query.is_empty() {
+        return String::new();
+    }
+    let at = s.current.map_or(0, |c| c + 1);
+    let more = if s.done { "" } else { "+" };
+    match (short, s.count) {
+        (false, 0) if s.done => "No results".to_owned(),
+        (true, count) => format!("{at}/{count}{more}"),
+        (false, count) => format!("{at} of {count}{more}"),
+    }
+}
+
 /// Find's bar: a field, how many matches, the one before and the next, and
 /// close.
 fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
-    use crate::compose::{button, row, text, text_input, text_signal};
+    use crate::compose::{button, row, svg, text, text_input, text_signal};
+    let look = find_look();
     let ask = |ui: &Ui, what: Ask| {
         let weak = ui.downgrade();
         move || {
@@ -1089,8 +1158,14 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
             }
         }
     };
+    let after = look.navigator_after;
+    let navigating = {
+        let typed = typed.clone();
+        move || typed.with(|t| t.chars().count() >= after)
+    };
     let keys = {
         let (next, previous, close) = (next.clone(), previous.clone(), close.clone());
+        let navigating = navigating.clone();
         move |cx: &mut crate::input::EventContext| {
             if cx.phase == EventPhase::Capture {
                 return;
@@ -1099,6 +1174,7 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
                 return;
             };
             match key {
+                Key::Enter if !navigating() => {}
                 Key::Enter if modifiers.shift => previous(),
                 Key::Enter => next(),
                 Key::Escape => close(),
@@ -1108,26 +1184,72 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
             cx.stop_propagation();
         }
     };
-    let shown = move || {
-        let s = status.get();
-        match (s.query.is_empty(), s.count, s.current) {
-            (true, ..) => String::new(),
-            (false, 0, _) if s.done => "No results".to_owned(),
-            (false, count, current) => {
-                let at = current.map_or(0, |c| c + 1);
-                let more = if s.done { "" } else { "+" };
-                format!("{at} of {count}{more}")
-            }
-        }
+    let short = look.short_count;
+    let shown = move || count_text(&status.get(), short);
+    let icon = |source: &Option<std::sync::Arc<crate::svg::SvgData>>| {
+        source.as_ref().map(|source| {
+            svg("", std::sync::Arc::new(source.current_color()))
+                .size(16., 16.)
+                .accessible_hidden()
+                .merge_styles(&look.icon)
+        })
     };
-    let small = |label: &'static str, name: &'static str, act: Rc<dyn Fn()>| {
-        button()
+    let small = |glyph: &'static str,
+                 source: &Option<std::sync::Arc<crate::svg::SvgData>>,
+                 name: &'static str,
+                 act: Rc<dyn Fn()>| {
+        let mut b = button()
             .accessible_label(name)
             .px(6.)
             .py(2.)
             .on_click(move || act())
-            .child(text(label))
+            .merge_styles(&look.button)
+            .child(icon(source).unwrap_or_else(|| text(glyph)));
+        if let Some(hover) = look.button_hover.clone() {
+            b = b.hover(move |_| hover);
+        }
+        if let Some(active) = look.button_active.clone() {
+            b = b.active(move |_| active);
+        }
+        b
     };
+    let mut field = text_input("Find", typed)
+        .id(FIELD)
+        .w(180.)
+        .merge_styles(&look.field);
+    if let Some(placeholder) = look.placeholder.clone() {
+        field = field.placeholder(placeholder);
+    }
+    if let Some(focus) = look.field_focus.clone() {
+        field = field.focus(move |_| focus);
+    }
+    let navigator = {
+        let shows = navigating.clone();
+        row()
+            .gap(6.)
+            .items_center()
+            .reactive_style(move || {
+                let mut s = Styles::new();
+                if !shows() {
+                    s = s.opacity(0.);
+                }
+                s
+            })
+            .pointer_events_when(navigating)
+            .child(
+                text_signal(shown)
+                    .text_size(12.)
+                    .text_color(tok::TEXT_SECONDARY)
+                    .merge_styles(&look.count)
+                    .live(crate::semantics::Live::Polite),
+            )
+            .child(small("‹", &look.icons.previous, "Previous", Rc::new(previous)))
+            .child(small("›", &look.icons.next, "Next", Rc::new(next)))
+    };
+    let mut group = row().gap(6.).items_center().merge_styles(&look.group);
+    if let Some(lead) = icon(&look.icons.search) {
+        group = group.child(lead);
+    }
     row()
         .absolute()
         .top(8.)
@@ -1139,20 +1261,13 @@ fn bar(ui: &Ui, status: Signal<FindStatus>, typed: Signal<String>) -> View {
         .bg(tok::POPOVER_BG)
         .border(1.)
         .border_color(tok::BORDER_SUBTLE)
+        .merge_styles(&look.panel)
         .accessible_label("Find")
         .reactive_style(move || {
             typing();
             Styles::new()
         })
         .on_event(keys)
-        .child(text_input("Find", typed).id(FIELD).w(180.))
-        .child(
-            text_signal(shown)
-                .text_size(12.)
-                .text_color(tok::TEXT_SECONDARY)
-                .live(crate::semantics::Live::Polite),
-        )
-        .child(small("‹", "Previous", Rc::new(previous)))
-        .child(small("›", "Next", Rc::new(next)))
-        .child(small("✕", "Close", Rc::new(close)))
+        .child(group.child(field).child(navigator))
+        .child(small("✕", &look.icons.close, "Close", Rc::new(close)))
 }

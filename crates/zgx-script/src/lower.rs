@@ -3752,6 +3752,7 @@ fn kind_view(
             autofocus,
             layer,
             dismiss,
+            scrim_blur,
             on_close,
         } => {
             // Built when it first opens (`View::lazy`), as every script
@@ -3770,6 +3771,10 @@ fn kind_view(
             let view = match dismiss {
                 Some(d) => view.dismiss_on_backdrop(*d),
                 None => view,
+            };
+            let view = match scrim_blur {
+                Some(sigma) if sigma.is_finite() && *sigma > 0. => view.scrim_blur(*sigma),
+                _ => view,
             };
             let view = match on_close {
                 Some(on_close) => {
@@ -9122,6 +9127,96 @@ pub(crate) fn install_menu_look(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Resu
                     .get::<Option<f64>>("fade")?
                     .filter(|ms| ms.is_finite() && *ms > 0.)
                     .map(|ms| std::time::Duration::from_secs_f64(ms / 1000.)),
+            });
+            Ok(())
+        })?,
+    )
+}
+
+/// Installs `ui.find_look { panel, group, field, field_focus, count, button,
+/// button_hover, button_active, icon, icons, placeholder, short_count,
+/// navigator_after }`: the look of the find bar zgx builds. `icons` are SVG
+/// paths from the script's folder, or SVG markup.
+pub(crate) fn install_find_look(
+    lua: &mlua::Lua,
+    ui: &mlua::Table,
+    vm: std::rc::Weak<Vm>,
+) -> mlua::Result<()> {
+    ui.set(
+        "find_look",
+        lua.create_function(move |lua, look: mlua::Table| {
+            let part = |name: &str| -> mlua::Result<Option<Styles>> {
+                match look.get::<mlua::Value>(name)? {
+                    mlua::Value::Nil => Ok(None),
+                    value => {
+                        let lits = crate::node::plain_styles(lua, value, &format!("find_look.{name}"))?;
+                        Ok(Some(apply_all(Styles::new(), &lits)))
+                    }
+                }
+            };
+            let icons = look.get::<Option<mlua::Table>>("icons")?;
+            let icon = |name: &str| -> mlua::Result<Option<Arc<SvgData>>> {
+                let Some(src) = icons.as_ref().map(|t| t.get::<Option<String>>(name)).transpose()?.flatten() else {
+                    return Ok(None);
+                };
+                let bytes = if src.trim_start().starts_with('<') {
+                    src.into_bytes()
+                } else {
+                    let vm = vm.upgrade().ok_or_else(|| mlua::Error::runtime("find_look: the script has ended"))?;
+                    let path = resolve_path(&vm, &src).map_err(mlua::Error::runtime)?;
+                    std::fs::read(&path)
+                        .map_err(|e| mlua::Error::runtime(format!("find_look.icons.{name}: {}: {e}", path.display())))?
+                };
+                SvgData::new(bytes)
+                    .map(|svg| Some(Arc::new(svg)))
+                    .map_err(|e| mlua::Error::runtime(format!("find_look.icons.{name}: {e}")))
+            };
+            zgx::find::set_find_look(zgx::find::FindLook {
+                panel: part("panel")?.unwrap_or_default(),
+                group: part("group")?.unwrap_or_default(),
+                field: part("field")?.unwrap_or_default(),
+                field_focus: part("field_focus")?,
+                count: part("count")?.unwrap_or_default(),
+                button: part("button")?.unwrap_or_default(),
+                button_hover: part("button_hover")?,
+                button_active: part("button_active")?,
+                icon: part("icon")?.unwrap_or_default(),
+                icons: zgx::find::FindIcons {
+                    search: icon("search")?,
+                    previous: icon("previous")?,
+                    next: icon("next")?,
+                    close: icon("close")?,
+                },
+                placeholder: look.get("placeholder")?,
+                short_count: look.get::<Option<bool>>("short_count")?.unwrap_or(false),
+                navigator_after: look.get::<Option<usize>>("navigator_after")?.unwrap_or(0),
+            });
+            Ok(())
+        })?,
+    )
+}
+
+/// Installs `ui.tooltip_look { panel, placement, keep_below }`: a text tip's
+/// panel in plain styles, where tips go unless their view says, and the band
+/// at the window's top (a titlebar) no tip reaches into.
+pub(crate) fn install_tooltip_look(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<()> {
+    ui.set(
+        "tooltip_look",
+        lua.create_function(|lua, look: mlua::Table| {
+            let panel = match look.get::<mlua::Value>("panel")? {
+                mlua::Value::Nil => None,
+                value => {
+                    let lits = crate::node::plain_styles(lua, value, "tooltip_look.panel")?;
+                    Some(apply_all(Styles::new(), &lits))
+                }
+            };
+            zgx::compose::set_tooltip_look(zgx::compose::TooltipLook {
+                panel,
+                placement: crate::node::placement_of(look.get("placement")?)?,
+                keep_below: look
+                    .get::<Option<f32>>("keep_below")?
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(0.),
             });
             Ok(())
         })?,
