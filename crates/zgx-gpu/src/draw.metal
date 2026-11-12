@@ -94,10 +94,10 @@ float rounded(
         return 1.0;
     }
     metal::float2 half_ = b.zw * 0.5;
-    metal::float2 q = (p - b.xy) - half_;
-    float radius = (q.y < 0.0) ? ((q.x > 0.0) ? r.y : r.x) : ((q.x > 0.0) ? r.z : r.w);
-    metal::float2 d = (metal::abs(q) - half_) + metal::float2(radius);
-    float sdf = (metal::length(metal::max(d, metal::float2(0.0))) + metal::min(metal::max(d.x, d.y), 0.0)) - radius;
+    metal::float2 q_1 = (p - b.xy) - half_;
+    float radius_1 = (q_1.y < 0.0) ? ((q_1.x > 0.0) ? r.y : r.x) : ((q_1.x > 0.0) ? r.z : r.w);
+    metal::float2 d = (metal::abs(q_1) - half_) + metal::float2(radius_1);
+    float sdf = (metal::length(metal::max(d, metal::float2(0.0))) + metal::min(metal::max(d.x, d.y), 0.0)) - radius_1;
     if (feather > 0.0) {
         float t = metal::clamp(-(sdf) / feather, 0.0, 1.0);
         return (t * t) * (3.0 - (2.0 * t));
@@ -192,6 +192,46 @@ float region(
     return _e47;
 }
 
+metal::float3 corner_sdf(
+    metal::float2 q,
+    float radius,
+    float k_3
+) {
+    bool local_2 = {};
+    bool local_3 = {};
+    bool local_4 = {};
+    metal::float2 o_3 = metal::max(q, metal::float2(0.0));
+    if (k_3 > 1.01) {
+        local_2 = o_3.x > 0.0;
+    } else {
+        local_2 = false;
+    }
+    bool _e14 = local_2;
+    if (_e14) {
+        local_3 = o_3.y > 0.0;
+    } else {
+        local_3 = false;
+    }
+    bool _e21 = local_3;
+    if (_e21) {
+        local_4 = radius > 0.0;
+    } else {
+        local_4 = false;
+    }
+    bool _e27 = local_4;
+    if (_e27) {
+        float n = metal::exp2(k_3);
+        metal::float2 u = o_3 / metal::float2(radius);
+        float s = metal::pow(metal::pow(u.x, n) + metal::pow(u.y, n), 1.0 / n);
+        metal::float2 g_2 = metal::pow(u / metal::float2(metal::max(s, 0.000001)), metal::float2(n - 1.0));
+        float gl = metal::max(metal::length(g_2), 0.000001);
+        return metal::float3(((s - 1.0) * radius) / gl, g_2 / metal::float2(gl));
+    }
+    float reach = metal::length(o_3);
+    metal::float2 gradient = (reach > 0.0) ? (o_3 / metal::float2(metal::max(reach, 0.00000000000000000001))) : ((q.x > q.y) ? metal::float2(1.0, 0.0) : metal::float2(0.0, 1.0));
+    return metal::float3((reach + metal::min(metal::max(q.x, q.y), 0.0)) - radius, gradient);
+}
+
 metal::float2 centred(
     metal::float2 at,
     metal::float4 box,
@@ -215,10 +255,10 @@ metal::float4 shade_texel(
 ) {
     Out v_5 = {};
     metal::float4 color_1 = {};
-    bool local_2 = {};
-    bool local_3 = {};
+    bool local_5 = {};
+    bool local_6 = {};
     float corner = {};
-    bool local_4 = {};
+    bool local_7 = {};
     bool premultiplied_1 = false;
     metal::float3 rgb = metal::float3(0.0);
     float scale = 1.0;
@@ -237,16 +277,16 @@ metal::float4 shade_texel(
         float _e30 = v_5.shape.w;
         if (!((_e30 > 0.5))) {
             float _e38 = v_5.shape.z;
-            local_3 = _e38 > 0.0;
+            local_6 = _e38 > 0.0;
         } else {
-            local_3 = true;
+            local_6 = true;
         }
-        bool _e42 = local_3;
-        local_2 = _e42;
+        bool _e42 = local_6;
+        local_5 = _e42;
     } else {
-        local_2 = false;
+        local_5 = false;
     }
-    bool _e44 = local_2;
+    bool _e44 = local_5;
     if (_e44) {
         float _e47 = v_5.shape.x;
         corner = _e47;
@@ -269,146 +309,149 @@ metal::float4 shade_texel(
         float _e95 = corner;
         float _e98 = v_5.fade.z;
         float _e101 = v_5.fade.w;
-        float radius_1 = metal::clamp(_e95, 0.0, metal::min(_e98, _e101) * 0.5);
-        metal::float4 _e108 = v_5.position;
-        metal::float4 _e111 = v_5.fade;
-        metal::float2 _e112 = centred(_e108.xy, _e111, viewport);
-        metal::float4 _e114 = v_5.fade;
-        metal::float2 q_1 = _e112 - ((_e114.zw * 0.5) - metal::float2(radius_1));
-        float distance = (metal::length(metal::max(q_1, metal::float2(0.0))) + metal::min(metal::max(q_1.x, q_1.y), 0.0)) - radius_1;
-        metal::float2 outside = metal::max(q_1, metal::float2(0.0));
-        float reach = metal::length(outside);
-        metal::float2 gradient = (reach > 0.0) ? (outside / metal::float2(metal::max(reach, 0.00000000000000000001))) : ((q_1.x > q_1.y) ? metal::float2(1.0, 0.0) : metal::float2(0.0, 1.0));
-        float _e155 = viewport.z;
-        metal::float2 slope = gradient / metal::float2(_e155);
-        float _e160 = v_5.shape.y;
-        if (_e160 < 0.0) {
-            float _e165 = v_5.shape.x;
-            uint a_1 = naga_f2u32(_e165);
-            float _e169 = v_5.shape.z;
-            uint b_2 = naga_f2u32(_e169);
+        float radius_2 = metal::clamp(_e95, 0.0, metal::min(_e98, _e101) * 0.5);
+        float _e109 = v_5.shape.w;
+        float _e112 = v_5.fade.z;
+        float _e115 = v_5.fade.w;
+        float k_4 = (radius_2 < ((metal::min(_e112, _e115) * 0.5) - 0.25)) ? _e109 : 1.0;
+        metal::float4 _e125 = v_5.position;
+        metal::float4 _e128 = v_5.fade;
+        metal::float2 _e129 = centred(_e125.xy, _e128, viewport);
+        metal::float4 _e131 = v_5.fade;
+        metal::float2 q_2 = _e129 - ((_e131.zw * 0.5) - metal::float2(radius_2));
+        metal::float3 _e138 = corner_sdf(q_2, radius_2, k_4);
+        float distance = _e138.x;
+        float _e144 = viewport.z;
+        metal::float2 slope = metal::abs(_e138.yz) / metal::float2(_e144);
+        float _e149 = v_5.shape.y;
+        if (_e149 < 0.0) {
+            float _e154 = v_5.shape.x;
+            uint a_1 = naga_f2u32(_e154);
+            float _e158 = v_5.shape.z;
+            uint b_2 = naga_f2u32(_e158);
             metal::float4 sides = metal::float4(static_cast<float>(a_1 & 4095u), static_cast<float>(a_1 >> 12u), static_cast<float>(b_2 & 4095u), static_cast<float>(b_2 >> 12u)) / metal::float4(16.0);
-            float _e189 = v_5.point.x;
-            float _e192 = v_5.fade.x;
-            float _e195 = v_5.fade.z;
-            bool right_1 = _e189 > (_e192 + (_e195 * 0.5));
-            float _e202 = v_5.point.y;
-            float _e205 = v_5.fade.y;
-            float _e208 = v_5.fade.w;
-            bool bottom_1 = _e202 > (_e205 + (_e208 * 0.5));
+            float _e178 = v_5.point.x;
+            float _e181 = v_5.fade.x;
+            float _e184 = v_5.fade.z;
+            bool right_1 = _e178 > (_e181 + (_e184 * 0.5));
+            float _e191 = v_5.point.y;
+            float _e194 = v_5.fade.y;
+            float _e197 = v_5.fade.w;
+            bool bottom_1 = _e191 > (_e194 + (_e197 * 0.5));
             float across = right_1 ? sides.y : sides.w;
             float down = bottom_1 ? sides.z : sides.x;
-            metal::float4 _e220 = v_5.fade;
-            metal::float4 _e225 = v_5.fade;
-            metal::float4 box_1 = metal::float4(_e220.xy + sides.wx, metal::max((_e225.zw - sides.wx) - sides.yz, metal::float2(0.0)));
-            float inner_radius = metal::clamp(radius_1 - ((across + down) * 0.5), 0.0, metal::min(box_1.z, box_1.w) * 0.5);
-            metal::float4 _e247 = v_5.position;
-            metal::float2 _e249 = centred(_e247.xy, box_1, viewport);
-            metal::float2 iq = _e249 - ((box_1.zw * 0.5) - metal::float2(inner_radius));
-            float inside = (metal::length(metal::max(iq, metal::float2(0.0))) + metal::min(metal::max(iq.x, iq.y), 0.0)) - inner_radius;
+            metal::float4 _e209 = v_5.fade;
+            metal::float4 _e214 = v_5.fade;
+            metal::float4 box_1 = metal::float4(_e209.xy + sides.wx, metal::max((_e214.zw - sides.wx) - sides.yz, metal::float2(0.0)));
+            float inner_radius = metal::clamp(radius_2 - ((across + down) * 0.5), 0.0, metal::min(box_1.z, box_1.w) * 0.5);
+            metal::float4 _e236 = v_5.position;
+            metal::float2 _e238 = centred(_e236.xy, box_1, viewport);
+            metal::float2 iq = _e238 - ((box_1.zw * 0.5) - metal::float2(inner_radius));
+            metal::float3 _e245 = corner_sdf(iq, inner_radius, k_4);
+            float inside = _e245.x;
             float aa = metal::max(slope.x + slope.y, 0.5);
             if (box_1.z > 0.0) {
-                local_4 = box_1.w > 0.0;
+                local_7 = box_1.w > 0.0;
             } else {
-                local_4 = false;
+                local_7 = false;
             }
-            bool _e287 = local_4;
-            float hollow = _e287 ? metal::clamp(0.5 - (inside / aa), 0.0, 1.0) : 0.0;
-            float _e291 = color_1.w;
-            color_1.w = _e291 * metal::max(metal::clamp(0.5 - (distance / aa), 0.0, 1.0) - hollow, 0.0);
+            bool _e267 = local_7;
+            float hollow = _e267 ? metal::clamp(0.5 - (inside / aa), 0.0, 1.0) : 0.0;
+            float _e271 = color_1.w;
+            color_1.w = _e271 * metal::max(metal::clamp(0.5 - (distance / aa), 0.0, 1.0) - hollow, 0.0);
         } else {
-            float _e304 = v_5.shape.z;
-            if (_e304 > 0.0) {
-                float _e309 = v_5.shape.z;
-                float x = distance / (_e309 * 1.4142135);
+            float _e284 = v_5.shape.z;
+            if (_e284 > 0.0) {
+                float _e289 = v_5.shape.z;
+                float x = distance / (_e289 * 1.4142135);
                 float x2_ = x * x;
                 float e = metal::sign(x) * metal::sqrt(1.0 - metal::exp((-(x2_) * (1.2732395 + (0.147 * x2_))) / (1.0 + (0.147 * x2_))));
-                float _e332 = color_1.w;
-                color_1.w = _e332 * (0.5 - (0.5 * e));
+                float _e312 = color_1.w;
+                color_1.w = _e312 * (0.5 - (0.5 * e));
             } else {
                 float dx = slope.x;
                 float dy = slope.y;
-                float aa_1 = metal::max((radius_1 <= 0.0) ? metal::max(dx, dy) : (dx + dy), 0.5);
+                float aa_1 = metal::max((radius_2 <= 0.0) ? metal::max(dx, dy) : (dx + dy), 0.5);
                 float outer = metal::clamp(0.5 - (distance / aa_1), 0.0, 1.0);
-                float _e355 = v_5.shape.y;
-                float inner = metal::clamp(0.5 - ((distance + _e355) / aa_1), 0.0, 1.0);
-                float _e364 = color_1.w;
-                float _e368 = v_5.border.w;
-                float alpha = (_e364 * inner) + (_e368 * (outer - inner));
-                metal::float4 _e372 = color_1;
-                float _e375 = color_1.w;
-                metal::float4 _e379 = v_5.border;
-                float _e383 = v_5.border.w;
-                metal::float3 rgb_2 = (alpha > 0.0) ? ((((_e372.xyz * _e375) * inner) + ((_e379.xyz * _e383) * (outer - inner))) / metal::float3(metal::max(alpha, 0.00001))) : metal::float3(0.0);
+                float _e335 = v_5.shape.y;
+                float inner = metal::clamp(0.5 - ((distance + _e335) / aa_1), 0.0, 1.0);
+                float _e344 = color_1.w;
+                float _e348 = v_5.border.w;
+                float alpha = (_e344 * inner) + (_e348 * (outer - inner));
+                metal::float4 _e352 = color_1;
+                float _e355 = color_1.w;
+                metal::float4 _e359 = v_5.border;
+                float _e363 = v_5.border.w;
+                metal::float3 rgb_2 = (alpha > 0.0) ? ((((_e352.xyz * _e355) * inner) + ((_e359.xyz * _e363) * (outer - inner))) / metal::float3(metal::max(alpha, 0.00001))) : metal::float3(0.0);
                 color_1 = metal::float4(rgb_2, alpha);
             }
         }
     }
-    float _e407 = v_5.options.y;
-    if (_e407 > 0.5) {
+    float _e387 = v_5.options.y;
+    if (_e387 > 0.5) {
         tex = given;
         if (!(has_texel)) {
-            metal::float2 _e415 = v_5.uv;
-            metal::float4 _e416 = atlas.sample(tex_sampler, _e415);
-            tex = _e416;
+            metal::float2 _e395 = v_5.uv;
+            metal::float4 _e396 = atlas.sample(tex_sampler, _e395);
+            tex = _e396;
         }
-        float _e419 = v_5.options.y;
-        if (_e419 > 1.5) {
+        float _e399 = v_5.options.y;
+        if (_e399 > 1.5) {
             premultiplied_1 = true;
-            metal::float4 _e423 = color_1;
-            metal::float4 _e425 = tex;
-            float _e429 = color_1.w;
-            rgb = (_e423.xyz * _e425.xyz) * _e429;
-            float _e433 = color_1.w;
-            float _e435 = tex.w;
-            color_1.w = _e433 * _e435;
+            metal::float4 _e403 = color_1;
+            metal::float4 _e405 = tex;
+            float _e409 = color_1.w;
+            rgb = (_e403.xyz * _e405.xyz) * _e409;
+            float _e413 = color_1.w;
+            float _e415 = tex.w;
+            color_1.w = _e413 * _e415;
         } else {
-            metal::float4 _e437 = color_1;
-            metal::float4 _e439 = tex;
-            float _e443 = color_1.w;
-            float _e445 = tex.w;
-            float _e448 = v_5.options.y;
-            metal::float4 _e449 = color_1;
-            float _e451 = firmness(_e448, _e449.xyz);
-            float _e452 = firm(_e445, _e451);
-            color_1 = metal::float4(_e437.xyz * _e439.xyz, _e443 * _e452);
+            metal::float4 _e417 = color_1;
+            metal::float4 _e419 = tex;
+            float _e423 = color_1.w;
+            float _e425 = tex.w;
+            float _e428 = v_5.options.y;
+            metal::float4 _e429 = color_1;
+            float _e431 = firmness(_e428, _e429.xyz);
+            float _e432 = firm(_e425, _e431);
+            color_1 = metal::float4(_e417.xyz * _e419.xyz, _e423 * _e432);
         }
     }
-    float _e457 = v_5.options.x;
-    if (_e457 > 0.0) {
-        metal::float2 _e461 = v_5.point;
-        metal::float4 _e463 = v_5.fade;
-        metal::float4 _e467 = v_5.fade;
-        metal::float4 _e470 = v_5.fade;
-        metal::float2 _e474 = v_5.point;
-        metal::float2 distance_1 = metal::min(_e461 - _e463.xy, (_e467.xy + _e470.zw) - _e474);
-        float _e482 = v_5.options.x;
-        float f_1 = metal::clamp(metal::min(distance_1.x, distance_1.y) / _e482, 0.0, 1.0);
-        float _e488 = color_1.w;
-        color_1.w = _e488 * f_1;
-        float _e490 = scale;
-        scale = _e490 * f_1;
+    float _e437 = v_5.options.x;
+    if (_e437 > 0.0) {
+        metal::float2 _e441 = v_5.point;
+        metal::float4 _e443 = v_5.fade;
+        metal::float4 _e447 = v_5.fade;
+        metal::float4 _e450 = v_5.fade;
+        metal::float2 _e454 = v_5.point;
+        metal::float2 distance_1 = metal::min(_e441 - _e443.xy, (_e447.xy + _e450.zw) - _e454);
+        float _e462 = v_5.options.x;
+        float f_1 = metal::clamp(metal::min(distance_1.x, distance_1.y) / _e462, 0.0, 1.0);
+        float _e468 = color_1.w;
+        color_1.w = _e468 * f_1;
+        float _e470 = scale;
+        scale = _e470 * f_1;
     }
-    float _e494 = v_5.mask.x;
-    if (_e494 > 0.5) {
-        float _e499 = v_5.mask.x;
-        metal::float4 _e501 = v_5.position;
-        float _e503 = region(_e499, _e501.xy, viewport, regions, _buffer_sizes);
-        float _e505 = color_1.w;
-        color_1.w = _e505 * _e503;
-        float _e507 = scale;
-        scale = _e507 * _e503;
+    float _e474 = v_5.mask.x;
+    if (_e474 > 0.5) {
+        float _e479 = v_5.mask.x;
+        metal::float4 _e481 = v_5.position;
+        float _e483 = region(_e479, _e481.xy, viewport, regions, _buffer_sizes);
+        float _e485 = color_1.w;
+        color_1.w = _e485 * _e483;
+        float _e487 = scale;
+        scale = _e487 * _e483;
     }
-    float _e511 = v_5.mask.x;
-    metal::float4 _e512 = color_1;
-    float _e515 = color_1.w;
-    float _e518 = color_1.w;
-    metal::float3 _e520 = rgb;
-    float _e521 = scale;
-    float _e524 = color_1.w;
-    bool _e526 = premultiplied_1;
-    metal::float4 _e528 = tinted(_e511, _e526 ? metal::float4(_e520 * _e521, _e524) : metal::float4(_e512.xyz * _e515, _e518), regions, _buffer_sizes);
-    return _e528;
+    float _e491 = v_5.mask.x;
+    metal::float4 _e492 = color_1;
+    float _e495 = color_1.w;
+    float _e498 = color_1.w;
+    metal::float3 _e500 = rgb;
+    float _e501 = scale;
+    float _e504 = color_1.w;
+    bool _e506 = premultiplied_1;
+    metal::float4 _e508 = tinted(_e491, _e506 ? metal::float4(_e500 * _e501, _e504) : metal::float4(_e492.xyz * _e495, _e498), regions, _buffer_sizes);
+    return _e508;
 }
 
 metal::float4 shade(

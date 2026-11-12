@@ -6,6 +6,21 @@
 //! last-write precedence, including individual padding and margin sides.
 use crate::scene::{Align, BoxShadow, Color, Insets, Justify, Layout, LocalTransform, Transform};
 
+static CORNER_SHAPE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// Sets the shape every rounded corner smaller than half its box takes, as CSS's
+/// `corner-shape: superellipse(k)`: 1 (the default) is round, 1.5 a continuous
+/// corner. Corners as large as half the box (pills, circles) stay round.
+pub fn set_corner_shape(k: f32) {
+    let k = if k.is_finite() { k.clamp(1., 8.) } else { 1. };
+    CORNER_SHAPE.store(k.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The corner shape `set_corner_shape` set.
+pub fn corner_shape() -> f32 {
+    f32::from_bits(CORNER_SHAPE.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Where a stroke (`Styled::stroke`) lies against the box's edge, as a
 /// design tool aligns it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
