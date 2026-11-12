@@ -122,6 +122,11 @@ impl Platform for Desktop {
         windows.add_font(font)?;
         Ok(families)
     }
+    fn fonts(&self) -> Vec<Arc<[u8]>> {
+        self.windows
+            .as_ref()
+            .map_or_else(Vec::new, crate::WindowFactory::font_files)
+    }
     fn open_url(&self, url: &str) -> bool {
         // The launcher runs detached: nothing waits on the browser.
         crate::url::valid_url(url) && open::that_detached(url).is_ok()
