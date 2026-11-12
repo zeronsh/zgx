@@ -17178,13 +17178,12 @@ impl GpuRenderer {
     /// bytes in RGBA order. Single-pass renderers draw the pending frame
     /// through a non-sRGB view; others use the present blit, as on screen.
     pub fn debug_present_offscreen(&mut self) -> Result<Vec<u8>, GpuError> {
-        // Direct3D 11 presents through its own swap chain alone: the no-op
-        // shell would read back nothing.
+        // Direct3D 11 draws into what it presents (its swap chain's buffer,
+        // or offscreen its own target), with no blit between: what it would
+        // present is its frame as read back.
         #[cfg(d3d11)]
         if self.d3d11.is_some() {
-            return Err(GpuError(
-                "ZGX_D3D11 presents through no wgpu surface, offscreen either".into(),
-            ));
+            return self.readback();
         }
         let srgb = wgpu::TextureFormat::Bgra8UnormSrgb;
         let drawable = self.device.create_texture(&wgpu::TextureDescriptor {
