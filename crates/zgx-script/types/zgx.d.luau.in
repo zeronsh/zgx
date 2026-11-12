@@ -1413,12 +1413,21 @@ export type CanvasTextOptions = {
 	-- Wrapped to lines this many points wide, in a box that wide.
 	width: number?,
 }
+-- How `c:image` fills its box, cuts its corners and fades it.
+export type CanvasImageOptions = {
+	fit: Fit?,
+	radius: number?,
+	opacity: number?,
+}
 declare extern type Canvas with
 	function rect(self, x: number, y: number, w: number, h: number, paint: Paint, radius: number?): ()
 	function circle(self, cx: number, cy: number, r: number, paint: Paint): ()
 	function line(self, x1: number, y1: number, x2: number, y2: number, paint: Paint, width: number?, opts: LineOptions?): ()
 	function fill(self, path: Path, paint: Paint, rule: ("nonzero" | "evenodd")?): ()
 	function stroke(self, path: Path, paint: Paint, width: number?, opts: StrokeOptions?): ()
+	-- A picture (a path, a URL, `host:<name>` or a Bitmap) in a box, as
+	-- `ui.image` fits one; nothing while one isn't there yet.
+	function image(self, src: string | Bitmap, x: number, y: number, w: number, h: number, opts: CanvasImageOptions?): ()
 	-- Clips what follows to the path, until `restore`.
 	function clip(self, path: Path): ()
 	function restore(self): ()
