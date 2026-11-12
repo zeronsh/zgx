@@ -218,12 +218,12 @@ pub(crate) fn pasted_files(lua: &Lua) -> mlua::Result<mlua::Value> {
     Value::List(paths.iter().map(|path| file_value(path)).collect()).into_lua(lua)
 }
 
-/// Installs `ui.clipboard` (text and images), `ui.open_files`, `ui.save_file`, `ui.read_file`
-/// and `ui.write_file`. `clipboard` and `files` are false for a plugin the
-/// host did not grant them.
 /// The most `ui.write_file` decodes from base64.
 const WRITE_LIMIT: usize = 256 << 20;
 
+/// Installs `ui.clipboard` (text and images), `ui.open_files`, `ui.save_file`, `ui.read_file`
+/// and `ui.write_file`. `clipboard` and `files` are false for a plugin the
+/// host did not grant them.
 pub(crate) fn install(
     lua: &Lua,
     ui: &Table,
