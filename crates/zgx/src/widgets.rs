@@ -290,6 +290,9 @@ struct EditorHint {
     /// Misspelled words (`View::spellcheck`), as byte ranges: marked with a
     /// dotted line. Usually none.
     misspelled: RefCell<Vec<std::ops::Range<usize>>>,
+    /// Checks the text again from scratch (`EditorHandle::recheck_spelling`): set
+    /// while it is spellchecked.
+    respell: RefCell<Option<Rc<dyn Fn()>>>,
     /// The clause an input method is converting (its composition's cursor
     /// range), in the composition layer's points, and that layer: where its
     /// candidates show.
@@ -507,6 +510,7 @@ impl EditorHint {
             secure: Cell::default(),
             input_mode: Cell::default(),
             misspelled: RefCell::default(),
+            respell: RefCell::default(),
             clause: Cell::default(),
             composition_layer: Cell::default(),
             reveal: Cell::default(),
@@ -803,6 +807,20 @@ impl EditorHandle {
             .iter()
             .find(|range| range.start <= start && end <= range.end)
             .cloned()
+    }
+    /// Checks the spelling of the whole text again, forgetting what was
+    /// checked before: after the system's checker learns or ignores a word
+    /// (`Platform::learn_spelling`, `ignore_spelling`) the underline under it
+    /// goes, as it does from zgx's own context menu. Nothing happens while the
+    /// editor isn't spellchecked (`View::spellcheck`).
+    pub fn recheck_spelling(&self) {
+        let recheck = self.hint.respell.borrow().clone();
+        if let Some(recheck) = recheck {
+            recheck();
+        }
+    }
+    pub(crate) fn set_spell_recheck(&self, recheck: Rc<dyn Fn()>) {
+        *self.hint.respell.borrow_mut() = Some(recheck);
     }
     pub(crate) fn misspellings(&self) -> Vec<std::ops::Range<usize>> {
         self.hint.misspelled.borrow().clone()
