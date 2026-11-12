@@ -151,6 +151,19 @@ impl SpanStyle {
         self.weight.is_some() || self.italic || self.size.is_some() || self.line_height.is_some() || self.mono
     }
 }
+/// Room around one line of a text area (`EditorHandle::set_line_insets`): a list item's indent, a heading's space
+/// above. The line wraps in what the indent leaves, and its carets, hits and selection move with it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LineInset {
+    /// Points before the line's text.
+    pub left: f32,
+    /// Points above the line.
+    pub above: f32,
+    /// Points below the line.
+    pub below: f32,
+}
+/// Each line's room, by its index.
+pub type LineInsets = Rc<dyn Fn(usize) -> LineInset>;
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
 pub type LineSpans = Vec<(Range<usize>, SpanStyle)>;
 /// A `Highlighter` that styles its ranges (`SpanStyle`) beyond colouring
@@ -368,6 +381,7 @@ pub(crate) struct LineCache {
     tail: RefCell<Option<Tail>>,
     /// Highlighted lines, by their text and what the line before left.
     colored: RefCell<HashMap<(Box<str>, u32), Colored>>,
+    insets: RefCell<Option<LineInsets>>,
 }
 /// What the lines below an edit left before it (`LineCache::edited`).
 struct Tail {
@@ -527,6 +541,13 @@ impl LineCache {
         }
     }
     /// Style lines with `highlighter` (none: the editor's style).
+    pub(crate) fn set_insets(&self, insets: Option<LineInsets>) {
+        *self.insets.borrow_mut() = insets;
+        self.shaped.borrow_mut().clear();
+        self.styled.borrow_mut().clear();
+        self.heights.borrow_mut().clear();
+        self.forget_last();
+    }
     pub(crate) fn set_highlighter(&self, highlighter: Option<SpanHighlighter>) {
         *self.highlighter.borrow_mut() = highlighter;
         self.shapes.set(false);
@@ -625,12 +646,12 @@ impl LineCache {
     }
     /// Line `i` shaped with the runs its spans give it, if they shape it
     /// (a weight, italics): `None` for a line shaped as its plain text.
-    fn styled(&self, layout: &LinesLayout, i: usize, text: &str) -> Option<Rc<dyn TextLayout>> {
+    fn styled(&self, layout: &LinesLayout, i: usize, text: &str, wrap: Option<f32>, key_text: &str) -> Option<Rc<dyn TextLayout>> {
         if !self.shapes.get() {
             return None;
         }
         let spans = self.spans(layout, i)?;
-        let key = (Box::<str>::from(text), shape_key(&spans)?);
+        let key = (Box::<str>::from(key_text), shape_key(&spans)?);
         let tick = self.clock.get() + 1;
         self.clock.set(tick);
         if let Some((layout, used)) = self.styled.borrow_mut().get_mut(&key) {
@@ -643,24 +664,24 @@ impl LineCache {
             (f32::from_bits(shaping.size), shaping.font.clone())
         };
         let rich = styled_line(text, &spans, crate::scene::Color(0, 0, 0, 255), size, &font)?;
-        let shaped: Rc<dyn TextLayout> = (layout.rich)(&rich, layout.wrap).into();
+        let shaped: Rc<dyn TextLayout> = (layout.rich)(&rich, wrap).into();
         let mut styled = self.styled.borrow_mut();
         evict(&mut styled);
         styled.insert(key, (shaped.clone(), tick));
         Some(shaped)
     }
     /// Line `text`, shaped (from the cache if it is there).
-    fn line(&self, text: &str, shape: &LineShaper, wrap: Option<f32>) -> Rc<dyn TextLayout> {
+    fn line(&self, text: &str, shape: &LineShaper, wrap: Option<f32>, key: &str) -> Rc<dyn TextLayout> {
         let tick = self.clock.get() + 1;
         self.clock.set(tick);
-        if let Some((layout, used)) = self.shaped.borrow_mut().get_mut(text) {
+        if let Some((layout, used)) = self.shaped.borrow_mut().get_mut(key) {
             *used = tick;
             return layout.clone();
         }
         let layout: Rc<dyn TextLayout> = shape(text, wrap).into();
         let mut shaped = self.shaped.borrow_mut();
         evict(&mut shaped);
-        shaped.insert(text.into(), (layout.clone(), tick));
+        shaped.insert(key.into(), (layout.clone(), tick));
         layout
     }
 }
@@ -937,18 +958,29 @@ impl LinesLayout {
         first..end.max(first + 1).min(self.line_count())
     }
     /// Line `i`, shaped.
+    /// Line `i`'s room (`LineCache::set_insets`).
+    pub(crate) fn inset(&self, i: usize) -> LineInset {
+        self.cache.insets.borrow().as_ref().map_or_else(LineInset::default, |insets| insets(i))
+    }
     pub(crate) fn line(&self, i: usize) -> Rc<dyn TextLayout> {
         let text = self.line_text(i);
-        let layout = match self.cache.styled(self, i, &text) {
+        let inset = self.inset(i);
+        // an indented line wraps narrower: kept apart from the same text unindented
+        let (wrap, key) = if inset.left > 0. {
+            (self.wrap.map(|w| (w - inset.left).max(1.)), std::borrow::Cow::Owned(format!("{}\u{0}{}", inset.left.to_bits(), &*text)))
+        } else {
+            (self.wrap, std::borrow::Cow::Borrowed(&*text))
+        };
+        let layout = match self.cache.styled(self, i, &text, wrap, &key) {
             Some(layout) => layout,
-            None => self.cache.line(&text, &self.shape, self.wrap),
+            None => self.cache.line(&text, &self.shape, wrap, &key),
         };
         let (width, height) = layout.size();
         if width > self.widest.get() {
             self.widest.set(width);
         }
         if let Some(heights) = &self.heights {
-            let height = height.max(self.row);
+            let height = height.max(self.row) + inset.above + inset.below;
             if heights.borrow().each[i] != height {
                 heights.borrow_mut().set(i, height);
                 self.cache
@@ -968,7 +1000,8 @@ impl LinesLayout {
         }
     }
     fn shift(&self, i: usize, rect: Rect) -> Rect {
-        Rect::new(rect.x, rect.y + self.top(i), rect.width, rect.height)
+        let inset = self.inset(i);
+        Rect::new(rect.x + inset.left, rect.y + self.top(i) + inset.above, rect.width, rect.height)
     }
     /// The selection of `range`, only on the lines between `top` and
     /// `bottom`: what an editor draws of a selection of the whole file.
@@ -1032,7 +1065,8 @@ impl TextLayout for LinesLayout {
     fn hit_position(&self, x: f32, y: f32) -> TextPosition {
         let i = self.line_at(y);
         let layout = self.line(i);
-        let local = layout.hit_position(x, y.max(0.) - self.top(i));
+        let inset = self.inset(i);
+        let local = layout.hit_position(x - inset.left, y.max(0.) - self.top(i) - inset.above);
         let range = self.line_range(i);
         TextPosition {
             byte_offset: range.start + local.byte_offset.min(range.len()),
@@ -1139,6 +1173,26 @@ mod tests {
             0,
             shaper,
         )
+    }
+
+    /// An inset line keeps its carets, hits and selection inside its room, and wraps in what the indent leaves.
+    #[test]
+    fn insets_move_carets_hits_and_wrapping() {
+        let cache = Rc::new(LineCache::default());
+        cache.set_insets(Some(Rc::new(|i| if i == 1 { LineInset { left: 36., above: 8., below: 4. } } else { LineInset::default() })));
+        let text = "first\nsecond line that is long enough to wrap in a narrow box\nthird";
+        let layout = |cache: &Rc<LineCache>| cache.layout(|| Text::new(text), None, 14., Some(200.), &FontStyle::default(), 0, shaper);
+        let inset = layout(&cache);
+        let plain = layout(&Rc::new(LineCache::default()));
+        let second = text.find("second").unwrap();
+        let (a, b) = (inset.caret(second), plain.caret(second));
+        assert_eq!(a.x, b.x + 36.);
+        assert_eq!(a.y, b.y + 8.);
+        assert_eq!(inset.hit_test(a.x + 1., a.y + 1.), second);
+        assert!(inset.height(1) > plain.height(1) + 11., "above, below and a narrower wrap add height");
+        let third = text.find("third").unwrap();
+        assert!(inset.caret(third).y > plain.caret(third).y + 11.);
+        assert_eq!(inset.caret(0), plain.caret(0));
     }
 
     /// Laid out by its lines, a text has the carets, hits and selections it
