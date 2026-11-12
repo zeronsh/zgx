@@ -10,6 +10,7 @@ ui.path() -> Path
 ui.linear(x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush
 ui.render_canvas(draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<string>
 ui.bitmap(w: number, h: number, alpha: (x: number, y: number) -> number) -> Bitmap
+ui.decode_image(base64: string) -> Promise<Bitmap>
 ui.shader(source: string, opts: { fps: number? }?) -> Shader
 ```
 
@@ -19,7 +20,7 @@ A PNG, JPEG or GIF (with zgx-gpu's `gif` feature, on by default), decoded once p
 
 | Option | Type | Default | |
 | --- | --- | --- | --- |
-| `src` | `Reactive<string>`, or a `Bitmap` | required | a path (from the script's directory) or an absolute one; `"host:<name>"`, an image the app made (`ScriptHost::image`), following each one it replaces it with, or on macOS a frame it shows as it is (`ScriptHost::surface`, a video's: drawn from its own storage, no bytes read, its image shown once it's let go or where pixels are read, as `dither` and `characters` do); a `Bitmap` shown as it is (`ui.bitmap`, a pasted image from `ui.clipboard.read_image()`); a state or function (of a path or a `Bitmap`) swaps the image |
+| `src` | `Reactive<string>`, or a `Bitmap` | required | a path (from the script's directory) or an absolute one; `"host:<name>"`, an image the app made (`ScriptHost::image`), following each one it replaces it with, or on macOS a frame it shows as it is (`ScriptHost::surface`, a video's: drawn from its own storage, no bytes read, its image shown once it's let go or where pixels are read, as `dither` and `characters` do); a `Bitmap` shown as it is (`ui.bitmap`, a pasted image from `ui.clipboard.read_image()`, a picture's bytes from `ui.decode_image`); a state or function (of a path or a `Bitmap`) swaps the image |
 | `fallback` | `Node` | none | shown in the image's place while a remote one (`https://…`) loads, and if it can't be shown (a remote one failed, a file gone or not a picture: never a script error): an avatar's initials |
 | `on_load` | `function(size: { w, h })` | none | its picture's size in pixels, once known: a file's from its header, before it draws (nothing decoded); a remote one's once it has arrived. Once per `src` |
 | `on_error` | `function(why: string)` | none | why its picture can't be shown: a file gone (a sent picture deleted, a kept copy pruned) or not a picture, a remote one that failed (`"… didn't load: HTTP 503"`). Without it, a warning (`ScriptHost::warnings`), with the script line naming the file |
@@ -147,6 +148,7 @@ Any node can show its content through a bitmap's alpha, have its box filled by a
 | | |
 | --- | --- |
 | `ui.bitmap(w, h, fn)` | `w` by `h` pixels (1 to 4096 a side), white, each with the alpha `fn(x, y)` returns (0 to 1). A `Bitmap` can also be a full-colour image (`ui.clipboard.read_image`'s); a mask reads only its alpha |
+| `ui.decode_image(base64)` | a promise of the `Bitmap` in a PNG, JPEG or GIF's bytes, given in base64 (one a server or the host handed over: a picture kept in a database, a picture fetched as bytes), up to 64 MiB, decoded off the main thread as `ui.image` decodes a file (a PNG or JPEG keeps its bytes and decodes its pixels when shown, at the size shown). Show it with `ui.image { src = bitmap }`; keep it (in state, or a table) rather than decoding it again. Text that isn't base64, or bytes that aren't a picture, reject the promise (`kind` `"io"`) |
 | `mask = bitmap` or `mask = { bitmap, w = …, h = …, x = …, y = …, sweep = … }` | the content shows through the bitmap's alpha, drawn `w` by `h` (the bitmap's size) from (`x`, `y`), unsmoothed; `maskX` and `maskY` animate its place, and `sweep = { x, y, duration, frame_rate }` moves it by (`x`, `y`) every `duration` ms, over and over, on the engine's own clock (a text shimmer: no script, style pass or layout per step, only the masked node composites again; 4 steps a second while it doesn't show) |
 | `ui.shader(wgsl, { fps })` | a fill: the source defines `fn fill(input: FillInput) -> vec4<f32>` (straight alpha), reading `input.p` (points from the box's top left), `input.size`, `input.time` (seconds), `input.scale` (pixels per point) and `input.params` (four `vec4`s); `fps` caps how often time repaints it |
 | `bg_shader = shader`, `shader_params = { … }` | fill the box with it, over `bg` and under the border and children; parameters are colors (0 to 1) or lists of four numbers; `shaderTime` and `shaderParam0` to `shaderParam15` animate |
