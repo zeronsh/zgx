@@ -1157,6 +1157,9 @@ pub(crate) enum Kind {
     Markdown {
         text: Text,
         options: crate::markdown::view::ViewOptions,
+        /// `on_link(url)`: told of a link click (or its Open Link); `true`
+        /// says it was handled, so the link isn't opened.
+        on_link: Option<Function>,
     },
     Rich(Vec<Span>),
     Image {
@@ -5313,6 +5316,8 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 },
                 copy: flag("copy", true)?,
             };
+            let on_link = table.get::<Option<Function>>("on_link")?;
+            table.raw_set("on_link", mlua::Value::Nil)?;
             let mut args = TextArgs::default();
             let empty = Kind::Text(Text::Literal(String::new()));
             let (owner, lint) = owner_and_lint(lua)?;
@@ -5320,7 +5325,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             fill_from(lua, &mut node, &table, Some(&mut args), lint)?;
             let literal = args.literal.unwrap_or(false);
             let text = text_of(lua, args.content, "ui.markdown_view", literal)?;
-            node.kind = Kind::Markdown { text, options };
+            node.kind = Kind::Markdown { text, options, on_link };
             // Prose: selectable as a web page's is, unless asked not to be.
             if node.selectable.is_none() {
                 node.selectable = Some(true);

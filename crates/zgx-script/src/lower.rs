@@ -1502,6 +1502,28 @@ fn tooltip(anchor: View, tip: &crate::node::Tooltip, low: &Rc<Lowering>) -> View
 }
 
 /// `view` under the theme scope `theme = …` asks for.
+/// A markdown view's `on_link`: asked first of its links; one it handles
+/// stays unopened, any other goes to the guard around it, if there is one.
+fn with_link_handler(view: View, on_link: mlua::Function, vm: &Rc<Vm>) -> View {
+    let vm = vm.clone();
+    zgx::compose::provide_with(
+        move |cx| {
+            let outer = cx.try_service::<zgx::platform::LinkGuard>();
+            zgx::platform::LinkGuard(Rc::new(move |url: &str| {
+                let handled = match vm.call::<Option<bool>>(&on_link, url.to_owned()) {
+                    Ok(handled) => handled == Some(true),
+                    Err(error) => {
+                        vm.report(error);
+                        true
+                    }
+                };
+                !handled && outer.as_ref().is_none_or(|guard| (guard.0)(url))
+            }))
+        },
+        view,
+    )
+}
+
 fn themed(spec: &crate::node::ThemeSpec, vm: &Rc<Vm>, view: View) -> View {
     use crate::node::ThemeSpec;
     let compute = |value: Value, vm: &Vm| {
@@ -3028,11 +3050,11 @@ fn kind_view(
             }
         }
         Kind::Text(text) => lower_text(text, vm),
-        Kind::Markdown { text, options } => {
+        Kind::Markdown { text, options, on_link } => {
             use crate::markdown::view::Source;
             // A state's text, as it is (`"{reply}"`): not copied into a
             // string, and a long one streamed in is parsed by its edits.
-            if let Text::Template(segments) = text
+            let view = if let Text::Template(segments) = text
                 && let [Segment::State(state, path)] = &segments[..]
                 && path.is_empty()
             {
@@ -3047,6 +3069,10 @@ fn kind_view(
                     move || Source::Made(render_text(&text, &vm)),
                     options.clone(),
                 )
+            };
+            match on_link {
+                Some(on_link) => with_link_handler(view, on_link.clone(), vm),
+                None => view,
             }
         }
         Kind::Rich(spans) => lower_rich(spans, vm, low),
