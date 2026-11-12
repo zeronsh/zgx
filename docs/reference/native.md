@@ -313,6 +313,20 @@ return ui.button {
 }
 ```
 
+## Controls on screen
+
+```luau
+ui.controls(opts: { limit: number? }?) -> { Control }
+ui.press(handle: number) -> boolean
+```
+
+`ui.controls()` lists what a person could use in the window that has the keys (the active one) as the accessibility tree has it: in document order, with popups, menus and modals last, each as `{ role, name, x, y, w, h, disabled, selected, expanded, focused, handle }`. `role` is ARIA's name for it (`"button"`, `"link"`, `"menuitem"`, `"tab"`, `"dialog"`…), `name` its accessible name or else its text, and the box is the part of it that shows, in the window's points. A plain group, a text, a scroll view or a table's rows and cells are left out, and so is what is hidden or has no box. `selected` and `expanded` are nil where a control can't be. `limit` stops the list there. Nothing is built until it is called, and it costs nothing in a frame that doesn't.
+
+`ui.press(handle)` presses and releases the primary button at the middle of the control `handle` names, through the window's input as `zgx inspect click` does. It returns false, doing nothing, for a handle whose control is gone, hidden or covered there by something else. While a handler is handling input (a click's `on_click`) it returns false, doing nothing: press from a command, a timer or a task.
+
+A Rust host gives the window with `ScriptHost::window_controls(&ui)` (`zgx-run` does); without one both do nothing (`{}` and false). They are the app's own: a plugin that calls either gets an error.
+
+
 ## Example
 
 ```lua

@@ -1246,6 +1246,31 @@ declare extern type Ref with
 	function elements(self): { Element }
 end
 
+-- One control `ui.controls` lists, in window points.
+export type Control = {
+	-- ARIA's name for it: "button", "link", "checkbox", "menuitem", "tab", "dialog"…
+	role: string,
+	-- Its accessible name, else its text.
+	name: string,
+	-- The part of its box that shows.
+	x: number,
+	y: number,
+	w: number,
+	h: number,
+	disabled: boolean,
+	-- Nil where it cannot be selected or opened.
+	selected: boolean?,
+	expanded: boolean?,
+	focused: boolean,
+	-- Names it for `ui.press` while it is there.
+	handle: number,
+}
+
+export type ControlsOptions = {
+	-- At most this many, in order.
+	limit: number?,
+}
+
 export type ToastOptions = {
 	title: string | UiError,
 	body: (string | UiError)?,
@@ -22610,6 +22635,15 @@ declare ui: {
 	toast: (opts: ToastOptions) -> number,
 	-- How long toasts shown from now on stay when they do not say.
 	toast_defaults: (opts: ToastDefaults) -> (),
+	-- The controls on screen, in document order with popups and modals last
+	-- (a plain group, a text, a scroll view or a table's rows are not
+	-- controls). Nothing is built until you ask. `{}` where the host gave
+	-- no window; an error in a plugin.
+	controls: (opts: ControlsOptions?) -> { Control },
+	-- Presses and releases the primary button at the middle of the control
+	-- `handle` names, as `zgx inspect click` does. False, doing nothing,
+	-- for a handle whose control is gone, hidden or covered.
+	press: (handle: number) -> boolean,
 	dismiss_toast: (id: number) -> (),
 	-- JSON: `encode(value, { pretty = true })` writes what state could hold
 	-- (lists as arrays, tables as objects, `ui.null` as null); `decode(text)`

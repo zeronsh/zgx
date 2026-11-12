@@ -676,6 +676,8 @@ impl Diagnostics {
     }
 }
 pub(crate) type SharedWarnings = Rc<Diagnostics>;
+/// The windows `ui.controls` and `ui.press` read and act on (`ScriptHost::window_controls`).
+pub(crate) type ControlWindows = Rc<RefCell<Vec<zgx::widgets::WeakUi>>>;
 /// Where script warnings go: stderr and the host's list
 /// ([`ScriptHost::warnings`]). Everything that warns comes through here, so
 /// a host can show them elsewhere too.
@@ -1683,6 +1685,8 @@ struct Inner {
     full_screen: RefCell<Option<zgx::reactive::Effect>>,
     /// Keeps the window's zoom and `ui.window.zoom` the same (`window_zoom`).
     zoom: RefCell<Option<zgx::reactive::Effect>>,
+    /// The windows `ui.controls` reads (`window_controls`).
+    control_windows: ControlWindows,
     visible: RefCell<Option<zgx::reactive::Effect>>,
     /// What publishes the window's state: `window_maximized`'s (true) and
     /// `window_state`'s, each starting only its own anew.
@@ -1893,6 +1897,7 @@ impl ScriptHost {
             window_size: RefCell::default(),
             full_screen: RefCell::default(),
             zoom: RefCell::default(),
+            control_windows: Rc::default(),
             visible: RefCell::default(),
             window_state: RefCell::default(),
             actions: Actions::default(),
@@ -2775,6 +2780,14 @@ impl ScriptHost {
             }
         });
         *self.0.zoom.borrow_mut() = Some(effect);
+    }
+    /// Lets `ui.controls()` list what window `ui` shows and `ui.press(handle)`
+    /// press it, as a person would: nothing is built until a script asks.
+    /// With several windows, the active one answers (else the last given).
+    pub fn window_controls(&self, ui: &zgx::widgets::Ui) {
+        let mut windows = self.0.control_windows.borrow_mut();
+        windows.retain(|window| window.upgrade().is_some());
+        windows.push(ui.downgrade());
     }
     /// Keep `ui.window.visible` as the app's window shows, `visible` at
     /// first (as it opened), and `show` it as a script sets it: an app that
@@ -4311,6 +4324,7 @@ impl ScriptHost {
             functions: self.0.functions.clone(),
             persist: self.0.persist.clone(),
             warnings: self.0.warnings.clone(),
+            control_windows: self.0.control_windows.clone(),
             timers: self.0.timers.clone(),
             grants: grants.clone(),
             exposed_actions: self.0.exposed_actions.clone(),

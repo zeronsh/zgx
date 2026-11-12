@@ -234,6 +234,8 @@ pub(crate) fn register(lua: &Lua, ui: &Table) -> mlua::Result<()> {
             Ok(())
         })?,
     )?;
+    ui.set("controls", lua.create_function(controls)?)?;
+    ui.set("press", lua.create_function(press)?)?;
     ui.set(
         "tabs",
         lua.create_function(|lua, table: Table| {
@@ -1575,6 +1577,81 @@ fn toast_defaults(lua: &Lua, table: Table) -> mlua::Result<()> {
     read("error_duration", &mut defaults.error)?;
     toaster.set_defaults(defaults);
     Ok(())
+}
+
+/// The window `ui.controls` and `ui.press` act on: the active one, else the
+/// last given (`ScriptHost::window_controls`); a plugin has none.
+fn control_window(lua: &Lua, what: &str) -> mlua::Result<Option<zgx::widgets::Ui>> {
+    let env = crate::node::env(lua)?;
+    if env.meter.is_some() {
+        return Err(mlua::Error::runtime(format!(
+            "{what} is not available to plugins"
+        )));
+    }
+    let windows: Vec<zgx::widgets::Ui> = env
+        .control_windows
+        .borrow()
+        .iter()
+        .filter_map(|window| window.upgrade())
+        .collect();
+    let at = windows
+        .iter()
+        .position(|ui| ui.window_is_active())
+        .unwrap_or(windows.len().saturating_sub(1));
+    Ok(windows.into_iter().nth(at))
+}
+
+/// `ui.controls { limit? }`: the controls on screen as a list, in document
+/// order with popups and modals last: `{ role, name, x, y, w, h, disabled,
+/// selected, expanded, focused, handle }`, window points. `{}` where the
+/// host gave no window (`ScriptHost::window_controls`).
+fn controls(lua: &Lua, options: Option<Table>) -> mlua::Result<Table> {
+    let limit = match &options {
+        Some(options) => options
+            .get::<Option<f64>>("limit")?
+            .map(|n| n.max(0.) as usize),
+        None => None,
+    };
+    let out = lua.create_table()?;
+    let Some(ui) = control_window(lua, "ui.controls")? else {
+        return Ok(out);
+    };
+    for (i, control) in crate::driver::controls(&ui, limit).into_iter().enumerate() {
+        let item = lua.create_table()?;
+        item.set("role", control.role)?;
+        item.set("name", control.name)?;
+        item.set("x", control.bounds.x)?;
+        item.set("y", control.bounds.y)?;
+        item.set("w", control.bounds.width)?;
+        item.set("h", control.bounds.height)?;
+        item.set("disabled", control.disabled)?;
+        item.set("selected", control.selected)?;
+        item.set("expanded", control.expanded)?;
+        item.set("focused", control.focused)?;
+        // A number a script can hold exactly (2^53): a slot reused two million times wraps.
+        item.set("handle", (control.handle & ((1 << 53) - 1)) as f64)?;
+        out.raw_set(i + 1, item)?;
+    }
+    Ok(out)
+}
+
+/// `ui.press(handle)`: the press and release `zgx inspect click` makes at
+/// the middle of the control `handle` (from `ui.controls`) names, through
+/// the window's input; false, doing nothing, for a handle that is stale,
+/// hidden or covered, and while a handler is handling input (press from a
+/// command, a timer or a task).
+fn press(lua: &Lua, handle: f64) -> mlua::Result<bool> {
+    let Some(mut ui) = control_window(lua, "ui.press")? else {
+        return Ok(false);
+    };
+    // Input within input would go to what the outer press captured.
+    if ui.is_dispatching() {
+        return Ok(false);
+    }
+    if !(handle.is_finite() && handle >= 0. && handle.fract() == 0.) {
+        return Ok(false);
+    }
+    Ok(crate::driver::press_control(&mut ui, handle as u64))
 }
 
 /// What a disclosure's summary shows: text, or a node of the app's.

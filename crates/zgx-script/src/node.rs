@@ -1993,6 +1993,8 @@ pub(crate) struct Env {
     pub persist: Rc<Persist>,
     /// The host's warnings (`crate::warn`): each once, across reloads.
     pub warnings: crate::SharedWarnings,
+    /// The windows `ui.controls` and `ui.press` act on.
+    pub control_windows: crate::ControlWindows,
     /// Where `ui.every` and `ui.after` run.
     pub timers: Rc<crate::timers::Timers>,
     /// What the script may do beyond its sandbox.
