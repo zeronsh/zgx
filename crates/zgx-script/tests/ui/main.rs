@@ -81,6 +81,8 @@ mod list_thin_rows;
 mod markdown_lazy;
 #[path = "../mentions.rs"]
 mod mentions;
+#[path = "../menu_rows_width.rs"]
+mod menu_rows_width;
 #[path = "../modal_focus.rs"]
 mod modal_focus;
 #[path = "../panel_width_auto.rs"]

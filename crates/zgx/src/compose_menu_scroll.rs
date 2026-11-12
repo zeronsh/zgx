@@ -99,13 +99,15 @@ pub(crate) fn mount(ui: &mut Ui, panel: NodeId, viewport: NodeId, content: NodeI
     });
     let scene = ui.scene.clone();
     ui.bind(panel, move || {
-        let (width, height) = size.get();
+        let (_, height) = size.get();
         let limit = (extent.get().1 - height).max(0.);
         let position = offset.get().clamp(0., limit);
         offset.set(position);
         let mut scene = scene.borrow_mut();
         let mut style = scene.style(content);
-        style.width = Some(width);
+        // The viewport's width where it has one (rows wrap or truncate to it), the rows' own where
+        // it is sized by them (a menu with `w = "auto"`).
+        style.width_percent = Some(1.);
         style.flex_shrink = 0.;
         scene.set_style(content, style);
         scene.set_transform(
