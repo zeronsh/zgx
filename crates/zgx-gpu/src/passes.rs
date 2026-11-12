@@ -653,6 +653,16 @@ impl GpuRenderer {
         let Some(inputs) = shader.inputs() else {
             return true;
         };
+        // Direct3D 11 runs no passes yet (its wgpu device is the no-op one,
+        // which would leave the shader reading zeros): the layer composites
+        // as painted, the kind named once.
+        #[cfg(d3d11)]
+        if self.d3d11.is_some() {
+            crate::d3d11_frame::left_out(
+                "layer shaders with inputs (passes, pictures, GPU views): drawn as painted",
+            );
+            return false;
+        }
         let wait = self.waits_for_shaders();
         let frame = self.image_frame;
         let scale = self.scale;

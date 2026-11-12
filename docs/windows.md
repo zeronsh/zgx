@@ -230,7 +230,9 @@ draws with `frame.device` as anywhere, the device asking for what
 `viewport::view_device_features` lists where the adapter has it. What it
 doesn't draw yet, it leaves out where what's left can't show a picture a
 user would wrongly trust, naming each kind once on stderr: GPU views, where
-the views' device can't be made, are left empty. The rest fails the frame
+the views' device can't be made, are left empty, and layer shaders with
+inputs (`FillShader::with_inputs`: passes, pictures, GPU views read by name)
+composite their layer as painted, as while one compiles. The rest fails the frame
 with an error naming it (and panics in a debug build), since there is no
 Direct3D 12 to fall back to. What it draws is Direct3D 12's frame byte for
 byte (`tests/d3d11_parity.rs`, at 1×, 1.5× and 2×). Both run
