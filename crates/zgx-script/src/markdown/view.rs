@@ -841,7 +841,7 @@ struct Reveal {
     feeding: RefCell<Option<String>>,
 }
 /// Blocks shown at once when a long text lands: more than a screenful.
-const REVEAL_FIRST: usize = 30;
+const REVEAL_FIRST: usize = 20;
 /// Blocks added each frame after them, and how often without a frame clock.
 const REVEAL_CHUNK: usize = 60;
 const REVEAL_TICK: Duration = Duration::from_millis(8);
