@@ -6694,6 +6694,52 @@ fn images_too_large_for_a_texture_draw_at_the_size_they_show() {
 }
 
 /// The 33rd shadow on a panel is left off, once said, and the frame draws.
+/// A box's shadow draws only outside its border box, as CSS's does: under a
+/// transparent box the background shows, not the shadow.
+#[test]
+fn a_box_shadow_draws_only_outside_the_box() {
+    let _gpu_fixture = gpu_fixture();
+    let mut gpu = GpuRenderer::new(80, 60).unwrap();
+    gpu.set_background(Color(255, 255, 255, 255));
+    let mut scene = Scene::new(80., 60.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let id = scene.append(
+        scene.root(),
+        NodeKind::Quad(QuadStyle {
+            decoration: None,
+            fill: Color(0, 0, 0, 0),
+            radius: 6.,
+            border_color: Color(0, 0, 0, 0),
+            border_width: 0.,
+            shadow: Some(BoxShadow {
+                color: Color(0, 0, 255, 255),
+                offset: Transform { x: 0., y: 0. },
+                blur_radius: 3.,
+                spread: 0.,
+            }),
+            border_over: false,
+            outline: None,
+        }),
+        fixed(30., 30.),
+    );
+    scene.set_transform(id, Transform { x: 25., y: 15. });
+    let d = scene.flush().damage;
+    gpu.render(&scene, &d).unwrap();
+    let pixels = gpu.readback().unwrap();
+    let pixel = |x: usize, y: usize| &pixels[(y * 80 + x) * 4..(y * 80 + x) * 4 + 4];
+    assert_eq!(pixel(40, 30), &[255, 255, 255, 255], "inside: no shadow");
+    assert!(
+        pixel(23, 30)[0] < 200,
+        "outside the edge: the shadow: {:?}",
+        pixel(23, 30)
+    );
+    assert!(
+        pixel(40, 13)[0] < 200,
+        "above the box: the shadow: {:?}",
+        pixel(40, 13)
+    );
+}
+
 #[test]
 fn a_panel_past_32_shadows_draws_the_first_32() {
     use zgx::{compose::prelude::*, widgets::Ui};

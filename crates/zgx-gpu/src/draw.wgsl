@@ -148,6 +148,16 @@ fn shade_texel(input:Out, given:vec4<f32>, has_texel:bool)->vec4<f32> {
      let x2=x*x;
      let e=sign(x)*sqrt(1.-exp(-x2*(1.27323954+0.147*x2)/(1.+0.147*x2)));
      color.a*=0.5-0.5*e;
+     // `shape.y` above 500 is 1000 plus the spread, and `uv` the offset: cut out the box it is
+     // the shadow of, as CSS draws a box shadow only outside its border box.
+     if v.shape.y>500. {
+       let spread=v.shape.y-1000.;
+       let box=vec4(v.fade.xy-v.uv.xy+vec2(spread),max(v.fade.zw-vec2(2.*spread),vec2(0.)));
+       let r0=clamp(radius-spread,0.,min(box.z,box.w)*0.5);
+       let q0=centred(v.position.xy,box)-(box.zw*0.5-vec2(r0));
+       let inside=length(max(q0,vec2(0.)))+min(max(q0.x,q0.y),0.)-r0;
+       color.a*=clamp(0.5+inside*viewport.z,0.,1.);
+     }
    }
    // A square box's corner on whole pixels is covered as its edges are:
    // `fwidth` (the slopes' sum) adds both axes' there when the pixel's 2×2
