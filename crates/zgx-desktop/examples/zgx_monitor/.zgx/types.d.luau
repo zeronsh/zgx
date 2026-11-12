@@ -5544,6 +5544,13 @@ export type SpanProps = {
 	padding: (number | { number })?,
 	-- The background's corner radius.
 	radius: number?,
+	-- An SVG drawn in the line as a glyph: `w` by `h`, `d` below the baseline.
+	inline_svg: {
+		svg: string,
+		w: number,
+		h: number,
+		d: number,
+	}?,
 }
 -- Runs: spans, strings, functions, or span options. `literal`: the runs'
 -- strings as they are (a span's own `literal` wins).
