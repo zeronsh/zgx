@@ -227,11 +227,20 @@ fn mount_placement(
     let anchor_node = anchor;
     ui.bind(owner, move || {
         let anchor = anchor_bounds.get();
+        let window = viewport.get();
         let viewport = screens
             .with(|screens| screen_of(screens, anchor))
-            .unwrap_or_else(|| viewport.get());
-        let viewport = match keep_below > 0. && keep_below < viewport.height {
-            true => Rect::new(viewport.x, viewport.y + keep_below, viewport.width, viewport.height - keep_below),
+            .unwrap_or(window);
+        // the band is the window's top, wherever on screen the popup may go
+        let viewport = match keep_below > 0. {
+            true => {
+                let top = viewport.y.max(window.y + keep_below);
+                let bottom = viewport.y + viewport.height;
+                match top < bottom {
+                    true => Rect::new(viewport.x, top, viewport.width, bottom - top),
+                    false => viewport,
+                }
+            }
             false => viewport,
         };
         let panel = panel_bounds.get();

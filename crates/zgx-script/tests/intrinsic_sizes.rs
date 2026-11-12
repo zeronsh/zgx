@@ -206,3 +206,25 @@ fn a_modal_scrim_blur_blurs_behind_the_backdrop() {
     assert_eq!(h.error(), None);
     assert!(h.ui.scene.borrow().has_backdrop_blur());
 }
+
+/// With popups free to leave the window (`set_popup_screens`), a tip still
+/// keeps out of the window's top band rather than open above the window.
+#[test]
+fn a_tooltip_keeps_below_the_band_when_popups_may_leave_the_window() {
+    let mut h = Harness::inline(
+        r##"ui.tooltip_look { keep_below = 44 }
+        return ui.column { w = 600, h = 400,
+            ui.div { h = 8 },
+            ui.button { id = "search", w = 28, h = 28, tooltip = "Search", tooltip_delay = 0, "S" },
+        }"##,
+    );
+    h.ui.set_popup_screens(vec![zgx::scene::Rect::new(-500., -300., 2000., 1500.)]);
+    h.frames(2);
+    h.hover("search");
+    h.frames(6);
+    let at = h.target("\"Search\"").ok().map(|t| h.ui.scene.borrow().bounds(t));
+    zgx::compose::set_tooltip_look(Default::default());
+    assert_eq!(h.error(), None);
+    let at = at.expect("the tip shows");
+    assert!(at.y >= 44., "below the band: {at:?}");
+}
