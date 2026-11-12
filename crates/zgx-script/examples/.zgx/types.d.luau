@@ -1415,6 +1415,9 @@ declare extern type Canvas with
 	function line(self, x1: number, y1: number, x2: number, y2: number, paint: Paint, width: number?, opts: LineOptions?): ()
 	function fill(self, path: Path, paint: Paint, rule: ("nonzero" | "evenodd")?): ()
 	function stroke(self, path: Path, paint: Paint, width: number?, opts: StrokeOptions?): ()
+	-- The shadow the path casts, written as a `shadow` property is, under
+	-- what is drawn after it.
+	function shadow(self, path: Path, shadow: ShadowSpec?): ()
 	-- Clips what follows to the path, until `restore`.
 	function clip(self, path: Path): ()
 	function restore(self): ()

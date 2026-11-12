@@ -274,6 +274,159 @@ fn path(path: &Path) -> Option<sk::Path> {
     }
     builder.finish()
 }
+/// The shadow `source` casts (`Draw::Shadow`), worked out in device
+/// pixels: its coverage grown (or shrunk) by `spread`, blurred as a text
+/// shadow is (`blur_coverage`), moved by `offset` and painted in `color`
+/// through `clip`. Only what can reach the raster is worked out.
+fn draw_shadow(
+    pixmap: &mut sk::Pixmap,
+    source: &Path,
+    (color, offset, blur, spread): (zgx::scene::Color, Point, f32, f32),
+    transform: sk::Transform,
+    clip: Option<&sk::Mask>,
+) -> Result<(), GpuError> {
+    if ![offset.x, offset.y, blur, spread]
+        .iter()
+        .all(|v| v.is_finite())
+    {
+        return Err(GpuError("invalid canvas shadow".into()));
+    }
+    let Some(shape) = path(source).and_then(|shape| shape.transform(transform)) else {
+        return Ok(());
+    };
+    if color.3 == 0 {
+        return Ok(());
+    }
+    // Points to pixels: the raster's scale and the view's zoom.
+    let scale = (transform.sx + transform.sy) / 2.;
+    let (spread, sigma) = (spread * scale, blur.max(0.) * scale);
+    let sigma = if sigma < 0.01 { 0. } else { sigma };
+    let reach = (sigma * 3.).ceil();
+    let (dx, dy) = (offset.x * transform.sx, offset.y * transform.sy);
+    let bounds = shape.bounds();
+    let grown = spread.max(0.) + 1.;
+    let x0 = (bounds.left() + dx - grown).max(-reach).floor();
+    let y0 = (bounds.top() + dy - grown).max(-reach).floor();
+    let x1 = (bounds.right() + dx + grown)
+        .min(pixmap.width() as f32 + reach)
+        .ceil();
+    let y1 = (bounds.bottom() + dy + grown)
+        .min(pixmap.height() as f32 + reach)
+        .ceil();
+    if x1 <= x0 || y1 <= y0 {
+        return Ok(());
+    }
+    let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
+    if (u64::from(w) * u64::from(h))
+        .checked_mul(4)
+        .is_none_or(|bytes| bytes > BUDGET as u64)
+    {
+        return Err(GpuError("canvas shadow exceeds 32 MiB".into()));
+    }
+    let mut cast =
+        sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
+    let at = sk::Transform::from_translate(dx - x0, dy - y0);
+    let mut ink = sk::Paint::default();
+    ink.set_color_rgba8(0, 0, 0, 255);
+    cast.fill_path(&shape, &ink, sk::FillRule::Winding, at, None);
+    // Grown by a band `spread` wide round its edge, or shrunk by clearing it.
+    if spread != 0. {
+        if spread < 0. {
+            ink.blend_mode = sk::BlendMode::Clear;
+        }
+        let band = sk::Stroke {
+            width: spread.abs() * 2.,
+            line_join: sk::LineJoin::Round,
+            ..Default::default()
+        };
+        cast.stroke_path(&shape, &ink, &band, at, None);
+    }
+    let (alpha, texels, origin, step) = if sigma > 0. {
+        let coverage: Vec<f32> = cast.pixels().iter().map(|p| f32::from(p.alpha())).collect();
+        let blurred = crate::blur_coverage(&coverage, (w, h), sigma);
+        let reach = blurred.reach as f32;
+        let step = blurred.size.0 / blurred.texels.0;
+        (
+            blurred.alpha,
+            blurred.texels,
+            (x0 - reach, y0 - reach),
+            step as f32,
+        )
+    } else {
+        let alpha = cast.pixels().iter().map(|p| p.alpha()).collect();
+        (alpha, (w, h), (x0, y0), 1.)
+    };
+    // Over the part of the raster it reaches, each pixel's coverage read
+    // between the texels (bilinearly, in 256ths), tinted, cut by the clip
+    // and blended over what is there, in integers and one pass: through a
+    // pixmap and `draw_pixmap` it took four times as long.
+    let (tw, th) = (texels.0 as usize, texels.1 as usize);
+    let (left, top) = (origin.0.max(0.) as u32, origin.1.max(0.) as u32);
+    let right = (origin.0 + texels.0 as f32 * step).clamp(0., pixmap.width() as f32) as u32;
+    let bottom = (origin.1 + texels.1 as f32 * step).clamp(0., pixmap.height() as f32) as u32;
+    if right <= left || bottom <= top {
+        return Ok(());
+    }
+    // Each pixel's centre in texels along an axis: the two texels around it
+    // and how far it is from the first, in 256ths.
+    let between = |from: u32, to: u32, origin: f32, last: usize| -> Vec<(usize, usize, u32)> {
+        (from..to)
+            .map(|p| {
+                let t = ((p as f32 + 0.5 - origin) / step - 0.5).clamp(0., last as f32);
+                let i = t as usize;
+                (i, (i + 1).min(last), ((t - i as f32) * 256.) as u32)
+            })
+            .collect()
+    };
+    let columns = between(left, right, origin.0, tw - 1);
+    let rows = between(top, bottom, origin.1, th - 1);
+    let zgx::scene::Color(r, g, b, a) = color;
+    let tint = [r, g, b].map(u32::from);
+    let stride = pixmap.width() as usize;
+    let (left, span) = (left as usize, (right - left) as usize);
+    let clip = clip.map(|clip| clip.data());
+    let data = pixmap.data_mut();
+    // A row's coverage, 0 to 255 × 256.
+    let mut line = vec![0u32; span];
+    for (y, &(above, below, down)) in (top as usize..).zip(&rows) {
+        let (above, below) = (&alpha[above * tw..][..tw], &alpha[below * tw..][..tw]);
+        for (out, &(first, next, across)) in line.iter_mut().zip(&columns) {
+            let mix = |texels: &[u8]| {
+                u32::from(texels[first]) * (256 - across) + u32::from(texels[next]) * across
+            };
+            *out = (mix(above) * (256 - down) + mix(below) * down) >> 8;
+        }
+        let start = y * stride + left;
+        let clipped = clip.map(|clip| &clip[start..start + span]);
+        let pixels = &mut data[start * 4..(start + span) * 4];
+        for (x, (pixel, &coverage)) in pixels
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(&line)
+            .enumerate()
+        {
+            let coverage = match clipped {
+                Some(clipped) => coverage * u32::from(clipped[x]) / 255,
+                None => coverage,
+            };
+            let alpha = (u32::from(a) * coverage + 255 * 128) / (255 * 256);
+            if alpha == 0 {
+                continue;
+            }
+            // Source over, premultiplied.
+            let under = 255 - alpha;
+            for (k, channel) in pixel.iter_mut().enumerate() {
+                let source = match tint.get(k) {
+                    Some(c) => (c * alpha + 127) / 255,
+                    None => alpha,
+                };
+                *channel = (source + (u32::from(*channel) * under + 127) / 255) as u8;
+            }
+        }
+    }
+    Ok(())
+}
 /// A renderer's canvas work on the CPU, with no GPU: for benches that count
 /// instructions and draw nothing (the CPU gate), so a canvas that stops
 /// drawing as shapes shows there. Each canvas a frame damages is found as
@@ -416,6 +569,22 @@ pub fn rasterize_viewed(
                 if masks.pop().is_none() {
                     return Err(GpuError("unbalanced canvas restore".into()));
                 }
+                continue;
+            }
+            Draw::Shadow {
+                path,
+                color,
+                offset,
+                blur,
+                spread,
+            } => {
+                draw_shadow(
+                    &mut pixmap,
+                    path,
+                    (*color, *offset, *blur, *spread),
+                    transform,
+                    masks.last(),
+                )?;
                 continue;
             }
             _ => {}
@@ -607,5 +776,95 @@ mod lifetime_tests {
         assert_eq!(cache.entries.len(), MAX_ENTRIES);
         assert_eq!(cache.bytes(), MAX_ENTRIES * 4);
         assert!(!cache.entries.contains_key(&first.unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod shadow_tests {
+    use super::*;
+    use zgx::scene::{Color, Rect};
+    const RED: Color = Color(255, 0, 0, 255);
+    /// The shadow of a box at `rect`, `w` by `h` points, one pixel a point.
+    fn cast(
+        (w, h): (f32, f32),
+        rect: Rect,
+        (color, offset, blur, spread): (Color, Point, f32, f32),
+    ) -> ImageData {
+        let mut canvas = Canvas::new();
+        canvas.shadow(Path::rectangle(rect), color, offset, blur, spread);
+        rasterize(&canvas, w, h, 1.).unwrap()
+    }
+    fn at(image: &ImageData, x: u32, y: u32) -> [u8; 4] {
+        let i = (y * image.width() + x) as usize * 4;
+        image.pixels()[i..i + 4].try_into().unwrap()
+    }
+    #[test]
+    fn a_sharp_shadow_is_the_shape_moved_grown_or_shrunk() {
+        let rect = Rect::new(5., 2., 6., 4.);
+        let moved = cast((20., 10.), rect, (RED, Point::new(4., 3.), 0., 0.));
+        assert_eq!(at(&moved, 12, 7), [255, 0, 0, 255], "where it fell");
+        assert_eq!(at(&moved, 6, 3)[3], 0, "not where the shape is");
+        let rect = Rect::new(8., 3., 4., 4.);
+        let grown = cast((20., 10.), rect, (RED, Point::new(0., 0.), 0., 2.));
+        assert_eq!(at(&grown, 6, 5)[3], 255, "two points out");
+        assert_eq!(at(&grown, 5, 5)[3], 0);
+        let shrunk = cast((20., 10.), rect, (RED, Point::new(0., 0.), 0., -1.));
+        assert_eq!(at(&shrunk, 8, 5)[3], 0, "a point in");
+        assert_eq!(at(&shrunk, 10, 5)[3], 255);
+        let faint = cast(
+            (20., 10.),
+            rect,
+            (Color(0, 0, 0, 128), Point::new(0., 0.), 0., 0.),
+        );
+        assert_eq!(at(&faint, 10, 5), [0, 0, 0, 128], "its colour's alpha");
+    }
+    #[test]
+    fn a_blurred_shadow_fades_past_its_edge_as_a_gaussian() {
+        // Sigma 2: half at the edge, most of it inside, a little beyond.
+        let rect = Rect::new(5., 2., 10., 6.);
+        let soft = cast((20., 10.), rect, (RED, Point::new(0., 0.), 2., 0.));
+        let alpha = |x, y| at(&soft, x, y)[3];
+        assert!(alpha(10, 5) > 180, "{}", alpha(10, 5));
+        assert!((90..170).contains(&alpha(5, 5)), "{}", alpha(5, 5));
+        assert!((1..60).contains(&alpha(3, 5)), "{}", alpha(3, 5));
+        assert!(alpha(0, 5) < 10, "{}", alpha(0, 5));
+        assert_eq!(at(&soft, 10, 5)[..3], [255, 0, 0], "its colour kept");
+        // Sigma 10, worked out at a quarter size, the same shape of fade.
+        let rect = Rect::new(25., 25., 50., 50.);
+        let wide = cast((100., 100.), rect, (RED, Point::new(0., 0.), 10., 0.));
+        let alpha = |x, y| at(&wide, x, y)[3];
+        assert!(alpha(50, 50) > 230, "{}", alpha(50, 50));
+        assert!((100..160).contains(&alpha(25, 50)), "{}", alpha(25, 50));
+        assert!(alpha(0, 0) < 10, "{}", alpha(0, 0));
+        assert!(
+            alpha(25, 50).abs_diff(alpha(74, 50)) < 12,
+            "even on both sides: {} {}",
+            alpha(25, 50),
+            alpha(74, 50)
+        );
+    }
+    #[test]
+    fn a_shadow_is_clipped_and_drawn_under_what_follows() {
+        let mut canvas = Canvas::new();
+        canvas.clip(
+            Path::rectangle(Rect::new(0., 0., 10., 10.)),
+            FillRule::Winding,
+        );
+        canvas.shadow(
+            Path::rectangle(Rect::new(2., 2., 16., 6.)),
+            RED,
+            Point::new(0., 0.),
+            0.,
+            0.,
+        );
+        canvas.restore();
+        canvas.fill(
+            Path::rectangle(Rect::new(4., 4., 2., 2.)),
+            Color(0, 0, 255, 255),
+        );
+        let drawn = rasterize(&canvas, 20., 10., 1.).unwrap();
+        assert_eq!(at(&drawn, 3, 3), [255, 0, 0, 255]);
+        assert_eq!(at(&drawn, 15, 5)[3], 0, "outside the clip");
+        assert_eq!(at(&drawn, 4, 4), [0, 0, 255, 255], "the shape over it");
     }
 }
