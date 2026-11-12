@@ -25,12 +25,16 @@ pub(crate) struct ViewOptions {
     pub copy: bool,
     /// Draws TeX (`Options::math`); without it, math shows as code.
     pub math: Option<MathFn>,
+    /// A link's own menu, asked with its address and text; without it, a link's is Open Link and Copy Link.
+    pub link_menu: Option<LinkMenuFn>,
 }
 /// A scroller's viewport size, once it is mounted.
 type Viewport = Rc<RefCell<Option<Signal<(f32, f32)>>>>;
 
 /// TeX, inline or display, drawn as a picture in ems; `None` if it can't be.
 pub(crate) type MathFn = Rc<dyn Fn(&str, bool) -> Option<zgx::compose::InlineSvg>>;
+/// A link's menu at a press: its entries for the address and text (none lets the press through).
+pub(crate) type LinkMenuFn = Rc<dyn Fn(&zgx::compose::ContextMenuEvent, &str, &str) -> Vec<View>>;
 
 fn themed<T>(name: &str) -> Themed<T> {
     Themed::Token(token(name))
@@ -94,7 +98,8 @@ impl<'a> RunFields<'a> {
 }
 
 /// A run of text as a span: bold, italic, struck, code or a link.
-fn span(run: &Value, bold: bool, math: Option<&MathFn>) -> zgx::compose::TextSpan {
+fn span(run: &Value, bold: bool, options: &ViewOptions) -> zgx::compose::TextSpan {
+    let math = options.math.as_ref();
     let fields = RunFields::of(run);
     let tex = text_of(fields.text);
     if fields.math > 0
@@ -104,6 +109,7 @@ fn span(run: &Value, bold: bool, math: Option<&MathFn>) -> zgx::compose::TextSpa
         return zgx::compose::text_span(tex).inline_svg(drawn);
     }
     let code = fields.code || fields.math > 0;
+    let label = if options.link_menu.is_some() && fields.link.is_some() { tex.clone() } else { String::new() };
     let mut out = zgx::compose::text_span(tex);
     if bold || fields.bold {
         out = out.font_bold();
@@ -126,6 +132,10 @@ fn span(run: &Value, bold: bool, math: Option<&MathFn>) -> zgx::compose::TextSpa
         // Still streaming its address: styled as a link, going nowhere.
         if &**href != PENDING_LINK_URL {
             out = out.href(href.to_string());
+            if let Some(menu) = &options.link_menu {
+                let (menu, href, text) = (menu.clone(), href.to_string(), label);
+                out = out.context_menu(move |e| menu(e, &href, &text));
+            }
         }
     }
     out
@@ -168,13 +178,13 @@ fn display_math(tex: &str, math: Option<&MathFn>, cx: &mut Context) -> View {
 fn static_runs(
     list: Option<&Value>,
     bold: bool,
-    math: Option<&MathFn>,
+    options: &ViewOptions,
 ) -> zgx::compose::RichTextView {
     let spans = list
         .map(|l| {
             l.list()
                 .iter()
-                .map(|r| span(r, bold, math))
+                .map(|r| span(r, bold, options))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -326,7 +336,7 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                 _ => "font.size.md",
             };
             View::from(
-                static_runs(b.field("s"), true, options.math.as_ref())
+                static_runs(b.field("s"), true, options)
                     .text_size(themed(size))
                     .pt(4.),
             )
@@ -381,7 +391,7 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                 row.map(|c| c.list().to_vec())
                     .unwrap_or_default()
                     .iter()
-                    .map(|cell| static_runs(Some(cell), bold, options.math.as_ref()).into())
+                    .map(|cell| static_runs(Some(cell), bold, options).into())
                     .collect()
             };
             let rows = b
@@ -396,7 +406,7 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
         }
         "img" => text(text_of(b.field("alt"))).text_color(themed("text.secondary")),
         "math" => display_math(&text_of(b.field("x")), options.math.as_ref(), cx),
-        _ => static_runs(b.field("s"), false, options.math.as_ref()).into(),
+        _ => static_runs(b.field("s"), false, options).into(),
     }
 }
 
@@ -621,14 +631,14 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
 }
 
 /// A paragraph of the runs field `field` of `cell` holds, following it.
-fn runs_of(cell: Signal<Value>, field: &'static str, bold: bool, math: Option<MathFn>) -> View {
+fn runs_of(cell: Signal<Value>, field: &'static str, bold: bool, options: ViewOptions) -> View {
     zgx::compose::rich_text_signal(move || {
         cell.with(|b| {
             b.field(field)
                 .map(|runs| {
                     runs.list()
                         .iter()
-                        .map(|r| span(r, bold, math.as_ref()))
+                        .map(|r| span(r, bold, &options))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -648,7 +658,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                 2 => "font.size.lg",
                 _ => "font.size.md",
             };
-            runs_of(cell, "s", true, options.math.clone())
+            runs_of(cell, "s", true, options.clone())
                 .text_size(themed(size))
                 .pt(4.)
                 .heading(level)
@@ -735,7 +745,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                         let runs = cell
                             .list()
                             .iter()
-                            .map(|r| span(r, bold, options.math.as_ref()))
+                            .map(|r| span(r, bold, options))
                             .collect::<Vec<_>>();
                         zgx::compose::rich_text()
                             .children(runs)
@@ -760,7 +770,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         "img" => zgx::compose::text_signal(move || cell.with(|b| text_of(b.field("alt"))))
             .text_color(themed("text.secondary")),
         "math" => display_math(&text_of(b.field("x")), options.math.as_ref(), cx),
-        _ => runs_of(cell, "s", false, options.math.clone()),
+        _ => runs_of(cell, "s", false, options.clone()),
     }
 }
 

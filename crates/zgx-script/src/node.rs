@@ -1164,6 +1164,10 @@ pub(crate) enum Kind {
         /// and its width, height above the baseline and depth below, in
         /// ems), or nil to show the TeX as code.
         on_math: Option<Function>,
+        /// `link_menu(e)`: a link's own menu, `e` its `href`, `text` and the
+        /// point; nil or none back gives it no menu (the press goes on to the
+        /// paragraph's), in place of Open Link and Copy Link.
+        link_menu: Option<Function>,
     },
     Rich(Vec<Span>),
     Image {
@@ -5323,9 +5327,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 },
                 copy: flag("copy", true)?,
                 math: None,
+                link_menu: None,
             };
             let on_link = table.get::<Option<Function>>("on_link")?;
             table.raw_set("on_link", mlua::Value::Nil)?;
+            let link_menu = table.get::<Option<Function>>("link_menu")?;
+            table.raw_set("link_menu", mlua::Value::Nil)?;
             let mut args = TextArgs::default();
             let empty = Kind::Text(Text::Literal(String::new()));
             let (owner, lint) = owner_and_lint(lua)?;
@@ -5338,6 +5345,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 options,
                 on_link,
                 on_math,
+                link_menu,
             };
             // Prose: selectable as a web page's is, unless asked not to be.
             if node.selectable.is_none() {

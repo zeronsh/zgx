@@ -67,3 +67,39 @@ fn the_open_link_item_asks_on_link_too() {
     assert!(desktop.opened().is_empty(), "{:?}", desktop.opened());
     assert_eq!(h.text("told"), "https://anara.com/cite/doc1?page=3");
 }
+
+fn menu_at_link(hooks: &str) -> String {
+    let code: &'static str = Box::leak(app(hooks).into_boxed_str());
+    let mut h = Harness::with_desktop(move |runtime| ScriptHost::inline(runtime, "app", code));
+    h.ui.prepare_frame();
+    let bounds = h.bounds("md");
+    zgx_script::driver::right_click_at(&mut h.ui, (bounds.x + 20., bounds.y + 8.));
+    h.settle();
+    h.ui.prepare_frame();
+    h.tree()
+}
+
+#[test]
+fn link_menu_builds_a_link_s_menu_from_its_address_and_text() {
+    let tree = menu_at_link(
+        r#"link_menu = function(e)
+            told:set(e.href .. "|" .. string.sub(e.text, 1, 3))
+            return { ui.menu_item { label = "Show source", on_click = function() end } }
+        end,"#,
+    );
+    assert!(tree.contains("Show source"), "{tree}");
+    assert!(!tree.contains("Copy Link"), "{tree}");
+    assert!(tree.contains("https://anara.com/cite/doc1?page=3|aaa"), "{tree}");
+}
+
+#[test]
+fn link_menu_giving_nothing_leaves_a_link_without_a_menu() {
+    let tree = menu_at_link(r#"link_menu = function(e) return nil end,"#);
+    assert!(!tree.contains("Copy Link") && !tree.contains("menuitem"), "{tree}");
+}
+
+#[test]
+fn without_link_menu_a_link_has_open_link_and_copy_link() {
+    let tree = menu_at_link("");
+    assert!(tree.contains("Copy Link"), "{tree}");
+}

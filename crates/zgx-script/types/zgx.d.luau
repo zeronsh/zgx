@@ -5451,6 +5451,7 @@ export type MarkdownViewProps = {
 	on_link: ((url: string) -> boolean?)?,
 	-- TeX between dollars drawn as an SVG with its width, height above the baseline and depth below, in ems; nil shows it as code.
 	on_math: ((tex: string, display: boolean) -> { svg: string, w: number, h: number, d: number }?)?,
+	link_menu: ((e: { x: number, y: number, local_x: number, local_y: number, href: string, text: string }) -> { Node }?)?,
 }
 -- `ui.span`'s options are plain values.
 export type SpanProps = {

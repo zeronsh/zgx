@@ -1560,6 +1560,24 @@ fn math_renderer(on_math: mlua::Function, vm: &Rc<Vm>) -> crate::markdown::view:
     })
 }
 
+/// A markdown view's `link_menu`, told the link's address and text with the point, its entries lowered.
+fn link_menu_builder(build: mlua::Function, vm: &Rc<Vm>, low: &Rc<Lowering>) -> crate::markdown::view::LinkMenuFn {
+    let (vm, low) = (vm.clone(), low.clone());
+    Rc::new(move |e: &zgx::compose::ContextMenuEvent, href: &str, text: &str| {
+        let point = vm.lua.create_table().and_then(|t| {
+            t.set("x", e.x)?;
+            t.set("y", e.y)?;
+            t.set("local_x", e.local_x)?;
+            t.set("local_y", e.local_y)?;
+            t.set("href", href)?;
+            t.set("text", text)?;
+            Ok(t)
+        });
+        let items = point.and_then(|p| vm.runtime.clone().batch(|| vm.call::<Option<mlua::Table>>(&build, p)));
+        lowered_menu(&vm, &low, items)
+    })
+}
+
 /// A markdown view's `on_link`: asked first of its links; one it handles
 /// stays unopened, any other goes to the guard around it, if there is one.
 fn with_link_handler(view: View, on_link: mlua::Function, vm: &Rc<Vm>) -> View {
@@ -3113,14 +3131,13 @@ fn kind_view(
             options,
             on_link,
             on_math,
+            link_menu,
         } => {
             use crate::markdown::view::Source;
-            let options = match on_math {
-                Some(on_math) => crate::markdown::view::ViewOptions {
-                    math: Some(math_renderer(on_math.clone(), vm)),
-                    ..options.clone()
-                },
-                None => options.clone(),
+            let options = crate::markdown::view::ViewOptions {
+                math: on_math.clone().map(|on_math| math_renderer(on_math, vm)),
+                link_menu: link_menu.clone().map(|build| link_menu_builder(build, vm, low)),
+                ..options.clone()
             };
             // A state's text, as it is (`"{reply}"`): not copied into a
             // string, and a long one streamed in is parsed by its edits.
@@ -8572,6 +8589,11 @@ fn context_menu_items(
             .clone()
             .batch(|| vm.call::<Option<mlua::Table>>(build, p))
     });
+    lowered_menu(vm, low, items)
+}
+
+/// A script's menu entries (`menu_item`s, `submenu`s, separators), lowered; an error reported and nothing shown.
+fn lowered_menu(vm: &Rc<Vm>, low: &Rc<Lowering>, items: mlua::Result<Option<mlua::Table>>) -> Vec<View> {
     match items {
         Ok(Some(items)) => items
             .sequence_values::<mlua::AnyUserData>()
