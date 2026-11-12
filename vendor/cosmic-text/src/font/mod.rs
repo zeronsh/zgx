@@ -301,9 +301,12 @@ impl Font {
                      ..
                  }| {
                     let font_ref = FontRef::from_index((**data).as_ref(), info.index)?;
+                    // zgx patch: the point size applies the font's `trak` table at the
+                    // size it is drawn, as Core Text and browsers do (SF's tracking).
                     let shaper = shaper_data
                         .shaper(&font_ref)
                         .instance(Some(shaper_instance))
+                        .point_size((optical > 0).then_some(f32::from(optical)))
                         .build();
                     Ok::<_, ReadError>(shaper)
                 },
