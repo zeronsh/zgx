@@ -3421,6 +3421,14 @@ pub struct Scene {
     /// Tests: work every move's context out again (`move_context` unused).
     #[cfg(test)]
     pub(crate) no_move_context: bool,
+    /// Tests: a moved leaf damaged by the two subtree walks, as every move
+    /// was (`move_damaged`), to compare the two.
+    #[cfg(test)]
+    pub(crate) leaf_moves_off: bool,
+    /// Tests: moved leaves damaged together, and of those to the grid's
+    /// cells (`damage_moved_leaf`).
+    #[cfg(test)]
+    pub(crate) leaf_moves: [u64; 2],
     #[cfg(test)]
     pub(crate) move_context_kept: u64,
     /// Tests: damage subtrees by the walks as they were before they took
@@ -3701,6 +3709,10 @@ impl Scene {
             move_context: None,
             #[cfg(test)]
             no_move_context: false,
+            #[cfg(test)]
+            leaf_moves_off: false,
+            #[cfg(test)]
+            leaf_moves: [0; 2],
             #[cfg(test)]
             move_context_kept: 0,
             #[cfg(test)]
@@ -9381,12 +9393,8 @@ impl Scene {
         // What it needs of the node, read once (a move is the hottest
         // setter: a reorder animation moves every row each frame).
         let node = self.node(id);
-        let (scroll_copy, from, transparent, parent) = (
-            node.scroll_copy,
-            node.transform,
-            node.effects.opacity <= 0.,
-            node.parent,
-        );
+        let (scroll_copy, from, transparent) =
+            (node.scroll_copy, node.transform, node.effects.opacity <= 0.);
         if scroll_copy {
             transform = self.on_pixels(transform);
         }
@@ -9414,20 +9422,151 @@ impl Scene {
             self.invalidate(id, COMPOSITE);
             return;
         }
+        self.move_damaged(id, &transform);
+    }
+    /// `set_transform`'s damage for `id` moved to `to` from where it is,
+    /// and the move itself. A leaf with nothing transformed or filtered (each row of
+    /// a list animating its order) has both its places worked out at once,
+    /// from one look at the node, and added together, as layout adds a
+    /// moved leaf's (`leaf_damage`); anything else is walked where it was
+    /// and where it lands (`damage_subtree_with`). Out of line, so
+    /// `set_transform`'s other paths stay as they were.
+    #[inline(never)]
+    fn move_damaged(&mut self, id: NodeId, to: &Transform) {
+        // Read here, not passed: `set_transform`'s own paths keep no more
+        // live for the call.
+        let node = self.node(id);
+        let (from, parent, to) = (node.transform, node.parent, *to);
         // Its old place and its new, under the same ancestors: their
         // context is worked out once, and kept for the next move under the
         // same parent while nothing else changed (`move_context`).
         let mut context = self.kept_context(parent);
-        self.damage_subtree_with(id, &mut context);
+        let leaf = self.transformed + self.filtered.get() == 0
+            && self.children_raw(self.node(id)).is_empty();
+        #[cfg(test)]
+        let leaf = leaf && !self.leaf_moves_off;
+        match leaf {
+            true => self.damage_moved_leaf(id, from, to, &mut context),
+            false => self.damage_subtree_with(id, &mut context),
+        }
         self.move_context = None;
-        self.node_mut(id).transform = transform;
+        self.node_mut(id).transform = to;
         self.geometry_revision = self.geometry_revision.wrapping_add(1);
-        self.damage_subtree_with(id, &mut context);
+        if !leaf {
+            self.damage_subtree_with(id, &mut context);
+        }
         self.invalidate(id, COMPOSITE);
         // Moving a child (and marking it and its ancestors to repaint)
         // leaves the parent's places, clips and visibility as they were: a
         // child is never its own parent's ancestor.
         self.keep_context(parent, context);
+    }
+    /// A moved leaf's damage where it was (`from`) and where it lands
+    /// (`to`): to the grid's cells when it takes them, else as rounded
+    /// rectangles, those sharing their extent along an axis and
+    /// overlapping as one (as `add_moved_leaf_damage`, which stays
+    /// `arrange::<false>`'s alone), into the list as the walks add them.
+    fn damage_moved_leaf(
+        &mut self,
+        id: NodeId,
+        from: Transform,
+        to: Transform,
+        context: &mut Option<DamageContext>,
+    ) {
+        #[cfg(test)]
+        {
+            self.leaf_moves[0] += 1;
+            self.leaf_moves[1] += self.grid_takes_cells() as u64;
+        }
+        if self.grid_takes_cells() {
+            let (before, after) = self.moved_leaf_rects::<true>(id, context, from, to);
+            if let Some(grid) = &mut self.damage_grid {
+                grid.mark_clipped_pair(before, after);
+            }
+            return;
+        }
+        match self.moved_leaf_rects::<false>(id, context, from, to) {
+            (Some(before), Some(after))
+                if (before.x == after.x && before.width == after.width
+                    || before.y == after.y && before.height == after.height)
+                    && before.intersects(after) =>
+            {
+                self.add_damage(before.union(after));
+            }
+            (before, after) => {
+                for rect in [before, after].into_iter().flatten() {
+                    self.add_damage(rect);
+                }
+            }
+        }
+    }
+    /// What `damage_subtree_with` adds for leaf `id` under translation
+    /// `from` and then `to`, with nothing transformed or filtered: as
+    /// `leaf_damage` works a leaf's two boxes out, for one box at two
+    /// translations.
+    fn moved_leaf_rects<const CELLS: bool>(
+        &self,
+        id: NodeId,
+        context: &mut Option<DamageContext>,
+        from: Transform,
+        to: Transform,
+    ) -> (Option<Rect>, Option<Rect>) {
+        // Hidden, or never laid out (a row mounting as it moves in): it
+        // damages nothing, and its parent's context goes unworked, as
+        // `damage_subtree_with` leaves it.
+        let node = self.node(id);
+        let unplaced = node.measurement.is_none() && node.bounds == Rect::default();
+        if !own_visible(&node.style) || unplaced || self.damage_is_full() {
+            return (None, None);
+        }
+        let Some((parent, parent_clip)) =
+            *context.get_or_insert_with(|| self.damage_context(node.parent))
+        else {
+            return (None, None);
+        };
+        let at = |translation: Transform| Transform {
+            x: parent.x + translation.x,
+            y: parent.y + translation.y,
+        };
+        let (was, now) = (at(from), at(to));
+        let clips = clip_axes(&node.style) != (false, false);
+        let past_clip = clips && matches!(node.kind, NodeKind::Quad(_) | NodeKind::Panel { .. });
+        let bounds = node.bounds;
+        macro_rules! pair {
+            ($paint:expr) => {{
+                let paint = $paint;
+                let rect = |transform| {
+                    self.leaf_rect::<CELLS>(
+                        node,
+                        bounds,
+                        transform,
+                        parent_clip,
+                        clips,
+                        past_clip,
+                        &paint,
+                    )
+                };
+                (rect(was), rect(now))
+            }};
+        }
+        match &node.kind {
+            NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => {
+                if quad.decoration.is_none() && quad.shadow.is_none() && quad.outline.is_none() {
+                    pair!(Some)
+                } else {
+                    pair!(|bounds| Some(quad.paint_bounds(bounds)))
+                }
+            }
+            NodeKind::Image(image) => pair!(|bounds| Some(image.paint_bounds(bounds))),
+            NodeKind::Svg(svg) => pair!(|bounds| Some(svg.paint_bounds(bounds))),
+            NodeKind::Text { .. } | NodeKind::RichText { .. }
+                if node.effects.blur_radius <= 0.0 =>
+            {
+                pair!(|bounds| Some(self.text_ink(id, bounds)))
+            }
+            NodeKind::Container(_) if node.effects.blur_radius <= 0.0 => (None, None),
+            _ => pair!(Some),
+        }
     }
     /// The context kept for `parent` (`move_context`), if any.
     #[inline(always)]
@@ -23834,4 +23973,202 @@ fn rect_minus(outer: Rect, inner: Rect) -> impl Iterator<Item = Rect> {
     ]
     .into_iter()
     .filter(|rect| rect.width > 0. && rect.height > 0.)
+}
+#[cfg(test)]
+mod leaf_move_tests {
+    use super::*;
+
+    /// A column (clipping or not) of leaves (boxes, panels with a shadow
+    /// past their clip) and a group of two: the scene the comparisons run.
+    fn built(scene: &mut Scene) -> (NodeId, NodeId, Vec<NodeId>) {
+        let column = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Column),
+            Style {
+                width: Some(300.),
+                height: Some(16_000.),
+                ..Default::default()
+            },
+        );
+        let shadow = BoxShadow {
+            color: Color(0, 0, 0, 128),
+            offset: Transform { x: 3., y: 5. },
+            blur_radius: 6.,
+            spread: 1.,
+        };
+        let mut leaves: Vec<NodeId> = (0..200)
+            .map(|i| {
+                let style = Style {
+                    width: Some(40. + (i % 5) as f32 * 17.3),
+                    height: Some(12.4 + (i % 3) as f32 * 0.6),
+                    clip: i % 7 == 0,
+                    margin: Insets {
+                        top: 40.,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let kind = match i % 3 {
+                    0 => NodeKind::Rect(Color(1, 2, 3, 255)),
+                    _ => NodeKind::Panel {
+                        layout: Layout::Overlay,
+                        quad: QuadStyle {
+                            fill: Color(9, 200, 9, 255),
+                            radius: 4.,
+                            shadow: (i % 3 == 1).then_some(shadow),
+                            ..Default::default()
+                        },
+                    },
+                };
+                scene.append(column, kind, style)
+            })
+            .collect();
+        let group = scene.append(
+            column,
+            NodeKind::Container(Layout::Row),
+            Style {
+                width: Some(120.),
+                height: Some(30.),
+                ..Default::default()
+            },
+        );
+        for _ in 0..2 {
+            leaves.push(scene.append(
+                group,
+                NodeKind::Rect(Color(200, 9, 9, 255)),
+                Style {
+                    width: Some(50.),
+                    height: Some(20.),
+                    ..Default::default()
+                },
+            ));
+        }
+        scene.flush();
+        (column, group, leaves)
+    }
+
+    /// What a frame of `step` damages, with moved leaves damaged together
+    /// (`leaf`) or by the two subtree walks: frame by frame, the damage and
+    /// where everything is.
+    /// Each frame's damage and where the leaves are.
+    type Frames = Vec<(Vec<Rect>, Vec<Rect>)>;
+
+    fn frames(seed: u64, steps: usize, leaf: bool) -> (Frames, [u64; 2]) {
+        let mut scene = Scene::new(400.5, 16_000.25);
+        scene.leaf_moves_off = !leaf;
+        let (column, group, leaves) = built(&mut scene);
+        let mut state = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let mut next = move |n: u64| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (state >> 33) % n
+        };
+        let mut out = Vec::new();
+        for _ in 0..steps {
+            let moves = match next(6) {
+                // Every leaf: more than the list holds, so the grid takes them.
+                0 => leaves.len(),
+                _ => 1 + next(4) as usize,
+            };
+            for _ in 0..moves {
+                let id = leaves[next(leaves.len() as u64) as usize];
+                // Within its own gap down the column: apart from its
+                // neighbours' areas, so a frame moving every leaf leaves more
+                // areas than the list holds.
+                let x = next(120) as f32 * 0.37 - 20.;
+                let y = next(60) as f32 * 0.29 - 8.;
+                scene.set_transform(id, Transform { x, y });
+            }
+            match next(9) {
+                0 => scene.set_transform(
+                    group,
+                    Transform {
+                        x: next(30) as f32 * 1.5,
+                        y: 2.25,
+                    },
+                ),
+                1 => {
+                    let mut style = scene.style(column).clone();
+                    style.clip = !style.clip;
+                    scene.set_style(column, style);
+                }
+                2 => {
+                    let id = leaves[next(leaves.len() as u64) as usize];
+                    let mut style = scene.style(id).clone();
+                    let mut options = style.layout_options.as_deref().cloned().unwrap_or_default();
+                    options.visible = Some(options.visible == Some(false));
+                    style.layout_options = Some(Arc::new(options));
+                    scene.set_style(id, style);
+                }
+                3 => {
+                    let id = leaves[next(leaves.len() as u64) as usize];
+                    let effects = Effects {
+                        blur_radius: next(2) as f32 * 4.,
+                        ..Default::default()
+                    };
+                    scene.set_effects(id, effects);
+                }
+                4 => {
+                    // Something filtered: no move takes the leaf path.
+                    let effects = Effects {
+                        filter_blur: next(2) as f32 * 3.,
+                        ..Default::default()
+                    };
+                    scene.set_effects(group, effects);
+                }
+                _ => {}
+            }
+            // In any order: a leaf's two areas added as one (or one after
+            // the other) can leave the list's rectangles in another order.
+            let mut damage = scene.flush().damage;
+            damage.sort_by(|a, b| {
+                [a.x, a.y, a.width, a.height]
+                    .partial_cmp(&[b.x, b.y, b.width, b.height])
+                    .unwrap()
+            });
+            let bounds = leaves.iter().map(|id| scene.bounds(*id)).collect();
+            out.push((damage, bounds));
+        }
+        (out, scene.leaf_moves)
+    }
+
+    /// Leaves moved by `set_transform` (with the grid taking them or not,
+    /// clipped, hidden, blurred behind, beside a moved group and a filtered
+    /// one) damage, frame by frame, the same rectangles to the bit as the
+    /// two subtree walks did.
+    #[test]
+    fn moved_leaves_damage_what_the_walks_did() {
+        let mut taken = [0; 2];
+        for seed in 0..40 {
+            let (leaf, counted) = frames(seed, 30, true);
+            let (walked, none) = frames(seed, 30, false);
+            assert_eq!(leaf, walked, "seed {seed}");
+            assert_eq!(none, [0; 2], "the walks' run took no leaf path");
+            taken = [taken[0] + counted[0], taken[1] + counted[1]];
+        }
+        // Both ways ran: to the list, and to the grid's cells.
+        assert!(taken[1] > 1_000 && taken[0] - taken[1] > 1_000, "{taken:?}");
+    }
+
+    /// A leaf moved alone is damaged where it was and where it lands, as one
+    /// area when they share a column and overlap.
+    #[test]
+    fn a_leaf_moved_down_a_little_damages_one_area() {
+        let mut scene = Scene::new(400., 300.);
+        let leaf = scene.append(
+            scene.root(),
+            NodeKind::Rect(Color(1, 2, 3, 255)),
+            Style {
+                width: Some(40.),
+                height: Some(10.),
+                ..Default::default()
+            },
+        );
+        scene.flush();
+        scene.set_transform(leaf, Transform { x: 0., y: 4. });
+        assert_eq!(scene.flush().damage, [Rect::new(0., 0., 40., 14.)]);
+    }
 }
