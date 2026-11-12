@@ -331,13 +331,25 @@ pub(crate) struct Estimator {
     /// The list last seen, each row's scan by the row.
     seen: Cell<usize>,
     scanned: RefCell<FxHashMap<usize, Rc<Scanned>>>,
+    /// Folded rows opened for their scans, let go at the next idle: freed
+    /// in a pass, a long list's first would cost a free a row.
+    spent: Rc<RefCell<Vec<Value>>>,
+    _trim: zgx::idle::IdleTrim,
 }
 impl Estimator {
     pub(crate) fn new(
+        runtime: &zgx::reactive::Runtime,
         rule: Rc<Rule>,
         items: Rc<dyn Fn() -> Value>,
         heights: VariableHeights,
     ) -> Self {
+        let spent: Rc<RefCell<Vec<Value>>> = Rc::default();
+        let trim = {
+            let spent = spent.clone();
+            zgx::idle::on_idle(runtime, move || {
+                drop(std::mem::take(&mut *spent.borrow_mut()))
+            })
+        };
         Self {
             rule,
             items,
@@ -345,6 +357,8 @@ impl Estimator {
             width: Cell::new(0.),
             seen: Cell::new(0),
             scanned: RefCell::default(),
+            spent,
+            _trim: trim,
         }
     }
 }
@@ -372,7 +386,16 @@ impl Estimator {
             };
             let known = scanned.get(&at).filter(|_| at != 0).cloned();
             let new = known.is_none();
-            let scan = known.unwrap_or_else(|| Rc::new(Scanned::of(&self.rule, &row.opened())));
+            let scan = known.unwrap_or_else(|| {
+                let opened = row.opened();
+                let scan = Rc::new(Scanned::of(&self.rule, &opened));
+                // Let go at the next idle: freed here, a long list's first
+                // pass would cost a free a row.
+                if let std::borrow::Cow::Owned(opened) = opened {
+                    self.spent.borrow_mut().push(opened);
+                }
+                scan
+            });
             if new || widened {
                 updates.push((index, scan.height(&self.rule, per_em)));
             }

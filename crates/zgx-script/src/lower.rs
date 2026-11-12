@@ -8276,8 +8276,12 @@ fn lower_item_list(
             .map(|rule| {
                 let (rows, items) = (rows.clone(), items.clone());
                 let now = Rc::new(move || items.with_untracked(Clone::clone));
-                Rc::new(crate::estimate::Estimator::new(rule, now, rows))
-                    as Rc<dyn zgx::compose::RowsWatch>
+                Rc::new(crate::estimate::Estimator::new(
+                    &cx.runtime(),
+                    rule,
+                    now,
+                    rows,
+                )) as Rc<dyn zgx::compose::RowsWatch>
             });
         let list = match key {
             // Heights by key, kept as rows move, each read here: no item is
