@@ -135,3 +135,34 @@ fn a_very_long_text_is_parsed_a_piece_a_frame_and_ends_whole() {
     assert_eq!(h.ui.find_status().count, 24);
     assert!(h.bounds("md").height > start * 100.);
 }
+
+#[test]
+fn a_long_text_the_host_holds_is_read_without_the_script_and_shown_over_frames() {
+    let mut text = String::new();
+    for i in 0..8_000 {
+        text.push_str(&format!(
+            "Paragraph {i}, held by the host for the view to read.\n\n"
+        ));
+    }
+    text.push_str("The last line.");
+    assert!(text.len() > 256 * 1024);
+    let mut body = None;
+    let mut h = Harness::new(|runtime| {
+        let host = ScriptHost::inline(
+            runtime,
+            "app",
+            r#"return ui.column { ui.markdown_view { id = "md", w = 300, "{doc_body}" } }"#,
+        );
+        body = Some(host.shared("doc_body", zgx_script::Value::from("")));
+        host
+    });
+    h.ui.prepare_frame();
+    body.unwrap()
+        .set(zgx_script::Value::Text(zgx::text::Text::new(&text)));
+    h.frames(1);
+    let start = h.bounds("md").height;
+    assert!(start > 0. && start < 3_000., "{start}");
+    h.frames(400);
+    h.ui.find_text("The last line.");
+    assert_eq!(h.ui.find_status().count, 1);
+}

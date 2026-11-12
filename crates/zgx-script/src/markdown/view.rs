@@ -790,9 +790,23 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
                 let mut parser = parser.borrow_mut();
                 match source() {
                     Source::Made(text) => revealing.feed(&mut parser, text),
+                    // a long text landing whole (a document, not a reply growing) goes in a piece a frame too
+                    Source::Held(Value::Text(text))
+                        if text.len() >= FEED_FROM
+                            && (parser.source().is_empty()
+                                || !text.to_cow().starts_with(parser.source())) =>
+                    {
+                        revealing.feed(&mut parser, text.to_cow().into_owned())
+                    }
                     Source::Held(value) => {
-                        revealing.feeding.borrow_mut().take();
-                        parser.set_value(&value)
+                        if revealing.feeding.borrow().is_some()
+                            && let Value::Text(text) = &value
+                        {
+                            revealing.feed(&mut parser, text.to_cow().into_owned());
+                        } else {
+                            revealing.feeding.borrow_mut().take();
+                            parser.set_value(&value)
+                        }
                     }
                 }
                 let shown = revealing.show(parser.blocks());
@@ -856,7 +870,8 @@ impl Reveal {
         if feeding.as_deref() == Some(text.as_str()) {
             return;
         }
-        let lands_whole = text.len() >= FEED_FROM && !text.starts_with(parser.source());
+        let lands_whole = text.len() >= FEED_FROM
+            && (parser.source().is_empty() || !text.starts_with(parser.source()));
         if lands_whole || (feeding.is_some() && text.starts_with(parser.source())) {
             let from = if lands_whole {
                 0
