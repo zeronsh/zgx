@@ -108,6 +108,9 @@ fn premultiply_into_cell(cell: &mut [u8], pixels: &[u8], width: u32) {
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 /// The backdrop blur atlas's format (see `atlas_texture`).
 const BLUR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+/// A factor-8 reduce's halves (blur.wgsl's `fs_reduce4`): sums of four taps,
+/// in the atlas's format (rgba32f opens a driver block of its own on Metal).
+const HALVES_FORMAT: wgpu::TextureFormat = BLUR_FORMAT;
 /// Why rendering failed, in words.
 #[derive(Debug)]
 pub struct GpuError(pub String);
@@ -2923,6 +2926,8 @@ struct BlurPipelines {
     layout: wgpu::BindGroupLayout,
     linear: wgpu::Sampler,
     reduce: wgpu::RenderPipeline,
+    /// A factor-8 reduce's first half (`fs_reduce4`), into `HALVES_FORMAT`.
+    halves: wgpu::RenderPipeline,
     across: wgpu::RenderPipeline,
     down: wgpu::RenderPipeline,
     vertical: wgpu::RenderPipeline,
@@ -2991,8 +2996,9 @@ impl BlurPipelines {
             });
             Self::pipeline(device, &shader, Some(&layout), entry, &[target])
         };
-        let (reduce, across, down, vertical) = (
+        let (reduce, halves, across, down, vertical) = (
             pipeline("fs_reduce", BLUR_FORMAT),
+            pipeline("fs_reduce4", HALVES_FORMAT),
             pipeline("fs_across", BLUR_FORMAT),
             pipeline("fs_down", BLUR_FORMAT),
             pipeline("fs", FORMAT),
@@ -3026,6 +3032,7 @@ impl BlurPipelines {
             layout,
             linear,
             reduce,
+            halves,
             across,
             down,
             vertical,
@@ -4938,6 +4945,9 @@ pub struct GpuRenderer {
     blur_pipelines: Option<BlurPipelines>,
     /// Backdrop blur scratch, shared by the window and every isolated layer.
     blur_scratch: Option<BlurScratch>,
+    /// Twice the blur atlas's extent, where a batch has a factor-8 slot: its
+    /// reduce's first half (`plan_halves`, `halves_pass`).
+    blur_halves: Option<wgpu::Texture>,
     /// Blurred and masked layers' slots (effects.rs), made with the first.
     effects: Option<effects::EffectAtlas>,
     effect_pipelines: Option<effects::EffectPipelines>,
@@ -5625,6 +5635,7 @@ impl GpuRenderer {
             // As if last recycled long ago: the first fill recycles.
             atlas_recycled_at: 0_u64.wrapping_sub(ATLAS_THRASH_FRAMES),
             blur_scratch: None,
+            blur_halves: None,
             effects: None,
             effect_pipelines: None,
             effect_jobs: Vec::new(),
@@ -6215,6 +6226,7 @@ impl GpuRenderer {
                 .any(|texture| texture.width() > width * 2 || texture.height() > height * 2)
         }) {
             self.blur_scratch = None;
+            self.blur_halves = None;
         }
         self.width = width;
         self.height = height;
@@ -11773,7 +11785,8 @@ impl GpuRenderer {
                         (record.atlas[0] as u32, record.atlas[1] as u32, *w, *h)
                     })
                     .collect();
-                Some((plan, slots, rects))
+                let halved = halved(&plan.slots);
+                Some((plan, slots, rects, halved))
             })
             .collect();
         let committed = {
@@ -11800,6 +11813,14 @@ impl GpuRenderer {
                 .as_ref()
                 .filter(|_| plans.iter().any(Option::is_some))
                 .map(|scratch| scratch.atlas.each_ref().map(raw));
+            let blur_halves = (self.blur_halves.as_ref())
+                .filter(|_| {
+                    plans
+                        .iter()
+                        .flatten()
+                        .any(|plan| plan.3.iter().any(Option::is_some))
+                })
+                .map(raw);
             // Effect slots drawn first, each pass of them into its atlas.
             let effect_passes = self.metal_effect_passes(effect_jobs, effect_first, &raw);
             let band_targets: Vec<_> = bands.iter().map(|band| raw(&band.texture)).collect();
@@ -11888,7 +11909,7 @@ impl GpuRenderer {
             // The batch drawn back at the start of the pass after its blur.
             let mut blurred = None;
             for (segment, end) in splits.chain([draws.len()]).enumerate() {
-                if let Some((plan, slots, _)) = blurred.take() {
+                if let Some((plan, slots, _, _)) = blurred.take() {
                     let plan: &BlurPlan = plan;
                     let records = metal_frame::BlurRecords {
                         blurs: bytemuck::cast_slice(&plan.blurs),
@@ -11933,7 +11954,7 @@ impl GpuRenderer {
                         stats.instances += (batch.end - batch.start) as usize;
                     });
                 }
-                let Some(Some((plan, slots, rects))) = plans.get(segment) else {
+                let Some(Some((plan, slots, rects, halved))) = plans.get(segment) else {
                     from = end;
                     continue;
                 };
@@ -11942,14 +11963,25 @@ impl GpuRenderer {
                     slots: bytemuck::cast_slice(slots),
                 };
                 let blur = blur_atlas.as_ref().expect("planned");
-                pass.blur(frame, &target, [&blur[0], &blur[1]], &records, rects);
+                let halves = (blur_halves.as_ref())
+                    .filter(|_| halved.iter().any(Option::is_some))
+                    .map(|halves| (&**halves, &halved[..]));
+                pass.blur(
+                    frame,
+                    &target,
+                    [&blur[0], &blur[1]],
+                    halves,
+                    &records,
+                    rects,
+                );
                 pass.resume(&target);
                 pass.texture(&atlas);
                 sampled = TextureSource::Atlas;
                 stats.draw_calls += 3 * rects.iter().filter(|r| r.2 > 0 && r.3 > 0).count();
-                stats.render_passes += 4;
+                stats.render_passes += 4 + usize::from(halves.is_some());
+                stats.draw_calls += halved.iter().flatten().count();
                 stats.blur_passes += 3;
-                blurred = Some((plan, slots, rects));
+                blurred = Some((plan, slots, rects, halved));
                 from = end;
             }
             let _span = zgx::profile::span(zgx::profile::Phase::Submit);
@@ -12313,6 +12345,8 @@ impl GpuRenderer {
             let texture = &scratch.atlas[0];
             (texture.width(), texture.height())
         });
+        // `plan_halves` fitted Direct3D 12's halves to every batch above.
+        let halves_size = (self.blur_halves.as_ref()).map(|h| (h.width(), h.height()));
         let state = self.d3d11.as_mut().expect("checked by the caller");
         let device = state.device.clone();
         let parts = [bytemuck::cast_slice(&quads)];
@@ -12401,6 +12435,16 @@ impl GpuRenderer {
                 .is_none_or(|a| (a[0].width, a[0].height) != (atlas_width, atlas_height))
         {
             state.blur_atlas = Some(device.blur_atlas(atlas_width, atlas_height)?);
+        }
+        // The halves where a batch reduces a slot by 8, of Direct3D 12's size.
+        if let Some((halves_width, halves_height)) = halves_size.filter(|_| {
+            (plans.iter().flatten()).any(|plan| halved(&plan.slots).iter().any(Option::is_some))
+        }) && state
+            .blur_halves
+            .as_ref()
+            .is_none_or(|h| (h.width, h.height) != (halves_width, halves_height))
+        {
+            state.blur_halves = Some(device.blur_halves(halves_width, halves_height)?);
         }
         let records = plans
             .iter()
@@ -12499,22 +12543,31 @@ impl GpuRenderer {
                     continue;
                 };
                 let slots: Vec<d3d11_frame::BlurSlot> = (plan.slots.iter())
-                    .map(|(record, (w, h), blurred)| d3d11_frame::BlurSlot {
-                        texels: (record.atlas[0] as u32, record.atlas[1] as u32, *w, *h),
-                        blurred: *blurred,
-                    })
+                    .zip(halved(&plan.slots))
+                    .map(
+                        |((record, (w, h), blurred), halves)| d3d11_frame::BlurSlot {
+                            texels: (record.atlas[0] as u32, record.atlas[1] as u32, *w, *h),
+                            blurred: *blurred,
+                            halves,
+                        },
+                    )
                     .collect();
                 let copies = plan.slots.iter().any(|slot| !slot.2);
                 let records = [&records[0], &records[1]];
                 let backdrop = state.popup_backdrop.as_ref();
-                let drawn = frame.blur(target, backdrop, atlas, records, &slots, copies)
+                let halves = state.blur_halves.as_ref();
+                let drawn = frame.blur(target, backdrop, atlas, halves, records, &slots, copies)
                     && frame.blur_back(target, &atlas[0], records, &plan.draws, plan.mixed);
                 if drawn {
+                    // With the halves pass where a slot reduces by 8.
+                    let halved = (slots.iter()).filter(|slot| slot.halves.is_some()).count()
+                        * usize::from(halves.is_some());
                     stats.blur_passes += 3;
-                    stats.render_passes += 3;
+                    stats.render_passes += 3 + usize::from(halved > 0);
                     stats.draw_calls += plan.draws.len()
                         + slots.iter().filter(|slot| slot.blurred).count() * 2
-                        + slots.len();
+                        + slots.len()
+                        + halved;
                 } else {
                     unpainted = true;
                 }
@@ -13576,6 +13629,41 @@ impl GpuRenderer {
             }
         }
     }
+    /// Fit the halves (`blur_halves`) to a batch whose slots reduce by 8, at
+    /// twice its extent: grown, or kept for batches planned before; false
+    /// where twice the extent passes the device's limit (the batch draws no
+    /// blur). Out of `plan_blur`'s body: a frame without a blur never comes
+    /// here.
+    #[cold]
+    #[inline(never)]
+    fn plan_halves(
+        &mut self,
+        slots: &[(SlotRecord, (u32, u32), bool)],
+        (width, height): (u32, u32),
+        limit: u32,
+    ) -> bool {
+        if !slots
+            .iter()
+            .any(|(record, _, blurred)| *blurred && record.region[2] == 8.)
+        {
+            return true;
+        }
+        if width * 2 > limit || height * 2 > limit {
+            return false;
+        }
+        let fits = |h: &wgpu::Texture| h.width() >= width * 2 && h.height() >= height * 2;
+        if !self.blur_halves.as_ref().is_some_and(fits) {
+            let (current_w, current_h) =
+                (self.blur_halves.as_ref()).map_or((0, 0), |h| (h.width(), h.height()));
+            let grow = |want: u32, have: u32| want.max(have).next_multiple_of(128).min(limit);
+            self.blur_halves = Some(halves_texture(
+                &self.device,
+                grow(width * 2, current_w),
+                grow(height * 2, current_h),
+            ));
+        }
+        true
+    }
     /// Plan a batch of backdrop filters (see blur.wgsl): each one's levels
     /// as slots of the atlas, packed, the atlas grown to hold them.
     fn plan_blur(&mut self, filters: &[Filter]) -> Option<BlurPlan> {
@@ -13741,6 +13829,10 @@ impl GpuRenderer {
         if width > limit || height > limit {
             return None;
         }
+        // A factor-8 slot's reduce goes through the halves.
+        if !self.plan_halves(&slots, (width, height), limit) {
+            return None;
+        }
         let atlas = self.blur_scratch.take().map(|scratch| scratch.atlas);
         let atlas = [0, 1].map(|i| match &atlas {
             Some(atlas) if atlas[i].width() >= width && atlas[i].height() >= height => {
@@ -13839,11 +13931,21 @@ impl GpuRenderer {
         // (its shadow), not the window's pixels.
         let backdrop = self.backdrop.as_ref().map(|(_, view)| view);
         let source = backdrop.unwrap_or(&self.view);
+        let halves = self.blur_halves.as_ref();
         let passes = [
             (
                 "blur reduce",
                 &pipelines.reduce,
-                bind(source, &views[1]),
+                // After a factor-8 batch's halves pass, reading them.
+                halves_pass(
+                    encoder,
+                    pipelines,
+                    halves,
+                    slots,
+                    &|other| bind(source, other),
+                    &views[1],
+                    stats,
+                ),
                 &views[0],
                 backdrop.is_some(),
                 false,
@@ -16678,6 +16780,7 @@ impl GpuRenderer {
         // The font cache read at launch, checked as the host first goes idle.
         font_cache_check();
         self.blur_scratch = None;
+        self.blur_halves = None;
         // A frame's quads and draws: the next frame makes them again.
         self.frame_quads = Vec::new();
         self.frame_points = Vec::new();
@@ -17750,6 +17853,81 @@ fn written(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView)
 }
 /// A backdrop blur atlas: half floats, so averaging down and blurring in
 /// steps adds no 8-bit banding to smooth frost.
+/// Encode a batch's halves pass where any of its slots reduces by 8 (its
+/// factor-8 slots' first halves into `halves`, cleared: `fs_reduce4`), and
+/// give the reduce's bind group: reading them, or `other` where there's no
+/// such pass. Out of `blur`'s body.
+#[inline(never)]
+fn halves_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    pipelines: &BlurPipelines,
+    halves: Option<&wgpu::Texture>,
+    slots: &[(SlotRecord, (u32, u32), bool)],
+    bind: &dyn Fn(&wgpu::TextureView) -> wgpu::BindGroup,
+    other: &wgpu::TextureView,
+    stats: &mut GpuStats,
+) -> wgpu::BindGroup {
+    let halved = halved(slots);
+    let Some(halves) = halves.filter(|_| halved.iter().any(Option::is_some)) else {
+        return bind(other);
+    };
+    let view = halves.create_view(&Default::default());
+    let group = bind(other);
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("blur reduce halves"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    pass.set_pipeline(&pipelines.halves);
+    pass.set_bind_group(0, &group, &[]);
+    for (k, rect) in halved.iter().enumerate() {
+        let Some((x, y, w, h)) = *rect else { continue };
+        pass.set_scissor_rect(x, y, w, h);
+        pass.draw(0..3, k as u32..k as u32 + 1);
+        stats.draw_calls += 1;
+    }
+    drop(pass);
+    stats.render_passes += 1;
+    bind(&view)
+}
+/// Each slot's place in the halves (`GpuRenderer::blur_halves`), twice its own,
+/// where it is blurred at factor 8.
+fn halved(slots: &[(SlotRecord, (u32, u32), bool)]) -> Vec<Option<Scissor>> {
+    slots
+        .iter()
+        .map(|(record, (w, h), blurred)| {
+            (*blurred && record.region[2] == 8. && *w > 0 && *h > 0).then(|| {
+                let (x, y) = (record.atlas[0] as u32, record.atlas[1] as u32);
+                (x * 2, y * 2, w * 2, h * 2)
+            })
+        })
+        .collect()
+}
+/// A factor-8 reduce's halves (`GpuRenderer::blur_halves`).
+fn halves_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("backdrop blur halves"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HALVES_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
 fn atlas_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some("backdrop blur"),

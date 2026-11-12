@@ -340,10 +340,11 @@ fn blur_frames_defer_the_tail_after_the_last_filter_and_still_match() {
         let stats = single.render(&b.scene, &damage).unwrap();
         blurred += stats.blur_passes;
         if n > 0 {
-            // Draws up to the filter, its three blur passes, then
-            // presentation with the blur drawn back and everything after it.
+            // Draws up to the filter, its blur passes (three, and the
+            // first half of a factor-8 reduce), then presentation with the
+            // blur drawn back and everything after it.
             assert!(
-                stats.render_passes <= 5,
+                stats.render_passes <= 6,
                 "frame {n}: {} passes",
                 stats.render_passes
             );

@@ -133,9 +133,18 @@ pub(crate) struct EffectDraw {
     pub(crate) instance: u32,
 }
 
+/// A batch's halves texture and each slot's place there (none but at
+/// factor 8), for a factor-8 reduce's first half.
+pub(crate) type Halves<'a> = (
+    &'a ProtocolObject<dyn MTLTexture>,
+    &'a [Option<(u32, u32, u32, u32)>],
+);
+
 /// The backdrop blur pipelines (blur.wgsl), as `BlurPipelines`' mixed ones.
 struct Blur {
     reduce: Pipeline,
+    /// A factor-8 reduce's first half (`fs_reduce4`), into the rgba16f halves.
+    halves: Pipeline,
     across: Pipeline,
     down: Pipeline,
     mix: Pipeline,
@@ -372,6 +381,7 @@ impl MetalFrame {
                 let half = MTLPixelFormat::RGBA16Float;
                 Some(Blur {
                     reduce: pipeline("fs_reduce", half, Blend::Replace)?,
+                    halves: pipeline("fs_reduce4", half, Blend::Replace)?,
                     across: pipeline("fs_across", half, Blend::Replace)?,
                     down: pipeline("fs_down", half, Blend::Replace)?,
                     mix: pipeline("fs_mix", MTLPixelFormat::BGRA8Unorm, Blend::Mix)?,
@@ -694,27 +704,53 @@ impl Frame {
     /// A batch of backdrop filters' blur passes (`GpuRenderer::plan_blur`):
     /// `target` averaged down into `atlas[0]`, blurred across into
     /// `atlas[1]` and down into `atlas[0]`, each slot (atlas x, y, width,
-    /// height) drawn in each. The pass into the target ends; `resume` opens
-    /// the next.
+    /// height) drawn in each. Factor-8 slots reduce through `halves` first
+    /// (their places there, `fs_reduce4`). The pass into the target ends;
+    /// `resume` opens the next.
     pub(crate) fn blur(
         &mut self,
         frame: &MetalFrame,
         target: &ProtocolObject<dyn MTLTexture>,
         atlas: [&ProtocolObject<dyn MTLTexture>; 2],
+        halves: Option<Halves<'_>>,
         records: &BlurRecords<'_>,
         slots: &[(u32, u32, u32, u32)],
     ) {
         let blur = frame.blur().expect("checked by `blurs`");
+        let timing = TIME_PASSES.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some((texture, places)) = halves {
+            self.encoder.endEncoding();
+            if timing {
+                self.split(frame, "frame before the blur");
+            }
+            self.encoder = pass(&self.buffer, texture, MTLLoadAction::Clear);
+            self.scissor = None;
+            self.encoder.setRenderPipelineState(&blur.halves);
+            // SAFETY: Live textures for the blur's source slot.
+            unsafe {
+                self.encoder
+                    .setFragmentTexture_atIndex(Some(target), BLUR_SOURCE);
+            }
+            self.records(frame, records);
+            for (index, place) in places.iter().enumerate() {
+                if let Some(place) = *place {
+                    self.scissor(place);
+                    self.triangle(index as u32);
+                }
+            }
+            self.scissor = None;
+        }
         let passes = [
             (&blur.reduce, target, atlas[0]),
             (&blur.across, atlas[0], atlas[1]),
             (&blur.down, atlas[1], atlas[0]),
         ];
-        let timing = TIME_PASSES.load(std::sync::atomic::Ordering::Relaxed);
         let ran = ["frame before the blur", "blur reduce", "blur across"];
         for (step, (pipeline, source, into)) in passes.into_iter().enumerate() {
             self.encoder.endEncoding();
-            if timing {
+            // With halves, the frame before split off above; the reduce's
+            // time is both halves'.
+            if timing && (step > 0 || halves.is_none()) {
                 self.split(frame, ran[step]);
             }
             self.encoder = pass(&self.buffer, into, MTLLoadAction::Clear);
@@ -723,6 +759,12 @@ impl Frame {
             unsafe {
                 self.encoder
                     .setFragmentTexture_atIndex(Some(source), BLUR_SOURCE);
+                if step == 0
+                    && let Some((texture, _)) = halves
+                {
+                    self.encoder
+                        .setFragmentTexture_atIndex(Some(texture), BLUR_SOURCE + 1);
+                }
             }
             self.records(frame, records);
             for (index, &(x, y, width, height)) in slots.iter().enumerate() {
