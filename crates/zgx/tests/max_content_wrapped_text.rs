@@ -17,14 +17,32 @@ fn unwrapped(words: &str) -> f32 {
 /// A bubble holding `words`, sized by what it holds (`width`: None, or a `w` expression), at most 70% of
 /// a row `parent` wide; its and its text's bounds.
 fn bubble(parent: f32, words: &str, width: Option<&str>) -> (zgx::scene::Rect, zgx::scene::Rect) {
+    bubble_of(parent, words, width, false)
+}
+
+/// `bubble`, its text a rich paragraph (`ui.rich`) when `rich`.
+fn bubble_of(
+    parent: f32,
+    words: &str,
+    width: Option<&str>,
+    rich: bool,
+) -> (zgx::scene::Rect, zgx::scene::Rect) {
     let mut ui = Ui::new(2000., 400.);
+    let body: View = if rich {
+        rich_text()
+            .id("text")
+            .child(text_span(words.to_owned()))
+            .into()
+    } else {
+        text(words.to_owned()).id("text")
+    };
     let mut b = column()
         .id("bubble")
         .max_w_percent(70.)
         .px(16.)
         .text_size(14.)
         .line_height(22.)
-        .child(text(words.to_owned()).id("text").text_wrap(true));
+        .child(body.text_wrap(true));
     if let Some(width) = width {
         b = b.w_calc(width.parse::<SizeCalc>().unwrap());
     }
@@ -49,12 +67,18 @@ fn text_that_only_just_wraps_fills_its_box_to_the_cap() {
     for slack in [3., 10., 17., 25., 33., 48., 70., 110.] {
         let parent = just_wrapping(WORDS, slack);
         let cap = (parent * 0.7).floor();
-        for width in [None, Some("fit-content"), Some("max-content")] {
-            let (bubble, text) = bubble(parent, WORDS, width);
-            assert!(text.height > 22.5, "{slack} {width:?}: it wraps: {text:?}");
+        for (width, rich) in [None, Some("fit-content"), Some("max-content")]
+            .into_iter()
+            .flat_map(|width| [(width, false), (width, true)])
+        {
+            let (bubble, text) = bubble_of(parent, WORDS, width, rich);
+            assert!(
+                text.height > 22.5,
+                "{slack} {width:?} rich {rich}: it wraps: {text:?}"
+            );
             assert!(
                 (bubble.width - cap).abs() <= 1.,
-                "{slack} {width:?}: the cap {cap}, the bubble {bubble:?}"
+                "{slack} {width:?} rich {rich}: the cap {cap}, the bubble {bubble:?}"
             );
         }
     }
