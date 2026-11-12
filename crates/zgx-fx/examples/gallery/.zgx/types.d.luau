@@ -21824,6 +21824,9 @@ declare ui: {
 	-- The look every menu takes that doesn't style itself, zgx's own (a link's, an editor's) among them: its
 	-- panel, each item, an item under the pointer and one with keyboard focus, in plain values.
 	menu_look: (look: { panel: Styles?, item: Styles?, hover: Styles?, focus: Styles? }) -> (),
+	-- Whether the last input was the keyboard's (a key that moves or types since the last press), as
+	-- `:focus-visible` reads it: what it opens can skip its fade, as a menu opened from the keyboard does.
+	keyboard_in_use: () -> boolean,
 	-- The id of the command (the app's or a plugin's) holding a shortcut
 	-- now, `Shift+Cmd+J` or `cmd+shift+j` alike; nil if none.
 	shortcut_owner: (keys: string) -> string?,

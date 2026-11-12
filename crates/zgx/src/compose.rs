@@ -6490,7 +6490,18 @@ fn open_element(
             .as_ref()
             .and_then(|_| environment.services.get::<TaskRunner>());
         let weak_ui = ui.downgrade();
+        // A submenu waits this long under the pointer before it opens, as
+        // Base UI's and AppKit's do, so a pointer passing over on its way to
+        // another item doesn't open it; a press or the keyboard opens it at once.
+        const SUBMENU_HOVER_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
+        let hover_open: Rc<RefCell<Option<TaskToken>>> = Rc::default();
         ui.on_event(root, true, move |cx| {
+            if cx.phase != EventPhase::Capture
+                && matches!(cx.event, InputEvent::PointerLeave)
+                && cx.target == root
+            {
+                hover_open.borrow_mut().take();
+            }
             // Over a menu's item (or pressing it): a submenu trigger opens
             // its submenu, and any other submenu of that menu closes.
             if cx.phase != EventPhase::Capture
@@ -6510,7 +6521,18 @@ fn open_element(
                 if let Some(open) = &menu_trigger
                     && matches!(cx.event, InputEvent::PointerEnter)
                 {
-                    open.set(true);
+                    match &runner {
+                        Some(runner) => {
+                            let open = open.clone();
+                            *hover_open.borrow_mut() = Some(runner.spawn(Box::pin(async move {
+                                crate::timer::sleep(SUBMENU_HOVER_DELAY).await;
+                                open.set(true);
+                            })));
+                        }
+                        None => {
+                            open.set(true);
+                        }
+                    }
                 }
             }
             if cx.phase != EventPhase::Capture
