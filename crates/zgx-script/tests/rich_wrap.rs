@@ -95,7 +95,8 @@ fn a_press_on_a_chip_s_icon_is_a_press_on_the_chip() {
 return ui.column { w = 300,
     ui.rich { id = "p", wrap = true, w_full = true, text_size = 16, line_height = 24,
         ui.span { "4", literal = true, padding = { 4, 2 }, bg = "#dddddd",
-            icon = { src = "x.svg", size = 14, gap = 2 }, on_click = function() clicked:set("yes") return true end },
+            icon = { code = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'><rect width='12' height='12'/></svg>", size = 14, gap = 2 },
+            on_click = function() clicked:set("yes") return true end },
         " after",
     },
     ui.text { id = "clicked", function() return clicked:get() end },
@@ -107,7 +108,25 @@ return ui.column { w = 300,
     let tree = h.tree();
     let chip = boxes(&tree)[0];
     assert!(chip.2 >= 14., "the chip's box takes its icon: {chip:?}\n{tree}");
-    zgx_script::driver::click_at(&mut h.ui, zgx::scene::Rect::new(chip.0, chip.1, 6., chip.3));
+    // the icon is drawn by a node of its own over the chip's box: a press there must not stop at it
+    {
+        let p = h.find("p").unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![p];
+        let mut icon = None;
+        while let Some(n) = stack.pop() {
+            if matches!(scene.kind(n), zgx::scene::NodeKind::Svg(_)) {
+                icon = Some(n);
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        let icon = icon.expect("the chip's icon is drawn");
+        let b = scene.bounds(icon);
+        let hit = scene.hit_test(b.x + b.width / 2., b.y + b.height / 2.);
+        assert!(hit.is_some_and(|n| n != icon), "the icon took the press: {hit:?}");
+    }
+    // the icon's middle: its own node is drawn there, over the chip's box
+    zgx_script::driver::click_at(&mut h.ui, zgx::scene::Rect::new(chip.0 + 4., chip.1, 14., chip.3));
     h.settle();
     assert_eq!(h.text("clicked"), "yes");
 }

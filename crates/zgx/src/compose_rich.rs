@@ -1274,6 +1274,8 @@ pub(crate) fn mount_icons(
                         style.clone(),
                     );
                     scene.append(node, NodeKind::Svg(icon.svg.clone()), glyph.clone());
+                    // drawn over the span's link box, it lets presses through to it
+                    scene.set_inert(node, true);
                     if index < mounted.len() {
                         let old = std::mem::replace(&mut mounted[index], node);
                         drop(scene);
@@ -1307,13 +1309,16 @@ pub(crate) fn mount_icons(
                 continue;
             }
             if index == mounted.len() {
-                mounted.push(scene.append(owner, NodeKind::Svg(icon.svg.clone()), style));
+                let node = scene.append(owner, NodeKind::Svg(icon.svg.clone()), style);
+                scene.set_inert(node, true);
+                mounted.push(node);
             } else {
                 // Unchanged (the paragraph only moved): nothing to lay out.
                 let node = mounted[index];
                 if !matches!(scene.kind(node), NodeKind::Svg(_)) {
                     // (It had a well: the icon alone now.)
                     let fresh = scene.append(owner, NodeKind::Svg(icon.svg.clone()), style);
+                    scene.set_inert(fresh, true);
                     drop(scene);
                     ui.remove(node);
                     mounted[index] = fresh;
