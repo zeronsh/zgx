@@ -281,9 +281,12 @@ impl<'b> LayoutRunIter<'b> {
             self.total_height += line_height;
 
             let line_top = self.line_top - self.scroll;
-            let glyph_height = layout_line.max_ascent + layout_line.max_descent;
-            let centering_offset = (line_height - glyph_height) / 2.0;
-            let line_y = line_top + centering_offset + layout_line.max_ascent;
+            // zgx patch: the baseline sits where a browser's line box puts it: ascent
+            // and descent rounded to whole pixels, the half-leading floored (Blink).
+            let ascent = layout_line.max_ascent.round();
+            let descent = layout_line.max_descent.round();
+            let centering_offset = ((line_height - ascent - descent) / 2.0).floor();
+            let line_y = line_top + centering_offset + ascent;
             if let Some(height) = self.height_opt {
                 if line_y - layout_line.max_ascent > height {
                     return Some(None);
