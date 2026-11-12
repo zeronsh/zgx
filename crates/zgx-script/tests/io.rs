@@ -185,11 +185,19 @@ return ui.column {
     ui.button { id = "broken", w = 40, h = 20, "b", on_click = function()
         save({ base64 = "not base64!" })
     end },
+    ui.button { id = "read", w = 40, h = 20, "rd", on_click = function()
+        ui.task(function()
+            local files = ui.open_files():await()
+            local encoded = ui.read_file(files[1], { base64 = true }):await()
+            shown:set(if encoded == BASE64 then "read whole" else encoded)
+        end)
+    end },
 }
 "#;
 
 /// A PNG or any other file: a string's bytes, or bytes in base64, reach
-/// the file as they are, NUL and bytes that aren't UTF-8 too.
+/// the file as they are, NUL and bytes that aren't UTF-8 too, and read
+/// back whole in base64.
 #[test]
 fn a_saved_file_takes_any_bytes() {
     use base64::Engine as _;
@@ -208,6 +216,15 @@ fn a_saved_file_takes_any_bytes() {
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
+    // Read back whole: the file the raw string wrote, as base64.
+    let read = dir("bytes-read");
+    let mut h = app(&read, code, None);
+    h.click("raw");
+    wait_for(&mut h, "wrote");
+    std::fs::rename(read.join("out.txt"), read.join("in.txt")).unwrap();
+    h.click("read");
+    wait_for(&mut h, "read whole");
+    std::fs::remove_dir_all(read).unwrap();
     let dir = dir("bytes-broken");
     let mut h = app(&dir, code, None);
     h.click("broken");

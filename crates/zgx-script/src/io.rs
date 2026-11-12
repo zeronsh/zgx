@@ -459,15 +459,25 @@ pub(crate) fn install(
         let picked = picked.clone();
         ui.set(
             "read_file",
-            lua.create_function(move |lua, file: mlua::Value| {
+            lua.create_function(move |lua, (file, opts): (mlua::Value, Option<Table>)| {
                 if !files {
                     return Err(denied("ui.read_file", "Files"));
                 }
                 let path = chosen(&picked, &file, "ui.read_file")?;
                 crate::rules::guard(lua, crate::GuardKind::File, &path.to_string_lossy())?;
+                // Text (a byte that isn't UTF-8 becomes U+FFFD), or with
+                // `base64` every byte, whole (a picture to keep).
+                let encoded = match &opts {
+                    Some(opts) => opts.get::<Option<bool>>("base64")?.unwrap_or(false),
+                    None => false,
+                };
                 off_thread(lua, format!("read {}", path.display()), move || {
+                    use base64::Engine as _;
                     std::fs::read(&path)
-                        .map(|bytes| Some(String::from_utf8_lossy(&bytes).into_owned()))
+                        .map(|bytes| match encoded {
+                            true => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                            false => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                        })
                         .map_err(|e| format!("{}: {e}", path.display()))
                 })
             })?,
