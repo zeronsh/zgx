@@ -3,8 +3,8 @@
 //! renderer is linked, their stand-ins.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) use zgx_gpu::{
-    assets::decode_image_kept, check_fill_shader, check_layer_inputs, check_layer_shader,
-    warm_fill_shader,
+    assets::decode_image, assets::decode_image_kept, check_fill_shader, check_layer_inputs,
+    check_layer_shader, warm_fill_shader,
 };
 
 #[cfg(target_arch = "wasm32")]
