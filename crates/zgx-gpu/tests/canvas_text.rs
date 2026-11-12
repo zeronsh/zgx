@@ -100,7 +100,10 @@ fn a_shape_drawn_after_a_text_covers_it_and_one_before_lies_under_it() {
         }),
     ] {
         let (pixels, canvases) = shown(draw, view);
-        assert_eq!(canvases, 2, "a layer for what covers the text");
+        // Panned and zoomed, its text is in its raster with its shapes:
+        // one node, the layers drawn into it.
+        let layers = if view.is_some() { 1 } else { 2 };
+        assert_eq!(canvases, layers, "a layer for what covers the text");
         let (_, other) = ink(&pixels, Rect::new(0., 0., 56., 40.), RED);
         assert_eq!(other, 0, "the first text hidden under the red ({view:?})");
         let (dark, _) = ink(&pixels, Rect::new(64., 4., 90., 34.), WHITE);
