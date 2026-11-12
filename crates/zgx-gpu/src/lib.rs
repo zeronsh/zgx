@@ -51,6 +51,32 @@ mod native_surface;
 mod surfaces;
 #[cfg(target_os = "macos")]
 pub use surfaces::{PixelBuffer, SurfaceReadback, blank_surface};
+/// The direct Metal path's first-frame libraries built ahead (build.rs):
+/// whether each still has its source's hash, or none built (no Metal
+/// toolchain where zgx was built): for tests.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn debug_built_metal_libraries() -> Option<[bool; 2]> {
+    metal_frame::built_libraries()
+}
+/// The first-frame libraries loaded from those built ahead, and those
+/// compiled at start, so far in this process: for tests.
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn debug_metal_library_counts() -> (usize, usize) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        metal_frame::LOADED.load(Relaxed),
+        metal_frame::COMPILED.load(Relaxed),
+    )
+}
+/// Compile the first-frame libraries at start even when built ahead (for
+/// a test comparing the two).
+#[cfg(target_os = "macos")]
+#[doc(hidden)]
+pub fn debug_compile_metal_libraries_at_start(on: bool) {
+    metal_frame::COMPILE_AT_START.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod phase_watch;
 mod planes;
