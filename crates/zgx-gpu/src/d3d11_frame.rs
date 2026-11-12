@@ -1157,6 +1157,9 @@ pub(crate) struct State {
     /// A copy of the target under blended layers (`Frame::blended`), of the
     /// last target's size that had one.
     pub(crate) backdrop: Option<Surface>,
+    /// A popup's copy of what its window last drew under it
+    /// (`crate::GpuRenderer::set_backdrop`), which its blurs reduce from.
+    pub(crate) popup_backdrop: Option<Surface>,
     /// The backdrop blur's atlas pair (`Frame::blur`), RGBA16F at the size
     /// the batches' plans want, as Direct3D 12's `BlurScratch`.
     pub(crate) blur_atlas: Option<[Surface; 2]>,
@@ -1195,6 +1198,7 @@ impl State {
             layers: Default::default(),
             textures: Default::default(),
             backdrop: None,
+            popup_backdrop: None,
             blur_atlas: None,
             effects: None,
         })
@@ -1533,11 +1537,13 @@ impl Frame<'_> {
     /// `GpuRenderer::blur` draws them: reduced from `target` into the first
     /// atlas, across into the second, then down into the first again (over
     /// the copies it holds where `copies`), each slot under its texels'
-    /// scissor; `blurs` and `slots` the batch's records. Whether it could
-    /// (its stages made).
+    /// scissor; `blurs` and `slots` the batch's records. A popup's blurs
+    /// reduce from its window's frame (`backdrop`) and its copies from its
+    /// own target, as Direct3D 12's do. Whether it could (its stages made).
     pub(crate) fn blur(
         &mut self,
         target: &Surface,
+        backdrop: Option<&Surface>,
         atlas: &[Surface; 2],
         records: [&ID3D11ShaderResourceView; 2],
         slots: &[BlurSlot],
@@ -1555,10 +1561,10 @@ impl Frame<'_> {
         let passes = [
             (
                 &blur.reduce,
-                srv(target),
+                srv(backdrop.unwrap_or(target)),
                 srv(&atlas[1]),
                 &atlas[0],
-                false,
+                backdrop.is_some(),
                 false,
             ),
             (
@@ -1590,6 +1596,26 @@ impl Frame<'_> {
                 into,
                 keep,
                 pixel,
+                &blur.replace,
+                [&source, &other],
+                records,
+                draws,
+            );
+        }
+        // A popup's copies ("originals"): its own target, reduced over the
+        // blurs' averages.
+        if backdrop.is_some() && copies {
+            let draws = slots
+                .iter()
+                .enumerate()
+                .filter(|(_, slot)| slot.texels.2 > 0 && slot.texels.3 > 0 && !slot.blurred)
+                .map(|(k, slot)| (k as u32, slot.texels));
+            let (source, other) = (srv(target), srv(&atlas[1]));
+            self.blur_draw(
+                blur,
+                &atlas[0],
+                true,
+                &blur.reduce,
                 &blur.replace,
                 [&source, &other],
                 records,

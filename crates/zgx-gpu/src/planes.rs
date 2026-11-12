@@ -133,10 +133,24 @@ impl GpuRenderer {
     pub fn set_backdrop(&mut self, window: Option<&GpuRenderer>) {
         let (Some(window), Some(rect)) = (window, self.plane_rect()) else {
             self.backdrop = None;
+            #[cfg(d3d11)]
+            if let Some(state) = &mut self.d3d11 {
+                state.popup_backdrop = None;
+            }
             return;
         };
         window.flush_pending();
         let (width, height) = (self.width, self.height);
+        // Direct3D 11 draws the frames: its copy of the window's.
+        #[cfg(d3d11)]
+        if self.d3d11.is_some() {
+            let left = (rect.x * self.scale).round() as i64;
+            let top = (rect.y * self.scale).round() as i64;
+            let across = window_span(left, width, window.width);
+            let down = window_span(top, height, window.height);
+            self.d3d11_backdrop(window, across, down);
+            return;
+        }
         let texture = |device: &wgpu::Device| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("popup backdrop"),
@@ -256,6 +270,63 @@ impl GpuRenderer {
             self.backdrop = Some((extended, view));
         }
         self.queue.submit([encoder.finish()]);
+    }
+    /// `set_backdrop` with Direct3D 11: what `window` last showed (its swap
+    /// chain's shown buffer, or offscreen its own target) copied into a
+    /// texture of this popup's size, as the wgpu path copies it: what lies
+    /// over the window (`across`, `down`: from, to, and where in the window),
+    /// its first and last rows again past them, then its first and last
+    /// columns past those.
+    #[cfg(d3d11)]
+    fn d3d11_backdrop(
+        &mut self,
+        window: &GpuRenderer,
+        across: (u32, u32, u32),
+        down: (u32, u32, u32),
+    ) {
+        let (width, height) = (self.width, self.height);
+        let Some(state) = &mut self.d3d11 else {
+            return;
+        };
+        state.popup_backdrop = None;
+        let device = state.device.clone();
+        let shown = (window.layer_present.as_ref())
+            .and_then(|present| present.chain.as_ref())
+            .and_then(|chain| chain.d3d11_views());
+        let source = match &shown {
+            Some(views) => &views[1],
+            None => match window.d3d11.as_ref().and_then(|w| w.target.as_ref()) {
+                Some(target) => target,
+                None => return,
+            },
+        };
+        let (Ok(first), Ok(extended)) = (
+            device.surface(width, height, false),
+            device.surface(width, height, false),
+        ) else {
+            return;
+        };
+        let inner = (across.1 - across.0, down.1 - down.0);
+        let last_row = down.2 + inner.1 - 1;
+        let rows = (0..down.0).chain(down.1..height).map(|y| {
+            let row = if y < down.0 { down.2 } else { last_row };
+            (across.2, row, inner.0, 1, across.0, y)
+        });
+        let cells = std::iter::once((across.2, down.2, inner.0, inner.1, across.0, down.0));
+        device.copy_cells(source, &first, cells.chain(rows));
+        let made = if inner.0 < width {
+            let last_column = across.1 - 1;
+            let columns = (0..across.0).chain(across.1..width).map(|x| {
+                let column = if x < across.0 { across.0 } else { last_column };
+                (column, 0, 1, height, x, 0)
+            });
+            let whole = std::iter::once((0, 0, width, height, 0, 0));
+            device.copy_cells(&first, &extended, whole.chain(columns));
+            extended
+        } else {
+            first
+        };
+        state.popup_backdrop = Some(made);
     }
     /// The popup root this draws (`set_popup`).
     pub(crate) fn plane_popup(&self) -> Option<NodeId> {
