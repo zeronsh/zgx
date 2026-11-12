@@ -14,6 +14,13 @@ use zgx::{
 };
 use zgx_gpu::GpuRenderer;
 
+/// Whether `gpu` has presentation routes to count: not on wgpu's no-op
+/// backend, as under Direct3D 11 (`ZGX_D3D11`), which draws into what it
+/// presents by one route (its pixels are still compared).
+fn routes(gpu: &GpuRenderer) -> bool {
+    gpu.adapter_info().backend != zgx_gpu::wgpu::Backend::Noop
+}
+
 fn gpu_fixture() -> std::sync::MutexGuard<'static, ()> {
     static DEVICE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
     DEVICE_TEST
@@ -1066,8 +1073,10 @@ fn a_view_that_cant_copy_stays_direct() {
         gpu.debug_present_offscreen().unwrap();
     }
     assert_eq!(gpu.debug_scroll_copies(), 0);
-    let direct = gpu.debug_direct_frames();
-    assert!(direct as usize >= steps - 3, "{direct} of {steps} direct");
+    if routes(&gpu) {
+        let direct = gpu.debug_direct_frames();
+        assert!(direct as usize >= steps - 3, "{direct} of {steps} direct");
+    }
 }
 
 /// A layer shader over a pass keeping state from frame to frame: it runs each
@@ -1168,7 +1177,7 @@ fn a_scroll_ending_leaves_whole_frames_direct() {
         frame(&mut ui, &mut gpu);
     }
     let before = gpu.debug_direct_frames();
-    assert!(before > 0, "no frame went direct");
+    assert!(!routes(&gpu) || before > 0, "no frame went direct");
     offset.set(8.);
     frame(&mut ui, &mut gpu);
     let before = gpu.debug_direct_frames().max(before);
@@ -1178,7 +1187,10 @@ fn a_scroll_ending_leaves_whole_frames_direct() {
         frame(&mut ui, &mut gpu);
     }
     let direct = gpu.debug_direct_frames() - before;
-    assert!(direct >= u64::from(steps) - 2, "{direct} of {steps} direct");
+    assert!(
+        !routes(&gpu) || direct >= u64::from(steps) - 2,
+        "{direct} of {steps} direct"
+    );
 }
 
 /// A dithered picture among a fading table's rows: its dots lie on the screen's

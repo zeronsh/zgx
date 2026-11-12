@@ -5,6 +5,13 @@
 use zgx::scene::*;
 use zgx_gpu::GpuRenderer;
 
+/// Whether `gpu` has presentation routes to count: not on wgpu's no-op
+/// backend, as under Direct3D 11 (`ZGX_D3D11`), which draws into what it
+/// presents by one route (its pixels are still compared).
+fn routes(gpu: &GpuRenderer) -> bool {
+    gpu.adapter_info().backend != zgx_gpu::wgpu::Backend::Noop
+}
+
 fn fixed(w: f32, h: f32) -> Style {
     Style {
         width: Some(w),
@@ -176,11 +183,13 @@ fn single_pass_presentation_matches_the_two_pass_route_exactly() {
                 stats.render_passes
             );
         }
-        assert_eq!(
-            single.debug_single_pass_frames(),
-            n as u64 + 1,
-            "frame {n} fell back to the two-pass route"
-        );
+        if routes(&single) {
+            assert_eq!(
+                single.debug_single_pass_frames(),
+                n as u64 + 1,
+                "frame {n} fell back to the two-pass route"
+            );
+        }
     }
 }
 
@@ -223,7 +232,9 @@ fn single_pass_matches_every_channel_value_through_the_srgb_drawable() {
         single.debug_present_offscreen().unwrap(),
         reference.debug_present_offscreen().unwrap()
     );
-    assert_eq!(single.debug_single_pass_frames(), 1);
+    if routes(&single) {
+        assert_eq!(single.debug_single_pass_frames(), 1);
+    }
 }
 
 #[test]
@@ -362,11 +373,13 @@ fn blur_frames_defer_the_tail_after_the_last_filter_and_still_match() {
             close(&single.readback().unwrap(), &retained),
             "frame {n}: retained target differs"
         );
-        assert_eq!(
-            single.debug_single_pass_frames(),
-            n as u64 + 1,
-            "frame {n} fell back to the two-pass route"
-        );
+        if routes(&single) {
+            assert_eq!(
+                single.debug_single_pass_frames(),
+                n as u64 + 1,
+                "frame {n} fell back to the two-pass route"
+            );
+        }
     }
     assert!(blurred >= 11, "the moving content must damage the glass");
 }
@@ -447,7 +460,9 @@ fn whole_window_frames_skip_the_retained_target_and_still_match() {
     }
     // Frames 1-5 (the first frame repaints whole too) and 10-11 follow a
     // whole-window frame.
-    assert_eq!(single.debug_direct_frames(), 7);
+    if routes(&single) {
+        assert_eq!(single.debug_direct_frames(), 7);
+    }
     // Once a partial frame has repainted it, the retained target is current.
     assert_eq!(single.readback().unwrap(), reference.readback().unwrap());
 }
