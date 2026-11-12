@@ -796,3 +796,106 @@ fn at_rest_a_list_asks_no_spare_time_when_room_for_pictures_comes_back() {
     assert!(!ui.spare_work_wanted(), "nothing wakes it at rest");
     drop((first, waiting));
 }
+
+/// A list scrolled by the view around it (`virtualize_in_ancestor`), its rows
+/// of their own heights, builds ahead as that view scrolls, as one that
+/// scrolls itself does: its view's moves are a scroll's, not rows settling.
+#[test]
+fn a_list_scrolled_by_the_view_around_it_builds_ahead_too() {
+    let mut ui = hosted();
+    let panel = ui.signal(0.);
+    let rows = Rows::default();
+    let built = rows.clone();
+    let heights = VariableHeights::new(&ui.runtime, 1000, 20.);
+    ui.mount(
+        scroll(panel.clone()).w(400.).h(100.).child(
+            column().w_full().child(
+                variable_virtual_list(
+                    ui.signal(0.),
+                    heights,
+                    0,
+                    |i| i,
+                    move |_, i, cx| built.row(i, 20., cx),
+                )
+                .virtualize_in_ancestor()
+                .w_full(),
+            ),
+        ),
+    );
+    ui.prepare_frame();
+    moves(&ui, &panel);
+    let mut at_first = rows.take();
+    at_first.dedup();
+    assert!(at_first.len() < 12, "the view's rows: {at_first:?}");
+    spare(&ui);
+    let ahead = rows.take();
+    assert!(
+        ahead
+            .iter()
+            .max()
+            .is_some_and(|last| (*last as f32 + 1.) * 20. >= 200.),
+        "a viewport beyond the view, built in spare time: {ahead:?}"
+    );
+    // Within what was built, the frame builds nothing.
+    scroll_to(&ui, &panel, 90.);
+    assert_eq!(
+        rows.take(),
+        Vec::<usize>::new(),
+        "built by the scroll's frame"
+    );
+}
+
+/// A list scrolled by the view around it, that view moving while the rows
+/// it shows stay the same: its pass does nothing (it asks no row's key).
+/// Rows coming into view, or rows' heights changing, run it again.
+#[test]
+fn a_list_scrolled_by_the_view_around_it_skips_passes_that_show_the_same_rows() {
+    let mut ui = Ui::new(400., 100.);
+    let panel = ui.signal(0.);
+    let rows = Rows::default();
+    let built = rows.clone();
+    let asked = Rc::new(Cell::new(0_usize));
+    let counted = asked.clone();
+    let heights = VariableHeights::new(&ui.runtime, 1000, 20.);
+    let resized = heights.clone();
+    ui.mount(
+        scroll(panel.clone()).w(400.).h(100.).child(
+            column().w_full().child(
+                variable_virtual_list(
+                    ui.signal(0.),
+                    heights,
+                    0,
+                    move |i| {
+                        counted.set(counted.get() + 1);
+                        i
+                    },
+                    move |_, i, cx| built.row(i, 20., cx),
+                )
+                .virtualize_in_ancestor()
+                .w_full(),
+            ),
+        ),
+    );
+    ui.prepare_frame();
+    // Rows 0 to 5 show (row 5 in part).
+    scroll_to(&ui, &panel, 2.);
+    rows.take();
+    asked.set(0);
+    for to in [3., 4., 5., 6.] {
+        scroll_to(&ui, &panel, to);
+    }
+    assert_eq!(asked.get(), 0, "passes over the same rows");
+    assert_eq!(rows.take(), Vec::<usize>::new());
+    // Row 6 comes into view.
+    scroll_to(&ui, &panel, 30.);
+    assert!(asked.get() > 0);
+    assert_eq!(rows.take(), vec![6]);
+    // Row 6 grows, pushing row 7 past the view: a pass, the same rows.
+    asked.set(0);
+    resized.set_height(6, 40.).unwrap();
+    ui.prepare_frame();
+    assert!(asked.get() > 0, "a height changed");
+    // And row 0's place in view still built as the view comes back.
+    scroll_to(&ui, &panel, 0.);
+    assert!(rows.take().contains(&0));
+}
