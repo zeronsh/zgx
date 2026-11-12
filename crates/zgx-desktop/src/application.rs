@@ -9383,25 +9383,26 @@ mod tests {
             );
             let full = Rect::new(0., 0., W, H);
             let mut held = super::FrameDamage::default();
-            let mut draw = |ui: &mut zgx::widgets::Ui, held: &mut super::FrameDamage, label: &str| {
-                ui.prepare_frame();
-                let damage = ui.scene.borrow_mut().flush().damage;
-                let damage = held.with(&damage, full);
-                held.clear();
-                gpu.render(&ui.scene.borrow(), &damage).unwrap();
-                let partial = gpu.debug_present_offscreen().unwrap();
-                whole.render(&ui.scene.borrow(), &[full]).unwrap();
-                let fresh = whole.debug_present_offscreen().unwrap();
-                let wrong = partial
-                    .chunks(4)
-                    .zip(fresh.chunks(4))
-                    .position(|(a, b)| a.iter().zip(b).any(|(a, b)| a.abs_diff(*b) > 1));
-                assert!(
-                    wrong.is_none(),
-                    "at {scale}x, {label}: a stale pixel at {:?}",
-                    wrong.map(|p| (p % w as usize, p / w as usize)),
-                );
-            };
+            let mut draw =
+                |ui: &mut zgx::widgets::Ui, held: &mut super::FrameDamage, label: &str| {
+                    ui.prepare_frame();
+                    let damage = ui.scene.borrow_mut().flush().damage;
+                    let damage = held.with(&damage, full);
+                    held.clear();
+                    gpu.render(&ui.scene.borrow(), &damage).unwrap();
+                    let partial = gpu.debug_present_offscreen().unwrap();
+                    whole.render(&ui.scene.borrow(), &[full]).unwrap();
+                    let fresh = whole.debug_present_offscreen().unwrap();
+                    let wrong = partial
+                        .chunks(4)
+                        .zip(fresh.chunks(4))
+                        .position(|(a, b)| a.iter().zip(b).any(|(a, b)| a.abs_diff(*b) > 1));
+                    assert!(
+                        wrong.is_none(),
+                        "at {scale}x, {label}: a stale pixel at {:?}",
+                        wrong.map(|p| (p % w as usize, p / w as usize)),
+                    );
+                };
             draw(&mut ui, &mut held, "first");
             draw(&mut ui, &mut held, "settled");
             for step in 0..6 {
