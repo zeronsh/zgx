@@ -14,6 +14,7 @@ use zgx::{
         Brush, Canvas, FillRule, GradientStop, LineCap, LineJoin, Path, PathBuilder, Point, Stroke,
     },
     scene::Color,
+    style::ObjectFit,
 };
 
 /// The canvas a draw function records into.
@@ -439,6 +440,79 @@ impl UserData for Recorder {
                     style.dash_offset = -length * start;
                 }
                 c.0.borrow_mut().stroke(path, brush(&paint)?, style);
+                Ok(())
+            },
+        );
+        // A picture from a file, a URL, the host (`host:`) or a `Bitmap`,
+        // fitted to its box as `ui.image` fits one. One not there yet (a
+        // remote one loading) draws nothing, and the drawing follows it.
+        methods.add_method(
+            "image",
+            |lua, c, (src, x, y, w, h, options): (mlua::Value, f32, f32, f32, f32, Option<Table>)| {
+                let image = match &src {
+                    mlua::Value::UserData(ud) if ud.is::<crate::node::BitmapUd>() => {
+                        Some(ud.borrow::<crate::node::BitmapUd>()?.0.clone())
+                    }
+                    mlua::Value::String(src) => {
+                        let env = crate::node::env(lua)?;
+                        match env.vm.upgrade() {
+                            Some(vm) => crate::lower::load_image_in(
+                                &vm,
+                                &env.assets,
+                                &env.runtime,
+                                &src.to_str()?,
+                            ),
+                            None => None,
+                        }
+                    }
+                    other => {
+                        return Err(mlua::Error::runtime(format!(
+                            "c:image draws a path or a Bitmap, not {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let Some(image) = image else {
+                    return Ok(());
+                };
+                let get = |key: &str| -> mlua::Result<Option<mlua::Value>> {
+                    options.as_ref().map_or(Ok(None), |o| o.get(key))
+                };
+                let fit = match get("fit")? {
+                    None | Some(mlua::Value::Nil) => ObjectFit::Fill,
+                    Some(mlua::Value::String(fit)) => match &*fit.to_str()? {
+                        "fill" => ObjectFit::Fill,
+                        "contain" => ObjectFit::Contain,
+                        "cover" => ObjectFit::Cover,
+                        "none" => ObjectFit::None,
+                        "scale_down" => ObjectFit::ScaleDown,
+                        other => {
+                            return Err(mlua::Error::runtime(format!(
+                                "a canvas image's `fit` is \"fill\", \"contain\", \"cover\", \"none\" or \"scale_down\", not `{other}`"
+                            )));
+                        }
+                    },
+                    Some(other) => {
+                        return Err(mlua::Error::runtime(format!(
+                            "a canvas image's `fit` is a string, not {}",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let number = |key: &str, default: f32| -> mlua::Result<f32> {
+                    Ok(options
+                        .as_ref()
+                        .map_or(Ok(None), |o| o.get::<Option<f32>>(key))?
+                        .unwrap_or(default))
+                };
+                let (radius, opacity) = (number("radius", 0.)?, number("opacity", 1.)?);
+                c.0.borrow_mut().image(
+                    image,
+                    zgx::scene::Rect::new(x, y, w, h),
+                    fit,
+                    radius.max(0.),
+                    opacity.clamp(0., 1.),
+                );
                 Ok(())
             },
         );

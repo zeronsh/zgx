@@ -5429,6 +5429,171 @@ fn a_redrawn_canvas_reuses_its_text_nodes() {
     assert_eq!(h.host.error().get(), None);
 }
 
+/// A canvas image as drawn: its size in pixels, box, fit, radius and
+/// opacity.
+type CanvasImage = (
+    (u32, u32),
+    zgx::scene::Rect,
+    zgx::style::ObjectFit,
+    f32,
+    f32,
+);
+/// The images a canvas under `id` draws.
+fn canvas_images(h: &mut Harness, id: &str) -> Vec<CanvasImage> {
+    let root = h.find(id).unwrap();
+    let scene = h.ui.scene.borrow();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        if let zgx::scene::NodeKind::Canvas(canvas) = scene.kind(n) {
+            return canvas
+                .commands()
+                .iter()
+                .filter_map(|draw| match draw {
+                    zgx::canvas::Draw::Image {
+                        image,
+                        rect,
+                        fit,
+                        radius,
+                        opacity,
+                    } => Some((
+                        (image.width(), image.height()),
+                        *rect,
+                        *fit,
+                        *radius,
+                        *opacity,
+                    )),
+                    _ => None,
+                })
+                .collect();
+        }
+        stack.extend(scene.children(n).iter().copied());
+    }
+    panic!("no canvas under {id}")
+}
+
+/// `c:image` draws a `Bitmap` in its box, as its options fit, round and
+/// fade it, and follows state as the rest of the drawing does.
+#[test]
+fn a_canvas_draws_a_bitmap_as_its_options_say() {
+    let mut h = Harness::inline(
+        r##"local faded = ui.state("faded", false)
+        local dots = ui.bitmap(3, 2, function() return 1 end)
+        return ui.column { w = 400, h = 300,
+            ui.button { id = "fade", on_click = function() faded:set(true) end, "fade" },
+            ui.canvas { id = "c", w = 200, h = 100,
+                draw = function(c)
+                    c:image(dots, 10, 20, 30, 40)
+                    c:image(dots, 50, 0, 60, 60, {
+                        fit = "cover", radius = 8, opacity = if faded:get() then 0.5 else 1 })
+                end } }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    use zgx::scene::Rect;
+    use zgx::style::ObjectFit;
+    assert_eq!(
+        canvas_images(&mut h, "c"),
+        [
+            (
+                (3, 2),
+                Rect::new(10., 20., 30., 40.),
+                ObjectFit::Fill,
+                0.,
+                1.
+            ),
+            (
+                (3, 2),
+                Rect::new(50., 0., 60., 60.),
+                ObjectFit::Cover,
+                8.,
+                1.
+            ),
+        ]
+    );
+    h.click("fade");
+    h.ui.prepare_frame();
+    assert_eq!(canvas_images(&mut h, "c")[1].4, 0.5);
+}
+
+/// `c:image` draws a file from the script's directory, decoded once; a
+/// file that isn't there draws nothing and is a warning, not an error.
+#[test]
+fn a_canvas_draws_a_picture_file_and_skips_a_missing_one() {
+    // A 2×2 PNG.
+    const PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 2, 8, 6,
+        0, 0, 0, 114, 182, 13, 36, 0, 0, 0, 17, 73, 68, 65, 84, 120, 156, 99, 248, 207, 192, 240,
+        31, 132, 25, 96, 12, 0, 71, 202, 7, 249, 103, 89, 110, 183, 0, 0, 0, 0, 73, 69, 78, 68,
+        174, 66, 96, 130,
+    ];
+    let dir = common::temp_dir("canvas-image");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("photo.png"), PNG).unwrap();
+    let app = dir.join("app.luau");
+    std::fs::write(
+        &app,
+        r##"return ui.canvas { id = "c", w = 100, h = 100,
+            draw = function(c)
+                c:image("photo.png", 0, 0, 40, 40, { fit = "contain" })
+                c:image("gone.png", 50, 0, 40, 40)
+            end }"##,
+    )
+    .unwrap();
+    let mut h = Harness::new(move |runtime| zgx_script::ScriptHost::new(runtime, app));
+    h.frames(1);
+    assert_eq!(h.error(), None);
+    assert_eq!(
+        canvas_images(&mut h, "c"),
+        [(
+            (2, 2),
+            zgx::scene::Rect::new(0., 0., 40., 40.),
+            zgx::style::ObjectFit::Contain,
+            0.,
+            1.
+        )]
+    );
+    let warnings = h.host.warnings();
+    assert!(
+        warnings.iter().any(|w| w.contains("gone.png")),
+        "{warnings:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A canvas drawing a picture the app hasn't made yet (`host:`) draws
+/// nothing for it, and draws it once the app makes it, and each that
+/// replaces it.
+#[test]
+fn a_canvas_draws_a_hosted_picture_as_it_comes() {
+    let mut h = Harness::inline(
+        r##"return ui.canvas { id = "c", w = 100, h = 100,
+            draw = function(c) c:image("host:art", 0, 0, 50, 50) end }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    assert!(canvas_images(&mut h, "c").is_empty(), "nothing yet");
+    let image = |w| {
+        std::sync::Arc::new(zgx::image::ImageData::new(w, 1, vec![255; w as usize * 4]).unwrap())
+    };
+    for w in [3, 5] {
+        h.host.image("art", Some(image(w)));
+        h.ui.prepare_frame();
+        assert_eq!(canvas_images(&mut h, "c")[0].0, (w, 1));
+    }
+}
+
+/// A canvas image's `fit` is one `ui.image` takes, or the script's error.
+#[test]
+fn a_canvas_images_fit_is_one_an_image_takes() {
+    let h = Harness::inline(
+        r##"local dots = ui.bitmap(1, 1, function() return 1 end)
+        return ui.canvas { w = 100, h = 100,
+            draw = function(c) c:image(dots, 0, 0, 10, 10, { fit = "stretch" }) end }"##,
+    );
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(error.contains("`fit` is \"fill\""), "{error}");
+}
+
 /// `c:text` with a `width` wraps to it in a box that wide, its lines a
 /// `line_height` apart and aligned as the box is on `x`; `letter_spacing`
 /// spaces its characters; `c:measure_text` measures each as drawn.

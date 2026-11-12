@@ -520,6 +520,19 @@ pub enum Draw {
         /// The line's width, ends, corners and dashes.
         style: Stroke,
     },
+    /// Draw `image` in `rect` (see [`Canvas::image`]).
+    Image {
+        /// The picture, drawn still.
+        image: Arc<crate::image::ImageData>,
+        /// The box it is drawn in.
+        rect: Rect,
+        /// How it fills the box, centred in it (CSS `object-fit`).
+        fit: crate::style::ObjectFit,
+        /// The box's corner radius: the picture is cut to its corners.
+        radius: f32,
+        /// How opaque it is, 0 to 1.
+        opacity: f32,
+    },
 }
 /// Where a text's point falls across it (`Canvas::text`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -658,6 +671,25 @@ impl Canvas {
             path,
             brush: brush.into(),
             style,
+        });
+        self
+    }
+    /// Draw `image` in `rect` as `fit` fills it, cut to the box rounded by
+    /// `radius`, at `opacity`: a photo in a card.
+    pub fn image(
+        &mut self,
+        image: Arc<crate::image::ImageData>,
+        rect: Rect,
+        fit: crate::style::ObjectFit,
+        radius: f32,
+        opacity: f32,
+    ) -> &mut Self {
+        self.commands.push(Draw::Image {
+            image,
+            rect,
+            fit,
+            radius,
+            opacity,
         });
         self
     }

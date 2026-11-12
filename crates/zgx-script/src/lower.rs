@@ -5388,7 +5388,16 @@ fn remote_status_in(
 /// gone or not a picture, a remote one that failed) is logged and draws
 /// nothing, never the script's error (`try_load_image` says why).
 fn load_image(vm: &Rc<Vm>, low: &Lowering, src: &str) -> Option<Arc<ImageData>> {
-    try_load_image(vm, low, src).unwrap_or_else(|why| {
+    load_image_in(vm, &low.assets, &low.runtime, src)
+}
+/// `load_image`, given the assets and runtime (a canvas's `c:image`).
+pub(crate) fn load_image_in(
+    vm: &Rc<Vm>,
+    assets: &Rc<Assets>,
+    runtime: &zgx::reactive::Runtime,
+    src: &str,
+) -> Option<Arc<ImageData>> {
+    try_load_image_in(vm, assets, runtime, src).unwrap_or_else(|why| {
         // (A remote one's failure was logged as it failed.)
         if !is_remote(src) {
             unshown(vm, why);
