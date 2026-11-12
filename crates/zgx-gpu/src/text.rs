@@ -1681,9 +1681,10 @@ pub(crate) fn truncated(
             .unwrap_or(0)
     };
     let clip_end = grapheme_end((offset + row.2).min(rich.text().len()));
-    // The wrapped row ends at a word; an ellipsis may cut inside the next one, as CSS's does.
+    // One line's ellipsis may cut inside the word that overflows, as CSS's text-overflow does; a clamp of
+    // several lines ends at a word, as -webkit-line-clamp's does.
     let end = match rows.get(limit) {
-        Some(next) if next.0 == row.0 && limit > 0 => {
+        Some(next) if next.0 == row.0 && limit == 1 => {
             grapheme_end((offset + next.2).min(rich.text().len()))
         }
         _ => clip_end,
