@@ -106,8 +106,14 @@ LINUX_ONLY = [
 
 # (jobs, patterns): a file takes the jobs of the first rule it matches; no match, ALL.
 RULES: list[tuple[tuple[str, ...], list[str]]] = [
-    # CI itself: everything, so a change to it is tried in full.
-    (ALL, [".github/workflows/ci.yml", ".github/ci/**"]),
+    # The workflow itself defines every job: a change to it is tried in full.
+    (ALL, [".github/workflows/ci.yml"]),
+    # perf's base binaries (which commit's stand in for the base): perf.
+    (("perf",), [".github/ci/gate_base.py"]),
+    # The planner, admission and the cache prune decide what runs, not what
+    # passes: their unit tests run in the plan job on every run, and every run
+    # exercises plan, admit and CI result. No test job (perf alone is ~70 min).
+    (NOTHING, [".github/ci/**"]),
     # Nothing this workflow builds, tests or reads.
     (NOTHING, [
         "site/**", "website/**", "changelog.d/**", "CHANGELOG.md", "LICENSE", ".gitignore", ".zed/**",

@@ -80,7 +80,9 @@ class RuleTests(unittest.TestCase):
             ("vendor/taffy/src/lib.rs", ALL), ("vendor/wgpu-hal/src/vulkan/device.rs", ALL),
             ("comparisons/workload/src/lib.rs", ALL), ("Cargo.lock", ALL), ("Cargo.toml", ALL),
             (".cargo/config.toml", ALL), (".gitattributes", ALL), ("scripts/perf/gate.py", ("linux", "perf")),
-            (".github/workflows/ci.yml", ALL), (".github/ci/plan.py", ALL),
+            (".github/workflows/ci.yml", ALL), (".github/ci/gate_base.py", ("perf",)),
+            # The planner and admission: their unit tests run in plan; no test job.
+            (".github/ci/plan.py", ()), (".github/ci/admit.py", ()), (".github/ci/prune_caches.py", ()),
             ("something/new.txt", ALL),  # unknown: everything
         ])
 
