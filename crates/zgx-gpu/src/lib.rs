@@ -9752,13 +9752,14 @@ impl GpuRenderer {
                                 let outer = core.expand(shadow.blur_radius.max(0.) * 3.);
                                 quads.push(Quad {
                                     rect: [outer.x, outer.y, outer.width, outer.height],
-                                    uv: [0.; 4],
+                                    // the offset and (in `shape.y`) the spread, to cut out the box
+                                    uv: [shadow.offset.x, shadow.offset.y, 0., 0.],
                                     color: rgba(shadow.color, item.effects.opacity),
                                     fade: [core.x, core.y, core.width, core.height],
                                     options: [0., 0., 0., 1.],
                                     shape: [
                                         (style.radius + spread).max(0.),
-                                        0.,
+                                        1000. + spread,
                                         shadow.blur_radius.max(0.001),
                                         zgx::style::corner_shape(),
                                     ],
