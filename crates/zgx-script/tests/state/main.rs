@@ -21,6 +21,8 @@ mod guard_doors;
 mod io;
 #[path = "../large_data.rs"]
 mod large_data;
+#[path = "../load_font.rs"]
+mod load_font;
 #[path = "../markdown_incremental.rs"]
 mod markdown_incremental;
 #[path = "../module_overrides.rs"]

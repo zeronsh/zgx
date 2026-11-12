@@ -205,6 +205,70 @@ fn off_thread(
     Ok(PromiseUd(promise))
 }
 
+/// The largest font file `ui.load_font` reads: what `FontData` takes.
+const FONT_LIMIT: u64 = 64 * 1024 * 1024;
+
+/// A font file's bytes, read only if its size is one a font may have.
+fn read_font(path: &Path) -> Result<Vec<u8>, String> {
+    let failed = |e: std::io::Error| format!("{}: {e}", path.display());
+    let size = std::fs::metadata(path).map_err(failed)?.len();
+    if size == 0 || size > FONT_LIMIT {
+        return Err(format!(
+            "{}: a font is 1 byte to 64 MiB, not {size} bytes",
+            path.display()
+        ));
+    }
+    std::fs::read(path).map_err(failed)
+}
+
+/// `ui.load_font(src)`: the font file at `src` (a path from the script's
+/// directory, or a `File` the user picked), or a font's bytes in base64
+/// (`{ base64 = … }`: one a server or a host's call handed over), added to
+/// every window's text, read off the main thread. A promise of the family
+/// names it holds.
+fn load_font(lua: &Lua, src: mlua::Value, shared: SharedPlatform) -> mlua::Result<PromiseUd> {
+    type Read = Box<dyn FnOnce() -> Result<Vec<u8>, String> + Send>;
+    let file = |given: String| -> mlua::Result<(String, Read)> {
+        let vm = crate::node::env(lua)?.vm.upgrade();
+        let vm = vm.ok_or_else(|| mlua::Error::runtime("ui.load_font: its script is gone"))?;
+        let path =
+            crate::lower::resolve_path_of(&vm, &given, "fonts").map_err(mlua::Error::runtime)?;
+        Ok((given, Box::new(move || read_font(&path))))
+    };
+    let (given, read) = match &src {
+        mlua::Value::String(path) => file(path.to_str()?.to_string())?,
+        mlua::Value::Table(t) => match t.get::<Option<mlua::LuaString>>("base64")? {
+            Some(encoded) => {
+                let encoded = encoded.as_bytes().to_vec();
+                let read: Read =
+                    Box::new(move || crate::b64::decode(&encoded, FONT_LIMIT as usize, "a font"));
+                ("{ base64 }".to_string(), read)
+            }
+            None => file(t.get::<String>("path")?)?,
+        },
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "ui.load_font takes a path, a File or {{ base64 = … }}, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let (tell, mut heard) = zgx::task::latest::<Result<Vec<u8>, String>>();
+    let promise = pending(lua, format!("load_font {given}"))?;
+    std::thread::spawn(move || tell.send(read()));
+    settle_with(lua, &promise, crate::errors::Kind::Io, async move {
+        let bytes = heard.recv().await.ok_or("the file thread stopped")??;
+        let families = later(&shared, "ui.load_font")?
+            .0
+            .add_font(bytes.into())
+            .map_err(|e| format!("{given}: {e}"))?;
+        Ok(Value::List(
+            families.into_iter().map(|f| Value::Str(f.into())).collect(),
+        ))
+    })?;
+    Ok(PromiseUd(promise))
+}
+
 /// `on_paste`'s `files`: those on the clipboard, which a script may then
 /// read as it does what the person picks. None for a plugin without both
 /// grants, or where no platform reads them.
@@ -218,9 +282,9 @@ pub(crate) fn pasted_files(lua: &Lua) -> mlua::Result<mlua::Value> {
     Value::List(paths.iter().map(|path| file_value(path)).collect()).into_lua(lua)
 }
 
-/// Installs `ui.clipboard` (text and images), `ui.open_files`, `ui.save_file`, `ui.read_file`
-/// and `ui.write_file`. `clipboard` and `files` are false for a plugin the
-/// host did not grant them.
+/// Installs `ui.clipboard` (text and images), `ui.open_files`, `ui.save_file`, `ui.read_file`,
+/// `ui.write_file` and `ui.load_font`. `clipboard`, `files` and `fonts` are
+/// false for a plugin the host did not grant them.
 pub(crate) fn install(
     lua: &Lua,
     ui: &Table,
@@ -228,7 +292,20 @@ pub(crate) fn install(
     picked: Picked,
     clipboard: bool,
     files: bool,
+    fonts: bool,
 ) -> mlua::Result<()> {
+    {
+        let shared = shared.clone();
+        ui.set(
+            "load_font",
+            lua.create_function(move |lua, src: mlua::Value| {
+                if !fonts {
+                    return Err(denied("ui.load_font", "Fonts"));
+                }
+                load_font(lua, src, shared.clone())
+            })?,
+        )?;
+    }
     let board = lua.create_table()?;
     {
         let shared = shared.clone();

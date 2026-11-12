@@ -585,6 +585,22 @@ impl WindowFactory {
             .send_event(Event::FontsReplaced)
             .map_err(|_| "application event loop is closed")
     }
+    /// Shape text with `font` too, in every window from now on, beside the
+    /// faces its families have (another weight of one): text that fell back
+    /// for want of its family measures, lays out and draws in it. zgx-script
+    /// calls it for `ui.load_font`.
+    pub fn add_font(&self, font: zgx_gpu::text::FontData) -> Result<(), &'static str> {
+        if !self.alive.get() {
+            return Err("application is closed");
+        }
+        for context in self.gpu_contexts.borrow().iter() {
+            context.add_font(&font);
+        }
+        self.fonts.borrow_mut().push(font);
+        self.proxy
+            .send_event(Event::FontsReplaced)
+            .map_err(|_| "application event loop is closed")
+    }
     /// Shape every window's text as in `language` from now on (an i18n
     /// locale; `None`: the system's), as CSS's `lang` on a document's root:
     /// Han characters take that language's fonts, a Japanese app's kanji a
