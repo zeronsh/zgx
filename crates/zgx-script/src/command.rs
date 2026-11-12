@@ -25,7 +25,8 @@ pub struct Command {
     pub id: String,
     /// What the menu item says.
     pub title: String,
-    /// The menu it goes in ("File", "Edit", "View", "Window", or any other).
+    /// The menu it goes in ("File", "Edit", "View", "Window", or any other);
+    /// empty for none (`menu = false`): its key alone runs it.
     pub menu: String,
     /// Its shortcut: modifiers and a key joined by `+`, as `cmd+shift+d`,
     /// `cmd+alt+arrowleft`, `cmd+1`, `ctrl+tab`.
@@ -370,9 +371,17 @@ pub(crate) fn install(lua: &Lua, ui: &Table, commands: Rc<Commands>) -> mlua::Re
         "command",
         lua.create_function(move |lua, table: Table| {
             crate::reloads::per_load(lua, "ui.command");
-            let menu = table
-                .get::<Option<String>>("menu")?
-                .unwrap_or_else(|| "File".into());
+            // `false`: no menu shows it, its key alone runs it (empty here).
+            let menu = match table.get::<mlua::Value>("menu")? {
+                mlua::Value::Nil => "File".into(),
+                mlua::Value::Boolean(false) => String::new(),
+                mlua::Value::String(menu) => menu.to_str()?.to_string(),
+                _ => {
+                    return Err(mlua::Error::runtime(
+                        "ui.command: `menu` is a menu's title, or false for a key alone",
+                    ));
+                }
+            };
             if table.get::<Option<bool>>("separator")?.unwrap_or(false) {
                 commands.pending.borrow_mut().push((
                     Command {

@@ -46,6 +46,28 @@ fn commands_are_published_after_a_load_and_run_by_id() {
     assert_eq!(h.text("count"), "2");
 }
 
+/// `menu = false` publishes a command no menu shows (an empty menu), its
+/// key alone running it.
+#[test]
+fn a_command_with_no_menu_is_published_for_its_key_alone() {
+    let mut h = Harness::inline(
+        r##"local count = ui.state("count", 0)
+        ui.command { id = "search", title = "Search", menu = false, key = "cmd+k", run = function() count:add(1) end }
+        return ui.text { "{count}", id = "count" }"##,
+    );
+    let commands = h.host.commands().get();
+    assert_eq!(
+        commands
+            .iter()
+            .map(|c| (c.id.as_str(), c.menu.as_str(), c.key.as_deref()))
+            .collect::<Vec<_>>(),
+        vec![("search", "", Some("cmd+k"))]
+    );
+    assert!(h.host.run_command("search"));
+    h.settle();
+    assert_eq!(h.text("count"), "1");
+}
+
 #[test]
 fn a_shortcut_following_a_state_is_rebound_without_a_reload() {
     // Settings' Shortcuts: rebinding applies at once, everywhere.

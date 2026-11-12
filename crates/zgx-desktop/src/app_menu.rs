@@ -121,6 +121,10 @@ pub enum StandardItem {
     Copy,
     /// Pastes the clipboard.
     Paste,
+    /// Pastes the clipboard's plain text, without its styles.
+    PasteAndMatchStyle,
+    /// Deletes the selection, putting nothing on the clipboard.
+    Delete,
     /// Selects everything in the focused view.
     SelectAll,
     /// Enters or leaves full screen. On macOS AppKit's own item, sent to
@@ -137,31 +141,51 @@ impl StandardItem {
             Self::Cut => "Cut",
             Self::Copy => "Copy",
             Self::Paste => "Paste",
+            Self::PasteAndMatchStyle => "Paste and Match Style",
+            Self::Delete => "Delete",
             Self::SelectAll => "Select All",
             Self::ToggleFullScreen => "Toggle Full Screen",
         }
     }
-    /// Its shortcut, as [`MenuAccelerator`] names one (macOS's).
-    fn shortcut_name(self) -> &'static str {
-        match self {
+    /// Its shortcut, as [`MenuAccelerator`] names one (macOS's); Delete has none.
+    pub fn shortcut_name(self) -> Option<&'static str> {
+        Some(match self {
             Self::Undo => "Super+Z",
             Self::Redo => "Super+Shift+Z",
             Self::Cut => "Super+X",
             Self::Copy => "Super+C",
             Self::Paste => "Super+V",
+            Self::PasteAndMatchStyle => "Alt+Shift+Super+V",
+            Self::Delete => return None,
             Self::SelectAll => "Super+A",
             Self::ToggleFullScreen => "Ctrl+Super+F",
-        }
+        })
     }
     /// Every standard item.
-    pub(crate) const ALL: [Self; 7] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::Undo,
         Self::Redo,
         Self::Cut,
         Self::Copy,
         Self::Paste,
+        Self::PasteAndMatchStyle,
+        Self::Delete,
         Self::SelectAll,
         Self::ToggleFullScreen,
+    ];
+    /// An Edit menu's standard items, as AppKit apps (and Electron's `editMenu`) order them;
+    /// `None` is a separator.
+    pub const EDIT_MENU: [Option<Self>; 10] = [
+        Some(Self::Undo),
+        Some(Self::Redo),
+        None,
+        Some(Self::Cut),
+        Some(Self::Copy),
+        Some(Self::Paste),
+        Some(Self::PasteAndMatchStyle),
+        Some(Self::Delete),
+        Some(Self::SelectAll),
+        None,
     ];
     /// The standard item whose action `action` is.
     pub(crate) fn of(action: &MenuAction) -> Option<Self> {
@@ -253,6 +277,9 @@ impl std::error::Error for AppMenuError {}
 /// menu of this name shows in the bar. Elsewhere, where there is no
 /// application menu, it is a menu like any other.
 pub const APPLICATION_MENU: &str = "Application";
+/// The menu of items with no place in the menu bar: their shortcuts work
+/// (zgx's keymap, after what has focus), no menu shows them.
+pub const KEY_ONLY_MENU: &str = "zgx:keys";
 /// macOS exposes the application menu in the system menu bar. Linux windows use
 /// [`app_menu_bar`], as winit has no GTK menubar host or universal Wayland app menu.
 pub fn has_native_app_menu() -> bool {
@@ -297,7 +324,9 @@ pub(crate) fn validate(menus: &[AppMenu]) -> Result<(), AppMenuError> {
                         visit(std::slice::from_ref(menu), ids, shortcuts)?
                     }
                     AppMenuEntry::Standard(item) => {
-                        if !shortcuts.insert(item.shortcut_name().to_owned()) {
+                        if let Some(name) = item.shortcut_name()
+                            && !shortcuts.insert(name.to_owned())
+                        {
                             return Err(AppMenuError(format!(
                                 "the standard {} item's shortcut is another item's",
                                 item.label()
@@ -397,14 +426,20 @@ pub(crate) fn sanitize(menus: Vec<AppMenu>) -> (Vec<AppMenu>, Vec<String>) {
                     }
                 }
                 AppMenuEntry::Standard(item) => {
-                    if shortcuts.contains(item.shortcut_name()) || ids.contains(&item.action().0) {
+                    if item
+                        .shortcut_name()
+                        .is_some_and(|name| shortcuts.contains(name))
+                        || ids.contains(&item.action().0)
+                    {
                         problems.push(format!(
                             "{label}: the standard {} item is there already, or its shortcut or action is another item's, so it is left out",
                             item.label()
                         ));
                         continue;
                     }
-                    shortcuts.insert(item.shortcut_name().to_owned());
+                    if let Some(name) = item.shortcut_name() {
+                        shortcuts.insert(name.to_owned());
+                    }
                     ids.insert(item.action().0);
                     entries.push(AppMenuEntry::Standard(item));
                 }
@@ -431,9 +466,9 @@ pub(crate) fn enabled_action(menus: &[AppMenu], action: &MenuAction) -> bool {
                 ..
             } => *enabled && id == action,
             AppMenuEntry::Submenu(menu) => enabled_action(std::slice::from_ref(menu), action),
-            // AppKit's own on macOS (sent to the first responder); elsewhere
-            // an item of zgx's menu bar like any other.
-            AppMenuEntry::Standard(item) => !cfg!(target_os = "macos") && item.action() == *action,
+            // On macOS it arrives from zgx's view answering AppKit's selector
+            // (`edit_selectors`) or as a zgx item; elsewhere as any item does.
+            AppMenuEntry::Standard(item) => item.action() == *action,
             AppMenuEntry::Separator => false,
         })
 }
@@ -449,6 +484,7 @@ pub fn app_menu_bar(
     Ok(compose::component(move |cx| {
         let menus = menus
             .into_iter()
+            .filter(|menu| menu.label != KEY_ONLY_MENU)
             .map(|menu| {
                 let open = cx.state(false);
                 let toggle = open.clone();
@@ -828,6 +864,22 @@ fn append_entries(menu: &muda::Submenu, entries: &[AppMenuEntry]) -> Result<(), 
                 StandardItem::Copy => muda::PredefinedMenuItem::copy(None),
                 StandardItem::Paste => muda::PredefinedMenuItem::paste(None),
                 StandardItem::SelectAll => muda::PredefinedMenuItem::select_all(None),
+                // muda has no AppKit item for these: zgx's own, its action
+                // reaching the app (`standard_edit`) as an item's does.
+                StandardItem::PasteAndMatchStyle | StandardItem::Delete => {
+                    let item_ = muda::MenuItem::with_id(item.action().0, item.label(), true, None);
+                    if let Some(name) = item.shortcut_name() {
+                        let accelerator = name
+                            .parse::<muda::accelerator::KeyAccelerator>()
+                            .map_err(|e| AppMenuError(e.to_string()))?;
+                        item_
+                            .set_key_accelerator(Some(accelerator))
+                            .map_err(|e| AppMenuError(e.to_string()))?;
+                    }
+                    menu.append(&item_)
+                        .map_err(|e| AppMenuError(e.to_string()))?;
+                    continue;
+                }
                 // AppKit retitles it Exit Full Screen while the window is.
                 StandardItem::ToggleFullScreen => {
                     muda::PredefinedMenuItem::fullscreen(Some("Enter Full Screen"))
@@ -991,12 +1043,27 @@ impl NativeMenu {
         // its title with the process name. Keep user menus in subsequent slots,
         // including after dynamic model replacement.
         let application = muda::Submenu::new("Application", true);
+        let own = menus
+            .iter()
+            .find(|m| m.label == APPLICATION_MENU && !m.entries.is_empty());
+        // About first, as every Mac app has it: AppKit's panel, its name and
+        // version the bundle's. The app's own About, if it has one, instead.
+        let own_about = own.is_some_and(|m| {
+            m.entries.iter().any(|entry| {
+                matches!(entry, AppMenuEntry::Item { label, .. } if label.starts_with("About"))
+            })
+        });
+        if !own_about {
+            application
+                .append_items(&[
+                    &muda::PredefinedMenuItem::about(None, None),
+                    &muda::PredefinedMenuItem::separator(),
+                ])
+                .map_err(|e| AppMenuError(e.to_string()))?;
+        }
         // The app's own items first (`APPLICATION_MENU`), as AppKit apps
         // have About and Settings… over Services.
-        if let Some(own) = menus
-            .iter()
-            .find(|m| m.label == APPLICATION_MENU && !m.entries.is_empty())
-        {
+        if let Some(own) = own {
             append_entries(&application, &own.entries)?;
             application
                 .append(&muda::PredefinedMenuItem::separator())
@@ -1023,7 +1090,7 @@ impl NativeMenu {
         let find = !binds_find_keys(menus);
         let zoom = !binds_zoom_keys(menus);
         for model in menus {
-            if model.label == APPLICATION_MENU {
+            if model.label == APPLICATION_MENU || model.label == KEY_ONLY_MENU {
                 continue;
             }
             let submenu = if model.label == "Window" {
@@ -1432,6 +1499,8 @@ mod edit_keys {
             StandardItem::Copy => ("c", false),
             StandardItem::Paste => ("v", false),
             StandardItem::SelectAll => ("a", false),
+            // ⌥ with it, or no key: the menu's (`is_edit_shortcut` takes neither).
+            StandardItem::PasteAndMatchStyle | StandardItem::Delete => return None,
             StandardItem::ToggleFullScreen => return None,
         })
     }
@@ -1629,6 +1698,37 @@ impl Drop for NativeMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The Edit menu's standard items, Paste and Match Style and Delete
+    /// among them, make a valid bar, each action naming its item again.
+    #[test]
+    fn the_standard_edit_menu_is_valid_and_its_actions_name_its_items() {
+        let entries = StandardItem::EDIT_MENU
+            .iter()
+            .take(StandardItem::EDIT_MENU.len() - 1)
+            .map(|item| item.map_or(AppMenuEntry::Separator, AppMenuEntry::Standard));
+        validate(&[AppMenu::new("Edit", entries)]).unwrap();
+        for item in StandardItem::ALL {
+            assert_eq!(
+                StandardItem::of(&item.action()),
+                Some(item),
+                "{}",
+                item.label()
+            );
+        }
+        assert_eq!(
+            StandardItem::PasteAndMatchStyle.action().0,
+            "standard:paste-and-match-style"
+        );
+        assert_eq!(StandardItem::Delete.shortcut_name(), None);
+        // Standard items' actions are the bar's on every platform now.
+        assert!(enabled_action(
+            &[AppMenu::new(
+                "Edit",
+                [AppMenuEntry::Standard(StandardItem::Copy)]
+            )],
+            &StandardItem::Copy.action()
+        ));
+    }
     /// One bad item costs that item (or its shortcut), never the bar: what
     /// `set_menus` shows is the rest, which `validate` then accepts.
     #[test]
@@ -2049,6 +2149,61 @@ mod dynamic_tests {
                 "{shortcut}"
             );
         }
+    }
+    /// An item of the key-only menu: its shortcut runs it from zgx's keymap
+    /// unless what has focus takes the key, and no menu bar shows it.
+    #[test]
+    fn a_key_only_item_runs_from_its_key_and_shows_in_no_menu() {
+        let mut ui = Ui::new(400., 300.);
+        let root = ui.scene.borrow().root();
+        let output = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let fallback = output.clone();
+        let _listener = ui.input.listen(root, move |event| {
+            if event.phase != EventPhase::Capture
+                && !event.default_prevented()
+                && let InputEvent::Action(action) = &event.event
+                && let Some(action) = action.downcast_ref::<MenuAction>()
+            {
+                fallback.borrow_mut().push(action.0.clone());
+                event.prevent_default();
+            }
+        });
+        let model = vec![
+            AppMenu::new("File", [AppMenuEntry::item("New Tab", "new_tab")]),
+            AppMenu::new(
+                KEY_ONLY_MENU,
+                [AppMenuEntry::item("Search", "search")
+                    .accelerator(MenuAccelerator::primary(Key::Character("k".into())))],
+            ),
+        ];
+        validate(&model).unwrap();
+        let _binding = ui.input.bind_keys(root, keymap(&model, &[]));
+        let bar = ui.mount(app_menu_bar(model, |_| {}).unwrap());
+        ui.prepare_frame();
+        let shown: Vec<String> = {
+            let scene = ui.scene.borrow();
+            let mut pending = vec![bar.node()];
+            let mut texts = Vec::new();
+            while let Some(id) = pending.pop() {
+                if let zgx::scene::NodeKind::Text { text, .. } = scene.kind(id) {
+                    texts.push(text.to_string());
+                }
+                pending.extend(scene.children(id).iter().copied());
+            }
+            texts
+        };
+        assert!(shown.contains(&"File".to_string()), "{shown:?}");
+        assert!(!shown.iter().any(|t| t == KEY_ONLY_MENU), "{shown:?}");
+        ui.dispatch(InputEvent::KeyDown {
+            key: Key::Character("k".into()),
+            modifiers: Modifiers {
+                control: !cfg!(target_os = "macos"),
+                meta: cfg!(target_os = "macos"),
+                ..Default::default()
+            },
+            repeat: false,
+        });
+        assert_eq!(*output.borrow(), ["search"]);
     }
     #[test]
     fn replacement_unregisters_shortcuts_and_focused_action_can_override() {
