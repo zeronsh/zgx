@@ -203,15 +203,25 @@ impl Expr {
 pub fn alpha(Color(r, g, b, a): Color, by: f32) -> Color {
     Color(r, g, b, (a as f32 * by.clamp(0., 1.)).round() as u8)
 }
-/// `t` of the way from `a` to `b`, per channel (straight alpha).
+/// `t` of the way from `a` to `b` with premultiplied alpha, as CSS transitions
+/// and `color-mix()` interpolate: an opaque colour easing to a translucent wash
+/// never passes through a darker middle.
 pub fn mix(a: Color, b: Color, t: f32) -> Color {
     let t = t.clamp(0., 1.);
-    let lerp = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+    let (aa, ba) = (a.3 as f32 / 255., b.3 as f32 / 255.);
+    let alpha = aa + (ba - aa) * t;
+    if alpha <= 0. {
+        return Color(0, 0, 0, 0);
+    }
+    let channel = |x: u8, y: u8| {
+        let (px, py) = (x as f32 * aa, y as f32 * ba);
+        ((px + (py - px) * t) / alpha).round().clamp(0., 255.) as u8
+    };
     Color(
-        lerp(a.0, b.0),
-        lerp(a.1, b.1),
-        lerp(a.2, b.2),
-        lerp(a.3, b.3),
+        channel(a.0, b.0),
+        channel(a.1, b.1),
+        channel(a.2, b.2),
+        (alpha * 255.).round() as u8,
     )
 }
 /// `wash` composited over `base` (source over, straight alpha).
@@ -455,6 +465,25 @@ fn parse_shadow(text: &str) -> Result<ShadowExpr, String> {
 mod tests {
     use super::*;
     use crate::theme::tok;
+    #[test]
+    fn colours_mix_with_premultiplied_alpha() {
+        let opaque = Color(255, 0, 0, 255);
+        let clear = Color(0, 0, 0, 0);
+        // Easing to a translucent wash keeps the colour: no darker middle.
+        assert_eq!(mix(opaque, clear, 0.5), Color(255, 0, 0, 128));
+        assert_eq!(mix(opaque, clear, 0.), opaque);
+        assert_eq!(mix(opaque, clear, 1.), clear);
+        assert_eq!(mix(clear, clear, 0.5), clear);
+        // Opaque colours mix channel by channel.
+        assert_eq!(
+            mix(Color(10, 20, 30, 255), Color(110, 120, 130, 255), 0.5),
+            Color(60, 70, 80, 255)
+        );
+        // A translucent end weighs by its alpha: translucent red to opaque blue at 0.5.
+        let mixed = mix(Color(255, 0, 0, 129), Color(0, 0, 255, 255), 0.5);
+        assert_eq!(mixed.3, 192);
+        assert!(mixed.0 < mixed.2, "{mixed:?}");
+    }
     #[test]
     fn colours_parse_in_css_forms() {
         assert_eq!(parse_color("#fff"), Some(Color(255, 255, 255, 255)));
