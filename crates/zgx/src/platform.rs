@@ -170,6 +170,15 @@ pub trait Platform {
     fn set_text_language(&self, language: Option<&str>) {
         let _ = language;
     }
+    /// Add the TrueType or OpenType font in `bytes` to every window's text,
+    /// beside the faces it has (another weight of a family it holds): text
+    /// in its families shapes with it from now on, and every text measures,
+    /// lays out and draws again. The family names it holds, or why not (not
+    /// a font). None adds none.
+    fn add_font(&self, bytes: Arc<[u8]>) -> Result<Vec<String>, String> {
+        let _ = bytes;
+        Err("no fonts are added here".into())
+    }
     /// Whether the platform looks words up (`look_up`): macOS's dictionary
     /// panel. A context menu offers Look Up where it does.
     fn looks_up(&self) -> bool {

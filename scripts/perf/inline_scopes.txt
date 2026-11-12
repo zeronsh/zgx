@@ -37,7 +37,7 @@ zgx-script	1533	13054	kind_view
 zgx-script	310	2303	kind_view::{closure#27}::{closure#0}
 zgx-script	553	8910	lower::apply
 zgx-script	352	3238	lower_list
-zgx-script	467	4011	lower_item_list
+zgx-script	467	4017	lower_item_list
 zgx-script	339	3739	lower_rich::{closure#1}::{closure#0}
 zgx-script	261	3001	to_lua
 zgx-script	171	1428	value::<impl in crates/zgx-script/src/value.rs>::reconcile
