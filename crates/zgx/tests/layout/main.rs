@@ -44,6 +44,8 @@ mod layout_growing_boxes;
 mod layout_history;
 #[path = "../layout_width_changes.rs"]
 mod layout_width_changes;
+#[path = "../max_content_wrapped_text.rs"]
+mod max_content_wrapped_text;
 #[path = "../panel_layout.rs"]
 mod panel_layout;
 #[path = "../percent_fields.rs"]
