@@ -1500,6 +1500,8 @@ pub(crate) struct SpanRare {
     /// Room after the text, given apart from the room before it
     /// (`padding = { before, after, down }`).
     pub padding_end: Option<f32>,
+    /// `outset = 2`: its background reaching past the text without taking room.
+    pub outset: Option<f32>,
     /// `context_menu = function(e) return { … } end`: its own menu (a
     /// link's in place of Open Link and Copy Link).
     pub menu: Option<Function>,
@@ -4973,6 +4975,7 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                     }
                 }
                 b"radius" => span.radius = number(given)?.unwrap_or(0.),
+                b"outset" => rare_mut(&mut span).outset = number(given)?,
                 b"underline_offset" => span.underline_offset = number(given)?,
                 b"underline_style" => {
                     span.underline_style = match lua.unpack(given)? {
