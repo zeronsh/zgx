@@ -1243,6 +1243,14 @@ export type ToastOptions = {
 	action: { label: string, run: () -> () }?,
 }
 
+export type ToastDefaults = {
+	-- Milliseconds toasts stay when they do not say (5000), a warning's
+	-- (7000) and an error's (until dismissed); `false` is until dismissed.
+	duration: number?,
+	warning_duration: (number | false)?,
+	error_duration: (number | false)?,
+}
+
 export type NumberOptions = {
 	-- Digits after the point (default: none for whole numbers, else 2).
 	decimals: number?,
@@ -22119,6 +22127,8 @@ declare ui: {
 	-- A toast in the window's corner: it goes after `duration` ms (5000;
 	-- 7000 a warning; an error stays), or at its ×. Returns its id.
 	toast: (opts: ToastOptions) -> number,
+	-- How long toasts shown from now on stay when they do not say.
+	toast_defaults: (opts: ToastDefaults) -> (),
 	dismiss_toast: (id: number) -> (),
 	-- JSON: `encode(value, { pretty = true })` writes what state could hold
 	-- (lists as arrays, tables as objects, `ui.null` as null); `decode(text)`
