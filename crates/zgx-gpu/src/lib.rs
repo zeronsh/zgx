@@ -12663,9 +12663,15 @@ impl GpuRenderer {
                 continue;
             }
             carried.clear();
+            // A move of whole pixels, to the error of the two offsets it is
+            // the difference of: at 1.5x a whole pixel (zgx-desktop's
+            // `on_pixel_grid`) is 2/3 of a point, which no f32 holds, and
+            // 20,000 points down a list the move is off by up to 0.003 px
+            // (0.012 px at 100,000). Copied, the content lands that far from
+            // where it would be drawn: no pixel tells.
             let whole = |value: f32| {
                 let scaled = value * self.scale;
-                ((scaled - scaled.round()).abs() < 1e-3).then_some(scaled.round() as i32)
+                ((scaled - scaled.round()).abs() < 1. / 64.).then_some(scaled.round() as i32)
             };
             // A view's edge on a device pixel, or the first whole one inside
             // it (up for its left and top, down for its right and bottom): a

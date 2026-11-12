@@ -1178,7 +1178,40 @@ fn main() {
         println!("layer_frames: faded scrolls copy their interior and match drawing whole");
         rounded_corners_scrolled_by_a_copy_match_drawing_whole();
         println!("layer_frames: rounded corners scrolled by a copy match drawing whole");
+        a_long_list_far_down_copies_whole_pixels_at_one_and_a_half();
+        println!("layer_frames: a long list far down copies whole pixels at 1.5x");
     }
+}
+
+/// A list 24,000 points long, scrolled near its end at 1.5x a whole pixel
+/// (2/3 of a point) at a time, as a trackpad's scroll moves: no f32 holds
+/// the offsets exactly, and each move still copies.
+#[cfg(target_os = "macos")]
+fn a_long_list_far_down_copies_whole_pixels_at_one_and_a_half() {
+    fn rows(offset: Signal<f32>) -> View {
+        virtual_list(
+            offset,
+            24.,
+            2,
+            || 1000,
+            |i| i,
+            |_, key, _| {
+                div()
+                    .w(600.)
+                    .h(24.)
+                    .bg(Color(30 + (key % 7) as u8 * 20, 60, 110, 255))
+            },
+        )
+        .w(SIZE.0)
+        .h(SIZE.1)
+    }
+    let mut steps = vec![20_000_f32];
+    for _ in 0..8 {
+        let last = *steps.last().unwrap();
+        steps.push(last + 2. / 3.);
+    }
+    let copies = scrolled_matches_drawing_whole_at(rows, &steps, 1.5);
+    assert!(copies >= 7, "{copies} of 8 moves copied");
 }
 
 /// A scroll view fading 40 px at top and bottom over cards (light paper,
