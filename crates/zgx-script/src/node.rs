@@ -1295,6 +1295,9 @@ pub(crate) enum Kind {
         /// `dismiss_on_backdrop = false`: a click outside doesn't close it
         /// (a dialog that must be answered).
         dismiss: Option<bool>,
+        /// `on_close` beside a state `open`: runs as the person closes it
+        /// (Escape, the backdrop); a controlled `open` has its own.
+        on_close: Option<Function>,
     },
     Popover {
         label: String,
@@ -6045,6 +6048,10 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
     ui.set(
         "modal",
         lua.create_function(|lua, table: Table| {
+            let on_close = match table.get::<mlua::Value>("open")? {
+                mlua::Value::Function(_) => None,
+                _ => table.get::<Option<Function>>("on_close")?,
+            };
             let open = open_of(lua, &table)?;
             let mut node = fill(
                 lua,
@@ -6057,6 +6064,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                         autofocus: table.get::<Option<bool>>("autofocus")?.unwrap_or(true),
                         layer: false,
                         dismiss: table.get("dismiss_on_backdrop")?,
+                        on_close,
                     },
                 ),
                 Some(&table),
@@ -6089,6 +6097,7 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                             autofocus: false,
                             layer: true,
                             dismiss: None,
+                            on_close: None,
                         },
                     ),
                     Some(&table),
