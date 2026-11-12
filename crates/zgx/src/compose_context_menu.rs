@@ -238,7 +238,14 @@ pub(crate) fn mount(
                 .h(origin.height)
                 .child(panel)
         } else {
-            div().absolute().left(x).top(y).w(0.).h(0.).child(panel)
+            // Base UI's context menu: 2 along from the pointer, its side offset under it (the 1pt anchor sits 1 above)
+            div()
+                .absolute()
+                .left(x + 2.)
+                .top(y - 1.)
+                .w(0.)
+                .h(0.)
+                .child(panel)
         };
         let root = ui.root();
         let mounted = crate::compose::mount(&mut ui, root, view, environment.clone());

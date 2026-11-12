@@ -121,3 +121,25 @@ fn shift_f10_and_the_menu_key_open_it_under_what_has_focus() {
     press(&mut ui, Key::ContextMenu, false);
     assert!(view.find("rename").is_some(), "and from the Menu key");
 }
+
+#[test]
+fn a_pointer_menu_hangs_two_along_and_four_under_the_pointer_as_base_ui() {
+    let mut ui = Ui::new(400., 300.);
+    let view = ui.mount(
+        div()
+            .size(400., 300.)
+            .context_menu(|_| vec![menu_item("Open").id("open")]),
+    );
+    ui.prepare_frame();
+    click(&ui, 100., 100., PointerButton::Secondary);
+    let item = view.find("open").expect("the menu shows");
+    let scene = ui.scene.borrow();
+    let panel = scene
+        .ancestors(item)
+        .find(|&a| {
+            scene.bounds(a).x < scene.bounds(item).x && scene.bounds(a).y < scene.bounds(item).y
+        })
+        .expect("the panel holds the item");
+    let b = scene.bounds(panel);
+    assert_eq!((b.x, b.y), (102., 104.), "the panel's corner: {b:?}");
+}
