@@ -7,7 +7,7 @@ use crate::node::parse_color;
 use mlua::{Lua, Table, UserData, UserDataMethods};
 use std::{cell::RefCell, rc::Rc};
 use zgx::canvas::{CanvasText, TextAnchor, TextBaseline};
-use zgx::text_layout::{FontFamily, FontFeatures, FontStyle};
+use zgx::text_layout::{FontFamily, FontFeatures, FontStyle, LetterSpacing, LineHeight, TextAlign};
 use zgx::theme::ThemeScope;
 use zgx::{
     canvas::{
@@ -245,6 +245,13 @@ fn text_style(options: Option<&Table>) -> mlua::Result<(f32, FontStyle)> {
     let Some(o) = options else {
         return Ok((TEXT_SIZE, font));
     };
+    // Points, as a text node's.
+    if let Some(line_height) = o.get::<Option<f32>>("line_height")? {
+        font.line_height = LineHeight::px(line_height);
+    }
+    if let Some(spacing) = o.get::<Option<f32>>("letter_spacing")? {
+        font.letter_spacing = LetterSpacing::px(spacing);
+    }
     if let Some(weight) = o.get::<Option<u16>>("weight")? {
         font.weight = weight;
     }
@@ -264,13 +271,26 @@ fn text_style(options: Option<&Table>) -> mlua::Result<(f32, FontStyle)> {
 }
 /// A canvas text's size where its options give none: a chart's labels.
 const TEXT_SIZE: f32 = 12.;
+/// The width a canvas text wraps to (`width`), if its options give one.
+fn wrap_width(options: Option<&Table>) -> mlua::Result<Option<f32>> {
+    let Some(width) = options.map_or(Ok(None), |o| o.get::<Option<f32>>("width"))? else {
+        return Ok(None);
+    };
+    if !width.is_finite() || width <= 0. {
+        return Err(mlua::Error::runtime(format!(
+            "a canvas text's `width` is a number of points above 0, not {width}"
+        )));
+    }
+    Ok(Some(width))
+}
 
 impl UserData for Recorder {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method(
             "text",
             |_, c, (text, x, y, options): (String, f32, f32, Option<Table>)| {
-                let (size, font) = text_style(options.as_ref())?;
+                let (size, mut font) = text_style(options.as_ref())?;
+                let width = wrap_width(options.as_ref())?;
                 let color = match options
                     .as_ref()
                     .map(|o| o.get::<mlua::Value>("color"))
@@ -302,6 +322,12 @@ impl UserData for Recorder {
                         )));
                     }
                 };
+                // Lines of a paragraph align as its box does on `x`.
+                font.align = match anchor {
+                    TextAnchor::Start => TextAlign::Start,
+                    TextAnchor::Center => TextAlign::Center,
+                    TextAnchor::End => TextAlign::End,
+                };
                 c.0.borrow_mut().text(CanvasText {
                     text: text.into(),
                     x,
@@ -311,6 +337,7 @@ impl UserData for Recorder {
                     font,
                     anchor,
                     baseline,
+                    width,
                 });
                 Ok(())
             },
@@ -320,8 +347,9 @@ impl UserData for Recorder {
             "measure_text",
             |_, _, (text, options): (String, Option<Table>)| {
                 let (size, font) = text_style(options.as_ref())?;
+                let wrap = wrap_width(options.as_ref())?;
                 let (width, height) =
-                    zgx::canvas::measure_text(&text, size, &font).unwrap_or((0., 0.));
+                    zgx::canvas::measure_text_in(&text, size, wrap, &font).unwrap_or((0., 0.));
                 Ok((width, height))
             },
         );

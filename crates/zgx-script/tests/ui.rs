@@ -5429,6 +5429,96 @@ fn a_redrawn_canvas_reuses_its_text_nodes() {
     assert_eq!(h.host.error().get(), None);
 }
 
+/// `c:text` with a `width` wraps to it in a box that wide, its lines a
+/// `line_height` apart and aligned as the box is on `x`; `letter_spacing`
+/// spaces its characters; `c:measure_text` measures each as drawn.
+#[test]
+fn canvas_text_wraps_to_a_width_with_its_spacing() {
+    let mut h = Harness::inline(
+        r##"local measured = ui.state("measured", "")
+        local seen = ""
+        local para = "one two three four five six"
+        return ui.column { w = 400, h = 300,
+            ui.button { id = "read", on_click = function() measured:set(seen) end, "read" },
+            ui.text { id = "measured", function() return measured:get() end },
+            ui.canvas { id = "c", w = 300, h = 200,
+                draw = function(c)
+                    local o = { size = 10, width = 60, line_height = 20 }
+                    c:text(para, 10, 0, o)
+                    c:text(para, 200, 0, { size = 10, width = 60, align = "center" })
+                    c:text("spaced", 10, 150, { size = 10 })
+                    c:text("spaced", 10, 170, { size = 10, letter_spacing = 5 })
+                    local _, tall = c:measure_text(para, o)
+                    local plain = c:measure_text("spaced", { size = 10 })
+                    local wide = c:measure_text("spaced", { size = 10, letter_spacing = 5 })
+                    seen = `{tall} {wide - plain}`
+                end } }"##,
+    );
+    h.ui.prepare_frame();
+    assert_eq!(h.host.error().get(), None);
+    let canvas = h.find("c").unwrap();
+    let shown = |h: &Harness| {
+        let scene = h.ui.scene.borrow();
+        let top = scene.bounds(canvas);
+        let group = *scene.children(canvas).last().unwrap();
+        scene
+            .children(group)
+            .iter()
+            .map(|&n| {
+                let b = scene.transformed_bounds(n);
+                (
+                    (b.x - top.x, b.y - top.y, b.width, b.height),
+                    scene.font(n).align,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let shown = shown(&h);
+    let (wrapped, align) = shown[0];
+    assert_eq!(
+        (wrapped.0, wrapped.1, wrapped.2),
+        (10., 0., 60.),
+        "{shown:?}"
+    );
+    assert!(
+        wrapped.3 >= 40. && wrapped.3 % 20. == 0.,
+        "lines 20 apart, more than one: {shown:?}"
+    );
+    assert_eq!(align, zgx::text_layout::TextAlign::Start);
+    let (centred, align) = shown[1];
+    assert_eq!((centred.0, centred.2), (170., 60.), "centred on x");
+    assert_eq!(align, zgx::text_layout::TextAlign::Center, "and its lines");
+    // Five points after each of its six characters (or between them).
+    let (plain, spaced) = (shown[2].0, shown[3].0);
+    assert!(spaced.2 - plain.2 >= 24.5, "{shown:?}");
+    h.click("read");
+    h.ui.prepare_frame();
+    let measured = h.text("measured");
+    let mut measured = measured.split(' ').map(|v| v.parse::<f32>().unwrap());
+    let (tall, extra) = (measured.next().unwrap(), measured.next().unwrap());
+    assert_eq!(tall, wrapped.3, "measured as drawn");
+    assert!(
+        (extra - (spaced.2 - plain.2)).abs() < 0.5,
+        "{extra} {shown:?}"
+    );
+    assert_eq!(h.host.error().get(), None);
+}
+
+/// A canvas text's `width` is a size: none or a negative one is the
+/// script's error, at its line.
+#[test]
+fn a_canvas_texts_width_must_be_a_size() {
+    let h = Harness::inline(
+        r##"return ui.canvas { w = 100, h = 100,
+            draw = function(c) c:text("x", 0, 0, { width = -1 }) end }"##,
+    );
+    let error = h.host.error().get().unwrap_or_default();
+    assert!(
+        error.contains("`width` is a number of points above 0"),
+        "{error}"
+    );
+}
+
 /// A pointer's place in a node's box is the same however it is zoomed, in
 /// any column: a hover tilt read from it stays in its range, so a far card
 /// doesn't tilt itself across its neighbours. Each event that says where.
