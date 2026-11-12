@@ -5470,6 +5470,10 @@ export type SpanProps = {
 	-- How far below the baseline the underline sits (CSS's
 	-- `text-underline-offset`).
 	underline_offset: number?,
+	-- How far its background reaches past the text on each side, taking no
+	-- room (CSS's negative inline margin under the same padding): a search
+	-- match's mark.
+	outset: number?,
 	-- How the underline is drawn, its colour and its thickness; any of them
 	-- underlines the span (unless `underline = false`). `"wavy"` marks a
 	-- mistake or a diagnostic.
