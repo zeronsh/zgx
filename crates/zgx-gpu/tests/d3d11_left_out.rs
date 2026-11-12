@@ -186,6 +186,33 @@ fn main() {
         .expect("a frame with a blend mode draws");
     assert_ne!(blended, plain, "the blend mode drew nothing");
 
+    // A layer shader with inputs (a pass): left out, its layer composited
+    // as painted (Direct3D 11 runs no passes yet), named once.
+    let with_pass = zgx::decoration::FillShader::with_inputs(
+        "fn layer(input: LayerInput) -> vec4<f32> {
+    return vec4(zgx_count(vec2(0.5)).r, 0.0, 0.0, 1.0);
+}",
+        None,
+        zgx::decoration::ShaderInputs {
+            passes: vec![zgx::decoration::ShaderPass {
+                name: "count".into(),
+                source: "fn run(input: PassInput) -> vec4<f32> { return vec4(1.0); }".into(),
+                size: zgx::decoration::PassSize::Pixels(4, 4),
+                format: zgx::decoration::PassFormat::Rgba16Float,
+                feedback: false,
+                steps: 1,
+                once: false,
+            }],
+            ..Default::default()
+        },
+    );
+    let passed = draw(|scene, id| scene.set_layer_shader(id, Some(with_pass)))
+        .expect("a frame with a layer shader with inputs draws");
+    assert_eq!(
+        passed, layered,
+        "a layer shader with inputs draws its layer as painted"
+    );
+
     // A GPU view draws (`view_host`): its painter's colour, on the views'
     // own Direct3D 12 device on Direct3D 11's adapter (on a machine without
     // a GPU, WARP, which wgpu's own list of adapters leaves out).
@@ -238,10 +265,8 @@ fn main() {
         !left_out.contains(&"images a GPU view draws"),
         "a GPU view was left out: {left_out:?}"
     );
-    assert!(
-        left_out.is_empty(),
-        "nothing here is left out: {left_out:?}"
-    );
+    let kind = "layer shaders with inputs (passes, pictures, GPU views): drawn as painted";
+    assert_eq!(left_out, [kind], "only shaders with inputs are left out");
     println!("d3d11_left_out: {left_out:?}");
 }
 
