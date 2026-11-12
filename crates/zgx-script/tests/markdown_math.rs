@@ -31,11 +31,11 @@ fn drawing(h: f32) -> String {
 }
 
 #[test]
-fn inline_math_is_asked_for_and_drawn_in_the_line() {
+fn inline_math_is_drawn_in_the_line_and_reads_as_its_tex() {
     let mut h = app("a $x^2$ b", &drawing(1.));
     assert_eq!(h.text("asked"), "x^2;");
     let tree = h.tree();
-    assert!(tree.contains("\"a  b\""), "{tree}");
+    assert!(tree.contains("\"a x^2 b\""), "{tree}");
 }
 
 #[test]

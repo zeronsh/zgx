@@ -5022,6 +5022,7 @@ fn paragraph_effect<const LOCATING: bool>(
         let mut icons = Vec::new();
         let mut spanned = Vec::new();
         let mut boxes = Vec::new();
+        let mut box_labels: Vec<std::sync::Arc<str>> = Vec::new();
         for (index, mut span) in spans.into_iter().enumerate() {
             if span.text.is_empty() {
                 continue;
@@ -5041,6 +5042,7 @@ fn paragraph_effect<const LOCATING: bool>(
                     .unwrap_or_else(|| base.color_in(Some(&theme)));
                 let at = content.len();
                 content.push_str(crate::rich_text::INLINE_BOX_TEXT);
+                box_labels.push(span.text.clone());
                 let (width, height) = (
                     inline.width * font_size,
                     (inline.height + inline.depth) * font_size,
@@ -5353,9 +5355,18 @@ fn paragraph_effect<const LOCATING: bool>(
         let content = if icons.is_empty() {
             content
         } else {
+            let mut labels = box_labels.iter();
             content
                 .replace(crate::compose_rich::ICON_PLACEHOLDER, "")
-                .replace(crate::rich_text::INLINE_BOX_CHAR, "")
+                .split(crate::rich_text::INLINE_BOX_CHAR)
+                .enumerate()
+                .fold(String::new(), |mut out, (i, piece)| {
+                    if i > 0 {
+                        out.push_str(labels.next().map_or("", |label| label));
+                    }
+                    out.push_str(piece);
+                    out
+                })
         };
         content_state.set(crate::compose_rich::Content { rich, links, icons });
         ui.semantics
