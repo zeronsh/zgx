@@ -386,6 +386,24 @@ pub enum Brush {
         /// The colours along it, in offset order.
         stops: Arc<[GradientStop]>,
     },
+    /// A radial gradient (see [`Brush::radial`]): offset 0 at the centre, 1
+    /// on the circle of radius 1 about the origin, both placed by
+    /// `transform`, and the last colour past it.
+    Radial {
+        /// Where the unit circle lies: an ellipse where it scales unevenly.
+        transform: Affine,
+        /// The colours out from the centre, in offset order.
+        stops: Arc<[GradientStop]>,
+    },
+    /// A conic gradient (see [`Brush::conic`]): offset 0 along +x from the
+    /// origin, rising clockwise to 1 a full turn round, both placed by
+    /// `transform`.
+    Conic {
+        /// Where its centre and its first colour's direction lie.
+        transform: Affine,
+        /// The colours round it, in offset order.
+        stops: Arc<[GradientStop]>,
+    },
     /// Diagonal parallel stripes in logical coordinates.
     Slash {
         /// The colour between the stripes.
@@ -417,17 +435,53 @@ impl Brush {
             .iter()
             .all(|v| v.is_finite())
             || start == end
-            || stops.len() < 2
-            || stops.len() > 1024
-            || stops
-                .iter()
-                .any(|s| !s.offset.is_finite() || !(0. ..=1.).contains(&s.offset))
-            || stops.windows(2).any(|s| s[0].offset > s[1].offset)
+            || !valid_stops(&stops)
         {
             return Err("invalid linear gradient");
         }
         Ok(Self::Linear { start, end, stops })
     }
+    /// A radial gradient from offset 0 at the origin to 1 on the unit
+    /// circle, both placed by `transform` (`Affine::scale(r, r)` then a
+    /// translation to the centre for a circle of radius `r`), or an error
+    /// unless `transform` is finite and invertible and the stops are as
+    /// [`Brush::linear`] takes them.
+    pub fn radial(
+        transform: Affine,
+        stops: impl Into<Arc<[GradientStop]>>,
+    ) -> Result<Self, &'static str> {
+        let stops = stops.into();
+        if !placed(transform) || !valid_stops(&stops) {
+            return Err("invalid radial gradient");
+        }
+        Ok(Self::Radial { transform, stops })
+    }
+    /// A conic gradient: offset 0 along +x from the origin, rising
+    /// clockwise (as screen coordinates turn) to 1 a full turn round, all
+    /// placed by `transform`; or an error as [`Brush::radial`]'s.
+    pub fn conic(
+        transform: Affine,
+        stops: impl Into<Arc<[GradientStop]>>,
+    ) -> Result<Self, &'static str> {
+        let stops = stops.into();
+        if !placed(transform) || !valid_stops(&stops) {
+            return Err("invalid conic gradient");
+        }
+        Ok(Self::Conic { transform, stops })
+    }
+}
+/// Whether a gradient's transform places it somewhere: finite, and
+/// invertible (not flattened to a line).
+fn placed(transform: Affine) -> bool {
+    transform.is_finite() && transform.inverse().is_some()
+}
+/// 2 to 1,024 stops with offsets from 0 to 1 in order.
+fn valid_stops(stops: &[GradientStop]) -> bool {
+    (2..=1024).contains(&stops.len())
+        && stops
+            .iter()
+            .all(|s| s.offset.is_finite() && (0. ..=1.).contains(&s.offset))
+        && stops.windows(2).all(|s| s[0].offset <= s[1].offset)
 }
 /// Which parts of a self-overlapping path are inside it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
