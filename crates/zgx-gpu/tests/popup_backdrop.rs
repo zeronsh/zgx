@@ -251,8 +251,7 @@ fn a_rounded_popup_keeps_its_own_pixels_past_its_curve() {
 }
 
 /// A popup whose window the system shadows draws none of its panel's own
-/// (`GpuRenderer::set_unshadowed`): under a translucent fill, zgx's shadow,
-/// drawn whole under the box, darkened what the system blurs behind it.
+/// (`GpuRenderer::set_unshadowed`), where the system's shadow is.
 #[test]
 fn an_unshadowed_panel_shows_its_fill_alone() {
     let _gpu_fixture = gpu_fixture();
@@ -294,9 +293,10 @@ fn an_unshadowed_panel_shows_its_fill_alone() {
         let bytes = popup.readback().unwrap();
         bytes[(50 * width + 50) * 4 + 3]
     };
+    // Box shadows draw outside their box alone, as CSS's do: under the fill
+    // there is none to darken it, shadowed or not.
+    let unshadowed = alpha(Some(panel));
+    assert!((60..=68).contains(&unshadowed), "the fill alone: {unshadowed}");
     let shadowed = alpha(None);
-    assert!(shadowed > 100, "the shadow under the fill: {shadowed}");
-    let alone = alpha(Some(panel));
-    assert!((60..=68).contains(&alone), "the fill alone: {alone}");
-    assert!(alpha(None) > 100, "shadowed again");
+    assert_eq!(shadowed, unshadowed, "no shadow under the fill");
 }
