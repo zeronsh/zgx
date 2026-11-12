@@ -1597,8 +1597,9 @@ export type CommandOptions = {
 	id: string?,
 	-- Defaults to the id.
 	title: string?,
-	-- "File" (the default), "Edit", "View", "Window" or any other menu.
-	menu: string?,
+	-- "File" (the default), "Edit", "View", "Window" or any other menu; false
+	-- for none: its key alone runs it, after what has focus.
+	menu: (string | false)?,
 	-- Modifiers and a key joined by "+": "cmd+shift+d", "cmd+alt+arrowleft".
 	-- A state or a function saying it follows what it reads: rebound (a
 	-- shortcuts setting), the menus have the new key at once, no reload.

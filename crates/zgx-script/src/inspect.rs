@@ -579,6 +579,7 @@ const HELP: &str = "commands (one JSON object a line, `cmd` and its fields):
   switch  [name] [on]                            list fast paths, or switch one on or off, to compare
   search  [query] [next] [prev] [all] [n=5] [close]  find in page: the count, the current match, the first n
   zoom    [to: in|out|reset|1.5|150%]            the window's zoom (Cmd/Ctrl +, -, 0) and its viewport in points
+  full-screen [to: on|off|toggle]                the window into or out of full screen, as its green button
   memory                                         what the app holds, by what holds it: a line each
   wait    target [text] [gone] [timeout_ms=3000] until it shows (the text), or is gone
   sleep   ms                                     let the app run
@@ -902,7 +903,12 @@ impl Session {
                 // Any target `click` and `hover` take, or a point; a trackpad's sideways motion with `dx`.
                 let delta_y = number("dy").unwrap_or(100.) as f32;
                 let delta_x = number("dx").unwrap_or(0.) as f32;
-                ui.dispatch(zgx::input::InputEvent::Scroll { x, y, delta_x, delta_y });
+                ui.dispatch(zgx::input::InputEvent::Scroll {
+                    x,
+                    y,
+                    delta_x,
+                    delta_y,
+                });
                 (format!("scrolled at {x:.0},{y:.0}"), Value::Nil)
             }),
             "command" => (|| {
@@ -1025,6 +1031,28 @@ impl Session {
                     ui.find_previous();
                 }
                 Ok(self.search(&ui, flag("all"), number("n").map_or(5, |n| n as usize)))
+            })(),
+            "full-screen" => (|| {
+                let Some(inspector) = self.0.inspector.as_ref() else {
+                    return Err(
+                        "this window has no inspector to ask its full screen of".to_string()
+                    );
+                };
+                let on = match text("to").as_deref() {
+                    None | Some("toggle") => None,
+                    Some("on") => Some(true),
+                    Some("off") => Some(false),
+                    Some(other) => {
+                        return Err(format!(
+                            "full-screen takes on, off or toggle, not `{other}`"
+                        ));
+                    }
+                };
+                inspector.request_full_screen(on);
+                Ok((
+                    "asked: read `state` ui.window.full_screen once it is there".to_string(),
+                    Value::Nil,
+                ))
             })(),
             "zoom" => (|| {
                 match text("to").as_deref() {

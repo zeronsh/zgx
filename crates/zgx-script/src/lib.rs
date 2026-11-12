@@ -56,6 +56,7 @@ mod folder;
 mod form;
 mod handlers;
 mod hook_targets;
+mod host_views;
 mod i18n;
 #[cfg(feature = "inspect")]
 pub mod inspect;
@@ -83,7 +84,6 @@ mod rules;
 pub mod scaffold;
 #[cfg(feature = "scene3d")]
 mod scene3d;
-mod host_views;
 pub use host_views::host_view;
 mod socket;
 mod sorted;

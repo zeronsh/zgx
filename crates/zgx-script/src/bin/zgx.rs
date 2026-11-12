@@ -483,6 +483,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   search [query] [--next] [--prev] [--all] [--close]
                        find in page: count, current, the first matches
   zoom [in|out|reset|150%]               the window's zoom and its viewport
+  full-screen [on|off|toggle]            the window into or out of full screen, as its green button
   memory [--human]                       what the app holds, a line each, as JSON
   sleep <ms>           raw <json>
   help                 what the app answers
@@ -639,6 +640,7 @@ fn inspect(args: Vec<String>) -> ExitCode {
         "frames" => put("n", arg(1)),
         "search" => put("query", arg(1)),
         "zoom" => put("to", arg(1)),
+        "full-screen" => put("to", arg(1)),
         "mark" => put("name", arg(1)),
         "switch" => {
             put("name", arg(1));
@@ -679,9 +681,10 @@ fn inspect(args: Vec<String>) -> ExitCode {
     let fields: Vec<(String, Value)> = fields
         .into_iter()
         .map(|(k, v)| match (&*k, &v) {
-            ("dy" | "dx" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every", Value::Str(s)) => {
-                (k, s.parse::<f64>().map(Value::Num).unwrap_or(v))
-            }
+            (
+                "dy" | "dx" | "ms" | "n" | "width" | "runs" | "keep" | "repeat" | "every",
+                Value::Str(s),
+            ) => (k, s.parse::<f64>().map(Value::Num).unwrap_or(v)),
             _ => (k, v),
         })
         .collect();
@@ -824,6 +827,12 @@ const TOOLS: &[Tool] = &[
         "What the app holds, by what holds it, one line each: the process's footprint and its allocator, each Luau VM's heap, decoded pictures shown and cached, text caches, the glyph atlas, GPU textures, layers and buffers, scene nodes and the frame log. Compare two answers to see which line grew.",
     ),
     (
+        "zgx_full_screen",
+        "full-screen",
+        &[("to", "string", false)],
+        "Ask the window into full screen (`on`), out of it (`off`), or the other way (`toggle`, the default), as its green button does. Read `ui.window.full_screen` after to see it there.",
+    ),
+    (
         "zgx_zoom",
         "zoom",
         &[("to", "string", false)],
@@ -880,7 +889,11 @@ const TOOLS: &[Tool] = &[
     (
         "zgx_scroll",
         "scroll",
-        &[("target", "string", true), ("dy", "number", true), ("dx", "number", false)],
+        &[
+            ("target", "string", true),
+            ("dy", "number", true),
+            ("dx", "number", false),
+        ],
         "Scroll the viewport under a node by dy points (down is positive).",
     ),
     (

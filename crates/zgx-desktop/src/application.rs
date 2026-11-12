@@ -1087,6 +1087,10 @@ impl Application {
             muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
                 let _ = wake.send_event(Event::NativeMenuAction(crate::MenuAction(event.id.0)));
             }));
+            let wake = proxy.clone();
+            edit_selectors::sink(move |action| {
+                let _ = wake.send_event(Event::NativeMenuAction(action));
+            });
             // With none of the app's own, still the application and Window
             // menus every Mac app has: checked now, made once the first frame
             // shows (`WindowManager::install_menu_bar`).
@@ -2863,6 +2867,13 @@ impl Host {
             self.context.ui.cancel_interactions();
             return Ok(());
         };
+        // Devtools' `full-screen`, as the green button.
+        if let Some(on) = self.context.inspector.take_full_screen_request() {
+            let full = window.fullscreen().is_some();
+            if on.unwrap_or(!full) != full {
+                self.context.window.set_fullscreen(!full);
+            }
+        }
         #[cfg(target_os = "macos")]
         let size = *self
             .reported_size
@@ -3662,8 +3673,8 @@ impl Host {
     /// toggles the window. Whether anything took it.
     fn standard_edit(&mut self, item: crate::app_menu::StandardItem) -> bool {
         use crate::app_menu::StandardItem;
-        let undo = |shift| InputEvent::KeyDown {
-            key: Key::Character("z".into()),
+        let primary = |key: &str, shift: bool| InputEvent::KeyDown {
+            key: Key::Character(key.into()),
             modifiers: zgx::input::Modifiers {
                 shift,
                 control: !cfg!(target_os = "macos"),
@@ -3672,10 +3683,11 @@ impl Host {
             },
             repeat: false,
         };
-        match item {
+        let taken = match item {
             StandardItem::Copy => self.clipboard_command("c"),
             StandardItem::Cut => self.clipboard_command("x"),
-            StandardItem::Paste => self.clipboard_command("v"),
+            // The clipboard's text alone either way: zgx's editors take no styles.
+            StandardItem::Paste | StandardItem::PasteAndMatchStyle => self.clipboard_command("v"),
             StandardItem::SelectAll => self
                 .context
                 .ui
@@ -3685,8 +3697,23 @@ impl Host {
             StandardItem::Undo | StandardItem::Redo => {
                 self.context.ui.focused_editor().is_some()
                     && self
-                        .dispatch_prevented(undo(item == StandardItem::Redo))
+                        .dispatch_prevented(primary("z", item == StandardItem::Redo))
                         .unwrap_or(false)
+            }
+            // The selection goes, as Backspace takes it; with none, nothing does.
+            StandardItem::Delete => {
+                return self
+                    .context
+                    .ui
+                    .focused_editor()
+                    .is_some_and(|editor| !editor.copy().is_empty())
+                    && self
+                        .dispatch_prevented(InputEvent::KeyDown {
+                            key: Key::Backspace,
+                            modifiers: zgx::input::Modifiers::default(),
+                            repeat: false,
+                        })
+                        .unwrap_or(false);
             }
             StandardItem::ToggleFullScreen => {
                 let Some(window) = &self.window else {
@@ -3695,9 +3722,25 @@ impl Host {
                 self.context
                     .window
                     .set_fullscreen(window.fullscreen().is_none());
-                true
+                return true;
             }
+        };
+        if taken {
+            return true;
         }
+        // Nothing of zgx's took it: its shortcut, as pressing it does, for
+        // what handles keys itself (a host's view copying its selection).
+        let key = match item {
+            StandardItem::Copy => ("c", false),
+            StandardItem::Cut => ("x", false),
+            StandardItem::Paste => ("v", false),
+            StandardItem::SelectAll => ("a", false),
+            StandardItem::Undo => ("z", false),
+            StandardItem::Redo => ("z", true),
+            _ => return false,
+        };
+        self.dispatch_prevented(primary(key.0, key.1))
+            .unwrap_or(false)
     }
     fn clipboard_key(&mut self, key: &Key) -> bool {
         #[cfg(windows)]
@@ -4070,6 +4113,7 @@ impl Host {
         #[cfg(target_os = "macos")]
         {
             content_never_moves_window();
+            edit_selectors::answer();
             mouse_down::watch();
         }
         let sized = self.options.bounds;
@@ -9007,6 +9051,75 @@ fn release_freed_heap() {
         // SAFETY: glibc's malloc_trim only releases memory it has freed.
         unsafe {
             malloc_trim(0);
+        }
+    }
+}
+/// AppKit's standard Edit items (Copy, Paste…) go to the first responder by
+/// selector. winit's view answers them here, each its item's action to the
+/// key window (`standard_edit`), so the items are enabled and do what their
+/// shortcuts do while zgx's view has the keyboard; a native view in the
+/// window (a web page) answers them itself.
+#[cfg(target_os = "macos")]
+mod edit_selectors {
+    use crate::app_menu::StandardItem;
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    use std::cell::RefCell;
+
+    type Sink = Box<dyn Fn(crate::MenuAction)>;
+    thread_local! {
+        static SINK: RefCell<Option<Sink>> = const { RefCell::new(None) };
+    }
+    const SELECTORS: [(&std::ffi::CStr, StandardItem); 8] = [
+        (c"undo:", StandardItem::Undo),
+        (c"redo:", StandardItem::Redo),
+        (c"cut:", StandardItem::Cut),
+        (c"copy:", StandardItem::Copy),
+        (c"paste:", StandardItem::Paste),
+        (c"pasteAsPlainText:", StandardItem::PasteAndMatchStyle),
+        (c"delete:", StandardItem::Delete),
+        (c"selectAll:", StandardItem::SelectAll),
+    ];
+    /// Where the items' actions go (the event loop).
+    pub(super) fn sink(send: impl Fn(crate::MenuAction) + 'static) {
+        SINK.with(|sink| *sink.borrow_mut() = Some(Box::new(send)));
+    }
+    /// The item the selector `name` is, if one of these.
+    pub(super) fn item(name: &std::ffi::CStr) -> Option<StandardItem> {
+        SELECTORS
+            .iter()
+            .find(|(s, _)| *s == name)
+            .map(|(_, item)| *item)
+    }
+    extern "C-unwind" fn edit(_this: *mut AnyObject, cmd: Sel, _sender: *mut AnyObject) {
+        if let Some(item) = item(cmd.name()) {
+            SINK.with(|sink| {
+                if let Some(send) = &*sink.borrow() {
+                    send(item.action());
+                }
+            });
+        }
+    }
+    /// winit's view answers the selectors (once its class is made: its first window's).
+    pub(super) fn answer() {
+        let Some(class) = AnyClass::get(c"WinitView") else {
+            return;
+        };
+        for (name, _) in SELECTORS {
+            // Added once; later calls find it there and change nothing.
+            // SAFETY: `edit` has an action method's C signature (self, _cmd,
+            // sender; void), which "v@:@" states; the transmute only erases
+            // the function pointer's type. `class_addMethod` is thread-safe.
+            unsafe {
+                let imp: objc2::runtime::Imp = std::mem::transmute(
+                    edit as extern "C-unwind" fn(*mut AnyObject, Sel, *mut AnyObject),
+                );
+                objc2::ffi::class_addMethod(
+                    class as *const AnyClass as *mut AnyClass,
+                    Sel::register(name),
+                    imp,
+                    c"v@:@".as_ptr(),
+                );
+            }
         }
     }
 }
