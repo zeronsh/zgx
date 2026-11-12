@@ -5215,6 +5215,7 @@ dependencies = [
  "ash",
  "block2 0.6.2",
  "bytemuck",
+ "dispatch2",
  "fontconfig-parser",
  "gif",
  "hypher",
