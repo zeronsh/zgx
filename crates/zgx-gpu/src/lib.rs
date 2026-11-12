@@ -19284,7 +19284,7 @@ fn area_quad(
                 Some(stops),
             )
         }
-        Brush::Slash { .. } => return None,
+        Brush::Radial { .. } | Brush::Conic { .. } | Brush::Slash { .. } => return None,
     };
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for [x, y] in top.iter().chain(&bottom) {
