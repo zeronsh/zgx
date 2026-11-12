@@ -81,6 +81,8 @@ mod list_thin_rows;
 mod markdown_lazy;
 #[path = "../mentions.rs"]
 mod mentions;
+#[path = "../modal_focus.rs"]
+mod modal_focus;
 #[path = "../pointer_lock.rs"]
 mod pointer_lock;
 #[path = "../pointer_through.rs"]

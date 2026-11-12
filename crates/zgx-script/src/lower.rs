@@ -3641,6 +3641,7 @@ fn kind_view(
             autofocus,
             layer,
             dismiss,
+            on_close,
         } => {
             // Built when it first opens (`View::lazy`), as every script
             // overlay: closed, a list's menus and cards cost nothing.
@@ -3657,6 +3658,18 @@ fn kind_view(
             let view = if *layer { view.layer() } else { view };
             let view = match dismiss {
                 Some(d) => view.dismiss_on_backdrop(*d),
+                None => view,
+            };
+            let view = match on_close {
+                Some(on_close) => {
+                    let (on_close, vm) = (on_close.clone(), Rc::downgrade(vm));
+                    view.on_dismiss(move || {
+                        let Some(vm) = vm.upgrade() else { return };
+                        if let Err(error) = vm.call::<()>(&on_close, ()) {
+                            vm.report(error);
+                        }
+                    })
+                }
                 None => view,
             };
             match placement {

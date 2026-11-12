@@ -28,7 +28,7 @@ context_menu_below: boolean?
 | Option | Type | Default | |
 | --- | --- | --- | --- |
 | `open` | `State<boolean>`, or `() -> boolean` | required (not `menu_item`) | true while shown; written back as it closes. A function controls it: it shows while the function says so, and its closing (Escape, the backdrop, a choice) goes to `on_close` (a modal route, [routing](state.md#routing)) |
-| `on_close` | `() -> ()` | none | a controlled overlay's closing |
+| `on_close` | `() -> ()` | none | a controlled overlay's closing; on a `modal` whose `open` is a state, it runs as the person closes it (Escape, a press on the backdrop), after the state has been written, and not when the app sets the state itself |
 | `build` (`modal`, `popover`, `menu`) | `() -> Node` | none | its content, built each time it opens and kept while it closes: a form starts from what it edits, its components' state new (as React's conditionally rendered dialog). Children given as well come before it, built once |
 | `anchor` (`popover`, `menu`) | `Node` | required | the trigger, laid out where the popover is |
 | `autofocus` (`modal`, `popover`, `menu`) | `boolean` | `true` | focus its first control as it opens; `false` keeps the panel itself focused (keys still reach it) |

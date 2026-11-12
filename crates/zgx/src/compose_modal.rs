@@ -80,6 +80,8 @@ pub(crate) fn activate(
     autofocus: bool,
     // A non-modal layer (`View::layer`).
     layer: bool,
+    // Run as the person closes it (Escape, the backdrop).
+    on_dismiss: Option<std::rc::Rc<dyn Fn()>>,
 ) {
     if layer {
         ui.input.set_layer(portal.overlay, true);
@@ -111,6 +113,11 @@ pub(crate) fn activate(
     ui.on_event(panel, true, |_| {});
     let close = open.clone();
     let input = ui.input.clone();
+    let dismissed = move || {
+        if let Some(handler) = &on_dismiss {
+            handler();
+        }
+    };
     ui.on_event(overlay, false, move |cx| match cx.event {
         InputEvent::FocusScopeClosed if cx.phase == EventPhase::Target => {
             close.set(false);
@@ -122,6 +129,7 @@ pub(crate) fn activate(
             && input.focus_scope() == Some(overlay) =>
         {
             close.set(false);
+            dismissed();
             cx.prevent_default();
             cx.stop_propagation();
         }
@@ -134,6 +142,7 @@ pub(crate) fn activate(
         {
             if dismiss_backdrop {
                 close.set(false);
+                dismissed();
             }
             cx.prevent_default();
             cx.stop_propagation();
