@@ -5129,6 +5129,15 @@ fn placeholder() -> Arc<ImageData> {
 /// own directory or below, as its modules do, not from anywhere the user
 /// can read.
 pub(crate) fn resolve_path(vm: &Vm, path: &str) -> Result<std::path::PathBuf, String> {
+    resolve_path_of(vm, path, "images")
+}
+/// A file's path as `resolve_path` finds an image's: `what` names what a
+/// plugin's come from its directory (`"fonts"`).
+pub(crate) fn resolve_path_of(
+    vm: &Vm,
+    path: &str,
+    what: &str,
+) -> Result<std::path::PathBuf, String> {
     let given = std::path::Path::new(path);
     let resolved = match (&vm.base, given.is_relative()) {
         (Some(base), true) => base.join(given),
@@ -5158,7 +5167,7 @@ pub(crate) fn resolve_path(vm: &Vm, path: &str) -> Result<std::path::PathBuf, St
             Ok(crate::normalize(&root.join(given)))
         }
         _ => Err(format!(
-            "{path}: a plugin's images come from its directory or below"
+            "{path}: a plugin's {what} come from its directory or below"
         )),
     }
 }

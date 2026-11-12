@@ -38,7 +38,7 @@ Any [property](properties.md); these are the text ones (they also set the defaul
 | `weight` | `number` | `400` | 100 to 900 |
 | `bold` | `boolean` | `false` | weight 700 |
 | `italic` | `boolean` | `false` | |
-| `font` | `string` | the host's | `"mono"` (or `"monospace"`), `"sans"`, `"serif"`, or a family name |
+| `font` | `string` | the host's | `"mono"` (or `"monospace"`), `"sans"`, `"serif"`, or a family name: installed, the host's, or one the script loaded ([fonts](#fonts)) |
 | `align` | `"start" \| "left" \| "center" \| "right"` | `"start"` | within the text's own box |
 | `wrap` | `boolean \| "balance"` | `false` | wrap at the box's width; `"balance"` balances the lines, as CSS's `text-wrap: balance` (see [properties](properties.md)) |
 | `lines` | `number` | none | at most this many lines |
@@ -208,6 +208,28 @@ return ui.column {
 	end),
 }
 ```
+
+## Fonts
+
+`font` names a family the system has installed, one the host registered, or one the script loaded. `ui.load_font(src)` loads a TrueType or OpenType file (`.ttf`, `.otf`, `.ttc`, up to 64 MiB) for every window: `src` is a path from the script's directory, or a `File` the user picked. It returns a promise of the family names the file holds, which is what `font` then names. Text in those families, `ui.text` and a canvas's `c:text` alike, lays out and draws again in it; another file of the same family (its bold, its italic) adds that face beside the others.
+
+```lua
+-- The system's sans until Inter loads, and if it can't.
+local family = ui.state("family", "sans")
+local _ = ui.task(function()
+	local loaded, families = pcall(function()
+		return ui.load_font("fonts/Inter-Regular.ttf"):await() -- { "Inter" }
+	end)
+	if loaded then
+		family:set(families[1])
+	end
+end)
+return ui.text { "Handgloves", font = function() return family:get() end, text_size = 24 }
+```
+
+A canvas's `draw` runs again when a state it reads changes: have it read one the load sets (`family` above) so `c:measure_text` measures in the font once it is there.
+
+A file that is not a font rejects the promise (`kind` `"io"`), as does one that can't be read. A plugin's fonts come from its directory or below (or a file the user picked), and only with `Capability::Fonts` (`fonts` in `zgx.json`): a loaded font is the app's too, so the host decides.
 
 ## Selectable text
 

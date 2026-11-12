@@ -4439,6 +4439,15 @@ impl GpuContext {
         font.replace_in(&mut self.inner.fonts.borrow_mut());
         self.inner.text_cache.borrow_mut().clear();
     }
+    /// Shape text with `font` too, beside the faces its families have
+    /// (`FontData::install`), and forget the text shaped before: a family
+    /// that fell back shapes in it now. Then as after `replace_font`.
+    pub fn add_font(&self, font: &crate::text::FontData) {
+        let mut fonts = self.inner.fonts.borrow_mut();
+        font.install(&mut fonts);
+        fonts.shape_run_cache.clear();
+        self.inner.text_cache.borrow_mut().clear();
+    }
     /// Shape text as in `language` from now on (`None`: the system's), its
     /// Han characters in that language's fonts
     /// (`FontSystem::set_language`), and forget the text prepared before.

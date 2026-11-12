@@ -22072,6 +22072,11 @@ declare ui: {
 	read_file: (file: File | string) -> Promise<string>,
 	-- Write `text` to a file the user picked (beside it, then over it).
 	write_file: (file: File | string, text: string) -> Promise<nil>,
+	-- A TrueType or OpenType font file (a path from the script's directory,
+	-- a plugin's inside it, or a File the user picked) added to every
+	-- window's text: a promise of the family names it holds, which `font`
+	-- then names. Text in those families lays out and draws again in it.
+	load_font: (src: File | string) -> Promise<{ string }>,
 	-- What the app was launched with after its script (`zgx-run app/
 	-- notes.txt` gives `{ "notes.txt" }`).
 	args: { string },

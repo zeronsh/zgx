@@ -310,6 +310,7 @@ const NOT_ELEMENTS: &[&str] = &[
     "badge",
     "read_file",
     "write_file",
+    "load_font",
     "i18n",
     "t",
     "selector",

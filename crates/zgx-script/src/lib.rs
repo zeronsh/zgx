@@ -983,6 +983,9 @@ pub enum Capability {
     /// `ui.open_folder`: a folder the user picks, with everything inside
     /// it to list, read and write.
     Folders,
+    /// `ui.load_font`: a font file from its directory (or one the user
+    /// picked) added to every window's text, the app's too.
+    Fonts,
     /// `ui.term`: terminal sessions, to read and to type into.
     Terminals,
     /// `ui.web` and `ui.webview`: web pages.
@@ -4383,10 +4386,12 @@ impl ScriptHost {
         let (platform, picked) = (self.0.platform.clone(), self.0.picked.clone());
         let (clipboard, files_allowed) = (may(Capability::Clipboard), may(Capability::Files));
         let (folders, access) = (may(Capability::Folders), self.0.folders.clone());
+        let fonts = may(Capability::Fonts);
         lazy.ui(
             &[
                 "badge",
                 "clipboard",
+                "load_font",
                 "notify",
                 "open_files",
                 "open_folder",
@@ -4397,7 +4402,7 @@ impl ScriptHost {
             ],
             move |lua, ui| {
                 folder::install(lua, ui, platform.clone(), folders, access)?;
-                io::install(lua, ui, platform, picked, clipboard, files_allowed)
+                io::install(lua, ui, platform, picked, clipboard, files_allowed, fonts)
             },
         );
         // A plugin's lent packages' tokens too: a lent design system themes it.
