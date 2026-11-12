@@ -612,6 +612,15 @@ fn paint_bounds(item: &PaintItem<'_>) -> Rect {
         _ => item.bounds,
     }
 }
+/// `paint_bounds` without a box's shadows: a shadow reaching a native view
+/// (it can reach three blurs out) does not lift the box, with its fill and what
+/// it holds, over that view.
+fn body_bounds(item: &PaintItem<'_>) -> Rect {
+    match item.kind {
+        NodeKind::Quad(quad) | NodeKind::Panel { quad, .. } => quad.body_bounds(item.bounds),
+        _ => paint_bounds(item),
+    }
+}
 impl Walk<'_> {
     fn overlaps(&self, rect: Rect) -> bool {
         self.native_rects
@@ -764,7 +773,13 @@ impl Walk<'_> {
             }) else {
                 continue;
             };
-            let on_overlay = !self.native_rects.is_empty() && self.overlaps(painted);
+            let body = map_rect(context.matrix, body_bounds(item));
+            let body = match clip {
+                Some(clip) => body.intersection(clip),
+                None => Some(body),
+            };
+            let on_overlay =
+                !self.native_rects.is_empty() && body.is_some_and(|body| self.overlaps(body));
             let was = self.previous.overlay.get(&item.id).copied();
             if on_overlay {
                 if item.effects.blur_radius > 0. {
