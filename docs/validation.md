@@ -1381,3 +1381,20 @@ shows and raises nothing.
   point, of any layer, must be the target's. `drive <dir> <popup_hover> act` also
   moves, resizes, miniaturizes, full-screens and closes the window with a popup
   open, or changes its Space.
+
+### Scroll-only accessibility projection
+
+`ax_projection_headless` isolates repeated nested scrolling with an active
+semantic tree and AccessKit consumer, without a native window. Compare repeated
+retired-instruction counts, with `AX_APPLY=0` to isolate projection, and the
+default to include consumer application. This does not measure native adapter
+cost or prove native query freshness.
+
+The registered `ax-scroll-projection` Linux smoke uses a private AT-SPI bus and
+normal client activation. It requires changing bounds during continuous nested input, then
+scrolls both containers repeatedly and queries native bounds, hit tests and text-range extents, and exercises focus
+and selection after every move. It retains the existing geometry pacing.
+
+```sh
+python3 scripts/linux_smokes.py --only ax-scroll-projection
+```

@@ -625,7 +625,7 @@ impl AccessibilityTree {
     }
     /// What looking at the nodes that changed made is what walking them all
     /// makes: what a client would be told, and what's kept to tell it next.
-    #[cfg(debug_assertions)]
+    #[cfg(any(debug_assertions, test))]
     fn assert_same_as(&self, whole: &Self, update: &TreeUpdate, sent: &TreeUpdate) {
         let sorted = |update: &TreeUpdate| {
             let mut nodes: Vec<_> = update.nodes.iter().map(|(id, node)| (id.0, node)).collect();
@@ -697,6 +697,7 @@ impl AccessibilityTree {
             None => self.walk_scene(scene, semantics, scale),
         };
         let (visible, children, list_items) = (&walk.visible, &walk.children, &walk.list_items);
+        let mut geometry_ranges = Vec::new();
         // Fields saying what is wrong with them, and the text that shows it
         // (most trees have none: no node is looked up for one).
         let any_errors = semantics.has_errors();
@@ -802,7 +803,8 @@ impl AccessibilityTree {
                         .and_then(|was| far_side(was, window_box))
                         == Some(now)
                 });
-            if self.projection_revisions.get(&id) == Some(&revision)
+            let same_revision = self.projection_revisions.get(&id) == Some(&revision);
+            if same_revision
                 && (far || self.run_boxes.get(&id).copied() == runs_at.filter(|_| !runs.is_empty()))
                 && self.blocks.contains(&id) == block
                 && self.cache.get(&native).is_some_and(|cached| {
@@ -818,6 +820,50 @@ impl AccessibilityTree {
                     self.cache.contains_key(run) && self.text_positions.contains_key(run)
                 })
             {
+                continue;
+            }
+            // The same label, translated without reflow: its native properties
+            // are already in the cache. Move its box and runs there, copying
+            // each once into the update, rather than building all properties
+            // again and copying them back into the cache.
+            let geometry_start = nodes.len();
+            if geometry
+                && !any_errors
+                && same_revision
+                && text
+                && self.blocks.contains(&id) == block
+                && runs.iter().all(|run| {
+                    self.cache.contains_key(run) && self.text_positions.contains_key(run)
+                })
+                && semantic.document_selection.is_none()
+                && semantic.active_descendant.is_none()
+                && self.cache.get(&native).is_some_and(|cached| {
+                    let counted = list_items.get(&id);
+                    cached.role() == semantic_role(semantic)
+                        && cached.is_disabled() == disabled
+                        && cached.position_in_set()
+                            == semantic.position_in_set.or(counted.map(|c| c.0))
+                        && cached.size_of_set() == semantic.size_of_set.or(counted.map(|c| c.1))
+                        && cached.children().iter().eq(kids.iter().chain(runs))
+                        && cached.numeric_value_step() == scene.numeric_step(id)
+                        && cached.supports_action(Action::ScrollIntoView)
+                            == scene.ancestors(id).any(|a| scene.is_scroll_content(a))
+                })
+                && semantics.text_lines(id).is_none()
+                && semantics.long_value(id).is_none()
+                && runs_at.is_some_and(|_| {
+                    let shown = semantics.text_node(id).unwrap_or(id);
+                    match scene.kind(shown) {
+                        zgx::scene::NodeKind::Text { text, .. } => {
+                            &**text == semantic.value.as_deref().unwrap_or(&semantic.label)
+                        }
+                        zgx::scene::NodeKind::RichText { .. } => true,
+                        _ => false,
+                    }
+                })
+                && self.move_label(id, native, bounds, runs_at, scale, &mut nodes)
+            {
+                geometry_ranges.push(geometry_start..nodes.len());
                 continue;
             }
             let mut native_children = kids.to_vec();
@@ -1302,14 +1348,38 @@ impl AccessibilityTree {
             self.text_positions.retain(|run, _| live.contains(run));
             self.cache.retain(|id, _| live.contains(id));
         }
-        nodes.retain(|(id, node)| {
-            if self.cache.get(id) == Some(node) {
-                false
-            } else {
-                self.cache.insert(*id, node.clone());
-                true
-            }
-        });
+        if geometry_ranges.is_empty() {
+            nodes.retain(|(id, node)| {
+                if self.cache.get(id) == Some(node) {
+                    false
+                } else {
+                    self.cache.insert(*id, node.clone());
+                    true
+                }
+            });
+        } else {
+            // Keep the same delivery order as full projection. Geometry nodes
+            // already changed their cache entries, so they bypass this filter.
+            let mut geometry_ranges = geometry_ranges.into_iter();
+            let mut geometry_range = geometry_ranges.next().unwrap_or(usize::MAX..usize::MAX);
+            let mut index = 0;
+            nodes.retain(|(id, node)| {
+                let at = index;
+                index += 1;
+                while at >= geometry_range.end {
+                    geometry_range = geometry_ranges.next().unwrap_or(usize::MAX..usize::MAX);
+                }
+                if geometry_range.contains(&at) {
+                    return true;
+                }
+                if self.cache.get(id) == Some(node) {
+                    false
+                } else {
+                    self.cache.insert(*id, node.clone());
+                    true
+                }
+            });
+        }
         self.walk = Some(walk);
         self.seen_revision = semantics.revision();
         self.last_focused = focused;
@@ -1330,6 +1400,54 @@ impl AccessibilityTree {
                 .and_then(|n| self.ids.get(&n).copied())
                 .unwrap_or(root),
         }
+    }
+    /// A label moved without changing size or properties. Its runs keep the
+    /// positions and text they had, translated by the same amount as before.
+    fn move_label(
+        &mut self,
+        id: NodeId,
+        native: AccessibleId,
+        bounds: accesskit::Rect,
+        now: Option<zgx::scene::Rect>,
+        scale: f64,
+        nodes: &mut Vec<(AccessibleId, Node)>,
+    ) -> bool {
+        let (Some(was), Some(now)) = (self.run_boxes.get(&id).copied(), now) else {
+            return false;
+        };
+        if was.width != now.width || was.height != now.height {
+            return false;
+        }
+        let Some(runs) = self.text_runs.get(&id) else {
+            return false;
+        };
+        let (dx, dy) = (
+            (now.x - was.x) as f64 * scale,
+            (now.y - was.y) as f64 * scale,
+        );
+        for run in runs {
+            let cached = self.cache.get_mut(run).expect("live label run");
+            if (dx != 0. || dy != 0.)
+                && let Some(b) = cached.bounds()
+            {
+                cached.set_bounds(accesskit::Rect::new(
+                    b.x0 + dx,
+                    b.y0 + dy,
+                    b.x1 + dx,
+                    b.y1 + dy,
+                ));
+                nodes.push((*run, cached.clone()));
+            }
+        }
+        let cached = self.cache.get_mut(&native).expect("projected label");
+        if cached.bounds() != Some(bounds) {
+            cached.set_bounds(bounds);
+            nodes.push((native, cached.clone()));
+        }
+        self.run_boxes.insert(id, now);
+        #[cfg(test)]
+        GEOMETRY_REUSED.with(|n| n.set(n.get() + 1));
+        true
     }
     /// The whole scene: which nodes are in the accessible tree, in paint order,
     /// and how they hang together.
@@ -1507,6 +1625,7 @@ thread_local! {
     /// Texts whose runs were placed from their shaping: none for a text
     /// that only moved.
     static SHAPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static GEOMETRY_REUSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 struct RunGeometry {
     bounds: accesskit::Rect,
@@ -3570,7 +3689,7 @@ mod idle_pool_tests {
 #[cfg(test)]
 mod vocabulary_tests {
     use super::*;
-    use zgx::{compose::prelude::*, semantics::Live, widgets::Ui};
+    use zgx::{compose::prelude::*, selection::TextPoint, semantics::Live, widgets::Ui};
 
     /// Every projected node, after a frame.
     /// A frame and an update, as a window's host does them. In a debug build
@@ -3588,6 +3707,364 @@ mod vocabulary_tests {
             1.,
         )
     }
+    /// Repeated nested scrolls keep the native tree exactly as a complete
+    /// projection does, including text positions, focus and selection changes.
+    #[test]
+    fn translated_labels_keep_live_native_geometry_without_rebuilding_properties() {
+        struct Changes;
+        impl accesskit_consumer::TreeChangeHandler for Changes {
+            fn node_added(&mut self, _: &accesskit_consumer::Node) {}
+            fn node_updated(&mut self, _: &accesskit_consumer::Node, _: &accesskit_consumer::Node) {
+            }
+            fn focus_moved(
+                &mut self,
+                _: Option<&accesskit_consumer::Node>,
+                _: Option<&accesskit_consumer::Node>,
+            ) {
+            }
+            fn node_removed(&mut self, _: &accesskit_consumer::Node) {}
+        }
+        let mut ui = Ui::new(500., 600.);
+        ui.set_assistive_technology(true);
+        let outer = ui.signal(0_f32);
+        let inner = ui.signal(0_f32);
+        let count = ui.signal(12_usize);
+        let rows = count.clone();
+        let view = ui.mount(
+            scroll(outer.clone()).h(300.).child(
+                column()
+                    .w(400.)
+                    .child(text("A heading").role(Role::Heading).id("heading"))
+                    .child(
+                        scroll(inner.clone()).h(120.).child(
+                            column()
+                                .w(350.)
+                                .selectable(true)
+                                .child(text("First selectable line").id("first"))
+                                .child(text("Second selectable line").id("second"))
+                                .child(keyed(
+                                    move || (0..rows.get()).collect(),
+                                    |i: usize, _| text(format!("Line {i}: words")).h(24.),
+                                )),
+                        ),
+                    )
+                    .child(button().id("focus").child("Focus"))
+                    .child(div().h(500.)),
+            ),
+        );
+        let first = view.find("first").unwrap();
+        let second = view.find("second").unwrap();
+        let button = view.find("focus").unwrap();
+        let mut tree = AccessibilityTree::new();
+        let initial = frame(&mut ui, &mut tree, None);
+        let mut consumer = accesskit_consumer::Tree::new(initial, true);
+        let mut whole = AccessibilityTree::new();
+        frame(&mut ui, &mut whole, None);
+        for step in 0..24 {
+            outer.set((step % 5) as f32 * 3.);
+            inner.set((step % 7) as f32 * 4.);
+            if step == 9 {
+                count.set(10);
+            }
+            if step == 14 {
+                assert!(ui.select_text(
+                    TextPoint {
+                        node: first,
+                        offset: 1
+                    },
+                    TextPoint {
+                        node: second,
+                        offset: 6
+                    }
+                ));
+            }
+            if step == 10 {
+                ui.scene.borrow_mut().set_numeric_step(first, Some(0.5));
+            }
+            if step == 11 {
+                ui.scene.borrow_mut().set_language(first, Some("fr".into()));
+            }
+            if step == 16 {
+                ui.semantics
+                    .borrow_mut()
+                    .update(second, |s| s.description = Some("Changed".into()));
+            }
+            if step == 13 {
+                ui.scene
+                    .borrow_mut()
+                    .set_clip_inset(view.node(), Some(zgx::scene::ClipInset::px(2., 3., 4., 5.)));
+            }
+            if step == 18 {
+                ui.scroll_into_view(first);
+            }
+            let focus = (step >= 5).then_some(button);
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+            tree.note_flush(&ui.scene.borrow());
+            whole.note_flush(&ui.scene.borrow());
+            if step == 20 {
+                // A client reconnect asks for the complete current snapshot.
+                tree.reset();
+                whole.reset();
+            }
+            // Retain the actual sent nodes/runs, but force the reference to
+            // build every node's semantic properties again.
+            whole.walk = None;
+            whole.projection_revisions.clear();
+            let before = GEOMETRY_REUSED.with(|n| n.get());
+            let update = tree.update(
+                &ui.scene.borrow(),
+                &ui.semantics.borrow(),
+                focus,
+                "Test",
+                2.,
+            );
+            let sent = whole.update(
+                &ui.scene.borrow(),
+                &ui.semantics.borrow(),
+                focus,
+                "Test",
+                2.,
+            );
+            tree.assert_same_as(&whole, &update, &sent);
+            assert_eq!(
+                update.nodes, sent.nodes,
+                "native delivery order is unchanged"
+            );
+            if step == 1 {
+                assert!(
+                    GEOMETRY_REUSED.with(|n| n.get()) > before,
+                    "a translation reuses the properties"
+                );
+            }
+            assert_eq!(
+                update.focus,
+                focus
+                    .map(|id| tree.ids[&id])
+                    .unwrap_or(tree.ids[&ui.scene.borrow().root()])
+            );
+            consumer.update_and_process_changes(update, &mut Changes);
+            assert_eq!(
+                consumer.state().focus().unwrap().role(),
+                if focus.is_some() {
+                    accesskit::Role::Button
+                } else {
+                    accesskit::Role::Window
+                }
+            );
+            for id in [first, second] {
+                let native = tree.ids[&id];
+                let consumed = consumer
+                    .state()
+                    .node_by_tree_local_id(native, TreeId::ROOT)
+                    .unwrap();
+                assert_eq!(consumed.bounding_box(), tree.cache[&native].bounds());
+                assert!(consumed.document_range().text().contains("selectable line"));
+                let r = ui.scene.borrow().hit_bounds(id);
+                assert_eq!(
+                    tree.cache[&native].bounds(),
+                    Some(accesskit::Rect::new(
+                        r.x as f64 * 2.,
+                        r.y as f64 * 2.,
+                        (r.x + r.width) as f64 * 2.,
+                        (r.y + r.height) as f64 * 2.
+                    )),
+                    "bounds are live after each scroll"
+                );
+                for run in &tree.text_runs[&id] {
+                    assert!(
+                        tree.text_positions.contains_key(run),
+                        "query positions stay live"
+                    );
+                }
+            }
+        }
+        view.unmount();
+        let removed = frame(&mut ui, &mut tree, None);
+        frame(&mut ui, &mut whole, None);
+        consumer.update_and_process_changes(removed, &mut Changes);
+        assert!(!tree.ids.contains_key(&first));
+        assert_eq!(
+            tree.cache, whole.cache,
+            "unmount keeps no stale native nodes"
+        );
+        assert_eq!(
+            consumer.state().focus().unwrap().role(),
+            accesskit::Role::Window
+        );
+    }
+
+    /// A cold projection rebuilds text geometry as well as properties. Only
+    /// its ID assignments are seeded from the live tree, so comparing its
+    /// delta cannot accidentally inherit stale geometry from either cache.
+    #[test]
+    fn scroll_and_same_tick_invalidations_match_a_cold_projection() {
+        let mut ui = Ui::new(500., 500.);
+        ui.set_assistive_technology(true);
+        let offset = ui.signal(0_f32);
+        let words = ui.signal(String::from("First text for a fixed box"));
+        let size = ui.signal(12_f32);
+        let (read_words, read_size) = (words.clone(), size.clone());
+        let view = ui.mount(
+            column()
+                .child(
+                    scroll(offset.clone()).h(180.).child(
+                        column()
+                            .w(350.)
+                            .role(Role::Group)
+                            .accessible_label("Inherited")
+                            .id("parent")
+                            .selectable(true)
+                            .child(
+                                text_signal(move || read_words.get())
+                                    .id("label")
+                                    .w(300.)
+                                    .h(36.)
+                                    .reactive_style(move || {
+                                        Styles::new().text_size(read_size.get())
+                                    }),
+                            )
+                            .child(div().h(600.)),
+                    ),
+                )
+                .child(button().id("button").child("Focus")),
+        );
+        let label = view.find("label").unwrap();
+        let parent = view.find("parent").unwrap();
+        let button = view.find("button").unwrap();
+        let mut live = AccessibilityTree::new();
+        frame(&mut ui, &mut live, None);
+        for step in 0..18 {
+            let old_id = live.ids.get(&label).copied();
+            let old_runs = live.text_runs.get(&label).cloned();
+            let own_revision = ui.semantics.borrow().node_revision(label);
+            offset.set((step % 6) as f32 * 3.);
+            match step {
+                2 => {
+                    ui.semantics
+                        .borrow_mut()
+                        .update(parent, |n| n.disabled = true);
+                }
+                3 => {
+                    ui.semantics
+                        .borrow_mut()
+                        .update(parent, |n| n.disabled = false);
+                }
+                4 => ui.scene.borrow_mut().set_effects(
+                    parent,
+                    zgx::scene::Effects {
+                        opacity: 0.,
+                        ..Default::default()
+                    },
+                ),
+                5 => ui
+                    .scene
+                    .borrow_mut()
+                    .set_effects(parent, zgx::scene::Effects::default()),
+                6 => {
+                    ui.semantics
+                        .borrow_mut()
+                        .update(parent, |n| n.hidden = true);
+                }
+                7 => {
+                    ui.semantics
+                        .borrow_mut()
+                        .update(parent, |n| n.hidden = false);
+                }
+                8 => ui
+                    .scene
+                    .borrow_mut()
+                    .set_clip_inset(parent, Some(zgx::scene::ClipInset::px(3., 2., 4., 1.))),
+                9 => {
+                    words.set("Other text for a fixed box".into());
+                }
+                10 => {
+                    ui.semantics.borrow_mut().update(label, |n| {
+                        n.role = Role::Heading;
+                        n.level = Some(2);
+                    });
+                }
+                11 => {
+                    ui.semantics.borrow_mut().update(label, |n| {
+                        n.role = Role::Label;
+                        n.level = None;
+                    });
+                }
+                12 => {
+                    size.set(20.);
+                }
+                13 => {
+                    size.set(14.);
+                }
+                14 => {
+                    assert!(ui.select_text(
+                        TextPoint {
+                            node: label,
+                            offset: 1
+                        },
+                        TextPoint {
+                            node: label,
+                            offset: 5
+                        }
+                    ));
+                }
+                15 => {
+                    words.set("Third text for a fixed box".into());
+                    size.set(18.);
+                }
+                _ => {}
+            }
+            let focus = (step % 2 == 0).then_some(button);
+            ui.prepare_frame();
+            ui.scene.borrow_mut().flush();
+            live.note_flush(&ui.scene.borrow());
+            if matches!(step, 2..=8 | 12 | 13) {
+                assert_eq!(
+                    ui.semantics.borrow().node_revision(label),
+                    own_revision,
+                    "inherited/style changes must be detected without an own semantic revision"
+                );
+            }
+            let before = live.cache.clone();
+            let mut cold = AccessibilityTree::new();
+            cold.ids = live.ids.clone();
+            cold.next = live.next;
+            cold.text_runs = live.text_runs.clone();
+            let scale = 1.;
+            let mut expected = cold.update(
+                &ui.scene.borrow(),
+                &ui.semantics.borrow(),
+                focus,
+                "Test",
+                scale,
+            );
+            expected
+                .nodes
+                .retain(|(id, node)| before.get(id) != Some(node));
+            let update = live.update(
+                &ui.scene.borrow(),
+                &ui.semantics.borrow(),
+                focus,
+                "Test",
+                scale,
+            );
+            assert_eq!(
+                live.cache, cold.cache,
+                "cold cache at same-tick invalidation {step}"
+            );
+            live.assert_same_as(&cold, &update, &expected);
+            assert_eq!(update.nodes, expected.nodes, "delivery order at {step}");
+            if let (Some(was), Some(now)) = (old_id, live.ids.get(&label).copied()) {
+                assert_eq!(was, now, "a retained label keeps its native ID");
+                if let (Some(was), Some(now)) = (old_runs, live.text_runs.get(&label))
+                    && was.len() == now.len()
+                {
+                    assert_eq!(was, *now, "retained runs keep their IDs");
+                }
+            }
+        }
+    }
+
     fn frame_names(ui: &mut Ui, tree: &mut AccessibilityTree, focused: Option<NodeId>) {
         ui.prepare_frame();
         ui.scene.borrow_mut().flush();

@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # (name, command, ambient X11 desktop). `{bin}` is the examples directory and
 # `{out}` the probe's evidence directory, /tmp/zgx-<name> by default.
 SMOKES = [
+    ("ax-scroll-projection", "python3 scripts/atspi_smoke.py {bin}/ax_scroll_projection --scroll-projection --output {out}", False),
     ("component-host", "python3 scripts/component_host_smoke.py {bin}/component_workload --output {out}", True),
     ("gallery", "python3 scripts/desktop_smoke.py {bin}/gallery", True),
     ("windows", "timeout 30s {bin}/windows --smoke-test", True),
