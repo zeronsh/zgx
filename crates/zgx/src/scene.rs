@@ -5897,6 +5897,11 @@ impl Scene {
     pub fn effects(&self, id: NodeId) -> Effects {
         self.node(id).effects
     }
+    /// Whether any node is scaled, turned or zoomed: what a box's place
+    /// is then isn't its ancestors' translations added up.
+    pub fn any_transformed(&self) -> bool {
+        self.transformed > 0
+    }
     /// `id`'s own translation.
     pub fn transform(&self, id: NodeId) -> Transform {
         self.node(id).transform

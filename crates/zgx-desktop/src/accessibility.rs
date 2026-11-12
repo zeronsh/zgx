@@ -183,6 +183,21 @@ struct Walk {
     /// Nodes painted at no opacity: shown again, the tree has more in it.
     faded_out: HashSet<NodeId>,
     scale: f64,
+    /// Scroll content whose offset is a node's AccessKit transform: the
+    /// nearest accessible node around it (`holders`, holder to content),
+    /// holding no other. A scroll moves that one node, as a client places
+    /// what it holds by it; none under a scaled, turned or zoomed node.
+    holders: HashMap<NodeId, NodeId>,
+    contents: HashMap<NodeId, NodeId>,
+    /// The holders over each node in the accessible tree, its own included:
+    /// its box as sent is where it shows less their offsets.
+    frames: HashMap<NodeId, Vec<NodeId>>,
+    /// For each scroll content: what a scroll of it changes as sent (its
+    /// holder, and what is under the holder but not in the content, or the
+    /// reverse), and what goes with it (in it and under its holder), which
+    /// changes only coming near the window or going from it.
+    moving: HashMap<NodeId, Vec<NodeId>>,
+    riding: HashMap<NodeId, Vec<NodeId>>,
 }
 /// What of a node's information decides the tree around it: changed, the
 /// update walks the whole scene.
@@ -225,6 +240,9 @@ struct FlushChanges {
     moved: Vec<NodeId>,
     /// Nodes painted differently, which may be shown or hidden now.
     painted: Vec<NodeId>,
+    /// Scroll content that scrolled (a holder's, `Walk::contents`), still
+    /// showing: its holder's transform changes, not the tree.
+    scrolled: Vec<NodeId>,
 }
 /// More changes than this since the last update: a walk is as quick.
 const CHANGES_KEPT: usize = 4096;
@@ -307,7 +325,22 @@ impl AccessibilityTree {
         }
         changes.flush = Some(*flushes.end());
         for (id, flags) in repainted {
-            if flags & (repaint::CHILDREN | repaint::COMPOSITE) != 0 {
+            // Scroll content its holder places (`Walk::contents`), still
+            // showing: it scrolled, which changes no node in the tree but the
+            // holder's transform. Hidden or faded out, the tree changes.
+            let scrolled = flags & repaint::CHILDREN == 0
+                && flags & repaint::COMPOSITE != 0
+                && self.walk.as_ref().is_some_and(|walk| {
+                    walk.contents.contains_key(id) && !walk.faded_out.contains(id)
+                })
+                && scene.contains(*id)
+                && scene.effects(*id).opacity > 0.
+                && scene.layout_visible(*id);
+            if scrolled {
+                if !changes.scrolled.contains(id) {
+                    changes.scrolled.push(*id);
+                }
+            } else if flags & (repaint::CHILDREN | repaint::COMPOSITE) != 0 {
                 changes.structure = true;
                 changes.geometry = true;
             }
@@ -318,11 +351,12 @@ impl AccessibilityTree {
                 changes.painted.push(*id);
             }
         }
-        if changes.moved.len() + changes.painted.len() > CHANGES_KEPT {
+        if changes.moved.len() + changes.painted.len() + changes.scrolled.len() > CHANGES_KEPT {
             changes.structure = true;
             changes.geometry = true;
             changes.moved = Vec::new();
             changes.painted = Vec::new();
+            changes.scrolled = Vec::new();
         }
     }
     /// The nodes to look at, in paint order, if an update need look at no
@@ -345,6 +379,9 @@ impl AccessibilityTree {
             || walk.scale != scale
             || scene.has_inert()
             || semantics.has_errors()
+            // Placed by holders as translations, but something now scales
+            // or turns: placed otherwise.
+            || (!walk.holders.is_empty() && scene.any_transformed())
         {
             return None;
         }
@@ -376,6 +413,40 @@ impl AccessibilityTree {
                     .find(|node| walk.nodes.contains_key(node));
                 dirty.extend(shown);
             }
+            // Scrolled: its holder's transform, what doesn't go with it, and
+            // what comes near the window or goes from it (shaped or let go
+            // there), or near and as sent elsewhere.
+            if !changes.scrolled.is_empty() {
+                let window = scene.bounds(scene.root());
+                let window = accesskit::Rect::new(
+                    0.,
+                    0.,
+                    window.width as f64 * scale,
+                    window.height as f64 * scale,
+                );
+                for content in &changes.scrolled {
+                    dirty.extend(walk.moving.get(content)?);
+                    for id in walk.riding.get(content)? {
+                        let r = scene.hit_bounds(*id);
+                        let shown = accesskit::Rect::new(
+                            r.x as f64 * scale,
+                            r.y as f64 * scale,
+                            (r.x + r.width) as f64 * scale,
+                            (r.y + r.height) as f64 * scale,
+                        );
+                        let (fx, fy) = frame(walk, scene, *id, scale);
+                        let cached = self.ids.get(id).and_then(|native| self.cache.get(native));
+                        let (sx, sy) = self.sent_frame(walk, *id);
+                        let was = shown + accesskit::Vec2::new(sx - fx, sy - fy);
+                        let near = far_side(shown, window).is_none();
+                        let as_sent = cached.and_then(Node::bounds)
+                            == Some(shown + accesskit::Vec2::new(-fx, -fy));
+                        if far_side(was, window) != far_side(shown, window) || (near && !as_sent) {
+                            dirty.push(*id);
+                        }
+                    }
+                }
+            }
         }
         for node in [focused, self.last_focused].into_iter().flatten() {
             if walk.nodes.contains_key(&node) {
@@ -386,6 +457,22 @@ impl AccessibilityTree {
         dirty.dedup();
         // Most of the tree: as quick to walk it.
         (dirty.len() * 2 <= walk.nodes.len()).then_some(dirty)
+    }
+    /// The offsets of the holders over `id` as last sent (their transforms
+    /// in the cache): where a scroll since moved it from.
+    fn sent_frame(&self, walk: &Walk, id: NodeId) -> (f64, f64) {
+        let Some(over) = walk.frames.get(&id) else {
+            return (0., 0.);
+        };
+        over.iter().fold((0., 0.), |(x, y), holder| {
+            let sent = self
+                .ids
+                .get(holder)
+                .and_then(|native| self.cache.get(native))
+                .and_then(Node::transform)
+                .map_or([0.; 6], |t| t.as_coeffs());
+            (x + sent[4], y + sent[5])
+        })
     }
     /// A window at rest: the room its tables took for what has gone.
     pub fn rest(&mut self) {
@@ -535,6 +622,7 @@ impl AccessibilityTree {
         &mut self,
         id: NodeId,
         runs: Vec<TextRunData>,
+        (fx, fy): (f64, f64),
         nodes: &mut Vec<(AccessibleId, Node)>,
     ) {
         let ids = self.text_runs.entry(id).or_default();
@@ -555,7 +643,8 @@ impl AccessibilityTree {
             text.set_character_lengths(run.lengths);
             text.set_word_starts(run.words);
             if let Some(geometry) = run.geometry {
-                text.set_bounds(geometry.bounds);
+                // Less the offsets of the holders over its label.
+                text.set_bounds(geometry.bounds + accesskit::Vec2::new(-fx, -fy));
                 text.set_character_positions(geometry.positions);
                 text.set_character_widths(geometry.widths);
                 text.set_text_direction(if geometry.rtl {
@@ -760,12 +849,29 @@ impl AccessibilityTree {
             // animation is taking it with `hit = "target"` (as Core
             // Animation's model layer): a reader's highlight goes ahead.
             let r = scene.hit_bounds(id);
-            let bounds = accesskit::Rect::new(
+            let shown = accesskit::Rect::new(
                 r.x as f64 * scale,
                 r.y as f64 * scale,
                 (r.x + r.width) as f64 * scale,
                 (r.y + r.height) as f64 * scale,
             );
+            // As sent: where it shows less the offsets of the holders over it
+            // (`Walk::holders`), which a client adds back; a holder's own
+            // transform, its content's offset.
+            let (fx, fy) = frame(&walk, scene, id, scale);
+            let bounds = shown + accesskit::Vec2::new(-fx, -fy);
+            let transform = walk.holders.get(&id).map(|content| {
+                let t = scene.transform(*content);
+                accesskit::Affine::translate((t.x as f64 * scale, t.y as f64 * scale))
+            });
+            let local = |r: zgx::scene::Rect| {
+                zgx::scene::Rect::new(
+                    r.x - (fx / scale) as f32,
+                    r.y - (fy / scale) as f32,
+                    r.width,
+                    r.height,
+                )
+            };
             let kids = children.get(&id).map_or(&[][..], Vec::as_slice);
             let runs = self.text_runs.get(&id).map_or(&[][..], Vec::as_slice);
             // Text read as text: a label, or a text node that is a heading
@@ -788,18 +894,18 @@ impl AccessibilityTree {
                 .or(text.then_some(id))
                 .filter(|node| scene.contains(*node))
                 // Where it shows: a zoom or transform moves its runs too.
-                .map(|node| scene.transformed_bounds(node));
+                .map(|node| local(scene.transformed_bounds(node)));
             // More than a window away, and on the side of it it was last
             // sent on: its box as sent stays (a reflow sends no node a
             // screen away, as it shapes none), and comes up to date as it
             // comes near. Above stays above, below below: a reader's order
             // and the way it scrolls to it are the same as the box's.
             let far = focused != Some(id)
-                && far_side(bounds, window_box).is_some_and(|now| {
+                && far_side(shown, window_box).is_some_and(|now| {
                     self.cache
                         .get(&native)
                         .and_then(Node::bounds)
-                        .and_then(|was| far_side(was, window_box))
+                        .and_then(|was| far_side(was + accesskit::Vec2::new(fx, fy), window_box))
                         == Some(now)
                 });
             if self.projection_revisions.get(&id) == Some(&revision)
@@ -808,6 +914,7 @@ impl AccessibilityTree {
                 && self.cache.get(&native).is_some_and(|cached| {
                     let counted = list_items.get(&id);
                     (far || cached.bounds() == Some(bounds))
+                        && cached.transform() == transform.as_ref()
                         && cached.is_disabled() == disabled
                         && cached.position_in_set()
                             == semantic.position_in_set.or(counted.map(|c| c.0))
@@ -1093,6 +1200,9 @@ impl AccessibilityTree {
                 n.add_action(Action::ScrollIntoView);
             }
             n.set_bounds(bounds);
+            if let Some(transform) = transform {
+                n.set_transform(transform);
+            }
             if text || matches!(semantic.role, Role::TextInput | Role::MultilineTextInput) {
                 // The node its text shows in, while it shows that text (a
                 // field composing shows other): its lines' geometry.
@@ -1115,9 +1225,12 @@ impl AccessibilityTree {
                                 }
                         }),
                 };
+                // Where it shows, and as its runs are sent (less its holders'
+                // offsets: a scroll moves none of them).
                 let shown_box = shown_in.map(|node| scene.transformed_bounds(node));
+                let sent_box = shown_box.map(local);
                 let was = self.run_boxes.get(&id).copied();
-                let moved = was != shown_box;
+                let moved = was != sent_box;
                 let unchanged = self
                     .ids
                     .get(&id)
@@ -1135,7 +1248,7 @@ impl AccessibilityTree {
                 let reusable = !moved && unchanged;
                 // Only moved, its box the same size (scrolled): its runs keep
                 // their shape, their boxes going with it, nothing shaped again.
-                let shifted = match (was, shown_box) {
+                let shifted = match (was, sent_box) {
                     (Some(was), Some(now))
                         if moved
                             && unchanged
@@ -1198,7 +1311,7 @@ impl AccessibilityTree {
                     let value = text_value.unwrap_or("");
                     let lines = shown_box.map(|rect| vec![estimated_line(value, rect)]);
                     if let Some(runs) = text_run_data_on(value, block, lines.as_deref(), scale) {
-                        self.push_runs(id, runs, &mut nodes);
+                        self.push_runs(id, runs, (fx, fy), &mut nodes);
                     }
                 } else if let Some((dx, dy, now)) = shifted {
                     self.run_boxes.insert(id, now);
@@ -1226,8 +1339,8 @@ impl AccessibilityTree {
                     } else {
                         self.blocks.remove(&id);
                     }
-                    match shown_box {
-                        Some(shown) => self.run_boxes.insert(id, shown),
+                    match sent_box {
+                        Some(sent) => self.run_boxes.insert(id, sent),
                         None => self.run_boxes.remove(&id),
                     };
                     #[cfg(test)]
@@ -1239,7 +1352,7 @@ impl AccessibilityTree {
                     if let Some(runs) =
                         text_run_data_on(text_value.unwrap_or(""), block, lines.as_deref(), scale)
                     {
-                        self.push_runs(id, runs, &mut nodes);
+                        self.push_runs(id, runs, (fx, fy), &mut nodes);
                     } else {
                         self.text_runs.remove(&id);
                     }
@@ -1318,6 +1431,7 @@ impl AccessibilityTree {
         if geometry {
             self.changes.geometry = false;
             self.changes.moved.clear();
+            self.changes.scrolled.clear();
         }
         let mut tree = Tree::new(root);
         tree.toolkit_name = Some("zgx".into());
@@ -1469,6 +1583,8 @@ impl AccessibilityTree {
         self.run_boxes.retain(|owner, _| visible.contains(owner));
         self.blocks.retain(|owner| visible.contains(owner));
         self.long_runs.retain(|owner, _| visible.contains(owner));
+        let (holders, contents, frames, moving, riding) =
+            scroll_holders(scene, &ordered, &visible, &parents);
         let nodes = ordered
             .iter()
             .enumerate()
@@ -1483,9 +1599,113 @@ impl AccessibilityTree {
                 list_items,
                 faded_out,
                 scale,
+                holders,
+                contents,
+                frames,
+                moving,
+                riding,
             },
         )
     }
+}
+/// What `Walk` keeps of scroll content placed by a transform: holders and
+/// contents both ways, each node's holders, and per content what a scroll
+/// of it changes and what goes with it. Nothing under a scaled, turned or
+/// zoomed node: a box's place isn't translations added up there.
+#[allow(clippy::type_complexity)]
+fn scroll_holders(
+    scene: &Scene,
+    ordered: &[(NodeId, &SemanticNode)],
+    visible: &HashSet<NodeId>,
+    parents: &HashMap<NodeId, NodeId>,
+) -> (
+    HashMap<NodeId, NodeId>,
+    HashMap<NodeId, NodeId>,
+    HashMap<NodeId, Vec<NodeId>>,
+    HashMap<NodeId, Vec<NodeId>>,
+    HashMap<NodeId, Vec<NodeId>>,
+) {
+    if scene.any_transformed() {
+        return Default::default();
+    }
+    // The scroll content around accessible nodes.
+    let mut found: HashSet<NodeId> = HashSet::default();
+    for (id, _) in ordered {
+        for at in std::iter::once(*id).chain(scene.ancestors(*id)) {
+            if scene.is_scroll_content(at) && !found.insert(at) {
+                break;
+            }
+        }
+    }
+    if found.is_empty() {
+        return Default::default();
+    }
+    // Each one's nearest accessible node, holding it alone (not the window).
+    let mut held: HashMap<NodeId, Vec<NodeId>> = HashMap::default();
+    for content in &found {
+        let holder = std::iter::once(*content)
+            .chain(scene.ancestors(*content))
+            .find(|at| visible.contains(at));
+        if let Some(holder) = holder.filter(|h| *h != scene.root()) {
+            held.entry(holder).or_default().push(*content);
+        }
+    }
+    let holders: HashMap<NodeId, NodeId> = held
+        .into_iter()
+        .filter_map(|(holder, contents)| match contents[..] {
+            [content] => Some((holder, content)),
+            _ => None,
+        })
+        .collect();
+    let contents: HashMap<NodeId, NodeId> = holders.iter().map(|(h, c)| (*c, *h)).collect();
+    // Each node's holders, up the accessible tree, its own included.
+    let mut frames: HashMap<NodeId, Vec<NodeId>> = HashMap::default();
+    for (id, _) in ordered {
+        let mut over = Vec::new();
+        let mut at = *id;
+        loop {
+            if holders.contains_key(&at) {
+                over.push(at);
+            }
+            match parents.get(&at) {
+                Some(parent) if *parent != at => at = *parent,
+                _ => break,
+            }
+        }
+        if !over.is_empty() {
+            frames.insert(*id, over);
+        }
+    }
+    let mut moving: HashMap<NodeId, Vec<NodeId>> = HashMap::default();
+    let mut riding: HashMap<NodeId, Vec<NodeId>> = HashMap::default();
+    for (holder, content) in &holders {
+        let (moves, rides) = (
+            moving.entry(*content).or_default(),
+            riding.entry(*content).or_default(),
+        );
+        moves.push(*holder);
+        for (id, _) in ordered {
+            let under = frames.get(id).is_some_and(|over| over.contains(holder));
+            let inside = scene.is_within(*id, *content);
+            match (under, inside) {
+                (true, true) if id != holder => rides.push(*id),
+                (true, false) | (false, true) if id != holder => moves.push(*id),
+                _ => {}
+            }
+        }
+    }
+    (holders, contents, frames, moving, riding)
+}
+/// How far `id`'s box as sent is from where it shows, in physical pixels:
+/// the offsets of the holders over it (`Walk::frames`), each its content's.
+fn frame(walk: &Walk, scene: &Scene, id: NodeId, scale: f64) -> (f64, f64) {
+    let Some(over) = walk.frames.get(&id) else {
+        return (0., 0.);
+    };
+    over.iter().fold((0., 0.), |(x, y), holder| {
+        let t = scene.transform(walk.holders[holder]);
+        (x + t.x as f64 * scale, y + t.y as f64 * scale)
+    })
 }
 // AccessKit character lengths and word indices are u8. Bound each run to
 // 255 selectable graphemes, preserving line linkage across split runs. A single
@@ -3175,6 +3395,28 @@ mod document_selection_tests {
     /// window away, whose boxes as sent stay on the side they are on (above
     /// stays above, below below); one scrolled in, as a reader moving to it
     /// asks, is sent where it now shows.
+    /// Where a client places `id`: its bounds as sent, moved by its own
+    /// transform and its ancestors' (accesskit_consumer's `bounding_box`;
+    /// zgx sends translations alone).
+    fn resolved(
+        tree: &HashMap<accesskit::NodeId, accesskit::Node>,
+        id: accesskit::NodeId,
+    ) -> Option<accesskit::Rect> {
+        let mut bounds = tree.get(&id)?.bounds()?;
+        let mut at = Some(id);
+        while let Some(node) = at {
+            if let Some(t) = tree.get(&node).and_then(accesskit::Node::transform) {
+                let [.., x, y] = t.as_coeffs();
+                bounds = bounds + accesskit::Vec2::new(x, y);
+            }
+            at = tree
+                .iter()
+                .find(|(_, parent)| parent.children().contains(&node))
+                .map(|(parent, _)| *parent);
+        }
+        Some(bounds)
+    }
+
     #[test]
     fn a_reflow_sends_only_what_is_near_the_window_and_far_boxes_keep_their_side() {
         let mut ui = Ui::new(400., 200.);
@@ -3213,7 +3455,7 @@ mod document_selection_tests {
                         (r.x + r.width) as f64,
                         (r.y + r.height) as f64,
                     );
-                    (*node, tree[native].bounds().unwrap(), now)
+                    (*node, resolved(&tree, *native).unwrap(), now)
                 })
                 .collect();
             (sent, boxes)
@@ -3293,34 +3535,56 @@ mod document_selection_tests {
         ui.prepare_frame();
         let scale = 2.;
         let mut adapter = AccessibilityTree::new();
-        let update = |adapter: &mut AccessibilityTree, ui: &Ui| {
-            adapter.update(
+        let mut tree: HashMap<accesskit::NodeId, accesskit::Node> = HashMap::default();
+        // Each update into the tree a client holds; how many nodes it sent.
+        // As a host does: the frame flushed, the tree told what it changed.
+        let update = |adapter: &mut AccessibilityTree,
+                      ui: &Ui,
+                      tree: &mut HashMap<accesskit::NodeId, accesskit::Node>| {
+            ui.scene.borrow_mut().flush();
+            adapter.note_flush(&ui.scene.borrow());
+            let update = adapter.update(
                 &ui.scene.borrow(),
                 &ui.semantics.borrow(),
                 Some(view.node()),
                 "Test",
                 scale,
-            )
+            );
+            let sent = update.nodes.len();
+            tree.extend(update.nodes);
+            sent
         };
-        // The runs, where they show.
-        let runs = |update: &accesskit::TreeUpdate| -> Vec<(accesskit::NodeId, accesskit::Rect)> {
-            update
-                .nodes
+        // The paragraph's runs, where a client places them: "Second line"
+        // lies a screen below the window, its runs kept as they are.
+        let runs = |tree: &HashMap<accesskit::NodeId, accesskit::Node>| {
+            let mut runs: Vec<(accesskit::NodeId, accesskit::Rect)> = tree
                 .iter()
                 .filter(|(_, node)| node.role() == accesskit::Role::TextRun)
-                // The paragraph's: "Second line" lies a screen below the
-                // window, its runs kept as they are (not shaped, not sent).
                 .filter(|(_, node)| node.value() != Some("Second line"))
-                .filter_map(|(id, node)| Some((*id, node.bounds()?)))
-                .collect()
+                .filter_map(|(id, _)| Some((*id, resolved(tree, *id)?)))
+                .collect();
+            runs.sort_by_key(|(id, _)| id.0);
+            runs
         };
-        let first = runs(&update(&mut adapter, &ui));
+        update(&mut adapter, &ui, &mut tree);
+        let first = runs(&tree);
         assert!(first.len() > 2, "a wrapped paragraph's runs");
         let shaped = SHAPED.with(|s| s.get());
         offset.set(30.);
         ui.prepare_frame();
-        let second = runs(&update(&mut adapter, &ui));
+        // (A geometry update: the pacer's, as `update` always is.)
+        let sent = update(&mut adapter, &ui, &mut tree);
         assert_eq!(SHAPED.with(|s| s.get()), shaped, "nothing shaped again");
+        assert!(
+            sent <= 2,
+            "a scroll sends its view's place, not its runs: {sent}"
+        );
+        #[cfg(debug_assertions)]
+        assert!(
+            adapter.looked_at_changes,
+            "a scroll looks only at what it moved"
+        );
+        let second = runs(&tree);
         assert_eq!(second.len(), first.len(), "every run went with its text");
         for ((id, was), (moved, now)) in first.iter().zip(&second) {
             assert_eq!(id, moved);
@@ -3331,7 +3595,7 @@ mod document_selection_tests {
             assert!((was.x0 - now.x0).abs() < 0.01);
         }
         // Unchanged and unmoved: nothing sent.
-        assert!(runs(&update(&mut adapter, &ui)).is_empty());
+        assert_eq!(update(&mut adapter, &ui, &mut tree), 0);
     }
 
     #[test]
@@ -3600,6 +3864,113 @@ mod vocabulary_tests {
             1.,
         );
     }
+    /// Where a client places `id` (`accesskit_consumer::Node::bounding_box`):
+    /// its bounds as sent, moved by its own and its ancestors' transforms.
+    fn placed(tree: &accesskit_consumer::Tree, id: AccessibleId) -> Option<accesskit::Rect> {
+        tree.state()
+            .node_by_tree_local_id(id, TreeId::ROOT)?
+            .bounding_box()
+    }
+
+    /// A long list scrolled, and a list scrolled inside it: each scroll sends
+    /// its view (its offset as the view's transform) and what comes near,
+    /// looking at no node but what it moved, and a client places every node
+    /// in reach where it shows, as a whole walk would have it.
+    #[test]
+    fn a_scroll_sends_its_view_alone_and_a_client_places_every_node_where_it_shows() {
+        let mut ui = Ui::new(400., 300.);
+        let outer = ui.signal(0_f32);
+        let inner = ui.signal(0_f32);
+        let rows: Vec<String> = (0..200).map(|i| format!("row {i}")).collect();
+        let nested: Vec<String> = (0..60).map(|i| format!("nested {i}")).collect();
+        ui.mount(
+            scroll(outer.clone()).w_full().h_full().child(
+                column()
+                    .w_full()
+                    .children(rows.iter().take(20).map(|row| text(row.as_str())))
+                    .child(
+                        scroll(inner.clone()).w(300.).h(120.).child(
+                            column()
+                                .w_full()
+                                .children(nested.iter().map(|row| text(row.as_str()))),
+                        ),
+                    )
+                    .children(rows.iter().skip(20).map(|row| text(row.as_str()))),
+            ),
+        );
+        let mut adapter = AccessibilityTree::new();
+        let first = frame(&mut ui, &mut adapter, None);
+        let mut client = accesskit_consumer::Tree::new(first, true);
+        let check = |ui: &mut Ui,
+                     adapter: &mut AccessibilityTree,
+                     client: &mut accesskit_consumer::Tree,
+                     what: &str| {
+            let update = frame(ui, adapter, None);
+            let sent = update.nodes.len();
+            client.update_and_process_changes(update, &mut NoChanges);
+            let scene = ui.scene.borrow();
+            let window = scene.bounds(scene.root());
+            let mut near = 0;
+            for (node, native) in &adapter.ids {
+                if *node == scene.root() {
+                    continue;
+                }
+                let r = scene.hit_bounds(*node);
+                // In reach of the window (a screen either way): placed where
+                // it shows. Further, its box may be as last sent.
+                if r.y + r.height < -window.height || r.y > window.height * 2. {
+                    continue;
+                }
+                let at = placed(client, *native).expect("bounds");
+                assert!(
+                    (at.x0 - r.x as f64).abs() < 0.01
+                        && (at.y0 - r.y as f64).abs() < 0.01
+                        && (at.x1 - (r.x + r.width) as f64).abs() < 0.01
+                        && (at.y1 - (r.y + r.height) as f64).abs() < 0.01,
+                    "{what}: {node:?} placed at {at:?}, shows at {r:?}"
+                );
+                near += 1;
+            }
+            assert!(near > 5, "{what}: rows in reach");
+            sent
+        };
+        // A frame's step sends the view and a row or two coming near; a jump,
+        // the rows it brings near (a label and its run each), never the tree
+        // (over 500 nodes here).
+        for (what, by, step, most) in [
+            ("outer down", &outer, 37., 12),
+            ("outer further", &outer, 410., 60),
+            ("inner down", &inner, 23., 12),
+            ("inner further", &inner, 300., 60),
+            ("outer back", &outer, -300., 60),
+            ("inner back", &inner, -250., 60),
+        ] {
+            by.update(|o| *o += step);
+            let sent = check(&mut ui, &mut adapter, &mut client, what);
+            #[cfg(debug_assertions)]
+            assert!(
+                adapter.looked_at_changes,
+                "{what}: looked only at what moved"
+            );
+            assert!(sent <= most, "{what}: sent {sent} nodes, at most {most}");
+        }
+        // Resting: nothing sent.
+        assert_eq!(check(&mut ui, &mut adapter, &mut client, "at rest"), 0);
+    }
+
+    struct NoChanges;
+    impl accesskit_consumer::TreeChangeHandler for NoChanges {
+        fn node_added(&mut self, _: &accesskit_consumer::Node) {}
+        fn node_updated(&mut self, _: &accesskit_consumer::Node, _: &accesskit_consumer::Node) {}
+        fn focus_moved(
+            &mut self,
+            _: Option<&accesskit_consumer::Node>,
+            _: Option<&accesskit_consumer::Node>,
+        ) {
+        }
+        fn node_removed(&mut self, _: &accesskit_consumer::Node) {}
+    }
+
     /// An update looks only at what changed, and a client hears just what a
     /// whole walk would tell it, whatever changes: text, places, rows, what's
     /// shown, what a node is, the focus.
