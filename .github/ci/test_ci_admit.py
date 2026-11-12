@@ -1,4 +1,4 @@
-# Vendored from zeronsh/zeron: scripts/tests/test_ci_admit.py at 513f6b0de, the
+# Vendored from zeronsh/zeron: scripts/tests/test_ci_admit.py at 686a608db, the
 # tests of admit.py (vendored beside it). Keep in sync with zeron's copy, as
 # admit.py. zgx's changes are marked `zgx:`: admit.py's directory, the cap
 # check (zgx's plan is smaller than zeron's), and no emergency.py here.
@@ -43,6 +43,20 @@ class ReservationTests(unittest.TestCase):
     def test_reservations_are_capped_at_a_full_run(self):
         # Another run's admit name comes from its own (editable) ci.yml.
         self.assertEqual(parse_reservation("admit [linux=999 windows=50 macos=40]"), admit.MAX_RESERVATION)
+
+    def test_giant_numbers_in_a_name_are_not_read(self):
+        # int() of a number this long raises ValueError (Python's int max str digits):
+        # more than 4 digits is no reservation or claim at all.
+        giant = "9" * 5000
+        self.assertIsNone(parse_reservation(f"admit [linux={giant}]"))
+        self.assertEqual(parse_reservation(f"admit [linux={giant} macos=1]"), {"linux": 0, "windows": 0, "macos": 1})
+        self.assertEqual(parse_reservation("admit [linux=9999]")["linux"], admit.MAX_RESERVATION["linux"])
+        self.assertIsNone(parse_reservation("admit [linux=12345]"))
+        self.assertIsNone(admit.PR_CLAIM.search(f"admit [linux=2] #{giant}"))
+        self.assertEqual(admit.PR_CLAIM.search("admit [linux=2] #1356").group(1), "1356")
+        scheduler = admit.Scheduler(None, "o/r", 1)
+        run = {"event": "pull_request", "head_sha": "abc"}
+        self.assertIsNone(scheduler.verified_pr(f"admit [linux=2] #{giant}", run, {77}))
 
     def test_cap_is_the_largest_plan(self):
         sys.path.insert(0, str(pathlib.Path(admit.__file__).parent))
@@ -348,6 +362,26 @@ class PriorityAndLockTests(unittest.TestCase):
         snap.holding = [held_(pr=90, linux=1)]
         self.assertTrue(decide(2, full, snap, big).admit)
 
+    def test_two_locks_added_in_the_same_second_do_not_wait_for_each_other(self):
+        # The queue order (rank) and the lock order (lock_is_older) break the tie the
+        # same way: by the key as text, not by when each admit job was created.
+        big = {"total": 20, "macos": 5, "windows": 10}
+        full_counts = admit.MAX_RESERVATION
+        full = need_of(full_counts)
+        same = "2026-10-27T10:00:00Z"
+        # #91's admit job was created first, but #90 sorts first as text.
+        snap = Snapshot([waiter(1, 2, pr=90, **full_counts), waiter(2, 1, pr=91, **full_counts)], [],
+                        locked={90, 91}, lock_times={90: same, 91: same})
+        first, second = decide(1, full, snap, big), decide(2, full, snap, big)
+        self.assertTrue(first.admit)
+        self.assertEqual(first.position, 0)
+        self.assertFalse(second.admit)
+        self.assertEqual(second.position, 1)
+        # A peer's key (`owner/repo#n`) against a number: still one order.
+        snap = Snapshot([waiter(1, 1, pr="o/zgx#5", **full_counts), waiter(2, 2, pr=90, **full_counts)], [],
+                        locked={90, "o/zgx#5"}, lock_times={90: same, "o/zgx#5": same})
+        self.assertEqual([decide(r, full, snap, big).admit for r in (1, 2)], [False, True])
+
     def test_an_unverified_claim_is_an_ordinary_run(self):
         snap = Snapshot([waiter(1, 1, linux=2), waiter(2, 2, pr=None, linux=2)], [], priority={77})
         self.assertEqual(decide(2, need(linux=2), snap, self.BIG).position, 1)
@@ -502,8 +536,10 @@ class SharedPoolTests(unittest.TestCase):
             if "/workflows/" in path:
                 wid = int(path.split("/workflows/")[1].split("/")[0])
                 status = path.split("status=")[1].split("&")[0] if "status=" in path else None
-                return {"workflow_runs": [r for r in self.runs[repo]
-                                          if r["workflow_id"] == wid and status in (None, r["status"])]}
+                event = path.split("event=")[1].split("&")[0] if "event=" in path else None
+                per_page = int(path.split("per_page=")[1].split("&")[0]) if "per_page=" in path else 30
+                return {"workflow_runs": [r for r in self.runs[repo] if r["workflow_id"] == wid
+                                          and status in (None, r["status"]) and event in (None, r["event"])][:per_page]}
             if "/actions/runs?" in path:
                 status = path.split("status=")[1].split("&")[0]
                 return {"workflow_runs": [r for r in self.runs[repo] if r["status"] == status]}
@@ -616,10 +652,11 @@ class SharedPoolTests(unittest.TestCase):
                                     releases={"o/r": ("release.yml",), "z/gx": ("release.yml",)})
         snap = scheduler.snapshot()
         releases = {w.run_id: w.release for w in snap.waiters}
-        # Only the tag's run is a release: not the pull request's, nor CI's, nor the branch push's.
-        self.assertEqual(releases, {10: True, 11: False, 12: False, 13: False})
+        # Only the tag's run is a release: not CI's, nor the branch push's. The pull request's
+        # isn't listed with the release workflow's runs at all (it's an outside run).
+        self.assertEqual(releases, {10: True, 12: False, 13: False})
         order = sorted(snap.waiters, key=lambda w: admit.rank(w, snap))
-        self.assertEqual([w.run_id for w in order], [10, 11, 12, 13])  # though its admit job is the newest
+        self.assertEqual([w.run_id for w in order], [10, 12, 13])  # though its admit job is the newest
         self.assertFalse(order[0].running)
         # The tag is looked up once per run.
         scheduler.snapshot()
@@ -632,8 +669,9 @@ class SharedPoolTests(unittest.TestCase):
         snap = scheduler.snapshot()
         held_needs = sorted(tuple(h.need.values()) for h in snap.holding)
         # The peer's admitted release holds its reservation (its signing job, waiting, nothing); its
-        # release without admission what it runs; the deploy what it runs. Each once.
-        self.assertEqual(held_needs, sorted([(2, 0, 1), (1, 1, 0), (1, 0, 0)]))
+        # release without admission what it runs; the deploy what it runs; the pull request's
+        # run of release.yml what it runs (its admit job). Each once.
+        self.assertEqual(held_needs, sorted([(2, 0, 1), (1, 1, 0), (1, 0, 0), (1, 0, 0)]))
         # Without release workflows, the same runs are all outside ones: seen as what they run.
         scheduler = admit.Scheduler(self.release_org(), "o/r", 9, peers=admit.parse_peers("z/gx:ci.yml"),
                                     outside=True)
@@ -642,6 +680,55 @@ class SharedPoolTests(unittest.TestCase):
         # (10, 11, 13: an admit job queued or running; 30; 20 and 21 as they are.)
         self.assertEqual(sorted(tuple(h.need.values()) for h in snap.holding),
                          sorted([(1, 0, 0), (1, 0, 0), (1, 0, 0), (1, 0, 0), (2, 0, 1), (1, 1, 0)]))
+
+
+    def test_pull_request_runs_of_a_release_workflow_cannot_hide_a_release(self):
+        # A fork's pull requests edit release.yml to run on pull_request: more of them than a
+        # page of the workflow's latest runs, all newer than the tag's release.
+        flood = [self.wfrun(200 + n, 7, event="pull_request") for n in range(admit.Scheduler.RECENT_RELEASES + 5)]
+        api = self.OrgApi(
+            workflows={("o/r", "ci.yml"): 9, ("o/r", "release.yml"): 7},
+            runs={"o/r": flood + [self.wfrun(10, 7, "queued", ref="v1.0")]},
+            jobs={10: [dict(job("admit [linux=2 macos=1] release", "ubuntu-24.04", "queued", None),
+                            created_at="2026-10-27T00:00:09Z", id=100)],
+                  **{r["id"]: [dict(job("admit [linux=1] release", "ubuntu-24.04", "in_progress", None),
+                                    created_at="2026-10-27T00:00:01Z", id=r["id"] * 10)] for r in flood}},
+            tags={("o/r", "v1.0"): "h"},
+        )
+        scheduler = admit.Scheduler(api, "o/r", 9, outside=True, releases={"o/r": ("release.yml",)})
+        snap = scheduler.snapshot()
+        self.assertEqual([(w.run_id, w.release) for w in snap.waiters], [(10, True)])
+        # Each pull request run counts as what it runs (its admit job), never as a waiter.
+        self.assertEqual(len(snap.holding), len(flood))
+        listed = [c for c in api.calls if "/workflows/7/runs" in c]
+        self.assertEqual(sorted(c.split("event=")[1].split("&")[0] for c in listed), ["push", "workflow_dispatch"])
+
+
+class ReleaseWorkflowTests(unittest.TestCase):
+    def test_admission_never_blocks_a_release(self):
+        """Admission fails open: a crash or a hang in a release's admit step still lets every
+        job that needs it run (a step's continue-on-error makes its job succeed)."""
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed")
+        workflows = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows"
+        checked = 0
+        for name in sorted({n for names in admit.RELEASE_WORKFLOWS.values() for n in names}):  # (either repository)
+            path = workflows / name
+            if not path.exists():
+                continue
+            jobs = yaml.safe_load(path.read_text(encoding="utf-8"))["jobs"]
+            if "admit" not in jobs:
+                continue
+            steps = [s for s in jobs["admit"]["steps"] if "admit.py" in s.get("run", "")]
+            self.assertEqual(len(steps), 1, name)
+            self.assertIs(steps[0].get("continue-on-error"), True, name)
+            self.assertLess(steps[0]["timeout-minutes"], jobs["admit"]["timeout-minutes"], name)
+            needs = [job.get("needs") or [] for job in jobs.values()]
+            self.assertTrue(any("admit" in ([n] if isinstance(n, str) else n) for n in needs), name)
+            checked += 1
+        self.assertGreater(checked, 0)
 
 
 class SupersededTests(unittest.TestCase):

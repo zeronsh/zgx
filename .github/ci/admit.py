@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# Vendored from zeronsh/zeron: scripts/ci/admit.py at 513f6b0de, unchanged below
+# Vendored from zeronsh/zeron: scripts/ci/admit.py at 686a608db, unchanged below
 # this header. zeron's and zgx's CI share the organization's hosted runners
 # through one admission queue, so the two copies must stay in sync: change it in
 # zeron first, then copy it here whole (keeping this header) and update the hash.
 # .github/ci/test_ci_plan.py checks everything below the header against it.
-# upstream sha256: f5ac9ac150c56d3d7e7a113c49d3bd7b7797614328d2a79d98c79ec334f0e513
+# upstream sha256: 0a59d6aa0f46c01833f04582cbccc0b3bea4bdfbbf790eb8a9540f90b9b39d85
 """Admission control for CI runs: a run starts only when all its runners are free.
 
 GitHub queues every job of every run as soon as it can, so under load each run
@@ -92,6 +92,9 @@ Releases (the `release` class):
     only counts when the run was started by pushing a tag or by hand
     (workflow_dispatch), never by a pull request, which can edit any workflow
     file (Scheduler.verified_release). Otherwise the run is an ordinary one.
+    A release workflow's runs are listed for those two events only
+    (RELEASE_EVENTS): a pull request's runs of it are outside runs, seen as
+    what they run, so however many there are they can't hide a release.
   - Verified releases go first, first come first served among themselves. A
     lock's standing reservation doesn't count against them, only what its
     runs hold: its runs wait behind the release, which must not wait for them.
@@ -127,7 +130,9 @@ RUNNERS = ("linux", "windows", "macos")
 RESOURCES = ("total", "macos", "windows")
 ADMIT_PREFIX = "admit"
 UNRESERVED_JOBS = ("plan",)  # jobs that run before admission and are not in reservations
-RESERVATION = re.compile(r"\b(linux|windows|macos)=(\d+)\b")
+# At most 4 digits (as PR_CLAIM): a name comes from another run's editable ci.yml,
+# and int() of a number thousands of digits long raises (its str digits limit).
+RESERVATION = re.compile(r"\b(linux|windows|macos)=(\d{1,4})\b")
 # At least the largest reservation plan.py makes: every suite, on main (checked by
 # test_ci_admit.py). One cap for every branch and repository sharing the queue
 # (main, zeron/zgx with its zgx suite, zeronsh/zgx): this file is the same in each.
@@ -149,7 +154,7 @@ KEEP_WAITING_SHARE = 4
 PRIORITY_LABEL = "ci:priority"
 LOCK_LABEL = "ci:lock"
 LOCK_HOURS = 6
-PR_CLAIM = re.compile(r"#(\d+)\s*$")
+PR_CLAIM = re.compile(r"#(\d{1,4})\s*$")
 RELEASE_CLAIM = re.compile(r"\]\s*release\s*$")
 # Every repository's admitted CI workflow.
 CI_WORKFLOW = "ci.yml"
@@ -161,6 +166,10 @@ RELEASE_WORKFLOWS = {
     "zeronsh/zeron": ("release.yml", "zgx-beta.yml"),
     "zeronsh/zgx": ("release.yml",),
 }
+# The events that start a release (a tag's push, a run by hand): a release workflow's
+# runs are listed for these only, so a pull request's runs of an edited copy (a fork's,
+# any number of them) can't push a real release out of the RECENT_RELEASES window.
+RELEASE_EVENTS = ("push", "workflow_dispatch")
 # How long a verified release's not-yet-created jobs stay reserved after admission: its
 # packaging and publishing start only once its builds are done (a hosted job's limit).
 RELEASE_GRACE = 6 * 3600
@@ -281,12 +290,17 @@ def bigger(a: dict[str, int], b: dict[str, int]) -> dict[str, int]:
 
 def rank(w: Waiter, snapshot: Snapshot) -> tuple:
     """Queue order: verified releases, then locked runs (oldest lock first), then
-    ci:priority, then everyone, each first come first served."""
+    ci:priority, then everyone, each first come first served.
+
+    Locks added in the same second go in the order of their keys as text, the
+    tiebreak decide()'s lock_is_older uses: if the two orders disagreed, two
+    such locks would each wait for the other.
+    """
     if w.release:
-        return (0, "", w.key)
+        return (0, "", "", w.key)
     if w.pr in snapshot.locked:
-        return (1, snapshot.lock_times.get(w.pr, ""), w.key)
-    return (2 if w.pr in snapshot.priority else 3, "", w.key)
+        return (1, snapshot.lock_times.get(w.pr, ""), str(w.pr), w.key)
+    return (2 if w.pr in snapshot.priority else 3, "", "", w.key)
 
 
 def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, int]) -> Decision:
@@ -313,7 +327,8 @@ def decide(me: int, mine: dict[str, int], snapshot: Snapshot, budget: dict[str, 
     my_lock = self_.pr if self_ is not None and self_.pr in snapshot.locked else None
 
     def lock_is_older(pr) -> bool:
-        # (Keys are numbers here and `owner/repo#n` from a peer: compared as text on a tie.)
+        # (Keys are numbers here and `owner/repo#n` from a peer: compared as text on a tie,
+        # as rank() orders them.)
         return (snapshot.lock_times.get(pr, ""), str(pr)) < (snapshot.lock_times.get(my_lock, ""), str(my_lock))
 
     def lock_stands(pr) -> bool:
@@ -624,9 +639,12 @@ class Scheduler:
             if release_workflow:
                 # Its admit job is its first: a run waiting for a runner for it is still
                 # `queued`, one waiting for an approval `waiting`. Releases are few: the latest
-                # page, whatever the status. (exclude_pull_requests only trims the response.)
-                runs = [run for run in self.list_runs(f"{path}?exclude_pull_requests=true", stale_ok,
-                                                      recent=self.RECENT_RELEASES)
+                # page of each RELEASE_EVENTS, whatever the status. Its other runs (a pull
+                # request's) are outside ones, below. (exclude_pull_requests only trims the
+                # response.)
+                runs = [run for event in RELEASE_EVENTS
+                        for run in self.list_runs(f"{path}?event={event}&exclude_pull_requests=true", stale_ok,
+                                                  recent=self.RECENT_RELEASES)
                         if run.get("status") != "completed"]
             else:
                 runs = self.list_runs(f"{path}?status=in_progress", stale_ok)
@@ -657,13 +675,15 @@ class Scheduler:
                                                 stalled_for(jobs)))
 
         if self.outside:
-            mine = set(admitted)
+            release_workflows = {k for k, (_, release) in admitted.items() if release}
             for repo in repos:
                 stale_ok = 0.0 if repo == self.repo else self.OUTSIDE_REFRESH
                 for status in ("queued", "in_progress"):
                     for run in self.list_runs(f"/repos/{repo}/actions/runs?status={status}", stale_ok):
-                        if (repo, run.get("workflow_id")) in mine or run["id"] in live:
-                            continue
+                        workflow = (repo, run.get("workflow_id"))
+                        if run["id"] in live or (workflow in admitted and not (
+                                workflow in release_workflows and run.get("event") not in RELEASE_EVENTS)):
+                            continue  # (a release workflow's pull request runs: outside ones)
                         live.add(run["id"])
                         need = outside_need(self.run_jobs(run, repo, max(stale_ok, 60.0)))
                         if need["total"]:
@@ -868,7 +888,7 @@ def main() -> int:
         if state != last:
             print(f"[{waited / 60:5.1f} min] position {decision.position}, in use {decision.used}, "
                   f"needed ahead {decision.ahead}, {len(snap.waiters)} waiting, "
-                  f"priority {sorted(snap.priority) or '-'}, locked {sorted(snap.locked) or '-'}, "
+                  f"priority {sorted(map(str, snap.priority)) or '-'}, locked {sorted(map(str, snap.locked)) or '-'}, "
                   f"ignored (not taking their turn) {ignored or '-'}, API quota left {api.remaining}")
             last = state
         if decision.admit:
