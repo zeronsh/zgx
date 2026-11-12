@@ -2699,10 +2699,143 @@ mod mac {
         zoom: f64,
         position: Option<(f64, f64)>,
     ) {
-        use objc2_foundation::{NSPoint, NSRect, NSSize};
         let Some(window) = ns_window(window) else {
             return;
         };
+        let outer = REPLACING.replace(true);
+        place(&window, zoom, position, false);
+        REPLACING.set(outer);
+        keep_placed(&window, zoom, position);
+    }
+
+    /// What the buttons were last asked to be, by window number, and the
+    /// observers that put them back when AppKit lays them out again.
+    struct Placed {
+        zoom: f64,
+        position: Option<(f64, f64)>,
+        observers:
+            Vec<Retained<objc2::runtime::ProtocolObject<dyn objc2_foundation::NSObjectProtocol>>>,
+    }
+
+    thread_local! {
+        static PLACED: std::cell::RefCell<std::collections::HashMap<isize, Placed>> =
+            Default::default();
+        static REPLACING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// AppKit lays the buttons out in its own display pass as a window
+    /// resizes, after the app was told of the new size: a frame drawn between
+    /// showed them in its places, flickering against the app's. Each of
+    /// their frame changes (and the title bar's and its container's) puts
+    /// them back at once, in that same pass.
+    fn keep_placed(window: &NSWindow, zoom: f64, position: Option<(f64, f64)>) {
+        use objc2_app_kit::NSViewFrameDidChangeNotification;
+        use objc2_foundation::{NSNotification, NSNotificationCenter};
+        let number = window.windowNumber();
+        let center = NSNotificationCenter::defaultCenter();
+        let wanted = position.is_some() || zoom != 1.;
+        let old = PLACED.with_borrow_mut(|placed| {
+            if !wanted {
+                return placed.remove(&number);
+            }
+            match placed.get_mut(&number) {
+                Some(kept) => {
+                    kept.zoom = zoom;
+                    kept.position = position;
+                }
+                None => {
+                    placed.insert(
+                        number,
+                        Placed {
+                            zoom,
+                            position,
+                            observers: Vec::new(),
+                        },
+                    );
+                }
+            }
+            None
+        });
+        for observer in old.into_iter().flat_map(|placed| placed.observers) {
+            // SAFETY: an observer this module added.
+            unsafe { center.removeObserver(observer.as_ref()) };
+        }
+        if !PLACED.with_borrow(|placed| {
+            placed
+                .get(&number)
+                .is_some_and(|placed| placed.observers.is_empty())
+        }) {
+            return;
+        }
+        let views: Vec<Retained<NSView>> = {
+            let mut views = Vec::new();
+            for button in [0_usize, 1, 2] {
+                // SAFETY: `-standardWindowButton:` takes an NSUInteger and
+                // returns an NSButton (a view) or nil, retained here.
+                let Some(button): Option<Retained<NSView>> =
+                    (unsafe { msg_send![window, standardWindowButton: button] })
+                else {
+                    continue;
+                };
+                // SAFETY: a set superview back pointer is a live view.
+                let bar = unsafe { button.superview() };
+                let container = bar.as_ref().and_then(|bar| unsafe { bar.superview() });
+                views.push(button);
+                views.extend(bar);
+                views.extend(container);
+            }
+            let mut seen = std::collections::HashSet::new();
+            views.retain(|view| seen.insert(Retained::as_ptr(view)));
+            views
+        };
+        let mut observers = Vec::new();
+        for view in &views {
+            let block = block2::RcBlock::new(move |note: std::ptr::NonNull<NSNotification>| {
+                // SAFETY: AppKit passes a valid notification for the block's
+                // duration; a frame change's object is the view.
+                let note = unsafe { note.as_ref() };
+                let Some(view) = note.object().and_then(|o| o.downcast::<NSView>().ok()) else {
+                    return;
+                };
+                let Some(window) = view.window() else {
+                    return;
+                };
+                let Some((zoom, position)) = PLACED.with_borrow(|placed| {
+                    placed
+                        .get(&window.windowNumber())
+                        .map(|placed| (placed.zoom, placed.position))
+                }) else {
+                    return;
+                };
+                if REPLACING.replace(true) {
+                    return;
+                }
+                place(&window, zoom, position, true);
+                REPLACING.set(false);
+            });
+            let object: &objc2::runtime::AnyObject = view;
+            // SAFETY: with no queue the block runs where AppKit posts the
+            // notification (the main thread, in its layout pass).
+            observers.push(unsafe {
+                center.addObserverForName_object_queue_usingBlock(
+                    Some(NSViewFrameDidChangeNotification),
+                    Some(object),
+                    None,
+                    &block,
+                )
+            });
+        }
+        PLACED.with_borrow_mut(|placed| {
+            if let Some(placed) = placed.get_mut(&number) {
+                placed.observers = observers;
+            }
+        });
+    }
+
+    /// `place_buttons` on an `NSWindow`: `in_layout` when AppKit is laying
+    /// the title bar out (its layout is then under way, not to be asked for).
+    fn place(window: &NSWindow, zoom: f64, position: Option<(f64, f64)>, in_layout: bool) {
+        use objc2_foundation::{NSPoint, NSRect, NSSize};
         if window.styleMask().contains(NSWindowStyleMask::FullScreen) {
             return;
         }
@@ -2730,7 +2863,9 @@ mod mac {
         };
         // AppKit's own layout first (a resize leaves it pending): done now, it
         // has nothing left to put back over what follows.
-        container.layoutSubtreeIfNeeded();
+        if !in_layout {
+            container.layoutSubtreeIfNeeded();
+        }
         let number = window.windowNumber();
         let base = BUTTONS.with_borrow_mut(|known| {
             *known.entry(number).or_insert_with(|| {
