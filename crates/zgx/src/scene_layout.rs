@@ -437,7 +437,9 @@ fn overlay_down(value: Justify) -> t::AlignItems {
     }
 }
 /// A child's style in its overlay parent: in the one grid area, its own
-/// `align_self` across.
+/// `align_self` across. Inlined: the overlay's layout had it inlined as its
+/// one caller, and `inset_move_laid` calls it too.
+#[inline(always)]
 fn stacked_style(mut mapped: t::Style) -> t::Style {
     if mapped.position != t::Position::Absolute {
         mapped.grid_row = t::Line {
@@ -1394,6 +1396,172 @@ impl Scene {
     }
 }
 
+impl Scene {
+    /// Where absolute node `id`'s new style puts it in its parent, if that
+    /// only moves it (`invalidate_absolute_restyled`): of a fixed size, placed
+    /// by its parent's layout, it maps as that layout last mapped it (its
+    /// leaf's style in its parent's tree) but for its insets, which place it
+    /// in points (a thumb's `top` as its list scrolls). Worked out as that
+    /// layout places it, from the inset that does (its start's if set, else
+    /// its end's), and only if the insets it had give where it is now.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn inset_move_laid(&self, id: NodeId) -> Option<((f32, f32), t::Style)> {
+        use taffy::style::CompactLength;
+        let node = self.node(id);
+        let given = &node.style;
+        let fixed = given.absolute
+            && given.width.is_some()
+            && given.height.is_some()
+            && !given.intrinsic_width
+            && !given.intrinsic_height
+            && given.width_percent.is_none()
+            && given.height_percent.is_none();
+        if !fixed
+            || node.special.any()
+            || node.dirty & LAYOUT != 0
+            // `way`'s answer, written out: one more caller of it changes
+            // how it compiles, and with it `set_style_within`.
+            || !laid_out_as_given(
+                given,
+                Way {
+                    own: node.rtl,
+                    parent: node.parent.is_some_and(|parent| self.tree_node(parent).rtl),
+                },
+            )
+            || self.given_styles.contains_key(&id)
+            || self.containing_block(id).is_some()
+        {
+            return None;
+        }
+        let parent = node.parent?;
+        let held = self.node(parent);
+        if held.special.any() || held.dirty & LAYOUT != 0 {
+            return None;
+        }
+        let layout = match held.kind {
+            NodeKind::Container(layout) | NodeKind::Panel { layout, .. } => layout,
+            _ => return None,
+        };
+        let cache = held.advanced_layout.as_deref()?;
+        let (key, _) = cache.nodes.get(&id)?;
+        let was = cache.tree.style(*key).ok()?;
+        // Its new style, mapped as its parent's layout maps it.
+        let mut now = style(given, Layout::Column, true);
+        if given.layout_options.is_some() {
+            self.map_size_calcs(id, &mut now, cache.bases);
+            self.map_grid_place(id, &mut now);
+        }
+        now.overflow = overflow(super::clips(&self.node(self.laid_out_as(id)).style));
+        let display = held.style.layout_options.as_deref().and_then(|o| o.display);
+        if layout == Layout::Overlay && display != Some(ViewDisplay::Grid) {
+            now = stacked_style(now);
+        }
+        if was.inset == now.inset {
+            return None;
+        }
+        // The same but for its insets.
+        let mut same = now.clone();
+        same.inset = was.inset;
+        if same != *was {
+            return None;
+        }
+        let size = node.measurement.as_ref()?.size;
+        let room = held.measurement.as_ref()?.size;
+        let &(_, rect, _) = held
+            .measurement
+            .as_ref()?
+            .children
+            .iter()
+            .find(|(child, ..)| *child == id)?;
+        let border = self.layout_border(parent);
+        // An inset or margin in points: unset, a length, or not this.
+        let points = |value: t::LengthPercentageAuto| -> Option<Option<f32>> {
+            if value.is_auto() {
+                return Some(None);
+            }
+            let raw = value.into_raw();
+            (raw.tag() == CompactLength::LENGTH_TAG).then_some(Some(raw.value()))
+        };
+        // Along one axis: from its start, or from its end, as its parent's
+        // layout places it (`perform_absolute_layout_on_absolute_children`).
+        let along =
+            |inset: [Option<f32>; 2], edges: [f32; 2], margins: [f32; 2], room: f32, size: f32| {
+                match inset {
+                    [Some(start), _] => Some(start + edges[0] + margins[0]),
+                    [None, Some(end)] => Some(room - edges[1] - size - end - margins[1]),
+                    [None, None] => None,
+                }
+            };
+        let axis = |was: [t::LengthPercentageAuto; 2],
+                    now: [t::LengthPercentageAuto; 2],
+                    edges: [f32; 2],
+                    margins: [t::LengthPercentageAuto; 2],
+                    room: f32,
+                    size: f32,
+                    at: f32|
+         -> Option<f32> {
+            if was == now {
+                return Some(at);
+            }
+            let margins = [
+                points(margins[0])?.unwrap_or(0.),
+                points(margins[1])?.unwrap_or(0.),
+            ];
+            let (was, now) = (
+                [points(was[0])?, points(was[1])?],
+                [points(now[0])?, points(now[1])?],
+            );
+            // Placed so now, or not by its insets alone.
+            (along(was, edges, margins, room, size)? == at).then_some(())?;
+            along(now, edges, margins, room, size)
+        };
+        let (a, b, m) = (was.inset, now.inset, now.margin);
+        let now = now.clone();
+        // An automatic margin centres it: not by its insets alone.
+        if [m.left, m.right, m.top, m.bottom]
+            .into_iter()
+            .any(|m| m.is_auto())
+        {
+            return None;
+        }
+        let x = axis(
+            [a.left, a.right],
+            [b.left, b.right],
+            [border.left, border.right],
+            [m.left, m.right],
+            room.0,
+            size.0,
+            rect.x,
+        )?;
+        let y = axis(
+            [a.top, a.bottom],
+            [b.top, b.bottom],
+            [border.top, border.bottom],
+            [m.top, m.bottom],
+            room.1,
+            size.1,
+            rect.y,
+        )?;
+        Some(((x, y), now))
+    }
+    /// After `move_by_insets`: `id`'s leaf in its parent's tree takes its new
+    /// style, as mapped (`inset_move_laid`), so that the next move compares
+    /// with where it now is, and the parent's next layout places it there.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn moved_leaf_style(&mut self, parent: NodeId, id: NodeId, now: t::Style) {
+        let writes = self.node(id).style_writes;
+        let Some(cache) = self.node_mut(parent).advanced_layout.as_deref_mut() else {
+            return;
+        };
+        if let Some((key, last)) = cache.nodes.get_mut(&id) {
+            let key = *key;
+            last.writes = writes;
+            let _ = cache.tree.set_style(key, now);
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

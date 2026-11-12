@@ -655,6 +655,7 @@ fn frames(scale: f32) -> Vec<Vec<u8>> {
     all.extend(view_frames(scale));
     all.extend(view_scene_frames(scale));
     all.extend(blur_frames(scale));
+    all.extend(fade_frames(scale));
     all
 }
 
@@ -810,8 +811,83 @@ fn view_frames(scale: f32) -> Vec<Vec<u8>> {
         })
         .collect()
 }
+
+/// A card fading as one across a `fade_edges` band (bands.rs): light paper,
+/// rounded and clipping, holding dark art, in a clip whose top 40 points
+/// fade, over an opaque ground. Direct3D 12 draws what reaches the band
+/// into a texture and fades it once, so the paper never shows through the
+/// art as a veil. The card moves down through the band, a frame a step.
+#[cfg(windows)]
+fn fade_frames(scale: f32) -> Vec<Vec<u8>> {
+    use zgx::scene::*;
+    let size = FADE_SIZE;
+    let mut gpu = GpuRenderer::new((size.0 * scale) as u32, (size.1 * scale) as u32).unwrap();
+    gpu.set_scale_factor(scale);
+    let mut scene = Scene::new(size.0, size.1);
+    let root = scene.root();
+    scene.set_kind(root, NodeKind::Container(Layout::Overlay));
+    scene.append(
+        root,
+        NodeKind::Rect(Color(30, 90, 60, 255)),
+        Style {
+            width: Some(size.0),
+            height: Some(size.1),
+            ..Default::default()
+        },
+    );
+    let clip = scene.append(
+        root,
+        NodeKind::Container(Layout::Overlay),
+        Style {
+            width: Some(160.),
+            height: Some(160.),
+            clip: true,
+            fade_edges: [40., 0.],
+            ..Default::default()
+        },
+    );
+    scene.set_transform(clip, Transform { x: 20., y: 20. });
+    let card = scene.append(
+        clip,
+        NodeKind::Panel {
+            layout: Layout::Overlay,
+            quad: QuadStyle {
+                fill: Color(240, 238, 232, 255),
+                radius: 12.,
+                ..Default::default()
+            },
+        },
+        Style {
+            width: Some(160.),
+            height: Some(80.),
+            clip: true,
+            ..Default::default()
+        },
+    );
+    let art = zgx::image::ImageData::new(4, 4, [40u8, 40, 80, 255].repeat(16)).unwrap();
+    scene.append(
+        card,
+        NodeKind::Image(std::sync::Arc::new(art)),
+        Style {
+            width: Some(120.),
+            height: Some(60.),
+            ..Default::default()
+        },
+    );
+    [0., 13., 27.5, 60.]
+        .into_iter()
+        .map(|y| {
+            scene.set_transform(card, Transform { x: 0., y });
+            let report = scene.flush();
+            gpu.render(&scene, &report.damage).unwrap();
+            gpu.readback().unwrap()
+        })
+        .collect()
+}
 #[cfg(windows)]
 const VIEW_SIZE: (f32, f32) = (240., 160.);
+#[cfg(windows)]
+const FADE_SIZE: (f32, f32) = (200., 200.);
 
 /// Backdrop blurs (`Effects::blur_radius`), drawn as Direct3D 12 draws them
 /// (blur.wgsl's passes into an atlas, then back over the target): a plain
@@ -1648,6 +1724,10 @@ fn where_(frame: usize, scale: f32, pixel: usize) -> String {
             LAYER_COLUMNS,
             EFFECT_NAMES.map(String::from).to_vec(),
         )
+    } else if frame
+        >= FRAMES + 3 + 5 + 4 + 2 + 2 + 5 + 2 + 3 + view_painters::VIEW_SCENE_NAMES.len() as u32 + 4
+    {
+        (FADE_SIZE.0, FADE_SIZE, 1, vec!["card in a fade".into()])
     } else if frame
         >= FRAMES + 3 + 5 + 4 + 2 + 2 + 5 + 2 + 3 + view_painters::VIEW_SCENE_NAMES.len() as u32
     {

@@ -391,7 +391,10 @@ impl<K: Eq + Hash + Clone> Kept<K> {
                 self.unasked = true;
             }
         }
-        let pictures = self.unasked && crate::image::ahead_room();
+        // At rest it asks for none, as a list with no spare time: what it let
+        // go of is no longer its to ask for, though room comes back for the
+        // process's decodes ahead while it rests.
+        let pictures = self.unasked && !self.ahead.resting.get() && crate::image::ahead_room();
         ui.list_wants(&self.ahead, next.is_some() || pictures);
         drop(in_view);
         kept.extend(shown);

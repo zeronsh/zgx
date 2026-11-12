@@ -1735,6 +1735,13 @@ pub const HB_BUFFER_SCRATCH_FLAG_SHAPER0: u32 = 0x0100_0000;
 pub struct UnicodeBuffer(pub(crate) hb_buffer_t);
 
 impl UnicodeBuffer {
+    /// zgx: the bytes its glyph arrays hold on the heap (their capacity), for
+    /// a memory report.
+    pub fn heap_bytes(&self) -> usize {
+        self.0.info.capacity() * size_of::<GlyphInfo>()
+            + self.0.pos.capacity() * size_of::<GlyphPosition>()
+    }
+
     /// Create a new `UnicodeBuffer`.
     #[inline]
     pub fn new() -> UnicodeBuffer {

@@ -8,6 +8,10 @@
 //! hand it over as they please, and the count would move with them. CI's
 //! instruction gate counts it, so what a terminal's output costs is
 //! guarded.
+//! `PER_FRAME` feeds that many lines a frame instead, as output trickling
+//! in does (`tail -f`, a build, a reply streaming): each frame scrolls the
+//! screen a line, and what it costs shouldn't grow with the screen's
+//! height (`HEIGHT`, in points, 600 by default).
 //! Run: cargo run -p zgx-terminal --release --example terminal_bench
 //! (`LINES` sets the lines, 10,000 by default.)
 use std::fmt::Write;
@@ -84,12 +88,45 @@ fn output(lines: usize) -> Vec<u8> {
     out.into_bytes()
 }
 
+/// The output a few lines a read (`PER_FRAME`).
+struct Lines<'a> {
+    rest: &'a [u8],
+    per_read: usize,
+}
+impl<'a> Lines<'a> {
+    /// The next `per_read` lines, the last read what is left.
+    #[inline(never)]
+    fn next_read(&mut self) -> Option<&'a [u8]> {
+        if self.rest.is_empty() {
+            return None;
+        }
+        let mut end = 0;
+        for _ in 0..self.per_read {
+            match memchr::memmem::find(&self.rest[end..], b"\r\n") {
+                Some(at) => end += at + 2,
+                None => {
+                    end = self.rest.len();
+                    break;
+                }
+            }
+        }
+        let (read, rest) = self.rest.split_at(end);
+        self.rest = rest;
+        Some(read)
+    }
+}
+
 fn main() {
     let lines: usize = std::env::var("LINES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(10_000);
-    let mut ui = Ui::new(800., 600.);
+    let per_frame: Option<usize> = std::env::var("PER_FRAME").ok().and_then(|v| v.parse().ok());
+    let height: f32 = std::env::var("HEIGHT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600.);
+    let mut ui = Ui::new(800., height);
     let text = zgx_gpu::TextServices::new();
     let font = zgx_gpu::text::FontData::new(std::sync::Arc::<[u8]>::from(zgx_workload::FONT_BYTES))
         .expect("the bundled font");
@@ -103,15 +140,27 @@ fn main() {
         TerminalRenderer::new(zgx_terminal::terminal_view),
         theme_scope_with(
             || ThemeOverride::new().with(tok::FONT_MONO, FontFamily::from(zgx_workload::FONT)),
-            terminal(&term).w(800.).h(600.),
+            terminal(&term).w(800.).h(height),
         ),
     ));
     ui.prepare_frame();
     ui.scene.borrow_mut().flush();
     let output = output(lines);
+    // A frame's worth each: 4 KB reads, or so many lines. Taken as they go,
+    // nothing allocated for them: the 4 KB reads cost what they did before
+    // `PER_FRAME` (a list of them moved the heap, and `terminal-reader`
+    // counted 0.04% more in malloc and in this function, none of it zgx's).
+    let mut chunks = output.chunks(4096);
+    let mut trickle = Lines {
+        rest: &output,
+        per_read: per_frame.unwrap_or(1).max(1),
+    };
     let started = std::time::Instant::now();
     let mut frames = 0;
-    for read in output.chunks(4096) {
+    while let Some(read) = match per_frame {
+        None => chunks.next(),
+        Some(_) => trickle.next_read(),
+    } {
         replay.feed(read);
         ui.prepare_frame();
         ui.scene.borrow_mut().flush();

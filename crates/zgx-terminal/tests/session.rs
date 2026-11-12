@@ -237,6 +237,111 @@ fn queries_are_answered_and_the_foreground_is_known() {
     }
 }
 
+/// termenv's query, rounds given: each answer read a byte at a time, the
+/// first required to be the colour's (as `termStatusReport`), each timed.
+#[cfg(unix)]
+const PROBE: &str = r#"
+use strict;
+use warnings;
+use Time::HiRes qw(time sleep);
+system("stty raw -echo") == 0 or die "stty";
+sub byte {
+    my ($deadline) = @_;
+    my $left = $deadline - time();
+    return undef if $left <= 0;
+    my $rin = '';
+    vec($rin, fileno(STDIN), 1) = 1;
+    return undef unless select(my $rout = $rin, undef, undef, $left) > 0;
+    my $b;
+    return undef unless sysread(STDIN, $b, 1) == 1;
+    return $b;
+}
+sub answer {
+    my ($deadline) = @_;
+    while (1) {
+        my $b = byte($deadline);
+        return undef unless defined $b;
+        last if $b eq "\e";
+    }
+    my $kind = byte($deadline);
+    return undef unless defined $kind;
+    my $got = "\e$kind";
+    while (length($got) < 64) {
+        my $b = byte($deadline);
+        return undef unless defined $b;
+        $got .= $b;
+        return $got if $kind eq ']' && ($b eq "\a" || substr($got, -2) eq "\e\\");
+        return $got if $kind eq '[' && $b eq 'R';
+    }
+    return $got;
+}
+my ($ordered, $misordered, $lost) = (0, 0, 0);
+my (@color, @cursor);
+for (1 .. $ARGV[0]) {
+    my $start = time();
+    syswrite(STDOUT, "\e]11;?\e\\\e[6n");
+    my $deadline = $start + 2;
+    my $first = answer($deadline);
+    my $t1 = time();
+    my $second = defined $first ? answer($deadline) : undef;
+    my $t2 = time();
+    if (!defined $first || !defined $second) {
+        $lost++;
+    } elsif (substr($first, 0, 2) eq "\e]") {
+        $ordered++; push @color, ($t1 - $start) * 1e3; push @cursor, ($t2 - $start) * 1e3;
+    } else {
+        $misordered++; push @cursor, ($t1 - $start) * 1e3; push @color, ($t2 - $start) * 1e3;
+    }
+    sleep(0.002);
+}
+system("stty sane");
+sub pct { my ($q, @x) = @_; return -1 unless @x; @x = sort { $a <=> $b } @x; my $i = int($q * @x); $i = $#x if $i > $#x; return $x[$i]; }
+sub most { my @x = @_; return -1 unless @x; my $m = $x[0]; for (@x) { $m = $_ if $_ > $m } return $m; }
+printf "\r\nPROBE ordered=%d misordered=%d lost=%d color_p50=%.2f color_p99=%.2f color_max=%.2f cursor_p50=%.2f cursor_max=%.2f\r\n",
+    $ordered, $misordered, $lost, pct(.5, @color), pct(.99, @color), most(@color), pct(.5, @cursor), most(@cursor);
+"#;
+
+/// termenv's way of asking (gh, glamour, lipgloss): the background colour
+/// (OSC 11), then the cursor (CSI 6n), each answer read a byte at a time and
+/// the first required to be the colour's, else "no colour", and what comes
+/// after reads as typed keys (gh's prompt: "unexpected escape sequence from
+/// terminal: ['\x1b' ']']"). Asked many times over, every answer comes in
+/// the order asked, timed.
+#[cfg(unix)]
+#[test]
+fn answers_come_in_the_order_they_were_asked() {
+    let probe = std::env::temp_dir().join(format!("zgx-terminal-probe-{}.pl", std::process::id()));
+    std::fs::write(&probe, PROBE).unwrap();
+    let mut run = Scripted::run(
+        &format!("exec perl {} 200; sleep 30", probe.display()),
+        200,
+        6,
+    );
+    run.until("the probe's summary", |_, term| {
+        rows(term)
+            .iter()
+            .any(|r| r.starts_with("PROBE ") && r.contains("cursor_max="))
+    });
+    let summary = rows(&run.session.term())
+        .into_iter()
+        .find(|r| r.starts_with("PROBE "))
+        .unwrap();
+    let _ = std::fs::remove_file(&probe);
+    eprintln!("{summary}");
+    let field = |name: &str| -> usize {
+        summary
+            .split_whitespace()
+            .find_map(|kv| kv.strip_prefix(&format!("{name}=")))
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(usize::MAX)
+    };
+    assert_eq!(
+        (field("ordered"), field("misordered"), field("lost")),
+        (200, 0, 0),
+        "{summary}"
+    );
+}
+
 /// A picture a program sends in its output (the kitty graphics protocol)
 /// is placed on the cells at the cursor and kept for the view, the cursor
 /// moves past it, and the program is answered through the pty.

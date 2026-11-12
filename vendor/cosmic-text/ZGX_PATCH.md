@@ -513,3 +513,14 @@ looked for takes those faces (in their order) without looking again. It is
 forgotten when the database can change (`db_mut`). `FontSystem::full_scans`
 counts the stage's runs. zgx-gpu's `simplified_han_after_kana_takes_a_chinese_face`
 and `every_face_is_looked_at_once_a_character` check both.
+
+## What shaping keeps, counted (zgx-cosmic-text 0.19.14)
+
+`FontSystem::cache_bytes`: about the bytes shaping holds between runs, for
+zgx's memory report (`zgx inspect memory`'s "text shaping buffers and
+caches"): `ShapeBuffer::heap_bytes` (cached shape plans and harfrust's buffer,
+through zgx-harfrust's `heap_bytes`; the spans, words, lines and hyphenation
+it reuses) and the font searches' caches (matches, first fonts and
+fallbacks, `scanned`, codepoint support, weight axes, monospace ids, the
+parsed-font table). Walked when asked; nothing is counted as text shapes.
+zgx-gpu's `shaping_counts_the_buffers_and_caches_it_keeps` checks it.

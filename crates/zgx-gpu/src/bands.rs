@@ -41,8 +41,9 @@ pub(crate) struct BandPhase<'a> {
     pub(crate) damage: Vec<Rect>,
     pub(crate) regions: Vec<(Rect, Scissor)>,
     pub(crate) view: wgpu::TextureView,
-    /// Its texture, for Metal directly (`render_direct`).
-    #[cfg(target_os = "macos")]
+    /// Its texture, for Metal directly (`render_direct`), and Direct3D 11
+    /// (its own texture keyed by it, `render_d3d11`).
+    #[cfg(any(target_os = "macos", d3d11))]
     pub(crate) texture: wgpu::Texture,
     /// The loop's draws for it (`render_flat`).
     pub(crate) draws: Vec<Draw>,
@@ -146,17 +147,10 @@ impl GpuRenderer {
     pub fn set_fade_bands(&mut self, enabled: bool) {
         self.bands_off = !enabled;
     }
-    /// Whether this renderer draws fade bands as one: not with Direct3D 11,
-    /// which draws no layers (its fades go item by item, as they did).
+    /// Whether this renderer draws fade bands as one (Direct3D 11 too, in
+    /// `render_d3d11`).
     pub(crate) fn band_capable(&self) -> bool {
-        if self.bands_off {
-            return false;
-        }
-        #[cfg(d3d11)]
-        if self.d3d11.is_some() {
-            return false;
-        }
-        true
+        !self.bands_off
     }
     /// The band textures, pooled or a frame's, let go (`GpuRenderer::trim`,
     /// as the host goes idle): a window at rest holds none; the next frame
@@ -665,7 +659,7 @@ impl GpuRenderer {
             damage,
             regions,
             view,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", d3d11))]
             texture,
             draws: Vec::new(),
         }

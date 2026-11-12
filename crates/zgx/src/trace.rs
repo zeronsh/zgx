@@ -154,21 +154,41 @@ thread_local! {
 /// the effects it can tell apart.
 pub fn memory(report: &mut crate::memory::Report) {
     LOG.with_borrow(|log| {
-        let frame = |f: &Frame| {
-            size_of::<Frame>()
+        // A name or note is counted once, however many frames' runs hold it
+        // (a run keeps its effect's name after the effect is gone): its text
+        // and its `Rc`'s counts.
+        let mut seen = std::collections::HashSet::new();
+        let mut text = |s: &Rc<str>| {
+            if seen.insert(Rc::as_ptr(s).cast::<u8>()) {
+                s.len() + 2 * size_of::<usize>()
+            } else {
+                0
+            }
+        };
+        let frames = log.frames.iter().chain(&log.held).chain([&log.current]);
+        let mut held = 0;
+        for f in frames.clone() {
+            held += size_of::<Frame>()
                 + f.writes.capacity() * size_of::<(usize, u32)>()
                 + f.runs.capacity() * size_of::<Run>()
                 + f.phases.capacity() * size_of::<(&'static str, u64, f32)>()
                 + f.notes.capacity() * size_of::<Rc<str>>()
-        };
-        let frames: usize = log.frames.iter().map(frame).sum();
-        report.add(
-            "devtools",
-            "frame log",
-            Some(log.frames.len()),
-            Some(frames),
-        );
-        let names = log.names.values().map(|name| name.len() + 16).sum();
+                + f.layout.top.capacity() * size_of::<Measured>()
+                + f.notes.iter().map(&mut text).sum::<usize>();
+        }
+        report.add("devtools", "frame log", Some(log.frames.len()), Some(held));
+        let table = |entries: usize, value: usize| entries * (size_of::<u64>() + value + 1);
+        let mut names = table(log.names.capacity(), size_of::<Rc<str>>())
+            + table(log.causes.capacity(), size_of::<usize>());
+        names += log.names.values().map(&mut text).sum::<usize>();
+        for f in frames {
+            names += f
+                .runs
+                .iter()
+                .filter_map(|r| r.name.as_ref())
+                .map(&mut text)
+                .sum::<usize>();
+        }
         report.add(
             "devtools",
             "effect names",
@@ -374,6 +394,43 @@ pub fn frames(n: usize) -> Vec<Frame> {
 #[cfg(test)]
 mod tests {
     use crate::{compose::prelude::*, widgets::Ui};
+
+    /// A memory report's devtools lines count a name once, wherever it's
+    /// held (the names, and runs of frames kept), and one a gone effect's
+    /// run alone still holds.
+    #[test]
+    fn a_report_counts_each_name_once_and_those_runs_keep() {
+        use std::rc::Rc;
+        let (named, gone): (Rc<str>, Rc<str>) = ("app.luau:30 effect".into(), "@12 binding".into());
+        super::LOG.with_borrow_mut(|log| {
+            *log = super::Log::default();
+            log.names.insert(1, named.clone());
+            let run = |name: &Rc<str>| super::Run {
+                effect: 1,
+                name: Some(name.clone()),
+                cause: None,
+                micros: 1.,
+            };
+            let frame = super::Frame {
+                runs: vec![run(&named), run(&named), run(&gone)],
+                ..Default::default()
+            };
+            log.frames.push_back(frame);
+        });
+        let mut report = crate::memory::Report::default();
+        super::memory(&mut report);
+        let (names, causes) =
+            super::LOG.with_borrow(|log| (log.names.capacity(), log.causes.capacity()));
+        super::LOG.with_borrow_mut(|log| *log = super::Log::default());
+        let line = report
+            .lines
+            .iter()
+            .find(|l| l.name == "effect names")
+            .unwrap();
+        let text = |s: &str| s.len() + 2 * size_of::<usize>();
+        let tables = names * (8 + size_of::<Rc<str>>() + 1) + causes * (8 + size_of::<usize>() + 1);
+        assert_eq!(line.bytes, Some(tables + text(&named) + text(&gone)));
+    }
 
     fn sizes() -> (usize, usize) {
         super::LOG.with_borrow(|log| (log.names.len(), log.causes.len()))

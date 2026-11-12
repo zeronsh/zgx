@@ -241,7 +241,7 @@ fn a_reader_hears_the_one_line_changed_among_identical_lines() {
     let mut app = Harness::new();
     app.ui.set_assistive_technology(true);
     let command = "stty -echo; i=0; while [ $i -lt 200 ]; do echo same; i=$((i+1)); done; \
-                   printf same; read a; printf '\\033[5;1Hdiff'; sleep 30";
+                   printf same; printf '\\033]2;read\\007'; read a; printf '\\033[5;1Hdiff'; sleep 30";
     let term = Terminal::new(&app.ui.runtime, session(command));
     let frames = zgx::frame::FrameClock::new();
     let renderer = zgx::terminal::TerminalRenderer::new(zgx_terminal::terminal_view);
@@ -259,13 +259,18 @@ fn a_reader_hears_the_one_line_changed_among_identical_lines() {
         });
         app.pump();
     };
-    // Every row showing the line, the last one too: the script's final
-    // `printf same` (no newline) has been read. Until then the bottom row is
-    // blank, and on a loaded machine that last line could arrive after this
-    // frame, with the rewrite, and be heard as news beside it.
+    // Every row showing the line, once the title the script sets after its
+    // last line is in: everything before it has been read. The rows alone
+    // don't say so: once the screen is full, each line scrolling in leaves
+    // it as it was, and a read ending inside a line (`same` before its
+    // newline) shows every row too. On a loaded machine the rest could
+    // arrive after this frame, with the rewrite, and be heard as news
+    // beside it.
     app.until("a screen of identical lines", |app| {
         let rows = term.state().get().rows;
-        rows > 5 && app.texts().iter().filter(|shown| *shown == "same").count() >= usize::from(rows)
+        term.title() == "read"
+            && rows > 5
+            && app.texts().iter().filter(|shown| *shown == "same").count() >= usize::from(rows)
     });
     // What the lines' arrival said goes with this frame.
     frame(&mut app);

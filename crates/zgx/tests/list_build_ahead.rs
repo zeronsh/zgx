@@ -726,3 +726,73 @@ fn pictures_in_rows_built_ahead_decode_before_they_show() {
     spare(&ui);
     assert!(decoded(9), "row 9's picture: {:?}", decoded_names());
 }
+
+/// Set, a decode `held_picture` makes goes on.
+static HELD_GO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Set once `held_picture` has begun: the decoding thread is busy with it.
+static HELD_BEGUN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A 300 by 300 picture that decodes once `HELD_GO` is set (or after ten
+/// seconds), holding the decoding thread till then.
+fn held_picture(_: &[u8]) -> Result<std::sync::Arc<[u8]>, String> {
+    use std::sync::atomic::Ordering;
+    HELD_BEGUN.store(true, Ordering::Relaxed);
+    let until = Instant::now() + Duration::from_secs(10);
+    while !HELD_GO.load(Ordering::Relaxed) && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    Ok([90, 120, 200, 255].repeat(300 * 300).into())
+}
+/// Until `done` says so, or ten seconds.
+fn wait_until(what: &str, done: impl Fn() -> bool) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !done() {
+        assert!(Instant::now() < until, "{what}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A list whose last row built ahead found no room for its pictures (the
+/// process's decodes ahead were all waiting) asks for no spare time at rest
+/// once room comes back: what it let go of is no longer its to ask for.
+#[test]
+fn at_rest_a_list_asks_no_spare_time_when_room_for_pictures_comes_back() {
+    use std::sync::{Arc, atomic::Ordering};
+    use zgx::image::{AHEAD_MOST, ImageData, ahead_room};
+    let _alone = pictures_alone();
+    wait_until("a decode ahead left over", ahead_room);
+    let mut ui = hosted();
+    let (offset, _rows) = fixed(&mut ui, 10_000);
+    spare(&ui);
+    for to in [100., 200., 300.] {
+        scroll_to(&ui, &offset, to);
+        spare(&ui);
+    }
+    // No room ahead: one decode holds the decoding thread, `AHEAD_MOST` wait.
+    HELD_GO.store(false, Ordering::Relaxed);
+    HELD_BEGUN.store(false, Ordering::Relaxed);
+    let held: Vec<Arc<ImageData>> = (0..=AHEAD_MOST)
+        .map(|i| {
+            let file: Arc<[u8]> = format!("held {i}").into_bytes().into();
+            Arc::new(ImageData::kept(300, 300, file, held_picture).unwrap())
+        })
+        .collect();
+    let first = held[0].decode_ahead((300, 300)).expect("asked ahead");
+    wait_until("the held decode to begin", || {
+        HELD_BEGUN.load(Ordering::Relaxed)
+    });
+    let waiting: Vec<_> = held[1..]
+        .iter()
+        .map(|image| image.decode_ahead((300, 300)))
+        .collect();
+    assert!(waiting.iter().all(Option::is_some), "all asked ahead");
+    assert!(!ahead_room());
+    // Its last row built ahead: no room to ask for its pictures.
+    scroll_to(&ui, &offset, 400.);
+    spare(&ui);
+    // Room comes back while it rests.
+    HELD_GO.store(true, Ordering::Relaxed);
+    wait_until("room ahead again", ahead_room);
+    ui.release_kept_rows().unwrap();
+    assert!(!ui.spare_work_wanted(), "nothing wakes it at rest");
+    drop((first, waiting));
+}

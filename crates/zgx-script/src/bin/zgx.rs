@@ -214,7 +214,7 @@ fn test(args: Vec<String>) -> ExitCode {
     let dir = PathBuf::from(args.first().map_or(".", String::as_str));
     let filter = args.get(1).map(String::as_str);
     // Interrupted, what the tests made in the temp directory goes too.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     zgx_script::test_runner::remove_made_on_interrupt();
     let report = zgx_script::test_runner::run(&dir, filter, |outcome| {
         let millis = outcome.duration.as_secs_f64() * 1e3;
