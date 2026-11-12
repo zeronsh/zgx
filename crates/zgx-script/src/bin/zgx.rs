@@ -468,7 +468,7 @@ another of its windows (an id from `windows`, or an item's key in ui.windows).
   state [name] [--full]                  set <name> <json>
   click <target>       type <target> <text>      key <keys>
   hover <target|x,y>   right-click <target|x,y>  drag <from> <to|x,y>
-  scroll <target> <dy> [dx] command <id>
+  scroll <target|x,y> <dy> [dx]  command <id>
   errors               lint
   contributions        each plugin's targets: where, live matches, error (JSON)
   elements             named elements by the context they read, for plugins (JSON)
