@@ -2968,8 +2968,9 @@ impl Host {
         if !damage.is_empty() {
             if self.frame_paced && !self.present_ready {
                 // Layout/model work proceeds, but GPU work waits until a
-                // frame is granted: its damage is the next frame's too.
-                self.held_damage.hold(damage);
+                // frame is granted: its damage is the next frame's too, and
+                // so is every view it scrolled (`hold_frame`).
+                hold_frame(&mut self.held_damage, damage, &scene);
                 window.request_redraw();
             } else {
                 // Steady frames render at a time of their own within their
@@ -8857,6 +8858,22 @@ impl FrameDamage {
         self.0.clear();
     }
 }
+/// A frame the compositor hasn't granted yet: its `damage`, and every view
+/// its flush scrolled, whole. A scroll's flush damages only what copying
+/// the view's old pixels can't give (`ScrollMove`), and the copy is good
+/// only over the frame drawn from the flush before it; this one is never
+/// drawn, and the next flush reports moves of its own (or none, the scroll
+/// at rest), so those views would keep their old pixels, every row of them
+/// off by however far it moved.
+fn hold_frame(held: &mut FrameDamage, damage: &[Rect], scene: &zgx::scene::Scene) {
+    held.hold(damage);
+    let serial = scene.flush_serial();
+    for scroll in scene.scroll_moves() {
+        if scroll.serial == serial {
+            held.hold(&[scroll.clip]);
+        }
+    }
+}
 /// `rect` into `rects`, joined with every rectangle it meets.
 fn join(rects: &mut Vec<Rect>, mut rect: Rect) {
     while let Some(at) = rects.iter().position(|other| other.intersects(rect)) {
@@ -9310,6 +9327,94 @@ mod tests {
         held.clear();
         assert!(held.is_empty());
         assert_eq!(held.with(&[third], window), vec![third]);
+    }
+
+    /// A frame-paced window (Wayland) that scrolls a fading view (a
+    /// transcript under its title bar and composer) while its frame waits,
+    /// and then draws a flush that moves nothing: the frame it draws matches
+    /// one painted whole. The waiting flush damaged only the view's bands and
+    /// the strip scrolled in, for a copy of the rest; that copy was never
+    /// drawn, so the rest must repaint, at a scale whose moves fall between
+    /// device pixels (no copy at all) and at one where they copy.
+    #[test]
+    fn a_scroll_flushed_while_a_frame_waits_is_painted_whole_with_the_next() {
+        use zgx::compose::prelude::*;
+        use zgx_gpu::GpuRenderer;
+        const W: f32 = 240.;
+        const H: f32 = 180.;
+        for scale in [1.875_f32, 1.] {
+            let (w, h) = ((W * scale) as u32, (H * scale) as u32);
+            let renderer = || {
+                let mut gpu = GpuRenderer::new(w, h).unwrap();
+                gpu.set_scale_factor(scale);
+                gpu.set_background(zgx::scene::Color(0, 0, 0, 255));
+                gpu.debug_enable_single_pass();
+                gpu
+            };
+            let (mut gpu, mut whole) = (renderer(), renderer());
+            gpu.debug_allow_scroll_copies();
+            let mut ui = zgx::widgets::Ui::new(W, H);
+            let offset = ui.signal(0_f32);
+            // Something beside the view that changes as it scrolls (its
+            // rail, a way back to the end showing).
+            let lit = ui.signal(false);
+            let read = lit.clone();
+            let mut page = column().w(W - 20.);
+            for i in 0..60 {
+                let color = if i % 2 == 0 { 0x5a7a9a } else { 0x9a5a7a };
+                page = page.child(div().w(W - 20.).h(16.).bg(rgb(color)));
+            }
+            ui.mount(
+                row()
+                    .w(W)
+                    .h(H)
+                    .bg(rgb(0x000000))
+                    .child(
+                        scroll(offset.clone())
+                            .w(W - 20.)
+                            .h(H)
+                            .bg(rgb(0x101820))
+                            .fade_edges(12., 40.)
+                            .child(page),
+                    )
+                    .child(div().w(20.).h(20.).reactive_style(move || {
+                        Styles::new().bg(rgb(if read.get() { 0xffffff } else { 0x303030 }))
+                    })),
+            );
+            let full = Rect::new(0., 0., W, H);
+            let mut held = super::FrameDamage::default();
+            let mut draw = |ui: &mut zgx::widgets::Ui, held: &mut super::FrameDamage, label: &str| {
+                ui.prepare_frame();
+                let damage = ui.scene.borrow_mut().flush().damage;
+                let damage = held.with(&damage, full);
+                held.clear();
+                gpu.render(&ui.scene.borrow(), &damage).unwrap();
+                let partial = gpu.debug_present_offscreen().unwrap();
+                whole.render(&ui.scene.borrow(), &[full]).unwrap();
+                let fresh = whole.debug_present_offscreen().unwrap();
+                let wrong = partial
+                    .chunks(4)
+                    .zip(fresh.chunks(4))
+                    .position(|(a, b)| a.iter().zip(b).any(|(a, b)| a.abs_diff(*b) > 1));
+                assert!(
+                    wrong.is_none(),
+                    "at {scale}x, {label}: a stale pixel at {:?}",
+                    wrong.map(|p| (p % w as usize, p / w as usize)),
+                );
+            };
+            draw(&mut ui, &mut held, "first");
+            draw(&mut ui, &mut held, "settled");
+            for step in 0..6 {
+                // Scrolled while the frame waits: flushed, held, not drawn.
+                offset.update(|o| *o += 8.);
+                ui.prepare_frame();
+                let report = ui.scene.borrow_mut().flush();
+                super::hold_frame(&mut held, &report.damage, &ui.scene.borrow());
+                // The frame granted, its own flush moving nothing.
+                lit.update(|on| *on = !*on);
+                draw(&mut ui, &mut held, &format!("step {step}"));
+            }
+        }
     }
 
     /// However many waits pile up, what is kept stays bounded and holds all
