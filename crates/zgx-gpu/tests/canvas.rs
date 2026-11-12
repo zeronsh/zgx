@@ -469,6 +469,155 @@ fn a_canvas_view_places_its_drawing_without_drawing_it_again() {
     assert_eq!(rgb(&bytes, 200, 25, 25), [255, 0, 0]);
 }
 
+/// A board larger than its box, of curves, an ellipse, a gradient and a
+/// clip: panned, its raster moves with no rasterizing, or rasterizes what
+/// the pan shows anew alone, and looks as its raster under the view does.
+#[test]
+fn a_panned_canvas_moves_its_raster_and_looks_as_drawn_under_the_view() {
+    use zgx::scene::CanvasView;
+    let mut board = Canvas::new();
+    board.fill(
+        Path::rectangle(Rect::new(0., 0., 400., 300.)),
+        Brush::linear(
+            Point::new(0., 0.),
+            Point::new(400., 300.),
+            vec![
+                GradientStop {
+                    offset: 0.,
+                    color: Color(250, 240, 220, 255),
+                },
+                GradientStop {
+                    offset: 1.,
+                    color: Color(40, 60, 120, 255),
+                },
+            ],
+        )
+        .unwrap(),
+    );
+    board.clip(
+        Path::rounded_rect(Rect::new(30., 20., 300., 200.), 24.).unwrap(),
+        FillRule::Winding,
+    );
+    for i in 0..12 {
+        let at = i as f32 * 31.;
+        board.fill(
+            Path::ellipse(Rect::new(at, at * 0.6, 70., 40.)).unwrap(),
+            Color(200, (i * 20) as u8, 40, 255),
+        );
+        let mut curve = Path::builder();
+        curve.move_to(at, 250.).cubic_to(
+            Point::new(at + 20., 150.),
+            Point::new(at + 50., 290.),
+            Point::new(at + 80., 200.),
+        );
+        board.stroke(
+            curve.build().unwrap(),
+            Color(20, 20, 20, 255),
+            Stroke {
+                width: 3.,
+                ..Stroke::default()
+            },
+        );
+    }
+    board.restore();
+    let board = Arc::new(board);
+    let mut scene = Scene::new(200., 120.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let node = scene.append(
+        scene.root(),
+        NodeKind::Canvas(board.clone()),
+        Style {
+            width: Some(200.),
+            height: Some(120.),
+            ..Default::default()
+        },
+    );
+    let at = |x: f32, y: f32, scale: f32| CanvasView { x, y, scale };
+    let renderer = || {
+        let mut gpu = GpuRenderer::new(300, 180).unwrap();
+        gpu.set_scale_factor(1.5);
+        gpu
+    };
+    // What a box's raster under `view` shows.
+    let drawn = |view: CanvasView| {
+        let image = zgx_gpu::canvas::rasterize_viewed(&board, view, 200., 120., 1.5).unwrap();
+        image.pixels().to_vec()
+    };
+    // The pixels that differ by more than 2 in a colour, and the most any does.
+    let differ = |a: &[u8], b: &[u8]| {
+        let off = (0..300 * 180)
+            .filter(|i| (0..3).any(|c| a[i * 4 + c].abs_diff(b[i * 4 + c]) > 2))
+            .count();
+        let most = (0..300 * 180 * 4)
+            .filter(|i| i % 4 != 3)
+            .map(|i| a[i].abs_diff(b[i]))
+            .max()
+            .unwrap();
+        (off, most)
+    };
+    // As its raster under `view`, but at edges' antialiasing, which
+    // tiny-skia draws a little differently for the same drawing moved by
+    // whole pixels.
+    let looks_as_drawn = |gpu: &GpuRenderer, view: CanvasView| {
+        let (off, most) = differ(&gpu.readback().unwrap(), &drawn(view));
+        assert!(
+            off < 300 * 180 / 100 && most < 80,
+            "{view:?}: {off} pixels, by {most}"
+        );
+    };
+    let mut gpu = renderer();
+    let mut show = |gpu: &mut GpuRenderer, view: CanvasView| {
+        scene.set_canvas_view(node, Some(view));
+        let report = scene.flush();
+        gpu.render(&scene, &report.damage).unwrap()
+    };
+    let start = at(-10., -6., 1.5);
+    assert_eq!(show(&mut gpu, start).canvas_rasterizations, 1);
+    let first = drawn(start);
+    assert_eq!(differ(&gpu.readback().unwrap(), &first), (0, 0));
+    // Panned (by whole pixels) onto more of it: what is new rasterized,
+    // beside what was.
+    let panned = at(-90., -50., 1.5);
+    let stats = show(&mut gpu, panned);
+    assert_eq!(stats.canvas_rasterizations, 1);
+    assert_eq!(stats.image_uploads, 1);
+    looks_as_drawn(&gpu, panned);
+    // Back, and between: the raster moves, nothing drawn or uploaded, its
+    // pixels exactly the first raster's moved.
+    for (view, dx, dy) in [
+        (start, 0, 0),
+        (at(-50., -30., 1.5), 60, 36),
+        (at(-12., -8., 1.5), 3, 3),
+    ] {
+        let stats = show(&mut gpu, view);
+        assert_eq!(stats.canvas_rasterizations, 0, "{view:?}");
+        assert_eq!(stats.image_uploads, 0, "{view:?}");
+        looks_as_drawn(&gpu, view);
+        let shown = gpu.readback().unwrap();
+        for y in 0..180 - dy {
+            for x in 0..300 - dx {
+                let (i, j) = ((y * 300 + x) * 4, ((y + dy) * 300 + x + dx) * 4);
+                assert_eq!(shown[i..i + 3], first[j..j + 3], "{view:?} at {x}, {y}");
+            }
+        }
+    }
+    // Panned off it, and back: nothing shows, then it does.
+    assert_eq!(show(&mut gpu, at(500., 0., 1.5)).canvas_rasterizations, 0);
+    assert_eq!(gpu.readback().unwrap(), {
+        let mut empty = renderer();
+        let mut blank = Scene::new(200., 120.);
+        let report = blank.flush();
+        empty.render(&blank, &report.damage).unwrap();
+        empty.readback().unwrap()
+    });
+    assert_eq!(show(&mut gpu, start).canvas_rasterizations, 0);
+    assert_eq!(differ(&gpu.readback().unwrap(), &first), (0, 0));
+    // A zoom draws it again: what shows, as its raster under the view.
+    let zoomed = at(-40., -20., 2.);
+    assert_eq!(show(&mut gpu, zoomed).canvas_rasterizations, 1);
+    assert_eq!(differ(&gpu.readback().unwrap(), &drawn(zoomed)), (0, 0));
+}
+
 /// A filled area under a chart's line, its top chain jagged, in a gradient
 /// fading out: drawn as a quad, no raster made (rasterized where FXC compiles), and
 /// looks as its raster does, at both scales. So do a band between two lines, a triangle and a

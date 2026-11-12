@@ -28,6 +28,272 @@ struct Entry {
     /// Its size in bytes, uploaded or not: what the budget counts.
     bytes: usize,
     used: u64,
+    /// Where it lies, if drawn to be panned (`CanvasCache::get_panned`).
+    panned: Option<Panned>,
+}
+/// A raster drawn to be panned: a region of the drawing under one zoom, in
+/// the box's device pixels under the view it was first drawn under.
+#[derive(Clone, Copy)]
+struct Panned {
+    /// The region drawn (x0, y0, x1, y1).
+    region: [i32; 4],
+    /// What the drawing paints within, there: no pan shows more.
+    painted: [i32; 4],
+}
+/// Where a panned raster shows in its canvas's box: `rect` (x, y, width,
+/// height, in points from the box's corner; empty for nothing) and the part
+/// of the raster drawn there, `uv` (x, y, width, height, from 0 to 1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    /// Where in the box, in points.
+    pub rect: [f32; 4],
+    /// Which part of the raster.
+    pub uv: [f32; 4],
+}
+/// The most pixels a panned raster's region takes (its bytes the budget).
+const REGION_PIXELS: i64 = BUDGET as i64 / 4;
+/// The longest side of a panned raster's region, unless the viewport's is
+/// longer: within any GPU's textures.
+const REGION_SIDE: i64 = 4096;
+impl Panned {
+    /// Where it shows panned by `shift` device pixels from where it was
+    /// drawn, in a box of `size` device pixels (`width` points across, at
+    /// `scale`): `None` if part of the drawing that would show isn't in it.
+    fn place(
+        &self,
+        shift: [i32; 2],
+        size: [i32; 2],
+        width: f32,
+        height: f32,
+        scale: f32,
+    ) -> Option<Placement> {
+        let [rx0, ry0, rx1, ry1] = self.region;
+        // The viewport, where the raster was drawn.
+        let seen = [-shift[0], -shift[1], size[0] - shift[0], size[1] - shift[1]];
+        let needed = intersect(seen, self.painted);
+        if needed[0] < needed[2]
+            && needed[1] < needed[3]
+            && (needed[0] < rx0 || needed[1] < ry0 || needed[2] > rx1 || needed[3] > ry1)
+        {
+            return None;
+        }
+        let [x0, y0, x1, y1] = intersect(seen, self.region);
+        if x0 >= x1 || y0 >= y1 {
+            return Some(Placement {
+                rect: [0.; 4],
+                uv: [0.; 4],
+            });
+        }
+        let (x, y) = (
+            (x0 + shift[0]) as f32 / scale,
+            (y0 + shift[1]) as f32 / scale,
+        );
+        // The last pixel, cut where the box ends.
+        let w = ((x1 - x0) as f32 / scale).min(width - x);
+        let h = ((y1 - y0) as f32 / scale).min(height - y);
+        let (rw, rh) = ((rx1 - rx0) as f32, (ry1 - ry0) as f32);
+        Some(Placement {
+            rect: [x, y, w, h],
+            uv: [
+                (x0 - rx0) as f32 / rw,
+                (y0 - ry0) as f32 / rh,
+                w * scale / rw,
+                h * scale / rh,
+            ],
+        })
+    }
+}
+fn intersect(a: [i32; 4], b: [i32; 4]) -> [i32; 4] {
+    [
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+        a[2].min(b[2]),
+        a[3].min(b[3]),
+    ]
+}
+/// What `canvas` paints within (x0, y0, x1, y1, in its points): its fills
+/// and strokes' reach, a curve's by its control points. `None` for nothing.
+fn painted_bounds(canvas: &Canvas) -> Option<[f32; 4]> {
+    let mut out: Option<[f32; 4]> = None;
+    // A path's points, painted `reach` around and moved by `(dx, dy)`.
+    let mut within = |path: &Path, reach: f32, (dx, dy): (f32, f32)| {
+        let reach = if reach.is_finite() { reach.max(0.) } else { 0. };
+        for segment in path.segments() {
+            let points: &[Point] = match segment {
+                Segment::Move(p) | Segment::Line(p) => std::slice::from_ref(p),
+                Segment::Quadratic(a, b) => &[*a, *b],
+                Segment::Cubic(a, b, c) => &[*a, *b, *c],
+                Segment::Close => &[],
+            };
+            for p in points {
+                let (x, y) = (p.x + dx, p.y + dy);
+                if !x.is_finite() || !y.is_finite() {
+                    continue;
+                }
+                let [x0, y0, x1, y1] = out.get_or_insert([x, y, x, y]);
+                *x0 = x0.min(x - reach);
+                *y0 = y0.min(y - reach);
+                *x1 = x1.max(x + reach);
+                *y1 = y1.max(y + reach);
+            }
+        }
+    };
+    for command in canvas.commands() {
+        match command {
+            Draw::Fill { path, .. } => within(path, 0., (0., 0.)),
+            // A miter juts out at most its limit times half the width; a
+            // square cap, half the width's diagonal.
+            Draw::Stroke { path, style, .. } => within(
+                path,
+                style.width / 2. * style.miter_limit.max(std::f32::consts::SQRT_2),
+                (0., 0.),
+            ),
+            Draw::Clip { .. } | Draw::Restore => {}
+        }
+    }
+    out
+}
+/// The first region of `canvas` drawn under `view` for a box of `size`
+/// device pixels at `scale`: what of it shows, as a raster of the box drew,
+/// and what it paints within (both in the box's device pixels).
+fn panned_region(
+    canvas: &Canvas,
+    view: zgx::scene::CanvasView,
+    size: [i32; 2],
+    scale: f32,
+) -> Panned {
+    // Two pixels more each way, for antialiasing.
+    let painted = painted_bounds(canvas).map_or([0; 4], |[x0, y0, x1, y1]| {
+        let at = |v: f32, offset: f32| ((v * view.scale + offset) * scale) as f64;
+        let clamp = |v: f64| v.clamp(i32::MIN as f64 / 2., i32::MAX as f64 / 2.) as i32;
+        [
+            clamp(at(x0, view.x).floor() - 2.),
+            clamp(at(y0, view.y).floor() - 2.),
+            clamp(at(x1, view.x).ceil() + 2.),
+            clamp(at(y1, view.y).ceil() + 2.),
+        ]
+    });
+    Panned {
+        region: intersect([0, 0, size[0], size[1]], painted),
+        painted,
+    }
+}
+fn is_empty([x0, y0, x1, y1]: [i32; 4]) -> bool {
+    x0 >= x1 || y0 >= y1
+}
+fn area([x0, y0, x1, y1]: [i32; 4]) -> i64 {
+    (i64::from(x1) - i64::from(x0)) * (i64::from(y1) - i64::from(y0))
+}
+impl Panned {
+    /// It grown for the viewport panned by `shift` past it: on to an
+    /// eighth of the viewport beyond, the way the view went, added to what
+    /// it holds while within the limits (or in its place).
+    fn extended(&self, shift: [i32; 2], size: [i32; 2]) -> Panned {
+        let seen = [-shift[0], -shift[1], size[0] - shift[0], size[1] - shift[1]];
+        let (mx, my) = (size[0] / 8, size[1] / 8);
+        let [x0, y0, x1, y1] = self.region;
+        let ahead = [
+            if seen[0] < x0 { seen[0] - mx } else { seen[0] },
+            if seen[1] < y0 { seen[1] - my } else { seen[1] },
+            if seen[2] > x1 { seen[2] + mx } else { seen[2] },
+            if seen[3] > y1 { seen[3] + my } else { seen[3] },
+        ];
+        let grown = intersect(ahead, self.painted);
+        let both = match is_empty(self.region) {
+            true => grown,
+            false => [
+                x0.min(grown[0]),
+                y0.min(grown[1]),
+                x1.max(grown[2]),
+                y1.max(grown[3]),
+            ],
+        };
+        let fits = |[x0, y0, x1, y1]: [i32; 4]| {
+            i64::from(x1 - x0) <= REGION_SIDE.max(i64::from(size[0] + 2 * mx))
+                && i64::from(y1 - y0) <= REGION_SIDE.max(i64::from(size[1] + 2 * my))
+                && area([x0, y0, x1, y1]) <= REGION_PIXELS
+        };
+        Panned {
+            region: if fits(both) {
+                both
+            } else if area(grown) <= REGION_PIXELS {
+                grown
+            } else {
+                intersect(seen, self.painted)
+            },
+            painted: self.painted,
+        }
+    }
+}
+/// The `region` (x0, y0, x1, y1, in its box's device pixels) of `canvas`
+/// under `view` at `scale`, its pixels where `old` (the region `pixels`
+/// hold) has them taken from there: only what is new is rasterized.
+fn rasterize_region(
+    canvas: &Canvas,
+    view: zgx::scene::CanvasView,
+    scale: f32,
+    region: [i32; 4],
+    old: Option<([i32; 4], &ImageData)>,
+) -> Result<ImageData, GpuError> {
+    if is_empty(region) {
+        // Nothing shows: a pixel, never drawn.
+        return ImageData::new(1, 1, vec![0; 4]).map_err(|e| GpuError(e.into()));
+    }
+    if area(region) > REGION_PIXELS {
+        return Err(GpuError("canvas raster exceeds 32 MiB".into()));
+    }
+    let [x0, y0, x1, y1] = region;
+    let (w, h) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    let drawn = |[ax, ay, bx, by]: [i32; 4]| {
+        let transform = sk::Transform::from_translate(-ax as f32, -ay as f32).pre_concat(
+            sk::Transform::from_row(
+                view.scale * scale,
+                0.,
+                0.,
+                view.scale * scale,
+                view.x * scale,
+                view.y * scale,
+            ),
+        );
+        rasterize_at(canvas, (bx - ax) as u32, (by - ay) as u32, transform)
+    };
+    let kept = old
+        .map(|(at, pixels)| (intersect(at, region), at, pixels))
+        .filter(|(both, ..)| !is_empty(*both));
+    let Some((both, at, pixels)) = kept else {
+        return drawn(region);
+    };
+    let mut out = vec![0u8; w * h * 4];
+    // Each part's rows into place.
+    let mut put =
+        |[ax, ay, bx, by]: [i32; 4], from: &[u8], from_x: i32, from_y: i32, stride: usize| {
+            let len = (bx - ax) as usize * 4;
+            for y in ay..by {
+                let src = ((y - from_y) as usize * stride + (ax - from_x) as usize) * 4;
+                let dst = ((y - y0) as usize * w + (ax - x0) as usize) * 4;
+                out[dst..dst + len].copy_from_slice(&from[src..src + len]);
+            }
+        };
+    put(both, pixels.pixels(), at[0], at[1], pixels.width() as usize);
+    // What is new: the bands above and below what was kept, and beside it.
+    for part in [
+        [x0, y0, x1, both[1]],
+        [x0, both[3], x1, y1],
+        [x0, both[1], both[0], both[3]],
+        [both[2], both[1], x1, both[3]],
+    ] {
+        if !is_empty(part) {
+            let image = drawn(part)?;
+            put(
+                part,
+                image.pixels(),
+                part[0],
+                part[1],
+                image.width() as usize,
+            );
+        }
+    }
+    ImageData::new(w as u32, h as u32, out).map_err(|e| GpuError(e.into()))
 }
 /// A cached raster: its image id, and its pixels if not uploaded yet.
 pub struct Raster {
@@ -82,7 +348,11 @@ impl CanvasCache {
     }
     /// `node`'s raster is on the GPU: its pixels need not stay in memory.
     pub fn uploaded(&mut self, node: NodeId) {
-        if let Some(entry) = self.entries.get_mut(&node) {
+        // A panned raster's are kept: a pan past it draws what is new
+        // beside them.
+        if let Some(entry) = self.entries.get_mut(&node)
+            && entry.panned.is_none()
+        {
             entry.pixels = None;
         }
     }
@@ -162,11 +432,116 @@ impl CanvasCache {
             && entry.height == height
             && entry.scale == scale
             && entry.view == view
+            && entry.panned.is_none()
         {
             entry.used = self.clock;
             return Ok(entry.raster());
         }
         let image = Arc::new(rasterize_viewed(canvas, view, width, height, scale)?);
+        Ok(self.store(node, canvas, image, (width, height, scale), view, None))
+    }
+    /// `canvas` rasterized for `node` under `view`, to be drawn where the
+    /// `Placement` says in its `width` by `height` point box at `scale`. A
+    /// pan moves the raster, in whole device pixels, rasterizing nothing;
+    /// one onto more of the drawing rasterizes what it shows anew alone,
+    /// kept beside the rest (to the limits). A zoom or a change rasterizes
+    /// what shows, as `get_viewed` does.
+    pub fn get_panned(
+        &mut self,
+        node: NodeId,
+        canvas: &Arc<Canvas>,
+        view: zgx::scene::CanvasView,
+        width: f32,
+        height: f32,
+        scale: f32,
+    ) -> Result<(Raster, Placement), GpuError> {
+        if ![width, height, scale, view.x, view.y, view.scale]
+            .iter()
+            .all(|v| v.is_finite())
+            || width <= 0.
+            || height <= 0.
+            || scale <= 0.
+            || view.scale <= 0.
+            || canvas.commands().len() > 65536
+        {
+            return Err(GpuError(
+                "invalid canvas dimensions or command count".into(),
+            ));
+        }
+        let size = [
+            (width * scale).ceil() as i32,
+            (height * scale).ceil() as i32,
+        ];
+        self.clock = self.clock.wrapping_add(1);
+        // The raster at this zoom, and how far the view moved since.
+        let mut kept = None;
+        if let Some(entry) = self.entries.get_mut(&node)
+            && let Some(panned) = entry.panned
+            && entry
+                .canvas
+                .upgrade()
+                .is_some_and(|old| Arc::ptr_eq(&old, canvas) || old == *canvas)
+            && entry.width == width
+            && entry.height == height
+            && entry.scale == scale
+            && entry.view.scale == view.scale
+        {
+            let shift = [
+                ((view.x - entry.view.x) * scale).round() as i32,
+                ((view.y - entry.view.y) * scale).round() as i32,
+            ];
+            if let Some(placement) = panned.place(shift, size, width, height, scale) {
+                entry.used = self.clock;
+                return Ok((entry.raster(), placement));
+            }
+            kept = entry
+                .pixels
+                .clone()
+                .map(|pixels| (entry.view, panned, pixels, shift));
+        }
+        // Panned past what it holds: what is new drawn beside what it
+        // holds. Else (a zoom, a change) what shows, as a box's raster.
+        let (drawn, panned, image, shift) = match &kept {
+            Some((drawn, old, pixels, shift)) => {
+                let panned = old.extended(*shift, size);
+                let image = rasterize_region(
+                    canvas,
+                    *drawn,
+                    scale,
+                    panned.region,
+                    Some((old.region, pixels)),
+                )?;
+                (*drawn, panned, image, *shift)
+            }
+            None => {
+                let panned = panned_region(canvas, view, size, scale);
+                let image = rasterize_region(canvas, view, scale, panned.region, None)?;
+                (view, panned, image, [0, 0])
+            }
+        };
+        let placement = panned
+            .place(shift, size, width, height, scale)
+            .expect("drawn where it shows");
+        let raster = self.store(
+            node,
+            canvas,
+            Arc::new(image),
+            (width, height, scale),
+            drawn,
+            Some(panned),
+        );
+        Ok((raster, placement))
+    }
+    /// Keep `image`, `canvas` rasterized for `node`, within the budget.
+    fn store(
+        &mut self,
+        node: NodeId,
+        canvas: &Arc<Canvas>,
+        image: Arc<ImageData>,
+        (width, height, scale): (f32, f32, f32),
+        view: zgx::scene::CanvasView,
+        panned: Option<Panned>,
+    ) -> Raster {
         if let Some(old) = self.entries.remove(&node) {
             self.bytes -= old.bytes;
         }
@@ -191,13 +566,14 @@ impl CanvasCache {
                 pixels: Some(image.clone()),
                 bytes,
                 used: self.clock,
+                panned,
             },
         );
         self.rasterizations += 1;
-        Ok(Raster {
+        Raster {
             id: image.id(),
             pixels: Some(image),
-        })
+        }
     }
 }
 /// Whether `node` is in the scene, a canvas or a decorated box.
@@ -325,7 +701,7 @@ impl HeadlessCanvases {
                 counts.0 += 1;
             } else if self
                 .cache
-                .get_viewed(item.id, canvas, view, bounds.width, bounds.height, scale)
+                .get_panned(item.id, canvas, view, bounds.width, bounds.height, scale)
                 .is_ok()
             {
                 counts.1 += 1;
@@ -374,12 +750,22 @@ pub fn rasterize_viewed(
     {
         return Err(GpuError("canvas raster exceeds 32 MiB".into()));
     }
-    let mut pixmap =
-        sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
     // Exact scaling to rounded texture extents avoids a fractional final-pixel seam.
     let transform = sk::Transform::from_scale(w as f32 / width, h as f32 / height).pre_concat(
         sk::Transform::from_row(view.scale, 0., 0., view.scale, view.x, view.y),
     );
+    rasterize_at(canvas, w, h, transform)
+}
+/// `canvas` drawn by `transform` (its points to pixels) into a `w` by `h`
+/// pixel image.
+fn rasterize_at(
+    canvas: &Canvas,
+    w: u32,
+    h: u32,
+    transform: sk::Transform,
+) -> Result<ImageData, GpuError> {
+    let mut pixmap =
+        sk::Pixmap::new(w, h).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
     let mut masks: Vec<sk::Mask> = Vec::new();
     for command in canvas.commands() {
         match command {
