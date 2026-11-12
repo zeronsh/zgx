@@ -110,7 +110,8 @@ pub fn accelerator(text: &str) -> Option<MenuAccelerator> {
 ///
 /// ```json
 /// { "title": "Mail", "width": 1100, "height": 720, "min_width": 640,
-///   "min_height": 400, "titlebar": "inset", "glass": true, "app_id": "mail" }
+///   "min_height": 400, "titlebar": "inset", "traffic_lights": { "x": 18, "y": 22 },
+///   "glass": true, "app_id": "mail" }
 /// ```
 #[derive(Clone, Debug, PartialEq)]
 pub struct AppConfig {
@@ -149,6 +150,10 @@ struct WindowConfig {
     /// How tall `titlebar: "inset"`'s caption buttons are on Windows, in the
     /// content's points (`caption_height`; `WindowOptions::caption_height`).
     caption_height: Option<f64>,
+    /// Where `titlebar: "inset"`'s traffic lights go on macOS: the close
+    /// button's top left in the content's points (`traffic_lights`,
+    /// `{ "x": 18, "y": 22 }`; `WindowOptions::traffic_lights`).
+    traffic_lights: Option<(f64, f64)>,
 }
 impl AppConfig {
     /// The config for the script at `script`: its directory's `zgx.json`
@@ -194,6 +199,7 @@ impl AppConfig {
                     visible: true,
                     max_size: None,
                     caption_height: None,
+                    traffic_lights: None,
                 },
             ));
         };
@@ -232,6 +238,7 @@ impl AppConfig {
                 "min_height",
                 "titlebar",
                 "caption_height",
+                "traffic_lights",
                 "glass",
                 "app_id",
                 "application_id",
@@ -264,6 +271,25 @@ impl AppConfig {
                 return Err(fail(format!("`caption_height` is {height}: not positive")));
             }
             height => height,
+        };
+        // `{ "x": 18, "y": 22 }`: the close button's top left.
+        let traffic_lights = match object.get("traffic_lights") {
+            None => None,
+            Some(value) => {
+                let at = value.as_object().filter(|at| at.len() == 2);
+                let coordinate = |key: &str| {
+                    at.and_then(|at| at.get(key)?.as_f64())
+                        .filter(|v| v.is_finite())
+                };
+                match (coordinate("x"), coordinate("y")) {
+                    (Some(x), Some(y)) => Some((x, y)),
+                    _ => {
+                        return Err(fail(
+                            "`traffic_lights` is not `{ \"x\": <points>, \"y\": <points> }`".into(),
+                        ));
+                    }
+                }
+            }
         };
         config.titlebar = match string("titlebar")?.as_deref() {
             None | Some("standard") => zgx_desktop::Titlebar::Standard,
@@ -308,6 +334,7 @@ impl AppConfig {
                 visible,
                 max_size,
                 caption_height,
+                traffic_lights,
             },
         ))
     }
@@ -385,6 +412,7 @@ pub fn run_hosting(
         visible,
         max_size,
         caption_height,
+        traffic_lights,
     } = window_config;
     let options = WindowOptions {
         title: config.title.clone(),
@@ -394,6 +422,7 @@ pub fn run_hosting(
         max_size,
         titlebar: config.titlebar,
         caption_height,
+        traffic_lights,
         glass: config.glass.then(zgx_desktop::Glass::default),
         frame_autosave,
         visible,
@@ -815,6 +844,36 @@ mod tests {
         .unwrap();
         let error = AppConfig::read(&script).unwrap_err();
         assert!(error.contains("is not a folder"), "{error}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_zgx_json_places_an_inset_title_bars_traffic_lights() {
+        let dir = std::env::temp_dir().join(format!("zgx-run-lights-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("app.luau");
+        std::fs::write(&script, "return ui.text 'x'").unwrap();
+        let lights = |script: &Path| AppConfig::read(script).map(|read| read.2.traffic_lights);
+        assert_eq!(lights(&script), Ok(None));
+        std::fs::write(
+            dir.join("zgx.json"),
+            r#"{ "titlebar": "inset", "traffic_lights": { "x": 18, "y": 22.5 } }"#,
+        )
+        .unwrap();
+        assert_eq!(lights(&script), Ok(Some((18., 22.5))));
+        for wrong in [
+            r#"{ "traffic_lights": [18, 22] }"#,
+            r#"{ "traffic_lights": { "x": 18 } }"#,
+            r#"{ "traffic_lights": { "x": 18, "y": "22" } }"#,
+            r#"{ "traffic_lights": { "x": 18, "y": 22, "z": 1 } }"#,
+        ] {
+            std::fs::write(dir.join("zgx.json"), wrong).unwrap();
+            let error = lights(&script).unwrap_err();
+            assert!(
+                error.contains("`traffic_lights` is not"),
+                "{wrong}: {error}"
+            );
+        }
         std::fs::remove_dir_all(dir).ok();
     }
 

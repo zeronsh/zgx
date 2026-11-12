@@ -170,7 +170,7 @@ ui.window.titlebar_area: State<WindowRect?>
 ui.window.controls: State<WindowRect?>
 ```
 
-Content under an inset or hidden title bar stays clear of the window's own buttons by reading where it may draw, as the web's Window Controls Overlay gives it. `ui.window.titlebar_area` is the strip the title bar leaves, less the window's buttons. `ui.window.controls` is the buttons. Each is `{ x, y, width, height }` in points from the window's top left, or nil for a standard title bar, in fullscreen, and where the platform does not say (macOS and Linux, for now). Both follow resizes, scale and fullscreen. `zgx run` keeps them; a Rust host passes its window's with `ScriptHost::window_chrome`.
+Content under an inset or hidden title bar stays clear of the window's own buttons by reading where it may draw, as the web's Window Controls Overlay gives it. `ui.window.titlebar_area` is the strip the title bar leaves, less the window's buttons. `ui.window.controls` is the buttons. Each is `{ x, y, width, height }` in points from the window's top left, or nil for a standard title bar and in fullscreen. On macOS they are AppKit's traffic lights where they are (a `zgx.json`'s `traffic_lights` places them) and the strip beside them, 40 points tall or as tall as centres the lights where they sit lower. Both follow resizes, scale and fullscreen. `zgx run` keeps them; a Rust host passes its window's with `ScriptHost::window_chrome`.
 
 ```lua
 return ui.row {

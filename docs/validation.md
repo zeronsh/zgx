@@ -1309,6 +1309,22 @@ zoomed or resized while zoomed keeps them there (zoom_probe `--inset --zoom
 2`, resized to 620×420: 40 points, read from screen captures). Passed on
 macOS 27 (M4), 2026-10-26.
 
+## macOS traffic lights placed by the app
+
+`scripts/macos_traffic_lights_probe.py` runs the traffic_lights_probe
+example with the close button asked at 18,22 and at 12,6
+(`WindowOptions::traffic_lights`). Through a resize, a dark and a light
+appearance, the app hidden and shown (focus lost and back), a zoom to 125%
+and back, and into and out of full screen by `toggleFullScreen:`, it reads
+the close button's top left from its own frame: there at every step, at
+125% where the zoomed content has it (22.5,29.25 for 18,22), and back after
+full screen rather than in AppKit's place. `WindowInfo::controls` says the
+same in the content's points, and `titlebar_area` is as tall as centres the
+lights (58 points for 18,22) or AppKit's 40. Screen captures of the window
+(`screencapture -l`) after the resize and after full screen show the
+lights 18 points in and 22 down, level with the mark in the probe's 60-point row.
+Passed on macOS 27 (arm64), 2026-11-11.
+
 ## macOS baked loops
 
 `scripts/macos_baked_loops_probe.py` runs a Luau app in `zgx-run` with a shader
