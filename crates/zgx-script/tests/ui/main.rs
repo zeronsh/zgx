@@ -81,6 +81,8 @@ mod list_thin_rows;
 mod markdown_lazy;
 #[path = "../markdown_links.rs"]
 mod markdown_links;
+#[path = "../markdown_math.rs"]
+mod markdown_math;
 #[path = "../mentions.rs"]
 mod mentions;
 #[path = "../modal_focus.rs"]

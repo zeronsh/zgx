@@ -23,7 +23,14 @@ pub(crate) struct ViewOptions {
     pub parse: Options,
     /// Code blocks get a Copy button.
     pub copy: bool,
+    /// Draws TeX (`Options::math`); without it, math shows as code.
+    pub math: Option<MathFn>,
 }
+/// A scroller's viewport size, once it is mounted.
+type Viewport = Rc<RefCell<Option<Signal<(f32, f32)>>>>;
+
+/// TeX, inline or display, drawn as a picture in ems; `None` if it can't be.
+pub(crate) type MathFn = Rc<dyn Fn(&str, bool) -> Option<zgx::compose::InlineSvg>>;
 
 fn themed<T>(name: &str) -> Themed<T> {
     Themed::Token(token(name))
@@ -50,6 +57,8 @@ struct RunFields<'a> {
     strike: bool,
     code: bool,
     link: Option<&'a Value>,
+    /// Math: 1 inline, 2 display.
+    math: u8,
 }
 impl<'a> RunFields<'a> {
     /// Read in one pass over its fields, a run being a small map: not a
@@ -63,6 +72,7 @@ impl<'a> RunFields<'a> {
                 strike: flag(run, "s"),
                 code: flag(run, "c"),
                 link: run.field("a"),
+                math: run.field("m").and_then(Value::as_f64).unwrap_or(0.) as u8,
             };
         };
         let mut out = Self::default();
@@ -75,6 +85,7 @@ impl<'a> RunFields<'a> {
                 "s" => out.strike = on,
                 "c" => out.code = on,
                 "a" => out.link = Some(value),
+                "m" => out.math = value.as_f64().unwrap_or(0.) as u8,
                 _ => {}
             }
         }
@@ -83,9 +94,16 @@ impl<'a> RunFields<'a> {
 }
 
 /// A run of text as a span: bold, italic, struck, code or a link.
-fn span(run: &Value, bold: bool) -> zgx::compose::TextSpan {
+fn span(run: &Value, bold: bool, math: Option<&MathFn>) -> zgx::compose::TextSpan {
     let fields = RunFields::of(run);
-    let mut out = zgx::compose::text_span(text_of(fields.text));
+    let tex = text_of(fields.text);
+    if fields.math > 0
+        && let Some(drawn) = math.and_then(|math| math(&tex, fields.math == 2))
+    {
+        return zgx::compose::text_span(tex).inline_svg(drawn);
+    }
+    let code = fields.code || fields.math > 0;
+    let mut out = zgx::compose::text_span(tex);
     if bold || fields.bold {
         out = out.font_bold();
     }
@@ -95,7 +113,7 @@ fn span(run: &Value, bold: bool) -> zgx::compose::TextSpan {
     if fields.strike {
         out = out.strikethrough(Default::default());
     }
-    if fields.code {
+    if code {
         out = out
             .font_family(FontFamily::Monospace)
             .background(themed("surface.sunken"))
@@ -112,11 +130,52 @@ fn span(run: &Value, bold: bool) -> zgx::compose::TextSpan {
     out
 }
 
+/// A formula on a line of its own, centred, scrolling sideways when wider
+/// than the view, as KaTeX's display math does.
+fn display_math(tex: &str, math: Option<&MathFn>, cx: &mut Context) -> View {
+    let Some(drawn) = math.and_then(|math| math(tex, true)) else {
+        return text(tex.to_owned()).font_family(FontFamily::Monospace);
+    };
+    let formula = zgx::compose::rich_text()
+        .children(vec![
+            zgx::compose::text_span(tex.to_owned()).inline_svg(drawn),
+        ])
+        .shrink_0();
+    let viewport: Viewport = Rc::default();
+    let mounted: Signal<bool> = cx.runtime().signal(false);
+    let (seen, told) = (viewport.clone(), mounted.clone());
+    let line = row()
+        .justify_center()
+        .shrink_0()
+        .reactive_style(move || {
+            mounted.get();
+            let view = seen.borrow().as_ref().map_or(0., |size| size.get().0);
+            Styles::new().min_w(view)
+        })
+        .child(formula);
+    zgx::compose::scroll_x(cx.state(0_f32))
+        .w_full()
+        .on_mount(move |handle| {
+            *viewport.borrow_mut() = handle.observe_size();
+            told.set(true);
+        })
+        .child(line)
+}
+
 /// A settled block (one before the last: a parse keeps it as it is),
 /// built as it is, without following anything: a paragraph of runs.
-fn static_runs(list: Option<&Value>, bold: bool) -> zgx::compose::RichTextView {
+fn static_runs(
+    list: Option<&Value>,
+    bold: bool,
+    math: Option<&MathFn>,
+) -> zgx::compose::RichTextView {
     let spans = list
-        .map(|l| l.list().iter().map(|r| span(r, bold)).collect::<Vec<_>>())
+        .map(|l| {
+            l.list()
+                .iter()
+                .map(|r| span(r, bold, math))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     zgx::compose::rich_text().children(spans).text_wrap(true)
 }
@@ -212,11 +271,19 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
 fn table(head: Vec<View>, rows: Vec<Vec<View>>, cx: &mut Context) -> View {
     const MIN_COLUMN: f32 = 100.;
     const GAP: f32 = 12.;
-    let columns = rows.iter().map(Vec::len).chain(std::iter::once(head.len())).max().unwrap_or(0).max(1);
-    let tracks = format!("repeat({columns}, 1fr)").parse().expect("a track list");
+    let columns = rows
+        .iter()
+        .map(Vec::len)
+        .chain(std::iter::once(head.len()))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let tracks = format!("repeat({columns}, 1fr)")
+        .parse()
+        .expect("a track list");
     let least = columns as f32 * MIN_COLUMN + (columns - 1) as f32 * GAP;
     // the viewport's width, once it has one: a scroller's content has none of its own to share
-    let viewport: Rc<RefCell<Option<Signal<(f32, f32)>>>> = Rc::default();
+    let viewport: Viewport = Rc::default();
     let mounted: Signal<bool> = cx.runtime().signal(false);
     let seen = viewport.clone();
     let told = mounted.clone();
@@ -258,7 +325,7 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                 _ => "font.size.md",
             };
             View::from(
-                static_runs(b.field("s"), true)
+                static_runs(b.field("s"), true, options.math.as_ref())
                     .text_size(themed(size))
                     .pt(4.),
             )
@@ -313,10 +380,13 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                 row.map(|c| c.list().to_vec())
                     .unwrap_or_default()
                     .iter()
-                    .map(|cell| static_runs(Some(cell), bold).into())
+                    .map(|cell| static_runs(Some(cell), bold, options.math.as_ref()).into())
                     .collect()
             };
-            let rows = b.field("rows").map(|r| r.list().to_vec()).unwrap_or_default();
+            let rows = b
+                .field("rows")
+                .map(|r| r.list().to_vec())
+                .unwrap_or_default();
             table(
                 cells(b.field("head"), true),
                 rows.iter().map(|r| cells(Some(r), false)).collect(),
@@ -324,7 +394,8 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
             )
         }
         "img" => text(text_of(b.field("alt"))).text_color(themed("text.secondary")),
-        _ => static_runs(b.field("s"), false).into(),
+        "math" => display_math(&text_of(b.field("x")), options.math.as_ref(), cx),
+        _ => static_runs(b.field("s"), false, options.math.as_ref()).into(),
     }
 }
 
@@ -549,11 +620,16 @@ fn code(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
 }
 
 /// A paragraph of the runs field `field` of `cell` holds, following it.
-fn runs_of(cell: Signal<Value>, field: &'static str, bold: bool) -> View {
+fn runs_of(cell: Signal<Value>, field: &'static str, bold: bool, math: Option<MathFn>) -> View {
     zgx::compose::rich_text_signal(move || {
         cell.with(|b| {
             b.field(field)
-                .map(|runs| runs.list().iter().map(|r| span(r, bold)).collect())
+                .map(|runs| {
+                    runs.list()
+                        .iter()
+                        .map(|r| span(r, bold, math.as_ref()))
+                        .collect()
+                })
                 .unwrap_or_default()
         })
     })
@@ -571,7 +647,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                 2 => "font.size.lg",
                 _ => "font.size.md",
             };
-            runs_of(cell, "s", true)
+            runs_of(cell, "s", true, options.math.clone())
                 .text_size(themed(size))
                 .pt(4.)
                 .heading(level)
@@ -655,13 +731,23 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                     .unwrap_or_default()
                     .iter()
                     .map(|cell| {
-                        let runs = cell.list().iter().map(|r| span(r, bold)).collect::<Vec<_>>();
-                        zgx::compose::rich_text().children(runs).text_wrap(true).into()
+                        let runs = cell
+                            .list()
+                            .iter()
+                            .map(|r| span(r, bold, options.math.as_ref()))
+                            .collect::<Vec<_>>();
+                        zgx::compose::rich_text()
+                            .children(runs)
+                            .text_wrap(true)
+                            .into()
                     })
                     .collect()
             };
             let (head, rows) = cell.with(|b| {
-                let rows: Vec<Value> = b.field("rows").map(|r| r.list().to_vec()).unwrap_or_default();
+                let rows: Vec<Value> = b
+                    .field("rows")
+                    .map(|r| r.list().to_vec())
+                    .unwrap_or_default();
                 (b.field("head").cloned(), rows)
             });
             table(
@@ -672,7 +758,8 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
         }
         "img" => zgx::compose::text_signal(move || cell.with(|b| text_of(b.field("alt"))))
             .text_color(themed("text.secondary")),
-        _ => runs_of(cell, "s", false),
+        "math" => display_math(&text_of(b.field("x")), options.math.as_ref(), cx),
+        _ => runs_of(cell, "s", false, options.math.clone()),
     }
 }
 

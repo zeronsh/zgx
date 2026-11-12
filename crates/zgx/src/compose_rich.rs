@@ -81,6 +81,9 @@ pub(crate) struct InlineIcon {
     /// The well it sits on (`SpanIcon::bg`), resolved: drawn under it,
     /// `pad` larger on every side.
     pub well: Option<IconWell>,
+    /// An inline box's (`TextSpan::inline_svg`): its height, placed where
+    /// the layout put the box rather than centred on the line.
+    pub boxed: Option<f32>,
 }
 /// An inline icon's well: a rounded fill under it, `pad` past it on every
 /// side.
@@ -149,6 +152,22 @@ pub(crate) struct SpanExtras {
     pub fade: Option<TextFade>,
     /// Its background reaching past the text across (`TextSpan::outset`).
     pub outset: f32,
+    /// A picture in place of its text (`TextSpan::inline_svg`).
+    pub inline: Option<InlineSvg>,
+}
+/// A picture standing in a line as a word does (`TextSpan::inline_svg`):
+/// sized in ems of the span's text, its baseline on the line's, tinted
+/// with the span's text colour. The line grows to hold it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct InlineSvg {
+    /// The picture, drawn to fill its box.
+    pub svg: Arc<crate::svg::SvgData>,
+    /// Its width, in ems.
+    pub width: f32,
+    /// How far it reaches above the baseline, in ems.
+    pub height: f32,
+    /// How far it reaches below the baseline, in ems.
+    pub depth: f32,
 }
 /// A run's text fading in (`TextSpan::fade_in`): from clear at `start`
 /// (milliseconds since the Unix epoch, as `ui.now()` says, on the thread's
@@ -211,6 +230,12 @@ pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {
     }
 }
 impl TextSpan {
+    /// `svg` in place of the text, in the line as an inline box
+    /// (`InlineSvg`): a formula among words. The text is what it reads as.
+    pub fn inline_svg(mut self, svg: InlineSvg) -> Self {
+        self.extras.get_or_insert_default().inline = Some(svg);
+        self
+    }
     /// An icon before the text, in the line (a file chip's file type):
     /// `size` square, centred on the line, `gap` from the text. An icon
     /// that follows the text colour takes the span's.
@@ -1123,10 +1148,21 @@ pub(crate) fn mount_icons(
                 scene.shape_rich_text(&data.rich, Some(wrap)),
                 inset,
             );
+            let placed = if data.icons.iter().any(|icon| icon.boxed.is_some()) {
+                layout.inline_boxes()
+            } else {
+                Vec::new()
+            };
             rects = data
                 .icons
                 .iter()
-                .map(|icon| layout.selection(icon.range.clone()).into_iter().next())
+                .map(|icon| match icon.boxed {
+                    Some(height) => placed
+                        .iter()
+                        .find(|(at, ..)| *at == icon.range.start)
+                        .map(|&(_, x, y)| crate::scene::Rect::new(x, y, icon.size, height)),
+                    None => layout.selection(icon.range.clone()).into_iter().next(),
+                })
                 .collect();
             drop(scene);
             geometry_key = Some(key);
@@ -1139,13 +1175,17 @@ pub(crate) fn mount_icons(
             // it, `pad` in from its every side.
             let pad = icon.well.map_or(0., |well| well.pad);
             let side = icon.size + 2. * pad;
+            let (width, height) = match icon.boxed {
+                Some(height) => (icon.size, height),
+                None => (side, side),
+            };
             let style = Style {
                 absolute: true,
-                width: Some(side),
-                height: Some(side),
+                width: Some(width),
+                height: Some(height),
                 margin: crate::scene::Insets {
                     left: bounds.x - owner_bounds.x + rect.x + icon.inset - padding.left,
-                    top: bounds.y - owner_bounds.y + rect.y + (rect.height - side) / 2.
+                    top: bounds.y - owner_bounds.y + rect.y + (rect.height - height) / 2.
                         - padding.top,
                     ..Default::default()
                 },

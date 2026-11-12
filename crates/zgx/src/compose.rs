@@ -2475,7 +2475,8 @@ pub use crate::compose_context_menu::{ContextMenuEvent, ContextMenuSpan};
 pub use crate::compose_modal::ModalPlacement;
 pub use crate::compose_popover::{Edge as PlacementEdge, Placement, Side as PlacementSide};
 pub use crate::compose_rich::{
-    RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now, rich_text, text_span,
+    InlineSvg, RichTextView, SpanHover, SpanIcon, TextFade, TextSpan, fade_now, rich_text,
+    text_span,
 };
 pub use crate::compose_scrollbar::{ScrollbarEase, ScrollbarStyle};
 pub use crate::compose_tooltip::{Tooltip, TooltipTiming, set_tooltip_timing};
@@ -5020,8 +5021,56 @@ fn paragraph_effect<const LOCATING: bool>(
         let mut links = Vec::new();
         let mut icons = Vec::new();
         let mut spanned = Vec::new();
+        let mut boxes = Vec::new();
         for (index, mut span) in spans.into_iter().enumerate() {
             if span.text.is_empty() {
+                continue;
+            }
+            if let Some(inline) = span.extras.as_mut().and_then(|extras| extras.inline.take()) {
+                if span.styles.has_tokens() {
+                    crate::theme::resolve(&mut span.styles, &theme);
+                }
+                let font_size = span
+                    .styles
+                    .text_size
+                    .get()
+                    .unwrap_or_else(|| base.size_in(Some(&theme)));
+                let color = span
+                    .styles
+                    .text_color
+                    .unwrap_or_else(|| base.color_in(Some(&theme)));
+                let at = content.len();
+                content.push_str(crate::rich_text::INLINE_BOX_TEXT);
+                let (width, height) = (
+                    inline.width * font_size,
+                    (inline.height + inline.depth) * font_size,
+                );
+                boxes.push(crate::rich_text::InlineBox {
+                    width,
+                    height,
+                    baseline: inline.height * font_size,
+                    ..crate::rich_text::InlineBox::new(at)
+                });
+                runs.push(crate::rich_text::TextRun {
+                    background: None,
+                    underline: None,
+                    strikethrough: None,
+                    padding: [0., 0.],
+                    radius: 0.,
+                    outset: 0.,
+                    range: at..content.len(),
+                    font: base.font_in(Some(&theme)),
+                    font_size,
+                    color,
+                });
+                icons.push(crate::compose_rich::InlineIcon {
+                    range: at..content.len(),
+                    svg: std::sync::Arc::new(inline.svg.tinted(color)),
+                    size: width,
+                    inset: 0.,
+                    well: None,
+                    boxed: Some(height),
+                });
                 continue;
             }
             let link = span.action.is_some() || span.href.is_some();
@@ -5208,6 +5257,7 @@ fn paragraph_effect<const LOCATING: bool>(
                                 pad,
                             })
                         }),
+                        boxed: None,
                     });
                 }
                 _ => {}
@@ -5265,7 +5315,9 @@ fn paragraph_effect<const LOCATING: bool>(
         }
         let rich = crate::rich_text::RichText::new(content.as_str(), runs)
             .expect("normalized inline spans")
-            .with_options(base.display);
+            .with_options(base.display)
+            .with_inline_boxes(boxes)
+            .expect("a box's character is a run of its own");
         // Recomputed but unchanged (its inputs animate for a sibling):
         // nothing to lay out, paint, describe or relabel.
         if content_state.with_untracked(|current| {
@@ -5301,7 +5353,9 @@ fn paragraph_effect<const LOCATING: bool>(
         let content = if icons.is_empty() {
             content
         } else {
-            content.replace(crate::compose_rich::ICON_PLACEHOLDER, "")
+            content
+                .replace(crate::compose_rich::ICON_PLACEHOLDER, "")
+                .replace(crate::rich_text::INLINE_BOX_CHAR, "")
         };
         content_state.set(crate::compose_rich::Content { rich, links, icons });
         ui.semantics

@@ -1502,6 +1502,45 @@ fn tooltip(anchor: View, tip: &crate::node::Tooltip, low: &Rc<Lowering>) -> View
 }
 
 /// `view` under the theme scope `theme = …` asks for.
+/// A markdown view's `on_math`, each formula asked once: the same SVG
+/// (one identity, so rasterized once) for every build that shows it.
+fn math_renderer(on_math: mlua::Function, vm: &Rc<Vm>) -> crate::markdown::view::MathFn {
+    let vm = vm.clone();
+    let drawn: std::cell::RefCell<HashMap<(String, bool), Option<zgx::compose::InlineSvg>>> =
+        Default::default();
+    Rc::new(move |tex: &str, display: bool| {
+        let key = (tex.to_owned(), display);
+        if let Some(found) = drawn.borrow().get(&key) {
+            return found.clone();
+        }
+        let made = match vm.call::<Option<mlua::Table>>(&on_math, (tex.to_owned(), display)) {
+            Ok(Some(t)) => (|| {
+                let svg = t.get::<mlua::LuaString>("svg").ok()?;
+                let svg = zgx::svg::SvgData::new(svg.as_bytes().to_vec()).ok()?;
+                let num = |k: &str| t.get::<f32>(k).ok().filter(|v| v.is_finite() && *v >= 0.);
+                Some(zgx::compose::InlineSvg {
+                    svg: std::sync::Arc::new(svg),
+                    width: num("w")?,
+                    height: num("h")?,
+                    depth: num("d").unwrap_or(0.),
+                })
+            })(),
+            Ok(None) => None,
+            Err(error) => {
+                vm.report(error);
+                None
+            }
+        };
+        let mut drawn = drawn.borrow_mut();
+        // A formula typed or streamed in asks for each prefix of it.
+        if drawn.len() >= 1024 {
+            drawn.clear();
+        }
+        drawn.insert(key, made.clone());
+        made
+    })
+}
+
 /// A markdown view's `on_link`: asked first of its links; one it handles
 /// stays unopened, any other goes to the guard around it, if there is one.
 fn with_link_handler(view: View, on_link: mlua::Function, vm: &Rc<Vm>) -> View {
@@ -3050,8 +3089,20 @@ fn kind_view(
             }
         }
         Kind::Text(text) => lower_text(text, vm),
-        Kind::Markdown { text, options, on_link } => {
+        Kind::Markdown {
+            text,
+            options,
+            on_link,
+            on_math,
+        } => {
             use crate::markdown::view::Source;
+            let options = match on_math {
+                Some(on_math) => crate::markdown::view::ViewOptions {
+                    math: Some(math_renderer(on_math.clone(), vm)),
+                    ..options.clone()
+                },
+                None => options.clone(),
+            };
             // A state's text, as it is (`"{reply}"`): not copied into a
             // string, and a long one streamed in is parsed by its edits.
             let view = if let Text::Template(segments) = text
@@ -3059,16 +3110,10 @@ fn kind_view(
                 && path.is_empty()
             {
                 let state = state.clone();
-                crate::markdown::view::view(
-                    move || Source::Held(state.with(Value::clone)),
-                    options.clone(),
-                )
+                crate::markdown::view::view(move || Source::Held(state.with(Value::clone)), options)
             } else {
                 let (text, vm) = (copy_text(text), vm.clone());
-                crate::markdown::view::view(
-                    move || Source::Made(render_text(&text, &vm)),
-                    options.clone(),
-                )
+                crate::markdown::view::view(move || Source::Made(render_text(&text, &vm)), options)
             };
             match on_link {
                 Some(on_link) => with_link_handler(view, on_link.clone(), vm),

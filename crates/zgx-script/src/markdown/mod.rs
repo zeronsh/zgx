@@ -45,6 +45,9 @@ pub struct Options {
     /// More fields for a code block, from its language and text (coloured
     /// lines, say): `(name, value)` pairs.
     pub code: Option<CodeFields>,
+    /// TeX between dollars is math: `$…$` a run with `m` 1, `$$…$$` one
+    /// with `m` 2, or a `math` block (`x`) when it is its paragraph whole.
+    pub math: bool,
 }
 
 /// A code block's added fields, from its language and text.
@@ -539,6 +542,7 @@ impl Call {
             breaks: flag("breaks")?,
             paths: flag("paths")?,
             code: None,
+            math: flag("math")?,
         };
         let key: Option<String> = match opts {
             Some(t) => t.get("key")?,
@@ -911,8 +915,11 @@ fn pending_block(text: &str, from: usize, to: usize, hint: Rc<str>) -> Value {
     ])
 }
 
-fn parser_flags() -> pulldown_cmark::Options {
+fn parser_flags(options: &Options) -> pulldown_cmark::Options {
     let mut flags = pulldown_cmark::Options::empty();
+    if options.math {
+        flags.insert(pulldown_cmark::Options::ENABLE_MATH);
+    }
     flags.insert(pulldown_cmark::Options::ENABLE_TABLES);
     flags.insert(pulldown_cmark::Options::ENABLE_STRIKETHROUGH);
     flags.insert(pulldown_cmark::Options::ENABLE_TASKLISTS);
@@ -1058,7 +1065,7 @@ fn parse_at(text: &str, offset: usize, options: &Options, defs: &Defs) -> Made {
 /// one loop over the parser's events, so the parser's iterator has the one
 /// caller it is inlined into.
 fn parse_or_scan(text: &str, offset: usize, options: &Options, scan: bool, defs: &Defs) -> Made {
-    let flags = parser_flags();
+    let flags = parser_flags(options);
     let mut builder = Builder {
         frames: vec![Frame::Blocks(Vec::new())],
         runs: Vec::new(),
@@ -1185,6 +1192,8 @@ struct Run {
     file: Option<String>,
     /// A picture among the words: its source, its text the alt's.
     img: Option<String>,
+    /// Math: 1 inline, 2 display; 0 for words.
+    math: u8,
 }
 
 /// Where a link goes: a page, or (with `paths`) a file in the repository.
@@ -1393,6 +1402,9 @@ fn runs_value(runs: &[Run]) -> Value {
                 if let Some(img) = &r.img {
                     f.push(("img", Value::Str(img.as_str().into())));
                 }
+                if r.math > 0 {
+                    f.push(("m", Value::Num(r.math.into())));
+                }
                 map(f)
             })
             .collect(),
@@ -1536,6 +1548,21 @@ impl Builder<'_> {
         }
     }
 
+    fn push_math(&mut self, tex: &str, math: u8) {
+        if self.image.is_some() {
+            return self.push_text(tex, true);
+        }
+        self.runs.push(Run {
+            text: tex.to_string(),
+            style: self.style(),
+            code: false,
+            link: None,
+            file: None,
+            img: None,
+            math,
+        });
+    }
+
     fn push_run(&mut self, text: &str, code: bool, link: Option<String>, file: Option<String>) {
         let style = self.style();
         if let Some(last) = self.runs.last_mut() {
@@ -1544,6 +1571,7 @@ impl Builder<'_> {
                 && file.is_none()
                 && last.file.is_none()
                 && last.img.is_none()
+                && last.math == 0
                 && last.link == link
                 && {
                     let s = last.style;
@@ -1561,6 +1589,7 @@ impl Builder<'_> {
             link,
             file,
             img: None,
+            math: 0,
         });
     }
 
@@ -1614,6 +1643,7 @@ impl Builder<'_> {
                 link,
                 file: None,
                 img: Some(src),
+                math: 0,
             });
             return false;
         }
@@ -1801,7 +1831,18 @@ impl Builder<'_> {
             Event::End(end) => match end {
                 TagEnd::Paragraph => {
                     // None is left empty where a picture took its place.
-                    if !(self.took && self.runs.is_empty()) {
+                    let mut words = self
+                        .runs
+                        .iter()
+                        .filter(|r| r.math > 0 || r.img.is_some() || !r.text.trim().is_empty());
+                    if let (Some(only), None) = (words.next(), words.next())
+                        && only.math == 2
+                    {
+                        let tex = only.text.clone();
+                        self.runs.clear();
+                        self.line = (0, 0);
+                        self.block(map(vec![("t", "math".into()), ("x", tex.as_str().into())]));
+                    } else if !(self.took && self.runs.is_empty()) {
                         let runs = self.take_runs();
                         self.block(map(vec![("t", "p".into()), ("s", runs)]));
                     }
@@ -1910,7 +1951,8 @@ impl Builder<'_> {
                 None => self.push_text(&text, false),
             },
             Event::Code(text) => self.push_text(&text, true),
-            Event::InlineMath(text) | Event::DisplayMath(text) => self.push_text(&text, true),
+            Event::InlineMath(text) => self.push_math(&text, 1),
+            Event::DisplayMath(text) => self.push_math(&text, 2),
             Event::SoftBreak => {
                 let breaks = self.options.breaks;
                 self.push_text(if breaks { "\n" } else { " " }, false);

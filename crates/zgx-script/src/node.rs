@@ -1160,6 +1160,10 @@ pub(crate) enum Kind {
         /// `on_link(url)`: told of a link click (or its Open Link); `true`
         /// says it was handled, so the link isn't opened.
         on_link: Option<Function>,
+        /// `on_math(tex, display)`: TeX drawn as `{ svg, w, h, d }` (an SVG
+        /// and its width, height above the baseline and depth below, in
+        /// ems), or nil to show the TeX as code.
+        on_math: Option<Function>,
     },
     Rich(Vec<Span>),
     Image {
@@ -5308,13 +5312,17 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
                 table.raw_set(name, mlua::Value::Nil)?;
                 Ok(value)
             };
+            let on_math = table.get::<Option<Function>>("on_math")?;
+            table.raw_set("on_math", mlua::Value::Nil)?;
             let options = crate::markdown::view::ViewOptions {
                 parse: crate::markdown::Options {
                     breaks: flag("breaks", false)?,
                     paths: flag("paths", false)?,
                     code: None,
+                    math: on_math.is_some(),
                 },
                 copy: flag("copy", true)?,
+                math: None,
             };
             let on_link = table.get::<Option<Function>>("on_link")?;
             table.raw_set("on_link", mlua::Value::Nil)?;
@@ -5325,7 +5333,12 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
             fill_from(lua, &mut node, &table, Some(&mut args), lint)?;
             let literal = args.literal.unwrap_or(false);
             let text = text_of(lua, args.content, "ui.markdown_view", literal)?;
-            node.kind = Kind::Markdown { text, options, on_link };
+            node.kind = Kind::Markdown {
+                text,
+                options,
+                on_link,
+                on_math,
+            };
             // Prose: selectable as a web page's is, unless asked not to be.
             if node.selectable.is_none() {
                 node.selectable = Some(true);
@@ -6399,7 +6412,11 @@ pub(crate) fn install(lua: &Lua) -> mlua::Result<()> {
         lua.create_function(|lua, table: Table| {
             let name: String = table.get("name")?;
             table.raw_set("name", mlua::Value::Nil)?;
-            let node = fill(lua, Node::new(owner(lua)?, Kind::Host(name.into())), Some(&table))?;
+            let node = fill(
+                lua,
+                Node::new(owner(lua)?, Kind::Host(name.into())),
+                Some(&table),
+            )?;
             node_ud(lua, node)
         })?,
     )?;
