@@ -1406,6 +1406,9 @@ export type CanvasTextOptions = {
 	letter_spacing: number?,
 	-- Wrapped to lines this many points wide, in a box that wide.
 	width: number?,
+	-- `c:text`: a matrix { a, b, c, d, e, f } (x' = a x + c y + e,
+	-- y' = b x + d y + f) mapping the placed text, as a turned shape's.
+	transform: { number }?,
 }
 -- How `c:image` fills its box, cuts its corners and fades it.
 export type CanvasImageOptions = {
