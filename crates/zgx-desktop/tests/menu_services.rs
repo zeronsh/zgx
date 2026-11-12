@@ -97,17 +97,18 @@ fn main() {
             "the application menu's items weren't changed in place"
         );
         let titles: Vec<&str> = items.iter().map(|(t, ..)| t.as_str()).collect();
-        assert_eq!(&titles[..2], ["Checking for Updates…", ""], "{titles:?}");
-        assert_eq!(titles[2], "Settings…", "{titles:?}");
+        assert!(titles[0].starts_with("About "), "{titles:?}");
+        assert_eq!(&titles[1..4], ["", "Checking for Updates…", ""], "{titles:?}");
+        assert_eq!(titles[4], "Settings…", "{titles:?}");
         assert!(
-            titles[3..].contains(&"Services") && !items[0].1,
+            titles[5..].contains(&"Services") && !items[2].1,
             "{items:?}"
         );
         assert!(
             debug_menu_bar_services_filled(&own("Check for Updates…", true)).unwrap(),
             "with the app's own items first, AppKit fills another Services menu"
         );
-        println!("menu_services: the app's own items lead the application menu");
+        println!("menu_services: About, then the app's own items, lead the application menu");
 
         // The app's Window menu keeps Minimize and Zoom over its items and
         // Bring All to Front under them; its Help menu is AppKit's help
