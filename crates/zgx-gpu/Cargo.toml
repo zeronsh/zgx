@@ -68,6 +68,14 @@ wgpu = { version = "29.0.4", default-features = false, features = ["gles"] }
 # Vulkan's types, for a present's partial copy and its regions (lib.rs,
 # `SwapHistory`): the version wgpu-hal's Vulkan backend uses.
 ash = { version = "0.38", default-features = false }
+# The GPU the display server composites with (display_gpu.rs): Wayland's
+# linux-dmabuf feedback on the window's connection, X11's DRI3, and the
+# device numbers they give; the versions winit and zgx-desktop use.
+wayland-client = "=0.31.15"
+wayland-backend = { version = "=0.3.17", features = ["client_system"] }
+wayland-protocols = { version = "=0.32.13", features = ["client"] }
+x11rb = { version = "0.13", default-features = false, features = ["dri3"] }
+libc = "0.2"
 
 [target.'cfg(not(any(windows, target_vendor = "apple")))'.dependencies]
 wgpu = { version = "29.0.4", default-features = false, features = ["vulkan"] }
