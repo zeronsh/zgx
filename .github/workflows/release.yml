@@ -20,7 +20,9 @@ jobs:
   # ci.yml's admit job). A tag's or a by-hand run is a release in the queue
   # shared with CI and zeron: it goes first. Its name carries the reservation,
   # the three dry-run jobs. Admission fails open: CI_ADMISSION=off, or API
-  # trouble, starts it at once.
+  # trouble, starts it at once. So does a crash, or a hang: the step continues
+  # on error (its job succeeds, so every `needs: admit` runs), and its own
+  # timeout ends before the job's.
   admit:
     name: "admit [linux=1 windows=1 macos=1] release"
     runs-on: ubuntu-latest
@@ -47,6 +49,8 @@ jobs:
           CI_RELEASE_WORKFLOWS: ${{ vars.CI_RELEASE_WORKFLOWS }}
           CI_SEE_OUTSIDE: ${{ vars.CI_SEE_OUTSIDE }}
           MAX_WAIT_MINUTES: 120
+        continue-on-error: true
+        timeout-minutes: 320
         run: python3 -I .github/ci/admit.py
 
   dry-run:
