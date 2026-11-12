@@ -1287,11 +1287,13 @@ pub fn rasterize_viewed(
 ) -> Result<ImageData, GpuError> {
     straight(paint(canvas, view, width, height, scale, None)?)
 }
-/// `canvas` as a `ui.canvas` shows it, alone: its shapes under `view`, then
-/// its text over them (as `CanvasLabels` lays it out, whatever the shapes'
-/// order or clips), at `width` by `height` logical points and `scale`, on
-/// `background` (transparent if none). A picture of a drawing with no
-/// window or frame: `ui.render_canvas`.
+/// `canvas` as a `ui.canvas` shows it, alone: its shapes under `view` and
+/// its text (as `CanvasLabels` lays it out) in the same layers a window
+/// draws them in (`Canvas::layers`), each text cut by its clip's box
+/// (`Canvas::text_clips`) and mapped by its transform, at `width` by
+/// `height` logical points and `scale`, on `background` (transparent if
+/// none). A picture of a drawing with no window or frame:
+/// `ui.render_canvas`.
 pub fn picture(
     canvas: &Canvas,
     view: zgx::scene::CanvasView,
@@ -1301,75 +1303,193 @@ pub fn picture(
     background: Option<zgx::scene::Color>,
     text: &mut crate::text::CpuTextRaster,
 ) -> Result<ImageData, GpuError> {
-    let mut pixmap = paint(canvas, view, width, height, scale, background)?;
-    let zoom = scale * view.scale;
-    for label in canvas.texts() {
-        let (x, y, size) = label_box(label, text);
-        let left = ((view.x + x * view.scale) * scale).round() as i32;
-        let top = ((view.y + y * view.scale) * scale).round() as i32;
-        // A mask's coverage firmed below 2x by how light the text is, as
-        // `draw.wgsl`'s `firm` does.
-        let (r, g, b) = (label.color.0, label.color.1, label.color.2);
-        let light = (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)) / 255.;
-        let firmness = if zoom < crate::SHARP_TEXT_BELOW {
-            (light * 2.).clamp(0., 1.)
-        } else {
-            0.
+    let mut pixmap = paint(&Canvas::new(), view, width, height, scale, background)?;
+    if canvas.commands().len() > 65536 {
+        return Err(GpuError(
+            "invalid canvas dimensions or command count".into(),
+        ));
+    }
+    let transform = device(&pixmap, width, height, view);
+    let boxes: Vec<_> = canvas
+        .texts()
+        .iter()
+        .map(|label| label_box(label, text))
+        .collect();
+    // `layers` asks the texts' sizes in their order.
+    let mut sizes = boxes.iter().map(|(_, _, size)| *size);
+    let layers = canvas.layers(|_| sizes.next().unwrap_or_default());
+    let clips = canvas.text_clips();
+    for layer in &layers {
+        pixmap = match layers.len() {
+            1 => paint_into(canvas, pixmap, transform)?,
+            _ => paint_into(&canvas.layer(layer), pixmap, transform)?,
         };
-        let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
-        let glyphs =
-            rasterize_scaled(text, &label.text, label.size, size.0, size.1, &label.font, zoom);
-        let pixels = pixmap.pixels_mut();
-        for (gx, gy, image) in glyphs {
-            let gx = left + gx + image.placement.left;
-            let gy = top + gy - image.placement.top;
-            for by in 0..image.placement.height as i32 {
-                let py = gy + by;
-                if py < 0 || py >= h {
-                    continue;
-                }
-                for bx in 0..image.placement.width as i32 {
-                    let px = gx + bx;
-                    if px < 0 || px >= w {
-                        continue;
-                    }
-                    let i = (by * image.placement.width as i32 + bx) as usize;
-                    let (ink, coverage) = match image.content {
-                        cosmic_text::SwashContent::Mask => {
-                            let a = f32::from(image.data[i]) / 255.;
-                            ((r, g, b), a + firmness * 0.67 * a * (1. - a))
-                        }
-                        cosmic_text::SwashContent::Color => (
-                            (
-                                image.data[i * 4],
-                                image.data[i * 4 + 1],
-                                image.data[i * 4 + 2],
-                            ),
-                            f32::from(image.data[i * 4 + 3]) / 255.,
-                        ),
-                        cosmic_text::SwashContent::SubpixelMask => {
-                            ((r, g, b), f32::from(image.data[i * 4]) / 255.)
-                        }
-                    };
-                    let alpha = coverage * f32::from(label.color.3) / 255.;
-                    let under = pixels[(py * w + px) as usize];
-                    // Over what is there, premultiplied as the pixmap is.
-                    let over = |ink: u8, under: u8| {
-                        (f32::from(ink) * alpha + f32::from(under) * (1. - alpha)).round() as u8
-                    };
-                    let a = over(255, under.alpha());
-                    pixels[(py * w + px) as usize] = sk::PremultipliedColorU8::from_rgba(
-                        over(ink.0, under.red()).min(a),
-                        over(ink.1, under.green()).min(a),
-                        over(ink.2, under.blue()).min(a),
-                        a,
-                    )
-                    .unwrap_or(under);
-                }
-            }
+        for index in layer.texts.clone() {
+            let clip = clips.get(index).copied().flatten();
+            let label = Label {
+                text: &canvas.texts()[index],
+                at: boxes[index],
+                transform: canvas.text_transform(index),
+            };
+            draw_label(&mut pixmap, &label, clip, view, scale, transform, text);
         }
     }
     straight(pixmap)
+}
+/// A canvas's text to draw: it, its box's top left and size, and what it
+/// is mapped by.
+struct Label<'a> {
+    text: &'a CanvasText,
+    at: (f32, f32, (f32, f32)),
+    transform: zgx::affine::Affine,
+}
+/// `label` drawn over `pixmap` (whose pixels `transform` maps the canvas's
+/// points to), cut by `clip`'s box, as a window shows it: its glyphs placed
+/// as the GPU places them, on whole pixels below 2x.
+fn draw_label(
+    pixmap: &mut sk::Pixmap,
+    label: &Label,
+    clip: Option<zgx::canvas::TextClip>,
+    view: zgx::scene::CanvasView,
+    scale: f32,
+    transform: sk::Transform,
+    text: &mut crate::text::CpuTextRaster,
+) {
+    let (x, y, size) = label.at;
+    let zoom = scale * view.scale;
+    let glyphs = rasterize_scaled(
+        text,
+        &label.text.text,
+        label.text.size,
+        size.0,
+        size.1,
+        &label.text.font,
+        zoom,
+    );
+    let mask = clip.and_then(|clip| {
+        let mut mask = sk::Mask::new(pixmap.width(), pixmap.height())?;
+        let r = clip.rect;
+        if r.width > 0. && r.height > 0. {
+            let shape = Path::rounded_rect(r, clip.radius).ok()?;
+            mask.fill_path(&path(&shape)?, sk::FillRule::Winding, true, transform);
+        }
+        Some(mask)
+    });
+    if label.transform == zgx::affine::Affine::IDENTITY {
+        let left = ((view.x + x * view.scale) * scale).round() as i32;
+        let top = ((view.y + y * view.scale) * scale).round() as i32;
+        blend_glyphs(
+            pixmap,
+            (left, top),
+            &glyphs,
+            label.text,
+            zoom,
+            mask.as_ref(),
+        );
+        return;
+    }
+    // Turned: drawn upright into pixels of its own, then those mapped.
+    let pad = (label.text.size * zoom).ceil() as i32 + 2;
+    let (tw, th) = (
+        (size.0 * zoom).ceil() as i32 + 2 * pad,
+        (size.1 * zoom).ceil() as i32 + 2 * pad,
+    );
+    let Some(mut own) = sk::Pixmap::new(tw.max(1) as u32, th.max(1) as u32) else {
+        return;
+    };
+    blend_glyphs(&mut own, (pad, pad), &glyphs, label.text, zoom, None);
+    let t = label.transform;
+    let placed = transform
+        .pre_concat(sk::Transform::from_row(t.a, t.b, t.c, t.d, t.tx, t.ty))
+        .pre_translate(x, y)
+        .pre_scale(1. / zoom, 1. / zoom)
+        .pre_translate(-pad as f32, -pad as f32);
+    pixmap.draw_pixmap(
+        0,
+        0,
+        own.as_ref(),
+        &sk::PixmapPaint {
+            quality: sk::FilterQuality::Bilinear,
+            ..Default::default()
+        },
+        placed,
+        mask.as_ref(),
+    );
+}
+/// `glyphs` of `label`, its top left at `at` in `pixmap`'s pixels, blended
+/// over what is there (premultiplied, as the pixmap is), each pixel's
+/// coverage times `mask`'s where there is one.
+fn blend_glyphs(
+    pixmap: &mut sk::Pixmap,
+    (left, top): (i32, i32),
+    glyphs: &[(i32, i32, cosmic_text::SwashImage)],
+    label: &CanvasText,
+    zoom: f32,
+    mask: Option<&sk::Mask>,
+) {
+    // A mask's coverage firmed below 2x by how light the text is, as
+    // `draw.wgsl`'s `firm` does.
+    let (r, g, b) = (label.color.0, label.color.1, label.color.2);
+    let light = (0.2126 * f32::from(r) + 0.7152 * f32::from(g) + 0.0722 * f32::from(b)) / 255.;
+    let firmness = if zoom < crate::SHARP_TEXT_BELOW {
+        (light * 2.).clamp(0., 1.)
+    } else {
+        0.
+    };
+    let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
+    let pixels = pixmap.pixels_mut();
+    for (gx, gy, image) in glyphs {
+        let gx = left + gx + image.placement.left;
+        let gy = top + gy - image.placement.top;
+        for by in 0..image.placement.height as i32 {
+            let py = gy + by;
+            if py < 0 || py >= h {
+                continue;
+            }
+            for bx in 0..image.placement.width as i32 {
+                let px = gx + bx;
+                if px < 0 || px >= w {
+                    continue;
+                }
+                let i = (by * image.placement.width as i32 + bx) as usize;
+                let (ink, coverage) = match image.content {
+                    cosmic_text::SwashContent::Mask => {
+                        let a = f32::from(image.data[i]) / 255.;
+                        ((r, g, b), a + firmness * 0.67 * a * (1. - a))
+                    }
+                    cosmic_text::SwashContent::Color => (
+                        (
+                            image.data[i * 4],
+                            image.data[i * 4 + 1],
+                            image.data[i * 4 + 2],
+                        ),
+                        f32::from(image.data[i * 4 + 3]) / 255.,
+                    ),
+                    cosmic_text::SwashContent::SubpixelMask => {
+                        ((r, g, b), f32::from(image.data[i * 4]) / 255.)
+                    }
+                };
+                let cut = mask.map_or(1., |m| f32::from(m.data()[(py * w + px) as usize]) / 255.);
+                let alpha = coverage * cut * f32::from(label.color.3) / 255.;
+                if alpha <= 0. {
+                    continue;
+                }
+                let under = pixels[(py * w + px) as usize];
+                // Over what is there, premultiplied as the pixmap is.
+                let over = |ink: u8, under: u8| {
+                    (f32::from(ink) * alpha + f32::from(under) * (1. - alpha)).round() as u8
+                };
+                let a = over(255, under.alpha());
+                pixels[(py * w + px) as usize] = sk::PremultipliedColorU8::from_rgba(
+                    over(ink.0, under.red()).min(a),
+                    over(ink.1, under.green()).min(a),
+                    over(ink.2, under.blue()).min(a),
+                    a,
+                )
+                .unwrap_or(under);
+            }
+        }
+    }
 }
 /// Where `label` lays out, as `CanvasLabels` places its text node: its
 /// box's top left and size. Its lines wrap at the box's width: a
@@ -1463,6 +1583,23 @@ fn paint(
         sk::Transform::from_row(view.scale, 0., 0., view.scale, view.x, view.y),
     );
     paint_into(canvas, pixmap, transform)
+}
+/// What maps a canvas's points under `view` to `pixmap`'s pixels, for a
+/// drawing `width` by `height` points: exact scaling to the rounded pixel
+/// extents avoids a fractional final-pixel seam.
+fn device(
+    pixmap: &sk::Pixmap,
+    width: f32,
+    height: f32,
+    view: zgx::scene::CanvasView,
+) -> sk::Transform {
+    sk::Transform::from_scale(
+        pixmap.width() as f32 / width,
+        pixmap.height() as f32 / height,
+    )
+    .pre_concat(sk::Transform::from_row(
+        view.scale, 0., 0., view.scale, view.x, view.y,
+    ))
 }
 /// `canvas` drawn by `transform` (its points to pixels) into a `w` by `h`
 /// pixel image.
