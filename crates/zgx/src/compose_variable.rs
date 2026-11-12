@@ -396,6 +396,12 @@ fn anchor_moved<K: Eq + Clone>(
     entries: &HashMap<K, Entry, rustc_hash::FxBuildHasher>,
     key: &mut impl FnMut(usize) -> K,
 ) -> Option<usize> {
+    // An anchor with no position (a list scrolled by the view around it)
+    // never moves its list: nothing asked for equals NaN.
+    debug_assert!(
+        previous.position.is_finite(),
+        "an anchor with no position moved"
+    );
     let shifted = previous.index as i64 + length as i64 - previous.length as i64;
     if !(0..length as i64).contains(&shifted) {
         return None;

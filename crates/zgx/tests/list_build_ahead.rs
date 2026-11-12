@@ -899,3 +899,54 @@ fn a_list_scrolled_by_the_view_around_it_skips_passes_that_show_the_same_rows() 
     scroll_to(&ui, &panel, 0.);
     assert!(rows.take().contains(&0));
 }
+
+/// A list scrolled by the view around it keeps an anchor with no position
+/// (NaN): scrolled, its heights changed, its window resized and the list
+/// mounted again, its own offset stays where it was, finite, and it builds
+/// the rows that view shows.
+#[test]
+fn a_list_scrolled_by_the_view_around_it_keeps_a_finite_place() {
+    let mut ui = hosted();
+    let heights = VariableHeights::new(&ui.runtime, 1000, 20.);
+    for _ in 0..2 {
+        let panel = ui.signal(0.);
+        let own = ui.signal(0.);
+        let rows = Rows::default();
+        let built = rows.clone();
+        let tree = ui.mount(
+            scroll(panel.clone()).w_full().h_full().child(
+                column().w_full().child(
+                    variable_virtual_list(
+                        own.clone(),
+                        heights.clone(),
+                        0,
+                        |i| i,
+                        move |_, i, cx| built.row(i, 20., cx),
+                    )
+                    .virtualize_in_ancestor()
+                    .w_full(),
+                ),
+            ),
+        );
+        ui.prepare_frame();
+        scroll_to(&ui, &panel, 300.);
+        // Rows 0 to 4 grow: rows settle, the view stays at 300.
+        heights.set_heights(&[(0, 40.), (1, 40.), (2, 40.), (3, 40.), (4, 40.)]);
+        ui.prepare_frame();
+        ui.scene.borrow_mut().resize(400., 200.);
+        ui.prepare_frame();
+        spare(&ui);
+        assert_eq!(own.get(), 0., "its own offset, untouched");
+        let all = rows.take();
+        // 300 to 500 shows rows 10 to 19 (rows 0 to 4 are 40 tall).
+        assert!(
+            all.contains(&10) && all.contains(&19),
+            "the rows shown: {all:?}"
+        );
+        assert!(own.get().is_finite());
+        tree.unmount();
+        ui.prepare_frame();
+        ui.scene.borrow_mut().resize(400., 100.);
+        heights.set_heights(&[(0, 20.), (1, 20.), (2, 20.), (3, 20.), (4, 20.)]);
+    }
+}
