@@ -12620,10 +12620,10 @@ impl GpuRenderer {
     }
     /// Split the last flush's scroll moves into pixel copies this frame can
     /// apply and clips it must repaint instead. A copy is exact only when the
-    /// retained target holds the previous flush, both the clip and the shift
-    /// land on whole pixels, and within the clip nothing but the content
-    /// changes position: whatever lies under it is hidden by one opaque
-    /// rectangle, and anything over it is repainted anyway.
+    /// retained target holds the previous flush, the shift lands on whole
+    /// pixels, and within the clip nothing but the content changes position
+    /// (`copy_blocker`). It copies within the clip's whole pixels and
+    /// repaints the slivers past them.
     #[inline]
     fn scroll_copies(&self, scene: &Scene, damage: &[Rect]) -> (Vec<ScrollCopy>, Vec<Rect>) {
         // A frame with no scroll moved, nearly every one that isn't scrolling,
@@ -12667,16 +12667,34 @@ impl GpuRenderer {
                 let scaled = value * self.scale;
                 ((scaled - scaled.round()).abs() < 1e-3).then_some(scaled.round() as i32)
             };
-            // The copy of `clip`'s pixels the move makes, if whole.
+            // A view's edge on a device pixel, or the first whole one inside
+            // it (up for its left and top, down for its right and bottom): a
+            // view laid out between pixels (centred in a window of odd width)
+            // copies within them, and the slivers past them repaint.
+            let edge = |value: f32, up: bool| {
+                let scaled = value * self.scale;
+                if (scaled - scaled.round()).abs() < 1e-3 {
+                    scaled.round() as i32
+                } else if up {
+                    scaled.ceil() as i32
+                } else {
+                    scaled.floor() as i32
+                }
+            };
+            let screen = Rect::new(
+                0.,
+                0.,
+                self.width as f32 / self.scale,
+                self.height as f32 / self.scale,
+            );
+            // The copy of `clip`'s pixels the move makes, if the move is whole.
             let pixels_of = |clip: Rect| {
-                let clip = clip.intersection(Rect::new(
-                    0.,
-                    0.,
-                    self.width as f32 / self.scale,
-                    self.height as f32 / self.scale,
-                ))?;
-                let (x, y) = (whole(clip.x)?, whole(clip.y)?);
-                let (right, bottom) = (whole(clip.x + clip.width)?, whole(clip.y + clip.height)?);
+                let clip = clip.intersection(screen)?;
+                let (x, y) = (edge(clip.x, true), edge(clip.y, true));
+                let (right, bottom) = (
+                    edge(clip.x + clip.width, false),
+                    edge(clip.y + clip.height, false),
+                );
                 let (dx, dy) = (whole(scroll.dx)?, whole(scroll.dy)?);
                 // Destination: the clip minus the exposed strip; source: the
                 // same pixels before the move.
@@ -12709,12 +12727,38 @@ impl GpuRenderer {
                 carried.clear();
                 self.copy_next.set(clear);
             }
+            // What of the view lies past its whole pixels: repainted beside
+            // a copy, which leaves it as it was.
+            if pixels.is_some()
+                && let Some(clip) = scroll.clip.intersection(screen)
+            {
+                let at = |pixel: i32| pixel as f32 / self.scale;
+                let (x, y) = (at(edge(clip.x, true)), at(edge(clip.y, true)));
+                let (right, bottom) = (
+                    at(edge(clip.x + clip.width, false)),
+                    at(edge(clip.y + clip.height, false)),
+                );
+                let off_grid = [
+                    Rect::new(clip.x, clip.y, x - clip.x, clip.height),
+                    Rect::new(right, clip.y, clip.x + clip.width - right, clip.height),
+                    Rect::new(clip.x, clip.y, clip.width, y - clip.y),
+                    Rect::new(clip.x, bottom, clip.width, clip.y + clip.height - bottom),
+                ];
+                carried.extend(
+                    off_grid
+                        .into_iter()
+                        .filter(|r| r.width > 0. && r.height > 0.),
+                );
+            }
             // Why it repaints, for devtools (`zgx inspect frames`).
             let refused: Result<_, fn(&Scene) -> String> = match pixels {
                 _ if !zgx::switches::SCROLL_COPY.on() => {
                     Err(|_| "switched off (zgx inspect switch scroll_copy on)".into())
                 }
-                None => Err(|_| "its view or its move falls between device pixels".into()),
+                None if whole(scroll.dx).is_none() || whole(scroll.dy).is_none() => {
+                    Err(|_| "its move falls between device pixels".into())
+                }
+                None => Err(|_| "its view holds no whole device pixel to copy".into()),
                 Some(_) if !copyable => Err(|_| {
                     "the window presents through the system's surface, whose first copy holds \
                      100 MB of graphics memory (macOS)"

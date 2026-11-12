@@ -131,6 +131,16 @@ fn scattered_damage_presented_through_surfaces_matches_drawing_whole() {
 /// lies outside it, down the view (a user's report: a trail of corners).
 #[cfg(target_os = "macos")]
 fn panel(offset: Signal<f32>) -> View {
+    panel_at(offset, 20.)
+}
+/// The same, laid out between device pixels (centred in a window of odd
+/// width): it copies within its whole pixels.
+#[cfg(target_os = "macos")]
+fn panel_off_grid(offset: Signal<f32>) -> View {
+    panel_at(offset, 20.3)
+}
+#[cfg(target_os = "macos")]
+fn panel_at(offset: Signal<f32>, left: f32) -> View {
     let mut cards = column().gap(6.).p(6.);
     for i in 0..40 {
         cards = cards.child(div().w(300.).h(36.).bg(if i % 2 == 0 {
@@ -146,7 +156,7 @@ fn panel(offset: Signal<f32>) -> View {
             row()
                 .w(600.)
                 .h(380.)
-                .left(20.)
+                .left(left)
                 .top(10.)
                 .rounded(16.)
                 .bg(Color(17, 17, 17, 255))
@@ -168,6 +178,11 @@ fn rounded_panel_scrolled_through_surfaces_matches_drawing_whole() {
     let copies = scrolled_matches_drawing_whole(panel, STEPS);
     // Each step moved by whole pixels: each copied, its corners repainted.
     assert!(copies > 0, "no scroll copied");
+    // Between device pixels, the moves by whole ones still copy.
+    for scale in [1., 2.] {
+        let off_grid = scrolled_matches_drawing_whole_at(panel_off_grid, STEPS, scale);
+        assert!(off_grid > 0, "scale {scale}: no copy between pixels");
+    }
 }
 
 /// A scroll view's content under something that stays where it is: a
