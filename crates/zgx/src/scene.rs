@@ -160,6 +160,9 @@ impl std::hash::Hasher for NodeHasher {
 /// Separate damage rectangles a flush keeps before marking damage on a grid
 /// of `DAMAGE_CELL` cells instead (see `DamageGrid`).
 const DAMAGE_RECTS: usize = 64;
+/// The most parts of a view a scroll copies, beside the glass over it
+/// (`clear_of_blurs`): the largest, the rest repainting.
+const MOST_CLEAR_PARTS: usize = 6;
 /// A node of `SEARCHED_CHILDREN` children or more whose ink is its children's
 /// union translated, nothing of its own (`Scene::ink_is_held`), as its ink
 /// was last worked out (`Scene::long_children`): the union of all its children
@@ -14547,60 +14550,142 @@ impl Scene {
         }
         transform
     }
-    /// The largest band of `clip` a move can copy: clear of every backdrop blur
-    /// that shows, and of what such a bar paints around itself (a shadow, which
-    /// a copy would carry and `copy_blocker` refuses): three times its blur's sigma.
-    /// All of `clip` if none touches it; none if little's left.
-    fn clear_of_blurs(&self, clip: Rect) -> Option<Rect> {
-        let mut clear = clip;
+    /// The parts of `clip` a move can copy: clear of every backdrop blur that
+    /// shows, and of what such a bar paints around itself (a shadow, which a
+    /// copy would carry and `copy_blocker` refuses): its ink, the box and its
+    /// shadows and what it holds, on whole device pixels. What lies past that
+    /// within its blur's reach is only read: a copy has moved it already when
+    /// the bar blurs it. Beside a bar narrower than the view, the content
+    /// copies too: a part each side. All of `clip` if none touches it; none
+    /// if little's left.
+    fn clear_of_blurs(&self, id: NodeId, clip: Rect) -> smallvec::SmallVec<[Rect; 1]> {
+        let mut clear: smallvec::SmallVec<[Rect; 1]> = smallvec::smallvec![clip];
         let mut touched = false;
         for blur in &self.blur_nodes {
             let (bounds, effects, _) = self.world(*blur);
             if effects.opacity <= 0. {
                 continue;
             }
-            let reach = (effects.blur_radius * 3.).ceil();
-            let wide = Rect::new(
-                bounds.x - reach,
-                bounds.y - reach,
-                bounds.width + reach * 2.,
-                bounds.height + reach * 2.,
-            );
-            if !wide.intersects(clear) {
+            let wide = self.blur_ink(*blur, bounds);
+            if !wide.intersects(clip) {
                 continue;
             }
             touched = true;
-            let bands = [
-                Rect::new(clear.x, clear.y, clear.width, wide.y - clear.y),
-                Rect::new(
-                    clear.x,
-                    wide.y + wide.height,
-                    clear.width,
-                    clear.y + clear.height - wide.y - wide.height,
-                ),
-                Rect::new(clear.x, clear.y, wide.x - clear.x, clear.height),
-                Rect::new(
-                    wide.x + wide.width,
-                    clear.y,
-                    clear.x + clear.width - wide.x - wide.width,
-                    clear.height,
-                ),
-            ];
-            clear = bands
+            clear = clear
                 .into_iter()
-                .filter(|band| band.width > 0. && band.height > 0.)
-                .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))?;
+                .flat_map(|part| -> smallvec::SmallVec<[Rect; 4]> {
+                    match part.intersection(wide) {
+                        Some(inner) => rect_minus(part, inner).collect(),
+                        None => smallvec::smallvec![part],
+                    }
+                })
+                .collect();
         }
         if let Some(cold) = self.cold.as_deref()
             && !cold.backdrop_readers.is_empty()
         {
-            clear = self.clear_of_readers(&cold.backdrop_readers, clear, &mut touched)?;
+            clear = clear
+                .into_iter()
+                .filter_map(|part| {
+                    self.clear_of_readers(&cold.backdrop_readers, part, &mut touched)
+                })
+                .collect();
         }
-        // A band too small for the copy to pay isn't one.
-        if touched && clear.width * clear.height < clip.width * clip.height * 0.25 {
-            return None;
+        if !touched {
+            return clear;
         }
-        Some(clear)
+        // Under a fade, what of a part lies in its bands repaints (its mask
+        // holds still as the content moves); the interior copies.
+        if let Some(interior) = self.fade_interior(id) {
+            clear = clear
+                .into_iter()
+                .filter_map(|part| part.intersection(interior))
+                .collect();
+        }
+        // A part too small for its copy to pay repaints; so do all, if what
+        // copies is too little of the view.
+        let area = |rect: &Rect| rect.width * rect.height;
+        let whole = area(&clip);
+        clear.retain(|part| area(part) >= whole / 64.);
+        clear.sort_by(|a, b| area(b).total_cmp(&area(a)));
+        clear.truncate(MOST_CLEAR_PARTS);
+        if clear.iter().map(area).sum::<f32>() < whole * 0.25 {
+            clear.clear();
+        }
+        clear
+    }
+    /// Where the nearest fade around scroll content `id` (`fade_edges`) is
+    /// whole, in the window: its box less its bands and insets, in to whole
+    /// device pixels. `None` with no fade around it.
+    #[cold]
+    #[inline(never)]
+    fn fade_interior(&self, id: NodeId) -> Option<Rect> {
+        let band = |band: f32| if band.is_finite() { band.max(0.) } else { 0. };
+        let mut at = self.node(id).parent;
+        let fade = loop {
+            let node = at?;
+            let style = &self.node(node).style;
+            if style
+                .fade_edges
+                .iter()
+                .chain(&style.fade_edges_x)
+                .any(|edge| band(*edge) > 0.)
+            {
+                break node;
+            }
+            at = self.node(node).parent;
+        };
+        let style = &self.node(fade).style;
+        let edge = |band_at: f32, inset: f32| match band(band_at) > 0. {
+            true => band(band_at) + band(inset),
+            false => 0.,
+        };
+        let top = edge(style.fade_edges[0], style.fade_insets[0]);
+        let bottom = edge(style.fade_edges[1], style.fade_insets[1]);
+        let left = edge(style.fade_edges_x[0], style.fade_insets_x[0]);
+        let right = edge(style.fade_edges_x[1], style.fade_insets_x[1]);
+        let bounds = self.world(fade).0;
+        let scale = match self.pixel_scale > 0. {
+            true => self.pixel_scale,
+            false => 1.,
+        };
+        let x0 = ((bounds.x + left) * scale).ceil() / scale;
+        let y0 = ((bounds.y + top) * scale).ceil() / scale;
+        let x1 = ((bounds.x + bounds.width - right) * scale).floor() / scale;
+        let y1 = ((bounds.y + bounds.height - bottom) * scale).floor() / scale;
+        (x1 > x0 && y1 > y0).then(|| Rect::new(x0, y0, x1 - x0, y1 - y0))
+    }
+    /// What backdrop blur `id`, its box `bounds` in the window, paints there:
+    /// its ink's reach past its own box, on each side, added to `bounds`, and
+    /// a device pixel more. Scaled or turned, three times its blur's sigma
+    /// around it, as before its ink was asked.
+    fn blur_ink(&self, id: NodeId, bounds: Rect) -> Rect {
+        let node = self.node(id);
+        if node.transformed() {
+            return bounds.expand((node.effects.blur_radius * 3.).ceil());
+        }
+        // (Ink is in the parent's space, the node's translation in it.)
+        let local = node.bounds.translated(node.transform);
+        let ink = self.ink(id).map_or(local, |ink| ink.union(local));
+        let pixel = match self.pixel_scale > 0. {
+            true => 1. / self.pixel_scale,
+            false => 1.,
+        };
+        let left = (local.x - ink.x).max(0.) + pixel;
+        let top = (local.y - ink.y).max(0.) + pixel;
+        let right = (ink.x + ink.width - local.x - local.width).max(0.) + pixel;
+        let bottom = (ink.y + ink.height - local.y - local.height).max(0.) + pixel;
+        // Out to whole device pixels: a copy moves whole pixels only.
+        let scale = 1. / pixel;
+        let (x0, y0) = (
+            ((bounds.x - left) * scale).floor() / scale,
+            ((bounds.y - top) * scale).floor() / scale,
+        );
+        let (x1, y1) = (
+            ((bounds.x + bounds.width + right) * scale).ceil() / scale,
+            ((bounds.y + bounds.height + bottom) * scale).ceil() / scale,
+        );
+        Rect::new(x0, y0, x1 - x0, y1 - y0)
     }
     /// `clear_of_blurs` for nodes reading the backdrop: the largest band of
     /// `clear` none of them reads (`touched` if any reached it).
@@ -14918,26 +15003,44 @@ impl Scene {
             let isolated = layered;
             // Clear of what blurs what's behind it: a glass bar over the view takes
             // only the view's band it reaches, and what's beside it still moves.
-            let clear = clip.and_then(|clip| self.clear_of_blurs(clip));
-            let usable = clear
-                .filter(|clear| !isolated && dx.abs() < clear.width && dy.abs() < clear.height);
-            // What of the view the band leaves repaints.
-            if let (Some(clip), Some(clear)) = (clip, usable)
-                && clear != clip
+            let usable: smallvec::SmallVec<[Rect; 1]> = match (clip, isolated) {
+                (Some(clip), false) => self
+                    .clear_of_blurs(id, clip)
+                    .into_iter()
+                    .filter(|clear| dx.abs() < clear.width && dy.abs() < clear.height)
+                    .collect(),
+                _ => smallvec::SmallVec::new(),
+            };
+            // What of the view the parts leave repaints.
+            if let Some(clip) = clip
+                && !usable.is_empty()
+                && usable[..] != [clip]
             {
-                for rest in rect_minus(clip, clear) {
+                let mut rest = vec![clip];
+                for part in &usable {
+                    rest = rest
+                        .into_iter()
+                        .flat_map(|left| -> Vec<Rect> {
+                            match left.intersection(*part) {
+                                Some(inner) => rect_minus(left, inner).collect(),
+                                None => vec![left],
+                            }
+                        })
+                        .collect();
+                }
+                for rest in rest {
                     self.add_damage(rest);
                 }
             }
-            match usable {
-                Some(clip) => moves.push(ScrollMove {
+            match usable.is_empty() {
+                false => moves.extend(usable.into_iter().map(|clip| ScrollMove {
                     node: id,
                     clip,
                     dx,
                     dy,
                     serial: 0,
-                }),
-                None => {
+                })),
+                true => {
                     // What was damaged in it since it moved (a node gone, a
                     // box laid out again) was taken where the content is
                     // now, but painted where it was: there too.
@@ -14957,7 +15060,9 @@ impl Scene {
                 (0..moves.len()).any(|j| {
                     i != j
                         && (moves[i].clip.intersects(moves[j].clip)
-                            || self.is_within(moves[i].node, moves[j].node))
+                            // (One view's parts beside a glass are apart.)
+                            || moves[i].node != moves[j].node
+                                && self.is_within(moves[i].node, moves[j].node))
                 })
             })
             .collect();

@@ -515,14 +515,17 @@ fn scrolled_matches_drawing_whole_at(
     let offset = ui.signal(0.);
     ui.mount(view(offset.clone()));
     let mut copies = 0;
-    for &at in steps {
+    let mut damaged = 0;
+    for (step, &at) in steps.iter().enumerate() {
         offset.set(at);
         ui.prepare_frame();
         let damage = ui.scene.borrow_mut().flush().damage;
-        copies += gpu
-            .render(&ui.scene.borrow(), &damage)
-            .unwrap()
-            .scroll_copies;
+        let stats = gpu.render(&ui.scene.borrow(), &damage).unwrap();
+        copies += stats.scroll_copies;
+        // (The first frame draws everything.)
+        if step > 0 {
+            damaged += stats.damaged_pixels;
+        }
         gpu.present().unwrap();
         let shown = gpu.shown_pixels().expect("a surface shown").2;
         let whole_host = objc2_quartz_core::CALayer::new();
@@ -559,7 +562,13 @@ fn scrolled_matches_drawing_whole_at(
             "scroll {at}: the surface shown differs from the scene drawn whole"
         );
     }
+    DAMAGED.with(|cell| cell.set(damaged));
     copies
+}
+std::thread_local! {
+    /// Device pixels the last `scrolled_matches_drawing_whole_at` repainted,
+    /// after its first frame.
+    static DAMAGED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 /// The plain layer's tiles (one per surface shown, `Layer::tiles`): each
@@ -1131,6 +1140,8 @@ fn main() {
         println!("layer_frames: switches between tiles and drawables match drawing whole");
         a_scroll_under_glass_copies_beside_it_and_matches_drawing_whole();
         println!("layer_frames: a scroll under glass copies beside it and matches drawing whole");
+        a_scroll_under_a_composers_glass_copies_up_to_its_shadow();
+        println!("layer_frames: a scroll under a composer's glass copies up to its shadow");
         faded_scrolls_copy_their_interior_and_match_drawing_whole();
         println!("layer_frames: faded scrolls copy their interior and match drawing whole");
         rounded_corners_scrolled_by_a_copy_match_drawing_whole();
@@ -1254,6 +1265,146 @@ fn a_scroll_under_glass_copies_beside_it_and_matches_drawing_whole() {
         let copies = scrolled_matches_drawing_whole_at(under_glass, &steps, scale);
         assert!(copies > 0, "scale {scale}: no copy beside the glass");
     }
+}
+/// A composer's glass over a transcript's foot: wide frost (sigma 28, its
+/// reach 84 points) and a shadow of its own. What a copy must leave is the
+/// glass and its shadow; past them, within the blur's reach, it copies.
+#[cfg(target_os = "macos")]
+fn under_composer(offset: Signal<f32>) -> View {
+    composer_over(offset, false)
+}
+/// The same, the transcript fading at its edges (24 points at the top, 61
+/// at its foot, under the composer), as a chat's does.
+#[cfg(target_os = "macos")]
+fn under_composer_faded(offset: Signal<f32>) -> View {
+    composer_over(offset, true)
+}
+#[cfg(target_os = "macos")]
+fn composer_over(offset: Signal<f32>, faded: bool) -> View {
+    let mut rows = column().gap(4.).p(4.);
+    for i in 0..60 {
+        rows = rows.child(div().w(500.).h(22.).bg(if i % 3 == 0 {
+            Color(170, 60, 60, 255)
+        } else if i % 3 == 1 {
+            Color(60, 170, 60, 255)
+        } else {
+            Color(60, 60, 170, 255)
+        }));
+    }
+    overlay()
+        .size(SIZE.0, SIZE.1)
+        .bg(Color(17, 17, 17, 255))
+        .child({
+            let view = scroll(offset)
+                .w(SIZE.0)
+                .h(SIZE.1)
+                .bg(Color(17, 17, 17, 255))
+                .child(rows);
+            match faded {
+                true => view.fade_edges(24., 61.),
+                false => view,
+            }
+        })
+        .child(
+            div()
+                .w(260.)
+                .h(48.)
+                .left(60.)
+                .top(SIZE.1 - 60.)
+                .rounded(16.)
+                .bg(Color(255, 255, 255, 50))
+                .shadow(zgx::scene::BoxShadow {
+                    color: Color(0, 0, 0, 90),
+                    offset: zgx::scene::Transform { x: 0., y: 4. },
+                    blur_radius: 10.,
+                    spread: 0.,
+                })
+                .backdrop_blur(28.),
+        )
+        // A "jump to latest" pill above it, off the pixel grid.
+        .child(
+            div()
+                .w(90.3)
+                .h(26.)
+                .left(145.1)
+                .top(SIZE.1 - 75.)
+                .rounded(13.)
+                .bg(Color(255, 255, 255, 60))
+                .shadow(zgx::scene::BoxShadow {
+                    color: Color(0, 0, 0, 80),
+                    offset: zgx::scene::Transform { x: 0., y: 2. },
+                    blur_radius: 6.,
+                    spread: 0.,
+                })
+                .backdrop_blur(16.),
+        )
+}
+#[cfg(target_os = "macos")]
+fn a_scroll_under_a_composers_glass_copies_up_to_its_shadow() {
+    let steps = [0., 3., 7., 30., 31., 90., 89., 0.];
+    for scale in [2., 1., 1.5] {
+        let copies = scrolled_matches_drawing_whole_at(under_composer, &steps, scale);
+        assert!(copies > 0, "scale {scale}: no copy over the composer");
+    }
+    // Faded too: what beside the glass lies above the fade's foot copies,
+    // the band repainting. More than one part a move, on the GPU.
+    let moved = steps.windows(2).filter(|pair| pair[0] != pair[1]).count();
+    for scale in [2., 1., 1.5] {
+        let copies = scrolled_matches_drawing_whole_at(under_composer_faded, &steps, scale);
+        let damaged = DAMAGED.with(std::cell::Cell::get);
+        eprintln!("faded at {scale}: {copies} copies, {damaged} px repainted over {moved} moves");
+        assert!(
+            copies > moved,
+            "scale {scale}: {copies} copies over {moved} moves, faded"
+        );
+    }
+    // The copy reaches down to the glass's shadow, not its blur's reach.
+    let mut ui = Ui::new(SIZE.0, SIZE.1);
+    ui.scene.borrow_mut().set_pixel_scale(2.);
+    let offset = ui.signal(0.);
+    ui.mount(under_composer(offset.clone()));
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    offset.set(8.);
+    ui.prepare_frame();
+    ui.scene.borrow_mut().flush();
+    let scene = ui.scene.borrow();
+    let moves = scene.scroll_moves();
+    // Above the glasses, and beside each.
+    assert!(moves.len() >= 2, "{} parts copied: {moves:?}", moves.len());
+    let pill_top = SIZE.1 - 75.;
+    let top = moves
+        .iter()
+        .map(|scroll| scroll.clip)
+        .max_by(|a, b| (a.width * a.height).total_cmp(&(b.width * b.height)))
+        .unwrap();
+    // The pill's shadow: blur 6, down 2.
+    assert!(
+        top.y + top.height > pill_top - 20.,
+        "the copy stops {} points above the pill, short of its shadow",
+        pill_top - top.y - top.height
+    );
+    // Every part on whole device pixels (a copy moves whole pixels), and
+    // clear of both glasses' boxes.
+    let pill = zgx::scene::Rect::new(145.1, pill_top, 90.3, 26.);
+    let composer = zgx::scene::Rect::new(60., SIZE.1 - 60., 260., 48.);
+    for scroll in moves {
+        let clip = scroll.clip;
+        for edge in [clip.x, clip.y, clip.x + clip.width, clip.y + clip.height] {
+            assert!((edge * 2.).fract().abs() < 1e-3, "{clip:?} off the pixels");
+        }
+        assert!(
+            !clip.intersects(pill) && !clip.intersects(composer),
+            "{clip:?} over a glass"
+        );
+    }
+    // Beside the composer, at its height, the content copies.
+    assert!(
+        moves.iter().any(|scroll| scroll.clip.x >= 320.
+            && scroll.clip.y < SIZE.1 - 60.
+            && scroll.clip.y + scroll.clip.height > SIZE.1 - 30.),
+        "nothing copied beside the composer: {moves:?}"
+    );
 }
 /// A faded scroll copies its interior and repaints its bands and what it
 /// scrolls in: each frame as the scene drawn whole, at scale 1 and 1.5.
