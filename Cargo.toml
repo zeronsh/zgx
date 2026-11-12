@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/zgx", "crates/zgx-3d", "crates/zgx-components", "crates/zgx-desktop", "crates/zgx-dom", "crates/zgx-fx", "crates/zgx-video", "crates/zgx-ghostty-sys", "crates/zgx-gpu", "crates/zgx-script", "crates/zgx-run", "crates/zgx-terminal", "comparisons/workload", "comparisons/demo", "scripts/perf/fingerprint"]
+members = ["crates/zgx", "crates/zgx-3d", "crates/zgx-components", "crates/zgx-desktop", "crates/zgx-dom", "crates/zgx-fx", "crates/zgx-video", "crates/zgx-ghostty-sys", "crates/zgx-gpu", "crates/zgx-script", "crates/zgx-run", "crates/zgx-terminal", "crates/zgx-text", "comparisons/workload", "comparisons/demo", "scripts/perf/fingerprint"]
 exclude = [
     "comparisons/gpui",
     "comparisons/quickgui",
