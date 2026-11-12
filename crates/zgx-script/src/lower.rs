@@ -6903,15 +6903,7 @@ fn lerp(a: &Lit, b: &Lit, t: f32) -> Option<Lit> {
         (Lit::Num(x), Lit::Num(y)) => Lit::Num(mix(*x, *y)),
         (Lit::Len(Length::Px(x)), Lit::Len(Length::Px(y))) => Lit::Len(Length::Px(mix(*x, *y))),
         (Lit::Pair(x0, y0), Lit::Pair(x1, y1)) => Lit::Pair(mix(*x0, *x1), mix(*y0, *y1)),
-        (Lit::Color(c0), Lit::Color(c1)) => {
-            let ch = |x: u8, y: u8| mix(x as f32, y as f32).round().clamp(0., 255.) as u8;
-            Lit::Color(Color(
-                ch(c0.0, c1.0),
-                ch(c0.1, c1.1),
-                ch(c0.2, c1.2),
-                ch(c0.3, c1.3),
-            ))
-        }
+        (Lit::Color(c0), Lit::Color(c1)) => Lit::Color(zgx::theme::mix(*c0, *c1, t)),
         (_, other) if t >= 0.5 => other.clone(),
         (other, _) => other.clone(),
     })
