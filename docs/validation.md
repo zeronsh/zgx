@@ -1381,3 +1381,16 @@ shows and raises nothing.
   point, of any layer, must be the target's. `drive <dir> <popup_hover> act` also
   moves, resizes, miniaturizes, full-screens and closes the window with a popup
   open, or changes its Space.
+
+### Accessibility geometry after a live scale change
+
+`ax-scale-projection` runs a private AT-SPI client and owned XSETTINGS
+provider against `ax_scale_projection`. It changes Xft/DPI live from 96 to
+192, 120 and 96. Fixed logical text boxes keep the layout stable so that
+updated parent bounds cannot hide stale native text-range geometry. The
+probe checks physical range size, hit queries, focus, selection and bounds
+events. The unit regression also compares a cold snapshot and stable IDs.
+
+```sh
+python3 scripts/linux_smokes.py --only ax-scale-projection
+```
