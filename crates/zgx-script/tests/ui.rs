@@ -201,6 +201,56 @@ fn rich_text_svg_and_canvas_render() {
 }
 
 #[test]
+fn a_canvas_texts_transform_maps_it() {
+    use zgx::affine::Affine;
+    let mut h = Harness::inline(
+        r##"return ui.canvas { id = "canvas", w = 40, h = 40, draw = function(c)
+            c:text("upright", 0, 0)
+            c:text("turned", 10, 20, { transform = { 0, 1, -1, 0, 30, 10 } })
+        end }"##,
+    );
+    assert_eq!(h.host.error().get(), None);
+    let board = h.find("canvas").unwrap();
+    let scene = h.ui.scene.borrow();
+    let id = *scene
+        .children(board)
+        .iter()
+        .find(|id| matches!(scene.kind(**id), zgx::scene::NodeKind::Canvas(_)))
+        .unwrap();
+    let zgx::scene::NodeKind::Canvas(canvas) = scene.kind(id) else {
+        unreachable!()
+    };
+    assert_eq!(canvas.text_transform(0), Affine::IDENTITY);
+    assert_eq!(
+        canvas.text_transform(1),
+        Affine {
+            a: 0.,
+            b: 1.,
+            c: -1.,
+            d: 0.,
+            tx: 30.,
+            ty: 10.
+        }
+    );
+    drop(scene);
+    for (matrix, error) in [
+        ("{ 1, 0, 0 }", "six numbers"),
+        ("{ 1, 0, 0, 1, 0 / 0, 0 }", "finite"),
+    ] {
+        let h = Harness::inline(&format!(
+            r##"return ui.canvas {{ w = 10, h = 10, draw = function(c) c:text("a", 0, 0, {{ transform = {matrix} }}) end }}"##
+        ));
+        let shown = h.host.error().get();
+        assert!(
+            shown
+                .as_ref()
+                .is_some_and(|e| e.to_string().contains(error)),
+            "{matrix}: {shown:?}"
+        );
+    }
+}
+
+#[test]
 fn virtual_lists_mount_only_visible_rows() {
     let mut h = Harness::inline(
         r##"return ui.list { id = "list", count = 100000, height = 20, w = 200, h = 200,
