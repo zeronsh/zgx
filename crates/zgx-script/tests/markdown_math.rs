@@ -87,8 +87,12 @@ fn a_long_text_shows_its_start_at_once_and_the_rest_over_frames() {
 
 #[test]
 fn find_opened_while_a_long_text_builds_counts_what_comes_after() {
-    let text: String = (0..1_000).map(|i| format!("Paragraph {i}, a needle.\n\n")).collect();
-    let code = format!("return ui.column {{ ui.markdown_view {{ id = \"md\", w = 300, literal = true, {text:?} }} }}");
+    let text: String = (0..1_000)
+        .map(|i| format!("Paragraph {i}, a needle.\n\n"))
+        .collect();
+    let code = format!(
+        "return ui.column {{ ui.markdown_view {{ id = \"md\", w = 300, literal = true, {text:?} }} }}"
+    );
     let code: &'static str = Box::leak(code.into_boxed_str());
     let mut h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
     h.ui.prepare_frame();
@@ -102,4 +106,32 @@ fn find_opened_while_a_long_text_builds_counts_what_comes_after() {
     }
     assert_eq!(h.ui.find_status().count, 1_000);
     assert_eq!(h.ui.find_status().current, Some(0));
+}
+
+#[test]
+fn a_very_long_text_is_parsed_a_piece_a_frame_and_ends_whole() {
+    let mut text = String::new();
+    for i in 0..12_000 {
+        text.push_str(&format!(
+            "Paragraph {i}, about this long, for the parser to read.\n\n"
+        ));
+        if i % 500 == 0 {
+            text.push_str("```\ncode\n\nwith a blank line\n```\n\n");
+        }
+    }
+    text.push_str("The last line.");
+    assert!(text.len() > 512 * 1024);
+    let code = format!(
+        "return ui.column {{ ui.markdown_view {{ id = \"md\", w = 300, literal = true, {text:?} }} }}"
+    );
+    let code: &'static str = Box::leak(code.into_boxed_str());
+    let mut h = Harness::new(move |runtime| ScriptHost::inline(runtime, "app", code));
+    h.ui.prepare_frame();
+    let start = h.bounds("md").height;
+    h.frames(400);
+    h.ui.find_text("The last line.");
+    assert_eq!(h.ui.find_status().count, 1);
+    h.ui.find_text("with a blank line");
+    assert_eq!(h.ui.find_status().count, 24);
+    assert!(h.bounds("md").height > start * 100.);
 }

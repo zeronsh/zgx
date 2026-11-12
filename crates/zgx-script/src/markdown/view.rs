@@ -776,7 +776,7 @@ pub(crate) enum Source {
 }
 pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOptions) -> View {
     zgx::compose::component(move |cx| {
-        let parser = RefCell::new(Incremental::new(options.parse.clone()));
+        let parser = Rc::new(RefCell::new(Incremental::new(options.parse.clone())));
         let top = cx.runtime().signal(Value::List(Vec::new().into()));
         let blocks = top.clone();
         let reveal = Rc::new(Reveal::default());
@@ -786,26 +786,35 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
             .map(|f| (*f).clone());
         let revealing = reveal.clone();
         cx.retain(cx.runtime().effect(move || {
-            let mut parser = parser.borrow_mut();
-            match source() {
-                Source::Made(text) => parser.set_text(&text),
-                Source::Held(value) => parser.set_value(&value),
+            {
+                let mut parser = parser.borrow_mut();
+                match source() {
+                    Source::Made(text) => revealing.feed(&mut parser, text),
+                    Source::Held(value) => {
+                        revealing.feeding.borrow_mut().take();
+                        parser.set_value(&value)
+                    }
+                }
+                let shown = revealing.show(parser.blocks());
+                blocks.mutate(|was| {
+                    *was = Value::List(shown.into());
+                    true
+                });
             }
-            let parsed = parser.blocks();
-            let shown = revealing.show(parsed);
-            blocks.mutate(|was| {
-                *was = Value::List(shown.into());
-                true
-            });
             if revealing.pending() && !revealing.ticking.replace(true) {
-                let (reveal, blocks, frames) = (revealing.clone(), blocks.clone(), frames.clone());
+                let (reveal, blocks, frames, parser) = (
+                    revealing.clone(),
+                    blocks.clone(),
+                    frames.clone(),
+                    parser.clone(),
+                );
                 tasks.spawn(async move {
                     while reveal.pending() {
                         match &frames {
                             Some(frames) => drop(frames.next().await),
                             None => zgx::timer::sleep(REVEAL_TICK).await,
                         }
-                        let shown = reveal.more();
+                        let shown = reveal.more(&mut parser.borrow_mut());
                         blocks.mutate(|was| {
                             *was = Value::List(shown.into());
                             true
@@ -820,27 +829,55 @@ pub(crate) fn view(mut source: impl FnMut() -> Source + 'static, options: ViewOp
 }
 
 /// A long text landing whole shows its first blocks at once and the rest a
-/// chunk a frame, so opening a long document never builds it in one frame.
-/// Appends (a reply streaming in) show at once.
+/// chunk a frame, so opening a long document never builds it in one frame;
+/// a very long one is parsed a piece a frame too. Appends (a reply streaming
+/// in) show at once.
 #[derive(Default)]
 struct Reveal {
     all: RefCell<Vec<Value>>,
     shown: std::cell::Cell<usize>,
     ticking: std::cell::Cell<bool>,
+    /// A text landed whole, still being handed to the parser a piece at a time.
+    feeding: RefCell<Option<String>>,
 }
 /// Blocks shown at once when a long text lands: more than a screenful.
 const REVEAL_FIRST: usize = 30;
 /// Blocks added each frame after them, and how often without a frame clock.
 const REVEAL_CHUNK: usize = 60;
 const REVEAL_TICK: Duration = Duration::from_millis(8);
+/// Texts this long landing whole are parsed this much a frame.
+const FEED_FROM: usize = 256 * 1024;
+const FEED_CHUNK: usize = 128 * 1024;
 impl Reveal {
+    /// `text` to the parser: whole, unless it is very long and lands whole,
+    /// when it goes in a piece now and the rest a piece a frame (`more`).
+    fn feed(&self, parser: &mut Incremental, text: String) {
+        let mut feeding = self.feeding.borrow_mut();
+        if feeding.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        let lands_whole = text.len() >= FEED_FROM && !text.starts_with(parser.source());
+        if lands_whole || (feeding.is_some() && text.starts_with(parser.source())) {
+            let from = if lands_whole {
+                0
+            } else {
+                parser.source().len()
+            };
+            let cut = piece_end(&text, from + FEED_CHUNK);
+            parser.set_text(&text[..cut]);
+            *feeding = (cut < text.len()).then_some(text);
+        } else {
+            *feeding = None;
+            parser.set_text(&text);
+        }
+    }
     fn show(&self, all: Vec<Value>) -> Vec<Value> {
         // Another text, not this one grown: from its start again.
         if self.all.borrow().first() != all.first() {
             self.shown.set(0);
         }
         let shown = self.shown.get().min(all.len());
-        let next = if all.len() > shown + REVEAL_FIRST {
+        let next = if all.len() > shown + REVEAL_FIRST || self.feeding.borrow().is_some() {
             (shown.max(REVEAL_FIRST)).min(all.len())
         } else {
             all.len()
@@ -850,13 +887,47 @@ impl Reveal {
         *self.all.borrow_mut() = all;
         out
     }
-    fn more(&self) -> Vec<Value> {
+    fn more(&self, parser: &mut Incremental) -> Vec<Value> {
+        let fed = {
+            let mut feeding = self.feeding.borrow_mut();
+            match feeding.as_deref() {
+                Some(text) => {
+                    let cut = piece_end(text, parser.source().len() + FEED_CHUNK);
+                    parser.set_text(&text[..cut]);
+                    if cut >= text.len() {
+                        *feeding = None;
+                    }
+                    true
+                }
+                None => false,
+            }
+        };
+        if fed {
+            *self.all.borrow_mut() = parser.blocks();
+        }
         let all = self.all.borrow();
         let next = (self.shown.get() + REVEAL_CHUNK).min(all.len());
         self.shown.set(next);
         all[..next].to_vec()
     }
     fn pending(&self) -> bool {
-        self.shown.get() < self.all.borrow().len()
+        self.feeding.borrow().is_some() || self.shown.get() < self.all.borrow().len()
     }
+}
+
+/// Where a piece of `text` about `at` bytes long ends: at a blank line
+/// outside a code fence, so no block is cut; the whole text if none.
+fn piece_end(text: &str, at: usize) -> usize {
+    if at >= text.len() {
+        return text.len();
+    }
+    let mut from = at;
+    while let Some(found) = text[from..].find("\n\n") {
+        let cut = from + found + 2;
+        if text[..cut].matches("```").count() % 2 == 0 {
+            return cut;
+        }
+        from = cut;
+    }
+    text.len()
 }
