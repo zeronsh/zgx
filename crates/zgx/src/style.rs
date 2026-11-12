@@ -987,6 +987,9 @@ impl RareStyles {
                 (Some((width, c)), Some(Some((_, mine)))) if c == OUTLINE_COLOR_UNSET => {
                     Some((width, mine))
                 }
+                (Some((width, color)), Some(Some((mine, _)))) if width.is_nan() => {
+                    Some((mine, color))
+                }
                 _ => theirs,
             });
         }
@@ -1513,6 +1516,9 @@ pub(crate) fn merge_insets(target: &mut Insets, source: Insets, mask: u8) {
 /// An outline's colour while only its width is set: a patch carrying it keeps
 /// the colour (or theme token) it lands on, and alone it draws black.
 pub(crate) const OUTLINE_COLOR_UNSET: Color = Color(1, 2, 3, 0);
+/// An outline's width while only its colour is set: a patch carrying it keeps
+/// the width it lands on (0 included), and alone it draws 1 point.
+pub(crate) const OUTLINE_WIDTH_UNSET: f32 = f32::NAN;
 macro_rules! value_or_token {
     ($self:ident, $value:ident, $field:expr) => {
         let ($value, token) = crate::theme::split($value.into());
@@ -2395,12 +2401,12 @@ pub trait Styled: Sized {
         self
     }
     /// The outline's colour, a value or a theme token, keeping its width
-    /// (1 point if none was set).
+    /// (1 point if none was set, also as a patch lands on a node's own).
     fn outline_color(mut self, value: impl Into<crate::theme::Themed<Color>>) -> Self {
         value_or_token!(self, value, crate::theme::Field::OutlineColor);
         let width = match self.styles_mut().rare_mut().outline {
             Some(Some((width, _))) => width,
-            _ => 1.,
+            _ => OUTLINE_WIDTH_UNSET,
         };
         self.styles_mut().rare_mut().outline = Some(Some((width, value)));
         self
