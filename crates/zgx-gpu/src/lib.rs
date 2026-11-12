@@ -12381,10 +12381,14 @@ impl GpuRenderer {
             .collect();
         cuts.sort_by_key(|&(at, batch)| (at, batch.is_none()));
         let mut from = 0;
+        // Each region is cleared once, in the first segment: a batch of blurs
+        // at the first draw (a popup's glass) leaves `from` at 0, and its blur
+        // drawn back must not be cleared again.
+        let mut cleared = false;
         for &(at, batch) in cuts.iter().chain(std::iter::once(&(draws.len(), None))) {
             for (index, (region, region_scissor)) in regions.iter().enumerate() {
                 frame.scissor(*region_scissor);
-                if from == 0 && first[index] == 0 {
+                if !cleared && first[index] == 0 {
                     frame.quads(clear, true, 0..1);
                     stats.draw_calls += 1;
                 }
@@ -12392,6 +12396,7 @@ impl GpuRenderer {
                     self.d3d11_batch(&mut frame, &mut sampled, &mut unpainted, &mut stats, batch)
                 });
             }
+            cleared = true;
             if let Some(batch) = batch {
                 from = at;
                 let (Some(plan), Some(records), Some(atlas)) =
@@ -12407,7 +12412,8 @@ impl GpuRenderer {
                     .collect();
                 let copies = plan.slots.iter().any(|slot| !slot.2);
                 let records = [&records[0], &records[1]];
-                let drawn = frame.blur(target, atlas, records, &slots, copies)
+                let backdrop = state.popup_backdrop.as_ref();
+                let drawn = frame.blur(target, backdrop, atlas, records, &slots, copies)
                     && frame.blur_back(target, &atlas[0], records, &plan.draws, plan.mixed);
                 if drawn {
                     stats.blur_passes += 3;
@@ -16561,6 +16567,10 @@ impl GpuRenderer {
     /// window has stopped presenting for a while.
     pub fn trim(&mut self) {
         self.backdrop = None;
+        #[cfg(d3d11)]
+        if let Some(state) = &mut self.d3d11 {
+            state.popup_backdrop = None;
+        }
         present_log::log(|| {
             #[cfg(target_os = "macos")]
             let plane = self.layer_present.as_ref().map_or("none", |p| p.plane());

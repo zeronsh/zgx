@@ -782,6 +782,12 @@ jobs:
       - run: cargo test -p zgx-gpu --features d3d11 --test d3d11_parity --test d3d11_left_out --test d3d11_atlas --release --locked
         env:
           LOCALAPPDATA: ${{ runner.temp }}\zgx-cold-d3d11
+      # Tests of the renderer's own, drawn with Direct3D 11 throughout
+      # (`ZGX_D3D11` is read once a process): a popup's glass blurring what
+      # its window drew under it.
+      - run: cargo test -p zgx-gpu --features d3d11 --test popup_backdrop --release --locked
+        env:
+          ZGX_D3D11: "1"
       # Its ahead-compiled shaders (dxbc/) are FXC's bytecode of naga's HLSL
       # today; stale ones are kept for a machine without FXC to take (and
       # checked when the parity above failed: stale shaders fail it).
