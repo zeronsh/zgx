@@ -19,6 +19,12 @@ takes the newest kept commit no such change separates from BASE, and `adopt`
 stamps them as BASE's (gate.py's `stamp`: the commit, a newline, then
 `rustc -vV`; another compiler still fails gate.py's check, and it builds).
 Anything unexpected picks nothing: gate.py builds the base, as before.
+
+A pull request's run restores from its own cache scope first, and its earlier
+commits can write there (an edited ci.yml saves anything): a `gate-bin-<sha>`
+of its own making would be measured as main's. So outside main, `pick` skips a
+commit whose key has an entry in the run's own scope (`shadowed`), as if main
+kept none for it; if that can't be checked, it picks nothing.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ import os
 import pathlib
 import subprocess
 import sys
+from urllib.parse import quote
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import plan  # noqa: E402
@@ -42,18 +49,37 @@ def kept(repo: str) -> list[str]:
     return [c["key"][len(PREFIX):] for c in data.get("actions_caches", []) if c["key"].startswith(PREFIX)]
 
 
+def shadowed(repo: str, ref: str, sha: str) -> bool:
+    """Whether `ref`'s own cache scope has an entry under `sha`'s key, which a
+    restore there would take instead of main's."""
+    data = plan.api(f"/repos/{repo}/actions/caches?key={PREFIX}{sha}&ref={quote(ref, safe='')}&per_page=100")
+    return any(c.get("key") == f"{PREFIX}{sha}" for c in data.get("actions_caches", []))
+
+
+def own_scope() -> str | None:
+    """The run's own cache scope when it isn't main's: a pull request's merge ref."""
+    ref = os.environ.get("GITHUB_REF", "")
+    return ref if ref and ref != "refs/heads/main" else None
+
+
 def changed(a: str, b: str) -> list[str] | None:
     result = subprocess.run(["git", "diff", "--name-only", "--no-renames", a, b],
                             capture_output=True, text=True)
     return result.stdout.split() if result.returncode == 0 else None
 
 
-def choose(base: str, candidates: list[str], diff=changed) -> str | None:
-    if base in candidates:
+def choose(base: str, candidates: list[str], diff=None, shadowed=None) -> str | None:
+    """The base's own kept binaries, or the newest kept commit's that nothing perf
+    builds separates from it; never one `shadowed` (the run's own scope has its key)."""
+    diff = diff or changed
+    shadowed = shadowed or (lambda sha: False)
+    if base in candidates and not shadowed(base):
         return base
     for sha in candidates[:CANDIDATES]:
+        if sha == base:
+            continue
         paths = diff(sha, base)
-        if paths is not None and not any(plan.perf_builds(p) for p in paths):
+        if paths is not None and not any(plan.perf_builds(p) for p in paths) and not shadowed(sha):
             return sha
     return None
 
@@ -90,10 +116,12 @@ def main() -> int:
         return 0
     if len(sys.argv) == 3 and sys.argv[1] == "pick":
         base = sys.argv[2]
+        repo, scope = os.environ["GITHUB_REPOSITORY"], own_scope()
         try:
-            sha = choose(base, kept(os.environ["GITHUB_REPOSITORY"]))
+            sha = choose(base, kept(repo), shadowed=(lambda s: shadowed(repo, scope, s)) if scope else None)
         except (OSError, KeyError, ValueError) as error:
-            print(f"::warning::could not list main's kept perf binaries ({error}); building the base",
+            print(f"::warning::could not list main's kept perf binaries, or this run's own ({error}); "
+                  "building the base",
                   file=sys.stderr)
             return 0
         if sha is None:
