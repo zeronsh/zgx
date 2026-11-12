@@ -6780,6 +6780,7 @@ fn open_element(
         }
         let typography = environment.typography.clone();
         let theme = environment.theme.clone();
+        let mounted = editor.clone();
         ui.bind_input(root, move || {
             let style = typography.get();
             let theme = Some(&*theme);
@@ -6789,6 +6790,17 @@ fn open_element(
                 style.font_in(theme),
                 style.wrap,
             );
+        });
+        // Bound after its options, so their first runs come before it: the
+        // editor draws once as it mounts, not once each. That draw's reads
+        // (a custom shaper's) are this binding's: it draws again as they change.
+        let first = Cell::new(true);
+        ui.bind(root, move || {
+            if first.replace(false) {
+                mounted.finish_mount();
+            } else {
+                mounted.refresh();
+            }
         });
     }
     if let Some(id) = view.id {

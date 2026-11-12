@@ -298,6 +298,9 @@ struct EditorHint {
     /// A selection set by the program shows the next time it is drawn,
     /// focused or not (a search's match, chosen from its field).
     reveal: Cell<bool>,
+    /// Mounting, its draws wait for its options (`EditorHandle::finish_mount`):
+    /// 0 drawn as asked, 1 held, 2 held with a draw owed.
+    held: Cell<u8>,
     /// Another editor was just refreshed for its new size, in the same step
     /// of a frame (`refresh_if_resized`): the next draw takes its size from
     /// the layout that one made, not laying out what that one's draw dirtied.
@@ -510,6 +513,7 @@ impl EditorHint {
             clause: Cell::default(),
             composition_layer: Cell::default(),
             reveal: Cell::default(),
+            held: Cell::default(),
             laid_out: Cell::default(),
             reveal_at: Cell::default(),
             point: std::cell::OnceCell::new(),
@@ -1074,6 +1078,13 @@ impl EditorHandle {
     /// Lay out and repaint the editor from its model again.
     pub fn refresh(&self) {
         (self.refresh)();
+    }
+    /// A mount set its options: the draw they held (`text_input_styled`)
+    /// happens now, once, unless the mount draws it later.
+    pub(crate) fn finish_mount(&self) {
+        if self.hint.held.replace(0) == 2 && !input_draw_pending(self.node, &self.scene) {
+            self.refresh();
+        }
     }
     /// The selected text, for the clipboard; empty in a password field.
     pub fn copy(&self) -> String {
@@ -5314,6 +5325,10 @@ impl Ui {
         let gesture = Rc::new(EditorDrag::default());
         let draw_gesture = gesture.clone();
         let hint = Rc::new(EditorHint::new(value, multiline));
+        // A view's editor draws once its mount has set its options.
+        if styled {
+            hint.held.set(1);
+        }
         let wheel_hint = hint.clone();
         hint.composition_layer.set(Some(preedit_layer));
         let draw_hint = hint.clone();
@@ -6343,6 +6358,11 @@ impl Ui {
             let told = hint.clone();
             let storage = Rc::downgrade(&self.storage);
             Rc::new(move || {
+                if told.held.get() != 0 {
+                    told.held.set(2);
+                    return;
+                }
+                EDITOR_DRAWS.set(EDITOR_DRAWS.get() + 1);
                 refresh();
                 // Spans that shape their lines found as it drew (the first
                 // bold line): what it placed from plain lines is placed again.
@@ -7876,6 +7896,15 @@ impl Ui {
     }
 }
 
+thread_local! {
+    static EDITOR_DRAWS: Cell<u64> = const { Cell::new(0) };
+}
+/// How many times editors on this thread were drawn from their model: for
+/// tests that an editor's options don't each draw it.
+#[doc(hidden)]
+pub fn debug_editor_draws() -> u64 {
+    EDITOR_DRAWS.get()
+}
 /// An input waiting to be drawn, with the model effect whose reads its
 /// draw's are.
 type InputDraw = (NodeId, u64, Rc<dyn Fn()>);

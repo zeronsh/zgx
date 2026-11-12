@@ -253,3 +253,52 @@ fn tab_indents_and_outdents_lines_and_undo_takes_it_back() {
     assert_eq!(value.get(), text);
     assert_ne!(ui.focused_editor().map(|e| e.node), Some(editor.node));
 }
+
+/// A code editor shown once its text is in (a viewer's `ui.show`), with a
+/// highlighter, line numbers, a current line and read-only following a
+/// state, is drawn once as it mounts, not once for its text and again for
+/// each option.
+#[test]
+fn a_code_editor_mounted_with_its_options_draws_once() {
+    let mut ui = Ui::new(400., 300.);
+    let shown = ui.signal(false);
+    let value = ui.signal(
+        (0..40)
+            .map(|i| format!("fn f{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    );
+    let editable = ui.signal(false);
+    let (when, text, edit) = (shown.clone(), value.clone(), editable.clone());
+    let root = ui.mount(switch_or_none(
+        move || when.get(),
+        move |on, _| {
+            on.then(|| {
+                let edit = edit.clone();
+                text_area("Code", text.clone())
+                    .w(300.)
+                    .h(200.)
+                    .text_size(10.)
+                    .line_height(20.)
+                    .line_numbers(true)
+                    .highlighter(highlight)
+                    .current_line(|| Some(CURRENT))
+                    .read_only_when(move || !edit.get())
+            })
+        },
+    ));
+    ui.prepare_frame();
+    let before = zgx::widgets::debug_editor_draws();
+    shown.set(true);
+    ui.prepare_frame();
+    let draws = zgx::widgets::debug_editor_draws() - before;
+    assert_eq!(draws, 1, "{draws} draws as it mounted");
+    // And that draw shows what each option asks for.
+    assert!(
+        runs(&ui, root.node(), "fn f0() {}").contains(&("fn".to_string(), KEYWORD)),
+        "highlighted"
+    );
+    assert_eq!(rects(&ui, root.node(), CURRENT), 1, "its current line");
+    editable.set(true);
+    ui.prepare_frame();
+}
