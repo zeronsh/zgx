@@ -767,6 +767,9 @@ pub struct Canvas {
     /// no text is transformed, as a chart's labels and a terminal's rows:
     /// the canvas no larger than it was, and nothing allocated.
     order: Option<Box<TextOrder>>,
+    /// Whether its text is drawn into its raster with its shapes
+    /// (`Canvas::raster_text`), rather than as text nodes over it.
+    raster_text: bool,
 }
 impl Canvas {
     /// An empty canvas.
@@ -893,6 +896,19 @@ impl Canvas {
             self.order().transformed.push((index, transform));
         }
         self.text(text)
+    }
+    /// Draw its text into its raster with its shapes, in their layers, as
+    /// a picture of it draws them, rather than as text nodes over it: a
+    /// canvas that pans and zooms (`View::canvas_view`) then moves and
+    /// scales its words with its raster, as pixels, rather than laying out
+    /// and drawing every one of them again at each new zoom.
+    pub fn raster_text(&mut self) -> &mut Self {
+        self.raster_text = true;
+        self
+    }
+    /// Whether its text is drawn into its raster (`Canvas::raster_text`).
+    pub fn rasters_text(&self) -> bool {
+        self.raster_text
     }
     /// The canvas's lines of text.
     pub fn texts(&self) -> &[CanvasText] {

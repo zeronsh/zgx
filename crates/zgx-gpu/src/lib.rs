@@ -4052,6 +4052,9 @@ struct GpuContextInner {
     queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
     fonts: Rc<RefCell<FontSystem>>,
+    /// The fonts given it (`add_font`, `replace_font`), for canvases that
+    /// draw their text into their raster on the CPU (`Canvas::raster_text`).
+    canvas_fonts: canvas::CanvasFonts,
     /// Shaped text shared by layout measurement and every renderer.
     text_cache: Rc<RefCell<prepared::TextCache>>,
     /// `fonts` and `text_cache` as text services a scene with none takes
@@ -4385,6 +4388,7 @@ impl GpuContext {
                     queue,
                     info,
                     fonts,
+                    canvas_fonts: Default::default(),
                     text_cache,
                     quads,
                     texture_layout,
@@ -4437,6 +4441,7 @@ impl GpuContext {
     /// `Scene::fonts_replaced`.
     pub fn replace_font(&self, font: &crate::text::FontData) {
         font.replace_in(&mut self.inner.fonts.borrow_mut());
+        self.inner.canvas_fonts.add(font, true);
         self.inner.text_cache.borrow_mut().clear();
     }
     /// Shape text with `font` too, beside the faces its families have
@@ -4446,6 +4451,7 @@ impl GpuContext {
         let mut fonts = self.inner.fonts.borrow_mut();
         font.install(&mut fonts);
         fonts.shape_run_cache.clear();
+        self.inner.canvas_fonts.add(font, false);
         self.inner.text_cache.borrow_mut().clear();
     }
     /// Shape text as in `language` from now on (`None`: the system's), its
@@ -9706,7 +9712,9 @@ impl GpuRenderer {
                             // (the zoom before's scaled meanwhile).
                             let wait = self.waits_for_shaders();
                             let mut placed = None;
+                            let fonts = self.context.inner.canvas_fonts.clone();
                             let id = self.canvas_texture(item.id, &mut stats, |cache| {
+                                cache.set_fonts(&fonts);
                                 let (raster, placement) = cache.get_panned(
                                     item.id, canvas, view, width, height, scale, wait,
                                 )?;
@@ -18687,6 +18695,10 @@ fn canvas_quads(
     areas: bool,
     points: &mut Vec<[f32; 2]>,
 ) -> Option<Vec<CanvasQuad>> {
+    // Its text drawn into its raster: rasterized, words and all.
+    if canvas.rasters_text() && !canvas.texts().is_empty() {
+        return None;
+    }
     let mark = points.len();
     let quads = canvas_quads_of(canvas, origin, view, areas, points);
     if quads.is_none() {

@@ -886,6 +886,12 @@ impl CpuTextRaster {
     pub fn register_font(&mut self, font: &FontData) {
         font.install(&mut self.fonts);
     }
+    /// Shape `font`'s families with it alone from now on, in place of their
+    /// faces (`FontData::replace_in`), as a window does after
+    /// `GpuContext::replace_font`.
+    pub fn replace_font(&mut self, font: &FontData) {
+        font.replace_in(&mut self.fonts);
+    }
     /// Rasterize `rich` laid out in `width` by `height`.
     pub fn rasterize_rich(
         &mut self,

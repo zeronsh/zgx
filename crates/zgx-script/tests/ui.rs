@@ -5495,10 +5495,10 @@ fn a_canvas_draws_text_where_it_says() {
     assert_eq!(h.host.error().get(), None);
 }
 
-/// A canvas without text makes no nodes for it, and text takes a canvas's
-/// pan and zoom.
+/// A canvas without text makes no nodes for it, and a canvas that pans and
+/// zooms draws its text into its raster, with its drawing.
 #[test]
-fn canvas_text_costs_nothing_unused_and_follows_a_view() {
+fn canvas_text_costs_nothing_unused_and_a_view_draws_it_in_its_raster() {
     let mut h = Harness::inline(
         r##"local view = ui.state("view", { x = 0, y = 0, zoom = 1 })
         return ui.column { w = 400, h = 300,
@@ -5514,30 +5514,27 @@ fn canvas_text_costs_nothing_unused_and_follows_a_view() {
         1,
         "the drawing alone"
     );
+    // A canvas that pans and zooms draws its text into its raster: no node
+    // for it, the drawing holds it, and the drawing follows the view.
     let canvas = h.find("c").unwrap();
-    let mark = |h: &mut Harness| {
+    let drawing = |h: &Harness| {
         let scene = h.ui.scene.borrow();
-        let group = *scene.children(canvas).last().unwrap();
-        let text = scene.children(group)[0];
-        let (b, top) = (scene.transformed_bounds(text), scene.bounds(canvas));
-        (b.x - top.x, b.y - top.y, b.height)
+        let kids = scene.children(canvas).to_vec();
+        assert_eq!(kids.len(), 1, "the drawing alone, its text in it");
+        let zgx::scene::NodeKind::Canvas(drawn) = scene.kind(kids[0]) else {
+            panic!("not a canvas");
+        };
+        assert!(drawn.rasters_text());
+        assert_eq!(drawn.texts().len(), 1);
+        assert_eq!((drawn.texts()[0].x, drawn.texts()[0].y), (10., 5.));
+        scene.canvas_view(kids[0])
     };
-    let before = mark(&mut h);
-    assert_eq!((before.0, before.1), (10., 5.));
-    // Read by the canvas's `label`, not line by line.
-    let text = {
-        let scene = h.ui.scene.borrow();
-        scene.children(*scene.children(canvas).last().unwrap())[0]
-    };
-    assert!(h.ui.semantics.borrow().get(text).is_none());
+    let before = drawing(&h);
+    assert_eq!((before.x, before.y, before.scale), (0., 0., 1.));
     h.click("zoom");
     h.ui.prepare_frame();
-    let zoomed = mark(&mut h);
-    assert_eq!((zoomed.0, zoomed.1), (40., 20.));
-    assert!(
-        (zoomed.2 - before.2 * 2.).abs() < 0.5,
-        "{zoomed:?} {before:?}"
-    );
+    let zoomed = drawing(&h);
+    assert_eq!((zoomed.x, zoomed.y, zoomed.scale), (20., 10., 2.));
 }
 
 /// A canvas redrawn keeps its text nodes: a line's node is reused by place,

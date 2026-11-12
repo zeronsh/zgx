@@ -2627,6 +2627,9 @@ struct CanvasLayers {
     layers: Vec<(NodeId, CanvasLabels)>,
     size: (f32, f32),
     view: Option<crate::scene::CanvasView>,
+    /// A canvas that pans and zooms: its text drawn into its raster
+    /// (`Canvas::raster_text`), no node for any of it.
+    raster_text: bool,
 }
 impl CanvasLayers {
     fn show(
@@ -2634,10 +2637,15 @@ impl CanvasLayers {
         scene: &mut crate::scene::Scene,
         root: NodeId,
         drawing: NodeId,
-        content: crate::canvas::Canvas,
+        mut content: crate::canvas::Canvas,
         size: (f32, f32),
     ) {
         use std::sync::Arc;
+        if self.raster_text {
+            content.raster_text();
+            scene.set_kind(drawing, NodeKind::Canvas(Arc::new(content)));
+            return;
+        }
         let texts = content.texts();
         // The drawing, then its words over it (a chart's labels, a
         // terminal's rows): one layer, nothing clipped, measured or
@@ -6884,7 +6892,10 @@ fn open_element(
             },
         );
         let scene = ui.scene.clone();
-        let labels = Rc::new(RefCell::new(CanvasLayers::default()));
+        let labels = Rc::new(RefCell::new(CanvasLayers {
+            raster_text: canvas_view.is_some(),
+            ..Default::default()
+        }));
         let shown = labels.clone();
         ui.bind(root, move || {
             let (width, height) = size.get();
