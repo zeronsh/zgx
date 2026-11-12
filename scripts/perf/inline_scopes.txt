@@ -37,10 +37,10 @@ zgx-script	1567	13150	kind_view
 zgx-script	325	2333	kind_view::{closure#27}::{closure#0}
 zgx-script	553	8910	lower::apply
 zgx-script	361	3264	lower_list
-zgx-script	475	4029	lower_item_list
+zgx-script	475	4035	lower_item_list
 zgx-script	351	3771	lower_rich::{closure#1}::{closure#0}
 zgx-script	261	3001	to_lua
 zgx-script	171	1428	value::<impl in crates/zgx-script/src/value.rs>::reconcile
 zgx-script	174	1227	<impl in crates/zgx-script/src/lib.rs>::set_state
 zgx-script	107	1234	element::<impl in crates/zgx-script/src/element.rs>::flush
-zgx-script	361	2213	engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush
+zgx-script	361	2213	anime::engine::<impl in crates/zgx-script/src/anime/engine.rs>::flush
