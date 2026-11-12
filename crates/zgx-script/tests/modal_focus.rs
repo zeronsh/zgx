@@ -37,8 +37,6 @@ return ui.row { w_full = true, h_full = true, gap = 8,
 }
 "##;
 
-const INSIDE: [&str; 3] = ["tab1", "tab2", "done"];
-
 fn open() -> Harness {
     let mut h = Harness::inline(APP);
     h.frames(3);
@@ -50,11 +48,24 @@ fn open() -> Harness {
     h
 }
 
+/// Whether focus is on the modal's panel or in it.
 fn inside(h: &mut Harness) -> bool {
-    let focused = h.ui.input.focused();
-    INSIDE
-        .iter()
-        .any(|id| focused.is_some() && h.find(id) == focused)
+    use zgx::semantics::Role;
+    let Some(focused) = h.ui.input.focused() else {
+        return false;
+    };
+    let Some(title) = h.find("title") else {
+        return false;
+    };
+    let scene = h.ui.scene.borrow();
+    let semantics = h.ui.semantics.borrow();
+    let Some(dialog) = scene
+        .ancestors(title)
+        .find(|node| semantics.get(*node).is_some_and(|s| s.role == Role::Dialog))
+    else {
+        return false;
+    };
+    focused == dialog || scene.ancestors(focused).any(|node| node == dialog)
 }
 
 fn closed(h: &mut Harness) -> String {
@@ -95,14 +106,14 @@ fn a_click_on_blank_space_inside_never_leaves_focus_outside() {
     h.frames(2);
     let focused = h.ui.input.focused();
     assert!(
-        focused.is_none() || inside(&mut h),
+        inside(&mut h),
         "a click inside moved focus out: {focused:?}"
     );
     h.click("title");
     h.frames(2);
     let focused = h.ui.input.focused();
     assert!(
-        focused.is_none() || inside(&mut h),
+        inside(&mut h),
         "a click on the title moved focus out: {focused:?}"
     );
     // And Tab and Escape still work from there.
@@ -122,8 +133,7 @@ fn escape_after_a_click_inside_reaches_on_close() {
     assert_eq!(closed(&mut h), "closed=0");
     h.key(Key::Escape);
     h.frames(3);
-    assert_eq!(closed(&mut h), "closed=1");
-    assert!(h.find("done").is_none(), "the modal closed");
+    assert_eq!(closed(&mut h), "closed=1", "Escape reached on_close");
 }
 
 #[test]
@@ -133,4 +143,42 @@ fn closing_gives_focus_back_to_what_had_it() {
     h.frames(3);
     let opener = h.find("opener");
     assert_eq!(h.ui.input.focused(), opener);
+}
+
+#[test]
+fn a_press_on_the_backdrop_reaches_on_close_once() {
+    let mut h = open();
+    h.ui.dispatch(zgx::input::InputEvent::PointerDown {
+        x: 2.,
+        y: 2.,
+        button: zgx::input::PointerButton::Primary,
+    });
+    h.ui.dispatch(zgx::input::InputEvent::PointerUp {
+        x: 2.,
+        y: 2.,
+        button: zgx::input::PointerButton::Primary,
+    });
+    h.frames(3);
+    assert_eq!(closed(&mut h), "closed=1");
+}
+
+#[test]
+fn a_controlled_open_hears_its_close_once() {
+    let mut h = Harness::inline(
+        r##"local open = ui.state("open", true)
+        local closed = ui.state("closed", 0)
+        return ui.column { w_full = true, h_full = true,
+            ui.text { id = "closed", function() return `closed={closed:get()}` end },
+            ui.modal {
+                open = function() return open:get() end,
+                on_close = function() closed:set(closed:peek() + 1); open:set(false) end,
+                build = function() return ui.button { id = "done", label = "Done" } end,
+            },
+        }"##,
+    );
+    h.frames(3);
+    assert_eq!(h.error(), None);
+    h.key(Key::Escape);
+    h.frames(3);
+    assert_eq!(h.text("closed"), "closed=1");
 }

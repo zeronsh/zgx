@@ -604,6 +604,8 @@ pub(crate) struct Rare {
     /// `View::active_descendant`: the id of the item it is on.
     active_descendant: Option<Box<dyn Fn() -> Option<String>>>,
     dismiss_backdrop: Option<bool>,
+    /// `View::on_dismiss`: runs as the person closes a modal or popover.
+    on_dismiss: Option<Rc<dyn Fn()>>,
     /// Where an overlay opens and a submenu's own trigger row: boxed, as
     /// few views have them (views are moved through the mount recursion).
     portal: Option<Box<PortalOptions>>,
@@ -719,6 +721,9 @@ impl Rare {
         }
         if self.dismiss_backdrop.is_some() {
             inner.dismiss_backdrop = self.dismiss_backdrop;
+        }
+        if self.on_dismiss.is_some() {
+            inner.on_dismiss = self.on_dismiss;
         }
         if self.portal.is_some() {
             inner.portal = self.portal;
@@ -1166,6 +1171,14 @@ impl View {
     /// Configure whether clicking outside a modal or popover panel dismisses it.
     pub fn dismiss_on_backdrop(mut self, enabled: bool) -> Self {
         self.rare_mut().dismiss_backdrop = Some(enabled);
+        self
+    }
+    /// Runs as the person closes a modal (Escape, or a press on the
+    /// backdrop), after it has closed: for what a closing owes the app when
+    /// its `open` is a plain signal the app also sets.
+    #[doc(hidden)]
+    pub fn on_dismiss(mut self, handler: impl Fn() + 'static) -> Self {
+        self.rare_mut().on_dismiss = Some(Rc::new(handler));
         self
     }
     /// Where an anchored popover or menu opens against its trigger (below
@@ -5579,6 +5592,7 @@ fn mount_portal_panel(
     // items closes it); the parent's backdrop dismisses both.
     let mut rare = view.rare.as_mut();
     let dismiss_backdrop = rare.as_mut().and_then(|r| r.dismiss_backdrop.take());
+    let on_dismiss = rare.as_mut().and_then(|r| r.on_dismiss.take());
     let dismiss_backdrop = dismiss_backdrop.unwrap_or(!is_submenu);
     let (placement, modal_placement, autofocus, over, arrow) = rare
         .and_then(|r| r.portal.take())
@@ -5813,6 +5827,7 @@ fn mount_portal_panel(
         is_submenu,
         autofocus.unwrap_or(true),
         keeps_focus,
+        on_dismiss,
     );
     // An unnamed popover or menu is named by its trigger, as a browser's
     // popover target is (`aria-labelledby`).
@@ -6783,6 +6798,10 @@ fn mount_element(
     assert!(
         rare.as_ref().is_none_or(|r| r.dismiss_backdrop.is_none()),
         "dismiss_on_backdrop is only supported on modal and popover views"
+    );
+    assert!(
+        rare.as_ref().is_none_or(|r| r.on_dismiss.is_none()),
+        "on_dismiss is only supported on modal and popover views"
     );
     assert!(
         rare.as_ref()
