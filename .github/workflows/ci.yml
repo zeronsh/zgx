@@ -500,6 +500,9 @@ jobs:
       # perf job): the base's own, or else those of the newest kept commit
       # that differs from it in nothing perf builds (a docs-only push keeps
       # none), stamped as the base's. None found, and the gate builds the base.
+      # Never one this pull request saved in its own cache scope (an earlier
+      # commit's edited ci.yml could): the restore below would take that over
+      # main's, so pick passes over a commit whose key is there (gate_base.py).
       - name: Base binaries kept on main
         id: kept
         continue-on-error: true

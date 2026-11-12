@@ -12,7 +12,10 @@ name: Perf base binaries
 # same build in the same place as the perf job's, on its dependency cache.
 # Skipped when the push changes nothing perf builds (docs, tests, other
 # platforms' code): the binaries of the commit before stand for it then.
-# Afterwards the cache entries CI no longer needs go (prune_caches.py).
+# Afterwards the cache entries CI no longer needs go (prune_caches.py), in a
+# job of its own: the build runs the dependencies' build scripts, which never
+# get a token that can write (`actions: write` deletes caches), and neither
+# job's checkout keeps its token in .git/config.
 
 on:
   push:
@@ -39,9 +42,10 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      actions: write  # prune cache entries
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Does this push change what perf builds?
         id: needed
         continue-on-error: true  # unsure: build
@@ -87,8 +91,23 @@ jobs:
         with:
           path: ${{ runner.temp }}/gate-bin
           key: gate-bin-${{ github.sha }}
+
+  # After the binaries are saved, built or not: only the repository's own
+  # prune_caches.py and gh run here, with the token that can delete caches.
+  prune:
+    needs: perf
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: write  # delete cache entries
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/ci
+          persist-credentials: false
       - name: Prune caches
-        if: ${{ !cancelled() }}
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
