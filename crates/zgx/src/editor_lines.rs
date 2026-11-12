@@ -61,6 +61,14 @@ pub struct SpanStyle {
     pub strike: bool,
     /// A wash behind it (inline code).
     pub background: Option<crate::scene::Color>,
+    /// Its font size (a heading in a note): shaped so.
+    pub size: Option<f32>,
+    /// Its line pitch in points (a heading's): the line takes the tallest.
+    pub line_height: Option<f32>,
+    /// A line under it (a link).
+    pub underline: bool,
+    /// In the monospaced font (inline code): shaped so.
+    pub mono: bool,
 }
 impl From<crate::scene::Color> for SpanStyle {
     fn from(color: crate::scene::Color) -> Self {
@@ -96,20 +104,51 @@ impl SpanStyle {
         self.background = Some(color);
         self
     }
+    /// Its text `size` points large.
+    pub const fn size(mut self, size: f32) -> Self {
+        self.size = Some(size);
+        self
+    }
+    /// Its line `line_height` points high.
+    pub const fn line_height(mut self, line_height: f32) -> Self {
+        self.line_height = Some(line_height);
+        self
+    }
+    /// A line under its text.
+    pub const fn underline(mut self) -> Self {
+        self.underline = true;
+        self
+    }
+    /// Its text in the monospaced font.
+    pub const fn mono(mut self) -> Self {
+        self.mono = true;
+        self
+    }
     fn merge(&mut self, style: &SpanStyle) {
         self.color = self.color.or(style.color);
         self.weight = self.weight.or(style.weight);
         self.italic |= style.italic;
         self.strike |= style.strike;
         self.background = self.background.or(style.background);
+        self.size = self.size.or(style.size);
+        self.line_height = self.line_height.or(style.line_height);
+        self.underline |= style.underline;
+        self.mono |= style.mono;
     }
     /// Whether it only colours its text.
     fn colors_only(&self) -> bool {
-        self.weight.is_none() && !self.italic && !self.strike && self.background.is_none()
+        self.weight.is_none()
+            && !self.italic
+            && !self.strike
+            && self.background.is_none()
+            && self.size.is_none()
+            && self.line_height.is_none()
+            && !self.underline
+            && !self.mono
     }
-    /// Whether it changes how its text is shaped (and so its width).
+    /// Whether it changes how its text is shaped (and so its width or height).
     fn shapes(&self) -> bool {
-        self.weight.is_some() || self.italic
+        self.weight.is_some() || self.italic || self.size.is_some() || self.line_height.is_some() || self.mono
     }
 }
 /// A line's styled ranges: byte ranges of the line, each with how it shows.
@@ -228,12 +267,19 @@ pub(crate) fn styled_line(
                 font.weight = weight.clamp(1, 1000);
             }
             font.italic |= style.italic;
+            if style.mono {
+                font.family = crate::text_layout::FontFamily::Monospace;
+            }
+            if let Some(line_height) = style.line_height {
+                font.line_height = crate::text_layout::LineHeight::px(line_height);
+            }
             crate::rich_text::TextRun {
                 range,
                 font,
-                font_size: size,
+                font_size: style.size.unwrap_or(size),
                 color: style.color.unwrap_or(color),
                 background: style.background,
+                underline: style.underline.then(|| crate::rich_text::Decoration::new(1.)),
                 strikethrough: style.strike.then(|| crate::rich_text::Decoration::new(1.)),
                 ..Default::default()
             }
@@ -257,6 +303,9 @@ fn shape_key(spans: &LineSpans) -> Option<ShapeKey> {
                     r.end as u32,
                     s.weight.unwrap_or(0),
                     s.italic,
+                    s.size.map_or(0, f32::to_bits),
+                    s.line_height.map_or(0, f32::to_bits),
+                    s.mono,
                 )
             })
             .collect(),
@@ -331,7 +380,7 @@ struct Tail {
 /// A shaped line, and when it was last used.
 type Shaped = (Rc<dyn TextLayout>, u64);
 /// What shapes a styled line's runs: each one's range, weight and slant.
-type ShapeKey = Box<[(u32, u32, u16, bool)]>;
+type ShapeKey = Box<[(u32, u32, u16, bool, u32, u32, bool)]>;
 /// A styled line's text and what shapes its runs (`shape_key`).
 type StyledKey = (Box<str>, ShapeKey);
 /// A highlighted line: its colours, what it leaves the next, when used.
@@ -1044,6 +1093,30 @@ mod tests {
             .map(|r| (r.range.clone(), r.color))
             .collect();
         assert_eq!(runs, [(0..1, ink), (1..4, red), (4..6, blue), (6..8, ink)]);
+    }
+    /// A note's heading and inline code: size, line pitch, underline and the monospaced font reach the runs.
+    #[test]
+    fn note_spans_set_size_pitch_underline_and_font() {
+        use crate::scene::Color;
+        let ink = Color(0, 0, 0, 255);
+        let spans: LineSpans = vec![
+            (0..5, SpanStyle::default().size(24.).line_height(32.).weight(600)),
+            (6..10, SpanStyle::default().mono()),
+            (11..15, SpanStyle::default().underline()),
+        ];
+        let font = crate::text_layout::FontStyle::default();
+        let rich = styled_line("Title code link", &spans, ink, 16., &font).unwrap();
+        let runs = rich.runs();
+        let title = runs.iter().find(|r| r.range == (0..5)).unwrap();
+        assert_eq!(title.font_size, 24.);
+        assert_eq!(title.font.line_height.pixels(), Some(32.));
+        assert_eq!(title.font.weight, 600);
+        let code = runs.iter().find(|r| r.range == (6..10)).unwrap();
+        assert_eq!(code.font.family, crate::text_layout::FontFamily::Monospace);
+        assert_eq!(code.font_size, 16.);
+        assert!(runs.iter().find(|r| r.range == (11..15)).unwrap().underline.is_some());
+        assert!(shape_key(&spans).is_some(), "size and font reshape the line");
+        assert!(shape_key(&vec![(11..15, SpanStyle::default().underline())]).is_none());
     }
     use crate::text_layout::{FallbackTextLayout, FontStyle};
 
