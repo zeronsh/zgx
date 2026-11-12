@@ -5472,6 +5472,10 @@ export type MarkdownViewProps = {
 	paths: boolean?,
 	-- A Copy button on code blocks (true).
 	copy: boolean?,
+	-- Told of a link click (or its Open Link); true says it was handled, so the link isn't opened.
+	on_link: ((url: string) -> boolean?)?,
+	-- TeX between dollars drawn as an SVG with its width, height above the baseline and depth below, in ems; nil shows it as code.
+	on_math: ((tex: string, display: boolean) -> { svg: string, w: number, h: number, d: number }?)?,
 }
 -- `ui.span`'s options are plain values.
 export type SpanProps = {
@@ -21815,6 +21819,8 @@ declare ui: {
 	group: (props: GroupProps) -> Object3D,
 	model: (props: ModelProps) -> Object3D,
 	webview: (props: WebViewProps) -> Node,
+	-- A view the host makes in Rust (`host_view(name, make)`), laid out, clipped and stacked as the script's own.
+	host_view: (props: ContainerProps & { name: string }) -> Node,
 	-- `ui.web(opts)`: a page for this run. `ui.web(id, opts)`: the host's
 	-- page for `id`, made with `opts` the first time, kept across reloads.
 	web: ((opts: WebOptions?) -> Web) & ((id: string, opts: WebOptions?) -> Web),
