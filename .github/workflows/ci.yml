@@ -788,6 +788,12 @@ jobs:
       - run: cargo test -p zgx-gpu --features d3d11 --test popup_backdrop --release --locked
         env:
           ZGX_D3D11: "1"
+      # Layer shaders' passes and tagged boxes read on Direct3D 11 as on
+      # Direct3D 12 (`shader_passes`, but its pictures and GPU views, which
+      # Direct3D 11 leaves out: `d3d11_left_out`).
+      - run: cargo test -p zgx-gpu --features d3d11 --test shader_passes --release --locked -- a_feedback_pass_keeps_state_from_frame_to_frame steps_run_a_pass_that_many_times_a_frame a_once_pass_draws_once a_later_pass_reads_an_earlier_ones_result_from_this_frame a_pass_past_one_keeps_float_values a_shader_declared_as_a_script_declares_it_draws_through_its_passes tagged_boxes_are_read_where_they_are_this_frame
+        env:
+          ZGX_D3D11: "1"
       # Its ahead-compiled shaders (dxbc/) are FXC's bytecode of naga's HLSL
       # today; stale ones are kept for a machine without FXC to take (and
       # checked when the parity above failed: stale shaders fail it).
