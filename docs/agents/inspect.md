@@ -128,6 +128,7 @@ zgx inspect type '#composer' 'Write me a function'     # clicks it, then types
 zgx inspect key Enter                                  # Escape, Tab, cmd+k, alt+ArrowDown, shift+Tab, F5…
 zgx inspect key alt                                    # modifiers alone (ctrl+shift): held, then let go, as a window reports a tap
 zgx inspect scroll '#transcript' 400                   # points; down is positive
+zgx inspect scroll 500,300 0 120                      # or at a point; a third number is the sideways motion (dx), as a trackpad's
 zgx inspect command new                                # a ui.command, as its menu item or shortcut runs it
 zgx inspect set current '"c1"'                         # a named state, the value as JSON
 zgx inspect wait '"Copy"' --timeout 8000               # until it shows
