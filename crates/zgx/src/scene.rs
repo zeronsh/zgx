@@ -13474,6 +13474,31 @@ impl Scene {
     /// image's pixels, or none. Reads the kind in place: cloning it took an
     /// atomic count on every measure of text, images and decorated paint.
     fn leaf_size(&self, id: NodeId, style: &Style, available_w: Option<f32>) -> (f32, f32) {
+        let size = self.leaf_size_at(id, style, available_w);
+        let wraps = match &self.node(id).kind {
+            NodeKind::Text { font_size, .. } => {
+                let line = self.node(id).font.line_height.resolve(*font_size);
+                (style.text_wrap || style.text_options != Default::default()) && size.1 > line * 1.5
+            }
+            NodeKind::RichText { text } => {
+                (style.text_wrap || text.options() != Default::default()) && size.1 > 0.
+            }
+            _ => false,
+        };
+        let limit = match available_w {
+            Some(limit) if wraps && limit > 0. && size.0 < limit - 0.5 => limit,
+            _ => return size,
+        };
+        // Wrapped text fills the room it wrapped in, as CSS's does: a box
+        // shrinking to it takes its cap, not its widest line.
+        let unwrapped = self.leaf_size_at(id, style, None);
+        if unwrapped.0 > limit {
+            (limit, size.1)
+        } else {
+            size
+        }
+    }
+    fn leaf_size_at(&self, id: NodeId, style: &Style, available_w: Option<f32>) -> (f32, f32) {
         match &self.node(id).kind {
             NodeKind::Text {
                 text, font_size, ..
