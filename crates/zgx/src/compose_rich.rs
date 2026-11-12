@@ -212,6 +212,8 @@ pub struct SpanHover {
     pub underline: Option<crate::rich_text::Decoration>,
     /// The text colour under the pointer, or a colour token.
     pub text_color: Option<crate::theme::Themed<Color>>,
+    /// The background under the pointer, or a colour token (a badge's `:hover`).
+    pub background: Option<crate::theme::Themed<Color>>,
 }
 /// A span of `text`, styled as the paragraph is.
 pub fn text_span(text: impl Into<Arc<str>>) -> TextSpan {

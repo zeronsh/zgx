@@ -1234,6 +1234,50 @@ fn an_image_takes_a_position() {
 }
 
 #[test]
+fn a_link_span_takes_its_hover_background_under_the_pointer() {
+    use zgx::scene::NodeKind;
+    let mut h = Harness::inline(
+        r##"return ui.column { w = 300, ui.rich { id = "p",
+            ui.span { "1", literal = true, on_click = function() end, bg = "#eeeeee",
+                padding = { 4, 2 }, hover = { bg = "#cccccc" } } } }"##,
+    );
+    h.frames(2);
+    let background = |h: &mut Harness| {
+        let p = h.find("p").unwrap();
+        let scene = h.ui.scene.borrow();
+        let mut stack = vec![p];
+        while let Some(n) = stack.pop() {
+            if let NodeKind::RichText { text } = scene.kind(n) {
+                return text.runs().iter().find_map(|r| r.background);
+            }
+            stack.extend(scene.children(n).iter().copied());
+        }
+        panic!("no paragraph")
+    };
+    assert_eq!(
+        background(&mut h),
+        Some(zgx::scene::Color(0xee, 0xee, 0xee, 255))
+    );
+    let p = h.find("p").unwrap();
+    let b = h.ui.scene.borrow().bounds(p);
+    h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+        x: b.x + 5.,
+        y: b.y + b.height / 2.,
+    });
+    h.frames(2);
+    assert_eq!(
+        background(&mut h),
+        Some(zgx::scene::Color(0xcc, 0xcc, 0xcc, 255))
+    );
+    h.ui.dispatch(zgx::input::InputEvent::PointerLeave);
+    h.frames(2);
+    assert_eq!(
+        background(&mut h),
+        Some(zgx::scene::Color(0xee, 0xee, 0xee, 255))
+    );
+}
+
+#[test]
 fn a_link_span_underlines_under_the_pointer() {
     use zgx::scene::NodeKind;
     let mut h = Harness::inline(

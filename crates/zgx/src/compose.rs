@@ -5107,6 +5107,7 @@ fn paragraph_effect<const LOCATING: bool>(
             if link && !styled_hover && !plain {
                 span.underline.get_or_insert_with(Default::default);
             }
+            let mut hover_background = None;
             if let Some(hover) = hover.filter(|_| link && hovered == Some(links.len())) {
                 if let Some(underline) = hover.underline {
                     span.underline = Some(underline);
@@ -5114,10 +5115,18 @@ fn paragraph_effect<const LOCATING: bool>(
                 if let Some(color) = hover.text_color {
                     span.styles = std::mem::take(&mut span.styles).text_color(color);
                 }
+                hover_background = hover.background;
             }
             if span.styles.has_tokens() {
                 crate::theme::resolve(&mut span.styles, &theme);
                 span.background = span.background.or(span.styles.background);
+            }
+            match hover_background {
+                Some(crate::theme::Themed::Value(color)) => span.background = Some(color),
+                Some(crate::theme::Themed::Token(token)) => {
+                    span.background = theme.get(token).color().or(span.background)
+                }
+                None => {}
             }
             // An icon keeps its room before the text: a padded
             // placeholder run of its own. So does the room before the text

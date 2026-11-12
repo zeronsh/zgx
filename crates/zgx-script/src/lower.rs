@@ -8601,7 +8601,11 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         underline_style: Option<zgx::rich_text::LineStyle>,
         underline_color: Option<zgx::theme::Themed<Color>>,
         underline_thickness: Option<f32>,
-        hover: Option<(bool, Option<zgx::theme::Themed<Color>>)>,
+        hover: Option<(
+            bool,
+            Option<zgx::theme::Themed<Color>>,
+            Option<zgx::theme::Themed<Color>>,
+        )>,
     }
     // Whether any span fades in: known as they're taken, so a paragraph
     // none of whose spans does builds them as before, and only one that has
@@ -8763,10 +8767,11 @@ fn lower_rich(spans: &[Span], vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                 if let Some(color) = underline_color {
                     out = out.underline_color(color);
                 }
-                if let Some((underlined, color)) = hover {
+                if let Some((underlined, color, background)) = hover {
                     out = out.hover(zgx::compose::SpanHover {
                         underline: underlined.then(decoration),
                         text_color: color,
+                        background,
                     });
                 }
                 if strike {

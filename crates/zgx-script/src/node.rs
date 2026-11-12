@@ -1493,7 +1493,7 @@ pub(crate) struct Span {
     pub underline_color: Option<Themed<Color>>,
     pub underline_thickness: Option<f32>,
     /// A link's look under the pointer: underlined, and its colour.
-    pub hover: Option<(bool, Option<Themed<Color>>)>,
+    pub hover: Option<(bool, Option<Themed<Color>>, Option<Themed<Color>>)>,
     /// What few spans have (an icon, a menu), apart: most spans carry none.
     pub rare: Option<Rc<SpanRare>>,
 }
@@ -4996,13 +4996,14 @@ fn span(lua: &Lua, arg: mlua::Value, literal: bool) -> mlua::Result<Span> {
                 }
                 b"underline_color" => span.underline_color = themed_color(&lua.unpack(given)?),
                 b"underline_thickness" => span.underline_thickness = number(given)?,
-                // `hover = { underline = true, color = … }`: a link's look
-                // under the pointer (CSS's `a:hover`).
+                // `hover = { underline = true, color = …, bg = … }`: a link's
+                // look under the pointer (CSS's `a:hover`).
                 b"hover" => {
                     let hover: Table = lua.unpack(given)?;
                     span.hover = Some((
                         hover.get::<Value>("underline")?.truthy(),
                         themed_color(&hover.get::<Value>("color")?),
+                        themed_color(&hover.get::<Value>("bg")?),
                     ));
                 }
                 b"icon" => {
