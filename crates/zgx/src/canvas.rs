@@ -637,8 +637,9 @@ pub struct CanvasLayer {
 /// as all once did.
 const MAX_LAYERS: usize = 8;
 
-/// Where a canvas's texts fall among its commands, and whether it clips:
-/// kept only once a command follows a text or a clip opens.
+/// Where a canvas's texts fall among its commands, whether it clips, and
+/// the texts transformed: kept only once a command follows a text, a clip
+/// opens or a text is transformed.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct TextOrder {
     /// How many commands came before the first text, and each later text
@@ -647,6 +648,9 @@ struct TextOrder {
     text_moves: Vec<(usize, usize)>,
     /// Whether a clip was opened.
     clipped: bool,
+    /// The texts drawn transformed (`Canvas::text_transformed`): their
+    /// indices, in order, and transforms.
+    transformed: Vec<(usize, Affine)>,
 }
 impl TextOrder {
     /// How many commands came before the last text.
@@ -664,9 +668,9 @@ pub struct Canvas {
     /// Beside the commands: `Draw` is public and exhaustive. Empty, it
     /// allocates nothing.
     text: Vec<CanvasText>,
-    /// None while every text comes after every command and nothing clips,
-    /// as a chart's labels and a terminal's rows do: the canvas no larger
-    /// than it was, and nothing allocated.
+    /// None while every text comes after every command, nothing clips and
+    /// no text is transformed, as a chart's labels and a terminal's rows:
+    /// the canvas no larger than it was, and nothing allocated.
     order: Option<Box<TextOrder>>,
 }
 impl Canvas {
@@ -745,9 +749,39 @@ impl Canvas {
         self.text.push(text);
         self
     }
+    /// Add a line of text laid out as [`Canvas::text`] places it, then
+    /// mapped by `transform` (in the canvas's coordinates): turned, scaled,
+    /// mirrored or skewed with a shape drawn under the same transform.
+    pub fn text_transformed(&mut self, text: CanvasText, transform: Affine) -> &mut Self {
+        if transform != Affine::IDENTITY {
+            let index = self.text.len();
+            self.order().transformed.push((index, transform));
+        }
+        self.text(text)
+    }
     /// The canvas's lines of text.
     pub fn texts(&self) -> &[CanvasText] {
         &self.text
+    }
+    /// What the text at `index` is mapped by once placed: identity unless
+    /// it was added with [`Canvas::text_transformed`].
+    pub fn text_transform(&self, index: usize) -> Affine {
+        let Some(order) = &self.order else {
+            return Affine::IDENTITY;
+        };
+        match order
+            .transformed
+            .binary_search_by_key(&index, |(at, _)| *at)
+        {
+            Ok(found) => order.transformed[found].1,
+            Err(_) => Affine::IDENTITY,
+        }
+    }
+    /// Whether a text was added transformed.
+    pub fn texts_transformed(&self) -> bool {
+        self.order
+            .as_ref()
+            .is_some_and(|order| !order.transformed.is_empty())
     }
     /// How many commands came before the text at `index`: where it falls
     /// among them.
@@ -760,9 +794,9 @@ impl Canvas {
             moved => order.text_moves[moved - 1].1,
         }
     }
-    /// Whether every text comes after every command and nothing clips:
-    /// the drawing, then its words over it, as a chart's labels and a
-    /// terminal's rows are.
+    /// Whether every text comes after every command, nothing clips and no
+    /// text is transformed: the drawing, then its words over it, as a
+    /// chart's labels and a terminal's rows are.
     pub fn texts_last(&self) -> bool {
         self.order.is_none()
     }
@@ -793,6 +827,9 @@ impl Canvas {
         if other.order.as_ref().is_some_and(|order| order.clipped) {
             self.order().clipped = true;
         }
+        if other.texts_transformed() {
+            self.order();
+        }
         self.commands.extend_from_slice(&other.commands);
         if !other.text.is_empty() && (self.order.is_some() || other.order.is_some()) {
             let (first, moves) = match &other.order {
@@ -810,6 +847,14 @@ impl Canvas {
                 moves
                     .iter()
                     .map(|(at, after)| (at + texts_before, after + before)),
+            );
+        }
+        if let (Some(order), Some(theirs)) = (&mut self.order, &other.order) {
+            order.transformed.extend(
+                theirs
+                    .transformed
+                    .iter()
+                    .map(|(at, transform)| (at + texts_before, *transform)),
             );
         }
         self.text.extend_from_slice(&other.text);
@@ -889,7 +934,9 @@ impl Canvas {
                 let text = &self.text[next_text];
                 let (width, height) = size(text);
                 let (x, y) = text.origin((width, height));
-                let area = Rect::new(x, y, width, height);
+                let area = self
+                    .text_transform(next_text)
+                    .bounds(Rect::new(x, y, width, height));
                 covered = Some(covered.map_or(area, |c| c.union(area)));
                 boxes.push(area);
                 next_text += 1;
@@ -1225,6 +1272,50 @@ mod tests {
                 clip(100., 100., 0., 0., 0.),
                 None,
             ]
+        );
+    }
+
+    #[test]
+    fn a_texts_transform_stays_with_it_when_drawings_join() {
+        let text = |x| CanvasText {
+            text: "a".into(),
+            x,
+            y: 0.,
+            size: 10.,
+            color: Color(0, 0, 0, 255),
+            font: Default::default(),
+            anchor: TextAnchor::Start,
+            baseline: TextBaseline::Top,
+        };
+        let turned = Affine::rotation(1.);
+        let mut item = Canvas::new();
+        item.text(text(0.))
+            .text_transformed(text(1.), turned)
+            .text_transformed(text(2.), Affine::IDENTITY);
+        assert_eq!(
+            item.order.as_ref().map(|o| o.transformed.len()),
+            Some(1),
+            "identity is kept as none"
+        );
+        let mut board = Canvas::new();
+        board
+            .text_transformed(text(9.), Affine::scale(2., 2.))
+            .extend(&item);
+        let transforms: Vec<Affine> = (0..4).map(|i| board.text_transform(i)).collect();
+        assert_eq!(
+            transforms,
+            [
+                Affine::scale(2., 2.),
+                Affine::IDENTITY,
+                turned,
+                Affine::IDENTITY
+            ]
+        );
+        let mut plain = Canvas::new();
+        plain.text_transformed(text(0.), Affine::IDENTITY);
+        assert!(
+            plain.texts_last(),
+            "an identity transform keeps the plain path"
         );
     }
 }
