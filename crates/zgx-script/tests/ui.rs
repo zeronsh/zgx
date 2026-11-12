@@ -655,6 +655,9 @@ fn submenus_take_their_own_trigger_rows_and_open_on_hover() {
         y: b.y + 5.,
     });
     h.frames(3);
+    assert!(!shown(&mut h, "inner"), "not before the hover delay");
+    std::thread::sleep(std::time::Duration::from_millis(130));
+    h.frames(3);
     assert!(shown(&mut h, "inner"), "opened by hovering");
     let plain = h.find("plain").unwrap();
     let b = h.ui.scene.borrow().bounds(plain);
@@ -664,6 +667,21 @@ fn submenus_take_their_own_trigger_rows_and_open_on_hover() {
     });
     h.frames(3);
     assert!(!shown(&mut h, "inner"), "closed by hovering another item");
+    // a pointer passing over the trigger on its way elsewhere doesn't open it
+    let b = h.ui.scene.borrow().bounds(node);
+    h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+        x: b.x + 5.,
+        y: b.y + 5.,
+    });
+    h.frames(1);
+    let b = h.ui.scene.borrow().bounds(plain);
+    h.ui.dispatch(zgx::input::InputEvent::PointerMove {
+        x: b.x + 5.,
+        y: b.y + 5.,
+    });
+    std::thread::sleep(std::time::Duration::from_millis(130));
+    h.frames(3);
+    assert!(!shown(&mut h, "inner"), "passed over, not opened");
 }
 
 #[test]

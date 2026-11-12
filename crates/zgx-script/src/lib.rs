@@ -4415,6 +4415,7 @@ impl ScriptHost {
             node::install_decisions,
         );
         lazy.ui(&["modifiers"], modifiers::install);
+        lazy.ui(&["keyboard_in_use"], modifiers::install_keyboard);
         lazy.ui(&["editor"], element::install_editor);
         lazy.ui(&["router"], router::install);
         lazy.ui(&["async", "optimistic"], handlers::install);

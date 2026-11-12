@@ -30,3 +30,8 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     modifiers.set_readonly(true);
     ui.set("modifiers", modifiers)
 }
+
+/// `ui.keyboard_in_use()`: whether the last input was the keyboard's (`zgx::input::keyboard_in_use`).
+pub(crate) fn install_keyboard(lua: &Lua, ui: &Table) -> mlua::Result<()> {
+    ui.set("keyboard_in_use", lua.create_function(|_, ()| Ok(zgx::input::keyboard_in_use()))?)
+}

@@ -3085,7 +3085,10 @@ impl InputDispatcher {
             self.state.borrow_mut().modifiers = *modifiers;
         }
         match &event {
-            InputEvent::PointerDown { .. } => self.state.borrow_mut().pointer_modality = true,
+            InputEvent::PointerDown { .. } => {
+                self.state.borrow_mut().pointer_modality = true;
+                KEYBOARD_IN_USE.with(|k| k.set(false));
+            }
             // As `:focus-visible`: a key that moves or types does; Escape
             // (closing a popup) and shortcuts don't. The key is looked at
             // only while the pointer's in use: typing keeps the keyboard's.
@@ -3095,6 +3098,9 @@ impl InputDispatcher {
                 let mut state = self.state.borrow_mut();
                 if state.pointer_modality && !matches!(key, Key::Escape) {
                     state.pointer_modality = false;
+                }
+                if !matches!(key, Key::Escape) {
+                    KEYBOARD_IN_USE.with(|k| k.set(true));
                 }
             }
             _ => {}
@@ -4879,4 +4885,14 @@ mod held_modifiers_tests {
             "each change once, a repeat none"
         );
     }
+}
+
+thread_local! {
+    static KEYBOARD_IN_USE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+/// Whether the last input in any window was the keyboard's, as `:focus-visible`
+/// reads it: a key that moves or types since the last press. What it opens
+/// can skip its fade, as a menu opened from the keyboard does on the web.
+pub fn keyboard_in_use() -> bool {
+    KEYBOARD_IN_USE.with(std::cell::Cell::get)
 }
