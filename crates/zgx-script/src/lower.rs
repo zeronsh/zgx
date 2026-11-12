@@ -3453,8 +3453,11 @@ fn kind_view(
         } => crate::motion::each(
             need(&mut cx),
             items.clone(),
-            row_builder(builder, vm, low),
-            key.clone(),
+            crate::motion::EachRows {
+                builder: row_builder(builder, vm, low),
+                key: key.clone(),
+                live: builder.info().num_params >= 3,
+            },
             motion.clone(),
             vm,
             low,

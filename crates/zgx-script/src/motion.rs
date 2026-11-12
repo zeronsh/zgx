@@ -238,6 +238,12 @@ struct Rows {
     /// Where each row was (from the region's corner) before a change whose
     /// layout pass has not run yet.
     before: Option<HashMap<RowKey, (f32, f32)>>,
+    /// Each identity's item as the last change saw it.
+    items: HashMap<Rc<str>, Value>,
+    /// A live row's item (a builder with a third parameter), kept current.
+    signals: HashMap<RowKey, Signal<Value>>,
+    /// Rows built again for a changed item: they don't play `enter`.
+    rebuilt: HashSet<RowKey>,
 }
 
 /// Where layout put `node`, from `origin`'s corner.
@@ -276,18 +282,31 @@ fn identities(
         .collect()
 }
 
+/// How a motion `ui.each` builds its rows: the builder, the key function,
+/// and whether the builder takes a third parameter (its item as state).
+pub(crate) struct EachRows {
+    pub builder: Function,
+    pub key: Option<Function>,
+    pub live: bool,
+}
+
 /// `ui.each` with motion. Rows that stay but move slide from where they
 /// were; new rows play `enter`; leaving rows leave the flow, held where they
 /// were, and play `exit` before they unmount.
 pub(crate) fn each(
     cx: &mut Context,
     items: Signal<Value>,
-    builder: Function,
-    key: Option<Function>,
+    row: EachRows,
     motion: Rc<EachMotion>,
     vm: &Rc<Vm>,
     low: &Rc<Lowering>,
 ) -> View {
+    let EachRows {
+        builder,
+        key,
+        live: live_rows,
+    } = row;
+    let runtime = cx.runtime();
     let rows: Rc<RefCell<Rows>> = Rc::default();
     let shown = cx.state(Vec::<RowKey>::new());
     let remove: Rc<dyn Fn(RowKey)> = {
@@ -299,6 +318,8 @@ pub(crate) fn each(
                 st.shown.retain(|k| *k != row);
                 st.exiting.remove(&row);
                 st.elements.remove(&row);
+                st.signals.remove(&row);
+                st.rebuilt.remove(&row);
                 st.shown.clone()
             };
             shown.set(list);
@@ -306,7 +327,8 @@ pub(crate) fn each(
     };
     let change = {
         let (rows, shown, motion, vm) = (rows.clone(), shown.clone(), motion.clone(), vm.clone());
-        move |ids: Vec<Rc<str>>| {
+        let runtime = runtime.clone();
+        move |ids: Vec<Rc<str>>, items_now: Vec<Value>| {
             let mut leaving_out = Vec::new();
             let flip;
             let list = {
@@ -339,11 +361,28 @@ pub(crate) fn each(
                 let mut live = HashMap::with_capacity(ids.len());
                 let mut indices = HashMap::with_capacity(ids.len());
                 let mut keys = Vec::with_capacity(ids.len());
+                let mut items = HashMap::with_capacity(ids.len());
                 for (i, id) in ids.into_iter().enumerate() {
-                    let generation = st.live.remove(&id).unwrap_or_else(|| {
+                    let item = items_now.get(i).cloned().unwrap_or_default();
+                    let mut generation = st.live.remove(&id).unwrap_or_else(|| {
                         st.next += 1;
                         st.next
                     });
+                    let row = RowKey(id.clone(), generation);
+                    if st.items.get(&id).is_some_and(|last| *last != item) {
+                        if live_rows {
+                            if let Some(signal) = st.signals.get(&row) {
+                                runtime.untracked(|| signal.set(item.clone()));
+                            }
+                        } else {
+                            // The item changed under its key: its row is built again.
+                            st.elements.remove(&row);
+                            st.next += 1;
+                            generation = st.next;
+                            st.rebuilt.insert(RowKey(id.clone(), generation));
+                        }
+                    }
+                    items.insert(id.clone(), item);
                     live.insert(id.clone(), generation);
                     indices.insert(id.clone(), i);
                     keys.push(RowKey(id, generation));
@@ -351,6 +390,7 @@ pub(crate) fn each(
                 // What is left of the old list is leaving.
                 let leaving = std::mem::replace(&mut st.live, live);
                 st.indices = indices;
+                st.items = items;
                 if first {
                     st.first_end = Some(st.next + 1);
                 }
@@ -370,6 +410,7 @@ pub(crate) fn each(
                             // out), so never shown: it just goes.
                             if placed.is_some_and(|(_, b)| b == Rect::default()) {
                                 st.elements.remove(&row);
+                                st.signals.remove(&row);
                                 continue;
                             }
                             if let Some(((x, y), b)) = placed {
@@ -391,6 +432,7 @@ pub(crate) fn each(
                         }
                         _ => {
                             st.elements.remove(&row);
+                            st.signals.remove(&row);
                         }
                     }
                 }
@@ -445,13 +487,17 @@ pub(crate) fn each(
             }
         }
     };
-    let runtime = cx.runtime();
     let (key_vm, untracked) = (vm.clone(), runtime.clone());
     let from = items.clone();
     let mut item_keys = crate::lower::ItemKeys::default();
     cx.retain(runtime.effect(move || {
-        let ids = from.with(|list| identities(list, &key, &mut item_keys, &key_vm));
-        untracked.untracked(|| change(ids));
+        let (ids, items) = from.with(|list| {
+            (
+                identities(list, &key, &mut item_keys, &key_vm),
+                list.list().to_vec(),
+            )
+        });
+        untracked.untracked(|| change(ids, items));
     }));
     let (build_rows, vm, low) = (rows.clone(), vm.clone(), low.clone());
     let region_rows = Rc::downgrade(&rows);
@@ -462,16 +508,30 @@ pub(crate) fn each(
                 let st = build_rows.borrow();
                 let index = st.indices.get(&row.0).copied().unwrap_or(0);
                 let first = st.first_end.is_none_or(|end| row.1 < end);
-                (index, motion.enter.is_some() && (!first || motion.initial))
+                let enters = motion.enter.is_some()
+                    && (!first || motion.initial)
+                    && !st.rebuilt.contains(&row);
+                (index, enters)
             };
-            let item = items.with_untracked(|list| list.item(index).cloned());
-            let content = build_scoped(
-                &vm,
-                cx,
-                &low,
-                &builder,
-                (item.unwrap_or_default(), index + 1),
-            );
+            let item = items
+                .with_untracked(|list| list.item(index).cloned())
+                .unwrap_or_default();
+            let content = if live_rows {
+                let signal = vm.runtime.signal(item.clone());
+                build_rows
+                    .borrow_mut()
+                    .signals
+                    .insert(row.clone(), signal.clone());
+                build_scoped(
+                    &vm,
+                    cx,
+                    &low,
+                    &builder,
+                    (item, index + 1, crate::value::State::new(signal)),
+                )
+            } else {
+                build_scoped(&vm, cx, &low, &builder, (item, index + 1))
+            };
             let element = Element::new(&low.runtime, None, Rc::new([]), "each");
             let (rows, motion, vm) = (Rc::downgrade(&build_rows), motion.clone(), vm.clone());
             let (own, elements) = (element.clone(), low.elements.clone());
