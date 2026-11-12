@@ -270,6 +270,30 @@ fn text_style(options: Option<&Table>) -> mlua::Result<(f32, FontStyle)> {
     let size = o.get::<Option<f32>>("size")?.unwrap_or(TEXT_SIZE);
     Ok((size.max(1.), font))
 }
+/// A canvas text's `transform` option, `{ a, b, c, d, e, f }` as SVG's
+/// `matrix` (x' is a x + c y + e, y' is b x + d y + f), mapping the text
+/// once placed: identity without one.
+fn text_transform(options: Option<&Table>) -> mlua::Result<zgx::affine::Affine> {
+    let Some(matrix) = options
+        .map(|o| o.get::<Option<Vec<f32>>>("transform"))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(zgx::affine::Affine::IDENTITY);
+    };
+    let [a, b, c, d, tx, ty] = matrix[..] else {
+        return Err(mlua::Error::runtime(
+            "a canvas text's `transform` is six numbers, { a, b, c, d, e, f }",
+        ));
+    };
+    let transform = zgx::affine::Affine { a, b, c, d, tx, ty };
+    if !transform.is_finite() {
+        return Err(mlua::Error::runtime(
+            "a canvas text's `transform` must be finite",
+        ));
+    }
+    Ok(transform)
+}
 /// A canvas text's size where its options give none: a chart's labels.
 const TEXT_SIZE: f32 = 12.;
 /// The width a canvas text wraps to (`width`), if its options give one.
@@ -332,17 +356,21 @@ impl UserData for Recorder {
                     TextAnchor::Center => TextAlign::Center,
                     TextAnchor::End => TextAlign::End,
                 };
-                c.0.borrow_mut().text(CanvasText {
-                    text: text.into(),
-                    x,
-                    y,
-                    size,
-                    color,
-                    font,
-                    anchor,
-                    baseline,
-                    width,
-                });
+                let transform = text_transform(options.as_ref())?;
+                c.0.borrow_mut().text_transformed(
+                    CanvasText {
+                        text: text.into(),
+                        x,
+                        y,
+                        size,
+                        color,
+                        font,
+                        anchor,
+                        baseline,
+                        width,
+                    },
+                    transform,
+                );
                 Ok(())
             },
         );
