@@ -6,7 +6,8 @@
 //!
 //! It resizes the window, gives it a dark and then a light appearance,
 //! hides and shows the app (the window losing focus and getting it back),
-//! zooms it to 125% and back, and goes into full screen and out (as the
+//! moves the close button off its place (as AppKit's layout does) and reads it
+//! back at once, zooms it to 125% and back, and goes into full screen and out (as the
 //! green button does), printing after each
 //! `CLOSE <when> x=<pt> y=<pt> h=<pt> hidden=<bool> zoom=<z>
 //! controls=<x,y,w,h or none> area_h=<pt or none>`: the close button's top
@@ -104,6 +105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window.set_inner_size(720., 460.);
                 pause(800).await;
                 report("resized");
+                // AppKit's layout moving the button: its frame change must put it back at once.
+                state::nudge();
+                report("nudged");
                 if let Some(ui) = ui.upgrade() {
                     ui.set_zoom(zoom_arg);
                 }
@@ -303,6 +307,17 @@ mod state {
         ))
     }
 
+    /// The close button set off its place, as AppKit's own layout does: the
+    /// frame change must have it back where the app asked before this returns.
+    pub fn nudge() {
+        let Some(window) = ours() else {
+            return;
+        };
+        if let Some(close) = window.standardWindowButton(NSWindowButton::CloseButton) {
+            close.setFrameOrigin(objc2_foundation::NSPoint::new(3., 3.));
+        }
+    }
+
     /// The app hidden, or shown again: its window resigns key and becomes
     /// key again.
     pub fn hide(hide: bool) {
@@ -336,6 +351,7 @@ mod state {
     pub fn number() -> isize {
         0
     }
+    pub fn nudge() {}
     pub fn hide(_: bool) {}
     pub fn toggle() {}
     pub fn watch_frames(_: (f64, f64)) {}
