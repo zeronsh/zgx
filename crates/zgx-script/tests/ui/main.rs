@@ -122,6 +122,8 @@ mod measure_text;
 mod mentions;
 #[path = "../modal_focus.rs"]
 mod modal_focus;
+#[path = "../panel_width_auto.rs"]
+mod panel_width_auto;
 #[path = "../pointer_lock.rs"]
 mod pointer_lock;
 #[path = "../pointer_through.rs"]
