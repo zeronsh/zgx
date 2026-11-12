@@ -7,6 +7,7 @@ ui.webview(props: WebViewProps) -> Node
 ui.web(opts: WebOptions?) -> Web
 ui.web(id: string, opts: WebOptions?) -> Web
 ui.terminal(props: TerminalProps) -> Node
+ui.host_view(props: HostViewProps) -> Node
 ui.term(id: string, opts: TermOptions?) -> Term
 ui.command(opts: CommandOptions) -> ()
 ```
@@ -17,6 +18,7 @@ ui.command(opts: CommandOptions) -> ()
 | `web` | a page's controller, usable before and after its view mounts. `ui.web(opts)` makes a page for this run; `ui.web(id, opts)` returns the host's page for `id`, made with `opts` the first time, kept across reloads until `web:close()` |
 | `terminal` | shows a session (`term = ui.term(id)`) |
 | `term` | the session for `id`, started the first time with `opts`; later calls return the same session, their handlers replacing the previous run's |
+| `host_view` | a view the host made in Rust, registered by name with `zgx_script::host_view(name, || View)` and shown where `ui.host_view { name = … }` puts it. It mounts in the script's tree, so it lays out and clips like any element (give it `w`, `h`, or let it grow) and sits under the script's popups, dialogs and layers, which a view composed beside the script's can't. `make` runs each time the element mounts; a name nothing registered shows an empty box |
 | `command` | an app command: the host shows it as a menu item (`ScriptHost::commands`) and runs it when chosen, its key working wherever focus is |
 
 ## Web view options
