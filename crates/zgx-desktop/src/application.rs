@@ -1243,6 +1243,15 @@ const FRAME_SAVE_DELAY: std::time::Duration = std::time::Duration::from_millis(5
 /// Frames presented this close together are a steady run.
 #[cfg(target_os = "macos")]
 const STEADY_GAP: std::time::Duration = std::time::Duration::from_millis(50);
+/// Whether a frame hands over as a live scroll's (`Latch::decide`: at once
+/// if ready past its refresh's point). A whole notch's frame
+/// (`ScrollResampler::notch_applied`) doesn't: notches come near a refresh's
+/// start, and one ready just before a refresh handed over beside the frame
+/// already waiting for it, leaving the next refresh nothing new.
+#[cfg(target_os = "macos")]
+fn hands_over_live(scroll_live: bool, notched: bool) -> bool {
+    scroll_live && !notched
+}
 /// Sleep until `at`: a long sleep ends up to a millisecond or two late (the
 /// kernel coalesces timers in proportion to their length), so the last
 /// stretch is a short one of its own.
@@ -3109,7 +3118,10 @@ impl Host {
                 #[cfg(target_os = "macos")]
                 let grid = self.refresh_grid();
                 #[cfg(target_os = "macos")]
-                let live = self.scroll_live(std::time::Instant::now());
+                let live = hands_over_live(
+                    self.scroll_live(std::time::Instant::now()),
+                    self.scroll.notched(),
+                );
                 // A frame that presents itself (a live scroll's drawable,
                 // `GpuRenderer::set_scrolling`) shows once the GPU is done
                 // with it: waiting here would only hold the main thread, and
@@ -5384,6 +5396,35 @@ impl Host {
                     };
                     if !zgx::zoom::wheel_notched(step.1, || self.dispatch_prevented(event))? {
                         self.context.ui.zoom_wheel(-dy / step.1);
+                    }
+                } else if crate::scroll_resample::enabled()
+                    && matches!(delta, MouseScrollDelta::LineDelta(x, y) if !continuous_lines(x, y))
+                    && self.scroll.notches_whole()
+                {
+                    // A notch that moves whole goes in as it comes and draws at
+                    // once, as an `NSScrollView` takes it. The system hands a
+                    // wheel's notches over about once a refresh, near its
+                    // start: applied at the next refresh's tick instead, one
+                    // coming just after a tick waited a refresh, and that
+                    // refresh showed nothing new (notches at 144 Hz: 104-113
+                    // refreshes a second at 120 Hz showed a new frame, as they
+                    // come 118-120).
+                    self.scroll.position = self.cursor;
+                    self.scroll.notch_applied(std::time::Instant::now());
+                    zgx_gpu::present_log::log(|| {
+                        format!("scroll-applied source=notch dx={dx:.3} dy={dy:.3}")
+                    });
+                    let event = InputEvent::Scroll {
+                        x: self.cursor.0,
+                        y: self.cursor.1,
+                        delta_x: dx,
+                        delta_y: dy,
+                    };
+                    self.dispatch_wheel(event, true)?;
+                    self.after_scroll();
+                    #[cfg(any(target_os = "macos", windows))]
+                    {
+                        self.input_arrived = true;
                     }
                 } else if crate::scroll_resample::enabled() {
                     // Applied on display refreshes; see `update`.
@@ -9533,6 +9574,68 @@ mod tests {
         for left in [1.9, 2.5, 3.2, 8.0, 15.0] {
             assert_eq!(align_wait(ms(left), slow), None, "{left} ms at 60 Hz");
         }
+    }
+    /// A notch coming just after a refresh's tick shows on the next refresh:
+    /// applied as it comes (nothing waits for a tick) and drawn at once, its
+    /// frame hands over at the coming point. Applied at the next tick, as
+    /// notches were, it showed a refresh later.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_notch_just_after_a_tick_shows_on_the_next_refresh() {
+        use crate::scroll_resample::ScrollResampler;
+        use std::time::{Duration, Instant};
+        let period = Duration::from_nanos(8_333_333);
+        let ms = |v: f64| Duration::from_secs_f64(v / 1e3);
+        let origin = Instant::now();
+        let tick = origin + period * 10 + ms(0.2);
+        let arrived = tick + ms(0.5);
+        let work = ms(1.5);
+        let next_refresh = origin + period * 11;
+        // As it comes.
+        let mut scroll = ScrollResampler::default();
+        scroll.set_wheel_eases(false);
+        scroll.notch_applied(arrived);
+        assert!(!scroll.pending(), "nothing left for a tick");
+        let mut latch = Latch::default();
+        let live = hands_over_live(scroll.active(arrived), scroll.notched());
+        let at = latch.decide(arrived + work, origin, period, live);
+        assert!(
+            at < next_refresh && next_refresh - at <= Latch::LEAD,
+            "on the next refresh"
+        );
+        // At the next tick: a refresh later.
+        let mut held = ScrollResampler::default();
+        held.set_wheel_eases(false);
+        held.push_wheel(arrived, (0., 30.));
+        assert_eq!(held.sample(tick + period, period), Some((0., 30.)));
+        let at = Latch::default().decide(tick + period + work, origin, period, true);
+        assert!(at > next_refresh, "a refresh later");
+    }
+    /// A notch's frame ready just past its refresh's point, before the
+    /// refresh, waits for the next point: the frame handed over at this
+    /// point shows on this refresh and it on the next, one each. Handed over
+    /// at once, as a live scroll's is, both landed on this refresh and the
+    /// next showed nothing new.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_notch_frame_ready_just_before_a_refresh_keeps_to_the_next() {
+        use std::time::{Duration, Instant};
+        let period = Duration::from_nanos(8_333_333);
+        let ms = |v: f64| Duration::from_secs_f64(v / 1e3);
+        let origin = Instant::now();
+        let point = origin + period * 11 - Latch::LEAD;
+        let mut latch = Latch::default();
+        let first = latch.decide(point - ms(3.), origin, period, false);
+        assert_eq!(first, point);
+        let ready = point + ms(1.);
+        assert!(!hands_over_live(true, true));
+        let second = latch.decide(ready, origin, period, hands_over_live(true, true));
+        assert_eq!(second, point + period, "the next refresh's point");
+        // A trackpad's frame keeps handing over at once.
+        assert!(hands_over_live(true, false));
+        let mut latch = Latch::default();
+        latch.decide(point - ms(3.), origin, period, true);
+        assert_eq!(latch.decide(ready, origin, period, true), ready);
     }
     #[cfg(target_os = "macos")]
     #[test]

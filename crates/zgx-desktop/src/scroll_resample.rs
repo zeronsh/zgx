@@ -92,6 +92,10 @@ pub(crate) struct ScrollResampler {
     /// Wheel notches move whole on the next refresh, not eased over several:
     /// an `NSScrollView`'s do (`set_wheel_eases`).
     whole_notches: bool,
+    /// The latest input was a whole notch the host applied as it came
+    /// (`notch_applied`): kept where notches move whole (macOS).
+    #[cfg(target_os = "macos")]
+    notched: bool,
     /// When the latest input arrived.
     last_input: Option<Instant>,
     /// Pointer position of the latest input; motion is delivered there.
@@ -106,6 +110,25 @@ impl ScrollResampler {
     /// the refresh after it, and notches within one refresh together.
     pub fn set_wheel_eases(&mut self, eases: bool) {
         self.whole_notches = !eases;
+    }
+    /// Whether a wheel's notches move whole (`set_wheel_eases` off): the
+    /// host applies each as it comes (`notch_applied`), not on a refresh.
+    pub fn notches_whole(&self) -> bool {
+        self.whole_notches
+    }
+    /// A wheel's notch the host applied as it came (`notches_whole`): the
+    /// scroll is live (`active`), and its refreshes run on.
+    pub fn notch_applied(&mut self, now: Instant) {
+        self.last_input = Some(now);
+        #[cfg(target_os = "macos")]
+        {
+            self.notched = true;
+        }
+    }
+    /// Whether the latest input was a whole notch applied as it came.
+    #[cfg(target_os = "macos")]
+    pub fn notched(&self) -> bool {
+        self.notched
     }
     pub fn pending(&self) -> bool {
         self.received != self.applied || self.wheel != (0., 0.)
@@ -123,6 +146,10 @@ impl ScrollResampler {
     }
     /// Buffer pixel-precise motion that arrived at `now`.
     pub fn push_precise(&mut self, now: Instant, delta: (f32, f32)) {
+        #[cfg(target_os = "macos")]
+        {
+            self.notched = false;
+        }
         let last = self.last_input.replace(now);
         match last {
             Some(last) if now.duration_since(last) < STALL => {
@@ -179,6 +206,10 @@ impl ScrollResampler {
     }
     /// Queue a discrete wheel step to ease in over the next refreshes.
     pub fn push_wheel(&mut self, now: Instant, delta: (f32, f32)) {
+        #[cfg(target_os = "macos")]
+        {
+            self.notched = false;
+        }
         self.last_input = Some(now);
         if self.wheel == (0., 0.) {
             self.wheel_at = Some(now);
@@ -710,6 +741,34 @@ mod tests {
             Some((0., 60.))
         );
         assert!(!resampler.pending());
+    }
+
+    /// A notch applied as it came keeps the scroll live for `LINGER` and
+    /// leaves nothing for a refresh; a trackpad's motion or an eased notch
+    /// after it is resampled again.
+    #[test]
+    fn notches_applied_as_they_come_keep_the_scroll_live() {
+        let start = Instant::now();
+        let refresh = Duration::from_micros(8333);
+        let mut resampler = ScrollResampler::default();
+        resampler.set_wheel_eases(false);
+        assert!(resampler.notches_whole());
+        resampler.notch_applied(start);
+        #[cfg(target_os = "macos")]
+        assert!(resampler.notched());
+        assert!(!resampler.pending());
+        assert!(resampler.active(start + LINGER - Duration::from_millis(1)));
+        assert!(!resampler.active(start + LINGER));
+        assert_eq!(resampler.sample(start + refresh, refresh), None);
+        resampler.push_precise(start + refresh, (0., 4.));
+        #[cfg(target_os = "macos")]
+        assert!(!resampler.notched());
+        resampler.notch_applied(start + refresh * 2);
+        resampler.push_wheel(start + refresh * 3, (0., 30.));
+        #[cfg(target_os = "macos")]
+        assert!(!resampler.notched());
+        // Eased, notches stay the refreshes' to apply.
+        assert!(!ScrollResampler::default().notches_whole());
     }
 
     #[test]
