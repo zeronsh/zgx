@@ -36,6 +36,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .unwrap_or((18., 22.));
     let hold = args.iter().any(|arg| arg == "--hold");
+    let busy = args.iter().any(|arg| arg == "--busy");
+    let zoom_arg: f64 = args
+        .iter()
+        .position(|arg| arg == "--zoom")
+        .and_then(|i| args.get(i + 1)?.parse().ok())
+        .unwrap_or(1.);
     Application::new()
         .window(WindowOptions {
             title: "Traffic lights".into(),
@@ -59,6 +65,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .child(div().w(28.).h(28.).rounded(7.).bg(rgb(0xf0c040))),
                 ),
             );
+            if busy {
+                // A main thread kept busy, as a heavy app's is: the resize
+                // events wait behind it, while AppKit lays out and draws.
+                cx.tasks.spawn(async {
+                    loop {
+                        zgx::timer::sleep(Duration::from_millis(4)).await;
+                        let until = std::time::Instant::now() + Duration::from_millis(12);
+                        while std::time::Instant::now() < until {
+                            std::hint::spin_loop();
+                        }
+                    }
+                });
+            }
             let (window, info, ui) = (cx.window.clone(), cx.window_info.clone(), cx.ui.downgrade());
             cx.tasks.spawn(async move {
                 let pause = |ms| zgx::timer::sleep(Duration::from_millis(ms));
@@ -85,14 +104,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 window.set_inner_size(720., 460.);
                 pause(800).await;
                 report("resized");
+                if let Some(ui) = ui.upgrade() {
+                    ui.set_zoom(zoom_arg);
+                }
+                pause(800).await;
+                let at = (at.0 * zoom_arg, (at.1 + 7.) * zoom_arg - 7.);
                 state::watch_frames(at);
                 for step in 0..90 {
-                    let grow = if step < 45 { step } else { 90 - step } as f32;
+                    let grow = if step < 45 { step } else { 90 - step } as f64;
                     window.set_inner_size(640. + grow * 4., 400. + grow * 2.);
                     pause(16).await;
                 }
                 pause(200).await;
                 println!("{}", state::watched());
+                state::watch_frames(at);
+                for size in [(1000., 700.), (560., 360.), (900., 600.)] {
+                    state::animate_resize(size);
+                    pause(300).await;
+                }
+                println!("ANIMATED {}", state::watched());
                 window.set_theme(Some(zgx::theme::Appearance::Dark));
                 pause(600).await;
                 report("dark");
@@ -122,6 +152,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 pause(3000).await;
                 report("after");
                 println!("TRAFFIC_LIGHTS_DONE");
+                if hold {
+                    state::reset_counts();
+                    // Time to drag the window's edge by hand: the counts keep running.
+                    for _ in 0..90 {
+                        pause(1000).await;
+                        println!("HELD {}", state::watched());
+                    }
+                }
                 if !hold {
                     window.close();
                 }
@@ -222,6 +260,12 @@ mod state {
         std::mem::forget(block);
     }
 
+    pub fn reset_counts() {
+        SAMPLES.store(0, Ordering::Relaxed);
+        WRONG.store(0, Ordering::Relaxed);
+        FIRST_WRONG.lock().unwrap().clear();
+    }
+
     pub fn watched() -> String {
         format!(
             "LIVE_RESIZE samples={} wrong={} first_wrong={}",
@@ -229,6 +273,24 @@ mod state {
             WRONG.load(Ordering::Relaxed),
             FIRST_WRONG.lock().unwrap()
         )
+    }
+
+    /// The window resized as AppKit animates a frame change (its own loop
+    /// runs the frames, as a drag's does), to a content size.
+    pub fn animate_resize(size: (f64, f64)) {
+        use objc2_foundation::{NSRect, NSSize};
+        let Some(window) = ours() else {
+            return;
+        };
+        let mut frame = window.frame();
+        let content = window.contentRectForFrameRect(frame);
+        frame.size = NSSize::new(
+            frame.size.width - content.size.width + size.0,
+            frame.size.height - content.size.height + size.1,
+        );
+        frame.origin.y -= frame.size.height - window.frame().size.height;
+        let _: NSRect = frame;
+        window.setFrame_display_animate(frame, true, true);
     }
 
     fn close_xy() -> Option<(f64, f64)> {
@@ -277,6 +339,8 @@ mod state {
     pub fn hide(_: bool) {}
     pub fn toggle() {}
     pub fn watch_frames(_: (f64, f64)) {}
+    pub fn animate_resize(_: (f64, f64)) {}
+    pub fn reset_counts() {}
     pub fn watched() -> String {
         "LIVE_RESIZE samples=0 wrong=0 first_wrong=".into()
     }
