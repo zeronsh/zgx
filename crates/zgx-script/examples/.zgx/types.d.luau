@@ -1443,6 +1443,16 @@ declare extern type Canvas with
 	-- Its width and height, for placing what goes around it.
 	function measure_text(self, text: string, opts: CanvasTextOptions?): (number, number)
 end
+-- `ui.render_canvas`'s picture: its size in points, pixels a point, the
+-- drawing's point at its top left, and what is under it (transparent).
+export type RenderCanvasOptions = {
+	width: number,
+	height: number,
+	scale: number?,
+	x: number?,
+	y: number?,
+	background: Color?,
+}
 
 -- `ui.web(opts)`: a web page's controller. Its fields are tracked, so a
 -- text or computed reading `web.title` follows the page.
@@ -22197,6 +22207,9 @@ declare ui: {
 	number: (n: number, opts: NumberOptions?) -> string,
 	path: () -> Path,
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
+	-- `draw` as a canvas would show it, as a PNG in base64, with no window:
+	-- `width * scale` by `height * scale` pixels, `x`, `y` at its top left.
+	render_canvas: (draw: (c: Canvas, w: number, h: number) -> (), opts: RenderCanvasOptions) -> Promise<string>,
 }
 
 ---------------------------------------------------------------------------

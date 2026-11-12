@@ -67,6 +67,10 @@ impl FontData {
     pub fn families(&self) -> &[String] {
         &self.families
     }
+    /// Its file's bytes, shared.
+    pub fn bytes(&self) -> Arc<[u8]> {
+        self.bytes.clone()
+    }
     /// Its size in bytes.
     pub fn byte_len(&self) -> usize {
         self.bytes.len()
@@ -934,6 +938,24 @@ impl CpuTextRaster {
             }
         }
         images
+    }
+    /// Its fonts and glyph cache, for a renderer that places glyphs its own
+    /// way (zgx-gpu's canvas labels, as the GPU renderer places them).
+    #[doc(hidden)]
+    pub fn parts(&mut self) -> (&mut FontSystem, &mut cosmic_text::SwashCache) {
+        (&mut self.fonts, &mut self.swash)
+    }
+    /// The width and height `text` takes at `size` in `font`, wrapped at
+    /// `width` if given, as a scene measures it
+    /// (`Scene::measure_text_with_font` with these fonts).
+    pub fn measure(
+        &mut self,
+        text: &str,
+        size: f32,
+        width: Option<f32>,
+        font: &zgx::text_layout::FontStyle,
+    ) -> (f32, f32) {
+        ShapedText::with_font(&mut self.fonts, text, size, width, font).size()
     }
 }
 
