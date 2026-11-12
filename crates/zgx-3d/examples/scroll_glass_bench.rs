@@ -87,6 +87,22 @@ mod counting {
                     "extend",
                     "from_iter",
                     "collect",
+                    "sample",
+                    "alloc_impl",
+                    "box_new_uninit",
+                    "grow_impl",
+                    "grow",
+                    "do_alloc",
+                    "new_uninit_in",
+                    "try_new_uninit_in",
+                    "to_owned",
+                    "insert_single",
+                    "reserve_rehash",
+                    "resize",
+                    "allocate_in",
+                    "try_allocate_in",
+                    "new_in",
+                    "insert",
                 ]
                 .contains(&short)
                     && ![
@@ -109,7 +125,7 @@ mod counting {
                     .iter()
                     .any(|skip| name.contains(skip))
             });
-        let site: Vec<String> = frames.by_ref().take(3).collect();
+        let site: Vec<String> = frames.by_ref().take(4).collect();
         let site = site.join(" < ");
         let mut sites = SITES.lock().unwrap();
         match sites.iter_mut().find(|(name, _)| *name == site) {
@@ -124,7 +140,7 @@ mod counting {
         let every = EVERY.load(Relaxed);
         let mut sites = SITES.lock().unwrap().clone();
         sites.sort_by_key(|site| std::cmp::Reverse(site.1));
-        for (site, n) in sites.iter().take(40) {
+        for (site, n) in sites.iter().take(60) {
             println!("{:7.1}/frame  {site}", (n * every) as f64 / frames as f64);
         }
     }
