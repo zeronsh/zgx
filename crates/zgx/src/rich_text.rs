@@ -147,6 +147,9 @@ pub struct TextRun {
     pub padding: [f32; 2],
     /// The background's corner radius.
     pub radius: f32,
+    /// How far the background reaches past the text across without taking room (CSS's negative inline
+    /// margin under padding): a search match's mark.
+    pub outset: f32,
 }
 impl TextRun {
     /// The approximate advance of `grapheme` at byte `at` (no shaper): 0.6
@@ -176,6 +179,7 @@ impl Default for TextRun {
             strikethrough: None,
             padding: [0.; 2],
             radius: 0.,
+            outset: 0.,
         }
     }
 }

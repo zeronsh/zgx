@@ -147,6 +147,8 @@ pub(crate) struct SpanExtras {
     pub padding_end: Option<f32>,
     /// Its text fading in (`TextSpan::fade_in`).
     pub fade: Option<TextFade>,
+    /// Its background reaching past the text across (`TextSpan::outset`).
+    pub outset: f32,
 }
 /// A run's text fading in (`TextSpan::fade_in`): from clear at `start`
 /// (milliseconds since the Unix epoch, as `ui.now()` says, on the thread's
@@ -242,6 +244,12 @@ impl TextSpan {
     /// edge, its name with more room after it.
     pub fn padding_end(mut self, end: f32) -> Self {
         self.extras.get_or_insert_default().padding_end = Some(end.max(0.));
+        self
+    }
+    /// Its background reaching `x` past the text on each side without taking room, as CSS's negative
+    /// inline margin under the same padding: a search match's mark.
+    pub fn outset(mut self, x: f32) -> Self {
+        self.extras.get_or_insert_default().outset = x.max(0.);
         self
     }
     /// The span background's corner radius.
