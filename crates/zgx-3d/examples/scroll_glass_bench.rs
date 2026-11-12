@@ -33,18 +33,119 @@ mod counting {
     };
     pub static ALLOCS: AtomicU64 = AtomicU64::new(0);
     pub static REALLOCS: AtomicU64 = AtomicU64::new(0);
+    /// `ALLOC_SAMPLE=n`: every nth allocation or reallocation of a
+    /// scrolled frame (`SAMPLING`) keeps where it came from (`report`).
+    pub static SAMPLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static EVERY: AtomicU64 = AtomicU64::new(0);
+    static SITES: std::sync::Mutex<Vec<(String, u64)>> = std::sync::Mutex::new(Vec::new());
+    thread_local! {
+        static INSIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    pub fn sample_every(n: u64) {
+        EVERY.store(n, Relaxed);
+    }
+    /// Where this allocation came from: the first frames past the
+    /// allocator's own and the collections' growth.
+    fn sample(count: u64) {
+        let every = EVERY.load(Relaxed);
+        if every == 0 || !SAMPLING.load(Relaxed) || !count.is_multiple_of(every) {
+            return;
+        }
+        if INSIDE.with(|inside| inside.replace(true)) {
+            return;
+        }
+        let trace = std::backtrace::Backtrace::force_capture().to_string();
+        let mut frames = trace
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("at "))
+            .map(|line| {
+                line.split_once(": ")
+                    .map_or(line, |(_, name)| name)
+                    .trim()
+                    .to_string()
+            })
+            .filter(|name| {
+                let short = name.split('<').next().unwrap_or(name);
+                ![
+                    "alloc",
+                    "realloc",
+                    "alloc_zeroed",
+                    "alloc_impl_runtime",
+                    "realloc_nonnull",
+                    "grow_impl_runtime",
+                    "allocate",
+                    "grow_amortized",
+                    "grow_one",
+                    "finish_grow",
+                    "reserve",
+                    "do_reserve_and_handle",
+                    "push",
+                    "with_capacity",
+                    "to_vec",
+                    "clone",
+                    "new",
+                    "extend",
+                    "from_iter",
+                    "collect",
+                ]
+                .contains(&short)
+                    && ![
+                        "counting::",
+                        "std::backtrace",
+                        "__rust",
+                        "alloc::alloc",
+                        "alloc::raw_vec",
+                        "alloc::vec",
+                        "<alloc::",
+                        "alloc::boxed",
+                        "alloc::string",
+                        "alloc::rc",
+                        "alloc::sync",
+                        "hashbrown",
+                        "core::",
+                        "std::alloc",
+                        "<std::",
+                    ]
+                    .iter()
+                    .any(|skip| name.contains(skip))
+            });
+        let site: Vec<String> = frames.by_ref().take(3).collect();
+        let site = site.join(" < ");
+        let mut sites = SITES.lock().unwrap();
+        match sites.iter_mut().find(|(name, _)| *name == site) {
+            Some((_, n)) => *n += 1,
+            None => sites.push((site, 1)),
+        }
+        drop(sites);
+        INSIDE.with(|inside| inside.set(false));
+    }
+    /// The sampled sites, most first.
+    pub fn report(frames: u64) {
+        let every = EVERY.load(Relaxed);
+        let mut sites = SITES.lock().unwrap().clone();
+        sites.sort_by_key(|site| std::cmp::Reverse(site.1));
+        for (site, n) in sites.iter().take(40) {
+            println!("{:7.1}/frame  {site}", (n * every) as f64 / frames as f64);
+        }
+    }
     struct Counting;
     unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            ALLOCS.fetch_add(1, Relaxed);
+            if !INSIDE.with(|inside| inside.get()) {
+                sample(ALLOCS.fetch_add(1, Relaxed));
+            }
             unsafe { System.alloc(layout) }
         }
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-            ALLOCS.fetch_add(1, Relaxed);
+            if !INSIDE.with(|inside| inside.get()) {
+                sample(ALLOCS.fetch_add(1, Relaxed));
+            }
             unsafe { System.alloc_zeroed(layout) }
         }
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
-            REALLOCS.fetch_add(1, Relaxed);
+            if !INSIDE.with(|inside| inside.get()) {
+                sample(REALLOCS.fetch_add(1, Relaxed));
+            }
             unsafe { System.realloc(ptr, layout, size) }
         }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -268,6 +369,8 @@ fn main() {
     let (mut damaged, mut items) = (0_u64, 0_usize);
     #[cfg(feature = "count-allocs")]
     let mut counted = (0_u64, 0_u64);
+    #[cfg(feature = "count-allocs")]
+    counting::sample_every(env("ALLOC_SAMPLE", 0) as u64);
     let mut at = 0_f32;
     let mut down = true;
     for frame in 0..frames {
@@ -283,6 +386,8 @@ fn main() {
         // From the second frame: the first mounts everything.
         #[cfg(feature = "count-allocs")]
         let before = counting::now();
+        #[cfg(feature = "count-allocs")]
+        counting::SAMPLING.store(frame > 0, std::sync::atomic::Ordering::Relaxed);
         ui.prepare_frame();
         let report = ui.scene.borrow_mut().flush();
         let stats = gpu
@@ -306,6 +411,8 @@ fn main() {
             counted.0 as f64 / scrolled,
             counted.1 as f64 / scrolled
         );
+        counting::SAMPLING.store(false, std::sync::atomic::Ordering::Relaxed);
+        counting::report(frames.saturating_sub(1).max(1) as u64);
     }
     let watched = kept.borrow();
     println!(
