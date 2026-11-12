@@ -17,7 +17,7 @@ use std::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-pub use crate::editor_lines::{Highlighter, LineColors, LineSpans, SpanHighlighter, SpanStyle};
+pub use crate::editor_lines::{Highlighter, LineColors, LineInset, LineInsets, LineSpans, SpanHighlighter, SpanStyle};
 
 #[derive(Default)]
 struct Owned {
@@ -945,6 +945,15 @@ impl EditorHandle {
             return;
         }
         self.hint.line_cache().set_highlighter(highlighter);
+        self.refresh();
+    }
+    /// Room around each line of a text area (a list item's indent, a heading's space above), by line index; its
+    /// carets, hits, selection and wrapping follow. `None`: none.
+    pub fn set_line_insets(&self, insets: Option<crate::editor_lines::LineInsets>) {
+        if !self.multiline {
+            return;
+        }
+        self.hint.line_cache().set_insets(insets);
         self.refresh();
     }
     /// The caret's colour (`None`: the text's, as by default) and width in
@@ -5811,11 +5820,12 @@ impl Ui {
                         if s.bounds(*id).width == 0. {
                             s.know_text_size(*id, Some(0.), shaped);
                         }
+                        let inset = lines.inset(*i);
                         s.set_transform(
                             *id,
                             Transform {
-                                x: -scroll.0,
-                                y: lines.top(*i) - scroll.1,
+                                x: inset.left - scroll.0,
+                                y: lines.top(*i) + inset.above - scroll.1,
                             },
                         );
                     }
