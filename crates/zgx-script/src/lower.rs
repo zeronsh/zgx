@@ -9088,8 +9088,10 @@ fn apply<S: Styled>(s: S, prop: Prop, lit: &Lit) -> S {
         match (prop, l) {
             (W, Length::Px(v)) => return s.w(v),
             (W, Length::Percent(p)) => return s.w_percent(pct(p)),
+            (W, Length::Auto) => return s.w_auto(),
             (H, Length::Px(v)) => return s.h(v),
             (H, Length::Percent(p)) => return s.h_percent(pct(p)),
+            (H, Length::Auto) => return s.h_auto(),
             (MinW, Length::Px(v)) => return s.min_w(v),
             (MinW, Length::Percent(p)) => return s.min_w_percent(pct(p)),
             (MaxW, Length::Px(v)) => return s.max_w(v),

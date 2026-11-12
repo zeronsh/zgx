@@ -1306,11 +1306,12 @@ impl Styles {
         if other.overflow().layout.is_some() {
             self.fields_mut(bit::LAYOUT).overflow_mut().layout = other.overflow().layout;
         }
-        if other.width.is_some() || other.width_percent.is_some() {
+        // Set, not only given: `auto` and a calculated width clear a width under them.
+        if other.set & (bit::WIDTH | bit::WIDTH_PERCENT) != 0 {
             self.fields_mut(bit::WIDTH).width = other.width;
             self.fields_mut(bit::WIDTH_PERCENT).width_percent = other.width_percent;
         }
-        if other.height.is_some() || other.height_percent.is_some() {
+        if other.set & (bit::HEIGHT | bit::HEIGHT_PERCENT) != 0 {
             self.fields_mut(bit::HEIGHT).height = other.height;
             self.fields_mut(bit::HEIGHT_PERCENT).height_percent = other.height_percent;
         }
@@ -2087,6 +2088,23 @@ pub trait Styled: Sized {
     fn h(mut self, value: impl Into<crate::theme::Themed<f32>>) -> Self {
         value_or_token!(self, value, crate::theme::Field::Height);
         self.styles_mut().fields_mut(bit::HEIGHT).height = Some(value).into();
+        self.styles_mut()
+            .fields_mut(bit::HEIGHT_PERCENT)
+            .height_percent = Opt32::none();
+        self
+    }
+    /// The width the layout gives it from what it holds (CSS `auto`), over a
+    /// default or an earlier width.
+    fn w_auto(mut self) -> Self {
+        self.styles_mut().fields_mut(bit::WIDTH).width = Opt32::none();
+        self.styles_mut()
+            .fields_mut(bit::WIDTH_PERCENT)
+            .width_percent = Opt32::none();
+        self
+    }
+    /// The height the layout gives it from what it holds (CSS `auto`).
+    fn h_auto(mut self) -> Self {
+        self.styles_mut().fields_mut(bit::HEIGHT).height = Opt32::none();
         self.styles_mut()
             .fields_mut(bit::HEIGHT_PERCENT)
             .height_percent = Opt32::none();
@@ -3556,6 +3574,23 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn auto_and_a_calculated_width_replace_a_width_they_merge_over() {
+        let mut base = Styles::new().w(240.);
+        base.merge(&Styles::new().w_auto());
+        assert!(base.width.is_none() && base.width_percent.is_none());
+        let mut base = Styles::new().h(40.);
+        base.merge(&Styles::new().h_auto());
+        assert!(base.height.is_none() && base.height_percent.is_none());
+        // A style that sets neither leaves them.
+        let mut base = Styles::new().w(240.);
+        base.merge(&Styles::new().p(4.));
+        assert!(base.width.is_some());
+        let mut base = Styles::new().w(240.);
+        base.merge(&Styles::new().w_percent(50.));
+        assert!(base.width.is_none() && base.width_percent.is_some());
+    }
 
     /// A style setting none of the properties few set (`Overflow`) holds
     /// no allocation for them, nor does one given their paint unset; one

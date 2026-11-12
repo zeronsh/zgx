@@ -4705,18 +4705,36 @@ fn a_markdown_table_lays_out_as_the_web_notes_do() {
     let flops = text_place(&mut h, "$$3.3 \\times 10^{18}$$");
     // 13 columns can't share 356 at 100 each: every one keeps 100 (and the 12 gap), and the table scrolls.
     let pitch = second.x - base.x;
-    assert!((pitch - 112.).abs() < 1., "columns 100 wide with their gap, {pitch} apart");
-    assert!(flops.x > 420., "the last column lies past the view, to scroll to ({}pt)", flops.x);
-    assert!(flops.width <= 100.5, "its cell wraps inside its column ({}pt)", flops.width);
+    assert!(
+        (pitch - 112.).abs() < 1.,
+        "columns 100 wide with their gap, {pitch} apart"
+    );
+    assert!(
+        flops.x > 420.,
+        "the last column lies past the view, to scroll to ({}pt)",
+        flops.x
+    );
+    assert!(
+        flops.width <= 100.5,
+        "its cell wraps inside its column ({}pt)",
+        flops.width
+    );
     let line = base.height;
-    assert!(big.y - base.y <= flops.height + 4.5 && flops.height < line * 3., "a row is as tall as its own cells");
+    assert!(
+        big.y - base.y <= flops.height + 4.5 && flops.height < line * 3.,
+        "a row is as tall as its own cells"
+    );
     assert_eq!(h.error(), None);
 
     // Two columns share the width equally.
     let mut h = note_pane("| A | B |\n| --- | --- |\n| left | right |");
     let left = text_place(&mut h, "left");
     let right = text_place(&mut h, "right");
-    assert!((right.x - left.x - 184.).abs() < 1., "two columns of (356 - 12) / 2, {} apart", right.x - left.x);
+    assert!(
+        (right.x - left.x - 184.).abs() < 1.,
+        "two columns of (356 - 12) / 2, {} apart",
+        right.x - left.x
+    );
 }
 
 #[test]
