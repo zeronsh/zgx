@@ -4658,49 +4658,65 @@ fn a_list_of_data_takes_no_count() {
     assert!(error.contains("not with `count`"), "{error}");
 }
 
-#[test]
-fn a_markdown_table_wider_than_its_view_keeps_its_columns_and_scrolls() {
-    // A note's 13-column table in a 420pt reading pane: columns as wide as their cells, as a browser's are.
-    let mut h = Harness::inline(
-        r##"local md = ui.state("md", table.concat({
-            "| Model | Layers ($$N$$) | $$d_{model}$$ | $$d_{ff}$$ | Heads ($$h$$) | $$d_k = d_v$$ | $$P_{drop}$$ | $$\\epsilon_{ls}$$ | Params | Train steps | Step time | Wall time | FLOPs (EN-DE) |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-            "| base | 6 | 512 | 2048 | 8 | 64 | 0.1 | 0.1 | 65M | 100K | 0.4 s | 12 h | $$3.3 \\times 10^{18}$$ |",
-            "| big | 6 | 1024 | 4096 | 16 | 64 | 0.3 | 0.1 | 213M | 300K | 1.0 s | 3.5 days | $$2.3 \\times 10^{19}$$ |",
-        }, "\n"))
-        return ui.column { w = 420, h = 600, ui.scroll { grow = 1, w_full = true, min_h = 0,
-            ui.column { w_full = true, items = "center",
-                ui.column { w_full = true, max_w = 768, p = 32, text_size = 14, line_height = 22,
-                    ui.markdown_view { function() return md:get() end, w_full = true } } } } }"##,
-    );
-    h.frames(1);
+/// Where the first shown text equal to `want` lies.
+fn text_place(h: &mut Harness, want: &str) -> zgx::scene::Rect {
     h.texts();
-    let place = |h: &mut Harness, want: &str| -> zgx::scene::Rect {
-        let scene = h.ui.scene.borrow();
-        let mut stack = vec![scene.root()];
-        while let Some(n) = stack.pop() {
-            let text = match scene.kind(n) {
-                NodeKind::Text { text, .. } => Some(text.to_string()),
-                NodeKind::RichText { text, .. } => Some(text.text().to_owned()),
-                _ => None,
-            };
-            if text.as_deref() == Some(want) {
-                return scene.bounds(n);
-            }
-            stack.extend(scene.children(n).iter().copied());
+    let scene = h.ui.scene.borrow();
+    let mut stack = vec![scene.root()];
+    while let Some(n) = stack.pop() {
+        let text = match scene.kind(n) {
+            NodeKind::Text { text, .. } => Some(text.to_string()),
+            NodeKind::RichText { text, .. } => Some(text.text().to_owned()),
+            _ => None,
+        };
+        if text.as_deref() == Some(want) {
+            return scene.bounds(n);
         }
-        panic!("no `{want}`")
-    };
-    let base = place(&mut h, "base");
-    let big = place(&mut h, "big");
-    let flops = place(&mut h, "$$3.3 \\times 10^{18}$$");
-    let head = place(&mut h, "FLOPs (EN-DE)");
+        stack.extend(scene.children(n).iter().copied());
+    }
+    panic!("no `{want}`")
+}
+
+/// A note's reading pane, 420 wide (356 inside its padding), showing `md`.
+fn note_pane(md: &str) -> Harness {
+    let mut h = Harness::inline(&format!(
+        r##"local md = ui.state("md", {md:?})
+        return ui.column {{ w = 420, h = 600, ui.scroll {{ grow = 1, w_full = true, min_h = 0,
+            ui.column {{ w_full = true, items = "center",
+                ui.column {{ w_full = true, max_w = 768, p = 32, text_size = 14, line_height = 22,
+                    ui.markdown_view {{ function() return md:get() end, w_full = true }} }} }} }} }}"##
+    ));
+    h.frames(1);
+    h
+}
+
+#[test]
+fn a_markdown_table_lays_out_as_the_web_notes_do() {
+    // Plate's fixed layout: equal columns sharing the width, none under 100, cells wrapping inside them.
+    let mut h = note_pane(
+        "| Model | Layers ($$N$$) | $$d_{model}$$ | $$d_{ff}$$ | Heads ($$h$$) | $$d_k = d_v$$ | $$P_{drop}$$ | $$\\epsilon_{ls}$$ | Params | Train steps | Step time | Wall time | FLOPs (EN-DE) |\n\
+         | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n\
+         | base | 6 | 512 | 2048 | 8 | 64 | 0.1 | 0.1 | 65M | 100K | 0.4 s | 12 h | $$3.3 \\times 10^{18}$$ |\n\
+         | big | 6 | 1024 | 4096 | 16 | 64 | 0.3 | 0.1 | 213M | 300K | 1.0 s | 3.5 days | $$2.3 \\times 10^{19}$$ |",
+    );
+    let base = text_place(&mut h, "base");
+    let second = text_place(&mut h, "6");
+    let big = text_place(&mut h, "big");
+    let flops = text_place(&mut h, "$$3.3 \\times 10^{18}$$");
+    // 13 columns can't share 356 at 100 each: every one keeps 100 (and the 12 gap), and the table scrolls.
+    let pitch = second.x - base.x;
+    assert!((pitch - 112.).abs() < 1., "columns 100 wide with their gap, {pitch} apart");
+    assert!(flops.x > 420., "the last column lies past the view, to scroll to ({}pt)", flops.x);
+    assert!(flops.width <= 100.5, "its cell wraps inside its column ({}pt)", flops.width);
     let line = base.height;
-    assert!(big.y - base.y < line * 2., "one-line rows {} and {} apart for a {line}pt line", base.y, big.y);
-    assert!(flops.height < line * 1.5, "the last column keeps its natural width, one line ({}pt)", flops.height);
-    assert!(flops.x > 420., "it lies past the view's edge, to scroll to ({}pt)", flops.x);
-    assert!(head.height < line * 1.5, "the header's cells keep theirs too ({}pt)", head.height);
+    assert!(big.y - base.y <= flops.height + 4.5 && flops.height < line * 3., "a row is as tall as its own cells");
     assert_eq!(h.error(), None);
+
+    // Two columns share the width equally.
+    let mut h = note_pane("| A | B |\n| --- | --- |\n| left | right |");
+    let left = text_place(&mut h, "left");
+    let right = text_place(&mut h, "right");
+    assert!((right.x - left.x - 184.).abs() < 1., "two columns of (356 - 12) / 2, {} apart", right.x - left.x);
 }
 
 #[test]

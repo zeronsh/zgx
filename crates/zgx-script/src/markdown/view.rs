@@ -207,22 +207,44 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
         )
 }
 
-/// A table at its natural width: each column as wide as its widest cell on one line, shared across rows; wider
-/// than the view, it scrolls sideways rather than squeezing its columns.
+/// A table as the web app's notes lay one out (Plate's fixed layout): equal columns sharing the view, none
+/// narrower than 100, cells wrapping inside them; a table those minimums make wider than the view scrolls sideways.
 fn table(head: Vec<View>, rows: Vec<Vec<View>>, cx: &mut Context) -> View {
-    let columns = rows.iter().map(Vec::len).chain(std::iter::once(head.len())).max().unwrap_or(0);
-    let tracks = format!("repeat({}, auto)", columns.max(1))
-        .parse()
-        .expect("a track list");
-    let mut grid = div().grid().grid_template_columns(tracks).gap_x(12.).gap_y(4.).shrink_0();
+    const MIN_COLUMN: f32 = 100.;
+    const GAP: f32 = 12.;
+    let columns = rows.iter().map(Vec::len).chain(std::iter::once(head.len())).max().unwrap_or(0).max(1);
+    let tracks = format!("repeat({columns}, 1fr)").parse().expect("a track list");
+    let least = columns as f32 * MIN_COLUMN + (columns - 1) as f32 * GAP;
+    // the viewport's width, once it has one: a scroller's content has none of its own to share
+    let viewport: Rc<RefCell<Option<Signal<(f32, f32)>>>> = Rc::default();
+    let mounted: Signal<bool> = cx.runtime().signal(false);
+    let seen = viewport.clone();
+    let told = mounted.clone();
+    let mut grid = div()
+        .grid()
+        .grid_template_columns(tracks)
+        .gap_x(GAP)
+        .gap_y(4.)
+        .shrink_0()
+        .reactive_style(move || {
+            mounted.get();
+            let view = seen.borrow().as_ref().map_or(0., |size| size.get().0);
+            Styles::new().w(view.max(least))
+        });
     let pad = |mut cells: Vec<View>| {
         cells.resize_with(columns, div);
         cells
     };
     for cell in pad(head).into_iter().chain(rows.into_iter().flat_map(pad)) {
-        grid = grid.child(column().text_wrap(false).child(cell));
+        grid = grid.child(column().min_w(0.).child(cell));
     }
-    zgx::compose::scroll_x(cx.state(0_f32)).w_full().child(grid)
+    zgx::compose::scroll_x(cx.state(0_f32))
+        .w_full()
+        .on_mount(move |handle| {
+            *viewport.borrow_mut() = handle.observe_size();
+            told.set(true);
+        })
+        .child(grid)
 }
 
 fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
@@ -291,7 +313,7 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                 row.map(|c| c.list().to_vec())
                     .unwrap_or_default()
                     .iter()
-                    .map(|cell| static_runs(Some(cell), bold).text_wrap(false).into())
+                    .map(|cell| static_runs(Some(cell), bold).into())
                     .collect()
             };
             let rows = b.field("rows").map(|r| r.list().to_vec()).unwrap_or_default();
@@ -634,7 +656,7 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                     .iter()
                     .map(|cell| {
                         let runs = cell.list().iter().map(|r| span(r, bold)).collect::<Vec<_>>();
-                        zgx::compose::rich_text().children(runs).text_wrap(false).into()
+                        zgx::compose::rich_text().children(runs).text_wrap(true).into()
                     })
                     .collect()
             };
