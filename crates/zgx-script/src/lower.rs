@@ -3084,6 +3084,7 @@ fn kind_view(
             .on_mount(move |handle| handle.retain(sweeper.sweeper()))
         }
         Kind::WebView(spec) => web_view_of(spec, vm, low),
+        Kind::Host(name) => crate::host_views::view(name),
         Kind::Terminal(term) => zgx::terminal::terminal(term),
         #[cfg(feature = "scene3d")]
         Kind::Scene3d(spec) => crate::scene3d::lower(spec, vm, &low.assets, need(&mut cx)),
