@@ -105,7 +105,9 @@ pub(crate) fn mount(ui: &mut Ui, panel: NodeId, viewport: NodeId, content: NodeI
         offset.set(position);
         let mut scene = scene.borrow_mut();
         let mut style = scene.style(content);
-        style.width = Some(width);
+        // At least the viewport's width, so rows fill it, and otherwise its
+        // own: a panel sized by what it holds (`max-content`) sees its rows.
+        style.min_width = Some(width);
         style.flex_shrink = 0.;
         scene.set_style(content, style);
         scene.set_transform(

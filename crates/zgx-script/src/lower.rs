@@ -9075,6 +9075,33 @@ fn is_transform(prop: Prop) -> bool {
     )
 }
 
+/// Installs `ui.menu_look { panel, item, hover, focus }`: plain styles every
+/// menu the app doesn't style itself takes, zgx's own (a link's, an
+/// editor's) among them.
+pub(crate) fn install_menu_look(lua: &mlua::Lua, ui: &mlua::Table) -> mlua::Result<()> {
+    ui.set(
+        "menu_look",
+        lua.create_function(|lua, look: mlua::Table| {
+            let part = |name: &str| -> mlua::Result<Option<Styles>> {
+                match look.get::<mlua::Value>(name)? {
+                    mlua::Value::Nil => Ok(None),
+                    value => {
+                        let lits = crate::node::plain_styles(lua, value, &format!("menu_look.{name}"))?;
+                        Ok(Some(apply_all(Styles::new(), &lits)))
+                    }
+                }
+            };
+            zgx::compose::set_menu_look(zgx::compose::MenuLook {
+                panel: part("panel")?.unwrap_or_default(),
+                item: part("item")?.unwrap_or_default(),
+                hover: part("hover")?,
+                focus: part("focus")?,
+            });
+            Ok(())
+        })?,
+    )
+}
+
 /// Applies literal styles; translation and the local transform collect
 /// their parts first, so each is set once.
 fn apply_all<S: Styled>(mut s: S, lits: &[(Prop, Lit)]) -> S {

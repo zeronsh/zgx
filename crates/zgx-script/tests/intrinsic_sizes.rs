@@ -45,3 +45,52 @@ fn not_on_the_spacing() {
     .expect("an error");
     assert!(error.contains("size w, h"), "{error}");
 }
+
+/// A menu takes its widest row's width at `w = "max-content"`, as a context
+/// menu sized to its labels does, above its `min_w`.
+#[test]
+fn a_menu_is_as_wide_as_its_widest_row() {
+    let mut h = Harness::inline(
+        r##"local open = ui.state("open", true)
+        return ui.column { w = 800, h = 600,
+            ui.menu { id = "menu", open = open, w = "max-content", min_w = 140, p = 0,
+                anchor = ui.button { "Open" },
+                ui.menu_item { "Short" },
+                ui.div { w = 300, h = 4 },
+            },
+            ui.popover { id = "pop", open = ui.state("pop", true), w = "max-content", min_w = 140, p = 0,
+                anchor = ui.button { "Pop" },
+                ui.div { w = 300, h = 4 },
+            },
+        }"##,
+    );
+    let pop = width(&mut h, "pop");
+    let menu = width(&mut h, "menu");
+    assert_eq!(h.error(), None);
+    assert_eq!((menu, pop), (300., 300.));
+}
+
+/// `ui.menu_look` styles the menus the app doesn't style itself, zgx's own
+/// among them: an item takes its row height, and one with a height of its
+/// own keeps it.
+#[test]
+fn a_menu_look_styles_items_that_do_not_style_themselves() {
+    let mut h = Harness::inline(
+        r##"ui.menu_look { panel = { p = 0 }, item = { h = 24, px = 12 } }
+        return ui.column { w = 800, h = 600,
+            ui.menu { id = "menu", open = ui.state("open", true), anchor = ui.button { "Open" },
+                ui.menu_item { id = "plain", "Open Link" },
+                ui.menu_item { id = "own", h = 40, "Copy Link" },
+            },
+        }"##,
+    );
+    h.frames(2);
+    let height = |h: &mut Harness, id: &str| {
+        let node = h.find(id).unwrap();
+        h.ui.scene.borrow().bounds(node).height
+    };
+    let (plain, own) = (height(&mut h, "plain"), height(&mut h, "own"));
+    zgx::compose::set_menu_look(Default::default());
+    assert_eq!(h.error(), None);
+    assert_eq!((plain, own), (24., 40.));
+}

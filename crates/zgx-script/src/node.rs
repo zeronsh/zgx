@@ -4464,27 +4464,8 @@ fn fill_from(
                 node.events.get_or_insert_default().context_menu_below = below;
             }
             "context_menu_style" => {
-                let mlua::Value::Table(styles) = value else {
-                    return Err(mlua::Error::runtime(
-                        "`context_menu_style` takes a table of styles",
-                    ));
-                };
-                let mut lits = Vec::new();
-                for pair in styles.pairs::<String, mlua::Value>() {
-                    let (name, value) = pair?;
-                    let prop = Prop::parse(&name).ok_or_else(|| {
-                        mlua::Error::runtime(format!(
-                            "unknown style `{name}` in `context_menu_style`"
-                        ))
-                    })?;
-                    let Source::Lit(lit) = source(lua, prop.ty(), &name, value)? else {
-                        return Err(mlua::Error::runtime(format!(
-                            "`context_menu_style.{name}` must be a plain value"
-                        )));
-                    };
-                    lits.push((prop, lit));
-                }
-                node.events.get_or_insert_default().context_menu_style = Some(lits.into());
+                node.events.get_or_insert_default().context_menu_style =
+                    Some(plain_styles(lua, value, "context_menu_style")?);
             }
             "provide" => node.provide = Some(provided(lua, value)?),
             "theme" => {
@@ -7812,4 +7793,25 @@ mod tests {
             .unwrap();
         assert_eq!(seen, 1);
     }
+}
+
+/// A table of styles in plain values (`context_menu_style`, the parts of
+/// `ui.menu_look`), `what` naming it in errors.
+pub(crate) fn plain_styles(lua: &Lua, value: mlua::Value, what: &str) -> mlua::Result<Styles> {
+    let mlua::Value::Table(styles) = value else {
+        return Err(mlua::Error::runtime(format!("`{what}` takes a table of styles")));
+    };
+    let mut lits = Vec::new();
+    for pair in styles.pairs::<String, mlua::Value>() {
+        let (name, value) = pair?;
+        let prop = Prop::parse(&name)
+            .ok_or_else(|| mlua::Error::runtime(format!("unknown style `{name}` in `{what}`")))?;
+        let Source::Lit(lit) = source(lua, prop.ty(), &name, value)? else {
+            return Err(mlua::Error::runtime(format!(
+                "`{what}.{name}` must be a plain value"
+            )));
+        };
+        lits.push((prop, lit));
+    }
+    Ok(lits.into())
 }

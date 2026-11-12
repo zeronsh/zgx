@@ -53,6 +53,10 @@ context_menu_below: boolean?
 
 Panels start with 16 points of padding, the theme's surface color and rounded corners; a modal is 360 wide, a popover or menu 240, and each is as tall as its content, at most the window.
 
+`ui.menu_look { panel, item, hover, focus }` gives every menu that doesn't style itself a look of the app's, in plain values (as `context_menu_style`): `panel` for menu, submenu and context menu panels, `item` for each item, `hover` and `focus` in place of the platform's highlight. A menu's or item's own styles go over it, and the menus zgx builds itself (a link's Open Link and Copy Link, an editor's, a selection's) take it as they are. Set it once, before the menus it styles are built.
+
+A panel given `w = "max-content"` is as wide as its widest item, at least its `min_w`: a context menu sized to its labels.
+
 ## Behavior
 
 - Escape closes the top panel; a click on blank panel space does not. A click outside a modal or a menu closes it and does nothing else.

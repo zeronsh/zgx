@@ -21827,6 +21827,9 @@ declare ui: {
 	-- "Ctrl+Shift+Z" elsewhere (`cmd` is Command on macOS, Control
 	-- elsewhere); a lone modifier ("cmd") as itself, "⌘" or "Ctrl".
 	shortcut_text: (keys: string) -> string,
+	-- The look every menu takes that doesn't style itself, zgx's own (a link's, an editor's) among them: its
+	-- panel, each item, an item under the pointer and one with keyboard focus, in plain values.
+	menu_look: (look: { panel: Styles?, item: Styles?, hover: Styles?, focus: Styles? }) -> (),
 	-- The id of the command (the app's or a plugin's) holding a shortcut
 	-- now, `Shift+Cmd+J` or `cmd+shift+j` alike; nil if none.
 	shortcut_owner: (keys: string) -> string?,

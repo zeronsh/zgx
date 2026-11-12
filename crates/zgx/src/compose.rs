@@ -4519,6 +4519,7 @@ fn mount_portal_panel(
     };
     if is_menu {
         defaults = defaults.items_stretch();
+        defaults.merge(&menu_look().panel);
     }
     defaults.merge(&view.styles);
     view.styles = defaults;
@@ -4989,6 +4990,34 @@ fn dim_when_disabled(view: &mut View) {
     if view.variants.disabled.is_none() {
         view.variants.disabled = Some(Box::new(Styles::new().opacity(0.45)));
     }
+}
+/// The look an app gives every menu it doesn't style itself: the ones zgx
+/// builds (a link's, an editor's, a selection's) take it, so they look as the
+/// app's own. Each part lies under what a menu or item sets of its own.
+#[derive(Clone, Default)]
+pub struct MenuLook {
+    /// The panel of a menu, a submenu or a context menu.
+    pub panel: Styles,
+    /// Each item.
+    pub item: Styles,
+    /// An item under the pointer, in place of the platform's.
+    pub hover: Option<Styles>,
+    /// An item with keyboard focus, in place of the platform's.
+    pub focus: Option<Styles>,
+}
+thread_local! { static MENU_LOOK: RefCell<Rc<MenuLook>> = RefCell::default(); }
+/// Gives every menu built after it `look` (`ui.menu_look`).
+pub fn set_menu_look(look: MenuLook) {
+    MENU_LOOK.with(|now| *now.borrow_mut() = Rc::new(look));
+}
+fn menu_look() -> Rc<MenuLook> {
+    MENU_LOOK.with(|now| now.borrow().clone())
+}
+fn menu_hover_look() -> Styles {
+    menu_look()
+        .hover
+        .clone()
+        .unwrap_or_else(|| widget_style(|w| &w.menu_hover))
 }
 fn widget_style(pick: impl FnOnce(&WidgetStyles) -> &Styles) -> Styles {
     thread_local! { static STYLES: WidgetStyles = WidgetStyles::new(); }
@@ -6100,13 +6129,18 @@ fn open_element(
             {
                 defaults = defaults.min_h(0.);
             }
+            let look = menu_look();
+            defaults.merge(&look.item);
             defaults.merge(&view.styles);
             view.styles = defaults;
             if view.variants.hover.is_none() {
-                view.variants.defaults[0] = Some(|| widget_style(|w| &w.menu_hover));
+                view.variants.defaults[0] = Some(menu_hover_look);
             }
             if view.variants.focus.is_none() {
-                view.variants.defaults[2] = Some(menu_focus(&view.styles));
+                view.variants.defaults[2] = Some(match look.focus {
+                    Some(_) => || menu_look().focus.clone().unwrap_or_default(),
+                    None => menu_focus(&view.styles),
+                });
             }
             let root = ui.container(parent, Layout::Row, Default::default());
             let mut semantic = SemanticNode::new(Role::MenuItem, label.clone());

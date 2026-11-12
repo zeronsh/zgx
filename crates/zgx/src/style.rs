@@ -824,6 +824,15 @@ impl Default for ImagePlacement {
         }
     }
 }
+/// Whether `styles` takes its width and its height from a size expression.
+fn calc_sized(styles: &Styles) -> (bool, bool) {
+    styles
+        .rare()
+        .cold
+        .as_ref()
+        .and_then(|cold| cold.size_calcs.as_ref())
+        .map_or((false, false), |calcs| (calcs.width.is_some(), calcs.height.is_some()))
+}
 /// What of `styles`' size is worked out from its containing block.
 fn size_calcs(styles: &mut Styles) -> &mut crate::size_calc::SizeCalcs {
     // A parent lays out what has options with taffy, the only layout that
@@ -1210,6 +1219,36 @@ impl Styles {
         // Nothing set: nothing to overlay.
         if other.set == 0 {
             return;
+        }
+        // A width (or height) replaces the one here whatever its kind: points
+        // or a percentage over `"max-content"`, and the other way round.
+        let (their_calc_w, their_calc_h) = calc_sized(other);
+        let their_w = other.width.is_some() || other.width_percent.is_some();
+        let their_h = other.height.is_some() || other.height_percent.is_some();
+        let (mine_calc_w, mine_calc_h) = calc_sized(self);
+        if (their_w && mine_calc_w) || (their_h && mine_calc_h) {
+            if let Some(calcs) = self
+                .rare_mut()
+                .cold
+                .as_mut()
+                .and_then(|cold| cold.size_calcs.as_mut())
+            {
+                let calcs = std::sync::Arc::make_mut(calcs);
+                if their_w {
+                    calcs.width = None;
+                }
+                if their_h {
+                    calcs.height = None;
+                }
+            }
+        }
+        if their_calc_w {
+            self.fields_mut(bit::WIDTH).width = Opt32::none();
+            self.fields_mut(bit::WIDTH_PERCENT).width_percent = Opt32::none();
+        }
+        if their_calc_h {
+            self.fields_mut(bit::HEIGHT).height = Opt32::none();
+            self.fields_mut(bit::HEIGHT_PERCENT).height_percent = Opt32::none();
         }
         if self.tokens.is_some() || other.tokens.is_some() {
             crate::theme::merge(self, other);
@@ -3556,6 +3595,24 @@ mod tests {
     }
 
     use super::*;
+
+    /// A width merged over another replaces it whatever kind either is, as a
+    /// later CSS declaration does: a context menu's `"max-content"` over the
+    /// panel's default 240 points, and points back over an expression.
+    #[test]
+    fn a_merged_width_replaces_one_of_another_kind() {
+        let mut panel = Styles::new().w(240.).h(100.);
+        panel.merge(&Styles::new().w_calc("max-content".parse::<crate::size_calc::SizeCalc>().unwrap()));
+        assert!(panel.width.is_none() && panel.width_percent.is_none());
+        assert_eq!(calc_sized(&panel), (true, false));
+        assert!(panel.height.is_some());
+        panel.merge(&Styles::new().w(200.));
+        assert_eq!(calc_sized(&panel), (false, false));
+        assert!(panel.width.is_some());
+        let mut tall = Styles::new().h_calc("max-content".parse::<crate::size_calc::SizeCalc>().unwrap());
+        tall.merge(&Styles::new().h_percent(50.));
+        assert_eq!(calc_sized(&tall), (false, false));
+    }
 
     /// A style setting none of the properties few set (`Overflow`) holds
     /// no allocation for them, nor does one given their paint unset; one
