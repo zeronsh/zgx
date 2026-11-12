@@ -15497,18 +15497,117 @@ impl Scene {
     ) -> Vec<PaintItem<'_>> {
         match self.plain_walks() {
             true => match damage {
-                Some(_) => self.layer_items_walk::<false, false, false>(
+                Some(_) => self.layer_items_walk::<false, false, false, false>(
                     root,
                     damage,
                     &mut Vec::new(),
                     None,
+                    None,
                 ),
                 None => self.layer_items_whole(root),
             },
-            false => {
-                self.layer_items_walk::<true, false, false>(root, damage, &mut Vec::new(), None)
-            }
+            false => self.layer_items_walk::<true, false, false, false>(
+                root,
+                damage,
+                &mut Vec::new(),
+                None,
+                None,
+            ),
         }
+    }
+    /// The window's paint items within `clip`, as
+    /// `layer_items_within(None, Some(&[clip]))` finds them, but for what
+    /// `node` holds: its own items stay, its descendants' are left out. Only
+    /// where what it holds paints as plain items alone, its paint order the
+    /// tree's (`paints_plainly`, and no raised or sticky children or popups
+    /// anywhere, which could paint between them); `None` otherwise. For a
+    /// renderer asking what lies around content that moves (zgx-gpu's
+    /// scroll copies). Renderer plumbing, not a stable API.
+    #[doc(hidden)]
+    pub fn layer_items_around(&self, node: NodeId, clip: Rect) -> Option<Vec<PaintItem<'_>>> {
+        if !self.plain_walks() || !self.paints_plainly(node, clip) {
+            return None;
+        }
+        Some(self.layer_items_walk::<false, false, false, true>(
+            None,
+            Some(&[clip]),
+            &mut Vec::new(),
+            None,
+            Some(node),
+        ))
+    }
+    /// Whether everything `root` holds that can show within `clip` (`root`
+    /// itself among it) paints as a plain item: no layer (isolated,
+    /// transformed or an effect's), backdrop blur, edge fade, picture drawn
+    /// with an effect, layer shader, baked loop, or node painted outside its
+    /// parent's fade. Its nodes are looked at, as far down as the paint walk
+    /// would go within `clip`, and no item is made; whatever might paint
+    /// otherwise, shown or not, says `false`.
+    #[doc(hidden)]
+    pub fn paints_plainly(&self, root: NodeId, clip: Rect) -> bool {
+        // (These lists can hold removed nodes until they're let go:
+        // `outside_fade` as it grows, the others on a flush or a free.)
+        let within = |id: &NodeId| self.contains(*id) && self.is_within(*id, root);
+        if self.blur_nodes.iter().any(within) || self.layer_shaders.keys().any(within) {
+            return false;
+        }
+        #[cfg(target_os = "macos")]
+        if self.baked_loops.iter().any(|(id, _)| within(id)) {
+            return false;
+        }
+        if let Some(cold) = &self.cold
+            && cold.outside_fade.keys().any(within)
+        {
+            return false;
+        }
+        self.settle_children();
+        let mut transform = Transform::default();
+        let mut parent = self.node(root).parent;
+        while let Some(id) = parent {
+            let n = self.node(id);
+            transform.x += n.transform.x;
+            transform.y += n.transform.y;
+            parent = n.parent;
+        }
+        let mut stack = vec![(root, transform)];
+        while let Some((id, parent_transform)) = stack.pop() {
+            let node = self.node(id);
+            if node.isolated
+                || node.transformed()
+                || node.effect_layer()
+                || node.effects.blur_radius > 0.
+                // A fade of its own, as the walk makes one: bands of a
+                // `fade_overflow` node the content doesn't run past are none.
+                || fades(&node.style)
+                    && fade_mask(None, Some(node.bounds), &node.style, self.overflow_of(id, node))
+                        .is_some()
+                || matches!(&node.kind, NodeKind::Image(image)
+                    if image.effect() != crate::image::ImageEffect::Plain)
+            {
+                return false;
+            }
+            let transform = Transform {
+                x: parent_transform.x + node.transform.x,
+                y: parent_transform.y + node.transform.y,
+            };
+            let children = match self.children_raw(node) {
+                all if all.len() >= SEARCHED_CHILDREN => {
+                    self.searched(id, node, all, transform, clip)
+                }
+                all => all,
+            };
+            // The children the walk goes on to, as it filters them.
+            stack.extend(
+                children
+                    .iter()
+                    .filter(|child| {
+                        self.ink(**child)
+                            .is_some_and(|ink| ink.translated(transform).intersects(clip))
+                    })
+                    .map(|child| (*child, transform)),
+            );
+        }
+        true
     }
     /// Of `node`'s `children`, those whose ink can meet `reach` (a damaged
     /// walk's damage, all of it, in the window) at `transform` (its
@@ -15561,7 +15660,7 @@ impl Scene {
     /// its damage already, and pays nothing for it.
     #[inline(never)]
     fn layer_items_whole(&self, root: Option<NodeId>) -> Vec<PaintItem<'_>> {
-        self.layer_items_walk::<false, false, true>(root, None, &mut Vec::new(), None)
+        self.layer_items_walk::<false, false, true, false>(root, None, &mut Vec::new(), None, None)
     }
     /// The window's paint items (as [`Scene::layer_items`] with `None`), and
     /// into `inherited` what each took from its ancestors, for
@@ -15569,8 +15668,11 @@ impl Scene {
     pub fn layer_items_recorded(&self, inherited: &mut Vec<Inherited>) -> Vec<PaintItem<'_>> {
         inherited.clear();
         match self.plain_walks() {
-            true => self.layer_items_walk::<false, true, false>(None, None, inherited, None),
-            false => self.layer_items_walk::<true, true, false>(None, None, inherited, None),
+            true => self
+                .layer_items_walk::<false, true, false, false>(None, None, inherited, None, None),
+            false => {
+                self.layer_items_walk::<true, true, false, false>(None, None, inherited, None, None)
+            }
         }
     }
     /// The paint items of `id`'s subtree as the window's walk makes them,
@@ -15587,12 +15689,20 @@ impl Scene {
     ) -> Vec<PaintItem<'_>> {
         out.clear();
         match self.plain_walks() {
-            true => {
-                self.layer_items_walk::<false, true, false>(None, None, out, Some((id, inherited)))
-            }
-            false => {
-                self.layer_items_walk::<true, true, false>(None, None, out, Some((id, inherited)))
-            }
+            true => self.layer_items_walk::<false, true, false, false>(
+                None,
+                None,
+                out,
+                Some((id, inherited)),
+                None,
+            ),
+            false => self.layer_items_walk::<true, true, false, false>(
+                None,
+                None,
+                out,
+                Some((id, inherited)),
+                None,
+            ),
         }
     }
     /// Plain node `id`'s box as [`Scene::item_in`] places it, from what it
@@ -15661,12 +15771,19 @@ impl Scene {
     /// `RECORD`: what each item inherits goes into `inherited`.
     /// `from`: a subtree alone, from what its root inherited (`root` and
     /// `damage` are then `None`).
-    fn layer_items_walk<const POPUPS: bool, const RECORD: bool, const CLIPS: bool>(
+    /// `AROUND`: what `around` holds is left out, its own items kept.
+    fn layer_items_walk<
+        const POPUPS: bool,
+        const RECORD: bool,
+        const CLIPS: bool,
+        const AROUND: bool,
+    >(
         &self,
         root: Option<NodeId>,
         damage: Option<&[Rect]>,
         inherited: &mut Vec<Inherited>,
         from: Option<(NodeId, &Inherited)>,
+        around: Option<NodeId>,
     ) -> Vec<PaintItem<'_>> {
         self.settle_children();
         let reach = damage.map(|damage| {
@@ -15935,6 +16052,7 @@ impl Scene {
                     .shared(),
                 };
                 let children = match POPUPS {
+                    _ if AROUND && around == Some(id) => &[][..],
                     true => self.paint_order(id, node),
                     false => match (reach, self.children_raw(node)) {
                         (Some(reach), all) if all.len() >= SEARCHED_CHILDREN => {
@@ -16384,6 +16502,24 @@ mod tests {
         assert!(relayered.has_inline_boxes());
     }
     use super::*;
+    /// A node painted outside its parent's fade, removed, leaves its entry
+    /// (let go only as the map grows): asking what paints plainly passes
+    /// it by rather than looking it up.
+    #[test]
+    fn paints_plainly_passes_removed_nodes_by() {
+        let mut scene = Scene::new(200., 200.);
+        let root = scene.root();
+        let view = scene.append(root, NodeKind::Container(Layout::Column), Style::default());
+        let bar = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+        scene.set_outside_fade(bar);
+        scene.flush();
+        let clip = Rect::new(0., 0., 200., 200.);
+        assert!(!scene.paints_plainly(view, clip));
+        scene.remove(bar);
+        scene.flush();
+        assert!(scene.paints_plainly(view, clip));
+        assert!(scene.paints_plainly(root, clip));
+    }
     /// A long column's ink worked out from its kept union and the children
     /// that grew where they were (`grown_ink`) is, to the bit, the ink worked
     /// out over every child (`rescan_inks`), and so is every walk's: as its
