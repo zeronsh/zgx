@@ -466,6 +466,25 @@ mod tests {
     use super::*;
     use crate::theme::tok;
     #[test]
+    fn colours_mix_with_premultiplied_alpha() {
+        let opaque = Color(255, 0, 0, 255);
+        let clear = Color(0, 0, 0, 0);
+        // Easing to a translucent wash keeps the colour: no darker middle.
+        assert_eq!(mix(opaque, clear, 0.5), Color(255, 0, 0, 128));
+        assert_eq!(mix(opaque, clear, 0.), opaque);
+        assert_eq!(mix(opaque, clear, 1.), clear);
+        assert_eq!(mix(clear, clear, 0.5), clear);
+        // Opaque colours mix channel by channel.
+        assert_eq!(
+            mix(Color(10, 20, 30, 255), Color(110, 120, 130, 255), 0.5),
+            Color(60, 70, 80, 255)
+        );
+        // A translucent end weighs by its alpha: translucent red to opaque blue at 0.5.
+        let mixed = mix(Color(255, 0, 0, 129), Color(0, 0, 255, 255), 0.5);
+        assert_eq!(mixed.3, 192);
+        assert!(mixed.0 < mixed.2, "{mixed:?}");
+    }
+    #[test]
     fn colours_parse_in_css_forms() {
         assert_eq!(parse_color("#fff"), Some(Color(255, 255, 255, 255)));
         assert_eq!(parse_color("#10141c"), Some(Color(16, 20, 28, 255)));
