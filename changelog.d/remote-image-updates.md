@@ -1,0 +1,4 @@
+---
+section: fixed
+---
+- **An image whose remote `src` keeps changing shows each version without a blank frame, and holds memory to the cache's budget** (zgx-script): a picture fetched again and again under a new URL (a tile a program redraws, `…/tile/5.png?v=12`) showed nothing while each new URL loaded, kept its file to decode as it was drawn (a frame later, and again at each new size while zooming, so a zoomed canvas of tiles went blank), and piled up in the cache until the window went idle (about 1 MB a version: +150 MB over 300 updates). Now the image shows its last picture until the next arrives, a remote picture up to 1024 by 1024 pixels arrives decoded off the main thread, and past twice its budget the cache drops the pictures no node shows as the next one arrives. A 512 px tile rewritten 10 times a second: no blank frames (from 10% of frames), 48 re-uploads in a 6 s zoom (from 527 to 691), +41 to 68 MB (from +150 MB).

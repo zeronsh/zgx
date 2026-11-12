@@ -154,6 +154,11 @@ impl Assets {
             self.held.set(self.held.get() - old.bytes);
         }
         self.decoded.set(self.decoded.get() + 1);
+        // Past twice the budget (URLs that change with each version, none
+        // unmounting): what no node shows goes now, not at the next idle.
+        if self.held.get() > 2 * self.budget.get() {
+            self.sweep(self.budget.get());
+        }
     }
     fn keep_svg(&self, src: String, svg: Arc<SvgData>) {
         let bytes = svg.bytes().len();
@@ -274,6 +279,12 @@ impl Assets {
             match image {
                 true => drop(images.remove(&src)),
                 false => drop(svgs.remove(&src)),
+            }
+            // A remote one is fetched again if it shows again.
+            if is_remote(&src)
+                && let Ok(mut remote) = self.remote.try_borrow_mut()
+            {
+                remote.retain(|key, _| key != &src && !key.ends_with(&format!("\0{src}")));
             }
             freed += bytes;
         }
@@ -5179,6 +5190,10 @@ enum Decoded {
     Image(Arc<ImageData>),
     Svg(Arc<SvgData>),
 }
+/// The most pixels a remote picture decodes whole as it arrives (1024 by
+/// 1024); a larger one keeps its file and decodes as it is drawn.
+#[cfg(not(target_arch = "wasm32"))]
+const REMOTE_WHOLE: u64 = 1024 * 1024;
 const LOADING: u8 = 0;
 const READY: u8 = 1;
 const FAILED: u8 = 2;
@@ -5320,8 +5335,15 @@ fn remote_status_in(
                             .map(|svg| Decoded::Svg(Arc::new(svg)))
                             .map_err(|e| e.to_string())
                     } else {
-                        // Its file kept, its pixels decoded as it is drawn.
-                        crate::gpu::decode_image_kept(Arc::from(bytes))
+                        // Its file kept, its pixels decoded as it is drawn;
+                        // up to `REMOTE_WHOLE`, decoded whole here, so it
+                        // shows in the frame it arrives in, at any zoom (a
+                        // tile a program rewrites, fetched again and again).
+                        crate::gpu::decode_image_kept(Arc::from(&bytes[..]))
+                            .and_then(|kept| match kept.width() as u64 * kept.height() as u64 {
+                                n if n <= REMOTE_WHOLE => crate::gpu::decode_image(&bytes),
+                                _ => Ok(kept),
+                            })
                             .map(Decoded::Image)
                             .map_err(|e| e.to_string())
                     });
@@ -7164,6 +7186,9 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
         move || {
             let (src, vm2, low2) = (src.clone(), vm2.clone(), low2.clone());
             let (dither, characters, told) = (dither.clone(), characters.clone(), told.clone());
+            // The picture last shown, while a remote `src` it moved to loads
+            // (a tile rewritten under a new URL): never a blank between.
+            let mut last: Option<Arc<ImageData>> = None;
             image_signal(label.clone(), move || {
                 let image = match picture_of(&src, &vm2) {
                     Some(Picture::Image(image)) => {
@@ -7172,9 +7197,13 @@ fn lower_image(node: &Node, vm: &Rc<Vm>, low: &Rc<Lowering>) -> View {
                     }
                     Some(Picture::Path(path)) => match try_load_image(&vm2, &low2, &path) {
                         Ok(Some(image)) => {
+                            if is_remote(&path) {
+                                last = Some(image.clone());
+                            }
                             told.loaded(&vm2, path, &image);
                             image
                         }
+                        Ok(None) if is_remote(&path) => last.clone().unwrap_or_else(placeholder),
                         Ok(None) => placeholder(),
                         Err(why) => {
                             told.failed(&vm2, path, why);
