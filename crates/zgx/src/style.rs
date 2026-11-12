@@ -955,8 +955,14 @@ impl RareStyles {
         if other.border_over.is_some() {
             self.border_over = other.border_over;
         }
-        if other.outline.is_some() {
-            self.outline = other.outline;
+        if let Some(theirs) = other.outline {
+            // a width alone keeps the colour (or its token) already here
+            self.outline = Some(match (theirs, self.outline) {
+                (Some((width, c)), Some(Some((_, mine)))) if c == OUTLINE_COLOR_UNSET => {
+                    Some((width, mine))
+                }
+                _ => theirs,
+            });
         }
         if other.outline_offset.is_some() {
             self.outline_offset = other.outline_offset;
@@ -1448,6 +1454,9 @@ pub(crate) fn merge_insets(target: &mut Insets, source: Insets, mask: u8) {
 /// value is written when the node is styled). A later value replaces the
 /// binding. One path through the setter keeps chained setters moving the
 /// style in place.
+/// An outline's colour while only its width is set: a patch carrying it keeps
+/// the colour (or theme token) it lands on, and alone it draws black.
+pub(crate) const OUTLINE_COLOR_UNSET: Color = Color(1, 2, 3, 0);
 macro_rules! value_or_token {
     ($self:ident, $value:ident, $field:expr) => {
         let ($value, token) = crate::theme::split($value.into());
@@ -2328,7 +2337,7 @@ pub trait Styled: Sized {
     fn outline_width(mut self, width: f32) -> Self {
         let color = match self.styles_mut().rare_mut().outline {
             Some(Some((_, color))) => color,
-            _ => Color(0, 0, 0, 255),
+            _ => OUTLINE_COLOR_UNSET,
         };
         self.styles_mut().rare_mut().outline = Some(Some((width.max(0.), color)));
         self
@@ -3534,6 +3543,20 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn an_outline_width_alone_keeps_the_colour_it_lands_on() {
+        let mut base = Styles::new().outline(2., Color(9, 8, 7, 255));
+        base.merge(&Styles::new().outline_width(4.));
+        assert_eq!(base.rare().outline, Some(Some((4., Color(9, 8, 7, 255)))));
+        // A patch with a colour of its own still replaces it.
+        base.merge(&Styles::new().outline(1., Color(1, 2, 3, 255)));
+        assert_eq!(base.rare().outline, Some(Some((1., Color(1, 2, 3, 255)))));
+        // With nothing under it the width carries no colour yet.
+        let mut bare = Styles::new();
+        bare.merge(&Styles::new().outline_width(3.));
+        assert_eq!(bare.rare().outline, Some(Some((3., OUTLINE_COLOR_UNSET))));
+    }
 
     /// A style setting none of the properties few set (`Overflow`) holds
     /// no allocation for them, nor does one given their paint unset; one
