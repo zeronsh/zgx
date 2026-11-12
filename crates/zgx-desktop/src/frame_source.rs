@@ -92,15 +92,27 @@ pub(crate) struct FrameTimer {
     epoch: Instant,
     /// The index of the refresh starting at `epoch`.
     first: u64,
+    /// The refresh the deadline last set is for (`next_deadline_every`),
+    /// and the last one delivered (`frame`).
+    scheduled: Option<u64>,
+    delivered: Option<u64>,
 }
 impl FrameTimer {
     pub(crate) fn new(epoch: Instant) -> Self {
-        Self { epoch, first: 0 }
+        Self::aligned(epoch, 0)
     }
     /// Ticks continuing a native source's: refresh `first` starts at `epoch`.
-    #[cfg(any(target_os = "macos", windows))]
     pub(crate) fn aligned(epoch: Instant, first: u64) -> Self {
-        Self { epoch, first }
+        Self {
+            epoch,
+            first,
+            scheduled: None,
+            delivered: None,
+        }
+    }
+    /// When refresh `index` starts.
+    fn boundary(&self, index: u64, interval: Duration) -> Instant {
+        self.epoch + interval.mul_f64(index.saturating_sub(self.first) as f64)
     }
     fn index(&self, at: Instant, interval: Duration) -> u64 {
         (at.saturating_duration_since(self.epoch).as_secs_f64() / interval.as_secs_f64()) as u64
@@ -117,9 +129,16 @@ impl FrameTimer {
     /// the refreshes a native source paced to every `every`th delivers
     /// (`zgx::frame::divisor`), so frames the timer paces keep its cadence
     /// as one hands over to the other.
+    ///
+    /// The refresh after the last delivered, not the first after `now`: a
+    /// turn ending just past a boundary would otherwise skip a refresh, the
+    /// timer's grid being a little off the display's. That refresh's start
+    /// may have passed (the frame starts at once, a little late); more than
+    /// half a refresh past, the window is truly behind, and the next after
+    /// `now` is taken instead, skipping on purpose rather than catching up.
     #[cfg(target_os = "macos")]
     pub(crate) fn next_deadline_every(
-        &self,
+        &mut self,
         now: Instant,
         interval: Duration,
         every: u64,
@@ -130,16 +149,33 @@ impl FrameTimer {
         } else {
             self.first + self.index(now, interval)
         };
-        let next = (current / every + 1) * every;
-        self.epoch + interval.mul_f64(next.saturating_sub(self.first) as f64)
+        let after_now = (current / every + 1) * every;
+        let next = match self.delivered {
+            Some(last) => {
+                let next = (last / every + 1) * every;
+                match self.boundary(next, interval) + interval / 2 < now {
+                    true => after_now,
+                    false => next,
+                }
+            }
+            None => after_now,
+        };
+        self.scheduled = Some(next);
+        self.boundary(next, interval)
     }
-    /// The frame for the boundary at or before `now`. It is expected on screen
-    /// one refresh later, once rendered.
-    pub(crate) fn frame(&self, now: Instant, interval: Duration) -> Frame {
-        let index = self.index(now, interval);
+    /// The frame for the refresh the deadline was set for, or else the
+    /// boundary at or before `now` (a timer waking a little before its
+    /// boundary would take the refresh before it, delivered already). It is
+    /// expected on screen one refresh later, once rendered.
+    pub(crate) fn frame(&mut self, now: Instant, interval: Duration) -> Frame {
+        let index = match self.scheduled.take() {
+            Some(index) => index,
+            None => self.first + self.index(now, interval),
+        };
+        self.delivered = Some(index);
         Frame {
-            index: self.first + index,
-            time: self.epoch + interval.mul_f64((index + 1) as f64),
+            index,
+            time: self.boundary(index + 1, interval),
             interval,
         }
     }
@@ -1258,7 +1294,7 @@ mod tests {
     #[test]
     fn timer_ticks_on_a_fixed_grid_after_late_wakeups() {
         let epoch = Instant::now();
-        let timer = FrameTimer::new(epoch);
+        let mut timer = FrameTimer::new(epoch);
         let interval = Duration::from_millis(10);
         assert_eq!(timer.next_deadline(epoch, interval), epoch + interval);
         // Waking 3 ms late still schedules the following boundary on the grid.
@@ -1279,7 +1315,7 @@ mod tests {
     fn a_paced_timer_ticks_on_the_refreshes_the_link_delivers() {
         let epoch = Instant::now();
         let interval = Duration::from_millis(8);
-        let timer = FrameTimer::aligned(epoch, 101);
+        let mut timer = FrameTimer::aligned(epoch, 101);
         // From refresh 101, the next even one is 102, a refresh on.
         assert_eq!(
             timer.next_deadline_every(epoch, interval, 2),
@@ -1298,6 +1334,46 @@ mod tests {
         assert_eq!(
             timer.next_deadline_every(epoch, interval, 1),
             epoch + interval
+        );
+    }
+    /// Once a refresh is delivered, the next deadline is the one after it,
+    /// even where the turn ends just past its start (the timer's grid a
+    /// little off the display's): no refresh skipped; a wake just before the
+    /// scheduled start delivers that refresh, not the one before again; and
+    /// more than half a refresh past, the window is behind, and the next
+    /// after `now` comes, one skipped on purpose rather than caught up.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_timer_steps_a_refresh_at_a_time_from_the_last_delivered() {
+        let epoch = Instant::now();
+        let interval = Duration::from_millis(8);
+        let ms = Duration::from_millis;
+        let mut timer = FrameTimer::aligned(epoch, 100);
+        let first = timer.next_deadline_every(epoch, interval, 1);
+        assert_eq!(first, epoch + interval);
+        assert_eq!(timer.frame(first, interval).index, 101);
+        // The turn ends 1 ms past refresh 102's start: 102 next, not 103.
+        let late = epoch + interval * 2 + ms(1);
+        assert_eq!(
+            timer.next_deadline_every(late, interval, 1),
+            epoch + interval * 2
+        );
+        // Woken 0.2 ms before 102's start: 102, not 101 again.
+        let early = epoch + interval * 2 - Duration::from_micros(200);
+        let frame = timer.frame(early, interval);
+        assert_eq!(frame.index, 102);
+        assert_eq!(frame.time, epoch + interval * 3);
+        // 6 ms past 103's start (more than half a refresh): 104, skipping 103.
+        let behind = epoch + interval * 3 + ms(6);
+        assert_eq!(
+            timer.next_deadline_every(behind, interval, 1),
+            epoch + interval * 4
+        );
+        assert_eq!(timer.frame(behind, interval).index, 104);
+        // Every second refresh: from 104, 106.
+        assert_eq!(
+            timer.next_deadline_every(behind, interval, 2),
+            epoch + interval * 6
         );
     }
     #[test]
