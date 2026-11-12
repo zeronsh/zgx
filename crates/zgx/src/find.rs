@@ -285,7 +285,13 @@ impl Ui {
     /// The query looked for again in text mounted since (`next_step`), the
     /// current match kept: what was found before it is where it was.
     fn recount(&mut self) {
-        let Some(folded) = self.storage.find.borrow().as_ref().map(|s| s.folded.clone()) else {
+        let Some(folded) = self
+            .storage
+            .find
+            .borrow()
+            .as_ref()
+            .map(|s| s.folded.clone())
+        else {
             return;
         };
         let segments = self.collect(&folded);
