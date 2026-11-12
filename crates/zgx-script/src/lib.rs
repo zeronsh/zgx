@@ -4339,7 +4339,7 @@ impl ScriptHost {
         let ui: mlua::Table = lua.globals().get("ui").map_err(fail)?;
         // Each module made the first time a script names it (`lazy`).
         let lazy = lazy::Lazy::default();
-        lazy.ui(&["path", "linear"], canvas::install);
+        lazy.ui(&["path", "linear", "radial", "conic"], canvas::install);
         lazy.ui(&["glass"], node::install_glass);
         lazy.ui(&["map"], node::install_map);
         #[cfg(feature = "scene3d")]

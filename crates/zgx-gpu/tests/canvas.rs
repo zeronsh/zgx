@@ -381,6 +381,80 @@ fn rgb(bytes: &[u8], width: usize, x: usize, y: usize) -> [u8; 3] {
     [bytes[at], bytes[at + 1], bytes[at + 2]]
 }
 
+/// Radial and conic gradients show on screen as they rasterize: a canvas
+/// of them draws through its raster, panned and zoomed by its view.
+#[test]
+fn radial_and_conic_gradients_show_as_drawn() {
+    use zgx::{affine::Affine, scene::CanvasView};
+    let stops = vec![
+        GradientStop {
+            offset: 0.,
+            color: Color(255, 0, 0, 255),
+        },
+        GradientStop {
+            offset: 1.,
+            color: Color(0, 0, 255, 255),
+        },
+    ];
+    let mut scene = Scene::new(200., 100.);
+    scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+    let mut canvas = Canvas::new();
+    canvas
+        .fill(
+            Path::rectangle(Rect::new(0., 0., 100., 100.)),
+            Brush::radial(
+                Affine::scale(40., 40.).then(Affine::translation(50., 50.)),
+                stops.clone(),
+            )
+            .unwrap(),
+        )
+        .fill(
+            Path::rectangle(Rect::new(100., 0., 100., 100.)),
+            Brush::conic(Affine::translation(150., 50.), stops).unwrap(),
+        );
+    let node = scene.append(
+        scene.root(),
+        NodeKind::Canvas(Arc::new(canvas)),
+        Style {
+            width: Some(200.),
+            height: Some(100.),
+            ..Default::default()
+        },
+    );
+    let mut gpu = GpuRenderer::new(200, 100).unwrap();
+    let report = scene.flush();
+    gpu.render(&scene, &report.damage).unwrap();
+    let bytes = gpu.readback().unwrap();
+    let near = |found: [u8; 3], expected: [u8; 3]| {
+        found.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 4)
+    };
+    let centre = rgb(&bytes, 200, 50, 50);
+    assert!(near(centre, [253, 0, 2]), "{centre:?}");
+    let half = rgb(&bytes, 200, 70, 50);
+    assert!(near(half, [125, 0, 130]), "halfway out: {half:?}");
+    assert_eq!(rgb(&bytes, 200, 50, 70), half, "a circle");
+    assert_eq!(rgb(&bytes, 200, 2, 2), [0, 0, 255], "past its edge");
+    let down = rgb(&bytes, 200, 150, 90);
+    assert!(near(down, [191, 0, 64]), "a quarter round: {down:?}");
+    let up = rgb(&bytes, 200, 150, 10);
+    assert!(near(up, [64, 0, 191]), "three quarters round: {up:?}");
+    // Zoomed twice about the top left: the circle's centre moves to (100, 100),
+    // halfway out is 40 across.
+    scene.set_canvas_view(
+        node,
+        Some(CanvasView {
+            x: 0.,
+            y: -50.,
+            scale: 2.,
+        }),
+    );
+    let report = scene.flush();
+    gpu.render(&scene, &report.damage).unwrap();
+    let bytes = gpu.readback().unwrap();
+    let half = rgb(&bytes, 200, 140, 50);
+    assert!(near(half, [125, 0, 130]), "zoomed: {half:?}");
+}
+
 #[test]
 fn a_canvas_view_places_its_drawing_without_drawing_it_again() {
     use zgx::scene::{CanvasView, GridFill, GridMark};

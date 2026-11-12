@@ -1013,6 +1013,10 @@ declare extern type LayerShader with
 end
 declare extern type Brush with
 end
+-- `ui.radial`'s and `ui.conic`'s options: `ry` an ellipse's vertical
+-- radius, `angle` where a conic one starts, `transform` a matrix
+-- { a, b, c, d, e, f } (x' = a x + c y + e, y' = b x + d y + f) mapping it.
+export type GradientOptions = { ry: number?, angle: number?, transform: { number }? }
 
 -- What failed (`ui.try`'s error, a promise's `error`, `:after`'s
 -- `on_error`): the same from every source. Still text where text goes:
@@ -22298,6 +22302,11 @@ declare ui: {
 	number: (n: number, opts: NumberOptions?) -> string,
 	path: () -> Path,
 	linear: (x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush,
+	-- Out from (`cx`, `cy`) to radius `r` (`ry` down, for an ellipse), the
+	-- last colour past it; `transform` ({ a, b, c, d, e, f }) maps it after.
+	radial: (cx: number, cy: number, r: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush,
+	-- Round (`cx`, `cy`) clockwise, starting `angle` degrees clockwise from +x.
+	conic: (cx: number, cy: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush,
 }
 
 ---------------------------------------------------------------------------

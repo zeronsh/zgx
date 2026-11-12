@@ -10,6 +10,7 @@ use zgx::canvas::{CanvasText, TextAnchor, TextBaseline};
 use zgx::text_layout::{FontFamily, FontFeatures, FontStyle};
 use zgx::theme::ThemeScope;
 use zgx::{
+    affine::Affine,
     canvas::{
         Brush, Canvas, FillRule, GradientStop, LineCap, LineJoin, Path, PathBuilder, Point, Stroke,
     },
@@ -117,7 +118,7 @@ impl UserData for PathUd {
     }
 }
 
-/// `ui.linear(x1, y1, x2, y2, stops)`: a gradient brush for canvases.
+/// `ui.linear`, `ui.radial` or `ui.conic`: a gradient brush for canvases.
 #[derive(Clone)]
 pub(crate) struct BrushUd(pub Brush);
 impl UserData for BrushUd {}
@@ -438,22 +439,78 @@ pub(crate) fn install(lua: &Lua, ui: &Table) -> mlua::Result<()> {
     ui.set(
         "linear",
         lua.create_function(|_, (x1, y1, x2, y2, stops): (f32, f32, f32, f32, Table)| {
-            let colors: Vec<mlua::Value> = stops.sequence_values().collect::<mlua::Result<_>>()?;
-            let n = colors.len().max(2) - 1;
-            let stops: Vec<GradientStop> = colors
-                .iter()
-                .enumerate()
-                .map(|(i, c)| {
-                    Ok(GradientStop {
-                        offset: i as f32 / n as f32,
-                        color: color(c)?,
-                    })
-                })
-                .collect::<mlua::Result<_>>()?;
-            Brush::linear(Point::new(x1, y1), Point::new(x2, y2), stops)
+            Brush::linear(Point::new(x1, y1), Point::new(x2, y2), even_stops(&stops)?)
                 .map(BrushUd)
                 .map_err(mlua::Error::runtime)
         })?,
     )?;
+    ui.set(
+        "radial",
+        lua.create_function(
+            |_, (cx, cy, r, stops, options): (f32, f32, f32, Table, Option<Table>)| {
+                let ry = match &options {
+                    Some(o) => o.get::<Option<f32>>("ry")?.unwrap_or(r),
+                    None => r,
+                };
+                let placed = Affine::scale(r, ry)
+                    .then(Affine::translation(cx, cy))
+                    .then(gradient_transform(options.as_ref())?);
+                Brush::radial(placed, even_stops(&stops)?)
+                    .map(BrushUd)
+                    .map_err(mlua::Error::runtime)
+            },
+        )?,
+    )?;
+    ui.set(
+        "conic",
+        lua.create_function(
+            |_, (cx, cy, stops, options): (f32, f32, Table, Option<Table>)| {
+                let angle = match &options {
+                    Some(o) => o.get::<Option<f32>>("angle")?.unwrap_or(0.),
+                    None => 0.,
+                };
+                let placed = Affine::rotation(angle.to_radians())
+                    .then(Affine::translation(cx, cy))
+                    .then(gradient_transform(options.as_ref())?);
+                Brush::conic(placed, even_stops(&stops)?)
+                    .map(BrushUd)
+                    .map_err(mlua::Error::runtime)
+            },
+        )?,
+    )?;
     Ok(())
+}
+/// A gradient's colours, spread evenly from offset 0 to 1.
+fn even_stops(stops: &Table) -> mlua::Result<Vec<GradientStop>> {
+    let colors: Vec<mlua::Value> = stops.sequence_values().collect::<mlua::Result<_>>()?;
+    let n = colors.len().max(2) - 1;
+    colors
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            Ok(GradientStop {
+                offset: i as f32 / n as f32,
+                color: color(c)?,
+            })
+        })
+        .collect()
+}
+/// A gradient's `transform` option, `{ a, b, c, d, e, f }` as SVG's
+/// `matrix` (x' is a x + c y + e, y' is b x + d y + f): what it maps the
+/// gradient by once placed, as a drawing's own transform. Identity without
+/// one.
+fn gradient_transform(options: Option<&Table>) -> mlua::Result<Affine> {
+    let Some(matrix) = options
+        .map(|o| o.get::<Option<Vec<f32>>>("transform"))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(Affine::IDENTITY);
+    };
+    let [a, b, c, d, tx, ty] = matrix[..] else {
+        return Err(mlua::Error::runtime(
+            "a gradient's `transform` is six numbers, { a, b, c, d, e, f }",
+        ));
+    };
+    Ok(Affine { a, b, c, d, tx, ty })
 }

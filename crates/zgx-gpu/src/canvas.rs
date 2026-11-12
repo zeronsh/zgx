@@ -258,6 +258,109 @@ fn premultiplied_stops(stops: &[zgx::canvas::GradientStop]) -> Vec<sk::GradientS
     }
     out
 }
+/// 2 to 1,024 stops with offsets from 0 to 1, or an error.
+fn check_stops(stops: &[zgx::canvas::GradientStop]) -> Result<(), GpuError> {
+    if stops.len() < 2
+        || stops.len() > 1024
+        || stops
+            .iter()
+            .any(|s| !s.offset.is_finite() || !(0. ..=1.).contains(&s.offset))
+    {
+        return Err(GpuError("invalid gradient stops".into()));
+    }
+    Ok(())
+}
+fn affine(m: zgx::affine::Affine) -> sk::Transform {
+    sk::Transform::from_row(m.a, m.b, m.c, m.d, m.tx, m.ty)
+}
+/// The colour at each of `N` offsets evenly from 0 to 1 along `stops`,
+/// premultiplied and mixed premultiplied, as `premultiplied_stops` draws a
+/// linear or radial one.
+fn ramp<const N: usize>(stops: &[zgx::canvas::GradientStop]) -> [sk::PremultipliedColorU8; N] {
+    let premultiplied = |c: zgx::scene::Color| {
+        let alpha = f32::from(c.3) / 255.;
+        [
+            f32::from(c.0) * alpha,
+            f32::from(c.1) * alpha,
+            f32::from(c.2) * alpha,
+            alpha * 255.,
+        ]
+    };
+    std::array::from_fn(|i| {
+        let t = i as f32 / (N - 1) as f32;
+        let after = stops.iter().position(|s| s.offset > t);
+        let mix = match after {
+            None => premultiplied(stops[stops.len() - 1].color),
+            Some(0) => premultiplied(stops[0].color),
+            Some(next) => {
+                let (a, b) = (&stops[next - 1], &stops[next]);
+                let f = (t - a.offset) / (b.offset - a.offset);
+                let (pa, pb) = (premultiplied(a.color), premultiplied(b.color));
+                std::array::from_fn(|k| pa[k] + (pb[k] - pa[k]) * f)
+            }
+        };
+        let [r, g, b, a] = mix.map(|v| v.round().clamp(0., 255.) as u8);
+        sk::PremultipliedColorU8::from_rgba(r.min(a), g.min(a), b.min(a), a)
+            .unwrap_or(sk::PremultipliedColorU8::TRANSPARENT)
+    })
+}
+/// Pixels to draw from a device pixel: where their top left falls, and them.
+type Tile = ((i32, i32), sk::Pixmap);
+/// A conic gradient's pixels over the device pixels `path`, drawn under
+/// `transform` and reaching `reach` past its outline, can cover within a
+/// `size` raster: where they start and the pixels, or `None` where it
+/// covers none.
+fn conic_tile(
+    path: &sk::Path,
+    reach: f32,
+    transform: sk::Transform,
+    placed: zgx::affine::Affine,
+    stops: &[zgx::canvas::GradientStop],
+    (width, height): (u32, u32),
+) -> Result<Option<Tile>, GpuError> {
+    let bounds = path.bounds();
+    let Some(device) = sk::Rect::from_ltrb(
+        bounds.left() - reach,
+        bounds.top() - reach,
+        bounds.right() + reach,
+        bounds.bottom() + reach,
+    )
+    .and_then(|r| r.transform(transform)) else {
+        return Ok(None);
+    };
+    let x0 = (device.left().floor().max(0.)) as i32;
+    let y0 = (device.top().floor().max(0.)) as i32;
+    let x1 = (device.right().ceil().min(width as f32)) as i32;
+    let y1 = (device.bottom().ceil().min(height as f32)) as i32;
+    if x1 <= x0 || y1 <= y0 {
+        return Ok(None);
+    }
+    // Device pixels back to the gradient's own coordinates.
+    let to_gradient = transform
+        .pre_concat(affine(placed))
+        .invert()
+        .ok_or_else(|| GpuError("invalid gradient geometry".into()))?;
+    const STEPS: usize = 1024;
+    let colors = ramp::<STEPS>(stops);
+    let (tw, th) = ((x1 - x0) as u32, (y1 - y0) as u32);
+    let mut tile =
+        sk::Pixmap::new(tw, th).ok_or_else(|| GpuError("canvas allocation failed".into()))?;
+    let pixels = tile.pixels_mut();
+    for y in 0..th {
+        for x in 0..tw {
+            let mut at = [sk::Point::from_xy(
+                x0 as f32 + x as f32 + 0.5,
+                y0 as f32 + y as f32 + 0.5,
+            )];
+            to_gradient.map_points(&mut at);
+            let turn = at[0].y.atan2(at[0].x) / std::f32::consts::TAU;
+            let offset = turn.rem_euclid(1.);
+            pixels[(y * tw + x) as usize] =
+                colors[((offset * (STEPS - 1) as f32).round() as usize).min(STEPS - 1)];
+        }
+    }
+    Ok(Some(((x0, y0), tile)))
+}
 fn point(point: Point) -> sk::Point {
     sk::Point::from_xy(point.x, point.y)
 }
@@ -432,14 +535,7 @@ pub fn rasterize_viewed(
         paint.shader = match brush {
             Brush::Solid(c) => sk::Shader::SolidColor(color(*c)),
             Brush::Linear { start, end, stops } => {
-                if stops.len() < 2
-                    || stops.len() > 1024
-                    || stops
-                        .iter()
-                        .any(|s| !s.offset.is_finite() || !(0. ..=1.).contains(&s.offset))
-                {
-                    return Err(GpuError("invalid gradient stops".into()));
-                }
+                check_stops(stops)?;
                 sk::LinearGradient::new(
                     point(*start),
                     point(*end),
@@ -448,6 +544,50 @@ pub fn rasterize_viewed(
                     sk::Transform::identity(),
                 )
                 .ok_or_else(|| GpuError("invalid gradient geometry".into()))?
+            }
+            Brush::Radial {
+                transform: placed,
+                stops,
+            } => {
+                check_stops(stops)?;
+                sk::RadialGradient::new(
+                    sk::Point::zero(),
+                    sk::Point::zero(),
+                    1.,
+                    premultiplied_stops(stops),
+                    sk::SpreadMode::Pad,
+                    affine(*placed),
+                )
+                .ok_or_else(|| GpuError("invalid gradient geometry".into()))?
+            }
+            Brush::Conic {
+                transform: placed,
+                stops,
+            } => {
+                check_stops(stops)?;
+                // tiny-skia has no sweep gradient: its pixels are worked out
+                // over the device pixels the path can reach, and drawn as a
+                // pattern there.
+                let reach = match command {
+                    Draw::Stroke { style, .. } => style.width.max(0.) * style.miter_limit.max(1.),
+                    _ => 0.,
+                };
+                let Some((tile_at, pixels)) =
+                    conic_tile(&path, reach, transform, *placed, stops, (w, h))?
+                else {
+                    continue;
+                };
+                tile = pixels;
+                let to_user = transform
+                    .invert()
+                    .ok_or_else(|| GpuError("invalid canvas transform".into()))?;
+                sk::Pattern::new(
+                    tile.as_ref(),
+                    sk::SpreadMode::Pad,
+                    sk::FilterQuality::Nearest,
+                    1.,
+                    to_user.pre_translate(tile_at.0 as f32, tile_at.1 as f32),
+                )
             }
             Brush::Slash {
                 background,
@@ -607,5 +747,145 @@ mod lifetime_tests {
         assert_eq!(cache.entries.len(), MAX_ENTRIES);
         assert_eq!(cache.bytes(), MAX_ENTRIES * 4);
         assert!(!cache.entries.contains_key(&first.unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod gradient_tests {
+    use super::*;
+    use zgx::{affine::Affine, scene::Color};
+    const RED: Color = Color(255, 0, 0, 255);
+    const BLUE: Color = Color(0, 0, 255, 255);
+    fn stops(colors: &[Color]) -> Vec<GradientStop> {
+        let n = (colors.len() - 1) as f32;
+        colors
+            .iter()
+            .enumerate()
+            .map(|(i, &color)| GradientStop {
+                offset: i as f32 / n,
+                color,
+            })
+            .collect()
+    }
+    /// A 100 by 100 square filled with `brush`, rasterized at 1x.
+    fn filled(brush: Brush) -> ImageData {
+        let mut canvas = Canvas::new();
+        canvas.fill(
+            Path::rectangle(zgx::scene::Rect::new(0., 0., 100., 100.)),
+            brush,
+        );
+        rasterize(&canvas, 100., 100., 1.).unwrap()
+    }
+    fn at(image: &ImageData, x: u32, y: u32) -> [u8; 4] {
+        let i = ((y * image.width() + x) * 4) as usize;
+        image.pixels()[i..i + 4].try_into().unwrap()
+    }
+    /// Within 3 of `expected` in each channel.
+    fn close(found: [u8; 4], expected: [u8; 4]) -> bool {
+        found.iter().zip(expected).all(|(a, b)| a.abs_diff(b) <= 3)
+    }
+
+    #[test]
+    fn a_radial_gradient_runs_out_from_its_centre_and_holds_its_last_colour() {
+        let circle = Affine::scale(40., 40.).then(Affine::translation(50., 50.));
+        let image = filled(Brush::radial(circle, stops(&[RED, BLUE])).unwrap());
+        // Pixel centres: (50.5, 50.5) is half a pixel out.
+        assert!(
+            close(at(&image, 50, 50), [253, 0, 2, 255]),
+            "{:?}",
+            at(&image, 50, 50)
+        );
+        let half = at(&image, 70, 50);
+        assert!(close(half, [125, 0, 130, 255]), "halfway out: {half:?}");
+        assert_eq!(at(&image, 50, 70), half, "the same distance down");
+        assert_eq!(at(&image, 29, 50), half, "or back");
+        assert_eq!(at(&image, 95, 50), [0, 0, 255, 255], "past its edge");
+        assert_eq!(at(&image, 0, 0), [0, 0, 255, 255]);
+        // An ellipse half as tall: half its height down is halfway out.
+        let ellipse = Affine::scale(40., 20.).then(Affine::translation(50., 50.));
+        let image = filled(Brush::radial(ellipse, stops(&[RED, BLUE])).unwrap());
+        assert!(close(at(&image, 50, 60), half), "{:?}", at(&image, 50, 60));
+        assert!(close(at(&image, 70, 50), half), "{:?}", at(&image, 70, 50));
+        assert_eq!(at(&image, 50, 75), [0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn a_conic_gradient_turns_clockwise_from_its_angle() {
+        let centre = Affine::translation(50., 50.);
+        let image = filled(Brush::conic(centre, stops(&[RED, BLUE])).unwrap());
+        // A quarter turn clockwise from +x is straight down (y grows down).
+        let down = at(&image, 50, 90);
+        assert!(close(down, [191, 0, 64, 255]), "a quarter round: {down:?}");
+        let left = at(&image, 10, 50);
+        assert!(close(left, [128, 0, 128, 255]), "half round: {left:?}");
+        let up = at(&image, 50, 10);
+        assert!(close(up, [64, 0, 191, 255]), "three quarters: {up:?}");
+        // Turned a quarter, it starts straight down.
+        let turned = Affine::rotation(std::f32::consts::FRAC_PI_2).then(centre);
+        let image = filled(Brush::conic(turned, stops(&[RED, BLUE])).unwrap());
+        // Just clockwise of straight down (left of it): just past its start.
+        let down = at(&image, 47, 90);
+        assert!(down[0] > 240 && down[2] < 15, "{down:?}");
+        let left = at(&image, 10, 50);
+        assert!(close(left, [191, 0, 64, 255]), "{left:?}");
+        // Mirrored top to bottom, it runs anticlockwise: straight down is
+        // three quarters round.
+        let mirrored = Affine::scale(1., -1.).then(centre);
+        let image = filled(Brush::conic(mirrored, stops(&[RED, BLUE])).unwrap());
+        let down = at(&image, 50, 90);
+        assert!(close(down, [64, 0, 191, 255]), "{down:?}");
+    }
+
+    #[test]
+    fn a_conic_gradient_mixes_alpha_premultiplied_and_keeps_to_its_clip_and_shape() {
+        let centre = Affine::translation(50., 50.);
+        let clear_red = Color(255, 0, 0, 0);
+        let mut canvas = Canvas::new();
+        canvas
+            .clip(
+                Path::rectangle(zgx::scene::Rect::new(0., 0., 100., 50.)),
+                FillRule::Winding,
+            )
+            .fill(
+                Path::ellipse(zgx::scene::Rect::new(10., 10., 80., 80.)).unwrap(),
+                Brush::conic(centre, stops(&[RED, clear_red])).unwrap(),
+            )
+            .restore();
+        let image = rasterize(&canvas, 100., 100., 1.).unwrap();
+        // Up and left (offset about 0.625): its colour stays red as it fades.
+        let faded = at(&image, 30, 30);
+        assert!(
+            faded[0] == 255 && faded[1] == 0 && (90..=100).contains(&faded[3]),
+            "{faded:?}"
+        );
+        assert_eq!(at(&image, 50, 70)[3], 0, "below the clip");
+        assert_eq!(at(&image, 2, 2)[3], 0, "outside the ellipse");
+        // A stroke of it.
+        let mut canvas = Canvas::new();
+        canvas.stroke(
+            Path::ellipse(zgx::scene::Rect::new(10., 10., 80., 80.)).unwrap(),
+            Brush::conic(centre, stops(&[RED, BLUE])).unwrap(),
+            Stroke {
+                width: 6.,
+                ..Default::default()
+            },
+        );
+        let image = rasterize(&canvas, 100., 100., 1.).unwrap();
+        assert!(
+            close(at(&image, 50, 89), [191, 0, 64, 255]),
+            "{:?}",
+            at(&image, 50, 89)
+        );
+        assert_eq!(at(&image, 50, 50)[3], 0, "inside the ring");
+    }
+
+    #[test]
+    fn gradients_that_place_nothing_are_errors() {
+        let flat = Affine::scale(0., 1.);
+        assert!(Brush::radial(flat, stops(&[RED, BLUE])).is_err());
+        assert!(Brush::conic(flat, stops(&[RED, BLUE])).is_err());
+        let nan = Affine::translation(f32::NAN, 0.);
+        assert!(Brush::conic(nan, stops(&[RED, BLUE])).is_err());
+        assert!(Brush::radial(Affine::IDENTITY, stops(&[RED])).is_err());
     }
 }

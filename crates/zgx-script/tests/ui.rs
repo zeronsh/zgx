@@ -201,6 +201,101 @@ fn rich_text_svg_and_canvas_render() {
 }
 
 #[test]
+fn radial_and_conic_brushes_place_their_gradients() {
+    use zgx::{affine::Affine, canvas::Brush};
+    let mut h = Harness::inline(
+        r##"return ui.canvas { id = "canvas", w = 40, h = 40, draw = function(c, w, h)
+            c:rect(0, 0, w, h, ui.radial(20, 10, 8, { "#f00", "#0f0", "#00f" }))
+            c:rect(0, 0, w, h, ui.radial(20, 10, 8, { "#f00", "#00f" }, { ry = 4, transform = { 1, 0, 0, 1, 5, 0 } }))
+            c:rect(0, 0, w, h, ui.conic(20, 10, { "#f00", "#00f" }, { angle = 90 }))
+        end }"##,
+    );
+    assert_eq!(h.host.error().get(), None);
+    let board = h.find("canvas").unwrap();
+    let scene = h.ui.scene.borrow();
+    let id = *scene
+        .children(board)
+        .iter()
+        .find(|id| matches!(scene.kind(**id), zgx::scene::NodeKind::Canvas(_)))
+        .unwrap();
+    let zgx::scene::NodeKind::Canvas(canvas) = scene.kind(id) else {
+        unreachable!()
+    };
+    let brushes: Vec<_> = canvas
+        .commands()
+        .iter()
+        .map(|draw| match draw {
+            zgx::canvas::Draw::Fill { brush, .. } => brush.clone(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    let near = |a: Affine, b: Affine| {
+        [
+            a.a - b.a,
+            a.b - b.b,
+            a.c - b.c,
+            a.d - b.d,
+            a.tx - b.tx,
+            a.ty - b.ty,
+        ]
+        .iter()
+        .all(|d| d.abs() < 1e-5)
+    };
+    let Brush::Radial { transform, stops } = &brushes[0] else {
+        panic!("{:?}", brushes[0])
+    };
+    assert!(near(
+        *transform,
+        Affine::scale(8., 8.).then(Affine::translation(20., 10.))
+    ));
+    let offsets: Vec<f32> = stops.iter().map(|s| s.offset).collect();
+    assert_eq!(offsets, [0., 0.5, 1.], "colours spread evenly");
+    let Brush::Radial { transform, .. } = &brushes[1] else {
+        panic!("{:?}", brushes[1])
+    };
+    assert!(
+        near(
+            *transform,
+            Affine::scale(8., 4.).then(Affine::translation(25., 10.))
+        ),
+        "an ellipse, moved by its transform: {transform:?}"
+    );
+    let Brush::Conic { transform, .. } = &brushes[2] else {
+        panic!("{:?}", brushes[2])
+    };
+    assert!(
+        near(
+            *transform,
+            Affine::rotation(std::f32::consts::FRAC_PI_2).then(Affine::translation(20., 10.))
+        ),
+        "turned to start straight down: {transform:?}"
+    );
+    drop(scene);
+    for (script, error) in [
+        (
+            r##"ui.radial(0, 0, 0, { "#f00", "#00f" })"##,
+            "invalid radial gradient",
+        ),
+        (
+            r##"ui.conic(0, 0, { "#f00", "#00f" }, { transform = { 1, 0, 0 } })"##,
+            "six numbers",
+        ),
+        (r##"ui.conic(0, 0, { "#f00" })"##, "invalid conic gradient"),
+    ] {
+        let h = Harness::inline(&format!(
+            r##"return ui.canvas {{ w = 10, h = 10, draw = function(c) c:rect(0, 0, 1, 1, {script}) end }}"##
+        ));
+        let shown = h.host.error().get();
+        assert!(
+            shown
+                .as_ref()
+                .is_some_and(|e| e.to_string().contains(error)),
+            "{script}: {shown:?}"
+        );
+    }
+}
+
+#[test]
 fn virtual_lists_mount_only_visible_rows() {
     let mut h = Harness::inline(
         r##"return ui.list { id = "list", count = 100000, height = 20, w = 200, h = 200,

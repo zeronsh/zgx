@@ -1,6 +1,6 @@
 # Images and canvas: image, svg, canvas
 
-Pixels from files, vector icons, and drawing in script. Paths in `src` are relative to the script's directory. The same section covers what makes paint for these and other nodes: `ui.path` and `ui.linear` for canvases, `ui.bitmap` for masks, and `ui.shader` for shader fills.
+Pixels from files, vector icons, and drawing in script. Paths in `src` are relative to the script's directory. The same section covers what makes paint for these and other nodes: `ui.path`, `ui.linear`, `ui.radial` and `ui.conic` for canvases, `ui.bitmap` for masks, and `ui.shader` for shader fills.
 
 ```luau
 ui.image(props: ImageProps) -> Node
@@ -8,6 +8,8 @@ ui.svg(props: SvgProps) -> Node
 ui.canvas(props: CanvasProps) -> Node
 ui.path() -> Path
 ui.linear(x1: number, y1: number, x2: number, y2: number, colors: { read [number]: Color }) -> Brush
+ui.radial(cx: number, cy: number, r: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush
+ui.conic(cx: number, cy: number, colors: { read [number]: Color }, opts: GradientOptions?) -> Brush
 ui.bitmap(w: number, h: number, alpha: (x: number, y: number) -> number) -> Bitmap
 ui.shader(source: string, opts: { fps: number? }?) -> Shader
 ```
@@ -76,6 +78,20 @@ An SVG, from a file or from markup, drawn as vectors at every scale; `tint` reco
 Text on a canvas is shaped and drawn as any text is: sharp at any zoom, in the theme's fonts with their fallbacks, and following `view`. It sits over the canvas's shapes whatever order they were drawn in, so a shape drawn after it doesn't cover it, and `c:clip` doesn't cut it. Assistive technology doesn't read it: give the canvas a `label` that says what it shows (`label = "Requests, now 5,400, up 1.4%"`), and offer a chart's numbers as text or a table where they matter.
 
 `paint` is a [color](properties.md) or a brush from `ui.linear(x1, y1, x2, y2, { colors })`, its colors spread evenly from (`x1`, `y1`) to (`x2`, `y2`). A color may name a theme token (`"$accent"`, `"$surface.raised"`), resolved in the canvas's theme while `draw` runs: the drawing follows it as it follows state, so a theme change draws it again. `ui.linear` called inside `draw` takes tokens too.
+
+`ui.radial(cx, cy, r, { colors }, opts?)` spreads its colors out from (`cx`, `cy`) to `r` away, the last one past it; `ui.conic(cx, cy, { colors }, opts?)` spreads them clockwise round (`cx`, `cy`), a full turn from `angle`. `opts`: `ry` (a radial one's radius down, for an ellipse; `r`), `angle` (where a conic one starts, degrees clockwise from +x as `arc`'s; 0), `transform` (`{ a, b, c, d, e, f }`, as SVG's `matrix`: x' = a x + c y + e, y' = b x + d y + f), which maps the gradient once placed, so a drawing that turns or mirrors its shapes by a matrix turns their gradients by the same one:
+
+```lua
+return ui.canvas {
+	w = 200,
+	h = 120,
+	draw = function(c, w, h)
+		c:rect(0, 0, w, h, ui.radial(w / 2, 0, w / 2, { "#5ea5ff", "#5ea5ff00" }, { ry = h }))
+		local wheel = { "#f00", "#ff0", "#0f0", "#0ff", "#00f", "#f0f", "#f00" }
+		c:circle(w / 2, h / 2, 40, ui.conic(w / 2, h / 2, wheel, { angle = -90 }))
+	end,
+}
+```
 
 A path is built by chaining: `ui.path():move(x, y):line(x, y):quad(cx, cy, x, y):cubic(c1x, c1y, c2x, c2y, x, y):arc(cx, cy, r, start, sweep):close()`. `arc` angles are degrees, clockwise from +x. Once drawn, a path is fixed: it can be drawn again (make it once, outside `draw`), not extended. `:rect(x, y, w, h, r?)` and `:ellipse(x, y, w, h)` add a rounded rectangle or an ellipse as a closed subpath.
 
