@@ -212,11 +212,20 @@ fn static_code(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
 fn table(head: Vec<View>, rows: Vec<Vec<View>>, cx: &mut Context) -> View {
     const MIN_COLUMN: f32 = 100.;
     const GAP: f32 = 12.;
-    let columns = rows.iter().map(Vec::len).chain(std::iter::once(head.len())).max().unwrap_or(0).max(1);
-    let tracks = format!("repeat({columns}, 1fr)").parse().expect("a track list");
+    let columns = rows
+        .iter()
+        .map(Vec::len)
+        .chain(std::iter::once(head.len()))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let tracks = format!("repeat({columns}, 1fr)")
+        .parse()
+        .expect("a track list");
     let least = columns as f32 * MIN_COLUMN + (columns - 1) as f32 * GAP;
     // the viewport's width, once it has one: a scroller's content has none of its own to share
-    let viewport: Rc<RefCell<Option<Signal<(f32, f32)>>>> = Rc::default();
+    type Viewport = Rc<RefCell<Option<Signal<(f32, f32)>>>>;
+    let viewport: Viewport = Rc::default();
     let mounted: Signal<bool> = cx.runtime().signal(false);
     let seen = viewport.clone();
     let told = mounted.clone();
@@ -316,7 +325,10 @@ fn static_block(b: &Value, options: &ViewOptions, cx: &mut Context) -> View {
                     .map(|cell| static_runs(Some(cell), bold).into())
                     .collect()
             };
-            let rows = b.field("rows").map(|r| r.list().to_vec()).unwrap_or_default();
+            let rows = b
+                .field("rows")
+                .map(|r| r.list().to_vec())
+                .unwrap_or_default();
             table(
                 cells(b.field("head"), true),
                 rows.iter().map(|r| cells(Some(r), false)).collect(),
@@ -655,13 +667,23 @@ fn block(cell: Signal<Value>, options: &ViewOptions, cx: &mut Context) -> View {
                     .unwrap_or_default()
                     .iter()
                     .map(|cell| {
-                        let runs = cell.list().iter().map(|r| span(r, bold)).collect::<Vec<_>>();
-                        zgx::compose::rich_text().children(runs).text_wrap(true).into()
+                        let runs = cell
+                            .list()
+                            .iter()
+                            .map(|r| span(r, bold))
+                            .collect::<Vec<_>>();
+                        zgx::compose::rich_text()
+                            .children(runs)
+                            .text_wrap(true)
+                            .into()
                     })
                     .collect()
             };
             let (head, rows) = cell.with(|b| {
-                let rows: Vec<Value> = b.field("rows").map(|r| r.list().to_vec()).unwrap_or_default();
+                let rows: Vec<Value> = b
+                    .field("rows")
+                    .map(|r| r.list().to_vec())
+                    .unwrap_or_default();
                 (b.field("head").cloned(), rows)
             });
             table(

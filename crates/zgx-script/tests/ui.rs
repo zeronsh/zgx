@@ -4679,7 +4679,7 @@ fn text_place(h: &mut Harness, want: &str) -> zgx::scene::Rect {
 
 /// A note's reading pane, 420 wide (356 inside its padding), showing `md`.
 fn note_pane(md: &str) -> Harness {
-    let mut h = Harness::inline(&format!(
+    let h = Harness::inline(&format!(
         r##"local md = ui.state("md", {md:?})
         return ui.column {{ w = 420, h = 600, ui.scroll {{ grow = 1, w_full = true, min_h = 0,
             ui.column {{ w_full = true, items = "center",

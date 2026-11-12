@@ -1547,7 +1547,7 @@ fn toast_defaults(lua: &Lua, table: Table) -> mlua::Result<()> {
     let runtime = crate::node::env(lua)?.runtime.clone();
     let toaster = Toaster::of(&runtime);
     let mut defaults = toaster.defaults();
-    let mut read = |key: &str, slot: &mut Option<std::time::Duration>| -> mlua::Result<()> {
+    let read = |key: &str, slot: &mut Option<std::time::Duration>| -> mlua::Result<()> {
         match table.get::<mlua::Value>(key)? {
             mlua::Value::Nil => {}
             mlua::Value::Boolean(false) => *slot = None,

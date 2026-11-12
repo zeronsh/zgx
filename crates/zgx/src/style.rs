@@ -973,7 +973,9 @@ impl RareStyles {
         if let Some(theirs) = other.outline {
             // a width alone keeps the colour (or its token) already here
             self.outline = Some(match (theirs, self.outline) {
-                (Some((width, c)), Some(Some((_, mine)))) if c == OUTLINE_COLOR_UNSET => Some((width, mine)),
+                (Some((width, c)), Some(Some((_, mine)))) if c == OUTLINE_COLOR_UNSET => {
+                    Some((width, mine))
+                }
                 _ => theirs,
             });
         }
