@@ -347,134 +347,136 @@ float4 shade_texel(Out input, float4 given, bool has_texel)
         float2 gradient = ((reach > 0.0) ? (outside / (max(reach, 1e-20)).xx) : ((q_1.x > q_1.y) ? float2(1.0, 0.0) : float2(0.0, 1.0)));
         float _e155 = viewport.z;
         float2 slope = (gradient / (_e155).xx);
-        float _e160 = v_7.shape.y;
-        if ((_e160 < 0.0)) {
-            float _e165 = v_7.shape.x;
-            uint a_2 = naga_f2u32(_e165);
-            float _e169 = v_7.shape.z;
-            uint b_3 = naga_f2u32(_e169);
+        float _e160 = viewport.z;
+        float least = min(0.5, (1.0 / _e160));
+        float _e167 = v_7.shape.y;
+        if ((_e167 < 0.0)) {
+            float _e172 = v_7.shape.x;
+            uint a_2 = naga_f2u32(_e172);
+            float _e176 = v_7.shape.z;
+            uint b_3 = naga_f2u32(_e176);
             float4 sides = (float4(float((a_2 & 4095u)), float((a_2 >> 12u)), float((b_3 & 4095u)), float((b_3 >> 12u))) / (16.0).xxxx);
-            float _e189 = v_7.point_.x;
-            float _e192 = v_7.fade.x;
-            float _e195 = v_7.fade.z;
-            bool right_1 = (_e189 > (_e192 + (_e195 * 0.5)));
-            float _e202 = v_7.point_.y;
-            float _e205 = v_7.fade.y;
-            float _e208 = v_7.fade.w;
-            bool bottom_1 = (_e202 > (_e205 + (_e208 * 0.5)));
+            float _e196 = v_7.point_.x;
+            float _e199 = v_7.fade.x;
+            float _e202 = v_7.fade.z;
+            bool right_1 = (_e196 > (_e199 + (_e202 * 0.5)));
+            float _e209 = v_7.point_.y;
+            float _e212 = v_7.fade.y;
+            float _e215 = v_7.fade.w;
+            bool bottom_1 = (_e209 > (_e212 + (_e215 * 0.5)));
             float across = (right_1 ? sides.y : sides.w);
             float down = (bottom_1 ? sides.z : sides.x);
-            float4 _e220 = v_7.fade;
-            float4 _e225 = v_7.fade;
-            float4 box_2 = float4((_e220.xy + sides.wx), max(((_e225.zw - sides.wx) - sides.yz), (0.0).xx));
+            float4 _e227 = v_7.fade;
+            float4 _e232 = v_7.fade;
+            float4 box_2 = float4((_e227.xy + sides.wx), max(((_e232.zw - sides.wx) - sides.yz), (0.0).xx));
             float inner_radius = clamp((radius_1 - ((across + down) * 0.5)), 0.0, (min(box_2.z, box_2.w) * 0.5));
-            float4 _e247 = v_7.position;
-            const float2 _e249 = centred(_e247.xy, box_2);
-            float2 iq = (_e249 - ((box_2.zw * 0.5) - (inner_radius).xx));
+            float4 _e254 = v_7.position;
+            const float2 _e256 = centred(_e254.xy, box_2);
+            float2 iq = (_e256 - ((box_2.zw * 0.5) - (inner_radius).xx));
             float inside = ((length(max(iq, (0.0).xx)) + min(max(iq.x, iq.y), 0.0)) - inner_radius);
-            float aa = max((slope.x + slope.y), 0.5);
+            float aa = max((slope.x + slope.y), least);
             if ((box_2.z > 0.0)) {
                 local_4 = (box_2.w > 0.0);
             } else {
                 local_4 = false;
             }
-            bool _e287 = local_4;
-            float hollow = (_e287 ? clamp((0.5 - (inside / aa)), 0.0, 1.0) : 0.0);
-            float _e291 = color_1.w;
-            color_1.w = (_e291 * max((clamp((0.5 - (distance_ / aa)), 0.0, 1.0) - hollow), 0.0));
+            bool _e293 = local_4;
+            float hollow = (_e293 ? clamp((0.5 - (inside / aa)), 0.0, 1.0) : 0.0);
+            float _e297 = color_1.w;
+            color_1.w = (_e297 * max((clamp((0.5 - (distance_ / aa)), 0.0, 1.0) - hollow), 0.0));
         } else {
-            float _e304 = v_7.shape.z;
-            if ((_e304 > 0.0)) {
-                float _e309 = v_7.shape.z;
-                float x_1 = (distance_ / (_e309 * 1.4142135));
+            float _e310 = v_7.shape.z;
+            if ((_e310 > 0.0)) {
+                float _e315 = v_7.shape.z;
+                float x_1 = (distance_ / (_e315 * 1.4142135));
                 float x2_ = (x_1 * x_1);
                 float e_1 = (sign(x_1) * sqrt((1.0 - exp(((-(x2_) * (1.2732395 + (0.147 * x2_))) / (1.0 + (0.147 * x2_)))))));
-                float _e332 = color_1.w;
-                color_1.w = (_e332 * (0.5 - (0.5 * e_1)));
+                float _e338 = color_1.w;
+                color_1.w = (_e338 * (0.5 - (0.5 * e_1)));
             } else {
                 float dx = slope.x;
                 float dy = slope.y;
-                float aa_1 = max(((radius_1 <= 0.0) ? max(dx, dy) : (dx + dy)), 0.5);
+                float aa_1 = max(((radius_1 <= 0.0) ? max(dx, dy) : (dx + dy)), least);
                 float outer = clamp((0.5 - (distance_ / aa_1)), 0.0, 1.0);
-                float _e355 = v_7.shape.y;
-                float inner = clamp((0.5 - ((distance_ + _e355) / aa_1)), 0.0, 1.0);
-                float _e364 = color_1.w;
-                float _e368 = v_7.border.w;
-                float alpha = ((_e364 * inner) + (_e368 * (outer - inner)));
-                float4 _e372 = color_1;
-                float _e375 = color_1.w;
-                float4 _e379 = v_7.border;
-                float _e383 = v_7.border.w;
-                float3 rgb_2 = ((alpha > 0.0) ? ((((_e372.xyz * _e375) * inner) + ((_e379.xyz * _e383) * (outer - inner))) / (max(alpha, 1e-5)).xxx) : (0.0).xxx);
+                float _e360 = v_7.shape.y;
+                float inner = clamp((0.5 - ((distance_ + _e360) / aa_1)), 0.0, 1.0);
+                float _e369 = color_1.w;
+                float _e373 = v_7.border.w;
+                float alpha = ((_e369 * inner) + (_e373 * (outer - inner)));
+                float4 _e377 = color_1;
+                float _e380 = color_1.w;
+                float4 _e384 = v_7.border;
+                float _e388 = v_7.border.w;
+                float3 rgb_2 = ((alpha > 0.0) ? ((((_e377.xyz * _e380) * inner) + ((_e384.xyz * _e388) * (outer - inner))) / (max(alpha, 1e-5)).xxx) : (0.0).xxx);
                 color_1 = float4(rgb_2, alpha);
             }
         }
     }
-    float _e407 = v_7.options.y;
-    if ((_e407 > 0.5)) {
+    float _e412 = v_7.options.y;
+    if ((_e412 > 0.5)) {
         tex = given;
         if (!(has_texel)) {
-            float2 _e415 = v_7.uv;
-            float4 _e416 = atlas.Sample(tex_sampler, _e415);
-            tex = _e416;
+            float2 _e420 = v_7.uv;
+            float4 _e421 = atlas.Sample(tex_sampler, _e420);
+            tex = _e421;
         }
-        float _e419 = v_7.options.y;
-        if ((_e419 > 1.5)) {
+        float _e424 = v_7.options.y;
+        if ((_e424 > 1.5)) {
             premultiplied_1 = true;
-            float4 _e423 = color_1;
-            float4 _e425 = tex;
-            float _e429 = color_1.w;
-            rgb = ((_e423.xyz * _e425.xyz) * _e429);
-            float _e433 = color_1.w;
-            float _e435 = tex.w;
-            color_1.w = (_e433 * _e435);
+            float4 _e428 = color_1;
+            float4 _e430 = tex;
+            float _e434 = color_1.w;
+            rgb = ((_e428.xyz * _e430.xyz) * _e434);
+            float _e438 = color_1.w;
+            float _e440 = tex.w;
+            color_1.w = (_e438 * _e440);
         } else {
-            float4 _e437 = color_1;
-            float4 _e439 = tex;
-            float _e443 = color_1.w;
-            float _e445 = tex.w;
-            float _e448 = v_7.options.y;
-            float4 _e449 = color_1;
-            const float _e451 = firmness(_e448, _e449.xyz);
-            const float _e452 = firm(_e445, _e451);
-            color_1 = float4((_e437.xyz * _e439.xyz), (_e443 * _e452));
+            float4 _e442 = color_1;
+            float4 _e444 = tex;
+            float _e448 = color_1.w;
+            float _e450 = tex.w;
+            float _e453 = v_7.options.y;
+            float4 _e454 = color_1;
+            const float _e456 = firmness(_e453, _e454.xyz);
+            const float _e457 = firm(_e450, _e456);
+            color_1 = float4((_e442.xyz * _e444.xyz), (_e448 * _e457));
         }
     }
-    float _e457 = v_7.options.x;
-    if ((_e457 > 0.0)) {
-        float2 _e461 = v_7.point_;
-        float4 _e463 = v_7.fade;
-        float4 _e467 = v_7.fade;
-        float4 _e470 = v_7.fade;
-        float2 _e474 = v_7.point_;
-        float2 distance_1 = min((_e461 - _e463.xy), ((_e467.xy + _e470.zw) - _e474));
-        float _e482 = v_7.options.x;
-        float f_1 = clamp((min(distance_1.x, distance_1.y) / _e482), 0.0, 1.0);
-        float _e488 = color_1.w;
-        color_1.w = (_e488 * f_1);
-        float _e490 = scale;
-        scale = (_e490 * f_1);
+    float _e462 = v_7.options.x;
+    if ((_e462 > 0.0)) {
+        float2 _e466 = v_7.point_;
+        float4 _e468 = v_7.fade;
+        float4 _e472 = v_7.fade;
+        float4 _e475 = v_7.fade;
+        float2 _e479 = v_7.point_;
+        float2 distance_1 = min((_e466 - _e468.xy), ((_e472.xy + _e475.zw) - _e479));
+        float _e487 = v_7.options.x;
+        float f_1 = clamp((min(distance_1.x, distance_1.y) / _e487), 0.0, 1.0);
+        float _e493 = color_1.w;
+        color_1.w = (_e493 * f_1);
+        float _e495 = scale;
+        scale = (_e495 * f_1);
     }
-    float _e494 = v_7.mask.x;
-    if ((_e494 > 0.5)) {
-        float _e499 = v_7.mask.x;
-        float4 _e501 = v_7.position;
-        const float _e503 = region(_e499, _e501.xy);
-        float _e505 = color_1.w;
-        color_1.w = (_e505 * _e503);
-        float _e507 = scale;
-        scale = (_e507 * _e503);
+    float _e499 = v_7.mask.x;
+    if ((_e499 > 0.5)) {
+        float _e504 = v_7.mask.x;
+        float4 _e506 = v_7.position;
+        const float _e508 = region(_e504, _e506.xy);
+        float _e510 = color_1.w;
+        color_1.w = (_e510 * _e508);
+        float _e512 = scale;
+        scale = (_e512 * _e508);
     }
-    float _e511 = v_7.mask.x;
-    float4 _e512 = color_1;
-    float _e515 = color_1.w;
-    float _e518 = color_1.w;
-    float3 _e520 = rgb;
-    float _e521 = scale;
-    float _e524 = color_1.w;
-    bool _e526 = premultiplied_1;
-    const float4 _e528 = tinted(_e511, (_e526 ? float4((_e520 * _e521), _e524) : float4((_e512.xyz * _e515), _e518)));
-    return _e528;
+    float _e516 = v_7.mask.x;
+    float4 _e517 = color_1;
+    float _e520 = color_1.w;
+    float _e523 = color_1.w;
+    float3 _e525 = rgb;
+    float _e526 = scale;
+    float _e529 = color_1.w;
+    bool _e531 = premultiplied_1;
+    const float4 _e533 = tinted(_e516, (_e531 ? float4((_e525 * _e526), _e529) : float4((_e517.xyz * _e520), _e523)));
+    return _e533;
 }
 
 float4 shade(Out input_1)
