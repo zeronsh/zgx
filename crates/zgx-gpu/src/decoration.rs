@@ -304,10 +304,10 @@ pub fn shadow_corners(style: &QuadStyle, width: f32, height: f32, spread: f32) -
         .unwrap_or(Corners::all(style.radius));
     radii(
         Corners {
-            top_left: c.top_left + spread,
-            top_right: c.top_right + spread,
-            bottom_right: c.bottom_right + spread,
-            bottom_left: c.bottom_left + spread,
+            top_left: (c.top_left + spread).max(0.),
+            top_right: (c.top_right + spread).max(0.),
+            bottom_right: (c.bottom_right + spread).max(0.),
+            bottom_left: (c.bottom_left + spread).max(0.),
         },
         width,
         height,
