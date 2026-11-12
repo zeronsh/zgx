@@ -543,10 +543,11 @@ pub enum TextBaseline {
     /// Its line's bottom.
     Bottom,
 }
-/// A line of text on a canvas. It is shaped and drawn as any text is, over
-/// the canvas's shapes whatever their order: no clip of the canvas applies,
-/// and assistive technology doesn't read it (a canvas's `label` speaks for
-/// the drawing).
+/// A line of text on a canvas. It is shaped and drawn as any text is, in
+/// the drawing's order (over the shapes drawn before it, under those after
+/// that reach it: [`Canvas::layers`]), cut by the box of the clips open
+/// where it is drawn ([`Canvas::text_clips`]). Assistive technology doesn't
+/// read it (a canvas's `label` speaks for the drawing).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CanvasText {
     /// The text.
@@ -612,6 +613,50 @@ pub fn measure_text(
     })
 }
 
+/// The clip a canvas's text is cut by: the box its clips leave, its corners
+/// rounded where that box is one rounded rectangle's or circle's
+/// ([`Canvas::text_clips`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextClip {
+    /// The box, in the canvas's coordinates; empty where the clips leave
+    /// nothing.
+    pub rect: Rect,
+    /// Its corners' radius.
+    pub radius: f32,
+}
+/// A run of a canvas's commands and the texts drawn over them, before the
+/// next run's commands ([`Canvas::layers`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CanvasLayer {
+    /// Its commands' indices.
+    pub commands: std::ops::Range<usize>,
+    /// Its texts' indices.
+    pub texts: std::ops::Range<usize>,
+}
+/// At most this many layers: past it, the texts left go over what follows,
+/// as all once did.
+const MAX_LAYERS: usize = 8;
+
+/// Where a canvas's texts fall among its commands, and whether it clips:
+/// kept only once a command follows a text or a clip opens.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct TextOrder {
+    /// How many commands came before the first text, and each later text
+    /// before which more had come (its index, and how many).
+    first_text_after: usize,
+    text_moves: Vec<(usize, usize)>,
+    /// Whether a clip was opened.
+    clipped: bool,
+}
+impl TextOrder {
+    /// How many commands came before the last text.
+    fn last_text_after(&self) -> usize {
+        self.text_moves
+            .last()
+            .map_or(self.first_text_after, |(_, after)| *after)
+    }
+}
+
 /// Equal command lists preserve pixels, uploads and retained layout.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Canvas {
@@ -619,11 +664,35 @@ pub struct Canvas {
     /// Beside the commands: `Draw` is public and exhaustive. Empty, it
     /// allocates nothing.
     text: Vec<CanvasText>,
+    /// None while every text comes after every command and nothing clips,
+    /// as a chart's labels and a terminal's rows do: the canvas no larger
+    /// than it was, and nothing allocated.
+    order: Option<Box<TextOrder>>,
 }
 impl Canvas {
     /// An empty canvas.
     pub fn new() -> Self {
         Self::default()
+    }
+    /// The texts' order, kept from now on: while there was none, every
+    /// text came after every command.
+    fn order(&mut self) -> &mut TextOrder {
+        let at = self.commands.len();
+        self.order.get_or_insert_with(|| {
+            Box::new(TextOrder {
+                first_text_after: at,
+                ..Default::default()
+            })
+        })
+    }
+    /// Add `command`, keeping the texts' order once it follows one.
+    fn push(&mut self, command: Draw) {
+        if matches!(command, Draw::Clip { .. }) {
+            self.order().clipped = true;
+        } else if !self.text.is_empty() && self.order.is_none() {
+            self.order();
+        }
+        self.commands.push(command);
     }
     /// Fill `path` with `brush`, by the nonzero rule.
     pub fn fill(&mut self, path: Path, brush: impl Into<Brush>) -> &mut Self {
@@ -631,7 +700,7 @@ impl Canvas {
     }
     /// Fill `path` with `brush`, by `rule`.
     pub fn fill_rule(&mut self, path: Path, brush: impl Into<Brush>, rule: FillRule) -> &mut Self {
-        self.commands.push(Draw::Fill {
+        self.push(Draw::Fill {
             path,
             brush: brush.into(),
             rule,
@@ -640,7 +709,7 @@ impl Canvas {
     }
     /// Stroke `path` with `brush` and `style`.
     pub fn stroke(&mut self, path: Path, brush: impl Into<Brush>, style: Stroke) -> &mut Self {
-        self.commands.push(Draw::Stroke {
+        self.push(Draw::Stroke {
             path,
             brush: brush.into(),
             style,
@@ -649,20 +718,30 @@ impl Canvas {
     }
     /// Clip the commands after this to `path` until `restore`.
     pub fn clip(&mut self, path: Path, rule: FillRule) -> &mut Self {
-        self.commands.push(Draw::Clip { path, rule });
+        self.push(Draw::Clip { path, rule });
         self
     }
     /// End the most recent clip.
     pub fn restore(&mut self) -> &mut Self {
-        self.commands.push(Draw::Restore);
+        self.push(Draw::Restore);
         self
     }
     /// The commands, in order.
     pub fn commands(&self) -> &[Draw] {
         &self.commands
     }
-    /// Add a line of text, over the canvas's shapes.
+    /// Add a line of text, over what was drawn before it and under what is
+    /// drawn after, cut by the clips open now (see [`Canvas::layers`] and
+    /// [`Canvas::text_clips`]).
     pub fn text(&mut self, text: CanvasText) -> &mut Self {
+        let (at, index) = (self.commands.len(), self.text.len());
+        if let Some(order) = &mut self.order {
+            if index == 0 {
+                order.first_text_after = at;
+            } else if order.last_text_after() != at {
+                order.text_moves.push((index, at));
+            }
+        }
         self.text.push(text);
         self
     }
@@ -670,12 +749,261 @@ impl Canvas {
     pub fn texts(&self) -> &[CanvasText] {
         &self.text
     }
+    /// How many commands came before the text at `index`: where it falls
+    /// among them.
+    pub fn text_after(&self, index: usize) -> usize {
+        let Some(order) = &self.order else {
+            return self.commands.len();
+        };
+        match order.text_moves.partition_point(|(at, _)| *at <= index) {
+            0 => order.first_text_after,
+            moved => order.text_moves[moved - 1].1,
+        }
+    }
+    /// Whether every text comes after every command and nothing clips:
+    /// the drawing, then its words over it, as a chart's labels and a
+    /// terminal's rows are.
+    pub fn texts_last(&self) -> bool {
+        self.order.is_none()
+    }
+    /// How many commands came before each text, in order.
+    fn texts_after(&self) -> impl Iterator<Item = usize> + '_ {
+        let (first, moves) = match &self.order {
+            Some(order) => (order.first_text_after, &order.text_moves[..]),
+            None => (self.commands.len(), &[][..]),
+        };
+        (0..self.text.len()).scan(0, move |moved, index| {
+            if moves.get(*moved).is_some_and(|(at, _)| *at == index) {
+                *moved += 1;
+            }
+            Some(match *moved {
+                0 => first,
+                moved => moves[moved - 1].1,
+            })
+        })
+    }
     /// `other`'s commands after these, as drawn: a drawing made of parts
     /// kept apart (each item's, drawn again only when it changes).
     pub fn extend(&mut self, other: &Canvas) -> &mut Self {
+        let (before, texts_before) = (self.commands.len(), self.text.len());
+        // Kept from before `other`'s commands, which follow these texts.
+        if texts_before > 0 && !other.commands.is_empty() {
+            self.order();
+        }
+        if other.order.as_ref().is_some_and(|order| order.clipped) {
+            self.order().clipped = true;
+        }
         self.commands.extend_from_slice(&other.commands);
+        if !other.text.is_empty() && (self.order.is_some() || other.order.is_some()) {
+            let (first, moves) = match &other.order {
+                Some(order) => (order.first_text_after, &order.text_moves[..]),
+                None => (other.commands.len(), &[][..]),
+            };
+            let first = first + before;
+            let order = self.order();
+            if texts_before == 0 {
+                order.first_text_after = first;
+            } else if order.last_text_after() != first {
+                order.text_moves.push((texts_before, first));
+            }
+            order.text_moves.extend(
+                moves
+                    .iter()
+                    .map(|(at, after)| (at + texts_before, after + before)),
+            );
+        }
         self.text.extend_from_slice(&other.text);
         self
+    }
+    /// Each text's clip, in order: the box its open clips leave (their
+    /// bounds', intersected), rounded where that is a rounded rectangle's
+    /// or a circle's. `None` where none is open; empty when the canvas
+    /// clips nothing.
+    pub fn text_clips(&self) -> Vec<Option<TextClip>> {
+        if self.text.is_empty() || !self.order.as_ref().is_some_and(|order| order.clipped) {
+            return Vec::new();
+        }
+        let mut clips = Vec::with_capacity(self.text.len());
+        let mut open: Vec<Option<TextClip>> = Vec::new();
+        let mut texts = self.texts_after().peekable();
+        for at in 0..=self.commands.len() {
+            while texts.next_if(|after| *after == at).is_some() {
+                clips.push(open.last().copied().flatten());
+            }
+            match self.commands.get(at) {
+                Some(Draw::Clip { path, .. }) => {
+                    let (rect, radius) = clip_box(path);
+                    let clip = match open.last().copied().flatten() {
+                        None => TextClip { rect, radius },
+                        Some(outer) => {
+                            let inner = outer
+                                .rect
+                                .intersection(rect)
+                                .unwrap_or(Rect::new(rect.x, rect.y, 0., 0.));
+                            let radius = if inner == rect {
+                                radius
+                            } else if inner == outer.rect {
+                                outer.radius
+                            } else {
+                                0.
+                            };
+                            TextClip {
+                                rect: inner,
+                                radius,
+                            }
+                        }
+                    };
+                    open.push(Some(clip));
+                }
+                Some(Draw::Restore) => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        clips
+    }
+    /// The canvas as runs of commands each with the texts over them, in
+    /// order: a text goes under a later shape only where that shape can
+    /// reach it, so a drawing that keeps its words clear of what follows
+    /// is one layer (as is one with no text after its last command, which
+    /// measures nothing). `size` gives a text's width and height. At most
+    /// 8 layers: past them, the texts left go over what follows.
+    pub fn layers(&self, mut size: impl FnMut(&CanvasText) -> (f32, f32)) -> Vec<CanvasLayer> {
+        let all = || CanvasLayer {
+            commands: 0..self.commands.len(),
+            texts: 0..self.text.len(),
+        };
+        if self.text.is_empty() || self.text_after(0) == self.commands.len() {
+            return vec![all()];
+        }
+        let mut layers = Vec::new();
+        let (mut first_command, mut first_text) = (0, 0);
+        // The boxes of this layer's texts, and their union.
+        let mut boxes: Vec<Rect> = Vec::new();
+        let mut covered: Option<Rect> = None;
+        let mut next_text = 0;
+        let mut afters = self.texts_after().peekable();
+        for (at, command) in self.commands.iter().enumerate() {
+            while afters.next_if(|after| *after == at).is_some() {
+                let text = &self.text[next_text];
+                let (width, height) = size(text);
+                let (x, y) = text.origin((width, height));
+                let area = Rect::new(x, y, width, height);
+                covered = Some(covered.map_or(area, |c| c.union(area)));
+                boxes.push(area);
+                next_text += 1;
+            }
+            let Some(covered_now) = covered else { continue };
+            let Some(reach) = command_bounds(command) else {
+                continue;
+            };
+            if layers.len() + 1 < MAX_LAYERS
+                && covered_now.intersects(reach)
+                && boxes.iter().any(|b| b.intersects(reach))
+            {
+                layers.push(CanvasLayer {
+                    commands: first_command..at,
+                    texts: first_text..next_text,
+                });
+                (first_command, first_text) = (at, next_text);
+                boxes.clear();
+                covered = None;
+            }
+        }
+        layers.push(CanvasLayer {
+            commands: first_command..self.commands.len(),
+            texts: first_text..self.text.len(),
+        });
+        layers
+    }
+    /// `layer`'s commands as a canvas of their own (no text): the clips
+    /// open where it starts opened again first, and those open where it
+    /// ends closed.
+    pub fn layer(&self, layer: &CanvasLayer) -> Canvas {
+        let mut open: Vec<usize> = Vec::new();
+        for (at, command) in self.commands[..layer.commands.start].iter().enumerate() {
+            match command {
+                Draw::Clip { .. } => open.push(at),
+                Draw::Restore => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        let mut canvas = Canvas::new();
+        canvas
+            .commands
+            .extend(open.iter().map(|at| self.commands[*at].clone()));
+        let mut depth = open.len();
+        for command in &self.commands[layer.commands.clone()] {
+            match command {
+                Draw::Clip { .. } => depth += 1,
+                Draw::Restore => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            canvas.commands.push(command.clone());
+        }
+        canvas
+            .commands
+            .extend(std::iter::repeat_n(Draw::Restore, depth));
+        canvas
+    }
+}
+/// Where a path lies: its points' bounds (a curve's control points
+/// included, which may reach past it).
+fn path_bounds(path: &Path) -> Rect {
+    let positive = |r: Rect| {
+        Rect::new(
+            r.x.min(r.x + r.width),
+            r.y.min(r.y + r.height),
+            r.width.abs(),
+            r.height.abs(),
+        )
+    };
+    match path.shape() {
+        Some(Shape::Rect { rect, .. } | Shape::Ellipse { rect }) => return positive(rect),
+        Some(Shape::Line { from, to }) => {
+            return positive(Rect::new(from.x, from.y, to.x - from.x, to.y - from.y));
+        }
+        None => {}
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for segment in path.segments() {
+        let points: &[Point] = match segment {
+            Segment::Move(p) | Segment::Line(p) => std::slice::from_ref(p),
+            Segment::Quadratic(a, b) => &[*a, *b],
+            Segment::Cubic(a, b, c) => &[*a, *b, *c],
+            Segment::Close => &[],
+        };
+        for p in points {
+            (x0, y0, x1, y1) = (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y));
+        }
+    }
+    if x0 > x1 {
+        return Rect::new(0., 0., 0., 0.);
+    }
+    Rect::new(x0, y0, x1 - x0, y1 - y0)
+}
+/// The box a clip to `path` leaves text, and its corners' radius.
+fn clip_box(path: &Path) -> (Rect, f32) {
+    let rect = path_bounds(path);
+    let radius = match path.shape() {
+        Some(Shape::Rect { radius, .. }) => radius,
+        Some(Shape::Ellipse { .. }) if (rect.width - rect.height).abs() < 1e-3 => rect.width / 2.,
+        _ => 0.,
+    };
+    (rect, radius)
+}
+/// What a command can paint, or `None` for a clip's.
+fn command_bounds(command: &Draw) -> Option<Rect> {
+    match command {
+        Draw::Fill { path, .. } => Some(path_bounds(path)),
+        // A miter reaches out its limit's widths; caps half one.
+        Draw::Stroke { path, style, .. } => {
+            Some(path_bounds(path).expand(style.width.max(0.) * style.miter_limit.max(1.)))
+        }
+        Draw::Clip { .. } | Draw::Restore => None,
     }
 }
 
@@ -722,5 +1050,181 @@ mod tests {
         assert_ne!(Path::rounded_rect(rect, 2.).unwrap(), rounded);
         assert!(Path::rounded_rect(Rect::new(f32::NAN, 0., 1., 1.), 0.).is_err());
         assert!(Path::ellipse(Rect::new(0., 0., f32::INFINITY, 1.)).is_err());
+    }
+
+    fn label(text: &str, x: f32, y: f32) -> CanvasText {
+        CanvasText {
+            text: text.into(),
+            x,
+            y,
+            size: 10.,
+            color: Color(0, 0, 0, 255),
+            font: Default::default(),
+            anchor: TextAnchor::Start,
+            baseline: TextBaseline::Top,
+        }
+    }
+    fn square(x: f32, y: f32) -> Path {
+        Path::rectangle(Rect::new(x, y, 10., 10.))
+    }
+
+    #[test]
+    fn a_text_goes_under_a_later_shape_only_where_it_reaches_it() {
+        let red = Color(255, 0, 0, 255);
+        // Every text 20 by 10.
+        let size = |_: &CanvasText| (20., 10.);
+        // Shapes then text: one layer, nothing measured.
+        let mut canvas = Canvas::new();
+        canvas.fill(square(0., 0.), red).text(label("a", 0., 0.));
+        assert_eq!(
+            canvas.layers(|_| unreachable!("measured")),
+            [CanvasLayer {
+                commands: 0..1,
+                texts: 0..1
+            }]
+        );
+        // A shape after a text, clear of it: still one.
+        canvas.fill(square(50., 50.), red);
+        assert_eq!(canvas.layers(size).len(), 1);
+        assert_eq!(canvas.text_after(0), 1);
+        assert!(
+            canvas
+                .order
+                .as_ref()
+                .is_some_and(|o| o.text_moves.is_empty()),
+            "one place: no move kept"
+        );
+        // One over it: a second layer, from that shape on.
+        canvas.fill(square(15., 5.), red).text(label("b", 0., 30.));
+        assert_eq!(
+            canvas.layers(size),
+            [
+                CanvasLayer {
+                    commands: 0..2,
+                    texts: 0..1
+                },
+                CanvasLayer {
+                    commands: 2..3,
+                    texts: 1..2
+                }
+            ]
+        );
+        // Kept apart and joined (an `each` item's), as drawn.
+        let mut joined = Canvas::new();
+        joined.fill(square(90., 90.), red).extend(&canvas);
+        assert_eq!((joined.text_after(0), joined.text_after(1)), (2, 4));
+        assert_eq!(joined.texts_after().collect::<Vec<_>>(), [2, 4]);
+        assert_eq!(joined.layers(size)[0].commands, 0..3);
+        // However many times a text is covered, at most 8 layers.
+        let mut many = Canvas::new();
+        for _ in 0..20 {
+            many.text(label("c", 0., 0.)).fill(square(0., 0.), red);
+        }
+        let layers = many.layers(size);
+        assert_eq!(layers.len(), 8);
+        assert_eq!(layers[7].texts, 7..20, "the rest over what follows");
+    }
+
+    #[test]
+    fn a_layer_opens_the_clips_open_where_it_starts_and_closes_its_own() {
+        let red = Color(255, 0, 0, 255);
+        let clip = square(0., 0.);
+        let mut canvas = Canvas::new();
+        canvas
+            .clip(clip.clone(), FillRule::Winding)
+            .text(label("a", 0., 0.))
+            .fill(square(0., 0.), red)
+            .clip(square(5., 5.), FillRule::EvenOdd)
+            .fill(square(5., 5.), red)
+            .restore()
+            .restore();
+        let layers = canvas.layers(|_| (20., 10.));
+        assert_eq!(layers.len(), 2);
+        assert_eq!(
+            canvas.layer(&layers[0]).commands(),
+            [
+                Draw::Clip {
+                    path: clip.clone(),
+                    rule: FillRule::Winding
+                },
+                Draw::Restore
+            ]
+        );
+        let second = canvas.layer(&layers[1]);
+        // The card's clip again, then its own: a fill, a clip, a fill, and
+        // both closed.
+        assert_eq!(second.commands().len(), 6, "{:?}", second.commands());
+        assert_eq!(second.commands()[4..], [Draw::Restore, Draw::Restore]);
+        assert_eq!(
+            second.commands()[0],
+            Draw::Clip {
+                path: clip,
+                rule: FillRule::Winding
+            }
+        );
+        assert!(second.texts().is_empty());
+    }
+
+    #[test]
+    fn a_text_is_cut_by_the_box_its_open_clips_leave() {
+        let mut canvas = Canvas::new();
+        canvas.text(label("none", 0., 0.));
+        assert!(canvas.text_clips().is_empty(), "nothing clips");
+        let card = Rect::new(10., 10., 100., 50.);
+        canvas
+            .clip(Path::rounded_rect(card, 8.).unwrap(), FillRule::Winding)
+            .text(label("card", 0., 0.))
+            .clip(
+                Path::rectangle(Rect::new(0., 20., 200., 20.)),
+                FillRule::Winding,
+            )
+            .text(label("band", 0., 0.))
+            .clip(
+                Path::rounded_rect(Rect::new(20., 25., 10., 10.), 3.).unwrap(),
+                FillRule::Winding,
+            )
+            .text(label("inner", 0., 0.))
+            .restore()
+            .restore()
+            .clip(
+                Path::ellipse(Rect::new(20., 20., 30., 30.)).unwrap(),
+                FillRule::Winding,
+            )
+            .text(label("avatar", 0., 0.))
+            .restore()
+            .restore()
+            .clip(
+                Path::ellipse(Rect::new(0., 0., 30., 10.)).unwrap(),
+                FillRule::Winding,
+            )
+            .text(label("oval", 0., 0.))
+            .clip(square(100., 100.), FillRule::Winding)
+            .text(label("gone", 0., 0.))
+            .restore()
+            .restore()
+            .text(label("after", 0., 0.));
+        let clip = |x, y, w, h, radius| {
+            Some(TextClip {
+                rect: Rect::new(x, y, w, h),
+                radius,
+            })
+        };
+        assert_eq!(
+            canvas.text_clips(),
+            [
+                None,
+                clip(10., 10., 100., 50., 8.),
+                // The band across the card: square where it cuts it.
+                clip(10., 20., 100., 20., 0.),
+                clip(20., 25., 10., 10., 3.),
+                // A circle in the card: round.
+                clip(20., 20., 30., 30., 15.),
+                // An oval: its box.
+                clip(0., 0., 30., 10., 0.),
+                // Nothing left.
+                clip(100., 100., 0., 0., 0.),
+                None,
+            ]
+        );
     }
 }
