@@ -157,6 +157,74 @@ fn a_picked_file_reads_and_a_saved_one_is_written() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+/// Writes `BYTES` (every byte value, then a NUL) as a string, or in base64
+/// from the test, to the file the user saves to.
+const BYTES: &str = r#"
+local shown = ui.state("shown", "")
+local function save(data)
+    ui.task(function()
+        local file = ui.save_file({ name = "out.png" }):await()
+        local ok, why = pcall(function()
+            ui.write_file(file, data):await()
+        end)
+        shown:set(if ok then "wrote" else tostring(why))
+    end)
+end
+return ui.column {
+    ui.text { id = "label", function() return shown:get() end },
+    ui.button { id = "raw", w = 40, h = 20, "r", on_click = function()
+        local bytes = {}
+        for i = 0, 255 do
+            bytes[#bytes + 1] = string.char(i)
+        end
+        save(table.concat(bytes) .. string.char(0))
+    end },
+    ui.button { id = "encoded", w = 40, h = 20, "e", on_click = function()
+        save({ base64 = BASE64 })
+    end },
+    ui.button { id = "broken", w = 40, h = 20, "b", on_click = function()
+        save({ base64 = "not base64!" })
+    end },
+}
+"#;
+
+/// A PNG or any other file: a string's bytes, or bytes in base64, reach
+/// the file as they are, NUL and bytes that aren't UTF-8 too.
+#[test]
+fn a_saved_file_takes_any_bytes() {
+    use base64::Engine as _;
+    let expected: Vec<u8> = (0..=255u8).chain([0]).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&expected);
+    let code: &'static str = BYTES.replace("BASE64", &format!("{encoded:?}")).leak();
+    for button in ["raw", "encoded"] {
+        let dir = dir(&format!("bytes-{button}"));
+        let mut h = app(&dir, code, None);
+        h.click(button);
+        wait_for(&mut h, "wrote");
+        assert_eq!(
+            std::fs::read(dir.join("out.txt")).unwrap(),
+            expected,
+            "{button}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    let dir = dir("bytes-broken");
+    let mut h = app(&dir, code, None);
+    h.click("broken");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !h.text("label").contains("isn't base64") && Instant::now() < deadline {
+        h.settle();
+        h.ui.prepare_frame();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        h.text("label").contains("isn't base64"),
+        "{}",
+        h.text("label")
+    );
+    assert!(!dir.join("out.txt").exists());
+}
+
 /// A dialog the person never answers, telling when the host drops it.
 struct Waiting(Rc<std::cell::Cell<bool>>);
 impl Drop for Waiting {

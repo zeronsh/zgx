@@ -22077,8 +22077,9 @@ declare ui: {
 	badge: (count: number | string | nil) -> boolean,
 	-- A file the user picked, read as text off the main thread: a promise.
 	read_file: (file: File | string) -> Promise<string>,
-	-- Write `text` to a file the user picked (beside it, then over it).
-	write_file: (file: File | string, text: string) -> Promise<nil>,
+	-- Write to a file the user picked (beside it, then over it): a string's
+	-- bytes as they are (any byte), or `{ base64 = … }`'s (a PNG).
+	write_file: (file: File | string, data: string | { base64: string }) -> Promise<nil>,
 	-- What the app was launched with after its script (`zgx-run app/
 	-- notes.txt` gives `{ "notes.txt" }`).
 	args: { string },
