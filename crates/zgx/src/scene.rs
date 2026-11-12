@@ -15937,9 +15937,12 @@ impl Scene {
     /// world translation and the clip it paints within. A kept frame's walk
     /// leaves out only nodes for which this is false (a long list's rows
     /// out of view), so one changing that still can't show paints nothing
-    /// a patch must draw. Never false where the walk would keep it (its
-    /// clip insets aren't applied, which only widens the clip); false where
-    /// an ancestor is hidden.
+    /// a patch must draw. Never false where the walk would keep something
+    /// that paints (its clip insets aren't applied, which only widens the
+    /// clip); false where an ancestor is hidden. Unlike `within`, false
+    /// within a clip for a node with no ink or an empty one: the walk keeps
+    /// it, but nothing in it paints, and once something does its ink is
+    /// worked out afresh.
     /// Renderer plumbing, not a stable API.
     #[doc(hidden)]
     pub fn ink_may_show(&self, id: NodeId) -> bool {
@@ -15952,8 +15955,8 @@ impl Scene {
         let Some(clip) = clip else {
             return true;
         };
-        self.ink(id).is_none_or(|ink| {
-            ink.width <= 0. || ink.height <= 0. || ink.translated(transform).intersects(clip)
+        self.ink(id).is_some_and(|ink| {
+            ink.width > 0. && ink.height > 0. && ink.translated(transform).intersects(clip)
         })
     }
     /// Plain node `id`'s box as [`Scene::item_in`] places it, from what it
@@ -23645,6 +23648,57 @@ mod local_transform_tests {
             .collect();
         assert_eq!(spliced, rows, "the splice walks the rows the keep did");
         assert_eq!(out.len(), spliced.len(), "each with what it inherited");
+    }
+    #[test]
+    fn a_long_list_leaves_out_a_row_that_paints_nothing_out_of_view() {
+        let mut scene = Scene::new(400., 300.);
+        scene.set_kind(scene.root(), NodeKind::Container(Layout::Overlay));
+        let view = scene.append(
+            scene.root(),
+            NodeKind::Container(Layout::Overlay),
+            Style {
+                clip: true,
+                ..fixed(200., 100.)
+            },
+        );
+        let list = scene.append(view, NodeKind::Container(Layout::Column), Style::default());
+        let mut empty = None;
+        for i in 0..400u32 {
+            let kind = match i {
+                300 => NodeKind::Container(Layout::Overlay),
+                _ => NodeKind::Quad(QuadStyle {
+                    fill: Color((i % 251) as u8, 9, 9, 255),
+                    ..QuadStyle::default()
+                }),
+            };
+            let row = scene.append(list, kind, fixed(200., 20.));
+            if i == 300 {
+                empty = Some(row);
+            }
+        }
+        let empty = empty.unwrap();
+        scene.flush();
+        // A debug build checks each row left out can't show.
+        let mut inherited = Vec::new();
+        let ids: Vec<NodeId> = scene
+            .layer_items_recorded(&mut inherited)
+            .iter()
+            .map(|item| item.id)
+            .collect();
+        assert!(!ids.contains(&empty));
+        assert!(!scene.ink_may_show(empty), "it paints nothing");
+        // Given something to paint, in view, it can show.
+        scene.append(
+            empty,
+            NodeKind::Quad(QuadStyle {
+                fill: Color(9, 9, 9, 255),
+                ..QuadStyle::default()
+            }),
+            fixed(200., 20.),
+        );
+        scene.set_transform(list, Transform { x: 0., y: -6000. });
+        scene.flush();
+        assert!(scene.ink_may_show(empty));
     }
     #[test]
     fn colour_filters_compose_down_the_tree_without_layers() {
