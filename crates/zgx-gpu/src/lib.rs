@@ -12164,9 +12164,31 @@ impl GpuRenderer {
             *sampled = batch.source;
         }
         frame.scissor(rect);
+        if self
+            .d3d11
+            .as_ref()
+            .is_some_and(|state| !state.chains.is_empty())
+        {
+            self.d3d11_inputs(frame, batch.shading);
+        }
         frame.quads(batch.shading, false, batch.start..batch.end);
         stats.draw_calls += 1;
         stats.instances += (batch.end - batch.start) as usize;
+    }
+    /// Bind what the layer shader `shading` draws with at its inputs'
+    /// registers, if it has inputs (`d3d11_frame::Frame::inputs`), as
+    /// `bind_inputs` binds them for wgpu. Out of line: only frames with such
+    /// a shader call it.
+    #[cfg(d3d11)]
+    #[cold]
+    #[inline(never)]
+    fn d3d11_inputs(&self, frame: &mut d3d11_frame::Frame<'_>, shading: Shading) {
+        let (Shading::Filter(id) | Shading::FilterBlend(id)) = shading else {
+            return;
+        };
+        if let Some(chain) = (self.d3d11.as_ref()).and_then(|state| state.chains.get(&id)) {
+            frame.inputs(chain);
+        }
     }
     /// Fade bands' passes with Direct3D 11 (`render_d3d11`): each band's
     /// texture (one of Direct3D 11's standing for its wgpu texture, as a
@@ -12612,6 +12634,9 @@ impl GpuRenderer {
                 Shading::FilterBlend(id) => Some(id),
                 _ => None,
             };
+            if glass.is_some() && !state.chains.is_empty() {
+                self.d3d11_inputs(&mut frame, draw.shading);
+            }
             for (index, (region, _)) in regions.iter().enumerate() {
                 let Some(rect) = region
                     .intersection(draw.clip)
@@ -16935,10 +16960,11 @@ impl GpuRenderer {
             frame.retain_fills(|id| fills.contains_key(&id));
         }
         #[cfg(d3d11)]
-        if let Some(state) = &self.d3d11 {
+        if let Some(state) = &mut self.d3d11 {
             state
                 .device
                 .retain_app_shaders(|id| fills.contains_key(&id) || filters.contains_key(&id));
+            state.chains.retain(|id, _| filters.contains_key(id));
         }
     }
     /// Input arrived: if the window idled (`trim`) and has drawn nothing

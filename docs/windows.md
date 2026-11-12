@@ -214,7 +214,10 @@ and canvases' polyline strokes and filled areas, and shader fills and
 layer shaders (`radial` gradients, `hue_rotate`, `sepia` and `invert`, and
 zgx-fx's fills and layer effects among them; those reading the backdrop,
 glass, over a copy of the target under them), each one's pixel stage
-compiled by FXC off the frame as Direct3D 12's is, in a process of its own, images drawn dithered or as characters
+compiled by FXC off the frame as Direct3D 12's is, in a process of its own,
+with the passes and tagged boxes a layer shader reads
+(`FillShader::with_inputs`: its passes drawn with Direct3D 11 ahead of the
+frame, as Direct3D 12 draws them), images drawn dithered or as characters
 (image_effects.wgsl's pixel stage, made when one first draws), and layer
 effects: blend modes (over that copy too), content blurs, masks and drop
 shadows, their passes drawn into the effect atlas with effects.wgsl as on
@@ -230,9 +233,9 @@ draws with `frame.device` as anywhere, the device asking for what
 `viewport::view_device_features` lists where the adapter has it. What it
 doesn't draw yet, it leaves out where what's left can't show a picture a
 user would wrongly trust, naming each kind once on stderr: GPU views, where
-the views' device can't be made, are left empty, and layer shaders with
-inputs (`FillShader::with_inputs`: passes, pictures, GPU views read by name)
-composite their layer as painted, as while one compiles. The rest fails the frame
+the views' device can't be made, are left empty, and layer shaders reading
+pictures or GPU views by name composite their layer as painted, as while
+one compiles. The rest fails the frame
 with an error naming it (and panics in a debug build), since there is no
 Direct3D 12 to fall back to. What it draws is Direct3D 12's frame byte for
 byte (`tests/d3d11_parity.rs`, at 1×, 1.5× and 2×). Both run
