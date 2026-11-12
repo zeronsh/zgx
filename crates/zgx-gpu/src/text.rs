@@ -1671,15 +1671,23 @@ pub(crate) fn truncated(
         .unwrap_or((0, 0, 0, 0.));
     let offset = starts.get(row.0).copied().unwrap_or(0);
     let start = (offset + row.1).min(rich.text().len());
-    let raw_end = (offset + row.2).min(rich.text().len());
-    let end = rich
-        .text()
-        .grapheme_indices(true)
-        .map(|(i, _)| i)
-        .chain(std::iter::once(rich.text().len()))
-        .take_while(|i| *i <= raw_end)
-        .last()
-        .unwrap_or(0);
+    let grapheme_end = |raw: usize| {
+        rich.text()
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain(std::iter::once(rich.text().len()))
+            .take_while(|i| *i <= raw)
+            .last()
+            .unwrap_or(0)
+    };
+    let clip_end = grapheme_end((offset + row.2).min(rich.text().len()));
+    // The wrapped row ends at a word; an ellipsis may cut inside the next one, as CSS's does.
+    let end = match rows.get(limit) {
+        Some(next) if next.0 == row.0 && limit > 0 => {
+            grapheme_end((offset + next.2).min(rich.text().len()))
+        }
+        _ => clip_end,
+    };
     let make = |fonts: &mut FontSystem, cut: usize, ellipsis: bool| {
         let mut content = rich.text()[..cut].to_owned();
         let mut runs: Vec<_> = rich
@@ -1726,7 +1734,7 @@ pub(crate) fn truncated(
         rich_buffer_raw(fonts, &truncated, width, None, ellipsis)
     };
     if options.overflow == TextOverflow::Clip {
-        return Some(make(fonts, end, false));
+        return Some(make(fonts, clip_end, false));
     }
     let mut boundaries: Vec<_> = rich
         .text()
@@ -2123,6 +2131,28 @@ mod rich_tests {
             "the two families differ: {regular} {geist}"
         );
         assert_eq!(medium, regular, "its own Book, not Geist's Medium");
+    }
+    #[test]
+    fn one_line_ellipsis_cuts_inside_the_word_that_overflows() {
+        use zgx::text_layout::{TextOptions, TextOverflow};
+        let mut fonts = FontSystem::new();
+        let text = "aa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let rich = RichText::new(
+            text,
+            vec![TextRun {
+                range: 0..text.len(),
+                font_size: 14.,
+                ..Default::default()
+            }],
+        )
+        .unwrap()
+        .with_options(TextOptions {
+            overflow: TextOverflow::Ellipsis,
+            line_clamp: std::num::NonZeroU32::new(1),
+        });
+        let buffer = rich_buffer(&mut fonts, &rich, Some(120.), None);
+        let shown: String = buffer.lines.iter().map(|line| line.text().to_owned()).collect();
+        assert!(shown.ends_with("b…"), "cut inside the long word, not after `aa`: {shown:?}");
     }
     #[test]
     fn display_line_clamp_shapes_ellipsis_and_excludes_hidden_link_geometry() {
